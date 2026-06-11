@@ -24,7 +24,7 @@ You are working on **wastech-orchestrator** — an orchestrator that launches co
 ## Canonical names (do not invent your own)
 
 - Providers: `codex`, `claude`.
-- Stages: `planning`, `implementation`, `testing`, `review`, `fixing`, `publishing`.
+- Stages: `refinement`, `planning`, `implementation`, `testing`, `review`, `fixing`, `summary`, `publishing`.
 - Branch prefix: `agent/<task-id>-<slug>`.
 - State machine statuses: see orchestrator_final_plan.md §8.
 

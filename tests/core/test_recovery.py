@@ -1,0 +1,333 @@
+"""Tests for restart recovery (§13): reconciliation decisions and resume behavior."""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from pathlib import Path
+
+import pytest
+
+from wastech_orchestrator.core.recovery import RecoveryAction, RecoveryReconciler
+from wastech_orchestrator.core.state_machine import Status
+from wastech_orchestrator.state_store import StateStore, SubtaskRow, TaskRow
+
+
+class FakeGit:
+    """A stand-in exposing only ``commit_on_branch`` for reconciliation unit tests."""
+
+    def __init__(self, *, on_branch: bool = True) -> None:
+        self._on_branch = on_branch
+        self.queries: list[tuple[str, str]] = []
+
+    def commit_on_branch(self, sha: str, branch: str) -> bool:
+        self.queries.append((sha, branch))
+        return self._on_branch
+
+
+@pytest.fixture
+def store(tmp_path: Path) -> StateStore:
+    return StateStore.open(tmp_path / "state.db")
+
+
+def _reconciler(store: StateStore, make_git_config, git_repo, *, on_branch: bool = True):
+    config = make_git_config(git_repo.clone)
+    return RecoveryReconciler(config, store, FakeGit(on_branch=on_branch))  # type: ignore[arg-type]
+
+
+def test_no_active_task_is_none(store, make_git_config, git_repo) -> None:
+    plan = _reconciler(store, make_git_config, git_repo).reconcile()
+    assert plan.action is RecoveryAction.NONE
+
+
+def test_one_active_task_resumes(store, make_git_config, git_repo) -> None:
+    store.insert_task(TaskRow(task_id="t1", title="t", status=Status.IMPLEMENTING))
+    plan = _reconciler(store, make_git_config, git_repo).reconcile()
+    assert plan.action is RecoveryAction.RESUME
+    assert plan.task_id == "t1"
+
+
+def test_more_than_one_active_is_manual(store, make_git_config, git_repo) -> None:
+    store.insert_task(TaskRow(task_id="a", title="a", status=Status.IMPLEMENTING))
+    store.insert_task(TaskRow(task_id="b", title="b", status=Status.REVIEWING))
+    plan = _reconciler(store, make_git_config, git_repo).reconcile()
+    assert plan.action is RecoveryAction.MANUAL
+    assert set(plan.manual_task_ids) == {"a", "b"}
+
+
+def test_interrupted_cleanup_is_cleanup(store, make_git_config, git_repo) -> None:
+    store.insert_task(TaskRow(task_id="t1", title="t", status=Status.DONE, branch="agent/t1-x"))
+    plan = _reconciler(store, make_git_config, git_repo).reconcile()
+    assert plan.action is RecoveryAction.CLEANUP
+    assert plan.task_id == "t1"
+
+
+def test_terminal_without_branch_is_not_cleanup(store, make_git_config, git_repo) -> None:
+    # A gate-rejected task (terminal failed, no branch) needs no cleanup.
+    store.insert_task(TaskRow(task_id="t1", title="t", status=Status.FAILED))
+    plan = _reconciler(store, make_git_config, git_repo).reconcile()
+    assert plan.action is RecoveryAction.NONE
+
+
+def _decomposed(store: StateStore, *, completed: int, shas: dict[int, str]) -> None:
+    store.insert_task(
+        TaskRow(
+            task_id="d",
+            title="d",
+            status=Status.IMPLEMENTING,
+            branch="agent/d-x",
+            decomposition_accepted=True,
+            subtask_count=2,
+            active_subtask=completed + 1,
+            subtasks_completed=completed,
+        )
+    )
+    rows = []
+    for order in (1, 2):
+        rows.append(
+            SubtaskRow(
+                task_id="d",
+                order=order,
+                slug=f"s{order}",
+                title=f"S{order}",
+                status="committed" if order in shas else "pending",
+                depends_on=(),
+                commit_sha=shas.get(order),
+            )
+        )
+    store.insert_subtasks(rows)
+
+
+def test_decomposed_resumes_at_next_subtask(store, make_git_config, git_repo) -> None:
+    _decomposed(store, completed=1, shas={1: "sha1"})
+    plan = _reconciler(store, make_git_config, git_repo, on_branch=True).reconcile()
+    assert plan.action is RecoveryAction.RESUME
+    assert plan.resume_subtask == 2
+
+
+def test_decomposed_recorded_sha_absent_is_manual(store, make_git_config, git_repo) -> None:
+    _decomposed(store, completed=1, shas={1: "sha1"})
+    # The fake git reports the recorded commit is NOT on the branch → inconsistent.
+    plan = _reconciler(store, make_git_config, git_repo, on_branch=False).reconcile()
+    assert plan.action is RecoveryAction.MANUAL
+    assert "absent" in (plan.manual_reason or "")
+
+
+def test_decomposed_more_committed_than_recorded_is_manual(
+    store, make_git_config, git_repo
+) -> None:
+    # Both subtasks have a commit on the branch, but only 1 is recorded as completed.
+    _decomposed(store, completed=1, shas={1: "sha1", 2: "sha2"})
+    plan = _reconciler(store, make_git_config, git_repo, on_branch=True).reconcile()
+    assert plan.action is RecoveryAction.MANUAL
+    assert "committed" in (plan.manual_reason or "")
+
+
+# --- resume() integration ----------------------------------------------------------------
+
+
+class _FakeProvider:
+    """Minimal provider: writes a file on implementation so each commit is non-empty."""
+
+    def __init__(self, provider_id: str, clone: Path) -> None:
+        self.id = provider_id
+        self._clone = clone
+        self._n = 0
+
+    def preflight(self):
+        from wastech_orchestrator.providers.base import ProviderHealth
+
+        return ProviderHealth(
+            provider_id=self.id,
+            executable_found=True,
+            version="1",
+            authenticated=True,
+            supports_required_features=True,
+            message="ok",
+        )
+
+    def run(self, request):
+        from wastech_orchestrator.providers.base import AgentRunResult, RunStatus, Stage
+
+        if request.stage is Stage.IMPLEMENTATION:
+            (self._clone / f"impl-{self._n}.py").write_text("x\n", encoding="utf-8")
+            self._n += 1
+        return AgentRunResult(
+            status=RunStatus.SUCCEEDED,
+            provider=self.id,
+            stage=request.stage,
+            attempt=request.attempt,
+            exit_code=0,
+            started_at="t",
+            finished_at="t",
+            final_message="done",
+            structured_output=None,
+        )
+
+
+def _make_providers(git_repo):
+    from wastech_orchestrator.providers.base import ProviderId
+
+    return {
+        ProviderId.CLAUDE: _FakeProvider("claude", git_repo.clone),
+        ProviderId.CODEX: _FakeProvider("codex", git_repo.clone),
+    }
+
+
+def _build_orchestrator(git_repo, make_git_config, tmp_path: Path, providers, verdicts):
+    from wastech_orchestrator.check_runner import CheckRunner
+    from wastech_orchestrator.core.loop_control import LoopController
+    from wastech_orchestrator.core.orchestrator import Orchestrator
+    from wastech_orchestrator.git_manager import GitManager
+    from wastech_orchestrator.ledger import Ledger
+    from wastech_orchestrator.providers.process import ProcessResult
+    from wastech_orchestrator.routing.router import AgentRouter
+    from wastech_orchestrator.task.validation_gate import ValidationGate
+
+    art = tmp_path / "art"
+    config = make_git_config(git_repo.clone, checks=["pytest"], decomposition=True)
+    store = StateStore.open(art / "state.db")
+    ledger = Ledger(art / "logs")
+
+    def fake_proc(argv, *, cwd, env, timeout_seconds, stdout_path, stdin_text=None):
+        Path(stdout_path).write_text("ok\n", encoding="utf-8")
+        return ProcessResult(
+            exit_code=verdicts[0],
+            timed_out=False,
+            launch_error=None,
+            duration_seconds=0.0,
+            stdout_path=str(stdout_path),
+            stderr_text="",
+        )
+
+    def fake_gh(argv: Sequence[str]):
+        from wastech_orchestrator.git_manager import GitResult
+
+        return GitResult(
+            exit_code=0,
+            stdout="https://example/pr/9\n",
+            stderr="",
+            timed_out=False,
+            launch_error=None,
+        )
+
+    git = GitManager(config, store=store, artifacts_root=str(art), gh_runner=fake_gh)
+    orch = Orchestrator(
+        config,
+        router=AgentRouter(config, providers),
+        git=git,
+        checks=CheckRunner(config, run_process=fake_proc),
+        store=store,
+        ledger=ledger,
+        loops=LoopController(config.agents),
+        gate=ValidationGate(
+            config, store_has_task_id=store.task_id_exists, ledger_has_task_id=ledger.has_task_id
+        ),
+        artifacts_root=str(art),
+    )
+    return orch, store, ledger, art, git
+
+
+def test_resume_no_active_returns_none(git_repo, make_git_config, tmp_path: Path) -> None:
+    orch, *_ = _build_orchestrator(
+        git_repo, make_git_config, tmp_path, _make_providers(git_repo), [0]
+    )
+    assert orch.resume() is None  # nothing in flight → slot free
+
+
+def test_resume_more_than_one_active_marks_manual(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    orch, store, ledger, *_ = _build_orchestrator(
+        git_repo, make_git_config, tmp_path, _make_providers(git_repo), [0]
+    )
+    store.insert_task(TaskRow(task_id="a", title="a", status=Status.IMPLEMENTING))
+    store.insert_task(TaskRow(task_id="b", title="b", status=Status.REVIEWING))
+    result = orch.resume()
+    assert result is not None and result.final_status is Status.MANUAL_ACTION_REQUIRED
+    assert store.get_task("a").status is Status.MANUAL_ACTION_REQUIRED
+    assert store.get_task("b").status is Status.MANUAL_ACTION_REQUIRED
+    assert {r["id"] for r in ledger.records()} == {"a", "b"}
+
+
+def test_resume_decomposed_at_subtask_without_duplicate_commit(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    from wastech_orchestrator.core.decomposition import (
+        DecompositionDecision,
+        SubtaskSpec,
+        write_subtask_artifacts,
+    )
+    from wastech_orchestrator.git_manager import KIND_SUBTASK_COMMIT
+    from wastech_orchestrator.state_store import PublishOpRow
+    from wastech_orchestrator.task.model import NormalizedTask
+    from wastech_orchestrator.task.parser import write_normalized
+
+    providers = _make_providers(git_repo)
+    orch, store, ledger, art, git = _build_orchestrator(
+        git_repo, make_git_config, tmp_path, providers, [0]
+    )
+    task_id = "task-d"
+    slug = "add-a-thing"
+    branch = f"agent/{task_id}-{slug}"
+
+    # Simulate an interrupted run: subtask 1 was committed on the branch, subtask 2 is pending.
+    git_run(["checkout", "-b", branch], git_repo.clone)
+    (git_repo.clone / "sub1.py").write_text("a = 1\n", encoding="utf-8")
+    git_run(["add", "sub1.py"], git_repo.clone)
+    git_run(["commit", "-m", "subtask 1"], git_repo.clone)
+    sha1 = git_run(["rev-parse", "HEAD"], git_repo.clone)
+    git_run(["checkout", "main"], git_repo.clone)
+
+    task = NormalizedTask(id=task_id, title="Add a thing", description="do it")
+    write_normalized(task, str(art))
+    decision = DecompositionDecision(
+        accepted=True,
+        reason="accepted",
+        n=2,
+        subtasks=(
+            SubtaskSpec(1, "First", "s1", ("a",), ()),
+            SubtaskSpec(2, "Second", "s2", ("b",), (1,)),
+        ),
+    )
+    write_subtask_artifacts(decision, str(art), task_id)
+
+    store.insert_task(
+        TaskRow(
+            task_id=task_id,
+            title="Add a thing",
+            status=Status.IMPLEMENTING,
+            branch=branch,
+            slug=slug,
+            decomposition_accepted=True,
+            subtask_count=2,
+            active_subtask=2,
+            subtasks_completed=1,
+            refinement_ran=False,
+        )
+    )
+    store.insert_subtasks(
+        [
+            SubtaskRow(task_id, 1, "s1", "First", "committed", (), commit_sha=sha1),
+            SubtaskRow(task_id, 2, "s2", "Second", "pending", (1,)),
+        ]
+    )
+    store.record_publish_op(
+        PublishOpRow(
+            task_id=task_id,
+            kind=KIND_SUBTASK_COMMIT,
+            subtask_order=1,
+            fingerprint="fp1",
+            status="completed",
+            result_ref=sha1,
+        )
+    )
+
+    result = orch.resume()
+    assert result is not None and result.final_status is Status.DONE
+    # Subtask 1's recorded commit is unchanged (never re-committed, §13).
+    subs = {s.order: s for s in store.get_subtasks(task_id)}
+    assert subs[1].commit_sha == sha1
+    assert subs[2].commit_sha and subs[2].commit_sha != sha1
+    # Exactly one commit for subtask 1 on the branch.
+    log = git_run(["log", "--format=%s", f"main..{branch}"], git_repo.clone)
+    assert log.count("subtask 1") == 1

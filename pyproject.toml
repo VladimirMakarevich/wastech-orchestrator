@@ -28,6 +28,7 @@ dev = [
 wastech-orchestrator = "wastech_orchestrator.cli:main"
 
 [tool.hatch.build.targets.wheel]
+# Non-.py files under the package (e.g. templates/, used by `init`) ship as package data.
 packages = ["src/wastech_orchestrator"]
 
 [tool.ruff]

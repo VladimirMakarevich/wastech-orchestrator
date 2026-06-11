@@ -1,0 +1,449 @@
+"""Integration tests for the Orchestrator Core pipeline (§5, §8).
+
+These drive the real Router + Git Manager (temp repo) + Check Runner, with fake in-memory providers
+and a fake check process, exercising the full state machine, loops, decomposition, summary fallback,
+publishing, terminal cleanup, and the ledger.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Sequence
+from pathlib import Path
+
+import pytest
+
+from wastech_orchestrator.check_runner import CheckRunner
+from wastech_orchestrator.core.loop_control import LoopController
+from wastech_orchestrator.core.orchestrator import Orchestrator, SlotBusyError
+from wastech_orchestrator.core.state_machine import Status
+from wastech_orchestrator.git_manager import GitManager, GitResult
+from wastech_orchestrator.ledger import Ledger
+from wastech_orchestrator.providers.base import (
+    AgentRunRequest,
+    AgentRunResult,
+    ErrorClass,
+    ProviderError,
+    ProviderHealth,
+    ProviderId,
+    RunStatus,
+    Stage,
+)
+from wastech_orchestrator.state_store import StateStore, TaskRow
+from wastech_orchestrator.task.validation_gate import ValidationGate
+
+
+class FakeProvider:
+    """An in-memory AgentProvider returning scripted results, used to drive the Core."""
+
+    def __init__(
+        self,
+        provider_id: str,
+        *,
+        outputs: dict[Stage, tuple[str, dict | None]] | None = None,
+        infra_fail: set[Stage] | None = None,
+    ) -> None:
+        self.id = provider_id
+        self._outputs = outputs or {}
+        self._infra_fail = infra_fail or set()
+
+    def preflight(self) -> ProviderHealth:
+        return ProviderHealth(
+            provider_id=self.id,
+            executable_found=True,
+            version="1",
+            authenticated=True,
+            supports_required_features=True,
+            message="ok",
+        )
+
+    def run(self, request: AgentRunRequest) -> AgentRunResult:
+        if request.stage in self._infra_fail:
+            raise ProviderError(error_class=ErrorClass.TIMEOUT, message="infra fail")
+        message, structured = self._outputs.get(request.stage, ("done", None))
+        return AgentRunResult(
+            status=RunStatus.SUCCEEDED,
+            provider=self.id,
+            stage=request.stage,
+            attempt=request.attempt,
+            exit_code=0,
+            started_at="t0",
+            finished_at="t1",
+            final_message=message,
+            structured_output=structured,
+        )
+
+
+def _fake_proc(verdicts: list[int]) -> Callable[..., object]:
+    """A run_process stand-in for the Check Runner; pops one exit code per call (repeats last)."""
+    from wastech_orchestrator.providers.process import ProcessResult
+
+    state = {"i": 0}
+
+    def run(argv: Sequence[str], *, cwd, env, timeout_seconds, stdout_path, stdin_text=None):
+        Path(stdout_path).write_text("check\n", encoding="utf-8")
+        idx = min(state["i"], len(verdicts) - 1)
+        state["i"] += 1
+        code = verdicts[idx]
+        return ProcessResult(
+            exit_code=code,
+            timed_out=False,
+            launch_error=None,
+            duration_seconds=0.0,
+            stdout_path=str(stdout_path),
+            stderr_text="",
+        )
+
+    return run
+
+
+def _fake_gh() -> Callable[[Sequence[str]], GitResult]:
+    def gh(argv: Sequence[str]) -> GitResult:
+        return GitResult(
+            exit_code=0,
+            stdout="https://example/pr/1\n",
+            stderr="",
+            timed_out=False,
+            launch_error=None,
+        )
+
+    return gh
+
+
+def _build(
+    git_repo,
+    make_git_config,
+    tmp_path: Path,
+    *,
+    providers: dict[ProviderId, FakeProvider],
+    check_verdicts: list[int],
+    config_kwargs: dict | None = None,
+) -> tuple[Orchestrator, StateStore, Ledger, Path]:
+    from wastech_orchestrator.routing.router import AgentRouter
+
+    art = tmp_path / "art"
+    config = make_git_config(git_repo.clone, checks=["pytest"], **(config_kwargs or {}))
+    store = StateStore.open(art / "state.db")
+    ledger = Ledger(art / "logs")
+    router = AgentRouter(config, providers)  # type: ignore[arg-type]
+    git = GitManager(config, store=store, artifacts_root=str(art), gh_runner=_fake_gh())
+    checks = CheckRunner(config, run_process=_fake_proc(check_verdicts))  # type: ignore[arg-type]
+    gate = ValidationGate(
+        config,
+        store_has_task_id=store.task_id_exists,
+        ledger_has_task_id=ledger.has_task_id,
+    )
+    orch = Orchestrator(
+        config,
+        router=router,
+        git=git,
+        checks=checks,
+        store=store,
+        ledger=ledger,
+        loops=LoopController(config.agents),
+        gate=gate,
+        artifacts_root=str(art),
+    )
+    return orch, store, ledger, art
+
+
+def _complete_task(tmp_path: Path, task_id: str = "task-001") -> str:
+    path = tmp_path / f"{task_id}.md"
+    path.write_text(
+        f'---\nid: {task_id}\ntitle: "Add a thing"\nrefined: true\n---\n\n'
+        "## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def _both(**kwargs) -> dict[ProviderId, FakeProvider]:
+    return {
+        ProviderId.CLAUDE: FakeProvider("claude", **kwargs),
+        ProviderId.CODEX: FakeProvider("codex", **kwargs),
+    }
+
+
+def _impl_writes_file(provider_id: str) -> FakeProvider:
+    # Implementation must actually change the working tree so there is something to commit.
+    return FakeProvider(provider_id, outputs={Stage.IMPLEMENTATION: ("implemented", None)})
+
+
+def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: Path) -> None:
+    providers = _both()
+    orch, store, ledger, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    task_file = _complete_task(tmp_path)
+    # The implementation stage must leave a change to commit; simulate by writing in the clone.
+    # We patch the provider run for implementation to create a file via a side effect.
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.stage is Stage.IMPLEMENTATION:
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    result = orch.run_task(task_file)
+    assert result.final_status is Status.DONE
+    assert result.pr_url == "https://example/pr/1"
+
+    row = store.get_task("task-001")
+    assert row is not None and row.status is Status.DONE
+    assert row.refinement_ran is False  # refined: true → skipped
+    # The task file was moved into its lifecycle folder (tasks/done, §20.2).
+    assert (tmp_path / "done" / "task-001.md").exists()
+    assert not (tmp_path / "task-001.md").exists()
+    # Exactly one ledger record; back on the base branch.
+    records = ledger.records()
+    assert len(records) == 1 and records[0]["final_status"] == "done"
+    assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "main"
+    # The commit landed on the task branch.
+    branches = git_run(["branch", "--list", "agent/task-001-add-a-thing"], git_repo.clone)
+    assert "agent/task-001-add-a-thing" in branches
+
+
+def test_vague_task_runs_refinement(git_repo, make_git_config, tmp_path: Path) -> None:
+    providers = _both()
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    path = tmp_path / "task-002.md"
+    path.write_text(
+        '---\nid: task-002\ntitle: "Vague"\n---\n\n## Description\n\nMake it better.\n',
+        encoding="utf-8",
+    )
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.stage is Stage.IMPLEMENTATION:
+            (git_repo.clone / "f.py").write_text("y = 2\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    result = orch.run_task(str(path))
+    assert result.final_status is Status.DONE
+    row = store.get_task("task-002")
+    assert row is not None and row.refinement_ran is True
+    assert (art / "logs" / "task-002" / "task.enriched.md").exists()
+
+
+def test_failed_checks_then_fix_then_pass(git_repo, make_git_config, tmp_path: Path) -> None:
+    providers = _both()
+    # Checks fail once, then pass on the retry after fixing.
+    orch, store, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[1, 0]
+    )
+    task_file = _complete_task(tmp_path, "task-003")
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.stage in (Stage.IMPLEMENTATION, Stage.FIXING):
+            (git_repo.clone / "f.py").write_text("z = 3\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    result = orch.run_task(task_file)
+    assert result.final_status is Status.DONE
+    row = store.get_task("task-003")
+    assert row is not None and row.fix_iterations == 1  # one fixing entry
+
+
+def test_fix_budget_exhausted_is_manual(git_repo, make_git_config, tmp_path: Path) -> None:
+    providers = _both()
+    # Checks always fail → the test-driven fix loop hits max_fix_cycles.
+    orch, store, ledger, art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[1],
+        config_kwargs={"max_fix_cycles": 2, "max_total_fix_iterations": 10},
+    )
+    task_file = _complete_task(tmp_path, "task-004")
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.stage in (Stage.IMPLEMENTATION, Stage.FIXING):
+            (git_repo.clone / "f.py").write_text("w = 4\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    result = orch.run_task(task_file)
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
+    assert (art / "logs" / "task-004" / "failure_report.json").exists()
+    assert (art / "logs" / "task-004" / "stuck.md").exists()
+    assert ledger.records()[0]["final_status"] == "manual_action_required"
+
+
+def test_review_blocking_then_fix(git_repo, make_git_config, tmp_path: Path) -> None:
+    # Review returns a blocking finding the first time, none the second.
+    review_outputs = [
+        ("blocking found", {"findings": [{"title": "bug", "severity": "blocking"}]}),
+        ("clean", {"findings": []}),
+    ]
+    state = {"i": 0}
+
+    class ReviewProvider(FakeProvider):
+        def run(self, request: AgentRunRequest) -> AgentRunResult:
+            if request.stage is Stage.IMPLEMENTATION:
+                (git_repo.clone / "r.py").write_text("a = 1\n", encoding="utf-8")
+            if request.stage is Stage.REVIEW:
+                msg, structured = review_outputs[min(state["i"], 1)]
+                state["i"] += 1
+                return AgentRunResult(
+                    status=RunStatus.SUCCEEDED,
+                    provider=self.id,
+                    stage=request.stage,
+                    attempt=request.attempt,
+                    exit_code=0,
+                    started_at="t",
+                    finished_at="t",
+                    final_message=msg,
+                    structured_output=structured,
+                )
+            return super().run(request)
+
+    providers = {
+        ProviderId.CLAUDE: ReviewProvider("claude"),
+        ProviderId.CODEX: ReviewProvider("codex"),
+    }
+    orch, store, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    result = orch.run_task(_complete_task(tmp_path, "task-005"))
+    assert result.final_status is Status.DONE
+    row = store.get_task("task-005")
+    assert row is not None and row.fix_iterations == 1  # one review-driven fix
+
+
+def test_summary_fallback_when_provider_fails(git_repo, make_git_config, tmp_path: Path) -> None:
+    # Both providers fail the summary stage with an infra error → minimal summary, still DONE.
+    providers = _both(infra_fail={Stage.SUMMARY})
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    task_file = _complete_task(tmp_path, "task-006")
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.stage is Stage.IMPLEMENTATION:
+            (git_repo.clone / "s.py").write_text("b = 1\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    result = orch.run_task(task_file)
+    assert result.final_status is Status.DONE  # summary failure never blocks (§5.2)
+    summary = (art / "logs" / "task-006" / "summary.md").read_text(encoding="utf-8")
+    assert "## What" in summary
+
+
+def test_decomposed_task_commits_each_subtask(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    subtasks = {
+        "decompose": True,
+        "subtasks": [
+            {
+                "order": 1,
+                "title": "First",
+                "slug": "first",
+                "acceptance_criteria": ["a"],
+                "depends_on": [],
+            },
+            {
+                "order": 2,
+                "title": "Second",
+                "slug": "second",
+                "acceptance_criteria": ["b"],
+                "depends_on": [1],
+            },
+        ],
+    }
+
+    class DecompProvider(FakeProvider):
+        def run(self, request: AgentRunRequest) -> AgentRunResult:
+            if request.stage is Stage.PLANNING:
+                return AgentRunResult(
+                    status=RunStatus.SUCCEEDED,
+                    provider=self.id,
+                    stage=request.stage,
+                    attempt=request.attempt,
+                    exit_code=0,
+                    started_at="t",
+                    finished_at="t",
+                    final_message="plan",
+                    structured_output=subtasks,
+                )
+            if request.stage is Stage.IMPLEMENTATION:
+                # Each subtask writes a distinct file so each commit is non-empty.
+                marker = git_repo.clone / f"impl-{state['n']}.py"
+                marker.write_text("x\n", encoding="utf-8")
+                state["n"] += 1
+            return super().run(request)
+
+    state = {"n": 0}
+    providers = {
+        ProviderId.CLAUDE: DecompProvider("claude"),
+        ProviderId.CODEX: DecompProvider("codex"),
+    }
+    orch, store, _, art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"decomposition": True},
+    )
+    result = orch.run_task(_complete_task(tmp_path, "task-007"))
+    assert result.final_status is Status.DONE
+    row = store.get_task("task-007")
+    assert row is not None
+    assert row.decomposition_accepted is True
+    assert row.subtask_count == 2
+    assert row.subtasks_completed == 2
+    # Two subtask commits + the final (empty) code commit guard; assert at least 2 new commits.
+    branch = "agent/task-007-add-a-thing"
+    count = git_run(["rev-list", "--count", f"main..{branch}"], git_repo.clone)
+    assert int(count) >= 2
+    subs = store.get_subtasks("task-007")
+    assert all(s.commit_sha for s in subs)
+
+
+def test_single_active_slot_blocks(git_repo, make_git_config, tmp_path: Path) -> None:
+    providers = _both()
+    orch, store, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    # Pre-seed another active task occupying the slot.
+    store.insert_task(TaskRow(task_id="other", title="o", status=Status.IMPLEMENTING))
+    with pytest.raises(SlotBusyError):
+        orch.run_task(_complete_task(tmp_path, "task-008"))
+
+
+def test_rejected_task_no_branch(git_repo, make_git_config, git_run, tmp_path: Path) -> None:
+    quarantine = tmp_path / "rejected"
+    orch, store, ledger, art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        config_kwargs={"quarantine": str(quarantine)},
+    )
+    bad = tmp_path / "task-009.md"
+    bad.write_text("no front matter at all\n", encoding="utf-8")
+    result = orch.run_task(str(bad))
+    assert result.final_status is Status.FAILED
+    assert result.validation_reason == "frontmatter_missing"
+    assert (art / "logs" / "task-009" / "validation_report.json").exists()
+    # No branch was created and the file was quarantined.
+    assert (quarantine / "task-009.md").exists()
+    branches = git_run(["branch", "--list", "agent/*"], git_repo.clone)
+    assert branches == ""
+    assert ledger.records()[0]["validation_reason"] == "frontmatter_missing"

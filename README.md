@@ -2,7 +2,7 @@
 
 A console **lean orchestrator** for automatically carrying out development tasks via external coding agents (**OpenAI Codex CLI** and **Anthropic Claude Code CLI**), publishing the result to a dedicated Git branch / Pull Request.
 
-The orchestrator owns the process: it accepts a task → parses it → creates a branch → runs a deterministic pipeline of stages through interchangeable CLI agents → runs checks → commits and pushes. The agents work only with the repository contents and do not manage the Git lifecycle.
+The orchestrator owns the process: it accepts a task → parses it → creates a branch → runs a deterministic pipeline of stages through interchangeable CLI agents → runs checks → commits and pushes. After a task reaches a terminal state, it safely switches the working copy back to the configured base branch before any next task can start. The agents work only with the repository contents and do not manage the Git lifecycle.
 
 > Status: **design / pre-MVP**. The architecture is fixed; the codebase is in an early stage. The spec below is the source of truth for the implementation.
 
@@ -29,6 +29,7 @@ For coding agents: [CLAUDE.md](CLAUDE.md) (Claude Code) and [AGENTS.md](AGENTS.m
 5. **Only the orchestrator does commit / push / PR** — agents are forbidden from doing so.
 6. **Checkpoints at every stage** → recovery after a crash, idempotent publishing.
 7. **The security policy cannot be weakened** through a task or `extra_args`.
+8. **Auto mode is opt-in** — by default the orchestrator handles one task, returns to `repo.base_branch`, and leaves the next pending task untouched.
 
 ---
 
@@ -58,9 +59,11 @@ wastech-orchestrator/
     skills/                      # reusable skills for development
   src/
     wastech_orchestrator/
-      cli.py                     # entry point
+      cli.py                     # entry point (run / watch / init)
       providers/
         base.py                  # AgentProvider contract (§4.3 of the spec)
+      templates/                 # scaffolding copied out by `init` (task + per-stage prompts)
+  tasks/                         # pending / processing / done / failed / rejected
   tests/                         # unit / integration / e2e (see docs/rules/testing.md)
 ```
 
@@ -87,12 +90,21 @@ mypy src
 pytest
 ```
 
-Running (as the CLI is implemented):
+Initialize a project layout (folders + `config.yaml` + templates; idempotent):
+
+```bash
+python -m wastech_orchestrator init .                              # external git footprint (default)
+python -m wastech_orchestrator init . --git-mode in_repo_exclude   # keep artifacts out of the target repo
+```
+
+Running (as the pipeline is implemented):
 
 ```bash
 python -m wastech_orchestrator run tasks/pending/task-001.md
 python -m wastech_orchestrator watch
 ```
+
+`watch` respects `orchestrator.auto_mode.enabled` in `config.yaml`: when `false` (default), it does not automatically take another pending task after terminal cleanup; when `true`, it processes pending tasks sequentially, returning to `repo.base_branch` between tasks.
 
 ---
 

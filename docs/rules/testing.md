@@ -13,7 +13,15 @@ Cover pure logic without external processes:
 - error classification (`ProviderError` → class);
 - state machine transitions;
 - secret redaction and path normalization;
-- retry / fallback / fix-cycle limits.
+- retry / fallback / fix-cycle limits, the global fix-iteration budget, and the stuck condition;
+- the `refinement` skip decision (already-complete task vs. needs enrichment);
+- the single-active-task slot (a new task does not start while another is active);
+- terminal cleanup and auto mode: config default/rejects, checkout to `base_branch` before next pickup, auto off leaves the next task pending, unsafe cleanup blocks continuation;
+- the decomposition accept/reject decision and per-subtask vs. global counter semantics (§5.1);
+- the §19 validation gate: each Phase-A reason code, required/optional fields, duplicate-id, the injection-token scan, and Phase-B classification;
+- `init` idempotency (a second run is all-skipped; never overwrites `config.yaml`; `--dry-run` is a no-op);
+- the git footprint (§21): scoped staging excludes `tasks/`/`logs/`/`workspace/`, the `.git/info/exclude` append is idempotent, the audit commit is orchestrator-only, and the validator rejects illegal mode pairings;
+- the `summary` stage (§5.2): the handoff artifact is produced, and a provider failure falls back to a deterministic minimal summary without blocking publishing.
 
 ### Integration
 Use **fake CLI executables** (stub scripts) rather than the real Codex/Claude:
@@ -25,11 +33,19 @@ Use **fake CLI executables** (stub scripts) rather than the real Codex/Claude:
 
 ### End-to-end
 On a temporary Git repository:
+- a vague task triggers `refinement` (→ `task.enriched.md`); an already-complete task skips it;
 - Claude performs planning/implementation, Codex performs review;
 - failed checks trigger `fixing`;
 - success → exactly one commit, push, and PR;
+- terminal cleanup checks out the base branch after the terminal task;
+- auto mode enabled → two pending tasks run sequentially with a base-branch checkout between them; auto mode disabled → the second task remains pending;
 - a restart does not duplicate publishing;
-- exhausting attempts → `failed`.
+- the completed-tasks ledger gains exactly one record per terminal transition;
+- a large task with decomposition enabled → `n` subtasks, `n` sequential commits on one branch, one PR; a restart resumes at `k` without a duplicate commit (§5.1);
+- a broken task → quarantined to `tasks/rejected/` as `failed`, writes `validation_report.json`, with no branch/provider (§19);
+- in every git footprint mode the code commit excludes `tasks/`/`logs/`/`workspace/` (§21);
+- a successful task produces `summary.md` (what / how / integration / why) which becomes the PR body (§5.2);
+- exhausting a fix loop or the global fix-iteration budget → `manual_action_required` + failure report; an unrecoverable error → `failed`.
 
 ## Principles
 

@@ -1,0 +1,113 @@
+# Example configuration for wastech-orchestrator.
+# Copy to config.yaml and fill it in for your project. config.yaml is NOT committed to git.
+# This is the packaged copy used by `wastech-orchestrator init`; keep it in sync with the
+# repo-root config.example.yaml and with §11 of orchestrator_final_plan.md.
+
+orchestrator:
+  auto_mode:
+    enabled: false                  # when true, pick the next pending task after terminal cleanup
+
+repo:
+  url: "git@github.com:OWNER/REPO.git"
+  local_path: "./workspace/repo"
+  base_branch: "main"
+  branch_prefix: "agent"            # task branches: agent/<task-id>-<slug>
+
+agents:
+  allowed:
+    - claude
+    - codex
+
+  max_stage_attempts: 2
+  max_fix_cycles: 3
+  max_total_fix_iterations: 5       # hard global cap across all fix loops (and all subtasks)
+
+  decomposition:                    # optional task decomposition (§5.1); OFF by default
+    enabled: false
+    max_subtasks: 8                 # a split with n > this (or n < 2) is rejected; runs as a single task
+    min_size_signal: "large"        # advisory threshold passed to the planning prompt
+    commit_per_subtask: true        # one local commit per subtask on the single task branch
+
+  routing:                          # primary/fallback per stage
+    refinement:
+      primary: claude
+      fallback: codex
+    planning:
+      primary: claude
+      fallback: codex
+    implementation:
+      primary: claude
+      fallback: codex
+    review:
+      primary: codex
+      fallback: claude
+    fixing:
+      primary: claude
+      fallback: codex
+    summary:
+      primary: claude
+      fallback: codex
+
+  providers:
+    claude:
+      command: "claude"
+      model: ""
+      timeout_seconds: 1800
+      max_turns: 50
+      max_budget_usd: null
+      permission_profile: "workspace-write"
+      extra_args: []
+    codex:
+      command: "codex"
+      model: ""
+      timeout_seconds: 1800
+      sandbox: "workspace-write"
+      permission_profile: "workspace-write"
+      extra_args: []
+
+security:
+  strict_isolation: true
+  allowed_environment:
+    - "PATH"
+    - "HOME"
+    - "USERPROFILE"
+    - "CODEX_HOME"
+    - "CLAUDE_CONFIG_DIR"
+  denied_read_paths:
+    - ".env"
+    - "secrets/**"
+  denied_commands:
+    - "git commit"
+    - "git push"
+    - "gh pr create"
+
+validation:                         # input hardening gate (§19); rejects broken tasks before any branch
+  max_task_bytes: 262144
+  max_task_lines: 5000
+  max_line_bytes: 8192
+  max_control_ratio: 0.01
+  required_fields: ["id", "title"]
+  reject_unknown_fields: true
+  quarantine_folder: "./tasks/rejected"
+
+checks:
+  commands:
+    - "npm test"
+    - "npm run lint"
+  timeout_seconds: 1800             # per-command timeout for the Check Runner (argv list, no shell)
+
+git:
+  create_pull_request: true
+  pr_base: "main"
+  footprint:                        # where orchestration/task artifacts live vs. the target repo (§21)
+    location: external              # external | in_repo
+    tracking: none                  # none | exclude_local | commit
+    external_root: "./"             # location=external: where tasks/ & logs/ live, OUTSIDE the clone
+    audit_commit_message: "chore(orchestrator): audit trail for {task_id}"  # tracking=commit only
+    audit_on_branch: task           # task | sibling   (tracking=commit only)
+
+telegram:                           # human-in-the-loop + notifications (optional)
+  enabled: false
+  bot_token_env: "TELEGRAM_BOT_TOKEN"
+  chat_id_env: "TELEGRAM_CHAT_ID"
+  ask_timeout_s: 1800

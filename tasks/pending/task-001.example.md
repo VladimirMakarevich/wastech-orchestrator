@@ -1,11 +1,14 @@
 ---
 id: task-001
 title: "Example task: add login form validation"
+refined: false              # set true to skip the refinement stage (task already complete)
 agents:                     # optional per-stage override (only from agents.allowed)
+  refinement: claude
   planning: claude
   implementation: claude
   review: codex
   fixing: claude
+  summary: claude
 contacts: ["@team-lead"]    # who to ping on Telegram when there are questions
 ---
 

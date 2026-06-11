@@ -9,7 +9,7 @@ The document was reworked after studying [crewAI](https://github.com/crewAIInc/c
 
 ## 1. The idea in one paragraph
 
-The application does not replace the coding agent and Git. It acts as an **orchestrator**: it watches the task folder, parses the task, updates the repository, creates a dedicated branch, and runs the task through a deterministic stage pipeline (plan → implementation → review → tests → fixes → commit → push). The heavy lifting on the code is done by an **external coding agent** — Codex CLI or Claude Code CLI — behind an abstraction that allows globally enabling/disabling a provider and falling back to the remaining one. On top of the stages sits a thin **supervisor** that plans, routes, and, when needed, asks the human clarifying questions (via Telegram). Git access uses ordinary means (SSH key, GitHub token, `gh auth login`). The ChatGPT/Codex or Claude subscription is used for access to the agent, not as a Git authentication mechanism.
+The application does not replace the coding agent and Git. It acts as an **orchestrator**: it watches the task folder, parses the task, updates the repository, creates a dedicated branch, and runs the task through a deterministic stage pipeline (plan → implementation → review → tests → fixes → commit → push). After a task finishes, it safely switches the working copy back to the repository's main/base branch; only then can the next task start. Taking the next task automatically is an explicit **auto mode** setting and is off by default. The heavy lifting on the code is done by an **external coding agent** — Codex CLI or Claude Code CLI — behind an abstraction that allows globally enabling/disabling a provider and falling back to the remaining one. On top of the stages sits a thin **supervisor** that plans, routes, and, when needed, asks the human clarifying questions (via Telegram). Git access uses ordinary means (SSH key, GitHub token, `gh auth login`). The ChatGPT/Codex or Claude subscription is used for access to the agent, not as a Git authentication mechanism.
 
 ---
 
@@ -49,11 +49,21 @@ The application does not replace the coding agent and Git. It acts as an **orche
    │  ├─ STAGE fix        (retry loop, attempt limit)       │
    │  ├─ GUARDRAILS       (action blacklist + diff-checks)  │
    │  ├─ git commit                                        │
-   │  └─ git push / gh pr create                           │
+   │  ├─ git push / gh pr create                           │
+   │  └─ return_to_base_branch                             │
    └───────────────────────────────────────────────────────┘
-          │            ▲                       │
-          │            │ clarifying question /  │ result
-          ▼            │ action approval        ▼
+          │ result
+          ▼
+   ┌────────────────────┐
+   │ auto mode enabled? │── yes ──> next pending task
+   └─────────┬──────────┘
+             │ no
+             ▼
+          idle/stop
+
+                      ▲
+                      │ clarifying question / action approval
+                      │
    ┌─────────────┐  ┌──┴──────────┐      ┌──────────────┐
    │ State Store │  │  Telegram   │      │ tasks/done/  │
    │  (SQLite,   │  │  (HITL +    │      │ tasks/failed/│
@@ -119,7 +129,11 @@ git add .
 git commit -m "Implement task-001: add login validation"
 git push origin codex/task-001-add-login-validation
 gh pr create --title "Task 001" --body-file logs/task-001/pr.md --base main --head codex/task-001-add-login-validation
+git checkout main
 ```
+
+> Note: `git add .` above is illustrative. The canonical spec uses **scoped staging** — an explicit pathspec that excludes `tasks/`/`logs/`/`workspace/`, never `git add .`/`-A` — see [orchestrator_final_plan.md §21.1](orchestrator_final_plan.md). The git footprint mode (external / in-repo-excluded / in-repo-audit) is also defined there.
+> The final `git checkout main` is terminal cleanup. In the canonical spec this uses `repo.base_branch`, runs only when safe, and must complete before auto mode may pick another pending task.
 
 Parallel tasks — via `git worktree` (v2), so as not to mix them in one clone.
 
@@ -291,6 +305,10 @@ templates/
 ## 5. Example `config.yaml`
 
 ```yaml
+orchestrator:
+  auto_mode:
+    enabled: false                  # when true, pick the next pending task after terminal cleanup
+
 repos:                                # binding to projects/repos (#8)
   my-service:
     url: "git@github.com:OWNER/my-service.git"
@@ -369,8 +387,9 @@ telegram:                             # HITL + notifications (#2, #10)
                       → ask_human(approval) (#2)
 15. STAGE commit    → git add / commit                                [checkpoint]
 16. STAGE push      → git push; optionally gh pr create               [checkpoint]
-17. Move the task to done/ (or failed/), notify via Telegram (#10)
-18. (resume) on a crash at any step — continue from the next incomplete stage
+17. Terminal handling → write final artifacts, run terminal cleanup, move the task to done/failed/manual_action_required, notify via Telegram (#10)
+18. If `orchestrator.auto_mode.enabled: true`, pick the next pending task; otherwise stop/idle
+19. (resume) on a crash at any step — continue from the next incomplete stage
 ```
 
 The provider fallback `(#1)` triggers transparently inside any `CodingAgent.run`.
@@ -427,10 +446,13 @@ Python CLI
 Minimal logic:
 
 ```python
-while True:
+def watch():
+  while True:
     task = find_new_task()
     if not task:
-        sleep(5); continue
+        if config.orchestrator.auto_mode.enabled:
+            sleep(5); continue
+        return
 
     parse_task(task)                 # (#9)
     supervisor = build_supervisor(task)   # recreation per task (#5)
@@ -448,7 +470,11 @@ while True:
 
     if guardrails_ok(task):          # (#3)
         commit_and_push(task)        # with provider fallback (#1)
+    return_to_base_branch(task)      # must succeed before the next task
     notify_telegram(task)            # (#10)
+
+    if not config.orchestrator.auto_mode.enabled:
+        return
 ```
 
 ---

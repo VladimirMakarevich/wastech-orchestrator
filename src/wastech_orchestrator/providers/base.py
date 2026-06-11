@@ -7,27 +7,36 @@ Core depends only on this module, not on specific adapters.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
 # --- Canonical enumerations (do not duplicate as string literals throughout the code) ---
 
 
-class Stage(str, Enum):
+class ProviderId(StrEnum):
+    """Canonical coding-agent provider ids. The only providers the orchestrator supports."""
+
+    CODEX = "codex"
+    CLAUDE = "claude"
+
+
+class Stage(StrEnum):
+    REFINEMENT = "refinement"
     PLANNING = "planning"
     IMPLEMENTATION = "implementation"
     TESTING = "testing"
     REVIEW = "review"
     FIXING = "fixing"
+    SUMMARY = "summary"
     PUBLISHING = "publishing"
 
 
-class RunStatus(str, Enum):
+class RunStatus(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
 
 
-class ErrorClass(str, Enum):
+class ErrorClass(StrEnum):
     """Normalized provider error classes (spec §7.1)."""
 
     BINARY_NOT_FOUND = "binary_not_found"
@@ -141,7 +150,8 @@ class AgentProvider(Protocol):
     """Common interface for Codex and Claude Code.
 
     Adapters implement this protocol. They do NOT perform fallback and do NOT change the
-    state machine — that is the responsibility of the Router and Core (see docs/rules/architecture.md).
+    state machine — that is the responsibility of the Router and Core (see
+    docs/rules/architecture.md).
     """
 
     id: str

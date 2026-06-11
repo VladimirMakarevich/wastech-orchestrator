@@ -21,7 +21,7 @@ This file is for Codex. The full set of rules matches [CLAUDE.md](CLAUDE.md) and
 ## Canonical names
 
 - Providers: `codex`, `claude`.
-- Stages: `planning`, `implementation`, `testing`, `review`, `fixing`, `publishing`.
+- Stages: `refinement`, `planning`, `implementation`, `testing`, `review`, `fixing`, `summary`, `publishing`.
 - Branch prefix: `agent/<task-id>-<slug>`.
 
 ## Check commands
