@@ -1,48 +1,48 @@
-# CLAUDE.md — инструкции для Claude Code в этом репозитории
+# CLAUDE.md — instructions for Claude Code in this repository
 
-Ты работаешь над **wastech-orchestrator** — оркестратором, который запускает кодинг-агенты (Codex / Claude Code) для выполнения задач разработки и публикации результата в Git.
+You are working on **wastech-orchestrator** — an orchestrator that launches coding agents (Codex / Claude Code) to carry out development tasks and publish the result to Git.
 
-## Прежде чем писать код
+## Before writing code
 
-1. Прочитай **[orchestrator_final_plan.md](orchestrator_final_plan.md)** — это канонический спек. При любых расхождениях он главнее architecture.md.
-2. Свериться с правилами в **[docs/rules/](docs/rules/)** — они обязательны:
-   - [architecture.md](docs/rules/architecture.md) — инварианты, которые нельзя нарушать
-   - [coding-style.md](docs/rules/coding-style.md) — стиль Python
+1. Read **[orchestrator_final_plan.md](orchestrator_final_plan.md)** — this is the canonical spec. In case of any discrepancy, it takes precedence over architecture.md.
+2. Check against the rules in **[docs/rules/](docs/rules/)** — they are mandatory:
+   - [architecture.md](docs/rules/architecture.md) — invariants that must not be violated
+   - [coding-style.md](docs/rules/coding-style.md) — Python style
    - [security.md](docs/rules/security.md) — security policy
-   - [git-workflow.md](docs/rules/git-workflow.md) — ветки, коммиты, PR
-   - [testing.md](docs/rules/testing.md) — что и как тестировать
+   - [git-workflow.md](docs/rules/git-workflow.md) — branches, commits, PRs
+   - [testing.md](docs/rules/testing.md) — what to test and how
 
-## Жёсткие инварианты (нарушать нельзя)
+## Hard invariants (must not be violated)
 
-- **Ядро не знает синтаксис CLI.** Вся provider-специфика живёт только в `src/wastech_orchestrator/providers/`. Core вызывает только интерфейс `AgentProvider`.
-- **Commit / push / PR делает только оркестратор**, не агент-провайдер. Провайдеры не выполняют fallback и не меняют state machine.
-- **Fallback — только для инфраструктурных ошибок** (`binary_not_found`, `timeout`, `rate_limited`, …). Ошибки тестов/ревью идут в стадию `fixing`, а не на другого провайдера.
-- **Security policy нельзя ослабить** через задачу или `extra_args`. Никаких флагов обхода sandbox/approvals.
-- **Никаких секретов** в логах, в SQLite, в артефактах. Передавать процессам только allowlisted env-переменные.
-- **CLI запускать без shell-интерполяции** пользовательских строк (список аргументов, не строка).
+- **The core does not know the CLI syntax.** All provider-specific logic lives only in `src/wastech_orchestrator/providers/`. The core only ever calls the `AgentProvider` interface.
+- **Only the orchestrator does commit / push / PR**, not the agent provider. Providers do not perform fallback and do not change the state machine.
+- **Fallback is only for infrastructure errors** (`binary_not_found`, `timeout`, `rate_limited`, …). Test/review errors go to the `fixing` stage, not to another provider.
+- **The security policy cannot be weakened** through a task or `extra_args`. No flags that bypass sandbox/approvals.
+- **No secrets** in logs, in SQLite, or in artifacts. Pass only allowlisted env variables to processes.
+- **Launch the CLI without shell interpolation** of user strings (an argument list, not a string).
 
-## Канонические имена (не выдумывать свои)
+## Canonical names (do not invent your own)
 
-- Провайдеры: `codex`, `claude`.
-- Стадии: `planning`, `implementation`, `testing`, `review`, `fixing`, `publishing`.
-- Префикс веток: `agent/<task-id>-<slug>`.
-- Статусы state machine: см. orchestrator_final_plan.md §8.
+- Providers: `codex`, `claude`.
+- Stages: `planning`, `implementation`, `testing`, `review`, `fixing`, `publishing`.
+- Branch prefix: `agent/<task-id>-<slug>`.
+- State machine statuses: see orchestrator_final_plan.md §8.
 
-## Команды
+## Commands
 
 ```bash
-pip install -e ".[dev]"   # установка
-ruff check .              # линт
-mypy src                  # типы
-pytest                    # тесты
+pip install -e ".[dev]"   # install
+ruff check .              # lint
+mypy src                  # types
+pytest                    # tests
 ```
 
-Для прогона всех проверок есть skill: `/run-checks`.
+There is a skill for running all checks: `/run-checks`.
 
-## Стиль работы
+## Working style
 
-- Делай минимальные, сфокусированные изменения; следуй стилю окружающего кода.
-- Для новых компонентов сверяйся с контрактами из orchestrator_final_plan.md (§4, §7, §8).
-- Добавляя/меняя поведение — добавляй или обновляй тесты (см. docs/rules/testing.md).
-- Перед коммитом прогоняй `ruff`, `mypy`, `pytest`.
-- Не переходи к следующей стадии реализации, пока не выполнен DoD текущей (§15–16 спеки).
+- Make minimal, focused changes; follow the style of the surrounding code.
+- For new components, check against the contracts in orchestrator_final_plan.md (§4, §7, §8).
+- When adding/changing behavior — add or update tests (see docs/rules/testing.md).
+- Before committing, run `ruff`, `mypy`, `pytest`.
+- Do not move to the next implementation stage until the DoD of the current one is met (§15–16 of the spec).

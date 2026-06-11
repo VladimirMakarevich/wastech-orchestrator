@@ -1,40 +1,40 @@
-# Правила тестирования
+# Testing rules
 
-Источник истины — [orchestrator_final_plan.md §14](../../orchestrator_final_plan.md).
+The source of truth is [orchestrator_final_plan.md §14](../../orchestrator_final_plan.md).
 
-## Уровни
+## Levels
 
 ### Unit
-Покрывают чистую логику без внешних процессов:
-- валидация конфигурации и task overrides;
-- route resolution и allowlist;
-- command builder каждого провайдера (без реального запуска CLI);
-- парсинг structured output;
-- классификация ошибок (`ProviderError` → класс);
-- переходы state machine;
-- redaction секретов и нормализация путей;
-- лимиты retry / fallback / fix-циклов.
+Cover pure logic without external processes:
+- configuration and task override validation;
+- route resolution and the allowlist;
+- each provider's command builder (without actually running the CLI);
+- parsing of structured output;
+- error classification (`ProviderError` → class);
+- state machine transitions;
+- secret redaction and path normalization;
+- retry / fallback / fix-cycle limits.
 
 ### Integration
-Используют **fake CLI executables** (скрипты-заглушки), а не реальные Codex/Claude:
-- успешный запуск;
+Use **fake CLI executables** (stub scripts) rather than the real Codex/Claude:
+- a successful run;
 - `binary_not_found`, `authentication_failed`, `rate_limited`, `timeout`, `process_crashed`, malformed output;
-- инфраструктурная ошибка **после** изменения файлов;
-- успешный fallback;
-- запрет fallback при quality failure.
+- an infrastructure error **after** files have been changed;
+- a successful fallback;
+- fallback being forbidden on a quality failure.
 
 ### End-to-end
-На временном Git-репозитории:
-- Claude выполняет planning/implementation, Codex — review;
-- упавшие checks запускают `fixing`;
-- успех → ровно один commit, push и PR;
-- рестарт не дублирует публикацию;
-- исчерпание attempts → `failed`.
+On a temporary Git repository:
+- Claude performs planning/implementation, Codex performs review;
+- failed checks trigger `fixing`;
+- success → exactly one commit, push, and PR;
+- a restart does not duplicate publishing;
+- exhausting attempts → `failed`.
 
-## Принципы
+## Principles
 
-- Тесты детерминированны и изолированы (никаких сетевых вызовов и реальных CLI в unit/integration).
-- Внешние процессы и время мокируются/инжектируются.
-- Каждое изменение поведения сопровождается тестом.
-- Цель — высокий охват критичных путей (router, fallback, state machine, security/redaction), а не процент ради процента.
-- `pytest` зелёный — обязательное условие коммита и перехода между стадиями реализации.
+- Tests are deterministic and isolated (no network calls and no real CLIs in unit/integration).
+- External processes and time are mocked/injected.
+- Every behavior change is accompanied by a test.
+- The goal is high coverage of critical paths (router, fallback, state machine, security/redaction), not a percentage for its own sake.
+- A green `pytest` is a mandatory precondition for committing and for transitioning between implementation stages.

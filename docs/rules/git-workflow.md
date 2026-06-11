@@ -1,24 +1,24 @@
 # Git workflow
 
-Здесь два уровня git: (A) как разрабатывается **сам** оркестратор; (B) как оркестратор работает с **целевыми** репозиториями. Не путать.
+There are two levels of git here: (A) how the orchestrator **itself** is developed; (B) how the orchestrator works with **target** repositories. Do not conflate them.
 
-## A. Разработка самого оркестратора
+## A. Developing the orchestrator itself
 
-- Ветки от `main`: `feat/<краткое-описание>`, `fix/<…>`, `docs/<…>`, `chore/<…>`.
-- Атомарные коммиты, повелительное наклонение в заголовке: `Add provider health preflight`.
-- Перед коммитом — `ruff check .`, `mypy src`, `pytest` (см. [testing.md](testing.md)).
-- Не коммитить: `config.yaml`, `.venv/`, `workspace/`, `logs/`, `*.db`, секреты (см. `.gitignore`).
-- PR в `main`; merge только после прохождения проверок.
-- Не делать push в `main` напрямую.
+- Branches off `main`: `feat/<short-description>`, `fix/<…>`, `docs/<…>`, `chore/<…>`.
+- Atomic commits, imperative mood in the subject: `Add provider health preflight`.
+- Before committing — `ruff check .`, `mypy src`, `pytest` (see [testing.md](testing.md)).
+- Do not commit: `config.yaml`, `.venv/`, `workspace/`, `logs/`, `*.db`, secrets (see `.gitignore`).
+- PR into `main`; merge only after checks pass.
+- Do not push to `main` directly.
 
-## B. Как оркестратор управляет целевым репозиторием (контракт реализации)
+## B. How the orchestrator manages a target repository (implementation contract)
 
-Это инвариант продукта (см. [orchestrator_final_plan.md §8, §13](../../orchestrator_final_plan.md)):
+This is a product invariant (see [orchestrator_final_plan.md §8, §13](../../orchestrator_final_plan.md)):
 
-- Префикс веток: **`agent/<task-id>-<slug>`**.
-- Последовательность: `git fetch` → checkout `base_branch` → `pull` → создать ветку задачи.
-- **Commit / push / PR выполняет только оркестратор** (Git Manager), не агент-провайдер.
-- Публикация (`publishing`) — только из статуса `ready_to_publish`, при успешных checks и без blocking findings.
-- Идемпотентность: повторный запуск не создаёт второй commit/push/PR; используется сохранённый fingerprint операции и сверка удалённого состояния.
-- Прямой push в `base_branch` запрещён; результат идёт через PR (`gh pr create`).
-- При неоднозначном состоянии ветки — `manual_action_required`, без автоматических действий.
+- Branch prefix: **`agent/<task-id>-<slug>`**.
+- Sequence: `git fetch` → checkout `base_branch` → `pull` → create the task branch.
+- **Only the orchestrator (Git Manager) performs commit / push / PR**, not the agent provider.
+- Publishing (`publishing`) happens only from the `ready_to_publish` status, when checks succeed and there are no blocking findings.
+- Idempotency: a re-run does not create a second commit/push/PR; a stored operation fingerprint and a reconciliation of remote state are used.
+- A direct push to `base_branch` is forbidden; the result goes through a PR (`gh pr create`).
+- On an ambiguous branch state — `manual_action_required`, with no automatic actions.

@@ -1,7 +1,7 @@
-"""Точка входа CLI.
+"""CLI entry point.
 
-Пока скелет: разбирает команды `run` и `watch`. Реализация стадий пайплайна
-добавляется по дорожной карте (см. orchestrator_final_plan.md §15).
+A skeleton for now: it parses the `run` and `watch` commands. The pipeline stages
+are implemented incrementally per the roadmap (see orchestrator_final_plan.md §15).
 """
 
 from __future__ import annotations
@@ -14,16 +14,16 @@ from collections.abc import Sequence
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="wastech-orchestrator",
-        description="Оркестратор кодинг-агентов (Codex / Claude Code) поверх Git.",
+        description="Orchestrator for coding agents (Codex / Claude Code) on top of Git.",
     )
-    parser.add_argument("--config", default="config.yaml", help="путь к config.yaml")
+    parser.add_argument("--config", default="config.yaml", help="path to config.yaml")
 
     sub = parser.add_subparsers(dest="command", required=True)
 
-    run_cmd = sub.add_parser("run", help="выполнить одну задачу из файла")
-    run_cmd.add_argument("task_file", help="путь к файлу задачи (.md или .json)")
+    run_cmd = sub.add_parser("run", help="run a single task from a file")
+    run_cmd.add_argument("task_file", help="path to the task file (.md or .json)")
 
-    sub.add_parser("watch", help="следить за папкой задач и выполнять их")
+    sub.add_parser("watch", help="watch the tasks folder and run the tasks in it")
 
     return parser
 
@@ -31,10 +31,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
-    # TODO(stage-05): подключить Orchestrator Core (см. docs/rules/architecture.md).
+    # TODO(stage-05): wire up the Orchestrator Core (see docs/rules/architecture.md).
     raise SystemExit(
-        f"Команда '{args.command}' ещё не реализована. "
-        f"См. дорожную карту в orchestrator_final_plan.md §15."
+        f"Command '{args.command}' is not implemented yet. "
+        f"See the roadmap in orchestrator_final_plan.md §15."
     )
 
 

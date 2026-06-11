@@ -1,32 +1,32 @@
-# Правила безопасности
+# Security rules
 
-Источник истины — [orchestrator_final_plan.md §12](../../orchestrator_final_plan.md). Нарушать нельзя; валидатор конфигурации обязан отклонять небезопасные настройки.
+The source of truth is [orchestrator_final_plan.md §12](../../orchestrator_final_plan.md). These rules must not be violated; the configuration validator is required to reject unsafe settings.
 
-## Изоляция
+## Isolation
 
-1. Рабочая область агента ограничена отдельным clone/worktree (`workspace/repo`).
-2. Агентам **запрещены** commit, push, merge, создание PR — это делает только оркестратор.
-3. При `strict_isolation: true` невозможность включить требуемую изоляцию завершает preflight ошибкой.
+1. The agent's workspace is confined to a dedicated clone/worktree (`workspace/repo`).
+2. Agents are **forbidden** to commit, push, merge, or create PRs — only the orchestrator does that.
+3. Under `strict_isolation: true`, the inability to enable the required isolation fails preflight with an error.
 
-## Окружение и секреты
+## Environment and secrets
 
-4. Процессам передаются **только allowlisted** env-переменные (см. `security.allowed_environment` в конфиге).
-5. Секретные файлы (`.env`, `secrets/**`, …) исключены из чтения агентом и из логирования.
-6. Секреты, токены и полное окружение процесса **не сохраняются** в SQLite, логах и артефактах. Request-артефакт хранит **redacted** представление.
-7. Git credentials и credentials агентов настраиваются вне оркестратора.
+4. Processes receive **only allowlisted** env variables (see `security.allowed_environment` in the config).
+5. Secret files (`.env`, `secrets/**`, …) are excluded from reading by the agent and from logging.
+6. Secrets, tokens, and the full process environment are **not stored** in SQLite, logs, or artifacts. The request artifact stores a **redacted** representation.
+7. Git credentials and agent credentials are configured outside the orchestrator.
 
-## Выполнение команд
+## Command execution
 
-8. CLI запускаются **без shell-интерполяции** пользовательских строк (список аргументов).
-9. Task ID, имя ветки и пути проходят строгую нормализацию (защита от path traversal и инъекций).
-10. Опции обхода sandbox/permissions **запрещены** валидатором конфигурации; их нельзя включить ни через задачу, ни через `extra_args`.
+8. CLIs are run **without shell interpolation** of user-supplied strings (argument list).
+9. The task ID, branch name, and paths go through strict normalization (protection against path traversal and injection).
+10. Options that bypass the sandbox/permissions are **forbidden** by the configuration validator; they cannot be enabled through a task or through `extra_args`.
 
-## Blacklist действий
+## Action blacklist
 
-11. Глобальный blacklist запрещённых команд и путей (`security.denied_commands`, `denied_read_paths`) применяется до запуска.
-12. Прямой push в `base_branch` запрещён; публикация — только через PR.
-13. Необратимые/опасные действия требуют одобрения человека (HITL через Telegram).
+11. A global blacklist of forbidden commands and paths (`security.denied_commands`, `denied_read_paths`) is applied before any run.
+12. A direct push to `base_branch` is forbidden; publishing happens only through a PR.
+13. Irreversible/dangerous actions require human approval (HITL via Telegram).
 
-## Контрольный слой
+## Control layer
 
-14. Pull Request и CI остаются обязательным контрольным слоем — оркестратор их не заменяет и не делает auto-merge (в первой версии).
+14. The Pull Request and CI remain a mandatory control layer — the orchestrator does not replace them and does not auto-merge (in the first version).

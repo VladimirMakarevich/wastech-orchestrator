@@ -1,4 +1,4 @@
-"""Smoke-тесты контракта провайдера. Проверяют, что базовые инварианты на месте."""
+"""Smoke tests for the provider contract. They verify that the basic invariants are in place."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def test_stage_values_are_canonical() -> None:
 
 
 def test_quality_errors_are_not_fallback_eligible() -> None:
-    # Ошибки качества/конфигурации не должны вызывать смену провайдера (спек §7.3).
+    # Quality/configuration errors must not trigger a provider switch (spec §7.3).
     for ec in (ErrorClass.TASK_FAILURE, ErrorClass.CONFIGURATION_ERROR):
         assert ec not in FALLBACK_ELIGIBLE
 
@@ -35,7 +35,7 @@ def test_infra_error_is_fallback_eligible() -> None:
 
 
 def test_conditional_errors_excluded_from_unconditional_set() -> None:
-    # authorization_failed / permission_denied — условный fallback, решает Router.
+    # authorization_failed / permission_denied are a conditional fallback, decided by the Router.
     assert ErrorClass.AUTHORIZATION_FAILED not in FALLBACK_ELIGIBLE
     assert ErrorClass.PERMISSION_DENIED not in FALLBACK_ELIGIBLE
 

@@ -1,6 +1,6 @@
-"""wastech-orchestrator — lean-оркестратор кодинг-агентов (Codex / Claude Code) поверх Git.
+"""wastech-orchestrator — a lean orchestrator for coding agents (Codex / Claude Code) on top of Git.
 
-Источник истины по архитектуре: orchestrator_final_plan.md.
+Architecture source of truth: orchestrator_final_plan.md.
 """
 
 __version__ = "0.0.1"

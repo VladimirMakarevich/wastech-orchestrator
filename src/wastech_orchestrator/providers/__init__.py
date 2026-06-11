@@ -1,6 +1,6 @@
-"""Провайдерный слой.
+"""Provider layer.
 
-Единственное место, где живёт синтаксис конкретного CLI. Core взаимодействует
-с провайдерами ТОЛЬКО через контракт `AgentProvider` из `base.py`.
-Провайдеры не выполняют fallback и не меняют state machine.
+The only place where the syntax of a specific CLI lives. Core interacts
+with providers ONLY through the `AgentProvider` contract from `base.py`.
+Providers do not perform fallback and do not change the state machine.
 """

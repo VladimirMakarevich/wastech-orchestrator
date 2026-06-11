@@ -1,11 +1,11 @@
-# Пример конфигурации wastech-orchestrator.
-# Скопируй в config.yaml и заполни под свой проект. config.yaml в git НЕ коммитится.
+# Example configuration for wastech-orchestrator.
+# Copy to config.yaml and fill it in for your project. config.yaml is NOT committed to git.
 
 repo:
   url: "git@github.com:OWNER/REPO.git"
   local_path: "./workspace/repo"
   base_branch: "main"
-  branch_prefix: "agent"            # ветки задач: agent/<task-id>-<slug>
+  branch_prefix: "agent"            # task branches: agent/<task-id>-<slug>
 
 agents:
   allowed:
@@ -15,7 +15,7 @@ agents:
   max_stage_attempts: 2
   max_fix_cycles: 3
 
-  routing:                          # primary/fallback на стадию
+  routing:                          # primary/fallback per stage
     planning:
       primary: claude
       fallback: codex
@@ -71,7 +71,7 @@ git:
   create_pull_request: true
   pr_base: "main"
 
-telegram:                           # human-in-the-loop + уведомления (опционально)
+telegram:                           # human-in-the-loop + notifications (optional)
   enabled: false
   bot_token_env: "TELEGRAM_BOT_TOKEN"
   chat_id_env: "TELEGRAM_CHAT_ID"

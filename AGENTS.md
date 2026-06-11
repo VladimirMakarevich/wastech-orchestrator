@@ -1,30 +1,30 @@
-# AGENTS.md — инструкции для Codex CLI в этом репозитории
+# AGENTS.md — instructions for Codex CLI in this repository
 
-Ты работаешь над **wastech-orchestrator** — оркестратором, который запускает кодинг-агенты (Codex / Claude Code) для выполнения задач разработки и публикации результата в Git.
+You are working on **wastech-orchestrator** — an orchestrator that launches coding agents (Codex / Claude Code) to carry out development tasks and publish the result to Git.
 
-Этот файл — для Codex. Полный набор правил совпадает с [CLAUDE.md](CLAUDE.md) и [docs/rules/](docs/rules/); ниже — суть.
+This file is for Codex. The full set of rules matches [CLAUDE.md](CLAUDE.md) and [docs/rules/](docs/rules/); below is the gist.
 
-## Прежде чем писать код
+## Before writing code
 
-1. Прочитай **[orchestrator_final_plan.md](orchestrator_final_plan.md)** — канонический спек (источник истины).
-2. Соблюдай правила в **[docs/rules/](docs/rules/)**: `architecture.md`, `coding-style.md`, `security.md`, `git-workflow.md`, `testing.md`.
+1. Read **[orchestrator_final_plan.md](orchestrator_final_plan.md)** — the canonical spec (source of truth).
+2. Follow the rules in **[docs/rules/](docs/rules/)**: `architecture.md`, `coding-style.md`, `security.md`, `git-workflow.md`, `testing.md`.
 
-## Жёсткие инварианты (нарушать нельзя)
+## Hard invariants (must not be violated)
 
-- **Ядро не знает синтаксис CLI.** Provider-специфика — только в `src/wastech_orchestrator/providers/`. Core вызывает только `AgentProvider`.
-- **Commit / push / PR выполняет только оркестратор**, не провайдер.
-- **Fallback — только для инфраструктурных ошибок** провайдера. Ошибки тестов/ревью → стадия `fixing`.
-- **Security policy нельзя ослабить** через задачу или `extra_args`; никаких флагов обхода sandbox/approvals.
-- **Секреты** не попадают в логи, SQLite и артефакты. Процессам — только allowlisted env.
-- **CLI вызывать списком аргументов**, без shell-интерполяции пользовательских строк.
+- **The core does not know the CLI syntax.** Provider-specific logic lives only in `src/wastech_orchestrator/providers/`. The core only ever calls `AgentProvider`.
+- **Only the orchestrator does commit / push / PR**, not the provider.
+- **Fallback is only for infrastructure errors** of the provider. Test/review errors → the `fixing` stage.
+- **The security policy cannot be weakened** through a task or `extra_args`; no flags that bypass sandbox/approvals.
+- **Secrets** do not end up in logs, SQLite, or artifacts. Processes get only allowlisted env.
+- **Call the CLI with an argument list**, without shell interpolation of user strings.
 
-## Канонические имена
+## Canonical names
 
-- Провайдеры: `codex`, `claude`.
-- Стадии: `planning`, `implementation`, `testing`, `review`, `fixing`, `publishing`.
-- Префикс веток: `agent/<task-id>-<slug>`.
+- Providers: `codex`, `claude`.
+- Stages: `planning`, `implementation`, `testing`, `review`, `fixing`, `publishing`.
+- Branch prefix: `agent/<task-id>-<slug>`.
 
-## Команды проверок
+## Check commands
 
 ```bash
 pip install -e ".[dev]"
@@ -33,9 +33,9 @@ mypy src
 pytest
 ```
 
-## Definition of Done для изменения
+## Definition of Done for a change
 
-- код проходит `ruff`, `mypy`, `pytest`;
-- добавлены/обновлены тесты при изменении поведения;
-- не нарушены инварианты выше;
-- не выполнен переход к следующей стадии реализации без DoD предыдущей (см. спек §15–16).
+- the code passes `ruff`, `mypy`, `pytest`;
+- tests are added/updated when behavior changes;
+- the invariants above are not violated;
+- there is no move to the next implementation stage without the DoD of the previous one (see spec §15–16).

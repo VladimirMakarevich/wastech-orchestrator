@@ -1,43 +1,43 @@
 ---
 name: add-provider
-description: Создать новый адаптер кодинг-агента (AgentProvider) для wastech-orchestrator по контракту из providers/base.py. Использовать при добавлении Codex/Claude Code адаптера или другого CLI-провайдера.
+description: Create a new coding-agent adapter (AgentProvider) for wastech-orchestrator following the contract in providers/base.py. Use when adding a Codex/Claude Code adapter or another CLI provider.
 ---
 
 # add-provider
 
-Скаффолдинг нового provider-адаптера строго по контракту.
+Scaffold a new provider adapter strictly according to the contract.
 
-## Прежде чем начать
+## Before you start
 
-Прочитай:
-- `src/wastech_orchestrator/providers/base.py` — контракт `AgentProvider`, структуры запроса/результата, классы ошибок;
-- `orchestrator_final_plan.md` §4.3, §4.4, §7 — обязанности адаптера и нормализация ошибок;
-- `docs/rules/architecture.md` и `docs/rules/security.md` — инварианты.
+Read:
+- `src/wastech_orchestrator/providers/base.py` — the `AgentProvider` contract, the request/result structures, and the error classes;
+- `orchestrator_final_plan.md` §4.3, §4.4, §7 — the adapter's responsibilities and error normalization;
+- `docs/rules/architecture.md` and `docs/rules/security.md` — the invariants.
 
-## Шаги
+## Steps
 
-1. Создай модуль `src/wastech_orchestrator/providers/<provider>.py` с классом, реализующим `AgentProvider`:
-   - `id` = канонический идентификатор (`codex` / `claude`);
-   - `preflight()` → `ProviderHealth` (executable, версия, авторизация, нужные возможности; сообщение без секретов);
-   - `run(request)` → `AgentRunResult` (или `ProviderError` с корректным `ErrorClass` при инфраструктурном сбое).
-2. Построение вызова CLI:
-   - **список аргументов**, без `shell=True` и интерполяции пользовательских строк;
-   - обязательный таймаут;
-   - sandbox/permission profile из request, **без** опций обхода;
-   - передавать только allowlisted env (см. security.md).
-3. Нормализация:
-   - exit code и события → `RunStatus` / `ErrorClass`;
+1. Create the module `src/wastech_orchestrator/providers/<provider>.py` with a class implementing `AgentProvider`:
+   - `id` = canonical identifier (`codex` / `claude`);
+   - `preflight()` → `ProviderHealth` (executable, version, authentication, required capabilities; message free of secrets);
+   - `run(request)` → `AgentRunResult` (or `ProviderError` with the correct `ErrorClass` on an infrastructure failure).
+2. Building the CLI call:
+   - an **argument list**, without `shell=True` and without interpolating user-supplied strings;
+   - a mandatory timeout;
+   - the sandbox/permission profile from the request, **without** any bypass options;
+   - pass only allowlisted env (see security.md).
+3. Normalization:
+   - exit code and events → `RunStatus` / `ErrorClass`;
    - structured output (JSONL / stream-json) → `structured_output`;
-   - stdout/stderr/event log → пути артефактов (спек §10), redacted request-артефакт.
-4. **Запрещено** в адаптере: fallback, изменение state machine, commit/push/PR.
-5. Тесты (см. docs/rules/testing.md):
-   - unit: command builder, парсинг output, классификация ошибок;
-   - integration: fake CLI executable на сценарии успех/timeout/crash/malformed/auth-fail.
-6. Прогони `/run-checks`.
+   - stdout/stderr/event log → artifact paths (spec §10), redacted request artifact.
+4. **Forbidden** in the adapter: fallback, changing the state machine, commit/push/PR.
+5. Tests (see docs/rules/testing.md):
+   - unit: command builder, output parsing, error classification;
+   - integration: a fake CLI executable for the success/timeout/crash/malformed/auth-fail scenarios.
+6. Run `/run-checks`.
 
 ## Definition of Done
 
-- класс проходит `isinstance(obj, AgentProvider)` (Protocol runtime-checkable);
-- все инфраструктурные сбои возвращают корректный `ErrorClass`;
-- нет секретов в логах/артефактах;
-- зелёные ruff/mypy/pytest.
+- the class passes `isinstance(obj, AgentProvider)` (Protocol runtime-checkable);
+- all infrastructure failures return the correct `ErrorClass`;
+- no secrets in logs/artifacts;
+- green ruff/mypy/pytest.

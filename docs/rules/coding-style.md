@@ -1,42 +1,42 @@
-# Правила стиля кода
+# Code style rules
 
-## Язык и инструменты
+## Language and tooling
 
 - **Python 3.12+**.
-- Форматирование и линт: **ruff** (`ruff check .`, `ruff format`).
-- Типы: **mypy** в строгом режиме для `src/`. Весь публичный API аннотирован.
-- Тесты: **pytest**.
+- Formatting and linting: **ruff** (`ruff check .`, `ruff format`).
+- Types: **mypy** in strict mode for `src/`. The entire public API is annotated.
+- Tests: **pytest**.
 
-## Общие принципы
+## General principles
 
-- Маленькие, сфокусированные функции и модули с одной ответственностью.
-- Явное лучше неявного: никаких «магических» глобальных состояний.
-- Никаких побочных эффектов на уровне импорта модуля.
-- Ошибки — через типизированные исключения/результаты, а не «голые» строки.
+- Small, focused functions and modules with a single responsibility.
+- Explicit is better than implicit: no "magic" global state.
+- No side effects at module import time.
+- Errors are surfaced through typed exceptions/results, not "bare" strings.
 
-## Структура
+## Structure
 
-- Пакет: `src/wastech_orchestrator/`, src-layout.
-- Один компонент = один модуль/подпакет (`providers/`, `git_manager.py`, `state_store.py`, …).
-- Контракты данных — `dataclasses` (или Pydantic, если понадобится валидация ввода). Provider-контракт — `typing.Protocol`.
+- Package: `src/wastech_orchestrator/`, src-layout.
+- One component = one module/subpackage (`providers/`, `git_manager.py`, `state_store.py`, …).
+- Data contracts are `dataclasses` (or Pydantic if input validation is needed). The provider contract is a `typing.Protocol`.
 
-## Именование
+## Naming
 
-- `snake_case` для функций/переменных, `PascalCase` для классов, `UPPER_SNAKE` для констант.
-- Имена провайдеров и стадий — строго из канонического списка (см. [architecture.md](architecture.md)); заводить enum, а не строковые литералы по коду.
+- `snake_case` for functions/variables, `PascalCase` for classes, `UPPER_SNAKE` for constants.
+- Provider and stage names come strictly from the canonical list (see [architecture.md](architecture.md)); define an enum rather than scattering string literals through the code.
 
-## Процессы и subprocess
+## Processes and subprocess
 
-- Внешние CLI запускать **списком аргументов** (`subprocess.run([...])`), без `shell=True` и без интерполяции пользовательских строк.
-- Таймауты обязательны для всех внешних вызовов.
-- stdout/stderr пишутся в артефакты (см. спек §10), а не теряются.
+- Run external CLIs with an **argument list** (`subprocess.run([...])`), without `shell=True` and without interpolating user-supplied strings.
+- Timeouts are mandatory for all external calls.
+- stdout/stderr are written to artifacts (see spec §10), not discarded.
 
-## Логирование
+## Logging
 
-- Стандартный `logging`, структурно (task_id, stage, attempt, provider).
-- **Никогда** не логировать секреты, токены, полное окружение процесса.
+- Standard `logging`, structured (task_id, stage, attempt, provider).
+- **Never** log secrets, tokens, or the full process environment.
 
-## Документация в коде
+## In-code documentation
 
-- Docstring у публичных функций/классов: что делает, контракт ввода/вывода, какие исключения.
-- Комментарии — только там, где «почему», а не «что».
+- Public functions/classes have a docstring: what it does, the input/output contract, and which exceptions it raises.
+- Comments belong only where they explain "why", not "what".

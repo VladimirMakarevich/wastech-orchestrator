@@ -1,7 +1,7 @@
-"""Контракт провайдера агента.
+"""Agent provider contract.
 
-Реализация спеки orchestrator_final_plan.md §4.3 (контракт) и §7.1 (классы ошибок).
-Core зависит только от этого модуля, не от конкретных адаптеров.
+Implements the spec orchestrator_final_plan.md §4.3 (contract) and §7.1 (error classes).
+Core depends only on this module, not on specific adapters.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
-# --- Канонические перечисления (не дублировать строковыми литералами по коду) ---
+# --- Canonical enumerations (do not duplicate as string literals throughout the code) ---
 
 
 class Stage(str, Enum):
@@ -28,7 +28,7 @@ class RunStatus(str, Enum):
 
 
 class ErrorClass(str, Enum):
-    """Нормализованные классы ошибок провайдера (спек §7.1)."""
+    """Normalized provider error classes (spec §7.1)."""
 
     BINARY_NOT_FOUND = "binary_not_found"
     UNSUPPORTED_VERSION = "unsupported_version"
@@ -45,9 +45,9 @@ class ErrorClass(str, Enum):
     TASK_FAILURE = "task_failure"
 
 
-# Классы ошибок, безусловно допускающие fallback (спек §7.2).
-# authorization_failed / permission_denied — условный fallback, решается Router'ом,
-# а не здесь, поэтому в этот набор не входят.
+# Error classes that unconditionally allow fallback (spec §7.2).
+# authorization_failed / permission_denied are a conditional fallback, decided by the Router,
+# not here, so they are not part of this set.
 FALLBACK_ELIGIBLE: frozenset[ErrorClass] = frozenset(
     {
         ErrorClass.BINARY_NOT_FOUND,
@@ -63,7 +63,7 @@ FALLBACK_ELIGIBLE: frozenset[ErrorClass] = frozenset(
 )
 
 
-# --- Структуры данных контракта (спек §4.3) ---
+# --- Contract data structures (spec §4.3) ---
 
 
 @dataclass(frozen=True)
@@ -73,7 +73,7 @@ class ProviderHealth:
     version: str | None
     authenticated: bool
     supports_required_features: bool
-    message: str  # диагностика без секретов
+    message: str  # diagnostics without secrets
 
 
 @dataclass(frozen=True)
@@ -85,7 +85,7 @@ class AgentRunRequest:
     permission_profile: str
     timeout_seconds: int
     attempt: int
-    # Пути к артефактам контекста (см. спек §6, §10).
+    # Paths to context artifacts (see spec §6, §10).
     task_path: str | None = None
     plan_path: str | None = None
     diff_path: str | None = None
@@ -99,7 +99,7 @@ class AgentRunRequest:
 @dataclass(frozen=True)
 class NormalizedError:
     error_class: ErrorClass
-    message: str  # без секретов
+    message: str  # without secrets
 
 
 @dataclass(frozen=True)
@@ -114,7 +114,7 @@ class AgentRunResult:
     final_message: str | None = None
     structured_output: dict[str, Any] | None = None
     usage: dict[str, Any] | None = None
-    session_id: str | None = None  # только для аудита
+    session_id: str | None = None  # for auditing only
     stdout_path: str | None = None
     stderr_path: str | None = None
     event_log_path: str | None = None
@@ -122,7 +122,7 @@ class AgentRunResult:
 
 
 class ProviderError(Exception):
-    """Исключение провайдера с нормализованным классом ошибки."""
+    """Provider exception carrying a normalized error class."""
 
     def __init__(self, error_class: ErrorClass, message: str) -> None:
         super().__init__(message)
@@ -133,23 +133,23 @@ class ProviderError(Exception):
         return self.error_class in FALLBACK_ELIGIBLE
 
 
-# --- Контракт провайдера ---
+# --- Provider contract ---
 
 
 @runtime_checkable
 class AgentProvider(Protocol):
-    """Общий интерфейс для Codex и Claude Code.
+    """Common interface for Codex and Claude Code.
 
-    Адаптеры реализуют этот протокол. Они НЕ выполняют fallback и НЕ меняют
-    state machine — это ответственность Router'а и Core (см. docs/rules/architecture.md).
+    Adapters implement this protocol. They do NOT perform fallback and do NOT change the
+    state machine — that is the responsibility of the Router and Core (see docs/rules/architecture.md).
     """
 
     id: str
 
     def preflight(self) -> ProviderHealth:
-        """Проверить доступность executable, версию, авторизацию, нужные возможности."""
+        """Check executable availability, version, authentication, and required capabilities."""
         ...
 
     def run(self, request: AgentRunRequest) -> AgentRunResult:
-        """Выполнить один запуск стадии. Инфраструктурные сбои → ProviderError."""
+        """Execute a single stage run. Infrastructure failures → ProviderError."""
         ...
