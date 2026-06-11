@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Конфигурация и секреты (НЕ коммитить)
+config.yaml
+.env
+secrets/
+*.key
+*.pem
+
+# Рабочая область и артефакты оркестратора
+workspace/
+logs/
+*.db
+*.sqlite
+*.sqlite3
+
+# Задачи в работе (опционально оставить только pending в git)
+tasks/processing/
+tasks/done/
+tasks/failed/
+
+# IDE / ОС
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

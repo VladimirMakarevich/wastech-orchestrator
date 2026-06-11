@@ -1,0 +1,78 @@
+# Пример конфигурации wastech-orchestrator.
+# Скопируй в config.yaml и заполни под свой проект. config.yaml в git НЕ коммитится.
+
+repo:
+  url: "git@github.com:OWNER/REPO.git"
+  local_path: "./workspace/repo"
+  base_branch: "main"
+  branch_prefix: "agent"            # ветки задач: agent/<task-id>-<slug>
+
+agents:
+  allowed:
+    - claude
+    - codex
+
+  max_stage_attempts: 2
+  max_fix_cycles: 3
+
+  routing:                          # primary/fallback на стадию
+    planning:
+      primary: claude
+      fallback: codex
+    implementation:
+      primary: claude
+      fallback: codex
+    review:
+      primary: codex
+      fallback: claude
+    fixing:
+      primary: claude
+      fallback: codex
+
+  providers:
+    claude:
+      command: "claude"
+      model: ""
+      timeout_seconds: 1800
+      max_turns: 50
+      max_budget_usd: null
+      permission_profile: "workspace-write"
+      extra_args: []
+    codex:
+      command: "codex"
+      model: ""
+      timeout_seconds: 1800
+      sandbox: "workspace-write"
+      permission_profile: "workspace-write"
+      extra_args: []
+
+security:
+  strict_isolation: true
+  allowed_environment:
+    - "PATH"
+    - "HOME"
+    - "USERPROFILE"
+    - "CODEX_HOME"
+    - "CLAUDE_CONFIG_DIR"
+  denied_read_paths:
+    - ".env"
+    - "secrets/**"
+  denied_commands:
+    - "git commit"
+    - "git push"
+    - "gh pr create"
+
+checks:
+  commands:
+    - "npm test"
+    - "npm run lint"
+
+git:
+  create_pull_request: true
+  pr_base: "main"
+
+telegram:                           # human-in-the-loop + уведомления (опционально)
+  enabled: false
+  bot_token_env: "TELEGRAM_BOT_TOKEN"
+  chat_id_env: "TELEGRAM_CHAT_ID"
+  ask_timeout_s: 1800

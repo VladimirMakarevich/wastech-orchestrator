@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "wastech-orchestrator"
+version = "0.0.1"
+description = "Lean-оркестратор кодинг-агентов (Codex / Claude Code) с публикацией в Git"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+dependencies = [
+    "watchdog>=4.0",
+    "PyYAML>=6.0",
+    "python-telegram-bot>=21.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "types-PyYAML",
+]
+
+[project.scripts]
+wastech-orchestrator = "wastech_orchestrator.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wastech_orchestrator"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
