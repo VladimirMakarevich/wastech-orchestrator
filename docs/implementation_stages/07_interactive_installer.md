@@ -45,13 +45,13 @@ wastech-orchestrator install [repo-path]
 - Генерировать `config.yaml` структурно через YAML:
   - только выбранные providers;
   - безопасный `workspace-write`;
-  - внешний footprint;
+  - in-repo audit footprint (`location: in_repo`, `tracking: commit`): задачи и артефакты хранятся в самом репозитории;
   - абсолютные native Windows/macOS пути;
   - найденные remote и base branch;
   - неизменяемые безопасные security defaults;
   - никаких секретов или credentials.
 
-- Не изменять tracked-файлы целевого репозитория. `config.yaml`, tasks, logs и SQLite находятся только в соседнем workspace.
+- Не изменять tracked-файлы целевого репозитория при установке: каталоги задач/логов создаются **пустыми** (git их не видит). `config.yaml` и карантин отклонённых задач (`tasks/rejected/`) лежат в соседнем workspace, вне репозитория; `tasks/`, `logs/` и SQLite-состояние — в самом репозитории (артефакты коммитятся оркестратором во время задач, а `state.db`/`config.yaml` исключены из коммитов).
 
 - Сохранять привязку `repo root -> config.yaml` в пользовательском системном каталоге через `platformdirs`:
   - Windows: `%LOCALAPPDATA%`;

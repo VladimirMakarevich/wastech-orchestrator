@@ -99,7 +99,7 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
     workspace = str(spec.workspace)
     return {
         "schema_version": CONFIG_SCHEMA_VERSION,
-        "orchestrator": {"auto_mode": {"enabled": spec.auto_mode}},
+        "orchestrator": {"auto_mode": {"enabled": spec.auto_mode}, "poll_interval_seconds": 300},
         "repo": {
             "url": spec.repo_url,
             "local_path": str(spec.repo_local_path),
@@ -146,9 +146,11 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "create_pull_request": spec.create_pull_request,
             "pr_base": spec.base_branch,
             "footprint": {
-                "location": "external",
-                "tracking": "none",
-                "external_root": workspace,
+                # Tasks and their result artifacts live in the target repo and are audit-committed
+                # there (§21); the control workspace holds only config.yaml and the quarantine.
+                "location": "in_repo",
+                "tracking": "commit",
+                "external_root": workspace,  # unused under in_repo, kept for round-trip clarity
                 "audit_commit_message": "chore(orchestrator): audit trail for {task_id}",
                 "audit_on_branch": "task",
             },

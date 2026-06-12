@@ -77,6 +77,13 @@ def validate_config(config: OrchestratorConfig) -> list[str]:
             continue
         _check_route(stage, route, allowed, provider_ids, issues)
 
+    # Watch poll interval (§8.3): negative is meaningless; 0 means single-pass (no loop).
+    if config.orchestrator.poll_interval_seconds < 0:
+        issues.append(
+            "orchestrator.poll_interval_seconds must be >= 0 "
+            f"(got {config.orchestrator.poll_interval_seconds})"
+        )
+
     # Loop-control hard cap (§8.1): the global cap must be >= a single fix loop.
     if agents.max_total_fix_iterations < agents.max_fix_cycles:
         issues.append(

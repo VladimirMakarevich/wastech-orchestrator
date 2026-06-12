@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from wastech_orchestrator.config.loader import ConfigError, loads_config
+from wastech_orchestrator.config.schema import FootprintLocation, FootprintTracking
 from wastech_orchestrator.config.validation import validate_config
 from wastech_orchestrator.providers.base import ProviderId, Stage
 
@@ -57,6 +58,18 @@ agents:
 """
     result = loads_config(text)
     assert result.config.orchestrator.auto_mode.enabled is True
+
+
+def test_poll_interval_defaults_to_300() -> None:
+    result = loads_config(_LEGACY)
+    assert result.config.orchestrator.poll_interval_seconds == 300
+
+
+def test_footprint_defaults_to_in_repo_commit() -> None:
+    # The operating default keeps tasks + artifacts in the modified repo, audit-committed (§21).
+    result = loads_config(_LEGACY)
+    assert result.config.git.footprint.location is FootprintLocation.IN_REPO
+    assert result.config.git.footprint.tracking is FootprintTracking.COMMIT
 
 
 def test_auto_mode_enabled_must_be_boolean() -> None:

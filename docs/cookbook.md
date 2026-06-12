@@ -35,17 +35,19 @@ This creates `config.yaml`, `tasks/`, `logs/`, `workspace/`, and editable copies
 templates under `templates/`. The command is idempotent: a second run skips existing files and never
 overwrites `config.yaml`.
 
-The generated task template is `templates/task.md`. Repository examples live under
-[`docs/examples/`](examples/) and should be copied into `tasks/pending/` only in the external
-orchestrator workspace. Do not commit example files under a target repository's `tasks/` or
-`logs/` directories: the footprint preflight treats tracked paths with those names as a collision.
+The generated task template is `templates/task.md`. Under the default in-repo audit footprint, live
+task files belong in the repo's `tasks/pending/` (committed and pushed there). Under the
+`external`/`exclude_local` footprints, copy examples into the external workspace's `tasks/pending/`
+instead and do not commit them under a target repo's `tasks/`/`logs/` paths — there the footprint
+preflight treats tracked paths with those names as a collision.
 
-Choose a footprint mode at initialization when you already know where artifacts should live:
+Choose a footprint mode at initialization when you already know where artifacts should live (the
+default is `in_repo_commit`):
 
 ```bash
-python -m wastech_orchestrator init . --git-mode external
+python -m wastech_orchestrator init . --git-mode in_repo_commit   # default: tasks + artifacts in the repo
 python -m wastech_orchestrator init . --git-mode in_repo_exclude
-python -m wastech_orchestrator init . --git-mode in_repo_commit
+python -m wastech_orchestrator init . --git-mode external
 ```
 
 Use `--dry-run` to inspect the created/skipped plan without writing files.
@@ -244,10 +246,16 @@ terminal cleanup back to `repo.base_branch`.
 
 ```bash
 python -m wastech_orchestrator watch
+python -m wastech_orchestrator watch --poll-seconds 0   # single pass (no loop), e.g. under cron
 ```
 
-By default, `orchestrator.auto_mode.enabled` is `false`, so `watch` processes or resumes one task and
-then stops:
+By default `watch` is a long-running loop: `orchestrator.poll_interval_seconds` (default `300`) is
+how often it runs `git fetch` + `pull --ff-only` on `base_branch` and re-scans, so tasks committed
+and pushed to the repo after `watch` started are picked up without a manual pull. Stop it with
+Ctrl-C; set `poll_interval_seconds: 0` (or `--poll-seconds 0`) for a single pass.
+
+By default, `orchestrator.auto_mode.enabled` is `false`, so within each scan `watch` processes or
+resumes one task and then waits for the next tick:
 
 ```yaml
 orchestrator:
@@ -358,11 +366,18 @@ The footprint controls where `tasks/` and `logs/` live relative to the target cl
 
 | Mode | Config | Best for |
 |---|---|---|
-| `external` | `location: external`, `tracking: none` | Zero artifact footprint in the target repo. |
+| `in_repo_commit` (default) | `location: in_repo`, `tracking: commit` | The task + its summary stored in git, in the same repo as the code, via a separate orchestrator-made `tasks/` commit (`logs/` stays local). |
 | `in_repo_exclude` | `location: in_repo`, `tracking: exclude_local` | Artifacts beside the code, excluded through `.git/info/exclude`. |
-| `in_repo_commit` | `location: in_repo`, `tracking: commit` | A separate orchestrator-made audit commit. |
+| `external` | `location: external`, `tracking: none` | Zero artifact footprint in the target repo. |
 
 Examples:
+
+```yaml
+git:
+  footprint:
+    location: in_repo
+    tracking: commit
+```
 
 ```yaml
 git:
@@ -372,15 +387,10 @@ git:
     external_root: "./"
 ```
 
-```yaml
-git:
-  footprint:
-    location: in_repo
-    tracking: exclude_local
-```
-
-In every mode, planned v1 behavior uses scoped staging for code changes and excludes
-`tasks/`/`logs/`/`workspace/` from the code commit.
+In every mode the *code* commit uses scoped staging and excludes `tasks/`/`logs/`/`workspace/` (and,
+under in-repo, the root runtime files `state.db`/`config.yaml`); audit mode stores **`tasks/`** (the
+task moved to `done/`/`failed/` + its `<id>.summary.md`) in a *separate* commit, while `logs/`
+(plan, review, diffs, `summary.json`) stays local and is never committed.
 
 ## 10. Inspect Logs And Artifacts
 
@@ -428,7 +438,7 @@ causes:
 | Fix budget exhausted | Read `stuck.md`, inspect the final diff, and decide whether to fix manually or refine the task. |
 | Terminal cleanup unsafe | Inspect `repo.local_path` with `git status`, reconcile the branch, and return to `repo.base_branch`. |
 | More than one active task on restart | Decide which task is authoritative, then repair state before rerunning. |
-| Footprint conflict | Remove or rename tracked `tasks/`/`logs/` paths. The current preflight rejects this collision in every footprint mode. |
+| Footprint conflict | Only under `external`/`exclude_local`: remove or rename tracked `tasks/`/`logs/` paths (the preflight rejects that collision). Under the default `in_repo_commit` those paths are the expected audit trail and the preflight is skipped. |
 
 After resolving the problem, run:
 

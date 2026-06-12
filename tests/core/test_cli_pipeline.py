@@ -39,6 +39,7 @@ class _FakeOrch:
         self._runs = list(runs or [])
         self.run_calls: list[str] = []
         self.resume_calls = 0
+        self.refresh_calls = 0
 
     def resume(self):
         self.resume_calls += 1
@@ -46,6 +47,9 @@ class _FakeOrch:
 
     def acquire_slot(self, task_id: str) -> bool:
         return True
+
+    def refresh_repo(self) -> None:
+        self.refresh_calls += 1
 
     def run_task(self, task_file: str):
         self.run_calls.append(task_file)
@@ -102,6 +106,43 @@ def test_watch_resume_manual_blocks(make_git_config, git_repo, tmp_path: Path) -
     assert orch.run_calls == []  # resume's manual outcome blocks picking pending
 
 
+# --- watch_loop unit tests (periodic discovery, §8.3) ------------------------------------
+
+
+def test_watch_loop_refreshes_each_tick_and_sleeps_between(
+    make_git_config, git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = make_git_config(git_repo.clone)
+    orch = _FakeOrch()
+    ticks = {"n": 0}
+
+    def fake_watch_once(_o, _c, _f):
+        ticks["n"] += 1
+        return [_done(f"t{ticks['n']}")]
+
+    monkeypatch.setattr(cli, "watch_once", fake_watch_once)
+    sleeps: list[float] = []
+    results = cli.watch_loop(
+        orch, config, tmp_path, poll_interval=60, max_iterations=3, sleep_fn=sleeps.append
+    )  # type: ignore[arg-type]
+    assert orch.refresh_calls == 3  # repo refreshed before every tick
+    assert ticks["n"] == 3
+    assert sleeps == [60, 60]  # slept between ticks, never after the last
+    assert len(results) == 3
+
+
+def test_watch_loop_single_pass_when_poll_zero(
+    make_git_config, git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = make_git_config(git_repo.clone)
+    orch = _FakeOrch()
+    monkeypatch.setattr(cli, "watch_once", lambda _o, _c, _f: [])
+    sleeps: list[float] = []
+    cli.watch_loop(orch, config, tmp_path, poll_interval=0, sleep_fn=sleeps.append)  # type: ignore[arg-type]
+    assert orch.refresh_calls == 1  # one tick (still refreshes before scanning)
+    assert sleeps == []  # no loop, no sleep
+
+
 # --- end-to-end via main() with fake CLIs ------------------------------------------------
 
 
@@ -113,6 +154,8 @@ def _write_cli_config(
     codex_cmd: str,
     create_pr: bool = False,
     auto_mode: bool = False,
+    location: str = "external",
+    tracking: str = "none",
 ) -> Path:
     env = ["PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "TEMP", "TMP", "APPDATA", "LOCALAPPDATA"]
     env_lines = "\n".join(f"    - {e}" for e in env)
@@ -123,6 +166,7 @@ def _write_cli_config(
 orchestrator:
   auto_mode:
     enabled: {str(auto_mode).lower()}
+  poll_interval_seconds: 0
 repo:
   url: "git@example.com:o/r.git"
   local_path: {str(clone)!r}
@@ -153,8 +197,8 @@ git:
   create_pull_request: {str(create_pr).lower()}
   pr_base: "main"
   footprint:
-    location: external
-    tracking: none
+    location: {location}
+    tracking: {tracking}
     external_root: {str(external)!r}
 """,
         encoding="utf-8",
@@ -225,6 +269,46 @@ def test_cmd_run_happy_path(
         "terminal cleanup started",
         "terminal cleanup completed",
     } <= messages
+
+
+def test_in_repo_commit_stores_task_and_summary_not_logs(
+    git_repo, fake_cli, git_run, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In-repo audit footprint: the task (moved to done/) + its summary.md are committed; logs/ is
+    not. Code change and task lifecycle are separate commits on the branch (§6, §21)."""
+    project = tmp_path / "project"
+    project.mkdir()
+    claude_cmd = fake_cli("success_edit", "claude")
+    codex_cmd = fake_cli("success_edit", "codex")
+    config = _write_cli_config(
+        project,
+        git_repo.clone,
+        claude_cmd=claude_cmd,
+        codex_cmd=codex_cmd,
+        location="in_repo",
+        tracking="commit",
+    )
+    # The task lives in the repo's own tasks/pending (how a teammate hands work over via git).
+    task_file = git_repo.clone / "tasks" / "pending" / "task-300.md"
+    task_file.parent.mkdir(parents=True, exist_ok=True)
+    _complete_task_file(task_file, "task-300")
+
+    code = cli.main(["--config", str(config), "--heartbeat-seconds", "0", "run", str(task_file)])
+    assert code == 0
+
+    branch = "agent/task-300-add-a-thing"
+    assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "main"
+    tracked = git_run(["ls-tree", "-r", "--name-only", branch], git_repo.clone)
+    assert "tasks/done/task-300.md" in tracked  # task moved into done/ and committed
+    assert "tasks/done/task-300.summary.md" in tracked  # summary committed next to the task
+    assert "agent_change.py" in tracked  # the code change
+    assert "logs/" not in tracked  # plan/review/stage-logs/summary.json never enter git
+    # Code and task lifecycle are distinct commits on the branch.
+    subjects = git_run(["log", "--format=%s", "main.." + branch], git_repo.clone)
+    assert "feat(task-300)" in subjects
+    assert "audit trail for task-300" in subjects
+    # summary.json stays a local-only working artifact in logs/.
+    assert (git_repo.clone / "logs" / "task-300" / "summary.json").exists()
 
 
 def test_cmd_status_reports_active_task(

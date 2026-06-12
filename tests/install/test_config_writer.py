@@ -75,14 +75,14 @@ def test_both_use_the_default_routing_table(tmp_path: Path) -> None:
     assert cfg.agents.routing[Stage.REVIEW].fallback is ProviderId.CLAUDE
 
 
-def test_generated_config_is_external_footprint_with_absolute_paths(tmp_path: Path) -> None:
+def test_generated_config_is_in_repo_commit_footprint_with_absolute_paths(tmp_path: Path) -> None:
     spec = _spec(tmp_path, (ProviderId.CODEX,))
     cfg = loads_config(build_and_validate(spec)).config
-    assert cfg.git.footprint.location is FootprintLocation.EXTERNAL
-    assert cfg.git.footprint.tracking is FootprintTracking.NONE
-    assert cfg.git.footprint.external_root == str(tmp_path / "my-repo-orchestrator")
+    # Tasks + artifacts live in the bound repo and are audit-committed there (§21).
+    assert cfg.git.footprint.location is FootprintLocation.IN_REPO
+    assert cfg.git.footprint.tracking is FootprintTracking.COMMIT
     assert cfg.repo.local_path == str(tmp_path / "my-repo")
-    # Anti-traversal: the `-orchestrator` sibling must not count as inside `my-repo`.
+    assert cfg.orchestrator.poll_interval_seconds == 300
     assert validate_config(cfg) == []
 
 

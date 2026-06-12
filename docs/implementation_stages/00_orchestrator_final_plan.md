@@ -242,9 +242,9 @@ After the review passes and before publishing, a final **`summary` stage** produ
 3. **How** it integrates into the overall system (which components / flows it touches);
 4. **Why** — the intent and the rationale behind the approach.
 
-The stage reads the task, the enriched specification, the plan, the final `git diff`, and the review findings, and writes `summary.md` (human-readable) plus `summary.json` (the four fields, machine-readable) under `logs/<task-id>/` (§10). For a decomposed task (§5.1) it produces one summary for the whole parent (optionally with a short per-subtask section), matching the single PR.
+The stage reads the task, the enriched specification, the plan, the final `git diff`, and the review findings, and produces `summary.md` (human-readable) plus `summary.json` (the four fields, machine-readable). `summary.json` is a working artifact under `logs/<task-id>/`; the human-readable `summary.md` is written **next to the task file** as `tasks/<done|failed>/<id>.summary.md` during finalize (§8.3) so that — under the in-repo footprint — the task and its summary are committed together while `logs/` stays out of git (§10, §21). For a decomposed task (§5.1) it produces one summary for the whole parent (optionally with a short per-subtask section), matching the single PR.
 
-The summary is a **handoff artifact, not a quality gate**: an infrastructure failure falls back to the other provider (§7.2), and if no provider can produce it the Core writes a minimal deterministic summary from the task and diff and proceeds — a reviewed, passing change is never blocked by the prose step. The `publishing` stage uses `summary.md` as the Pull Request body, so reviewers read the explanation directly on the PR (§10, §21).
+The summary is a **handoff artifact, not a quality gate**: an infrastructure failure falls back to the other provider (§7.2), and if no provider can produce it the Core writes a minimal deterministic summary from the task and diff and proceeds — a reviewed, passing change is never blocked by the prose step. The `publishing` stage uses `summary.md` (the committed `tasks/<done|failed>/<id>.summary.md`) as the Pull Request body, so reviewers read the explanation directly on the PR (§10, §21).
 
 ## 6. Context between stages
 
@@ -416,18 +416,22 @@ The first version processes **at most one task at a time**. The Core holds a sin
 - additional tasks remain in `pending` until the active task reaches a terminal status (`done`, `failed`, or `manual_action_required`);
 - the `watch` loop may pick a pending task only when the slot is free and terminal cleanup has returned the working copy to `repo.base_branch` (§8.3).
 
-This keeps a single working copy consistent (concurrent execution and `git worktree` are deferred to v2). Subtasks of a decomposed task (§5.1) execute strictly sequentially within this single slot; they never run in parallel and do not introduce additional active tasks or worktrees. On restart, recovery resumes the one active task; finding more than one task in an active status is an inconsistent state and is routed to `manual_action_required` (§13).
+When `orchestrator.poll_interval_seconds > 0` (default `300`) the `watch` loop is **long-running**: between ticks it refreshes the repo and re-scans, so it discovers tasks pushed to git after it started (§8.3). `0` makes `watch` a single pass (one resume+scan, then exit) for cron-style invocation. This keeps a single working copy consistent (concurrent execution and `git worktree` are deferred to v2). Subtasks of a decomposed task (§5.1) execute strictly sequentially within this single slot; they never run in parallel and do not introduce additional active tasks or worktrees. On restart, recovery resumes the one active task; finding more than one task in an active status is an inconsistent state and is routed to `manual_action_required` (§13).
 
 ### 8.3. Terminal cleanup and auto mode
+
+**Finalize before the commit.** On a `done` outcome — and on a `failed` outcome once a task branch exists — the Core finalizes *before* publishing: it moves the task file into its lifecycle folder (`tasks/done/` or `tasks/failed/`) and writes `tasks/<dir>/<id>.summary.md` next to it, then makes the scoped **code** commit and the separate **task** commit of `tasks/` (the moved task + its summary). This is what puts the task and its summary into the same commit/PR as the code (§6, §21). A `done` task is then pushed and a PR opened; a `failed` task with a branch is committed and pushed (best-effort) so the attempt + summary are recorded in git, but **no PR** is opened. A `failed` outcome with no branch (e.g. an isolation-preflight failure) and `manual_action_required` are **not** published: the latter leaves the task in place for the operator.
 
 When the pipeline reaches a terminal outcome, the Core finishes terminal handling before releasing the processing slot: final artifacts are registered, and the Git Manager performs **terminal cleanup** by safely switching the target repository back to `repo.base_branch`. The completed-tasks ledger is appended exactly once, and any final notification/reporting hook runs, after the final terminal outcome and cleanup state are known.
 
 Terminal cleanup is mandatory when it is safe. The Git Manager must not discard uncommitted changes, remove partial work, or hide an ambiguous branch state. If the checkout back to `repo.base_branch` cannot be proven safe — for example because the working tree is dirty in a way not accounted for by the terminal outcome, the expected task branch cannot be reconciled, or the base branch checkout would overwrite files — the Core does not start another task and records the final outcome as `manual_action_required`.
 
-`orchestrator.auto_mode.enabled` controls only whether the orchestrator automatically picks the next pending task after terminal cleanup:
+After cleanup completes safely and before the slot is reused, the Git Manager refreshes the working copy with `git fetch` + `git pull --ff-only` on `repo.base_branch`. Because the operating footprint is in-repo (§21), the task queue (`tasks/pending/`) lives in the repository, so this refresh is what makes tasks that were committed and pushed to git visible. The `watch` loop repeats the same fetch/pull on each tick (every `orchestrator.poll_interval_seconds`, default `300`) even while idle, so a task pushed to git long after the last scan is discovered without a manual pull — discovery is not limited to a local filesystem watch. The fetch/pull is best-effort and a no-op unless the working copy is on `repo.base_branch` (i.e. the slot is free), so it never disturbs an active task branch.
 
-- `false` (default): process/resume one task, perform terminal cleanup, then leave any further pending tasks untouched for the operator to start explicitly.
-- `true`: after successful terminal cleanup and slot release, pick the next pending task and run it through the same single-task pipeline.
+`orchestrator.auto_mode.enabled` controls only whether the orchestrator automatically picks the next pending task after terminal cleanup and the refresh:
+
+- `false` (default): process/resume one task, perform terminal cleanup, refresh the base branch, then leave any further pending tasks untouched for the operator to start explicitly (the loop still refreshes on its interval to surface new tasks for the operator).
+- `true`: after successful terminal cleanup, base-branch refresh, and slot release, pick the next pending task and run it through the same single-task pipeline.
 
 Auto mode does not change routing, security, stage attempts, fix-loop budgets, or Git ownership. It never processes more than one task at a time, and any `manual_action_required` task blocks automatic continuation until an operator resolves it.
 
@@ -476,7 +480,7 @@ logs/
     task.enriched.md
     plan.md
     current.diff
-    summary.md
+    summary.md                     # working copy; the committed one is tasks/<dir>/<id>.summary.md (§8.3)
     summary.json
     failure_report.json
     stuck.md
@@ -521,7 +525,7 @@ Rules:
 - when a task is decomposed (§5.1), the Core writes `subtasks/index.json` (ordered list with `order`, `slug`, `title`, `depends_on`, `status`, `commit_sha`) and one `NN-<slug>.md` spec per subtask at the end of planning; `index.json` is updated transactionally as each subtask is committed, the per-subtask `.md` files are never overwritten, and all subtask artifacts live only under `logs/<task-id>/` (never in the target repository);
 - for a decomposed task the `failure_report.json` / `stuck.md` and the `completed.jsonl` record additionally carry the failing subtask index `k` of `n`, the count of already-committed subtasks (with their SHAs), and `decomposed` / `subtask_count` / `subtasks_completed`;
 - the §19 validation gate writes `validation_report.json` for every task (pass or reject); on a reject this is the only artifact, no `stages/` directory is created, the file is moved to `tasks/rejected/`, and the `completed.jsonl` record carries `final_status: failed` plus the `validation_reason`;
-- the `summary` stage (§5.2) writes `summary.md` and `summary.json`; the `publishing` stage uses `summary.md` as the Pull Request body, and the `completed.jsonl` record carries a one-line gist with a pointer to it. Like all artifacts these live under `logs/<task-id>/` and are not committed into the target repository except in the `in_repo` + `commit` audit footprint (§21); the PR description carries the summary regardless of footprint mode.
+- the `summary` stage (§5.2) produces `summary.md` and `summary.json`; `summary.json` is a working artifact under `logs/<task-id>/`, while the human-readable `summary.md` is committed at `tasks/<done|failed>/<id>.summary.md` (under the in-repo footprint) and used as the Pull Request body. Everything else under `logs/<task-id>/` (plan, review, diffs, stage logs, `summary.json`, `terminal-cleanup.json`) is **never** committed in any footprint mode; only `tasks/` (the task file + its `summary.md`) is committed, and only in the `in_repo` + `commit` audit footprint (§21). The PR description carries the summary regardless of footprint mode.
 
 ## 11. Configuration
 
@@ -531,6 +535,7 @@ Target structure:
 orchestrator:
   auto_mode:
     enabled: false
+  poll_interval_seconds: 300    # watch tick: fetch/pull base_branch + re-scan; 0 = single pass (§8.3)
 
 repo:
   url: "git@github.com:OWNER/REPO.git"
@@ -624,9 +629,9 @@ git:
   create_pull_request: true
   pr_base: "main"
   footprint:                      # where orchestration/task artifacts live vs. the target repo (§21)
-    location: external            # external | in_repo
-    tracking: none                # none | exclude_local | commit
-    external_root: "./"           # location=external: where tasks/ & logs/ live, OUTSIDE the clone
+    location: in_repo             # external | in_repo  (default: in_repo — tasks & logs in the repo)
+    tracking: commit              # none | exclude_local | commit  (default: commit — audit trail)
+    external_root: "./"           # location=external only: where tasks/ & logs/ live, OUTSIDE the clone
     audit_commit_message: "chore(orchestrator): audit trail for {task_id}"  # tracking=commit only
     audit_on_branch: task         # task | sibling   (tracking=commit only)
 ```
@@ -634,6 +639,7 @@ git:
 Configuration requirements:
 
 - `orchestrator.auto_mode.enabled` defaults to `false` and must be a boolean;
+- `orchestrator.poll_interval_seconds` defaults to `300`, must be an integer `>= 0` (`0` = single-pass `watch`, no periodic git sync; §8.3);
 - unknown route keys are treated as an error;
 - the primary and fallback cannot reference a forbidden provider;
 - a task override cannot change the provider command, extra args, or security;
@@ -730,7 +736,7 @@ On a temporary Git repository, verify that:
 - the completed-tasks ledger gains exactly one record per terminal transition;
 - a large task with decomposition enabled produces `n` subtasks, `n` sequential commits on one branch, and a single PR, and a restart mid-subtask resumes at `k` without duplicating a subtask commit (§5.1);
 - a broken task is quarantined to `tasks/rejected/` as `failed`, writes `validation_report.json`, and never creates a branch or calls a provider (§19);
-- in every git footprint mode the code commit contains no `tasks/`/`logs/`/`workspace/` paths; `exclude_local` adds them to `.git/info/exclude`; audit mode adds one orchestrator-made artifact commit (§21);
+- in every git footprint mode the code commit contains no `tasks/`/`logs/`/`workspace/` paths; `exclude_local` adds all three to `.git/info/exclude`; audit mode adds one orchestrator-made `tasks/` commit (the task + its `summary.md`) and keeps `logs/`/`workspace/` local (§21);
 - a successful task produces `summary.md` (what / how / integration / why) which becomes the PR body (§5.2);
 - exhaustion of a fix loop or of the global fix-iteration budget moves the task to `manual_action_required` and writes a failure report, while an unrecoverable error moves the task to `failed`.
 
@@ -849,7 +855,7 @@ The `validation:` block (§11) sets `max_task_bytes`, `max_task_lines`, `max_lin
 ```text
 wastech-orchestrator init [path]
     [path]                 target directory (default: the current directory)
-    --git-mode MODE        external | in_repo_exclude | in_repo_commit   (default: external)
+    --git-mode MODE        in_repo_commit | in_repo_exclude | external   (default: in_repo_commit)
                            seeds git.footprint.* in the generated config.yaml (§21)
     --force                re-copy existing template files (never deletes; never touches config.yaml)
     --dry-run              print the created/skipped plan; write nothing
@@ -908,8 +914,8 @@ wastech-orchestrator install [repo-path]
 
 The wizard, in order: (1) detects the Git root, `origin`, current/base branch, and cleanliness; (2) proposes the sibling workspace; (3) detects `codex`/`claude` and proposes routing; (4) detects checks from `pyproject.toml` / `package.json` / `Cargo.toml` / `go.mod`; (5) asks about PR creation (default off without `gh`); (6) asks about auto mode (default off); (7) shows the resolved config and asks to confirm. A dirty repository is a warning the operator confirms.
 
-- **Generated config (§11).** `repo.local_path` is the bound repo (absolute, native path); the workspace is `git.footprint.external_root` with `location: external`, `tracking: none` (§21), so `tasks/`, `logs/`, and the SQLite state live only in the workspace. Only the selected providers are written, routing references only allowed providers, and the safe security defaults are immutable. The config is round-tripped through the loader and validator **before it is written**, and no secrets are stored. `install` never installs or authorizes the agent CLIs or `gh`; it only reports what is missing.
-- **Binding + discovery.** `install` records `repo-root -> config.yaml` in a per-user registry (`platformdirs`: `%LOCALAPPDATA%` / `~/Library/Application Support` / the XDG config dir; override with `WASTECH_ORCHESTRATOR_HOME`). Afterwards `preflight`, `watch`, and `status` resolve the config without `--config`, in order: explicit `--config`, then `./config.yaml` (backward compatibility), then the current repo's binding, otherwise a "run `install .`" hint. `watch` reads `tasks/pending` from the artifact root (the workspace), so it works from any directory.
+- **Generated config (§11).** `repo.local_path` is the bound repo (absolute, native path); the footprint is `location: in_repo`, `tracking: commit` (§21), so the task lifecycle (`tasks/pending|processing|done|failed`), `logs/`, and the SQLite state live **in the repo** and are stored in git via the audit commit — the orchestrator's root runtime files (`state.db`, `config.yaml`) are excluded from commits. `config.yaml` and the rejected-task quarantine (`tasks/rejected/`) live in the sibling workspace, out of the repo. `install` creates the repo's task/log dirs **empty**, so it does not alter the target repo's tracked state. Only the selected providers are written, routing references only allowed providers, and the safe security defaults are immutable. The config is round-tripped through the loader and validator **before it is written**, and no secrets are stored. `install` never installs or authorizes the agent CLIs or `gh`; it only reports what is missing.
+- **Binding + discovery.** `install` records `repo-root -> config.yaml` in a per-user registry (`platformdirs`: `%LOCALAPPDATA%` / `~/Library/Application Support` / the XDG config dir; override with `WASTECH_ORCHESTRATOR_HOME`). Afterwards `preflight`, `watch`, and `status` resolve the config without `--config`, in order: explicit `--config`, then `./config.yaml` (backward compatibility), then the current repo's binding, otherwise a "run `install .`" hint. `watch` reads `tasks/pending` from the artifact root (the bound repo under the in-repo footprint), so it works from any directory.
 - **Idempotency.** A re-run is a no-op (`already configured`); `--reconfigure` writes a timestamped backup and atomically replaces the config; a `config.yaml` that exists but is bound to another repo is never overwritten. After a successful write `install` auto-runs preflight (§6.7); a preflight failure keeps the config but exits non-zero with specific instructions.
 
 ## 21. Git footprint in the target repository
@@ -918,27 +924,29 @@ The orchestration and task files can be kept entirely out of the customer's repo
 
 | Mode | `location` | `tracking` | Effect |
 |---|---|---|---|
-| **external** (default) | `external` | `none` | `tasks/` and `logs/` live outside the target clone (`external_root`); zero footprint, nothing to ignore. |
-| **in-repo, excluded** | `in_repo` | `exclude_local` | Artifacts inside the clone, listed in `.git/info/exclude`; never committed, no change to tracked files. |
-| **in-repo, audit** | `in_repo` | `commit` | Artifacts inside the clone, committed by the orchestrator as a separate audit trail. |
+| **in-repo, audit** (default) | `in_repo` | `commit` | The **task file and its `summary.md`** live inside the target clone and are committed by the orchestrator (a separate `tasks/` commit after the code commit) — so the task and its outcome are stored in the same repo as the code. The rest of `logs/` (plan, review, diffs, stage logs, `summary.json`) and `workspace/` are kept **local** via `.git/info/exclude` and never committed. |
+| **in-repo, excluded** | `in_repo` | `exclude_local` | All artifacts inside the clone, listed in `.git/info/exclude`; never committed, no change to tracked files. |
+| **external** | `external` | `none` | `tasks/` and `logs/` live outside the target clone (`external_root`); zero footprint, nothing to ignore. |
 
 ### 21.1. Scoped staging (all modes)
 
-The Git Manager **never** runs `git add .` / `git add -A`. It stages only the agent's intended code paths via an explicit pathspec computed from the post-implementation diff after the output guardrails (`only_allowed_paths`, `no_unexpected_files`), plus belt-and-braces exclude pathspecs `:(exclude)tasks/ :(exclude)logs/ :(exclude)workspace/`. This guarantees, in every mode, that orchestration and task files never enter a code commit. This rule supersedes the illustrative `git add .` in the high-level overview (codex_git_orchestrator_architecture.md §4.2).
+The Git Manager **never** runs `git add .` / `git add -A`. It stages only the agent's intended code paths via an explicit pathspec computed from the post-implementation diff after the output guardrails (`only_allowed_paths`, `no_unexpected_files`), plus belt-and-braces `:(exclude)` pathspecs for the artifact dirs. The exclude guards cover only dirs that are **not** already in `.git/info/exclude` for the active footprint (a dir that is both ignored and present in the worktree makes `git add` fail with "paths are ignored", so it is dropped): under `commit` the guard is `:(exclude)tasks/` (logs/`/`workspace/ are ignored), under `exclude_local` there are none (all three ignored), under `external` all three. This guarantees, in every mode, that orchestration and task files never enter a *code* commit. This rule supersedes the illustrative `git add .` in the high-level overview (codex_git_orchestrator_architecture.md §4.2).
 
-### 21.2. `exclude_local`
+Under the in-repo footprint the artifact root **is** the clone, so the orchestrator's own runtime files (`state.db`, its WAL/SHM sidecars, and `config.yaml`/`config.yaml.bak-*`) sit at the repo root. The Git Manager treats these as artifacts: they are excluded from the code staging set and are not counted as "unaccounted dirty" changes at terminal cleanup, so they never reach git and never block the base-branch checkout.
 
-Before any staging, the Git Manager idempotently appends `tasks/`, `logs/`, `workspace/` to the clone's `.git/info/exclude` (append-only, de-duplicated). These entries are per-clone and are never committed, so the agent's `git status` stays clean and even a stray `git add .` would skip them.
+### 21.2. Local-only exclude
+
+Before any staging, the Git Manager idempotently appends the footprint's local-only dirs to the clone's `.git/info/exclude` (append-only, de-duplicated): under `exclude_local` that is `tasks/`, `logs/`, `workspace/`; under `commit` it is `logs/` and `workspace/` only (`tasks/` is tracked — it carries the committed task + summary). These entries are per-clone and never committed, so the agent's `git status` stays clean and even a stray `git add .` would skip them.
 
 ### 21.3. `commit` (audit)
 
-The **orchestrator** (Git Manager), never an agent, makes a separate audit commit of the artifact directories after the code commit (`git add -- tasks/ logs/`), with a fixed message (`audit_commit_message`). This preserves the invariant that agents never commit; the `denied_commands` blacklist targets agent processes, not the Git Manager. By default the audit commit is placed on the task branch (so the PR shows code and audit as separate commits); `audit_on_branch: sibling` keeps it off the code PR. The audit commit uses an operation fingerprint like the code commit, so a restart does not double-commit (§13).
+The **orchestrator** (Git Manager), never an agent, makes a separate **task commit** after the code commit (`git add -- tasks/`), with a fixed message (`audit_commit_message`). It stages **only** `tasks/` — the task file (moved to `done/`/`failed/`) plus its `<id>.summary.md`. `logs/` is deliberately **not** committed (it stays local via §21.2), so plan/review/diffs/stage-logs/`summary.json` never enter git history. This preserves the invariant that agents never commit; the `denied_commands` blacklist targets agent processes, not the Git Manager. By default the commit is placed on the task branch (so the PR shows code and task as separate commits); `audit_on_branch: sibling` keeps it off the code PR. The commit uses an operation fingerprint like the code commit, so a restart does not double-commit (§13).
 
 ### 21.4. Defaults and validation
 
-- The default is `external` + `none`: `tasks/` and `logs/` live under `external_root`, outside `repo.local_path` (the §10 "paths relative to the task artifact directory" rule is unchanged — that directory is simply outside the clone).
-- The validator rejects the illegal pairings `external` + `exclude_local|commit` and `in_repo` + `none`, and requires `external_root` to resolve outside `repo.local_path` (normalization, anti-traversal).
-- Preflight edge: if the target repo already **tracks** a `tasks/`/`logs/` path (a name collision that `.git/info/exclude` cannot untrack), the task moves to `manual_action_required` rather than silently committing artifacts.
+- The default is `in_repo` + `commit`: `tasks/` (the task + its `summary.md`) lives inside `repo.local_path` and is stored in git via the task commit (§21.3); `logs/`/`workspace/` stay local. The `external` + `none` mode remains supported for operators who want zero footprint in the target repo.
+- The validator rejects the illegal pairings `external` + `exclude_local|commit` and `in_repo` + `none`, and (for `external` only) requires `external_root` to resolve outside `repo.local_path` (normalization, anti-traversal).
+- Preflight edge: the Git Manager refuses to start if the repo already **tracks** a path the footprint must keep out of git (a name collision `.git/info/exclude` cannot untrack) → `manual_action_required`. It checks `tasks/` **and** `logs/` under `external`/`exclude_local`, but only `logs/` under `commit` — there a tracked `tasks/` is **expected** (it is the committed audit trail once a prior task merged into `base_branch`), so checking it would wrongly block the second task in the same repo.
 
 ## 22. Versioning and compatibility
 

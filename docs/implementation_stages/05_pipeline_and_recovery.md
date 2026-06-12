@@ -130,21 +130,30 @@ The **only** component that commits/pushes/PRs; agents never do.
 - **Branch:** `git fetch` → checkout `base_branch` → `pull` → create `agent/<task-id>-<slug>`.
 - **Scoped staging (all modes, §21.1):** stage only the agent's intended code paths via an explicit
   pathspec computed from the post-implementation diff after the output guardrails
-  (`only_allowed_paths`, `no_unexpected_files`), plus belt-and-braces
-  `:(exclude)tasks/ :(exclude)logs/ :(exclude)workspace/`. **Never** `git add .`/`-A`.
-- **Footprint modes (§21):** `external` (default, artifacts under `external_root` outside the
-  clone — zero footprint); `in_repo` + `exclude_local` (idempotently append `tasks/`,`logs/`,
-  `workspace/` to `.git/info/exclude` **before** staging); `in_repo` + `commit` (after the code
-  commit, the **orchestrator** makes a separate audit commit `git add -- tasks/ logs/` with
-  `audit_commit_message`, on the task branch or `sibling`). Preflight edge: if the repo already
-  **tracks** a `tasks/`/`logs/` path → `manual_action_required` (§21.4).
-- **Publish:** commit → push → `gh pr create` with `summary.md` as the body, **only** from
-  `ready_to_publish`. No direct push to `base_branch`. Every operation uses an **idempotency
-  fingerprint** + remote-state check so a restart never double-commits/pushes/PRs.
-- **Terminal cleanup (§8.3):** after final artifacts are prepared and before the ledger append, safely checkout
-  `repo.base_branch`. Do not discard uncommitted changes or hide an ambiguous branch state; if the
-  checkout cannot be proven safe, write `publish/terminal-cleanup.json`, stop in
-  `manual_action_required`, and do not pick another task.
+  (`only_allowed_paths`, `no_unexpected_files`), plus belt-and-braces `:(exclude)` guards for the
+  artifact dirs **not** already git-ignored in the active footprint (under `commit` just
+  `:(exclude)tasks/`; an ignored+present dir would make `git add` fail). **Never** `git add .`/`-A`.
+- **Footprint modes (§21):** `in_repo` + `commit` (**default**: after the code commit the
+  **orchestrator** makes a separate `tasks/` commit — `git add -- tasks/`, the moved task file +
+  `<id>.summary.md`, with `audit_commit_message`, on the task branch or `sibling`; `logs/` is **not**
+  committed); `in_repo` + `exclude_local` (append `tasks/`,`logs/`,`workspace/` to `.git/info/exclude`
+  before staging); `external` + `none` (artifacts under `external_root` outside the clone — zero
+  footprint). Under in-repo the orchestrator's root runtime files (`state.db` + sidecars,
+  `config.yaml`) and `logs/`/`workspace/` are excluded from staging and from the cleanup dirty-check.
+  Preflight edge (§21.4): a repo that already **tracks** a kept-out path → `manual_action_required`
+  (checks `tasks/`+`logs/` under `external`/`exclude_local`, only `logs/` under `commit`).
+- **Finalize + publish:** on `done` (and on `failed` once a branch exists), **before** the code
+  commit, move the task to `tasks/<done|failed>/` and write `<id>.summary.md` beside it; then code
+  commit → `tasks/` commit → push → (done only) `gh pr create` with that `summary.md` as the body,
+  **only** from `ready_to_publish`. A `failed` branch is committed + pushed best-effort with **no
+  PR**. No direct push to `base_branch`. Every op uses an **idempotency fingerprint** + remote-state
+  check so a restart never double-commits/pushes/PRs.
+- **Terminal cleanup (§8.3):** after publish and before the ledger append, safely checkout
+  `repo.base_branch` (the task move already rode the `tasks/` commit, so cleanup does not re-move it).
+  Do not discard uncommitted changes or hide an ambiguous branch state; if the checkout cannot be
+  proven safe, write `publish/terminal-cleanup.json`, stop in `manual_action_required`, and do not
+  pick another task. After a safe checkout, `refresh_base` runs `git fetch` + `pull --ff-only` on
+  `base_branch`.
 
 ### 5.10 Failure report + ledger (`ledger.py`, §10)
 - On the stuck transition write `failure_report.json` (machine) + `stuck.md` (human): which loop and
@@ -178,7 +187,10 @@ Replace the `run`/`watch` stubs:
   cleanup back to `repo.base_branch` when safe.
 - `watch` — process/resume one pending task when the slot is free; after terminal cleanup, pick the
   next pending task only when `orchestrator.auto_mode.enabled: true`. With auto mode disabled
-  (default), leave additional pending tasks untouched for an explicit later run.
+  (default), leave additional pending tasks untouched for an explicit later run. When
+  `orchestrator.poll_interval_seconds > 0` (default `300`; `--poll-seconds` overrides) `watch` loops:
+  each tick `refresh_base` (fetch/pull `base_branch`) then re-scans, so git-pushed tasks are
+  discovered without a manual pull; `0` is a single pass.
 
 ---
 

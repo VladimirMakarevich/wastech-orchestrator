@@ -137,10 +137,23 @@ def test_in_repo_with_none_tracking_is_rejected(base_config: OrchestratorConfig)
 
 def test_external_root_inside_local_path_is_rejected(base_config: OrchestratorConfig) -> None:
     # repo.local_path defaults to ./workspace/repo; an external_root inside it is a traversal.
-    bad = _with_footprint(base_config, external_root="./workspace/repo/artifacts")
+    bad = _with_footprint(
+        base_config,
+        location=FootprintLocation.EXTERNAL,
+        tracking=FootprintTracking.NONE,
+        external_root="./workspace/repo/artifacts",
+    )
     with pytest.raises(ConfigError) as exc:
         validate_config(bad)
     assert any("external_root" in issue for issue in exc.value.issues)
+
+
+def test_negative_poll_interval_is_rejected(base_config: OrchestratorConfig) -> None:
+    runtime = replace(base_config.orchestrator, poll_interval_seconds=-1)
+    bad = replace(base_config, orchestrator=runtime)
+    with pytest.raises(ConfigError) as exc:
+        validate_config(bad)
+    assert any("poll_interval_seconds" in issue for issue in exc.value.issues)
 
 
 def test_in_repo_commit_is_accepted(base_config: OrchestratorConfig) -> None:

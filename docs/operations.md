@@ -29,9 +29,9 @@ Scaffold a project layout (folders + `config.yaml` + editable templates). `init`
 second run skips everything and never overwrites `config.yaml`:
 
 ```bash
-python -m wastech_orchestrator init .                            # external footprint (default)
+python -m wastech_orchestrator init .                            # in-repo audit footprint (default)
 python -m wastech_orchestrator init . --git-mode in_repo_exclude # artifacts in the clone, git-ignored
-python -m wastech_orchestrator init . --git-mode in_repo_commit  # artifacts committed as an audit trail
+python -m wastech_orchestrator init . --git-mode external        # artifacts outside the clone (zero footprint)
 ```
 
 Then copy/adjust `config.yaml` (it mirrors §11 of the spec) and point `repo.url` /
@@ -96,9 +96,10 @@ Do it **between tasks**, not mid-run: an in-flight task holds the single process
 working branch, and its state lives in `state.db`. Wait until `status` shows no active task, then
 upgrade and re-run `preflight` / `watch`.
 
-The control workspace (`config.yaml`, `state.db`, the registry, and `tasks/`/`logs/`) survives an
-upgrade — back it up first (copy the workspace directory, or at least `config.yaml` + `state.db`) so
-you can roll back. The orchestrator **fail-closes on a backward-incompatible workspace**: if the
+The persisted state survives an upgrade — back it up first so you can roll back. Under the default
+in-repo footprint that is `config.yaml` (in the control workspace) plus `state.db` and `tasks/`/`logs/`
+(in the bound repo); under the `external` footprint they all live in the control workspace. Copy at
+least `config.yaml` + `state.db`. The orchestrator **fail-closes on a backward-incompatible workspace**: if the
 `config.yaml` `schema_version` or the `state.db` schema is **newer** than the installed version
 understands, the command prints a clear `error:` and exits non-zero (2) instead of running against a
 format it cannot read. To recover, upgrade the package to a version that supports it (or, for a
@@ -106,7 +107,7 @@ throwaway setup, start a fresh workspace via `install --reconfigure`). Older or 
 accepted as-is. Per-release changes are listed in [CHANGELOG.md](../CHANGELOG.md).
 
 To install or pin a specific published (pre)release, append its tag to the `pipx`/`pip` source — e.g.
-`pipx install "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git@v0.1.0a1"`. Releases
+`pipx install "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git@v0.1.1a1"`. Releases
 are tag-driven and pre-releases (`aN`/`bN`/`rcN` tags) are marked as such on GitHub; maintainers cut
 them per [RELEASING.md](RELEASING.md).
 
@@ -192,6 +193,13 @@ returns the working copy to `repo.base_branch`; on, it processes pending tasks s
 out the base branch between them. A `manual_action_required` outcome always blocks automatic
 continuation. Exit code: `0` done, `1` failed, `2` manual_action_required.
 
+By default `watch` is a **long-running loop** (`orchestrator.poll_interval_seconds: 300`, overridable
+with `--poll-seconds N`): each tick it runs `git fetch` + `pull --ff-only` on `base_branch` then
+re-scans, so a task committed and pushed to git after `watch` started is picked up without a manual
+pull (discovery is not limited to the local filesystem). Stop it with Ctrl-C. Set
+`poll_interval_seconds: 0` (or `--poll-seconds 0`) for a single pass — e.g. when an external scheduler
+re-invokes `watch`.
+
 ### Structured logs
 
 The pipeline emits a secret-free **logfmt** trace on stderr (keyed by `task_id` / `stage` /
@@ -243,14 +251,15 @@ Two axes under `git.footprint` control where `tasks/` and `logs/` live relative 
 
 | Mode (`--git-mode`) | `location` / `tracking` | Use when |
 |---|---|---|
-| **external** (default) | `external` / `none` | You want **zero footprint** in the customer repo. `tasks/` and `logs/` live under `external_root`, outside the clone. Nothing to ignore, nothing committed. |
+| **in_repo_commit** (default) | `in_repo` / `commit` | You want the **task and its summary stored in git, in the same repo as the code**. The orchestrator (never an agent) makes a separate `tasks/` commit (the task moved to `done/`/`failed/` + `<id>.summary.md`) after the code commit; `logs/` (plan, review, diffs, `summary.json`) stays local, never committed. |
 | **in_repo_exclude** | `in_repo` / `exclude_local` | You want artifacts beside the code for convenience but **never committed**. They are appended to `.git/info/exclude` (per-clone, not tracked). |
-| **in_repo_commit** | `in_repo` / `commit` | You want an **audit trail in git**. The orchestrator (never an agent) makes a separate audit commit of `tasks/`/`logs/` after the code commit. |
+| **external** | `external` / `none` | You want **zero footprint** in the customer repo. `tasks/` and `logs/` live under `external_root`, outside the clone. Nothing to ignore, nothing committed. |
 
-In every mode the code commit is **scoped** (an explicit pathspec that excludes
-`tasks/`/`logs/`/`workspace/`) — there is never a `git add .`. The validator rejects the illegal
-pairings (`external`+`exclude_local|commit`, `in_repo`+`none`); `external_root` must resolve outside
-`repo.local_path`.
+In every mode the *code* commit is **scoped** (an explicit pathspec that excludes
+`tasks/`/`logs/`/`workspace/`, plus — under in-repo — the root runtime files `state.db`/`config.yaml`)
+— there is never a `git add .`. The validator rejects the illegal pairings
+(`external`+`exclude_local|commit`, `in_repo`+`none`); under `external`, `external_root` must resolve
+outside `repo.local_path`.
 
 ---
 
@@ -311,7 +320,7 @@ Common causes and what to do:
 |---|---|
 | **Fix budget exhausted** — `max_fix_cycles` or the global `max_total_fix_iterations` hit. | Read `stuck.md`: the last failing check / blocking findings and the final diff. Fix manually on the task branch, or refine the task, then re-submit. |
 | **Terminal cleanup unsafe** — base-branch checkout would lose uncommitted work or the branch state is ambiguous (§8.3). | Inspect the clone (`git status`); reconcile by hand, commit/stash or discard intentionally, return to `base_branch`, then re-run `watch`. |
-| **Repo already tracks `tasks/`/`logs/`** (footprint preflight, §21.4). | Remove/rename the colliding tracked paths; the current preflight rejects this collision in every footprint mode. |
+| **Repo already tracks `tasks/`/`logs/`** (footprint preflight, §21.4). | Only under `external`/`exclude_local`: remove/rename the colliding tracked paths. Under the default `in_repo_commit` this is expected (those paths are the audit trail) and the preflight is skipped. |
 | **More than one active task on restart** (inconsistent state, §13). | Only one task may be active. Decide which to keep, mark the others resolved, then re-run. |
 
 A §19-**rejected** task is different: it is terminal `failed`, quarantined to `tasks/rejected/` with
@@ -323,6 +332,7 @@ Recovery is idempotent: re-running `watch`/`run` resumes the single in-flight ta
 existing branch, and never re-commits/re-pushes a completed operation (it checks the persisted
 fingerprints and the remote).
 
-For the current implementation, a tracked `tasks/` or `logs/` path is rejected in every footprint
-mode. Keep task examples under `docs/examples/` or `templates/`, and place live task files only in
-the external control workspace.
+Under `external`/`exclude_local`, a tracked `tasks/` or `logs/` path is rejected by the footprint
+preflight (a name collision `.git/info/exclude` cannot untrack); keep task examples under
+`docs/examples/` or `templates/`. Under the default `in_repo_commit`, tracked `tasks/`/`logs/` are
+the **expected** audit trail — that is where live task files belong, and the preflight is skipped.

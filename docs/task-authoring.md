@@ -8,9 +8,11 @@ Tasks can be Markdown (`.md`) or JSON (`.json`). Markdown is the normal operator
 this guide focuses on.
 
 Use the packaged `templates/task.md` as the editable runtime template. A completed example is kept
-at [`docs/examples/task-001.example.md`](examples/task-001.example.md). Copy it into the external
-orchestrator workspace's `tasks/pending/` directory; do not keep tracked examples under a target
-repository's `tasks/` or `logs/` paths because footprint preflight treats those names as collisions.
+at [`docs/examples/task-001.example.md`](examples/task-001.example.md). Under the default in-repo
+audit footprint, live task files belong in the repo's own `tasks/pending/` directory (committed and
+pushed there) — that is how a teammate hands the orchestrator work over git. Only under the
+`external`/`exclude_local` footprints must task files stay out of the repo, since there the preflight
+treats tracked `tasks/`/`logs/` names as a collision.
 
 The canonical task rules are in [orchestrator_final_plan.md sections 5 and 19](orchestrator_final_plan.md).
 

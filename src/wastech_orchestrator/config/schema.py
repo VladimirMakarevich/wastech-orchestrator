@@ -64,6 +64,9 @@ class AutoModeConfig:
 @dataclass(frozen=True)
 class OrchestratorRuntimeConfig:
     auto_mode: AutoModeConfig
+    # Seconds between `watch` ticks; each tick fetch/pulls base_branch to discover tasks pushed to
+    # git, then processes pending. 0 = single-pass (no loop, no periodic sync). See spec §8.3.
+    poll_interval_seconds: int
 
 
 @dataclass(frozen=True)

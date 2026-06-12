@@ -61,6 +61,8 @@ def _loaded(clone: Path) -> Any:
 
 
 def test_non_interactive_codex_only(git_repo: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from wastech_orchestrator.config.schema import FootprintLocation, FootprintTracking
+
     _present(monkeypatch, "codex")
     rc = cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight"))
     assert rc == 0
@@ -68,11 +70,15 @@ def test_non_interactive_codex_only(git_repo: Any, monkeypatch: pytest.MonkeyPat
     assert config_path is not None and config_path.is_file()
     workspace = config_path.parent
     assert workspace.name == f"{git_repo.clone.name}-orchestrator"
-    assert (workspace / "tasks" / "pending").is_dir()
-    assert (workspace / "logs").is_dir()
+    # in_repo footprint: the task lifecycle + artifact dirs live in the repo; the quarantine for
+    # rejected tasks stays in the control workspace, out of the repo (§21).
+    assert (git_repo.clone / "tasks" / "pending").is_dir()
+    assert (git_repo.clone / "logs").is_dir()
+    assert (workspace / "tasks" / "rejected").is_dir()
     cfg = load_config(config_path).config
     assert cfg.agents.allowed == (ProviderId.CODEX,)
-    assert cfg.git.footprint.external_root == str(workspace)
+    assert cfg.git.footprint.location is FootprintLocation.IN_REPO
+    assert cfg.git.footprint.tracking is FootprintTracking.COMMIT
     assert cfg.repo.local_path == str(git_repo.clone.resolve())
 
 

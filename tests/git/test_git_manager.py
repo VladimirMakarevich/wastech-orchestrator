@@ -158,6 +158,20 @@ def test_exclude_local_noop_when_external(
     assert "tasks/" not in content
 
 
+def test_exclude_local_under_commit_keeps_tasks_trackable(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # Under commit, logs/ + workspace/ are excluded, but tasks/ stays trackable (it is committed).
+    gm = _manager(
+        git_repo, store, tmp_path / "art", make_git_config, location="in_repo", tracking="commit"
+    )
+    gm.ensure_exclude_local()
+    exclude = (git_repo.clone / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+    assert "logs/" in exclude
+    assert "workspace/" in exclude
+    assert "tasks/" not in exclude
+
+
 def test_preflight_tracked_artifact_path_requires_manual(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
 ) -> None:
@@ -168,6 +182,88 @@ def test_preflight_tracked_artifact_path_requires_manual(
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
     with pytest.raises(ManualActionRequired):
         gm.preflight_footprint()
+
+
+def test_preflight_allows_tracked_tasks_under_commit_tracking(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # tracking=commit intentionally commits tasks/ as the audit trail, so once a prior task's audit
+    # commit has merged into base, a tracked tasks/ path is expected (§21.3/§21.4), not a defect —
+    # otherwise the second task in the same repo would be wrongly blocked.
+    (git_repo.clone / "tasks" / "done").mkdir(parents=True)
+    (git_repo.clone / "tasks" / "done" / "task-001.md").write_text("x\n", encoding="utf-8")
+    git_run(["add", "tasks/done/task-001.md"], git_repo.clone)
+    git_run(["commit", "-m", "prior audit trail"], git_repo.clone)
+    gm = _manager(
+        git_repo, store, tmp_path / "art", make_git_config, location="in_repo", tracking="commit"
+    )
+    gm.preflight_footprint()  # does not raise — tasks/ is the committed audit trail
+
+
+def test_preflight_rejects_tracked_logs_under_commit_tracking(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # Even under commit, logs/ must stay out of git; a tracked logs/ path that .git/info/exclude
+    # cannot untrack is a collision requiring manual action.
+    (git_repo.clone / "logs").mkdir()
+    (git_repo.clone / "logs" / "keep.txt").write_text("x\n", encoding="utf-8")
+    git_run(["add", "logs/keep.txt"], git_repo.clone)
+    git_run(["commit", "-m", "stray logs"], git_repo.clone)
+    gm = _manager(
+        git_repo, store, tmp_path / "art", make_git_config, location="in_repo", tracking="commit"
+    )
+    with pytest.raises(ManualActionRequired):
+        gm.preflight_footprint()
+
+
+def test_changed_code_paths_excludes_root_runtime_files(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # Under the in-repo footprint the artifact root *is* the clone, so state.db / config.yaml sit at
+    # the repo root; they must never be staged into a code commit (§21.1).
+    gm = _manager(
+        git_repo, store, tmp_path / "art", make_git_config, location="in_repo", tracking="commit"
+    )
+    gm.prepare_branch("task-001", "x")
+    (git_repo.clone / "state.db").write_text("db\n", encoding="utf-8")
+    (git_repo.clone / "config.yaml").write_text("cfg\n", encoding="utf-8")
+    (git_repo.clone / "real.py").write_text("code\n", encoding="utf-8")
+    paths = gm.changed_code_paths()
+    assert "real.py" in paths
+    assert "state.db" not in paths
+    assert "config.yaml" not in paths
+
+
+def test_refresh_base_pulls_pushed_commits(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # A second clone pushes a new task file to origin/main; refresh_base brings it into the
+    # orchestrator clone without a manual pull (periodic discovery, §8.3).
+    other = tmp_path / "other"
+    git_run(["clone", str(git_repo.remote), str(other)], tmp_path)
+    git_run(["config", "user.email", "o@example.com"], other)
+    git_run(["config", "user.name", "Other"], other)
+    git_run(["config", "commit.gpgsign", "false"], other)
+    (other / "pushed-task.md").write_text("task\n", encoding="utf-8")
+    git_run(["add", "pushed-task.md"], other)
+    git_run(["commit", "-m", "add task via git"], other)
+    git_run(["push", "origin", "main"], other)
+
+    gm = _manager(
+        git_repo, store, tmp_path / "art", make_git_config, location="in_repo", tracking="commit"
+    )
+    assert not (git_repo.clone / "pushed-task.md").exists()  # not seen yet
+    gm.refresh_base()
+    assert (git_repo.clone / "pushed-task.md").exists()  # pulled in
+
+
+def test_refresh_base_is_noop_off_base_branch(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    branch = gm.prepare_branch("task-001", "x")  # now on the task branch, not base
+    gm.refresh_base()  # must not switch branches or pull onto an active task branch
+    assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == branch
 
 
 def test_audit_commit_only_when_tracking_commit(
@@ -185,8 +281,9 @@ def test_audit_commit_only_when_tracking_commit(
     gm.prepare_branch("task-001", "x")
     (git_repo.clone / "src.py").write_text("x\n", encoding="utf-8")
     gm.commit_code("task-001", "feat")
-    (git_repo.clone / "tasks").mkdir(exist_ok=True)
-    (git_repo.clone / "tasks" / "task-001.md").write_text("x\n", encoding="utf-8")
+    (git_repo.clone / "tasks" / "done").mkdir(parents=True, exist_ok=True)
+    (git_repo.clone / "tasks" / "done" / "task-001.md").write_text("x\n", encoding="utf-8")
+    (git_repo.clone / "tasks" / "done" / "task-001.summary.md").write_text("s\n", encoding="utf-8")
     (git_repo.clone / "logs").mkdir(exist_ok=True)
     (git_repo.clone / "logs" / "run.log").write_text("x\n", encoding="utf-8")
 
@@ -194,6 +291,11 @@ def test_audit_commit_only_when_tracking_commit(
     assert sha is not None
     msg = git_run(["log", "-1", "--format=%s", "HEAD"], git_repo.clone)
     assert "audit trail for task-001" in msg
+    # The task lifecycle + summary are committed; logs/ is deliberately NOT (kept out of git, §21).
+    tracked = git_run(["ls-files"], git_repo.clone)
+    assert "tasks/done/task-001.md" in tracked
+    assert "tasks/done/task-001.summary.md" in tracked
+    assert "logs/run.log" not in tracked
 
 
 def test_no_audit_commit_when_tracking_none(

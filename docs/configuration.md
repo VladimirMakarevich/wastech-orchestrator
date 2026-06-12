@@ -57,11 +57,13 @@ Controls the outer queue behavior.
 orchestrator:
   auto_mode:
     enabled: false
+  poll_interval_seconds: 300
 ```
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `auto_mode.enabled` | boolean | `false` | When `true`, `watch` can pick another pending task after terminal cleanup succeeds. |
+| `poll_interval_seconds` | integer `>= 0` | `300` | `watch` loop interval: each tick runs `git fetch` + `pull --ff-only` on `base_branch` to discover git-pushed tasks, then re-scans. `0` makes `watch` a single pass (no loop, no periodic sync). `--poll-seconds` overrides it. |
 
 Auto mode does not enable concurrency. The v1 contract keeps one active task at a time.
 
@@ -75,6 +77,9 @@ Logging and heartbeat settings are global CLI options, not `config.yaml` fields:
 | `--log-format logfmt|json` | `logfmt` | Format used for stderr and `--log-file`. |
 | `--log-file PATH` | unset | Also write a rotating 10 MB operator log with five backups. |
 | `--heartbeat-seconds N` | `30` | Progress interval for long provider/check/Git calls; `0` disables. |
+
+The `watch` subcommand also accepts `--poll-seconds N` (placed after `watch`), which overrides
+`orchestrator.poll_interval_seconds` for that run.
 
 Place global options before the subcommand:
 
@@ -377,8 +382,8 @@ git:
   create_pull_request: true
   pr_base: "main"
   footprint:
-    location: external
-    tracking: none
+    location: in_repo
+    tracking: commit
     external_root: "./"
     audit_commit_message: "chore(orchestrator): audit trail for {task_id}"
     audit_on_branch: task
@@ -397,9 +402,9 @@ first self-hosting run; a no-push dry-run mode is not implemented.
 
 | Field | Values | Default | Meaning |
 |---|---|---|---|
-| `location` | `external`, `in_repo` | `external` | Whether artifacts live outside or inside the target clone. |
-| `tracking` | `none`, `exclude_local`, `commit` | `none` | How artifacts are tracked by git. |
-| `external_root` | string | `"./"` | Artifact root when `location: external`; must resolve outside `repo.local_path`. |
+| `location` | `external`, `in_repo` | `in_repo` | Whether artifacts live outside or inside the target clone. |
+| `tracking` | `none`, `exclude_local`, `commit` | `commit` | How artifacts are tracked by git. |
+| `external_root` | string | `"./"` | Artifact root when `location: external` (ignored for `in_repo`); must resolve outside `repo.local_path`. |
 | `audit_commit_message` | string | `"chore(orchestrator): audit trail for {task_id}"` | Commit message for audit commits. |
 | `audit_on_branch` | `task`, `sibling` | `task` | Branch placement for audit commits when `tracking: commit`. |
 
@@ -418,8 +423,12 @@ Rejected combinations:
 - `location: in_repo` with `tracking: none`;
 - `location: external` when `external_root` resolves inside `repo.local_path`.
 
-Planned v1 behavior always stages code changes with an explicit scoped pathspec and excludes
-`tasks/`, `logs/`, and `workspace/` from code commits.
+The code commit always stages changes with an explicit scoped pathspec and excludes
+`tasks/`, `logs/`, and `workspace/`; under the in-repo footprint it also excludes the orchestrator's
+root runtime files (`state.db` + sidecars, `config.yaml`). With `tracking: commit` only **`tasks/`**
+(the task moved to `done/`/`failed/` + its `<id>.summary.md`) is stored in a *separate*
+orchestrator-made commit; `logs/` (plan, review, diffs, `summary.json`) stays local and is never
+committed.
 
 ## `telegram`
 

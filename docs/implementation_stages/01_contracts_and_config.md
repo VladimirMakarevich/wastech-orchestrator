@@ -27,7 +27,7 @@ Already present; this block ratifies it as the frozen contract for the project.
 
 ### 1.2 Config schema (`config/schema.py`)
 Frozen dataclasses mirroring §11, one per block: root `OrchestratorConfig`,
-`OrchestratorRuntimeConfig` (`auto_mode.enabled=false`), `RepoConfig`, `AgentsConfig`
+`OrchestratorRuntimeConfig` (`auto_mode.enabled=false`, `poll_interval_seconds=300`), `RepoConfig`, `AgentsConfig`
 (`allowed`, `max_stage_attempts`, `max_fix_cycles`, `max_total_fix_iterations`,
 `DecompositionConfig`, `routing`, `providers`), `ProviderConfig` (per provider — note Codex has
 `sandbox`, both have `permission_profile`, `extra_args`, `model`, `timeout_seconds`),
@@ -50,6 +50,8 @@ Enforce every §11 requirement so an unsafe or contradictory config never reache
   `agents.providers`.
 - `orchestrator.auto_mode.enabled` defaults to `false` and must be a boolean; it controls only
   whether `watch` may pick the next pending task after terminal cleanup.
+- `orchestrator.poll_interval_seconds` defaults to `300` and must be an integer `>= 0` (`0` =
+  single-pass `watch`; otherwise the loop fetch/pulls `base_branch` and re-scans each tick, §8.3).
 - `max_total_fix_iterations >= max_fix_cycles` (§8.1 hard-cap invariant).
 - `decomposition.max_subtasks >= 2`; decomposition off unless `enabled: true`.
 - `extra_args` validated against a provider allowlist; **reject any flag that disables the

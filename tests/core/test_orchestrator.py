@@ -473,6 +473,44 @@ def test_strict_isolation_preflight_fails_without_branch(
     assert ledger.records()[0]["final_status"] == "failed"
 
 
+def test_failed_with_branch_commits_and_pushes_task_and_summary(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # Both providers fail (infra) at implementation, AFTER the branch exists → FAILED. The failed
+    # attempt is finalized like a success: the task moves to tasks/failed/, its summary.md is
+    # committed, and the branch is pushed — but no PR is opened for a failure (§6).
+    providers = _both(infra_fail={Stage.IMPLEMENTATION})
+    orch, store, ledger, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"location": "in_repo", "tracking": "commit"},
+    )
+    pending = git_repo.clone / "tasks" / "pending"
+    pending.mkdir(parents=True)
+    task_file = pending / "task-fail.md"
+    task_body = (
+        '---\nid: task-fail\ntitle: "Add a thing"\nrefined: true\n---\n\n## Description\n\nDo it.\n'
+    )
+    task_file.write_text(task_body, encoding="utf-8")
+
+    result = orch.run_task(str(task_file))
+
+    assert result.final_status is Status.FAILED
+    assert result.pr_url is None  # no PR for a failed attempt
+    branch = "agent/task-fail-add-a-thing"
+    tracked = git_run(["ls-tree", "-r", "--name-only", branch], git_repo.clone)
+    assert "tasks/failed/task-fail.md" in tracked  # task moved to failed/ and committed
+    assert "tasks/failed/task-fail.summary.md" in tracked  # summary committed beside it
+    assert "logs/" not in tracked  # working artifacts never enter git
+    # The failed branch was pushed for inspection; the working copy is back on base.
+    assert git_run(["ls-remote", "--heads", "origin", branch], git_repo.clone) != ""
+    assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "main"
+    assert ledger.records()[0]["final_status"] == "failed"
+
+
 def test_artifacts_registered_with_checksums(git_repo, make_git_config, tmp_path: Path) -> None:
     providers = _both()
     orch, store, _, _ = _build(

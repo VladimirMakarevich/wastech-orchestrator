@@ -206,8 +206,11 @@ def _build_auto_mode(raw: Any, issues: list[str]) -> AutoModeConfig:
 def _build_orchestrator(raw: Any, issues: list[str]) -> OrchestratorRuntimeConfig:
     where = "orchestrator"
     m = _mapping(raw, where, issues)
-    _check_keys(m, {"auto_mode"}, where, issues)
-    return OrchestratorRuntimeConfig(auto_mode=_build_auto_mode(m.get("auto_mode"), issues))
+    _check_keys(m, {"auto_mode", "poll_interval_seconds"}, where, issues)
+    return OrchestratorRuntimeConfig(
+        auto_mode=_build_auto_mode(m.get("auto_mode"), issues),
+        poll_interval_seconds=_int(m, "poll_interval_seconds", 300, where, issues),
+    )
 
 
 def _build_repo(raw: Any, issues: list[str]) -> RepoConfig:
@@ -443,14 +446,14 @@ def _build_footprint(raw: Any, issues: list[str]) -> FootprintConfig:
             FootprintLocation,
             f"{where}.location",
             issues,
-            FootprintLocation.EXTERNAL,
+            FootprintLocation.IN_REPO,
         ),
         tracking=_enum(
             m.get("tracking"),
             FootprintTracking,
             f"{where}.tracking",
             issues,
-            FootprintTracking.NONE,
+            FootprintTracking.COMMIT,
         ),
         external_root=_str(m, "external_root", "./", where, issues),
         audit_commit_message=_str(m, "audit_commit_message", _DEFAULT_AUDIT_MESSAGE, where, issues),

@@ -6,6 +6,8 @@ schema_version: 1                   # config format version; the orchestrator re
 orchestrator:
   auto_mode:
     enabled: false                  # when true, pick the next pending task after terminal cleanup
+  poll_interval_seconds: 300        # `watch` tick: fetch/pull base_branch to discover git-pushed
+                                    # tasks, then process pending. 0 = single-pass (no loop, no sync)
 
 repo:
   url: "git@github.com:OWNER/REPO.git"
@@ -100,9 +102,9 @@ git:
   create_pull_request: true
   pr_base: "main"
   footprint:                        # where orchestration/task artifacts live vs. the target repo (§21)
-    location: external              # external | in_repo
-    tracking: none                  # none | exclude_local | commit
-    external_root: "./"             # location=external: where tasks/ & logs/ live, OUTSIDE the clone
+    location: in_repo               # external | in_repo  (in_repo: tasks/ & logs/ live in the repo)
+    tracking: commit                # none | exclude_local | commit  (commit: audit-commit tasks/ & logs/)
+    external_root: "./"             # location=external only: where tasks/ & logs/ live, OUTSIDE the clone
     audit_commit_message: "chore(orchestrator): audit trail for {task_id}"  # tracking=commit only
     audit_on_branch: task           # task | sibling   (tracking=commit only)
 

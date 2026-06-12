@@ -232,11 +232,20 @@ class Orchestrator:
                 pipeline, Status.MANUAL_ACTION_REQUIRED, manual_reason=exc.reason
             )
         except (PipelineFailed, GitCommandError) as exc:
-            return self._go_terminal(pipeline, Status.FAILED, manual_reason=str(exc))
+            return self._fail(pipeline, str(exc))
 
     def acquire_slot(self, task_id: str) -> bool:
         """True iff no *other* task currently owns the processing slot (§8.2)."""
         return not any(t.task_id != task_id for t in self._store.find_active_tasks())
+
+    def refresh_repo(self) -> None:
+        """Best-effort fetch/pull of ``base_branch`` so git-pushed tasks become visible (§8.3).
+
+        Called by the ``watch`` loop between ticks. Delegates to the Git Manager, which no-ops
+        unless the working copy is on ``base_branch`` (the slot is free after terminal cleanup), so
+        it never disturbs an active or interrupted task branch.
+        """
+        self._git.refresh_base()
 
     def resume(self) -> PipelineResult | None:
         """Reconcile persisted state on startup and resume the single unfinished task (§13).
@@ -576,12 +585,17 @@ class Orchestrator:
                 description=p.task.description,
                 diff=diff,
             )
+        # summary.json stays under logs/ (a working artifact, never committed); the human-readable
+        # summary.md is placed next to the task and committed during finalize (§6, §21.3).
         task_dir = task_artifact_dir(self._artifacts_root, p.task.id)
-        self._register_artifact(p.task.id, "summary_md", str(task_dir / "summary.md"))
         self._register_artifact(p.task.id, "summary_json", str(task_dir / "summary.json"))
         self._transition(p, Status.READY_TO_PUBLISH)
 
     def _publish(self, p: _Pipeline) -> PipelineResult:
+        # Finalize BEFORE the commit so the task move + summary.md enter the task commit (§6, §21):
+        # the scoped code commit carries the code, the audit commit carries `tasks/` (the moved task
+        # file + `<id>.summary.md`); `logs/` is never committed.
+        summary_md = self._finalize_task_artifacts(p, Status.DONE)
         self._transition(p, Status.COMMITTING)
         message = f"feat({p.task.id}): {p.task.title}"
         self._observe(
@@ -592,15 +606,56 @@ class Orchestrator:
         self._transition(p, Status.PUSHING)
         self._observe(p, "push", lambda: self._git.push(p.task.id, p.branch))
         self._transition(p, Status.CREATING_PR)
-        summary_md = str(task_artifact_dir(self._artifacts_root, p.task.id) / "summary.md")
+        body_path = str(summary_md) if summary_md else self._fallback_summary_path(p)
         pr_url = self._observe(
             p,
             "pull request",
             lambda: self._git.create_pr(
-                p.task.id, p.branch, title=f"{p.task.title}", body_path=summary_md
+                p.task.id, p.branch, title=f"{p.task.title}", body_path=body_path
             ),
         )
-        return self._go_terminal(p, Status.DONE, pr_url=pr_url)
+        return self._go_terminal(p, Status.DONE, pr_url=pr_url, already_moved=True)
+
+    def _fallback_summary_path(self, p: _Pipeline) -> str:
+        """The logs/ working copy of summary.md — PR body fallback when no task file is on disk."""
+        return str(task_artifact_dir(self._artifacts_root, p.task.id) / "summary.md")
+
+    def _summary_md_body(self, p: _Pipeline) -> str:
+        """The human-readable summary text; falls back to a deterministic minimal summary (§5.2)."""
+        md_path = task_artifact_dir(self._artifacts_root, p.task.id) / "summary.md"
+        if not md_path.exists():
+            diff = self._git.cumulative_committed_diff() or (
+                Path(p.diff_path).read_text(encoding="utf-8")
+                if p.diff_path and Path(p.diff_path).exists()
+                else ""
+            )
+            write_minimal_summary(
+                self._artifacts_root,
+                p.task.id,
+                title=p.task.title,
+                description=p.task.description,
+                diff=diff,
+            )
+        return md_path.read_text(encoding="utf-8") if md_path.exists() else (p.task.title + "\n")
+
+    def _finalize_task_artifacts(self, p: _Pipeline, final: Status) -> Path | None:
+        """Move the task into its lifecycle folder; write the committed `<id>.summary.md` alongside.
+
+        Runs **before** the commit so both land in the task (audit) commit (§6, §21.3). Returns the
+        path to the committed `summary.md`, or ``None`` when there is no on-disk task file (e.g. a
+        synthetic ``run`` path). ``summary.json`` and the rest of ``logs/`` are never committed.
+        """
+        dest = self._move_task_file(p, final)
+        body = self._summary_md_body(p)
+        if dest is None:
+            return None
+        summary_path = dest.with_name(f"{p.task.id}.summary.md")
+        try:
+            summary_path.write_text(body, encoding="utf-8")
+        except OSError:
+            return None
+        self._register_artifact(p.task.id, "summary_md", str(summary_path))
+        return summary_path
 
     # --- fix-loop control -----------------------------------------------------------------
 
@@ -629,6 +684,30 @@ class Orchestrator:
 
     # --- terminal handling ----------------------------------------------------------------
 
+    def _fail(self, p: _Pipeline, error: str) -> PipelineResult:
+        """Terminal ``failed``. When a task branch exists, finalize like a success — move the task
+        to ``tasks/failed/``, write its ``summary.md``, commit (code + task) and push — so the
+        failed attempt and its summary are stored in git (§6). No PR is opened for a failure. When
+        no branch was created yet (e.g. an isolation-preflight failure), nothing is published.
+
+        The git operations are best-effort: a failed task must still reach a terminal state even if
+        git is unhappy, so a publish error here is logged, not raised.
+        """
+        if not p.branch:
+            return self._go_terminal(p, Status.FAILED, manual_reason=error)
+        moved = False
+        try:
+            moved = self._finalize_task_artifacts(p, Status.FAILED) is not None
+            message = f"chore({p.task.id}): failed attempt — {p.task.title}"
+            self._git.commit_code(p.task.id, message)
+            self._git.commit_audit(p.task.id)
+            self._git.push(p.task.id, p.branch)
+        except (GitCommandError, OSError) as exc:
+            self._log(p.task.id).warning(
+                "failed-task publish incomplete", extra={"error": str(exc)}
+            )
+        return self._go_terminal(p, Status.FAILED, manual_reason=error, already_moved=moved)
+
     def _go_terminal(
         self,
         p: _Pipeline,
@@ -636,8 +715,14 @@ class Orchestrator:
         *,
         pr_url: str | None = None,
         manual_reason: str | None = None,
+        already_moved: bool = False,
     ) -> PipelineResult:
-        """Run terminal cleanup, set the final status, append exactly one ledger record (§8.3)."""
+        """Run terminal cleanup, set the final status, append exactly one ledger record (§8.3).
+
+        ``already_moved`` is set when the task file was moved + committed during finalize (§6); the
+        move is then complete on the task branch, so this must not re-move it on ``base_branch``
+        after the cleanup checkout.
+        """
         final = status
         cleanup = self._observe(
             p, "terminal cleanup", lambda: self._git.terminal_cleanup(p.task.id)
@@ -655,7 +740,8 @@ class Orchestrator:
             cleanup_last_error=last_error,
         )
         self._transition(p, final, finished_at=self._clock())
-        self._move_task_file(p, final)
+        if not already_moved:
+            self._move_task_file(p, final)
         self._append_ledger(p, final, pr_url=pr_url, cleanup_safe=cleanup.safe)
         self._log(p.task.id).info(
             "terminal",
@@ -663,29 +749,36 @@ class Orchestrator:
         )
         return PipelineResult(task_id=p.task.id, final_status=final, pr_url=pr_url)
 
-    def _move_task_file(self, p: _Pipeline, final: Status) -> None:
+    def _move_task_file(self, p: _Pipeline, final: Status) -> Path | None:
         """Move the task file into its lifecycle folder (``tasks/done`` / ``tasks/failed``, §20.2).
 
         ``done`` and ``failed`` (died during processing) move; ``manual_action_required`` stays put
         for the operator to resolve (§8.3). A §19 gate reject is quarantined separately (§19.4).
+        Idempotent: returns the destination path whether it moved now or was already in place (a
+        restart, or a finalize that already moved it); returns ``None`` when there is nothing to do.
         """
         folder_name = {Status.DONE: "done", Status.FAILED: "failed"}.get(final)
         if folder_name is None or not p.task_file:
-            return
+            return None
         src = Path(p.task_file)
-        if not src.exists():
-            return  # already moved (idempotent restart) or synthetic path
         parent = src.parent
-        tasks_root = parent.parent if parent.name in ("pending", "processing") else parent
-        dest_dir = tasks_root / folder_name
+        if parent.name in ("pending", "processing", "done", "failed"):
+            tasks_root = parent.parent
+        else:
+            tasks_root = parent
+        dest = tasks_root / folder_name / src.name
+        if src.resolve() == dest.resolve():
+            return dest  # already in its lifecycle folder (idempotent restart)
+        if not src.exists():
+            return dest if dest.exists() else None  # already moved
         try:
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            dest = dest_dir / src.name
+            dest.parent.mkdir(parents=True, exist_ok=True)
             src.replace(dest)
             self._store.update_task(p.task.id, source_path=str(dest))
         except OSError:
             # Never let a file-move failure mask the terminal outcome; the ledger still records it.
-            return
+            return None
+        return dest
 
     def _reject(self, task_file: str, result: ValidationResult) -> PipelineResult:
         """Handle a §19 Phase-A reject: failed, quarantine, report, ledger — no branch (§19.4)."""

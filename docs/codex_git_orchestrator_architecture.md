@@ -41,25 +41,27 @@ The application does not replace the coding agent and Git. It acts as an **orche
           │ recreate supervisor + context per task
           ▼
    ┌──────────────────── Stage Flow ────────────────────┐
-   │  git pull/fetch → checkout -b codex/task-001         │
+   │  git pull/fetch → checkout -b agent/task-001         │
    │  ├─ STAGE plan       (CodingAgent.run, no edits)      │
    │  ├─ STAGE implement  (CodingAgent.run, edits)         │
    │  ├─ STAGE review     (CodingAgent.run, no edits)      │
    │  ├─ STAGE test       (Test Runner)                    │
    │  ├─ STAGE fix        (retry loop, attempt limit)       │
    │  ├─ GUARDRAILS       (action blacklist + diff-checks)  │
-   │  ├─ git commit                                        │
+   │  ├─ STAGE summary  (move task → done/, write summary)  │
+   │  ├─ git commit (code) + task commit (tasks/, no logs/) │
    │  ├─ git push / gh pr create                           │
-   │  └─ return_to_base_branch                             │
+   │  └─ return_to_base_branch → fetch/pull refresh         │
    └───────────────────────────────────────────────────────┘
           │ result
           ▼
-   ┌────────────────────┐
+   ┌──────────────────────────────────┐
+   │ poll every N s: fetch/pull base   │
    │ auto mode enabled? │── yes ──> next pending task
    └─────────┬──────────┘
              │ no
              ▼
-          idle/stop
+          idle (keep polling for git-pushed tasks)
 
                       ▲
                       │ clarifying question / action approval
@@ -133,7 +135,8 @@ git checkout main
 ```
 
 > Note: `git add .` above is illustrative. The canonical spec uses **scoped staging** — an explicit pathspec that excludes `tasks/`/`logs/`/`workspace/`, never `git add .`/`-A` — see [orchestrator_final_plan.md §21.1](orchestrator_final_plan.md). The git footprint mode (external / in-repo-excluded / in-repo-audit) is also defined there.
-> The final `git checkout main` is terminal cleanup. In the canonical spec this uses `repo.base_branch`, runs only when safe, and must complete before auto mode may pick another pending task.
+> The **default footprint is in-repo audit** (`location: in_repo`, `tracking: commit`): the **task file and its `summary.md`** live inside the target repo and are stored in git — the code change is a scoped **code** commit, and `tasks/` (the task moved to `done/`/`failed/` plus `<id>.summary.md`) is stored via a separate **task commit** the orchestrator (never the agent) makes after it. The working artifacts under `logs/` (plan, review, diffs, stage logs, `summary.json`) and the root runtime files (`state.db`, `config.yaml`) are **not** committed — `logs/`/`workspace/` are kept local via `.git/info/exclude`.
+> The final `git checkout main` is terminal cleanup. In the canonical spec this uses `repo.base_branch`, runs only when safe, and must complete before auto mode may pick another pending task. After cleanup the Git Manager runs `git fetch` + `git pull --ff-only` to refresh the base branch, and the `watch` loop repeats that refresh every `orchestrator.poll_interval_seconds` (default 300s) so tasks pushed to git after the last scan are discovered — watching is not limited to the local filesystem.
 
 Parallel tasks — via `git worktree` (v2), so as not to mix them in one clone.
 
@@ -385,14 +388,30 @@ telegram:                             # HITL + notifications (#2, #10)
                        failure → return to fix (up to max_retries) (#3)
 14. A dangerous action (push/deletion/new dependency)
                       → ask_human(approval) (#2)
-15. STAGE commit    → git add / commit                                [checkpoint]
-16. STAGE push      → git push; optionally gh pr create               [checkpoint]
-17. Terminal handling → write final artifacts, run terminal cleanup, move the task to done/failed/manual_action_required, notify via Telegram (#10)
-18. If `orchestrator.auto_mode.enabled: true`, pick the next pending task; otherwise stop/idle
-19. (resume) on a crash at any step — continue from the next incomplete stage
+15. STAGE summary  → produce the change summary; move the task file to tasks/done/ and write
+                     tasks/done/<id>.summary.md beside it (these enter the upcoming commit). plan,
+                     review, diffs and summary.json stay under logs/ and are NOT committed (#6, §21) [checkpoint]
+16. STAGE commit   → scoped code commit (code only) + task commit of tasks/ (the moved task file
+                     + its summary.md); logs/ is never committed                                [checkpoint]
+17. STAGE push     → git push; optionally gh pr create (summary.md = PR body)                   [checkpoint]
+18. Terminal handling → terminal cleanup: switch back to repo.base_branch, then git fetch +
+                     pull --ff-only to refresh the repo; notify via Telegram (#10)
+19. Discovery & auto mode → the watcher keeps the repo current with git fetch + pull --ff-only on
+                     base_branch every orchestrator.poll_interval_seconds (default 300s), so tasks
+                     pushed to git later become visible without a manual pull. If
+                     `orchestrator.auto_mode.enabled: true`, the next pending task starts ONLY after
+                     cleanup returned to base_branch and the refresh completed; otherwise stop/idle.
+20. (resume) on a crash at any step — continue from the next incomplete stage
 ```
 
-The provider fallback `(#1)` triggers transparently inside any `CodingAgent.run`.
+Steps 15–17 are why the **task and its summary** live in the same repository as the code (the
+in-repo footprint, §21): the summary stage writes the summary and moves the task into `tasks/done/`
+**before** the commit, then the orchestrator makes a scoped **code** commit and a separate **task**
+commit of `tasks/` (the moved task file + `<id>.summary.md`). Working artifacts — plan, review,
+diffs, stage logs, `summary.json` — stay under `logs/` and never enter git history. A **failed**
+task with a branch is finalized the same way (moved to `tasks/failed/`, summary written, code + task
+committed and pushed) but opens **no PR**; `manual_action_required` stays put for the operator. The
+provider fallback `(#1)` triggers transparently inside any `CodingAgent.run`.
 
 ---
 
@@ -447,12 +466,14 @@ Minimal logic:
 
 ```python
 def watch():
+  poll = config.orchestrator.poll_interval_seconds   # default 300; 0 = single pass
   while True:
+    refresh_base()                   # git fetch + pull --ff-only on base (discover git-pushed tasks)
     task = find_new_task()
     if not task:
-        if config.orchestrator.auto_mode.enabled:
-            sleep(5); continue
-        return
+        if poll <= 0:
+            return
+        sleep(poll); continue        # idle: keep polling the repo for new tasks
 
     parse_task(task)                 # (#9)
     supervisor = build_supervisor(task)   # recreation per task (#5)
@@ -469,11 +490,12 @@ def watch():
                 break
 
     if guardrails_ok(task):          # (#3)
-        commit_and_push(task)        # with provider fallback (#1)
-    return_to_base_branch(task)      # must succeed before the next task
+        run_stage("summary", task)   # move task → tasks/done/, write summary.md, BEFORE the commit
+        commit_and_push(task)        # scoped code commit + task commit of tasks/ (no logs/) (#1)
+    return_to_base_branch(task)      # must succeed before the next task; then fetch/pull refresh
     notify_telegram(task)            # (#10)
 
-    if not config.orchestrator.auto_mode.enabled:
+    if poll <= 0 and not config.orchestrator.auto_mode.enabled:
         return
 ```
 

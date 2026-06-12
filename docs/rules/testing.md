@@ -17,10 +17,11 @@ Cover pure logic without external processes:
 - the `refinement` skip decision (already-complete task vs. needs enrichment);
 - the single-active-task slot (a new task does not start while another is active);
 - terminal cleanup and auto mode: config default/rejects, checkout to `base_branch` before next pickup, auto off leaves the next task pending, unsafe cleanup blocks continuation;
+- the `watch` poll loop (§8.3): `poll_interval_seconds` default/`>=0` validation, the loop refreshes (`refresh_base`) before each tick, `0` is a single pass, and a bounded loop sleeps between ticks but not after the last;
 - the decomposition accept/reject decision and per-subtask vs. global counter semantics (§5.1);
 - the §19 validation gate: each Phase-A reason code, required/optional fields, duplicate-id, the injection-token scan, and Phase-B classification;
 - `init` idempotency (a second run is all-skipped; never overwrites `config.yaml`; `--dry-run` is a no-op);
-- the git footprint (§21): scoped staging excludes `tasks/`/`logs/`/`workspace/`, the `.git/info/exclude` append is idempotent, the audit commit is orchestrator-only, and the validator rejects illegal mode pairings;
+- the git footprint (§21): scoped staging excludes `tasks/`/`logs/`/`workspace/` (and, under in-repo, the root runtime files `state.db`/`config.yaml`), the `.git/info/exclude` append is idempotent, the audit commit is orchestrator-only, the preflight rejects tracked artifacts under `external`/`exclude_local` but is **skipped** under `commit`, and the validator rejects illegal mode pairings;
 - the `summary` stage (§5.2): the handoff artifact is produced, and a provider failure falls back to a deterministic minimal summary without blocking publishing.
 
 ### Integration

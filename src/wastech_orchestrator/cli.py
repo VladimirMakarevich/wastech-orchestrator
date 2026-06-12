@@ -13,7 +13,8 @@ import logging
 import os
 import sys
 import tempfile
-from collections.abc import Iterator, Sequence
+import time
+from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, datetime
 from importlib import resources
 from importlib.resources.abc import Traversable
@@ -83,16 +84,18 @@ RUNTIME_DIRS: tuple[str, ...] = (
     "workspace",
 )
 
-# Directories `install` creates inside the sibling control workspace. Unlike `init` there is no
-# `workspace/` clone dir: `install` binds the existing repo as repo.local_path (§21 external).
-INSTALL_WORKSPACE_DIRS: tuple[str, ...] = (
+# `install` binds the existing repo as repo.local_path and uses the in-repo footprint (§21): the
+# task lifecycle + artifact dirs live in the repo (created empty here, so they stay invisible to
+# `git status` until a task writes into them), while config.yaml and the rejected-task quarantine
+# stay in the sibling control workspace, out of the repo.
+INSTALL_REPO_DIRS: tuple[str, ...] = (
     "tasks/pending",
     "tasks/processing",
     "tasks/done",
     "tasks/failed",
-    "tasks/rejected",
     "logs",
 )
+INSTALL_WORKSPACE_DIRS: tuple[str, ...] = ("tasks/rejected",)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -139,8 +142,9 @@ def build_parser() -> argparse.ArgumentParser:
     init_cmd.add_argument(
         "--git-mode",
         choices=sorted(GIT_MODES),
-        default="external",
-        help="git footprint mode seeded into config.yaml (default: external)",
+        default="in_repo_commit",
+        help="git footprint mode seeded into config.yaml (default: in_repo_commit — tasks & "
+        "artifacts live in the repo and are audit-committed)",
     )
     init_cmd.add_argument(
         "--force", action="store_true", help="re-copy template files (never touches config.yaml)"
@@ -206,7 +210,15 @@ def build_parser() -> argparse.ArgumentParser:
     run_cmd = sub.add_parser("run", help="run a single task from a file")
     run_cmd.add_argument("task_file", help="path to the task file (.md or .json)")
 
-    sub.add_parser("watch", help="watch the tasks folder and run the tasks in it")
+    watch_cmd = sub.add_parser("watch", help="watch the tasks folder and run the tasks in it")
+    watch_cmd.add_argument(
+        "--poll-seconds",
+        type=int,
+        default=None,
+        metavar="N",
+        help="override orchestrator.poll_interval_seconds: fetch/pull base_branch and re-scan "
+        "every N seconds (0 = single pass, no loop)",
+    )
 
     sub.add_parser(
         "preflight", help="check both CLIs' health and the strict_isolation policy (read-only)"
@@ -230,10 +242,14 @@ def _iter_template_files(root: Path) -> Iterator[Path]:
 
 
 def _apply_git_mode(config_text: str, git_mode: str) -> str:
-    """Seed the git.footprint location/tracking for the selected --git-mode (spec §21)."""
+    """Seed the git.footprint location/tracking for the selected --git-mode (spec §21).
+
+    Anchored on the packaged config's defaults (``in_repo``/``commit``); selecting a different mode
+    rewrites just those two value lines (the trailing comments are left intact).
+    """
     location, tracking = GIT_MODES[git_mode]
-    config_text = config_text.replace("location: external", f"location: {location}", 1)
-    return config_text.replace("tracking: none", f"tracking: {tracking}", 1)
+    config_text = config_text.replace("location: in_repo", f"location: {location}", 1)
+    return config_text.replace("tracking: commit", f"tracking: {tracking}", 1)
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -396,6 +412,36 @@ def watch_once(
     return results
 
 
+def watch_loop(
+    orchestrator: Orchestrator,
+    config: OrchestratorConfig,
+    folder: Path,
+    *,
+    poll_interval: int,
+    max_iterations: int | None = None,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> list[PipelineResult]:
+    """Run ``watch_once`` on a loop, refreshing the repo each tick (periodic discovery, §8.3).
+
+    Each tick: ``refresh_repo`` (fetch + ff-only pull of ``base_branch`` when the slot is free, so a
+    task pushed to git later becomes visible), then ``watch_once``, then sleep ``poll_interval``.
+    ``poll_interval <= 0`` runs exactly one tick (single pass, no sleep). ``max_iterations`` bounds
+    the loop for tests; in production the loop runs until interrupted.
+    """
+    results: list[PipelineResult] = []
+    iteration = 0
+    while True:
+        orchestrator.refresh_repo()
+        results.extend(watch_once(orchestrator, config, folder))
+        iteration += 1
+        if poll_interval <= 0:
+            break
+        if max_iterations is not None and iteration >= max_iterations:
+            break
+        sleep_fn(poll_interval)
+    return results
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     """Process exactly one task file through the Core pipeline (§5)."""
     _configure_runtime_logging(args)
@@ -464,17 +510,33 @@ def cmd_preflight(args: argparse.Namespace) -> int:
 
 
 def cmd_watch(args: argparse.Namespace) -> int:
-    """Resume an in-flight task and process pending tasks (auto mode permitting)."""
+    """Resume an in-flight task and process pending tasks (auto mode permitting).
+
+    With ``poll_interval > 0`` (config ``orchestrator.poll_interval_seconds`` or ``--poll-seconds``)
+    this runs as a daemon: each tick fetch/pulls ``base_branch`` to discover git-pushed tasks, then
+    processes pending, then sleeps. ``0`` is a single pass. Stop the daemon with Ctrl-C.
+    """
     _configure_runtime_logging(args)
     config = load_config_for(args)
     if config is None:
         return 2
+    poll = (
+        args.poll_seconds
+        if args.poll_seconds is not None
+        else config.orchestrator.poll_interval_seconds
+    )
     orchestrator = build_orchestrator(
         config,
         artifacts_root=artifacts_root_for(config),
         heartbeat_seconds=args.heartbeat_seconds,
     )
-    results = watch_once(orchestrator, config, pending_dir(config))
+    if poll > 0:
+        print(f"watch: polling every {poll}s for git-pushed tasks (Ctrl-C to stop)")
+    try:
+        results = watch_loop(orchestrator, config, pending_dir(config), poll_interval=poll)
+    except KeyboardInterrupt:
+        print("watch: stopped")
+        return 0
     if not results:
         print("watch: nothing to do (slot free, no pending tasks)")
         return 0
@@ -562,8 +624,14 @@ def _install_backup_config(path: Path) -> Path:
     return backup
 
 
-def _install_create_dirs(workspace: Path) -> None:
-    """Create the control workspace's task/log directories (idempotent)."""
+def _install_create_dirs(repo_local_path: Path, workspace: Path) -> None:
+    """Create the runtime task/log dirs in the repo and the quarantine in the workspace.
+
+    Idempotent. The repo dirs are created empty, so they do not appear in ``git status`` until a
+    task writes into them (the install leaves the target repo's tracked state untouched, §21).
+    """
+    for rel in INSTALL_REPO_DIRS:
+        (repo_local_path / rel).mkdir(parents=True, exist_ok=True)
     for rel in INSTALL_WORKSPACE_DIRS:
         (workspace / rel).mkdir(parents=True, exist_ok=True)
 
@@ -582,6 +650,8 @@ def _install_print_plan(
     print(f"  checks:     {', '.join(spec.checks) or '(none)'}")
     print(f"  create_pr:  {spec.create_pull_request}")
     print(f"  auto_mode:  {spec.auto_mode}")
+    for rel in INSTALL_REPO_DIRS:
+        print(f"  would create {spec.repo_local_path / rel}")
     for rel in INSTALL_WORKSPACE_DIRS:
         print(f"  would create {spec.workspace / rel}")
     print(f"  would bind   {spec.repo_local_path} -> {config_path}")
@@ -651,7 +721,7 @@ def cmd_install(args: argparse.Namespace) -> int:
         print(f"install: backed up existing config to {_install_backup_config(config_path)}")
 
     text = config_writer.build_and_validate(spec)
-    _install_create_dirs(spec.workspace)
+    _install_create_dirs(spec.repo_local_path, spec.workspace)
     _install_atomic_write(config_path, text)
     registry.bind(spec.repo_local_path, config_path)
     print(f"install: wrote {config_path}")
@@ -667,6 +737,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.heartbeat_seconds < 0:
         parser.error("--heartbeat-seconds must be >= 0")
+    if getattr(args, "poll_seconds", None) is not None and args.poll_seconds < 0:
+        parser.error("--poll-seconds must be >= 0")
 
     # A config/DB written by a newer orchestrator is refused with a clean message + exit 2 here,
     # rather than surfacing as a traceback (fail loud, not ugly). See the versioning gates.
