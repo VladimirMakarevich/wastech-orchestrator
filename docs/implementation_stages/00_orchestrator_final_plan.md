@@ -548,9 +548,9 @@ agents:
     - claude
     - codex
 
-  max_stage_attempts: 2
-  max_fix_cycles: 3
-  max_total_fix_iterations: 5
+  max_stage_attempts: 3
+  max_fix_cycles: 15
+  max_total_fix_iterations: 30
 
   decomposition:                # optional task decomposition (§5.1); OFF by default
     enabled: false

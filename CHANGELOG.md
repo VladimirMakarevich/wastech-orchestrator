@@ -40,6 +40,10 @@ The maintainer bumps the package version in `pyproject.toml` on release; `wastec
   `error:` message and exit code 2 instead of being misread.
 
 ### Changed
+- **Raised the default fix budget**: `agents.max_fix_cycles` `3 → 15` and
+  `agents.max_total_fix_iterations` `5 → 30` (the loader defaults, both `config.example.yaml` copies,
+  and the `install` generator). Existing configs are unaffected. The validator invariant
+  `max_total_fix_iterations >= max_fix_cycles` still holds (30 ≥ 15).
 - **Default git footprint is now in-repo audit** (`location: in_repo`, `tracking: commit`), so the
   **task file and its `summary.md`** live in the same repository as the modified code and are stored
   in git. On a terminal outcome the orchestrator finalizes **before** the commit: it moves the task

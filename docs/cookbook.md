@@ -499,7 +499,7 @@ Smaller fix budget for conservative runs:
 
 ```yaml
 agents:
-  max_stage_attempts: 2
-  max_fix_cycles: 2
-  max_total_fix_iterations: 2
+  max_stage_attempts: 3
+  max_fix_cycles: 15
+  max_total_fix_iterations: 30
 ```

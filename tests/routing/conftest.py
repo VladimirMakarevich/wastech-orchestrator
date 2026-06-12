@@ -113,7 +113,7 @@ class FakeSnapshotHook:
 
 @pytest.fixture
 def config(packaged_config_text: str) -> OrchestratorConfig:
-    """The packaged default config — canonical §5 routing, both providers, max_stage_attempts=2.
+    """The packaged default config — canonical §5 routing, both providers, max_stage_attempts=3.
 
     ``packaged_config_text`` comes from the root tests/conftest.py.
     """

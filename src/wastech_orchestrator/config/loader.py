@@ -363,9 +363,9 @@ def _build_agents(raw: Any, issues: list[str], warnings: list[str]) -> AgentsCon
         routing = _legacy_codex_routing()
     return AgentsConfig(
         allowed=_build_allowed(m.get("allowed"), issues),
-        max_stage_attempts=_int(m, "max_stage_attempts", 2, "agents", issues),
-        max_fix_cycles=_int(m, "max_fix_cycles", 3, "agents", issues),
-        max_total_fix_iterations=_int(m, "max_total_fix_iterations", 5, "agents", issues),
+        max_stage_attempts=_int(m, "max_stage_attempts", 3, "agents", issues),
+        max_fix_cycles=_int(m, "max_fix_cycles", 15, "agents", issues),
+        max_total_fix_iterations=_int(m, "max_total_fix_iterations", 30, "agents", issues),
         decomposition=_build_decomposition(m.get("decomposition"), issues),
         routing=routing,
         providers=_build_providers(m.get("providers"), issues),

@@ -22,9 +22,9 @@ agents:
     - claude
     - codex
 
-  max_stage_attempts: 2
-  max_fix_cycles: 3
-  max_total_fix_iterations: 5       # hard global cap across all fix loops (and all subtasks)
+  max_stage_attempts: 3
+  max_fix_cycles: 15
+  max_total_fix_iterations: 30      # hard global cap across all fix loops (and all subtasks); >= max_fix_cycles
 
   decomposition:                    # optional task decomposition (§5.1); OFF by default
     enabled: false

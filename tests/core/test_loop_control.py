@@ -15,7 +15,7 @@ def _agents(*, max_fix_cycles: int, max_total: int) -> AgentsConfig:
     """A minimal AgentsConfig carrying just the loop limits the controller reads."""
     return AgentsConfig(
         allowed=(ProviderId.CLAUDE, ProviderId.CODEX),
-        max_stage_attempts=2,
+        max_stage_attempts=3,
         max_fix_cycles=max_fix_cycles,
         max_total_fix_iterations=max_total,
         decomposition=DecompositionConfig(

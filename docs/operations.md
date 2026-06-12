@@ -212,7 +212,7 @@ ts=… level=info task_id=task-001 stage=implementation primary=codex msg="stage
 ts=… level=info task_id=task-001 stage=implementation provider=codex attempt=1 elapsed_seconds=30.0 msg="provider heartbeat"
 ts=… level=info task_id=task-001 stage=implementation primary=codex duration_seconds=84.2 msg="stage completed"
 ts=… level=info task_id=task-001 stage=review msg="falling back" from=codex to=claude error_class=rate_limited
-ts=… level=warn task_id=task-001 msg="task stuck" limit=max_total_fix_iterations fix_iterations=5
+ts=… level=warn task_id=task-001 msg="task stuck" limit=max_total_fix_iterations fix_iterations=30
 ts=… level=info task_id=task-001 msg=terminal final_status=done pr_url=… cleanup_safe=True
 ```
 

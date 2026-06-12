@@ -128,17 +128,17 @@ agents:
     - claude
     - codex
 
-  max_stage_attempts: 2
-  max_fix_cycles: 3
-  max_total_fix_iterations: 5
+  max_stage_attempts: 3
+  max_fix_cycles: 15
+  max_total_fix_iterations: 30
 ```
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `allowed` | list of `claude`, `codex` | `["claude", "codex"]` | Providers the router may use. |
-| `max_stage_attempts` | integer | `2` | Attempts allowed for a stage/provider route. |
-| `max_fix_cycles` | integer | `3` | Fix cycles for a local failing loop. |
-| `max_total_fix_iterations` | integer | `5` | Hard global fix cap across the whole task and all subtasks. |
+| `max_stage_attempts` | integer | `3` | Attempts allowed for a stage/provider route. |
+| `max_fix_cycles` | integer | `15` | Fix cycles for a single local failing loop (test-driven or review-driven, counted separately). |
+| `max_total_fix_iterations` | integer | `30` | Hard global fix cap across the whole task and all subtasks. Must be `>= max_fix_cycles`. |
 
 Validation requires `max_total_fix_iterations >= max_fix_cycles`.
 
@@ -515,9 +515,9 @@ Conservative retry budget:
 
 ```yaml
 agents:
-  max_stage_attempts: 1
-  max_fix_cycles: 1
-  max_total_fix_iterations: 1
+  max_stage_attempts: 3
+  max_fix_cycles: 15
+  max_total_fix_iterations: 30
 ```
 
 ## Validation Checklist
