@@ -433,7 +433,12 @@ class ClaudeCodeProvider:
         """Execute a single Claude stage run. Infrastructure failures raise ``ProviderError``."""
         started_at = self._clock().isoformat()
         paths = create_attempt_dir(
-            self._artifacts_root, request.task_id, request.stage, request.attempt, self.id
+            self._artifacts_root,
+            request.task_id,
+            request.stage,
+            request.attempt,
+            self.id,
+            stage_run_id=request.stage_run_id,
         )
         schema_path = self._write_output_schema(paths, request)
 
@@ -573,6 +578,7 @@ class ClaudeCodeProvider:
             "provider": self.id,
             "task_id": request.task_id,
             "stage": request.stage.value,
+            "stage_run_id": request.stage_run_id,
             "attempt": request.attempt,
             "working_directory": request.working_directory,
             "permission_profile": request.permission_profile,

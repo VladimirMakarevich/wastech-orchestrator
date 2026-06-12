@@ -18,6 +18,9 @@ The maintainer bumps the package version in `pyproject.toml` on release; `wastec
 ## [Unreleased]
 
 ### Added
+- Opt-in Telegram terminal notifications and a blocking `ask_human` HITL primitive, with
+  environment-only credentials, deterministic timeouts, secret redaction, and no-op behavior when
+  disabled or unconfigured.
 - `orchestrator.poll_interval_seconds` (default **300**, integer `>= 0`): `watch` is now a
   long-running loop that runs `git fetch` + `pull --ff-only` on `base_branch` and re-scans every
   interval, so a task committed and pushed to the repo after `watch` started is discovered **without
@@ -66,6 +69,14 @@ The maintainer bumps the package version in `pyproject.toml` on release; `wastec
   the bound repo itself).
 - A backward-incompatible `config.yaml` / `state.db` now fails loud at the CLI boundary (exit 2)
   rather than surfacing as a traceback.
+
+### Fixed
+- Reserve a persistent stage-run ID before provider execution and include it in artifact paths, so
+  repeated fixing cycles and recovery runs cannot collide on `<attempt>-<provider>` directories.
+- Resume tasks from their persisted pipeline status instead of always restarting implementation;
+  fixing recovery now restores its failed-check or review context without double-counting a cycle.
+- Isolate rejected-task quarantine paths in test fixtures so test runs cannot write generated task
+  files into the repository's real `tasks/rejected/` directory.
 
 ## [0.0.1]
 

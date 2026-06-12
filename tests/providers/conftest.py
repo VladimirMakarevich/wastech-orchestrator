@@ -91,6 +91,7 @@ def make_request(tmp_path: Any) -> Callable[..., AgentRunRequest]:
             "permission_profile": "workspace-write",
             "timeout_seconds": 1800,
             "attempt": 1,
+            "stage_run_id": 1,
         }
         defaults.update(overrides)
         return AgentRunRequest(**defaults)

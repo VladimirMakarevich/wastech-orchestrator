@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,8 @@ from wastech_orchestrator.core.orchestrator import Orchestrator, SlotBusyError
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import GitManager, GitResult
 from wastech_orchestrator.ledger import Ledger
+from wastech_orchestrator.notify import AskKind, AskResult, Notifier
+from wastech_orchestrator.providers.artifacts import create_attempt_dir
 from wastech_orchestrator.providers.base import (
     AgentRunRequest,
     AgentRunResult,
@@ -74,6 +77,65 @@ class FakeProvider:
         )
 
 
+class ArtifactWritingProvider(FakeProvider):
+    """Provider fake that exercises the production artifact directory allocator."""
+
+    def __init__(self, provider_id: str, artifacts_root: Path) -> None:
+        super().__init__(provider_id)
+        self._artifacts_root = artifacts_root
+
+    def run(self, request: AgentRunRequest) -> AgentRunResult:
+        paths = create_attempt_dir(
+            self._artifacts_root,
+            request.task_id,
+            request.stage,
+            request.attempt,
+            self.id,
+            stage_run_id=request.stage_run_id,
+        )
+        result = super().run(request)
+        Path(paths.stdout_path).write_text("provider output\n", encoding="utf-8")
+        return replace(result, stdout_path=paths.stdout_path)
+
+
+class RecordingNotifier:
+    """Core-facing notifier fake that records terminal messages without network access."""
+
+    def __init__(self, *, raise_on_send: bool = False) -> None:
+        self.calls: list[dict[str, str | None]] = []
+        self._raise_on_send = raise_on_send
+
+    def send_notification(
+        self,
+        *,
+        task_id: str,
+        final_status: str,
+        pr_url: str | None,
+        reason: str | None,
+    ) -> None:
+        self.calls.append(
+            {
+                "task_id": task_id,
+                "final_status": final_status,
+                "pr_url": pr_url,
+                "reason": reason,
+            }
+        )
+        if self._raise_on_send:
+            raise RuntimeError("notification failed")
+
+    def ask_human(
+        self,
+        *,
+        question: str,
+        context: str,
+        task_id: str,
+        kind: AskKind,
+        timeout_s: int,
+    ) -> AskResult:
+        return AskResult(answered=False, timed_out=True)
+
+
 def _fake_proc(verdicts: list[int]) -> Callable[..., object]:
     """A run_process stand-in for the Check Runner; pops one exit code per call (repeats last)."""
     from wastech_orchestrator.providers.process import ProcessResult
@@ -118,6 +180,7 @@ def _build(
     providers: dict[ProviderId, FakeProvider],
     check_verdicts: list[int],
     config_kwargs: dict | None = None,
+    notifier: Notifier | None = None,
 ) -> tuple[Orchestrator, StateStore, Ledger, Path]:
     from wastech_orchestrator.routing.router import AgentRouter
 
@@ -143,6 +206,7 @@ def _build(
         loops=LoopController(config.agents),
         gate=gate,
         artifacts_root=str(art),
+        notifier=notifier,
     )
     return orch, store, ledger, art
 
@@ -171,8 +235,14 @@ def _impl_writes_file(provider_id: str) -> FakeProvider:
 
 def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: Path) -> None:
     providers = _both()
+    notifier = RecordingNotifier()
     orch, store, ledger, art = _build(
-        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
     )
     task_file = _complete_task(tmp_path)
     # The implementation stage must leave a change to commit; simulate by writing in the clone.
@@ -199,6 +269,14 @@ def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: 
     # Exactly one ledger record; back on the base branch.
     records = ledger.records()
     assert len(records) == 1 and records[0]["final_status"] == "done"
+    assert notifier.calls == [
+        {
+            "task_id": "task-001",
+            "final_status": "done",
+            "pr_url": "https://example/pr/1",
+            "reason": None,
+        }
+    ]
     assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "main"
     # The commit landed on the task branch.
     branches = git_run(["branch", "--list", "agent/task-001-add-a-thing"], git_repo.clone)
@@ -234,7 +312,7 @@ def test_vague_task_runs_refinement(git_repo, make_git_config, tmp_path: Path) -
 def test_failed_checks_then_fix_then_pass(git_repo, make_git_config, tmp_path: Path) -> None:
     providers = _both()
     # Checks fail once, then pass on the retry after fixing.
-    orch, store, _, _ = _build(
+    orch, store, _, art = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[1, 0]
     )
     task_file = _complete_task(tmp_path, "task-003")
@@ -251,10 +329,66 @@ def test_failed_checks_then_fix_then_pass(git_repo, make_git_config, tmp_path: P
     assert result.final_status is Status.DONE
     row = store.get_task("task-003")
     assert row is not None and row.fix_iterations == 1  # one fixing entry
+    context = json.loads(
+        (art / "logs" / "task-003" / "fixing-context.json").read_text(encoding="utf-8")
+    )
+    assert context["loop"] == "test"
+    assert context["check_artifacts_path"]
+
+
+def test_two_fix_cycles_use_distinct_stage_run_artifacts(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    artifacts_root = tmp_path / "art"
+    providers: dict[ProviderId, FakeProvider] = {
+        ProviderId.CLAUDE: ArtifactWritingProvider("claude", artifacts_root),
+        ProviderId.CODEX: ArtifactWritingProvider("codex", artifacts_root),
+    }
+    orch, store, _, art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[1, 1, 0],
+        config_kwargs={"max_fix_cycles": 3, "max_total_fix_iterations": 10},
+    )
+    task_file = _complete_task(tmp_path, "task-two-fixes")
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.stage in (Stage.IMPLEMENTATION, Stage.FIXING):
+            (git_repo.clone / "f.py").write_text(
+                f"stage_run_id = {request.stage_run_id}\n", encoding="utf-8"
+            )
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    result = orch.run_task(task_file)
+
+    assert result.final_status is Status.DONE
+    rows = store._conn.execute(  # noqa: SLF001 - cross-checking SQLite against artifact paths
+        "SELECT id FROM stage_runs WHERE task_id = ? AND stage = ? ORDER BY id",
+        ("task-two-fixes", Stage.FIXING.value),
+    ).fetchall()
+    assert len(rows) == 2
+    expected = [
+        art
+        / "logs"
+        / "task-two-fixes"
+        / "stages"
+        / "fixing"
+        / f"run-{row['id']:06d}"
+        / "1-claude"
+        for row in rows
+    ]
+    assert all(path.is_dir() for path in expected)
+    assert expected[0] != expected[1]
 
 
 def test_fix_budget_exhausted_is_manual(git_repo, make_git_config, tmp_path: Path) -> None:
     providers = _both()
+    notifier = RecordingNotifier()
     # Checks always fail → the test-driven fix loop hits max_fix_cycles.
     orch, store, ledger, art = _build(
         git_repo,
@@ -263,6 +397,7 @@ def test_fix_budget_exhausted_is_manual(git_repo, make_git_config, tmp_path: Pat
         providers=providers,
         check_verdicts=[1],
         config_kwargs={"max_fix_cycles": 2, "max_total_fix_iterations": 10},
+        notifier=notifier,
     )
     task_file = _complete_task(tmp_path, "task-004")
     orig = providers[ProviderId.CLAUDE].run
@@ -279,6 +414,8 @@ def test_fix_budget_exhausted_is_manual(git_repo, make_git_config, tmp_path: Pat
     assert (art / "logs" / "task-004" / "failure_report.json").exists()
     assert (art / "logs" / "task-004" / "stuck.md").exists()
     assert ledger.records()[0]["final_status"] == "manual_action_required"
+    assert len(notifier.calls) == 1
+    assert notifier.calls[0]["final_status"] == "manual_action_required"
 
 
 def test_review_blocking_then_fix(git_repo, make_git_config, tmp_path: Path) -> None:
@@ -313,13 +450,18 @@ def test_review_blocking_then_fix(git_repo, make_git_config, tmp_path: Path) -> 
         ProviderId.CLAUDE: ReviewProvider("claude"),
         ProviderId.CODEX: ReviewProvider("codex"),
     }
-    orch, store, _, _ = _build(
+    orch, store, _, art = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
     )
     result = orch.run_task(_complete_task(tmp_path, "task-005"))
     assert result.final_status is Status.DONE
     row = store.get_task("task-005")
     assert row is not None and row.fix_iterations == 1  # one review-driven fix
+    context = json.loads(
+        (art / "logs" / "task-005" / "fixing-context.json").read_text(encoding="utf-8")
+    )
+    assert context["loop"] == "review"
+    assert context["review_artifacts_path"]
 
 
 def test_summary_fallback_when_provider_fails(git_repo, make_git_config, tmp_path: Path) -> None:
@@ -429,6 +571,7 @@ def test_single_active_slot_blocks(git_repo, make_git_config, tmp_path: Path) ->
 
 def test_rejected_task_no_branch(git_repo, make_git_config, git_run, tmp_path: Path) -> None:
     quarantine = tmp_path / "rejected"
+    notifier = RecordingNotifier()
     orch, store, ledger, art = _build(
         git_repo,
         make_git_config,
@@ -436,6 +579,7 @@ def test_rejected_task_no_branch(git_repo, make_git_config, git_run, tmp_path: P
         providers=_both(),
         check_verdicts=[0],
         config_kwargs={"quarantine": str(quarantine)},
+        notifier=notifier,
     )
     bad = tmp_path / "task-009.md"
     bad.write_text("no front matter at all\n", encoding="utf-8")
@@ -448,6 +592,38 @@ def test_rejected_task_no_branch(git_repo, make_git_config, git_run, tmp_path: P
     branches = git_run(["branch", "--list", "agent/*"], git_repo.clone)
     assert branches == ""
     assert ledger.records()[0]["validation_reason"] == "frontmatter_missing"
+    assert notifier.calls == [
+        {
+            "task_id": "task-009",
+            "final_status": "failed",
+            "pr_url": None,
+            "reason": "frontmatter_missing",
+        }
+    ]
+
+
+def test_notifier_exception_does_not_change_terminal_outcome(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    notifier = RecordingNotifier(raise_on_send=True)
+    orch, _, ledger, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        notifier=notifier,
+    )
+    bad = tmp_path / "task-notify-fail.md"
+    bad.write_text("no front matter at all\n", encoding="utf-8")
+
+    result = orch.run_task(str(bad))
+
+    assert result.final_status is Status.FAILED
+    assert ledger.records()[0]["final_status"] == "failed"
+    assert len(notifier.calls) == 1
+    assert (tmp_path / "rejected" / "task-notify-fail.md").exists()
+    assert not (Path.cwd() / "tasks" / "rejected" / "task-notify-fail.md").exists()
 
 
 # --- Phase 6: security & observability (spec §6.1/§6.5) -------------------------------------------

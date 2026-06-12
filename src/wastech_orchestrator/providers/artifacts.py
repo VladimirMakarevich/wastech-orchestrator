@@ -1,10 +1,10 @@
 """Artifact writer (spec §10).
 
 Writes the per-attempt artifacts under
-``<artifacts_root>/logs/<task-id>/stages/<stage>/<attempt>-<provider>/`` (with a ``sub-<NN>/`` level
-for a decomposed subtask). The directory layout and the **never overwrite** rule live here; the
-*content* (already redacted) is supplied by the caller — this module imports neither
-:mod:`~wastech_orchestrator.providers.redaction` nor any provider syntax.
+``<artifacts_root>/logs/<task-id>/stages/<stage>/run-<stage-run-id>/<attempt>-<provider>/`` (with a
+``sub-<NN>/`` level for a decomposed subtask). The directory layout and the **never overwrite**
+rule live here; the *content* (already redacted) is supplied by the caller — this module imports
+neither :mod:`~wastech_orchestrator.providers.redaction` nor any provider syntax.
 
 Artifacts (§10): ``request.json`` (redacted), ``stdout.log``, ``stderr.log``, ``events.jsonl``,
 ``result.json``. ``before.diff`` / ``after.diff`` are stamped by the pipeline in P5.
@@ -60,18 +60,20 @@ def create_attempt_dir(
     attempt: int,
     provider: str,
     *,
+    stage_run_id: int,
     subtask: int | None = None,
 ) -> ArtifactPaths:
     """Create the attempt directory and return its :class:`ArtifactPaths`.
 
-    The directory must not already exist — logs are never overwritten (§10); a re-run uses a
-    distinct ``attempt`` (or ``subtask``) and therefore a distinct directory. A collision raises
-    :class:`FileExistsError`.
+    The directory must not already exist — logs are never overwritten (§10). ``stage_run_id`` is
+    reserved in SQLite before the provider starts, so a repeated fixing cycle or recovery run gets
+    a distinct directory even though its provider attempt counter starts again at one. A collision
+    raises :class:`FileExistsError`.
     """
     stage_dir = Path(artifacts_root) / "logs" / task_id / "stages" / stage.value
     if subtask is not None:
         stage_dir = stage_dir / f"sub-{subtask:02d}"
-    attempt_dir = stage_dir / f"{attempt}-{provider}"
+    attempt_dir = stage_dir / f"run-{stage_run_id:06d}" / f"{attempt}-{provider}"
     attempt_dir.mkdir(parents=True, exist_ok=False)
     return ArtifactPaths(
         attempt_dir=str(attempt_dir),

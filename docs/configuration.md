@@ -432,7 +432,7 @@ committed.
 
 ## `telegram`
 
-Reserved for human-in-the-loop and notifications.
+Optional terminal notifications and the reusable blocking human-in-the-loop primitive.
 
 ```yaml
 telegram:
@@ -444,13 +444,15 @@ telegram:
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `enabled` | boolean | `false` | Reserved feature flag. |
-| `bot_token_env` | string | `"TELEGRAM_BOT_TOKEN"` | Environment variable name for a bot token. |
-| `chat_id_env` | string | `"TELEGRAM_CHAT_ID"` | Environment variable name for the target chat. |
-| `ask_timeout_s` | integer | `1800` | Planned timeout for human responses. |
+| `enabled` | boolean | `false` | Enables Telegram when both named environment variables are present. |
+| `bot_token_env` | string | `"TELEGRAM_BOT_TOKEN"` | Name of the environment variable containing the bot token. |
+| `chat_id_env` | string | `"TELEGRAM_CHAT_ID"` | Name of the environment variable containing the target chat id. |
+| `ask_timeout_s` | integer | `1800` | Maximum wait for a human reply. |
 
-Telegram interaction is deferred in v1. Do not place token values in `config.yaml`; this block stores
-environment variable names only.
+The config stores environment variable **names only**. Token and chat-id values are resolved from the
+orchestrator process environment at startup and are never written to config, SQLite, logs, or
+artifacts. If the feature is disabled or either variable is missing/blank, Telegram is a clean
+no-op. Delivery and polling failures are best-effort and never change a task outcome.
 
 ## Common Examples
 

@@ -160,7 +160,7 @@ class GitConfig:
 
 @dataclass(frozen=True)
 class TelegramConfig:
-    """Human-in-the-loop notifications (present but inert in v1)."""
+    """Optional Telegram human-in-the-loop and terminal notifications."""
 
     enabled: bool
     bot_token_env: str
