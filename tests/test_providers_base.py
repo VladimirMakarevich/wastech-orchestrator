@@ -56,8 +56,10 @@ def test_request_is_constructible() -> None:
         permission_profile="workspace-write",
         timeout_seconds=1800,
         attempt=1,
+        stage_run_id=42,
     )
     assert req.extra_args == []
+    assert req.stage_run_id == 42
 
 
 def test_protocol_runtime_checkable() -> None:

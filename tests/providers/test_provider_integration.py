@@ -73,7 +73,15 @@ def test_successful_run(
     assert result.session_id == "sess-fake"
     assert result.final_message == "Fake implemented the task."
     assert result.structured_output == {"summary": "fake done"}
-    attempt = tmp_path / "logs" / "task-001" / "stages" / "planning" / f"1-{provider_name}"
+    attempt = (
+        tmp_path
+        / "logs"
+        / "task-001"
+        / "stages"
+        / "planning"
+        / "run-000001"
+        / f"1-{provider_name}"
+    )
     for name in ("request.json", "stdout.log", "stderr.log", "events.jsonl", "result.json"):
         assert (attempt / name).exists(), name
 

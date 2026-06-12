@@ -509,6 +509,38 @@ class StateStore:
             )
             return int(cur.lastrowid or 0)
 
+    def complete_stage_run(
+        self,
+        run_id: int,
+        *,
+        status: str,
+        provider_used: str | None,
+        error_class: str | None,
+        stage_attempts: int,
+        finished_at: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> None:
+        """Finalize a stage run that was reserved before invoking its provider."""
+        with self._writer(conn) as c:
+            cur = c.execute(
+                """
+                UPDATE stage_runs
+                SET status = ?, provider_used = ?, error_class = ?,
+                    stage_attempts = ?, finished_at = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    provider_used,
+                    error_class,
+                    stage_attempts,
+                    finished_at,
+                    run_id,
+                ),
+            )
+            if cur.rowcount != 1:
+                raise KeyError(run_id)
+
     def record_provider_attempt(
         self, attempt: ProviderAttemptRow, conn: sqlite3.Connection | None = None
     ) -> None:
@@ -556,6 +588,22 @@ class StateStore:
                     run.finished_at,
                 ),
             )
+
+    def latest_failed_check_log(
+        self, task_id: str, subtask_order: int | None = None
+    ) -> str | None:
+        """Return the newest failed check log for recovery of a fixing stage."""
+        row = self._conn.execute(
+            """
+            SELECT log_path
+            FROM check_runs
+            WHERE task_id = ? AND subtask_order IS ? AND passed = 0
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (task_id, subtask_order),
+        ).fetchone()
+        return str(row["log_path"]) if row is not None else None
 
     def register_artifact(
         self, artifact: ArtifactRow, conn: sqlite3.Connection | None = None
@@ -617,11 +665,20 @@ class StateStore:
     def insert_subtasks(
         self, rows: Sequence[SubtaskRow], conn: sqlite3.Connection | None = None
     ) -> None:
+        """Insert planned subtasks idempotently for a recovery re-run of planning.
+
+        Uncommitted rows may be refreshed. Committed rows retain their status and commit marker, so
+        recovery cannot turn completed work back into pending.
+        """
         with self._writer(conn) as c:
             for row in rows:
                 c.execute(
                     'INSERT INTO subtasks (task_id, "order", slug, title, status, depends_on, '
-                    "commit_sha, artifact_path) VALUES (?,?,?,?,?,?,?,?)",
+                    "commit_sha, artifact_path) VALUES (?,?,?,?,?,?,?,?) "
+                    'ON CONFLICT(task_id, "order") DO UPDATE SET '
+                    "slug = excluded.slug, title = excluded.title, status = excluded.status, "
+                    "depends_on = excluded.depends_on, artifact_path = excluded.artifact_path "
+                    "WHERE subtasks.commit_sha IS NULL",
                     (
                         row.task_id,
                         row.order,

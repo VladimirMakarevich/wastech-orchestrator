@@ -9,7 +9,9 @@ import pytest
 
 from wastech_orchestrator.core.recovery import RecoveryAction, RecoveryReconciler
 from wastech_orchestrator.core.state_machine import Status
-from wastech_orchestrator.state_store import StateStore, SubtaskRow, TaskRow
+from wastech_orchestrator.notify import AskKind, AskResult, Notifier
+from wastech_orchestrator.providers.base import AgentRunRequest, ProviderId, Stage
+from wastech_orchestrator.state_store import CheckRunRow, StateStore, SubtaskRow, TaskRow
 
 
 class FakeGit:
@@ -22,6 +24,34 @@ class FakeGit:
     def commit_on_branch(self, sha: str, branch: str) -> bool:
         self.queries.append((sha, branch))
         return self._on_branch
+
+
+class RecordingNotifier:
+    """Record terminal notification calls made while recovery reconciles state."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def send_notification(
+        self,
+        *,
+        task_id: str,
+        final_status: str,
+        pr_url: str | None,
+        reason: str | None,
+    ) -> None:
+        self.calls.append((task_id, final_status))
+
+    def ask_human(
+        self,
+        *,
+        question: str,
+        context: str,
+        task_id: str,
+        kind: AskKind,
+        timeout_s: int,
+    ) -> AskResult:
+        return AskResult(answered=False, timed_out=True)
 
 
 @pytest.fixture
@@ -132,6 +162,7 @@ class _FakeProvider:
         self.id = provider_id
         self._clone = clone
         self._n = 0
+        self.requests: list[AgentRunRequest] = []
 
     def preflight(self):
         from wastech_orchestrator.providers.base import ProviderHealth
@@ -148,6 +179,7 @@ class _FakeProvider:
     def run(self, request):
         from wastech_orchestrator.providers.base import AgentRunResult, RunStatus, Stage
 
+        self.requests.append(request)
         if request.stage is Stage.IMPLEMENTATION:
             (self._clone / f"impl-{self._n}.py").write_text("x\n", encoding="utf-8")
             self._n += 1
@@ -173,7 +205,14 @@ def _make_providers(git_repo):
     }
 
 
-def _build_orchestrator(git_repo, make_git_config, tmp_path: Path, providers, verdicts):
+def _build_orchestrator(
+    git_repo,
+    make_git_config,
+    tmp_path: Path,
+    providers,
+    verdicts,
+    notifier: Notifier | None = None,
+):
     from wastech_orchestrator.check_runner import CheckRunner
     from wastech_orchestrator.core.loop_control import LoopController
     from wastech_orchestrator.core.orchestrator import Orchestrator
@@ -223,6 +262,7 @@ def _build_orchestrator(git_repo, make_git_config, tmp_path: Path, providers, ve
             config, store_has_task_id=store.task_id_exists, ledger_has_task_id=ledger.has_task_id
         ),
         artifacts_root=str(art),
+        notifier=notifier,
     )
     return orch, store, ledger, art, git
 
@@ -237,8 +277,14 @@ def test_resume_no_active_returns_none(git_repo, make_git_config, tmp_path: Path
 def test_resume_more_than_one_active_marks_manual(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
+    notifier = RecordingNotifier()
     orch, store, ledger, *_ = _build_orchestrator(
-        git_repo, make_git_config, tmp_path, _make_providers(git_repo), [0]
+        git_repo,
+        make_git_config,
+        tmp_path,
+        _make_providers(git_repo),
+        [0],
+        notifier=notifier,
     )
     store.insert_task(TaskRow(task_id="a", title="a", status=Status.IMPLEMENTING))
     store.insert_task(TaskRow(task_id="b", title="b", status=Status.REVIEWING))
@@ -247,6 +293,121 @@ def test_resume_more_than_one_active_marks_manual(
     assert store.get_task("a").status is Status.MANUAL_ACTION_REQUIRED
     assert store.get_task("b").status is Status.MANUAL_ACTION_REQUIRED
     assert {r["id"] for r in ledger.records()} == {"a", "b"}
+    assert set(notifier.calls) == {
+        ("a", "manual_action_required"),
+        ("b", "manual_action_required"),
+    }
+
+
+def test_resume_interrupted_cleanup_notifies_after_ledger(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    notifier = RecordingNotifier()
+    orch, store, ledger, *_ = _build_orchestrator(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        _make_providers(git_repo),
+        [0],
+        notifier=notifier,
+    )
+    branch = "agent/task-cleanup-x"
+    git_run(["checkout", "-b", branch], git_repo.clone)
+    store.insert_task(
+        TaskRow(task_id="task-cleanup", title="cleanup", status=Status.DONE, branch=branch)
+    )
+
+    result = orch.resume()
+
+    assert result is not None and result.final_status is Status.DONE
+    assert ledger.records()[0]["id"] == "task-cleanup"
+    assert notifier.calls == [("task-cleanup", "done")]
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_provider", "expected_first_stage"),
+    [
+        (Status.VALIDATED, ProviderId.CLAUDE, Stage.REFINEMENT),
+        (Status.PREPARING, ProviderId.CLAUDE, Stage.REFINEMENT),
+        (Status.REFINING, ProviderId.CLAUDE, Stage.REFINEMENT),
+        (Status.PLANNING, ProviderId.CLAUDE, Stage.PLANNING),
+        (Status.IMPLEMENTING, ProviderId.CLAUDE, Stage.IMPLEMENTATION),
+        (Status.TESTING, ProviderId.CODEX, Stage.REVIEW),
+        (Status.REVIEWING, ProviderId.CODEX, Stage.REVIEW),
+        (Status.FIXING, ProviderId.CLAUDE, Stage.FIXING),
+    ],
+)
+def test_resume_continues_persisted_checkpoint(
+    status: Status,
+    expected_provider: ProviderId,
+    expected_first_stage: Stage,
+    git_repo,
+    make_git_config,
+    git_run,
+    tmp_path: Path,
+) -> None:
+    from wastech_orchestrator.task.model import NormalizedTask
+    from wastech_orchestrator.task.parser import slugify, write_normalized
+
+    providers = _make_providers(git_repo)
+    orch, store, _, art, _ = _build_orchestrator(
+        git_repo, make_git_config, tmp_path, providers, [0]
+    )
+    task_id = f"resume-{status.value}"
+    title = "Resume checkpoint"
+    slug = slugify(title)
+    branch = f"agent/{task_id}-{slug}"
+    write_normalized(
+        NormalizedTask(id=task_id, title=title, description="Implement the requested change."),
+        str(art),
+    )
+
+    branch_prepared = status not in {Status.VALIDATED, Status.PREPARING}
+    if branch_prepared:
+        git_run(["checkout", "-b", branch], git_repo.clone)
+    if status in {Status.TESTING, Status.REVIEWING, Status.FIXING}:
+        (git_repo.clone / "feature.py").write_text("implemented = True\n", encoding="utf-8")
+
+    store.insert_task(
+        TaskRow(
+            task_id=task_id,
+            title=title,
+            status=status,
+            branch=branch if branch_prepared else None,
+            slug=slug if branch_prepared else None,
+            decomposition_accepted=False,
+            test_fix_cycles=1 if status is Status.FIXING else 0,
+            fix_iterations=1 if status is Status.FIXING else 0,
+        )
+    )
+    failed_check = art / "logs" / task_id / "checks" / "001.log"
+    if status is Status.FIXING:
+        failed_check.parent.mkdir(parents=True, exist_ok=True)
+        failed_check.write_text("failed assertion\n", encoding="utf-8")
+        store.record_check_run(
+            CheckRunRow(
+                task_id=task_id,
+                command="pytest",
+                passed=False,
+                exit_code=1,
+                log_path=str(failed_check),
+            )
+        )
+
+    result = orch.resume()
+
+    assert result is not None and result.final_status is Status.DONE
+    expected = providers[expected_provider]
+    assert expected.requests[0].stage is expected_first_stage
+    all_requests = [
+        request for provider in providers.values() for request in provider.requests
+    ]
+    if status in {Status.TESTING, Status.REVIEWING, Status.FIXING}:
+        assert all(request.stage is not Stage.IMPLEMENTATION for request in all_requests)
+    if status is Status.FIXING:
+        assert expected.requests[0].check_artifacts_path == str(failed_check)
+        row = store.get_task(task_id)
+        assert row is not None and row.fix_iterations == 1
 
 
 def test_resume_decomposed_at_subtask_without_duplicate_commit(

@@ -451,7 +451,8 @@ subtasks
 
 At a minimum the following are stored:
 
-- the identifiers of the task, stage, and attempt;
+- the identifiers of the task, stage run, and provider attempt; the `stage_runs` row is inserted
+  before provider execution so its persistent ID can namespace artifacts even after a crash;
 - the selected primary/fallback and the provider actually used;
 - the status and error class;
 - timestamps and the exit code;
@@ -495,15 +496,18 @@ logs/
       summary.md
     stages/
       <stage>/
-        <attempt>-<provider>/          # single-task run
-        sub-<NN>/<attempt>-<provider>/ # one set per subtask when decomposed (§5.1)
-          request.json
-          stdout.log
-          stderr.log
-          events.jsonl
-          result.json
-          before.diff
-          after.diff
+        run-<stage-run-id>/                    # one directory per stage invocation
+          <attempt>-<provider>/                # primary/fallback attempts within that run
+            request.json
+            stdout.log
+            stderr.log
+            events.jsonl
+            result.json
+            before.diff
+            after.diff
+        sub-<NN>/run-<stage-run-id>/           # decomposed subtask (§5.1)
+          <attempt>-<provider>/
+            ...                                # same files as a single-task attempt
     publish/
       commit.json
       push.json
@@ -514,7 +518,9 @@ logs/
 Rules:
 
 - all paths are relative to the task artifact directory;
-- logs are not overwritten;
+- logs are not overwritten; the Core reserves a persistent `stage_runs.id` before invoking a
+  provider, and that ID namespaces the run so repeated fixing cycles and recovery runs cannot
+  collide when their provider attempt counters restart at `1`;
 - the request artifact stores a redacted representation of the run;
 - the machine-readable result is separated from the human-readable summary;
 - artifacts are registered in SQLite with a checksum;
@@ -670,7 +676,11 @@ On startup the orchestrator:
 1. Finds the active task (at most one, see §8.2); more than one task in an active status is an inconsistent state and is moved to `manual_action_required`.
 2. Reconciles SQLite, the task files, the working branch, and the artifacts.
 3. Checks whether the external process has finished and whether a valid result artifact exists.
-4. Repeats only the unfinished idempotent operation.
+4. Continues from the task's persisted status rather than resetting to `implementation`; an
+   interrupted agent stage is re-run, while `testing`, `reviewing`, and `fixing` resume directly.
+   Entering `fixing` writes a task-level `fixing-context.json` checkpoint with the triggering loop
+   and relevant failed-check/review artifact path, so recovery does not lose context or increment
+   fix counters again.
 5. For commit/push/PR it uses the saved fingerprint and checks the remote state.
 6. If a task is already terminal but terminal cleanup was interrupted, performs the checkout back to `repo.base_branch` once when safe.
 7. In an ambiguous state it moves the task to `manual_action_required`.

@@ -23,8 +23,7 @@ These are explicitly deferred by the v1 spec.
 
 | Item | Summary | Notes |
 |---|---|---|
-| Human-in-the-loop questions and approvals | Let agents ask clarifying questions and request human approval for dangerous actions. | Should block the current stage and resume after answer/timeout. Must not weaken security policy. |
-| Telegram integration | Send HITL prompts, terminal task notifications, and PR links through Telegram. | Tokens stay in env vars only. One chat per project/repo is recommended. |
+| Human-in-the-loop stage wiring | Let agent stage outputs invoke the implemented `ask_human` primitive for clarifying questions and dangerous-action approvals. | The Telegram transport, timeout handling, and terminal notifications are implemented; typed stage signals and answer reinjection remain. Must not weaken security policy. |
 | Per-task reasoning and complexity levels | Add `reasoning` / `complexity` task fields that map to provider model flags, timeouts, and fix budgets. | Current v1 uses global provider model and global limits. |
 | Richer task parsing | Extract additional structured metadata beyond current `id`, `title`, `refined`, `decompose`, `agents`, and `contacts`. | Candidate fields: repo binding, commands/hints, priority, labels, issue links. Must stay fail-closed. |
 | Parallel and graph decomposition | Support graph-shaped subtasks, per-subtask worktrees/branches, and parallel execution. | V1 decomposition is linear, sequential, and uses one task branch. |
@@ -36,6 +35,7 @@ These were described in architecture notes or v1 exclusions but are not schedule
 
 | Item | Summary | Source / constraint |
 |---|---|---|
+| [Automatic check discovery and environment resolution](automatic_check_discovery.md) | Detect repository quality gates, resolve the correct project environment, validate/probe candidates, and persist a reusable check profile; use a read-only agent only when deterministic evidence is insufficient. | **Accepted / not scheduled.** The Check Runner remains the deterministic authority; launch failures do not consume fixing budget; setup/bootstrap stays separately controlled. |
 | PR template support | Generate PR bodies from a configurable template in addition to `summary.md`. | Should integrate with the existing summary stage and Git Manager. |
 | GitHub Issues integration | Link tasks to issues, update issue status, and optionally close issues after PR creation/merge. | Requires GitHub auth through existing external credential model. |
 | Concurrent task processing via worktrees | Process multiple independent tasks at once by assigning each task its own `git worktree`. | Must not share a mutable working copy between active agents. |
@@ -58,6 +58,7 @@ These were described in architecture notes or v1 exclusions but are not schedule
 
 | Item | Detail |
 |---|---|
+| Automatic check discovery and environment resolution | [automatic_check_discovery.md](automatic_check_discovery.md) |
 | Prompt template customization | [prompt_template_customization.md](prompt_template_customization.md) |
 | Token optimization | [token_optimization.md](token_optimization.md) |
 

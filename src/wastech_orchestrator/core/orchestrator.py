@@ -46,6 +46,7 @@ from wastech_orchestrator.ledger import (
     write_failure_report,
     write_minimal_summary,
 )
+from wastech_orchestrator.notify import Notifier, NullNotifier, build_notifier
 from wastech_orchestrator.observability.logging import bind
 from wastech_orchestrator.providers.artifacts import sha256_file, task_artifact_dir
 from wastech_orchestrator.providers.base import (
@@ -123,7 +124,12 @@ def _utc_now_iso() -> str:
 _ARTIFACT_KINDS: dict[str, str] = {
     "task.enriched.md": "enriched",
     "plan.md": "plan",
+    "fixing-context.json": "fixing_context",
 }
+
+_UNIT_STATUSES = frozenset(
+    {Status.IMPLEMENTING, Status.TESTING, Status.REVIEWING, Status.FIXING}
+)
 
 
 def _artifact_kind(name: str) -> str:
@@ -188,6 +194,7 @@ class Orchestrator:
         artifacts_root: str | Path,
         clock: Callable[[], str] = _utc_now_iso,
         monotonic: Callable[[], float] = time.monotonic,
+        notifier: Notifier | None = None,
     ) -> None:
         self._config = config
         self._router = router
@@ -200,6 +207,7 @@ class Orchestrator:
         self._artifacts_root = artifacts_root
         self._clock = clock
         self._monotonic = monotonic
+        self._notifier: Notifier = notifier if notifier is not None else NullNotifier()
 
     # --- entry point ----------------------------------------------------------------------
 
@@ -282,6 +290,12 @@ class Orchestrator:
                         fix_iterations=row.fix_iterations,
                     )
                 )
+                self._notify_terminal(
+                    task_id=task_id,
+                    final_status=Status.MANUAL_ACTION_REQUIRED,
+                    pr_url=None,
+                    reason=plan.manual_reason,
+                )
         first = plan.manual_task_ids[0] if plan.manual_task_ids else (plan.task_id or "")
         return PipelineResult(task_id=first, final_status=Status.MANUAL_ACTION_REQUIRED)
 
@@ -312,6 +326,12 @@ class Orchestrator:
                     finished_at=self._clock(),
                 )
             )
+            self._notify_terminal(
+                task_id=task_id,
+                final_status=row.status,
+                pr_url=None,
+                reason=cleanup.error,
+            )
         return PipelineResult(task_id=task_id, final_status=row.status)
 
     def _resume_task(self, plan: RecoveryPlan) -> PipelineResult:
@@ -331,8 +351,6 @@ class Orchestrator:
             slug=row.slug or slugify(task.title),
             plan_path=str(task_artifact_dir(self._artifacts_root, plan.task_id) / "plan.md"),
         )
-        # Re-attach to the existing branch (reused, never recreated) so git ops target it.
-        self._git.prepare_branch(plan.task_id, p.slug)
 
         publish_phase = {
             Status.SUMMARIZING,
@@ -342,6 +360,27 @@ class Orchestrator:
             Status.CREATING_PR,
         }
         try:
+            if row.status is Status.VALIDATED:
+                return self._drive(p, self._gate.phase_b(task))
+            if row.status is Status.PREPARING:
+                self._prepare_branch(p)
+                self._refinement(p, self._gate.phase_b(task))
+                self._planning(p)
+                return self._run_units_and_finish(p)
+
+            # Re-attach to the existing branch (reused, never recreated) so git ops target it.
+            self._git.prepare_branch(plan.task_id, p.slug)
+
+            if row.status is Status.REFINING:
+                self._run_refinement(p)
+                self._planning(p)
+                return self._run_units_and_finish(p)
+            if row.status is Status.PLANNING:
+                self._planning(p)
+                return self._run_units_and_finish(p)
+            if row.status in _UNIT_STATUSES:
+                self._restore_recovery_context(p, row)
+                return self._run_units_and_finish(p)
             if row.status in publish_phase:
                 if row.status is Status.SUMMARIZING:
                     self._summary(p)
@@ -349,10 +388,7 @@ class Orchestrator:
                     self._store.set_status(plan.task_id, Status.READY_TO_PUBLISH)
                     p.status = Status.READY_TO_PUBLISH
                 return self._publish(p)
-            # An earlier (unit) stage: re-run the active subtask/unit, skipping committed subtasks.
-            self._store.set_status(plan.task_id, Status.IMPLEMENTING)
-            p.status = Status.IMPLEMENTING
-            return self._run_units_and_finish(p)
+            raise PipelineFailed(f"cannot recover task from status {row.status.value}")
         except ManualActionRequired as exc:
             return self._go_terminal(p, Status.MANUAL_ACTION_REQUIRED, manual_reason=exc.reason)
         except (PipelineFailed, GitCommandError) as exc:
@@ -395,12 +431,15 @@ class Orchestrator:
                 raise PipelineFailed(f"strict_isolation: {joined}")
 
         self._transition(p, Status.PREPARING)
+        self._prepare_branch(p)
+        self._refinement(p, completeness)
+        self._planning(p)
+        return self._run_units_and_finish(p)
 
+    def _prepare_branch(self, p: _Pipeline) -> None:
+        """Complete the persisted ``preparing`` checkpoint and attach the task branch."""
         # Branch + footprint preflight (no branch is ever created before this point).
-        try:
-            self._git.preflight_footprint()
-        except ManualActionRequired as exc:
-            return self._go_terminal(p, Status.MANUAL_ACTION_REQUIRED, manual_reason=exc.reason)
+        self._git.preflight_footprint()
         self._git.ensure_exclude_local()
         p.slug = slugify(p.task.title)
         p.branch = self._observe(
@@ -409,10 +448,6 @@ class Orchestrator:
             lambda: self._git.prepare_branch(p.task.id, p.slug),
         )
         self._store.update_task(p.task.id, branch=p.branch, slug=p.slug)
-
-        self._refinement(p, completeness)
-        self._planning(p)
-        return self._run_units_and_finish(p)
 
     def _run_units_and_finish(self, p: _Pipeline) -> PipelineResult:
         """Run the per-unit loop (skipping already-committed subtasks) then summary + publish."""
@@ -440,6 +475,10 @@ class Orchestrator:
             return
         self._log(p.task.id).info("refinement running")
         self._transition(p, Status.REFINING)
+        self._run_refinement(p)
+
+    def _run_refinement(self, p: _Pipeline) -> None:
+        """Run or re-run the persisted ``refining`` checkpoint."""
         outcome = self._run_stage(p, Stage.REFINEMENT)
         message = self._require_result(p, outcome, Stage.REFINEMENT)
         p.enriched_path = self._write_artifact(p, "task.enriched.md", message)
@@ -502,9 +541,8 @@ class Orchestrator:
     ) -> PipelineResult | None:
         """Run one unit's implement→test→review→fix loop; return a terminal result if stuck."""
         subtask = unit.order if unit is not None else None
-        if p.status is not Status.IMPLEMENTING:
-            # On entry for a 2nd+ subtask the status was set back to IMPLEMENTING by the prior unit.
-            self._transition(p, Status.IMPLEMENTING)
+        if p.status not in _UNIT_STATUSES:
+            raise PipelineFailed(f"cannot run unit from status {p.status.value}")
 
         while True:
             if p.status is Status.IMPLEMENTING:
@@ -679,8 +717,72 @@ class Orchestrator:
                 p, Status.MANUAL_ACTION_REQUIRED, manual_reason=f"stuck: {decision.limit_name}"
             )
         self._log(p.task.id).info("entering fixing", extra=counters)
+        self._write_fixing_context(p, loop)
         self._transition(p, Status.FIXING)
         return None
+
+    def _write_fixing_context(self, p: _Pipeline, loop: FixLoop) -> str:
+        """Persist the current fixing trigger so restart can rebuild the provider request."""
+        payload = {
+            "loop": loop.value,
+            "check_artifacts_path": p.check_log if loop is FixLoop.TEST else None,
+            "review_artifacts_path": (
+                p.review_findings_path if loop is FixLoop.REVIEW else None
+            ),
+        }
+        return self._write_artifact(
+            p,
+            "fixing-context.json",
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+        )
+
+    def _restore_recovery_context(self, p: _Pipeline, row: TaskRow) -> None:
+        """Restore task-level paths needed by testing/review/fixing after restart."""
+        task_dir = task_artifact_dir(self._artifacts_root, p.task.id)
+        diff_path = task_dir / "current.diff"
+        if diff_path.exists():
+            p.diff_path = str(diff_path)
+
+        if p.status is not Status.FIXING:
+            return
+
+        context_path = task_dir / "fixing-context.json"
+        context: Mapping[str, Any] = {}
+        if context_path.exists():
+            try:
+                loaded = json.loads(context_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, Mapping):
+                    context = loaded
+            except (OSError, json.JSONDecodeError):
+                context = {}
+
+        check_path = context.get("check_artifacts_path")
+        if isinstance(check_path, str) and Path(check_path).exists():
+            p.check_log = check_path
+        review_path = context.get("review_artifacts_path")
+        if isinstance(review_path, str) and Path(review_path).exists():
+            p.review_findings_path = review_path
+
+        # Backward compatibility for tasks that entered fixing before the checkpoint existed.
+        subtask = row.active_subtask if row.decomposition_accepted else None
+        if p.check_log is None:
+            latest_check = self._store.latest_failed_check_log(p.task.id, subtask)
+            if latest_check and Path(latest_check).exists():
+                p.check_log = latest_check
+        if p.review_findings_path is None:
+            fallback_review = task_dir / "review" / "findings.json"
+            if fallback_review.exists():
+                p.review_findings_path = str(fallback_review)
+
+        if p.review_findings_path:
+            try:
+                loaded = json.loads(
+                    Path(p.review_findings_path).read_text(encoding="utf-8")
+                )
+                if isinstance(loaded, Mapping):
+                    p.last_review_findings = self._extract_findings(loaded)
+            except (OSError, json.JSONDecodeError):
+                p.last_review_findings = []
 
     # --- terminal handling ----------------------------------------------------------------
 
@@ -743,6 +845,9 @@ class Orchestrator:
         if not already_moved:
             self._move_task_file(p, final)
         self._append_ledger(p, final, pr_url=pr_url, cleanup_safe=cleanup.safe)
+        self._notify_terminal(
+            task_id=p.task.id, final_status=final, pr_url=pr_url, reason=manual_reason
+        )
         self._log(p.task.id).info(
             "terminal",
             extra={"final_status": final.value, "pr_url": pr_url, "cleanup_safe": cleanup.safe},
@@ -797,6 +902,9 @@ class Orchestrator:
                 branch=None,
             )
         )
+        self._notify_terminal(
+            task_id=task_id, final_status=Status.FAILED, pr_url=None, reason=reason
+        )
         return PipelineResult(task_id=task_id, final_status=Status.FAILED, validation_reason=reason)
 
     def _quarantine(self, task_file: str) -> str | None:
@@ -825,6 +933,20 @@ class Orchestrator:
     ) -> StageOutcome:
         route = self._router.resolve_route(stage, p.task.agents)
         provider_cfg = self._config.agents.providers[route.primary]
+        started_at = self._clock()
+        run_id = self._store.record_stage_run(
+            StageRunRow(
+                task_id=p.task.id,
+                stage=stage.value,
+                subtask_order=subtask,
+                status="running",
+                route_primary=route.primary.value,
+                route_fallback=route.fallback.value if route.fallback else None,
+                route_source=route.source.value,
+                stage_attempts=0,
+                started_at=started_at,
+            )
+        )
         request = AgentRunRequest(
             task_id=p.task.id,
             stage=stage,
@@ -833,6 +955,7 @@ class Orchestrator:
             permission_profile=provider_cfg.permission_profile,
             timeout_seconds=provider_cfg.timeout_seconds,
             attempt=1,
+            stage_run_id=run_id,
             task_path=p.task_file,
             plan_path=p.plan_path,
             diff_path=p.diff_path,
@@ -842,6 +965,7 @@ class Orchestrator:
         fields: dict[str, object] = {
             "stage": stage.value,
             "primary": route.primary.value,
+            "stage_run_id": run_id,
         }
         if subtask is not None:
             fields["subtask"] = subtask
@@ -851,7 +975,7 @@ class Orchestrator:
             lambda: self._router.run_stage(request, route, snapshot=self._git),
             fields=fields,
         )
-        self._record_stage(p, stage, outcome, subtask)
+        self._record_stage(run_id, outcome)
         p.counters.stage_attempts = outcome.stage_attempts
         return outcome
 
@@ -866,29 +990,24 @@ class Orchestrator:
             prompt += f"\n\nActive subtask {unit.order} of {p.decomposition.n}; spec: {spec_path}"
         return prompt
 
-    def _record_stage(
-        self, p: _Pipeline, stage: Stage, outcome: StageOutcome, subtask: int | None
-    ) -> None:
+    def _record_stage(self, run_id: int, outcome: StageOutcome) -> None:
         status = outcome.result.status.value if outcome.result is not None else "infra_exhausted"
-        run_id = self._store.record_stage_run(
-            StageRunRow(
-                task_id=p.task.id,
-                stage=stage.value,
-                subtask_order=subtask,
-                status=status,
-                route_primary=outcome.route.primary.value,
-                route_fallback=outcome.route.fallback.value if outcome.route.fallback else None,
-                route_source=outcome.route.source.value,
-                provider_used=outcome.provider_used.value if outcome.provider_used else None,
-                error_class=outcome.terminal_error.error_class.value
-                if outcome.terminal_error
-                else None,
-                stage_attempts=outcome.stage_attempts,
-                started_at=self._clock(),
-                finished_at=self._clock(),
-            )
+        self._store.complete_stage_run(
+            run_id,
+            status=status,
+            provider_used=outcome.provider_used.value if outcome.provider_used else None,
+            error_class=outcome.terminal_error.error_class.value
+            if outcome.terminal_error
+            else None,
+            stage_attempts=outcome.stage_attempts,
+            finished_at=self._clock(),
         )
         for attempt in outcome.attempts:
+            attempt_dir = (
+                str(Path(attempt.result.stdout_path).parent)
+                if attempt.result and attempt.result.stdout_path
+                else None
+            )
             self._store.record_provider_attempt(
                 ProviderAttemptRow(
                     stage_run_id=run_id,
@@ -897,7 +1016,7 @@ class Orchestrator:
                     status=attempt.status.value if attempt.status else None,
                     error_class=attempt.error_class.value if attempt.error_class else None,
                     exit_code=attempt.result.exit_code if attempt.result else None,
-                    attempt_dir=attempt.result.stdout_path if attempt.result else None,
+                    attempt_dir=attempt_dir,
                     started_at=self._clock(),
                     finished_at=self._clock(),
                 )
@@ -1125,6 +1244,27 @@ class Orchestrator:
         )
         return result
 
+    def _notify_terminal(
+        self,
+        *,
+        task_id: str,
+        final_status: Status,
+        pr_url: str | None,
+        reason: str | None,
+    ) -> None:
+        """Best-effort terminal notification (§4.7). Never raises and never alters the outcome."""
+        try:
+            self._notifier.send_notification(
+                task_id=task_id,
+                final_status=final_status.value,
+                pr_url=pr_url,
+                reason=reason,
+            )
+        except Exception as exc:  # noqa: BLE001 — notifier is best-effort by contract
+            self._log(task_id).warning(
+                "terminal notification failed", extra={"error_type": type(exc).__name__}
+            )
+
     def _append_ledger(
         self, p: _Pipeline, final: Status, *, pr_url: str | None, cleanup_safe: bool
     ) -> None:
@@ -1229,6 +1369,7 @@ def build_orchestrator(
         ledger_has_task_id=ledger.has_task_id,
     )
     loops = LoopController(config.agents)
+    notifier = build_notifier(config.telegram)
     return Orchestrator(
         config,
         router=router,
@@ -1239,4 +1380,5 @@ def build_orchestrator(
         loops=loops,
         gate=gate,
         artifacts_root=str(root),
+        notifier=notifier,
     )

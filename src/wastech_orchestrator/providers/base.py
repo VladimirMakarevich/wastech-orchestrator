@@ -94,6 +94,7 @@ class AgentRunRequest:
     permission_profile: str
     timeout_seconds: int
     attempt: int
+    stage_run_id: int
     # Paths to context artifacts (see spec §6, §10).
     task_path: str | None = None
     plan_path: str | None = None

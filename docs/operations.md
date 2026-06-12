@@ -230,6 +230,21 @@ These are global CLI options and must come before the subcommand. The file rotat
 keeps five backups. Supported formats are `logfmt` and newline-delimited `json`.
 `--heartbeat-seconds 0` disables heartbeat records.
 
+### Telegram HITL and notifications
+
+Set `telegram.enabled: true`, then export the variables named by `telegram.bot_token_env` and
+`telegram.chat_id_env`. The values themselves must not be placed in `config.yaml`.
+
+After the completed-task ledger record is written, the orchestrator sends one best-effort message
+for `done`, `failed`, or `manual_action_required`, including the task id, final status, and PR URL
+when present. A Telegram or network failure is logged with credentials redacted and does not change
+the terminal outcome.
+
+The notifier also exposes `ask_human` for a free-form question or yes/no approval. It posts the
+question and blocks only the current stage until a matching-chat reply arrives or
+`telegram.ask_timeout_s` expires. Per-stage agent prompt wiring is not enabled yet; ambiguous or
+dangerous stage actions continue to follow the existing deterministic failure/manual-action paths.
+
 Monitor from another terminal:
 
 ```bash
@@ -281,7 +296,7 @@ logs/
     failure_report.json / stuck.md# written iff the task ended manual_action_required
     review/findings.json          # review findings (severity → blocking)
     checks/<NNN>.log              # each check command's output (redacted)
-    stages/<stage>/<attempt>-<provider>/
+    stages/<stage>/run-<stage-run-id>/<attempt>-<provider>/
       request.json                # redacted request (argv, no secrets)
       stdout.log / stderr.log     # redacted process output
       events.jsonl                # redacted provider event stream
@@ -298,6 +313,9 @@ logs/
 - **Audit completeness**: SQLite records every `stage_runs` and `provider_attempts` row (primary
   **and** any fallback), each artifact is registered with a **sha256 checksum**, and every
   commit/push/PR carries an idempotency fingerprint so a restart never double-publishes.
+- **Stage run vs. attempt**: `run-<stage-run-id>` is reserved in SQLite before the provider starts
+  and changes for every repeated stage invocation, including each fixing cycle and recovery run.
+  `<attempt>` starts at `1` inside that run and increments only for provider fallback.
 - **No secrets anywhere**: `request.json`, the stdout/stderr/events logs, diffs, SQLite rows, the
   ledger, and the failure report are all redacted; `denied_read_paths` (`.env`, `secrets/**`) are
   excluded from agent reads and their values are scrubbed from any sink.
@@ -329,8 +347,10 @@ the task file (e.g. add a Description, a valid `id`, remove injection-shaped fro
 re-submit from `tasks/pending/`.
 
 Recovery is idempotent: re-running `watch`/`run` resumes the single in-flight task, reuses the
-existing branch, and never re-commits/re-pushes a completed operation (it checks the persisted
-fingerprints and the remote).
+existing branch, continues from its persisted status (`planning`, `testing`, `reviewing`, `fixing`,
+and so on), and never re-commits/re-pushes a completed operation. A fixing entry also persists
+`fixing-context.json`, so the resumed agent receives the same failed-check or review-findings path
+without incrementing the fix counters a second time.
 
 Under `external`/`exclude_local`, a tracked `tasks/` or `logs/` path is rejected by the footprint
 preflight (a name collision `.git/info/exclude` cannot untrack); keep task examples under

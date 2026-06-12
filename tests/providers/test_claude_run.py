@@ -99,7 +99,9 @@ def _provider(
 
 
 def _attempt_dir(root: Path) -> Path:
-    return root / "logs" / "task-001" / "stages" / "planning" / "1-claude"
+    return (
+        root / "logs" / "task-001" / "stages" / "planning" / "run-000001" / "1-claude"
+    )
 
 
 def test_implements_agent_provider_protocol(

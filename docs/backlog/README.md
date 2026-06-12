@@ -13,6 +13,7 @@ Backlog documents must not override the hard invariants from [../../CLAUDE.md](.
 |---|---|
 | [product_backlog.md](product_backlog.md) | Aggregated product backlog collected from the spec, architecture notes, implementation-stage notes, and scattered v2/candidate lists. |
 | [follow_ups.md](follow_ups.md) | Implementation follow-ups / tech-debt discovered while building (e.g. the schema migration runner) — distinct from product features. Recorded via `/sync-docs`. |
+| [automatic_check_discovery.md](automatic_check_discovery.md) | Accepted detailed task for automatic repository check discovery, environment resolution, agent-assisted fallback, and persisted check profiles. |
 | [prompt_template_customization.md](prompt_template_customization.md) | Detailed backlog task for user-overridable agent prompt templates. |
 | [token_optimization.md](token_optimization.md) | Detailed backlog task for measuring and reducing token usage. |
 

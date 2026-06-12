@@ -170,9 +170,15 @@ def git_run() -> Callable[[Sequence[str], Path], str]:
 
 
 @pytest.fixture
-def make_git_config() -> Callable[..., OrchestratorConfig]:
-    """Factory fixture returning :func:`build_git_config`."""
-    return build_git_config
+def make_git_config(tmp_path: Path) -> Callable[..., OrchestratorConfig]:
+    """Build configs whose rejected-task quarantine is isolated to the current test."""
+
+    def _make(clone: Path, **kwargs: object) -> OrchestratorConfig:
+        if kwargs.get("quarantine") is None:
+            kwargs["quarantine"] = str(tmp_path / "rejected")
+        return build_git_config(clone, **kwargs)  # type: ignore[arg-type]
+
+    return _make
 
 
 @pytest.fixture

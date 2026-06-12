@@ -172,6 +172,40 @@ def test_stage_run_and_provider_attempts(store: StateStore) -> None:
     assert [r["provider"] for r in cur.fetchall()] == ["claude"]
 
 
+def test_stage_run_can_be_reserved_then_completed(store: StateStore) -> None:
+    store.insert_task(_new_task())
+    run_id = store.record_stage_run(
+        StageRunRow(
+            task_id="task-001",
+            stage="fixing",
+            route_primary="claude",
+            route_source="config",
+            status="running",
+            stage_attempts=0,
+            started_at="t0",
+        )
+    )
+
+    store.complete_stage_run(
+        run_id,
+        status="succeeded",
+        provider_used="claude",
+        error_class=None,
+        stage_attempts=1,
+        finished_at="t1",
+    )
+
+    row = store._conn.execute(  # noqa: SLF001 - inspecting persisted rows in a unit test
+        "SELECT * FROM stage_runs WHERE id = ?", (run_id,)
+    ).fetchone()
+    assert row is not None
+    assert row["status"] == "succeeded"
+    assert row["provider_used"] == "claude"
+    assert row["stage_attempts"] == 1
+    assert row["started_at"] == "t0"
+    assert row["finished_at"] == "t1"
+
+
 def test_check_run_and_artifact(store: StateStore) -> None:
     store.insert_task(_new_task())
     store.record_check_run(
@@ -192,6 +226,41 @@ def test_check_run_and_artifact(store: StateStore) -> None:
     assert checks[0]["passed"] == 0
     arts = store._conn.execute("SELECT kind, checksum FROM artifacts").fetchall()  # noqa: SLF001
     assert arts[0]["kind"] == "plan"
+
+
+def test_latest_failed_check_log_is_scoped_to_subtask(store: StateStore) -> None:
+    store.insert_task(_new_task())
+    store.record_check_run(
+        CheckRunRow(
+            task_id="task-001",
+            subtask_order=1,
+            command="pytest",
+            passed=False,
+            log_path="checks/sub-1-old.log",
+        )
+    )
+    store.record_check_run(
+        CheckRunRow(
+            task_id="task-001",
+            subtask_order=2,
+            command="pytest",
+            passed=False,
+            log_path="checks/sub-2.log",
+        )
+    )
+    store.record_check_run(
+        CheckRunRow(
+            task_id="task-001",
+            subtask_order=1,
+            command="pytest",
+            passed=False,
+            log_path="checks/sub-1-new.log",
+        )
+    )
+
+    assert store.latest_failed_check_log("task-001", 1) == "checks/sub-1-new.log"
+    assert store.latest_failed_check_log("task-001", 2) == "checks/sub-2.log"
+    assert store.latest_failed_check_log("task-001") is None
 
 
 def test_artifact_registration_is_idempotent(store: StateStore) -> None:
@@ -286,6 +355,23 @@ def test_subtasks_round_trip_and_commit_marker(store: StateStore) -> None:
     assert subs[0].commit_sha == "abc123"
     assert subs[0].status == "committed"
     assert subs[1].commit_sha is None
+
+
+def test_subtask_planning_insert_is_idempotent_without_reopening_committed_work(
+    store: StateStore,
+) -> None:
+    store.insert_task(_new_task())
+    original = SubtaskRow("task-001", 1, "old", "Old", "pending", ())
+    store.insert_subtasks([original])
+    store.insert_subtasks([SubtaskRow("task-001", 1, "new", "New", "pending", ())])
+    assert store.get_subtasks("task-001")[0].slug == "new"
+
+    store.set_subtask_commit("task-001", 1, "abc123", "committed")
+    store.insert_subtasks([original])
+    committed = store.get_subtasks("task-001")[0]
+    assert committed.slug == "new"
+    assert committed.status == "committed"
+    assert committed.commit_sha == "abc123"
 
 
 def test_no_secret_columns_in_schema(store: StateStore) -> None:

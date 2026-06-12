@@ -19,6 +19,7 @@ def _reset_package_logger() -> Iterator[None]:
     """Isolate each test from the process-wide package logger / configure-once flag."""
     pkg = logging.getLogger(obslog.LOGGER_NAME)
     saved = pkg.handlers[:]
+    saved_propagate = pkg.propagate
     pkg.handlers.clear()
     obslog._configured = False
     yield
@@ -26,6 +27,7 @@ def _reset_package_logger() -> Iterator[None]:
         handler.close()
     pkg.handlers.clear()
     pkg.handlers.extend(saved)
+    pkg.propagate = saved_propagate
     obslog._configured = False
 
 

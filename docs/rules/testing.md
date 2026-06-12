@@ -14,6 +14,8 @@ Cover pure logic without external processes:
 - state machine transitions;
 - secret redaction and path normalization;
 - retry / fallback / fix-cycle limits, the global fix-iteration budget, and the stuck condition;
+- repeated stage execution uses distinct persisted stage-run artifact paths, including an
+  integration case with two fixing cycles whose provider attempt counters both start at `1`;
 - the `refinement` skip decision (already-complete task vs. needs enrichment);
 - the single-active-task slot (a new task does not start while another is active);
 - terminal cleanup and auto mode: config default/rejects, checkout to `base_branch` before next pickup, auto off leaves the next task pending, unsafe cleanup blocks continuation;
@@ -41,9 +43,14 @@ On a temporary Git repository:
 - terminal cleanup checks out the base branch after the terminal task;
 - auto mode enabled → two pending tasks run sequentially with a base-branch checkout between them; auto mode disabled → the second task remains pending;
 - a restart does not duplicate publishing;
+- recovery continues each persisted checkpoint from `validated` through `fixing`; resuming
+  `testing`, `reviewing`, or `fixing` must not invoke implementation again, and fixing context and
+  counters must survive the restart;
 - the completed-tasks ledger gains exactly one record per terminal transition;
 - a large task with decomposition enabled → `n` subtasks, `n` sequential commits on one branch, one PR; a restart resumes at `k` without a duplicate commit (§5.1);
 - a broken task → quarantined to `tasks/rejected/` as `failed`, writes `validation_report.json`, with no branch/provider (§19);
+- test configuration paths with side effects, including `validation.quarantine_folder`, are
+  isolated under the test's temporary directory and never write into the repository checkout;
 - in every git footprint mode the code commit excludes `tasks/`/`logs/`/`workspace/` (§21);
 - a successful task produces `summary.md` (what / how / integration / why) which becomes the PR body (§5.2);
 - exhausting a fix loop or the global fix-iteration budget → `manual_action_required` + failure report; an unrecoverable error → `failed`.
