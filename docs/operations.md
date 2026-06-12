@@ -37,10 +37,78 @@ python -m wastech_orchestrator init . --git-mode in_repo_commit  # artifacts com
 Then copy/adjust `config.yaml` (it mirrors §11 of the spec) and point `repo.url` /
 `repo.local_path` at the target repository clone.
 
-For self-hosting, the clone in `repo.local_path` must be separate from the checkout used to run the
-orchestrator. Keep the known-good control process, SQLite state, tasks, and logs outside the target
-clone. This prevents the IDE, the coding agent, and terminal cleanup from competing over one working
-tree.
+For self-hosting with `init`, the clone in `repo.local_path` must be separate from the checkout used
+to run the orchestrator. Keep the known-good control process, SQLite state, tasks, and logs outside
+the target clone. This prevents the IDE, the coding agent, and terminal cleanup from competing over
+one working tree. (The `install` flow below intentionally binds the checkout you run it in and keeps
+only the control plane in a sibling workspace — see its repo-cleanliness check.)
+
+### Bind an existing repository (`install`)
+
+`install` is the two-step flow for a repository you already have checked out. Install the CLI once,
+then bind the repo (the same commands work on Windows and macOS):
+
+```powershell
+pipx install "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git"
+cd C:\projects\my-repo
+wastech-orchestrator install .          # interactive wizard
+```
+
+The wizard detects the Git root, `origin`, base branch, and cleanliness; proposes a sibling control
+workspace `<repo-name>-orchestrator`; finds `codex`/`claude`/`gh`; proposes checks from the repo's
+ecosystem (`pyproject.toml` / `package.json` / `Cargo.toml` / `go.mod`); and writes a validated
+`config.yaml` into the workspace. It **binds the current checkout** as `repo.local_path` (so the
+orchestrator branches/commits/pushes there) and keeps `config.yaml`, `tasks/`, `logs/`, and the
+SQLite state **only in the sibling workspace** — the installer never touches the target repo's
+tracked files. It never installs or authorizes the CLIs; it reports what is missing and auto-runs
+`preflight` at the end (a failed preflight keeps the config but exits non-zero with instructions).
+
+The binding (`repo-root -> config.yaml`) is stored in a per-user directory via `platformdirs`
+(`%LOCALAPPDATA%` on Windows, `~/Library/Application Support` on macOS, the XDG config dir on Linux;
+override with `WASTECH_ORCHESTRATOR_HOME`). Subsequent commands then need no `--config` and no WSL
+paths, run from anywhere inside the repo:
+
+```text
+wastech-orchestrator preflight
+wastech-orchestrator watch
+wastech-orchestrator status
+```
+
+Config discovery order: explicit `--config` > `./config.yaml` > the current repo's binding > a hint
+to run `install .`. Re-running `install` is idempotent; `--reconfigure` writes a timestamped backup
+and atomically replaces the config; a workspace bound to another repo is never overwritten. For
+automation: `wastech-orchestrator install . --non-interactive --provider codex --no-create-pr`. As
+with `init`, `--no-create-pr` disables the PR but not commit/push.
+
+---
+
+## Upgrading the orchestrator
+
+The orchestrator is a CLI, not a daemon — "updating the implementation" means upgrading the package
+and restarting any `watch` loop:
+
+```bash
+pipx upgrade wastech-orchestrator        # or: pipx install --force "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git"
+wastech-orchestrator --version           # confirm the new version
+```
+
+Do it **between tasks**, not mid-run: an in-flight task holds the single processing slot and a live
+working branch, and its state lives in `state.db`. Wait until `status` shows no active task, then
+upgrade and re-run `preflight` / `watch`.
+
+The control workspace (`config.yaml`, `state.db`, the registry, and `tasks/`/`logs/`) survives an
+upgrade — back it up first (copy the workspace directory, or at least `config.yaml` + `state.db`) so
+you can roll back. The orchestrator **fail-closes on a backward-incompatible workspace**: if the
+`config.yaml` `schema_version` or the `state.db` schema is **newer** than the installed version
+understands, the command prints a clear `error:` and exits non-zero (2) instead of running against a
+format it cannot read. To recover, upgrade the package to a version that supports it (or, for a
+throwaway setup, start a fresh workspace via `install --reconfigure`). Older or absent versions are
+accepted as-is. Per-release changes are listed in [CHANGELOG.md](../CHANGELOG.md).
+
+To install or pin a specific published (pre)release, append its tag to the `pipx`/`pip` source — e.g.
+`pipx install "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git@v0.1.0a1"`. Releases
+are tag-driven and pre-releases (`aN`/`bN`/`rcN` tags) are marked as such on GitHub; maintainers cut
+them per [RELEASING.md](RELEASING.md).
 
 ---
 

@@ -20,6 +20,7 @@ from typing import Any
 import yaml
 
 from wastech_orchestrator.config.schema import (
+    CONFIG_SCHEMA_VERSION,
     ROUTABLE_STAGES,
     AgentsConfig,
     AuditBranch,
@@ -487,6 +488,7 @@ def _build_telegram(raw: Any, issues: list[str]) -> TelegramConfig:
 
 
 _TOP_LEVEL_KEYS = {
+    "schema_version",
     "orchestrator",
     "repo",
     "agents",
@@ -498,8 +500,29 @@ _TOP_LEVEL_KEYS = {
 }
 
 
+def _check_schema_version(raw: Mapping[str, Any], issues: list[str]) -> None:
+    """Refuse a config whose ``schema_version`` is newer than this orchestrator understands.
+
+    Absent or ``<= CONFIG_SCHEMA_VERSION`` is accepted (a lower value is the future-migration hook);
+    a newer value is a fail-closed error directing the operator to upgrade. ``schema_version`` is
+    config metadata only — it is validated here and not stored on :class:`OrchestratorConfig`.
+    """
+    if "schema_version" not in raw:
+        return
+    value = raw["schema_version"]
+    if isinstance(value, bool) or not isinstance(value, int):
+        issues.append(f"schema_version: expected an integer, got {type(value).__name__}")
+        return
+    if value > CONFIG_SCHEMA_VERSION:
+        issues.append(
+            f"schema_version {value} is newer than this orchestrator supports "
+            f"({CONFIG_SCHEMA_VERSION}); upgrade wastech-orchestrator"
+        )
+
+
 def _parse(raw: Mapping[str, Any], issues: list[str], warnings: list[str]) -> OrchestratorConfig:
     _check_keys(raw, _TOP_LEVEL_KEYS, "<root>", issues)
+    _check_schema_version(raw, issues)
     return OrchestratorConfig(
         orchestrator=_build_orchestrator(raw.get("orchestrator"), issues),
         repo=_build_repo(raw.get("repo"), issues),

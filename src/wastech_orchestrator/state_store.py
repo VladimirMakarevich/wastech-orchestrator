@@ -29,6 +29,35 @@ def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+# The SQLite schema version, stamped into ``PRAGMA user_version``. Bumped only when the schema
+# changes (not on every release). ``open()`` adopts a 0 (brand-new, or pre-versioning) database as
+# the current version; both open paths refuse a database stamped newer than this. See the spec's
+# "Versioning & compatibility" section.
+DB_SCHEMA_VERSION = 1
+
+
+class IncompatibleStateError(Exception):
+    """The on-disk ``state.db`` schema version is newer than this orchestrator understands."""
+
+
+def _enforce_schema_version(conn: sqlite3.Connection, *, writable: bool) -> None:
+    """Verify (and, when ``writable``, stamp) ``PRAGMA user_version`` against ``DB_SCHEMA_VERSION``.
+
+    A database newer than this orchestrator is refused (fail-loud). A ``0`` value — a brand-new DB,
+    or one created before versioning whose shape is already v1 — is adopted when writable. A value
+    in ``1..DB_SCHEMA_VERSION`` is compatible; the ``< current`` case is the future-migration hook.
+    """
+    current = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    if current > DB_SCHEMA_VERSION:
+        raise IncompatibleStateError(
+            f"state.db schema version {current} is newer than this orchestrator supports "
+            f"({DB_SCHEMA_VERSION}); upgrade wastech-orchestrator or start a fresh workspace"
+        )
+    if current == 0 and writable:
+        # DB_SCHEMA_VERSION is a trusted int constant (no injection); PRAGMA can't be parameterized.
+        conn.execute(f"PRAGMA user_version={DB_SCHEMA_VERSION}")
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
     task_id TEXT PRIMARY KEY,
@@ -277,6 +306,7 @@ class StateStore:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
         conn.executescript(_SCHEMA)
+        _enforce_schema_version(conn, writable=True)
         return cls(conn, clock=clock)
 
     @classmethod
@@ -288,6 +318,7 @@ class StateStore:
         conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, isolation_level=None)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only=ON")
+        _enforce_schema_version(conn, writable=False)
         return cls(conn, clock=clock)
 
     def close(self) -> None:

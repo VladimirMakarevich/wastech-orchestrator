@@ -37,5 +37,7 @@ pytest
 
 - the code passes `ruff`, `mypy`, `pytest`;
 - tests are added/updated when behavior changes;
-- the invariants above are not violated;
-- there is no move to the next implementation stage without the DoD of the previous one (see spec §15–16).
+- docs and a `CHANGELOG.md` `[Unreleased]` entry are updated in the same change when behavior/CLI/config/architecture change (use `/sync-docs`), and deferred work is recorded in [docs/backlog/follow_ups.md](docs/backlog/follow_ups.md) — the Stop docs-sync gate enforces this;
+- the invariants above are not violated.
+
+The MVP build (the six phases under [docs/implementation_stages/](docs/implementation_stages/)) is complete; those phase docs are a historical record. Track ongoing work in [docs/backlog/follow_ups.md](docs/backlog/follow_ups.md) and the product backlog.

@@ -6,7 +6,7 @@ processed into a Pull Request".
 
 The canonical product contract remains [orchestrator_final_plan.md](orchestrator_final_plan.md).
 Where this guide mentions planned v1 behavior, it is labeled explicitly. The CLI surface described
-here (`init`, `preflight`, `run`, `watch`, and `status`) exists in the current codebase.
+here (`init`, `install`, `preflight`, `run`, `watch`, and `status`) exists in the current codebase.
 
 ## 1. Initialize A Workspace
 
@@ -49,6 +49,30 @@ python -m wastech_orchestrator init . --git-mode in_repo_commit
 ```
 
 Use `--dry-run` to inspect the created/skipped plan without writing files.
+
+### Bind An Existing Repository Instead (`install`)
+
+If you already have the target repository checked out, skip `init` + hand-editing and use `install`,
+which detects settings, generates a validated `config.yaml` in a sibling control workspace, and
+records a binding so later commands need no `--config`:
+
+```powershell
+pipx install "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git"
+cd C:\projects\my-repo
+wastech-orchestrator install .                 # interactive wizard (same on macOS)
+```
+
+```bash
+# non-interactive, e.g. for CI/automation:
+wastech-orchestrator install . --non-interactive --provider codex --no-create-pr
+```
+
+`install` binds the current checkout as `repo.local_path` and keeps `config.yaml`, `tasks/`, `logs/`,
+and SQLite state only in the `<repo-name>-orchestrator` sibling — it never modifies the target repo.
+Re-running is idempotent; `--reconfigure` backs up and regenerates; `--dry-run` writes nothing. See
+[configuration.md](configuration.md) for the discovery order and [operations.md](operations.md) for
+the full wizard. The remaining recipes also apply to an `install`-bound project — its commands just
+run from inside the repo without `--config`.
 
 ## 2. Configure A Target Repository
 

@@ -1117,9 +1117,7 @@ def build_orchestrator(
     and validation gate. The Core depends only on these interfaces — never on a provider directly.
     """
     root = Path(artifacts_root)
-    providers = build_providers(
-        config, artifacts_root=root, heartbeat_seconds=heartbeat_seconds
-    )
+    providers = build_providers(config, artifacts_root=root, heartbeat_seconds=heartbeat_seconds)
 
     store = StateStore.open(root / "state.db")
     ledger = Ledger(root / "logs")

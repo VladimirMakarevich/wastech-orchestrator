@@ -1,10 +1,11 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "wastech-orchestrator"
-version = "0.0.1"
+# Version is derived from the Git tag (hatch-vcs); tag `vX.Y.Z[aN|bN|rcN]` to release. See docs/RELEASING.md.
+dynamic = ["version"]
 description = "Lean-оркестратор кодинг-агентов (Codex / Claude Code) с публикацией в Git"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -12,6 +13,7 @@ license = { text = "Proprietary" }
 dependencies = [
     "watchdog>=4.0",
     "PyYAML>=6.0",
+    "platformdirs>=4.0",
     "python-telegram-bot>=21.0",
 ]
 
@@ -26,6 +28,12 @@ dev = [
 
 [project.scripts]
 wastech-orchestrator = "wastech_orchestrator.cli:main"
+
+[tool.hatch.version]
+# The version comes from the Git tag (e.g. tag `v0.1.0a1` -> version `0.1.0a1`). Between tags,
+# builds get a dev version like `0.1.0a1.dev3+g<sha>`. Requires full history at build time
+# (CI: actions/checkout with fetch-depth: 0). See docs/RELEASING.md.
+source = "vcs"
 
 [tool.hatch.build.targets.wheel]
 # Non-.py files under the package (e.g. templates/, used by `init`) ship as package data.

@@ -9,6 +9,12 @@
             "command": "python .claude/hooks/stop_checks.py",
             "timeout": 180,
             "statusMessage": "Quality gate: ruff + pytest"
+          },
+          {
+            "type": "command",
+            "command": "python .claude/hooks/docs_sync_gate.py",
+            "timeout": 30,
+            "statusMessage": "Docs sync gate"
           }
         ]
       }
