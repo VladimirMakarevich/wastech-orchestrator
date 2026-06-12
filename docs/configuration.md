@@ -1,0 +1,478 @@
+# Configuration Reference
+
+`config.yaml` controls repositories, providers, routing, security, validation, checks, git publishing, and optional notification settings. The packaged example is [`config.example.yaml`](../config.example.yaml), and the canonical contract is [orchestrator_final_plan.md section 11](orchestrator_final_plan.md).
+
+The loader is fail-closed:
+
+- unknown top-level keys are rejected;
+- unknown keys inside known blocks are rejected;
+- unknown enum values are rejected;
+- semantic validation rejects unsafe or contradictory settings.
+
+The current schema lives in `src/wastech_orchestrator/config/schema.py`; defaults come from `src/wastech_orchestrator/config/loader.py`.
+
+## Minimal Shape
+
+Most fields have safe defaults, but a real run needs at least a target repository and one configured provider:
+
+```yaml
+repo:
+  url: "git@github.com:OWNER/REPO.git"
+  local_path: "./workspace/repo"
+
+agents:
+  allowed:
+    - codex
+  providers:
+    codex:
+      command: "codex"
+```
+
+If `agents.routing` is omitted, the loader treats the file as a legacy Codex-only config and creates a Codex route for all agent-routed stages with a warning.
+
+## `orchestrator`
+
+Controls the outer queue behavior.
+
+```yaml
+orchestrator:
+  auto_mode:
+    enabled: false
+```
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `auto_mode.enabled` | boolean | `false` | When `true`, `watch` can pick another pending task after terminal cleanup succeeds. |
+
+Auto mode does not enable concurrency. The v1 contract keeps one active task at a time.
+
+## `repo`
+
+Describes the target repository clone that agents edit and the Git Manager publishes.
+
+```yaml
+repo:
+  url: "git@github.com:OWNER/REPO.git"
+  local_path: "./workspace/repo"
+  base_branch: "main"
+  branch_prefix: "agent"
+```
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `url` | string | `""` | Remote repository URL. |
+| `local_path` | string | `"./workspace/repo"` | Dedicated clone/worktree used for agent runs. |
+| `base_branch` | string | `"main"` | Branch checked out before task branches and after terminal cleanup. |
+| `branch_prefix` | string | `"agent"` | Prefix for task branches: `agent/<task-id>-<slug>`. |
+
+Git credentials are not stored in this file. Configure SSH, a credential helper, or `gh auth login`
+outside the orchestrator.
+
+## `agents`
+
+Controls provider availability, retry/fix budgets, decomposition, routes, and provider-specific
+settings.
+
+```yaml
+agents:
+  allowed:
+    - claude
+    - codex
+
+  max_stage_attempts: 2
+  max_fix_cycles: 3
+  max_total_fix_iterations: 5
+```
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `allowed` | list of `claude`, `codex` | `["claude", "codex"]` | Providers the router may use. |
+| `max_stage_attempts` | integer | `2` | Attempts allowed for a stage/provider route. |
+| `max_fix_cycles` | integer | `3` | Fix cycles for a local failing loop. |
+| `max_total_fix_iterations` | integer | `5` | Hard global fix cap across the whole task and all subtasks. |
+
+Validation requires `max_total_fix_iterations >= max_fix_cycles`.
+
+### `agents.decomposition`
+
+Planned v1 feature, off by default. It lets planning propose a sequential subtask list for large
+tasks; the Core accepts it only under deterministic rules.
+
+```yaml
+agents:
+  decomposition:
+    enabled: false
+    max_subtasks: 8
+    min_size_signal: "large"
+    commit_per_subtask: true
+```
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` | Enables the planning sub-phase for decomposition. |
+| `max_subtasks` | integer | `8` | Maximum accepted split size; must be at least `2`. |
+| `min_size_signal` | string | `"large"` | Advisory size threshold passed to the planning prompt. |
+| `commit_per_subtask` | boolean | `true` | Planned v1: one local commit per accepted subtask. |
+
+A task can set `decompose: true` or `decompose: false`, but that only controls the gate for that
+task. It cannot change `max_subtasks`, routes, or security settings.
+
+### `agents.routing`
+
+Routes agent-driven stages to a primary provider and optional fallback provider.
+
+```yaml
+agents:
+  routing:
+    refinement:
+      primary: claude
+      fallback: codex
+    planning:
+      primary: claude
+      fallback: codex
+    implementation:
+      primary: claude
+      fallback: codex
+    review:
+      primary: codex
+      fallback: claude
+    fixing:
+      primary: claude
+      fallback: codex
+    summary:
+      primary: claude
+      fallback: codex
+```
+
+Routable stages are:
+
+```text
+refinement, planning, implementation, review, fixing, summary
+```
+
+`testing` and `publishing` are not routed to providers. The Check Runner owns `testing`; the Git
+Manager owns `publishing`.
+
+Rules:
+
+- route keys must be known routable stages;
+- `primary` is required;
+- `fallback` may be omitted or set to `null`;
+- every named provider must be in `agents.allowed`;
+- every named provider must have an `agents.providers.<provider>` entry.
+
+Fallback is planned only for infrastructure errors such as missing binaries, authentication errors,
+rate limits, provider unavailability, timeouts, process crashes, and invalid provider output. Test
+failures and review findings go to `fixing`, not fallback.
+
+### `agents.providers`
+
+Configures each provider adapter. Provider adapters are the only layer that knows CLI syntax.
+
+```yaml
+agents:
+  providers:
+    claude:
+      command: "claude"
+      model: ""
+      timeout_seconds: 1800
+      max_turns: 50
+      max_budget_usd: null
+      permission_profile: "workspace-write"
+      extra_args: []
+    codex:
+      command: "codex"
+      model: ""
+      timeout_seconds: 1800
+      sandbox: "workspace-write"
+      permission_profile: "workspace-write"
+      extra_args: []
+```
+
+Common fields:
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `command` | string | provider id (`"claude"` or `"codex"`) | Executable name or path. |
+| `model` | string | `""` | Provider model setting; empty means provider default. |
+| `timeout_seconds` | integer | `1800` | Timeout for a stage run. |
+| `permission_profile` | string | `"workspace-write"` | Orchestrator permission profile passed into the adapter. |
+| `extra_args` | list of strings | `[]` | Additional provider CLI arguments after safety validation. |
+
+Provider-specific fields:
+
+| Provider | Field | Type | Default | Meaning |
+|---|---|---|---|---|
+| `codex` | `sandbox` | string or null | `null` if omitted | Codex sandbox mode. The example sets `workspace-write`. |
+| `claude` | `max_turns` | integer or null | `null` if omitted | Claude Code turn limit. |
+| `claude` | `max_budget_usd` | number or null | `null` if omitted | Claude Code budget limit when supported. |
+
+Unsafe `extra_args` are rejected by config validation and again by provider command builders. Known
+forbidden examples include:
+
+```yaml
+extra_args:
+  - "--dangerously-bypass-approvals-and-sandbox"
+```
+
+```yaml
+extra_args:
+  - "--sandbox"
+  - "danger-full-access"
+```
+
+```yaml
+extra_args:
+  - "--dangerously-skip-permissions"
+```
+
+Do not pass secrets through `extra_args`.
+
+## `security`
+
+Controls isolation, child-process environment allowlisting, denied read paths, and denied commands.
+
+```yaml
+security:
+  strict_isolation: true
+  allowed_environment:
+    - "PATH"
+    - "HOME"
+    - "USERPROFILE"
+    - "CODEX_HOME"
+    - "CLAUDE_CONFIG_DIR"
+  denied_read_paths:
+    - ".env"
+    - "secrets/**"
+  denied_commands:
+    - "git commit"
+    - "git push"
+    - "gh pr create"
+```
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `strict_isolation` | boolean | `true` | Preflight fails if the required isolation cannot be enforced. |
+| `allowed_environment` | list of strings | `PATH`, `HOME`, `USERPROFILE`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR` | Only these environment variables reach child processes. |
+| `denied_read_paths` | list of strings | `.env`, `secrets/**` | Paths agents must not read and artifacts must not expose. |
+| `denied_commands` | list of strings | `git commit`, `git push`, `gh pr create` | Commands agents are forbidden to run. |
+
+Only the orchestrator's Git Manager commits, pushes, and creates PRs. Agent providers do not.
+
+## `validation`
+
+Controls the task input hardening gate. The gate runs before branch creation and before any provider
+run.
+
+```yaml
+validation:
+  max_task_bytes: 262144
+  max_task_lines: 5000
+  max_line_bytes: 8192
+  max_control_ratio: 0.01
+  required_fields: ["id", "title"]
+  reject_unknown_fields: true
+  quarantine_folder: "./tasks/rejected"
+```
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `max_task_bytes` | integer | `262144` | Maximum task file size. |
+| `max_task_lines` | integer | `5000` | Maximum number of lines. |
+| `max_line_bytes` | integer | `8192` | Maximum UTF-8 byte length for one line. |
+| `max_control_ratio` | number | `0.01` | Maximum share of disallowed control characters. |
+| `required_fields` | list of strings | `["id", "title"]` | Schema field for required front matter. The current gate requires `id`, `title`, and a Description body. |
+| `reject_unknown_fields` | boolean | `true` | Schema field for unknown front matter policy. The current gate rejects unknown task fields fail-closed. |
+| `quarantine_folder` | string | `"./tasks/rejected"` | Destination for structurally rejected task files. |
+
+Current task front matter fields are:
+
+```text
+id, title, refined, decompose, agents, contacts
+```
+
+A structurally rejected task is terminal `failed`, gets a `validation_report.json`, and never creates
+a branch or calls a provider.
+
+## `checks`
+
+Configures the Check Runner.
+
+```yaml
+checks:
+  commands:
+    - "npm test"
+    - "npm run lint"
+  timeout_seconds: 1800
+```
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `commands` | list of strings | `[]` | Commands the Check Runner executes. |
+| `timeout_seconds` | integer | `1800` | Per-command timeout. |
+
+Use commands that represent the target repository's merge gate, for example:
+
+```yaml
+checks:
+  commands:
+    - "pytest"
+    - "ruff check ."
+    - "mypy src"
+```
+
+Planned v1 behavior runs these commands as bounded external processes and records redacted logs
+under the task artifact directory.
+
+## `git`
+
+Controls PR creation and artifact footprint.
+
+```yaml
+git:
+  create_pull_request: true
+  pr_base: "main"
+  footprint:
+    location: external
+    tracking: none
+    external_root: "./"
+    audit_commit_message: "chore(orchestrator): audit trail for {task_id}"
+    audit_on_branch: task
+```
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `create_pull_request` | boolean | `true` | Whether publishing creates a PR. |
+| `pr_base` | string | `"main"` | Base branch for PR creation. Usually matches `repo.base_branch`. |
+
+### `git.footprint`
+
+| Field | Values | Default | Meaning |
+|---|---|---|---|
+| `location` | `external`, `in_repo` | `external` | Whether artifacts live outside or inside the target clone. |
+| `tracking` | `none`, `exclude_local`, `commit` | `none` | How artifacts are tracked by git. |
+| `external_root` | string | `"./"` | Artifact root when `location: external`; must resolve outside `repo.local_path`. |
+| `audit_commit_message` | string | `"chore(orchestrator): audit trail for {task_id}"` | Commit message for audit commits. |
+| `audit_on_branch` | `task`, `sibling` | `task` | Branch placement for audit commits when `tracking: commit`. |
+
+Valid combinations:
+
+| Mode | `location` | `tracking` |
+|---|---|---|
+| External artifacts | `external` | `none` |
+| In-repo local exclude | `in_repo` | `exclude_local` |
+| In-repo audit commit | `in_repo` | `commit` |
+
+Rejected combinations:
+
+- `location: external` with `tracking: exclude_local`;
+- `location: external` with `tracking: commit`;
+- `location: in_repo` with `tracking: none`;
+- `location: external` when `external_root` resolves inside `repo.local_path`.
+
+Planned v1 behavior always stages code changes with an explicit scoped pathspec and excludes
+`tasks/`, `logs/`, and `workspace/` from code commits.
+
+## `telegram`
+
+Reserved for human-in-the-loop and notifications.
+
+```yaml
+telegram:
+  enabled: false
+  bot_token_env: "TELEGRAM_BOT_TOKEN"
+  chat_id_env: "TELEGRAM_CHAT_ID"
+  ask_timeout_s: 1800
+```
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | boolean | `false` | Reserved feature flag. |
+| `bot_token_env` | string | `"TELEGRAM_BOT_TOKEN"` | Environment variable name for a bot token. |
+| `chat_id_env` | string | `"TELEGRAM_CHAT_ID"` | Environment variable name for the target chat. |
+| `ask_timeout_s` | integer | `1800` | Planned timeout for human responses. |
+
+Telegram interaction is deferred in v1. Do not place token values in `config.yaml`; this block stores
+environment variable names only.
+
+## Common Examples
+
+Codex-only routing:
+
+```yaml
+agents:
+  allowed:
+    - codex
+  routing:
+    refinement:
+      primary: codex
+      fallback: null
+    planning:
+      primary: codex
+      fallback: null
+    implementation:
+      primary: codex
+      fallback: null
+    review:
+      primary: codex
+      fallback: null
+    fixing:
+      primary: codex
+      fallback: null
+    summary:
+      primary: codex
+      fallback: null
+  providers:
+    codex:
+      command: "codex"
+      model: ""
+      timeout_seconds: 1800
+      sandbox: "workspace-write"
+      permission_profile: "workspace-write"
+      extra_args: []
+```
+
+External artifacts beside the orchestrator workspace:
+
+```yaml
+repo:
+  local_path: "./workspace/repo"
+
+git:
+  footprint:
+    location: external
+    tracking: none
+    external_root: "./"
+```
+
+In-repo artifacts never committed:
+
+```yaml
+git:
+  footprint:
+    location: in_repo
+    tracking: exclude_local
+```
+
+Conservative retry budget:
+
+```yaml
+agents:
+  max_stage_attempts: 1
+  max_fix_cycles: 1
+  max_total_fix_iterations: 1
+```
+
+## Validation Checklist
+
+Before running tasks:
+
+- `python -m wastech_orchestrator preflight` succeeds;
+- every routed provider is in `agents.allowed`;
+- every allowed provider has an `agents.providers` entry;
+- `max_total_fix_iterations >= max_fix_cycles`;
+- `agents.decomposition.max_subtasks >= 2`;
+- `git.footprint` uses one of the valid mode combinations;
+- `external_root` is outside `repo.local_path` when using external artifacts;
+- no `extra_args` disable sandbox or approvals;
+- secrets are configured outside `config.yaml`.

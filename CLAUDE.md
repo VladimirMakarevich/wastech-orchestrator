@@ -4,7 +4,7 @@ You are working on **wastech-orchestrator** — an orchestrator that launches co
 
 ## Before writing code
 
-1. Read **[orchestrator_final_plan.md](orchestrator_final_plan.md)** — this is the canonical spec. In case of any discrepancy, it takes precedence over architecture.md.
+1. Read **[docs/orchestrator_final_plan.md](docs/orchestrator_final_plan.md)** — this is the canonical spec. In case of any discrepancy, it takes precedence over architecture.md.
 2. Check against the rules in **[docs/rules/](docs/rules/)** — they are mandatory:
    - [architecture.md](docs/rules/architecture.md) — invariants that must not be violated
    - [coding-style.md](docs/rules/coding-style.md) — Python style
@@ -26,7 +26,7 @@ You are working on **wastech-orchestrator** — an orchestrator that launches co
 - Providers: `codex`, `claude`.
 - Stages: `refinement`, `planning`, `implementation`, `testing`, `review`, `fixing`, `summary`, `publishing`.
 - Branch prefix: `agent/<task-id>-<slug>`.
-- State machine statuses: see orchestrator_final_plan.md §8.
+- State machine statuses: see [docs/orchestrator_final_plan.md §8](docs/orchestrator_final_plan.md).
 
 ## Commands
 
@@ -42,7 +42,7 @@ There is a skill for running all checks: `/run-checks`.
 ## Working style
 
 - Make minimal, focused changes; follow the style of the surrounding code.
-- For new components, check against the contracts in orchestrator_final_plan.md (§4, §7, §8).
+- For new components, check against the contracts in [docs/orchestrator_final_plan.md](docs/orchestrator_final_plan.md) (§4, §7, §8).
 - When adding/changing behavior — add or update tests (see docs/rules/testing.md).
 - Before committing, run `ruff`, `mypy`, `pytest`.
 - Do not move to the next implementation stage until the DoD of the current one is met (§15–16 of the spec).

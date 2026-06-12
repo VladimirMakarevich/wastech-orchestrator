@@ -158,6 +158,19 @@ def test_check_run_and_artifact(store: StateStore) -> None:
     assert arts[0]["kind"] == "plan"
 
 
+def test_artifact_registration_is_idempotent(store: StateStore) -> None:
+    # Re-registering the same (task_id, kind, path) updates the checksum, never duplicates (§13).
+    store.insert_task(_new_task())
+    path = "logs/task-001/plan.md"
+    store.register_artifact(ArtifactRow(task_id="task-001", kind="plan", path=path, checksum="aaa"))
+    store.register_artifact(ArtifactRow(task_id="task-001", kind="plan", path=path, checksum="bbb"))
+    rows = store._conn.execute(  # noqa: SLF001
+        "SELECT checksum FROM artifacts WHERE kind='plan'"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["checksum"] == "bbb"
+
+
 def test_publish_op_idempotent_upsert(store: StateStore) -> None:
     store.insert_task(_new_task())
     store.record_publish_op(

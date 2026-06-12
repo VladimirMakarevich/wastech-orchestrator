@@ -777,7 +777,7 @@ The project is considered complete when:
 
 ## 18. Scope decisions and deferred work (v2)
 
-This section records the design decisions and the ideas that are intentionally out of scope for the first version, so that nothing from the original requirements is silently dropped. The fuller designs for the deferred items live in [codex_git_orchestrator_architecture.md](codex_git_orchestrator_architecture.md).
+This section records the design decisions and the ideas that are intentionally out of scope for the first version, so that nothing from the original requirements is silently dropped. The fuller designs for the deferred items live in [codex_git_orchestrator_architecture.md](codex_git_orchestrator_architecture.md), and the aggregated backlog is tracked in [backlog/product_backlog.md](backlog/product_backlog.md).
 
 ### 18.1. Design decisions
 
@@ -792,7 +792,7 @@ This section records the design decisions and the ideas that are intentionally o
 - **Richer task parsing.** Beyond the per-stage routing override (§5), extracting additional fields such as contacts and free-form commands/hints from the task. Designed in architecture.md §4.1.
 - **Parallel and graph decomposition.** Parallel subtask execution, per-subtask branches/worktrees, and inter-subtask dependency graphs beyond a linear order. v1 decomposition (§5.1) is strictly sequential on a single branch with linear ordering only.
 
-These items are the canonical backlog.
+These items are mirrored in [backlog/product_backlog.md](backlog/product_backlog.md) with the rest of the product backlog.
 
 ## 19. Input validation gate
 

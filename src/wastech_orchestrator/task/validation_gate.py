@@ -28,7 +28,7 @@ from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.config.validation import check_task_route_override
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.providers.base import ProviderId, Stage
-from wastech_orchestrator.security.forbidden_args import find_forbidden_args
+from wastech_orchestrator.security.injection import scan_frontmatter
 from wastech_orchestrator.task.model import (
     ALLOWED_TASK_KEYS,
     NormalizedTask,
@@ -44,9 +44,6 @@ VALIDATION_REPORT_FILENAME = "validation_report.json"
 
 # Characters allowed alongside printable text (everything else counts as a control char, §19.2).
 _ALLOWED_CONTROL = {"\t", "\n", "\r"}
-
-# Front-matter values must not look like a CLI argument (§19.5).
-_INJECTION_SUBSTRINGS = (";", "`", "|", "$(", "\n", "\r")
 
 
 class ValidationReason(StrEnum):
@@ -220,10 +217,11 @@ class ValidationGate:
         if route_reject is not None:
             return route_reject, None
 
-        # injection_suspected — argv-shaped tokens in front-matter values (§19.5).
-        injection_reject = self._scan_injection(frontmatter)
-        if injection_reject is not None:
-            return injection_reject, None
+        # injection_suspected — argv-shaped tokens in front-matter values (§19.5). The scanner is
+        # belt-and-braces over the file-path-only structural guarantee (see security/injection.py).
+        finding = scan_frontmatter(frontmatter)
+        if finding is not None:
+            return _rej(ValidationReason.INJECTION_SUSPECTED, finding.detail)
 
         task = NormalizedTask(
             id=id_value,
@@ -288,38 +286,6 @@ class ValidationGate:
         if issues:
             return {}, _Reject(ValidationReason.INVALID_ROUTE_OVERRIDE, "; ".join(issues))
         return agents, None
-
-    def _scan_injection(self, fm: Mapping[str, Any]) -> _Reject | None:
-        for key, value in fm.items():
-            reject = self._scan_value(key, value)
-            if reject is not None:
-                return reject
-        return None
-
-    def _scan_value(self, key: str, value: Any) -> _Reject | None:
-        if isinstance(value, str):
-            stripped = value.strip()
-            if stripped.startswith("-"):
-                return _Reject(
-                    ValidationReason.INJECTION_SUSPECTED, f"{key}: value starts with '-'"
-                )
-            if any(token in value for token in _INJECTION_SUBSTRINGS):
-                return _Reject(ValidationReason.INJECTION_SUSPECTED, f"{key}: argv-shaped token")
-            if find_forbidden_args([stripped]):
-                return _Reject(ValidationReason.INJECTION_SUSPECTED, f"{key}: forbidden flag shape")
-            return None
-        if isinstance(value, Mapping):
-            for k, v in value.items():
-                reject = self._scan_value(f"{key}.{k}", v)
-                if reject is not None:
-                    return reject
-            return None
-        if isinstance(value, Sequence) and not isinstance(value, str | bytes):
-            for index, item in enumerate(value):
-                reject = self._scan_value(f"{key}[{index}]", item)
-                if reject is not None:
-                    return reject
-        return None
 
     # --- Phase B --------------------------------------------------------------------------
 

@@ -18,6 +18,7 @@ infrastructure ``ProviderError`` is.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -25,6 +26,7 @@ from enum import StrEnum
 from wastech_orchestrator.config.loader import ConfigError
 from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.config.validation import check_task_route_override
+from wastech_orchestrator.observability.logging import bind
 from wastech_orchestrator.providers.base import (
     FALLBACK_ELIGIBLE,
     AgentProvider,
@@ -39,6 +41,8 @@ from wastech_orchestrator.providers.base import (
 )
 from wastech_orchestrator.routing.snapshots import PartialChange, SnapshotHook
 from wastech_orchestrator.security.profiles import is_same_or_stricter
+
+_LOG = logging.getLogger(__name__)
 
 # authorization_failed / permission_denied fall back only when the fallback provider runs in the
 # same or a stricter permission profile (§7.2) — decided here, not in providers.base.
@@ -180,6 +184,16 @@ class AgentRouter:
         if route.fallback is not None:
             sequence.append(route.fallback)
 
+        log = bind(_LOG, task_id=request.task_id, stage=route.stage.value)
+        log.info(
+            "route resolved",
+            extra={
+                "primary": route.primary.value,
+                "fallback": route.fallback.value if route.fallback else None,
+                "source": route.source.value,
+            },
+        )
+
         attempts: list[ProviderAttempt] = []
         stage_attempts = 0
         last_error: NormalizedError | None = None
@@ -204,15 +218,41 @@ class AgentRouter:
                         result=None,
                     )
                 )
+                log.info(
+                    "provider attempt failed",
+                    extra={
+                        "provider": pid.value,
+                        "attempt": attempt_no,
+                        "error_class": exc.error_class.value,
+                    },
+                )
                 has_next = index + 1 < len(sequence)
                 if not has_next or stage_attempts >= max_attempts:
                     continue  # exhausted — the loop will exit and surface last_error
+                next_pid = sequence[index + 1]
                 if not fallback_allowed(
                     exc.error_class,
                     primary_profile=self._profile_of(pid),
-                    fallback_profile=self._profile_of(sequence[index + 1]),
+                    fallback_profile=self._profile_of(next_pid),
                 ):
+                    log.info(
+                        "fallback denied",
+                        extra={
+                            "from": pid.value,
+                            "to": next_pid.value,
+                            "error_class": exc.error_class.value,
+                            "reason": "not infra-eligible or would relax the permission profile",
+                        },
+                    )
                     break  # non-fallback infra error → terminal for this stage
+                log.info(
+                    "falling back",
+                    extra={
+                        "from": pid.value,
+                        "to": next_pid.value,
+                        "error_class": exc.error_class.value,
+                    },
+                )
                 if snapshot is not None and before is not None:
                     partial = snapshot.partial_change_since(before)
                 continue

@@ -8,6 +8,7 @@ a time, continuing only when ``orchestrator.auto_mode.enabled``). See the spec �
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from collections.abc import Iterator, Sequence
 from importlib import resources
@@ -21,8 +22,19 @@ from wastech_orchestrator.core.orchestrator import (
     Orchestrator,
     PipelineResult,
     build_orchestrator,
+    build_providers,
 )
 from wastech_orchestrator.core.state_machine import Status
+from wastech_orchestrator.observability.logging import configure_logging
+from wastech_orchestrator.security.isolation import check_isolation
+
+# --log-level names → stdlib logging levels for the structured operator trace (§6.6).
+_LOG_LEVELS: dict[str, int] = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "warning": logging.WARNING,
+    "error": logging.ERROR,
+}
 
 # Exit codes for a terminal pipeline outcome.
 _EXIT_BY_STATUS: dict[Status, int] = {
@@ -56,6 +68,12 @@ def build_parser() -> argparse.ArgumentParser:
         description="Orchestrator for coding agents (Codex / Claude Code) on top of Git.",
     )
     parser.add_argument("--config", default="config.yaml", help="path to config.yaml")
+    parser.add_argument(
+        "--log-level",
+        choices=sorted(_LOG_LEVELS),
+        default="info",
+        help="structured operator log level (default: info)",
+    )
 
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -83,6 +101,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_cmd.add_argument("task_file", help="path to the task file (.md or .json)")
 
     sub.add_parser("watch", help="watch the tasks folder and run the tasks in it")
+
+    sub.add_parser(
+        "preflight", help="check both CLIs' health and the strict_isolation policy (read-only)"
+    )
 
     return parser
 
@@ -224,6 +246,7 @@ def watch_once(
 
 def cmd_run(args: argparse.Namespace) -> int:
     """Process exactly one task file through the Core pipeline (§5)."""
+    configure_logging(level=_LOG_LEVELS[args.log_level])
     config = _load_config(args.config)
     orchestrator = build_orchestrator(config, artifacts_root=artifacts_root_for(config))
     result = orchestrator.run_task(args.task_file)
@@ -232,8 +255,49 @@ def cmd_run(args: argparse.Namespace) -> int:
     return _EXIT_BY_STATUS.get(result.final_status, 1)
 
 
+def cmd_preflight(args: argparse.Namespace) -> int:
+    """Report each CLI's health and the strict_isolation verdict (read-only diagnostics, §6.7).
+
+    Runs every allowed provider's ``preflight()`` (``<cli> --version`` — no task is processed) and
+    the deterministic ``check_isolation`` policy check. Exit 0 iff every provider is healthy and the
+    required isolation can be enabled; non-zero otherwise. Messages are secret-free by contract.
+    """
+    configure_logging(level=_LOG_LEVELS[args.log_level])
+    config = _load_config(args.config)
+    providers = build_providers(config, artifacts_root=artifacts_root_for(config))
+
+    ok = True
+    for pid in config.agents.allowed:
+        provider = providers.get(pid)
+        if provider is None:
+            print(f"{pid.value}: FAIL — no provider adapter configured")
+            ok = False
+            continue
+        health = provider.preflight()
+        healthy = health.executable_found and health.supports_required_features
+        ok = ok and healthy
+        print(
+            f"{pid.value}: {'OK' if healthy else 'FAIL'} — {health.message} "
+            f"(version={health.version or 'unknown'}, authenticated={health.authenticated})"
+        )
+
+    reasons = check_isolation(config)
+    if reasons:
+        ok = False
+        print("isolation: FAIL")
+        for reason in reasons:
+            print(f"  - {reason}")
+    else:
+        enforced = "enforced" if config.security.strict_isolation else "strict_isolation=false"
+        print(f"isolation: OK ({enforced})")
+
+    print(f"preflight: {'ready' if ok else 'NOT ready'}")
+    return 0 if ok else 1
+
+
 def cmd_watch(args: argparse.Namespace) -> int:
     """Resume an in-flight task and process pending tasks (auto mode permitting)."""
+    configure_logging(level=_LOG_LEVELS[args.log_level])
     config = _load_config(args.config)
     orchestrator = build_orchestrator(config, artifacts_root=artifacts_root_for(config))
     results = watch_once(orchestrator, config, pending_dir())
@@ -255,6 +319,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_run(args)
     if args.command == "watch":
         return cmd_watch(args)
+    if args.command == "preflight":
+        return cmd_preflight(args)
     raise SystemExit(f"Unknown command '{args.command}'.")
 
 

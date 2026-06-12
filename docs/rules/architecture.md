@@ -1,6 +1,6 @@
 # Architecture rules (invariants)
 
-The source of truth is [orchestrator_final_plan.md](../../orchestrator_final_plan.md). These invariants must not be violated.
+The source of truth is [orchestrator_final_plan.md](../orchestrator_final_plan.md). These invariants must not be violated.
 
 ## Layers and dependencies
 

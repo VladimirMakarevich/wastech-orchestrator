@@ -10,6 +10,7 @@ import pytest
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import (
     EXCLUDED_DIRS,
+    GitCommandError,
     GitManager,
     GitResult,
     ManualActionRequired,
@@ -306,3 +307,32 @@ def test_write_current_diff(
     path = gm.write_current_diff("task-001")
     assert Path(path).exists()
     assert "README.md" in Path(path).read_text(encoding="utf-8")
+
+
+def test_push_to_base_branch_is_refused(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # §12.12: publishing is PR-only; a push aimed at base_branch is refused, never executed.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    with pytest.raises(GitCommandError):
+        gm.push("task-001", "main")
+
+
+def test_current_diff_is_redacted(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # §12.6: current.diff (the failure report reads it back) must carry no secrets — token-shaped
+    # ones via pattern, denied_read_paths values via the content-scan seed.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x")
+    token = "ghp_" + "D" * 20
+    file_secret = "plainOpaqueSecret12345"
+    (git_repo.clone / ".env").write_text(f"APP_SECRET={file_secret}\n", encoding="utf-8")
+    (git_repo.clone / "README.md").write_text(
+        f"# project\nleak {token}\ncopied {file_secret}\n", encoding="utf-8"
+    )
+    diff = Path(gm.write_current_diff("task-001")).read_text(encoding="utf-8")
+    assert token not in diff
+    assert file_secret not in diff

@@ -33,7 +33,7 @@ from wastech_orchestrator.config.schema import (
 )
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.providers.process import ProcessResult, run_process
-from wastech_orchestrator.providers.redaction import redact_text
+from wastech_orchestrator.providers.redaction import read_denied_secrets, redact_text
 from wastech_orchestrator.routing.snapshots import PartialChange, WorkingTreeSnapshot
 from wastech_orchestrator.security.env import build_child_env
 from wastech_orchestrator.state_store import PublishOpRow, StateStore
@@ -395,7 +395,17 @@ class GitManager:
     # --- publish (idempotent, §13) --------------------------------------------------------
 
     def push(self, task_id: str, branch: str) -> bool:
-        """Push the task branch to ``origin``. Idempotent via the publish op + remote check."""
+        """Push the task branch to ``origin``. Idempotent via the publish op + remote check.
+
+        Refuses to push directly to ``base_branch`` (§12.12): publishing is PR-only, and the task
+        branch is always ``agent/<task-id>-<slug>``, so a push targeting the base branch signals a
+        corrupted branch state rather than a normal publish.
+        """
+        base = self._config.repo.base_branch
+        if branch == base:
+            raise GitCommandError(
+                f"refusing to push directly to base branch {base!r}; publishing is PR-only (§12.12)"
+            )
         existing = self._store.get_publish_op(task_id, KIND_PUSH, None)
         if existing is not None and existing.status == _STATUS_COMPLETED:
             return True
@@ -461,13 +471,21 @@ class GitManager:
     # --- diffs ----------------------------------------------------------------------------
 
     def write_current_diff(self, task_id: str) -> str:
-        """Write ``logs/<task-id>/current.diff`` (working tree vs HEAD) and return its path (§6)."""
+        """Write ``logs/<task-id>/current.diff`` (working tree vs HEAD) and return its path (§6).
+
+        The diff is redacted before writing (§12.6): the failure report reads it back, so this is
+        the single place that keeps a leaked secret out of both ``current.diff`` and the report.
+        """
         diff = self._git("diff", "HEAD").stdout
         task_dir = task_artifact_dir(self._artifacts_root, task_id)
         task_dir.mkdir(parents=True, exist_ok=True)
         path = task_dir / "current.diff"
-        path.write_text(diff, encoding="utf-8")
+        path.write_text(redact_text(diff, extra_secrets=self._diff_secrets()), encoding="utf-8")
         return str(path)
+
+    def _diff_secrets(self) -> tuple[str, ...]:
+        """Denied-file secret values present in the clone, to redact from written diffs (§12.6)."""
+        return read_denied_secrets(self._clone, self._config.security.denied_read_paths)
 
     def cumulative_committed_diff(self) -> str:
         """The diff of all task-branch commits vs ``base_branch`` (decomposed context, §6)."""

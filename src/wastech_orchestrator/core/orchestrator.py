@@ -10,6 +10,7 @@ that touches git. Context is handed to agents **only as artifact file paths** on
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -38,15 +39,25 @@ from wastech_orchestrator.git_manager import (
     ManualActionRequired,
 )
 from wastech_orchestrator.ledger import (
+    DecomposedFailureInfo,
     Ledger,
     LedgerRecord,
     write_failure_report,
     write_minimal_summary,
 )
-from wastech_orchestrator.providers.artifacts import task_artifact_dir
-from wastech_orchestrator.providers.base import AgentRunRequest, RunStatus, Stage
+from wastech_orchestrator.observability.logging import bind
+from wastech_orchestrator.providers.artifacts import sha256_file, task_artifact_dir
+from wastech_orchestrator.providers.base import (
+    AgentProvider,
+    AgentRunRequest,
+    ProviderId,
+    RunStatus,
+    Stage,
+)
 from wastech_orchestrator.routing.router import AgentRouter, StageOutcome
+from wastech_orchestrator.security.isolation import check_isolation
 from wastech_orchestrator.state_store import (
+    ArtifactRow,
     CheckRunRow,
     ProviderAttemptRow,
     StageRunRow,
@@ -67,6 +78,8 @@ from wastech_orchestrator.task.validation_gate import (
     ValidationResult,
     write_validation_report,
 )
+
+_LOG = logging.getLogger(__name__)
 
 # Severities that make a review finding "blocking" → the review-driven fix loop (§5, §8.1).
 _BLOCKING_SEVERITIES = frozenset({"blocking", "critical", "high"})
@@ -102,6 +115,18 @@ _STAGE_PROMPTS: dict[Stage, str] = {
 
 def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+# Map a task-level artifact filename to its registry ``kind`` (§10). Unknown names fall back to the
+# filename so registration is always meaningful even if a new artifact is added.
+_ARTIFACT_KINDS: dict[str, str] = {
+    "task.enriched.md": "enriched",
+    "plan.md": "plan",
+}
+
+
+def _artifact_kind(name: str) -> str:
+    return _ARTIFACT_KINDS.get(name, name)
 
 
 @dataclass(frozen=True)
@@ -346,6 +371,17 @@ class Orchestrator:
     # --- pipeline -------------------------------------------------------------------------
 
     def _drive(self, p: _Pipeline, completeness: Completeness) -> PipelineResult:
+        # strict_isolation preflight (§12.8): if a provider that may run cannot have its required
+        # isolation enabled, fail here — before any branch — rather than silently downgrading.
+        if self._config.security.strict_isolation:
+            reasons = check_isolation(self._config)
+            if reasons:
+                joined = "; ".join(reasons)
+                self._log(p.task.id).warning(
+                    "isolation preflight failed", extra={"reasons": joined}
+                )
+                raise PipelineFailed(f"strict_isolation: {joined}")
+
         self._transition(p, Status.PREPARING)
 
         # Branch + footprint preflight (no branch is ever created before this point).
@@ -383,8 +419,10 @@ class Orchestrator:
         if skip:
             reason = "task flagged refined" if p.task.refined else "task already complete"
             self._store.update_task(p.task.id, refinement_ran=False, refinement_skip_reason=reason)
+            self._log(p.task.id).info("refinement skipped", extra={"reason": reason})
             self._transition(p, Status.PLANNING)
             return
+        self._log(p.task.id).info("refinement running")
         self._transition(p, Status.REFINING)
         outcome = self._run_stage(p, Stage.REFINEMENT)
         message = self._require_result(p, outcome, Stage.REFINEMENT)
@@ -403,6 +441,15 @@ class Orchestrator:
             max_subtasks=self._config.agents.decomposition.max_subtasks,
         )
         p.decomposition = decision
+        self._log(p.task.id).info(
+            "decomposition decided",
+            extra={
+                "gate_on": gate_on,
+                "accepted": decision.accepted,
+                "n": decision.n,
+                "reason": decision.reason,
+            },
+        )
         self._store.update_task(
             p.task.id,
             decomposition_enabled=gate_on,
@@ -413,6 +460,12 @@ class Orchestrator:
         )
         if decision.accepted:
             write_subtask_artifacts(decision, self._artifacts_root, p.task.id)
+            subtasks_dir = task_artifact_dir(self._artifacts_root, p.task.id) / "subtasks"
+            self._register_artifact(p.task.id, "subtasks_index", str(subtasks_dir / "index.json"))
+            for s in decision.subtasks:
+                self._register_artifact(
+                    p.task.id, "subtask_spec", str(subtasks_dir / f"{s.order:02d}-{s.slug}.md")
+                )
             self._store.insert_subtasks(
                 [
                     SubtaskRow(
@@ -442,6 +495,7 @@ class Orchestrator:
                 outcome = self._run_stage(p, Stage.IMPLEMENTATION, subtask=subtask, unit=unit)
                 self._require_result(p, outcome, Stage.IMPLEMENTATION)
                 p.diff_path = self._git.write_current_diff(p.task.id)
+                self._register_artifact(p.task.id, "diff", p.diff_path)
                 self._transition(p, Status.TESTING)
 
             if p.status is Status.TESTING:
@@ -472,6 +526,7 @@ class Orchestrator:
                 outcome = self._run_stage(p, Stage.FIXING, subtask=subtask, unit=unit)
                 self._require_result(p, outcome, Stage.FIXING)
                 p.diff_path = self._git.write_current_diff(p.task.id)
+                self._register_artifact(p.task.id, "diff", p.diff_path)
                 self._transition(p, Status.TESTING)
 
     def _on_review_passed(
@@ -514,6 +569,9 @@ class Orchestrator:
                 description=p.task.description,
                 diff=diff,
             )
+        task_dir = task_artifact_dir(self._artifacts_root, p.task.id)
+        self._register_artifact(p.task.id, "summary_md", str(task_dir / "summary.md"))
+        self._register_artifact(p.task.id, "summary_json", str(task_dir / "summary.json"))
         self._transition(p, Status.READY_TO_PUBLISH)
 
     def _publish(self, p: _Pipeline) -> PipelineResult:
@@ -535,12 +593,23 @@ class Orchestrator:
     def _enter_fixing(self, p: _Pipeline, loop: FixLoop) -> PipelineResult | None:
         decision = self._loops.enter_fixing(p.counters, loop)
         self._save_counters(p)
+        counters = {
+            "loop": loop.value,
+            "fix_iterations": p.counters.fix_iterations,
+            "test_fix_cycles": p.counters.test_fix_cycles,
+            "review_fix_cycles": p.counters.review_fix_cycles,
+            "stage_attempts": p.counters.stage_attempts,
+        }
         if decision.stuck:
+            self._log(p.task.id).warning(
+                "task stuck", extra={**counters, "limit": decision.limit_name}
+            )
             report_path = self._write_failure_report(p, decision.loop, decision.limit_name)
             self._store.update_task(p.task.id, failure_report_path=report_path)
             return self._go_terminal(
                 p, Status.MANUAL_ACTION_REQUIRED, manual_reason=f"stuck: {decision.limit_name}"
             )
+        self._log(p.task.id).info("entering fixing", extra=counters)
         self._transition(p, Status.FIXING)
         return None
 
@@ -572,6 +641,10 @@ class Orchestrator:
         self._transition(p, final, finished_at=self._clock())
         self._move_task_file(p, final)
         self._append_ledger(p, final, pr_url=pr_url, cleanup_safe=cleanup.safe)
+        self._log(p.task.id).info(
+            "terminal",
+            extra={"final_status": final.value, "pr_url": pr_url, "cleanup_safe": cleanup.safe},
+        )
         return PipelineResult(task_id=p.task.id, final_status=final, pr_url=pr_url)
 
     def _move_task_file(self, p: _Pipeline, final: Status) -> None:
@@ -602,6 +675,7 @@ class Orchestrator:
         """Handle a §19 Phase-A reject: failed, quarantine, report, ledger — no branch (§19.4)."""
         task_id = Path(task_file).stem
         reason = result.reason.value if result.reason else "unknown"
+        self._log(task_id).info("validation rejected", extra={"reason": reason})
         write_validation_report(result, task_id, self._artifacts_root)
         self._quarantine(task_file)
         self._ledger.append(
@@ -739,7 +813,25 @@ class Orchestrator:
         task_dir.mkdir(parents=True, exist_ok=True)
         path = task_dir / name
         path.write_text(content, encoding="utf-8")
+        self._register_artifact(p.task.id, _artifact_kind(name), str(path))
         return str(path)
+
+    def _log(self, task_id: str) -> logging.LoggerAdapter[logging.Logger]:
+        """A task-scoped structured logger (§6.6): every record carries ``task_id``."""
+        return bind(_LOG, task_id=task_id)
+
+    def _register_artifact(self, task_id: str, kind: str, path: str | None) -> None:
+        """Register a durable §10 artifact in SQLite with a sha256 checksum (best-effort, §10).
+
+        Idempotent (the store upserts on ``(task_id, kind, path)``); a missing file is skipped and
+        registration never raises into the terminal path. Requires the ``tasks`` row to exist (FK),
+        so a §19-rejected task — which has no row — is not registered here.
+        """
+        if not path or not Path(path).exists():
+            return
+        self._store.register_artifact(
+            ArtifactRow(task_id=task_id, kind=kind, path=path, checksum=sha256_file(path))
+        )
 
     def _write_review(
         self, p: _Pipeline, structured: Mapping[str, Any] | None, message: str | None
@@ -754,6 +846,8 @@ class Orchestrator:
         (review_dir / "summary.md").write_text(message or "(no review summary)\n", encoding="utf-8")
         p.review_findings_path = str(review_dir / "findings.json")
         p.last_review_findings = findings
+        self._register_artifact(p.task.id, "review_findings", p.review_findings_path)
+        self._register_artifact(p.task.id, "review_summary", str(review_dir / "summary.md"))
         return any(self._is_blocking(f) for f in findings)
 
     def _extract_findings(self, structured: Mapping[str, Any] | None) -> list[dict[str, Any]]:
@@ -795,7 +889,7 @@ class Orchestrator:
             if p.check_log and Path(p.check_log).exists()
             else None
         )
-        report_path, _ = write_failure_report(
+        report_path, stuck_path = write_failure_report(
             self._artifacts_root,
             p.task.id,
             loop=loop.value if loop else "unknown",
@@ -809,8 +903,27 @@ class Orchestrator:
             last_check_log=check_log,
             last_review_findings=p.last_review_findings,
             final_diff=diff,
+            decomposed=self._decomposed_failure_info(p),
         )
+        self._register_artifact(p.task.id, "failure_report", report_path)
+        self._register_artifact(p.task.id, "stuck", stuck_path)
         return report_path
+
+    def _decomposed_failure_info(self, p: _Pipeline) -> DecomposedFailureInfo | None:
+        """Build the decomposed failure-report block (§10): failing subtask + committed SHAs."""
+        if not p.decomposition.accepted:
+            return None
+        row = self._store.get_task(p.task.id)
+        subtasks = sorted(self._store.get_subtasks(p.task.id), key=lambda s: s.order)
+        committed = tuple(sha for s in subtasks if (sha := s.commit_sha) is not None)
+        completed = row.subtasks_completed if row else len(committed)
+        failing = row.active_subtask if row and row.active_subtask else len(committed) + 1
+        return DecomposedFailureInfo(
+            subtask_count=p.decomposition.n,
+            subtasks_completed=completed,
+            failing_subtask=failing,
+            committed_shas=committed,
+        )
 
     # --- store helpers --------------------------------------------------------------------
 
@@ -824,8 +937,10 @@ class Orchestrator:
                 validation_passed=True,
             )
         )
-        write_normalized(task, self._artifacts_root)
-        write_validation_report(result, task.id, self._artifacts_root)
+        normalized_path = write_normalized(task, self._artifacts_root)
+        report_path = write_validation_report(result, task.id, self._artifacts_root)
+        self._register_artifact(task.id, "normalized", normalized_path)
+        self._register_artifact(task.id, "validation_report", report_path)
         self._transition_status(task.id, Status.NEW, Status.VALIDATED)
 
     def _decomposition_gate_on(self, task: NormalizedTask) -> bool:
@@ -893,6 +1008,27 @@ class Orchestrator:
         return result.final_message or ""
 
 
+def build_providers(
+    config: OrchestratorConfig, *, artifacts_root: str | Path
+) -> dict[ProviderId, AgentProvider]:
+    """Construct the real provider adapters for the configured providers (Core + CLI use this)."""
+    from wastech_orchestrator.providers.claude import ClaudeCodeProvider
+    from wastech_orchestrator.providers.codex import CodexProvider
+
+    root = str(Path(artifacts_root))
+    providers: dict[ProviderId, AgentProvider] = {}
+    for pid, provider_cfg in config.agents.providers.items():
+        if pid is ProviderId.CLAUDE:
+            providers[pid] = ClaudeCodeProvider(
+                provider_cfg, security=config.security, artifacts_root=root
+            )
+        elif pid is ProviderId.CODEX:
+            providers[pid] = CodexProvider(
+                provider_cfg, security=config.security, artifacts_root=root
+            )
+    return providers
+
+
 def build_orchestrator(
     config: OrchestratorConfig,
     *,
@@ -905,21 +1041,8 @@ def build_orchestrator(
     ledger (``<artifacts_root>/logs/completed.jsonl``), Git Manager, Check Runner, loop controller,
     and validation gate. The Core depends only on these interfaces — never on a provider directly.
     """
-    from wastech_orchestrator.providers.base import ProviderId
-    from wastech_orchestrator.providers.claude import ClaudeCodeProvider
-    from wastech_orchestrator.providers.codex import CodexProvider
-
     root = Path(artifacts_root)
-    providers: dict[ProviderId, Any] = {}
-    for pid, provider_cfg in config.agents.providers.items():
-        if pid is ProviderId.CLAUDE:
-            providers[pid] = ClaudeCodeProvider(
-                provider_cfg, security=config.security, artifacts_root=str(root)
-            )
-        elif pid is ProviderId.CODEX:
-            providers[pid] = CodexProvider(
-                provider_cfg, security=config.security, artifacts_root=str(root)
-            )
+    providers = build_providers(config, artifacts_root=root)
 
     store = StateStore.open(root / "state.db")
     ledger = Ledger(root / "logs")

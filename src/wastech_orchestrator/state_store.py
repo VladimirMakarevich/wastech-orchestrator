@@ -111,7 +111,8 @@ CREATE TABLE IF NOT EXISTS artifacts (
     kind TEXT NOT NULL,
     path TEXT NOT NULL,
     checksum TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    UNIQUE(task_id, kind, path)
 );
 
 CREATE TABLE IF NOT EXISTS publish_operations (
@@ -511,11 +512,15 @@ class StateStore:
     def register_artifact(
         self, artifact: ArtifactRow, conn: sqlite3.Connection | None = None
     ) -> None:
+        """Register an artifact with its checksum (§10). Idempotent: re-registering the same
+        ``(task_id, kind, path)`` updates the checksum rather than inserting a duplicate, so a
+        resumed run that re-writes ``plan.md`` etc. does not accumulate rows (§13)."""
         now = self._clock()
         with self._writer(conn) as c:
             c.execute(
                 "INSERT INTO artifacts (task_id, kind, path, checksum, created_at) "
-                "VALUES (?,?,?,?,?)",
+                "VALUES (?,?,?,?,?) "
+                "ON CONFLICT(task_id, kind, path) DO UPDATE SET checksum = excluded.checksum",
                 (artifact.task_id, artifact.kind, artifact.path, artifact.checksum, now),
             )
 

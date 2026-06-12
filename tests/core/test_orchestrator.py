@@ -7,6 +7,7 @@ publishing, terminal cleanup, and the ledger.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -447,3 +448,113 @@ def test_rejected_task_no_branch(git_repo, make_git_config, git_run, tmp_path: P
     branches = git_run(["branch", "--list", "agent/*"], git_repo.clone)
     assert branches == ""
     assert ledger.records()[0]["validation_reason"] == "frontmatter_missing"
+
+
+# --- Phase 6: security & observability (spec §6.1/§6.5) -------------------------------------------
+
+
+def test_strict_isolation_preflight_fails_without_branch(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # When strict_isolation cannot be guaranteed, the task fails BEFORE a branch is created (§12.8).
+    orch, store, ledger, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    monkeypatch.setattr(
+        "wastech_orchestrator.core.orchestrator.check_isolation",
+        lambda _config: ["codex: sandbox 'danger-full-access' grants full filesystem access"],
+    )
+    result = orch.run_task(_complete_task(tmp_path, "task-iso"))
+
+    assert result.final_status is Status.FAILED
+    row = store.get_task("task-iso")
+    assert row is not None and row.status is Status.FAILED
+    assert git_run(["branch", "--list", "agent/*"], git_repo.clone) == ""  # no branch created
+    assert ledger.records()[0]["final_status"] == "failed"
+
+
+def test_artifacts_registered_with_checksums(git_repo, make_git_config, tmp_path: Path) -> None:
+    providers = _both()
+    orch, store, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.stage is Stage.IMPLEMENTATION:
+            (git_repo.clone / "feature.py").write_text("z = 9\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+    orch.run_task(_complete_task(tmp_path, "task-art"))
+
+    rows = store._conn.execute(  # noqa: SLF001
+        "SELECT kind, checksum FROM artifacts WHERE task_id = ?", ("task-art",)
+    ).fetchall()
+    kinds = {r["kind"] for r in rows}
+    assert {"normalized", "validation_report", "plan", "diff", "summary_md"} <= kinds
+    assert rows and all(len(r["checksum"]) == 64 for r in rows)  # sha256 hex digests
+
+
+def test_decomposed_failure_report_has_subtask_fields(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # A decomposed task that gets stuck in subtask 1 records its decomposition context (§10).
+    subtasks = {
+        "decompose": True,
+        "subtasks": [
+            {
+                "order": 1,
+                "title": "First",
+                "slug": "first",
+                "acceptance_criteria": ["a"],
+                "depends_on": [],
+            },
+            {
+                "order": 2,
+                "title": "Second",
+                "slug": "second",
+                "acceptance_criteria": ["b"],
+                "depends_on": [1],
+            },
+        ],
+    }
+
+    class DecompProvider(FakeProvider):
+        def run(self, request: AgentRunRequest) -> AgentRunResult:
+            if request.stage is Stage.PLANNING:
+                return AgentRunResult(
+                    status=RunStatus.SUCCEEDED,
+                    provider=self.id,
+                    stage=request.stage,
+                    attempt=request.attempt,
+                    exit_code=0,
+                    started_at="t",
+                    finished_at="t",
+                    final_message="plan",
+                    structured_output=subtasks,
+                )
+            if request.stage in (Stage.IMPLEMENTATION, Stage.FIXING):
+                (git_repo.clone / "d.py").write_text("q = 1\n", encoding="utf-8")
+            return super().run(request)
+
+    providers = {
+        ProviderId.CLAUDE: DecompProvider("claude"),
+        ProviderId.CODEX: DecompProvider("codex"),
+    }
+    orch, _, _, art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[1],
+        config_kwargs={"decomposition": True, "max_fix_cycles": 2, "max_total_fix_iterations": 10},
+    )
+    result = orch.run_task(_complete_task(tmp_path, "task-dec"))
+
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
+    report = json.loads((art / "logs" / "task-dec" / "failure_report.json").read_text("utf-8"))
+    assert report["decomposed"]["subtask_count"] == 2
+    assert report["decomposed"]["failing_subtask"] == 1
+    assert report["decomposed"]["subtasks_completed"] == 0
+    assert report["decomposed"]["committed_shas"] == []

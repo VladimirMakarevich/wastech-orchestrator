@@ -12,8 +12,13 @@ The orchestrator owns the process: it accepts a task → parses it → creates a
 
 | Document | Role |
 |----------|------|
-| [orchestrator_final_plan.md](orchestrator_final_plan.md) | **Canonical build spec**: contracts, state machine, routing, fallback, security, DoD, implementation stages. Takes priority in case of discrepancies. |
-| [codex_git_orchestrator_architecture.md](codex_git_orchestrator_architecture.md) | Architectural overview and rationale for the decisions (high-level). The original requirements and their mapping are in §11; deferred items in [orchestrator_final_plan.md](orchestrator_final_plan.md) §18. |
+| [docs/orchestrator_final_plan.md](docs/orchestrator_final_plan.md) | **Canonical build spec**: contracts, state machine, routing, fallback, security, DoD, implementation stages. Takes priority in case of discrepancies. |
+| [docs/codex_git_orchestrator_architecture.md](docs/codex_git_orchestrator_architecture.md) | Architectural overview and rationale for the decisions (high-level). The original requirements and their mapping are in §11. |
+| [docs/operations.md](docs/operations.md) | **Operator guide**: install, authorization, preflight for both CLIs, footprint modes, diagnostics, and the `manual_action_required` recovery playbook. |
+| [docs/cookbook.md](docs/cookbook.md) | Practical recipes for initializing a workspace, configuring a repo, running tasks, routing providers, reading artifacts, and recovery. |
+| [docs/configuration.md](docs/configuration.md) | Detailed `config.yaml` reference with defaults, allowed values, validation rules, and safe examples. |
+| [docs/task-authoring.md](docs/task-authoring.md) | How to write valid task files, use front matter, choose refinement/decomposition flags, and avoid validation rejects. |
+| [docs/backlog/](docs/backlog/) | Aggregated backlog, including deferred v2 features, prompt customization, and token optimization. |
 | [docs/rules/](docs/rules/) | Development rules: style, architectural invariants, security, git-flow, tests. |
 
 For coding agents: [CLAUDE.md](CLAUDE.md) (Claude Code) and [AGENTS.md](AGENTS.md) (Codex).
@@ -54,6 +59,12 @@ wastech-orchestrator/
   pyproject.toml
   config.example.yaml            # configuration example (copy to config.yaml)
   docs/
+    cookbook.md                   # practical user recipes
+    configuration.md              # config.yaml reference
+    task-authoring.md             # task input guide
+    operations.md                 # operator guide
+    orchestrator_final_plan.md    # canonical build spec
+    backlog/                      # aggregated future work and detailed backlog items
     rules/                       # development rules (source of truth for agents)
   .claude/
     skills/                      # reusable skills for development
@@ -100,9 +111,14 @@ python -m wastech_orchestrator init . --git-mode in_repo_exclude   # keep artifa
 Running (as the pipeline is implemented):
 
 ```bash
+python -m wastech_orchestrator preflight                    # check both CLIs + isolation (read-only)
 python -m wastech_orchestrator run tasks/pending/task-001.md
 python -m wastech_orchestrator watch
 ```
+
+See [docs/cookbook.md](docs/cookbook.md) for practical recipes, [docs/configuration.md](docs/configuration.md)
+for every `config.yaml` field, [docs/task-authoring.md](docs/task-authoring.md) for task files, and
+[docs/operations.md](docs/operations.md) for production operations.
 
 `watch` respects `orchestrator.auto_mode.enabled` in `config.yaml`: when `false` (default), it does not automatically take another pending task after terminal cleanup; when `true`, it processes pending tasks sequentially, returning to `repo.base_branch` between tasks.
 
@@ -110,7 +126,7 @@ python -m wastech_orchestrator watch
 
 ## Implementation roadmap
 
-The stages are executed strictly in sequence (see [orchestrator_final_plan.md §15](orchestrator_final_plan.md)):
+The stages are executed strictly in sequence (see [docs/orchestrator_final_plan.md §15](docs/orchestrator_final_plan.md)):
 
 1. Contracts and configuration
 2. Provider layer and the Codex adapter

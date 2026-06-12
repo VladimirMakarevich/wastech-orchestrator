@@ -1,6 +1,6 @@
 # Security rules
 
-The source of truth is [orchestrator_final_plan.md §12](../../orchestrator_final_plan.md). These rules must not be violated; the configuration validator is required to reject unsafe settings.
+The source of truth is [orchestrator_final_plan.md §12](../orchestrator_final_plan.md). These rules must not be violated; the configuration validator is required to reject unsafe settings.
 
 ## Isolation
 

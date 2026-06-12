@@ -51,6 +51,7 @@ from wastech_orchestrator.providers.errors import classify, make_signatures, mes
 from wastech_orchestrator.providers.process import ProcessResult, run_process
 from wastech_orchestrator.providers.redaction import (
     is_sensitive_key,
+    read_denied_secrets,
     redact_mapping,
     redact_text,
 )
@@ -172,6 +173,21 @@ def _deny_tools_for(denied_commands: Sequence[str]) -> list[str]:
     return patterns
 
 
+def _deny_read_tools_for(denied_read_paths: Sequence[str]) -> list[str]:
+    """Translate ``denied_read_paths`` into Claude ``Read(<glob>)`` disallowed-tool patterns (§12).
+
+    The agent must never read secret files (``.env``, ``secrets/**``); denying the ``Read`` tool on
+    those paths is the tool-level enforcement, paired with the redaction net for what leaks.
+    """
+    patterns: list[str] = []
+    for path in denied_read_paths:
+        normalized = path.strip()
+        if not normalized:
+            continue
+        patterns.append(f"Read({normalized})")
+    return patterns
+
+
 def map_permission(profile: str) -> tuple[str, tuple[str, ...]]:
     """Map a request permission profile to a Claude ``(permission_mode, allowed_tools)`` pair.
 
@@ -223,6 +239,7 @@ def build_claude_argv(
     request: AgentRunRequest,
     *,
     denied_commands: Sequence[str] = (),
+    denied_read_paths: Sequence[str] = (),
     output_schema_path: str | None = None,
 ) -> list[str]:
     """Build the ``claude -p`` argv (a list, never a shell string).
@@ -230,8 +247,8 @@ def build_claude_argv(
     Raises :class:`ProviderError` (``CONFIGURATION_ERROR``) if ``extra_args`` would weaken isolation
     or the requested profile is the forbidden full-access mode — defence in depth over the P1 config
     validator. The prompt is delivered on stdin, never on the command line; context reaches Claude
-    only as file paths. ``denied_commands`` (the ``security.denied_commands`` blacklist) is enforced
-    as ``--disallowedTools`` so the agent process can never publish (§12).
+    only as file paths. ``denied_commands`` and ``denied_read_paths`` (the ``security.*`` lists) are
+    enforced as ``--disallowedTools`` so the agent can never publish or read secret files (§12).
     """
     combined_extra = tuple(config.extra_args) + tuple(request.extra_args)
     reasons = find_forbidden_args(combined_extra)
@@ -255,7 +272,7 @@ def build_claude_argv(
     ]
     if allowed_tools:
         argv += ["--allowedTools", ",".join(allowed_tools)]
-    denied_tools = _deny_tools_for(denied_commands)
+    denied_tools = _deny_tools_for(denied_commands) + _deny_read_tools_for(denied_read_paths)
     if denied_tools:
         argv += ["--disallowedTools", ",".join(denied_tools)]
     model = request.model or config.model
@@ -265,6 +282,27 @@ def build_claude_argv(
         argv += ["--max-turns", str(config.max_turns)]
     argv += list(combined_extra)
     return argv
+
+
+def isolation_reasons(config: ProviderConfig) -> list[str]:
+    """Reasons the configured Claude isolation cannot be enabled — an empty list means OK.
+
+    Pure and offline (no CLI launched), so it can drive the ``strict_isolation`` preflight
+    (:mod:`wastech_orchestrator.security.isolation`, §12.8). Mirrors what :func:`build_claude_argv`
+    would enforce: the permission profile must resolve to a concrete non-``bypassPermissions`` mode,
+    and ``extra_args`` must not weaken the sandbox/approvals or that mode.
+    """
+    profile = config.permission_profile or _DEFAULT_PROFILE
+    try:
+        mode, _ = map_permission(profile)
+    except ProviderError as exc:
+        return [str(exc)]
+    reasons = [f"extra_args {r}" for r in find_forbidden_args(config.extra_args)]
+    try:
+        _reject_weaker_permission_override(tuple(config.extra_args), mode)
+    except ProviderError as exc:
+        reasons.append(str(exc))
+    return reasons
 
 
 def parse_stream_json(stdout_text: str) -> ParsedEvents:
@@ -398,6 +436,7 @@ class ClaudeCodeProvider:
                 self._config,
                 request,
                 denied_commands=self._security.denied_commands,
+                denied_read_paths=self._security.denied_read_paths,
                 output_schema_path=schema_path,
             )
         except ProviderError:
@@ -418,12 +457,16 @@ class ClaudeCodeProvider:
         )
         finished_at = self._clock().isoformat()
 
-        extra_secrets = self._secret_env_values()
-        stdout_text = _read_text(paths.stdout_path)
+        # Redact every captured sink before it is written (§12.6): a leaked secret must never land
+        # in stdout.log or events.jsonl. Parsing uses the in-memory raw stream for correctness.
+        extra_secrets = self._extra_secrets(request)
+        raw_stdout = _read_text(paths.stdout_path)
+        redacted_stdout = redact_text(raw_stdout, extra_secrets=extra_secrets)
+        Path(paths.stdout_path).write_text(redacted_stdout, encoding="utf-8")
         Path(paths.stderr_path).write_text(
             redact_text(proc.stderr_text, extra_secrets=extra_secrets), encoding="utf-8"
         )
-        Path(paths.events_path).write_text(stdout_text, encoding="utf-8")
+        Path(paths.events_path).write_text(redacted_stdout, encoding="utf-8")
 
         # Infrastructure failure (launch / timeout / abnormal exit) → normalized error → raise.
         if proc.launch_error is not None or proc.timed_out or proc.exit_code != 0:
@@ -439,7 +482,7 @@ class ClaudeCodeProvider:
 
         # Clean exit: parse the structured event stream.
         try:
-            parsed = parse_stream_json(stdout_text)
+            parsed = parse_stream_json(raw_stdout)
         except ProviderError as exc:
             error = NormalizedError(exc.error_class, str(exc))
             self._finalize_failure(paths, request, started_at, finished_at, proc, error)
@@ -494,7 +537,7 @@ class ClaudeCodeProvider:
         self, paths: ArtifactPaths, request: AgentRunRequest, *, argv: list[str] | None
     ) -> None:
         representation = self._request_representation(request, argv)
-        redacted = redact_mapping(representation, extra_secrets=self._secret_env_values())
+        redacted = redact_mapping(representation, extra_secrets=self._extra_secrets(request))
         write_request_artifact(paths, redacted)
 
     def _request_representation(
@@ -546,6 +589,12 @@ class ClaudeCodeProvider:
             error=error,
         )
         write_result_artifact(paths, result)
+
+    def _extra_secrets(self, request: AgentRunRequest) -> tuple[str, ...]:
+        """Literal secrets to redact: secret-named parent env values + denied-read file contents."""
+        return self._secret_env_values() + read_denied_secrets(
+            request.working_directory, self._security.denied_read_paths
+        )
 
     def _secret_env_values(self) -> tuple[str, ...]:
         """Values of non-allowlisted, secret-named parent env vars, for defensive redaction."""

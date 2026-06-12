@@ -48,6 +48,7 @@ from wastech_orchestrator.providers.errors import classify, make_signatures, mes
 from wastech_orchestrator.providers.process import ProcessResult, run_process
 from wastech_orchestrator.providers.redaction import (
     is_sensitive_key,
+    read_denied_secrets,
     redact_mapping,
     redact_text,
 )
@@ -185,6 +186,23 @@ def build_codex_argv(
     argv += list(combined_extra)
     argv.append("-")  # read the prompt from stdin
     return argv
+
+
+def isolation_reasons(config: ProviderConfig) -> list[str]:
+    """Reasons the configured Codex isolation cannot be enabled — an empty list means OK.
+
+    Pure and offline (no CLI launched), so it can drive the ``strict_isolation`` preflight
+    (:mod:`wastech_orchestrator.security.isolation`, §12.8). Mirrors what :func:`build_codex_argv`
+    enforces: a non-``danger-full-access`` sandbox must be selectable and ``extra_args`` must not
+    weaken the sandbox/approvals. Codex has no per-tool deny mechanism — the sandbox *is* the
+    isolation, so "isolation enabled" means a real sandbox mode is in force.
+    """
+    sandbox = config.sandbox or config.permission_profile or _DEFAULT_SANDBOX
+    reasons: list[str] = []
+    if sandbox == FORBIDDEN_SANDBOX_VALUE:
+        reasons.append(f"sandbox {sandbox!r} grants full filesystem access (no isolation)")
+    reasons.extend(f"extra_args {r}" for r in find_forbidden_args(config.extra_args))
+    return reasons
 
 
 def parse_events(stdout_text: str, last_message_text: str | None = None) -> ParsedEvents:
@@ -340,12 +358,16 @@ class CodexProvider:
         )
         finished_at = self._clock().isoformat()
 
-        extra_secrets = self._secret_env_values()
-        stdout_text = _read_text(paths.stdout_path)
+        # Redact every captured sink before it is written (§12.6): a leaked secret must never land
+        # in stdout.log or events.jsonl. Parsing uses the in-memory raw stream for correctness.
+        extra_secrets = self._extra_secrets(request)
+        raw_stdout = _read_text(paths.stdout_path)
+        redacted_stdout = redact_text(raw_stdout, extra_secrets=extra_secrets)
+        Path(paths.stdout_path).write_text(redacted_stdout, encoding="utf-8")
         Path(paths.stderr_path).write_text(
             redact_text(proc.stderr_text, extra_secrets=extra_secrets), encoding="utf-8"
         )
-        Path(paths.events_path).write_text(stdout_text, encoding="utf-8")
+        Path(paths.events_path).write_text(redacted_stdout, encoding="utf-8")
 
         # Infrastructure failure (launch / timeout / abnormal exit) → normalized error → raise.
         if proc.launch_error is not None or proc.timed_out or proc.exit_code != 0:
@@ -359,10 +381,15 @@ class CodexProvider:
             self._finalize_failure(paths, request, started_at, finished_at, proc, error)
             raise ProviderError(error.error_class, error.message)
 
-        # Clean exit: parse the structured event stream.
+        # Clean exit: parse the structured event stream (the --output-last-message file is the
+        # authoritative final message; redact it on disk too since it may echo agent output).
         last_message_text = _read_text(last_message_path)
+        if last_message_text and Path(last_message_path).exists():
+            Path(last_message_path).write_text(
+                redact_text(last_message_text, extra_secrets=extra_secrets), encoding="utf-8"
+            )
         try:
-            parsed = parse_events(stdout_text, last_message_text or None)
+            parsed = parse_events(raw_stdout, last_message_text or None)
         except ProviderError as exc:
             error = NormalizedError(exc.error_class, str(exc))
             self._finalize_failure(paths, request, started_at, finished_at, proc, error)
@@ -417,7 +444,7 @@ class CodexProvider:
         self, paths: ArtifactPaths, request: AgentRunRequest, *, argv: list[str] | None
     ) -> None:
         representation = self._request_representation(request, argv)
-        redacted = redact_mapping(representation, extra_secrets=self._secret_env_values())
+        redacted = redact_mapping(representation, extra_secrets=self._extra_secrets(request))
         write_request_artifact(paths, redacted)
 
     def _request_representation(
@@ -469,6 +496,12 @@ class CodexProvider:
             error=error,
         )
         write_result_artifact(paths, result)
+
+    def _extra_secrets(self, request: AgentRunRequest) -> tuple[str, ...]:
+        """Literal secrets to redact: secret-named parent env values + denied-read file contents."""
+        return self._secret_env_values() + read_denied_secrets(
+            request.working_directory, self._security.denied_read_paths
+        )
 
     def _secret_env_values(self) -> tuple[str, ...]:
         """Values of non-allowlisted, secret-named parent env vars, for defensive redaction."""

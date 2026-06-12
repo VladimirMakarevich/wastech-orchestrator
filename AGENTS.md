@@ -6,7 +6,7 @@ This file is for Codex. The full set of rules matches [CLAUDE.md](CLAUDE.md) and
 
 ## Before writing code
 
-1. Read **[orchestrator_final_plan.md](orchestrator_final_plan.md)** — the canonical spec (source of truth).
+1. Read **[docs/orchestrator_final_plan.md](docs/orchestrator_final_plan.md)** — the canonical spec (source of truth).
 2. Follow the rules in **[docs/rules/](docs/rules/)**: `architecture.md`, `coding-style.md`, `security.md`, `git-workflow.md`, `testing.md`.
 
 ## Hard invariants (must not be violated)

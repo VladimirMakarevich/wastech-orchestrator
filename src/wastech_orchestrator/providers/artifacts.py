@@ -13,6 +13,7 @@ Artifacts (§10): ``request.json`` (redacted), ``stdout.log``, ``stderr.log``, `
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -20,6 +21,8 @@ from pathlib import Path
 from typing import Any
 
 from wastech_orchestrator.providers.base import AgentRunResult, Stage
+
+_CHECKSUM_CHUNK = 65536
 
 REQUEST_FILENAME = "request.json"
 STDOUT_FILENAME = "stdout.log"
@@ -94,3 +97,12 @@ def _write_json(path: str, data: Any) -> str:
     text = json.dumps(data, indent=2, ensure_ascii=False, sort_keys=False)
     Path(path).write_text(text + "\n", encoding="utf-8")
     return path
+
+
+def sha256_file(path: str | Path) -> str:
+    """Return the hex SHA-256 of a file's bytes (artifact checksum for the SQLite registry, §10)."""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(_CHECKSUM_CHUNK), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

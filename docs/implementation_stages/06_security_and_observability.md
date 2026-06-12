@@ -123,4 +123,4 @@ Closing this phase means the whole project DoD holds:
 
 Human-in-the-loop (clarifying questions / action approval), Telegram integration,
 reasoning/complexity levels per task, richer task parsing, and parallel/graph decomposition with
-worktrees.
+worktrees. Track these in [../backlog/product_backlog.md](../backlog/product_backlog.md).

@@ -532,13 +532,9 @@ briefly explain what was changed.
 
 ## 12. What to add in the second version
 
-- Parallel tasks via `git worktree`.
-- A queue with priorities.
-- A Web UI for tasks and logs.
-- A PR with a template, integration with GitHub Issues.
-- Auto-retry on network errors, a per-task budget limit.
-- Auto-closing of stale tasks, a dry-run without push.
-- (Optional) lightweight memory between tasks per project — only if needed (crewAI's vector-memory is overkill for this case).
+The second-version and candidate feature list has been consolidated into
+[backlog/product_backlog.md](backlog/product_backlog.md). Keep new backlog items there instead of
+adding another local list to this architecture note.
 
 ---
 
