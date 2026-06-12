@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import io
+import logging
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 import pytest
@@ -10,7 +12,22 @@ import pytest
 from wastech_orchestrator.check_runner import CheckRunner
 from wastech_orchestrator.config.loader import loads_config
 from wastech_orchestrator.config.schema import OrchestratorConfig
+from wastech_orchestrator.observability import logging as obslog
 from wastech_orchestrator.providers.process import ProcessResult
+
+
+@pytest.fixture(autouse=True)
+def _reset_package_logger() -> Iterator[None]:
+    pkg = logging.getLogger(obslog.LOGGER_NAME)
+    saved = pkg.handlers[:]
+    pkg.handlers.clear()
+    obslog._configured = False
+    yield
+    for handler in pkg.handlers:
+        handler.close()
+    pkg.handlers.clear()
+    pkg.handlers.extend(saved)
+    obslog._configured = False
 
 
 def _config(commands: list[str], *, timeout: int = 1800) -> OrchestratorConfig:
@@ -95,6 +112,27 @@ def test_all_commands_pass(tmp_path: Path) -> None:
     # Both log files exist under checks/.
     logs = list((tmp_path / "logs" / "t1" / "checks").glob("*.log"))
     assert len(logs) == 2
+
+
+def test_check_logs_start_completion_and_duration(tmp_path: Path) -> None:
+    stream = io.StringIO()
+    obslog.configure_logging(stream=stream)
+    ticks = iter((10.0, 12.5))
+    runner = CheckRunner(
+        _config(["npm run lint"]),
+        run_process=_FakeProc([_ok()]),
+        heartbeat_seconds=0,
+        monotonic=lambda: next(ticks),
+    )
+
+    runner.run(clone_dir=tmp_path, artifacts_root=tmp_path, task_id="t1")
+
+    output = stream.getvalue()
+    assert 'msg="check started"' in output
+    assert 'msg="check completed"' in output
+    assert "command=npm" in output
+    assert "passed=true" in output
+    assert "duration_seconds=2.5" in output
 
 
 def test_argv_split_no_shell(tmp_path: Path) -> None:

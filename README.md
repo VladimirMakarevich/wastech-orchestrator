@@ -62,6 +62,7 @@ wastech-orchestrator/
     cookbook.md                   # practical user recipes
     configuration.md              # config.yaml reference
     task-authoring.md             # task input guide
+    examples/                     # tracked examples; copy them into runtime tasks/pending
     operations.md                 # operator guide
     orchestrator_final_plan.md    # canonical build spec
     backlog/                      # aggregated future work and detailed backlog items
@@ -74,7 +75,7 @@ wastech-orchestrator/
       providers/
         base.py                  # AgentProvider contract (§4.3 of the spec)
       templates/                 # scaffolding copied out by `init` (task + per-stage prompts)
-  tasks/                         # pending / processing / done / failed / rejected
+  tasks/                         # runtime only: pending / processing / done / failed / rejected
   tests/                         # unit / integration / e2e (see docs/rules/testing.md)
 ```
 
@@ -114,6 +115,8 @@ Running (as the pipeline is implemented):
 python -m wastech_orchestrator preflight                    # check both CLIs + isolation (read-only)
 python -m wastech_orchestrator run tasks/pending/task-001.md
 python -m wastech_orchestrator watch
+python -m wastech_orchestrator status                       # active/latest persisted task
+python -m wastech_orchestrator --log-file logs/orchestrator.log watch
 ```
 
 See [docs/cookbook.md](docs/cookbook.md) for practical recipes, [docs/configuration.md](docs/configuration.md)

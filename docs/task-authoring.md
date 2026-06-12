@@ -7,6 +7,11 @@ for hidden context.
 Tasks can be Markdown (`.md`) or JSON (`.json`). Markdown is the normal operator format and is what
 this guide focuses on.
 
+Use the packaged `templates/task.md` as the editable runtime template. A completed example is kept
+at [`docs/examples/task-001.example.md`](examples/task-001.example.md). Copy it into the external
+orchestrator workspace's `tasks/pending/` directory; do not keep tracked examples under a target
+repository's `tasks/` or `logs/` paths because footprint preflight treats those names as collisions.
+
 The canonical task rules are in [orchestrator_final_plan.md sections 5 and 19](orchestrator_final_plan.md).
 
 ## Markdown Shape
@@ -331,6 +336,7 @@ parser.
 
 Before placing a task in `tasks/pending/`:
 
+- place it in the orchestrator control workspace, not the target repository clone;
 - use a lowercase normalized `id`;
 - write a short, specific `title`;
 - include a clear `## Description`;

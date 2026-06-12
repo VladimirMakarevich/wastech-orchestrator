@@ -22,6 +22,8 @@ def _reset_package_logger() -> Iterator[None]:
     pkg.handlers.clear()
     obslog._configured = False
     yield
+    for handler in pkg.handlers:
+        handler.close()
     pkg.handlers.clear()
     pkg.handlers.extend(saved)
     obslog._configured = False
@@ -80,4 +82,22 @@ def test_seeded_secret_never_reaches_the_sink() -> None:
     obslog.configure_logging(stream=stream)
     log = obslog.bind(logging.getLogger(obslog.LOGGER_NAME), task_id="t")
     log.info("agent printed %s", _GH_TOKEN, extra={"echoed": _GH_TOKEN})
+    assert _GH_TOKEN not in stream.getvalue()
+
+
+def test_json_file_handler_writes_redacted_records(tmp_path) -> None:
+    stream = io.StringIO()
+    log_path = tmp_path / "operator" / "orchestrator.jsonl"
+    obslog.configure_logging(fmt="json", stream=stream, file_path=log_path)
+    log = obslog.bind(logging.getLogger(obslog.LOGGER_NAME), task_id="task-9")
+
+    log.info("provider heartbeat", extra={"token": _GH_TOKEN, "elapsed_seconds": 30.0})
+    for handler in logging.getLogger(obslog.LOGGER_NAME).handlers:
+        handler.flush()
+
+    record = json.loads(log_path.read_text(encoding="utf-8").strip())
+    assert record["msg"] == "provider heartbeat"
+    assert record["task_id"] == "task-9"
+    assert record["elapsed_seconds"] == 30.0
+    assert _GH_TOKEN not in record["token"]
     assert _GH_TOKEN not in stream.getvalue()

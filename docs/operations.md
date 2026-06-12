@@ -37,6 +37,11 @@ python -m wastech_orchestrator init . --git-mode in_repo_commit  # artifacts com
 Then copy/adjust `config.yaml` (it mirrors §11 of the spec) and point `repo.url` /
 `repo.local_path` at the target repository clone.
 
+For self-hosting, the clone in `repo.local_path` must be separate from the checkout used to run the
+orchestrator. Keep the known-good control process, SQLite state, tasks, and logs outside the target
+clone. This prevents the IDE, the coding agent, and terminal cleanup from competing over one working
+tree.
+
 ---
 
 ## 2. Authorization (configured outside the orchestrator)
@@ -51,6 +56,10 @@ yourself, once, in the environment the orchestrator runs in:
   `CODEX_HOME`, which is on the default allowlist.
 - **Claude Code** — sign in with the Claude CLI (e.g. `claude login` or an API key in its own
   config); its config dir `CLAUDE_CONFIG_DIR` is on the default allowlist.
+
+Install only the providers you intend to route to. When Claude Code is unavailable, remove it from
+`agents.allowed` and route every agent-driven stage to Codex. GitHub CLI is required only when
+`git.create_pull_request: true`; disabling PR creation does not disable commit or push.
 
 If a credential must reach a child process, add **only its variable name** to
 `security.allowed_environment`. Never place a secret value in `config.yaml`, a task file, or
@@ -82,6 +91,23 @@ preflight: ready
   (the default) a run would **fail preflight** before any branch is created rather than silently
   downgrading isolation — fix the config (don't weaken the sandbox/permission profile) and re-run.
 
+### Verify the executable seen by the runtime
+
+Check versions from the same shell and environment that will launch the orchestrator:
+
+```bash
+command -v codex
+codex --version
+codex exec --help
+command -v claude
+command -v gh
+```
+
+On Windows use `where <command>`. WSL, PowerShell, a global npm install, and the Codex IDE extension
+may expose different binaries. Different reported versions therefore do not necessarily indicate a
+broken installation; they usually mean different `PATH` resolution. Set a specific provider
+`command` only to an executable that can run inside the orchestrator's OS environment.
+
 ---
 
 ## 4. Running
@@ -90,6 +116,7 @@ preflight: ready
 python -m wastech_orchestrator run tasks/pending/task-001.md   # one task, end to end
 python -m wastech_orchestrator watch                           # resume + process pending tasks
 python -m wastech_orchestrator --log-level debug run <task>    # more verbose operator trace
+python -m wastech_orchestrator status                          # active/latest persisted task
 ```
 
 `watch` respects `orchestrator.auto_mode.enabled`: off (default) it processes/resumes one task and
@@ -100,14 +127,45 @@ continuation. Exit code: `0` done, `1` failed, `2` manual_action_required.
 ### Structured logs
 
 The pipeline emits a secret-free **logfmt** trace on stderr (keyed by `task_id` / `stage` /
-`attempt` / `provider`): route source, fallback/skip/decompose decisions, fix-loop counters, and the
-terminal outcome. Secrets are never logged (and a redaction filter scrubs records as a safety net).
+`attempt` / `provider`): operation start/end/failure and duration, route source,
+fallback/skip/decompose decisions, fix-loop counters, and the terminal outcome. Secrets are never
+logged (and a redaction filter scrubs records as a safety net).
 
 ```text
+ts=… level=info task_id=task-001 stage=implementation primary=codex msg="stage started"
+ts=… level=info task_id=task-001 stage=implementation provider=codex attempt=1 elapsed_seconds=30.0 msg="provider heartbeat"
+ts=… level=info task_id=task-001 stage=implementation primary=codex duration_seconds=84.2 msg="stage completed"
 ts=… level=info task_id=task-001 stage=review msg="falling back" from=codex to=claude error_class=rate_limited
 ts=… level=warn task_id=task-001 msg="task stuck" limit=max_total_fix_iterations fix_iterations=5
 ts=… level=info task_id=task-001 msg=terminal final_status=done pr_url=… cleanup_safe=True
 ```
+
+For a durable live trace, enable the rotating file handler and heartbeat:
+
+```bash
+python -m wastech_orchestrator \
+  --log-file ./logs/orchestrator.jsonl \
+  --log-format json \
+  --heartbeat-seconds 30 \
+  watch
+```
+
+These are global CLI options and must come before the subcommand. The file rotates at 10 MB and
+keeps five backups. Supported formats are `logfmt` and newline-delimited `json`.
+`--heartbeat-seconds 0` disables heartbeat records.
+
+Monitor from another terminal:
+
+```bash
+tail -f logs/orchestrator.jsonl
+python -m wastech_orchestrator --config ./config.yaml status
+python -m wastech_orchestrator --config ./config.yaml status task-001
+```
+
+`status` opens the configured artifact root's `state.db` read-only. Without an id it reports active
+tasks, or the latest task when none is active. It does not invoke providers, checks, or Git. The
+displayed provider is the route's configured primary; it does not claim that a currently running
+subprocess has already succeeded.
 
 ---
 
@@ -167,6 +225,9 @@ logs/
   ledger, and the failure report are all redacted; `denied_read_paths` (`.env`, `secrets/**`) are
   excluded from agent reads and their values are scrubbed from any sink.
 
+Use the operator log for live monitoring. Provider `stdout.log` and `stderr.log` are finalized and
+redacted after the subprocess exits, so do not tail them while an attempt is still running.
+
 ---
 
 ## 7. Recovery playbook — `manual_action_required`
@@ -182,7 +243,7 @@ Common causes and what to do:
 |---|---|
 | **Fix budget exhausted** — `max_fix_cycles` or the global `max_total_fix_iterations` hit. | Read `stuck.md`: the last failing check / blocking findings and the final diff. Fix manually on the task branch, or refine the task, then re-submit. |
 | **Terminal cleanup unsafe** — base-branch checkout would lose uncommitted work or the branch state is ambiguous (§8.3). | Inspect the clone (`git status`); reconcile by hand, commit/stash or discard intentionally, return to `base_branch`, then re-run `watch`. |
-| **Repo already tracks `tasks/`/`logs/`** (footprint preflight, §21.4). | Remove/rename the colliding tracked paths or switch footprint mode; `.git/info/exclude` cannot untrack already-tracked files. |
+| **Repo already tracks `tasks/`/`logs/`** (footprint preflight, §21.4). | Remove/rename the colliding tracked paths; the current preflight rejects this collision in every footprint mode. |
 | **More than one active task on restart** (inconsistent state, §13). | Only one task may be active. Decide which to keep, mark the others resolved, then re-run. |
 
 A §19-**rejected** task is different: it is terminal `failed`, quarantined to `tasks/rejected/` with
@@ -193,3 +254,7 @@ re-submit from `tasks/pending/`.
 Recovery is idempotent: re-running `watch`/`run` resumes the single in-flight task, reuses the
 existing branch, and never re-commits/re-pushes a completed operation (it checks the persisted
 fingerprints and the remote).
+
+For the current implementation, a tracked `tasks/` or `logs/` path is rejected in every footprint
+mode. Keep task examples under `docs/examples/` or `templates/`, and place live task files only in
+the external control workspace.

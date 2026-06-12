@@ -19,7 +19,8 @@ infrastructure ``ProviderError`` is.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
 
@@ -122,9 +123,12 @@ class AgentRouter:
         self,
         config: OrchestratorConfig,
         providers: Mapping[ProviderId, AgentProvider],
+        *,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._config = config
         self._providers = providers
+        self._monotonic = monotonic
 
     def resolve_route(
         self,
@@ -205,9 +209,19 @@ class AgentRouter:
             attempt_no = stage_attempts + 1
             req = self._build_request(request, attempt_no, partial if index > 0 else None)
             stage_attempts += 1
+            attempt_started = self._monotonic()
+            log.info(
+                "provider attempt started",
+                extra={
+                    "provider": pid.value,
+                    "attempt": attempt_no,
+                    "timeout_seconds": req.timeout_seconds,
+                },
+            )
             try:
                 result = self._providers[pid].run(req)
             except ProviderError as exc:
+                duration = round(self._monotonic() - attempt_started, 3)
                 last_error = NormalizedError(error_class=exc.error_class, message=str(exc))
                 attempts.append(
                     ProviderAttempt(
@@ -224,6 +238,7 @@ class AgentRouter:
                         "provider": pid.value,
                         "attempt": attempt_no,
                         "error_class": exc.error_class.value,
+                        "duration_seconds": duration,
                     },
                 )
                 has_next = index + 1 < len(sequence)
@@ -265,6 +280,16 @@ class AgentRouter:
                     error_class=result.error.error_class if result.error else None,
                     result=result,
                 )
+            )
+            log.info(
+                "provider attempt completed",
+                extra={
+                    "provider": pid.value,
+                    "attempt": attempt_no,
+                    "status": result.status.value,
+                    "exit_code": result.exit_code,
+                    "duration_seconds": round(self._monotonic() - attempt_started, 3),
+                },
             )
             # A returned result — success or a quality failure — is never a fallback trigger (§7.3).
             return StageOutcome(

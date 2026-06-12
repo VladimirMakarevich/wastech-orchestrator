@@ -46,6 +46,31 @@ orchestrator:
 
 Auto mode does not enable concurrency. The v1 contract keeps one active task at a time.
 
+### Runtime observability options
+
+Logging and heartbeat settings are global CLI options, not `config.yaml` fields:
+
+| Option | Default | Meaning |
+|---|---:|---|
+| `--log-level debug|info|warning|error` | `info` | Minimum operator log level. |
+| `--log-format logfmt|json` | `logfmt` | Format used for stderr and `--log-file`. |
+| `--log-file PATH` | unset | Also write a rotating 10 MB operator log with five backups. |
+| `--heartbeat-seconds N` | `30` | Progress interval for long provider/check/Git calls; `0` disables. |
+
+Place global options before the subcommand:
+
+```bash
+python -m wastech_orchestrator \
+  --config ./config.yaml \
+  --log-file ./logs/orchestrator.jsonl \
+  --log-format json \
+  --heartbeat-seconds 30 \
+  watch
+```
+
+Use `python -m wastech_orchestrator --config ./config.yaml status [task-id]` for a read-only snapshot
+from the persisted state database.
+
 ## `repo`
 
 Describes the target repository clone that agents edit and the Git Manager publishes.
@@ -345,6 +370,10 @@ git:
 | `create_pull_request` | boolean | `true` | Whether publishing creates a PR. |
 | `pr_base` | string | `"main"` | Base branch for PR creation. Usually matches `repo.base_branch`. |
 
+`create_pull_request: false` skips only `gh pr create`. The successful publishing path still makes
+the orchestrator-owned commit and pushes the task branch. Use a disposable fork/test remote for a
+first self-hosting run; a no-push dry-run mode is not implemented.
+
 ### `git.footprint`
 
 | Field | Values | Default | Meaning |
@@ -468,11 +497,14 @@ agents:
 Before running tasks:
 
 - `python -m wastech_orchestrator preflight` succeeds;
+- `command -v`/`where` resolves provider and `gh` executables in the same environment that launches
+  the orchestrator;
 - every routed provider is in `agents.allowed`;
 - every allowed provider has an `agents.providers` entry;
 - `max_total_fix_iterations >= max_fix_cycles`;
 - `agents.decomposition.max_subtasks >= 2`;
 - `git.footprint` uses one of the valid mode combinations;
 - `external_root` is outside `repo.local_path` when using external artifacts;
+- the target clone does not track `tasks/` or `logs/`;
 - no `extra_args` disable sandbox or approvals;
 - secrets are configured outside `config.yaml`.

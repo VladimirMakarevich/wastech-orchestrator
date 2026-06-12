@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -31,6 +32,8 @@ from wastech_orchestrator.config.schema import (
     FootprintTracking,
     OrchestratorConfig,
 )
+from wastech_orchestrator.observability.logging import bind
+from wastech_orchestrator.observability.progress import run_with_heartbeat
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.providers.process import ProcessResult, run_process
 from wastech_orchestrator.providers.redaction import read_denied_secrets, redact_text
@@ -54,6 +57,7 @@ KIND_PR = "pr"
 
 _STATUS_STARTED = "started"
 _STATUS_COMPLETED = "completed"
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -123,6 +127,7 @@ class GitManager:
         artifacts_root: str | Path,
         gh_runner: CommandRunner | None = None,
         run_process: Callable[..., ProcessResult] = run_process,
+        heartbeat_seconds: float = 30.0,
     ) -> None:
         self._config = config
         self._store = store
@@ -131,6 +136,7 @@ class GitManager:
         self._env = build_child_env(config.security.allowed_environment)
         self._run_process = run_process
         self._gh_runner = gh_runner
+        self._heartbeat_seconds = heartbeat_seconds
         self._active: _ActiveTask | None = None
 
     # --- low-level command execution ------------------------------------------------------
@@ -139,12 +145,23 @@ class GitManager:
         """Run an argv list in the clone via the safe process runner; capture stdout + stderr."""
         with tempfile.TemporaryDirectory() as scratch:
             stdout_path = Path(scratch) / "stdout"
-            result = self._run_process(
-                list(argv),
-                cwd=self._clone,
-                env=self._env,
-                timeout_seconds=GIT_TIMEOUT_SECONDS,
-                stdout_path=str(stdout_path),
+            context: dict[str, object] = {"component": argv[0] if argv else "process"}
+            if self._active is not None:
+                context["task_id"] = self._active.task_id
+            log = bind(_LOG, **context)
+            operation = argv[1] if len(argv) > 1 else "launch"
+            result = run_with_heartbeat(
+                lambda: self._run_process(
+                    list(argv),
+                    cwd=self._clone,
+                    env=self._env,
+                    timeout_seconds=GIT_TIMEOUT_SECONDS,
+                    stdout_path=str(stdout_path),
+                ),
+                logger=log,
+                message="git operation heartbeat",
+                interval_seconds=self._heartbeat_seconds,
+                fields={"operation": operation, "timeout_seconds": GIT_TIMEOUT_SECONDS},
             )
             stdout = stdout_path.read_text(encoding="utf-8", errors="replace")
         return GitResult(
@@ -166,10 +183,11 @@ class GitManager:
             )
         return result.stdout.strip()
 
-    def _gh(self, argv: Sequence[str]) -> GitResult:
+    def _gh(self, args: Sequence[str]) -> GitResult:
+        """Run GitHub CLI arguments, adding the ``gh`` executable exactly once."""
         if self._gh_runner is not None:
-            return self._gh_runner(argv)
-        return self._run(["gh", *argv])
+            return self._gh_runner(args)
+        return self._run(["gh", *args])
 
     # --- branch flow ----------------------------------------------------------------------
 
@@ -438,7 +456,6 @@ class GitManager:
         )
         result = self._gh(
             [
-                "gh",
                 "pr",
                 "create",
                 "--base",

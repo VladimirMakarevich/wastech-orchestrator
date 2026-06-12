@@ -41,6 +41,19 @@ def test_open_creates_schema_and_persists(tmp_path: Path) -> None:
     assert store2.get_task("task-001") is not None
 
 
+def test_open_readonly_reads_without_allowing_writes(tmp_path: Path) -> None:
+    db = tmp_path / "state.db"
+    writable = StateStore.open(db)
+    writable.insert_task(_new_task())
+    writable.close()
+
+    readonly = StateStore.open_readonly(db)
+    assert readonly.get_task("task-001") is not None
+    with pytest.raises(sqlite3.OperationalError):
+        readonly.insert_task(_new_task("task-002"))
+    readonly.close()
+
+
 def test_task_round_trip(store: StateStore) -> None:
     store.insert_task(_new_task())
     row = store.get_task("task-001")
@@ -76,6 +89,29 @@ def test_find_active_tasks_excludes_terminal_and_pending(store: StateStore) -> N
     store.insert_task(TaskRow(task_id="d", title="d", status=Status.NEW))
     active = {t.task_id for t in store.find_active_tasks()}
     assert active == {"a"}
+
+
+def test_latest_task_uses_updated_at(store: StateStore) -> None:
+    store.insert_task(
+        TaskRow(
+            task_id="older",
+            title="older",
+            status=Status.DONE,
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+    )
+    store.insert_task(
+        TaskRow(
+            task_id="newer",
+            title="newer",
+            status=Status.PLANNING,
+            updated_at="2026-01-02T00:00:00+00:00",
+        )
+    )
+
+    latest = store.latest_task()
+    assert latest is not None
+    assert latest.task_id == "newer"
 
 
 def test_counters_round_trip(store: StateStore) -> None:

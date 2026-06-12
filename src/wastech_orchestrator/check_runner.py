@@ -11,18 +11,24 @@ fallback** (§4.8). The Check Runner itself never transitions state nor touches 
 
 from __future__ import annotations
 
+import logging
 import shlex
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 from wastech_orchestrator.config.schema import OrchestratorConfig
+from wastech_orchestrator.observability.logging import bind
+from wastech_orchestrator.observability.progress import run_with_heartbeat
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.providers.process import ProcessResult, run_process
 from wastech_orchestrator.providers.redaction import redact_text
 from wastech_orchestrator.security.env import build_child_env
 
 RunProcess = Callable[..., ProcessResult]
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -49,10 +55,17 @@ class CheckRunner:
     """Runs ``checks.commands`` for a task (or subtask) and reports pass/fail."""
 
     def __init__(
-        self, config: OrchestratorConfig, *, run_process: RunProcess = run_process
+        self,
+        config: OrchestratorConfig,
+        *,
+        run_process: RunProcess = run_process,
+        heartbeat_seconds: float = 30.0,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._config = config
         self._run_process = run_process
+        self._heartbeat_seconds = heartbeat_seconds
+        self._monotonic = monotonic
 
     def run(
         self,
@@ -73,20 +86,48 @@ class CheckRunner:
         checks_dir.mkdir(parents=True, exist_ok=True)
 
         runs: list[CheckRunResult] = []
-        for command in commands:
+        log = bind(_LOG, task_id=task_id, stage="testing")
+        for index, command in enumerate(commands, start=1):
             argv = shlex.split(command, posix=True)
             if not argv:
                 continue  # an empty/blank command is a no-op, not a failure
             log_path = self._next_log_path(checks_dir, subtask)
-            result = self._run_process(
-                argv,
-                cwd=clone_dir,
-                env=env,
-                timeout_seconds=timeout,
-                stdout_path=str(log_path),
+            fields: dict[str, object] = {
+                "check_index": index,
+                "command": argv[0],
+                "timeout_seconds": timeout,
+            }
+            if subtask is not None:
+                fields["subtask"] = subtask
+            started = self._monotonic()
+            log.info("check started", extra=fields)
+            result = run_with_heartbeat(
+                partial(
+                    self._run_process,
+                    argv,
+                    cwd=clone_dir,
+                    env=env,
+                    timeout_seconds=timeout,
+                    stdout_path=str(log_path),
+                ),
+                logger=log,
+                message="check heartbeat",
+                interval_seconds=self._heartbeat_seconds,
+                fields=fields,
+                monotonic=self._monotonic,
             )
             self._append_stderr(log_path, result.stderr_text, result)
             passed = result.exit_code == 0 and not result.timed_out and result.launch_error is None
+            log.info(
+                "check completed",
+                extra={
+                    **fields,
+                    "passed": passed,
+                    "exit_code": result.exit_code,
+                    "timed_out": result.timed_out,
+                    "duration_seconds": round(self._monotonic() - started, 3),
+                },
+            )
             runs.append(
                 CheckRunResult(
                     command=command,

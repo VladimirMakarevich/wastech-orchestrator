@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,22 @@ import pytest
 from wastech_orchestrator import cli
 from wastech_orchestrator.core.orchestrator import PipelineResult
 from wastech_orchestrator.core.state_machine import Status
+from wastech_orchestrator.observability import logging as obslog
+from wastech_orchestrator.state_store import StateStore, TaskRow
+
+
+@pytest.fixture(autouse=True)
+def _reset_package_logger() -> Iterator[None]:
+    pkg = logging.getLogger(obslog.LOGGER_NAME)
+    saved = pkg.handlers[:]
+    pkg.handlers.clear()
+    obslog._configured = False
+    yield
+    for handler in pkg.handlers:
+        handler.close()
+    pkg.handlers.clear()
+    pkg.handlers.extend(saved)
+    obslog._configured = False
 
 # --- watch_once unit tests (fake orchestrator) -------------------------------------------
 
@@ -161,8 +179,22 @@ def test_cmd_run_happy_path(
     config = _write_cli_config(project, git_repo.clone, claude_cmd=claude_cmd, codex_cmd=codex_cmd)
     task_file = project / "task-100.md"
     _complete_task_file(task_file, "task-100")
+    operator_log = project / "operator.jsonl"
 
-    code = cli.main(["--config", str(config), "run", str(task_file)])
+    code = cli.main(
+        [
+            "--config",
+            str(config),
+            "--log-format",
+            "json",
+            "--log-file",
+            str(operator_log),
+            "--heartbeat-seconds",
+            "0",
+            "run",
+            str(task_file),
+        ]
+    )
     assert code == 0
     # One commit on the task branch; the agent's change is committed; back on main.
     assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "main"
@@ -177,6 +209,58 @@ def test_cmd_run_happy_path(
     assert json.loads(ledger_lines[0])["final_status"] == "done"
     # The task file moved into its lifecycle folder (done), out of the project root.
     assert (project / "done" / "task-100.md").exists()
+    messages = {
+        json.loads(line)["msg"] for line in operator_log.read_text(encoding="utf-8").splitlines()
+    }
+    assert {
+        "branch preparation started",
+        "branch preparation completed",
+        "stage started",
+        "stage completed",
+        "commit started",
+        "commit completed",
+        "push started",
+        "push completed",
+        "terminal cleanup started",
+        "terminal cleanup completed",
+    } <= messages
+
+
+def test_cmd_status_reports_active_task(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(
+        project,
+        git_repo.clone,
+        claude_cmd="claude",
+        codex_cmd="codex",
+    )
+    db_path = project / "external" / "state.db"
+    store = StateStore.open(db_path)
+    store.insert_task(
+        TaskRow(
+            task_id="task-active",
+            title="Active task",
+            status=Status.PLANNING,
+            branch="agent/task-active-active-task",
+            fix_iterations=2,
+            updated_at="2026-06-12T10:00:00+00:00",
+        )
+    )
+    store.close()
+
+    code = cli.main(["--config", str(config), "status"])
+
+    assert code == 0
+    output = capsys.readouterr().out
+    assert "task_id=task-active" in output
+    assert "status=planning" in output
+    assert "stage=planning" in output
+    assert "configured_primary=claude" in output
+    assert "branch=agent/task-active-active-task" in output
+    assert "fix_iterations=2" in output
 
 
 def test_cmd_run_rejected_task(git_repo, tmp_path: Path) -> None:

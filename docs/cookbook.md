@@ -6,7 +6,7 @@ processed into a Pull Request".
 
 The canonical product contract remains [orchestrator_final_plan.md](orchestrator_final_plan.md).
 Where this guide mentions planned v1 behavior, it is labeled explicitly. The CLI surface described
-here (`init`, `preflight`, `run`, and `watch`) exists in the current codebase.
+here (`init`, `preflight`, `run`, `watch`, and `status`) exists in the current codebase.
 
 ## 1. Initialize A Workspace
 
@@ -34,6 +34,11 @@ python -m wastech_orchestrator init .
 This creates `config.yaml`, `tasks/`, `logs/`, `workspace/`, and editable copies of task and prompt
 templates under `templates/`. The command is idempotent: a second run skips existing files and never
 overwrites `config.yaml`.
+
+The generated task template is `templates/task.md`. Repository examples live under
+[`docs/examples/`](examples/) and should be copied into `tasks/pending/` only in the external
+orchestrator workspace. Do not commit example files under a target repository's `tasks/` or
+`logs/` directories: the footprint preflight treats tracked paths with those names as a collision.
 
 Choose a footprint mode at initialization when you already know where artifacts should live:
 
@@ -72,6 +77,37 @@ Credentials are configured outside the orchestrator:
 
 For all configuration fields, see [configuration.md](configuration.md).
 
+### Self-host the orchestrator repository
+
+Do not point `repo.local_path` at the source checkout open in your IDE. Use one directory to run a
+known-good orchestrator build and a separate clone as the target repository:
+
+```text
+wastech-self/
+  .venv/                 # control environment running the known-good orchestrator
+  config.yaml
+  tasks/
+  logs/
+  workspace/
+    repo/                 # separate clone modified by coding agents
+```
+
+Recommended preparation:
+
+1. Create the control directory outside the source checkout and run `init` there with the external
+   footprint.
+2. Clone `wastech-orchestrator` into `workspace/repo`.
+3. Confirm the target clone is clean and on `main`.
+4. Confirm `git ls-files -- tasks logs` prints nothing. Runtime task files belong to the control
+   directory, not the target clone.
+5. Configure the real Python checks: `ruff check .`, `mypy src`, and `pytest`.
+6. Keep `orchestrator.auto_mode.enabled: false` for the first run.
+7. Use a unique task id and a small, fully specified task before attempting a larger backlog item.
+
+Run the first experiment against a disposable fork or test remote. `create_pull_request: false`
+skips `gh pr create`, but the current publishing pipeline still commits and pushes the task branch.
+There is no no-push dry-run mode yet.
+
 ## 3. Run Preflight
 
 Before processing tasks, run:
@@ -92,6 +128,25 @@ preflight: ready
 If preflight fails, fix the reported environment or configuration problem before running tasks. Do
 not work around failures by weakening sandbox or approval settings; the validator rejects known
 unsafe `extra_args`.
+
+Run these diagnostics in the same shell that will start the orchestrator:
+
+```bash
+command -v codex
+codex --version
+codex exec --help
+command -v claude
+command -v gh
+```
+
+On Windows use `where codex`, `where claude`, and `where gh`. WSL, PowerShell, the IDE extension,
+and a global npm installation can resolve different Codex executables and report different
+versions. Configure `agents.providers.codex.command` for the executable visible to the actual
+orchestrator process; do not infer it from a different terminal.
+
+Only providers named in `agents.allowed` are required. If Claude Code is not installed, use
+Codex-only routing for every agent-driven stage. If `gh` is not installed, set
+`git.create_pull_request: false` until GitHub CLI is installed and authenticated.
 
 ## 4. Create A First Task
 
@@ -144,6 +199,7 @@ Useful variants:
 ```bash
 python -m wastech_orchestrator --config ./config.yaml run tasks/pending/task-001.md
 python -m wastech_orchestrator --log-level debug run tasks/pending/task-001.md
+python -m wastech_orchestrator --log-file ./logs/orchestrator.log run tasks/pending/task-001.md
 ```
 
 Exit codes:
@@ -186,6 +242,44 @@ orchestrator:
 
 Auto mode does not introduce concurrency. Planned v1 behavior keeps a single active task slot and
 requires checkout back to `repo.base_branch` before the next task can start.
+
+### Monitor a running task
+
+For a long run, write the safe operator trace to a rotating file:
+
+```bash
+python -m wastech_orchestrator \
+  --log-file ./logs/orchestrator.jsonl \
+  --log-format json \
+  --heartbeat-seconds 30 \
+  watch
+```
+
+Global options must appear before `run`, `watch`, `preflight`, or `status`. The file rotates at
+10 MB and keeps five backups. Use `--log-format logfmt` for a human-readable `key=value` file, or
+`json` for ingestion by tools. `--heartbeat-seconds 30` emits safe progress records while a
+provider, check, or Git command is still running; set it to `0` to disable heartbeats.
+
+Follow the live trace from another terminal:
+
+```bash
+tail -f logs/orchestrator.jsonl
+```
+
+The trace includes start/completion/failure events and durations for stages, provider attempts,
+checks, branch preparation, commit, push, PR creation, and terminal cleanup. Heartbeats contain
+only safe metadata such as task, stage, provider, attempt, timeout, and elapsed time.
+
+Read the persisted task snapshot without starting providers, checks, or Git operations:
+
+```bash
+python -m wastech_orchestrator --config ./config.yaml status
+python -m wastech_orchestrator --config ./config.yaml status task-001
+```
+
+Without a task id, `status` shows active tasks or the most recently updated task. It reports the
+persisted status, current stage when applicable, configured primary provider, branch, subtask,
+fix counter, last update time, and elapsed time since that update. It opens `state.db` read-only.
 
 ## 7. Override Providers Per Stage
 
@@ -266,7 +360,7 @@ In every mode, planned v1 behavior uses scoped staging for code changes and excl
 
 ## 10. Inspect Logs And Artifacts
 
-Start with:
+The `--log-file` operator trace is the best live view. Start artifact inspection with:
 
 ```bash
 ls logs
@@ -296,6 +390,10 @@ Use `completed.jsonl` as the index of terminal tasks. Use `stuck.md` and `failur
 the result is `manual_action_required`. Provider stdout/stderr/event files are redacted; the full
 process environment and secrets must not be stored.
 
+Do not live-tail provider `stdout.log` or `stderr.log`: provider output is finalized and redacted
+after the subprocess exits. Use the operator log and `status` while work is in progress, then inspect
+provider artifacts after the attempt completes.
+
 ## 11. Recover From `manual_action_required`
 
 `manual_action_required` means the orchestrator stopped safely and needs a human decision. Common
@@ -306,7 +404,7 @@ causes:
 | Fix budget exhausted | Read `stuck.md`, inspect the final diff, and decide whether to fix manually or refine the task. |
 | Terminal cleanup unsafe | Inspect `repo.local_path` with `git status`, reconcile the branch, and return to `repo.base_branch`. |
 | More than one active task on restart | Decide which task is authoritative, then repair state before rerunning. |
-| Footprint conflict | Remove or rename tracked `tasks/`/`logs/` paths, or choose another footprint mode. |
+| Footprint conflict | Remove or rename tracked `tasks/`/`logs/` paths. The current preflight rejects this collision in every footprint mode. |
 
 After resolving the problem, run:
 
@@ -325,6 +423,13 @@ Codex-only:
 agents:
   allowed:
     - codex
+  routing:
+    refinement: {primary: codex, fallback: null}
+    planning: {primary: codex, fallback: null}
+    implementation: {primary: codex, fallback: null}
+    review: {primary: codex, fallback: null}
+    fixing: {primary: codex, fallback: null}
+    summary: {primary: codex, fallback: null}
   providers:
     codex:
       command: "codex"
@@ -342,6 +447,8 @@ git:
   create_pull_request: false
   pr_base: "main"
 ```
+
+This disables PR creation only. A successful run still commits and pushes the task branch.
 
 Long-running checks:
 

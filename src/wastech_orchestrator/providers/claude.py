@@ -20,6 +20,7 @@ selects an isolation-weakening mode.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import tempfile
@@ -31,6 +32,8 @@ from pathlib import Path
 from typing import Any
 
 from wastech_orchestrator.config.schema import ProviderConfig, SecurityConfig
+from wastech_orchestrator.observability.logging import bind
+from wastech_orchestrator.observability.progress import run_with_heartbeat
 from wastech_orchestrator.providers.artifacts import (
     ArtifactPaths,
     create_attempt_dir,
@@ -69,6 +72,7 @@ _PREFLIGHT_TIMEOUT_SECONDS = 10
 _MODE_ORDER: tuple[str, ...] = ("plan", "default", "acceptEdits", "bypassPermissions")
 _PERMISSION_MODE_FLAG = "--permission-mode"
 _BYPASS_MODE = "bypassPermissions"
+_LOG = logging.getLogger(__name__)
 
 # Profile → (permission mode, baseline allowed tools). ``read-only`` proposes but executes nothing;
 # ``workspace-write`` may edit files and run safe workspace commands without prompting — the Claude
@@ -372,6 +376,7 @@ class ClaudeCodeProvider:
         clock: Callable[[], datetime] = _utc_now,
         monotonic: Callable[[], float] = time.monotonic,
         run_process: RunProcess = run_process,
+        heartbeat_seconds: float = 30.0,
     ) -> None:
         self._config = config
         self._security = security
@@ -379,6 +384,7 @@ class ClaudeCodeProvider:
         self._clock = clock
         self._monotonic = monotonic
         self._run_process = run_process
+        self._heartbeat_seconds = heartbeat_seconds
 
     def preflight(self) -> ProviderHealth:
         """Detect the executable and parse its version (auth is best-effort/offline in P2)."""
@@ -446,14 +452,27 @@ class ClaudeCodeProvider:
         self._write_request(paths, request, argv=argv)
 
         env = build_child_env(self._security.allowed_environment)
-        proc = self._run_process(
-            argv,
-            cwd=request.working_directory,
-            env=env,
-            timeout_seconds=request.timeout_seconds,
-            stdout_path=paths.stdout_path,
-            stdin_text=build_effective_prompt(request),
-            monotonic=self._monotonic,
+        log = bind(
+            _LOG,
+            task_id=request.task_id,
+            stage=request.stage.value,
+            provider=self.id,
+            attempt=request.attempt,
+        )
+        proc = run_with_heartbeat(
+            lambda: self._run_process(
+                argv,
+                cwd=request.working_directory,
+                env=env,
+                timeout_seconds=request.timeout_seconds,
+                stdout_path=paths.stdout_path,
+                stdin_text=build_effective_prompt(request),
+                monotonic=self._monotonic,
+            ),
+            logger=log,
+            message="provider heartbeat",
+            interval_seconds=self._heartbeat_seconds,
+            fields={"timeout_seconds": request.timeout_seconds},
         )
         finished_at = self._clock().isoformat()
 

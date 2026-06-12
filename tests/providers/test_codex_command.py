@@ -29,12 +29,11 @@ def test_argv_is_codex_exec_reading_from_stdin(
 ) -> None:
     request = make_request(working_directory="/clone")
     argv = _argv(codex_config, request)
-    assert argv[0] == "codex"
-    assert argv[1] == "exec"
+    assert argv[:4] == ["codex", "--ask-for-approval", "never", "exec"]
     assert argv[-1] == "-"  # prompt comes from stdin
     assert "--cd" in argv and argv[argv.index("--cd") + 1] == "/clone"
     assert "--sandbox" in argv and argv[argv.index("--sandbox") + 1] == "workspace-write"
-    assert argv[argv.index("--ask-for-approval") + 1] == "never"
+    assert argv.index("--ask-for-approval") < argv.index("exec")
     assert "--json" in argv
     assert argv[argv.index("--output-last-message") + 1] == LAST_MSG
 

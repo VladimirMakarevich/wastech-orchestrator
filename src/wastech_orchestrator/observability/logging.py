@@ -25,6 +25,8 @@ from __future__ import annotations
 import logging
 import sys
 from collections.abc import Mapping, MutableMapping
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Any, TextIO
 
 from wastech_orchestrator.providers.redaction import redact_text
@@ -42,21 +44,37 @@ def configure_logging(
     level: int = logging.INFO,
     fmt: str = "logfmt",
     stream: TextIO | None = None,
+    file_path: str | Path | None = None,
+    max_bytes: int = 10 * 1024 * 1024,
+    backup_count: int = 5,
 ) -> None:
-    """Idempotently install one handler on the package logger with the :class:`RedactionFilter`.
+    """Idempotently install terminal and optional rotating-file handlers.
 
     ``fmt`` is ``"logfmt"`` (default, ``key=value``) or ``"json"``. Safe to call more than once
-    (``watch`` may re-enter): the second call is a no-op.
+    (``watch`` may re-enter): the second call is a no-op. Both sinks use the same redaction filter.
     """
     global _configured
     if _configured:
         return
+    formatter: logging.Formatter = _JsonFormatter() if fmt == "json" else _LogfmtFormatter()
     handler = logging.StreamHandler(stream if stream is not None else sys.stderr)
-    handler.setFormatter(_JsonFormatter() if fmt == "json" else _LogfmtFormatter())
+    handler.setFormatter(formatter)
     handler.addFilter(RedactionFilter())
     logger = logging.getLogger(LOGGER_NAME)
     logger.handlers.clear()
     logger.addHandler(handler)
+    if file_path is not None:
+        path = Path(file_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            path,
+            maxBytes=max_bytes,
+            backupCount=backup_count,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(formatter)
+        file_handler.addFilter(RedactionFilter())
+        logger.addHandler(file_handler)
     logger.setLevel(level)
     logger.propagate = False
     _configured = True

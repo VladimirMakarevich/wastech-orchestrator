@@ -2,7 +2,8 @@
 
 ``init`` scaffolds a project layout and templates; ``run`` processes one task end to end through
 the Orchestrator Core; ``watch`` resumes any in-flight task and then processes pending tasks (one at
-a time, continuing only when ``orchestrator.auto_mode.enabled``). See the spec §15.
+a time, continuing only when ``orchestrator.auto_mode.enabled``); ``status`` reads persisted
+progress without starting work. See the spec §15.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import argparse
 import logging
 import sys
 from collections.abc import Iterator, Sequence
+from datetime import UTC, datetime
 from importlib import resources
 from importlib.resources.abc import Traversable
 from pathlib import Path
@@ -26,7 +28,9 @@ from wastech_orchestrator.core.orchestrator import (
 )
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.observability.logging import configure_logging
+from wastech_orchestrator.providers.base import Stage
 from wastech_orchestrator.security.isolation import check_isolation
+from wastech_orchestrator.state_store import StateStore
 
 # --log-level names → stdlib logging levels for the structured operator trace (§6.6).
 _LOG_LEVELS: dict[str, int] = {
@@ -41,6 +45,20 @@ _EXIT_BY_STATUS: dict[Status, int] = {
     Status.DONE: 0,
     Status.FAILED: 1,
     Status.MANUAL_ACTION_REQUIRED: 2,
+}
+
+_STATUS_STAGE: dict[Status, Stage] = {
+    Status.REFINING: Stage.REFINEMENT,
+    Status.PLANNING: Stage.PLANNING,
+    Status.IMPLEMENTING: Stage.IMPLEMENTATION,
+    Status.TESTING: Stage.TESTING,
+    Status.REVIEWING: Stage.REVIEW,
+    Status.FIXING: Stage.FIXING,
+    Status.SUMMARIZING: Stage.SUMMARY,
+    Status.READY_TO_PUBLISH: Stage.PUBLISHING,
+    Status.COMMITTING: Stage.PUBLISHING,
+    Status.PUSHING: Stage.PUBLISHING,
+    Status.CREATING_PR: Stage.PUBLISHING,
 }
 
 # Friendly --git-mode names mapped onto the two git.footprint axes (spec §21).
@@ -74,6 +92,23 @@ def build_parser() -> argparse.ArgumentParser:
         default="info",
         help="structured operator log level (default: info)",
     )
+    parser.add_argument(
+        "--log-format",
+        choices=("logfmt", "json"),
+        default="logfmt",
+        help="operator log format for terminal and --log-file (default: logfmt)",
+    )
+    parser.add_argument(
+        "--log-file",
+        default=None,
+        help="also write rotating operator logs to this file (10 MB, 5 backups)",
+    )
+    parser.add_argument(
+        "--heartbeat-seconds",
+        type=float,
+        default=30.0,
+        help="heartbeat interval for long provider/check/git operations; 0 disables (default: 30)",
+    )
 
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -105,6 +140,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "preflight", help="check both CLIs' health and the strict_isolation policy (read-only)"
     )
+    status_cmd = sub.add_parser("status", help="show the active or latest persisted task status")
+    status_cmd.add_argument("task_id", nargs="?", help="specific task id (default: active/latest)")
 
     return parser
 
@@ -208,6 +245,14 @@ def pending_dir() -> Path:
     return Path("tasks") / "pending"
 
 
+def _configure_runtime_logging(args: argparse.Namespace) -> None:
+    configure_logging(
+        level=_LOG_LEVELS[args.log_level],
+        fmt=getattr(args, "log_format", "logfmt"),
+        file_path=getattr(args, "log_file", None),
+    )
+
+
 def select_pending(folder: Path) -> list[Path]:
     """Pending task files (``.md`` / ``.json``), in a deterministic order."""
     if not folder.is_dir():
@@ -246,9 +291,13 @@ def watch_once(
 
 def cmd_run(args: argparse.Namespace) -> int:
     """Process exactly one task file through the Core pipeline (§5)."""
-    configure_logging(level=_LOG_LEVELS[args.log_level])
+    _configure_runtime_logging(args)
     config = _load_config(args.config)
-    orchestrator = build_orchestrator(config, artifacts_root=artifacts_root_for(config))
+    orchestrator = build_orchestrator(
+        config,
+        artifacts_root=artifacts_root_for(config),
+        heartbeat_seconds=args.heartbeat_seconds,
+    )
     result = orchestrator.run_task(args.task_file)
     suffix = f" → {result.pr_url}" if result.pr_url else ""
     print(f"{result.task_id}: {result.final_status.value}{suffix}")
@@ -262,7 +311,7 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     the deterministic ``check_isolation`` policy check. Exit 0 iff every provider is healthy and the
     required isolation can be enabled; non-zero otherwise. Messages are secret-free by contract.
     """
-    configure_logging(level=_LOG_LEVELS[args.log_level])
+    _configure_runtime_logging(args)
     config = _load_config(args.config)
     providers = build_providers(config, artifacts_root=artifacts_root_for(config))
 
@@ -297,9 +346,13 @@ def cmd_preflight(args: argparse.Namespace) -> int:
 
 def cmd_watch(args: argparse.Namespace) -> int:
     """Resume an in-flight task and process pending tasks (auto mode permitting)."""
-    configure_logging(level=_LOG_LEVELS[args.log_level])
+    _configure_runtime_logging(args)
     config = _load_config(args.config)
-    orchestrator = build_orchestrator(config, artifacts_root=artifacts_root_for(config))
+    orchestrator = build_orchestrator(
+        config,
+        artifacts_root=artifacts_root_for(config),
+        heartbeat_seconds=args.heartbeat_seconds,
+    )
     results = watch_once(orchestrator, config, pending_dir())
     if not results:
         print("watch: nothing to do (slot free, no pending tasks)")
@@ -310,8 +363,66 @@ def cmd_watch(args: argparse.Namespace) -> int:
     return worst
 
 
+def cmd_status(args: argparse.Namespace) -> int:
+    """Show persisted progress without starting providers, checks, or git operations."""
+    _configure_runtime_logging(args)
+    config = _load_config(args.config)
+    db_path = Path(artifacts_root_for(config)) / "state.db"
+    if not db_path.is_file():
+        print(f"status: no state database at {db_path}")
+        return 0
+
+    store = StateStore.open_readonly(db_path)
+    try:
+        if args.task_id:
+            task = store.get_task(args.task_id)
+            tasks = [] if task is None else [task]
+        else:
+            tasks = store.find_active_tasks()
+            if not tasks:
+                latest = store.latest_task()
+                tasks = [] if latest is None else [latest]
+    finally:
+        store.close()
+
+    if not tasks:
+        suffix = f" for task {args.task_id!r}" if args.task_id else ""
+        print(f"status: no task found{suffix}")
+        return 1 if args.task_id else 0
+
+    now = datetime.now(UTC)
+    for index, task in enumerate(tasks):
+        if index:
+            print()
+        print(f"task_id={task.task_id}")
+        print(f"title={task.title}")
+        print(f"status={task.status.value}")
+        stage = _STATUS_STAGE.get(task.status)
+        if stage is not None:
+            print(f"stage={stage.value}")
+            route = config.agents.routing.get(stage)
+            if route is not None:
+                print(f"configured_primary={route.primary.value}")
+        if task.branch:
+            print(f"branch={task.branch}")
+        if task.active_subtask is not None and task.subtask_count is not None:
+            print(f"subtask={task.active_subtask}/{task.subtask_count}")
+        print(f"fix_iterations={task.fix_iterations}")
+        if task.updated_at:
+            print(f"updated_at={task.updated_at}")
+            updated = datetime.fromisoformat(task.updated_at)
+            elapsed = max(0.0, (now - updated).total_seconds())
+            print(f"elapsed_since_update_seconds={elapsed:.1f}")
+        if task.cleanup_last_error:
+            print(f"last_error={task.cleanup_last_error}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.heartbeat_seconds < 0:
+        parser.error("--heartbeat-seconds must be >= 0")
 
     if args.command == "init":
         return cmd_init(args)
@@ -321,6 +432,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_watch(args)
     if args.command == "preflight":
         return cmd_preflight(args)
+    if args.command == "status":
+        return cmd_status(args)
     raise SystemExit(f"Unknown command '{args.command}'.")
 
 

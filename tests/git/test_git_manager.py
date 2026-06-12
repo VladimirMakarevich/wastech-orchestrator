@@ -255,11 +255,42 @@ def test_create_pr_with_fake_gh(
     body.write_text("# summary\n", encoding="utf-8")
     url = gm.create_pr("task-001", branch, title="My PR", body_path=str(body))
     assert url == "https://github.com/o/r/pull/1"
-    assert gh_calls[0][:3] == ["gh", "pr", "create"]
+    assert gh_calls[0][:2] == ["pr", "create"]
     assert "--body-file" in gh_calls[0]
     url2 = gm.create_pr("task-001", branch, title="My PR", body_path=str(body))
     assert url2 == url
     assert len(gh_calls) == 1  # idempotent: gh not invoked again
+
+
+def test_create_pr_real_runner_adds_gh_executable_once(
+    git_repo,
+    store: StateStore,
+    tmp_path: Path,
+    make_git_config: ConfigFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _task(store)
+    calls: list[list[str]] = []
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+
+    def fake_run(argv: Sequence[str]) -> GitResult:
+        calls.append(list(argv))
+        return GitResult(
+            exit_code=0,
+            stdout="https://github.com/o/r/pull/1\n",
+            stderr="",
+            timed_out=False,
+            launch_error=None,
+        )
+
+    monkeypatch.setattr(gm, "_run", fake_run)
+    body = tmp_path / "summary.md"
+    body.write_text("# summary\n", encoding="utf-8")
+
+    gm.create_pr("task-001", "agent/task-001-x", title="My PR", body_path=str(body))
+
+    assert calls[0][:3] == ["gh", "pr", "create"]
+    assert calls[0].count("gh") == 1
 
 
 def test_create_pr_disabled_returns_none(

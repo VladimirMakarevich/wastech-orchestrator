@@ -279,6 +279,17 @@ class StateStore:
         conn.executescript(_SCHEMA)
         return cls(conn, clock=clock)
 
+    @classmethod
+    def open_readonly(
+        cls, db_path: str | Path, *, clock: Callable[[], str] = _utc_now_iso
+    ) -> StateStore:
+        """Open an existing database without creating or mutating it (operator ``status``)."""
+        path = Path(db_path).resolve()
+        conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        return cls(conn, clock=clock)
+
     def close(self) -> None:
         self._conn.close()
 
@@ -356,6 +367,12 @@ class StateStore:
 
     def get_task(self, task_id: str) -> TaskRow | None:
         cur = self._conn.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,))
+        row = cur.fetchone()
+        return _task_from_row(row) if row is not None else None
+
+    def latest_task(self) -> TaskRow | None:
+        """Most recently updated task, used when ``status`` has no explicit task id."""
+        cur = self._conn.execute("SELECT * FROM tasks ORDER BY updated_at DESC LIMIT 1")
         row = cur.fetchone()
         return _task_from_row(row) if row is not None else None
 

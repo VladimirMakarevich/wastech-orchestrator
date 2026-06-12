@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -186,6 +187,7 @@ class Orchestrator:
         gate: ValidationGate,
         artifacts_root: str | Path,
         clock: Callable[[], str] = _utc_now_iso,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._config = config
         self._router = router
@@ -197,6 +199,7 @@ class Orchestrator:
         self._gate = gate
         self._artifacts_root = artifacts_root
         self._clock = clock
+        self._monotonic = monotonic
 
     # --- entry point ----------------------------------------------------------------------
 
@@ -391,7 +394,11 @@ class Orchestrator:
             return self._go_terminal(p, Status.MANUAL_ACTION_REQUIRED, manual_reason=exc.reason)
         self._git.ensure_exclude_local()
         p.slug = slugify(p.task.title)
-        p.branch = self._git.prepare_branch(p.task.id, p.slug)
+        p.branch = self._observe(
+            p,
+            "branch preparation",
+            lambda: self._git.prepare_branch(p.task.id, p.slug),
+        )
         self._store.update_task(p.task.id, branch=p.branch, slug=p.slug)
 
         self._refinement(p, completeness)
@@ -577,14 +584,21 @@ class Orchestrator:
     def _publish(self, p: _Pipeline) -> PipelineResult:
         self._transition(p, Status.COMMITTING)
         message = f"feat({p.task.id}): {p.task.title}"
-        self._git.commit_code(p.task.id, message)
-        self._git.commit_audit(p.task.id)
+        self._observe(
+            p,
+            "commit",
+            lambda: (self._git.commit_code(p.task.id, message), self._git.commit_audit(p.task.id)),
+        )
         self._transition(p, Status.PUSHING)
-        self._git.push(p.task.id, p.branch)
+        self._observe(p, "push", lambda: self._git.push(p.task.id, p.branch))
         self._transition(p, Status.CREATING_PR)
         summary_md = str(task_artifact_dir(self._artifacts_root, p.task.id) / "summary.md")
-        pr_url = self._git.create_pr(
-            p.task.id, p.branch, title=f"{p.task.title}", body_path=summary_md
+        pr_url = self._observe(
+            p,
+            "pull request",
+            lambda: self._git.create_pr(
+                p.task.id, p.branch, title=f"{p.task.title}", body_path=summary_md
+            ),
         )
         return self._go_terminal(p, Status.DONE, pr_url=pr_url)
 
@@ -625,7 +639,9 @@ class Orchestrator:
     ) -> PipelineResult:
         """Run terminal cleanup, set the final status, append exactly one ledger record (§8.3)."""
         final = status
-        cleanup = self._git.terminal_cleanup(p.task.id)
+        cleanup = self._observe(
+            p, "terminal cleanup", lambda: self._git.terminal_cleanup(p.task.id)
+        )
         if not cleanup.safe and status is Status.DONE:
             # Publishing finished but the working copy could not be safely restored → manual (§8.3).
             final = Status.MANUAL_ACTION_REQUIRED
@@ -730,7 +746,18 @@ class Orchestrator:
             check_artifacts_path=p.check_log,
             review_artifacts_path=p.review_findings_path,
         )
-        outcome = self._router.run_stage(request, route, snapshot=self._git)
+        fields: dict[str, object] = {
+            "stage": stage.value,
+            "primary": route.primary.value,
+        }
+        if subtask is not None:
+            fields["subtask"] = subtask
+        outcome = self._observe(
+            p,
+            "stage",
+            lambda: self._router.run_stage(request, route, snapshot=self._git),
+            fields=fields,
+        )
         self._record_stage(p, stage, outcome, subtask)
         p.counters.stage_attempts = outcome.stage_attempts
         return outcome
@@ -951,13 +978,17 @@ class Orchestrator:
         return self._config.agents.decomposition.enabled
 
     def _transition(self, p: _Pipeline, dst: Status, **fields: object) -> None:
+        src = p.status
         with self._store.transaction() as conn:
-            assert_transition(p.status, dst)
+            assert_transition(src, dst)
             self._store.set_status(p.task.id, dst, conn)
             self._store.save_counters(p.task.id, p.counters, conn)
             if fields:
                 self._store.update_task(p.task.id, conn, **fields)
         p.status = dst
+        self._log(p.task.id).info(
+            "status changed", extra={"from_status": src.value, "to_status": dst.value}
+        )
 
     def _transition_status(self, task_id: str, src: Status, dst: Status) -> None:
         with self._store.transaction() as conn:
@@ -966,6 +997,40 @@ class Orchestrator:
 
     def _save_counters(self, p: _Pipeline) -> None:
         self._store.save_counters(p.task.id, p.counters)
+
+    def _observe[T](
+        self,
+        p: _Pipeline,
+        operation_name: str,
+        operation: Callable[[], T],
+        *,
+        fields: Mapping[str, object] | None = None,
+    ) -> T:
+        """Log a safe start/end/failure envelope around a pipeline operation."""
+        log = self._log(p.task.id)
+        safe_fields = dict(fields or {})
+        started = self._monotonic()
+        log.info(f"{operation_name} started", extra=safe_fields)
+        try:
+            result = operation()
+        except Exception as exc:
+            log.error(
+                f"{operation_name} failed",
+                extra={
+                    **safe_fields,
+                    "duration_seconds": round(self._monotonic() - started, 3),
+                    "error_type": type(exc).__name__,
+                },
+            )
+            raise
+        log.info(
+            f"{operation_name} completed",
+            extra={
+                **safe_fields,
+                "duration_seconds": round(self._monotonic() - started, 3),
+            },
+        )
+        return result
 
     def _append_ledger(
         self, p: _Pipeline, final: Status, *, pr_url: str | None, cleanup_safe: bool
@@ -1009,7 +1074,10 @@ class Orchestrator:
 
 
 def build_providers(
-    config: OrchestratorConfig, *, artifacts_root: str | Path
+    config: OrchestratorConfig,
+    *,
+    artifacts_root: str | Path,
+    heartbeat_seconds: float = 30.0,
 ) -> dict[ProviderId, AgentProvider]:
     """Construct the real provider adapters for the configured providers (Core + CLI use this)."""
     from wastech_orchestrator.providers.claude import ClaudeCodeProvider
@@ -1020,11 +1088,17 @@ def build_providers(
     for pid, provider_cfg in config.agents.providers.items():
         if pid is ProviderId.CLAUDE:
             providers[pid] = ClaudeCodeProvider(
-                provider_cfg, security=config.security, artifacts_root=root
+                provider_cfg,
+                security=config.security,
+                artifacts_root=root,
+                heartbeat_seconds=heartbeat_seconds,
             )
         elif pid is ProviderId.CODEX:
             providers[pid] = CodexProvider(
-                provider_cfg, security=config.security, artifacts_root=root
+                provider_cfg,
+                security=config.security,
+                artifacts_root=root,
+                heartbeat_seconds=heartbeat_seconds,
             )
     return providers
 
@@ -1034,6 +1108,7 @@ def build_orchestrator(
     *,
     artifacts_root: str | Path,
     gh_runner: Callable[..., Any] | None = None,
+    heartbeat_seconds: float = 30.0,
 ) -> Orchestrator:
     """Wire the full dependency graph from a validated config (used by the CLI and e2e tests).
 
@@ -1042,13 +1117,21 @@ def build_orchestrator(
     and validation gate. The Core depends only on these interfaces — never on a provider directly.
     """
     root = Path(artifacts_root)
-    providers = build_providers(config, artifacts_root=root)
+    providers = build_providers(
+        config, artifacts_root=root, heartbeat_seconds=heartbeat_seconds
+    )
 
     store = StateStore.open(root / "state.db")
     ledger = Ledger(root / "logs")
     router = AgentRouter(config, providers)
-    git = GitManager(config, store=store, artifacts_root=str(root), gh_runner=gh_runner)
-    checks = CheckRunner(config)
+    git = GitManager(
+        config,
+        store=store,
+        artifacts_root=str(root),
+        gh_runner=gh_runner,
+        heartbeat_seconds=heartbeat_seconds,
+    )
+    checks = CheckRunner(config, heartbeat_seconds=heartbeat_seconds)
     gate = ValidationGate(
         config,
         store_has_task_id=store.task_id_exists,
