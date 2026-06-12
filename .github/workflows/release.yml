@@ -1,0 +1,48 @@
+name: release
+
+# Cut a (pre)release when a version tag is pushed. The package version is derived from the tag by
+# hatch-vcs (e.g. tag `v0.1.0a1` -> version `0.1.0a1`); tags ending in aN/bN/rcN are marked as a
+# GitHub pre-release. See docs/RELEASING.md.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write          # required to create the GitHub release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history + tags so hatch-vcs can resolve the version
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install (with dev deps) and gate on the quality checks
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          ruff check .
+          ruff format --check .
+          mypy src
+          pytest -q
+
+      - name: Build sdist + wheel
+        run: |
+          pip install build
+          python -m build
+
+      - name: Create the GitHub (pre)release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          PRE=""
+          # aN / bN / rcN suffix (PEP 440 pre-release) -> mark as a GitHub pre-release.
+          if echo "$TAG" | grep -qE '(a|b|rc)[0-9]+$'; then PRE="--prerelease"; fi
+          gh release create "$TAG" dist/* $PRE --title "$TAG" --generate-notes

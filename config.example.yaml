@@ -1,6 +1,8 @@
 # Example configuration for wastech-orchestrator.
 # Copy to config.yaml and fill it in for your project. config.yaml is NOT committed to git.
 
+schema_version: 1                   # config format version; the orchestrator refuses newer configs
+
 orchestrator:
   auto_mode:
     enabled: false                  # when true, pick the next pending task after terminal cleanup

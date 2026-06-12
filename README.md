@@ -20,6 +20,7 @@ The orchestrator owns the process: it accepts a task → parses it → creates a
 | [docs/task-authoring.md](docs/task-authoring.md) | How to write valid task files, use front matter, choose refinement/decomposition flags, and avoid validation rejects. |
 | [docs/backlog/](docs/backlog/) | Aggregated backlog, including deferred v2 features, prompt customization, and token optimization. |
 | [docs/rules/](docs/rules/) | Development rules: style, architectural invariants, security, git-flow, tests. |
+| [CHANGELOG.md](CHANGELOG.md) | Release notes and the `config.yaml` / `state.db` / registry schema versions. |
 
 For coding agents: [CLAUDE.md](CLAUDE.md) (Claude Code) and [AGENTS.md](AGENTS.md) (Codex).
 
@@ -109,9 +110,29 @@ python -m wastech_orchestrator init .                              # external gi
 python -m wastech_orchestrator init . --git-mode in_repo_exclude   # keep artifacts out of the target repo
 ```
 
+### Two ways to set up
+
+- **`init [path]`** scaffolds a fresh layout in place (above) — for a dedicated orchestrator workspace where `repo.local_path` is a separate clone.
+- **`install [repo-path]`** binds an *existing* repo to a sibling control workspace, generates a validated `config.yaml`, and records the binding so later commands need no `--config`:
+
+```powershell
+pipx install "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git"
+cd C:\projects\my-repo
+wastech-orchestrator install .          # interactive wizard; the same commands work on macOS
+```
+
+`install` keeps `config.yaml`, `tasks/`, `logs/`, and SQLite state only in the sibling workspace and never touches the target repo's tracked files. Afterwards, from anywhere inside the repo:
+
+```bash
+wastech-orchestrator preflight
+wastech-orchestrator watch
+wastech-orchestrator status
+```
+
 Running (as the pipeline is implemented):
 
 ```bash
+python -m wastech_orchestrator --version                    # installed orchestrator version
 python -m wastech_orchestrator preflight                    # check both CLIs + isolation (read-only)
 python -m wastech_orchestrator run tasks/pending/task-001.md
 python -m wastech_orchestrator watch

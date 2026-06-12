@@ -3,6 +3,8 @@
 # This is the packaged copy used by `wastech-orchestrator init`; keep it in sync with the
 # repo-root config.example.yaml and with §11 of orchestrator_final_plan.md.
 
+schema_version: 1                   # config format version; the orchestrator refuses newer configs
+
 orchestrator:
   auto_mode:
     enabled: false                  # when true, pick the next pending task after terminal cleanup

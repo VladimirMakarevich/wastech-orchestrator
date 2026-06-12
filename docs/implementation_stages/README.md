@@ -1,5 +1,10 @@
 # Implementation stages
 
+> **Status: build complete.** All six phases below are implemented and tested — these files are now
+> a **historical record** of how the MVP was built. The `implement-phase` / `verify-dod` skills that
+> drove them have been retired. Track ongoing work in [../backlog/follow_ups.md](../backlog/follow_ups.md)
+> and the [product backlog](../backlog/product_backlog.md); keep docs in sync with `/sync-docs`.
+
 This directory breaks the build of **wastech-orchestrator** into six sequential phases.
 The canonical spec is [orchestrator_final_plan.md](../orchestrator_final_plan.md); these files
 expand its §15 roadmap into concrete, ordered work blocks with a Definition of Done (DoD) per

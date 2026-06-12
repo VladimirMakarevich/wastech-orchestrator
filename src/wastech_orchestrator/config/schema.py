@@ -13,6 +13,12 @@ from enum import StrEnum
 
 from wastech_orchestrator.providers.base import ProviderId, Stage
 
+# The config.yaml format version. Bumped only when the *format* changes (not on every release). The
+# loader refuses a config whose ``schema_version`` is newer than this (fail-loud); an absent or
+# older value is accepted — the older case is the hook for a future migration runner. See the
+# spec's "Versioning & compatibility" section.
+CONFIG_SCHEMA_VERSION = 1
+
 # Stages routed to an agent provider. The remaining stages (``testing``, ``publishing``) are run by
 # the orchestrator itself (Check Runner / Git Manager), so they never appear in ``agents.routing``
 # (spec §5, §11).

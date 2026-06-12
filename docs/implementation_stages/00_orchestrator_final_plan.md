@@ -889,6 +889,29 @@ wastech-orchestrator init [path]
 - Per path: if it exists it is **skipped**, otherwise it is **created**. `--force` re-copies only files under `templates/` and never touches `config.yaml`. `--dry-run` writes nothing. The exit code is `0` on success (an all-skipped re-run is a successful no-op); non-zero only on an I/O / permission error or an invalid `--git-mode`.
 - The generated `config.yaml` is the packaged `config.example.yaml`, which is kept in sync with §11.
 
+### 20.4. Project binding (`install`)
+
+`wastech-orchestrator install [repo-path]` is the second setup flow. Instead of scaffolding a new layout in place (`init`), it **binds an existing Git repository** to a sibling *control workspace* and generates a validated `config.yaml`. It is operator-run, idempotent, and never modifies the target repo's tracked files.
+
+```text
+wastech-orchestrator install [repo-path]
+    --workspace PATH               control workspace (default: a <repo-name>-orchestrator sibling)
+    --provider MODE                auto | codex | claude | both   (default: auto-detect on PATH)
+    --check COMMAND                a check command (repeatable); overrides ecosystem auto-detection
+    --create-pr / --no-create-pr   create a PR after push (default: yes iff `gh` is on PATH)
+    --auto-mode / --no-auto-mode   process pending tasks back-to-back (default: no)
+    --non-interactive              resolve from flags/detection; never prompt
+    --reconfigure                  back up and regenerate an existing config
+    --skip-preflight               do not run preflight after writing
+    --dry-run                      print the plan; write nothing
+```
+
+The wizard, in order: (1) detects the Git root, `origin`, current/base branch, and cleanliness; (2) proposes the sibling workspace; (3) detects `codex`/`claude` and proposes routing; (4) detects checks from `pyproject.toml` / `package.json` / `Cargo.toml` / `go.mod`; (5) asks about PR creation (default off without `gh`); (6) asks about auto mode (default off); (7) shows the resolved config and asks to confirm. A dirty repository is a warning the operator confirms.
+
+- **Generated config (§11).** `repo.local_path` is the bound repo (absolute, native path); the workspace is `git.footprint.external_root` with `location: external`, `tracking: none` (§21), so `tasks/`, `logs/`, and the SQLite state live only in the workspace. Only the selected providers are written, routing references only allowed providers, and the safe security defaults are immutable. The config is round-tripped through the loader and validator **before it is written**, and no secrets are stored. `install` never installs or authorizes the agent CLIs or `gh`; it only reports what is missing.
+- **Binding + discovery.** `install` records `repo-root -> config.yaml` in a per-user registry (`platformdirs`: `%LOCALAPPDATA%` / `~/Library/Application Support` / the XDG config dir; override with `WASTECH_ORCHESTRATOR_HOME`). Afterwards `preflight`, `watch`, and `status` resolve the config without `--config`, in order: explicit `--config`, then `./config.yaml` (backward compatibility), then the current repo's binding, otherwise a "run `install .`" hint. `watch` reads `tasks/pending` from the artifact root (the workspace), so it works from any directory.
+- **Idempotency.** A re-run is a no-op (`already configured`); `--reconfigure` writes a timestamped backup and atomically replaces the config; a `config.yaml` that exists but is bound to another repo is never overwritten. After a successful write `install` auto-runs preflight (§6.7); a preflight failure keeps the config but exits non-zero with specific instructions.
+
 ## 21. Git footprint in the target repository
 
 The orchestration and task files can be kept entirely out of the customer's repository, or committed as an audit trail. This is configured by two orthogonal axes under `git.footprint` (§11), yielding three supported modes (a tracked-`.gitignore` mode is intentionally not offered):
@@ -916,3 +939,15 @@ The **orchestrator** (Git Manager), never an agent, makes a separate audit commi
 - The default is `external` + `none`: `tasks/` and `logs/` live under `external_root`, outside `repo.local_path` (the §10 "paths relative to the task artifact directory" rule is unchanged — that directory is simply outside the clone).
 - The validator rejects the illegal pairings `external` + `exclude_local|commit` and `in_repo` + `none`, and requires `external_root` to resolve outside `repo.local_path` (normalization, anti-traversal).
 - Preflight edge: if the target repo already **tracks** a `tasks/`/`logs/` path (a name collision that `.git/info/exclude` cannot untrack), the task moves to `manual_action_required` rather than silently committing artifacts.
+
+## 22. Versioning and compatibility
+
+The orchestrator is a CLI, not a long-running daemon. Upgrading the implementation means upgrading the package (`pipx upgrade` / reinstall) and restarting any `watch` loop — done **between tasks**, since an in-flight task holds the single processing slot and a live working branch. `wastech-orchestrator --version` reports the installed version (single-sourced from the distribution metadata).
+
+Three persisted artifacts outlive an upgrade and each carries an **independent** schema version, bumped only when its format changes (not on every release):
+
+- **`config.yaml`** — a top-level `schema_version` (current `1`). The loader **refuses a config newer than it understands** (fail-closed `ConfigError`); an absent or older value is accepted (the older case is the future-migration hook). `install` stamps the current version into generated configs.
+- **`state.db`** — `PRAGMA user_version` (current `1`). `open()` refuses a database stamped newer than it understands and adopts a `0` value (a brand-new DB, or one created before versioning whose shape is already v1); `open_readonly` refuses-newer but never writes.
+- **registry** — a `version` field, read **forward-tolerantly**: bindings are plain repo→config paths and are version-stable, so config discovery never hard-fails on a newer registry.
+
+The policy is **fail-forward-loud**: a workspace written by a *newer* orchestrator is refused with a clean `error:` message and a non-zero exit (2) rather than misread. A *migration runner* for the `<`-than-current cases is intentionally **not** built yet — the version gates are the hooks for it. Operator guidance (backup, the upgrade-between-tasks rule, recovery) lives in [operations.md](../operations.md); per-release changes are recorded in [CHANGELOG.md](../../CHANGELOG.md).

@@ -44,5 +44,6 @@ There is a skill for running all checks: `/run-checks`.
 - Make minimal, focused changes; follow the style of the surrounding code.
 - For new components, check against the contracts in [docs/orchestrator_final_plan.md](docs/orchestrator_final_plan.md) (§4, §7, §8).
 - When adding/changing behavior — add or update tests (see docs/rules/testing.md).
+- When you change behavior/CLI/config/architecture — update the affected docs and a `CHANGELOG.md` `[Unreleased]` entry **in the same change** (use `/sync-docs`), and record deferred work in [docs/backlog/follow_ups.md](docs/backlog/follow_ups.md). The Stop docs-sync gate enforces this.
 - Before committing, run `ruff`, `mypy`, `pytest`.
-- Do not move to the next implementation stage until the DoD of the current one is met (§15–16 of the spec).
+- The MVP build (the six phases under [docs/implementation_stages/](docs/implementation_stages/)) is **complete**; those phase docs are now a historical record. Track ongoing work in [docs/backlog/follow_ups.md](docs/backlog/follow_ups.md) and the product backlog.

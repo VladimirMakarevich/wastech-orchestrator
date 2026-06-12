@@ -29,6 +29,7 @@ def _reset_package_logger() -> Iterator[None]:
     pkg.handlers.extend(saved)
     obslog._configured = False
 
+
 # --- watch_once unit tests (fake orchestrator) -------------------------------------------
 
 
@@ -284,23 +285,24 @@ def test_cmd_watch_auto_mode_two_tasks(
     git_repo, fake_cli, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project = tmp_path / "project"
-    (project / "tasks" / "pending").mkdir(parents=True)
+    external = project / "external"
+    # watch scans tasks/pending under the artifact root (external_root), not the cwd (§21).
+    (external / "tasks" / "pending").mkdir(parents=True)
     claude_cmd = fake_cli("success_edit", "claude")
     codex_cmd = fake_cli("success_edit", "codex")
     config = _write_cli_config(
         project, git_repo.clone, claude_cmd=claude_cmd, codex_cmd=codex_cmd, auto_mode=True
     )
     for tid in ("task-201", "task-202"):
-        _complete_task_file(project / "tasks" / "pending" / f"{tid}.md", tid)
+        _complete_task_file(external / "tasks" / "pending" / f"{tid}.md", tid)
 
     monkeypatch.chdir(project)
     code = cli.main(["--config", str(config), "watch"])
     assert code == 0
-    external = project / "external"
     ledger_lines = (external / "logs" / "completed.jsonl").read_text(encoding="utf-8").splitlines()
     ids = {json.loads(line)["id"] for line in ledger_lines}
     assert ids == {"task-201", "task-202"}  # both ran sequentially under auto mode
-    # Both task files moved out of pending into tasks/done (§20.2).
+    # Both task files moved out of pending into tasks/done under the artifact root (§20.2, §21).
     for tid in ("task-201", "task-202"):
-        assert (project / "tasks" / "done" / f"{tid}.md").exists()
-        assert not (project / "tasks" / "pending" / f"{tid}.md").exists()
+        assert (external / "tasks" / "done" / f"{tid}.md").exists()
+        assert not (external / "tasks" / "pending" / f"{tid}.md").exists()

@@ -119,16 +119,16 @@ The binding to a specific project/repo is set in `config.yaml` (see §5) and/or 
 git fetch origin
 git checkout main
 git pull origin main
-git checkout -b codex/task-001-add-login-validation
+git checkout -b agent/task-001-add-login-validation
 ```
 
 After:
 
 ```bash
 git add .
-git commit -m "Implement task-001: add login validation"
-git push origin codex/task-001-add-login-validation
-gh pr create --title "Task 001" --body-file logs/task-001/pr.md --base main --head codex/task-001-add-login-validation
+git commit -m "feat: implement task-001: add login validation"
+git push origin agent/task-001-add-login-validation
+gh pr create --title "Task 001" --body-file logs/task-001/pr.md --base main --head agent/task-001-add-login-validation
 git checkout main
 ```
 

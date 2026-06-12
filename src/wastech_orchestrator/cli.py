@@ -10,14 +10,17 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
+import tempfile
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 from importlib import resources
 from importlib.resources.abc import Traversable
 from pathlib import Path
 
-from wastech_orchestrator.config.loader import load_config
+from wastech_orchestrator import __version__
+from wastech_orchestrator.config.loader import ConfigError, load_config
 from wastech_orchestrator.config.schema import FootprintLocation, OrchestratorConfig
 from wastech_orchestrator.config.validation import validate_config
 from wastech_orchestrator.core.orchestrator import (
@@ -27,10 +30,11 @@ from wastech_orchestrator.core.orchestrator import (
     build_providers,
 )
 from wastech_orchestrator.core.state_machine import Status
+from wastech_orchestrator.install import config_writer, detect, registry, wizard
 from wastech_orchestrator.observability.logging import configure_logging
-from wastech_orchestrator.providers.base import Stage
+from wastech_orchestrator.providers.base import ProviderId, Stage
 from wastech_orchestrator.security.isolation import check_isolation
-from wastech_orchestrator.state_store import StateStore
+from wastech_orchestrator.state_store import IncompatibleStateError, StateStore
 
 # --log-level names → stdlib logging levels for the structured operator trace (§6.6).
 _LOG_LEVELS: dict[str, int] = {
@@ -79,13 +83,29 @@ RUNTIME_DIRS: tuple[str, ...] = (
     "workspace",
 )
 
+# Directories `install` creates inside the sibling control workspace. Unlike `init` there is no
+# `workspace/` clone dir: `install` binds the existing repo as repo.local_path (§21 external).
+INSTALL_WORKSPACE_DIRS: tuple[str, ...] = (
+    "tasks/pending",
+    "tasks/processing",
+    "tasks/done",
+    "tasks/failed",
+    "tasks/rejected",
+    "logs",
+)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="wastech-orchestrator",
         description="Orchestrator for coding agents (Codex / Claude Code) on top of Git.",
     )
-    parser.add_argument("--config", default="config.yaml", help="path to config.yaml")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="path to config.yaml (default: ./config.yaml, else the bound config from 'install')",
+    )
     parser.add_argument(
         "--log-level",
         choices=sorted(_LOG_LEVELS),
@@ -131,6 +151,57 @@ def build_parser() -> argparse.ArgumentParser:
     init_cmd.add_argument(
         "--quiet", action="store_true", help="suppress the per-file report (exit code only)"
     )
+
+    install_cmd = sub.add_parser(
+        "install", help="bind the current repo to a sibling workspace and generate config.yaml"
+    )
+    install_cmd.add_argument(
+        "repo_path", nargs="?", default=".", help="repository path (default: current directory)"
+    )
+    install_cmd.add_argument(
+        "--workspace",
+        default=None,
+        help="control workspace directory (default: a <repo-name>-orchestrator sibling)",
+    )
+    install_cmd.add_argument(
+        "--provider",
+        choices=("auto", "codex", "claude", "both"),
+        default="auto",
+        help="which providers to route to (default: auto-detect what is on PATH)",
+    )
+    install_cmd.add_argument(
+        "--check",
+        action="append",
+        default=None,
+        metavar="COMMAND",
+        help="a check command (repeatable); overrides ecosystem auto-detection",
+    )
+    install_cmd.add_argument(
+        "--create-pr",
+        dest="create_pr",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="create a pull request after push (default: yes when 'gh' is on PATH)",
+    )
+    install_cmd.add_argument(
+        "--auto-mode",
+        dest="auto_mode",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="process pending tasks back-to-back (default: no)",
+    )
+    install_cmd.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="resolve everything from flags/detection; never prompt",
+    )
+    install_cmd.add_argument(
+        "--reconfigure", action="store_true", help="back up and overwrite an existing config"
+    )
+    install_cmd.add_argument(
+        "--skip-preflight", action="store_true", help="do not run preflight after writing config"
+    )
+    install_cmd.add_argument("--dry-run", action="store_true", help="print the plan; write nothing")
 
     run_cmd = sub.add_parser("run", help="run a single task from a file")
     run_cmd.add_argument("task_file", help="path to the task file (.md or .json)")
@@ -233,6 +304,37 @@ def _load_config(path: str) -> OrchestratorConfig:
     return config
 
 
+def resolve_config_path(args: argparse.Namespace) -> str | None:
+    """Find the config to load (backlog: interactive installer), in priority order:
+
+    1. an explicit ``--config PATH``;
+    2. ``./config.yaml`` in the current directory (backward compatibility with ``init``);
+    3. the binding for the current Git repository recorded by ``install`` (works from any subdir);
+    4. otherwise ``None`` (the caller prints an actionable hint).
+    """
+    explicit = getattr(args, "config", None)
+    if explicit is not None:
+        return str(explicit)
+    if Path("config.yaml").is_file():
+        return "config.yaml"
+    info = detect.git_info(Path.cwd())
+    if info is not None:
+        return registry.lookup(info.root)
+    return None
+
+
+def load_config_for(args: argparse.Namespace) -> OrchestratorConfig | None:
+    """Resolve + load a command's config; print an install hint and return ``None`` if not found."""
+    path = resolve_config_path(args)
+    if path is None:
+        print(
+            "no orchestrator config found. Run 'wastech-orchestrator install .' in your "
+            "repository to set one up, or pass --config PATH."
+        )
+        return None
+    return _load_config(path)
+
+
 def artifacts_root_for(config: OrchestratorConfig) -> str:
     """Where ``logs/<task-id>/`` lives: ``external_root`` for external, else the clone (§21)."""
     if config.git.footprint.location is FootprintLocation.EXTERNAL:
@@ -240,9 +342,14 @@ def artifacts_root_for(config: OrchestratorConfig) -> str:
     return config.repo.local_path
 
 
-def pending_dir() -> Path:
-    """The folder ``watch`` scans for new tasks (created by ``init``, §20.2)."""
-    return Path("tasks") / "pending"
+def pending_dir(config: OrchestratorConfig) -> Path:
+    """The folder ``watch`` scans for new tasks: ``tasks/pending`` under the artifact root (§21).
+
+    For an external footprint this is the control workspace (``external_root``); for an in-repo
+    footprint it is the clone. With ``install``'s absolute ``external_root``, ``watch`` therefore
+    works from anywhere, not only the directory the tasks happen to live in.
+    """
+    return Path(artifacts_root_for(config)) / "tasks" / "pending"
 
 
 def _configure_runtime_logging(args: argparse.Namespace) -> None:
@@ -292,7 +399,9 @@ def watch_once(
 def cmd_run(args: argparse.Namespace) -> int:
     """Process exactly one task file through the Core pipeline (§5)."""
     _configure_runtime_logging(args)
-    config = _load_config(args.config)
+    config = load_config_for(args)
+    if config is None:
+        return 2
     orchestrator = build_orchestrator(
         config,
         artifacts_root=artifacts_root_for(config),
@@ -304,28 +413,27 @@ def cmd_run(args: argparse.Namespace) -> int:
     return _EXIT_BY_STATUS.get(result.final_status, 1)
 
 
-def cmd_preflight(args: argparse.Namespace) -> int:
-    """Report each CLI's health and the strict_isolation verdict (read-only diagnostics, §6.7).
+def run_preflight(config: OrchestratorConfig) -> tuple[bool, list[str]]:
+    """Compute the read-only preflight verdict + report lines (spec §6.7); no task is processed.
 
-    Runs every allowed provider's ``preflight()`` (``<cli> --version`` — no task is processed) and
-    the deterministic ``check_isolation`` policy check. Exit 0 iff every provider is healthy and the
-    required isolation can be enabled; non-zero otherwise. Messages are secret-free by contract.
+    Runs every allowed provider's ``preflight()`` (``<cli> --version``) and the deterministic
+    ``check_isolation`` policy check. Returns ``(ready, lines)`` where ``ready`` is true iff every
+    provider is healthy and the required isolation can be enabled. Lines are secret-free by
+    contract. Shared by ``cmd_preflight`` and the installer's post-write auto-preflight.
     """
-    _configure_runtime_logging(args)
-    config = _load_config(args.config)
+    lines: list[str] = []
     providers = build_providers(config, artifacts_root=artifacts_root_for(config))
-
     ok = True
     for pid in config.agents.allowed:
         provider = providers.get(pid)
         if provider is None:
-            print(f"{pid.value}: FAIL — no provider adapter configured")
+            lines.append(f"{pid.value}: FAIL — no provider adapter configured")
             ok = False
             continue
         health = provider.preflight()
         healthy = health.executable_found and health.supports_required_features
         ok = ok and healthy
-        print(
+        lines.append(
             f"{pid.value}: {'OK' if healthy else 'FAIL'} — {health.message} "
             f"(version={health.version or 'unknown'}, authenticated={health.authenticated})"
         )
@@ -333,27 +441,40 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     reasons = check_isolation(config)
     if reasons:
         ok = False
-        print("isolation: FAIL")
-        for reason in reasons:
-            print(f"  - {reason}")
+        lines.append("isolation: FAIL")
+        lines.extend(f"  - {reason}" for reason in reasons)
     else:
         enforced = "enforced" if config.security.strict_isolation else "strict_isolation=false"
-        print(f"isolation: OK ({enforced})")
+        lines.append(f"isolation: OK ({enforced})")
 
-    print(f"preflight: {'ready' if ok else 'NOT ready'}")
+    lines.append(f"preflight: {'ready' if ok else 'NOT ready'}")
+    return ok, lines
+
+
+def cmd_preflight(args: argparse.Namespace) -> int:
+    """Report each CLI's health and the strict_isolation verdict (read-only diagnostics, §6.7)."""
+    _configure_runtime_logging(args)
+    config = load_config_for(args)
+    if config is None:
+        return 2
+    ok, lines = run_preflight(config)
+    for line in lines:
+        print(line)
     return 0 if ok else 1
 
 
 def cmd_watch(args: argparse.Namespace) -> int:
     """Resume an in-flight task and process pending tasks (auto mode permitting)."""
     _configure_runtime_logging(args)
-    config = _load_config(args.config)
+    config = load_config_for(args)
+    if config is None:
+        return 2
     orchestrator = build_orchestrator(
         config,
         artifacts_root=artifacts_root_for(config),
         heartbeat_seconds=args.heartbeat_seconds,
     )
-    results = watch_once(orchestrator, config, pending_dir())
+    results = watch_once(orchestrator, config, pending_dir(config))
     if not results:
         print("watch: nothing to do (slot free, no pending tasks)")
         return 0
@@ -366,7 +487,9 @@ def cmd_watch(args: argparse.Namespace) -> int:
 def cmd_status(args: argparse.Namespace) -> int:
     """Show persisted progress without starting providers, checks, or git operations."""
     _configure_runtime_logging(args)
-    config = _load_config(args.config)
+    config = load_config_for(args)
+    if config is None:
+        return 2
     db_path = Path(artifacts_root_for(config)) / "state.db"
     if not db_path.is_file():
         print(f"status: no state database at {db_path}")
@@ -418,22 +541,151 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _install_atomic_write(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` atomically (temp file in the same dir + ``os.replace``)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".config-", suffix=".yaml")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def _install_backup_config(path: Path) -> Path:
+    """Copy an existing config to a timestamped ``.bak-<UTC>`` sibling and return that path."""
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    backup = path.with_name(f"{path.name}.bak-{stamp}")
+    backup.write_bytes(path.read_bytes())
+    return backup
+
+
+def _install_create_dirs(workspace: Path) -> None:
+    """Create the control workspace's task/log directories (idempotent)."""
+    for rel in INSTALL_WORKSPACE_DIRS:
+        (workspace / rel).mkdir(parents=True, exist_ok=True)
+
+
+def _install_print_plan(
+    spec: config_writer.InstallSpec, config_path: Path, missing: tuple[ProviderId, ...]
+) -> None:
+    """Print what ``install`` would do, writing nothing (``--dry-run``)."""
+    print("install (dry-run): no changes written")
+    print(f"  repo:       {spec.repo_local_path}")
+    print(f"  origin:     {spec.repo_url}")
+    print(f"  base:       {spec.base_branch}")
+    print(f"  workspace:  {spec.workspace}")
+    print(f"  config:     {config_path}")
+    print(f"  providers:  {', '.join(p.value for p in spec.providers)}")
+    print(f"  checks:     {', '.join(spec.checks) or '(none)'}")
+    print(f"  create_pr:  {spec.create_pull_request}")
+    print(f"  auto_mode:  {spec.auto_mode}")
+    for rel in INSTALL_WORKSPACE_DIRS:
+        print(f"  would create {spec.workspace / rel}")
+    print(f"  would bind   {spec.repo_local_path} -> {config_path}")
+    if missing:
+        print(f"  note: provider(s) not on PATH: {', '.join(p.value for p in missing)}")
+
+
+def _install_run_preflight(config_path: Path, *, skip: bool) -> int:
+    """Auto-run preflight after writing config; on failure keep config but exit non-zero (§6.7)."""
+    if skip:
+        return 0
+    ok, lines = run_preflight(_load_config(str(config_path)))
+    for line in lines:
+        print(line)
+    if not ok:
+        print(
+            "install: preflight is NOT ready — the config was written; resolve the items above, "
+            "then run 'wastech-orchestrator preflight'."
+        )
+        return 1
+    return 0
+
+
+def cmd_install(args: argparse.Namespace) -> int:
+    """Bind the current repo to a sibling control workspace and generate config (backlog).
+
+    Runs the wizard to resolve settings, then idempotently writes a validated ``config.yaml`` into
+    the workspace and records the ``repo -> config`` binding. Re-running is a no-op unless
+    ``--reconfigure`` (which backs up and regenerates); a config that exists but is bound to another
+    repo is never overwritten. After a successful write it auto-runs preflight (§6.7).
+    """
+    _configure_runtime_logging(args)
+    try:
+        outcome = wizard.run_wizard(
+            repo_path=Path(args.repo_path),
+            workspace=Path(args.workspace) if args.workspace else None,
+            provider=args.provider,
+            checks=args.check,
+            create_pr=args.create_pr,
+            auto_mode=args.auto_mode,
+            non_interactive=args.non_interactive,
+            prompter=wizard.ConsolePrompter(),
+        )
+    except wizard.InstallError as exc:
+        print(f"install: {exc}")
+        return 1
+
+    spec = outcome.spec
+    config_path = (spec.workspace / "config.yaml").resolve()
+
+    if args.dry_run:
+        _install_print_plan(spec, config_path, outcome.missing_providers)
+        return 0
+
+    bound = registry.lookup(spec.repo_local_path)
+    bound_to_this = bound is not None and Path(bound).resolve() == config_path
+    if config_path.exists():
+        if not args.reconfigure:
+            if bound_to_this:
+                print(f"install: already configured at {config_path} (use --reconfigure to redo)")
+                return _install_run_preflight(config_path, skip=args.skip_preflight)
+            print(
+                f"install: {config_path} already exists and is not bound to "
+                f"{spec.repo_local_path}; choose another --workspace or pass --reconfigure"
+            )
+            return 1
+        print(f"install: backed up existing config to {_install_backup_config(config_path)}")
+
+    text = config_writer.build_and_validate(spec)
+    _install_create_dirs(spec.workspace)
+    _install_atomic_write(config_path, text)
+    registry.bind(spec.repo_local_path, config_path)
+    print(f"install: wrote {config_path}")
+    print(f"install: bound {spec.repo_local_path} -> {config_path}")
+    if outcome.missing_providers:
+        names = ", ".join(p.value for p in outcome.missing_providers)
+        print(f"install: note — selected provider(s) not on PATH yet: {names}")
+    return _install_run_preflight(config_path, skip=args.skip_preflight)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.heartbeat_seconds < 0:
         parser.error("--heartbeat-seconds must be >= 0")
 
-    if args.command == "init":
-        return cmd_init(args)
-    if args.command == "run":
-        return cmd_run(args)
-    if args.command == "watch":
-        return cmd_watch(args)
-    if args.command == "preflight":
-        return cmd_preflight(args)
-    if args.command == "status":
-        return cmd_status(args)
+    # A config/DB written by a newer orchestrator is refused with a clean message + exit 2 here,
+    # rather than surfacing as a traceback (fail loud, not ugly). See the versioning gates.
+    try:
+        if args.command == "init":
+            return cmd_init(args)
+        if args.command == "install":
+            return cmd_install(args)
+        if args.command == "run":
+            return cmd_run(args)
+        if args.command == "watch":
+            return cmd_watch(args)
+        if args.command == "preflight":
+            return cmd_preflight(args)
+        if args.command == "status":
+            return cmd_status(args)
+    except (ConfigError, IncompatibleStateError) as exc:
+        print(f"error: {exc}")
+        return 2
     raise SystemExit(f"Unknown command '{args.command}'.")
 
 
