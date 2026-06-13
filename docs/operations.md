@@ -25,8 +25,9 @@ python -m venv .venv
 pip install -e ".[dev]"             # or: pip install wastech-orchestrator
 ```
 
-Scaffold a project layout (folders + `config.yaml` + editable templates). `init` is idempotent — a
-second run skips everything and never overwrites `config.yaml`:
+Scaffold a project layout (folders + `config.yaml` + editable templates + a `worc/` agent
+task-authoring guide). `init` is idempotent — a second run skips everything and never overwrites
+`config.yaml`:
 
 ```bash
 python -m wastech_orchestrator init .                            # in-repo audit footprint (default)
@@ -36,6 +37,12 @@ python -m wastech_orchestrator init . --git-mode external        # artifacts out
 
 Then copy/adjust `config.yaml` (it mirrors §11 of the spec) and point `repo.url` /
 `repo.local_path` at the target repository clone.
+
+Alongside `config.yaml`, `init` writes a `worc/` folder — a compact, agent-facing guide for writing
+task files (the task contract, a decision guide, best practices, and ready-to-adapt examples). Point
+an AI agent at it and ask it to "write a task for this orchestrator." It is generated content with no
+operator edits; under an in-repo footprint it is git-ignored alongside the other runtime files, and
+`upgrade-docs` (below) refreshes it after a package upgrade.
 
 For self-hosting with `init`, the clone in `repo.local_path` must be separate from the checkout used
 to run the orchestrator. Keep the known-good control process, SQLite state, tasks, and logs outside
@@ -58,9 +65,10 @@ The wizard detects the Git root, `origin`, base branch, and cleanliness; propose
 workspace `<repo-name>-orchestrator`; finds `codex`/`claude`/`gh`; proposes checks from the repo's
 ecosystem (`pyproject.toml` / `package.json` / `Cargo.toml` / `go.mod`); and writes a validated
 `config.yaml` into the workspace. It **binds the current checkout** as `repo.local_path` (so the
-orchestrator branches/commits/pushes there) and keeps `config.yaml`, `tasks/`, `logs/`, and the
-SQLite state **only in the sibling workspace** — the installer never touches the target repo's
-tracked files. It never installs or authorizes the CLIs; it reports what is missing and auto-runs
+orchestrator branches/commits/pushes there) and keeps `config.yaml`, `tasks/`, `logs/`, the
+SQLite state, and the `worc/` agent task-authoring guide **only in the sibling workspace** — the
+installer never touches the target repo's tracked files. (`install --reconfigure` refreshes the
+`worc/` docs to the packaged version.) It never installs or authorizes the CLIs; it reports what is missing and auto-runs
 `preflight` at the end (a failed preflight keeps the config but exits non-zero with instructions).
 
 The binding (`repo-root -> config.yaml`) is stored in a per-user directory via `platformdirs`
@@ -123,6 +131,23 @@ and fail-closed (it refuses a config that is unparsable or already newer than th
 writes a config that would fail validation). **Caveat:** when it does rewrite the file it re-emits via
 YAML and drops inline comments — see `config.example.yaml` / [configuration.md](configuration.md) for
 field docs. `--dry-run` lists what would be added without writing.
+
+The `worc/` agent task-authoring docs also ship with the package, so an upgrade brings newer docs
+than your already-installed copy. Refresh the installed copy (beside `config.yaml`) with
+**`upgrade-docs`**:
+
+```bash
+wastech-orchestrator upgrade-docs                # uses the discovered/bound config location
+wastech-orchestrator upgrade-docs --dry-run      # preview added/updated/removed files only
+```
+
+Unlike `config.yaml`, the `worc/` docs are generated content with **no operator edits to preserve**,
+so this is a straight overwrite to the packaged version: it writes missing or changed files, removes
+files no longer shipped, and makes no backup. It is idempotent (an already-current copy is a no-op),
+`--dry-run` writes nothing, and it fails closed (exit 2 with the same hint as `upgrade-config`) when
+no install location can be resolved. After a package upgrade, run **both** `upgrade-config` and
+`upgrade-docs` to bring your deployment fully current. (A single umbrella `upgrade` that does both is
+tracked in [follow-ups](backlog/follow_ups.md).)
 
 To install or pin a specific published (pre)release, append its tag to the `pipx`/`pip` source — e.g.
 `pipx install "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git@v0.1.1a1"`. Releases

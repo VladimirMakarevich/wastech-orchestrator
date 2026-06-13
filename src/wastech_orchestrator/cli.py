@@ -293,6 +293,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="print what would change; write nothing"
     )
 
+    upgrade_docs_cmd = sub.add_parser(
+        "upgrade-docs",
+        help="refresh the installed worc/ task-authoring docs to the packaged version (overwrite)",
+    )
+    upgrade_docs_cmd.add_argument(
+        "--dry-run", action="store_true", help="print what would change; write nothing"
+    )
+
     return parser
 
 
@@ -306,6 +314,39 @@ def _iter_template_files(root: Path) -> Iterator[Path]:
     for path in sorted(root.rglob("*")):
         if path.is_file():
             yield path.relative_to(root)
+
+
+def _worc_root() -> Traversable:
+    """The packaged ``worc/`` agent task-authoring docs (works from a source tree or a wheel).
+
+    These ship as package data next to ``templates/`` and are copied beside ``config.yaml`` by
+    ``init``/``install`` so an AI agent can author tasks from a local, self-contained guide. Unlike
+    ``templates/``, they are generated content with no operator edits — ``upgrade-docs`` overwrites
+    them to the packaged version.
+    """
+    return resources.files("wastech_orchestrator").joinpath("worc")
+
+
+def _copy_worc_docs(dest_root: Path, *, overwrite: bool, dry: bool) -> tuple[list[str], list[str]]:
+    """Copy the packaged ``worc/`` docs into ``dest_root/worc`` (beside ``config.yaml``).
+
+    Mirrors ``cmd_init``'s file handling: existing files are skipped unless ``overwrite``; ``dry``
+    writes nothing. Returns ``(written, skipped)`` as ``worc/...`` relative paths for reporting.
+    """
+    written: list[str] = []
+    skipped: list[str] = []
+    with resources.as_file(_worc_root()) as wroot:
+        for rel in _iter_template_files(Path(wroot)):
+            label = str(Path("worc") / rel)
+            dest = dest_root / "worc" / rel
+            if dest.exists() and not overwrite:
+                skipped.append(label)
+                continue
+            written.append(label)
+            if not dry:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes((Path(wroot) / rel).read_bytes())
+    return written, skipped
 
 
 def _apply_git_mode(config_text: str, git_mode: str) -> str:
@@ -367,6 +408,12 @@ def cmd_init(args: argparse.Namespace) -> int:
                 (Path(troot) / rel_path).read_bytes(),
                 overwrite=args.force,
             )
+
+    # 3b. The worc/ agent task-authoring docs, copied beside config.yaml so an agent can author
+    #     tasks from a local, self-contained guide. Skip-existing/--force/--dry-run like the rest.
+    worc_written, worc_skipped = _copy_worc_docs(target, overwrite=args.force, dry=dry)
+    created.extend(worc_written)
+    skipped.extend(worc_skipped)
 
     # 4. Under an in-repo footprint, ignore the orchestrator's runtime files so the operator's own
     #    `git status` stays clean (§21.2). No-op for external mode (runtime files live outside the
@@ -471,6 +518,71 @@ def cmd_upgrade_config(args: argparse.Namespace) -> int:
     _install_atomic_write(path, rendered)
     _report("upgrade-config: updated")
     print(f"  backup: {backup}")
+    return 0
+
+
+def cmd_upgrade_docs(args: argparse.Namespace) -> int:
+    """Refresh the installed ``worc/`` docs (beside ``config.yaml``) to the packaged version.
+
+    The worc/ docs ship with the package, so an upgraded orchestrator carries newer docs than an
+    already-installed copy. Unlike ``config.yaml`` they are generated content with no operator edits
+    to preserve, so this is a straight overwrite-with-the-packaged-version (no backup): missing or
+    differing files are written, files no longer in the package are removed. Idempotent — an
+    already-current copy is a no-op — and ``--dry-run`` previews without writing. Fail-closed
+    (exit 2) when no install location can be resolved, consistent with ``upgrade-config``.
+    """
+    path_str = resolve_config_path(args)
+    if path_str is None or not Path(path_str).is_file():
+        target = f" ({path_str})" if path_str is not None else ""
+        print(
+            f"upgrade-docs: no config.yaml found{target} — pass --config PATH, run from a "
+            "directory containing config.yaml, or 'install' to bind this repo"
+        )
+        return 2
+    worc_dir = Path(path_str).resolve().parent / "worc"
+
+    packaged: dict[Path, bytes] = {}
+    with resources.as_file(_worc_root()) as wroot:
+        for rel in _iter_template_files(Path(wroot)):
+            packaged[rel] = (Path(wroot) / rel).read_bytes()
+
+    to_add: list[Path] = []
+    to_update: list[Path] = []
+    for rel, content in sorted(packaged.items()):
+        dest = worc_dir / rel
+        if not dest.is_file():
+            to_add.append(rel)
+        elif dest.read_bytes() != content:
+            to_update.append(rel)
+    installed = (
+        {p.relative_to(worc_dir) for p in worc_dir.rglob("*") if p.is_file()}
+        if worc_dir.is_dir()
+        else set()
+    )
+    to_remove = sorted(installed - packaged.keys())
+
+    if not (to_add or to_update or to_remove):
+        print(f"upgrade-docs: already up to date ({len(packaged)} files in {worc_dir})")
+        return 0
+
+    def _report(prefix: str) -> None:
+        print(f"{prefix} {worc_dir}")
+        for rel in to_add:
+            print(f"  + {Path('worc') / rel}")
+        for rel in to_update:
+            print(f"  ~ {Path('worc') / rel}")
+        for rel in to_remove:
+            print(f"  - {Path('worc') / rel}")
+
+    if args.dry_run:
+        _report("upgrade-docs (dry-run): would update")
+        return 0
+
+    for rel in to_add + to_update:
+        _install_atomic_write(worc_dir / rel, packaged[rel].decode("utf-8"))
+    for rel in to_remove:
+        (worc_dir / rel).unlink()
+    _report("upgrade-docs: updated")
     return 0
 
 
@@ -935,6 +1047,7 @@ def _install_print_plan(
         print(f"  would create {spec.repo_local_path / rel}")
     for rel in INSTALL_WORKSPACE_DIRS:
         print(f"  would create {spec.workspace / rel}")
+    print(f"  would create {spec.workspace / 'worc'}/ (agent task-authoring docs)")
     print(f"  would bind   {spec.repo_local_path} -> {config_path}")
     if missing:
         print(f"  note: provider(s) not on PATH: {', '.join(p.value for p in missing)}")
@@ -1031,6 +1144,11 @@ def cmd_install(args: argparse.Namespace) -> int:
     registry.bind(spec.repo_local_path, config_path)
     print(f"install: wrote {config_path}")
     print(f"install: bound {spec.repo_local_path} -> {config_path}")
+    # The control workspace lives outside the repo, so the worc/ docs there never touch git status.
+    # --reconfigure refreshes them to the packaged version; a plain re-run leaves existing files.
+    worc_written, _ = _copy_worc_docs(spec.workspace, overwrite=args.reconfigure, dry=False)
+    if worc_written:
+        print(f"install: wrote agent task-authoring docs to {spec.workspace / 'worc'}")
     # Install always uses the in-repo footprint, so keep the operator's `git status` clean (§21.2).
     if append_runtime_excludes(spec.repo_local_path, tracked=args.gitignore_tracked):
         target = ".gitignore" if args.gitignore_tracked else ".git/info/exclude"
@@ -1075,6 +1193,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_status(args)
         if args.command == "upgrade-config":
             return cmd_upgrade_config(args)
+        if args.command == "upgrade-docs":
+            return cmd_upgrade_docs(args)
     except (ConfigError, IncompatibleStateError, detect.GhNotAvailableError) as exc:
         print(f"error: {exc}")
         return 2

@@ -18,6 +18,23 @@ The maintainer bumps the package version in `pyproject.toml` on release; `wastec
 ## [Unreleased]
 
 ### Added
+- **Agent task-authoring docs (`worc/`)**: a compact, rule-first, copy-paste-oriented guide an AI
+  agent can be pointed at to author valid, well-scoped task files without reading the whole `docs/`
+  tree. Authored in [`docs/worc/`](docs/worc/README.md) (the task contract + hard validation rules, a
+  "when to use what" decision guide, best practices, and two ready-to-adapt example tasks) and shipped
+  as package data so it is available from an installed wheel. `init` writes it beside the generated
+  `config.yaml` (a `worc/` folder); `install` writes it into the control workspace beside that
+  workspace's `config.yaml` (`--reconfigure` refreshes it). Under an in-repo footprint the copy is
+  git-ignored alongside the other runtime files (added to `append_runtime_excludes`), so it never
+  pollutes the operator's `git status` or enters a code commit. The shipped example tasks are verified
+  to pass the §19 `ValidationGate`, and a test keeps the authored and packaged copies in sync.
+- **`upgrade-docs` command**: refreshes the installed `worc/` docs (beside `config.yaml`) to the
+  current packaged version after a package upgrade. Because the docs are generated content with no
+  operator edits to preserve, it is a straight overwrite — it writes missing/changed files, removes
+  files no longer shipped, makes no backup, is idempotent (already-current → no-op), previews with
+  `--dry-run`, and fails closed (exit 2 with an actionable hint) when no install location can be
+  resolved, mirroring `upgrade-config`. Run it alongside `upgrade-config` after `pipx upgrade`. See
+  [docs/operations.md](docs/operations.md#upgrading-the-orchestrator).
 - **`upgrade-config` command**: brings an operator's `config.yaml` up to the current format after a
   package upgrade. It adds any keys the new version introduced (from the packaged template's defaults),
   **preserves every existing operator value**, stamps the current `schema_version`, and backs up the

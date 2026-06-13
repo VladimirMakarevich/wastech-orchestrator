@@ -67,6 +67,9 @@ RUNTIME_GITIGNORE_LINES: tuple[str, ...] = (
     "config.yaml",
     "config.yaml.bak-*",
     "orchestrator.pid",
+    # The agent task-authoring docs copied beside config.yaml by `init`/`install` (§21.2): generated
+    # per-deployment content, never part of a code commit and kept out of the operator's git status.
+    "worc/",
 )
 
 

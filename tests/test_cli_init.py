@@ -54,7 +54,33 @@ _RUNTIME_IGNORES = (
     "state.db-shm",
     "config.yaml.bak-*",
     "orchestrator.pid",
+    "worc/",
 )
+
+
+def test_init_copies_worc_docs(tmp_path: Path) -> None:
+    assert main(["init", str(tmp_path), "--quiet"]) == 0
+    # The agent task-authoring guide lands beside config.yaml, not under templates/.
+    assert (tmp_path / "worc" / "README.md").is_file()
+    assert (tmp_path / "worc" / "examples" / "task-minimal.md").is_file()
+
+
+def test_init_worc_docs_skipped_on_second_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["init", str(tmp_path), "--quiet"]) == 0
+    capsys.readouterr()
+    assert main(["init", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "skip worc/README.md" in out
+
+
+def test_init_force_recopies_worc_docs(tmp_path: Path) -> None:
+    assert main(["init", str(tmp_path), "--quiet"]) == 0
+    readme = tmp_path / "worc" / "README.md"
+    readme.write_text("# edited\n", encoding="utf-8")
+    assert main(["init", str(tmp_path), "--force", "--quiet"]) == 0
+    assert readme.read_text(encoding="utf-8") != "# edited\n"  # re-copied from the package
 
 
 def test_gitignore_tracked_writes_runtime_block(tmp_path: Path) -> None:

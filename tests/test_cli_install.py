@@ -238,6 +238,28 @@ def test_install_gitignore_tracked_writes_dot_gitignore(
     assert "orchestrator.pid" in (git_repo.clone / ".gitignore").read_text(encoding="utf-8")
 
 
+def test_install_copies_worc_docs_into_workspace(
+    git_repo: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _present(monkeypatch, "codex")
+    assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
+    workspace = git_repo.clone.parent / f"{git_repo.clone.name}-orchestrator"
+    # The agent task-authoring docs land beside config.yaml in the control workspace (out of repo).
+    assert (workspace / "worc" / "README.md").is_file()
+    assert (workspace / "config.yaml").is_file()
+
+
+def test_reconfigure_refreshes_worc_docs(git_repo: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    _present(monkeypatch, "codex")
+    assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
+    workspace = git_repo.clone.parent / f"{git_repo.clone.name}-orchestrator"
+    readme = workspace / "worc" / "README.md"
+    readme.write_text("# stale\n", encoding="utf-8")
+    redo = _ni(git_repo.clone, "--provider", "codex", "--reconfigure", "--skip-preflight")
+    assert cli.main(redo) == 0
+    assert readme.read_text(encoding="utf-8") != "# stale\n"  # refreshed from the package
+
+
 def test_install_runtime_excludes_are_idempotent(
     git_repo: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -180,9 +180,9 @@ to run `install .`.
 ## Commands
 
 ```text
-wastech-orchestrator init [path]        scaffold folders + config.yaml + templates (idempotent)
+wastech-orchestrator init [path]        scaffold folders + config.yaml + templates + worc/ docs (idempotent)
                           --git-mode in_repo_commit | in_repo_exclude | external   (default: in_repo_commit)
-wastech-orchestrator install [repo]     bind an existing repo, generate config, record the binding
+wastech-orchestrator install [repo]     bind an existing repo, generate config + worc/ docs, record the binding
                           --non-interactive --provider codex|claude|both|auto --no-create-pr --reconfigure
 wastech-orchestrator preflight          check both CLIs' health + the isolation policy (read-only)
 wastech-orchestrator telegram-test      send a real correlated Telegram prompt and wait for reply
@@ -197,6 +197,8 @@ wastech-orchestrator restart            stop the running watch daemon, then star
 wastech-orchestrator status [task-id]   show the active/latest persisted task (no work performed)
 wastech-orchestrator upgrade-config     add config keys from a new version, keeping existing values
                           --dry-run                   preview the keys that would be added
+wastech-orchestrator upgrade-docs       refresh the installed worc/ task-authoring docs to the packaged version
+                          --dry-run                   preview added/updated/removed files
 wastech-orchestrator --version          installed version
 ```
 
@@ -240,7 +242,9 @@ src/wastech_orchestrator/
   task/                   # parser + §19 validation gate
   install/                # the install wizard, config writer, detection, registry
   templates/              # scaffolding copied by `init` (config example + per-stage prompts)
+  worc/                   # agent task-authoring guide copied beside config.yaml by `init`/`install`
 docs/                     # spec, operations, cookbook, configuration, task authoring, rules, backlog
+  worc/                   # authored source for the packaged worc/ guide (kept in sync by a test)
 tests/                    # unit / integration / e2e (see docs/rules/testing.md)
 ```
 

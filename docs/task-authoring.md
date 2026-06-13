@@ -7,6 +7,11 @@ for hidden context.
 Tasks can be Markdown (`.md`) or JSON (`.json`). Markdown is the normal operator format and is what
 this guide focuses on.
 
+> **Writing tasks with an AI agent?** A compact, agent-facing version of this guide ships in
+> [`docs/worc/`](worc/README.md) and is copied beside `config.yaml` at `init`/`install` time. Point an
+> agent at that local `worc/` folder and ask it to "write a task for this orchestrator." This document
+> remains the full operator reference.
+
 Use the packaged `templates/task.md` as the editable runtime template. A completed example is kept
 at [`docs/examples/task-001.example.md`](examples/task-001.example.md). Under the default in-repo
 audit footprint, live task files belong in the repo's own `tasks/pending/` directory (committed and
