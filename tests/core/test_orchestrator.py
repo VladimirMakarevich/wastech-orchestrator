@@ -373,13 +373,7 @@ def test_two_fix_cycles_use_distinct_stage_run_artifacts(
     ).fetchall()
     assert len(rows) == 2
     expected = [
-        art
-        / "logs"
-        / "task-two-fixes"
-        / "stages"
-        / "fixing"
-        / f"run-{row['id']:06d}"
-        / "1-claude"
+        art / "logs" / "task-two-fixes" / "stages" / "fixing" / f"run-{row['id']:06d}" / "1-claude"
         for row in rows
     ]
     assert all(path.is_dir() for path in expected)

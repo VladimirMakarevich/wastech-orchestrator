@@ -216,9 +216,7 @@ def test_write_validation_report(config: OrchestratorConfig, tmp_path: Path) -> 
 
 
 def test_model_field_passes_and_is_stored(config: OrchestratorConfig) -> None:
-    text = (
-        "---\nid: task-001\ntitle: T\nmodel: claude-opus-4-8\n---\n\n## Description\n\nDo it.\n"
-    )
+    text = "---\nid: task-001\ntitle: T\nmodel: claude-opus-4-8\n---\n\n## Description\n\nDo it.\n"
     result = _gate(config).validate(_src(text))
     assert result.passed is True
     assert result.normalized is not None
@@ -243,9 +241,7 @@ def test_model_non_string_is_rejected(config: OrchestratorConfig) -> None:
 
 def test_reasoning_valid_level_passes_and_is_stored(config: OrchestratorConfig) -> None:
     for level in ("low", "medium", "high", "xhigh", "max"):
-        text = (
-            f"---\nid: task-001\ntitle: T\nreasoning: {level}\n---\n\n## Description\n\nDo it.\n"
-        )
+        text = f"---\nid: task-001\ntitle: T\nreasoning: {level}\n---\n\n## Description\n\nDo it.\n"
         result = _gate(config).validate(_src(text))
         assert result.passed is True, f"level {level!r} should pass"
         assert result.normalized is not None

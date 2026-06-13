@@ -399,9 +399,7 @@ def test_resume_continues_persisted_checkpoint(
     assert result is not None and result.final_status is Status.DONE
     expected = providers[expected_provider]
     assert expected.requests[0].stage is expected_first_stage
-    all_requests = [
-        request for provider in providers.values() for request in provider.requests
-    ]
+    all_requests = [request for provider in providers.values() for request in provider.requests]
     if status in {Status.TESTING, Status.REVIEWING, Status.FIXING}:
         assert all(request.stage is not Stage.IMPLEMENTATION for request in all_requests)
     if status is Status.FIXING:

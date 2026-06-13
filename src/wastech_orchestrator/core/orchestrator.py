@@ -128,9 +128,7 @@ _ARTIFACT_KINDS: dict[str, str] = {
     "fixing-context.json": "fixing_context",
 }
 
-_UNIT_STATUSES = frozenset(
-    {Status.IMPLEMENTING, Status.TESTING, Status.REVIEWING, Status.FIXING}
-)
+_UNIT_STATUSES = frozenset({Status.IMPLEMENTING, Status.TESTING, Status.REVIEWING, Status.FIXING})
 
 _SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
 
@@ -734,9 +732,7 @@ class Orchestrator:
         payload = {
             "loop": loop.value,
             "check_artifacts_path": p.check_log if loop is FixLoop.TEST else None,
-            "review_artifacts_path": (
-                p.review_findings_path if loop is FixLoop.REVIEW else None
-            ),
+            "review_artifacts_path": (p.review_findings_path if loop is FixLoop.REVIEW else None),
         }
         return self._write_artifact(
             p,
@@ -784,9 +780,7 @@ class Orchestrator:
 
         if p.review_findings_path:
             try:
-                loaded = json.loads(
-                    Path(p.review_findings_path).read_text(encoding="utf-8")
-                )
+                loaded = json.loads(Path(p.review_findings_path).read_text(encoding="utf-8"))
                 if isinstance(loaded, Mapping):
                     p.last_review_findings = self._extract_findings(loaded)
             except (OSError, json.JSONDecodeError):

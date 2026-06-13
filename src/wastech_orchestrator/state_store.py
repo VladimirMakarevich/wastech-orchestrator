@@ -589,9 +589,7 @@ class StateStore:
                 ),
             )
 
-    def latest_failed_check_log(
-        self, task_id: str, subtask_order: int | None = None
-    ) -> str | None:
+    def latest_failed_check_log(self, task_id: str, subtask_order: int | None = None) -> str | None:
         """Return the newest failed check log for recovery of a fixing stage."""
         row = self._conn.execute(
             """

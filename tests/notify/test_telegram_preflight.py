@@ -78,9 +78,7 @@ def test_enabled_get_me_succeeds() -> None:
 
 def test_enabled_get_me_fails_token_redacted() -> None:
     exc = RuntimeError("Unauthorized: 123:AAFakeToken is invalid")
-    ok, line = check_telegram_preflight(
-        _CFG_ENABLED, _ENV, client_factory=_factory(raise_exc=exc)
-    )
+    ok, line = check_telegram_preflight(_CFG_ENABLED, _ENV, client_factory=_factory(raise_exc=exc))
     assert ok is False
     assert "FAIL" in line
     assert "API error" in line
