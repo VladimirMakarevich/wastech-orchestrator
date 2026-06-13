@@ -110,6 +110,10 @@ def build_git_config(
     max_total_fix_iterations: int = 5,
     quarantine: str | None = None,
     auto_mode: bool = False,
+    auto_merge: bool = False,
+    auto_merge_strategy: str = "squash",
+    auto_merge_allow_per_task: bool = False,
+    auto_merge_wait_for_checks: bool = False,
 ) -> OrchestratorConfig:
     """Build a config pointing ``repo.local_path`` at the clone, with the given footprint/checks."""
     env_lines = "\n".join(f"    - {e}" for e in _TEST_ALLOWED_ENV)
@@ -153,6 +157,10 @@ security:
 git:
   create_pull_request: {str(create_pr).lower()}
   pr_base: "main"
+  auto_merge: {str(auto_merge).lower()}
+  auto_merge_strategy: {auto_merge_strategy}
+  auto_merge_allow_per_task: {str(auto_merge_allow_per_task).lower()}
+  auto_merge_wait_for_checks: {str(auto_merge_wait_for_checks).lower()}
   footprint:
     location: {location}
     tracking: {tracking}

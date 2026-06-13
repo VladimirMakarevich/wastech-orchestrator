@@ -30,6 +30,7 @@ from pathlib import Path
 from wastech_orchestrator.config.schema import (
     AuditBranch,
     FootprintTracking,
+    MergeStrategy,
     OrchestratorConfig,
 )
 from wastech_orchestrator.observability.logging import bind
@@ -111,6 +112,12 @@ KIND_SUBTASK_COMMIT = "subtask_commit"
 KIND_AUDIT_COMMIT = "audit_commit"
 KIND_PUSH = "push"
 KIND_PR = "pr"
+KIND_PR_MERGE = "pr_merge"
+
+# Substrings in a (redacted) ``gh pr merge`` failure that mean the PR is already merged/closed — an
+# idempotent success (a crash dropped the op row after a real merge, or a human merged out of band),
+# never a re-merge. Conflict/branch-protection failures deliberately do NOT match.
+_ALREADY_MERGED_MARKERS = ("already merged", "already been merged", "not open", "was merged")
 
 _STATUS_STARTED = "started"
 _STATUS_COMPLETED = "completed"
@@ -611,6 +618,54 @@ class GitManager:
         pr_url = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
         self._record_completed(task_id, KIND_PR, branch, pr_url)
         return pr_url
+
+    def merge_pr(
+        self, task_id: str, pr_url: str, *, strategy: MergeStrategy, wait_for_checks: bool
+    ) -> str | None:
+        """Merge an open PR via ``gh pr merge``. Idempotent via the publish op (§13).
+
+        Returns a merge-outcome marker: the merge commit SHA (immediate mode), ``"merged"`` when the
+        SHA is unreadable, or ``"armed"`` when GitHub-native auto-merge was armed (``--auto``);
+        ``None`` when there is no PR. Reached only when ``git.auto_merge`` resolves true.
+
+        DANGER: this bypasses the human review gate. It never weakens safety — **no** ``--admin``
+        (branch protection is respected), no force-push, exactly one attempt (no retry). A blocked
+        merge raises :class:`GitCommandError`; the Core surfaces that as ``manual_action_required``
+        and leaves the PR open for a human to merge.
+        """
+        if not pr_url:
+            return None
+        existing = self._store.get_publish_op(task_id, KIND_PR_MERGE, None)
+        if existing is not None and existing.status == _STATUS_COMPLETED:
+            return existing.result_ref
+        self._store.record_publish_op(
+            PublishOpRow(
+                task_id=task_id, kind=KIND_PR_MERGE, fingerprint=pr_url, status=_STATUS_STARTED
+            )
+        )
+        # Fixed argv (no shell, no interpolation); strategy comes from the validated MergeStrategy
+        # enum. ``--admin`` is never emitted, so a protected branch's checks remain the real gate.
+        args = ["pr", "merge", pr_url, f"--{strategy.value}"]
+        if wait_for_checks:
+            args.append("--auto")
+        result = self._gh(args)
+        if not result.ok:
+            haystack = f"{result.stderr}\n{result.stdout}".lower()
+            if any(marker in haystack for marker in _ALREADY_MERGED_MARKERS):
+                self._record_completed(task_id, KIND_PR_MERGE, pr_url, "merged")
+                return "merged"
+            # ``result.stderr`` is already redacted by ``_run`` — never surface raw process output.
+            raise GitCommandError(f"gh pr merge failed: {result.stderr.strip()}")
+        outcome = "armed" if wait_for_checks else (self._merge_commit_sha(pr_url) or "merged")
+        self._record_completed(task_id, KIND_PR_MERGE, pr_url, outcome)
+        return outcome
+
+    def _merge_commit_sha(self, pr_url: str) -> str | None:
+        """Best-effort merge commit SHA after an immediate merge; ``None`` when unavailable."""
+        result = self._gh(["pr", "view", pr_url, "--json", "mergeCommit", "-q", ".mergeCommit.oid"])
+        if not result.ok:
+            return None
+        return result.stdout.strip() or None
 
     def _record_completed(self, task_id: str, kind: str, fingerprint: str, result_ref: str) -> None:
         self._store.record_publish_op(

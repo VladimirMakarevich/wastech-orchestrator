@@ -741,7 +741,49 @@ class Orchestrator:
                 p.task.id, p.branch, title=f"{p.task.title}", body_path=body_path
             ),
         )
+        if pr_url and self._auto_merge_on(p.task):
+            return self._auto_merge(p, pr_url)
+        if pr_url and p.task.auto_merge is True:
+            # Reached only when a per-task opt-in was ignored (operator has not enabled per-task
+            # overrides and the global flag is off) — surface it rather than silently dropping it.
+            self._log(p.task.id).warning(
+                "[AUTO-MERGE] per-task auto_merge:true ignored; enable "
+                "git.auto_merge_allow_per_task to honor per-task overrides"
+            )
         return self._go_terminal(p, Status.DONE, pr_url=pr_url, already_moved=True)
+
+    def _auto_merge(self, p: _Pipeline, pr_url: str) -> PipelineResult:
+        """Merge the just-created PR, bypassing human review. Audited, idempotent, non-destructive.
+
+        A blocked merge (branch protection / pending checks / conflict) raises ManualActionRequired,
+        so the task ends ``manual_action_required`` with the PR left open — never FAILED, never a
+        force-merge, never ``--admin``. Idempotent on restart via the ``pr_merge`` publish op.
+        """
+        git = self._config.git
+        self._log(p.task.id).warning(
+            "[AUTO-MERGE] merging PR without human review",
+            extra={
+                "pr_url": pr_url,
+                "strategy": git.auto_merge_strategy.value,
+                "wait_for_checks": git.auto_merge_wait_for_checks,
+            },
+        )
+        try:
+            outcome = self._observe(
+                p,
+                "auto-merge",
+                lambda: self._git.merge_pr(
+                    p.task.id,
+                    pr_url,
+                    strategy=git.auto_merge_strategy,
+                    wait_for_checks=git.auto_merge_wait_for_checks,
+                ),
+            )
+        except GitCommandError as exc:
+            raise ManualActionRequired(f"auto-merge blocked: {exc}") from exc
+        return self._go_terminal(
+            p, Status.DONE, pr_url=pr_url, already_moved=True, merge_outcome=outcome
+        )
 
     def _fallback_summary_path(self, p: _Pipeline) -> str:
         """The logs/ working copy of summary.md — PR body fallback when no task file is on disk."""
@@ -903,6 +945,7 @@ class Orchestrator:
         pr_url: str | None = None,
         manual_reason: str | None = None,
         already_moved: bool = False,
+        merge_outcome: str | None = None,
     ) -> PipelineResult:
         """Run terminal cleanup, set the final status, append exactly one ledger record (§8.3).
 
@@ -929,7 +972,9 @@ class Orchestrator:
         self._transition(p, final, finished_at=self._clock())
         if not already_moved:
             self._move_task_file(p, final)
-        self._append_ledger(p, final, pr_url=pr_url, cleanup_safe=cleanup.safe)
+        self._append_ledger(
+            p, final, pr_url=pr_url, cleanup_safe=cleanup.safe, merge_outcome=merge_outcome
+        )
         self._notify_terminal(
             task_id=p.task.id,
             final_status=final,
@@ -1625,6 +1670,19 @@ class Orchestrator:
             return False
         return self._config.agents.decomposition.enabled
 
+    def _auto_merge_on(self, task: NormalizedTask) -> bool:
+        """Resolve the effective auto-merge decision (DANGER: bypasses human review).
+
+        An explicit per-task ``False`` always opts out; a per-task ``True`` is honored only when the
+        operator set ``git.auto_merge_allow_per_task`` — otherwise it falls through to the global
+        policy, so a task file can never grant itself merge rights. Absent → ``git.auto_merge``.
+        """
+        if task.auto_merge is False:
+            return False
+        if task.auto_merge is True and self._config.git.auto_merge_allow_per_task:
+            return True
+        return self._config.git.auto_merge
+
     def _transition(self, p: _Pipeline, dst: Status, **fields: object) -> None:
         src = p.status
         with self._store.transaction() as conn:
@@ -1704,7 +1762,13 @@ class Orchestrator:
             )
 
     def _append_ledger(
-        self, p: _Pipeline, final: Status, *, pr_url: str | None, cleanup_safe: bool
+        self,
+        p: _Pipeline,
+        final: Status,
+        *,
+        pr_url: str | None,
+        cleanup_safe: bool,
+        merge_outcome: str | None = None,
     ) -> None:
         task_row = self._store.get_task(p.task.id)
         self._ledger.append(
@@ -1714,6 +1778,8 @@ class Orchestrator:
                 branch=p.branch or None,
                 pr_url=pr_url,
                 final_status=final.value,
+                auto_merged=merge_outcome is not None,
+                merge_outcome=merge_outcome,
                 fix_iterations=p.counters.fix_iterations,
                 terminal_cleanup="completed" if cleanup_safe else "blocked",
                 finished_at=self._clock(),

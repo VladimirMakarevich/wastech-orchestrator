@@ -134,7 +134,7 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
                 "CLAUDE_CONFIG_DIR",
             ],
             "denied_read_paths": [".env", "secrets/**"],
-            "denied_commands": ["git commit", "git push", "gh pr create"],
+            "denied_commands": ["git commit", "git push", "gh pr create", "gh pr merge"],
         },
         "validation": {
             "max_task_bytes": 262144,
@@ -153,6 +153,11 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
         "git": {
             "create_pull_request": spec.create_pull_request,
             "pr_base": spec.base_branch,
+            # Auto-merge bypass — off by default (DANGER: skips review). See config.example.yaml.
+            "auto_merge": False,
+            "auto_merge_strategy": "squash",
+            "auto_merge_allow_per_task": False,
+            "auto_merge_wait_for_checks": False,
             "footprint": {
                 # Tasks and their result artifacts live in the target repo and are audit-committed
                 # there (§21); the control workspace holds only config.yaml and the quarantine.

@@ -1,7 +1,7 @@
 # Example configuration for wastech-orchestrator.
 # Copy to config.yaml and fill it in for your project. config.yaml is NOT committed to git.
 
-schema_version: 1                   # config format version; the orchestrator refuses newer configs
+schema_version: 2                   # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -106,6 +106,14 @@ checks:
 git:
   create_pull_request: true
   pr_base: "main"
+  # ⚠️  DANGER: auto-merge bypasses the human review gate — the last defence against shipping a wrong
+  #     or malicious agent diff. All four keys default to the safe value; enable only with protected
+  #     branches + required CI status checks already enforcing your quality gate. The mid-pipeline
+  #     dangerous-diff approval still fires; auto-merge only affects the publish step.
+  auto_merge: false                 # true: merge every published PR to pr_base automatically
+  auto_merge_strategy: squash       # merge | squash | rebase  (used when a merge fires)
+  auto_merge_allow_per_task: false  # true: honor a per-task `auto_merge: true` (a per-task false always opts out)
+  auto_merge_wait_for_checks: false # true: arm GitHub-native auto-merge (--auto) — merge only after required checks pass
   footprint:                        # where orchestration/task artifacts live vs. the target repo (§21)
     location: in_repo               # external | in_repo  (in_repo: tasks/ & logs/ live in the repo)
     tracking: commit                # none | exclude_local | commit  (commit: audit-commit tasks/ only)

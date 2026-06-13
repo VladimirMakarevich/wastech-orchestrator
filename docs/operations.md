@@ -349,6 +349,43 @@ In every mode the *code* commit is **scoped** (an explicit pathspec that exclude
 (`external`+`exclude_local|commit`, `in_repo`+`none`); under `external`, `external_root` must resolve
 outside `repo.local_path`.
 
+### Auto-merge to the base branch (DANGER: bypasses human review)
+
+By default the orchestrator opens a PR and stops — a human reviews and merges it. **Auto-merge**
+(opt-in, off by default) makes the orchestrator merge the PR itself, removing the last line of
+defence against shipping a wrong or malicious agent diff. Enable it **only** when protected branches
+and required CI status checks are already enforcing the quality gate you need.
+
+Configured under `git:` (all default to the safe value):
+
+| Key | Default | Effect |
+|---|---|---|
+| `auto_merge` | `false` | When true, every successfully published PR is merged to `pr_base`. |
+| `auto_merge_strategy` | `squash` | `merge` \| `squash` \| `rebase` — passed to `gh pr merge`. |
+| `auto_merge_allow_per_task` | `false` | When true, a task's front-matter `auto_merge: true` is honored. |
+| `auto_merge_wait_for_checks` | `false` | When true, arm GitHub-native auto-merge (`gh pr merge --auto`): GitHub merges only after required checks pass. When false, merge immediately. |
+
+**Per-task override.** A task file may carry `auto_merge: true` / `false` in its front-matter:
+
+- `auto_merge: false` **always** opts that task out, even when the global flag is on.
+- `auto_merge: true` is honored **only** when `git.auto_merge_allow_per_task: true`; otherwise it is
+  ignored (with a logged warning) and the task follows the global policy. This is deliberate: write
+  access to `tasks/pending/` would otherwise equal merge-to-`pr_base` rights. Resolution order:
+  per-task `false` → per-task `true` (if allowed) → global `git.auto_merge` → `false`.
+
+**What auto-merge does *not* weaken:**
+
+- The mid-pipeline **dangerous-diff approval** (code deletions / dependency changes) still fires —
+  auto-merge affects only the publish step, never the agent sandbox or earlier gates.
+- It never passes `--admin`, never force-pushes, and tries exactly once. If the merge is **blocked**
+  (branch protection, pending checks, conflict) the task ends `manual_action_required` with the PR
+  **left open** for a human — never `failed`, never a forced merge. Re-running the task retries the
+  merge idempotently (it never double-merges an already-merged PR).
+
+**Audit.** Every auto-merge writes a `[AUTO-MERGE]` `WARNING` log line, records the merge in the
+append-only ledger (`auto_merged` + `merge_outcome` = the merge SHA, `"merged"`, or `"armed"`), and
+persists a `pr_merge` row in `state.db`. The terminal Telegram notification carries the PR URL.
+
 ---
 
 ## 6. Diagnostics — reading what a run produced

@@ -59,6 +59,7 @@ def test_schema_constants() -> None:
         "title",
         "refined",
         "decompose",
+        "auto_merge",
         "agents",
         "contacts",
         "model",

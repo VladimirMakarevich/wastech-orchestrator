@@ -17,7 +17,9 @@ from wastech_orchestrator.providers.base import ProviderId, Stage
 # loader refuses a config whose ``schema_version`` is newer than this (fail-loud); an absent or
 # older value is accepted — the older case is the hook for a future migration runner. See the
 # spec's "Versioning & compatibility" section.
-CONFIG_SCHEMA_VERSION = 1
+# v2: added the opt-in ``git.auto_merge*`` keys (auto-merge bypass). Old (v1/absent) configs omit
+# them and take the safe ``false`` defaults — no migration flips anything.
+CONFIG_SCHEMA_VERSION = 2
 
 # Stages routed to an agent provider. The remaining stages (``testing``, ``publishing``) are run by
 # the orchestrator itself (Check Runner / Git Manager), so they never appear in ``agents.routing``
@@ -201,11 +203,32 @@ class FootprintConfig:
     audit_on_branch: AuditBranch
 
 
+class MergeStrategy(StrEnum):
+    """The ``gh pr merge`` strategy used when ``git.auto_merge`` fires (auto-merge bypass)."""
+
+    MERGE = "merge"
+    SQUASH = "squash"
+    REBASE = "rebase"
+
+
 @dataclass(frozen=True)
 class GitConfig:
     create_pull_request: bool
     pr_base: str
     footprint: FootprintConfig
+    # --- auto-merge bypass (DANGER: skips the human review gate; all default to the safe value) ---
+    # When true, every successfully published PR is merged to ``pr_base`` automatically.
+    # The mid-pipeline dangerous-diff approval still fires (auto_merge only affects publishing).
+    auto_merge: bool = False
+    # Strategy passed to ``gh pr merge`` when a merge fires.
+    auto_merge_strategy: MergeStrategy = MergeStrategy.SQUASH
+    # A per-task ``auto_merge: true`` is honored only when this is true; a per-task ``false``
+    # always opts out. Without it, a task file could grant itself merge rights the operator
+    # never intended.
+    auto_merge_allow_per_task: bool = False
+    # False: merge immediately (`gh pr merge`). True: arm GitHub-native auto-merge (`--auto`), which
+    # merges only after required status checks pass.
+    auto_merge_wait_for_checks: bool = False
 
 
 @dataclass(frozen=True)

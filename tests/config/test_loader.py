@@ -5,7 +5,11 @@ from __future__ import annotations
 import pytest
 
 from wastech_orchestrator.config.loader import ConfigError, loads_config
-from wastech_orchestrator.config.schema import FootprintLocation, FootprintTracking
+from wastech_orchestrator.config.schema import (
+    FootprintLocation,
+    FootprintTracking,
+    MergeStrategy,
+)
 from wastech_orchestrator.config.validation import validate_config
 from wastech_orchestrator.providers.base import ProviderId, Stage
 
@@ -225,3 +229,49 @@ def test_reasoning_null_parses_to_none() -> None:
     from wastech_orchestrator.providers.base import ProviderId
 
     assert result.config.agents.providers[ProviderId.CLAUDE].reasoning is None
+
+
+# --- auto-merge bypass (§ git.auto_merge*) ---
+
+
+def test_auto_merge_keys_default_to_safe_values() -> None:
+    cfg = loads_config(_LEGACY).config
+    assert cfg.git.auto_merge is False
+    assert cfg.git.auto_merge_strategy is MergeStrategy.SQUASH
+    assert cfg.git.auto_merge_allow_per_task is False
+    assert cfg.git.auto_merge_wait_for_checks is False
+
+
+def test_auto_merge_keys_parse() -> None:
+    text = _LEGACY + (
+        "git:\n"
+        "  auto_merge: true\n"
+        "  auto_merge_strategy: rebase\n"
+        "  auto_merge_allow_per_task: true\n"
+        "  auto_merge_wait_for_checks: true\n"
+    )
+    cfg = loads_config(text).config
+    assert cfg.git.auto_merge is True
+    assert cfg.git.auto_merge_strategy is MergeStrategy.REBASE
+    assert cfg.git.auto_merge_allow_per_task is True
+    assert cfg.git.auto_merge_wait_for_checks is True
+
+
+def test_auto_merge_strategy_invalid_value_is_rejected() -> None:
+    text = _LEGACY + "git:\n  auto_merge_strategy: fast-forward\n"
+    with pytest.raises(ConfigError) as exc:
+        loads_config(text)
+    assert any("auto_merge_strategy" in issue for issue in exc.value.issues)
+
+
+def test_auto_merge_must_be_boolean() -> None:
+    text = _LEGACY + "git:\n  auto_merge: 3\n"
+    with pytest.raises(ConfigError) as exc:
+        loads_config(text)
+    assert any("git.auto_merge" in issue for issue in exc.value.issues)
+
+
+def test_denied_commands_default_blocks_gh_pr_merge() -> None:
+    # The orchestrator owns merging; agents must not be able to run `gh pr merge` themselves.
+    cfg = loads_config(_LEGACY).config
+    assert "gh pr merge" in cfg.security.denied_commands

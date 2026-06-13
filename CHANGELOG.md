@@ -8,7 +8,7 @@ The persisted artifacts that outlive an upgrade carry their own independent sche
 (see the spec's "Versioning and compatibility" section and
 [docs/operations.md](docs/operations.md#upgrading-the-orchestrator)):
 
-- `config.yaml` — top-level `schema_version` (current: **1**)
+- `config.yaml` — top-level `schema_version` (current: **2**)
 - `state.db` — SQLite `PRAGMA user_version` (current: **1**)
 - registry (`registry.json`) — `version` (current: **1**, read forward-tolerantly)
 
@@ -18,6 +18,21 @@ The maintainer bumps the package version in `pyproject.toml` on release; `wastec
 ## [Unreleased]
 
 ### Added
+- **Auto-merge bypass (opt-in, off by default)**: after a successful publish the orchestrator can
+  merge the PR itself instead of waiting for a human. Four new `git:` keys — `auto_merge`,
+  `auto_merge_strategy` (`merge`|`squash`|`rebase`), `auto_merge_allow_per_task`, and
+  `auto_merge_wait_for_checks` (arm GitHub-native `gh pr merge --auto`) — plus a per-task front-matter
+  `auto_merge` tri-state. A per-task `true` is honored **only** when the operator sets
+  `auto_merge_allow_per_task`; a per-task `false` always opts out (resolution: per-task false →
+  per-task true if allowed → global `git.auto_merge` → false). The merge runs on the existing
+  `creating_pr → done` edge (no new status), is idempotent via a `pr_merge` publish op, **never**
+  uses `--admin`/force, and degrades to `manual_action_required` (PR left open) when blocked — never
+  `failed`. The mid-pipeline dangerous-diff approval gate is unaffected. Audited via a `[AUTO-MERGE]`
+  WARNING log, the append-only ledger (`auto_merged` + `merge_outcome`), and `state.db`. Bumps
+  `config.yaml` `schema_version` **1 → 2** (old configs load unchanged; the keys default to `false`)
+  and adds `gh pr merge` to the default `security.denied_commands` so agents cannot self-merge. See
+  [docs/operations.md](docs/operations.md#auto-merge-to-the-base-branch-danger-bypasses-human-review)
+  and [docs/backlog/auto_merge_bypass.md](docs/backlog/auto_merge_bypass.md).
 - **`worc` short alias**: a second `console_scripts` entry point (`pyproject.toml`) maps `worc` to
   the same CLI as the canonical `wastech-orchestrator` (e.g. `worc watch`, `worc status`). The long
   name remains canonical; `pip install -e .` registers both.

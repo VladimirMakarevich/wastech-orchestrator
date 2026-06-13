@@ -1,8 +1,24 @@
 # Backlog: Auto-merge bypass flags (global and per-task)
 
-Status: **backlog / not scheduled**
+Status: **implemented** (shipped; see CHANGELOG `[Unreleased]`)
 Date: 2026-06-13
 Owner: Vladimir Makarevich
+
+> **Status update (shipped).** This feature is now implemented. The design below is retained for
+> context; where the code diverges from it, **the code wins**:
+>
+> - Config lives under **`git:`** (not a new `publishing:` block): `git.auto_merge`,
+>   `git.auto_merge_strategy`, `git.auto_merge_allow_per_task`, `git.auto_merge_wait_for_checks`.
+> - There is **no `MANUAL_REVIEW` state**. The normal flow is `creating_pr → done` (DONE already means
+>   "PR created, human merges later"); auto-merge adds a merge step on that same edge. A **blocked**
+>   merge ends `manual_action_required` with the PR left open — never `failed`.
+> - A per-task `auto_merge: true` is honored **only** when `git.auto_merge_allow_per_task: true`
+>   (operator opt-in); a per-task `false` always opts out. This closes the "task authorship == merge
+>   rights" surface and intentionally diverges from §3.2 below.
+> - Two merge modes via `git.auto_merge_wait_for_checks`: immediate `gh pr merge` (default) or
+>   GitHub-native `gh pr merge --auto`. The merge **never** uses `--admin`; idempotent via a
+>   `pr_merge` publish op.
+> - Operator guide: [docs/operations.md](../operations.md#auto-merge-to-the-base-branch-danger-bypasses-human-review).
 
 > ⚠️ **Security-sensitive feature.** Both flags described here bypass the human review gate that
 > is the primary safeguard against shipping broken or malicious code to the main branch. Implement

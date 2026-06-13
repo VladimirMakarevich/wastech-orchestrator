@@ -5,10 +5,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from wastech_orchestrator.providers.base import ProviderId, Stage
 from wastech_orchestrator.task.model import NormalizedTask
 from wastech_orchestrator.task.parser import (
     extract_section,
+    load_normalized,
     read_task_source,
     slugify,
     split_frontmatter,
@@ -122,3 +125,22 @@ def test_write_normalized(tmp_path: Path) -> None:
     assert data["agents"] == {"review": "codex"}
     assert data["contacts"] == ["@lead"]
     assert path.endswith("task.normalized.json")
+
+
+@pytest.mark.parametrize("value", [True, False, None])
+def test_auto_merge_round_trips(tmp_path: Path, value: bool | None) -> None:
+    # Restart-safety: the resumed task must carry the exact tri-state it was parsed with, or a
+    # crash mid-publish could flip the auto-merge decision (e.g. a `false` opt-out → global true).
+    task = NormalizedTask(id="task-001", title="T", description="Do it", auto_merge=value)
+    write_normalized(task, tmp_path)
+    assert load_normalized(tmp_path, "task-001").auto_merge is value
+
+
+def test_auto_merge_absent_in_legacy_normalized_loads_as_none(tmp_path: Path) -> None:
+    # A task.normalized.json written before this field existed must load as None (defer to config).
+    task_dir = tmp_path / "logs" / "task-001"
+    task_dir.mkdir(parents=True)
+    (task_dir / "task.normalized.json").write_text(
+        json.dumps({"id": "task-001", "title": "T", "description": "d"}), encoding="utf-8"
+    )
+    assert load_normalized(tmp_path, "task-001").auto_merge is None

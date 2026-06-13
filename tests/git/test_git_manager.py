@@ -7,9 +7,11 @@ from pathlib import Path
 
 import pytest
 
+from wastech_orchestrator.config.schema import MergeStrategy
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import (
     EXCLUDED_DIRS,
+    KIND_PR_MERGE,
     GitCommandError,
     GitManager,
     GitResult,
@@ -401,6 +403,103 @@ def test_create_pr_disabled_returns_none(
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config, create_pr=False)
     branch = gm.prepare_branch("task-001", "x")
     assert gm.create_pr("task-001", branch, title="t", body_path="x") is None
+
+
+# --- merge_pr (auto-merge bypass, §13 idempotency) ---
+
+_PR_URL = "https://github.com/o/r/pull/1"
+
+
+def _merge_gh(
+    calls: list[list[str]], *, merge_exit: int = 0, merge_stderr: str = "", sha: str = "deadbeef"
+) -> Callable[[Sequence[str]], GitResult]:
+    def gh(argv: Sequence[str]) -> GitResult:
+        calls.append(list(argv))
+        head = list(argv[:2])
+        if head == ["pr", "view"]:
+            return GitResult(
+                exit_code=0, stdout=f"{sha}\n", stderr="", timed_out=False, launch_error=None
+            )
+        if head == ["pr", "merge"]:
+            return GitResult(
+                exit_code=merge_exit,
+                stdout="",
+                stderr=merge_stderr,
+                timed_out=False,
+                launch_error=None,
+            )
+        return GitResult(exit_code=0, stdout="", stderr="", timed_out=False, launch_error=None)
+
+    return gh
+
+
+def test_merge_pr_immediate_argv_sha_and_no_admin(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    _task(store)
+    calls: list[list[str]] = []
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=_merge_gh(calls))
+    out = gm.merge_pr("task-001", _PR_URL, strategy=MergeStrategy.SQUASH, wait_for_checks=False)
+    assert out == "deadbeef"
+    assert calls[0] == ["pr", "merge", _PR_URL, "--squash"]
+    # Never weakens branch protection.
+    assert all(
+        "--admin" not in c and not any(t.startswith("--dangerously") for t in c) for c in calls
+    )
+    op = store.get_publish_op("task-001", KIND_PR_MERGE)
+    assert op is not None and op.status == "completed" and op.result_ref == "deadbeef"
+
+
+def test_merge_pr_wait_for_checks_arms_auto(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    _task(store)
+    calls: list[list[str]] = []
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=_merge_gh(calls))
+    out = gm.merge_pr("task-001", _PR_URL, strategy=MergeStrategy.MERGE, wait_for_checks=True)
+    assert out == "armed"
+    assert calls[0] == ["pr", "merge", _PR_URL, "--merge", "--auto"]
+    # Arming is async — no synchronous SHA lookup.
+    assert not any(list(c[:2]) == ["pr", "view"] for c in calls)
+
+
+def test_merge_pr_is_idempotent(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    _task(store)
+    calls: list[list[str]] = []
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=_merge_gh(calls))
+    first = gm.merge_pr("task-001", _PR_URL, strategy=MergeStrategy.SQUASH, wait_for_checks=False)
+    n = len(calls)
+    second = gm.merge_pr("task-001", _PR_URL, strategy=MergeStrategy.SQUASH, wait_for_checks=False)
+    assert first == second == "deadbeef"
+    assert len(calls) == n  # the completed op short-circuits — gh is not invoked again
+
+
+def test_merge_pr_blocked_raises_and_stays_incomplete(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    _task(store)
+    calls: list[list[str]] = []
+    gh = _merge_gh(calls, merge_exit=1, merge_stderr="required status checks are pending")
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+    with pytest.raises(GitCommandError):
+        gm.merge_pr("task-001", _PR_URL, strategy=MergeStrategy.SQUASH, wait_for_checks=False)
+    op = store.get_publish_op("task-001", KIND_PR_MERGE)
+    assert op is not None and op.status != "completed"  # resume may retry
+
+
+def test_merge_pr_already_merged_is_idempotent_success(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    _task(store)
+    calls: list[list[str]] = []
+    gh = _merge_gh(calls, merge_exit=1, merge_stderr="GraphQL: Pull request is already merged")
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+    out = gm.merge_pr("task-001", _PR_URL, strategy=MergeStrategy.SQUASH, wait_for_checks=False)
+    assert out == "merged"
+    op = store.get_publish_op("task-001", KIND_PR_MERGE)
+    assert op is not None and op.status == "completed"
 
 
 def test_terminal_cleanup_safe(

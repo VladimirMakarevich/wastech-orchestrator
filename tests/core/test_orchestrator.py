@@ -265,6 +265,7 @@ def _build(
     check_verdicts: list[int],
     config_kwargs: dict | None = None,
     notifier: Notifier | None = None,
+    gh: Callable[[Sequence[str]], GitResult] | None = None,
 ) -> tuple[Orchestrator, StateStore, Ledger, Path]:
     from wastech_orchestrator.routing.router import AgentRouter
 
@@ -273,7 +274,7 @@ def _build(
     store = StateStore.open(art / "state.db")
     ledger = Ledger(art / "logs")
     router = AgentRouter(config, providers)  # type: ignore[arg-type]
-    git = GitManager(config, store=store, artifacts_root=str(art), gh_runner=_fake_gh())
+    git = GitManager(config, store=store, artifacts_root=str(art), gh_runner=gh or _fake_gh())
     checks = CheckRunner(config, run_process=_fake_proc(check_verdicts))  # type: ignore[arg-type]
     gate = ValidationGate(
         config,
@@ -1343,3 +1344,246 @@ def test_expanded_diff_requires_separate_approval_after_planning(
 
     assert result.final_status is Status.DONE
     assert len(notifier.ask_calls) == 2
+
+
+# --- auto-merge bypass (§ git.auto_merge*) ------------------------------------------------
+
+
+def _merge_gh(
+    calls: list[list[str]], *, merge_exit: int = 0, merge_stderr: str = ""
+) -> Callable[[Sequence[str]], GitResult]:
+    """Fake `gh` that records argv and handles pr create / merge / view for auto-merge tests."""
+
+    def gh(argv: Sequence[str]) -> GitResult:
+        calls.append(list(argv))
+        head = list(argv[:2])
+        if head == ["pr", "view"]:
+            return GitResult(0, "deadbeef\n", "", False, None)
+        if head == ["pr", "merge"]:
+            return GitResult(merge_exit, "", merge_stderr, False, None)
+        return GitResult(
+            0, "https://example/pr/1\n", "", False, None
+        )  # pr create (+ anything else)
+
+    return gh
+
+
+def _patch_impl_edit(providers: dict[ProviderId, FakeProvider], git_repo) -> None:
+    """Make the implementation stage leave a change to commit (so publish has a real diff)."""
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.stage is Stage.IMPLEMENTATION:
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+
+def _task_with_auto_merge(tmp_path: Path, value: bool, task_id: str = "task-001") -> str:
+    path = tmp_path / f"{task_id}.md"
+    path.write_text(
+        f'---\nid: {task_id}\ntitle: "Add a thing"\nrefined: true\n'
+        f"auto_merge: {str(value).lower()}\n---\n\n"
+        "## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def _merge_calls(calls: list[list[str]]) -> list[list[str]]:
+    return [c for c in calls if c[:2] == ["pr", "merge"]]
+
+
+def test_auto_merge_resolution_matrix(git_repo, make_git_config, tmp_path: Path) -> None:
+    from wastech_orchestrator.task.model import NormalizedTask
+
+    orch, _, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    base_git = orch._config.git
+
+    def eff(task_am: bool | None, cfg_am: bool, cfg_allow: bool) -> bool:
+        orch._config = replace(
+            orch._config,
+            git=replace(base_git, auto_merge=cfg_am, auto_merge_allow_per_task=cfg_allow),
+        )
+        task = NormalizedTask(id="t", title="T", description="d", auto_merge=task_am)
+        return orch._auto_merge_on(task)
+
+    # Explicit per-task False always opts out, in every config combination.
+    for cfg_am in (True, False):
+        for cfg_allow in (True, False):
+            assert eff(False, cfg_am, cfg_allow) is False
+    # Absent (None) defers to the global flag.
+    assert eff(None, True, False) is True
+    assert eff(None, True, True) is True
+    assert eff(None, False, False) is False
+    assert eff(None, False, True) is False
+    # Per-task True is honored only with operator opt-in; otherwise it falls through to the global.
+    assert eff(True, False, True) is True
+    assert eff(True, True, True) is True
+    assert eff(True, False, False) is False  # ignored → global False
+    assert eff(True, True, False) is True  # ignored → global True
+
+
+def test_global_auto_merge_merges_pr(git_repo, make_git_config, tmp_path: Path) -> None:
+    providers = _both()
+    calls: list[list[str]] = []
+    orch, store, ledger, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"auto_merge": True},
+        gh=_merge_gh(calls),
+    )
+    _patch_impl_edit(providers, git_repo)
+    result = orch.run_task(_complete_task(tmp_path))
+    assert result.final_status is Status.DONE
+    assert _merge_calls(calls) == [["pr", "merge", "https://example/pr/1", "--squash"]]
+    rec = ledger.records()[0]
+    assert rec["auto_merged"] is True and rec["merge_outcome"] == "deadbeef"
+    op = store.get_publish_op("task-001", "pr_merge")
+    assert op is not None and op.status == "completed"
+
+
+def test_no_auto_merge_leaves_pr_open(git_repo, make_git_config, tmp_path: Path) -> None:
+    providers = _both()
+    calls: list[list[str]] = []
+    orch, _, ledger, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        gh=_merge_gh(calls),
+    )
+    _patch_impl_edit(providers, git_repo)
+    result = orch.run_task(_complete_task(tmp_path))
+    assert result.final_status is Status.DONE
+    assert _merge_calls(calls) == []  # never merged
+    assert ledger.records()[0]["auto_merged"] is False
+
+
+def test_per_task_true_ignored_without_operator_optin(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    providers = _both()
+    calls: list[list[str]] = []
+    orch, _, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"auto_merge": False, "auto_merge_allow_per_task": False},
+        gh=_merge_gh(calls),
+    )
+    _patch_impl_edit(providers, git_repo)
+    result = orch.run_task(_task_with_auto_merge(tmp_path, True))
+    assert result.final_status is Status.DONE
+    assert _merge_calls(calls) == []  # per-task opt-in ignored: operator never enabled it
+
+
+def test_per_task_true_honored_with_operator_optin(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    providers = _both()
+    calls: list[list[str]] = []
+    orch, _, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"auto_merge": False, "auto_merge_allow_per_task": True},
+        gh=_merge_gh(calls),
+    )
+    _patch_impl_edit(providers, git_repo)
+    result = orch.run_task(_task_with_auto_merge(tmp_path, True))
+    assert result.final_status is Status.DONE
+    assert len(_merge_calls(calls)) == 1
+
+
+def test_per_task_false_opts_out_under_global(git_repo, make_git_config, tmp_path: Path) -> None:
+    providers = _both()
+    calls: list[list[str]] = []
+    orch, _, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"auto_merge": True},
+        gh=_merge_gh(calls),
+    )
+    _patch_impl_edit(providers, git_repo)
+    result = orch.run_task(_task_with_auto_merge(tmp_path, False))
+    assert result.final_status is Status.DONE
+    assert _merge_calls(calls) == []  # explicit per-task opt-out wins over the global flag
+
+
+def test_auto_merge_blocked_goes_manual(git_repo, make_git_config, tmp_path: Path) -> None:
+    providers = _both()
+    calls: list[list[str]] = []
+    orch, store, ledger, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"auto_merge": True},
+        gh=_merge_gh(calls, merge_exit=1, merge_stderr="required status checks are pending"),
+    )
+    _patch_impl_edit(providers, git_repo)
+    result = orch.run_task(_complete_task(tmp_path))
+    # A blocked merge is non-fatal: not FAILED, not a silent DONE — the PR is left open for a human.
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
+    assert len(_merge_calls(calls)) == 1  # attempted exactly once, no retry storm
+    op = store.get_publish_op("task-001", "pr_merge")
+    assert op is not None and op.status != "completed"  # resume can retry
+    assert ledger.records()[0]["final_status"] == "manual_action_required"
+
+
+def test_auto_merge_wait_for_checks_arms_native_auto(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    providers = _both()
+    calls: list[list[str]] = []
+    orch, _, ledger, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"auto_merge": True, "auto_merge_wait_for_checks": True},
+        gh=_merge_gh(calls),
+    )
+    _patch_impl_edit(providers, git_repo)
+    result = orch.run_task(_complete_task(tmp_path))
+    assert result.final_status is Status.DONE
+    assert _merge_calls(calls) == [["pr", "merge", "https://example/pr/1", "--squash", "--auto"]]
+    assert ledger.records()[0]["merge_outcome"] == "armed"
+
+
+def test_auto_merge_does_not_fire_when_quality_gate_fails(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # auto_merge affects only the publish step: a task that never reaches publish is never merged.
+    providers = _both()
+    calls: list[list[str]] = []
+    orch, _, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[1] * 20,  # checks always fail → fix loop exhausts, never publishes
+        config_kwargs={"auto_merge": True},
+        gh=_merge_gh(calls),
+    )
+    _patch_impl_edit(providers, git_repo)
+    result = orch.run_task(_complete_task(tmp_path))
+    assert result.final_status is not Status.DONE
+    assert _merge_calls(calls) == []

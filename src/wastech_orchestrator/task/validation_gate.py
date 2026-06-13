@@ -231,6 +231,7 @@ class ValidationGate:
             description=body.strip(),
             refined=bool(frontmatter.get("refined", False)),
             decompose=_as_tristate(frontmatter.get("decompose")),
+            auto_merge=_as_tristate(frontmatter.get("auto_merge")),
             agents=agents,
             contacts=[str(c) for c in frontmatter.get("contacts", [])],
             model=frontmatter.get("model") or None,
@@ -256,6 +257,12 @@ class ValidationGate:
             and not isinstance(fm["decompose"], bool)
         ):
             return _Reject(ValidationReason.INVALID_FIELD_TYPE, "decompose must be a boolean")
+        if (
+            "auto_merge" in fm
+            and fm["auto_merge"] is not None
+            and not isinstance(fm["auto_merge"], bool)
+        ):
+            return _Reject(ValidationReason.INVALID_FIELD_TYPE, "auto_merge must be a boolean")
         if "agents" in fm and not isinstance(fm["agents"], Mapping):
             return _Reject(ValidationReason.INVALID_FIELD_TYPE, "agents must be a mapping")
         if "contacts" in fm:

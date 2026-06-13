@@ -37,6 +37,11 @@ class LedgerRecord:
     finished_at: str
     branch: str | None = None
     pr_url: str | None = None
+    # Auto-merge audit (§ auto-merge bypass): ``auto_merged`` is true iff the orchestrator merged
+    # the PR without review; ``merge_outcome`` is the merge SHA, "merged", or "armed" (native
+    # --auto). Part of the append-only, tamper-evident audit trail.
+    auto_merged: bool = False
+    merge_outcome: str | None = None
     fix_iterations: int = 0
     terminal_cleanup: str | None = None
     failure_report: str | None = None
@@ -53,6 +58,8 @@ class LedgerRecord:
             "branch": self.branch,
             "pr_url": self.pr_url,
             "final_status": self.final_status,
+            "auto_merged": self.auto_merged,
+            "merge_outcome": self.merge_outcome,
             "fix_iterations": self.fix_iterations,
             "terminal_cleanup": self.terminal_cleanup,
             "finished_at": self.finished_at,

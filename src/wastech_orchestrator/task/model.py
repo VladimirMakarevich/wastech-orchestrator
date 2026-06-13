@@ -20,7 +20,17 @@ TASK_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 
 # Front-matter schema (spec §5, §19.3).
 ALLOWED_TASK_KEYS: frozenset[str] = frozenset(
-    {"id", "title", "refined", "decompose", "agents", "contacts", "model", "reasoning"}
+    {
+        "id",
+        "title",
+        "refined",
+        "decompose",
+        "auto_merge",
+        "agents",
+        "contacts",
+        "model",
+        "reasoning",
+    }
 )
 REQUIRED_TASK_FIELDS: frozenset[str] = frozenset({"id", "title"})
 
@@ -43,6 +53,9 @@ class NormalizedTask:
     refined: bool = False
     # Tri-state: True forces decomposition, False disables it, None defers to the config default.
     decompose: bool | None = None
+    # Tri-state opt-in to auto-merge (DANGER: bypasses human review). True requests it (honored only
+    # when config.git.auto_merge_allow_per_task), False always opts out, None defers to config.
+    auto_merge: bool | None = None
     # Per-stage provider override (only agent-routed stages; only providers from agents.allowed).
     agents: dict[Stage, ProviderId] = field(default_factory=dict)
     contacts: list[str] = field(default_factory=list)

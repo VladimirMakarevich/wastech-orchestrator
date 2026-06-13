@@ -35,6 +35,7 @@ from wastech_orchestrator.config.schema import (
     FootprintLocation,
     FootprintTracking,
     GitConfig,
+    MergeStrategy,
     OrchestratorConfig,
     OrchestratorRuntimeConfig,
     ProviderConfig,
@@ -459,7 +460,11 @@ def _build_security(raw: Any, issues: list[str]) -> SecurityConfig:
         ),
         denied_read_paths=_str_tuple(m, "denied_read_paths", (".env", "secrets/**"), where, issues),
         denied_commands=_str_tuple(
-            m, "denied_commands", ("git commit", "git push", "gh pr create"), where, issues
+            m,
+            "denied_commands",
+            ("git commit", "git push", "gh pr create", "gh pr merge"),
+            where,
+            issues,
         ),
     )
 
@@ -590,11 +595,34 @@ def _build_footprint(raw: Any, issues: list[str]) -> FootprintConfig:
 def _build_git(raw: Any, issues: list[str]) -> GitConfig:
     where = "git"
     m = _mapping(raw, where, issues)
-    _check_keys(m, {"create_pull_request", "pr_base", "footprint"}, where, issues)
+    _check_keys(
+        m,
+        {
+            "create_pull_request",
+            "pr_base",
+            "footprint",
+            "auto_merge",
+            "auto_merge_strategy",
+            "auto_merge_allow_per_task",
+            "auto_merge_wait_for_checks",
+        },
+        where,
+        issues,
+    )
     return GitConfig(
         create_pull_request=_bool(m, "create_pull_request", True, where, issues),
         pr_base=_str(m, "pr_base", "main", where, issues),
         footprint=_build_footprint(m.get("footprint"), issues),
+        auto_merge=_bool(m, "auto_merge", False, where, issues),
+        auto_merge_strategy=_enum(
+            m.get("auto_merge_strategy"),
+            MergeStrategy,
+            f"{where}.auto_merge_strategy",
+            issues,
+            MergeStrategy.SQUASH,
+        ),
+        auto_merge_allow_per_task=_bool(m, "auto_merge_allow_per_task", False, where, issues),
+        auto_merge_wait_for_checks=_bool(m, "auto_merge_wait_for_checks", False, where, issues),
     )
 
 

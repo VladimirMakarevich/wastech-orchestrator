@@ -209,6 +209,7 @@ def write_normalized(task: NormalizedTask, artifacts_root: str | Path) -> str:
         "description": task.description,
         "refined": task.refined,
         "decompose": task.decompose,
+        "auto_merge": task.auto_merge,
         "agents": {stage.value: provider.value for stage, provider in task.agents.items()},
         "contacts": list(task.contacts),
     }
@@ -229,6 +230,7 @@ def load_normalized(artifacts_root: str | Path, task_id: str) -> NormalizedTask:
         description=data.get("description", ""),
         refined=bool(data.get("refined", False)),
         decompose=data.get("decompose"),
+        auto_merge=data.get("auto_merge"),
         agents=agents,
         contacts=list(data.get("contacts", [])),
     )

@@ -215,6 +215,38 @@ def test_write_validation_report(config: OrchestratorConfig, tmp_path: Path) -> 
     assert path.endswith("validation_report.json")
 
 
+def test_auto_merge_true_passes_and_is_stored(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\nauto_merge: true\n---\n\n## Description\n\nDo it.\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.auto_merge is True
+
+
+def test_auto_merge_false_is_stored(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\nauto_merge: false\n---\n\n## Description\n\nDo it.\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.auto_merge is False
+
+
+def test_auto_merge_absent_normalizes_to_none(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\n---\n\n## Description\n\nDo it.\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.auto_merge is None
+
+
+def test_auto_merge_non_boolean_is_rejected(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\nauto_merge: 3\n---\n\n## Description\n\nDo it.\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_FIELD_TYPE
+    assert "auto_merge" in result.detail
+
+
 def test_model_field_passes_and_is_stored(config: OrchestratorConfig) -> None:
     text = "---\nid: task-001\ntitle: T\nmodel: claude-opus-4-8\n---\n\n## Description\n\nDo it.\n"
     result = _gate(config).validate(_src(text))
