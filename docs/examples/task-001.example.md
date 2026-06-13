@@ -13,6 +13,15 @@ agents:                     # optional per-stage override (only from agents.allo
 contacts: ["@team-lead"]    # plain-text Telegram mentions for prompts/terminal notifications
 model: null                 # optional: override model for all stages, e.g. "claude-opus-4-8"
 reasoning: null             # optional: low | medium | high | xhigh (Opus 4.7+) | max
+stages:                     # optional: per-stage model/reasoning (overrides the task-wide values
+                            # above for that stage; both sub-fields optional and independent).
+                            # Allowed: refinement, planning, implementation, review, fixing, summary.
+  planning:
+    model: null             # e.g. "claude-opus-4-8"
+    reasoning: null         # e.g. "high"
+  review:
+    model: null
+    reasoning: null
 ---
 
 ## Description

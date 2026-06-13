@@ -30,6 +30,7 @@ ALLOWED_TASK_KEYS: frozenset[str] = frozenset(
         "contacts",
         "model",
         "reasoning",
+        "stages",
     }
 )
 REQUIRED_TASK_FIELDS: frozenset[str] = frozenset({"id", "title"})
@@ -38,6 +39,18 @@ REQUIRED_TASK_FIELDS: frozenset[str] = frozenset({"id", "title"})
 def is_valid_task_id(task_id: str) -> bool:
     """Return True iff ``task_id`` matches the normalized id format (spec §19.3)."""
     return TASK_ID_PATTERN.fullmatch(task_id) is not None
+
+
+@dataclass(frozen=True)
+class StageParams:
+    """Per-stage model / reasoning override (task front matter ``stages.<stage>``).
+
+    Either field may be ``None`` to inherit the task-wide value (which in turn falls back to the
+    provider default). The two resolve independently — see :meth:`NormalizedTask.model_for`.
+    """
+
+    model: str | None = None
+    reasoning: str | None = None
 
 
 @dataclass(frozen=True)
@@ -61,3 +74,20 @@ class NormalizedTask:
     contacts: list[str] = field(default_factory=list)
     model: str | None = None
     reasoning: str | None = None
+    # Per-stage model/reasoning override (only the agent-routed stages in ROUTABLE_STAGES). Each
+    # field resolves independently: per-stage override → task-wide → provider default.
+    stage_params: dict[Stage, StageParams] = field(default_factory=dict)
+
+    def model_for(self, stage: Stage) -> str | None:
+        """Effective model: per-stage override → task-wide → None (provider default)."""
+        sp = self.stage_params.get(stage)
+        if sp is not None and sp.model is not None:
+            return sp.model
+        return self.model
+
+    def reasoning_for(self, stage: Stage) -> str | None:
+        """Effective reasoning: per-stage override → task-wide → None (provider default)."""
+        sp = self.stage_params.get(stage)
+        if sp is not None and sp.reasoning is not None:
+            return sp.reasoning
+        return self.reasoning

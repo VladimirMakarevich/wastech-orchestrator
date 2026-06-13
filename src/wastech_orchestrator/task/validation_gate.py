@@ -24,7 +24,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from wastech_orchestrator.config.schema import OrchestratorConfig
+from wastech_orchestrator.config.schema import ROUTABLE_STAGES, OrchestratorConfig
 from wastech_orchestrator.config.validation import check_task_route_override
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.providers.base import ProviderId, Stage
@@ -32,6 +32,7 @@ from wastech_orchestrator.security.injection import scan_frontmatter
 from wastech_orchestrator.task.model import (
     ALLOWED_TASK_KEYS,
     NormalizedTask,
+    StageParams,
     is_valid_task_id,
 )
 from wastech_orchestrator.task.parser import (
@@ -63,6 +64,7 @@ class ValidationReason(StrEnum):
     INVALID_TASK_ID = "invalid_task_id"
     DUPLICATE_TASK_ID = "duplicate_task_id"
     INVALID_ROUTE_OVERRIDE = "invalid_route_override"
+    INVALID_STAGE_OVERRIDE = "invalid_stage_override"
     INJECTION_SUSPECTED = "injection_suspected"
 
 
@@ -219,6 +221,11 @@ class ValidationGate:
         if route_reject is not None:
             return route_reject, None
 
+        # invalid_stage_override — map the per-stage model/reasoning override (agent-routed stages).
+        stage_params, stage_reject = self._build_stage_params(frontmatter.get("stages"))
+        if stage_reject is not None:
+            return stage_reject, None
+
         # injection_suspected — argv-shaped tokens in front-matter values (§19.5). The scanner is
         # belt-and-braces over the file-path-only structural guarantee (see security/injection.py).
         finding = scan_frontmatter(frontmatter)
@@ -236,6 +243,7 @@ class ValidationGate:
             contacts=[str(c) for c in frontmatter.get("contacts", [])],
             model=frontmatter.get("model") or None,
             reasoning=frontmatter.get("reasoning") or None,
+            stage_params=stage_params,
         )
         return None, task
 
@@ -273,19 +281,9 @@ class ValidationGate:
                 return _Reject(
                     ValidationReason.INVALID_FIELD_TYPE, "contacts must be a list of strings"
                 )
-        if "model" in fm and fm["model"] is not None and not isinstance(fm["model"], str):
-            return _Reject(ValidationReason.INVALID_FIELD_TYPE, "model must be a string or null")
-        if "reasoning" in fm and fm["reasoning"] is not None:
-            if not isinstance(fm["reasoning"], str):
-                return _Reject(
-                    ValidationReason.INVALID_FIELD_TYPE, "reasoning must be a string or null"
-                )
-            if fm["reasoning"] not in _REASONING_LEVELS:
-                return _Reject(
-                    ValidationReason.INVALID_FIELD_TYPE,
-                    f"reasoning must be one of {sorted(_REASONING_LEVELS)}",
-                )
-        return None
+        return _validate_model_reasoning(
+            fm.get("model"), fm.get("reasoning"), reason=ValidationReason.INVALID_FIELD_TYPE
+        )
 
     def _build_agents(self, raw: Any) -> tuple[dict[Stage, ProviderId], _Reject | None]:
         if raw is None:
@@ -309,6 +307,54 @@ class ValidationGate:
         if issues:
             return {}, _Reject(ValidationReason.INVALID_ROUTE_OVERRIDE, "; ".join(issues))
         return agents, None
+
+    def _build_stage_params(self, raw: Any) -> tuple[dict[Stage, StageParams], _Reject | None]:
+        """Map the ``stages`` front-matter block to ``{Stage: StageParams}`` (fail-closed).
+
+        Mirrors :meth:`_build_agents`: keys must be agent-routed stages (``ROUTABLE_STAGES`` — so
+        ``testing``/``publishing``, which run no agent, are rejected, not silently ignored). Each
+        value is an optional ``{model?, reasoning?}`` mapping; ``null``/``{}`` means "inherit".
+        Unknown stages, unknown sub-keys, and non-mapping values all reject with
+        ``INVALID_STAGE_OVERRIDE``.
+        """
+        if raw is None:
+            return {}, None
+        if not isinstance(raw, Mapping):
+            return {}, _Reject(ValidationReason.INVALID_STAGE_OVERRIDE, "stages must be a mapping")
+        stage_params: dict[Stage, StageParams] = {}
+        for key, value in raw.items():
+            stage = _STAGE_BY_KEY.get(str(key))
+            if stage is None or stage not in ROUTABLE_STAGES:
+                return {}, _Reject(
+                    ValidationReason.INVALID_STAGE_OVERRIDE, f"unknown stage {key!r}"
+                )
+            if value is None:
+                stage_params[stage] = StageParams()
+                continue
+            if not isinstance(value, Mapping):
+                return {}, _Reject(
+                    ValidationReason.INVALID_STAGE_OVERRIDE,
+                    f"stages.{stage.value} must be a mapping",
+                )
+            unknown = {str(k) for k in value} - {"model", "reasoning"}
+            if unknown:
+                return {}, _Reject(
+                    ValidationReason.INVALID_STAGE_OVERRIDE,
+                    f"stages.{stage.value}: unknown keys {sorted(unknown)}",
+                )
+            reject = _validate_model_reasoning(
+                value.get("model"),
+                value.get("reasoning"),
+                reason=ValidationReason.INVALID_STAGE_OVERRIDE,
+                prefix=f"stages.{stage.value} ",
+            )
+            if reject is not None:
+                return {}, reject
+            stage_params[stage] = StageParams(
+                model=value.get("model") or None,
+                reasoning=value.get("reasoning") or None,
+            )
+        return stage_params, None
 
     # --- Phase B --------------------------------------------------------------------------
 
@@ -336,6 +382,29 @@ def _rej(reason: ValidationReason, detail: str) -> tuple[_Reject, None]:
 def _as_tristate(value: Any) -> bool | None:
     if isinstance(value, bool):
         return value
+    return None
+
+
+def _validate_model_reasoning(
+    model: Any, reasoning: Any, *, reason: ValidationReason, prefix: str = ""
+) -> _Reject | None:
+    """Validate a ``(model, reasoning)`` pair — shared by the top-level fields and each stage block.
+
+    ``model`` must be a string or null; ``reasoning`` must be null or one of ``_REASONING_LEVELS``.
+    ``None`` for either is "unset" and skips its check. ``reason`` selects the reject code
+    (``INVALID_FIELD_TYPE`` for the top-level pair, ``INVALID_STAGE_OVERRIDE`` per stage) and
+    ``prefix`` frames the detail (e.g. ``"stages.planning "``) while keeping the ``model``/
+    ``reasoning`` substrings intact.
+    """
+    if model is not None and not isinstance(model, str):
+        return _Reject(reason, f"{prefix}model must be a string or null")
+    if reasoning is not None:
+        if not isinstance(reasoning, str):
+            return _Reject(reason, f"{prefix}reasoning must be a string or null")
+        if reasoning not in _REASONING_LEVELS:
+            return _Reject(
+                reason, f"{prefix}reasoning must be one of {sorted(_REASONING_LEVELS)}"
+            )
     return None
 
 

@@ -369,6 +369,51 @@ def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: 
     assert "agent/task-001-add-a-thing" in branches
 
 
+def test_per_stage_model_reasoning_reaches_provider(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    """A ``stages.<stage>`` override sets the model/reasoning for that stage only; other stages
+    fall back to the task-wide values. The resolved values travel on the AgentRunRequest."""
+    providers = _both()
+    orch, _store, _, _art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+    )
+    path = tmp_path / "task-001.md"
+    path.write_text(
+        '---\nid: task-001\ntitle: "Add a thing"\nrefined: true\n'
+        "model: claude-sonnet-4-6\n"
+        "reasoning: low\n"
+        "stages:\n"
+        "  planning:\n"
+        "    model: claude-opus-4-8\n"
+        "    reasoning: high\n"
+        "---\n\n## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
+        encoding="utf-8",
+    )
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.stage is Stage.IMPLEMENTATION:
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    result = orch.run_task(str(path))
+    assert result.final_status is Status.DONE
+
+    requests = providers[ProviderId.CLAUDE].requests + providers[ProviderId.CODEX].requests
+    planning = next(r for r in requests if r.stage is Stage.PLANNING)
+    impl = next(r for r in requests if r.stage is Stage.IMPLEMENTATION)
+    # Planning uses the per-stage override; implementation inherits the task-wide values.
+    assert (planning.model, planning.reasoning) == ("claude-opus-4-8", "high")
+    assert (impl.model, impl.reasoning) == ("claude-sonnet-4-6", "low")
+
+
 def test_prompt_override_reaches_provider_and_is_audited(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:

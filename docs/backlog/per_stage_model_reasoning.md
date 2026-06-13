@@ -1,12 +1,14 @@
 # Backlog: Per-stage model and reasoning overrides
 
-Status: **backlog / not scheduled**
+Status: **§3 implemented** (per-task per-stage `stages:` overrides) · **§4 still backlog**
+(config-level `stage_defaults`)
 Date: 2026-06-13
 Owner: Vladimir Makarevich
 
 This document captures the design for adding stage-level granularity to the `model` and `reasoning`
-task parameters. It is a backlog item, not part of the currently implemented runtime behavior.
-Nothing here overrides
+task parameters. The per-task per-stage portion (§3) is **implemented**; see the
+[Implementation notes](#7-implementation-notes-as-built) for the deltas from the original design.
+The config-level per-stage defaults (§4) remain a backlog item. Nothing here overrides
 [00_orchestrator_final_plan.md](../implementation_stages/00_orchestrator_final_plan.md),
 [CLAUDE.md](../../CLAUDE.md), or the hard invariants in [docs/rules/](../rules/).
 
@@ -241,17 +243,18 @@ Track it as a follow-up once per-task per-stage overrides are working.
 
 ---
 
-## 5. Implementation checklist (when scheduled)
+## 5. Implementation checklist (§3 — done)
 
-- [ ] Add `StageParams` dataclass to `task/model.py`.
-- [ ] Add `stage_params: dict[Stage, StageParams]` field to `NormalizedTask`.
-- [ ] Add `"stages"` to `ALLOWED_TASK_KEYS` in `task/model.py`.
-- [ ] Extend `task/validation_gate.py` to parse and validate `stages:` block; populate
+- [x] Add `StageParams` dataclass to `task/model.py`.
+- [x] Add `stage_params: dict[Stage, StageParams]` field to `NormalizedTask`.
+- [x] Add `"stages"` to `ALLOWED_TASK_KEYS` in `task/model.py`.
+- [x] Extend `task/validation_gate.py` to parse and validate `stages:` block; populate
       `stage_params`.
-- [ ] Add `_effective_model` / `_effective_reasoning` helpers to `core/orchestrator.py` and use
-      them in `AgentRunRequest` construction (`orchestrator.py:966-967`).
-- [ ] Update `docs/examples/task-001.example.md` with the new `stages:` key and inline comments.
-- [ ] Unit tests:
+- [x] Resolution helpers — **as `NormalizedTask.model_for(stage)` / `reasoning_for(stage)` methods**
+      (not free functions in the orchestrator), used in `AgentRunRequest` construction
+      (`orchestrator.py`, the per-stage `_run_stage`).
+- [x] Update `docs/examples/task-001.example.md` with the new `stages:` key and inline comments.
+- [x] Unit tests:
   - Per-stage override takes precedence over task-wide value.
   - Task-wide value used when stage not listed in `stages:`.
   - Provider config used when neither task-wide nor per-stage value set.
@@ -259,7 +262,10 @@ Track it as a follow-up once per-task per-stage overrides are working.
   - Unknown sub-key inside a stage block → task rejected.
   - `model` and `reasoning` resolved independently (e.g. only `reasoning` overridden for a
     stage uses the task-wide `model`).
-- [ ] Update `CHANGELOG.md` `[Unreleased]` entry.
+  - Plus: `stages.testing`/`stages.publishing`, non-mapping `stages`, non-mapping stage value, and
+    an end-to-end orchestrator test that the resolved values reach the provider request.
+- [x] Update `CHANGELOG.md` `[Unreleased]` entry.
+- [x] Update `docs/task-authoring.md` and the §5 front-matter example in `00_orchestrator_final_plan.md`.
 
 ---
 
@@ -273,3 +279,34 @@ Track it as a follow-up once per-task per-stage overrides are working.
 - `docs/examples/task-001.example.md` — example file to update.
 - [[product_backlog]] — "Per-task reasoning and complexity levels" row: this item builds on that
   row and refines it to stage-level granularity.
+
+---
+
+## 7. Implementation notes (as-built)
+
+§3 shipped largely as designed, with these deliberate refinements (the design above is kept for
+context; where it differs, this section is authoritative):
+
+- **Reject reason.** Invalid `stages:` entries use a dedicated `ValidationReason.INVALID_STAGE_OVERRIDE`
+  (not `INVALID_FIELD_TYPE` as §3.4 suggested), mirroring `agents`'s `INVALID_ROUTE_OVERRIDE` so a
+  rejected task's `validation_report.json` is self-explanatory. (The top-level `model`/`reasoning`
+  type checks still emit `INVALID_FIELD_TYPE`, unchanged.)
+- **Allowed stage keys = `ROUTABLE_STAGES`.** Keys are validated against
+  `config.schema.ROUTABLE_STAGES` (`refinement, planning, implementation, review, fixing, summary`),
+  which excludes **both** `testing` and `publishing` (neither runs an agent). The original "exclude
+  publishing" framing would have wrongly accepted `stages.testing`.
+- **Resolution lives on `NormalizedTask`.** `model_for(stage)` / `reasoning_for(stage)` methods
+  (frozen-dataclass methods, unit-testable in isolation) replace the proposed free
+  `_effective_model` / `_effective_reasoning` functions in the orchestrator.
+- **DRY validation.** A shared `_validate_model_reasoning(model, reasoning, *, reason, prefix)`
+  helper in `validation_gate.py` validates both the top-level pair and each stage block.
+- **Edge cases (fail-closed).** `stages: null|{}` and `stages.<stage>: null|{}` are accepted and mean
+  "inherit"; non-mapping `stages`, non-mapping stage values, unknown sub-keys, unknown/non-routable
+  stages, and invalid `reasoning` levels are all rejected.
+- **Non-goal.** No model-name-vs-provider cross-validation (a `model` string is not checked against
+  the stage's routed provider) — consistent with the existing task-wide `model`.
+
+As-built code references (the line numbers in §2/§6 above are from the original draft and are now
+stale): `task/model.py` (`StageParams`, `stage_params`, `model_for`/`reasoning_for`,
+`ALLOWED_TASK_KEYS`); `task/validation_gate.py` (`INVALID_STAGE_OVERRIDE`, `_build_stage_params`,
+`_validate_model_reasoning`); `core/orchestrator.py` (`_run_stage` → `AgentRunRequest`).

@@ -75,6 +75,7 @@ Allowed fields:
 | `contacts` | no | list of strings | Plain-text mentions in Telegram notifications/HITL prompts. |
 | `model` | no | string or null | Override the provider model for every stage of this task (e.g. `claude-opus-4-8`). |
 | `reasoning` | no | string or null | Override the reasoning effort level for this task: `low`, `medium`, `high`, `xhigh`, or `max`. |
+| `stages` | no | mapping | Per-stage `model`/`reasoning` override; takes precedence over the task-wide `model`/`reasoning` for that stage. |
 
 The current validation gate rejects unknown fields fail-closed. Keep task front matter limited to
 the fields above.
@@ -215,6 +216,54 @@ Valid values: `low`, `medium`, `high`, `xhigh`, `max`.
 
 When omitted, the global `agents.providers.<provider>.reasoning` value from `config.yaml` is used.
 When that is also absent, no reasoning flag is passed to the CLI.
+
+## `stages`
+
+Different stages have different cognitive demands: `planning` and `review` benefit from a capable,
+high-reasoning model, while `implementation`, `fixing`, and `summary` are usually fine on a
+lighter/cheaper one. Use `stages` to set `model` and/or `reasoning` per stage instead of one
+task-wide value:
+
+```yaml
+model: claude-sonnet-4-6   # task-wide fallback for stages not listed below
+reasoning: low
+stages:
+  planning:
+    model: claude-opus-4-8
+    reasoning: high
+  review:
+    reasoning: high         # only reasoning overridden — model stays the task-wide claude-sonnet-4-6
+  fixing:
+    model: claude-sonnet-4-6
+    reasoning: medium
+```
+
+Each field resolves independently, most-specific first:
+
+```text
+stages.<stage>.<field>  →  task-wide model/reasoning  →  agents.providers.<provider>.<field>  →  unset
+```
+
+So a stage can override only `reasoning` and keep the task-wide (or provider-default) `model`, and
+vice versa. Both sub-fields are optional; a stage block of `{}` or `null` means "inherit", which is
+useful for scaffolding a block before filling it in.
+
+Allowed stage keys:
+
+```text
+refinement, planning, implementation, review, fixing, summary
+```
+
+Rules:
+
+- only the agent-routed stages above may appear; `testing` (the Check Runner) and `publishing` (the
+  Git Manager) run no agent, so a `model`/`reasoning` override there is meaningless and is rejected
+  fail-closed (`invalid_stage_override`);
+- unknown sub-keys (anything but `model`/`reasoning`), non-mapping stage values, and invalid
+  `reasoning` levels are likewise rejected;
+- a `model` string is **not** validated against the stage's provider — if a stage routes to a
+  provider that does not recognize the model name, the run fails at that provider, the same as a
+  task-wide `model`. Keep model names consistent with the provider routing for that stage.
 
 ## Body Sections
 

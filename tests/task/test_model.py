@@ -9,6 +9,7 @@ from wastech_orchestrator.task.model import (
     ALLOWED_TASK_KEYS,
     REQUIRED_TASK_FIELDS,
     NormalizedTask,
+    StageParams,
     is_valid_task_id,
 )
 
@@ -50,7 +51,8 @@ def test_default_collections_are_independent() -> None:
     b = NormalizedTask(id="b", title="B", description="d")
     a.agents[Stage.PLANNING] = ProviderId.CODEX
     a.contacts.append("ops")
-    assert b.agents == {} and b.contacts == []
+    a.stage_params[Stage.PLANNING] = StageParams(model="m")
+    assert b.agents == {} and b.contacts == [] and b.stage_params == {}
 
 
 def test_schema_constants() -> None:
@@ -64,6 +66,57 @@ def test_schema_constants() -> None:
         "contacts",
         "model",
         "reasoning",
+        "stages",
     } == ALLOWED_TASK_KEYS
     assert {"id", "title"} == REQUIRED_TASK_FIELDS
     assert REQUIRED_TASK_FIELDS <= ALLOWED_TASK_KEYS
+
+
+def _task(**kwargs: object) -> NormalizedTask:
+    return NormalizedTask(id="t", title="x", description="d", **kwargs)
+
+
+def test_model_for_falls_back_to_task_wide_when_no_stage_params() -> None:
+    task = _task(model="task-model", reasoning="low")
+    assert task.model_for(Stage.PLANNING) == "task-model"
+    assert task.reasoning_for(Stage.PLANNING) == "low"
+
+
+def test_model_for_uses_stage_override() -> None:
+    task = _task(
+        model="task-model",
+        reasoning="low",
+        stage_params={Stage.PLANNING: StageParams(model="opus", reasoning="high")},
+    )
+    assert task.model_for(Stage.PLANNING) == "opus"
+    assert task.reasoning_for(Stage.PLANNING) == "high"
+    # A stage without an override still gets the task-wide value.
+    assert task.model_for(Stage.IMPLEMENTATION) == "task-model"
+    assert task.reasoning_for(Stage.IMPLEMENTATION) == "low"
+
+
+def test_model_and_reasoning_resolved_independently() -> None:
+    # Only reasoning overridden for the stage → model stays task-wide.
+    task = _task(
+        model="task-model",
+        reasoning="low",
+        stage_params={Stage.REVIEW: StageParams(reasoning="high")},
+    )
+    assert task.model_for(Stage.REVIEW) == "task-model"
+    assert task.reasoning_for(Stage.REVIEW) == "high"
+
+
+def test_stage_params_none_fields_inherit_task_wide() -> None:
+    task = _task(
+        model="task-model",
+        reasoning="low",
+        stage_params={Stage.PLANNING: StageParams()},
+    )
+    assert task.model_for(Stage.PLANNING) == "task-model"
+    assert task.reasoning_for(Stage.PLANNING) == "low"
+
+
+def test_model_for_returns_none_when_nothing_set() -> None:
+    task = _task()
+    assert task.model_for(Stage.PLANNING) is None
+    assert task.reasoning_for(Stage.PLANNING) is None

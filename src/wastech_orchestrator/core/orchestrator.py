@@ -1068,8 +1068,8 @@ class Orchestrator:
             review_artifacts_path=p.review_findings_path,
             human_input_path=human_input_path,
             output_schema=stage_output_schema(stage),
-            model=p.task.model or None,
-            reasoning=p.task.reasoning,
+            model=p.task.model_for(stage),
+            reasoning=p.task.reasoning_for(stage),
             session_id=p.session_ids.get(route.primary.value),
         )
         fields: dict[str, object] = {

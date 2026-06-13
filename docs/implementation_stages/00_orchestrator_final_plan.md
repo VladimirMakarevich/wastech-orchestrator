@@ -122,8 +122,8 @@ AgentProvider
 - `timeout_seconds`;
 - `attempt`;
 - `output_schema`;
-- `model` — optional per-task model override (from task front matter);
-- `reasoning` — optional reasoning effort level: `low`, `medium`, `high`, `xhigh`, or `max` (from task front matter or provider config); maps to `--effort` for Claude and `--reasoning-effort` for Codex;
+- `model` — optional model override, resolved per stage before the request is built: per-stage task override (`stages.<stage>.model`) → task-wide `model` → provider config;
+- `reasoning` — optional reasoning effort level: `low`, `medium`, `high`, `xhigh`, or `max`, resolved per stage by the same chain (`stages.<stage>.reasoning` → task-wide `reasoning` → provider config); maps to `--effort` for Claude and `--reasoning-effort` for Codex;
 - `session_id` — optional Claude session ID from the previous stage; when present, passed as `--resume <session_id>` so the agent continues the same session across stages, preserving context and saving tokens; ignored by Codex;
 - safe additional parameters.
 
@@ -251,10 +251,19 @@ agents:
   fixing: codex
 model: null             # optional: override provider model for all stages of this task
 reasoning: null         # optional: low | medium | high | xhigh (Opus 4.7+ / Fable 5) | max
+stages:                 # optional: per-stage model/reasoning, overrides the task-wide values above
+  planning:             #   for that stage (agent-routed stages only; both sub-fields optional).
+    model: claude-opus-4-8
+    reasoning: high
+  review:
+    reasoning: high
 ---
 ```
 
-For a JSON task, an `agents` object with the same keys is used.
+For a JSON task, an `agents` object with the same keys is used. Per-stage `model`/`reasoning`
+resolve most-specific first: `stages.<stage>.<field>` → task-wide `model`/`reasoning` →
+`agents.providers.<provider>` default. Only the agent-routed stages (`refinement`, `planning`,
+`implementation`, `review`, `fixing`, `summary`) are valid keys under `stages`.
 
 ### 5.1. Decomposition (flag-gated)
 

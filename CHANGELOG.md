@@ -18,6 +18,17 @@ The maintainer bumps the package version in `pyproject.toml` on release; `wastec
 ## [Unreleased]
 
 ### Added
+- **Per-stage model/reasoning overrides**: a task can now tune `model` and `reasoning` per agent
+  stage via a `stages:` front-matter block (e.g. Opus + `high` for `planning`/`review`, a lighter
+  model + `low` for `implementation`/`fixing`). Each field resolves independently, most-specific
+  first: `stages.<stage>.<field>` → task-wide `model`/`reasoning` → `agents.providers.<provider>`
+  default. Keys are limited to the agent-routed stages (`refinement`, `planning`, `implementation`,
+  `review`, `fixing`, `summary`); `testing`/`publishing` run no agent and are rejected fail-closed
+  (`invalid_stage_override`), as are unknown sub-keys and non-mapping values. Per-stage values
+  travel on `AgentRunRequest` only — they cannot change the provider, `extra_args`, or any security
+  policy. No `config.yaml` schema change (per-task only; config-level `stage_defaults` remains a
+  follow-up). See [docs/task-authoring.md](docs/task-authoring.md#stages) and
+  [docs/backlog/per_stage_model_reasoning.md](docs/backlog/per_stage_model_reasoning.md).
 - **Operator-customizable stage prompts**: a new optional `prompts:` block lets operators extend
   (`mode: append`) or replace (`mode: replace`) the per-stage instructions for the agent-routed
   stages (`refinement`, `planning`, `implementation`, `review`, `fixing`, `summary`) without editing

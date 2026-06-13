@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 
 from wastech_orchestrator.config.schema import OrchestratorConfig
+from wastech_orchestrator.providers.base import Stage
+from wastech_orchestrator.task.model import StageParams
 from wastech_orchestrator.task.parser import ParsedSource
 from wastech_orchestrator.task.validation_gate import (
     Completeness,
@@ -301,3 +303,120 @@ def test_reasoning_null_normalizes_to_none(config: OrchestratorConfig) -> None:
     assert result.passed is True
     assert result.normalized is not None
     assert result.normalized.reasoning is None
+
+
+def _stages_task(stages_block: str) -> str:
+    """Build a minimal valid task whose front matter carries the given ``stages:`` block."""
+    return f"---\nid: task-001\ntitle: T\n{stages_block}---\n\n## Description\n\nDo it.\n"
+
+
+def test_stages_absent_is_empty(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\n---\n\n## Description\n\nDo it.\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.stage_params == {}
+
+
+def test_stages_null_is_empty(config: OrchestratorConfig) -> None:
+    result = _gate(config).validate(_src(_stages_task("stages: null\n")))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.stage_params == {}
+
+
+def test_stages_empty_mapping_is_empty(config: OrchestratorConfig) -> None:
+    result = _gate(config).validate(_src(_stages_task("stages: {}\n")))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.stage_params == {}
+
+
+def test_stages_override_passes_and_is_stored(config: OrchestratorConfig) -> None:
+    block = "stages:\n  planning:\n    model: claude-opus-4-8\n    reasoning: high\n"
+    result = _gate(config).validate(_src(_stages_task(block)))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.stage_params == {
+        Stage.PLANNING: StageParams(model="claude-opus-4-8", reasoning="high")
+    }
+
+
+def test_stages_only_reasoning_overridden(config: OrchestratorConfig) -> None:
+    block = "stages:\n  review:\n    reasoning: high\n"
+    result = _gate(config).validate(_src(_stages_task(block)))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.stage_params[Stage.REVIEW] == StageParams(model=None, reasoning="high")
+
+
+def test_stages_stage_null_inherits(config: OrchestratorConfig) -> None:
+    result = _gate(config).validate(_src(_stages_task("stages:\n  planning: null\n")))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.stage_params == {Stage.PLANNING: StageParams()}
+
+
+def test_stages_empty_block_inherits(config: OrchestratorConfig) -> None:
+    result = _gate(config).validate(_src(_stages_task("stages:\n  planning: {}\n")))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.stage_params == {Stage.PLANNING: StageParams()}
+
+
+def test_stages_unknown_stage_rejected(config: OrchestratorConfig) -> None:
+    block = "stages:\n  nonsense:\n    model: m\n"
+    result = _gate(config).validate(_src(_stages_task(block)))
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_STAGE_OVERRIDE
+
+
+def test_stages_testing_rejected(config: OrchestratorConfig) -> None:
+    # ``testing`` runs no agent (it is the Check Runner) → not in ROUTABLE_STAGES.
+    block = "stages:\n  testing:\n    reasoning: high\n"
+    result = _gate(config).validate(_src(_stages_task(block)))
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_STAGE_OVERRIDE
+
+
+def test_stages_publishing_rejected(config: OrchestratorConfig) -> None:
+    block = "stages:\n  publishing:\n    model: m\n"
+    result = _gate(config).validate(_src(_stages_task(block)))
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_STAGE_OVERRIDE
+
+
+def test_stages_unknown_subkey_rejected(config: OrchestratorConfig) -> None:
+    block = "stages:\n  planning:\n    temperature: 1\n"
+    result = _gate(config).validate(_src(_stages_task(block)))
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_STAGE_OVERRIDE
+    assert "temperature" in result.detail
+
+
+def test_stages_non_mapping_value_rejected(config: OrchestratorConfig) -> None:
+    result = _gate(config).validate(_src(_stages_task("stages:\n  planning: opus\n")))
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_STAGE_OVERRIDE
+
+
+def test_stages_non_mapping_top_level_rejected(config: OrchestratorConfig) -> None:
+    result = _gate(config).validate(_src(_stages_task("stages: opus\n")))
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_STAGE_OVERRIDE
+
+
+def test_stages_invalid_reasoning_rejected(config: OrchestratorConfig) -> None:
+    block = "stages:\n  planning:\n    reasoning: ultra\n"
+    result = _gate(config).validate(_src(_stages_task(block)))
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_STAGE_OVERRIDE
+    assert "reasoning" in result.detail
+
+
+def test_stages_model_non_string_rejected(config: OrchestratorConfig) -> None:
+    block = "stages:\n  planning:\n    model: 42\n"
+    result = _gate(config).validate(_src(_stages_task(block)))
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_STAGE_OVERRIDE
+    assert "model" in result.detail
