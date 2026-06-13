@@ -18,6 +18,20 @@ The maintainer bumps the package version in `pyproject.toml` on release; `wastec
 ## [Unreleased]
 
 ### Added
+- **Automatic check discovery and environment resolution** (Phases 1–3 of
+  [docs/backlog/automatic_check_discovery.md](docs/backlog/automatic_check_discovery.md)): a new
+  provider-agnostic `checks/` package resolves the repository's quality-gate commands without
+  hand-written, technology-specific paths. It inspects manifests/lock files/`make`·`just`·`tox`·`nox`
+  wrappers/local `.venv` interpreters, validates and **probes launchability** without running the
+  suite, and persists a fingerprinted profile at `<workspace>/checks/resolved-profile.json`
+  (recomputed per `checks.discovery.refresh`). A new `checks.discovery` config block selects the mode
+  (`auto` / `deterministic` / `configured` / `disabled`); `install` writes `auto` when it cannot pin
+  explicit checks. `checks.commands` now accepts a **backward-compatible union** of legacy strings and
+  structured `{name, argv}` entries (no `schema_version` bump). `preflight` reports the resolved
+  commands, evidence, and probe status; `status` shows the cached profile read-only. An optional,
+  read-only, **advisory** agent fallback (cheap model via `checks.discovery.{model,reasoning}`,
+  strict schema-validated, runs only at install) proposes candidates that pass the same validation and
+  probing — it can never mark a check passing or execute anything.
 - **Reasoning/effort level config**: a `reasoning` field (`low` / `medium` / `high` / `xhigh` /
   `max`) can now be set globally under `agents.providers.<provider>.reasoning` in `config.yaml` or
   per-task via `reasoning:` front-matter. For Claude, this maps to `--effort <level>` (Claude Code

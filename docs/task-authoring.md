@@ -166,6 +166,12 @@ Rules:
 - `testing` and `publishing` cannot be overridden here;
 - task overrides cannot change commands, `extra_args`, credentials, sandbox, or any security policy.
 
+> **Tasks cannot supply or weaken checks.** The quality-gate commands are an operator/infrastructure
+> concern resolved from `config.yaml` and the repository at install/preflight time (see
+> [configuration.md](configuration.md#checks)). A task file has no field to add, replace, or relax a
+> check, and cannot change the discovery policy — this keeps the quality gate independent of task
+> content.
+
 ## `contacts`
 
 `contacts` is a list of strings:

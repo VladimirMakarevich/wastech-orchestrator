@@ -1,7 +1,7 @@
 # Backlog: Automatic check discovery and environment resolution
 
-Status: **accepted / not scheduled**
-Date: 2026-06-12
+Status: **in progress — Phases 1–3 implemented** (see [§17 Implementation status](#17-implementation-status))
+Date: 2026-06-12 (updated 2026-06-13)
 Owner: Vladimir Makarevich
 
 This document captures the product task of making repository quality checks discoverable and
@@ -38,7 +38,7 @@ Make the default onboarding path:
 
 ```text
 install repository
-    -> discover likely setup and check commands
+    -> discover likely check commands
     -> validate safe candidates
     -> probe launchability
     -> persist a resolved check profile
@@ -61,9 +61,10 @@ available as an override for unusual or policy-sensitive projects.
 3. **A launch failure is not a code-quality failure.**
    A missing executable or module should try the next candidate or fail check preflight. It must not
    enter `fixing` or consume the fix budget.
-4. **Setup and checks are separate.**
-   Discovering `uv run pytest` is safe and read-only. Running `uv sync`, `npm install`, or another
-   dependency bootstrap changes the environment and may use the network; it needs a separate policy.
+4. **A check never mutates the environment.**
+   Discovering `uv run pytest` is safe and read-only. A dependency-install/setup command (`uv sync`,
+   `npm install`, `pip install`) is not a check: it is rejected as a candidate and never run by the
+   orchestrator.
 5. **Resolved profiles are cached and audited.**
    Discovery should not repeat before every task when the relevant repository inputs and environment
    have not changed.
@@ -137,7 +138,6 @@ data, not an executable shell script:
 
 ```json
 {
-  "setup": [],
   "checks": [
     {
       "name": "tests",
@@ -187,7 +187,7 @@ Validation requirements:
 - only allowlisted environment variables reach the process;
 - mandatory timeout;
 - existing security blacklist applied;
-- no dependency installation or environment mutation hidden inside a check candidate;
+- a dependency-install/setup command is rejected, never run as a check;
 - command provenance and evidence recorded in the profile artifact.
 
 Probing should be lightweight and tool-specific where practical:
@@ -196,38 +196,11 @@ Probing should be lightweight and tool-specific where practical:
 - for Python, probe `python -c "import <module>"` or a safe version command;
 - for package scripts, verify the script exists in the parsed manifest;
 - for Make/Just/Task, parse or list targets without running the full target when supported;
-- distinguish `launchable`, `not_launchable`, `unsupported`, and `requires_bootstrap`.
+- distinguish `launchable`, `not_launchable`, and `unsupported`.
 
 Failed probes try the next candidate. They do not enter `fixing`.
 
-## 8. Setup/bootstrap policy
-
-Environment bootstrap is a separate phase because it can change files, install packages, execute
-project hooks, access the network, or consume credentials.
-
-Proposed modes:
-
-```yaml
-environment:
-  discovery: auto
-  bootstrap: prompt       # never | prompt | allowed
-```
-
-Initial implementation should default to `never` or `prompt`. Automatic bootstrap must not be
-silently inferred from an agent response.
-
-Examples requiring bootstrap policy:
-
-- `uv sync`;
-- `poetry install`;
-- `pip install -e ".[dev]"`;
-- `npm ci`;
-- `pnpm install --frozen-lockfile`;
-- downloading a missing toolchain.
-
-The resolver may report `requires_bootstrap` and the exact proposed argv without executing it.
-
-## 9. Proposed configuration
+## 8. Proposed configuration
 
 ```yaml
 checks:
@@ -243,16 +216,13 @@ Semantics:
 
 - `auto`: deterministic detection, then agent fallback when confidence is insufficient;
 - `deterministic`: inspect known project evidence only;
-- `configured`: require explicit `commands`;
+- `configured`: use explicit `commands` as-is (the backward-compatible default);
 - `disabled`: explicit no-check mode with a prominent warning and audit record;
 - non-empty `commands`: authoritative override regardless of discovery mode;
 - an empty `commands` list under `auto` is not a successful no-op: resolution must produce a valid
   profile or stop before implementation.
 
-Open compatibility decision: preserve the current string form temporarily and normalize it to argv,
-or make structured commands a schema-versioned change.
-
-## 10. Profile persistence and invalidation
+## 9. Profile persistence and invalidation
 
 Store a machine-readable artifact in the control workspace, for example:
 
@@ -282,7 +252,7 @@ Fingerprint inputs should include relevant files such as:
 
 Rediscover when the fingerprint changes or a previously resolved command becomes unlaunchable.
 
-## 11. Runtime behavior and error semantics
+## 10. Runtime behavior and error semantics
 
 Before creating a task branch:
 
@@ -300,7 +270,7 @@ During testing:
 - fixing agents receive the real check output, not a missing-executable error that they cannot fix in
   repository code.
 
-## 12. Security and invariants
+## 11. Security and invariants
 
 This feature must preserve:
 
@@ -317,7 +287,7 @@ This feature must preserve:
 Discovery must not scan denied paths or feed secret files to an agent. CI files and scripts may
 contain secret variable names; values must never be resolved or persisted.
 
-## 13. Implementation phases
+## 12. Implementation phases
 
 ### Phase 1: structured commands and deterministic resolver
 
@@ -341,14 +311,7 @@ contain secret variable names; values must never be resolved or persisted.
 - validate and probe every proposed command;
 - audit provider, evidence, rejected candidates, and final selection.
 
-### Phase 4: controlled bootstrap
-
-- introduce setup proposals and approval policy;
-- keep dependency installation separate from checks;
-- record setup changes and network requirements;
-- never weaken sandbox or credential rules.
-
-## 14. Acceptance criteria
+## 13. Acceptance criteria
 
 - A newly installed common Python, Node.js, Rust, Go, tox/nox, or Make-based repository can resolve
   a working check profile without manual command editing when sufficient evidence exists.
@@ -359,11 +322,11 @@ contain secret variable names; values must never be resolved or persisted.
 - No task branch or provider implementation run starts when required checks are not launchable.
 - Agent-assisted discovery returns schema-validated candidates and cannot execute or approve checks.
 - Resolved profiles are cached, audited, and invalidated when relevant inputs change.
-- Setup/bootstrap commands are never executed implicitly.
+- A dependency-install/setup command is never run as a check.
 - Check execution still uses argv lists, timeouts, environment allowlists, and redacted artifacts.
 - Documentation explains auto, deterministic, configured, and disabled modes.
 
-## 15. Testing plan
+## 14. Testing plan
 
 Unit tests:
 
@@ -373,7 +336,7 @@ Unit tests:
 - structured argv validation and path normalization;
 - fingerprint stability and invalidation;
 - launch error versus quality failure classification;
-- bootstrap-required candidates are never executed as checks.
+- install-shaped candidates are rejected as checks.
 
 Integration tests:
 
@@ -388,23 +351,58 @@ Integration tests:
 End-to-end:
 
 - `install` on representative fixture repositories resolves checks and `preflight` reports ready;
-- a task completes without manually editing `checks.commands`;
-- environment/bootstrap requirement produces an explicit operator decision instead of an implicit
-  installation.
+- a task completes without manually editing `checks.commands`.
 
-## 16. Documentation updates when implemented
+## 15. Documentation updates when implemented
 
-- [configuration.md](../configuration.md): discovery modes, structured commands, bootstrap policy.
+- [configuration.md](../configuration.md): discovery modes, structured commands.
 - [operations.md](../operations.md): diagnostics, profile refresh, rejected candidates.
 - [cookbook.md](../cookbook.md): zero-config onboarding and explicit overrides.
 - [task-authoring.md](../task-authoring.md): clarify that task files cannot provide check commands.
 - `CHANGELOG.md`: behavior and config-schema changes.
 
-## 17. Open decisions
+## 16. Open decisions
 
 - Which CI formats should be parsed in the first deterministic release?
 - What confidence threshold triggers agent-assisted discovery?
 - Should project-owned wrappers such as `make check` outrank language-native commands in all cases?
 - Where should the resolved profile live under each git footprint mode?
 - Should `disabled` be allowed globally, or require an explicit unsafe/no-quality-gate warning?
-- Which bootstrap operations may become automatically allowed after the initial prompt-only release?
+
+## 17. Implementation status
+
+Implemented 2026-06-13 (Phases 1–3). Code lives in `src/wastech_orchestrator/checks/`; tests in
+`tests/checks/` plus additions to `tests/check/`, `tests/config/`, `tests/install/`, and
+`tests/core/`.
+
+### Done
+
+- **Phase 1 — structured commands + deterministic resolver + the launch/quality split.**
+  Canonical `ResolvedCheck` and the backward-compatible `checks.commands` union (string and
+  `{name, argv}`); `RepositoryInspector` → `CheckCandidateDetector` → `CheckCandidateValidator` →
+  `CheckProbeRunner` → `CheckResolver`; profile persistence + input fingerprint; `CheckRunner` and
+  the orchestrator now treat a **process-launch failure as infrastructure** (terminal/preflight,
+  never `fixing`, no fix-budget spend) and a check-preflight resolves a launchable profile **before
+  any branch** (`checks.discovery.mode`, empty-under-`auto` stops). The decision settled here vs the
+  doc: the default mode is **`configured`** (zero behaviour change on upgrade); discovery is opt-in
+  via `mode` (and `install` writes `auto`).
+- **Phase 2 — installer & diagnostics.** `install` writes `checks.discovery` and (via auto-preflight)
+  seeds the resolved profile; `preflight` reports the resolved commands, evidence, probe status, and
+  rejected candidates; `status` surfaces the cached profile read-only; `refresh: on_change`
+  invalidation via the fingerprint. (`install/detect.py` is retained for the wizard's quick
+  ecosystem hint and not yet consolidated onto `checks/detect.py` — see follow-ups.)
+- **Phase 3 — agent-assisted fallback.** `AgentCheckDiscovery` + strict `schema_validate` +
+  `discovery_factory`; a read-only, advisory, schema-validated provider call (cheap model via
+  `checks.discovery.{provider,model,reasoning,timeout_seconds}`) whose proposals pass the same
+  validator + prober. Runs at install only, opt-in (requires a configured `model`), never inside the
+  state machine, never spends the fix budget.
+
+### Deferred (not implemented)
+
+- **Per-stage model/reasoning.** Discovery uses a deliberate one-off knob
+  (`checks.discovery.{model,reasoning}`); a general per-stage system
+  ([per_stage_model_reasoning.md](per_stage_model_reasoning.md)) would later subsume it.
+- **CI-format parsing depth** (only file presence is evidence today), the **confidence threshold**
+  that triggers agent fallback, **wrapper-vs-native precedence** beyond the current "launchable
+  wrapper wins", and **agent discovery at `preflight`** (currently install-only). See §16 + the
+  follow-ups tracker.

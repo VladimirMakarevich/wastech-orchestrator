@@ -343,22 +343,44 @@ security policy.
 
 ## 8. Configure Checks
 
-Checks are configured, not hardcoded:
+Checks are configured or discovered — never hardcoded. The Check Runner runs each resolved command
+with a timeout and records output as artifacts; a launched check that exits non-zero is a quality
+failure that goes to `fixing` (no provider fallback), while a check that **cannot be launched** stops
+the task before any branch and never burns a fixing iteration.
+
+**Zero-config onboarding.** `install` detects the repository's ecosystem and writes
+`checks.discovery.mode: auto` when it can't pin explicit commands. On the next `preflight`/run the
+orchestrator discovers the launchable profile — for a Python repo with a local virtualenv it resolves
+`.venv/bin/python -m pytest` (and ruff/mypy) even when `pytest` is not on `PATH`:
+
+```bash
+python -m wastech_orchestrator install        # detects ecosystem, writes mode: auto
+python -m wastech_orchestrator preflight       # reports the resolved, launchable checks
+```
 
 ```yaml
 checks:
-  commands:
-    - "pytest"
-    - "ruff check ."
+  discovery:
+    mode: auto
+  commands: []           # discovery resolves a launchable profile; preflight shows it
   timeout_seconds: 7200
 ```
 
-The Check Runner runs each command with a timeout and records output as artifacts. Planned v1
-behavior sends failing check output to the `fixing` stage. Check failures are quality failures, so
-they do not trigger provider fallback.
+**Explicit override.** A non-empty `commands` list is authoritative in any mode. Use legacy strings,
+structured `{name, argv}`, or both:
 
-Use the target repository's real quality gate here: unit tests, linting, type checks, or a focused
-project command.
+```yaml
+checks:
+  discovery:
+    mode: configured
+  commands:
+    - "ruff check ."
+    - name: tests
+      argv: [".venv/bin/python", "-m", "pytest"]
+```
+
+See [configuration.md](configuration.md#checks) for every field and
+[operations.md](operations.md#check-discovery-diagnostics) for the `preflight`/`status` diagnostics.
 
 ## 9. Choose A Git Footprint Mode
 

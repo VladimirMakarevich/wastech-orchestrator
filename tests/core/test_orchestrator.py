@@ -623,6 +623,81 @@ def test_notifier_exception_does_not_change_terminal_outcome(
 # --- Phase 6: security & observability (spec §6.1/§6.5) -------------------------------------------
 
 
+def test_check_launch_failure_is_infra_not_a_fix_cycle(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The original incident: a configured check whose executable cannot be launched. The launch
+    # failure must terminate the task as infrastructure — never entering fixing or spending budget.
+    from wastech_orchestrator.providers.process import ProcessResult
+
+    providers = _both()
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+
+    def launch_fail(argv, *, cwd, env, timeout_seconds, stdout_path, stdin_text=None):
+        Path(stdout_path).write_text("", encoding="utf-8")
+        return ProcessResult(
+            exit_code=None,
+            timed_out=False,
+            launch_error="could not launch 'pytest': No such file or directory",
+            duration_seconds=0.0,
+            stdout_path=str(stdout_path),
+            stderr_text="",
+        )
+
+    orch._checks = CheckRunner(orch._config, run_process=launch_fail)  # type: ignore[attr-defined]
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.stage is Stage.IMPLEMENTATION:
+            (git_repo.clone / "f.py").write_text("a = 1\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    result = orch.run_task(_complete_task(tmp_path, "task-launch"))
+    assert result.final_status is Status.FAILED
+    row = store.get_task("task-launch")
+    assert row is not None and row.status is Status.FAILED
+    assert row.fix_iterations == 0  # a launch failure never consumed a fix iteration
+
+
+def test_check_preflight_not_ready_stops_before_branch(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # A resolver that cannot produce a launchable profile stops the task before any branch (§11).
+    from wastech_orchestrator.checks.model import CheckSource
+    from wastech_orchestrator.checks.profile import ResolvedCheckProfile
+
+    orch, store, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+
+    class _NotReady:
+        def resolve(self, *, allow_agent: bool = False) -> ResolvedCheckProfile:
+            return ResolvedCheckProfile(
+                schema_version=1,
+                ready=False,
+                source=CheckSource.DETECTED,
+                checks=(),
+                candidates=(),
+                platform="linux",
+                fingerprint="x",
+                created_at="t",
+                last_validated_at="t",
+            )
+
+    orch._resolver = _NotReady()  # type: ignore[assignment]
+
+    result = orch.run_task(_complete_task(tmp_path, "task-pf"))
+    assert result.final_status is Status.FAILED
+    row = store.get_task("task-pf")
+    assert row is not None and row.status is Status.FAILED
+    assert not row.branch  # no branch was ever created
+    assert git_run(["branch", "--list", "agent/*"], git_repo.clone) == ""
+
+
 def test_strict_isolation_preflight_fails_without_branch(
     monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, git_run, tmp_path: Path
 ) -> None:

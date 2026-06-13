@@ -7,6 +7,12 @@ per-command ``checks.timeout_seconds``. Each run is written to ``checks/<run-id>
 A check failure is a **quality** error: the caller routes it to ``fixing`` with **no provider
 fallback** (§4.8). The Check Runner itself never transitions state nor touches git; it returns a
 :class:`CheckOutcome` and the orchestrator records the ``check_runs`` rows and drives the loop.
+
+A **launch** failure (a missing executable/module) is *not* a quality error: it is reported via
+``CheckOutcome.launch_failed`` so the orchestrator treats it as an infrastructure/preflight event,
+never spending a fix iteration on a problem no code change can fix (automatic check discovery §3,
+§11). Checks run from the canonical ``checks.model.ResolvedCheck`` argv lists supplied by the
+resolver; absent those, the configured ``checks.commands`` are normalized.
 """
 
 from __future__ import annotations
@@ -19,6 +25,7 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 
+from wastech_orchestrator.checks.model import ResolvedCheck, normalize_commands
 from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.observability.logging import bind
 from wastech_orchestrator.observability.progress import run_with_heartbeat
@@ -40,6 +47,10 @@ class CheckRunResult:
     timed_out: bool
     passed: bool
     log_path: str
+    name: str = ""
+    # A launch failure (binary/module not found) is an infrastructure event, not a quality failure.
+    launch_failed: bool = False
+    launch_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -49,6 +60,10 @@ class CheckOutcome:
     passed: bool
     runs: tuple[CheckRunResult, ...]
     first_failure_log: str | None = None
+    # Set when the first failure was a *launch* failure: the orchestrator treats it as an infra
+    # event (terminal/preflight), never routing it to ``fixing`` (automatic check discovery §11).
+    launch_failed: bool = False
+    first_launch_error: str | None = None
 
 
 class CheckRunner:
@@ -74,12 +89,20 @@ class CheckRunner:
         artifacts_root: str | Path,
         task_id: str,
         subtask: int | None = None,
+        checks: Sequence[ResolvedCheck] | None = None,
     ) -> CheckOutcome:
-        """Run each configured command in order, stopping at the first failure (§4.8).
+        """Run each resolved check in order, stopping at the first failure (§4.8).
 
-        Returns ``passed=True`` with no runs when no checks are configured.
+        ``checks`` is the resolved profile's argv list; when ``None`` the configured
+        ``checks.commands`` are normalized (backward compatible). Returns ``passed=True`` with no
+        runs when no checks are configured. A *launch* failure short-circuits with
+        ``launch_failed=True`` so the caller can treat it as infrastructure rather than a quality
+        failure.
         """
-        commands = self._config.checks.commands
+        if checks is not None:
+            resolved = list(checks)
+        else:
+            resolved = normalize_commands(self._config.checks.commands)
         timeout = self._config.checks.timeout_seconds
         env = build_child_env(self._config.security.allowed_environment)
         checks_dir = task_artifact_dir(artifacts_root, task_id) / "checks"
@@ -87,13 +110,12 @@ class CheckRunner:
 
         runs: list[CheckRunResult] = []
         log = bind(_LOG, task_id=task_id, stage="testing")
-        for index, command in enumerate(commands, start=1):
-            argv = shlex.split(command, posix=True)
-            if not argv:
-                continue  # an empty/blank command is a no-op, not a failure
+        for index, check in enumerate(resolved, start=1):
+            argv = list(check.argv)
             log_path = self._next_log_path(checks_dir, subtask)
             fields: dict[str, object] = {
                 "check_index": index,
+                "check": check.name,
                 "command": argv[0],
                 "timeout_seconds": timeout,
             }
@@ -117,12 +139,14 @@ class CheckRunner:
                 monotonic=self._monotonic,
             )
             self._append_stderr(log_path, result.stderr_text, result)
-            passed = result.exit_code == 0 and not result.timed_out and result.launch_error is None
+            launch_failed = result.launch_error is not None
+            passed = result.exit_code == 0 and not result.timed_out and not launch_failed
             log.info(
                 "check completed",
                 extra={
                     **fields,
                     "passed": passed,
+                    "launch_failed": launch_failed,
                     "exit_code": result.exit_code,
                     "timed_out": result.timed_out,
                     "duration_seconds": round(self._monotonic() - started, 3),
@@ -130,15 +154,24 @@ class CheckRunner:
             )
             runs.append(
                 CheckRunResult(
-                    command=command,
+                    command=" ".join(argv),
+                    name=check.name,
                     exit_code=result.exit_code,
                     timed_out=result.timed_out,
                     passed=passed,
                     log_path=str(log_path),
+                    launch_failed=launch_failed,
+                    launch_error=result.launch_error,
                 )
             )
             if not passed:
-                return CheckOutcome(passed=False, runs=tuple(runs), first_failure_log=str(log_path))
+                return CheckOutcome(
+                    passed=False,
+                    runs=tuple(runs),
+                    first_failure_log=str(log_path),
+                    launch_failed=launch_failed,
+                    first_launch_error=result.launch_error,
+                )
 
         return CheckOutcome(passed=True, runs=tuple(runs))
 

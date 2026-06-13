@@ -13,9 +13,16 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 
+from wastech_orchestrator.checks.model import (
+    CheckCommandError,
+    argv_matches_denied,
+    normalize_check_command,
+    shell_metachars,
+)
 from wastech_orchestrator.config.loader import ConfigError
 from wastech_orchestrator.config.schema import (
     ROUTABLE_STAGES,
+    CheckDiscoveryMode,
     FootprintLocation,
     FootprintTracking,
     OrchestratorConfig,
@@ -103,10 +110,64 @@ def validate_config(config: OrchestratorConfig) -> list[str]:
         _check_extra_args(pid, provider.extra_args, issues)
 
     _validate_footprint(config, issues)
+    _validate_checks(config, issues, warnings)
 
     if issues:
         raise ConfigError(issues)
     return warnings
+
+
+def _validate_checks(config: OrchestratorConfig, issues: list[str], warnings: list[str]) -> None:
+    """Validate configured check commands and the discovery block (automatic check discovery).
+
+    Each command must be a launchable argv with no shell metacharacters, no sandbox-weakening
+    flag, and must not be a denied command (e.g. ``git commit``). The same predicates run at
+    discovery time on candidates (defense in depth, mirroring ``find_forbidden_args``).
+    """
+    checks = config.checks
+    if checks.timeout_seconds <= 0:
+        issues.append(f"checks.timeout_seconds must be > 0 (got {checks.timeout_seconds})")
+
+    denied = config.security.denied_commands
+    for index, raw in enumerate(checks.commands):
+        where = f"checks.commands[{index}]"
+        if isinstance(raw, str) and not raw.strip():
+            continue  # a blank legacy string is a tolerated no-op (§4.8)
+        try:
+            check = normalize_check_command(raw)
+        except CheckCommandError as exc:
+            issues.append(f"{where}: {exc}")
+            continue
+        bad = shell_metachars(check.argv)
+        if bad is not None:
+            issues.append(f"{where}: argv token {bad!r} contains a shell metacharacter")
+        for reason in find_forbidden_args(check.argv):
+            issues.append(f"{where}: {reason}")
+        matched = argv_matches_denied(check.argv, denied)
+        if matched is not None:
+            issues.append(f"{where}: matches denied command {matched!r}")
+
+    discovery = checks.discovery
+    if discovery.timeout_seconds <= 0:
+        issues.append(
+            f"checks.discovery.timeout_seconds must be > 0 (got {discovery.timeout_seconds})"
+        )
+    if discovery.provider is not None:
+        allowed = frozenset(config.agents.allowed)
+        provider_ids = frozenset(config.agents.providers)
+        if discovery.provider not in allowed:
+            issues.append(
+                f"checks.discovery.provider: {discovery.provider.value!r} is not in agents.allowed"
+            )
+        if discovery.provider not in provider_ids:
+            issues.append(
+                f"checks.discovery.provider: {discovery.provider.value!r} "
+                "has no agents.providers entry"
+            )
+    if discovery.mode is CheckDiscoveryMode.DISABLED:
+        warnings.append(
+            "checks.discovery.mode is 'disabled': the quality gate is OFF — no checks will run"
+        )
 
 
 def _validate_footprint(config: OrchestratorConfig, issues: list[str]) -> None:

@@ -348,33 +348,54 @@ a branch or calls a provider.
 
 ## `checks`
 
-Configures the Check Runner.
+Configures the Check Runner and **automatic check discovery** (resolve the repository's quality-gate
+commands without hand-writing technology-specific paths). The Check Runner runs each resolved command
+as a bounded external process (argv list, no shell, allowlisted env) and records redacted logs under
+the task artifact directory. A **launch failure** (a missing executable/module) is treated as an
+infrastructure event — it stops the task before any branch and never consumes a fixing iteration —
+distinct from a quality failure (a launched check that exits non-zero), which enters `fixing`.
 
 ```yaml
 checks:
-  commands:
-    - "npm test"
-    - "npm run lint"
+  discovery:
+    mode: auto             # auto | deterministic | configured | disabled
+    refresh: on_change     # on_change | always | never
+  commands:                # legacy strings and/or structured {name, argv}
+    - "ruff check ."
+    - name: tests
+      argv: [".venv/bin/python", "-m", "pytest"]
   timeout_seconds: 7200
 ```
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `commands` | list of strings | `[]` | Commands the Check Runner executes. |
+| `commands` | list | `[]` | Checks the runner executes. Each item is a legacy shell-style **string** (split with `shlex`, no shell) **or** a structured `{name, argv: [...]}` mapping. |
 | `timeout_seconds` | integer | `7200` | Per-command timeout. |
+| `discovery.mode` | enum | `configured` | How the profile is resolved (see below). |
+| `discovery.agent_fallback` | bool | `true` | Allow a read-only agent discovery pass when deterministic confidence is low (only runs when `model` is set). |
+| `discovery.refresh` | enum | `on_change` | When a cached profile is recomputed: `on_change` (discovery-input fingerprint changed), `always`, or `never`. |
+| `discovery.provider` | enum/null | `null` | Which provider runs agent discovery; `null` = first available allowed provider. |
+| `discovery.model` | string | `""` | A **cheap** model id for agent discovery (e.g. a Haiku). Empty disables the agent fallback. |
+| `discovery.reasoning` | enum/null | `low` | Reasoning level for the discovery call. |
+| `discovery.timeout_seconds` | integer | `120` | Bound on the discovery call. |
 
-Use commands that represent the target repository's merge gate, for example:
+### Discovery modes
 
-```yaml
-checks:
-  commands:
-    - "pytest"
-    - "ruff check ."
-    - "mypy src"
-```
+- **`configured`** (the default, fully backward compatible): the Check Runner uses `commands`
+  as-is. With empty `commands` the task simply runs no checks.
+- **`deterministic`**: inspect known project evidence (manifests, lock files, `make`/`just`/`tox`/
+  `nox` wrappers, local `.venv` interpreters) and probe launchability, preferring any configured
+  commands when they probe launchable. Stops before any branch if no check is launchable.
+- **`auto`**: `deterministic`, plus a read-only agent fallback when confidence is low (opt-in: set
+  `discovery.model`). `install` writes `auto` when it could not detect explicit checks.
+- **`disabled`**: an explicit no-check mode with a prominent warning and an audit record.
 
-Planned v1 behavior runs these commands as bounded external processes and records redacted logs
-under the task artifact directory.
+A **non-empty `commands` list is authoritative regardless of mode**. Resolved profiles are cached at
+`<workspace>/checks/resolved-profile.json` and invalidated by the `refresh` policy. See
+[operations.md](operations.md#check-discovery-diagnostics) for `preflight`/`status` diagnostics.
+
+Discovery never installs dependencies or mutates the environment: a candidate that is really a
+dependency-install/setup command (e.g. `uv sync`, `npm ci`) is rejected as a check, not executed.
 
 ## `git`
 

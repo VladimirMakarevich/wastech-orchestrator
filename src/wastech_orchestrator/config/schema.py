@@ -8,7 +8,7 @@ CLI syntax. The loader (``config.loader``) maps YAML into these types; the valid
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 from wastech_orchestrator.providers.base import ProviderId, Stage
@@ -54,6 +54,23 @@ class AuditBranch(StrEnum):
 
     TASK = "task"
     SIBLING = "sibling"
+
+
+class CheckDiscoveryMode(StrEnum):
+    """How the check profile is resolved (backlog: automatic check discovery, §9)."""
+
+    AUTO = "auto"  # deterministic detection, then agent fallback when confidence is low
+    DETERMINISTIC = "deterministic"  # inspect known project evidence only; never an agent
+    CONFIGURED = "configured"  # use checks.commands as-is (the backward-compatible default)
+    DISABLED = "disabled"  # explicit no-check mode (a prominent warning + audit record)
+
+
+class CheckRefreshPolicy(StrEnum):
+    """When a cached resolved profile is recomputed (backlog: automatic check discovery, §10)."""
+
+    ON_CHANGE = "on_change"  # rediscover when the discovery-input fingerprint changes
+    ALWAYS = "always"
+    NEVER = "never"
 
 
 @dataclass(frozen=True)
@@ -136,11 +153,43 @@ class ValidationConfig:
 
 
 @dataclass(frozen=True)
+class CheckCommandSpec:
+    """A structured check command: a logical ``name`` plus an explicit argv list (no shell).
+
+    The backward-compatible alternative to a legacy shell-style string in ``checks.commands``. Both
+    forms normalize to ``checks.model.ResolvedCheck`` at consumption time (the loader stays
+    shapes-only and does no ``shlex`` splitting).
+    """
+
+    argv: tuple[str, ...]
+    name: str | None = None
+
+
+@dataclass(frozen=True)
+class CheckDiscoveryConfig:
+    """Check discovery policy (backlog: automatic check discovery, §9).
+
+    The defaults are backward compatible: ``configured`` uses ``checks.commands`` as-is. ``install``
+    opts new repositories into ``auto``. ``model``/``reasoning``/``provider``/``timeout_seconds``
+    parameterize the agent-assisted fallback (a deliberately cheap model + low reasoning)."""
+
+    mode: CheckDiscoveryMode = CheckDiscoveryMode.CONFIGURED
+    agent_fallback: bool = True
+    refresh: CheckRefreshPolicy = CheckRefreshPolicy.ON_CHANGE
+    provider: ProviderId | None = None  # which provider runs discovery; None => first available
+    model: str = ""  # a cheap model id for discovery; empty => skip agent fallback
+    reasoning: str | None = "low"  # low | medium | high | xhigh | max
+    timeout_seconds: int = 120
+
+
+@dataclass(frozen=True)
 class ChecksConfig:
-    commands: tuple[str, ...]
+    # A backward-compatible union: legacy shell-style strings and/or structured CheckCommandSpec.
+    commands: tuple[str | CheckCommandSpec, ...]
     # Per-command timeout for the Check Runner (spec §4.8). The process runner requires a timeout;
     # each ``commands`` entry is launched as an argv list (no shell) and bounded by this value.
     timeout_seconds: int = 7200
+    discovery: CheckDiscoveryConfig = field(default_factory=CheckDiscoveryConfig)
 
 
 @dataclass(frozen=True)

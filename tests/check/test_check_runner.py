@@ -166,9 +166,13 @@ def test_timeout_is_failure(tmp_path: Path) -> None:
     outcome = runner.run(clone_dir=tmp_path, artifacts_root=tmp_path, task_id="t1")
     assert outcome.passed is False
     assert outcome.runs[0].timed_out is True
+    # A timeout is a *quality* failure (the process launched) — never a launch failure.
+    assert outcome.launch_failed is False
 
 
-def test_launch_error_is_failure(tmp_path: Path) -> None:
+def test_launch_error_is_distinct_from_quality_failure(tmp_path: Path) -> None:
+    # The original incident: a configured check whose executable cannot be launched. This must be
+    # reported as a launch failure (infrastructure), not collapsed into a quality failure.
     launch_err = ProcessResult(
         exit_code=None,
         timed_out=False,
@@ -181,6 +185,23 @@ def test_launch_error_is_failure(tmp_path: Path) -> None:
     runner = CheckRunner(_config(["pytest"]), run_process=fake)
     outcome = runner.run(clone_dir=tmp_path, artifacts_root=tmp_path, task_id="t1")
     assert outcome.passed is False
+    assert outcome.launch_failed is True
+    assert outcome.first_launch_error == "could not launch 'pytest'"
+    assert outcome.runs[0].launch_failed is True
+
+
+def test_explicit_resolved_checks_override_config(tmp_path: Path) -> None:
+    from wastech_orchestrator.checks.model import ResolvedCheck
+
+    fake = _FakeProc([_ok()])
+    runner = CheckRunner(_config(["pytest"]), run_process=fake)
+    runner.run(
+        clone_dir=tmp_path,
+        artifacts_root=tmp_path,
+        task_id="t1",
+        checks=[ResolvedCheck(name="tests", argv=(".venv/bin/python", "-m", "pytest"))],
+    )
+    assert fake.calls[0]["argv"] == [".venv/bin/python", "-m", "pytest"]
 
 
 def test_timeout_value_passed_through(tmp_path: Path) -> None:

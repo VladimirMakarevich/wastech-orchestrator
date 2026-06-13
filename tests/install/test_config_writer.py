@@ -32,6 +32,7 @@ def _spec(
     checks: tuple[str, ...] = (),
     create_pr: bool = True,
     auto_mode: bool = False,
+    discovery_mode: str = "configured",
 ) -> InstallSpec:
     return InstallSpec(
         repo_url="git@github.com:me/my-repo.git",
@@ -42,6 +43,7 @@ def _spec(
         checks=checks,
         create_pull_request=create_pr,
         auto_mode=auto_mode,
+        discovery_mode=discovery_mode,
     )
 
 
@@ -119,6 +121,18 @@ def test_checks_are_reflected_including_empty(tmp_path: Path) -> None:
 
     empty = loads_config(build_and_validate(_spec(tmp_path, (ProviderId.CODEX,)))).config
     assert empty.checks.commands == ()
+
+
+def test_discovery_block_is_rendered(tmp_path: Path) -> None:
+    from wastech_orchestrator.config.schema import CheckDiscoveryMode
+
+    configured = loads_config(build_and_validate(_spec(tmp_path, (ProviderId.CODEX,)))).config
+    assert configured.checks.discovery.mode is CheckDiscoveryMode.CONFIGURED
+
+    auto = loads_config(
+        build_and_validate(_spec(tmp_path, (ProviderId.CODEX,), discovery_mode="auto"))
+    ).config
+    assert auto.checks.discovery.mode is CheckDiscoveryMode.AUTO
 
 
 @pytest.mark.parametrize(

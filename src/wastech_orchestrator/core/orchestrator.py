@@ -20,6 +20,9 @@ from pathlib import Path
 from typing import Any
 
 from wastech_orchestrator.check_runner import CheckOutcome, CheckRunner
+from wastech_orchestrator.checks.model import ResolvedCheck
+from wastech_orchestrator.checks.profile import ResolvedCheckProfile
+from wastech_orchestrator.checks.resolver import CheckResolver
 from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.core.decomposition import (
     DecompositionDecision,
@@ -181,6 +184,7 @@ class _Pipeline:
     branch: str = ""
     slug: str = ""
     session_ids: dict[str, str] = field(default_factory=dict)  # provider_id.value -> session_id
+    check_profile: ResolvedCheckProfile | None = None  # resolved at preflight (before any branch)
 
 
 class Orchestrator:
@@ -201,6 +205,7 @@ class Orchestrator:
         clock: Callable[[], str] = _utc_now_iso,
         monotonic: Callable[[], float] = time.monotonic,
         notifier: Notifier | None = None,
+        resolver: CheckResolver | None = None,
     ) -> None:
         self._config = config
         self._router = router
@@ -214,6 +219,9 @@ class Orchestrator:
         self._clock = clock
         self._monotonic = monotonic
         self._notifier: Notifier = notifier if notifier is not None else NullNotifier()
+        # The check resolver runs a deterministic preflight before any branch (automatic check
+        # discovery §11). ``None`` skips it — the Check Runner then uses ``checks.commands``.
+        self._resolver = resolver
 
     # --- entry point ----------------------------------------------------------------------
 
@@ -436,11 +444,41 @@ class Orchestrator:
                 )
                 raise PipelineFailed(f"strict_isolation: {joined}")
 
+        # Check preflight (automatic check discovery §11): resolve-or-load a launchable profile
+        # BEFORE any branch. A non-ready profile stops here — no branch, no fix budget spent.
+        self._check_preflight(p)
+
         self._transition(p, Status.PREPARING)
         self._prepare_branch(p)
         self._refinement(p, completeness)
         self._planning(p)
         return self._run_units_and_finish(p)
+
+    def _check_preflight(self, p: _Pipeline) -> None:
+        """Resolve (deterministically) the launchable check profile before any branch (§11).
+
+        Skipped when no resolver is wired (legacy behavior: the Check Runner uses
+        ``checks.commands``). A non-ready profile raises :class:`PipelineFailed` — the task fails
+        before a branch is created and without consuming any fix iteration. Agent fallback never
+        runs here (preflight must not spend a provider run); it is an install-time capability.
+        """
+        if self._resolver is None:
+            return
+        profile = self._resolver.resolve(allow_agent=False)
+        p.check_profile = profile
+        if profile.ready:
+            self._log(p.task.id).info(
+                "check preflight ready",
+                extra={"source": profile.source.value, "checks": len(profile.checks)},
+            )
+            return
+        self._log(p.task.id).warning(
+            "check preflight failed", extra={"source": profile.source.value}
+        )
+        raise PipelineFailed(
+            "check preflight: no launchable check profile could be resolved "
+            "(set checks.commands, or use checks.discovery.mode to detect them)"
+        )
 
     def _prepare_branch(self, p: _Pipeline) -> None:
         """Complete the persisted ``preparing`` checkpoint and attach the task branch."""
@@ -563,6 +601,13 @@ class Orchestrator:
                 if check.passed:
                     self._loops.on_check_pass(p.counters)
                     self._transition(p, Status.REVIEWING)
+                elif check.launch_failed:
+                    # A check could not be *launched* (missing executable/module): an infrastructure
+                    # event, not a quality failure. Never enter fixing — no code change can fix it.
+                    raise PipelineFailed(
+                        "check launch failure: "
+                        f"{check.first_launch_error or 'a configured check could not be launched'}"
+                    )
                 else:
                     p.check_log = check.first_failure_log
                     stuck = self._enter_fixing(p, FixLoop.TEST)
@@ -1033,12 +1078,25 @@ class Orchestrator:
                 )
             )
 
+    def _resolved_checks(self, p: _Pipeline) -> tuple[ResolvedCheck, ...] | None:
+        """The resolved profile's checks; on resume, fall back to the cached profile (§13)."""
+        if p.check_profile is not None:
+            return p.check_profile.checks
+        if self._resolver is None:
+            return None  # legacy path: the Check Runner normalizes checks.commands
+        cached = self._resolver.store.load()
+        if cached is not None:
+            p.check_profile = cached
+            return cached.checks
+        return None
+
     def _run_checks(self, p: _Pipeline, subtask: int | None) -> CheckOutcome:
         outcome = self._checks.run(
             clone_dir=self._config.repo.local_path,
             artifacts_root=self._artifacts_root,
             task_id=p.task.id,
             subtask=subtask,
+            checks=self._resolved_checks(p),
         )
         for run in outcome.runs:
             self._store.record_check_run(
@@ -1374,6 +1432,9 @@ def build_orchestrator(
         heartbeat_seconds=heartbeat_seconds,
     )
     checks = CheckRunner(config, heartbeat_seconds=heartbeat_seconds)
+    resolver = CheckResolver(
+        config, repo_root=config.repo.local_path, artifacts_root=str(root)
+    )
     gate = ValidationGate(
         config,
         store_has_task_id=store.task_id_exists,
@@ -1392,4 +1453,5 @@ def build_orchestrator(
         gate=gate,
         artifacts_root=str(root),
         notifier=notifier,
+        resolver=resolver,
     )

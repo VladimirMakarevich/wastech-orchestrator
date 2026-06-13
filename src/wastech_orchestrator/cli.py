@@ -21,6 +21,7 @@ from importlib.resources.abc import Traversable
 from pathlib import Path
 
 from wastech_orchestrator import __version__
+from wastech_orchestrator.checks import diagnostics as check_diagnostics
 from wastech_orchestrator.config.loader import ConfigError, load_config
 from wastech_orchestrator.config.schema import FootprintLocation, OrchestratorConfig
 from wastech_orchestrator.config.validation import validate_config
@@ -494,6 +495,10 @@ def run_preflight(config: OrchestratorConfig) -> tuple[bool, list[str]]:
         enforced = "enforced" if config.security.strict_isolation else "strict_isolation=false"
         lines.append(f"isolation: OK ({enforced})")
 
+    chk_ok, chk_lines = check_diagnostics.check_preflight(config, artifacts_root_for(config))
+    ok = ok and chk_ok
+    lines.extend(chk_lines)
+
     tg_ok, tg_line = check_telegram_preflight(config.telegram)
     if not tg_ok:
         ok = False
@@ -606,6 +611,15 @@ def cmd_status(args: argparse.Namespace) -> int:
             print(f"elapsed_since_update_seconds={elapsed:.1f}")
         if task.cleanup_last_error:
             print(f"last_error={task.cleanup_last_error}")
+
+    # The resolved check profile, read-only (status never resolves, probes, or runs anything).
+    profile = check_diagnostics.load_profile(artifacts_root_for(config))
+    print()
+    if profile is None:
+        print("checks_profile: none (run preflight or install to resolve)")
+    else:
+        for line in check_diagnostics.summarize_profile(profile):
+            print(line)
     return 0
 
 
@@ -654,6 +668,7 @@ def _install_print_plan(
     print(f"  config:     {config_path}")
     print(f"  providers:  {', '.join(p.value for p in spec.providers)}")
     print(f"  checks:     {', '.join(spec.checks) or '(none)'}")
+    print(f"  discovery:  {spec.discovery_mode}")
     print(f"  create_pr:  {spec.create_pull_request}")
     print(f"  auto_mode:  {spec.auto_mode}")
     for rel in INSTALL_REPO_DIRS:
@@ -663,6 +678,30 @@ def _install_print_plan(
     print(f"  would bind   {spec.repo_local_path} -> {config_path}")
     if missing:
         print(f"  note: provider(s) not on PATH: {', '.join(p.value for p in missing)}")
+
+
+def _install_resolve_checks(config: OrchestratorConfig) -> None:
+    """Seed the resolved profile at install, running the read-only agent fallback when configured.
+
+    Deterministic resolution is also performed by the auto-preflight, but only the agent fallback
+    needs an explicit provider run here. No-op unless ``checks.discovery`` enables agent fallback
+    and names a cheap model (opt-in); the deterministic preflight then seeds the profile on its own.
+    """
+    from wastech_orchestrator.checks.discovery_factory import build_discovery
+    from wastech_orchestrator.checks.resolver import CheckResolver
+
+    artifacts_root = artifacts_root_for(config)
+    providers = build_providers(config, artifacts_root=artifacts_root)
+    discovery = build_discovery(config, providers, artifacts_root)
+    if discovery is None:
+        return
+    resolver = CheckResolver(
+        config,
+        repo_root=config.repo.local_path,
+        artifacts_root=artifacts_root,
+        discovery=discovery,
+    )
+    resolver.resolve(allow_agent=True)
 
 
 def _install_run_preflight(config_path: Path, *, skip: bool) -> int:
@@ -735,6 +774,7 @@ def cmd_install(args: argparse.Namespace) -> int:
     if outcome.missing_providers:
         names = ", ".join(p.value for p in outcome.missing_providers)
         print(f"install: note — selected provider(s) not on PATH yet: {names}")
+    _install_resolve_checks(_load_config(str(config_path)))
     return _install_run_preflight(config_path, skip=args.skip_preflight)
 
 

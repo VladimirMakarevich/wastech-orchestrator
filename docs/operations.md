@@ -150,15 +150,49 @@ python -m wastech_orchestrator preflight
 claude: OK — claude 1.2.3 available (version=1.2.3, authenticated=True)
 codex: OK — codex 0.9.0 available (version=0.9.0, authenticated=True)
 isolation: OK (enforced)
+checks: OK (2 resolved, source=detected)
+  - tests: LAUNCHABLE  argv=['.venv/bin/python', '-m', 'pytest']
+  - lint: LAUNCHABLE  argv=['.venv/bin/ruff', 'check', '.']
 preflight: ready
 ```
 
-- Exit `0` when every allowed provider is healthy **and** the required isolation can be enabled;
-  non-zero otherwise.
+- Exit `0` when every allowed provider is healthy, the required isolation can be enabled, **and** the
+  repository's checks resolve to a launchable profile; non-zero otherwise.
 - A `FAIL` line names the problem without leaking secrets (e.g. `codex executable not found`).
 - `isolation: FAIL` lists the offending provider/setting. With `security.strict_isolation: true`
   (the default) a run would **fail preflight** before any branch is created rather than silently
   downgrading isolation — fix the config (don't weaken the sandbox/permission profile) and re-run.
+
+### Check discovery diagnostics
+
+When `checks.discovery.mode` is `auto`/`deterministic`, `preflight` resolves and probes the
+repository's quality-gate commands (deterministically — it never spends a provider run) and reports
+the verdict. `checks: FAIL` means no required check is launchable; the lines below it show which
+candidates were `not_launchable` or rejected by the security rules:
+
+```text
+checks: FAIL (0 resolved, source=detected)
+  not_launchable: tests (pytest)
+  rejected: lint (git push origin) — matches denied command 'git push'
+```
+
+- The resolved profile is cached at `<workspace>/checks/resolved-profile.json` with a fingerprint of
+  the discovery inputs (manifests, lock files, CI workflows, local interpreters). It is recomputed per
+  `checks.discovery.refresh` (`on_change` by default) — editing a manifest or lock file refreshes it.
+  Force a refresh by setting `refresh: always`, or re-run `install --reconfigure`.
+- `status` prints a read-only summary of the cached profile (it never resolves, probes, or runs
+  anything):
+
+  ```text
+  checks_profile: source=detected, resolved=2, ready=True, fingerprint=ab12cd34ef56
+    tests: .venv/bin/python -m pytest
+    lint: .venv/bin/ruff check .
+  ```
+
+- The agent-assisted fallback (a read-only, advisory provider call that proposes candidates) runs
+  only at `install`, and only when `checks.discovery.agent_fallback` is on **and** a cheap
+  `checks.discovery.model` is configured. Its proposals pass the same validation and probing as
+  deterministic candidates; it can never mark a check passing or execute anything.
 
 ### Verify the executable seen by the runtime
 

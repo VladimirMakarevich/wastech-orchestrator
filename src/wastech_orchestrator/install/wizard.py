@@ -112,6 +112,9 @@ def run_wizard(
         checks=resolved_checks,
         create_pull_request=resolved_create_pr,
         auto_mode=resolved_auto,
+        # With explicit/confirmed checks, trust them (``configured``); otherwise let discovery
+        # resolve a launchable profile at preflight/runtime (``auto``) — automatic check discovery.
+        discovery_mode="configured" if resolved_checks else "auto",
     )
     prompter.info(_summary(spec, missing))
     if not non_interactive and not prompter.confirm("Write this configuration?", default=True):

@@ -61,6 +61,9 @@ class InstallSpec:
     checks: tuple[str, ...]
     create_pull_request: bool
     auto_mode: bool
+    # ``configured`` when the operator supplied/confirmed explicit checks; ``auto`` when none were
+    # found, so discovery resolves them at preflight/runtime (automatic check discovery §9).
+    discovery_mode: str = "configured"
 
 
 def _ordered_providers(providers: tuple[ProviderId, ...]) -> tuple[ProviderId, ...]:
@@ -142,7 +145,11 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "reject_unknown_fields": True,
             "quarantine_folder": str(spec.workspace / "tasks" / "rejected"),
         },
-        "checks": {"commands": list(spec.checks), "timeout_seconds": 7200},
+        "checks": {
+            "discovery": {"mode": spec.discovery_mode, "refresh": "on_change"},
+            "commands": list(spec.checks),
+            "timeout_seconds": 7200,
+        },
         "git": {
             "create_pull_request": spec.create_pull_request,
             "pr_base": spec.base_branch,

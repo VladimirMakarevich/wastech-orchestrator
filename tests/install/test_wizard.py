@@ -201,6 +201,22 @@ def test_detected_checks_used_in_non_interactive(
     assert _run(monkeypatch, root).spec.checks == ("pytest",)
 
 
+def test_discovery_mode_configured_when_checks_resolved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    _patch_detect(monkeypatch, root=root, checks=("pytest",))
+    assert _run(monkeypatch, root).spec.discovery_mode == "configured"
+
+
+def test_discovery_mode_auto_when_no_checks_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    _patch_detect(monkeypatch, root=root, checks=())  # nothing detected
+    assert _run(monkeypatch, root).spec.discovery_mode == "auto"
+
+
 def test_interactive_checks_entered_one_by_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

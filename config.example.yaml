@@ -95,7 +95,10 @@ validation:                         # input hardening gate (§19); rejects broke
   quarantine_folder: "./tasks/rejected"
 
 checks:
-  commands:
+  discovery:
+    mode: configured                # auto | deterministic | configured | disabled (see docs/configuration.md)
+    refresh: on_change              # on_change | always | never — when a cached profile is recomputed
+  commands:                         # legacy strings and/or structured {name, argv}; non-empty wins in any mode
     - "npm test"
     - "npm run lint"
   timeout_seconds: 7200             # per-command timeout for the Check Runner (argv list, no shell)
