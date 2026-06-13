@@ -114,6 +114,13 @@ def test_context_footer_lists_only_present_paths(
     assert "diff" not in footer  # diff_path is None
 
 
+def test_context_footer_includes_human_input_path(
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    footer = build_context_footer(make_request(human_input_path="/logs/t/hitl/planning.json"))
+    assert "human_input: /logs/t/hitl/planning.json" in footer
+
+
 def test_context_footer_empty_when_no_paths(
     make_request: Callable[..., AgentRunRequest],
 ) -> None:

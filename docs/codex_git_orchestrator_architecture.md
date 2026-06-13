@@ -134,7 +134,7 @@ gh pr create --title "Task 001" --body-file logs/task-001/pr.md --base main --he
 git checkout main
 ```
 
-> Note: `git add .` above is illustrative. The canonical spec uses **scoped staging** — an explicit pathspec that excludes `tasks/`/`logs/`/`workspace/`, never `git add .`/`-A` — see [orchestrator_final_plan.md §21.1](orchestrator_final_plan.md). The git footprint mode (external / in-repo-excluded / in-repo-audit) is also defined there.
+> Note: `git add .` above is illustrative. The canonical spec uses **scoped staging** — an explicit pathspec that excludes `tasks/`/`logs/`/`workspace/`, never `git add .`/`-A` — see [00_orchestrator_final_plan.md §21.1](implementation_stages/00_orchestrator_final_plan.md). The git footprint mode (external / in-repo-excluded / in-repo-audit) is also defined there.
 > The **default footprint is in-repo audit** (`location: in_repo`, `tracking: commit`): the **task file and its `summary.md`** live inside the target repo and are stored in git — the code change is a scoped **code** commit, and `tasks/` (the task moved to `done/`/`failed/` plus `<id>.summary.md`) is stored via a separate **task commit** the orchestrator (never the agent) makes after it. The working artifacts under `logs/` (plan, review, diffs, stage logs, `summary.json`) and the root runtime files (`state.db`, `config.yaml`) are **not** committed — `logs/`/`workspace/` are kept local via `.git/info/exclude`.
 > The final `git checkout main` is terminal cleanup. In the canonical spec this uses `repo.base_branch`, runs only when safe, and must complete before auto mode may pick another pending task. After cleanup the Git Manager runs `git fetch` + `git pull --ff-only` to refresh the base branch, and the `watch` loop repeats that refresh every `orchestrator.poll_interval_seconds` (default 300s) so tasks pushed to git after the last scan are discovered — watching is not limited to the local filesystem.
 
@@ -222,18 +222,25 @@ On failure — the error is returned to the `fix` stage, retrying up to `guardra
 
 ### 4.7. Human-in-the-Loop via Telegram `(#2, #10)` `[← crewAI AskQuestion / human_input]`
 
-A single mechanism for clarifying questions and action approval. It blocks the current stage until there is an answer (or a timeout).
+A transport-neutral `Notifier` provides terminal messages and one durable question/approval
+round-trip. It blocks only the current checkpoint until an answer or fail-closed timeout.
 
 ```python
-def ask_human(question: str, context: str, task_id: str,
-              kind: str = "question", timeout=...) -> str:
-    # kind: "question" (free-form answer) | "approval" (yes/no on an action)
-    send_telegram(task_id, question, context, contacts=task.contacts)
-    return wait_for_reply(task_id, timeout)   # the answer is returned to the stage context
+handle = notifier.start_ask(question=..., kind=..., interaction_id=...)
+persist(handle)                         # secret-free message/offset/deadline
+result = notifier.wait_for_answer(handle)
+rerun_stage(human_input_path=artifact)  # answer never enters CLI argv
 ```
 
-- An agent's clarifying question → `kind="question"`.
-- A dangerous/irreversible action (push, deletion, new dependency) → `kind="approval"`.
+- `refinement`/`planning` may emit one typed `question` or `approval`.
+- Questions use ForceReply; approvals use inline buttons. Only the configured chat and exact
+  prompt/callback are accepted.
+- After `implementation`/`fixing`, tracked-file deletion and dependency manifest/lock changes
+  require approval before tests. Exact approved planning scope may be reused.
+- A denial returns once to the same stage for safe reconsideration; timeout, transport failure,
+  ambiguity, repeated request, or remaining dangerous diff → `manual_action_required`.
+- Routine commit/push/PR does not require Telegram approval.
+- Waiting/answer state is stored under `logs/<task-id>/hitl/`; no `waiting_human` state is added.
 - Telegram is also used for final result notifications (`done`/`failed` + link to the PR).
 
 ### 4.8. Test Runner
@@ -382,12 +389,12 @@ telegram:                             # HITL + notifications (#2, #10)
 10. STAGE test      → Test Runner
 11. STAGE fix       → if the tests failed: output → CodingAgent → repeat,
                       limit = reasoning.map[complexity].fix_attempts
-12. At any stage: the agent asked a clarifying question
-                      → ask_human(question) via Telegram, wait for the answer (#2, #10)
+12. refinement/planning emitted one typed human-input signal
+                      → persist handle, wait via Telegram, repeat stage with artifact (#2, #10)
 13. STAGE guardrails → action blacklist + diff check;
                        failure → return to fix (up to max_retries) (#3)
-14. A dangerous action (push/deletion/new dependency)
-                      → ask_human(approval) (#2)
+14. Deletion/dependency diff after implementation/fixing
+                      → exact-scope Telegram approval before tests (#2)
 15. STAGE summary  → produce the change summary; move the task file to tasks/done/ and write
                      tasks/done/<id>.summary.md beside it (these enter the upcoming commit). plan,
                      review, diffs and summary.json stay under logs/ and are NOT committed (#6, §21) [checkpoint]
@@ -446,7 +453,8 @@ Each transition = an atomic write of `stage`+`status` to SQLite. On restart, the
 5. Ban on direct push to `main`; only via PR.
 6. Minimal GitHub token privileges; preferably Docker/VM/a separate OS user.
 7. Log all commands and the agent's output.
-8. Irreversible actions require human approval (`ask_human(approval)`).
+8. Tracked-file deletion and dependency manifest/lock changes require correlated, fail-closed
+   Telegram approval. Routine orchestrator publishing remains automatic.
 
 ---
 

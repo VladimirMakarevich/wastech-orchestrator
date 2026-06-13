@@ -6,7 +6,6 @@ from collections.abc import Callable
 from pathlib import Path
 
 from tests.checks.conftest import make_process_result
-
 from wastech_orchestrator.checks.model import CheckCandidate, CheckSource, ProbeStatus
 from wastech_orchestrator.checks.probe import CheckProbeRunner
 

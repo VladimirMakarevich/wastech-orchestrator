@@ -1,6 +1,6 @@
 # Operations guide
 
-How to install, authorize, run, and diagnose **wastech-orchestrator** in production. The orchestrator drives coding agents (OpenAI Codex CLI, Anthropic Claude Code CLI) through a deterministic pipeline and publishes the result to a Pull Request. It **owns** git (commit/push/PR); the agents only edit files in a dedicated clone. This guide is for the operator who runs it; the build spec is [orchestrator_final_plan.md](orchestrator_final_plan.md) and the security
+How to install, authorize, run, and diagnose **wastech-orchestrator** in production. The orchestrator drives coding agents (OpenAI Codex CLI, Anthropic Claude Code CLI) through a deterministic pipeline and publishes the result to a Pull Request. It **owns** git (commit/push/PR); the agents only edit files in a dedicated clone. This guide is for the operator who runs it; the build spec is [00_orchestrator_final_plan.md](implementation_stages/00_orchestrator_final_plan.md) and the security
 policy is [security.md](rules/security.md).
 
 > The orchestrator never installs or authorizes the CLIs and never stores credentials. Authorization
@@ -128,7 +128,9 @@ yourself, once, in the environment the orchestrator runs in:
 
 Install only the providers you intend to route to. When Claude Code is unavailable, remove it from
 `agents.allowed` and route every agent-driven stage to Codex. GitHub CLI is required only when
-`git.create_pull_request: true`; disabling PR creation does not disable commit or push.
+`git.create_pull_request: true`; disabling PR creation does not disable commit or push. When PR
+creation is enabled, `run` and `watch` **pre-flight `gh` at startup** and exit `2` with an
+actionable message if it is not on `PATH`, rather than failing later inside the publish stage.
 
 If a credential must reach a child process, add **only its variable name** to
 `security.allowed_environment`. Never place a secret value in `config.yaml`, a task file, or
@@ -234,6 +236,25 @@ pull (discovery is not limited to the local filesystem). Stop it with Ctrl-C. Se
 `poll_interval_seconds: 0` (or `--poll-seconds 0`) for a single pass — e.g. when an external scheduler
 re-invokes `watch`.
 
+### Managing the daemon (`stop` / `restart`)
+
+When `watch` runs as a background service (systemd, launchd, `nohup &`) you do not need to track its
+PID. A looping `watch` writes `<artifacts_root>/orchestrator.pid` on start and removes it on exit;
+two commands act on it from any shell bound to the same repo:
+
+```bash
+worc stop                  # SIGTERM the watcher; SIGKILL after --timeout (default 30s); idempotent
+worc restart --poll-seconds 10   # stop the running watcher, then start a fresh loop with these flags
+```
+
+Shutdown is **graceful**: the SIGTERM is observed between ticks, so an in-flight task finishes its
+current stage rather than being interrupted mid-run (`--timeout` is the hard backstop). `stop` is
+idempotent — it prints a notice and exits `0` when nothing is running or the PID file is stale.
+Starting a second `watch` for the same artifact root is refused while one is already live.
+
+> Every command is also available under the short alias **`worc`** (`worc watch`, `worc status`, …);
+> `wastech-orchestrator` remains the canonical long form used throughout this guide.
+
 ### Structured logs
 
 The pipeline emits a secret-free **logfmt** trace on stderr (keyed by `task_id` / `stage` /
@@ -267,17 +288,35 @@ keeps five backups. Supported formats are `logfmt` and newline-delimited `json`.
 ### Telegram HITL and notifications
 
 Set `telegram.enabled: true`, then export the variables named by `telegram.bot_token_env` and
-`telegram.chat_id_env`. The values themselves must not be placed in `config.yaml`.
+`telegram.chat_id_env`. The values themselves must not be placed in `config.yaml`. Use a dedicated
+project bot/chat and only one long-poll consumer; webhook mode is incompatible.
 
 After the completed-task ledger record is written, the orchestrator sends one best-effort message
 for `done`, `failed`, or `manual_action_required`, including the task id, final status, and PR URL
 when present. A Telegram or network failure is logged with credentials redacted and does not change
-the terminal outcome.
+the already-determined terminal outcome. Task `contacts` are appended as plain-text mentions.
 
-The notifier also exposes `ask_human` for a free-form question or yes/no approval. It posts the
-question and blocks only the current stage until a matching-chat reply arrives or
-`telegram.ask_timeout_s` expires. Per-stage agent prompt wiring is not enabled yet; ambiguous or
-dangerous stage actions continue to follow the existing deterministic failure/manual-action paths.
+`refinement` and `planning` may emit one typed free-form question or yes/no approval. Questions use
+ForceReply; approvals use inline buttons. Only the configured chat and exact prompt/callback are
+accepted. The answer is persisted as redacted JSON and passed to the repeated stage through
+`human_input_path`, never CLI argv.
+
+After `implementation` and `fixing`, tracked-file deletions and dependency manifest/lock changes
+require approval before tests unless an exact planning approval already covers the same risk and
+normalized paths. Ordinary diffs and routine commit/push/PR do not ask.
+
+Timeout, transport failure, ambiguous approval, or a repeated stage request moves the task to
+`manual_action_required`. Waiting is stored in `logs/<task-id>/hitl/*.json`; restart resumes the
+existing Telegram message/deadline without adding a state-machine status.
+
+Verify setup:
+
+```bash
+wastech-orchestrator --config ./config.yaml preflight
+wastech-orchestrator --config ./config.yaml telegram-test --timeout-seconds 60
+```
+
+Full BotFather/chat-id setup and troubleshooting: [telegram.md](telegram.md).
 
 Monitor from another terminal:
 
@@ -326,6 +365,7 @@ logs/
     task.enriched.md              # refinement output (if it ran)
     plan.md                       # planning output
     current.diff                  # working-tree diff at the last checkpoint (redacted)
+    hitl/*.json                   # durable redacted question/approval + recovery handles
     summary.md / summary.json     # the what/how/integration/why handoff → PR body
     failure_report.json / stuck.md# written iff the task ended manual_action_required
     review/findings.json          # review findings (severity → blocking)

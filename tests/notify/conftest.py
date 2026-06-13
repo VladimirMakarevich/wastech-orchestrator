@@ -10,6 +10,8 @@ from typing import Any
 import pytest
 
 from wastech_orchestrator.config.schema import TelegramConfig
+from wastech_orchestrator.notify.interface import AskKind
+from wastech_orchestrator.notify.telegram import _ClientReply, _SentPrompt
 from wastech_orchestrator.observability.logging import LOGGER_NAME
 
 
@@ -40,23 +42,68 @@ class FakeTelegramClient:
     """
 
     sent: list[dict[str, Any]] = field(default_factory=list)
-    replies: list[str | None] = field(default_factory=list)
+    prompts: list[dict[str, Any]] = field(default_factory=list)
+    replies: list[_ClientReply | None] = field(default_factory=list)
     send_error: Exception | None = None
     poll_error: Exception | None = None
     deadlines: list[float] = field(default_factory=list)
+    next_message_id: int = 10
+    update_offset: int | None = 101
+    webhook_url: str = ""
 
     def send_message(self, *, chat_id: str, text: str) -> None:
         if self.send_error is not None:
             raise self.send_error
         self.sent.append({"chat_id": chat_id, "text": text})
 
-    def poll_reply(self, *, chat_id: str, deadline_monotonic: float) -> str | None:
+    def send_prompt(
+        self,
+        *,
+        chat_id: str,
+        text: str,
+        kind: AskKind,
+        interaction_id: str,
+    ) -> _SentPrompt:
+        if self.send_error is not None:
+            raise self.send_error
+        self.prompts.append(
+            {
+                "chat_id": chat_id,
+                "text": text,
+                "kind": kind,
+                "interaction_id": interaction_id,
+            }
+        )
+        return _SentPrompt(message_id=self.next_message_id, update_offset=self.update_offset)
+
+    def poll_reply(
+        self,
+        *,
+        chat_id: str,
+        prompt_message_id: int,
+        update_offset: int | None,
+        interaction_id: str,
+        kind: AskKind,
+        deadline_monotonic: float,
+    ) -> _ClientReply | None:
         if self.poll_error is not None:
             raise self.poll_error
         self.deadlines.append(deadline_monotonic)
         if not self.replies:
             return None
         return self.replies.pop(0)
+
+    def get_me(self) -> str:
+        return "testbot"
+
+    def get_chat(self, *, chat_id: str) -> str:
+        return "test-chat"
+
+    def get_webhook_url(self) -> str:
+        return self.webhook_url
+
+    def check_polling(self) -> None:
+        return None
 
 
 @pytest.fixture

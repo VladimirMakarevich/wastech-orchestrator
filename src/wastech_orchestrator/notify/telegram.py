@@ -3,15 +3,16 @@
 The Core does not import this module directly — it talks to a :class:`Notifier`. The factory
 :func:`build_notifier` resolves the bot token and chat id **only** from the env vars *named* by
 :class:`TelegramConfig`; with the feature disabled or either env var missing/blank it returns a
-silent :class:`NullNotifier`. All sends are best-effort: any Telegram or network failure is logged
-at warning level (with token + chat id redacted) and never re-raised — a transport failure must
-never change a task's terminal outcome.
+silent :class:`NullNotifier`. Terminal notifications are best-effort. Blocking HITL returns typed
+timeout/transport/invalid-response failures to the Core, which applies fail-closed task semantics.
+Transport exceptions are logged with token + chat id redacted and are never re-raised.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
@@ -21,6 +22,7 @@ from typing import Any, Protocol
 
 from wastech_orchestrator.config.schema import TelegramConfig
 from wastech_orchestrator.notify.interface import (
+    AskHandle,
     AskKind,
     AskResult,
     Notifier,
@@ -32,11 +34,21 @@ _LOG = logging.getLogger(__name__)
 _TRANSPORT_LOG_LOCK = threading.Lock()
 _TRANSPORT_LOG_PREFIXES = ("httpx", "httpcore", "telegram")
 _TRANSPORT_SILENT_LEVEL = logging.CRITICAL + 1
+_TELEGRAM_TEXT_LIMIT = 4096
+_TRUNCATION_SUFFIX = "\n\n[message truncated by wastech-orchestrator]"
+_ALLOWED_UPDATES = ("message", "callback_query")
 
-# Approval-reply matchers — case-insensitive, exact match against the trimmed reply. Anything else
-# leaves ``approved=None`` so the caller can treat an unrecognized reply as "unknown" (not "no").
-_APPROVE_WORDS: frozenset[str] = frozenset({"y", "yes", "approve", "approved", "ok", "confirm"})
-_DENY_WORDS: frozenset[str] = frozenset({"n", "no", "deny", "denied", "cancel", "reject"})
+
+@dataclass(frozen=True)
+class _SentPrompt:
+    message_id: int
+    update_offset: int | None
+
+
+@dataclass(frozen=True)
+class _ClientReply:
+    text: str
+    approved: bool | None = None
 
 
 class _TelegramClient(Protocol):
@@ -49,9 +61,33 @@ class _TelegramClient(Protocol):
 
     def send_message(self, *, chat_id: str, text: str) -> None: ...
 
-    def poll_reply(self, *, chat_id: str, deadline_monotonic: float) -> str | None: ...
+    def send_prompt(
+        self,
+        *,
+        chat_id: str,
+        text: str,
+        kind: AskKind,
+        interaction_id: str,
+    ) -> _SentPrompt: ...
+
+    def poll_reply(
+        self,
+        *,
+        chat_id: str,
+        prompt_message_id: int,
+        update_offset: int | None,
+        interaction_id: str,
+        kind: AskKind,
+        deadline_monotonic: float,
+    ) -> _ClientReply | None: ...
 
     def get_me(self) -> str: ...  # returns bot @username (first_name as fallback)
+
+    def get_chat(self, *, chat_id: str) -> str: ...
+
+    def get_webhook_url(self) -> str: ...
+
+    def check_polling(self) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -75,11 +111,13 @@ class TelegramNotifier:
         secrets: _Secrets,
         ask_timeout_s: int,
         monotonic: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], float] = time.time,
     ) -> None:
         self._client = client
         self._secrets = secrets
         self._ask_timeout_s = max(0, int(ask_timeout_s))
         self._monotonic = monotonic
+        self._wall_clock = wall_clock
 
     def send_notification(
         self,
@@ -88,9 +126,14 @@ class TelegramNotifier:
         final_status: str,
         pr_url: str | None,
         reason: str | None,
+        contacts: tuple[str, ...] = (),
     ) -> None:
         body = _format_terminal_message(
-            task_id=task_id, final_status=final_status, pr_url=pr_url, reason=reason
+            task_id=task_id,
+            final_status=final_status,
+            pr_url=pr_url,
+            reason=reason,
+            contacts=contacts,
         )
         self._safe_send(body, op="send_notification", task_id=task_id)
 
@@ -102,30 +145,121 @@ class TelegramNotifier:
         task_id: str,
         kind: AskKind,
         timeout_s: int,
+        interaction_id: str = "adhoc",
+        contacts: tuple[str, ...] = (),
     ) -> AskResult:
-        prompt = _format_ask_message(question=question, context=context, task_id=task_id, kind=kind)
-        if not self._safe_send(prompt, op="ask_human", task_id=task_id):
-            # If we could not even deliver the prompt, treat it as a deterministic timeout so the
-            # caller does not block on a reply that will never come.
-            return AskResult(answered=False, timed_out=True)
+        handle = self.start_ask(
+            question=question,
+            context=context,
+            task_id=task_id,
+            kind=kind,
+            timeout_s=timeout_s,
+            interaction_id=interaction_id,
+            contacts=contacts,
+        )
+        return self.wait_for_answer(handle)
 
+    def start_ask(
+        self,
+        *,
+        question: str,
+        context: str,
+        task_id: str,
+        kind: AskKind,
+        timeout_s: int,
+        interaction_id: str,
+        contacts: tuple[str, ...] = (),
+    ) -> AskHandle:
         effective_timeout = min(max(0, int(timeout_s)), self._ask_timeout_s)
-        deadline = self._monotonic() + effective_timeout
+        prompt = _format_ask_message(
+            question=question,
+            context=context,
+            task_id=task_id,
+            kind=kind,
+            contacts=contacts,
+        )
+        safe_prompt = self._outgoing(prompt)
+        try:
+            sent = self._client.send_prompt(
+                chat_id=self._secrets.chat_id,
+                text=safe_prompt,
+                kind=kind,
+                interaction_id=interaction_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - transport errors are returned, never raised
+            self._warn("ask_human send failed", task_id=task_id, error=str(exc))
+            return AskHandle(
+                interaction_id=interaction_id,
+                kind=kind,
+                expires_at=self._wall_clock(),
+                delivered=False,
+            )
+        return AskHandle(
+            interaction_id=interaction_id,
+            kind=kind,
+            expires_at=self._wall_clock() + effective_timeout,
+            message_id=sent.message_id,
+            update_offset=sent.update_offset,
+        )
+
+    def wait_for_answer(self, handle: AskHandle) -> AskResult:
+        if not handle.delivered or handle.message_id is None:
+            return AskResult(
+                answered=False,
+                failure="transport_error",
+                interaction_id=handle.interaction_id,
+                message_id=handle.message_id,
+            )
+        remaining = max(0.0, handle.expires_at - self._wall_clock())
+        deadline = self._monotonic() + remaining
         try:
             reply = self._client.poll_reply(
-                chat_id=self._secrets.chat_id, deadline_monotonic=deadline
+                chat_id=self._secrets.chat_id,
+                prompt_message_id=handle.message_id,
+                update_offset=handle.update_offset,
+                interaction_id=handle.interaction_id,
+                kind=handle.kind,
+                deadline_monotonic=deadline,
             )
-        except Exception as exc:  # noqa: BLE001 — transport failures are best-effort
-            self._warn("ask_human poll failed", task_id=task_id, error=str(exc))
-            return AskResult(answered=False, timed_out=True)
-
+        except Exception as exc:  # noqa: BLE001 - transport errors are returned, never raised
+            self._warn(
+                "ask_human poll failed",
+                interaction_id=handle.interaction_id,
+                error=str(exc),
+            )
+            return AskResult(
+                answered=False,
+                failure="transport_error",
+                interaction_id=handle.interaction_id,
+                message_id=handle.message_id,
+            )
         if reply is None:
-            return AskResult(answered=False, timed_out=True)
-        return _interpret_reply(reply, kind=kind)
+            return AskResult(
+                answered=False,
+                timed_out=True,
+                failure="timeout",
+                interaction_id=handle.interaction_id,
+                message_id=handle.message_id,
+            )
+        if handle.kind == "approval" and reply.approved is None:
+            return AskResult(
+                answered=True,
+                text=self._redact(reply.text),
+                failure="invalid_response",
+                interaction_id=handle.interaction_id,
+                message_id=handle.message_id,
+            )
+        return AskResult(
+            answered=True,
+            text=self._redact(reply.text),
+            approved=reply.approved,
+            interaction_id=handle.interaction_id,
+            message_id=handle.message_id,
+        )
 
     def _safe_send(self, body: str, *, op: str, task_id: str) -> bool:
         try:
-            self._client.send_message(chat_id=self._secrets.chat_id, text=body)
+            self._client.send_message(chat_id=self._secrets.chat_id, text=self._outgoing(body))
             return True
         except Exception as exc:  # noqa: BLE001 — Telegram/network failure must not propagate
             self._warn(f"{op} send failed", task_id=task_id, error=str(exc))
@@ -152,6 +286,9 @@ class TelegramNotifier:
 
     def _secret_literals(self) -> tuple[str, ...]:
         return (self._secrets.bot_token, self._secrets.chat_id)
+
+    def _outgoing(self, value: str) -> str:
+        return _limit_message(self._redact(value))
 
 
 def build_notifier(
@@ -212,9 +349,8 @@ def check_telegram_preflight(
 
     * ``enabled: false`` → ``(True, "telegram: SKIP (disabled)")`` — never fails preflight.
     * Missing env vars → ``(False, "telegram: FAIL — env var(s) not set: …")``.
-    * Credentials present + ``get_me()`` OK → ``(True, "telegram: OK (bot=@…, …)")``.
-    * Credentials present + ``get_me()`` fails → ``(False, "telegram: FAIL — API error (…)")``,
-      with the bot token and chat id redacted from the error message.
+    * Credentials present + bot/chat/polling checks OK → ``(True, "telegram: OK (…)")``.
+    * An invalid numeric chat id, configured webhook, inaccessible chat, or API failure is fatal.
     """
     if not cfg.enabled:
         return True, "telegram: SKIP (disabled)"
@@ -226,14 +362,27 @@ def check_telegram_preflight(
     missing = [n for n, v in [(cfg.bot_token_env, bot_token), (cfg.chat_id_env, chat_id)] if not v]
     if missing:
         return False, f"telegram: FAIL — env var(s) not set: {', '.join(missing)}"
+    if re.fullmatch(r"-?[1-9][0-9]*", chat_id) is None:
+        return False, "telegram: FAIL — chat id must be a numeric Telegram chat id"
 
     secrets = _Secrets(bot_token=bot_token, chat_id=chat_id)
-    client = (client_factory or _default_client_factory)(secrets, cfg)
     try:
+        client = (client_factory or _default_client_factory)(secrets, cfg)
         username = client.get_me()
-        return True, f"telegram: OK (bot=@{username}, chat_id configured)"
+        chat = client.get_chat(chat_id=chat_id)
+        webhook_url = client.get_webhook_url()
+        if webhook_url:
+            return (
+                False,
+                "telegram: FAIL — an outgoing webhook is configured; HITL requires polling",
+            )
+        client.check_polling()
+        return True, f"telegram: OK (bot=@{username}, chat={chat}, polling ready)"
     except Exception as exc:  # noqa: BLE001 — surface a safe summary, never re-raise
-        safe = redact_text(str(exc), extra_secrets=(bot_token, chat_id))
+        safe = str(exc)
+        for secret in (bot_token, chat_id):
+            safe = safe.replace(secret, REDACTED)
+        safe = redact_text(safe, extra_secrets=(bot_token, chat_id))
         return False, f"telegram: FAIL — API error ({safe})"
 
 
@@ -243,12 +392,15 @@ def _format_terminal_message(
     final_status: str,
     pr_url: str | None,
     reason: str | None,
+    contacts: tuple[str, ...] = (),
 ) -> str:
     parts = [f"[{task_id}] status={final_status}"]
     if pr_url:
         parts.append(f"pr={pr_url}")
     if reason:
         parts.append(f"reason={reason}")
+    if contacts:
+        parts.append(f"contacts={' '.join(contacts)}")
     return " ".join(parts)
 
 
@@ -258,26 +410,22 @@ def _format_ask_message(
     context: str,
     task_id: str,
     kind: AskKind,
+    contacts: tuple[str, ...] = (),
 ) -> str:
     header = f"[{task_id}] {kind}"
     body = question.strip()
     ctx = context.strip()
+    contact_line = f"\nContacts: {' '.join(contacts)}" if contacts else ""
     if ctx:
-        return f"{header}\n{body}\n\nContext:\n{ctx}"
-    return f"{header}\n{body}"
+        return f"{header}{contact_line}\n{body}\n\nContext:\n{ctx}"
+    return f"{header}{contact_line}\n{body}"
 
 
-def _interpret_reply(reply: str, *, kind: AskKind) -> AskResult:
-    text = reply.strip()
-    if kind == "approval":
-        normalized = text.lower()
-        if normalized in _APPROVE_WORDS:
-            return AskResult(answered=True, text=text, approved=True)
-        if normalized in _DENY_WORDS:
-            return AskResult(answered=True, text=text, approved=False)
-        # An ambiguous reply still counts as an answer (we relayed it), just unknown approval.
-        return AskResult(answered=True, text=text, approved=None)
-    return AskResult(answered=True, text=text, approved=None)
+def _limit_message(text: str) -> str:
+    if len(text) <= _TELEGRAM_TEXT_LIMIT:
+        return text
+    keep = _TELEGRAM_TEXT_LIMIT - len(_TRUNCATION_SUFFIX)
+    return text[:keep] + _TRUNCATION_SUFFIX
 
 
 def _default_client_factory(secrets: _Secrets, _cfg: TelegramConfig) -> _TelegramClient:
@@ -295,7 +443,6 @@ class _HttpTelegramClient:
 
     def __init__(self, *, bot_token: str) -> None:
         self._bot_token = bot_token
-        self._last_update_id: int | None = None
 
     def send_message(self, *, chat_id: str, text: str) -> None:
         import asyncio
@@ -322,14 +469,124 @@ class _HttpTelegramClient:
         with _suppress_transport_request_logs():
             return asyncio.run(fetch())
 
-    def poll_reply(self, *, chat_id: str, deadline_monotonic: float) -> str | None:
+    def get_chat(self, *, chat_id: str) -> str:
+        import asyncio
+
+        from telegram import Bot
+
+        async def fetch() -> str:
+            async with Bot(self._bot_token) as bot:
+                chat = await bot.get_chat(chat_id=int(chat_id))
+                return chat.title or chat.full_name or chat.type
+
+        with _suppress_transport_request_logs():
+            return asyncio.run(fetch())
+
+    def get_webhook_url(self) -> str:
+        import asyncio
+
+        from telegram import Bot
+
+        async def fetch() -> str:
+            async with Bot(self._bot_token) as bot:
+                info = await bot.get_webhook_info()
+                return info.url or ""
+
+        with _suppress_transport_request_logs():
+            return asyncio.run(fetch())
+
+    def check_polling(self) -> None:
+        import asyncio
+
+        from telegram import Bot
+
+        async def check() -> None:
+            async with Bot(self._bot_token) as bot:
+                await bot.get_updates(limit=1, timeout=0, allowed_updates=_ALLOWED_UPDATES)
+
+        with _suppress_transport_request_logs():
+            asyncio.run(check())
+
+    def send_prompt(
+        self,
+        *,
+        chat_id: str,
+        text: str,
+        kind: AskKind,
+        interaction_id: str,
+    ) -> _SentPrompt:
+        import asyncio
+
+        from telegram import Bot, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup
+
+        async def send() -> _SentPrompt:
+            async with Bot(self._bot_token) as bot:
+                offset = await self._drain_pending(bot)
+                markup: InlineKeyboardMarkup | ForceReply
+                if kind == "approval":
+                    markup = InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    "Approve",
+                                    callback_data=f"hitl:{interaction_id}:yes",
+                                ),
+                                InlineKeyboardButton(
+                                    "Deny",
+                                    callback_data=f"hitl:{interaction_id}:no",
+                                ),
+                            ]
+                        ]
+                    )
+                else:
+                    markup = ForceReply(
+                        selective=True,
+                        input_field_placeholder="Reply to this message",
+                    )
+                message = await bot.send_message(
+                    chat_id=int(chat_id),
+                    text=text,
+                    reply_markup=markup,
+                )
+                return _SentPrompt(message_id=message.message_id, update_offset=offset)
+
+        with _suppress_transport_request_logs():
+            return asyncio.run(send())
+
+    async def _drain_pending(self, bot: Any) -> int | None:
+        offset: int | None = None
+        for _ in range(10):
+            updates = await bot.get_updates(
+                offset=offset,
+                limit=100,
+                timeout=0,
+                allowed_updates=_ALLOWED_UPDATES,
+            )
+            if not updates:
+                return offset
+            offset = max(update.update_id for update in updates) + 1
+        raise RuntimeError("telegram update backlog is too large to drain safely")
+
+    def poll_reply(
+        self,
+        *,
+        chat_id: str,
+        prompt_message_id: int,
+        update_offset: int | None,
+        interaction_id: str,
+        kind: AskKind,
+        deadline_monotonic: float,
+    ) -> _ClientReply | None:
         import asyncio
 
         from telegram import Bot
 
         target_chat = int(chat_id)
+        expected_yes = f"hitl:{interaction_id}:yes"
+        expected_no = f"hitl:{interaction_id}:no"
 
-        async def poll() -> str | None:
+        async def poll() -> _ClientReply | None:
+            offset = update_offset
             async with Bot(self._bot_token) as bot:
                 while True:
                     remaining = deadline_monotonic - time.monotonic()
@@ -339,22 +596,44 @@ class _HttpTelegramClient:
                     try:
                         updates = await asyncio.wait_for(
                             bot.get_updates(
-                                offset=(self._last_update_id + 1)
-                                if self._last_update_id is not None
-                                else None,
+                                offset=offset,
                                 timeout=poll_timeout,
+                                allowed_updates=_ALLOWED_UPDATES,
+                                read_timeout=poll_timeout + 5,
                             ),
-                            timeout=remaining,
+                            timeout=remaining + 5,
                         )
                     except TimeoutError:
                         return None
                     for update in updates:
-                        self._last_update_id = update.update_id
-                        msg = update.message
-                        if msg is None or msg.chat.id != target_chat:
+                        offset = update.update_id + 1
+                        if kind == "question":
+                            msg = update.message
+                            if (
+                                msg is None
+                                or msg.chat.id != target_chat
+                                or msg.reply_to_message is None
+                                or msg.reply_to_message.message_id != prompt_message_id
+                                or not isinstance(msg.text, str)
+                                or not msg.text.strip()
+                            ):
+                                continue
+                            return _ClientReply(text=msg.text.strip())
+                        query = update.callback_query
+                        if query is None or query.message is None:
                             continue
-                        if isinstance(msg.text, str) and msg.text:
-                            return msg.text
+                        if (
+                            query.message.chat.id != target_chat
+                            or query.message.message_id != prompt_message_id
+                            or query.data not in (expected_yes, expected_no)
+                        ):
+                            continue
+                        await bot.answer_callback_query(query.id)
+                        approved = query.data == expected_yes
+                        return _ClientReply(
+                            text="approved" if approved else "denied",
+                            approved=approved,
+                        )
 
         with _suppress_transport_request_logs():
             return asyncio.run(poll())

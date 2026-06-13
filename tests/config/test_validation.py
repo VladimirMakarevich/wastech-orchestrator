@@ -156,6 +156,27 @@ def test_negative_poll_interval_is_rejected(base_config: OrchestratorConfig) -> 
     assert any("poll_interval_seconds" in issue for issue in exc.value.issues)
 
 
+def test_non_positive_telegram_timeout_is_rejected(base_config: OrchestratorConfig) -> None:
+    bad = replace(
+        base_config,
+        telegram=replace(base_config.telegram, ask_timeout_s=0),
+    )
+    with pytest.raises(ConfigError) as exc:
+        validate_config(bad)
+    assert any("telegram.ask_timeout_s" in issue for issue in exc.value.issues)
+
+
+@pytest.mark.parametrize("field", ["bot_token_env", "chat_id_env"])
+def test_invalid_telegram_env_name_is_rejected(base_config: OrchestratorConfig, field: str) -> None:
+    bad = replace(
+        base_config,
+        telegram=replace(base_config.telegram, **{field: "NOT VALID"}),
+    )
+    with pytest.raises(ConfigError) as exc:
+        validate_config(bad)
+    assert any(f"telegram.{field}" in issue for issue in exc.value.issues)
+
+
 def test_in_repo_commit_is_accepted(base_config: OrchestratorConfig) -> None:
     ok = _with_footprint(
         base_config, location=FootprintLocation.IN_REPO, tracking=FootprintTracking.COMMIT

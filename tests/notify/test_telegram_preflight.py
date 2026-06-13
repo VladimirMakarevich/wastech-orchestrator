@@ -37,6 +37,15 @@ class _FakeClient:
             raise self._raise
         return self._username
 
+    def get_chat(self, **_: object) -> str:
+        return "project-chat"
+
+    def get_webhook_url(self) -> str:
+        return ""
+
+    def check_polling(self) -> None:
+        return None
+
 
 def _factory(username: str = "mybot", *, raise_exc: Exception | None = None):
     def make(_secrets: object, _cfg: object) -> _FakeClient:
@@ -73,7 +82,7 @@ def test_enabled_get_me_succeeds() -> None:
     assert ok is True
     assert "OK" in line
     assert "@coolbot" in line
-    assert "chat_id configured" in line
+    assert "polling ready" in line
 
 
 def test_enabled_get_me_fails_token_redacted() -> None:
@@ -84,3 +93,37 @@ def test_enabled_get_me_fails_token_redacted() -> None:
     assert "API error" in line
     # The bot token must not appear verbatim in the report line
     assert "123:AAFakeToken" not in line
+
+
+def test_enabled_non_numeric_chat_id_fails() -> None:
+    ok, line = check_telegram_preflight(
+        _CFG_ENABLED,
+        {"TG_TOKEN": "123:AAFakeToken", "TG_CHAT": "@channel"},
+        client_factory=_factory(),
+    )
+    assert ok is False
+    assert "numeric" in line
+
+
+def test_enabled_zero_chat_id_fails() -> None:
+    ok, line = check_telegram_preflight(
+        _CFG_ENABLED,
+        {"TG_TOKEN": "123:AAFakeToken", "TG_CHAT": "0"},
+        client_factory=_factory(),
+    )
+    assert ok is False
+    assert "numeric" in line
+
+
+def test_enabled_webhook_conflict_fails() -> None:
+    class _WebhookClient(_FakeClient):
+        def get_webhook_url(self) -> str:
+            return "https://example.test/hook"
+
+    ok, line = check_telegram_preflight(
+        _CFG_ENABLED,
+        _ENV,
+        client_factory=lambda _secrets, _cfg: _WebhookClient(),
+    )
+    assert ok is False
+    assert "webhook" in line

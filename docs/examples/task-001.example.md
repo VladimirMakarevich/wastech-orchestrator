@@ -10,7 +10,7 @@ agents:                     # optional per-stage override (only from agents.allo
   review: codex
   fixing: claude
   summary: claude
-contacts: ["@team-lead"]    # who to ping on Telegram when there are questions
+contacts: ["@team-lead"]    # plain-text Telegram mentions for prompts/terminal notifications
 model: null                 # optional: override model for all stages, e.g. "claude-opus-4-8"
 reasoning: null             # optional: low | medium | high | xhigh (Opus 4.7+) | max
 ---

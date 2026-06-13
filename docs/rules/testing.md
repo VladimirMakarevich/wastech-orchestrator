@@ -1,6 +1,7 @@
 # Testing rules
 
-The source of truth is [orchestrator_final_plan.md §14](../orchestrator_final_plan.md).
+The source of truth is
+[00_orchestrator_final_plan.md §14](../implementation_stages/00_orchestrator_final_plan.md).
 
 ## Levels
 

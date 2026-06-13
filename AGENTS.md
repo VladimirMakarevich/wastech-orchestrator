@@ -6,7 +6,7 @@ This file is for Codex. The full set of rules matches [CLAUDE.md](CLAUDE.md) and
 
 ## Before writing code
 
-1. Read **[docs/orchestrator_final_plan.md](docs/orchestrator_final_plan.md)** — the canonical spec (source of truth).
+1. Read **[docs/implementation_stages/00_orchestrator_final_plan.md](docs/implementation_stages/00_orchestrator_final_plan.md)** — the canonical spec (source of truth).
 2. Follow the rules in **[docs/rules/](docs/rules/)**: `architecture.md`, `coding-style.md`, `security.md`, `git-workflow.md`, `testing.md`.
 
 ## Hard invariants (must not be violated)
@@ -41,3 +41,5 @@ pytest
 - the invariants above are not violated.
 
 The MVP build (the six phases under [docs/implementation_stages/](docs/implementation_stages/)) is complete; those phase docs are a historical record. Track ongoing work in [docs/backlog/follow_ups.md](docs/backlog/follow_ups.md) and the product backlog.
+
+@RTK.md

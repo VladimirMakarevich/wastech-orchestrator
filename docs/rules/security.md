@@ -1,6 +1,8 @@
 # Security rules
 
-The source of truth is [orchestrator_final_plan.md §12](../orchestrator_final_plan.md). These rules must not be violated; the configuration validator is required to reject unsafe settings.
+The source of truth is
+[00_orchestrator_final_plan.md §12](../implementation_stages/00_orchestrator_final_plan.md). These
+rules must not be violated; the configuration validator is required to reject unsafe settings.
 
 ## Isolation
 
@@ -26,8 +28,13 @@ The source of truth is [orchestrator_final_plan.md §12](../orchestrator_final_p
 11. A global blacklist of forbidden commands and paths (`security.denied_commands`, `denied_read_paths`) is applied before any run.
 12. A direct push to `base_branch` is forbidden; publishing happens only through a PR.
 13. Staging in the target repo is a **scoped** explicit pathspec that excludes `tasks/`/`logs/`/`workspace/`; blanket `git add .`/`-A` is forbidden, so orchestration and task artifacts never enter a code commit. In audit-footprint mode (spec §21) only the orchestrator — never an agent — makes the separate artifact commit.
-14. Irreversible/dangerous actions require human approval (HITL via Telegram).
+14. The implemented output guardrail requires Telegram approval for tracked-file deletion and
+    dependency manifest/lock changes after `implementation`/`fixing`. Approval is correlated to the
+    configured chat and exact prompt, persisted in redacted form, and fails closed. Ordinary diffs
+    and routine orchestrator commit/push/PR remain automatic.
+15. Bot token and chat id are environment-only. They must not enter handles, SQLite, logs, provider
+    argv, or artifacts. Task `contacts` are plain-text mentions only and cannot select a chat.
 
 ## Control layer
 
-15. The Pull Request and CI remain a mandatory control layer — the orchestrator does not replace them and does not auto-merge (in the first version).
+16. The Pull Request and CI remain a mandatory control layer — the orchestrator does not replace them and does not auto-merge (in the first version).

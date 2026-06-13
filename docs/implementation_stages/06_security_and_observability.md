@@ -119,8 +119,9 @@ Closing this phase means the whole project DoD holds:
 - [ ] Commit/push/PR are done **only** by the orchestrator and never duplicated; the security policy
       can't be relaxed via a task or `extra_args`; unit/integration/e2e pass; the ops docs exist.
 
-## Not in this phase (v2, spec §18.2)
+## Post-phase status
 
-Human-in-the-loop (clarifying questions / action approval), Telegram integration,
-reasoning/complexity levels per task, richer task parsing, and parallel/graph decomposition with
-worktrees. Track these in [../backlog/product_backlog.md](../backlog/product_backlog.md).
+This historical phase did not implement Telegram. Typed human-in-the-loop, durable recovery, and
+deletion/dependency approvals were subsequently completed in
+[Stage 08](08_telegram_integration.md). Parallel/graph decomposition with worktrees remains in
+[the product backlog](../backlog/product_backlog.md).

@@ -32,7 +32,9 @@ Frozen dataclasses mirroring §11, one per block: root `OrchestratorConfig`,
 `DecompositionConfig`, `routing`, `providers`), `ProviderConfig` (per provider — note Codex has
 `sandbox`, both have `permission_profile`, `extra_args`, `model`, `timeout_seconds`),
 `SecurityConfig`, `ValidationConfig`, `ChecksConfig`, `GitConfig` + `FootprintConfig`,
-`TelegramConfig` (present but inert in v1).
+`TelegramConfig` (originally present but inert in this phase; activated by
+[Stage 08](08_telegram_integration.md), including positive timeout and environment-name
+validation).
 - A `RouteConfig` is `{primary, fallback}`; routes are keyed by `Stage`.
 - Use the canonical enums for provider ids and stages — no bare strings.
 

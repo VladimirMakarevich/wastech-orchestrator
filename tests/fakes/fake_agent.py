@@ -33,18 +33,48 @@ def _arg_value(args: list[str], flag: str) -> str | None:
     return None
 
 
+def _schema_output(cli_name: str, cli_args: list[str]) -> dict[str, object]:
+    schema: dict[str, object] | None = None
+    if cli_name == "codex":
+        path = _arg_value(cli_args, "--output-schema")
+        if path:
+            with open(path, encoding="utf-8") as handle:
+                loaded = json.load(handle)
+            if isinstance(loaded, dict):
+                schema = loaded
+    else:
+        raw = _arg_value(cli_args, "--json-schema")
+        if raw:
+            loaded = json.loads(raw)
+            if isinstance(loaded, dict):
+                schema = loaded
+    if schema is None:
+        return _STRUCTURED_OUTPUT
+
+    required = schema.get("required")
+    if isinstance(required, list) and "decompose" in required:
+        return {
+            "content": "Fake planning result.",
+            "human_input": None,
+            "decompose": False,
+            "subtasks": [],
+        }
+    return {"content": "Fake refinement result.", "human_input": None}
+
+
 def _emit(events: list[dict[str, object]]) -> None:
     sys.stdout.write("\n".join(json.dumps(event) for event in events) + "\n")
 
 
 def _run_codex(scenario: str, cli_args: list[str]) -> int:
     if scenario == "success":
+        structured = _schema_output("codex", cli_args)
         _emit(
             [
                 {"type": "session", "session_id": _SESSION_ID},
                 {"type": "message", "role": "assistant", "text": "stream message"},
                 {"type": "usage", "input_tokens": 12, "output_tokens": 7},
-                {"type": "result", "status": "success", "output": _STRUCTURED_OUTPUT},
+                {"type": "result", "status": "success", "output": structured},
             ]
         )
         last_message = _arg_value(cli_args, "--output-last-message")
@@ -87,6 +117,7 @@ def _run_codex(scenario: str, cli_args: list[str]) -> int:
 
 def _run_claude(scenario: str, cli_args: list[str]) -> int:
     if scenario == "success":
+        structured = _schema_output("claude", cli_args)
         _emit(
             [
                 {"type": "system", "subtype": "init", "session_id": _SESSION_ID},
@@ -101,7 +132,7 @@ def _run_claude(scenario: str, cli_args: list[str]) -> int:
                     "result": _FINAL_MESSAGE,
                     "session_id": _SESSION_ID,
                     "usage": {"input_tokens": 12, "output_tokens": 7},
-                    "structured_output": _STRUCTURED_OUTPUT,
+                    "structured_output": structured,
                     "total_cost_usd": 0.001,
                 },
             ]

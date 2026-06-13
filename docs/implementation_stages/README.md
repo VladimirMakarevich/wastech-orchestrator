@@ -5,8 +5,8 @@
 > drove them have been retired. Track ongoing work in [../backlog/follow_ups.md](../backlog/follow_ups.md)
 > and the [product backlog](../backlog/product_backlog.md); keep docs in sync with `/sync-docs`.
 
-This directory breaks the build of **wastech-orchestrator** into six sequential phases.
-The canonical spec is [orchestrator_final_plan.md](../orchestrator_final_plan.md); these files
+This directory records the original six sequential MVP phases plus later implementation records.
+The canonical spec is [00_orchestrator_final_plan.md](00_orchestrator_final_plan.md); these files
 expand its §15 roadmap into concrete, ordered work blocks with a Definition of Done (DoD) per
 phase. In any discrepancy, the spec wins — these documents never override an invariant.
 
@@ -24,6 +24,14 @@ phase. In any discrepancy, the spec wins — these documents never override an i
 | 4 | [04_routing_and_fallback.md](04_routing_and_fallback.md) | Agent Router, allowlist enforcement, infra-only fallback, `stage_attempts`, partial-change snapshots | §4.2, §5, §7.2–§7.4, §8.1 |
 | 5 | [05_pipeline_and_recovery.md](05_pipeline_and_recovery.md) | State Store, state machine, validation gate, Task Parser, Check Runner, Git Manager, the Core pipeline, decomposition, loop control, terminal cleanup, auto mode, recovery, ledger, `run`/`watch` | §5, §5.1, §5.2, §6, §8, §8.3, §9, §10, §13, §19, §21 |
 | 6 | [06_security_and_observability.md](06_security_and_observability.md) | Security hardening + adversarial tests, audit completeness, `failure_report.json`/`stuck.md`, operations docs | §8.1, §10, §12, §16, §19.5 |
+
+Post-MVP implementation records:
+
+| # | File | Scope |
+|---|---|---|
+| 7 | [07_interactive_installer.md](07_interactive_installer.md) | Interactive repository binding and setup |
+| 8 | [08_telegram_integration.md](08_telegram_integration.md) | Telegram transport, typed HITL, durable recovery, dangerous-diff approvals |
+| 9 | [09_automatic_check_discovery.md](09_automatic_check_discovery.md) | Automatic check discovery and environment resolution |
 
 ```text
 P1 contracts+config

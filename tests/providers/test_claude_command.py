@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import replace
 
@@ -93,6 +94,19 @@ def test_max_turns_flag_only_when_configured(
     assert argv[argv.index("--max-turns") + 1] == "5"
 
 
+def test_output_schema_is_passed_as_json_schema(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    schema = {
+        "type": "object",
+        "properties": {"content": {"type": "string"}},
+        "required": ["content"],
+    }
+    argv = _argv(claude_config, make_request(output_schema=schema))
+
+    assert json.loads(argv[argv.index("--json-schema") + 1]) == schema
+
+
 def test_forbidden_extra_args_are_rejected(
     claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
@@ -147,6 +161,13 @@ def test_context_footer_lists_only_present_paths(
     assert "/logs/t/task.md" in footer
     assert "/logs/t/plan.md" in footer
     assert "diff" not in footer  # diff_path is None
+
+
+def test_context_footer_includes_human_input_path(
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    footer = build_context_footer(make_request(human_input_path="/logs/t/hitl/planning.json"))
+    assert "human_input: /logs/t/hitl/planning.json" in footer
 
 
 def test_effective_prompt_appends_footer(make_request: Callable[..., AgentRunRequest]) -> None:

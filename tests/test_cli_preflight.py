@@ -11,10 +11,13 @@ from __future__ import annotations
 import argparse
 import logging
 from collections.abc import Iterator
+from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
 from wastech_orchestrator import cli
+from wastech_orchestrator.notify import AskResult
 from wastech_orchestrator.observability import logging as obslog
 from wastech_orchestrator.providers.base import AgentRunRequest, ProviderHealth, ProviderId
 
@@ -143,3 +146,73 @@ def test_preflight_telegram_fail(
     assert rc == 1
     assert "telegram: FAIL" in out
     assert "preflight: NOT ready" in out
+
+
+def test_telegram_test_success(
+    monkeypatch: pytest.MonkeyPatch,
+    git_repo,
+    make_git_config,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    base = make_git_config(git_repo.clone)
+    config = replace(base, telegram=replace(base.telegram, enabled=True))
+    monkeypatch.setattr(cli, "_load_config", lambda _path: config)
+    monkeypatch.setattr(
+        cli,
+        "check_telegram_preflight",
+        lambda _cfg: (True, "telegram: OK (polling ready)"),
+    )
+    notifier = SimpleNamespace(ask_human=lambda **_kwargs: AskResult(answered=True, text="ok"))
+    monkeypatch.setattr(cli, "build_notifier", lambda _cfg: notifier)
+    args = argparse.Namespace(config="config.yaml", log_level="info", timeout_seconds=5)
+
+    rc = cli.cmd_telegram_test(args)
+
+    assert rc == 0
+    assert "telegram-test: OK" in capsys.readouterr().out
+
+
+def test_telegram_test_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    git_repo,
+    make_git_config,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    base = make_git_config(git_repo.clone)
+    config = replace(base, telegram=replace(base.telegram, enabled=True))
+    monkeypatch.setattr(cli, "_load_config", lambda _path: config)
+    monkeypatch.setattr(
+        cli,
+        "check_telegram_preflight",
+        lambda _cfg: (True, "telegram: OK (polling ready)"),
+    )
+    notifier = SimpleNamespace(
+        ask_human=lambda **_kwargs: AskResult(
+            answered=False,
+            timed_out=True,
+            failure="timeout",
+        )
+    )
+    monkeypatch.setattr(cli, "build_notifier", lambda _cfg: notifier)
+    args = argparse.Namespace(config="config.yaml", log_level="info", timeout_seconds=5)
+
+    rc = cli.cmd_telegram_test(args)
+
+    assert rc == 1
+    assert "telegram-test: FAIL (timeout)" in capsys.readouterr().out
+
+
+def test_telegram_test_rejects_disabled_config(
+    monkeypatch: pytest.MonkeyPatch,
+    git_repo,
+    make_git_config,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = make_git_config(git_repo.clone)
+    monkeypatch.setattr(cli, "_load_config", lambda _path: config)
+    args = argparse.Namespace(config="config.yaml", log_level="info", timeout_seconds=5)
+
+    rc = cli.cmd_telegram_test(args)
+
+    assert rc == 1
+    assert "telegram.enabled is false" in capsys.readouterr().out

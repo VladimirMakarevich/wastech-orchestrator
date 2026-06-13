@@ -215,3 +215,37 @@ def test_interactive_run_takes_defaults(git_repo: Any, monkeypatch: pytest.Monke
     cfg = _loaded(git_repo.clone)
     assert set(cfg.agents.allowed) == {ProviderId.CODEX, ProviderId.CLAUDE}
     assert cfg.git.create_pull_request is True  # gh present + default yes
+
+
+def test_install_excludes_runtime_files_via_git_info_exclude(
+    git_repo: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _present(monkeypatch, "codex")
+    assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
+    exclude = (git_repo.clone / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+    for pattern in ("state.db", "state.db-wal", "state.db-shm", "orchestrator.pid"):
+        assert pattern in exclude
+    # The default mode never touches the target repo's tracked .gitignore.
+    assert not (git_repo.clone / ".gitignore").exists()
+
+
+def test_install_gitignore_tracked_writes_dot_gitignore(
+    git_repo: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _present(monkeypatch, "codex")
+    argv = _ni(git_repo.clone, "--provider", "codex", "--skip-preflight", "--gitignore-tracked")
+    assert cli.main(argv) == 0
+    assert "orchestrator.pid" in (git_repo.clone / ".gitignore").read_text(encoding="utf-8")
+
+
+def test_install_runtime_excludes_are_idempotent(
+    git_repo: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _present(monkeypatch, "codex")
+    assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
+    exclude_path = git_repo.clone / ".git" / "info" / "exclude"
+    first = exclude_path.read_text(encoding="utf-8")
+    # --reconfigure re-runs the append step; it must not duplicate the block.
+    argv = _ni(git_repo.clone, "--provider", "codex", "--skip-preflight", "--reconfigure")
+    assert cli.main(argv) == 0
+    assert exclude_path.read_text(encoding="utf-8") == first

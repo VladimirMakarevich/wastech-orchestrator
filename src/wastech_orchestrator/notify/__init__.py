@@ -8,10 +8,19 @@ so the pipeline behaves exactly as it did before.
 
 from __future__ import annotations
 
-from wastech_orchestrator.notify.interface import AskKind, AskResult, Notifier, NullNotifier
+from wastech_orchestrator.notify.interface import (
+    AskFailure,
+    AskHandle,
+    AskKind,
+    AskResult,
+    Notifier,
+    NullNotifier,
+)
 from wastech_orchestrator.notify.telegram import TelegramNotifier, build_notifier
 
 __all__ = [
+    "AskFailure",
+    "AskHandle",
     "AskKind",
     "AskResult",
     "NullNotifier",

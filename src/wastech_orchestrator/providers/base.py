@@ -1,6 +1,6 @@
 """Agent provider contract.
 
-Implements the spec orchestrator_final_plan.md §4.3 (contract) and §7.1 (error classes).
+Implements docs/implementation_stages/00_orchestrator_final_plan.md §4.3 and §7.1.
 Core depends only on this module, not on specific adapters.
 """
 
@@ -101,6 +101,7 @@ class AgentRunRequest:
     diff_path: str | None = None
     check_artifacts_path: str | None = None
     review_artifacts_path: str | None = None
+    human_input_path: str | None = None
     output_schema: dict[str, Any] | None = None
     model: str | None = None
     extra_args: list[str] = field(default_factory=list)

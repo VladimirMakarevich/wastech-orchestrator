@@ -50,10 +50,60 @@ EXCLUDED_DIRS = ("tasks", "logs", "workspace")
 # Root-level orchestrator runtime files that must never enter a code commit and must not count as
 # "unaccounted dirty" at terminal cleanup. They only appear inside the clone under the in-repo
 # footprint, where the artifact root *is* the clone (§21); the audit commit stages only the
-# `tasks/`/`logs/` dirs, so these never reach git. `config.yaml.bak-<UTC>` backups are matched by
-# prefix.
-_EXCLUDED_FILES = ("state.db", "state.db-wal", "state.db-shm", "config.yaml")
+# `tasks/`/`logs/` dirs, so these never reach git. The `watch` daemon's `orchestrator.pid` lives
+# here too. `config.yaml.bak-<UTC>` backups are matched by prefix.
+_EXCLUDED_FILES = ("state.db", "state.db-wal", "state.db-shm", "config.yaml", "orchestrator.pid")
 _EXCLUDED_FILE_PREFIXES = ("config.yaml.bak-",)
+
+# Runtime-file patterns appended to a target repo's ignore list by `init`/`install` so an operator's
+# own `git status` stays clean under the in-repo footprint (§21.2). Superset of `_EXCLUDED_FILES`
+# expressed as gitignore patterns (the `config.yaml.bak-` prefix becomes a glob).
+RUNTIME_GITIGNORE_LINES: tuple[str, ...] = (
+    "# wastech-orchestrator runtime files (auto-appended by `worc install`)",
+    "state.db",
+    "state.db-shm",
+    "state.db-wal",
+    "config.yaml",
+    "config.yaml.bak-*",
+    "orchestrator.pid",
+)
+
+
+def _append_missing_lines(target: Path, lines: Sequence[str]) -> list[str]:
+    """Idempotently append the ``lines`` not already present in ``target`` (one entry per line).
+
+    Creates parent dirs and the file as needed, preserves existing content, and separates the
+    appended block with a blank line when the file does not already end on one. Returns the lines
+    actually appended (empty when all were present).
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    existing = target.read_text(encoding="utf-8").splitlines() if target.exists() else []
+    present = {line.strip() for line in existing}
+    additions = [line for line in lines if line.strip() not in present]
+    if additions:
+        with target.open("a", encoding="utf-8") as fh:
+            if existing and existing[-1].strip():
+                fh.write("\n")
+            fh.write("\n".join(additions) + "\n")
+    return additions
+
+
+def append_runtime_excludes(repo_root: str | Path, *, tracked: bool = False) -> list[str]:
+    """Idempotently add the runtime-file patterns to a repo's ignore list (§21.2).
+
+    Writes to ``.git/info/exclude`` by default (per-clone, leaves the tracked ``.gitignore``
+    untouched) or to ``.gitignore`` when ``tracked`` is true. Returns the lines actually appended —
+    empty when everything was already present, or (default mode) when ``repo_root`` has no ``.git``.
+    """
+    root = Path(repo_root)
+    if tracked:
+        target = root / ".gitignore"
+    elif (root / ".git").is_dir():
+        target = root / ".git" / "info" / "exclude"
+    else:
+        return []
+    return _append_missing_lines(target, RUNTIME_GITIGNORE_LINES)
+
 
 # publish_operations.kind values (idempotency keys, §13).
 KIND_CODE_COMMIT = "code_commit"
@@ -98,6 +148,15 @@ class CleanupOutcome:
     safe: bool
     target_branch: str
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class ChangedPath:
+    """One repository path changed against HEAD, normalized from Git's name-status output."""
+
+    status: str
+    path: str
+    previous_path: str | None = None
 
 
 class GitCommandError(Exception):
@@ -282,17 +341,7 @@ class GitManager:
         if not dirs:
             return
         exclude_path = Path(self._clone) / ".git" / "info" / "exclude"
-        exclude_path.parent.mkdir(parents=True, exist_ok=True)
-        existing = (
-            exclude_path.read_text(encoding="utf-8").splitlines() if exclude_path.exists() else []
-        )
-        present = {line.strip() for line in existing}
-        additions = [f"{d}/" for d in dirs if f"{d}/" not in present]
-        if additions:
-            with exclude_path.open("a", encoding="utf-8") as fh:
-                if existing and existing[-1].strip():
-                    fh.write("\n")
-                fh.write("\n".join(additions) + "\n")
+        _append_missing_lines(exclude_path, [f"{d}/" for d in dirs])
 
     # --- SnapshotHook (§7.4) --------------------------------------------------------------
 
@@ -348,6 +397,31 @@ class GitManager:
                 continue
             paths.append(path)
         return paths
+
+    def changed_code_entries(self) -> tuple[ChangedPath, ...]:
+        """Return tracked and untracked code changes for deterministic output guardrails."""
+        entries: list[ChangedPath] = []
+        tracked = self._git("diff", "--name-status", "HEAD", "--").stdout
+        for line in tracked.splitlines():
+            fields = line.split("\t")
+            if len(fields) < 2:
+                continue
+            status = fields[0]
+            if status.startswith(("R", "C")) and len(fields) >= 3:
+                previous = fields[1]
+                path = fields[2]
+            else:
+                previous = None
+                path = fields[1]
+            if self._is_artifact_path(path):
+                continue
+            entries.append(ChangedPath(status=status, path=path, previous_path=previous))
+
+        untracked = self._git("ls-files", "--others", "--exclude-standard", "-z").stdout
+        for path in (item for item in untracked.split("\0") if item):
+            if not self._is_artifact_path(path):
+                entries.append(ChangedPath(status="??", path=path))
+        return tuple(entries)
 
     def _is_artifact_path(self, path: str) -> bool:
         normalized = path.replace("\\", "/")

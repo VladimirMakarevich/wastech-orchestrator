@@ -1,6 +1,12 @@
 # Backlog: UX improvements (stop/restart, WAL artifacts, gh check, worc alias)
 
-Status: **backlog / not scheduled**
+Status: **implemented (2026-06-13)** — all four items shipped. See the `[Unreleased]` entries in
+[CHANGELOG.md](../../CHANGELOG.md); `worc` (pyproject), runtime-file excludes
+(`git_manager.append_runtime_excludes`), the `gh` pre-flight (`detect.require_gh`), and
+`stop`/`restart` (`process_control` + `cli.py`). One spec correction vs. this doc: PR creation is
+gated by `git.create_pull_request`, not a `publishing.enabled` field. Deferred extensions
+(`gh auth status` warning, PID-recycle hardening, `worc` PyPI-collision check) are tracked in
+[follow_ups.md](follow_ups.md).
 Date: 2026-06-13
 Owner: Vladimir Makarevich
 

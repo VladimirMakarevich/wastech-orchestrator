@@ -16,7 +16,8 @@ publishing is idempotent.
 > **Status: 0.x pre-release.** The full single-task pipeline, provider routing + fallback, the
 > security/isolation gate, scoped Git footprints, SQLite checkpoints + crash recovery, the watch
 > loop with periodic Git sync, and the `init`/`install` setup flows are implemented and covered by an
-> extensive test suite. Telegram human-in-the-loop and parallel `git worktree` execution are on the
+> extensive test suite. Telegram notifications and human-in-the-loop for clarification and
+> deletion/dependency approvals are implemented; parallel `git worktree` execution remains on the
 > roadmap (see [docs/backlog/](docs/backlog/)). APIs and config may still change before 1.0.
 
 ---
@@ -38,6 +39,9 @@ publishing is idempotent.
   `tasks/pending/` and pushing — no manual sync needed.
 - **Crash-safe and idempotent.** State machine + per-stage checkpoints in SQLite; a restart resumes
   the one in-flight task and never double-commits, double-pushes, or re-opens a PR.
+- **Optional Telegram HITL.** `refinement`/`planning` can ask one correlated question or approval,
+  and deletions/dependency changes are fail-closed before tests. Waiting state is a recoverable
+  artifact; ordinary diffs and routine publishing remain automatic.
 - **Security can't be weakened by a task.** The sandbox/approval policy and the environment
   allowlist are config-level invariants; no task or `extra_args` can disable them, and no secrets
   are written to logs, SQLite, or artifacts.
@@ -122,7 +126,7 @@ for malformed addresses.
 ```
 
 > Only `id` and `title` are required; the gate **rejects unknown fields**. The full allow-list
-> (`id`, `title`, `refined`, `decompose`, `agents`, `contacts`) is in
+> (`id`, `title`, `refined`, `decompose`, `agents`, `contacts`, `model`, `reasoning`) is in
 > [docs/task-authoring.md](docs/task-authoring.md).
 
 Then run it:
@@ -165,6 +169,7 @@ The knobs you'll touch most:
 | `agents.allowed` / `agents.routing` | Which providers are enabled and the primary/fallback per stage. |
 | `checks.commands` | Your project's test/lint commands, run as the `test` stage (argv list, no shell). |
 | `git.create_pull_request` | Open a PR after push (needs `gh`); disabling it does not disable commit/push. |
+| `telegram.*` | Optional terminal notifications and blocking HITL; credentials stay in environment variables. |
 | `security.*` | Strict isolation, the environment allowlist, denied paths/commands — invariants a task cannot weaken. |
 
 Config discovery order: explicit `--config` → `./config.yaml` → the current repo's binding → a hint
@@ -180,12 +185,21 @@ wastech-orchestrator init [path]        scaffold folders + config.yaml + templat
 wastech-orchestrator install [repo]     bind an existing repo, generate config, record the binding
                           --non-interactive --provider codex|claude|both|auto --no-create-pr --reconfigure
 wastech-orchestrator preflight          check both CLIs' health + the isolation policy (read-only)
+wastech-orchestrator telegram-test      send a real correlated Telegram prompt and wait for reply
+                          --timeout-seconds N       smoke-test deadline (default: 60)
 wastech-orchestrator run <task-file>    process exactly one task end to end
 wastech-orchestrator watch              process pending tasks; loop + periodic git sync
                           --poll-seconds N            override orchestrator.poll_interval_seconds
+wastech-orchestrator stop               stop a running watch daemon (SIGTERM, then SIGKILL)
+                          --timeout SECONDS           graceful-shutdown wait before SIGKILL (default: 30)
+wastech-orchestrator restart            stop the running watch daemon, then start a fresh one
+                          --timeout SECONDS  --poll-seconds N
 wastech-orchestrator status [task-id]   show the active/latest persisted task (no work performed)
 wastech-orchestrator --version          installed version
 ```
+
+Every command is also available under the short alias **`worc`** (e.g. `worc watch`, `worc stop`);
+`wastech-orchestrator` stays the canonical name.
 
 Global options (before the subcommand): `--config PATH`, `--log-level`, `--log-format logfmt|json`,
 `--log-file PATH`, `--heartbeat-seconds N`. Exit codes: `0` done, `1` failed, `2`
@@ -213,8 +227,9 @@ Project layout:
 
 ```text
 src/wastech_orchestrator/
-  cli.py                  # entry point: init / install / preflight / run / watch / status
-  core/                   # orchestrator, state machine, loop control, recovery, decomposition
+  cli.py                  # init / install / preflight / telegram-test / run / watch / status
+  core/                   # pipeline, HITL, dangerous-diff guardrails, recovery, decomposition
+  notify/                 # Notifier contract + Telegram transport
   providers/              # AgentProvider contract + Codex / Claude adapters, redaction
   routing/                # per-stage routing + infrastructure-error fallback
   config/                 # schema, loader, fail-closed validator
@@ -241,6 +256,7 @@ Coding agents working *in this repo* follow [CLAUDE.md](CLAUDE.md) (Claude Code)
 | [docs/cookbook.md](docs/cookbook.md) | Practical recipes: workspace setup, repo config, running tasks, routing, reading artifacts, recovery. |
 | [docs/configuration.md](docs/configuration.md) | Full `config.yaml` reference with defaults, allowed values, and validation rules. |
 | [docs/task-authoring.md](docs/task-authoring.md) | How to write valid task files and avoid validation rejects. |
+| [docs/telegram.md](docs/telegram.md) | Bot/chat setup, environment config, preflight, live smoke test, and troubleshooting. |
 | [docs/codex_git_orchestrator_architecture.md](docs/codex_git_orchestrator_architecture.md) | High-level architecture overview and the rationale behind the design. |
 | [docs/rules/](docs/rules/) | Development rules: style, architectural invariants, security, git-flow, testing. |
 | [docs/backlog/](docs/backlog/) | Deferred features and tracked follow-ups. |

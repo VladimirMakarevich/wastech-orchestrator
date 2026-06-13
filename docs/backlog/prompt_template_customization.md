@@ -6,7 +6,7 @@ Owner: Vladimir Makarevich
 
 This document captures the task of making stage prompts configurable by operators. It is a backlog
 item, not part of the currently implemented runtime behavior. Nothing here overrides
-[orchestrator_final_plan.md](../orchestrator_final_plan.md), [CLAUDE.md](../../CLAUDE.md), or the hard
+[00_orchestrator_final_plan.md](../implementation_stages/00_orchestrator_final_plan.md), [CLAUDE.md](../../CLAUDE.md), or the hard
 invariants in [docs/rules/](../rules/).
 
 ## 1. Goal

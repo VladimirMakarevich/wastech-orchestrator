@@ -71,6 +71,20 @@ def test_has_gh_false_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
     assert detect.has_gh() is False
 
 
+def test_require_gh_is_noop_when_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/gh" if name == "gh" else None)
+    detect.require_gh()  # must not raise
+
+
+def test_require_gh_raises_with_actionable_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    with pytest.raises(detect.GhNotAvailableError) as exc:
+        detect.require_gh()
+    message = str(exc.value)
+    assert "gh" in message
+    assert "cli.github.com" in message
+
+
 @pytest.mark.parametrize(
     ("marker", "content", "expected"),
     [
