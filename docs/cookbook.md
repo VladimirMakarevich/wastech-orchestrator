@@ -350,7 +350,7 @@ checks:
   commands:
     - "pytest"
     - "ruff check ."
-  timeout_seconds: 1800
+  timeout_seconds: 7200
 ```
 
 The Check Runner runs each command with a timeout and records output as artifacts. Planned v1
@@ -468,7 +468,7 @@ agents:
     codex:
       command: "codex"
       model: ""
-      timeout_seconds: 1800
+      timeout_seconds: 7200
       sandbox: "workspace-write"
       permission_profile: "workspace-write"
       extra_args: []

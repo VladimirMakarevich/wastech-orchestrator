@@ -54,7 +54,7 @@ def test_request_is_constructible() -> None:
         working_directory="./workspace/repo",
         prompt="...",
         permission_profile="workspace-write",
-        timeout_seconds=1800,
+        timeout_seconds=7200,
         attempt=1,
         stage_run_id=42,
     )

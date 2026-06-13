@@ -32,6 +32,7 @@ from wastech_orchestrator.core.orchestrator import (
 )
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.install import config_writer, detect, registry, wizard
+from wastech_orchestrator.notify.telegram import check_telegram_preflight
 from wastech_orchestrator.observability.logging import configure_logging
 from wastech_orchestrator.providers.base import ProviderId, Stage
 from wastech_orchestrator.security.isolation import check_isolation
@@ -492,6 +493,11 @@ def run_preflight(config: OrchestratorConfig) -> tuple[bool, list[str]]:
     else:
         enforced = "enforced" if config.security.strict_isolation else "strict_isolation=false"
         lines.append(f"isolation: OK ({enforced})")
+
+    tg_ok, tg_line = check_telegram_preflight(config.telegram)
+    if not tg_ok:
+        ok = False
+    lines.append(tg_line)
 
     lines.append(f"preflight: {'ready' if ok else 'NOT ready'}")
     return ok, lines

@@ -46,7 +46,7 @@ def _build_provider(
         cfg = ProviderConfig(
             command=command,
             model="",
-            timeout_seconds=1800,
+            timeout_seconds=7200,
             permission_profile="workspace-write",
             extra_args=(),
             sandbox="workspace-write",
@@ -55,7 +55,7 @@ def _build_provider(
     cfg = ProviderConfig(
         command=command,
         model="",
-        timeout_seconds=1800,
+        timeout_seconds=7200,
         permission_profile="workspace-write",
         extra_args=(),
     )

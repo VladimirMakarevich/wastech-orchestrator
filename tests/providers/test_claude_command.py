@@ -154,3 +154,55 @@ def test_effective_prompt_appends_footer(make_request: Callable[..., AgentRunReq
     effective = build_effective_prompt(request)
     assert effective.startswith("Do the thing.")
     assert "/logs/t/task.md" in effective
+
+
+def test_reasoning_request_level_adds_effort_flag(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    argv = _argv(claude_config, make_request(reasoning="xhigh"))
+    assert argv[argv.index("--effort") + 1] == "xhigh"
+
+
+def test_reasoning_config_level_adds_effort_flag(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    cfg = replace(claude_config, reasoning="high")
+    argv = _argv(cfg, make_request())
+    assert argv[argv.index("--effort") + 1] == "high"
+
+
+def test_reasoning_request_beats_config(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    cfg = replace(claude_config, reasoning="low")
+    argv = _argv(cfg, make_request(reasoning="max"))
+    assert argv[argv.index("--effort") + 1] == "max"
+
+
+def test_no_reasoning_means_no_effort_flag(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    argv = _argv(claude_config, make_request())
+    assert "--effort" not in argv
+
+
+def test_session_id_adds_resume_flag(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    argv = _argv(claude_config, make_request(session_id="abc-123"))
+    assert argv[argv.index("--resume") + 1] == "abc-123"
+
+
+def test_no_session_id_means_no_resume_flag(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    argv = _argv(claude_config, make_request())
+    assert "--resume" not in argv
+
+
+def test_effort_before_max_turns(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    cfg = replace(claude_config, max_turns=10, reasoning="high")
+    argv = _argv(cfg, make_request())
+    assert argv.index("--effort") < argv.index("--max-turns")

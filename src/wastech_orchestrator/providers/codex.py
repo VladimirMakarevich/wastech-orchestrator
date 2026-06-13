@@ -189,6 +189,19 @@ def build_codex_argv(
     model = request.model or config.model
     if model:
         argv += ["--model", model]
+    # Codex --reasoning-effort accepts none/low/medium/high/xhigh (aliases: extra_high, extra-high).
+    # "max" is Claude-only; clamp it to xhigh (Codex's ceiling).
+    # session_id is not passed to Codex (no --resume equivalent in the Codex CLI).
+    _CODEX_EFFORT_MAP: dict[str, str] = {
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "xhigh",
+        "max": "xhigh",
+    }
+    reasoning = request.reasoning or config.reasoning
+    if reasoning:
+        argv += ["--reasoning-effort", _CODEX_EFFORT_MAP[reasoning]]
     argv += list(combined_extra)
     argv.append("-")  # read the prompt from stdin
     return argv

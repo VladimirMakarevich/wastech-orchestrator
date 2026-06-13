@@ -71,7 +71,7 @@ def _ordered_providers(providers: tuple[ProviderId, ...]) -> tuple[ProviderId, .
 
 def _provider_block(pid: ProviderId) -> dict[str, Any]:
     """One ``agents.providers.<id>`` block, mirroring the packaged template's safe defaults."""
-    block: dict[str, Any] = {"command": pid.value, "model": "", "timeout_seconds": 1800}
+    block: dict[str, Any] = {"command": pid.value, "model": "", "timeout_seconds": 7200}
     if pid is ProviderId.CODEX:
         block["sandbox"] = "workspace-write"
     if pid is ProviderId.CLAUDE:
@@ -142,7 +142,7 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "reject_unknown_fields": True,
             "quarantine_folder": str(spec.workspace / "tasks" / "rejected"),
         },
-        "checks": {"commands": list(spec.checks), "timeout_seconds": 1800},
+        "checks": {"commands": list(spec.checks), "timeout_seconds": 7200},
         "git": {
             "create_pull_request": spec.create_pull_request,
             "pr_base": spec.base_branch,
@@ -160,7 +160,7 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "enabled": False,
             "bot_token_env": "TELEGRAM_BOT_TOKEN",
             "chat_id_env": "TELEGRAM_CHAT_ID",
-            "ask_timeout_s": 1800,
+            "ask_timeout_s": 28800,
         },
     }
 

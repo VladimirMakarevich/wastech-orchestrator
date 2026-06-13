@@ -213,3 +213,63 @@ def test_write_validation_report(config: OrchestratorConfig, tmp_path: Path) -> 
     assert data["passed"] is False
     assert data["reason"] == "duplicate_task_id"
     assert path.endswith("validation_report.json")
+
+
+def test_model_field_passes_and_is_stored(config: OrchestratorConfig) -> None:
+    text = (
+        "---\nid: task-001\ntitle: T\nmodel: claude-opus-4-8\n---\n\n## Description\n\nDo it.\n"
+    )
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.model == "claude-opus-4-8"
+
+
+def test_model_null_normalizes_to_none(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\nmodel: null\n---\n\n## Description\n\nDo it.\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.model is None
+
+
+def test_model_non_string_is_rejected(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\nmodel: 42\n---\n\n## Description\n\nDo it.\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_FIELD_TYPE
+    assert "model" in result.detail
+
+
+def test_reasoning_valid_level_passes_and_is_stored(config: OrchestratorConfig) -> None:
+    for level in ("low", "medium", "high", "xhigh", "max"):
+        text = (
+            f"---\nid: task-001\ntitle: T\nreasoning: {level}\n---\n\n## Description\n\nDo it.\n"
+        )
+        result = _gate(config).validate(_src(text))
+        assert result.passed is True, f"level {level!r} should pass"
+        assert result.normalized is not None
+        assert result.normalized.reasoning == level
+
+
+def test_reasoning_invalid_level_is_rejected(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\nreasoning: ultra\n---\n\n## Description\n\nDo it.\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_FIELD_TYPE
+    assert "reasoning" in result.detail
+
+
+def test_reasoning_non_string_is_rejected(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\nreasoning: 3\n---\n\n## Description\n\nDo it.\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_FIELD_TYPE
+
+
+def test_reasoning_null_normalizes_to_none(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\nreasoning: null\n---\n\n## Description\n\nDo it.\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.reasoning is None

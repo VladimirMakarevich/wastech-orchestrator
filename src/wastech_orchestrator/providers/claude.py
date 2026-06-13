@@ -282,6 +282,13 @@ def build_claude_argv(
     model = request.model or config.model
     if model:
         argv += ["--model", model]
+    # --effort enables adaptive thinking at the specified depth (low/medium/high/xhigh/max).
+    # No separate --thinking flag needed; --effort alone activates it.
+    reasoning = request.reasoning or config.reasoning
+    if reasoning:
+        argv += ["--effort", reasoning]
+    if request.session_id:
+        argv += ["--resume", request.session_id]
     if config.max_turns is not None:
         argv += ["--max-turns", str(config.max_turns)]
     argv += list(combined_extra)
@@ -588,6 +595,7 @@ class ClaudeCodeProvider:
             "context_paths": {k: v for k, v in context_paths.items() if v},
             "extra_args": list(request.extra_args),
             "config_extra_args": list(self._config.extra_args),
+            "reasoning": request.reasoning or self._config.reasoning or None,
             "argv": argv,
         }
 

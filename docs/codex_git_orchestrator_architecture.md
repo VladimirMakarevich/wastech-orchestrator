@@ -362,7 +362,7 @@ telegram:                             # HITL + notifications (#2, #10)
   enabled: true
   bot_token_env: "TELEGRAM_BOT_TOKEN"
   chat_id_env:   "TELEGRAM_CHAT_ID"
-  ask_timeout_s: 1800
+  ask_timeout_s: 28800
 ```
 
 ---

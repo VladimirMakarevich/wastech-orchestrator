@@ -54,7 +54,8 @@ agents:
     claude:
       command: "claude"
       model: ""
-      timeout_seconds: 1800
+      reasoning: null          # low | medium | high | xhigh (Opus 4.7+ / Fable 5) | max
+      timeout_seconds: 7200
       max_turns: 50
       max_budget_usd: null
       permission_profile: "workspace-write"
@@ -62,7 +63,8 @@ agents:
     codex:
       command: "codex"
       model: ""
-      timeout_seconds: 1800
+      reasoning: null          # low | medium | high | xhigh | max->xhigh
+      timeout_seconds: 7200
       sandbox: "workspace-write"
       permission_profile: "workspace-write"
       extra_args: []
@@ -96,7 +98,7 @@ checks:
   commands:
     - "npm test"
     - "npm run lint"
-  timeout_seconds: 1800             # per-command timeout for the Check Runner (argv list, no shell)
+  timeout_seconds: 7200             # per-command timeout for the Check Runner (argv list, no shell)
 
 git:
   create_pull_request: true
@@ -112,4 +114,4 @@ telegram:                           # human-in-the-loop + notifications (optiona
   enabled: false
   bot_token_env: "TELEGRAM_BOT_TOKEN"
   chat_id_env: "TELEGRAM_CHAT_ID"
-  ask_timeout_s: 1800
+  ask_timeout_s: 28800

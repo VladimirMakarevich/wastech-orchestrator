@@ -20,7 +20,7 @@ TASK_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 
 # Front-matter schema (spec §5, §19.3).
 ALLOWED_TASK_KEYS: frozenset[str] = frozenset(
-    {"id", "title", "refined", "decompose", "agents", "contacts"}
+    {"id", "title", "refined", "decompose", "agents", "contacts", "model", "reasoning"}
 )
 REQUIRED_TASK_FIELDS: frozenset[str] = frozenset({"id", "title"})
 
@@ -46,3 +46,5 @@ class NormalizedTask:
     # Per-stage provider override (only agent-routed stages; only providers from agents.allowed).
     agents: dict[Stage, ProviderId] = field(default_factory=dict)
     contacts: list[str] = field(default_factory=list)
+    model: str | None = None
+    reasoning: str | None = None

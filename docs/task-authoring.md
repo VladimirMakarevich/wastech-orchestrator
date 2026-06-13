@@ -32,6 +32,8 @@ agents:
   review: codex
 contacts:
   - "@team-lead"
+model: null          # optional: override provider model for this task
+reasoning: null      # optional: low | medium | high | xhigh | max
 ---
 
 ## Description
@@ -70,6 +72,8 @@ Allowed fields:
 | `decompose` | no | boolean | `true` forces the decomposition gate, `false` disables it, omitted uses config. |
 | `agents` | no | mapping | Per-stage provider override. |
 | `contacts` | no | list of strings | Human contacts for future notification/HITL flows. |
+| `model` | no | string or null | Override the provider model for every stage of this task (e.g. `claude-opus-4-8`). |
+| `reasoning` | no | string or null | Override the reasoning effort level for this task: `low`, `medium`, `high`, `xhigh`, or `max`. |
 
 The current validation gate rejects unknown fields fail-closed. Keep task front matter limited to
 the fields above.
@@ -172,8 +176,37 @@ contacts:
   - "frontend-team"
 ```
 
-Telegram/HITL behavior is deferred in v1. The field is parsed and preserved, but results are
-currently observed through logs and artifacts.
+When Telegram is configured, the orchestrator uses these for notifications and HITL prompts.
+The field is parsed and preserved for future HITL flows.
+
+## `model`
+
+Override the provider model for every agent stage of this specific task:
+
+```yaml
+model: "claude-opus-4-8"
+```
+
+When set, this replaces whatever model is configured under `agents.providers.<provider>.model` for
+all stages of this task. Use `null` or omit the field to use the globally configured model.
+
+## `reasoning`
+
+Override the reasoning effort level for this specific task:
+
+```yaml
+reasoning: "xhigh"
+```
+
+Valid values: `low`, `medium`, `high`, `xhigh`, `max`.
+
+- For **Claude Code** (CLI v2.1+), this maps to `--effort <level>`, which implicitly enables
+  adaptive thinking. `xhigh` requires Opus 4.7+ or Fable 5; using it on an incompatible model
+  exits non-zero → `unsupported_version` → infrastructure fallback.
+- For **Codex**, this maps to `--reasoning-effort`; Codex supports up to `xhigh` natively, and `max` (Claude-only) is clamped to `xhigh`.
+
+When omitted, the global `agents.providers.<provider>.reasoning` value from `config.yaml` is used.
+When that is also absent, no reasoning flag is passed to the CLI.
 
 ## Body Sections
 
@@ -345,6 +378,7 @@ Before placing a task in `tasks/pending/`:
 - include acceptance criteria unless you intentionally want refinement to enrich the task;
 - list constraints for modules, dependencies, migrations, or compatibility;
 - keep provider overrides minimal;
+- use `model` and `reasoning` only when the task demands a specific model tier or reasoning depth;
 - do not include credentials or secret values;
 - do not try to pass CLI flags through front matter;
 - prefer one coherent change per task.

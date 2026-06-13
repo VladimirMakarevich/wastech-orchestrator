@@ -236,7 +236,7 @@ checks:
     agent_fallback: true
     refresh: on_change     # on_change | always | never
   commands: []             # non-empty list is an explicit operator override
-  timeout_seconds: 1800
+  timeout_seconds: 7200
 ```
 
 Semantics:

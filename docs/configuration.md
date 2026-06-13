@@ -224,7 +224,8 @@ agents:
     claude:
       command: "claude"
       model: ""
-      timeout_seconds: 1800
+      reasoning: null          # low | medium | high | xhigh (Opus 4.7+ / Fable 5) | max
+      timeout_seconds: 7200
       max_turns: 50
       max_budget_usd: null
       permission_profile: "workspace-write"
@@ -232,7 +233,8 @@ agents:
     codex:
       command: "codex"
       model: ""
-      timeout_seconds: 1800
+      reasoning: null          # low | medium | high | xhigh | max→xhigh
+      timeout_seconds: 7200
       sandbox: "workspace-write"
       permission_profile: "workspace-write"
       extra_args: []
@@ -244,7 +246,8 @@ Common fields:
 |---|---|---|---|
 | `command` | string | provider id (`"claude"` or `"codex"`) | Executable name or path. |
 | `model` | string | `""` | Provider model setting; empty means provider default. |
-| `timeout_seconds` | integer | `1800` | Timeout for a stage run. |
+| `reasoning` | string or null | `null` | Reasoning effort level: `low`, `medium`, `high`, `xhigh`, or `max`. Maps to `--effort` for Claude (v2.1+) and `--reasoning-effort` for Codex. Codex supports up to `xhigh`; `max` (Claude-only) is clamped to `xhigh`. `xhigh` requires Opus 4.7+ or Fable 5 for Claude. |
+| `timeout_seconds` | integer | `7200` | Timeout for a stage run. |
 | `permission_profile` | string | `"workspace-write"` | Orchestrator permission profile passed into the adapter. |
 | `extra_args` | list of strings | `[]` | Additional provider CLI arguments after safety validation. |
 
@@ -337,7 +340,7 @@ validation:
 Current task front matter fields are:
 
 ```text
-id, title, refined, decompose, agents, contacts
+id, title, refined, decompose, agents, contacts, model, reasoning
 ```
 
 A structurally rejected task is terminal `failed`, gets a `validation_report.json`, and never creates
@@ -352,13 +355,13 @@ checks:
   commands:
     - "npm test"
     - "npm run lint"
-  timeout_seconds: 1800
+  timeout_seconds: 7200
 ```
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `commands` | list of strings | `[]` | Commands the Check Runner executes. |
-| `timeout_seconds` | integer | `1800` | Per-command timeout. |
+| `timeout_seconds` | integer | `7200` | Per-command timeout. |
 
 Use commands that represent the target repository's merge gate, for example:
 
@@ -439,7 +442,7 @@ telegram:
   enabled: false
   bot_token_env: "TELEGRAM_BOT_TOKEN"
   chat_id_env: "TELEGRAM_CHAT_ID"
-  ask_timeout_s: 1800
+  ask_timeout_s: 28800
 ```
 
 | Field | Type | Default | Meaning |
@@ -447,7 +450,7 @@ telegram:
 | `enabled` | boolean | `false` | Enables Telegram when both named environment variables are present. |
 | `bot_token_env` | string | `"TELEGRAM_BOT_TOKEN"` | Name of the environment variable containing the bot token. |
 | `chat_id_env` | string | `"TELEGRAM_CHAT_ID"` | Name of the environment variable containing the target chat id. |
-| `ask_timeout_s` | integer | `1800` | Maximum wait for a human reply. |
+| `ask_timeout_s` | integer | `28800` | Maximum wait for a human reply. |
 
 The config stores environment variable **names only**. Token and chat-id values are resolved from the
 orchestrator process environment at startup and are never written to config, SQLite, logs, or
@@ -485,7 +488,7 @@ agents:
     codex:
       command: "codex"
       model: ""
-      timeout_seconds: 1800
+      timeout_seconds: 7200
       sandbox: "workspace-write"
       permission_profile: "workspace-write"
       extra_args: []

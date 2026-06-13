@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -131,6 +132,12 @@ _UNIT_STATUSES = frozenset(
     {Status.IMPLEMENTING, Status.TESTING, Status.REVIEWING, Status.FIXING}
 )
 
+_SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
+
+
+def _validate_session_id(raw: str) -> str | None:
+    return raw if _SESSION_ID_RE.fullmatch(raw) else None
+
 
 def _artifact_kind(name: str) -> str:
     return _ARTIFACT_KINDS.get(name, name)
@@ -175,6 +182,7 @@ class _Pipeline:
     last_review_findings: list[dict[str, Any]] = field(default_factory=list)
     branch: str = ""
     slug: str = ""
+    session_ids: dict[str, str] = field(default_factory=dict)  # provider_id.value -> session_id
 
 
 class Orchestrator:
@@ -961,6 +969,9 @@ class Orchestrator:
             diff_path=p.diff_path,
             check_artifacts_path=p.check_log,
             review_artifacts_path=p.review_findings_path,
+            model=p.task.model or None,
+            reasoning=p.task.reasoning,
+            session_id=p.session_ids.get(route.primary.value),
         )
         fields: dict[str, object] = {
             "stage": stage.value,
@@ -977,6 +988,12 @@ class Orchestrator:
         )
         self._record_stage(run_id, outcome)
         p.counters.stage_attempts = outcome.stage_attempts
+        if outcome.result is not None and outcome.result.session_id and outcome.provider_used:
+            validated = _validate_session_id(outcome.result.session_id)
+            if validated:
+                p.session_ids[outcome.provider_used.value] = validated
+            if outcome.provider_used != route.primary:
+                p.session_ids.pop(route.primary.value, None)
         return outcome
 
     def _build_prompt(self, p: _Pipeline, stage: Stage, unit: SubtaskSpec | None) -> str:

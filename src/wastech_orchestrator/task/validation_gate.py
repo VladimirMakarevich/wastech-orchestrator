@@ -42,6 +42,8 @@ from wastech_orchestrator.task.parser import (
 
 VALIDATION_REPORT_FILENAME = "validation_report.json"
 
+_REASONING_LEVELS: frozenset[str] = frozenset({"low", "medium", "high", "xhigh", "max"})
+
 # Characters allowed alongside printable text (everything else counts as a control char, §19.2).
 _ALLOWED_CONTROL = {"\t", "\n", "\r"}
 
@@ -231,6 +233,8 @@ class ValidationGate:
             decompose=_as_tristate(frontmatter.get("decompose")),
             agents=agents,
             contacts=[str(c) for c in frontmatter.get("contacts", [])],
+            model=frontmatter.get("model") or None,
+            reasoning=frontmatter.get("reasoning") or None,
         )
         return None, task
 
@@ -261,6 +265,18 @@ class ValidationGate:
             if not all(isinstance(c, str) for c in contacts):
                 return _Reject(
                     ValidationReason.INVALID_FIELD_TYPE, "contacts must be a list of strings"
+                )
+        if "model" in fm and fm["model"] is not None and not isinstance(fm["model"], str):
+            return _Reject(ValidationReason.INVALID_FIELD_TYPE, "model must be a string or null")
+        if "reasoning" in fm and fm["reasoning"] is not None:
+            if not isinstance(fm["reasoning"], str):
+                return _Reject(
+                    ValidationReason.INVALID_FIELD_TYPE, "reasoning must be a string or null"
+                )
+            if fm["reasoning"] not in _REASONING_LEVELS:
+                return _Reject(
+                    ValidationReason.INVALID_FIELD_TYPE,
+                    f"reasoning must be one of {sorted(_REASONING_LEVELS)}",
                 )
         return None
 

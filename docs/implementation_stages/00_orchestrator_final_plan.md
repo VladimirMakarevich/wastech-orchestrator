@@ -43,7 +43,6 @@ The first version does not include:
 - automatic installation or authorization of the CLIs;
 - transferring an active vendor session between Codex and Claude Code;
 - human-in-the-loop: answering agents' clarifying questions and approving specific actions (deferred; see §18.2);
-- per-task reasoning/complexity levels (deferred; see §18.2);
 - Telegram integration for results and prompts (deferred; see §18.2).
 
 ## 3. Core principles
@@ -119,7 +118,10 @@ AgentProvider
 - `timeout_seconds`;
 - `attempt`;
 - `output_schema`;
-- a provider-specific model and safe additional parameters.
+- `model` — optional per-task model override (from task front matter);
+- `reasoning` — optional reasoning effort level: `low`, `medium`, `high`, `xhigh`, or `max` (from task front matter or provider config); maps to `--effort` for Claude and `--reasoning-effort` for Codex;
+- `session_id` — optional Claude session ID from the previous stage; when present, passed as `--resume <session_id>` so the agent continues the same session across stages, preserving context and saving tokens; ignored by Codex;
+- safe additional parameters.
 
 `AgentRunResult` contains:
 
@@ -132,7 +134,7 @@ AgentProvider
 - `final_message`;
 - `structured_output`;
 - `usage`, if the CLI reported it;
-- `session_id`, for auditing only;
+- `session_id`, captured from `stream-json` output for the next stage's `--resume` and for auditing;
 - paths to stdout/stderr/raw event log;
 - the normalized error.
 
@@ -210,6 +212,8 @@ agents:
   implementation: codex
   review: claude
   fixing: codex
+model: null             # optional: override provider model for all stages of this task
+reasoning: null         # optional: low | medium | high | xhigh (Opus 4.7+ / Fable 5) | max
 ---
 ```
 
@@ -248,7 +252,8 @@ The summary is a **handoff artifact, not a quality gate**: an infrastructure fai
 
 ## 6. Context between stages
 
-The vendor session is not the source of truth. Each new run receives its context from artifacts:
+The vendor session is not the primary source of truth. Each new run receives its context from
+artifacts:
 
 - the original task;
 - the normalized task manifest;
@@ -260,7 +265,17 @@ The vendor session is not the source of truth. Each new run receives its context
 - a description of the previous error or partially completed attempt;
 - when the task was decomposed (§5.1): the active subtask specification and the cumulative diff of the subtasks already committed.
 
-This makes it possible to execute the next stage with a different provider and to recover the pipeline after a restart.
+This makes it possible to execute the next stage with a different provider and to recover the
+pipeline after a restart.
+
+**Session continuity (Claude only).** Within a single task run, the orchestrator additionally
+threads the Claude session through stages by capturing the `session_id` from each stage's
+`stream-json` output and passing `--resume <session_id>` to the next stage. This preserves
+conversation context across the pipeline and reduces token usage from re-reading artifacts. Session
+IDs are held in memory on the pipeline object; they are never written to SQLite, logs, or artifacts.
+On orchestrator restart, every stage begins a fresh session. On provider fallback, the primary
+provider's session is cleared so the fallback starts fresh. Codex does not support `--resume` and
+ignores the field.
 
 ## 7. Fallback and errors
 
@@ -588,7 +603,8 @@ agents:
     claude:
       command: "claude"
       model: ""
-      timeout_seconds: 1800
+      reasoning: null          # low | medium | high | xhigh (Opus 4.7+ / Fable 5) | max
+      timeout_seconds: 7200
       max_turns: 50
       max_budget_usd: null
       permission_profile: "workspace-write"
@@ -596,7 +612,8 @@ agents:
     codex:
       command: "codex"
       model: ""
-      timeout_seconds: 1800
+      reasoning: null          # low | medium | high | xhigh | max→xhigh
+      timeout_seconds: 7200
       sandbox: "workspace-write"
       permission_profile: "workspace-write"
       extra_args: []
@@ -803,7 +820,7 @@ This section records the design decisions and the ideas that are intentionally o
 ### 18.2. Deferred to v2
 
 - **Human-in-the-loop: clarifying questions and action approval.** A mechanism for answering agents' clarifying questions and granting approval for specific (especially irreversible) actions. Designed in architecture.md §4.7. In v1, ambiguous or unsafe situations resolve to the `fixing` / `manual_action_required` states instead of an interactive prompt. The v1 `refinement` stage (§5) enriches tasks autonomously and does not introduce interactive clarification.
-- **Reasoning / complexity levels per task.** Per-task `reasoning` and `complexity` fields that map to provider model flags and to limits (attempts, timeouts). Designed in architecture.md §4.10. In v1, the model and limits are set globally in the configuration.
+- **Reasoning / complexity levels per task (implemented).** Per-task `reasoning` (`low` / `medium` / `high` / `xhigh` / `max`) and `model` fields are now supported in task front matter (§5, §19.3) and globally under `agents.providers.<provider>.reasoning` in `config.yaml` (§11). For Claude they map to `--effort`; for Codex to `--reasoning-effort` (with `xhigh` / `max` clamped to `high`). Session continuity (§6) is also implemented. The deferred part — per-task attempt / timeout overrides keyed to complexity — remains in the product backlog.
 - **Telegram integration.** Sending results and human-in-the-loop prompts to a Telegram bot. Designed in architecture.md §4.7. In v1, results are observed through logs and artifacts. It is important to have a separate Telegram chat for each project and repository.
 - **Richer task parsing.** Beyond the per-stage routing override (§5), extracting additional fields such as contacts and free-form commands/hints from the task. Designed in architecture.md §4.1.
 - **Parallel and graph decomposition.** Parallel subtask execution, per-subtask branches/worktrees, and inter-subtask dependency graphs beyond a linear order. v1 decomposition (§5.1) is strictly sequential on a single branch with linear ordering only.
@@ -840,8 +857,8 @@ Each failure maps to a machine-readable `validation.reason`; the first failure s
 ### 19.3. Required vs optional fields
 
 - **Required:** `id` (normalized, `invalid_task_id`), `title` (non-empty), and a non-empty **Description** section in the body.
-- **Optional:** `refined` (bool, default false), `decompose` (tri-state, §5.1), `agents` (per-stage routing map, default empty), `contacts` (list of strings, default empty).
-- Missing acceptance criteria / constraints is **not** a reject — it drives `needs_enrichment` (Phase B), i.e. `refinement` runs (§5). Any other top-level key is rejected (`unknown_top_level_field`), which keeps richer task parsing a v2 item (§18.2).
+- **Optional:** `refined` (bool, default false), `decompose` (tri-state, §5.1), `agents` (per-stage routing map, default empty), `contacts` (list of strings, default empty), `model` (string or null, default null — per-task model override), `reasoning` (one of `low` / `medium` / `high` / `xhigh` / `max` or null, default null — per-task reasoning effort).
+- Missing acceptance criteria / constraints is **not** a reject — it drives `needs_enrichment` (Phase B), i.e. `refinement` runs (§5). Any other top-level key is rejected (`unknown_top_level_field`).
 
 ### 19.4. Outcome and recording
 

@@ -54,6 +54,8 @@ def test_default_collections_are_independent() -> None:
 
 
 def test_schema_constants() -> None:
-    assert {"id", "title", "refined", "decompose", "agents", "contacts"} == ALLOWED_TASK_KEYS
+    assert {
+        "id", "title", "refined", "decompose", "agents", "contacts", "model", "reasoning"
+    } == ALLOWED_TASK_KEYS
     assert {"id", "title"} == REQUIRED_TASK_FIELDS
     assert REQUIRED_TASK_FIELDS <= ALLOWED_TASK_KEYS

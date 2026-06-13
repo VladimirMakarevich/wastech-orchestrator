@@ -16,7 +16,7 @@ def codex_config() -> ProviderConfig:
     return ProviderConfig(
         command="codex",
         model="",
-        timeout_seconds=1800,
+        timeout_seconds=7200,
         permission_profile="workspace-write",
         extra_args=(),
         sandbox="workspace-write",
@@ -28,7 +28,7 @@ def claude_config() -> ProviderConfig:
     return ProviderConfig(
         command="claude",
         model="",
-        timeout_seconds=1800,
+        timeout_seconds=7200,
         permission_profile="workspace-write",
         extra_args=(),
         max_turns=None,
@@ -89,7 +89,7 @@ def make_request(tmp_path: Any) -> Callable[..., AgentRunRequest]:
             "working_directory": str(tmp_path / "clone"),
             "prompt": "Implement the requested feature.",
             "permission_profile": "workspace-write",
-            "timeout_seconds": 1800,
+            "timeout_seconds": 7200,
             "attempt": 1,
             "stage_run_id": 1,
         }

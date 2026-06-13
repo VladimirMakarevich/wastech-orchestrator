@@ -91,7 +91,7 @@ def test_unknown_orchestrator_key_is_rejected() -> None:
 
 def test_checks_timeout_defaults_to_1800() -> None:
     result = loads_config(_LEGACY)
-    assert result.config.checks.timeout_seconds == 1800
+    assert result.config.checks.timeout_seconds == 7200
 
 
 def test_checks_timeout_loads() -> None:
@@ -158,3 +158,64 @@ def test_legacy_codex_only_config_migrates_with_warning() -> None:
     assert result.config.agents.routing[Stage.PLANNING].primary is ProviderId.CODEX
     assert result.config.agents.routing[Stage.REVIEW].primary is ProviderId.CODEX
     assert validate_config(result.config) == []
+
+
+_WITH_CLAUDE = _LEGACY + """
+agents:
+  allowed:
+    - claude
+  providers:
+    claude:
+      command: "claude"
+"""
+
+_PROVIDER_BASE = """
+agents:
+  allowed:
+    - claude
+    - codex
+  providers:
+    claude:
+      command: "claude"
+    codex:
+      command: "codex"
+"""
+
+
+def test_reasoning_absent_defaults_to_none() -> None:
+    result = loads_config(_PROVIDER_BASE)
+    from wastech_orchestrator.providers.base import ProviderId
+    assert result.config.agents.providers[ProviderId.CLAUDE].reasoning is None
+    assert result.config.agents.providers[ProviderId.CODEX].reasoning is None
+
+
+def test_reasoning_valid_levels_parse() -> None:
+    for level in ("low", "medium", "high", "xhigh", "max"):
+        text2 = _PROVIDER_BASE.replace(
+            "    claude:\n      command: \"claude\"",
+            f"    claude:\n      command: \"claude\"\n      reasoning: {level}",
+        )
+        result = loads_config(text2)
+        from wastech_orchestrator.providers.base import ProviderId
+        assert result.config.agents.providers[ProviderId.CLAUDE].reasoning == level
+
+
+def test_reasoning_invalid_value_is_rejected() -> None:
+    text = _PROVIDER_BASE.replace(
+        "    claude:\n      command: \"claude\"",
+        "    claude:\n      command: \"claude\"\n      reasoning: ultra",
+    )
+    with pytest.raises(ConfigError) as exc:
+        loads_config(text)
+    assert any("reasoning" in issue for issue in exc.value.issues)
+    assert any("ultra" in issue for issue in exc.value.issues)
+
+
+def test_reasoning_null_parses_to_none() -> None:
+    text = _PROVIDER_BASE.replace(
+        "    claude:\n      command: \"claude\"",
+        "    claude:\n      command: \"claude\"\n      reasoning: null",
+    )
+    result = loads_config(text)
+    from wastech_orchestrator.providers.base import ProviderId
+    assert result.config.agents.providers[ProviderId.CLAUDE].reasoning is None

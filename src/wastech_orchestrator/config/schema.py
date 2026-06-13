@@ -102,6 +102,7 @@ class ProviderConfig:
     sandbox: str | None = None
     max_turns: int | None = None
     max_budget_usd: float | None = None
+    reasoning: str | None = None  # "low" | "medium" | "high" | "xhigh" | "max"
 
 
 @dataclass(frozen=True)
@@ -139,7 +140,7 @@ class ChecksConfig:
     commands: tuple[str, ...]
     # Per-command timeout for the Check Runner (spec §4.8). The process runner requires a timeout;
     # each ``commands`` entry is launched as an argv list (no shell) and bounded by this value.
-    timeout_seconds: int = 1800
+    timeout_seconds: int = 7200
 
 
 @dataclass(frozen=True)

@@ -152,7 +152,7 @@ def make_request() -> Callable[..., AgentRunRequest]:
             "working_directory": "/tmp/clone",
             "prompt": "Do the stage.",
             "permission_profile": "workspace-write",
-            "timeout_seconds": 1800,
+            "timeout_seconds": 7200,
             "attempt": 1,
             "stage_run_id": 1,
         }

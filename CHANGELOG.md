@@ -18,6 +18,17 @@ The maintainer bumps the package version in `pyproject.toml` on release; `wastec
 ## [Unreleased]
 
 ### Added
+- **Reasoning/effort level config**: a `reasoning` field (`low` / `medium` / `high` / `xhigh` /
+  `max`) can now be set globally under `agents.providers.<provider>.reasoning` in `config.yaml` or
+  per-task via `reasoning:` front-matter. For Claude, this maps to `--effort <level>` (Claude Code
+  CLI v2.1+, implicitly enables adaptive thinking). For Codex, it maps to `--reasoning-effort`
+  (Codex supports up to `xhigh`; `max` is Claude-only and is clamped to `xhigh` for Codex). A `model:` field can also be set per-task in front-matter
+  to override the provider model for a single run.
+- **Session persistence across stages**: within a single task run the orchestrator now re-uses the
+  Claude session from the previous stage by passing `--resume <session_id>`. The session ID emitted
+  in the `stream-json` output is captured, validated, and stored in memory on `_Pipeline`; on
+  provider fallback the primary session is cleared so the fallback starts fresh. Sessions are not
+  persisted across orchestrator restarts.
 - Opt-in Telegram terminal notifications and a blocking `ask_human` HITL primitive, with
   environment-only credentials, deterministic timeouts, secret redaction, and no-op behavior when
   disabled or unconfigured.

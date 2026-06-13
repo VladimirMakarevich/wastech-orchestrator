@@ -104,6 +104,8 @@ class AgentRunRequest:
     output_schema: dict[str, Any] | None = None
     model: str | None = None
     extra_args: list[str] = field(default_factory=list)
+    reasoning: str | None = None
+    session_id: str | None = None
 
 
 @dataclass(frozen=True)

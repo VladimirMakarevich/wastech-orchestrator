@@ -97,3 +97,49 @@ def test_preflight_fails_on_isolation(
     assert rc == 1
     assert "isolation: FAIL" in out
     assert "codex: sandbox is forbidden" in out
+
+
+def test_preflight_telegram_skip(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _patch_providers(monkeypatch, make_git_config(git_repo.clone))
+    monkeypatch.setattr(
+        cli, "check_telegram_preflight", lambda _cfg: (True, "telegram: SKIP (disabled)")
+    )
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "telegram: SKIP" in out
+    assert "preflight: ready" in out
+
+
+def test_preflight_telegram_ok(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _patch_providers(monkeypatch, make_git_config(git_repo.clone))
+    monkeypatch.setattr(
+        cli,
+        "check_telegram_preflight",
+        lambda _cfg: (True, "telegram: OK (bot=@mybot, chat_id configured)"),
+    )
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "telegram: OK" in out
+    assert "preflight: ready" in out
+
+
+def test_preflight_telegram_fail(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _patch_providers(monkeypatch, make_git_config(git_repo.clone))
+    monkeypatch.setattr(
+        cli,
+        "check_telegram_preflight",
+        lambda _cfg: (False, "telegram: FAIL — env var(s) not set: TG_TOKEN"),
+    )
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "telegram: FAIL" in out
+    assert "preflight: NOT ready" in out

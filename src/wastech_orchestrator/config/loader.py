@@ -44,6 +44,8 @@ from wastech_orchestrator.providers.base import ProviderId, Stage
 
 # Defaults mirror §11 / the packaged config.example.yaml so a partial config still loads safely.
 _DEFAULT_AUDIT_MESSAGE = "chore(orchestrator): audit trail for {task_id}"
+
+_REASONING_LEVELS: frozenset[str] = frozenset({"low", "medium", "high", "xhigh", "max"})
 _DEFAULT_ALLOWED_ENV: tuple[str, ...] = (
     "PATH",
     "HOME",
@@ -238,19 +240,28 @@ def _build_provider(raw: Any, pid: ProviderId, issues: list[str]) -> ProviderCon
             "sandbox",
             "max_turns",
             "max_budget_usd",
+            "reasoning",
         },
         where,
         issues,
     )
+    reasoning_raw = _opt_str(m, "reasoning", where, issues)
+    if reasoning_raw is not None and reasoning_raw not in _REASONING_LEVELS:
+        issues.append(
+            f"{where}.reasoning: invalid value {reasoning_raw!r}, "
+            f"expected one of {sorted(_REASONING_LEVELS)}"
+        )
+        reasoning_raw = None
     return ProviderConfig(
         command=_str(m, "command", pid.value, where, issues),
         model=_str(m, "model", "", where, issues),
-        timeout_seconds=_int(m, "timeout_seconds", 1800, where, issues),
+        timeout_seconds=_int(m, "timeout_seconds", 7200, where, issues),
         permission_profile=_str(m, "permission_profile", "workspace-write", where, issues),
         extra_args=_str_tuple(m, "extra_args", (), where, issues),
         sandbox=_opt_str(m, "sandbox", where, issues),
         max_turns=_opt_int(m, "max_turns", where, issues),
         max_budget_usd=_opt_float(m, "max_budget_usd", where, issues),
+        reasoning=reasoning_raw,
     )
 
 
@@ -427,7 +438,7 @@ def _build_checks(raw: Any, issues: list[str]) -> ChecksConfig:
     _check_keys(m, {"commands", "timeout_seconds"}, where, issues)
     return ChecksConfig(
         commands=_str_tuple(m, "commands", (), where, issues),
-        timeout_seconds=_int(m, "timeout_seconds", 1800, where, issues),
+        timeout_seconds=_int(m, "timeout_seconds", 7200, where, issues),
     )
 
 
@@ -486,7 +497,7 @@ def _build_telegram(raw: Any, issues: list[str]) -> TelegramConfig:
         enabled=_bool(m, "enabled", False, where, issues),
         bot_token_env=_str(m, "bot_token_env", "TELEGRAM_BOT_TOKEN", where, issues),
         chat_id_env=_str(m, "chat_id_env", "TELEGRAM_CHAT_ID", where, issues),
-        ask_timeout_s=_int(m, "ask_timeout_s", 1800, where, issues),
+        ask_timeout_s=_int(m, "ask_timeout_s", 28800, where, issues),
     )
 
 

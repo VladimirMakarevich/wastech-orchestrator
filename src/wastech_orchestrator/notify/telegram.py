@@ -51,6 +51,8 @@ class _TelegramClient(Protocol):
 
     def poll_reply(self, *, chat_id: str, deadline_monotonic: float) -> str | None: ...
 
+    def get_me(self) -> str: ...  # returns bot @username (first_name as fallback)
+
 
 @dataclass(frozen=True)
 class _Secrets:
@@ -200,6 +202,41 @@ def build_notifier(
     )
 
 
+def check_telegram_preflight(
+    cfg: TelegramConfig,
+    env: Mapping[str, str] | None = None,
+    *,
+    client_factory: Callable[[_Secrets, TelegramConfig], _TelegramClient] | None = None,
+) -> tuple[bool, str]:
+    """Return ``(ok, report_line)`` for inclusion in the preflight report (spec §6.7).
+
+    * ``enabled: false`` → ``(True, "telegram: SKIP (disabled)")`` — never fails preflight.
+    * Missing env vars → ``(False, "telegram: FAIL — env var(s) not set: …")``.
+    * Credentials present + ``get_me()`` OK → ``(True, "telegram: OK (bot=@…, …)")``.
+    * Credentials present + ``get_me()`` fails → ``(False, "telegram: FAIL — API error (…)")``,
+      with the bot token and chat id redacted from the error message.
+    """
+    if not cfg.enabled:
+        return True, "telegram: SKIP (disabled)"
+
+    environ: Mapping[str, str] = env if env is not None else os.environ
+    bot_token = (environ.get(cfg.bot_token_env) or "").strip()
+    chat_id = (environ.get(cfg.chat_id_env) or "").strip()
+
+    missing = [n for n, v in [(cfg.bot_token_env, bot_token), (cfg.chat_id_env, chat_id)] if not v]
+    if missing:
+        return False, f"telegram: FAIL — env var(s) not set: {', '.join(missing)}"
+
+    secrets = _Secrets(bot_token=bot_token, chat_id=chat_id)
+    client = (client_factory or _default_client_factory)(secrets, cfg)
+    try:
+        username = client.get_me()
+        return True, f"telegram: OK (bot=@{username}, chat_id configured)"
+    except Exception as exc:  # noqa: BLE001 — surface a safe summary, never re-raise
+        safe = redact_text(str(exc), extra_secrets=(bot_token, chat_id))
+        return False, f"telegram: FAIL — API error ({safe})"
+
+
 def _format_terminal_message(
     *,
     task_id: str,
@@ -271,6 +308,19 @@ class _HttpTelegramClient:
 
         with _suppress_transport_request_logs():
             asyncio.run(send())
+
+    def get_me(self) -> str:
+        import asyncio
+
+        from telegram import Bot
+
+        async def fetch() -> str:
+            async with Bot(self._bot_token) as bot:
+                me = await bot.get_me()
+                return me.username or me.first_name
+
+        with _suppress_transport_request_logs():
+            return asyncio.run(fetch())
 
     def poll_reply(self, *, chat_id: str, deadline_monotonic: float) -> str | None:
         import asyncio

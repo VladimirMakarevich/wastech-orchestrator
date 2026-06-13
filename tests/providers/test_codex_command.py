@@ -125,3 +125,54 @@ def test_effective_prompt_appends_footer(make_request: Callable[..., AgentRunReq
     effective = build_effective_prompt(request)
     assert effective.startswith("Do the thing.")
     assert "/logs/t/task.md" in effective
+
+
+def test_reasoning_request_level_adds_reasoning_effort(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    argv = _argv(codex_config, make_request(reasoning="high"))
+    assert argv[argv.index("--reasoning-effort") + 1] == "high"
+
+
+def test_reasoning_xhigh_passes_through(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    argv = _argv(codex_config, make_request(reasoning="xhigh"))
+    assert argv[argv.index("--reasoning-effort") + 1] == "xhigh"
+
+
+def test_reasoning_max_clamped_to_xhigh(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    argv = _argv(codex_config, make_request(reasoning="max"))
+    assert argv[argv.index("--reasoning-effort") + 1] == "xhigh"
+
+
+def test_reasoning_config_level_adds_reasoning_effort(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    cfg = replace(codex_config, reasoning="medium")
+    argv = _argv(cfg, make_request())
+    assert argv[argv.index("--reasoning-effort") + 1] == "medium"
+
+
+def test_reasoning_request_beats_config(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    cfg = replace(codex_config, reasoning="low")
+    argv = _argv(cfg, make_request(reasoning="high"))
+    assert argv[argv.index("--reasoning-effort") + 1] == "high"
+
+
+def test_no_reasoning_means_no_reasoning_effort_flag(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    argv = _argv(codex_config, make_request())
+    assert "--reasoning-effort" not in argv
+
+
+def test_session_id_is_not_passed_to_codex(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    argv = _argv(codex_config, make_request(session_id="some-session"))
+    assert "--resume" not in argv
