@@ -1432,9 +1432,7 @@ def build_orchestrator(
         heartbeat_seconds=heartbeat_seconds,
     )
     checks = CheckRunner(config, heartbeat_seconds=heartbeat_seconds)
-    resolver = CheckResolver(
-        config, repo_root=config.repo.local_path, artifacts_root=str(root)
-    )
+    resolver = CheckResolver(config, repo_root=config.repo.local_path, artifacts_root=str(root))
     gate = ValidationGate(
         config,
         store_has_task_id=store.task_id_exists,

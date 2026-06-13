@@ -18,6 +18,9 @@ The maintainer bumps the package version in `pyproject.toml` on release; `wastec
 ## [Unreleased]
 
 ### Added
+- **CI quality gate** (`.github/workflows/ci.yml`): runs `ruff check`, `ruff format --check`,
+  `mypy src`, and `pytest` on every pull request and on pushes to `main` (Python 3.12 / 3.13 matrix),
+  mirroring the gate in `release.yml` so regressions are caught before a release tag.
 - **Automatic check discovery and environment resolution** (Phases 1–3 of
   [docs/backlog/automatic_check_discovery.md](docs/backlog/automatic_check_discovery.md)): a new
   provider-agnostic `checks/` package resolves the repository's quality-gate commands without

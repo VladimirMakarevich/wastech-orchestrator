@@ -82,9 +82,7 @@ class CheckResolver:
             repo_root, denied_read_paths=config.security.denied_read_paths
         )
         self._detector = CheckCandidateDetector()
-        self._validator = CheckCandidateValidator(
-            denied_commands=config.security.denied_commands
-        )
+        self._validator = CheckCandidateValidator(denied_commands=config.security.denied_commands)
         self._prober = CheckProbeRunner(
             repo_root=repo_root,
             allowed_environment=config.security.allowed_environment,
@@ -271,9 +269,7 @@ def _priority(candidate: CheckCandidate) -> int:
 
 
 def _has_launchable(candidates: list[CheckCandidate], name: str) -> bool:
-    return any(
-        c.name == name and c.probe_status is ProbeStatus.LAUNCHABLE for c in candidates
-    )
+    return any(c.name == name and c.probe_status is ProbeStatus.LAUNCHABLE for c in candidates)
 
 
 def _select(
@@ -299,8 +295,7 @@ def _select(
 
     selected_ids = {id(c) for c in selected}
     records = [
-        ProfileCandidateRecord.from_candidate(c, selected=id(c) in selected_ids)
-        for c in candidates
+        ProfileCandidateRecord.from_candidate(c, selected=id(c) in selected_ids) for c in candidates
     ]
     return selected, records
 
