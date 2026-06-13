@@ -527,6 +527,9 @@ At a minimum the following are stored:
 - the `stage_attempts`, per-loop `fix_cycles`, and global `fix_iterations` counters (§8.1);
 - a reference to the failure report artifact when the task ends in `manual_action_required` (§10);
 - whether the `refinement` stage ran or was skipped, with the skip reason (§5);
+- for any stage skipped by stage-skip control (`agents.skip_stages` or a task's
+  `stages.<stage>.enabled: false`): a `stage_runs` row with `skipped = 1` and a `skip_reason`, and no
+  provider data;
 - for decomposition (§5.1): on the `tasks` row whether it was enabled/accepted with the reason, the subtask count `n`, the `active_subtask` index `k`, and `subtasks_completed`; and one `subtasks` row per subtask with its `order`, `slug`, `title`, `status`, `depends_on`, `commit_sha` (the idempotency marker, null until committed), and artifact path;
 - the validation outcome on the `tasks` row (`validation_passed`) and, on rejection, the failing `validation_reason` (§19).
 
@@ -1069,8 +1072,8 @@ The orchestrator is a CLI, not a long-running daemon. Upgrading the implementati
 
 Three persisted artifacts outlive an upgrade and each carries an **independent** schema version, bumped only when its format changes (not on every release):
 
-- **`config.yaml`** — a top-level `schema_version` (current `1`). The loader **refuses a config newer than it understands** (fail-closed `ConfigError`); an absent or older value is accepted (the older case is the future-migration hook). `install` stamps the current version into generated configs.
-- **`state.db`** — `PRAGMA user_version` (current `1`). `open()` refuses a database stamped newer than it understands and adopts a `0` value (a brand-new DB, or one created before versioning whose shape is already v1); `open_readonly` refuses-newer but never writes.
+- **`config.yaml`** — a top-level `schema_version` (current `4`). The loader **refuses a config newer than it understands** (fail-closed `ConfigError`); an absent or older value is accepted (the older case is the future-migration hook). `install` stamps the current version into generated configs.
+- **`state.db`** — `PRAGMA user_version` (current `2`). `open()` refuses a database stamped newer than it understands; on the writable path it **migrates in place** an older or pre-versioning (`0`) database via idempotent `ALTER TABLE` (`_migrate`) and then stamps the current version. `open_readonly` refuses-newer but never writes. (v2 added `stage_runs.skipped`/`skip_reason` for stage-skip control.)
 - **registry** — a `version` field, read **forward-tolerantly**: bindings are plain repo→config paths and are version-stable, so config discovery never hard-fails on a newer registry.
 
 The policy is **fail-forward-loud**: a workspace written by a *newer* orchestrator is refused with a clean `error:` message and a non-zero exit (2) rather than misread. A *migration runner* for the `<`-than-current cases is intentionally **not** built yet — the version gates are the hooks for it. Operator guidance (backup, the upgrade-between-tasks rule, recovery) lives in [operations.md](../operations.md); per-release changes are recorded in [CHANGELOG.md](../../CHANGELOG.md).

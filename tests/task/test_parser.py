@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from wastech_orchestrator.providers.base import ProviderId, Stage
-from wastech_orchestrator.task.model import NormalizedTask
+from wastech_orchestrator.task.model import NormalizedTask, StageParams
 from wastech_orchestrator.task.parser import (
     extract_section,
     load_normalized,
@@ -134,6 +134,40 @@ def test_auto_merge_round_trips(tmp_path: Path, value: bool | None) -> None:
     task = NormalizedTask(id="task-001", title="T", description="Do it", auto_merge=value)
     write_normalized(task, tmp_path)
     assert load_normalized(tmp_path, "task-001").auto_merge is value
+
+
+def test_stage_params_round_trip(tmp_path: Path) -> None:
+    # Restart-safety: per-stage model/reasoning AND the skip toggle must survive a resume, or a
+    # crash could lose a skip and re-run a stage the operator disabled.
+    task = NormalizedTask(
+        id="task-001",
+        title="T",
+        description="Do it",
+        model="claude-opus-4-8",
+        reasoning="high",
+        stage_params={
+            Stage.PLANNING: StageParams(model="claude-opus-4-8", enabled=False),
+            Stage.TESTING: StageParams(enabled=False),
+            Stage.REVIEW: StageParams(reasoning="high"),
+        },
+    )
+    write_normalized(task, tmp_path)
+    loaded = load_normalized(tmp_path, "task-001")
+    assert loaded.model == "claude-opus-4-8"
+    assert loaded.reasoning == "high"
+    assert loaded.stage_params == task.stage_params
+    assert loaded.disabled_stages() == frozenset({Stage.PLANNING, Stage.TESTING})
+
+
+def test_stage_params_absent_in_legacy_normalized_loads_empty(tmp_path: Path) -> None:
+    task_dir = tmp_path / "logs" / "task-001"
+    task_dir.mkdir(parents=True)
+    (task_dir / "task.normalized.json").write_text(
+        json.dumps({"id": "task-001", "title": "T", "description": "d"}), encoding="utf-8"
+    )
+    loaded = load_normalized(tmp_path, "task-001")
+    assert loaded.stage_params == {}
+    assert loaded.model is None
 
 
 def test_auto_merge_absent_in_legacy_normalized_loads_as_none(tmp_path: Path) -> None:

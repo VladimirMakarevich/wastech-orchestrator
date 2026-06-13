@@ -24,7 +24,11 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from wastech_orchestrator.config.schema import ROUTABLE_STAGES, OrchestratorConfig
+from wastech_orchestrator.config.schema import (
+    ROUTABLE_STAGES,
+    SKIPPABLE_STAGES,
+    OrchestratorConfig,
+)
 from wastech_orchestrator.config.validation import check_task_route_override
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.providers.base import ProviderId, Stage
@@ -65,6 +69,7 @@ class ValidationReason(StrEnum):
     DUPLICATE_TASK_ID = "duplicate_task_id"
     INVALID_ROUTE_OVERRIDE = "invalid_route_override"
     INVALID_STAGE_OVERRIDE = "invalid_stage_override"
+    REVIEW_SKIP_NOT_ALLOWED = "review_skip_not_allowed"
     INJECTION_SUSPECTED = "injection_suspected"
 
 
@@ -311,11 +316,18 @@ class ValidationGate:
     def _build_stage_params(self, raw: Any) -> tuple[dict[Stage, StageParams], _Reject | None]:
         """Map the ``stages`` front-matter block to ``{Stage: StageParams}`` (fail-closed).
 
-        Mirrors :meth:`_build_agents`: keys must be agent-routed stages (``ROUTABLE_STAGES`` — so
-        ``testing``/``publishing``, which run no agent, are rejected, not silently ignored). Each
-        value is an optional ``{model?, reasoning?}`` mapping; ``null``/``{}`` means "inherit".
-        Unknown stages, unknown sub-keys, and non-mapping values all reject with
-        ``INVALID_STAGE_OVERRIDE``.
+        Each key is a stage; the valid sub-keys depend on the stage:
+
+        * ``model`` / ``reasoning``: only for agent-routed stages (``ROUTABLE_STAGES``). The
+          ``testing`` stage runs no agent, so a model/reasoning there is rejected.
+        * ``enabled``: only for skippable stages (``SKIPPABLE_STAGES``); ``enabled: false`` skips
+          it. ``implementation``/``refinement`` cannot be disabled here (refinement uses
+          ``refined``) and ``publishing`` is not a valid key at all.
+
+        A value of ``null``/``{}`` means "inherit / default". Unknown stages, unknown sub-keys, a
+        sub-key not valid for that stage, and non-mapping values all reject with
+        ``INVALID_STAGE_OVERRIDE``. Disabling ``review`` additionally requires
+        ``agents.allow_review_skip`` (else ``REVIEW_SKIP_NOT_ALLOWED``).
         """
         if raw is None:
             return {}, None
@@ -324,7 +336,7 @@ class ValidationGate:
         stage_params: dict[Stage, StageParams] = {}
         for key, value in raw.items():
             stage = _STAGE_BY_KEY.get(str(key))
-            if stage is None or stage not in ROUTABLE_STAGES:
+            if stage is None or stage not in (ROUTABLE_STAGES | SKIPPABLE_STAGES):
                 return {}, _Reject(
                     ValidationReason.INVALID_STAGE_OVERRIDE, f"unknown stage {key!r}"
                 )
@@ -336,7 +348,12 @@ class ValidationGate:
                     ValidationReason.INVALID_STAGE_OVERRIDE,
                     f"stages.{stage.value} must be a mapping",
                 )
-            unknown = {str(k) for k in value} - {"model", "reasoning"}
+            allowed_keys: set[str] = set()
+            if stage in ROUTABLE_STAGES:
+                allowed_keys |= {"model", "reasoning"}
+            if stage in SKIPPABLE_STAGES:
+                allowed_keys |= {"enabled"}
+            unknown = {str(k) for k in value} - allowed_keys
             if unknown:
                 return {}, _Reject(
                     ValidationReason.INVALID_STAGE_OVERRIDE,
@@ -350,9 +367,25 @@ class ValidationGate:
             )
             if reject is not None:
                 return {}, reject
+            enabled = value.get("enabled")
+            if enabled is not None and not isinstance(enabled, bool):
+                return {}, _Reject(
+                    ValidationReason.INVALID_STAGE_OVERRIDE,
+                    f"stages.{stage.value} enabled must be a boolean",
+                )
+            if (
+                stage is Stage.REVIEW
+                and enabled is False
+                and not self._config.agents.allow_review_skip
+            ):
+                return {}, _Reject(
+                    ValidationReason.REVIEW_SKIP_NOT_ALLOWED,
+                    "stages.review.enabled: false requires agents.allow_review_skip: true",
+                )
             stage_params[stage] = StageParams(
                 model=value.get("model") or None,
                 reasoning=value.get("reasoning") or None,
+                enabled=enabled,
             )
         return stage_params, None
 
@@ -402,9 +435,7 @@ def _validate_model_reasoning(
         if not isinstance(reasoning, str):
             return _Reject(reason, f"{prefix}reasoning must be a string or null")
         if reasoning not in _REASONING_LEVELS:
-            return _Reject(
-                reason, f"{prefix}reasoning must be one of {sorted(_REASONING_LEVELS)}"
-            )
+            return _Reject(reason, f"{prefix}reasoning must be one of {sorted(_REASONING_LEVELS)}")
     return None
 
 

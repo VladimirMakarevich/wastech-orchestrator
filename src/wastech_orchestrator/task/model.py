@@ -43,14 +43,18 @@ def is_valid_task_id(task_id: str) -> bool:
 
 @dataclass(frozen=True)
 class StageParams:
-    """Per-stage model / reasoning override (task front matter ``stages.<stage>``).
+    """Per-stage override (task front matter ``stages.<stage>``).
 
-    Either field may be ``None`` to inherit the task-wide value (which in turn falls back to the
-    provider default). The two resolve independently — see :meth:`NormalizedTask.model_for`.
+    ``model``/``reasoning`` may each be ``None`` to inherit the task-wide value (which in turn falls
+    back to the provider default); the two resolve independently — see
+    :meth:`NormalizedTask.model_for`. ``enabled`` is the stage-skip toggle: ``None`` means default
+    (the stage runs), ``False`` skips the stage (only the stages in ``SKIPPABLE_STAGES`` may be
+    disabled — enforced by the validation gate).
     """
 
     model: str | None = None
     reasoning: str | None = None
+    enabled: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -91,3 +95,7 @@ class NormalizedTask:
         if sp is not None and sp.reasoning is not None:
             return sp.reasoning
         return self.reasoning
+
+    def disabled_stages(self) -> frozenset[Stage]:
+        """The stages this task explicitly disables (``stages.<stage>.enabled: false``)."""
+        return frozenset(s for s, sp in self.stage_params.items() if sp.enabled is False)

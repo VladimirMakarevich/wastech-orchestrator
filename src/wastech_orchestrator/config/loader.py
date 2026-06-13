@@ -22,6 +22,7 @@ import yaml
 from wastech_orchestrator.config.schema import (
     CONFIG_SCHEMA_VERSION,
     ROUTABLE_STAGES,
+    SKIPPABLE_STAGES,
     AgentsConfig,
     AuditBranch,
     AutoModeConfig,
@@ -409,6 +410,40 @@ def _build_allowed(raw: Any, issues: list[str]) -> tuple[ProviderId, ...]:
     return tuple(allowed)
 
 
+def _build_skip_stages(m: Mapping[str, Any], issues: list[str]) -> tuple[Stage, ...]:
+    """Parse ``agents.skip_stages`` into a tuple of ``Stage`` (fail-closed).
+
+    Each entry must name a stage in ``SKIPPABLE_STAGES``; anything else (unknown name, or a real
+    stage that is not skippable like ``implementation``/``publishing``) is a config issue.
+    """
+    if "skip_stages" not in m:
+        return ()
+    value = m["skip_stages"]
+    if not isinstance(value, list):
+        issues.append(f"agents.skip_stages: expected a list, got {type(value).__name__}")
+        return ()
+    choices = sorted(s.value for s in SKIPPABLE_STAGES)
+    out: list[Stage] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, str):
+            issues.append(
+                f"agents.skip_stages[{index}]: expected a string, got {type(item).__name__}"
+            )
+            continue
+        try:
+            stage = Stage(item)
+        except ValueError:
+            issues.append(f"agents.skip_stages[{index}]: unknown stage {item!r}")
+            continue
+        if stage not in SKIPPABLE_STAGES:
+            issues.append(
+                f"agents.skip_stages[{index}]: stage {item!r} is not skippable (allowed: {choices})"
+            )
+            continue
+        out.append(stage)
+    return tuple(out)
+
+
 def _build_agents(raw: Any, issues: list[str], warnings: list[str]) -> AgentsConfig:
     m = _mapping(raw, "agents", issues)
     _check_keys(
@@ -421,6 +456,8 @@ def _build_agents(raw: Any, issues: list[str], warnings: list[str]) -> AgentsCon
             "decomposition",
             "routing",
             "providers",
+            "skip_stages",
+            "allow_review_skip",
         },
         "agents",
         issues,
@@ -435,6 +472,12 @@ def _build_agents(raw: Any, issues: list[str], warnings: list[str]) -> AgentsCon
             "for all agent stages"
         )
         routing = _legacy_codex_routing()
+    skip_stages = _build_skip_stages(m, issues)
+    allow_review_skip = _bool(m, "allow_review_skip", False, "agents", issues)
+    # Fail-closed: disabling the review quality gate (no agent review before commit/PR) requires the
+    # explicit opt-in, whether the skip comes from the global list or a per-task override.
+    if Stage.REVIEW in skip_stages and not allow_review_skip:
+        issues.append("agents.skip_stages: 'review' requires agents.allow_review_skip: true")
     return AgentsConfig(
         allowed=_build_allowed(m.get("allowed"), issues),
         max_stage_attempts=_int(m, "max_stage_attempts", 3, "agents", issues),
@@ -443,6 +486,8 @@ def _build_agents(raw: Any, issues: list[str], warnings: list[str]) -> AgentsCon
         decomposition=_build_decomposition(m.get("decomposition"), issues),
         routing=routing,
         providers=_build_providers(m.get("providers"), issues),
+        skip_stages=skip_stages,
+        allow_review_skip=allow_review_skip,
     )
 
 

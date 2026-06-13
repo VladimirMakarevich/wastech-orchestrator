@@ -109,6 +109,8 @@ def build_git_config(
     max_fix_cycles: int = 3,
     max_total_fix_iterations: int = 5,
     quarantine: str | None = None,
+    skip_stages: Sequence[str] = (),
+    allow_review_skip: bool = False,
     auto_mode: bool = False,
     auto_merge: bool = False,
     auto_merge_strategy: str = "squash",
@@ -122,6 +124,8 @@ def build_git_config(
     """
     env_lines = "\n".join(f"    - {e}" for e in _TEST_ALLOWED_ENV)
     check_lines = "\n".join(f"    - {c!r}" for c in checks)
+    skip_block = "  skip_stages: [" + ", ".join(skip_stages) + "]\n" if skip_stages else ""
+    skip_block += f"  allow_review_skip: {str(allow_review_skip).lower()}\n"
     validation_block = f"validation:\n  quarantine_folder: {quarantine!r}\n" if quarantine else ""
     text = f"""
 orchestrator:
@@ -136,7 +140,7 @@ agents:
   allowed: [claude, codex]
   max_fix_cycles: {max_fix_cycles}
   max_total_fix_iterations: {max_total_fix_iterations}
-  decomposition:
+{skip_block}  decomposition:
     enabled: {str(decomposition).lower()}
     max_subtasks: {max_subtasks}
   routing:

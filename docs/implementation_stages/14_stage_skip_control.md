@@ -1,14 +1,35 @@
-# Backlog: Stage skip control (per-task and global)
+# Stage skip control (per-task and global)
 
-Status: **backlog / not scheduled**
+Status: **implemented (2026-06-13)**
 Date: 2026-06-13
 Owner: Vladimir Makarevich
 
 This document captures the design for allowing operators to skip individual pipeline stages,
-either globally in `config.yaml` or per-task in task frontmatter. It is a backlog item, not
-part of the currently implemented runtime behavior. Nothing here overrides
+either globally in `config.yaml` or per-task in task frontmatter. It is **now implemented** — see
+[docs/task-authoring.md](../task-authoring.md#stages) and [docs/operations.md](../operations.md) for
+the operator-facing docs, and the [CHANGELOG](../../CHANGELOG.md) `[Unreleased]` entry. The sections
+below are the original design; the **Implemented shape** note that follows records where it diverged.
+Nothing here overrides
 [00_orchestrator_final_plan.md](../implementation_stages/00_orchestrator_final_plan.md), [CLAUDE.md](../../CLAUDE.md), or the
 hard invariants in [docs/rules/](../rules/).
+
+## Implemented shape (how it shipped vs. this design)
+
+Three decisions diverged from the original sketch below:
+
+1. **No new top-level `skip:` key.** Skip is expressed on the existing `stages:` block as
+   `stages.<stage>.enabled: false` (consolidating with per-stage model/reasoning — §5 here), so the
+   `stages:` validator now accepts a per-stage union of valid sub-keys: `model`/`reasoning` for
+   agent-routed stages, `enabled` for skippable stages.
+2. **`review` skip is gated** behind a new `agents.allow_review_skip` flag (fail-closed, required for
+   a review skip from either the global list or a task) rather than allowed with only a warning.
+3. **Audit** lives in `stage_runs.skipped`/`skip_reason` (the first real `state.db` migration,
+   v1→v2, via `_migrate`), and per-stage skip intent now round-trips through `task.normalized.json`
+   for crash recovery. The skipped set is appended to the PR body as `## Pipeline stages skipped`.
+
+Everything else (the union resolution with no per-task opt-out, the skippable set, the per-stage
+behaviours, the review+auto_merge double-warning) shipped as designed. A future per-task opt-out
+(`force_stages`) is tracked in [follow_ups.md](follow_ups.md).
 
 ---
 

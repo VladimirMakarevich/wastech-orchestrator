@@ -4,7 +4,7 @@
 # repo-root config.example.yaml and with §11 of
 # docs/implementation_stages/00_orchestrator_final_plan.md.
 
-schema_version: 3                   # config format version; the orchestrator refuses newer configs
+schema_version: 4                   # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -26,6 +26,9 @@ agents:
   max_stage_attempts: 3
   max_fix_cycles: 15
   max_total_fix_iterations: 30      # hard global cap across all fix loops (and all subtasks); >= max_fix_cycles
+
+  skip_stages: []                   # stages skipped for every task: any of [planning, testing, review, fixing, summary]
+  allow_review_skip: false          # required before any task (or skip_stages) may disable the `review` quality gate
 
   decomposition:                    # optional task decomposition (§5.1); OFF by default
     enabled: false

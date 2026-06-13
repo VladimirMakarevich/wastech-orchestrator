@@ -12,6 +12,13 @@ The config-level per-stage defaults (§4) remain a backlog item. Nothing here ov
 [00_orchestrator_final_plan.md](../implementation_stages/00_orchestrator_final_plan.md),
 [CLAUDE.md](../../CLAUDE.md), or the hard invariants in [docs/rules/](../rules/).
 
+> **Extended by stage-skip control (2026-06-13).** The `stages:` block now also carries a per-stage
+> `enabled: false` toggle that **skips** a stage (skippable: `planning`, `testing`, `review`,
+> `fixing`, `summary`). `StageParams` gained an `enabled` field and the `stages:` validator accepts a
+> per-stage union of valid sub-keys (`model`/`reasoning` for agent stages, `enabled` for skippable
+> ones — so `testing` accepts only `enabled`). See
+> [docs/backlog/stage_skip_control.md](../backlog/stage_skip_control.md).
+
 ---
 
 ## 1. Motivation

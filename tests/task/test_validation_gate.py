@@ -420,3 +420,85 @@ def test_stages_model_non_string_rejected(config: OrchestratorConfig) -> None:
     assert result.passed is False
     assert result.reason is ValidationReason.INVALID_STAGE_OVERRIDE
     assert "model" in result.detail
+
+
+# --- stage-skip control (stages.<stage>.enabled) -----------------------------------------
+
+
+def _allow_review_skip(config: OrchestratorConfig) -> OrchestratorConfig:
+    from dataclasses import replace
+
+    return replace(config, agents=replace(config.agents, allow_review_skip=True))
+
+
+def test_stages_testing_enabled_false_accepted(config: OrchestratorConfig) -> None:
+    # ``testing`` is skippable (no agent) — ``enabled`` is its only valid sub-key.
+    result = _gate(config).validate(_src(_stages_task("stages:\n  testing:\n    enabled: false\n")))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.stage_params[Stage.TESTING] == StageParams(enabled=False)
+    assert result.normalized.disabled_stages() == frozenset({Stage.TESTING})
+
+
+def test_stages_planning_model_and_enabled_accepted(config: OrchestratorConfig) -> None:
+    # ``planning`` is both routable and skippable, so all three sub-keys are valid together.
+    block = "stages:\n  planning:\n    model: claude-opus-4-8\n    enabled: false\n"
+    result = _gate(config).validate(_src(_stages_task(block)))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.stage_params[Stage.PLANNING] == StageParams(
+        model="claude-opus-4-8", enabled=False
+    )
+
+
+def test_stages_enabled_true_is_not_a_skip(config: OrchestratorConfig) -> None:
+    result = _gate(config).validate(_src(_stages_task("stages:\n  summary:\n    enabled: true\n")))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.disabled_stages() == frozenset()
+
+
+def test_stages_implementation_enabled_rejected(config: OrchestratorConfig) -> None:
+    # ``implementation`` is the core work — not skippable; ``enabled`` is not a valid sub-key.
+    block = "stages:\n  implementation:\n    enabled: false\n"
+    result = _gate(config).validate(_src(_stages_task(block)))
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_STAGE_OVERRIDE
+    assert "enabled" in result.detail
+
+
+def test_stages_testing_model_still_rejected(config: OrchestratorConfig) -> None:
+    # ``testing`` runs no agent, so model/reasoning remain invalid even though it is skippable.
+    result = _gate(config).validate(_src(_stages_task("stages:\n  testing:\n    model: m\n")))
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_STAGE_OVERRIDE
+
+
+def test_stages_enabled_non_bool_rejected(config: OrchestratorConfig) -> None:
+    block = "stages:\n  testing:\n    enabled: nope\n"
+    result = _gate(config).validate(_src(_stages_task(block)))
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_STAGE_OVERRIDE
+    assert "enabled" in result.detail
+
+
+def test_stages_review_skip_rejected_without_opt_in(config: OrchestratorConfig) -> None:
+    # The default config has allow_review_skip: false → disabling review is rejected (fail-closed).
+    result = _gate(config).validate(_src(_stages_task("stages:\n  review:\n    enabled: false\n")))
+    assert result.passed is False
+    assert result.reason is ValidationReason.REVIEW_SKIP_NOT_ALLOWED
+
+
+def test_stages_review_skip_allowed_with_opt_in(config: OrchestratorConfig) -> None:
+    result = _gate(_allow_review_skip(config)).validate(
+        _src(_stages_task("stages:\n  review:\n    enabled: false\n"))
+    )
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.disabled_stages() == frozenset({Stage.REVIEW})
+
+
+def test_stages_review_enabled_true_never_gated(config: OrchestratorConfig) -> None:
+    # Only ``enabled: false`` on review needs the opt-in; an explicit enable is always fine.
+    result = _gate(config).validate(_src(_stages_task("stages:\n  review:\n    enabled: true\n")))
+    assert result.passed is True

@@ -21,7 +21,7 @@ from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import GitManager, GitResult
 from wastech_orchestrator.ledger import Ledger
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult, Notifier
-from wastech_orchestrator.providers.artifacts import create_attempt_dir
+from wastech_orchestrator.providers.artifacts import create_attempt_dir, task_artifact_dir
 from wastech_orchestrator.providers.base import (
     AgentRunRequest,
     AgentRunResult,
@@ -1713,3 +1713,174 @@ def test_auto_merge_does_not_fire_when_quality_gate_fails(
     result = orch.run_task(_complete_task(tmp_path))
     assert result.final_status is not Status.DONE
     assert _merge_calls(calls) == []
+
+
+# --- stage-skip control (stages.<stage>.enabled / agents.skip_stages) ---------------------
+
+
+def _task_with_stages(tmp_path: Path, stages_block: str, task_id: str = "task-001") -> str:
+    path = tmp_path / f"{task_id}.md"
+    path.write_text(
+        f'---\nid: {task_id}\ntitle: "Add a thing"\nrefined: true\n{stages_block}---\n\n'
+        "## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def _skipped_stages(store: StateStore) -> list[str]:
+    rows = store._conn.execute(  # noqa: SLF001 - inspecting persisted audit rows in a unit test
+        "SELECT stage FROM stage_runs WHERE skipped = 1 ORDER BY stage"
+    ).fetchall()
+    return [r["stage"] for r in rows]
+
+
+def _summary_text(art: Path, task_id: str = "task-001") -> str:
+    return (task_artifact_dir(art, task_id) / "summary.md").read_text(encoding="utf-8")
+
+
+def test_skip_planning_writes_stub_and_runs(git_repo, make_git_config, tmp_path: Path) -> None:
+    providers = _both()
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+    block = "stages:\n  planning:\n    enabled: false\n"
+    result = orch.run_task(_task_with_stages(tmp_path, block))
+    assert result.final_status is Status.DONE
+    # The planning agent was never invoked, and a stub plan was written instead.
+    assert all(r.stage is not Stage.PLANNING for r in providers[ProviderId.CLAUDE].requests)
+    plan = (task_artifact_dir(art, "task-001") / "plan.md").read_text(encoding="utf-8")
+    assert "planning stage skipped" in plan
+    assert "planning" in _skipped_stages(store)
+
+
+def test_skip_testing_bypasses_checks(git_repo, make_git_config, tmp_path: Path) -> None:
+    providers = _both()
+    # check_verdicts would FAIL if the runner ran — proving testing is bypassed, not passed.
+    orch, store, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[1] * 20,
+        config_kwargs={"skip_stages": ["testing"]},
+    )
+    _patch_impl_edit(providers, git_repo)
+    result = orch.run_task(_complete_task(tmp_path))
+    assert result.final_status is Status.DONE
+    n_checks = store._conn.execute(  # noqa: SLF001
+        "SELECT COUNT(*) AS n FROM check_runs"
+    ).fetchone()["n"]
+    assert n_checks == 0  # the check runner never ran
+    assert "testing" in _skipped_stages(store)
+
+
+def test_skip_review_commits_without_review(git_repo, make_git_config, tmp_path: Path) -> None:
+    providers = _both()
+    orch, store, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"allow_review_skip": True},
+    )
+    _patch_impl_edit(providers, git_repo)
+    block = "stages:\n  review:\n    enabled: false\n"
+    result = orch.run_task(_task_with_stages(tmp_path, block))
+    assert result.final_status is Status.DONE
+    # Review is routed to codex (primary); it must never be invoked for the review stage.
+    assert all(r.stage is not Stage.REVIEW for r in providers[ProviderId.CODEX].requests)
+    assert "review" in _skipped_stages(store)
+
+
+def test_skip_fixing_routes_to_manual_on_failure(git_repo, make_git_config, tmp_path: Path) -> None:
+    providers = _both()
+    orch, store, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[1] * 20,  # first check fails
+        config_kwargs={"skip_stages": ["fixing"]},
+    )
+    _patch_impl_edit(providers, git_repo)
+    result = orch.run_task(_complete_task(tmp_path))
+    # Fixing disabled → the first test failure goes straight to manual review (0 fix iterations).
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
+    assert store.get_counters("task-001").fix_iterations == 0
+    assert "fixing" in _skipped_stages(store)
+
+
+def test_skip_summary_writes_stub(git_repo, make_git_config, tmp_path: Path) -> None:
+    providers = _both()
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+    block = "stages:\n  summary:\n    enabled: false\n"
+    result = orch.run_task(_task_with_stages(tmp_path, block))
+    assert result.final_status is Status.DONE
+    assert all(r.stage is not Stage.SUMMARY for r in providers[ProviderId.CLAUDE].requests)
+    assert "summary stage skipped" in _summary_text(art)
+    assert "summary" in _skipped_stages(store)
+
+
+def test_skipped_stages_listed_in_summary(git_repo, make_git_config, tmp_path: Path) -> None:
+    providers = _both()
+    orch, _, _, art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"skip_stages": ["testing"]},
+    )
+    _patch_impl_edit(providers, git_repo)
+    block = "stages:\n  planning:\n    enabled: false\n"
+    result = orch.run_task(_task_with_stages(tmp_path, block))
+    assert result.final_status is Status.DONE
+    summary = _summary_text(art)
+    assert "## Pipeline stages skipped" in summary
+    assert "`planning`" in summary and "`testing`" in summary
+
+
+def test_review_skip_with_auto_merge_warns(git_repo, make_git_config, tmp_path: Path) -> None:
+    import logging
+
+    providers = _both()
+    calls: list[list[str]] = []
+    orch, _, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={
+            "skip_stages": ["review"],
+            "allow_review_skip": True,
+            "auto_merge": True,
+        },
+        gh=_merge_gh(calls),
+    )
+    _patch_impl_edit(providers, git_repo)
+    # Attach a handler directly to the orchestrator logger so capture is independent of the
+    # global logging configuration (other tests reconfigure handlers / propagation).
+    messages: list[str] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    logger = logging.getLogger("wastech_orchestrator.core.orchestrator")
+    handler = _Capture()
+    logger.addHandler(handler)
+    try:
+        result = orch.run_task(_complete_task(tmp_path))
+    finally:
+        logger.removeHandler(handler)
+    assert result.final_status is Status.DONE
+    assert len(_merge_calls(calls)) == 1  # it really did merge without a review gate
+    # The double-warning must fire before the merge so the operator sees the bypassed gate.
+    assert any("review skipped AND auto_merge enabled" in m for m in messages)

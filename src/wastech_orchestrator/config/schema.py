@@ -21,7 +21,10 @@ from wastech_orchestrator.providers.base import ProviderId, Stage
 # them and take the safe ``false`` defaults — no migration flips anything.
 # v3: added the optional ``prompts`` block (operator-customizable stage prompts). Old (v1/v2/absent)
 # configs omit it and take the safe defaults (packaged templates, append mode) — no migration.
-CONFIG_SCHEMA_VERSION = 3
+# v4: added the optional ``agents.skip_stages`` / ``agents.allow_review_skip`` keys (stage-skip
+# control). Old configs omit them and take the safe defaults (no skips, review-skip disallowed) — no
+# migration flips anything.
+CONFIG_SCHEMA_VERSION = 4
 
 # Stages routed to an agent provider. The remaining stages (``testing``, ``publishing``) are run by
 # the orchestrator itself (Check Runner / Git Manager), so they never appear in ``agents.routing``
@@ -31,6 +34,21 @@ ROUTABLE_STAGES: frozenset[Stage] = frozenset(
         Stage.REFINEMENT,
         Stage.PLANNING,
         Stage.IMPLEMENTATION,
+        Stage.REVIEW,
+        Stage.FIXING,
+        Stage.SUMMARY,
+    }
+)
+
+# Stages an operator may skip (globally via ``agents.skip_stages`` or per-task via
+# ``stages.<stage>.enabled: false``). ``refinement`` is excluded — it uses the ``refined: true``
+# task flag instead — and ``implementation``/``publishing`` are never skippable (the core work and
+# the output). Note this is *not* ``ROUTABLE_STAGES``: ``testing`` is skippable but runs no agent,
+# while ``implementation``/``refinement`` are agent-routed but not skippable (stage-skip control).
+SKIPPABLE_STAGES: frozenset[Stage] = frozenset(
+    {
+        Stage.PLANNING,
+        Stage.TESTING,
         Stage.REVIEW,
         Stage.FIXING,
         Stage.SUMMARY,
@@ -135,6 +153,13 @@ class AgentsConfig:
     decomposition: DecompositionConfig
     routing: dict[Stage, RouteConfig]
     providers: dict[ProviderId, ProviderConfig]
+    # Stages skipped for every task processed by this instance (subset of SKIPPABLE_STAGES). The
+    # effective skip set for a task is this ∪ the task's own ``stages.<stage>.enabled: false`` — a
+    # global skip cannot be re-enabled per task (stage-skip control).
+    skip_stages: tuple[Stage, ...] = ()
+    # Gate for the high-risk ``review`` skip (no agent quality gate before commit/PR): a task or
+    # the global config may disable review only when this is true, else it is rejected.
+    allow_review_skip: bool = False
 
 
 @dataclass(frozen=True)

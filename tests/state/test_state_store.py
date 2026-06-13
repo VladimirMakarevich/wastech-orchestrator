@@ -172,6 +172,25 @@ def test_stage_run_and_provider_attempts(store: StateStore) -> None:
     assert [r["provider"] for r in cur.fetchall()] == ["claude"]
 
 
+def test_record_skip_writes_audit_row(store: StateStore) -> None:
+    store.insert_task(_new_task())
+    run_id = store.record_skip(
+        "task-001", "testing", reason="global config (agents.skip_stages)", subtask_order=2
+    )
+    assert run_id > 0
+    row = store._conn.execute(  # noqa: SLF001 - inspecting persisted rows in a unit test
+        "SELECT * FROM stage_runs WHERE id = ?", (run_id,)
+    ).fetchone()
+    assert row is not None
+    assert row["stage"] == "testing"
+    assert row["status"] == "skipped"
+    assert row["skipped"] == 1
+    assert row["skip_reason"] == "global config (agents.skip_stages)"
+    assert row["subtask_order"] == 2
+    assert row["provider_used"] is None
+    assert row["stage_attempts"] == 0
+
+
 def test_stage_run_can_be_reserved_then_completed(store: StateStore) -> None:
     store.insert_task(_new_task())
     run_id = store.record_stage_run(

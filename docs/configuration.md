@@ -39,7 +39,7 @@ If `agents.routing` is omitted, the loader treats the file as a legacy Codex-onl
 schema_version: 1
 ```
 
-Optional top-level integer marking the `config.yaml` **format** version (current: `1`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
+Optional top-level integer marking the `config.yaml` **format** version (current: `4`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
 
 ## Config Discovery
 
@@ -134,6 +134,9 @@ agents:
   max_stage_attempts: 3
   max_fix_cycles: 15
   max_total_fix_iterations: 30
+
+  skip_stages: []           # stages skipped for every task
+  allow_review_skip: false  # gate for skipping the review stage
 ```
 
 | Field | Type | Default | Meaning |
@@ -142,8 +145,12 @@ agents:
 | `max_stage_attempts` | integer | `3` | Attempts allowed for a stage/provider route. |
 | `max_fix_cycles` | integer | `15` | Fix cycles for a single local failing loop (test-driven or review-driven, counted separately). |
 | `max_total_fix_iterations` | integer | `30` | Hard global fix cap across the whole task and all subtasks. Must be `>= max_fix_cycles`. |
+| `skip_stages` | list of stage names | `[]` | Stages skipped for **every** task. Each must be skippable: `planning`, `testing`, `review`, `fixing`, `summary`. The effective skip set is this ∪ a task's `stages.<stage>.enabled: false`. See [operations.md](operations.md#skipping-pipeline-stages-agentsskip_stages). |
+| `allow_review_skip` | boolean | `false` | Required before `review` may be skipped (from `skip_stages` **or** a task) — disabling review removes the only agent quality gate before commit/PR. |
 
-Validation requires `max_total_fix_iterations >= max_fix_cycles`.
+Validation requires `max_total_fix_iterations >= max_fix_cycles`. Added in `config.yaml`
+`schema_version` **4**: `skip_stages` / `allow_review_skip` (older configs omit them and take the
+safe defaults — no skips, review-skip disallowed).
 
 ### `agents.decomposition`
 

@@ -75,13 +75,17 @@ _BASE_TRANSITIONS: dict[Status, frozenset[Status]] = {
     Status.PREPARING: frozenset({Status.REFINING, Status.PLANNING}),
     Status.REFINING: frozenset({Status.PLANNING}),
     Status.PLANNING: frozenset({Status.IMPLEMENTING}),
-    Status.IMPLEMENTING: frozenset({Status.TESTING}),
+    # implementing -> testing normally; -> reviewing when the testing stage is skipped (stage-skip
+    # control); the agent edit is unchanged, only the next gate differs.
+    Status.IMPLEMENTING: frozenset({Status.TESTING, Status.REVIEWING}),
     # testing: success -> reviewing; failure -> fixing (test-driven fix loop).
     Status.TESTING: frozenset({Status.REVIEWING, Status.FIXING}),
     # reviewing: pass -> summarizing; blocking findings -> fixing; decomposed subtask k<n -> the
     # next subtask's implementing.
     Status.REVIEWING: frozenset({Status.SUMMARIZING, Status.FIXING, Status.IMPLEMENTING}),
-    Status.FIXING: frozenset({Status.TESTING}),
+    # fixing -> testing normally; -> reviewing when testing is skipped (a review-driven fix must
+    # return to review, not to a skipped testing stage — stage-skip control).
+    Status.FIXING: frozenset({Status.TESTING, Status.REVIEWING}),
     Status.SUMMARIZING: frozenset({Status.READY_TO_PUBLISH}),
     Status.READY_TO_PUBLISH: frozenset({Status.COMMITTING}),
     Status.COMMITTING: frozenset({Status.PUSHING}),

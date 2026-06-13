@@ -386,6 +386,52 @@ Configured under `git:` (all default to the safe value):
 append-only ledger (`auto_merged` + `merge_outcome` = the merge SHA, `"merged"`, or `"armed"`), and
 persists a `pr_merge` row in `state.db`. The terminal Telegram notification carries the PR URL.
 
+### Skipping pipeline stages (`agents.skip_stages`)
+
+By default the pipeline runs `refinement → planning → [implementation → testing → review → fixing]
+→ summary → publishing`. An operator can skip stages that add no value for a given workload —
+globally for every task, or per-task in front-matter.
+
+Skippable stages: `planning`, `testing`, `review`, `fixing`, `summary`. `implementation` and
+`publishing` are never skippable; `refinement` uses the existing `refined: true` task flag.
+
+Global config under `agents:`:
+
+| Key | Default | Effect |
+|---|---|---|
+| `skip_stages` | `[]` | Stages skipped for **every** task, e.g. `[testing]` for a repo with no test suite. Each entry must be a skippable stage (else the config is rejected). |
+| `allow_review_skip` | `false` | Must be `true` before `review` may be skipped from **either** source. Disabling review removes the only agent quality gate before commit/PR. |
+
+```yaml
+agents:
+  skip_stages: [testing]      # this repo has no meaningful automated tests
+  allow_review_skip: false
+```
+
+**Per-task override.** A task disables a stage with `enabled: false` in its `stages:` block (see
+[task-authoring.md](task-authoring.md#stages)):
+
+```yaml
+stages:
+  planning: { enabled: false }
+  testing:  { enabled: false }
+```
+
+The effective skip set is the **union** of `agents.skip_stages` and the task's `enabled: false`
+overrides — a stage skipped globally **cannot** be re-enabled per task.
+
+**What each skip does:** `planning` → a stub `plan.md` and a single implementation unit (no
+decomposition); `testing` → straight from implementation to review, the Check Runner never runs;
+`review` → commit with no agent review gate; `fixing` → the first test/review failure goes to
+`manual_action_required` with a `stuck.md` report (no recovery loop, 0 fix iterations); `summary`
+→ a stub summary.
+
+**Audit.** Every skip writes a `<stage> skipped` `WARNING` log line (with the reason: global config,
+task front-matter, or both), persists a `stage_runs` row with `skipped = 1` and `skip_reason`, and
+lists the skipped stages in a `## Pipeline stages skipped` section of the PR body. When `review` is
+skipped **and** auto-merge fires, a second `WARNING` records that the task merged with no review gate
+at all.
+
 ---
 
 ## 6. Diagnostics — reading what a run produced

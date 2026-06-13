@@ -58,12 +58,14 @@ def test_terminal_statuses() -> None:
         (Status.REFINING, Status.PLANNING),
         (Status.PLANNING, Status.IMPLEMENTING),
         (Status.IMPLEMENTING, Status.TESTING),
+        (Status.IMPLEMENTING, Status.REVIEWING),  # testing skipped
         (Status.TESTING, Status.REVIEWING),  # checks pass
         (Status.TESTING, Status.FIXING),  # checks fail
         (Status.REVIEWING, Status.SUMMARIZING),  # review pass
         (Status.REVIEWING, Status.FIXING),  # blocking findings
         (Status.REVIEWING, Status.IMPLEMENTING),  # decomposed: next subtask
         (Status.FIXING, Status.TESTING),
+        (Status.FIXING, Status.REVIEWING),  # testing skipped: review-driven fix returns to review
         (Status.SUMMARIZING, Status.READY_TO_PUBLISH),
         (Status.READY_TO_PUBLISH, Status.COMMITTING),
         (Status.COMMITTING, Status.PUSHING),

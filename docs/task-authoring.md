@@ -75,7 +75,7 @@ Allowed fields:
 | `contacts` | no | list of strings | Plain-text mentions in Telegram notifications/HITL prompts. |
 | `model` | no | string or null | Override the provider model for every stage of this task (e.g. `claude-opus-4-8`). |
 | `reasoning` | no | string or null | Override the reasoning effort level for this task: `low`, `medium`, `high`, `xhigh`, or `max`. |
-| `stages` | no | mapping | Per-stage `model`/`reasoning` override; takes precedence over the task-wide `model`/`reasoning` for that stage. |
+| `stages` | no | mapping | Per-stage overrides: `model`/`reasoning` (precedence over the task-wide values) and `enabled: false` to skip a stage. See [`stages`](#stages). |
 
 The current validation gate rejects unknown fields fail-closed. Keep task front matter limited to
 the fields above.
@@ -248,19 +248,51 @@ So a stage can override only `reasoning` and keep the task-wide (or provider-def
 vice versa. Both sub-fields are optional; a stage block of `{}` or `null` means "inherit", which is
 useful for scaffolding a block before filling it in.
 
-Allowed stage keys:
+The `stages` block also carries the per-stage **skip** toggle, `enabled: false`:
+
+```yaml
+stages:
+  planning:
+    enabled: false          # write a stub plan and run as a single unit (no decomposition)
+  testing:
+    enabled: false          # bypass the Check Runner (e.g. a repo with no test suite)
+  review:
+    enabled: false          # DANGER: no agent review gate — requires agents.allow_review_skip: true
+```
+
+Skippable stages: `planning`, `testing`, `review`, `fixing`, `summary`. `implementation` (the core
+work), `publishing` (the output), and `refinement` (use the `refined` flag) can never be skipped
+here. The effective skip set is the union of `agents.skip_stages` (global) and a task's
+`enabled: false` overrides — a stage skipped globally cannot be re-enabled per task.
+
+What each skip does: `planning` → stub plan, single unit; `testing` → straight to review (no checks);
+`review` → commit with no agent gate; `fixing` → first test/review failure goes to
+`manual_action_required` (no recovery loop); `summary` → a stub summary. Every skip is logged at
+WARNING and recorded in `state.db` (`stage_runs.skipped`), and the skipped set is listed in the PR
+body.
+
+Allowed stage keys and their valid sub-keys:
 
 ```text
-refinement, planning, implementation, review, fixing, summary
+refinement      model, reasoning
+planning        model, reasoning, enabled
+implementation  model, reasoning
+testing         enabled
+review          model, reasoning, enabled
+fixing          model, reasoning, enabled
+summary         model, reasoning, enabled
 ```
 
 Rules:
 
-- only the agent-routed stages above may appear; `testing` (the Check Runner) and `publishing` (the
-  Git Manager) run no agent, so a `model`/`reasoning` override there is meaningless and is rejected
-  fail-closed (`invalid_stage_override`);
-- unknown sub-keys (anything but `model`/`reasoning`), non-mapping stage values, and invalid
-  `reasoning` levels are likewise rejected;
+- `model`/`reasoning` apply only to the agent-routed stages; `testing` (the Check Runner) and
+  `publishing` (the Git Manager) run no agent, so a `model`/`reasoning` override there is meaningless
+  and is rejected fail-closed (`invalid_stage_override`). `publishing` is not a valid key at all;
+- `enabled` applies only to the skippable stages above; `enabled` on `implementation`/`refinement`
+  is rejected. `enabled` must be a boolean;
+- disabling `review` (`enabled: false`) is rejected unless `agents.allow_review_skip: true`
+  (`review_skip_not_allowed`) — it removes the only agent quality gate before commit/PR;
+- unknown sub-keys, non-mapping stage values, and invalid `reasoning` levels are likewise rejected;
 - a `model` string is **not** validated against the stage's provider — if a stage routes to a
   provider that does not recognize the model name, the run fails at that provider, the same as a
   task-wide `model`. Keep model names consistent with the provider routing for that stage.

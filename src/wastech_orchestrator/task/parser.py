@@ -23,7 +23,7 @@ import yaml
 
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.providers.base import ProviderId, Stage
-from wastech_orchestrator.task.model import NormalizedTask
+from wastech_orchestrator.task.model import NormalizedTask, StageParams
 
 # For a ``.json`` task the body lives in this reserved key (a ``.md`` task carries it as the body
 # after the front matter). It is therefore not a front-matter field for either format.
@@ -212,9 +212,24 @@ def write_normalized(task: NormalizedTask, artifacts_root: str | Path) -> str:
         "auto_merge": task.auto_merge,
         "agents": {stage.value: provider.value for stage, provider in task.agents.items()},
         "contacts": list(task.contacts),
+        "model": task.model,
+        "reasoning": task.reasoning,
+        "stages": {stage.value: _stage_params_json(sp) for stage, sp in task.stage_params.items()},
     }
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return str(path)
+
+
+def _stage_params_json(sp: StageParams) -> dict[str, Any]:
+    """Serialize a :class:`StageParams`, omitting unset (``None``) fields."""
+    out: dict[str, Any] = {}
+    if sp.model is not None:
+        out["model"] = sp.model
+    if sp.reasoning is not None:
+        out["reasoning"] = sp.reasoning
+    if sp.enabled is not None:
+        out["enabled"] = sp.enabled
+    return out
 
 
 def load_normalized(artifacts_root: str | Path, task_id: str) -> NormalizedTask:
@@ -223,6 +238,14 @@ def load_normalized(artifacts_root: str | Path, task_id: str) -> NormalizedTask:
     data = json.loads(path.read_text(encoding="utf-8"))
     agents = {
         Stage(stage): ProviderId(provider) for stage, provider in (data.get("agents") or {}).items()
+    }
+    stage_params = {
+        Stage(stage): StageParams(
+            model=sp.get("model"),
+            reasoning=sp.get("reasoning"),
+            enabled=sp.get("enabled"),
+        )
+        for stage, sp in (data.get("stages") or {}).items()
     }
     return NormalizedTask(
         id=data["id"],
@@ -233,4 +256,7 @@ def load_normalized(artifacts_root: str | Path, task_id: str) -> NormalizedTask:
         auto_merge=data.get("auto_merge"),
         agents=agents,
         contacts=list(data.get("contacts", [])),
+        model=data.get("model"),
+        reasoning=data.get("reasoning"),
+        stage_params=stage_params,
     )

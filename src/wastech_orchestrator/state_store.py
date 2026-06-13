@@ -33,19 +33,34 @@ def _utc_now_iso() -> str:
 # changes (not on every release). ``open()`` adopts a 0 (brand-new, or pre-versioning) database as
 # the current version; both open paths refuse a database stamped newer than this. See the spec's
 # "Versioning & compatibility" section.
-DB_SCHEMA_VERSION = 1
+# v2: added ``stage_runs.skipped`` / ``stage_runs.skip_reason`` (stage-skip control). Migrated
+# in-place by ``_migrate`` (idempotent ``ALTER TABLE ADD COLUMN``); no data is rewritten.
+DB_SCHEMA_VERSION = 2
 
 
 class IncompatibleStateError(Exception):
     """The on-disk ``state.db`` schema version is newer than this orchestrator understands."""
 
 
-def _enforce_schema_version(conn: sqlite3.Connection, *, writable: bool) -> None:
-    """Verify (and, when ``writable``, stamp) ``PRAGMA user_version`` against ``DB_SCHEMA_VERSION``.
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring an existing database up to the current schema (writable open only).
 
-    A database newer than this orchestrator is refused (fail-loud). A ``0`` value — a brand-new DB,
-    or one created before versioning whose shape is already v1 — is adopted when writable. A value
-    in ``1..DB_SCHEMA_VERSION`` is compatible; the ``< current`` case is the future-migration hook.
+    Idempotent: each column add is guarded by a ``PRAGMA table_info`` check, so this is a no-op on
+    a brand-new DB (``_SCHEMA`` already created the columns) and adds only what a pre-v2 DB lacks.
+    """
+    cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(stage_runs)")}
+    if "skipped" not in cols:
+        conn.execute("ALTER TABLE stage_runs ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0")
+    if "skip_reason" not in cols:
+        conn.execute("ALTER TABLE stage_runs ADD COLUMN skip_reason TEXT")
+
+
+def _enforce_schema_version(conn: sqlite3.Connection, *, writable: bool) -> None:
+    """Verify (and, when ``writable``, migrate + stamp) ``PRAGMA user_version``.
+
+    A database newer than this orchestrator is refused (fail-loud). On the writable path an older or
+    pre-versioning (``0``) database is migrated in place by :func:`_migrate` and then stamped to
+    ``DB_SCHEMA_VERSION``. The read-only path only verifies the bound (it never mutates the file).
     """
     current = int(conn.execute("PRAGMA user_version").fetchone()[0])
     if current > DB_SCHEMA_VERSION:
@@ -53,9 +68,11 @@ def _enforce_schema_version(conn: sqlite3.Connection, *, writable: bool) -> None
             f"state.db schema version {current} is newer than this orchestrator supports "
             f"({DB_SCHEMA_VERSION}); upgrade wastech-orchestrator or start a fresh workspace"
         )
-    if current == 0 and writable:
-        # DB_SCHEMA_VERSION is a trusted int constant (no injection); PRAGMA can't be parameterized.
-        conn.execute(f"PRAGMA user_version={DB_SCHEMA_VERSION}")
+    if writable:
+        _migrate(conn)
+        if current != DB_SCHEMA_VERSION:
+            # DB_SCHEMA_VERSION is a trusted int constant (no injection); PRAGMA can't be a param.
+            conn.execute(f"PRAGMA user_version={DB_SCHEMA_VERSION}")
 
 
 _SCHEMA = """
@@ -105,7 +122,9 @@ CREATE TABLE IF NOT EXISTS stage_runs (
     commit_sha_before TEXT,
     commit_sha_after TEXT,
     started_at TEXT,
-    finished_at TEXT
+    finished_at TEXT,
+    skipped INTEGER NOT NULL DEFAULT 0,
+    skip_reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS provider_attempts (
@@ -222,6 +241,10 @@ class StageRunRow:
     commit_sha_after: str | None = None
     started_at: str | None = None
     finished_at: str | None = None
+    # Stage-skip audit (stage-skip control): a skipped stage gets a row with ``skipped=True`` and a
+    # human-readable ``skip_reason`` and no provider data.
+    skipped: bool = False
+    skip_reason: str | None = None
     id: int | None = None
 
 
@@ -487,8 +510,9 @@ class StateStore:
                 INSERT INTO stage_runs (
                     task_id, stage, subtask_order, status, route_primary, route_fallback,
                     route_source, provider_used, error_class, stage_attempts,
-                    commit_sha_before, commit_sha_after, started_at, finished_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    commit_sha_before, commit_sha_after, started_at, finished_at,
+                    skipped, skip_reason
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     run.task_id,
@@ -505,9 +529,43 @@ class StateStore:
                     run.commit_sha_after,
                     run.started_at,
                     run.finished_at,
+                    1 if run.skipped else 0,
+                    run.skip_reason,
                 ),
             )
             return int(cur.lastrowid or 0)
+
+    def record_skip(
+        self,
+        task_id: str,
+        stage: str,
+        *,
+        reason: str,
+        subtask_order: int | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> int:
+        """Record a skipped stage in the audit trail (stage-skip control).
+
+        A skipped stage runs no provider, so it carries sentinel route fields (``route_primary`` /
+        ``route_source`` are ``NOT NULL``) and ``stage_attempts=0``; ``skipped`` and ``skip_reason``
+        hold the audit detail.
+        """
+        return self.record_stage_run(
+            StageRunRow(
+                task_id=task_id,
+                stage=stage,
+                route_primary="(skipped)",
+                route_source="skip",
+                stage_attempts=0,
+                subtask_order=subtask_order,
+                status="skipped",
+                skipped=True,
+                skip_reason=reason,
+                started_at=self._clock(),
+                finished_at=self._clock(),
+            ),
+            conn,
+        )
 
     def complete_stage_run(
         self,

@@ -145,6 +145,17 @@ def _artifact_kind(name: str) -> str:
     return _ARTIFACT_KINDS.get(name, name)
 
 
+def effective_skip(config: OrchestratorConfig, task: NormalizedTask) -> frozenset[Stage]:
+    """The stages skipped for ``task``: the union of the global config list and the task's own
+    ``stages.<stage>.enabled: false`` overrides (stage-skip control).
+
+    Union, no opt-out: a stage skipped globally cannot be re-enabled per task. Validation has
+    already guaranteed every member is in ``SKIPPABLE_STAGES`` and that any ``review`` skip is
+    permitted, so the orchestrator can trust this set unconditionally.
+    """
+    return frozenset(config.agents.skip_stages) | task.disabled_stages()
+
+
 @dataclass(frozen=True)
 class PipelineResult:
     """The terminal outcome of running one task."""
@@ -186,6 +197,9 @@ class _Pipeline:
     slug: str = ""
     session_ids: dict[str, str] = field(default_factory=dict)  # provider_id.value -> session_id
     check_profile: ResolvedCheckProfile | None = None  # resolved at preflight (before any branch)
+    # Effective stage-skip set (global config ∪ per-task). Re-derived on every run/resume from
+    # config + frontmatter, so a restart recovers it without persistence (stage-skip control).
+    skip: frozenset[Stage] = frozenset()
 
 
 class Orchestrator:
@@ -250,6 +264,7 @@ class Orchestrator:
             status=Status.VALIDATED,
             counters=LoopCounters(),
             decomposition=DecompositionDecision(accepted=False, reason="pending", n=1),
+            skip=effective_skip(self._config, task),
         )
         try:
             return self._drive(pipeline, completeness)
@@ -368,6 +383,7 @@ class Orchestrator:
             branch=row.branch or "",
             slug=row.slug or slugify(task.title),
             plan_path=str(task_artifact_dir(self._artifacts_root, plan.task_id) / "plan.md"),
+            skip=effective_skip(self._config, task),
         )
 
         publish_phase = {
@@ -533,6 +549,26 @@ class Orchestrator:
         self._transition(p, Status.PLANNING)
 
     def _planning(self, p: _Pipeline) -> None:
+        if Stage.PLANNING in p.skip:
+            # No planning agent: write a stub plan from the task itself and run as a single unit
+            # (decomposition needs the planning agent's structured output, so it is forced off).
+            stub = (
+                f"# Plan (stub — planning stage skipped)\n\n"
+                f"## {p.task.title}\n\n{p.task.description}\n"
+            )
+            p.plan_path = self._write_artifact(p, "plan.md", stub)
+            p.decomposition = DecompositionDecision(accepted=False, reason="planning_skipped", n=1)
+            self._store.update_task(
+                p.task.id,
+                decomposition_enabled=False,
+                decomposition_accepted=False,
+                decomposition_reason="planning_skipped",
+                subtask_count=None,
+                active_subtask=None,
+            )
+            self._record_skip(p, Stage.PLANNING, self._skip_reason(p, Stage.PLANNING))
+            self._transition(p, Status.IMPLEMENTING)
+            return
         _, typed = self._run_typed_stage(p, Stage.PLANNING)
         p.plan_path = self._write_artifact(p, "plan.md", typed.content)
         gate_on = self._decomposition_gate_on(p.task)
@@ -598,7 +634,11 @@ class Orchestrator:
                     subtask=subtask,
                     unit=unit,
                 )
-                self._transition(p, Status.TESTING)
+                if Stage.TESTING in p.skip:
+                    self._record_skip(
+                        p, Stage.TESTING, self._skip_reason(p, Stage.TESTING), subtask=subtask
+                    )
+                self._transition(p, self._after_edit_target(p))
 
             if p.status is Status.TESTING:
                 check = self._run_checks(p, subtask)
@@ -620,6 +660,15 @@ class Orchestrator:
                     continue
 
             if p.status is Status.REVIEWING:
+                if Stage.REVIEW in p.skip:
+                    # No review agent: commit without an agent quality gate (validation has already
+                    # confirmed agents.allow_review_skip). The danger is audited again at publish.
+                    self._record_skip(
+                        p, Stage.REVIEW, self._skip_reason(p, Stage.REVIEW), subtask=subtask
+                    )
+                    self._loops.on_review_pass(p.counters)
+                    self._save_counters(p)
+                    return self._on_review_passed(p, unit, is_last=is_last)
                 outcome = self._run_stage(p, Stage.REVIEW, subtask=subtask, unit=unit)
                 result = self._require_result_outcome(p, outcome, Stage.REVIEW)
                 blocking = self._write_review(p, result.structured_output, result.final_message)
@@ -638,7 +687,9 @@ class Orchestrator:
                     subtask=subtask,
                     unit=unit,
                 )
-                self._transition(p, Status.TESTING)
+                # When testing is skipped a review-driven fix returns to review, not to a skipped
+                # test gate. The testing skip was already audited at IMPLEMENTING for this unit.
+                self._transition(p, self._after_edit_target(p))
 
     def _on_review_passed(
         self, p: _Pipeline, unit: SubtaskSpec | None, *, is_last: bool
@@ -663,28 +714,56 @@ class Orchestrator:
         return None
 
     def _summary(self, p: _Pipeline) -> None:
-        outcome = self._run_stage(p, Stage.SUMMARY)
-        if outcome.result is not None and outcome.result.status is RunStatus.SUCCEEDED:
-            self._write_summary_from_agent(
-                p, outcome.result.final_message, outcome.result.structured_output
-            )
+        if Stage.SUMMARY in p.skip:
+            # No summary agent: write a minimal stub so the PR body still has a body.
+            stub = f"# Summary\n\nTask `{p.task.id}`: {p.task.title}\n\n*(summary stage skipped)*\n"
+            self._write_summary_from_agent(p, stub, None)
+            self._record_skip(p, Stage.SUMMARY, self._skip_reason(p, Stage.SUMMARY))
         else:
-            # Best-effort stage: no provider could produce it → deterministic minimal summary.
-            diff = self._git.cumulative_committed_diff() or (
-                Path(p.diff_path).read_text(encoding="utf-8") if p.diff_path else ""
-            )
-            write_minimal_summary(
-                self._artifacts_root,
-                p.task.id,
-                title=p.task.title,
-                description=p.task.description,
-                diff=diff,
-            )
+            outcome = self._run_stage(p, Stage.SUMMARY)
+            if outcome.result is not None and outcome.result.status is RunStatus.SUCCEEDED:
+                self._write_summary_from_agent(
+                    p, outcome.result.final_message, outcome.result.structured_output
+                )
+            else:
+                # Best-effort stage: no provider could produce it → deterministic minimal summary.
+                diff = self._git.cumulative_committed_diff() or (
+                    Path(p.diff_path).read_text(encoding="utf-8") if p.diff_path else ""
+                )
+                write_minimal_summary(
+                    self._artifacts_root,
+                    p.task.id,
+                    title=p.task.title,
+                    description=p.task.description,
+                    diff=diff,
+                )
+        # Append the skipped-stages audit so reviewers see which stages ran (stage-skip control).
+        self._append_skip_section(p)
         # summary.json stays under logs/ (a working artifact, never committed); the human-readable
         # summary.md is placed next to the task and committed during finalize (§6, §21.3).
         task_dir = task_artifact_dir(self._artifacts_root, p.task.id)
         self._register_artifact(p.task.id, "summary_json", str(task_dir / "summary.json"))
         self._transition(p, Status.READY_TO_PUBLISH)
+
+    def _skip_section_md(self, p: _Pipeline) -> str:
+        """A ``## Pipeline stages skipped`` markdown block, or ``""`` when nothing was skipped."""
+        if not p.skip:
+            return ""
+        lines = "\n".join(f"- `{s.value}`" for s in sorted(p.skip, key=lambda s: s.value))
+        return f"\n## Pipeline stages skipped\n\n{lines}\n"
+
+    def _append_skip_section(self, p: _Pipeline) -> None:
+        """Append the skipped-stages section to ``summary.md`` (idempotent within a run)."""
+        section = self._skip_section_md(p)
+        if not section:
+            return
+        md_path = task_artifact_dir(self._artifacts_root, p.task.id) / "summary.md"
+        if not md_path.exists():
+            return
+        existing = md_path.read_text(encoding="utf-8")
+        if "## Pipeline stages skipped" in existing:
+            return
+        md_path.write_text(existing.rstrip("\n") + "\n" + section, encoding="utf-8")
 
     def _publish(self, p: _Pipeline) -> PipelineResult:
         # Finalize BEFORE the commit so the task move + summary.md enter the task commit (§6, §21):
@@ -709,6 +788,12 @@ class Orchestrator:
                 p.task.id, p.branch, title=f"{p.task.title}", body_path=body_path
             ),
         )
+        if pr_url and Stage.REVIEW in p.skip and self._auto_merge_on(p.task):
+            self._log(p.task.id).warning(
+                "[AUTO-MERGE] review skipped AND auto_merge enabled — task will merge without "
+                "any review gate",
+                extra={"pr_url": pr_url},
+            )
         if pr_url and self._auto_merge_on(p.task):
             return self._auto_merge(p, pr_url)
         if pr_url and p.task.auto_merge is True:
@@ -773,6 +858,7 @@ class Orchestrator:
                 description=p.task.description,
                 diff=diff,
             )
+            self._append_skip_section(p)
         return md_path.read_text(encoding="utf-8") if md_path.exists() else (p.task.title + "\n")
 
     def _finalize_task_artifacts(self, p: _Pipeline, final: Status) -> Path | None:
@@ -797,6 +883,17 @@ class Orchestrator:
     # --- fix-loop control -----------------------------------------------------------------
 
     def _enter_fixing(self, p: _Pipeline, loop: FixLoop) -> PipelineResult | None:
+        if Stage.FIXING in p.skip:
+            # Recovery disabled: the first test/review failure goes straight to manual review
+            # (effectively max_fix_attempts: 0), with a failure report for the operator.
+            self._record_skip(p, Stage.FIXING, self._skip_reason(p, Stage.FIXING))
+            report_path = self._write_failure_report(p, loop, "fixing_disabled")
+            self._store.update_task(p.task.id, failure_report_path=report_path)
+            return self._go_terminal(
+                p,
+                Status.MANUAL_ACTION_REQUIRED,
+                manual_reason=f"fixing disabled; {loop.value} failed",
+            )
         decision = self._loops.enter_fixing(p.counters, loop)
         self._save_counters(p)
         counters = {
@@ -1524,6 +1621,31 @@ class Orchestrator:
                 )
             )
         return outcome
+
+    # --- stage-skip helpers ---------------------------------------------------------------
+
+    def _record_skip(
+        self, p: _Pipeline, stage: Stage, reason: str, *, subtask: int | None = None
+    ) -> None:
+        """Log (WARNING) and persist a skipped stage to the audit trail (stage-skip control)."""
+        self._log(p.task.id).warning(
+            f"{stage.value} skipped", extra={"reason": reason, "subtask": subtask}
+        )
+        self._store.record_skip(p.task.id, stage.value, reason=reason, subtask_order=subtask)
+
+    def _skip_reason(self, p: _Pipeline, stage: Stage) -> str:
+        """Describe why ``stage`` is being skipped — global config, per-task, or both."""
+        in_global = stage in self._config.agents.skip_stages
+        in_task = stage in p.task.disabled_stages()
+        if in_global and in_task:
+            return "global config and task frontmatter"
+        if in_global:
+            return "global config (agents.skip_stages)"
+        return "task frontmatter (stages.<stage>.enabled: false)"
+
+    def _after_edit_target(self, p: _Pipeline) -> Status:
+        """Where the implement/fix edit hands off: testing, or review when testing is skipped."""
+        return Status.REVIEWING if Stage.TESTING in p.skip else Status.TESTING
 
     # --- artifact helpers -----------------------------------------------------------------
 

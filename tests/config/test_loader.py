@@ -41,6 +41,49 @@ def test_unknown_top_level_key_is_rejected() -> None:
     assert any("nonsense" in issue for issue in exc.value.issues)
 
 
+def _agents(body: str) -> str:
+    return (
+        'repo:\n  url: "git@example.com:o/r.git"\n'
+        'agents:\n  allowed: [codex]\n  providers:\n    codex:\n      command: "codex"\n' + body
+    )
+
+
+def test_skip_stages_default_empty() -> None:
+    result = loads_config(_LEGACY)
+    assert result.config.agents.skip_stages == ()
+    assert result.config.agents.allow_review_skip is False
+
+
+def test_skip_stages_parsed() -> None:
+    result = loads_config(_agents("  skip_stages: [testing, summary]\n"))
+    assert result.config.agents.skip_stages == (Stage.TESTING, Stage.SUMMARY)
+
+
+def test_skip_stages_unknown_name_is_issue() -> None:
+    with pytest.raises(ConfigError) as exc:
+        loads_config(_agents("  skip_stages: [nonsense]\n"))
+    assert any("skip_stages" in issue and "nonsense" in issue for issue in exc.value.issues)
+
+
+def test_skip_stages_non_skippable_is_issue() -> None:
+    # ``implementation`` is a real stage but cannot be skipped.
+    with pytest.raises(ConfigError) as exc:
+        loads_config(_agents("  skip_stages: [implementation]\n"))
+    assert any("not skippable" in issue for issue in exc.value.issues)
+
+
+def test_skip_stages_review_requires_opt_in() -> None:
+    with pytest.raises(ConfigError) as exc:
+        loads_config(_agents("  skip_stages: [review]\n"))
+    assert any("allow_review_skip" in issue for issue in exc.value.issues)
+
+
+def test_skip_stages_review_allowed_with_opt_in() -> None:
+    result = loads_config(_agents("  skip_stages: [review]\n  allow_review_skip: true\n"))
+    assert result.config.agents.skip_stages == (Stage.REVIEW,)
+    assert result.config.agents.allow_review_skip is True
+
+
 def test_auto_mode_defaults_to_false() -> None:
     result = loads_config(_LEGACY)
     assert result.config.orchestrator.auto_mode.enabled is False

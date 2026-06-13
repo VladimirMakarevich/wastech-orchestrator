@@ -8,8 +8,8 @@ The persisted artifacts that outlive an upgrade carry their own independent sche
 (see the spec's "Versioning and compatibility" section and
 [docs/operations.md](docs/operations.md#upgrading-the-orchestrator)):
 
-- `config.yaml` — top-level `schema_version` (current: **3**)
-- `state.db` — SQLite `PRAGMA user_version` (current: **1**)
+- `config.yaml` — top-level `schema_version` (current: **4**)
+- `state.db` — SQLite `PRAGMA user_version` (current: **2**)
 - registry (`registry.json`) — `version` (current: **1**, read forward-tolerantly)
 
 The maintainer bumps the package version in `pyproject.toml` on release; `wastech-orchestrator
@@ -18,6 +18,25 @@ The maintainer bumps the package version in `pyproject.toml` on release; `wastec
 ## [Unreleased]
 
 ### Added
+- **Stage-skip control**: operators can skip pipeline stages that add no value for a given workload,
+  globally or per-task. Skippable stages are `planning`, `testing`, `review`, `fixing`, `summary`
+  (`implementation`/`publishing` are never skippable; `refinement` keeps `refined: true`). Global:
+  `agents.skip_stages: [...]`. Per-task: `enabled: false` on the existing `stages:` block (e.g.
+  `stages: { testing: { enabled: false } }`). The effective skip set is the **union** of the two —
+  a global skip cannot be re-enabled per task. The high-risk `review` skip (no agent gate before
+  commit/PR) is fail-closed behind a new `agents.allow_review_skip` flag, required for a review skip
+  from either source (`review_skip_not_allowed`). Behaviour: `planning` → stub `plan.md`, single
+  unit; `testing` → straight to review (Check Runner bypassed); `review` → commit without an agent
+  gate; `fixing` → first failure goes to `manual_action_required` (0 fix iterations); `summary` →
+  stub summary. Every skip is logged at `WARNING`, recorded in `state.db`
+  (`stage_runs.skipped`/`skip_reason`), and listed in a `## Pipeline stages skipped` PR-body section;
+  a `review` skip under auto-merge emits a second prominent warning. Bumps `config.yaml`
+  `schema_version` → **4** (new optional `agents.skip_stages`/`allow_review_skip`, safe defaults) and
+  `state.db` `user_version` → **2** (in-place `ALTER TABLE` adds the two `stage_runs` columns; the
+  per-stage skip intent and per-stage model/reasoning now round-trip through `task.normalized.json`
+  for crash recovery). See [docs/task-authoring.md](docs/task-authoring.md#stages),
+  [docs/operations.md](docs/operations.md), and
+  [docs/backlog/stage_skip_control.md](docs/backlog/stage_skip_control.md).
 - **Per-stage model/reasoning overrides**: a task can now tune `model` and `reasoning` per agent
   stage via a `stages:` front-matter block (e.g. Opus + `high` for `planning`/`review`, a lighter
   model + `low` for `implementation`/`fixing`). Each field resolves independently, most-specific
