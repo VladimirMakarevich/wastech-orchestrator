@@ -24,8 +24,13 @@ from pathlib import Path
 
 from wastech_orchestrator import __version__, process_control
 from wastech_orchestrator.checks import diagnostics as check_diagnostics
-from wastech_orchestrator.config.loader import ConfigError, load_config
-from wastech_orchestrator.config.schema import FootprintLocation, OrchestratorConfig
+from wastech_orchestrator.config import upgrade as config_upgrade
+from wastech_orchestrator.config.loader import ConfigError, load_config, loads_config
+from wastech_orchestrator.config.schema import (
+    CONFIG_SCHEMA_VERSION,
+    FootprintLocation,
+    OrchestratorConfig,
+)
 from wastech_orchestrator.config.validation import validate_config
 from wastech_orchestrator.core.orchestrator import (
     Orchestrator,
@@ -280,6 +285,14 @@ def build_parser() -> argparse.ArgumentParser:
     status_cmd = sub.add_parser("status", help="show the active or latest persisted task status")
     status_cmd.add_argument("task_id", nargs="?", help="specific task id (default: active/latest)")
 
+    upgrade_cfg_cmd = sub.add_parser(
+        "upgrade-config",
+        help="add config keys introduced by the current version, preserving existing values",
+    )
+    upgrade_cfg_cmd.add_argument(
+        "--dry-run", action="store_true", help="print what would change; write nothing"
+    )
+
     return parser
 
 
@@ -407,6 +420,58 @@ def resolve_config_path(args: argparse.Namespace) -> str | None:
     if info is not None:
         return registry.lookup(info.root)
     return None
+
+
+def cmd_upgrade_config(args: argparse.Namespace) -> int:
+    """Add config keys introduced by the current version, preserving existing operator values.
+
+    The simple migration path (config/upgrade.py): merge the packaged template into the operator's
+    config (add-missing-only), stamp the current ``schema_version``, back up the original, and write
+    atomically. Idempotent — a config that is already current is left untouched (no rewrite, so its
+    comments survive). Refuses a config that is unparsable or already newer than this orchestrator.
+    """
+    path_str = resolve_config_path(args)
+    if path_str is None or not Path(path_str).is_file():
+        target = f" ({path_str})" if path_str is not None else ""
+        print(
+            f"upgrade-config: no config.yaml found{target} — pass --config PATH, run from a "
+            "directory containing config.yaml, or 'install' to bind this repo"
+        )
+        return 2
+    path = Path(path_str).resolve()
+    text = path.read_text(encoding="utf-8")
+    # Fail-closed: a structural problem or a newer-than-supported schema_version raises ConfigError
+    # (handled in main with a clean message + exit 2) — never upgrade a config we cannot read.
+    load_config(path)
+
+    operator = config_upgrade.parse_mapping(text)
+    template = config_upgrade.packaged_template_mapping()
+    merged, added = config_upgrade.upgrade_config_mapping(template, operator)
+    old_version = operator.get("schema_version", "absent")
+
+    if merged == operator:
+        print(f"upgrade-config: already up to date (schema_version {CONFIG_SCHEMA_VERSION})")
+        return 0
+
+    rendered = config_upgrade.render(merged)
+    # Defensive: the regenerated config must load and pass §11/§21.4 before we touch the file.
+    validate_config(loads_config(rendered, source="<upgraded config>").config)
+
+    def _report(prefix: str) -> None:
+        print(f"{prefix} {path}")
+        print(f"  schema_version: {old_version} -> {CONFIG_SCHEMA_VERSION}")
+        for key in added:
+            print(f"  + {key}")
+
+    if args.dry_run:
+        _report("upgrade-config (dry-run): would update")
+        return 0
+
+    backup = _install_backup_config(path)
+    _install_atomic_write(path, rendered)
+    _report("upgrade-config: updated")
+    print(f"  backup: {backup}")
+    return 0
 
 
 def load_config_for(args: argparse.Namespace) -> OrchestratorConfig | None:
@@ -1008,6 +1073,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_telegram_test(args)
         if args.command == "status":
             return cmd_status(args)
+        if args.command == "upgrade-config":
+            return cmd_upgrade_config(args)
     except (ConfigError, IncompatibleStateError, detect.GhNotAvailableError) as exc:
         print(f"error: {exc}")
         return 2

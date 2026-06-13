@@ -18,6 +18,15 @@ The maintainer bumps the package version in `pyproject.toml` on release; `wastec
 ## [Unreleased]
 
 ### Added
+- **`upgrade-config` command**: brings an operator's `config.yaml` up to the current format after a
+  package upgrade. It adds any keys the new version introduced (from the packaged template's defaults),
+  **preserves every existing operator value**, stamps the current `schema_version`, and backs up the
+  original to `config.yaml.bak-<UTC>` before writing atomically. Idempotent (an already-current config
+  is left untouched, comments and all) and fail-closed (refuses an unparsable or newer-than-supported
+  config; validates the result before writing). It does **not** itself bump any schema version. Caveat:
+  when it rewrites the file it re-emits via YAML and drops inline comments (the simple migration path).
+  `--dry-run` previews the additions. New module `config/upgrade.py` holds the pure add-missing-only
+  merge. See [docs/operations.md](docs/operations.md#upgrading-the-orchestrator).
 - **Stage-skip control**: operators can skip pipeline stages that add no value for a given workload,
   globally or per-task. Skippable stages are `planning`, `testing`, `review`, `fixing`, `summary`
   (`implementation`/`publishing` are never skippable; `refinement` keeps `refined: true`). Global:

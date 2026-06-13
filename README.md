@@ -195,6 +195,8 @@ wastech-orchestrator stop               stop a running watch daemon (SIGTERM, th
 wastech-orchestrator restart            stop the running watch daemon, then start a fresh one
                           --timeout SECONDS  --poll-seconds N
 wastech-orchestrator status [task-id]   show the active/latest persisted task (no work performed)
+wastech-orchestrator upgrade-config     add config keys from a new version, keeping existing values
+                          --dry-run                   preview the keys that would be added
 wastech-orchestrator --version          installed version
 ```
 

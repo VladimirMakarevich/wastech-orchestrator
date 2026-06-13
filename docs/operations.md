@@ -106,6 +106,24 @@ format it cannot read. To recover, upgrade the package to a version that support
 throwaway setup, start a fresh workspace via `install --reconfigure`). Older or absent versions are
 accepted as-is. Per-release changes are listed in [CHANGELOG.md](../CHANGELOG.md).
 
+`state.db` migrates itself **forward** in place the first time a newer version opens it (e.g. v1→v2
+adds the stage-skip audit columns) — no action needed. `config.yaml` does **not** auto-migrate: a new
+release may add keys (with safe defaults, so an older config still runs), but to materialize them in
+your file run **`upgrade-config`** after upgrading the package:
+
+```bash
+wastech-orchestrator upgrade-config              # uses the discovered/bound config
+wastech-orchestrator --config path/to/config.yaml upgrade-config --dry-run   # preview only
+```
+
+It adds any keys the current format introduced (from the packaged template's defaults), **keeps every
+existing value**, stamps the current `schema_version`, and backs up the original to
+`config.yaml.bak-<UTC>` before writing. It is idempotent (an already-current config is left untouched)
+and fail-closed (it refuses a config that is unparsable or already newer than this version, and never
+writes a config that would fail validation). **Caveat:** when it does rewrite the file it re-emits via
+YAML and drops inline comments — see `config.example.yaml` / [configuration.md](configuration.md) for
+field docs. `--dry-run` lists what would be added without writing.
+
 To install or pin a specific published (pre)release, append its tag to the `pipx`/`pip` source — e.g.
 `pipx install "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git@v0.1.1a1"`. Releases
 are tag-driven and pre-releases (`aN`/`bN`/`rcN` tags) are marked as such on GitHub; maintainers cut
