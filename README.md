@@ -1,4 +1,4 @@
-# wastech-orchestrator
+# WORC → wastech-orchestrator
 
 **A lean orchestrator that turns a written task into a reviewed Pull Request** — using external
 coding agents (**OpenAI Codex CLI** and **Anthropic Claude Code CLI**) to do the editing, while the

@@ -1,6 +1,1 @@
-Review the changes against the task: alignment with requirements, bugs, edge cases, style, test
-coverage, and the absence of accidental or extraneous files. Report blocking findings separately
-from non-blocking suggestions.
-
-Diff:
-{diff}
+Review the current diff against the task and plan. Report findings with a severity each; mark anything that must change before merge as blocking.

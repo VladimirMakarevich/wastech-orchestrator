@@ -19,7 +19,9 @@ from wastech_orchestrator.providers.base import ProviderId, Stage
 # spec's "Versioning & compatibility" section.
 # v2: added the opt-in ``git.auto_merge*`` keys (auto-merge bypass). Old (v1/absent) configs omit
 # them and take the safe ``false`` defaults — no migration flips anything.
-CONFIG_SCHEMA_VERSION = 2
+# v3: added the optional ``prompts`` block (operator-customizable stage prompts). Old (v1/v2/absent)
+# configs omit it and take the safe defaults (packaged templates, append mode) — no migration.
+CONFIG_SCHEMA_VERSION = 3
 
 # Stages routed to an agent provider. The remaining stages (``testing``, ``publishing``) are run by
 # the orchestrator itself (Check Runner / Git Manager), so they never appear in ``agents.routing``
@@ -241,6 +243,28 @@ class TelegramConfig:
     ask_timeout_s: int
 
 
+class PromptMode(StrEnum):
+    """How an operator override combines with the packaged default prompt (backlog §4)."""
+
+    APPEND = "append"  # packaged default, then the operator template
+    REPLACE = "replace"  # the operator template only, for stages that have an override
+
+
+@dataclass(frozen=True)
+class PromptsConfig:
+    """Operator-customizable stage prompts (backlog: prompt_template_customization §4).
+
+    Defaults reproduce the previous hardcoded behavior exactly: packaged templates, append mode,
+    non-strict, no overrides. ``overrides`` maps an agent-routed :class:`Stage` to a relative
+    filename inside ``templates_dir``; it is a tuple of pairs to keep the dataclass hashable.
+    """
+
+    templates_dir: str = "./templates/prompts"
+    mode: PromptMode = PromptMode.APPEND
+    strict: bool = False
+    overrides: tuple[tuple[Stage, str], ...] = ()
+
+
 @dataclass(frozen=True)
 class OrchestratorConfig:
     orchestrator: OrchestratorRuntimeConfig
@@ -251,3 +275,4 @@ class OrchestratorConfig:
     checks: ChecksConfig
     git: GitConfig
     telegram: TelegramConfig
+    prompts: PromptsConfig = PromptsConfig()

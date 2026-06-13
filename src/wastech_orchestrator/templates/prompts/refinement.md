@@ -1,13 +1,1 @@
-You are refining a task before implementation. Read the task and the repository context.
-
-Produce an enriched specification:
-1. a clarified description;
-2. scope (in / out);
-3. acceptance criteria;
-4. affected modules / files;
-5. assumptions and risks.
-
-Do not change code. If the scope cannot be determined at all, say so explicitly.
-
-Task:
-{task}
+Enrich the task into a complete, unambiguous specification. Document any assumptions. Do not edit code. Return the typed structured result required by the output schema. Set human_input only when a material ambiguity cannot be resolved safely from repository evidence. If a human_input context file is present, apply that answer and do not repeat the same question.

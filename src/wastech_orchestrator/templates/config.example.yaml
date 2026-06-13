@@ -4,7 +4,7 @@
 # repo-root config.example.yaml and with §11 of
 # docs/implementation_stages/00_orchestrator_final_plan.md.
 
-schema_version: 2                   # config format version; the orchestrator refuses newer configs
+schema_version: 3                   # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -129,3 +129,16 @@ telegram:                           # human-in-the-loop + notifications (optiona
   bot_token_env: "TELEGRAM_BOT_TOKEN"
   chat_id_env: "TELEGRAM_CHAT_ID"   # must resolve to a non-zero numeric chat id
   ask_timeout_s: 28800              # > 0; blocking HITL fails closed on timeout
+
+prompts:                            # operator-customizable stage prompts (optional; schema v3)
+  templates_dir: "./templates/prompts"  # resolves from the orchestrator project root, not the repo
+  mode: append                      # append (default + your text) | replace (your text only)
+  strict: false                     # true = a missing override file is a config error; false = warn + default
+  overrides: {}                     # map an agent-routed stage to a .md file inside templates_dir, e.g.:
+                                    #   implementation: "implementation.md"
+                                    #   review: "review.md"
+                                    # Templates are prompt text only; they cannot change provider,
+                                    # extra_args, sandbox/approvals, denied commands/reads, or env.
+                                    # Variables: {task_id} {stage} {repo_path} {task_path} {plan_path}
+                                    #   {diff_path} {checks_path} {review_path} {subtask_order}
+                                    #   {subtask_count} {subtask_spec_path} (paths/metadata only).

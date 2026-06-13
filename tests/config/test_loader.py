@@ -275,3 +275,59 @@ def test_denied_commands_default_blocks_gh_pr_merge() -> None:
     # The orchestrator owns merging; agents must not be able to run `gh pr merge` themselves.
     cfg = loads_config(_LEGACY).config
     assert "gh pr merge" in cfg.security.denied_commands
+
+
+# --- prompts block (backlog: prompt_template_customization) ---
+
+
+def test_prompts_block_absent_defaults_are_safe() -> None:
+    from wastech_orchestrator.config.schema import PromptMode
+
+    cfg = loads_config(_LEGACY).config
+    assert cfg.prompts.templates_dir == "./templates/prompts"
+    assert cfg.prompts.mode is PromptMode.APPEND
+    assert cfg.prompts.strict is False
+    assert cfg.prompts.overrides == ()
+
+
+def test_prompts_block_parses() -> None:
+    from wastech_orchestrator.config.schema import PromptMode
+
+    text = _LEGACY + (
+        "prompts:\n"
+        "  templates_dir: './tpl'\n"
+        "  mode: replace\n"
+        "  strict: true\n"
+        "  overrides:\n"
+        "    implementation: 'implementation.md'\n"
+        "    review: 'review.md'\n"
+    )
+    cfg = loads_config(text).config
+    assert cfg.prompts.templates_dir == "./tpl"
+    assert cfg.prompts.mode is PromptMode.REPLACE
+    assert cfg.prompts.strict is True
+    assert dict(cfg.prompts.overrides) == {
+        Stage.IMPLEMENTATION: "implementation.md",
+        Stage.REVIEW: "review.md",
+    }
+
+
+def test_prompts_unknown_stage_key_is_rejected() -> None:
+    text = _LEGACY + "prompts:\n  overrides:\n    deployment: 'x.md'\n"
+    with pytest.raises(ConfigError) as exc:
+        loads_config(text)
+    assert any("deployment" in issue for issue in exc.value.issues)
+
+
+def test_prompts_invalid_mode_is_rejected() -> None:
+    text = _LEGACY + "prompts:\n  mode: merge\n"
+    with pytest.raises(ConfigError) as exc:
+        loads_config(text)
+    assert any("prompts.mode" in issue for issue in exc.value.issues)
+
+
+def test_prompts_unknown_key_is_rejected() -> None:
+    text = _LEGACY + "prompts:\n  preamble: 'hi'\n"
+    with pytest.raises(ConfigError) as exc:
+        loads_config(text)
+    assert any("preamble" in issue for issue in exc.value.issues)

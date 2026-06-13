@@ -38,6 +38,8 @@ from wastech_orchestrator.config.schema import (
     MergeStrategy,
     OrchestratorConfig,
     OrchestratorRuntimeConfig,
+    PromptMode,
+    PromptsConfig,
     ProviderConfig,
     RepoConfig,
     RouteConfig,
@@ -638,6 +640,36 @@ def _build_telegram(raw: Any, issues: list[str]) -> TelegramConfig:
     )
 
 
+def _build_prompt_overrides(raw: Any, issues: list[str]) -> tuple[tuple[Stage, str], ...]:
+    where = "prompts.overrides"
+    m = _mapping(raw, where, issues)
+    overrides: dict[Stage, str] = {}
+    for key in sorted(m):
+        try:
+            stage = Stage(key)
+        except ValueError:
+            issues.append(f"{where}: unknown stage key {key!r}")
+            continue
+        value = m[key]
+        if not isinstance(value, str):
+            issues.append(f"{where}.{key}: expected a string, got {type(value).__name__}")
+            continue
+        overrides[stage] = value
+    return tuple(overrides.items())
+
+
+def _build_prompts(raw: Any, issues: list[str]) -> PromptsConfig:
+    where = "prompts"
+    m = _mapping(raw, where, issues)
+    _check_keys(m, {"templates_dir", "mode", "strict", "overrides"}, where, issues)
+    return PromptsConfig(
+        templates_dir=_str(m, "templates_dir", "./templates/prompts", where, issues),
+        mode=_enum(m.get("mode"), PromptMode, f"{where}.mode", issues, PromptMode.APPEND),
+        strict=_bool(m, "strict", False, where, issues),
+        overrides=_build_prompt_overrides(m.get("overrides"), issues),
+    )
+
+
 _TOP_LEVEL_KEYS = {
     "schema_version",
     "orchestrator",
@@ -648,6 +680,7 @@ _TOP_LEVEL_KEYS = {
     "checks",
     "git",
     "telegram",
+    "prompts",
 }
 
 
@@ -683,6 +716,7 @@ def _parse(raw: Mapping[str, Any], issues: list[str], warnings: list[str]) -> Or
         checks=_build_checks(raw.get("checks"), issues),
         git=_build_git(raw.get("git"), issues),
         telegram=_build_telegram(raw.get("telegram"), issues),
+        prompts=_build_prompts(raw.get("prompts"), issues),
     )
 
 

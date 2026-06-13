@@ -114,8 +114,12 @@ def build_git_config(
     auto_merge_strategy: str = "squash",
     auto_merge_allow_per_task: bool = False,
     auto_merge_wait_for_checks: bool = False,
+    prompts_block: str | None = None,
 ) -> OrchestratorConfig:
-    """Build a config pointing ``repo.local_path`` at the clone, with the given footprint/checks."""
+    """Build a config pointing ``repo.local_path`` at the clone, with the given footprint/checks.
+
+    ``prompts_block`` is appended verbatim (a full top-level ``prompts:`` YAML block) when given.
+    """
     env_lines = "\n".join(f"    - {e}" for e in _TEST_ALLOWED_ENV)
     check_lines = "\n".join(f"    - {c!r}" for c in checks)
     validation_block = f"validation:\n  quarantine_folder: {quarantine!r}\n" if quarantine else ""
@@ -168,6 +172,8 @@ git:
     audit_commit_message: "chore(orchestrator): audit trail for {{task_id}}"
     audit_on_branch: {audit_on_branch}
 """
+    if prompts_block:
+        text += "\n" + prompts_block
     return loads_config(text).config
 
 

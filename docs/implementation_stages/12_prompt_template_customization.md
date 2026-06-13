@@ -1,13 +1,30 @@
 # Backlog: Prompt template customization
 
-Status: **backlog / not scheduled**
+Status: **implemented (2026-06-13)** — core feature shipped; the §10 open questions (global
+preamble, per-stage `mode`, `agent_instructions:` for project stubs) remain deferred.
 Date: 2026-06-12
 Owner: Vladimir Makarevich
 
-This document captures the task of making stage prompts configurable by operators. It is a backlog
-item, not part of the currently implemented runtime behavior. Nothing here overrides
+This document captured the task of making stage prompts configurable by operators. The core of it
+is now implemented (the `prompts:` config block; see
+[configuration.md](../configuration.md#prompts), [cookbook.md](../cookbook.md#7a-customize-stage-prompts),
+and `core/prompts.py`). The notes below are retained as design rationale. Nothing here overrides
 [00_orchestrator_final_plan.md](../implementation_stages/00_orchestrator_final_plan.md), [CLAUDE.md](../../CLAUDE.md), or the hard
 invariants in [docs/rules/](../rules/).
+
+Implementation notes that refined this proposal:
+
+- Packaged `templates/prompts/*.md` are renamed to the stage value (`planning.md`,
+  `implementation.md`, `fixing.md`) and rewritten to match the previous runtime prompts (paths-only,
+  no embedded task/diff content); they are now the single default source and `_STAGE_PROMPTS` is
+  gone.
+- Variable substitution uses a *safe* renderer: only allowlisted `{name}` tokens interpolate; any
+  other `{...}` (unknown name or literal code/JSON braces) is left verbatim.
+- Strict/existence checks run when the `PromptTemplateStore` is built at orchestrator startup (fail
+  closed before any agent runs); config validation does the static checks (stage, `.md`, traversal).
+- The rendered-prompt audit artifact is written **once per stage run** under
+  `logs/<task-id>/stages/<stage>/[sub-NN/]rendered-prompt.md` (the prompt is deterministic across a
+  stage run's attempts), resolving open question §10/Q2.
 
 ## 1. Goal
 

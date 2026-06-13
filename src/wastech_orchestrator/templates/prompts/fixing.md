@@ -1,0 +1,1 @@
+Address the failing checks and/or the blocking review findings in the context files. Make the minimal change needed to resolve them. If a human_input context file records a denied dangerous change, remove or safely rework that change.

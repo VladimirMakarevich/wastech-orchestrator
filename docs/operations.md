@@ -407,6 +407,7 @@ logs/
     failure_report.json / stuck.md# written iff the task ended manual_action_required
     review/findings.json          # review findings (severity → blocking)
     checks/<NNN>.log              # each check command's output (redacted)
+    stages/<stage>/rendered-prompt.md  # the exact stage prompt sent (redacted; see `prompts:`)
     stages/<stage>/run-<stage-run-id>/<attempt>-<provider>/
       request.json                # redacted request (argv, no secrets)
       stdout.log / stderr.log     # redacted process output
@@ -431,8 +432,25 @@ logs/
   ledger, and the failure report are all redacted; `denied_read_paths` (`.env`, `secrets/**`) are
   excluded from agent reads and their values are scrubbed from any sink.
 
+- **Custom stage prompts**: when `prompts:` is configured, `stages/<stage>/rendered-prompt.md` is
+  the exact (redacted) instruction the agent received for that stage — read it first to confirm an
+  override took effect and rendered as intended.
+
 Use the operator log for live monitoring. Provider `stdout.log` and `stderr.log` are finalized and
 redacted after the subprocess exits, so do not tail them while an attempt is still running.
+
+### Troubleshooting prompt templates
+
+- **`ConfigError: prompts.overrides.<stage>: ...` at startup** — the override stage is not
+  agent-routed, the file is not a `.md` inside `templates_dir`, or (in `strict: true`) the file is
+  missing/unreadable. Fix the path/stage, or set `strict: false` to fall back to the packaged
+  default with a warning.
+- **An override "did nothing"** — check the operator log for a
+  `prompt override unreadable; using packaged default` warning (non-strict fallback), confirm
+  `mode` (`append` vs `replace`), and compare `rendered-prompt.md` against your template.
+- **A `{placeholder}` printed literally** — only the allowlisted variables interpolate (see
+  [configuration.md](configuration.md#prompts)); any other `{...}` is intentionally left verbatim so
+  code/JSON braces survive. A path variable with no value for that stage renders empty.
 
 ---
 

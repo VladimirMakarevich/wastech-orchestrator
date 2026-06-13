@@ -52,6 +52,7 @@ from wastech_orchestrator.core.hitl import (
     write_waiting_interaction,
 )
 from wastech_orchestrator.core.loop_control import FixLoop, LoopController, LoopCounters
+from wastech_orchestrator.core.prompts import PromptTemplateStore, render_prompt
 from wastech_orchestrator.core.recovery import (
     RecoveryAction,
     RecoveryPlan,
@@ -86,6 +87,7 @@ from wastech_orchestrator.providers.base import (
     RunStatus,
     Stage,
 )
+from wastech_orchestrator.providers.redaction import read_denied_secrets, redact_text
 from wastech_orchestrator.routing.router import AgentRouter, StageOutcome
 from wastech_orchestrator.security.isolation import check_isolation
 from wastech_orchestrator.state_store import (
@@ -116,44 +118,6 @@ _LOG = logging.getLogger(__name__)
 # Severities that make a review finding "blocking" → the review-driven fix loop (§5, §8.1).
 _BLOCKING_SEVERITIES = frozenset({"blocking", "critical", "high"})
 
-# Concise per-stage instruction prompts. Task content is NOT embedded — the provider appends the
-# context **file paths** set on the request (§6); these strings only state the stage's intent.
-_STAGE_PROMPTS: dict[Stage, str] = {
-    Stage.REFINEMENT: (
-        "Enrich the task into a complete, unambiguous specification. Document any assumptions. "
-        "Do not edit code. Return the typed structured result required by the output schema. "
-        "Set human_input only when a material ambiguity cannot be resolved safely from repository "
-        "evidence. If a human_input context file is present, apply that answer and do not repeat "
-        "the same question."
-    ),
-    Stage.PLANNING: (
-        "Produce a brief implementation plan from the task and enriched spec. Do not edit code. "
-        "Return the typed structured result required by the output schema. Use human_input for a "
-        "material clarification or approval, including a precise risk and repository-relative "
-        "paths. If a human_input context file is present, apply that answer and do not repeat the "
-        "same request. If decomposition is enabled and the task is large, return ordered subtasks."
-    ),
-    Stage.IMPLEMENTATION: (
-        "Implement the task in the working tree, following the plan. "
-        "Make a minimal focused change. "
-        "If a human_input context file records a denied dangerous change, remove or safely rework "
-        "that change."
-    ),
-    Stage.REVIEW: (
-        "Review the current diff against the task and plan. Report findings with a severity each; "
-        "mark anything that must change before merge as blocking."
-    ),
-    Stage.FIXING: (
-        "Address the failing checks and/or the blocking review findings in the context files. "
-        "Make the minimal change needed to resolve them. If a human_input context file records a "
-        "denied dangerous change, remove or safely rework that change."
-    ),
-    Stage.SUMMARY: (
-        "Write a plain-language summary of the change: what was done, how it works, how it "
-        "integrates, and why. Do not edit code."
-    ),
-}
-
 
 def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
@@ -165,6 +129,7 @@ _ARTIFACT_KINDS: dict[str, str] = {
     "task.enriched.md": "enriched",
     "plan.md": "plan",
     "fixing-context.json": "fixing_context",
+    "rendered-prompt.md": "rendered_prompt",
 }
 
 _UNIT_STATUSES = frozenset({Status.IMPLEMENTING, Status.TESTING, Status.REVIEWING, Status.FIXING})
@@ -252,6 +217,9 @@ class Orchestrator:
         self._loops = loops
         self._gate = gate
         self._artifacts_root = artifacts_root
+        # Resolve stage prompts (packaged defaults + operator overrides). In strict mode a missing
+        # override file fails closed here, before any agent runs (backlog: prompt customization).
+        self._prompts = PromptTemplateStore(config.prompts)
         self._clock = clock
         self._monotonic = monotonic
         self._notifier: Notifier = notifier if notifier is not None else NullNotifier()
@@ -1082,11 +1050,13 @@ class Orchestrator:
                 started_at=started_at,
             )
         )
+        prompt = self._build_prompt(p, stage, unit)
+        self._write_rendered_prompt(p, stage, subtask, prompt)
         request = AgentRunRequest(
             task_id=p.task.id,
             stage=stage,
             working_directory=self._config.repo.local_path,
-            prompt=self._build_prompt(p, stage, unit),
+            prompt=prompt,
             permission_profile=provider_cfg.permission_profile,
             timeout_seconds=provider_cfg.timeout_seconds,
             attempt=1,
@@ -1447,14 +1417,43 @@ class Orchestrator:
         )
         raise ManualActionRequired(f"{stage.value} human input failed: {failure}")
 
-    def _build_prompt(self, p: _Pipeline, stage: Stage, unit: SubtaskSpec | None) -> str:
-        prompt = _STAGE_PROMPTS[stage]
+    def _subtask_spec_path(self, p: _Pipeline, unit: SubtaskSpec) -> Path:
+        return (
+            task_artifact_dir(self._artifacts_root, p.task.id)
+            / "subtasks"
+            / f"{unit.order:02d}-{unit.slug}.md"
+        )
+
+    def _prompt_variables(
+        self, p: _Pipeline, stage: Stage, unit: SubtaskSpec | None
+    ) -> dict[str, object | None]:
+        """The allowlisted template variables (backlog §5): metadata and artifact **paths** only.
+
+        Never includes task bodies, diffs, check logs, env, or secrets — those stay in the artifact
+        files the provider references by path.
+        """
+        variables: dict[str, object | None] = {
+            "task_id": p.task.id,
+            "stage": stage.value,
+            "repo_path": self._config.repo.local_path,
+            "task_path": p.task_file,
+            "plan_path": p.plan_path,
+            "diff_path": p.diff_path,
+            "checks_path": p.check_log,
+            "review_path": p.review_findings_path,
+        }
         if unit is not None:
-            spec_path = (
-                task_artifact_dir(self._artifacts_root, p.task.id)
-                / "subtasks"
-                / f"{unit.order:02d}-{unit.slug}.md"
-            )
+            variables["subtask_order"] = unit.order
+            variables["subtask_count"] = p.decomposition.n
+            variables["subtask_spec_path"] = str(self._subtask_spec_path(p, unit))
+        return variables
+
+    def _build_prompt(self, p: _Pipeline, stage: Stage, unit: SubtaskSpec | None) -> str:
+        prompt = render_prompt(
+            self._prompts.resolved(stage), self._prompt_variables(p, stage, unit)
+        )
+        if unit is not None:
+            spec_path = self._subtask_spec_path(p, unit)
             prompt += f"\n\nActive subtask {unit.order} of {p.decomposition.n}; spec: {spec_path}"
         return prompt
 
@@ -1535,6 +1534,30 @@ class Orchestrator:
         path.write_text(content, encoding="utf-8")
         self._register_artifact(p.task.id, _artifact_kind(name), str(path))
         return str(path)
+
+    def _write_rendered_prompt(
+        self, p: _Pipeline, stage: Stage, subtask: int | None, prompt: str
+    ) -> None:
+        """Persist the rendered stage prompt for audit (backlog §7), once per stage run.
+
+        The prompt is deterministic across a stage run's provider attempts and retries (fallback
+        changes the provider, not the prompt), so one copy per stage dir is sufficient. Redacted
+        defensively before storage even though the allowlisted variables are paths/metadata only.
+        """
+        stage_dir = task_artifact_dir(self._artifacts_root, p.task.id) / "stages" / stage.value
+        if subtask is not None:
+            stage_dir = stage_dir / f"sub-{subtask:02d}"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        path = stage_dir / "rendered-prompt.md"
+        redacted = redact_text(prompt, extra_secrets=self._prompt_secrets())
+        path.write_text(redacted, encoding="utf-8")
+        self._register_artifact(p.task.id, "rendered_prompt", str(path))
+
+    def _prompt_secrets(self) -> tuple[str, ...]:
+        """Denied-read file secrets to scrub from the rendered prompt before storage (§6)."""
+        return read_denied_secrets(
+            self._config.repo.local_path, self._config.security.denied_read_paths
+        )
 
     def _log(self, task_id: str) -> logging.LoggerAdapter[logging.Logger]:
         """A task-scoped structured logger (§6.6): every record carries ``task_id``."""

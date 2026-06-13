@@ -487,6 +487,52 @@ Preflight requires a non-zero numeric chat id, bot access to the chat, no config
 working `getUpdates` polling API. Use one bot/chat with one orchestrator poller. See
 [telegram.md](telegram.md) for setup and `telegram-test`.
 
+## `prompts`
+
+Optional. Lets operators extend or replace the per-stage instructions sent to the agent for the
+agent-routed stages (`refinement`, `planning`, `implementation`, `review`, `fixing`, `summary`)
+without editing Python. The packaged templates remain the default; an override is layered on per
+`mode`. Added in `config.yaml` `schema_version` **3** (older configs omit the block and take the
+safe defaults below).
+
+```yaml
+prompts:
+  templates_dir: "./templates/prompts"
+  mode: append           # append | replace
+  strict: false
+  overrides:
+    implementation: "implementation.md"
+    review: "review.md"
+```
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `templates_dir` | string | `"./templates/prompts"` | Directory holding override templates, resolved from the orchestrator project root (not the target repo). `init` scaffolds it with the packaged defaults. |
+| `mode` | enum | `append` | `append` = packaged default first, then your template; `replace` = your template only (for stages that have an override). Global for now. |
+| `strict` | boolean | `false` | `true` = a missing/unreadable override file fails closed at startup (a `ConfigError`, before any agent runs); `false` = log a warning and fall back to the packaged default. |
+| `overrides` | map | `{}` | Maps an **agent-routed** stage to a `.md` file inside `templates_dir`. |
+
+**Template variables.** A template may reference an allowlisted set of `{name}` tokens; everything
+else (an unknown name, or literal braces in code/JSON) is left verbatim, so a template never breaks
+on stray braces. The variables are **metadata and artifact paths only** — never task bodies, diffs,
+check logs, environment values, or secrets (those stay in the artifact files the agent reads by
+path):
+
+`{task_id}` `{stage}` `{repo_path}` `{task_path}` `{plan_path}` `{diff_path}` `{checks_path}`
+`{review_path}` `{subtask_order}` `{subtask_count}` `{subtask_spec_path}`
+
+A variable with no value for the current stage (e.g. `{plan_path}` before planning) renders as the
+empty string.
+
+**Safety.** Templates are prompt **text** only — delivered to the CLI on stdin, never as a command
+argument. An override cannot change the provider, `extra_args`, sandbox/approval mode, denied
+commands, denied reads, the environment allowlist, or fallback policy; it cannot enable `git
+commit`/`git push`/`gh pr create`; and a task's front matter cannot select a template. Override
+paths are confined to `templates_dir` (path traversal and unknown stages are rejected at config
+load). Each rendered prompt is written, redacted, to `logs/<task-id>/stages/<stage>/[sub-NN/]
+rendered-prompt.md` for audit. See [cookbook.md](cookbook.md) for a recipe and
+[operations.md](operations.md) for troubleshooting.
+
 ## Common Examples
 
 Codex-only routing:
@@ -570,4 +616,5 @@ Before running tasks:
 - `external_root` is outside `repo.local_path` when using external artifacts;
 - the target clone does not track `tasks/` or `logs/`;
 - no `extra_args` disable sandbox or approvals;
+- `prompts.overrides` name only agent-routed stages and `.md` files inside `prompts.templates_dir`;
 - secrets are configured outside `config.yaml`.

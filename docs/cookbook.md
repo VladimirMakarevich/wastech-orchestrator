@@ -342,6 +342,51 @@ Git Manager.
 Task overrides cannot change provider commands, credentials, sandbox settings, `extra_args`, or any
 security policy.
 
+## 7a. Customize Stage Prompts
+
+To add repository-specific engineering rules or a review rubric to a stage without editing Python,
+use the optional `prompts:` block (see [configuration.md](configuration.md#prompts)). `init` already
+scaffolds `templates/prompts/` with the packaged defaults; edit a copy and point an override at it.
+
+Add house implementation rules on top of the default instruction:
+
+```yaml
+# config.yaml
+prompts:
+  mode: append            # keep the packaged default, then add your text
+  overrides:
+    implementation: "implementation.md"
+```
+
+```markdown
+<!-- templates/prompts/implementation.md -->
+Follow the repository conventions:
+- keep functions under 40 lines; extract helpers otherwise;
+- never add a runtime dependency without a note in the summary;
+- match the logging style in {repo_path}.
+```
+
+Replace the review prompt entirely with a security rubric:
+
+```yaml
+prompts:
+  mode: replace           # your template is the whole review prompt
+  overrides:
+    review: "review.md"
+```
+
+Notes:
+
+- Variables are metadata/paths only — e.g. `{repo_path}`, `{diff_path}`, `{plan_path}`. Large
+  content stays in the artifact files the agent reads by path. Unknown `{...}` and literal braces
+  pass through unchanged.
+- `strict: true` turns a missing override file into a startup error; the default `false` logs a
+  warning and falls back to the packaged default.
+- The exact text sent each run is saved (redacted) to
+  `logs/<task-id>/stages/<stage>/rendered-prompt.md` so you can verify what the agent received.
+- A template is prompt text only: it cannot change the provider, sandbox/approvals, denied
+  commands, or enable `git`/`gh` publishing.
+
 ## 8. Configure Checks
 
 Checks are configured or discovered — never hardcoded. The Check Runner runs each resolved command

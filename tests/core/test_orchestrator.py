@@ -369,6 +369,87 @@ def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: 
     assert "agent/task-001-add-a-thing" in branches
 
 
+def test_prompt_override_reaches_provider_and_is_audited(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    """A replace-mode override changes the prompt the provider receives; it is also audited.
+
+    The rendered prompt is written per stage run and redacted before storage; provider argv is
+    untouched (the prompt only ever travels on the request, never as a CLI arg).
+    """
+    tdir = tmp_path / "prompts"
+    tdir.mkdir()
+    # Include a token-shaped secret to prove the audit artifact is redacted defensively.
+    (tdir / "implementation.md").write_text(
+        "CUSTOM-IMPL-INSTRUCTION leaked=ghp_abcdefghij0123456789ABCDEFGHIJ\n",
+        encoding="utf-8",
+    )
+    prompts_block = (
+        "prompts:\n"
+        f"  templates_dir: {str(tdir)!r}\n"
+        "  mode: replace\n"
+        "  overrides:\n"
+        "    implementation: 'implementation.md'\n"
+    )
+    providers = _both()
+    orch, _store, _, art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"prompts_block": prompts_block},
+    )
+    task_file = _complete_task(tmp_path, "task-pc1")
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.stage is Stage.IMPLEMENTATION:
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    result = orch.run_task(task_file)
+    assert result.final_status is Status.DONE
+
+    impl_request = next(
+        r for r in providers[ProviderId.CLAUDE].requests if r.stage is Stage.IMPLEMENTATION
+    )
+    assert "CUSTOM-IMPL-INSTRUCTION" in impl_request.prompt
+    # Replace mode: the packaged default text is gone.
+    assert "following the plan" not in impl_request.prompt
+
+    rendered = art / "logs" / "task-pc1" / "stages" / "implementation" / "rendered-prompt.md"
+    assert rendered.exists()
+    body = rendered.read_text(encoding="utf-8")
+    assert "CUSTOM-IMPL-INSTRUCTION" in body
+    assert "ghp_abcdefghij0123456789ABCDEFGHIJ" not in body  # redacted
+
+
+def test_strict_missing_prompt_override_fails_at_construction(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    from wastech_orchestrator.config.loader import ConfigError
+
+    prompts_block = (
+        "prompts:\n"
+        f"  templates_dir: {str(tmp_path / 'absent')!r}\n"
+        "  strict: true\n"
+        "  overrides:\n"
+        "    implementation: 'implementation.md'\n"
+    )
+    with pytest.raises(ConfigError):
+        _build(
+            git_repo,
+            make_git_config,
+            tmp_path,
+            providers=_both(),
+            check_verdicts=[0],
+            config_kwargs={"prompts_block": prompts_block},
+        )
+
+
 def test_vague_task_runs_refinement(git_repo, make_git_config, tmp_path: Path) -> None:
     providers = _both()
     orch, store, _, art = _build(

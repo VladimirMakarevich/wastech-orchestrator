@@ -8,7 +8,7 @@ The persisted artifacts that outlive an upgrade carry their own independent sche
 (see the spec's "Versioning and compatibility" section and
 [docs/operations.md](docs/operations.md#upgrading-the-orchestrator)):
 
-- `config.yaml` — top-level `schema_version` (current: **2**)
+- `config.yaml` — top-level `schema_version` (current: **3**)
 - `state.db` — SQLite `PRAGMA user_version` (current: **1**)
 - registry (`registry.json`) — `version` (current: **1**, read forward-tolerantly)
 
@@ -18,6 +18,25 @@ The maintainer bumps the package version in `pyproject.toml` on release; `wastec
 ## [Unreleased]
 
 ### Added
+- **Operator-customizable stage prompts**: a new optional `prompts:` block lets operators extend
+  (`mode: append`) or replace (`mode: replace`) the per-stage instructions for the agent-routed
+  stages (`refinement`, `planning`, `implementation`, `review`, `fixing`, `summary`) without editing
+  Python. Packaged templates under `templates/prompts/<stage>.md` are the default (scaffolded by
+  `init`); `overrides.<stage>` points at a `.md` file inside `prompts.templates_dir`. `strict: true`
+  fails closed at startup on a missing override; `strict: false` warns and falls back to the default.
+  Templates may interpolate an allowlisted set of metadata/artifact-**path** variables only
+  (`{task_id} {stage} {repo_path} {task_path} {plan_path} {diff_path} {checks_path} {review_path}
+  {subtask_order} {subtask_count} {subtask_spec_path}`); unknown names and literal braces pass
+  through verbatim. The rendered prompt is delivered on stdin only — it can never reach provider
+  argv, change the provider/`extra_args`/sandbox/approvals/denied lists/env allowlist/fallback
+  policy, or be selected by task front matter; override paths are confined to `templates_dir`. Each
+  rendered prompt is written (redacted) to `logs/<task-id>/stages/<stage>/rendered-prompt.md` for
+  audit. Replaces the previously hardcoded `_STAGE_PROMPTS` (behavior unchanged with the defaults).
+  Bumps `config.yaml` `schema_version` **2 → 3** (old configs load unchanged; the block defaults to
+  packaged templates + append mode). See
+  [docs/configuration.md](docs/configuration.md#prompts),
+  [docs/cookbook.md](docs/cookbook.md#7a-customize-stage-prompts), and
+  [docs/backlog/prompt_template_customization.md](docs/backlog/prompt_template_customization.md).
 - **Auto-merge bypass (opt-in, off by default)**: after a successful publish the orchestrator can
   merge the PR itself instead of waiting for a human. Four new `git:` keys — `auto_merge`,
   `auto_merge_strategy` (`merge`|`squash`|`rebase`), `auto_merge_allow_per_task`, and
