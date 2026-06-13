@@ -1,6 +1,8 @@
 # Architecture rules (invariants)
 
-The source of truth is [orchestrator_final_plan.md](../orchestrator_final_plan.md). These invariants must not be violated.
+The source of truth is
+[00_orchestrator_final_plan.md](../implementation_stages/00_orchestrator_final_plan.md). These
+invariants must not be violated.
 
 ## Layers and dependencies
 
@@ -14,6 +16,8 @@ Dependency direction: `core → router → provider(interface)`. Providers do no
 ## Contracts (see spec §4.3)
 
 - `AgentProvider`: `id`, `preflight() -> ProviderHealth`, `run(AgentRunRequest) -> AgentRunResult`.
+- `Notifier`: two-phase `start_ask` / `wait_for_answer` with a durable secret-free handle, plus the
+  `ask_human` facade and best-effort terminal notifications.
 - Each stage run is **independent** and receives all context through files/artifacts and the prompt — the vendor session is **not** a source of truth.
 - The Core persists the `stage_runs` row before invoking a provider and passes its ID through
   `AgentRunRequest`; providers use it only to namespace artifacts. Provider fallback attempts share
@@ -25,7 +29,10 @@ Dependency direction: `core → router → provider(interface)`. Providers do no
 - Stages: `refinement`, `planning`, `implementation`, `testing`, `review`, `fixing`, `summary`, `publishing`.
 - `testing` is executed by the Check Runner; `publishing` by the Git Manager. The rest are agent-driven.
 - Default route: refinement/planning/implementation/fixing/summary → primary `claude`, fallback `codex`; review → primary `codex`, fallback `claude`.
-- `refinement` runs first to enrich an incomplete task (no code edits) and is **skipped** by the Core for tasks that are already complete or flagged `refined: true`. The skip decision is deterministic and audited. Refinement is autonomous (no interactive clarification in v1).
+- `refinement` runs first to enrich an incomplete task (no code edits) and is **skipped** by the
+  Core for tasks that are already complete or flagged `refined: true`. The skip decision is
+  deterministic and audited. Refinement/planning may request one typed human round-trip; the answer
+  returns only through a redacted artifact path.
 - A task override is allowed **only**: for known stages, with a provider from `agents.allowed`, without changing security/command/credentials, and after full validation of the task before the branch is created.
 - **Decomposition** (spec §5.1) is a flag-gated sub-phase of `planning`, **off by default**. The split is proposed by the agent but accepted deterministically by the Core (gate on; `2 <= n <= max_subtasks`; linear `depends_on` only); otherwise the task runs as a single unit. Subtasks run **strictly sequentially on the single task branch** (one local commit each) into a **single PR**; the global `fix_iterations` budget spans all subtasks.
 - **Validation gate** (spec §19): every task passes a structural gate on `new -> validated` before any branch or provider run. A broken task is terminal `failed`, quarantined to `tasks/rejected/`, and never branched.
@@ -41,7 +48,13 @@ Dependency direction: `core → router → provider(interface)`. Providers do no
 
 - Transitions are transactional; a re-run **does not** create a second commit/push/PR.
 - After a restart, the unfinished step is resumed or its result is safely reconciled.
+- Human waiting does not add a task status. The registered `logs/<task-id>/hitl/*.json` artifact is
+  the recovery source of truth; timeout, transport error, ambiguous approval, or a repeated signal
+  fails closed to `manual_action_required`.
 - Publishing happens only when checks succeed and there are no blocking findings.
+- After `implementation`/`fixing`, tracked-file deletion and dependency manifest/lock changes require
+  approval before tests. Exact approved planning scope may be reused; expanded scope requires a new
+  approval. Ordinary diffs and routine commit/push/PR do not ask.
 - At most one task is active at a time (a single processing slot); the rest wait in `pending`. More than one active task on restart → `manual_action_required`.
 - After a task reaches a terminal status, terminal cleanup must safely return the target repo to `repo.base_branch` before any next task can start. If cleanup or branch state is ambiguous, automatic continuation is forbidden and the task/state requires `manual_action_required`.
 - Auto mode (`orchestrator.auto_mode.enabled`) controls only whether the next pending task is picked after successful terminal cleanup. It is off by default and does not change the single-active-task invariant.
@@ -63,3 +76,5 @@ Dependency direction: `core → router → provider(interface)`. Providers do no
 - Letting a task that has not passed the §19 validation gate reach branch creation or any provider run.
 - Accepting a decomposition split without the deterministic rule, or running subtasks in parallel / on separate branches in v1.
 - Staging with `git add .` / `git add -A` in the target repo, or letting orchestration/task artifacts enter a code commit.
+- Accepting a Telegram reply from a different chat/message/callback, passing an answer through CLI
+  argv, or treating `contacts` as access control.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -45,6 +46,48 @@ def test_config_yaml_never_overwritten_even_with_force(tmp_path: Path) -> None:
 def test_dry_run_writes_nothing(tmp_path: Path) -> None:
     assert main(["init", str(tmp_path), "--dry-run", "--quiet"]) == 0
     assert list(tmp_path.iterdir()) == []
+
+
+_RUNTIME_IGNORES = (
+    "state.db",
+    "state.db-wal",
+    "state.db-shm",
+    "config.yaml.bak-*",
+    "orchestrator.pid",
+)
+
+
+def test_gitignore_tracked_writes_runtime_block(tmp_path: Path) -> None:
+    assert main(["init", str(tmp_path), "--gitignore-tracked", "--quiet"]) == 0
+    text = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    for pattern in _RUNTIME_IGNORES:
+        assert pattern in text
+
+
+def test_gitignore_tracked_is_idempotent(tmp_path: Path) -> None:
+    assert main(["init", str(tmp_path), "--gitignore-tracked", "--quiet"]) == 0
+    first = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert main(["init", str(tmp_path), "--gitignore-tracked", "--quiet"]) == 0
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == first
+
+
+def test_external_mode_skips_runtime_excludes(tmp_path: Path) -> None:
+    # External footprint keeps runtime files out of the repo, so there is nothing to exclude.
+    argv = ["init", str(tmp_path), "--git-mode", "external", "--gitignore-tracked", "--quiet"]
+    assert main(argv) == 0
+    gitignore = tmp_path / ".gitignore"
+    assert not gitignore.exists() or "runtime files" not in gitignore.read_text(encoding="utf-8")
+
+
+def test_default_mode_writes_git_info_exclude_in_a_git_repo(
+    tmp_path: Path, git_run: Callable[[Sequence[str], Path], str]
+) -> None:
+    git_run(["init", "-b", "main", "."], tmp_path)
+    assert main(["init", str(tmp_path), "--quiet"]) == 0
+    exclude = (tmp_path / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+    assert "orchestrator.pid" in exclude
+    assert "state.db-wal" in exclude
+    assert not (tmp_path / ".gitignore").exists()  # default mode leaves tracked .gitignore alone
 
 
 @pytest.mark.parametrize(

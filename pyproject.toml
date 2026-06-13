@@ -28,6 +28,8 @@ dev = [
 
 [project.scripts]
 wastech-orchestrator = "wastech_orchestrator.cli:main"
+# `worc` is a short alias for the canonical `wastech-orchestrator` command; same entry point.
+worc = "wastech_orchestrator.cli:main"
 
 [tool.hatch.version]
 # The version comes from the Git tag (e.g. tag `v0.1.1a1` -> version `0.1.0a1`). Between tags,

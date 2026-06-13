@@ -13,14 +13,16 @@ import logging
 import os
 import sys
 import tempfile
+import threading
 import time
+import uuid
 from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, datetime
 from importlib import resources
 from importlib.resources.abc import Traversable
 from pathlib import Path
 
-from wastech_orchestrator import __version__
+from wastech_orchestrator import __version__, process_control
 from wastech_orchestrator.checks import diagnostics as check_diagnostics
 from wastech_orchestrator.config.loader import ConfigError, load_config
 from wastech_orchestrator.config.schema import FootprintLocation, OrchestratorConfig
@@ -32,7 +34,9 @@ from wastech_orchestrator.core.orchestrator import (
     build_providers,
 )
 from wastech_orchestrator.core.state_machine import Status
+from wastech_orchestrator.git_manager import append_runtime_excludes
 from wastech_orchestrator.install import config_writer, detect, registry, wizard
+from wastech_orchestrator.notify import build_notifier
 from wastech_orchestrator.notify.telegram import check_telegram_preflight
 from wastech_orchestrator.observability.logging import configure_logging
 from wastech_orchestrator.providers.base import ProviderId, Stage
@@ -157,6 +161,11 @@ def build_parser() -> argparse.ArgumentParser:
     init_cmd.add_argument(
         "--quiet", action="store_true", help="suppress the per-file report (exit code only)"
     )
+    init_cmd.add_argument(
+        "--gitignore-tracked",
+        action="store_true",
+        help="write runtime-file ignores to the tracked .gitignore (default: .git/info/exclude)",
+    )
 
     install_cmd = sub.add_parser(
         "install", help="bind the current repo to a sibling workspace and generate config.yaml"
@@ -208,6 +217,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--skip-preflight", action="store_true", help="do not run preflight after writing config"
     )
     install_cmd.add_argument("--dry-run", action="store_true", help="print the plan; write nothing")
+    install_cmd.add_argument(
+        "--gitignore-tracked",
+        action="store_true",
+        help="write runtime-file ignores to the tracked .gitignore (default: .git/info/exclude)",
+    )
 
     run_cmd = sub.add_parser("run", help="run a single task from a file")
     run_cmd.add_argument("task_file", help="path to the task file (.md or .json)")
@@ -222,8 +236,46 @@ def build_parser() -> argparse.ArgumentParser:
         "every N seconds (0 = single pass, no loop)",
     )
 
+    stop_cmd = sub.add_parser("stop", help="stop a running 'watch' daemon (SIGTERM, then SIGKILL)")
+    stop_cmd.add_argument(
+        "--timeout",
+        type=float,
+        default=30.0,
+        metavar="SECONDS",
+        help="seconds to wait for graceful shutdown before SIGKILL (default: 30)",
+    )
+
+    restart_cmd = sub.add_parser(
+        "restart", help="stop the running 'watch' daemon, then start a fresh one with these flags"
+    )
+    restart_cmd.add_argument(
+        "--timeout",
+        type=float,
+        default=30.0,
+        metavar="SECONDS",
+        help="seconds to wait for the previous watcher to exit before SIGKILL (default: 30)",
+    )
+    restart_cmd.add_argument(
+        "--poll-seconds",
+        type=int,
+        default=None,
+        metavar="N",
+        help="override orchestrator.poll_interval_seconds for the new loop (0 = single pass)",
+    )
+
     sub.add_parser(
         "preflight", help="check both CLIs' health and the strict_isolation policy (read-only)"
+    )
+    telegram_test = sub.add_parser(
+        "telegram-test",
+        help="send a correlated Telegram prompt and wait for a reply",
+    )
+    telegram_test.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=60,
+        metavar="N",
+        help="maximum smoke-test wait, capped by telegram.ask_timeout_s (default: 60)",
     )
     status_cmd = sub.add_parser("status", help="show the active or latest persisted task status")
     status_cmd.add_argument("task_id", nargs="?", help="specific task id (default: active/latest)")
@@ -303,6 +355,18 @@ def cmd_init(args: argparse.Namespace) -> int:
                 overwrite=args.force,
             )
 
+    # 4. Under an in-repo footprint, ignore the orchestrator's runtime files so the operator's own
+    #    `git status` stays clean (§21.2). No-op for external mode (runtime files live outside the
+    #    repo) and, in the default mode, for a target that is not yet a git repo.
+    location, _ = GIT_MODES[args.git_mode]
+    exclude_target = ".gitignore" if args.gitignore_tracked else ".git/info/exclude"
+    in_repo = location == "in_repo"
+    excluded = (
+        append_runtime_excludes(target, tracked=args.gitignore_tracked)
+        if in_repo and not dry
+        else []
+    )
+
     if not args.quiet:
         verb_created = "would create" if dry else "create"
         verb_skipped = "would skip" if dry else "skip"
@@ -310,6 +374,10 @@ def cmd_init(args: argparse.Namespace) -> int:
             print(f"  {verb_created} {rel}")
         for rel in skipped:
             print(f"  {verb_skipped} {rel}")
+        if excluded:
+            print(f"  exclude runtime files via {exclude_target}")
+        elif dry and in_repo and (args.gitignore_tracked or (target / ".git").is_dir()):
+            print(f"  would exclude runtime files via {exclude_target}")
     summary = "init (dry-run)" if dry else "init"
     print(f"{summary}: {len(created)} created, {len(skipped)} skipped")
     return 0
@@ -422,6 +490,7 @@ def watch_loop(
     poll_interval: int,
     max_iterations: int | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
+    stop_event: threading.Event | None = None,
 ) -> list[PipelineResult]:
     """Run ``watch_once`` on a loop, refreshing the repo each tick (periodic discovery, §8.3).
 
@@ -429,10 +498,17 @@ def watch_loop(
     task pushed to git later becomes visible), then ``watch_once``, then sleep ``poll_interval``.
     ``poll_interval <= 0`` runs exactly one tick (single pass, no sleep). ``max_iterations`` bounds
     the loop for tests; in production the loop runs until interrupted.
+
+    A ``stop_event`` (set by a ``SIGTERM`` handler) is honored only *between* ticks, so an in-flight
+    task run finishes its current stage rather than being interrupted; when set, it also cuts the
+    poll sleep short for a prompt shutdown. The ``sleep_fn`` path is kept for callers without an
+    event (existing tests).
     """
     results: list[PipelineResult] = []
     iteration = 0
     while True:
+        if stop_event is not None and stop_event.is_set():
+            break
         orchestrator.refresh_repo()
         results.extend(watch_once(orchestrator, config, folder))
         iteration += 1
@@ -440,7 +516,11 @@ def watch_loop(
             break
         if max_iterations is not None and iteration >= max_iterations:
             break
-        sleep_fn(poll_interval)
+        if stop_event is not None:
+            if stop_event.wait(poll_interval):  # returns True the instant SIGTERM fires
+                break
+        else:
+            sleep_fn(poll_interval)
     return results
 
 
@@ -450,6 +530,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     config = load_config_for(args)
     if config is None:
         return 2
+    if config.git.create_pull_request:
+        detect.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish (§6.7)
     orchestrator = build_orchestrator(
         config,
         artifacts_root=artifacts_root_for(config),
@@ -520,41 +602,154 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
-def cmd_watch(args: argparse.Namespace) -> int:
-    """Resume an in-flight task and process pending tasks (auto mode permitting).
-
-    With ``poll_interval > 0`` (config ``orchestrator.poll_interval_seconds`` or ``--poll-seconds``)
-    this runs as a daemon: each tick fetch/pulls ``base_branch`` to discover git-pushed tasks, then
-    processes pending, then sleeps. ``0`` is a single pass. Stop the daemon with Ctrl-C.
-    """
+def cmd_telegram_test(args: argparse.Namespace) -> int:
+    """Send a real question/reply round-trip without processing a task."""
     _configure_runtime_logging(args)
     config = load_config_for(args)
     if config is None:
         return 2
-    poll = (
-        args.poll_seconds
-        if args.poll_seconds is not None
-        else config.orchestrator.poll_interval_seconds
+    if args.timeout_seconds <= 0:
+        print("error: --timeout-seconds must be > 0", file=sys.stderr)
+        return 2
+    if not config.telegram.enabled:
+        print("telegram-test: FAIL (telegram.enabled is false)")
+        return 1
+
+    ok, line = check_telegram_preflight(config.telegram)
+    print(line)
+    if not ok:
+        return 1
+
+    notifier = build_notifier(config.telegram)
+    result = notifier.ask_human(
+        question="Reply to this message to confirm Telegram HITL is working.",
+        context="This is an operator smoke test; no task or repository files will be changed.",
+        task_id="telegram-test",
+        kind="question",
+        timeout_s=args.timeout_seconds,
+        interaction_id="test-" + uuid.uuid4().hex[:24],
     )
-    orchestrator = build_orchestrator(
-        config,
-        artifacts_root=artifacts_root_for(config),
-        heartbeat_seconds=args.heartbeat_seconds,
-    )
-    if poll > 0:
-        print(f"watch: polling every {poll}s for git-pushed tasks (Ctrl-C to stop)")
-    try:
-        results = watch_loop(orchestrator, config, pending_dir(config), poll_interval=poll)
-    except KeyboardInterrupt:
-        print("watch: stopped")
-        return 0
+    if result.failure is not None:
+        print(f"telegram-test: FAIL ({result.failure})")
+        return 1
+    print("telegram-test: OK (correlated reply received)")
+    return 0
+
+
+def _summarize_watch(results: list[PipelineResult]) -> int:
+    """Print one line per processed task and return the worst exit code (0 when nothing ran)."""
     if not results:
         print("watch: nothing to do (slot free, no pending tasks)")
         return 0
     for result in results:
         print(f"{result.task_id}: {result.final_status.value}")
-    worst = max(_EXIT_BY_STATUS.get(r.final_status, 1) for r in results)
-    return worst
+    return max(_EXIT_BY_STATUS.get(r.final_status, 1) for r in results)
+
+
+def cmd_watch(args: argparse.Namespace) -> int:
+    """Resume an in-flight task and process pending tasks (auto mode permitting).
+
+    With ``poll_interval > 0`` (config ``orchestrator.poll_interval_seconds`` or ``--poll-seconds``)
+    this runs as a daemon: each tick fetch/pulls ``base_branch`` to discover git-pushed tasks, then
+    processes pending, then sleeps. ``0`` is a single pass. Stop the daemon with Ctrl-C, or from
+    another shell with ``stop`` / ``restart``.
+
+    The looping daemon writes ``<artifacts_root>/orchestrator.pid`` and installs a ``SIGTERM``
+    handler so ``stop``/``restart`` can shut it down gracefully between ticks; it refuses to start
+    when another watcher is already live for the same artifact root.
+    """
+    _configure_runtime_logging(args)
+    config = load_config_for(args)
+    if config is None:
+        return 2
+    if config.git.create_pull_request:
+        detect.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish (§6.7)
+    poll = (
+        args.poll_seconds
+        if args.poll_seconds is not None
+        else config.orchestrator.poll_interval_seconds
+    )
+    folder = pending_dir(config)
+    pid_path = process_control.pid_file_path(artifacts_root_for(config))
+
+    # Only the looping mode is a daemon; refuse a second watcher for the same artifact root. A stale
+    # PID file (process gone) is overwritten on start.
+    if poll > 0:
+        existing = process_control.read_pid(pid_path)
+        if existing is not None and process_control.is_running(existing):
+            print(
+                f"watch: already running (pid {existing}); stop it first with "
+                f"'wastech-orchestrator stop', or use 'restart' ({pid_path})"
+            )
+            return 1
+
+    orchestrator = build_orchestrator(
+        config,
+        artifacts_root=artifacts_root_for(config),
+        heartbeat_seconds=args.heartbeat_seconds,
+    )
+
+    # Single pass: no PID file, no signal handler.
+    if poll <= 0:
+        return _summarize_watch(watch_loop(orchestrator, config, folder, poll_interval=poll))
+
+    print(f"watch: polling every {poll}s for git-pushed tasks (Ctrl-C or 'stop' to exit)")
+    results: list[PipelineResult] = []
+    controller = process_control.StopController()  # SIGTERM -> event, restored on exit
+    try:
+        with controller:
+            process_control.write_pid_file(pid_path)
+            results = watch_loop(
+                orchestrator, config, folder, poll_interval=poll, stop_event=controller.event
+            )
+    except KeyboardInterrupt:
+        print("watch: stopped")
+        return 0
+    finally:
+        pid_path.unlink(missing_ok=True)  # clean exit, Ctrl-C, SIGKILL-survivor, or error
+    if controller.event.is_set():
+        print("watch: stopped")  # graceful SIGTERM shutdown
+        return 0
+    return _summarize_watch(results)
+
+
+def cmd_stop(args: argparse.Namespace) -> int:
+    """Stop a running ``watch`` daemon (SIGTERM, then SIGKILL after ``--timeout``). Idempotent."""
+    _configure_runtime_logging(args)
+    config = load_config_for(args)
+    if config is None:
+        return 2
+    pid_path = process_control.pid_file_path(artifacts_root_for(config))
+    outcome = process_control.stop_process(pid_path, timeout=args.timeout)
+    if not outcome.found:
+        print("stop: no running watcher (no PID file)")
+    elif outcome.already_dead:
+        print(f"stop: no running watcher (cleared stale PID {outcome.pid})")
+    elif outcome.killed:
+        print(f"stop: watcher {outcome.pid} did not exit in {args.timeout:g}s; sent SIGKILL")
+    else:
+        print(f"stop: watcher {outcome.pid} stopped")
+    return 0
+
+
+def cmd_restart(args: argparse.Namespace) -> int:
+    """Stop the running watcher (if any), then start a fresh ``watch`` with these flags.
+
+    Targets the daemon recorded in the PID file (a different process), waits for it to exit, then
+    runs its own loop in-process — it does not need to remember the old daemon's arguments.
+    """
+    _configure_runtime_logging(args)
+    config = load_config_for(args)
+    if config is None:
+        return 2
+    pid_path = process_control.pid_file_path(artifacts_root_for(config))
+    outcome = process_control.stop_process(pid_path, timeout=args.timeout)
+    if outcome.found and not outcome.already_dead:
+        suffix = " (SIGKILL)" if outcome.killed else ""
+        print(f"restart: stopped previous watcher {outcome.pid}{suffix}")
+    else:
+        print("restart: no previous watcher running")
+    return cmd_watch(args)
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -771,6 +966,10 @@ def cmd_install(args: argparse.Namespace) -> int:
     registry.bind(spec.repo_local_path, config_path)
     print(f"install: wrote {config_path}")
     print(f"install: bound {spec.repo_local_path} -> {config_path}")
+    # Install always uses the in-repo footprint, so keep the operator's `git status` clean (§21.2).
+    if append_runtime_excludes(spec.repo_local_path, tracked=args.gitignore_tracked):
+        target = ".gitignore" if args.gitignore_tracked else ".git/info/exclude"
+        print(f"install: excluded runtime files via {target}")
     if outcome.missing_providers:
         names = ", ".join(p.value for p in outcome.missing_providers)
         print(f"install: note — selected provider(s) not on PATH yet: {names}")
@@ -785,6 +984,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--heartbeat-seconds must be >= 0")
     if getattr(args, "poll_seconds", None) is not None and args.poll_seconds < 0:
         parser.error("--poll-seconds must be >= 0")
+    if getattr(args, "timeout", None) is not None and args.timeout < 0:
+        parser.error("--timeout must be >= 0")
 
     # A config/DB written by a newer orchestrator is refused with a clean message + exit 2 here,
     # rather than surfacing as a traceback (fail loud, not ugly). See the versioning gates.
@@ -797,11 +998,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_run(args)
         if args.command == "watch":
             return cmd_watch(args)
+        if args.command == "stop":
+            return cmd_stop(args)
+        if args.command == "restart":
+            return cmd_restart(args)
         if args.command == "preflight":
             return cmd_preflight(args)
+        if args.command == "telegram-test":
+            return cmd_telegram_test(args)
         if args.command == "status":
             return cmd_status(args)
-    except (ConfigError, IncompatibleStateError) as exc:
+    except (ConfigError, IncompatibleStateError, detect.GhNotAvailableError) as exc:
         print(f"error: {exc}")
         return 2
     raise SystemExit(f"Unknown command '{args.command}'.")

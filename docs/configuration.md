@@ -1,6 +1,9 @@
 # Configuration Reference
 
-`config.yaml` controls repositories, providers, routing, security, validation, checks, git publishing, and optional notification settings. The packaged example is [`config.example.yaml`](../config.example.yaml), and the canonical contract is [orchestrator_final_plan.md section 11](orchestrator_final_plan.md).
+`config.yaml` controls repositories, providers, routing, security, validation, checks, git publishing,
+and optional notification settings. The packaged example is
+[`config.example.yaml`](../config.example.yaml), and the canonical contract is
+[00_orchestrator_final_plan.md section 11](implementation_stages/00_orchestrator_final_plan.md).
 
 The loader is fail-closed:
 
@@ -456,7 +459,8 @@ committed.
 
 ## `telegram`
 
-Optional terminal notifications and the reusable blocking human-in-the-loop primitive.
+Optional terminal notifications and blocking human-in-the-loop for `refinement`, `planning`, and
+dangerous-diff guardrails.
 
 ```yaml
 telegram:
@@ -468,15 +472,20 @@ telegram:
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `enabled` | boolean | `false` | Enables Telegram when both named environment variables are present. |
-| `bot_token_env` | string | `"TELEGRAM_BOT_TOKEN"` | Name of the environment variable containing the bot token. |
-| `chat_id_env` | string | `"TELEGRAM_CHAT_ID"` | Name of the environment variable containing the target chat id. |
-| `ask_timeout_s` | integer | `28800` | Maximum wait for a human reply. |
+| `enabled` | boolean | `false` | Enables Telegram transport. Blocking HITL fails closed if credentials/transport are unavailable. |
+| `bot_token_env` | string | `"TELEGRAM_BOT_TOKEN"` | Valid environment-variable name containing the bot token. |
+| `chat_id_env` | string | `"TELEGRAM_CHAT_ID"` | Valid environment-variable name containing the numeric target chat id. |
+| `ask_timeout_s` | integer | `28800` | Maximum wait for a human reply; must be greater than zero. |
 
 The config stores environment variable **names only**. Token and chat-id values are resolved from the
 orchestrator process environment at startup and are never written to config, SQLite, logs, or
-artifacts. If the feature is disabled or either variable is missing/blank, Telegram is a clean
-no-op. Delivery and polling failures are best-effort and never change a task outcome.
+artifacts. Terminal delivery is best-effort and never changes a completed task outcome. A blocking
+question/approval is fail-closed: disabled/unconfigured transport, timeout, transport failure, or an
+ambiguous approval moves the task to `manual_action_required`.
+
+Preflight requires a non-zero numeric chat id, bot access to the chat, no configured webhook, and a
+working `getUpdates` polling API. Use one bot/chat with one orchestrator poller. See
+[telegram.md](telegram.md) for setup and `telegram-test`.
 
 ## Common Examples
 

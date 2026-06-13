@@ -4,7 +4,8 @@ This cookbook shows common ways to use **wastech-orchestrator**. It is written f
 run the orchestrator and for developers who want a practical path from "empty workspace" to "task
 processed into a Pull Request".
 
-The canonical product contract remains [orchestrator_final_plan.md](orchestrator_final_plan.md).
+The canonical product contract remains
+[00_orchestrator_final_plan.md](implementation_stages/00_orchestrator_final_plan.md).
 Where this guide mentions planned v1 behavior, it is labeled explicitly. The CLI surface described
 here (`init`, `install`, `preflight`, `run`, `watch`, and `status`) exists in the current codebase.
 

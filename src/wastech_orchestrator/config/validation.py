@@ -10,6 +10,7 @@ All problems are collected and raised together via the typed :class:`ConfigError
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -30,6 +31,8 @@ from wastech_orchestrator.config.schema import (
 )
 from wastech_orchestrator.providers.base import ProviderId, Stage
 from wastech_orchestrator.security.forbidden_args import find_forbidden_args
+
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _check_extra_args(pid: ProviderId, args: tuple[str, ...], issues: list[str]) -> None:
@@ -111,10 +114,25 @@ def validate_config(config: OrchestratorConfig) -> list[str]:
 
     _validate_footprint(config, issues)
     _validate_checks(config, issues, warnings)
+    _validate_telegram(config, issues)
 
     if issues:
         raise ConfigError(issues)
     return warnings
+
+
+def _validate_telegram(config: OrchestratorConfig, issues: list[str]) -> None:
+    telegram = config.telegram
+    if telegram.ask_timeout_s <= 0:
+        issues.append(f"telegram.ask_timeout_s must be > 0 (got {telegram.ask_timeout_s})")
+    for field, value in (
+        ("bot_token_env", telegram.bot_token_env),
+        ("chat_id_env", telegram.chat_id_env),
+    ):
+        if not _ENV_NAME_RE.fullmatch(value):
+            issues.append(
+                f"telegram.{field} must be a valid environment variable name (got {value!r})"
+            )
 
 
 def _validate_checks(config: OrchestratorConfig, issues: list[str], warnings: list[str]) -> None:

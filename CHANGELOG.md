@@ -18,11 +18,29 @@ The maintainer bumps the package version in `pyproject.toml` on release; `wastec
 ## [Unreleased]
 
 ### Added
+- **`worc` short alias**: a second `console_scripts` entry point (`pyproject.toml`) maps `worc` to
+  the same CLI as the canonical `wastech-orchestrator` (e.g. `worc watch`, `worc status`). The long
+  name remains canonical; `pip install -e .` registers both.
+- **`stop` / `restart` commands** for the `watch` daemon: a looping `watch` now writes
+  `<artifacts_root>/orchestrator.pid` and installs a `SIGTERM` handler that stops the loop
+  gracefully *between* ticks (an in-flight task finishes its current stage). `worc stop` sends
+  SIGTERM and escalates to SIGKILL after `--timeout` (default 30 s); `worc restart` stops the
+  running daemon then starts a fresh `watch` with the given flags. A second `watch` for the same
+  artifact root is refused while one is live; a stale PID file is reclaimed automatically. The
+  PID-file plumbing lives in a new `process_control` module; `orchestrator.pid` is excluded from
+  commits.
+- **`gh` pre-flight gate**: when `git.create_pull_request` is enabled, `run`/`watch` now fail fast at
+  startup with an actionable message if the GitHub CLI (`gh`) is not on `PATH`, instead of surfacing
+  a confusing `GitCommandError` deep inside the publish stage (`detect.require_gh`).
+- **Runtime-file ignores on setup**: `init`/`install` (in-repo footprint) now append the
+  orchestrator's runtime files (`state.db`, `state.db-wal`, `state.db-shm`, `config.yaml`,
+  `config.yaml.bak-*`, `orchestrator.pid`) to `.git/info/exclude` (per-clone) so an operator's
+  `git status` stays clean. `--gitignore-tracked` writes them to the tracked `.gitignore` instead.
 - **CI quality gate** (`.github/workflows/ci.yml`): runs `ruff check`, `ruff format --check`,
   `mypy src`, and `pytest` on every pull request and on pushes to `main` (Python 3.12 / 3.13 matrix),
   mirroring the gate in `release.yml` so regressions are caught before a release tag.
 - **Automatic check discovery and environment resolution** (Phases 1–3 of
-  [docs/backlog/automatic_check_discovery.md](docs/backlog/automatic_check_discovery.md)): a new
+  [Stage 09](docs/implementation_stages/09_automatic_check_discovery.md)): a new
   provider-agnostic `checks/` package resolves the repository's quality-gate commands without
   hand-written, technology-specific paths. It inspects manifests/lock files/`make`·`just`·`tox`·`nox`
   wrappers/local `.venv` interpreters, validates and **probes launchability** without running the
@@ -46,9 +64,15 @@ The maintainer bumps the package version in `pyproject.toml` on release; `wastec
   in the `stream-json` output is captured, validated, and stored in memory on `_Pipeline`; on
   provider fallback the primary session is cleared so the fallback starts fresh. Sessions are not
   persisted across orchestrator restarts.
-- Opt-in Telegram terminal notifications and a blocking `ask_human` HITL primitive, with
-  environment-only credentials, deterministic timeouts, secret redaction, and no-op behavior when
-  disabled or unconfigured.
+- **Telegram HITL completion**: terminal notifications plus typed `refinement`/`planning`
+  questions and approvals, ForceReply/inline-button correlation to the configured chat and exact
+  prompt, durable atomic `logs/<task-id>/hitl/*.json` recovery, redacted answer reinjection through
+  `AgentRunRequest.human_input_path`, and fail-closed timeout/transport/ambiguity handling. The Core
+  now approves tracked-file deletion and dependency manifest/lock changes before tests, reuses only
+  exact approved planning scope, and gives a denied edit one safe reconsideration. Added strict
+  Telegram config validation, webhook/chat/polling preflight, and
+  `wastech-orchestrator telegram-test` for a real send/reply smoke test. Routine commit/push/PR
+  remains automatic.
 - `orchestrator.poll_interval_seconds` (default **300**, integer `>= 0`): `watch` is now a
   long-running loop that runs `git fetch` + `pull --ff-only` on `base_branch` and re-scans every
   interval, so a task committed and pushed to the repo after `watch` started is discovered **without

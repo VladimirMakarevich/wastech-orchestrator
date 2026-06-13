@@ -108,9 +108,28 @@ def detect_providers() -> dict[ProviderId, str | None]:
     return {pid: find_executable(pid.value) for pid in ProviderId}
 
 
+class GhNotAvailableError(OSError):
+    """The GitHub CLI (``gh``) is required for PR creation but is not on ``PATH`` (§6.7)."""
+
+
 def has_gh() -> bool:
     """Whether the GitHub CLI (``gh``) is on ``PATH`` (gates the PR-creation default)."""
     return find_executable("gh") is not None
+
+
+def require_gh() -> None:
+    """Raise :class:`GhNotAvailableError` unless ``gh`` is on ``PATH`` (hard pre-flight gate).
+
+    The raising counterpart to :func:`has_gh`, used at ``watch``/``run`` startup when PR creation is
+    enabled so a missing GitHub CLI fails fast with an actionable message rather than surfacing as a
+    ``GitCommandError`` deep inside the publish stage.
+    """
+    if not has_gh():
+        raise GhNotAvailableError(
+            "'gh' (GitHub CLI) is not installed or not on PATH. Install it from "
+            "https://cli.github.com/ and run 'gh auth login', or disable PR creation "
+            "(git.create_pull_request: false)."
+        )
 
 
 def detect_checks(repo_root: Path | str) -> list[str]:

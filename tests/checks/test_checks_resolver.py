@@ -6,7 +6,6 @@ from collections.abc import Callable
 from pathlib import Path
 
 from tests.checks.conftest import make_process_result
-
 from wastech_orchestrator.checks.model import CheckSource
 from wastech_orchestrator.checks.resolver import CheckResolver
 from wastech_orchestrator.config.schema import OrchestratorConfig

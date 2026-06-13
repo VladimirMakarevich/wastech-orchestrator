@@ -65,6 +65,6 @@ def test_null_notifier_ask_human_is_deterministic_timeout() -> None:
     result = notifier.ask_human(
         question="q", context="", task_id="task-001", kind="question", timeout_s=1
     )
-    assert result.timed_out is True
+    assert result.failure == "transport_error"
     assert result.answered is False
     assert result.text is None

@@ -7,7 +7,7 @@ Owner: Vladimir Makarevich
 This document captures the design for allowing operators to skip individual pipeline stages,
 either globally in `config.yaml` or per-task in task frontmatter. It is a backlog item, not
 part of the currently implemented runtime behavior. Nothing here overrides
-[orchestrator_final_plan.md](../orchestrator_final_plan.md), [CLAUDE.md](../../CLAUDE.md), or the
+[00_orchestrator_final_plan.md](../implementation_stages/00_orchestrator_final_plan.md), [CLAUDE.md](../../CLAUDE.md), or the
 hard invariants in [docs/rules/](../rules/).
 
 ---

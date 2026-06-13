@@ -145,6 +145,7 @@ def build_context_footer(request: AgentRunRequest) -> str:
         ("diff", request.diff_path),
         ("checks", request.check_artifacts_path),
         ("review", request.review_artifacts_path),
+        ("human_input", request.human_input_path),
     )
     present = [(label, path) for label, path in fields if path]
     if not present:
@@ -244,7 +245,6 @@ def build_claude_argv(
     *,
     denied_commands: Sequence[str] = (),
     denied_read_paths: Sequence[str] = (),
-    output_schema_path: str | None = None,
 ) -> list[str]:
     """Build the ``claude -p`` argv (a list, never a shell string).
 
@@ -289,6 +289,11 @@ def build_claude_argv(
         argv += ["--effort", reasoning]
     if request.session_id:
         argv += ["--resume", request.session_id]
+    if request.output_schema is not None:
+        argv += [
+            "--json-schema",
+            json.dumps(request.output_schema, separators=(",", ":"), sort_keys=True),
+        ]
     if config.max_turns is not None:
         argv += ["--max-turns", str(config.max_turns)]
     argv += list(combined_extra)
@@ -447,7 +452,7 @@ class ClaudeCodeProvider:
             self.id,
             stage_run_id=request.stage_run_id,
         )
-        schema_path = self._write_output_schema(paths, request)
+        self._write_output_schema(paths, request)
 
         try:
             argv = build_claude_argv(
@@ -455,7 +460,6 @@ class ClaudeCodeProvider:
                 request,
                 denied_commands=self._security.denied_commands,
                 denied_read_paths=self._security.denied_read_paths,
-                output_schema_path=schema_path,
             )
         except ProviderError:
             self._write_request(paths, request, argv=None)
@@ -580,6 +584,7 @@ class ClaudeCodeProvider:
             "diff_path": request.diff_path,
             "check_artifacts_path": request.check_artifacts_path,
             "review_artifacts_path": request.review_artifacts_path,
+            "human_input_path": request.human_input_path,
         }
         return {
             "provider": self.id,

@@ -24,12 +24,32 @@ from wastech_orchestrator.checks.model import ResolvedCheck
 from wastech_orchestrator.checks.profile import ResolvedCheckProfile
 from wastech_orchestrator.checks.resolver import CheckResolver
 from wastech_orchestrator.config.schema import OrchestratorConfig
+from wastech_orchestrator.core.dangerous_diff import (
+    DangerousDiff,
+    classify_dangerous_diff,
+)
 from wastech_orchestrator.core.decomposition import (
     DecompositionDecision,
     SubtaskSpec,
     decide_decomposition,
     update_subtask_index,
     write_subtask_artifacts,
+)
+from wastech_orchestrator.core.hitl import (
+    HumanInputSignal,
+    StageOutputError,
+    TypedStageOutput,
+    guardrail_interaction_path,
+    handle_from_artifact,
+    interaction_id,
+    interaction_path,
+    load_interaction,
+    mark_consumed,
+    mark_interaction_status,
+    parse_typed_stage_output,
+    stage_output_schema,
+    write_answer,
+    write_waiting_interaction,
 )
 from wastech_orchestrator.core.loop_control import FixLoop, LoopController, LoopCounters
 from wastech_orchestrator.core.recovery import (
@@ -50,7 +70,13 @@ from wastech_orchestrator.ledger import (
     write_failure_report,
     write_minimal_summary,
 )
-from wastech_orchestrator.notify import Notifier, NullNotifier, build_notifier
+from wastech_orchestrator.notify import (
+    AskKind,
+    AskResult,
+    Notifier,
+    NullNotifier,
+    build_notifier,
+)
 from wastech_orchestrator.observability.logging import bind
 from wastech_orchestrator.providers.artifacts import sha256_file, task_artifact_dir
 from wastech_orchestrator.providers.base import (
@@ -95,14 +121,23 @@ _BLOCKING_SEVERITIES = frozenset({"blocking", "critical", "high"})
 _STAGE_PROMPTS: dict[Stage, str] = {
     Stage.REFINEMENT: (
         "Enrich the task into a complete, unambiguous specification. Document any assumptions. "
-        "Do not edit code. Read the context files listed below."
+        "Do not edit code. Return the typed structured result required by the output schema. "
+        "Set human_input only when a material ambiguity cannot be resolved safely from repository "
+        "evidence. If a human_input context file is present, apply that answer and do not repeat "
+        "the same question."
     ),
     Stage.PLANNING: (
         "Produce a brief implementation plan from the task and enriched spec. Do not edit code. "
-        "If decomposition is enabled and the task is large, instead return an ordered subtask list."
+        "Return the typed structured result required by the output schema. Use human_input for a "
+        "material clarification or approval, including a precise risk and repository-relative "
+        "paths. If a human_input context file is present, apply that answer and do not repeat the "
+        "same request. If decomposition is enabled and the task is large, return ordered subtasks."
     ),
     Stage.IMPLEMENTATION: (
-        "Implement the task in the working tree, following the plan. Make a minimal focused change."
+        "Implement the task in the working tree, following the plan. "
+        "Make a minimal focused change. "
+        "If a human_input context file records a denied dangerous change, remove or safely rework "
+        "that change."
     ),
     Stage.REVIEW: (
         "Review the current diff against the task and plan. Report findings with a severity each; "
@@ -110,7 +145,8 @@ _STAGE_PROMPTS: dict[Stage, str] = {
     ),
     Stage.FIXING: (
         "Address the failing checks and/or the blocking review findings in the context files. "
-        "Make the minimal change needed to resolve them."
+        "Make the minimal change needed to resolve them. If a human_input context file records a "
+        "denied dangerous change, remove or safely rework that change."
     ),
     Stage.SUMMARY: (
         "Write a plain-language summary of the change: what was done, how it works, how it "
@@ -523,19 +559,17 @@ class Orchestrator:
 
     def _run_refinement(self, p: _Pipeline) -> None:
         """Run or re-run the persisted ``refining`` checkpoint."""
-        outcome = self._run_stage(p, Stage.REFINEMENT)
-        message = self._require_result(p, outcome, Stage.REFINEMENT)
-        p.enriched_path = self._write_artifact(p, "task.enriched.md", message)
+        _, typed = self._run_typed_stage(p, Stage.REFINEMENT)
+        p.enriched_path = self._write_artifact(p, "task.enriched.md", typed.content)
         self._store.update_task(p.task.id, refinement_ran=True)
         self._transition(p, Status.PLANNING)
 
     def _planning(self, p: _Pipeline) -> None:
-        outcome = self._run_stage(p, Stage.PLANNING)
-        result = self._require_result_outcome(p, outcome, Stage.PLANNING)
-        p.plan_path = self._write_artifact(p, "plan.md", result.final_message or "")
+        _, typed = self._run_typed_stage(p, Stage.PLANNING)
+        p.plan_path = self._write_artifact(p, "plan.md", typed.content)
         gate_on = self._decomposition_gate_on(p.task)
         decision = decide_decomposition(
-            result.structured_output,
+            typed.structured,
             gate_on=gate_on,
             max_subtasks=self._config.agents.decomposition.max_subtasks,
         )
@@ -590,10 +624,12 @@ class Orchestrator:
 
         while True:
             if p.status is Status.IMPLEMENTING:
-                outcome = self._run_stage(p, Stage.IMPLEMENTATION, subtask=subtask, unit=unit)
-                self._require_result(p, outcome, Stage.IMPLEMENTATION)
-                p.diff_path = self._git.write_current_diff(p.task.id)
-                self._register_artifact(p.task.id, "diff", p.diff_path)
+                self._run_edit_stage_with_guardrail(
+                    p,
+                    Stage.IMPLEMENTATION,
+                    subtask=subtask,
+                    unit=unit,
+                )
                 self._transition(p, Status.TESTING)
 
             if p.status is Status.TESTING:
@@ -628,10 +664,12 @@ class Orchestrator:
                     return stuck
 
             if p.status is Status.FIXING:
-                outcome = self._run_stage(p, Stage.FIXING, subtask=subtask, unit=unit)
-                self._require_result(p, outcome, Stage.FIXING)
-                p.diff_path = self._git.write_current_diff(p.task.id)
-                self._register_artifact(p.task.id, "diff", p.diff_path)
+                self._run_edit_stage_with_guardrail(
+                    p,
+                    Stage.FIXING,
+                    subtask=subtask,
+                    unit=unit,
+                )
                 self._transition(p, Status.TESTING)
 
     def _on_review_passed(
@@ -893,7 +931,11 @@ class Orchestrator:
             self._move_task_file(p, final)
         self._append_ledger(p, final, pr_url=pr_url, cleanup_safe=cleanup.safe)
         self._notify_terminal(
-            task_id=p.task.id, final_status=final, pr_url=pr_url, reason=manual_reason
+            task_id=p.task.id,
+            final_status=final,
+            pr_url=pr_url,
+            reason=manual_reason,
+            contacts=tuple(p.task.contacts),
         )
         self._log(p.task.id).info(
             "terminal",
@@ -977,6 +1019,7 @@ class Orchestrator:
         *,
         subtask: int | None = None,
         unit: SubtaskSpec | None = None,
+        human_input_path: str | None = None,
     ) -> StageOutcome:
         route = self._router.resolve_route(stage, p.task.agents)
         provider_cfg = self._config.agents.providers[route.primary]
@@ -1008,6 +1051,8 @@ class Orchestrator:
             diff_path=p.diff_path,
             check_artifacts_path=p.check_log,
             review_artifacts_path=p.review_findings_path,
+            human_input_path=human_input_path,
+            output_schema=stage_output_schema(stage),
             model=p.task.model or None,
             reasoning=p.task.reasoning,
             session_id=p.session_ids.get(route.primary.value),
@@ -1034,6 +1079,328 @@ class Orchestrator:
             if outcome.provider_used != route.primary:
                 p.session_ids.pop(route.primary.value, None)
         return outcome
+
+    def _run_typed_stage(
+        self,
+        p: _Pipeline,
+        stage: Stage,
+        *,
+        subtask: int | None = None,
+        unit: SubtaskSpec | None = None,
+    ) -> tuple[StageOutcome, TypedStageOutput]:
+        """Run refinement/planning with at most one durable human round-trip."""
+        path = interaction_path(self._artifacts_root, p.task.id, stage, subtask=subtask)
+        persisted = load_interaction(path)
+        had_interaction = persisted is not None
+        human_input_path: str | None = None
+
+        if persisted is not None:
+            status = str(persisted.get("status", ""))
+            if status == "waiting":
+                handle = handle_from_artifact(persisted)
+                result = self._notifier.wait_for_answer(handle)
+                write_answer(path, result)
+                self._register_artifact(p.task.id, "hitl", str(path))
+                self._require_human_result(p, stage, handle.kind, result)
+                human_input_path = str(path)
+            elif status in {"answered", "consumed"}:
+                self._require_persisted_human_answer(p, stage, persisted)
+                human_input_path = str(path)
+            else:
+                raise ManualActionRequired(
+                    f"{stage.value} HITL cannot resume from interaction status {status!r}"
+                )
+
+        outcome = self._run_stage(
+            p,
+            stage,
+            subtask=subtask,
+            unit=unit,
+            human_input_path=human_input_path,
+        )
+        typed = self._typed_output(p, outcome, stage)
+        signal = typed.human_input
+        if signal is None:
+            if had_interaction:
+                mark_consumed(path)
+                self._register_artifact(p.task.id, "hitl", str(path))
+            return outcome, typed
+        if had_interaction:
+            raise ManualActionRequired(
+                f"{stage.value} requested human input more than once for the same checkpoint"
+            )
+
+        handle = self._notifier.start_ask(
+            question=signal.question,
+            context=signal.context,
+            task_id=p.task.id,
+            kind=signal.kind,
+            timeout_s=self._config.telegram.ask_timeout_s,
+            interaction_id=interaction_id(p.task.id, stage, subtask),
+            contacts=tuple(p.task.contacts),
+        )
+        write_waiting_interaction(
+            path,
+            task_id=p.task.id,
+            stage=stage,
+            subtask=subtask,
+            signal=signal,
+            handle=handle,
+        )
+        self._register_artifact(p.task.id, "hitl", str(path))
+        result = self._notifier.wait_for_answer(handle)
+        write_answer(path, result)
+        self._register_artifact(p.task.id, "hitl", str(path))
+        self._require_human_result(p, stage, signal.kind, result)
+
+        resumed = self._run_stage(
+            p,
+            stage,
+            subtask=subtask,
+            unit=unit,
+            human_input_path=str(path),
+        )
+        resumed_typed = self._typed_output(p, resumed, stage)
+        if resumed_typed.human_input is not None:
+            raise ManualActionRequired(
+                f"{stage.value} requested human input again after receiving an answer"
+            )
+        mark_consumed(path)
+        self._register_artifact(p.task.id, "hitl", str(path))
+        return resumed, resumed_typed
+
+    def _run_edit_stage_with_guardrail(
+        self,
+        p: _Pipeline,
+        stage: Stage,
+        *,
+        subtask: int | None,
+        unit: SubtaskSpec | None,
+    ) -> None:
+        """Run an editing stage and require approval for deletion/dependency changes."""
+        path = guardrail_interaction_path(
+            self._artifacts_root,
+            p.task.id,
+            stage,
+            subtask=subtask,
+            cycle=p.counters.fix_iterations,
+        )
+        persisted = load_interaction(path)
+        if persisted is None:
+            outcome = self._run_stage(p, stage, subtask=subtask, unit=unit)
+            self._require_result(p, outcome, stage)
+
+        p.diff_path = self._git.write_current_diff(p.task.id)
+        self._register_artifact(p.task.id, "diff", p.diff_path)
+        dangerous = classify_dangerous_diff(self._git.changed_code_entries())
+        if dangerous is None:
+            if persisted is not None:
+                mark_consumed(path)
+                self._register_artifact(p.task.id, "hitl", str(path))
+            return
+        if self._planning_approval_matches(p, dangerous):
+            self._log(p.task.id).info(
+                "dangerous diff covered by planning approval",
+                extra={"stage": stage.value, "risk": dangerous.risk, "paths": len(dangerous.paths)},
+            )
+            return
+
+        if persisted is None:
+            signal = self._dangerous_diff_signal(stage, dangerous)
+            handle = self._notifier.start_ask(
+                question=signal.question,
+                context=signal.context,
+                task_id=p.task.id,
+                kind="approval",
+                timeout_s=self._config.telegram.ask_timeout_s,
+                interaction_id=interaction_id(p.task.id, stage, subtask),
+                contacts=tuple(p.task.contacts),
+            )
+            write_waiting_interaction(
+                path,
+                task_id=p.task.id,
+                stage=stage,
+                subtask=subtask,
+                signal=signal,
+                handle=handle,
+            )
+            self._register_artifact(p.task.id, "hitl", str(path))
+            result = self._notifier.wait_for_answer(handle)
+            write_answer(path, result)
+            self._register_artifact(p.task.id, "hitl", str(path))
+            self._require_human_result(p, stage, "approval", result)
+            approved = result.approved
+        else:
+            approved = self._resume_guardrail_answer(p, stage, path, persisted, dangerous)
+
+        if approved is True:
+            mark_consumed(path)
+            self._register_artifact(p.task.id, "hitl", str(path))
+            return
+        if approved is not False:
+            raise ManualActionRequired(f"{stage.value} dangerous diff approval was ambiguous")
+
+        # A denial gets one safe-reconsideration run. Persist the boundary first so a crash cannot
+        # accidentally launch that run more than once.
+        mark_interaction_status(path, "reconsidering")
+        self._register_artifact(p.task.id, "hitl", str(path))
+        outcome = self._run_stage(
+            p,
+            stage,
+            subtask=subtask,
+            unit=unit,
+            human_input_path=str(path),
+        )
+        self._require_result(p, outcome, stage)
+        mark_interaction_status(path, "reconsidered")
+        p.diff_path = self._git.write_current_diff(p.task.id)
+        self._register_artifact(p.task.id, "diff", p.diff_path)
+        remaining = classify_dangerous_diff(self._git.changed_code_entries())
+        if remaining is not None:
+            raise ManualActionRequired(
+                f"{stage.value} retained dangerous changes after approval was denied"
+            )
+        mark_consumed(path)
+        self._register_artifact(p.task.id, "hitl", str(path))
+
+    def _resume_guardrail_answer(
+        self,
+        p: _Pipeline,
+        stage: Stage,
+        path: Path,
+        persisted: Mapping[str, Any],
+        dangerous: DangerousDiff,
+    ) -> bool | None:
+        status = str(persisted.get("status", ""))
+        if not self._guardrail_request_matches(persisted, dangerous):
+            raise ManualActionRequired(
+                f"{stage.value} dangerous diff expanded after its approval request"
+            )
+        if status == "waiting":
+            handle = handle_from_artifact(persisted)
+            result = self._notifier.wait_for_answer(handle)
+            write_answer(path, result)
+            self._register_artifact(p.task.id, "hitl", str(path))
+            self._require_human_result(p, stage, "approval", result)
+            return result.approved
+        if status in {"answered", "consumed"}:
+            self._require_persisted_human_answer(p, stage, persisted)
+            approved = persisted.get("approved")
+            return approved if isinstance(approved, bool) else None
+        if status in {"reconsidering", "reconsidered"}:
+            raise ManualActionRequired(
+                f"{stage.value} restart interrupted denied-change reconsideration"
+            )
+        raise ManualActionRequired(
+            f"{stage.value} guardrail cannot resume from interaction status {status!r}"
+        )
+
+    def _planning_approval_matches(self, p: _Pipeline, dangerous: DangerousDiff) -> bool:
+        path = interaction_path(self._artifacts_root, p.task.id, Stage.PLANNING)
+        persisted = load_interaction(path)
+        if persisted is None or persisted.get("approved") is not True:
+            return False
+        return self._guardrail_request_matches(persisted, dangerous)
+
+    def _guardrail_request_matches(
+        self,
+        persisted: Mapping[str, Any],
+        dangerous: DangerousDiff,
+    ) -> bool:
+        request = persisted.get("request")
+        if not isinstance(request, Mapping):
+            return False
+        paths = request.get("paths")
+        return (
+            request.get("kind") == "approval"
+            and request.get("risk") == dangerous.risk
+            and isinstance(paths, list)
+            and tuple(sorted(str(path) for path in paths)) == dangerous.paths
+        )
+
+    def _dangerous_diff_signal(
+        self,
+        stage: Stage,
+        dangerous: DangerousDiff,
+    ) -> HumanInputSignal:
+        detail: list[str] = []
+        if dangerous.deleted_paths:
+            detail.append("Deleted paths: " + ", ".join(dangerous.deleted_paths))
+        if dangerous.dependency_paths:
+            detail.append("Dependency manifests/locks: " + ", ".join(dangerous.dependency_paths))
+        return HumanInputSignal(
+            kind="approval",
+            question=f"Approve dangerous changes produced by the {stage.value} stage?",
+            context="\n".join(detail),
+            risk=dangerous.risk,
+            paths=dangerous.paths,
+        )
+
+    def _typed_output(
+        self,
+        p: _Pipeline,
+        outcome: StageOutcome,
+        stage: Stage,
+    ) -> TypedStageOutput:
+        result = self._require_result_outcome(p, outcome, stage)
+        try:
+            return parse_typed_stage_output(stage, result.structured_output)
+        except StageOutputError as exc:
+            raise PipelineFailed(
+                f"{stage.value} returned invalid structured output: {exc}"
+            ) from exc
+
+    def _require_human_result(
+        self,
+        p: _Pipeline,
+        stage: Stage,
+        kind: AskKind,
+        result: AskResult,
+    ) -> None:
+        failure = result.failure
+        if failure is None and result.answered:
+            if kind == "approval" and isinstance(result.approved, bool):
+                return
+            if kind == "question" and isinstance(result.text, str) and result.text.strip():
+                return
+            failure = "invalid_response"
+        elif failure is None:
+            failure = "invalid_response"
+        self._raise_human_failure(p, stage, failure)
+
+    def _require_persisted_human_answer(
+        self,
+        p: _Pipeline,
+        stage: Stage,
+        persisted: Mapping[str, Any],
+    ) -> None:
+        failure = persisted.get("failure")
+        if failure is not None:
+            self._raise_human_failure(p, stage, str(failure))
+            return
+        request = persisted.get("request")
+        if not isinstance(request, Mapping):
+            self._raise_human_failure(p, stage, "invalid_response")
+            return
+        kind = request.get("kind")
+        if kind == "approval" and isinstance(persisted.get("approved"), bool):
+            return
+        answer = persisted.get("answer")
+        if kind == "question" and isinstance(answer, str) and answer.strip():
+            return
+        self._raise_human_failure(p, stage, "invalid_response")
+
+    def _raise_human_failure(
+        self,
+        p: _Pipeline,
+        stage: Stage,
+        failure: str,
+    ) -> None:
+        self._log(p.task.id).warning(
+            "human input failed",
+            extra={"stage": stage.value, "failure": failure},
+        )
+        raise ManualActionRequired(f"{stage.value} human input failed: {failure}")
 
     def _build_prompt(self, p: _Pipeline, stage: Stage, unit: SubtaskSpec | None) -> str:
         prompt = _STAGE_PROMPTS[stage]
@@ -1320,6 +1687,7 @@ class Orchestrator:
         final_status: Status,
         pr_url: str | None,
         reason: str | None,
+        contacts: tuple[str, ...] = (),
     ) -> None:
         """Best-effort terminal notification (§4.7). Never raises and never alters the outcome."""
         try:
@@ -1328,6 +1696,7 @@ class Orchestrator:
                 final_status=final_status.value,
                 pr_url=pr_url,
                 reason=reason,
+                contacts=contacts,
             )
         except Exception as exc:  # noqa: BLE001 — notifier is best-effort by contract
             self._log(task_id).warning(

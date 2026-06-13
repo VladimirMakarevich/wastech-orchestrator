@@ -127,6 +127,7 @@ def build_context_footer(request: AgentRunRequest) -> str:
         ("diff", request.diff_path),
         ("checks", request.check_artifacts_path),
         ("review", request.review_artifacts_path),
+        ("human_input", request.human_input_path),
     )
     present = [(label, path) for label, path in fields if path]
     if not present:
@@ -495,6 +496,7 @@ class CodexProvider:
             "diff_path": request.diff_path,
             "check_artifacts_path": request.check_artifacts_path,
             "review_artifacts_path": request.review_artifacts_path,
+            "human_input_path": request.human_input_path,
         }
         return {
             "provider": self.id,

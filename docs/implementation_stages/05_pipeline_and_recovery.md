@@ -246,5 +246,6 @@ with auto mode disabled, the second task remains pending; exhausting a fix loop 
 
 - Cross-cutting security hardening + adversarial negative tests, audit-completeness verification, and
   the operations documentation — Phase 6.
-- Human-in-the-loop, Telegram, reasoning/complexity levels, parallel/worktree decomposition — v2
-  (spec §18.2; tracked in [../backlog/product_backlog.md](../backlog/product_backlog.md)).
+- At the time of this historical phase, human-in-the-loop and Telegram were deferred. They were
+  subsequently implemented in [Stage 08](08_telegram_integration.md). Parallel/worktree
+  decomposition remains backlog work.

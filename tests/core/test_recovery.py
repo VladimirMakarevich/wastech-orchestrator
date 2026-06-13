@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -9,7 +10,7 @@ import pytest
 
 from wastech_orchestrator.core.recovery import RecoveryAction, RecoveryReconciler
 from wastech_orchestrator.core.state_machine import Status
-from wastech_orchestrator.notify import AskKind, AskResult, Notifier
+from wastech_orchestrator.notify import AskHandle, AskKind, AskResult, Notifier
 from wastech_orchestrator.providers.base import AgentRunRequest, ProviderId, Stage
 from wastech_orchestrator.state_store import CheckRunRow, StateStore, SubtaskRow, TaskRow
 
@@ -29,8 +30,11 @@ class FakeGit:
 class RecordingNotifier:
     """Record terminal notification calls made while recovery reconciles state."""
 
-    def __init__(self) -> None:
+    def __init__(self, ask_result: AskResult | None = None) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.ask_result = ask_result
+        self.started: list[str] = []
+        self.waited: list[AskHandle] = []
 
     def send_notification(
         self,
@@ -39,8 +43,42 @@ class RecordingNotifier:
         final_status: str,
         pr_url: str | None,
         reason: str | None,
+        contacts: tuple[str, ...] = (),
     ) -> None:
         self.calls.append((task_id, final_status))
+
+    def start_ask(
+        self,
+        *,
+        question: str,
+        context: str,
+        task_id: str,
+        kind: AskKind,
+        timeout_s: int,
+        interaction_id: str,
+        contacts: tuple[str, ...] = (),
+    ) -> AskHandle:
+        self.started.append(interaction_id)
+        return AskHandle(
+            interaction_id=interaction_id,
+            kind=kind,
+            expires_at=0,
+            delivered=False,
+        )
+
+    def wait_for_answer(self, handle: AskHandle) -> AskResult:
+        self.waited.append(handle)
+        if self.ask_result is not None:
+            return AskResult(
+                answered=self.ask_result.answered,
+                text=self.ask_result.text,
+                approved=self.ask_result.approved,
+                timed_out=self.ask_result.timed_out,
+                failure=self.ask_result.failure,
+                interaction_id=handle.interaction_id,
+                message_id=handle.message_id,
+            )
+        return AskResult(answered=False, failure="transport_error")
 
     def ask_human(
         self,
@@ -50,8 +88,20 @@ class RecordingNotifier:
         task_id: str,
         kind: AskKind,
         timeout_s: int,
+        interaction_id: str = "adhoc",
+        contacts: tuple[str, ...] = (),
     ) -> AskResult:
-        return AskResult(answered=False, timed_out=True)
+        return self.wait_for_answer(
+            self.start_ask(
+                question=question,
+                context=context,
+                task_id=task_id,
+                kind=kind,
+                timeout_s=timeout_s,
+                interaction_id=interaction_id,
+                contacts=contacts,
+            )
+        )
 
 
 @pytest.fixture
@@ -183,6 +233,16 @@ class _FakeProvider:
         if request.stage is Stage.IMPLEMENTATION:
             (self._clone / f"impl-{self._n}.py").write_text("x\n", encoding="utf-8")
             self._n += 1
+        structured = None
+        if request.stage is Stage.REFINEMENT:
+            structured = {"content": "done", "human_input": None}
+        elif request.stage is Stage.PLANNING:
+            structured = {
+                "content": "done",
+                "human_input": None,
+                "decompose": False,
+                "subtasks": [],
+            }
         return AgentRunResult(
             status=RunStatus.SUCCEEDED,
             provider=self.id,
@@ -192,7 +252,7 @@ class _FakeProvider:
             started_at="t",
             finished_at="t",
             final_message="done",
-            structured_output=None,
+            structured_output=structured,
         )
 
 
@@ -406,6 +466,84 @@ def test_resume_continues_persisted_checkpoint(
         assert expected.requests[0].check_artifacts_path == str(failed_check)
         row = store.get_task(task_id)
         assert row is not None and row.fix_iterations == 1
+
+
+def test_resume_waits_on_persisted_planning_prompt_without_resending(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    from wastech_orchestrator.core.hitl import (
+        HumanInputSignal,
+        interaction_path,
+        load_interaction,
+        write_waiting_interaction,
+    )
+    from wastech_orchestrator.task.model import NormalizedTask
+    from wastech_orchestrator.task.parser import slugify, write_normalized
+
+    notifier = RecordingNotifier(AskResult(answered=True, text="Use PostgreSQL."))
+    providers = _make_providers(git_repo)
+    orch, store, _, art, _ = _build_orchestrator(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers,
+        [0],
+        notifier=notifier,
+    )
+    task_id = "resume-planning-hitl"
+    title = "Resume planning HITL"
+    slug = slugify(title)
+    branch = f"agent/{task_id}-{slug}"
+    git_run(["checkout", "-b", branch], git_repo.clone)
+    write_normalized(
+        NormalizedTask(id=task_id, title=title, description="Implement the requested change."),
+        str(art),
+    )
+    store.insert_task(
+        TaskRow(
+            task_id=task_id,
+            title=title,
+            status=Status.PLANNING,
+            branch=branch,
+            slug=slug,
+        )
+    )
+
+    path = interaction_path(art, task_id, Stage.PLANNING)
+    handle = AskHandle(
+        interaction_id="h-persisted",
+        kind="question",
+        expires_at=time.time() + 60,
+        message_id=123,
+        update_offset=456,
+    )
+    write_waiting_interaction(
+        path,
+        task_id=task_id,
+        stage=Stage.PLANNING,
+        subtask=None,
+        signal=HumanInputSignal(
+            kind="question",
+            question="Which database should be used?",
+            context="The task does not select one.",
+            risk="clarification",
+            paths=(),
+        ),
+        handle=handle,
+    )
+
+    result = orch.resume()
+
+    assert result is not None and result.final_status is Status.DONE
+    assert notifier.started == []
+    assert notifier.waited == [handle]
+    planning_requests = providers[ProviderId.CLAUDE].requests
+    assert planning_requests[0].stage is Stage.PLANNING
+    assert planning_requests[0].human_input_path == str(path)
+    persisted = load_interaction(path)
+    assert persisted is not None
+    assert persisted["status"] == "consumed"
+    assert persisted["answer"] == "Use PostgreSQL."
 
 
 def test_resume_decomposed_at_subtask_without_duplicate_commit(

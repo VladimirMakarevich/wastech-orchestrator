@@ -20,7 +20,7 @@ from wastech_orchestrator.core.orchestrator import Orchestrator, SlotBusyError
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import GitManager, GitResult
 from wastech_orchestrator.ledger import Ledger
-from wastech_orchestrator.notify import AskKind, AskResult, Notifier
+from wastech_orchestrator.notify import AskHandle, AskKind, AskResult, Notifier
 from wastech_orchestrator.providers.artifacts import create_attempt_dir
 from wastech_orchestrator.providers.base import (
     AgentRunRequest,
@@ -49,6 +49,7 @@ class FakeProvider:
         self.id = provider_id
         self._outputs = outputs or {}
         self._infra_fail = infra_fail or set()
+        self.requests: list[AgentRunRequest] = []
 
     def preflight(self) -> ProviderHealth:
         return ProviderHealth(
@@ -61,9 +62,26 @@ class FakeProvider:
         )
 
     def run(self, request: AgentRunRequest) -> AgentRunResult:
+        self.requests.append(request)
         if request.stage in self._infra_fail:
             raise ProviderError(error_class=ErrorClass.TIMEOUT, message="infra fail")
         message, structured = self._outputs.get(request.stage, ("done", None))
+        if request.stage is Stage.REFINEMENT:
+            structured = (
+                structured
+                if isinstance(structured, dict) and "content" in structured
+                else {"content": message, "human_input": None}
+            )
+        elif request.stage is Stage.PLANNING and (
+            not isinstance(structured, dict) or "content" not in structured
+        ):
+            planning = structured or {}
+            structured = {
+                "content": message,
+                "human_input": None,
+                "decompose": planning.get("decompose") is True,
+                "subtasks": planning.get("subtasks") or [],
+            }
         return AgentRunResult(
             status=RunStatus.SUCCEEDED,
             provider=self.id,
@@ -101,9 +119,16 @@ class ArtifactWritingProvider(FakeProvider):
 class RecordingNotifier:
     """Core-facing notifier fake that records terminal messages without network access."""
 
-    def __init__(self, *, raise_on_send: bool = False) -> None:
-        self.calls: list[dict[str, str | None]] = []
+    def __init__(
+        self,
+        *,
+        raise_on_send: bool = False,
+        ask_results: list[AskResult] | None = None,
+    ) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.ask_calls: list[dict[str, object]] = []
         self._raise_on_send = raise_on_send
+        self._ask_results = list(ask_results or [])
 
     def send_notification(
         self,
@@ -112,6 +137,7 @@ class RecordingNotifier:
         final_status: str,
         pr_url: str | None,
         reason: str | None,
+        contacts: tuple[str, ...] = (),
     ) -> None:
         self.calls.append(
             {
@@ -119,10 +145,56 @@ class RecordingNotifier:
                 "final_status": final_status,
                 "pr_url": pr_url,
                 "reason": reason,
+                "contacts": contacts,
             }
         )
         if self._raise_on_send:
             raise RuntimeError("notification failed")
+
+    def start_ask(
+        self,
+        *,
+        question: str,
+        context: str,
+        task_id: str,
+        kind: AskKind,
+        timeout_s: int,
+        interaction_id: str,
+        contacts: tuple[str, ...] = (),
+    ) -> AskHandle:
+        self.ask_calls.append(
+            {
+                "question": question,
+                "context": context,
+                "task_id": task_id,
+                "kind": kind,
+                "timeout_s": timeout_s,
+                "interaction_id": interaction_id,
+                "contacts": contacts,
+            }
+        )
+        return AskHandle(
+            interaction_id=interaction_id,
+            kind=kind,
+            expires_at=9999999999.0,
+            message_id=len(self.ask_calls),
+            update_offset=1,
+        )
+
+    def wait_for_answer(self, handle: AskHandle) -> AskResult:
+        if self._ask_results:
+            return replace(
+                self._ask_results.pop(0),
+                interaction_id=handle.interaction_id,
+                message_id=handle.message_id,
+            )
+        return AskResult(
+            answered=False,
+            timed_out=True,
+            failure="timeout",
+            interaction_id=handle.interaction_id,
+            message_id=handle.message_id,
+        )
 
     def ask_human(
         self,
@@ -132,8 +204,20 @@ class RecordingNotifier:
         task_id: str,
         kind: AskKind,
         timeout_s: int,
+        interaction_id: str = "adhoc",
+        contacts: tuple[str, ...] = (),
     ) -> AskResult:
-        return AskResult(answered=False, timed_out=True)
+        return self.wait_for_answer(
+            self.start_ask(
+                question=question,
+                context=context,
+                task_id=task_id,
+                kind=kind,
+                timeout_s=timeout_s,
+                interaction_id=interaction_id,
+                contacts=contacts,
+            )
+        )
 
 
 def _fake_proc(verdicts: list[int]) -> Callable[..., object]:
@@ -275,6 +359,7 @@ def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: 
             "final_status": "done",
             "pr_url": "https://example/pr/1",
             "reason": None,
+            "contacts": (),
         }
     ]
     assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "main"
@@ -515,7 +600,11 @@ def test_decomposed_task_commits_each_subtask(
                     started_at="t",
                     finished_at="t",
                     final_message="plan",
-                    structured_output=subtasks,
+                    structured_output={
+                        "content": "plan",
+                        "human_input": None,
+                        **subtasks,
+                    },
                 )
             if request.stage is Stage.IMPLEMENTATION:
                 # Each subtask writes a distinct file so each commit is non-empty.
@@ -592,6 +681,7 @@ def test_rejected_task_no_branch(git_repo, make_git_config, git_run, tmp_path: P
             "final_status": "failed",
             "pr_url": None,
             "reason": "frontmatter_missing",
+            "contacts": (),
         }
     ]
 
@@ -815,7 +905,11 @@ def test_decomposed_failure_report_has_subtask_fields(
                     started_at="t",
                     finished_at="t",
                     final_message="plan",
-                    structured_output=subtasks,
+                    structured_output={
+                        "content": "plan",
+                        "human_input": None,
+                        **subtasks,
+                    },
                 )
             if request.stage in (Stage.IMPLEMENTATION, Stage.FIXING):
                 (git_repo.clone / "d.py").write_text("q = 1\n", encoding="utf-8")
@@ -841,3 +935,411 @@ def test_decomposed_failure_report_has_subtask_fields(
     assert report["decomposed"]["failing_subtask"] == 1
     assert report["decomposed"]["subtasks_completed"] == 0
     assert report["decomposed"]["committed_shas"] == []
+
+
+def _incomplete_task(tmp_path: Path, task_id: str) -> str:
+    path = tmp_path / f"{task_id}.md"
+    path.write_text(
+        f'---\nid: {task_id}\ntitle: "Choose behavior"\n---\n\n'
+        "## Description\n\nThe behavior is intentionally ambiguous.\n",
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def _stage_result(
+    provider: FakeProvider,
+    request: AgentRunRequest,
+    structured: dict[str, object],
+) -> AgentRunResult:
+    return AgentRunResult(
+        status=RunStatus.SUCCEEDED,
+        provider=provider.id,
+        stage=request.stage,
+        attempt=request.attempt,
+        exit_code=0,
+        started_at="t0",
+        finished_at="t1",
+        final_message=str(structured.get("content", "")),
+        structured_output=structured,
+    )
+
+
+def test_refinement_question_is_answered_and_reinjected(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    class HitlProvider(FakeProvider):
+        def run(self, request: AgentRunRequest) -> AgentRunResult:
+            if request.stage is Stage.REFINEMENT:
+                self.requests.append(request)
+                if request.human_input_path is None:
+                    return _stage_result(
+                        self,
+                        request,
+                        {
+                            "content": "",
+                            "human_input": {
+                                "kind": "question",
+                                "question": "Which behavior?",
+                                "context": "The task permits A or B.",
+                                "risk": "clarification",
+                                "paths": [],
+                            },
+                        },
+                    )
+                return _stage_result(
+                    self,
+                    request,
+                    {"content": "Use behavior B.", "human_input": None},
+                )
+            if request.stage is Stage.IMPLEMENTATION:
+                (git_repo.clone / "feature.py").write_text("behavior = 'B'\n", encoding="utf-8")
+            return super().run(request)
+
+    claude = HitlProvider("claude")
+    providers = {ProviderId.CLAUDE: claude, ProviderId.CODEX: FakeProvider("codex")}
+    notifier = RecordingNotifier(
+        ask_results=[AskResult(answered=True, text="Use B", approved=None)]
+    )
+    orch, _, _, art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
+    )
+
+    result = orch.run_task(_incomplete_task(tmp_path, "task-hitl-question"))
+
+    assert result.final_status is Status.DONE
+    refinement_requests = [r for r in claude.requests if r.stage is Stage.REFINEMENT]
+    assert len(refinement_requests) == 2
+    assert refinement_requests[1].human_input_path is not None
+    interaction = json.loads(
+        (art / "logs" / "task-hitl-question" / "hitl" / "refinement.json").read_text()
+    )
+    assert interaction["status"] == "consumed"
+    assert interaction["answer"] == "Use B"
+
+
+def test_refinement_timeout_is_manual_action_required(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    signal = {
+        "content": "",
+        "human_input": {
+            "kind": "question",
+            "question": "Which behavior?",
+            "context": "",
+            "risk": "clarification",
+            "paths": [],
+        },
+    }
+    providers = _both(outputs={Stage.REFINEMENT: ("", signal)})
+    notifier = RecordingNotifier(
+        ask_results=[AskResult(answered=False, timed_out=True, failure="timeout")]
+    )
+    orch, _, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
+    )
+
+    result = orch.run_task(_incomplete_task(tmp_path, "task-hitl-timeout"))
+
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
+
+
+def test_ambiguous_stage_approval_is_manual_action_required(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    signal = {
+        "content": "",
+        "human_input": {
+            "kind": "approval",
+            "question": "Proceed?",
+            "context": "",
+            "risk": "other",
+            "paths": [],
+        },
+    }
+    providers = _both(outputs={Stage.REFINEMENT: ("", signal)})
+    notifier = RecordingNotifier(
+        ask_results=[AskResult(answered=True, text="maybe", approved=None)]
+    )
+    orch, _, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
+    )
+
+    result = orch.run_task(_incomplete_task(tmp_path, "task-hitl-ambiguous"))
+
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
+
+
+def test_repeated_stage_question_is_manual_action_required(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    signal = {
+        "content": "",
+        "human_input": {
+            "kind": "question",
+            "question": "Still unclear?",
+            "context": "",
+            "risk": "clarification",
+            "paths": [],
+        },
+    }
+    providers = _both(outputs={Stage.REFINEMENT: ("", signal)})
+    notifier = RecordingNotifier(ask_results=[AskResult(answered=True, text="Use B")])
+    orch, _, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
+    )
+
+    result = orch.run_task(_incomplete_task(tmp_path, "task-hitl-repeat"))
+
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
+
+
+@pytest.mark.parametrize("danger", ["dependency", "deletion"])
+def test_dangerous_diff_requires_approval(
+    danger: str, git_repo, make_git_config, tmp_path: Path
+) -> None:
+    class DangerousProvider(FakeProvider):
+        def run(self, request: AgentRunRequest) -> AgentRunResult:
+            if request.stage is Stage.IMPLEMENTATION:
+                if danger == "dependency":
+                    (git_repo.clone / "pyproject.toml").write_text(
+                        "[project]\nname='x'\n", encoding="utf-8"
+                    )
+                else:
+                    (git_repo.clone / "README.md").unlink()
+            return super().run(request)
+
+    providers = {
+        ProviderId.CLAUDE: DangerousProvider("claude"),
+        ProviderId.CODEX: DangerousProvider("codex"),
+    }
+    notifier = RecordingNotifier(
+        ask_results=[AskResult(answered=True, text="approved", approved=True)]
+    )
+    orch, _, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
+    )
+
+    result = orch.run_task(_complete_task(tmp_path, f"task-{danger}-approval"))
+
+    assert result.final_status is Status.DONE
+    assert len(notifier.ask_calls) == 1
+    assert notifier.ask_calls[0]["kind"] == "approval"
+
+
+def test_denied_dependency_change_gets_one_safe_reconsideration(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    class ReconsideringProvider(FakeProvider):
+        def run(self, request: AgentRunRequest) -> AgentRunResult:
+            if request.stage is Stage.IMPLEMENTATION:
+                dependency = git_repo.clone / "pyproject.toml"
+                if request.human_input_path is None:
+                    dependency.write_text("[project]\nname='x'\n", encoding="utf-8")
+                elif dependency.exists():
+                    dependency.unlink()
+                (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+            return super().run(request)
+
+    claude = ReconsideringProvider("claude")
+    providers = {ProviderId.CLAUDE: claude, ProviderId.CODEX: FakeProvider("codex")}
+    notifier = RecordingNotifier(
+        ask_results=[AskResult(answered=True, text="denied", approved=False)]
+    )
+    orch, _, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
+    )
+
+    result = orch.run_task(_complete_task(tmp_path, "task-denied-dependency"))
+
+    assert result.final_status is Status.DONE
+    implementation = [r for r in claude.requests if r.stage is Stage.IMPLEMENTATION]
+    assert len(implementation) == 2
+    assert implementation[1].human_input_path is not None
+
+
+def test_denied_dangerous_change_that_remains_requires_manual_action(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    class PersistentDangerProvider(FakeProvider):
+        def run(self, request: AgentRunRequest) -> AgentRunResult:
+            if request.stage is Stage.IMPLEMENTATION:
+                (git_repo.clone / "pyproject.toml").write_text(
+                    "[project]\nname='x'\n", encoding="utf-8"
+                )
+            return super().run(request)
+
+    providers = {
+        ProviderId.CLAUDE: PersistentDangerProvider("claude"),
+        ProviderId.CODEX: FakeProvider("codex"),
+    }
+    notifier = RecordingNotifier(
+        ask_results=[AskResult(answered=True, text="denied", approved=False)]
+    )
+    orch, _, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
+    )
+
+    result = orch.run_task(_complete_task(tmp_path, "task-denied-risk-remains"))
+
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
+    assert len(notifier.ask_calls) == 1
+
+
+def test_planning_approval_is_reused_for_exact_dependency_diff(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    class PlanningApprovalProvider(FakeProvider):
+        def run(self, request: AgentRunRequest) -> AgentRunResult:
+            if request.stage is Stage.PLANNING:
+                self.requests.append(request)
+                if request.human_input_path is None:
+                    return _stage_result(
+                        self,
+                        request,
+                        {
+                            "content": "",
+                            "human_input": {
+                                "kind": "approval",
+                                "question": "Approve adding Python dependencies?",
+                                "context": "The plan changes pyproject.toml.",
+                                "risk": "dependency",
+                                "paths": ["pyproject.toml"],
+                            },
+                            "decompose": False,
+                            "subtasks": [],
+                        },
+                    )
+                return _stage_result(
+                    self,
+                    request,
+                    {
+                        "content": "Update pyproject.toml.",
+                        "human_input": None,
+                        "decompose": False,
+                        "subtasks": [],
+                    },
+                )
+            if request.stage is Stage.IMPLEMENTATION:
+                (git_repo.clone / "pyproject.toml").write_text(
+                    "[project]\nname='x'\n", encoding="utf-8"
+                )
+            return super().run(request)
+
+    claude = PlanningApprovalProvider("claude")
+    providers = {ProviderId.CLAUDE: claude, ProviderId.CODEX: FakeProvider("codex")}
+    notifier = RecordingNotifier(
+        ask_results=[AskResult(answered=True, text="approved", approved=True)]
+    )
+    orch, _, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
+    )
+
+    result = orch.run_task(_complete_task(tmp_path, "task-planning-approval"))
+
+    assert result.final_status is Status.DONE
+    assert len(notifier.ask_calls) == 1
+
+
+def test_expanded_diff_requires_separate_approval_after_planning(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    class ExpandedDiffProvider(FakeProvider):
+        def run(self, request: AgentRunRequest) -> AgentRunResult:
+            if request.stage is Stage.PLANNING:
+                self.requests.append(request)
+                if request.human_input_path is None:
+                    return _stage_result(
+                        self,
+                        request,
+                        {
+                            "content": "",
+                            "human_input": {
+                                "kind": "approval",
+                                "question": "Approve changing pyproject.toml?",
+                                "context": "",
+                                "risk": "dependency",
+                                "paths": ["pyproject.toml"],
+                            },
+                            "decompose": False,
+                            "subtasks": [],
+                        },
+                    )
+                return _stage_result(
+                    self,
+                    request,
+                    {
+                        "content": "Update the Python manifest.",
+                        "human_input": None,
+                        "decompose": False,
+                        "subtasks": [],
+                    },
+                )
+            if request.stage is Stage.IMPLEMENTATION:
+                (git_repo.clone / "pyproject.toml").write_text(
+                    "[project]\nname='x'\n", encoding="utf-8"
+                )
+                (git_repo.clone / "package-lock.json").write_text("{}\n", encoding="utf-8")
+            return super().run(request)
+
+    claude = ExpandedDiffProvider("claude")
+    providers = {ProviderId.CLAUDE: claude, ProviderId.CODEX: FakeProvider("codex")}
+    notifier = RecordingNotifier(
+        ask_results=[
+            AskResult(answered=True, text="approved", approved=True),
+            AskResult(answered=True, text="approved", approved=True),
+        ]
+    )
+    orch, _, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
+    )
+
+    result = orch.run_task(_complete_task(tmp_path, "task-expanded-approval"))
+
+    assert result.final_status is Status.DONE
+    assert len(notifier.ask_calls) == 2

@@ -3,10 +3,16 @@ installer) — under the in-repo footprint that is the bound repo itself, not th
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Callable
 from pathlib import Path
 
-from wastech_orchestrator import cli
+import pytest
+
+from wastech_orchestrator import cli, process_control
 from wastech_orchestrator.config.loader import loads_config
+from wastech_orchestrator.config.schema import OrchestratorConfig
+from wastech_orchestrator.install import detect
 from wastech_orchestrator.install.config_writer import InstallSpec, build_and_validate
 from wastech_orchestrator.providers.base import ProviderId
 
@@ -26,3 +32,204 @@ def test_pending_dir_is_under_the_bound_repo(tmp_path: Path) -> None:
     config = loads_config(build_and_validate(spec)).config
     # in_repo footprint: artifacts (and the pending queue) live in the bound repo, not the cwd.
     assert cli.pending_dir(config) == repo / "tasks" / "pending"
+
+
+# --- stop / restart daemon control (backlog: stop/restart) ----------------------------------------
+
+
+class _FakeOrch:
+    """Minimal orchestrator stub for ``watch_loop`` tests (every tick is a no-op)."""
+
+    def __init__(self, on_refresh: Callable[[], None] | None = None) -> None:
+        self.refresh_calls = 0
+        self._on_refresh = on_refresh
+
+    def refresh_repo(self) -> None:
+        self.refresh_calls += 1
+        if self._on_refresh is not None:
+            self._on_refresh()
+
+    def resume(self) -> None:
+        return None
+
+
+class _FakeController:
+    """Stand-in for ``StopController`` that never touches the real signal table."""
+
+    def __init__(self, **_kwargs: object) -> None:
+        self.event = threading.Event()
+
+    def __enter__(self) -> _FakeController:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+
+@pytest.fixture
+def in_repo_config(
+    tmp_path: Path, make_git_config: Callable[..., OrchestratorConfig]
+) -> OrchestratorConfig:
+    """An in-repo config whose artifact root (PID-file home) is an isolated clone dir, PR off."""
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    return make_git_config(clone, location="in_repo", tracking="exclude_local", create_pr=False)
+
+
+def test_watch_loop_stops_before_first_tick_when_event_preset(
+    in_repo_config: OrchestratorConfig, tmp_path: Path
+) -> None:
+    orch = _FakeOrch()
+    event = threading.Event()
+    event.set()
+    results = cli.watch_loop(
+        orch, in_repo_config, tmp_path / "pending", poll_interval=5, stop_event=event
+    )
+    assert results == []
+    assert orch.refresh_calls == 0
+
+
+def test_watch_loop_honors_event_set_during_tick(
+    in_repo_config: OrchestratorConfig, tmp_path: Path
+) -> None:
+    event = threading.Event()
+    orch = _FakeOrch(on_refresh=event.set)  # SIGTERM arrives mid-tick
+    cli.watch_loop(orch, in_repo_config, tmp_path / "pending", poll_interval=100, stop_event=event)
+    assert orch.refresh_calls == 1  # post-tick wait returns at once; no second tick
+
+
+def test_watch_loop_without_event_uses_sleep_fn(
+    in_repo_config: OrchestratorConfig, tmp_path: Path
+) -> None:
+    orch = _FakeOrch()
+    sleeps: list[float] = []
+    cli.watch_loop(
+        orch,
+        in_repo_config,
+        tmp_path / "pending",
+        poll_interval=3,
+        max_iterations=2,
+        sleep_fn=sleeps.append,
+    )
+    assert orch.refresh_calls == 2
+    assert sleeps == [3]  # slept once between ticks, not after the last
+
+
+def test_stop_no_pid_file_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+    in_repo_config: OrchestratorConfig,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cli, "load_config_for", lambda args: in_repo_config)
+    assert cli.main(["stop"]) == 0
+    assert "no running watcher" in capsys.readouterr().out
+
+
+def test_stop_clears_stale_pid_file(
+    monkeypatch: pytest.MonkeyPatch,
+    in_repo_config: OrchestratorConfig,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cli, "load_config_for", lambda args: in_repo_config)
+    pid_path = process_control.pid_file_path(cli.artifacts_root_for(in_repo_config))
+    process_control.write_pid_file(pid_path, pid=999111)
+    monkeypatch.setattr(process_control, "is_running", lambda pid, **kw: False)
+    assert cli.main(["stop"]) == 0
+    assert "cleared stale" in capsys.readouterr().out
+    assert not pid_path.exists()
+
+
+def test_watch_refuses_to_start_when_already_running(
+    monkeypatch: pytest.MonkeyPatch,
+    in_repo_config: OrchestratorConfig,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cli, "load_config_for", lambda args: in_repo_config)
+    pid_path = process_control.pid_file_path(cli.artifacts_root_for(in_repo_config))
+    process_control.write_pid_file(pid_path, pid=4242)
+    monkeypatch.setattr(process_control, "is_running", lambda pid, **kw: True)
+    assert cli.main(["watch", "--poll-seconds", "5"]) == 1
+    assert "already running" in capsys.readouterr().out
+
+
+def test_watch_writes_then_removes_pid_file(
+    monkeypatch: pytest.MonkeyPatch, in_repo_config: OrchestratorConfig
+) -> None:
+    monkeypatch.setattr(cli, "load_config_for", lambda args: in_repo_config)
+    monkeypatch.setattr(cli, "build_orchestrator", lambda *a, **k: object())
+    monkeypatch.setattr(process_control, "StopController", _FakeController)
+    pid_path = process_control.pid_file_path(cli.artifacts_root_for(in_repo_config))
+    seen: dict[str, bool] = {}
+
+    def fake_loop(orch: object, config: object, folder: object, **_kw: object) -> list[object]:
+        seen["during"] = pid_path.exists()
+        return []
+
+    monkeypatch.setattr(cli, "watch_loop", fake_loop)
+    assert cli.main(["watch", "--poll-seconds", "5"]) == 0
+    assert seen["during"] is True
+    assert not pid_path.exists()
+
+
+def test_restart_stops_previous_then_delegates_to_watch(
+    monkeypatch: pytest.MonkeyPatch,
+    in_repo_config: OrchestratorConfig,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cli, "load_config_for", lambda args: in_repo_config)
+    outcome = process_control.StopOutcome(
+        found=True, pid=4242, signaled=True, killed=False, already_dead=False
+    )
+    monkeypatch.setattr(process_control, "stop_process", lambda path, **kw: outcome)
+    captured: dict[str, object] = {}
+
+    def fake_watch(args: object) -> int:
+        captured["poll"] = args.poll_seconds  # type: ignore[attr-defined]
+        return 0
+
+    monkeypatch.setattr(cli, "cmd_watch", fake_watch)
+    assert cli.main(["restart", "--poll-seconds", "7"]) == 0
+    assert "stopped previous watcher 4242" in capsys.readouterr().out
+    assert captured["poll"] == 7
+
+
+def test_watch_fails_fast_when_gh_missing_and_pr_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    make_git_config: Callable[..., OrchestratorConfig],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    config = make_git_config(clone, location="in_repo", tracking="exclude_local", create_pr=True)
+    monkeypatch.setattr(cli, "load_config_for", lambda args: config)
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    assert cli.main(["watch", "--poll-seconds", "5"]) == 2
+    assert "gh" in capsys.readouterr().out
+
+
+def test_run_fails_fast_when_gh_missing_and_pr_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    make_git_config: Callable[..., OrchestratorConfig],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    config = make_git_config(clone, location="in_repo", tracking="exclude_local", create_pr=True)
+    monkeypatch.setattr(cli, "load_config_for", lambda args: config)
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    assert cli.main(["run", "task.md"]) == 2
+    assert "gh" in capsys.readouterr().out
+
+
+def test_watch_skips_gh_check_when_pr_disabled(
+    monkeypatch: pytest.MonkeyPatch, in_repo_config: OrchestratorConfig
+) -> None:
+    monkeypatch.setattr(cli, "load_config_for", lambda args: in_repo_config)  # create_pr=False
+    monkeypatch.setattr(cli, "build_orchestrator", lambda *a, **k: object())
+    monkeypatch.setattr(cli, "watch_loop", lambda *a, **k: [])
+    calls: list[int] = []
+    monkeypatch.setattr(detect, "require_gh", lambda: calls.append(1))
+    assert cli.main(["watch", "--poll-seconds", "0"]) == 0
+    assert calls == []

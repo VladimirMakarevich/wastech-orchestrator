@@ -14,7 +14,8 @@ pushed there) — that is how a teammate hands the orchestrator work over git. O
 `external`/`exclude_local` footprints must task files stay out of the repo, since there the preflight
 treats tracked `tasks/`/`logs/` names as a collision.
 
-The canonical task rules are in [orchestrator_final_plan.md sections 5 and 19](orchestrator_final_plan.md).
+The canonical task rules are in
+[00_orchestrator_final_plan.md sections 5 and 19](implementation_stages/00_orchestrator_final_plan.md).
 
 ## Markdown Shape
 
@@ -71,7 +72,7 @@ Allowed fields:
 | `refined` | no | boolean | Set `true` when the task is already complete enough to skip refinement. |
 | `decompose` | no | boolean | `true` forces the decomposition gate, `false` disables it, omitted uses config. |
 | `agents` | no | mapping | Per-stage provider override. |
-| `contacts` | no | list of strings | Human contacts for future notification/HITL flows. |
+| `contacts` | no | list of strings | Plain-text mentions in Telegram notifications/HITL prompts. |
 | `model` | no | string or null | Override the provider model for every stage of this task (e.g. `claude-opus-4-8`). |
 | `reasoning` | no | string or null | Override the reasoning effort level for this task: `low`, `medium`, `high`, `xhigh`, or `max`. |
 
@@ -182,8 +183,9 @@ contacts:
   - "frontend-team"
 ```
 
-When Telegram is configured, the orchestrator uses these for notifications and HITL prompts.
-The field is parsed and preserved for future HITL flows.
+When Telegram is configured, the orchestrator renders these values as plain-text mentions in
+terminal notifications and HITL prompts. They do not choose the Telegram chat, grant access, alter
+routing, or change approval scope; the numeric chat id remains operator-controlled configuration.
 
 ## `model`
 

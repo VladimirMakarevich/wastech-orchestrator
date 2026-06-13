@@ -6,7 +6,8 @@ Owner: Vladimir Makarevich
 
 This document captures the design for adding stage-level granularity to the `model` and `reasoning`
 task parameters. It is a backlog item, not part of the currently implemented runtime behavior.
-Nothing here overrides [orchestrator_final_plan.md](../orchestrator_final_plan.md),
+Nothing here overrides
+[00_orchestrator_final_plan.md](../implementation_stages/00_orchestrator_final_plan.md),
 [CLAUDE.md](../../CLAUDE.md), or the hard invariants in [docs/rules/](../rules/).
 
 ---

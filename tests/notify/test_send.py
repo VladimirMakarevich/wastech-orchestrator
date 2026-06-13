@@ -46,6 +46,19 @@ def test_send_failed_includes_reason(fake_client: FakeTelegramClient) -> None:
     assert "pr=" not in text  # no PR URL → field omitted
 
 
+def test_send_includes_contacts_as_plain_text(fake_client: FakeTelegramClient) -> None:
+    n = _notifier(fake_client)
+    n.send_notification(
+        task_id="task-contacts",
+        final_status="done",
+        pr_url=None,
+        reason=None,
+        contacts=("@owner", "@ops"),
+    )
+
+    assert "contacts=@owner @ops" in fake_client.sent[0]["text"]
+
+
 def test_send_manual_action_required(fake_client: FakeTelegramClient) -> None:
     n = _notifier(fake_client)
     n.send_notification(
@@ -89,3 +102,22 @@ def test_send_failure_log_redacts_token_and_chat_id(
     assert token not in rendered
     assert chat_id not in rendered
     assert "[REDACTED]" in rendered
+
+
+def test_outgoing_message_is_redacted_and_bounded(fake_client: FakeTelegramClient) -> None:
+    token = "bot-token-secret-1234"
+    chat_id = "987654321098"
+    n = _notifier(fake_client, token=token, chat_id=chat_id)
+
+    n.send_notification(
+        task_id="task-long",
+        final_status="failed",
+        pr_url=None,
+        reason=(token + chat_id + "x" * 5000),
+    )
+
+    text = fake_client.sent[0]["text"]
+    assert len(text) <= 4096
+    assert token not in text
+    assert chat_id not in text
+    assert "message truncated" in text

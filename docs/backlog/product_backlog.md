@@ -4,11 +4,13 @@ Status: **backlog / not scheduled**
 Date: 2026-06-12
 Owner: Vladimir Makarevich
 
-This document aggregates deferred and candidate functionality that was previously scattered across the repository. It is an inventory, not an implementation contract. The source of truth for v1 behavior remains [../orchestrator_final_plan.md](../orchestrator_final_plan.md).
+This document aggregates deferred and candidate functionality that was previously scattered across
+the repository. It is an inventory, not an implementation contract. The source of truth remains
+[00_orchestrator_final_plan.md](../implementation_stages/00_orchestrator_final_plan.md).
 
 ## Sources Consolidated
 
-- [../orchestrator_final_plan.md](../orchestrator_final_plan.md) sections 2 and 18.
+- [00_orchestrator_final_plan.md](../implementation_stages/00_orchestrator_final_plan.md) sections 2 and 18.
 - [../codex_git_orchestrator_architecture.md](../codex_git_orchestrator_architecture.md) sections
   4.7, 4.10, 4.11, 6, 11, and 12.
 - [../implementation_stages/05_pipeline_and_recovery.md](../implementation_stages/05_pipeline_and_recovery.md)
@@ -23,11 +25,10 @@ These are explicitly deferred by the v1 spec.
 
 | Item | Summary | Notes |
 | --- | --- | --- |
-| Human-in-the-loop stage wiring | Let agent stage outputs invoke the implemented `ask_human` primitive for clarifying questions and dangerous-action approvals. | The Telegram transport, timeout handling, and terminal notifications are implemented; typed stage signals and answer reinjection remain. Must not weaken security policy. |
 | [Per-stage model and reasoning overrides](per_stage_model_reasoning.md) | Extend the existing task-level `model`/`reasoning` fields with a `stages:` block that sets them independently per stage (`planning`, `review`, `fixing`, etc.), allowing a high-capability model for review/planning and a lighter one for fixing/summary. | Builds on the existing per-task override; same resolution logic pattern as the existing `agents:` field. See linked detail file. |
 | [Stage skip control (per-task and global)](stage_skip_control.md) | Add a `skip:` list to task frontmatter and a global `agents.skip_stages` config key to bypass individual pipeline stages (`planning`, `testing`, `review`, `fixing`, `summary`). Useful for trivial tasks, repos without test suites, or high-trust automated flows. `implementation` and `publishing` cannot be skipped. | Every skipped stage is audited in `state.db` and logged as WARNING. Interacts with [[auto_merge_bypass]] — double-warning when review is skipped AND auto_merge is on. See linked detail file. |
 | [Task workflow profiles](task_workflow_profiles.md) | Add explicit `implementation`, `deep_research`, and `security_audit` task types with different stage graphs, permissions, output contracts, quality gates, and publishing behavior. | Security audits are read-only against the target repo and store private reports beside the resolved `config.yaml`, outside the repository, without commit/push/PR. |
-| Richer task parsing | Extract additional structured metadata beyond current `id`, `title`, `refined`, `decompose`, `agents`, and `contacts`. | Candidate fields: repo binding, commands/hints, priority, labels, issue links. Must stay fail-closed. |
+| Richer task parsing | Extract additional structured metadata beyond current `id`, `title`, `refined`, `decompose`, `agents`, `contacts`, `model`, and `reasoning`. | Candidate fields: repo binding, commands/hints, priority, labels, issue links. Must stay fail-closed. |
 | Parallel and graph decomposition | Support graph-shaped subtasks, per-subtask worktrees/branches, and parallel execution. | V1 decomposition is linear, sequential, and uses one task branch. |
 | Supervisor-style planning layer | Revisit an LLM supervisor/manager on top of the deterministic Core. | Must remain auditable; Core/provider boundaries stay intact. |
 
@@ -37,7 +38,6 @@ These were described in architecture notes or v1 exclusions but are not schedule
 
 | Item | Summary | Source / constraint |
 | --- | --- | --- |
-| [Automatic check discovery and environment resolution](automatic_check_discovery.md) | Detect repository quality gates, resolve the correct project environment, validate/probe candidates, and persist a reusable check profile; use a read-only agent only when deterministic evidence is insufficient. | **Accepted / not scheduled.** The Check Runner remains the deterministic authority; launch failures do not consume fixing budget; setup/bootstrap stays separately controlled. |
 | PR template support | Generate PR bodies from a configurable template in addition to `summary.md`. | Should integrate with the existing summary stage and Git Manager. |
 | GitHub Issues integration | Link tasks to issues, update issue status, and optionally close issues after PR creation/merge. | Requires GitHub auth through existing external credential model. |
 | Concurrent task processing via worktrees | Process multiple independent tasks at once by assigning each task its own `git worktree`. | Must not share a mutable working copy between active agents. |
@@ -62,7 +62,6 @@ These were described in architecture notes or v1 exclusions but are not schedule
 
 | Item | Detail |
 | --- | --- |
-| Automatic check discovery and environment resolution | [automatic_check_discovery.md](automatic_check_discovery.md) |
 | Prompt template customization | [prompt_template_customization.md](prompt_template_customization.md) |
 | Token optimization | [token_optimization.md](token_optimization.md) |
 | Runtime provider capacity gate for autonomous watch mode | [runtime_provider_capacity_gate.md](runtime_provider_capacity_gate.md) |
@@ -86,4 +85,9 @@ tracked here as future work unless their scope changes:
 - final summary stage and PR body handoff;
 - git footprint modes and scoped staging;
 - terminal cleanup and auto mode;
-- state-store recovery and idempotent publishing.
+- state-store recovery and idempotent publishing;
+- Telegram terminal notifications, typed HITL for `refinement`/`planning`, durable interaction
+  recovery, and deletion/dependency diff approvals (see
+  [Stage 08](../implementation_stages/08_telegram_integration.md));
+- automatic check discovery and environment resolution (see
+  [Stage 09](../implementation_stages/09_automatic_check_discovery.md)).
