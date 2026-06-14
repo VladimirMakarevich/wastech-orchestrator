@@ -27,10 +27,13 @@ These are explicitly deferred by the v1 spec.
 | --- | --- | --- |
 | [Per-stage model and reasoning overrides](per_stage_model_reasoning.md) | Extend the existing task-level `model`/`reasoning` fields with a `stages:` block that sets them independently per stage (`planning`, `review`, `fixing`, etc.), allowing a high-capability model for review/planning and a lighter one for fixing/summary. | **Per-task `stages:` overrides shipped (2026-06-13, §3).** Remaining: config-level `stage_defaults` (§4). See linked detail file. |
 | [Stage skip control (per-task and global)](stage_skip_control.md) | Add a `skip:` list to task frontmatter and a global `agents.skip_stages` config key to bypass individual pipeline stages (`planning`, `testing`, `review`, `fixing`, `summary`). Useful for trivial tasks, repos without test suites, or high-trust automated flows. `implementation` and `publishing` cannot be skipped. | Every skipped stage is audited in `state.db` and logged as WARNING. Interacts with [[auto_merge_bypass]] — double-warning when review is skipped AND auto_merge is on. See linked detail file. |
+| [Workflow execution foundation](workflow_execution_foundation.md) | Add the shared prerequisite for built-in workflow selection, immutable resolved-profile identity, execution roles/session scopes, and reusable output/audit contracts. | Must preserve current `implementation` behavior and must not pre-implement sessions, testing, supervisor, deep research, or security audit. |
 | [Task workflow profiles](task_workflow_profiles.md) | Add explicit `implementation`, `deep_research`, and `security_audit` task types with different stage graphs, permissions, output contracts, quality gates, and publishing behavior. | Security audits are read-only against the target repo and store private reports beside the resolved `config.yaml`, outside the repository, without commit/push/PR. |
 | Richer task parsing | Extract additional structured metadata beyond current `id`, `title`, `refined`, `decompose`, `agents`, `contacts`, `model`, and `reasoning`. | Candidate fields: repo binding, commands/hints, priority, labels, issue links. Must stay fail-closed. |
 | Parallel and graph decomposition | Support graph-shaped subtasks, per-subtask worktrees/branches, and parallel execution. | V1 decomposition is linear, sequential, and uses one task branch. |
-| Supervisor-style planning layer | Revisit an LLM supervisor/manager on top of the deterministic Core. | Must remain auditable; Core/provider boundaries stay intact. |
+| [Durable sessions and implementation/fixing affinity](durable_sessions_and_fixing_affinity.md) | Persist per-unit Claude/Codex editing lineage and make fixing prefer the provider/session from the successful implementation provider run. | Artifacts remain authoritative; evaluator sessions cannot contaminate editing lineage; infra-only fallback limits the affinity guarantee. |
+| [Hybrid agent testing](hybrid_agent_testing.md) | Add an optional once-per-unit agent that authors/repairs tests before deterministic checks. | `CheckRunner` exit codes remain the only publish authority; agent edits are restricted to trusted test paths. |
+| [Supervisor quality-gate](supervisor_quality_gate.md) | Add a mandatory read-only LLM evaluator that feeds bounded `accept`/`rework` verdicts into Core-owned loops and, when summary output is enabled, returns the final structured handoff. | No quality-gate enable/disable mode: the one-way `implementation-v2` cutover removes the old summary provider path. Summary output remains independently skippable; a skip creates no handoff call/files/body. Supervisor does not replace `review`, and Core owns transitions and optional artifact writes. |
 
 ## Additional Candidate Features
 
@@ -65,7 +68,11 @@ These were described in architecture notes or v1 exclusions but are not schedule
 | Prompt template customization | [prompt_template_customization.md](prompt_template_customization.md) |
 | Token optimization | [token_optimization.md](token_optimization.md) |
 | Runtime provider capacity gate for autonomous watch mode | [runtime_provider_capacity_gate.md](runtime_provider_capacity_gate.md) |
+| Workflow execution foundation | [workflow_execution_foundation.md](workflow_execution_foundation.md) |
 | Task workflow profiles | [task_workflow_profiles.md](task_workflow_profiles.md) |
+| Durable sessions and implementation/fixing affinity | [durable_sessions_and_fixing_affinity.md](durable_sessions_and_fixing_affinity.md) |
+| Hybrid agent testing | [hybrid_agent_testing.md](hybrid_agent_testing.md) |
+| Supervisor quality-gate | [supervisor_quality_gate.md](supervisor_quality_gate.md) |
 | Auto-merge bypass flags (global and per-task) | [auto_merge_bypass.md](auto_merge_bypass.md) |
 | UX improvements (stop/restart, WAL gitignore, gh check, worc alias) | [ux_improvements.md](ux_improvements.md) |
 | Per-stage model and reasoning overrides | [per_stage_model_reasoning.md](per_stage_model_reasoning.md) |

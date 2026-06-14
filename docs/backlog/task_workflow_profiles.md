@@ -10,6 +10,23 @@ is a backlog item, not current runtime behavior. Nothing here overrides the cano
 specification, [CLAUDE.md](../../CLAUDE.md), [AGENTS.md](../../AGENTS.md), or the hard invariants in
 [docs/rules/](../rules/).
 
+## 0. Foundation dependency
+
+This feature depends on the shared
+[workflow execution foundation](workflow_execution_foundation.md). That prerequisite owns
+`task_type` defaulting, the transitional `implementation-v1` profile, immutable resolved-profile
+identity, workflow-stage IDs, execution roles/session scopes, and generic output/audit contracts.
+
+This document owns the feature behavior above that foundation: `deep_research`, `security_audit`,
+their runners/stages, result schemas, network policy, output enforcement, private report storage,
+and publishing rules. It must extend the shared contracts rather than create a parallel profile or
+execution framework.
+
+The [supervisor quality-gate](supervisor_quality_gate.md) performs a one-way cutover to the sole
+executable `implementation-v2` profile before new workflow types are added. That implementation
+profile always requires supervisor evaluation; there is no supervisor-disabled implementation
+mode.
+
 ## 1. Background
 
 The current orchestrator is designed around one primary outcome: implement a requested change,
@@ -110,6 +127,7 @@ workflows:
   profiles:
     implementation:
       enabled: true
+      supervisor_policy: required
       output_policy: code_change
       publishing: pull_request
 
@@ -156,14 +174,27 @@ Implement a concrete change in the target repository.
 refinement
     -> planning
     -> implementation
+    -> required supervisor evaluation
     -> testing
     -> review
     -> fixing
-    -> summary
+    -> required supervisor evaluation
+    -> summary checkpoint (enabled: final supervisor handoff; disabled: audited no-output skip)
     -> publishing
 ```
 
-This is the current workflow and should retain its existing behavior and invariants.
+The canonical statuses and deterministic Core transitions remain, but the migrated
+`implementation-v2` policy adds required supervisor evaluations after successful
+`implementation`/`fixing`.
+
+Unless summary output is explicitly skipped, the `summary` lifecycle checkpoint is fulfilled by
+the final fresh supervisor pass: it synthesizes the complete accepted outcome and returns the
+structured handoff. The Core validates and writes summary artifacts. No separate summary provider
+call exists, and deterministic fallback remains non-blocking.
+
+When summary output is skipped, the Core records the checkpoint as skipped and creates no
+`summary.md`, `summary.json`, task-sidecar summary, deterministic fallback, or PR summary body.
+Publishing and the task audit commit must support the absent optional artifact.
 
 ### Allowed outputs
 
@@ -171,14 +202,14 @@ This is the current workflow and should retain its existing behavior and invaria
 - tests;
 - required documentation;
 - changelog entries where applicable;
-- task summary;
+- optional task summary when its output policy is enabled;
 - orchestrator-managed commits, push, and Pull Request.
 
 ### Definition of done
 
 - requirements are implemented;
 - expected tests and checks pass;
-- no blocking review findings remain;
+- no blocking review or supervisor findings remain;
 - output paths comply with security and scoped-staging policy;
 - documentation is synchronized where behavior, configuration, CLI, or architecture changed;
 - publishing is performed idempotently by the orchestrator.
@@ -498,7 +529,7 @@ TaskOutcome
 
 Type-specific structured results:
 
-- `implementation`: code diff, checks, review result, summary, PR reference;
+- `implementation`: code diff, checks, review result, optional summary reference, PR reference;
 - `deep_research`: report metadata, source list, recommendation, open questions;
 - `security_audit`: private report path, severity counts, scan metadata, safe summary.
 
@@ -658,11 +689,26 @@ The normalized task should record the resolved profile and profile version for r
 
 ## 17. Rollout plan
 
-### Phase 1: profile contract and implementation compatibility
+### Phase 1: shared foundation and implementation compatibility
+
+To be implemented by the prerequisite
+[workflow execution foundation](workflow_execution_foundation.md):
 
 - add `task_type` with `implementation` default;
-- introduce profile registry and versioning;
-- run the existing pipeline through the implementation profile without behavior changes.
+- introduce the built-in profile registry and versioning;
+- persist the immutable resolved-profile snapshot;
+- run the existing pipeline through `implementation-v1` without behavior changes.
+
+### Phase 1b: mandatory supervisor cutover
+
+Implemented by [supervisor quality-gate](supervisor_quality_gate.md):
+
+- require an empty non-terminal implementation queue during upgrade;
+- migrate required supervisor configuration;
+- replace `implementation-v1` with sole executable `implementation-v2`;
+- require supervisor evaluation after implementation/fixing;
+- replace the summary provider run with the final supervisor handoff when summary output is enabled;
+- retain no runtime selector for a no-supervisor implementation profile.
 
 ### Phase 2: deep research
 
@@ -700,7 +746,10 @@ The normalized task should record the resolved profile and profile version for r
 ## 19. Acceptance criteria
 
 - Tasks support explicit `implementation`, `deep_research`, and `security_audit` types.
-- Missing `task_type` preserves current implementation behavior.
+- Missing `task_type` selects the current required-supervisor `implementation-v2` profile.
+- The executable implementation profile requires supervisor evaluation and has no disable control.
+- `stages.summary.enabled: false` skips only final handoff/output: no supervisor handoff call,
+  summary files, fallback summary, task sidecar, or PR summary body is created.
 - Each type has a distinct persisted stage graph, permission ceiling, output contract, quality
   gates, and publishing policy.
 - Deep research produces an actionable Markdown design document without modifying source code.

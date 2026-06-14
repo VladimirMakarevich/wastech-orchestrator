@@ -6,65 +6,106 @@ just the mental model — for the full technical detail see the architecture and
 ## It's a pipeline, not an AI "supervisor"
 
 It is tempting to picture the orchestrator as a smart AI manager that watches everything and decides
-what to do next. That is **not** how it works.
+what to do next. That is **not** how it works today.
 
-The orchestrator is ordinary, predictable software. It is not an AI, it has **no master prompt**, and
-nothing "supervises" the run by reasoning about it. It simply moves a task through a fixed list of
-steps, in the same order every time:
+The orchestrator is ordinary, predictable software. It has **no master prompt**, and nothing
+"supervises" the run by reasoning about it. It simply moves a task through a fixed list of steps, in
+the same order every time. Choosing which step comes next, enforcing the quality checks, and doing
+all the Git work (committing, pushing a branch, opening the pull request) is fixed program logic. The
+AI never makes those decisions.
 
-**refinement → planning → implementation → testing → review → fixing → summary → publishing**
+## The steps, in order
 
-Choosing which step comes next, enforcing the quality checks, and doing all the Git work (committing,
-pushing a branch, opening the pull request) is fixed program logic. The AI never makes those
-decisions.
+Every task goes through the same line of steps:
+
+1. **Refinement** — if the task is vague, the agent first fills in the gaps: a clear description,
+   what is in and out of scope, and what "done" means. A task that is already clear skips this step.
+2. **Planning** — the agent works out *how* it will make the change before touching any code. (A
+   very large task can optionally be split into smaller ordered pieces here.)
+3. **Implementation** — the agent makes the actual code changes.
+4. **Testing** — the project's own test and lint commands are run to see whether they pass.
+5. **Review** — an agent reads the change like a code reviewer and flags problems.
+6. **Fixing** — only when testing or review found something. An agent fixes it, and then the change
+   is tested (and reviewed) again. More on this loop below.
+7. **Summary** — an agent writes a short, plain-language explanation of the change. This becomes the
+   description on the pull request.
+8. **Publishing** — the change is committed, pushed, and a pull request is opened.
+
+Before any of this, the orchestrator does a quick sanity check on the task file. If the task is
+broken or unusable, it is set aside immediately and never starts.
 
 ## Who does each step
 
-The steps fall into three kinds:
+The steps fall into two kinds:
 
-- **Thinking steps** (refinement, planning, implementation, review, fixing, summary) — for each of
-  these the orchestrator starts a coding agent (Codex or Claude Code) and gives it that step's
-  instructions.
-- **Testing** — this is **not** an agent. The orchestrator just runs the project's own test and lint
-  commands and checks whether they pass.
-- **Publishing** — also not an agent. The orchestrator does the Git work itself.
+- **Thinking steps, done by a coding agent** (Codex or Claude Code): refinement, planning,
+  implementation, review, fixing, and summary. By default Claude Code does most of them and Codex
+  does the review, but that is configurable.
+- **Plain automation, with no agent**: the sanity check at the start, **testing** (the orchestrator
+  just runs your test/lint commands and checks whether they pass), and **publishing** (the
+  orchestrator does the Git work itself).
 
-So the only "AI" in the loop is the coding agent that runs during the thinking steps. Everything
-around it is plain automation.
+So the only "AI" in the loop is the coding agent during the thinking steps. Everything around it is
+ordinary automation.
 
-## Agents are short-lived — started fresh each step
+## What happens when tests or review find problems
 
-A coding agent does **not** stay alive for the whole task. Each time a thinking step runs, the
-orchestrator starts a **new** agent, lets it do that one step, and lets it finish.
+This is where the order can loop:
 
-This matters when a change needs fixing. If testing fails, the task loops: testing → fixing →
-testing → fixing → … until it passes (or a safety limit stops it). In that loop:
+- If **testing** fails, the task goes to **fixing**, then back to **testing** — over and over until
+  it passes.
+- If **review** finds blocking problems, the task goes to **fixing**, then back through **testing**
+  and **review** again.
 
-- **Testing** just re-runs the checks — there is no agent to recreate, so "the 5th test run" is
-  simply the commands running a 5th time.
-- **Fixing** starts a **brand-new agent** every time. Five fix attempts means five fresh agents, one
-  after another — not one agent kept alive across all of them.
+This cannot loop forever. There is a safety limit on how many fix attempts are allowed. If the limit
+is reached, the orchestrator stops on its own, writes a short report of what was still wrong, and
+leaves the task for a human to look at.
 
-## A fresh agent doesn't start blind
+A couple of other things can pause a run for a person:
 
-Even though each agent is new, it is not starting from nothing. The orchestrator hands every agent
-the relevant files to read — the task itself, the plan, the current changes, the test output, and the
-review notes. So a fixing agent can see exactly what failed and address it.
+- If a change does something **risky** — like deleting tracked files or changing dependencies — the
+  orchestrator asks a human to approve it before continuing.
+- If something genuinely cannot be launched (for example a test command whose program is missing),
+  that is treated as a setup problem, not something the agent can fix by editing code.
 
-On top of that, with Claude the orchestrator can **resume the same conversation** from one step to the
-next, so the new agent picks up where the last one left off. Codex does not resume a conversation, so
-it relies on reading those files instead — but either way the agent always has the context it needs.
+## The agent keeps its context — it does not start over
 
-One caveat: the "resume the conversation" link only lasts while the orchestrator keeps running. If the
-orchestrator is stopped and started again, agents begin a fresh conversation — but they still receive
-all the files, so no real context is lost.
+Even though each step is a separate run, the agent does **not** start from a blank slate each time.
+Two things keep it informed:
+
+1. It is always handed the relevant files — the task, the plan, the current changes, the test
+   output, and the review notes. So a fixing agent can see exactly what failed.
+2. With **Claude**, the orchestrator also keeps the **same conversation going** from one step to the
+   next. In practice this means the agent that fixes the code is literally continuing the
+   conversation of the agent that wrote it — it remembers everything it did and saw, including across
+   the back-and-forth between testing and fixing. (Codex does not continue a conversation, so it
+   relies on the files instead — either way the agent always has the context it needs.)
+
+One caveat: that "same conversation" link lasts only while the orchestrator keeps running. If it is
+stopped and started again, the agent begins a fresh conversation — but it still receives all the
+files, so nothing important is lost.
+
+## How a task can end
+
+A task always finishes in one of three ways:
+
+- **Done** — testing passed and review was clean. The orchestrator commits the change, pushes the
+  branch, and opens a pull request.
+- **Stopped for a human** — too many fix attempts were used up, or a risky change needs approval, or
+  the situation is unclear. The work so far is kept, with a report.
+- **Rejected up front** — the task file was broken or unusable at the sanity check, so the
+  orchestrator never started on it.
+
+After a task ends, the orchestrator tidies up (returns the working copy to the main branch) before
+it will pick up another one.
 
 ## In short
 
 - The orchestrator is predictable software running a fixed pipeline — there is no AI supervisor and
   no master prompt.
-- Agents appear only during the thinking steps; testing runs your checks, and publishing does the Git
-  work.
-- Agents are created fresh for every step (and every retry), not kept alive for the whole task.
-- A new agent always gets the files it needs, and with Claude it can also resume the previous
-  conversation — so "fresh" does not mean "starting over."
+- A coding agent only appears in the thinking steps; testing runs your own checks, and publishing
+  does the Git work.
+- When testing or review fails, the task loops through fixing, bounded by a safety limit that stops
+  for a human.
+- The agent keeps its context between steps — and with Claude it continues one ongoing conversation
+  across the whole run, so "a new step" does not mean "starting over."
