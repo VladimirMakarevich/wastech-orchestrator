@@ -272,6 +272,30 @@ returns the working copy to `repo.base_branch`; on, it processes pending tasks s
 out the base branch between them. A `manual_action_required` outcome always blocks automatic
 continuation. Exit code: `0` done, `1` failed, `2` manual_action_required.
 
+### Re-attempting a terminal task (`rerun`)
+
+A task that ended `failed` or `manual_action_required` is terminal — `watch`/`resume` never pick it up
+again. `rerun` re-attempts it without hand-editing `state.db`, the ledger, or git. It needs an **idle
+slot** (no other active task) and the **watch daemon stopped**, since it drives the pipeline in the
+shared clone; it records a new ledger entry linked to the prior attempt (`attempt`, `rerun_of`).
+
+```bash
+worc rerun task-001 --dry-run        # show the planned reconciliation; write nothing
+worc rerun task-001 --yes            # fresh attempt from the current base_branch
+worc rerun task-001 --continue --yes # fix-and-continue: reuse the branch, re-enter at the failed stage
+```
+
+- **Fresh** (default) — for a quality failure, a clean redo, or when `base_branch` has moved on: the
+  agent branch is reset to the current base (the stale local branch is deleted and recreated), the
+  per-attempt state is cleared, and the prior attempt's `logs/<id>/` is archived to
+  `logs/<id>/attempt-<N>/`. If a prior **remote branch or open PR** exists it refuses and points you at
+  the (planned) `finalize` command; pass `--force-reset-remote` to delete that remote branch (which
+  closes its PR) instead.
+- **`--continue`** — for an **infrastructure** failure you fixed by hand (a missing tool, `PATH`, a
+  dropped Telegram approval): it keeps the existing branch and the work already done and re-enters the
+  pipeline at the stage it failed, reusing the same resume engine as crash recovery. Only available
+  when the failed run recorded a recoverable stage.
+
 By default `watch` is a **long-running loop** (`orchestrator.poll_interval_seconds: 300`, overridable
 with `--poll-seconds N`): each tick it runs `git fetch` + `pull --ff-only` on `base_branch` then
 re-scans, so a task committed and pushed to git after `watch` started is picked up without a manual

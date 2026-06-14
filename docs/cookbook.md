@@ -241,6 +241,23 @@ Planned v1 behavior: a successful task runs through validation, preparation, opt
 planning, implementation, checks, review, fixing if needed, summary, commit, push, PR creation, and
 terminal cleanup back to `repo.base_branch`.
 
+### Re-attempt a task that ended `failed` / `manual_action_required`
+
+A terminal task is frozen — `watch`/`resume` never pick it up again. `rerun` re-attempts it (stop the
+`watch` daemon first; it needs an idle slot):
+
+```bash
+worc rerun task-001 --dry-run        # show the plan; write nothing
+worc rerun task-001 --yes            # fresh attempt from the current base_branch
+worc rerun task-001 --continue --yes # infra failure you fixed: reuse the branch, re-enter at the failed stage
+```
+
+Use **fresh** (default) for a quality failure or a clean redo (the branch is reset to base and prior
+`logs/<id>/` is archived to `logs/<id>/attempt-<N>/`); use **`--continue`** when you fixed an
+environment/infra problem by hand (a missing tool, `PATH`, a dropped Telegram approval) and want to
+pick up where it stopped. Each re-attempt appends a ledger record linked to the prior one. See
+[operations.md](operations.md) "Re-attempting a terminal task" for the full rules.
+
 ## 6. Use `watch`
 
 `watch` resumes an interrupted task first, then processes pending task files:

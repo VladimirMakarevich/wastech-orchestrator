@@ -9,7 +9,7 @@ The persisted artifacts that outlive an upgrade carry their own independent sche
 [docs/operations.md](docs/operations.md#upgrading-the-orchestrator)):
 
 - `config.yaml` — top-level `schema_version` (current: **5**)
-- `state.db` — SQLite `PRAGMA user_version` (current: **2**)
+- `state.db` — SQLite `PRAGMA user_version` (current: **3**)
 - registry (`registry.json`) — `version` (current: **1**, read forward-tolerantly)
 
 The maintainer bumps the package version in `pyproject.toml` on release; `wastech-orchestrator
@@ -18,6 +18,18 @@ The maintainer bumps the package version in `pyproject.toml` on release; `wastec
 ## [Unreleased]
 
 ### Added
+- **`rerun` command — re-attempt a terminal task** (backlog: `task_rerun_command.md`). `worc rerun
+  <task-id>` launches a supported re-attempt of a `failed`/`manual_action_required` task without
+  hand-editing `state.db`/the ledger/git, in two modes on one command: **fresh** (default) resets the
+  agent branch to the current `base_branch`, clears the per-attempt state (counters, decomposition,
+  `subtasks`, `publish_operations`), archives the prior `logs/<id>/` to `logs/<id>/attempt-<N>/`, and
+  drives the pipeline from the start; **`--continue`** keeps the branch and the work already done and
+  re-enters at the stage the task failed (for an infra failure the operator fixed), reusing the crash
+  recovery engine. The §19 duplicate-id gate is bypassed for exactly the named id; the command refuses
+  while the `watch` daemon is live or another task is active, is **fail-closed** on an unaccounted-dirty
+  tree, and refuses (fresh mode) on a prior remote branch / open PR unless `--force-reset-remote`. The
+  ledger gains `attempt`/`rerun_of` linking each re-attempt to the prior record. Flags: `--continue`,
+  `--force-reset-remote`, `--dry-run`, `--yes`.
 - **Check discovery v2 — runtime, agent-assisted, human-checked** (post-test-run §1.2). Check
   discovery now runs inside the state machine at task start (`checks.discovery.run_at_task_start`,
   default on), so `auto` mode can resolve (and, when opted in with a cheap `checks.discovery.model`,
@@ -220,6 +232,9 @@ The maintainer bumps the package version in `pyproject.toml` on release; `wastec
   `error:` message and exit code 2 instead of being misread.
 
 ### Changed
+- **`state.db` schema → v3** (`PRAGMA user_version` 2 → 3): adds `tasks.interrupted_status` (the stage a
+  task was on before going terminal) so `rerun --continue` can re-enter at the failed stage. Migrated in
+  place by an idempotent `ALTER TABLE ADD COLUMN`; existing databases open and upgrade cleanly.
 - **Raised the default fix budget**: `agents.max_fix_cycles` `3 → 15` and
   `agents.max_total_fix_iterations` `5 → 30` (the loader defaults, both `config.example.yaml` copies,
   and the `install` generator). Existing configs are unaffected. The validator invariant

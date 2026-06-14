@@ -420,3 +420,108 @@ def test_foreign_keys_enforced(store: StateStore) -> None:
                 stage_attempts=1,
             )
         )
+
+
+# --- rerun / continue reset primitives ---------------------------------------------------
+
+
+def _seed_terminal_task(store: StateStore, *, status: Status = Status.FAILED) -> None:
+    """A failed task carrying branch, counters, decomposition, subtasks and publish ops."""
+    store.insert_task(
+        TaskRow(
+            task_id="task-001",
+            title="A task",
+            status=status,
+            branch="agent/task-001-a-task",
+            slug="a-task",
+            stage_attempts=3,
+            test_fix_cycles=2,
+            review_fix_cycles=1,
+            fix_iterations=4,
+            decomposition_accepted=True,
+            decomposition_reason="big",
+            subtask_count=2,
+            subtasks_completed=1,
+            failure_report_path="logs/task-001/failure_report.json",
+            cleanup_target_branch="main",
+            cleanup_completed=True,
+            cleanup_completed_at="2026-01-01T00:00:00+00:00",
+            finished_at="2026-01-01T00:00:00+00:00",
+            interrupted_status=Status.REVIEWING.value,
+        )
+    )
+    store.insert_subtasks([SubtaskRow("task-001", 1, "a", "A", "committed", (), commit_sha="abc")])
+    store.record_publish_op(
+        PublishOpRow(task_id="task-001", kind="pr", fingerprint="b", status="completed",
+                     result_ref="https://example/pull/1")
+    )
+
+
+def test_reset_task_for_rerun_clears_per_attempt_state(store: StateStore) -> None:
+    _seed_terminal_task(store)
+    store.reset_task_for_rerun("task-001")
+
+    row = store.get_task("task-001")
+    assert row is not None
+    assert row.status is Status.FAILED  # left terminal — run_task's upsert flips it
+    assert row.branch is None and row.slug is None
+    assert row.stage_attempts == 0 and row.fix_iterations == 0
+    assert row.test_fix_cycles == 0 and row.review_fix_cycles == 0
+    assert row.decomposition_accepted is None and row.subtask_count is None
+    assert row.subtasks_completed == 0
+    assert row.failure_report_path is None
+    assert row.cleanup_completed is None and row.cleanup_completed_at is None
+    assert row.cleanup_target_branch is None and row.finished_at is None
+    assert row.interrupted_status is None
+    assert store.get_subtasks("task-001") == []  # subtasks deleted
+    assert store.get_publish_op("task-001", "pr") is None  # publish idempotency cleared
+
+
+def test_revive_task_for_continue_preserves_work(store: StateStore) -> None:
+    _seed_terminal_task(store)
+    store.revive_task_for_continue("task-001", Status.REVIEWING)
+
+    row = store.get_task("task-001")
+    assert row is not None
+    assert row.status is Status.REVIEWING  # revived to the failed stage
+    assert row.finished_at is None
+    assert row.cleanup_completed is None and row.cleanup_completed_at is None
+    assert row.cleanup_target_branch is None
+    assert row.interrupted_status is None
+    # The work is kept — that is the whole point of continue.
+    assert row.branch == "agent/task-001-a-task"
+    assert row.fix_iterations == 4 and row.review_fix_cycles == 1
+    assert row.decomposition_accepted is True and row.subtask_count == 2
+    assert store.get_subtasks("task-001")[0].commit_sha == "abc"
+    assert store.get_publish_op("task-001", "pr") is not None
+
+
+def test_clear_publish_operations(store: StateStore) -> None:
+    store.insert_task(_new_task())
+    store.record_publish_op(
+        PublishOpRow(task_id="task-001", kind="push", fingerprint="f", status="completed")
+    )
+    store.clear_publish_operations("task-001")
+    assert store.get_publish_op("task-001", "push") is None
+
+
+def test_insert_task_upsert_refreshes_registration_fields(store: StateStore) -> None:
+    store.insert_task(
+        TaskRow(task_id="task-001", title="Old", status=Status.FAILED, source_path="a.md")
+    )
+    created = store.get_task("task-001").created_at
+    # A second insert with the same id (a rerun re-register) updates in place, does not raise.
+    store.insert_task(
+        TaskRow(
+            task_id="task-001",
+            title="New",
+            status=Status.NEW,
+            source_path="b.md",
+            validation_passed=True,
+        )
+    )
+    row = store.get_task("task-001")
+    assert row is not None
+    assert row.title == "New" and row.status is Status.NEW
+    assert row.source_path == "b.md" and row.validation_passed is True
+    assert row.created_at == created  # creation timestamp preserved

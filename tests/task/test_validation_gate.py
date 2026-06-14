@@ -157,6 +157,13 @@ def test_recovery_rerun_is_not_duplicate(config: OrchestratorConfig) -> None:
     assert result.passed is True
 
 
+def test_recovery_rerun_allowance_is_scoped_to_the_named_id(config: OrchestratorConfig) -> None:
+    # A re-run set for a *different* id does not exempt this duplicate (the ``rerun`` CLI scopes
+    # ``is_recovery_rerun`` to exactly the one id it is re-running).
+    result = _gate(config, store_ids={"task-001"}, recovery_ids={"task-002"}).validate(_src(_GOOD))
+    assert result.reason is ValidationReason.DUPLICATE_TASK_ID
+
+
 def test_invalid_route_override_unknown_stage(config: OrchestratorConfig) -> None:
     text = "---\nid: task-001\ntitle: T\nagents:\n  nonsense: claude\n---\n\n## Description\n\nx\n"
     result = _gate(config).validate(_src(text))

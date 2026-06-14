@@ -35,6 +35,7 @@ from wastech_orchestrator.config.validation import validate_config
 from wastech_orchestrator.core.orchestrator import (
     Orchestrator,
     PipelineResult,
+    RerunPlan,
     build_orchestrator,
     build_providers,
 )
@@ -299,6 +300,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     upgrade_docs_cmd.add_argument(
         "--dry-run", action="store_true", help="print what would change; write nothing"
+    )
+
+    rerun_cmd = sub.add_parser(
+        "rerun",
+        help="re-attempt a terminal task: fresh from base, or --continue from the failed stage",
+    )
+    rerun_cmd.add_argument(
+        "task_id", help="id of the failed / manual_action_required task to re-attempt"
+    )
+    rerun_cmd.add_argument(
+        "--continue",
+        dest="continue_",
+        action="store_true",
+        help="fix-and-continue: reuse the existing branch and re-enter at the stage it failed",
+    )
+    rerun_cmd.add_argument(
+        "--force-reset-remote",
+        action="store_true",
+        help="(fresh mode) delete the prior attempt's remote branch, closing any open PR",
+    )
+    rerun_cmd.add_argument(
+        "--dry-run", action="store_true", help="print the planned reconciliation; write nothing"
+    )
+    rerun_cmd.add_argument(
+        "-y", "--yes", action="store_true", help="skip the interactive confirmation prompt"
     )
 
     return parser
@@ -717,6 +743,110 @@ def cmd_run(args: argparse.Namespace) -> int:
     result = orchestrator.run_task(args.task_file)
     suffix = f" → {result.pr_url}" if result.pr_url else ""
     print(f"{result.task_id}: {result.final_status.value}{suffix}")
+    return _EXIT_BY_STATUS.get(result.final_status, 1)
+
+
+def _confirm(prompt: str) -> bool:
+    """Interactive y/N confirmation for a state-mutating operator command (default: no)."""
+    try:
+        answer = input(prompt)
+    except EOFError:
+        return False
+    return answer.strip().lower() in ("y", "yes")
+
+
+def _report_rerun_plan(plan: RerunPlan) -> None:
+    """Print the planned reconciliation for ``rerun --dry-run``; writes nothing."""
+    mode = "continue" if plan.continue_mode else "fresh"
+    current = plan.current_status.value if plan.current_status else "unknown"
+    print(f"rerun (dry-run): would re-attempt {plan.task_id} [{mode}]")
+    print(f"  current status: {current}")
+    if plan.continue_mode:
+        stage = plan.interrupted_status.value if plan.interrupted_status else "unknown"
+        print(f"  branch:    reuse {plan.branch or '(none)'}")
+        print(f"  re-enter:  {stage}")
+        print("  artifacts: kept; pending HITL prompt reset so the stage re-asks")
+        print("  state:     terminal markers cleared; counters/subtasks/publish-ops kept")
+    else:
+        target = plan.branch or "agent/<id>-<slug>"
+        archive = f"attempt-{max(plan.attempt - 1, 0)}"
+        print(f"  branch:    reset {target} to base '{plan.base_branch}'")
+        print(f"  artifacts: archived to logs/{plan.task_id}/{archive}/")
+        print("  state:     counters, branch/slug, decomposition, subtasks, publish-ops cleared")
+        if plan.has_remote_branch or plan.pr_url:
+            print(f"  remote/PR: delete remote branch (closes PR {plan.pr_url or ''})")
+    rerun_of = plan.task_id if plan.attempt > 1 else None
+    print(
+        f"  ledger:         append a record (attempt={plan.attempt}, rerun_of={rerun_of}); "
+        "prior records kept"
+    )
+
+
+def cmd_rerun(args: argparse.Namespace) -> int:
+    """Re-attempt a terminal task: fresh from base, or ``--continue`` from the failed stage."""
+    _configure_runtime_logging(args)
+    config = load_config_for(args)
+    if config is None:
+        return 2
+    root = artifacts_root_for(config)
+
+    # Rerun drives the pipeline in the shared clone; refuse while a live watch daemon owns it.
+    pid = process_control.read_pid(process_control.pid_file_path(root))
+    if pid is not None and process_control.is_running(pid):
+        print(
+            f"rerun: the watch daemon is running (pid {pid}); stop it first with "
+            "'wastech-orchestrator stop'"
+        )
+        return 1
+
+    if not (Path(root) / "state.db").is_file():
+        print(f"rerun: no state database at {Path(root) / 'state.db'}")
+        return 2
+
+    target_id: str = args.task_id
+    orchestrator = build_orchestrator(
+        config,
+        artifacts_root=root,
+        heartbeat_seconds=args.heartbeat_seconds,
+        is_recovery_rerun=lambda i: i == target_id,
+    )
+    plan = orchestrator.plan_rerun(
+        args.task_id,
+        continue_mode=args.continue_,
+        force_reset_remote=args.force_reset_remote,
+    )
+    if plan.refusals:
+        for reason in plan.refusals:
+            print(f"rerun: {reason}")
+        return 1
+
+    if args.dry_run:
+        _report_rerun_plan(plan)
+        return 0
+
+    if config.git.create_pull_request:
+        detect.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish (§6.7)
+
+    mode = "continue" if args.continue_ else "fresh"
+    if not args.yes and not _confirm(
+        f"Rerun {args.task_id} [{mode}] from base '{plan.base_branch}'? [y/N] "
+    ):
+        print("rerun: aborted")
+        return 0
+
+    if args.continue_:
+        result = orchestrator.continue_task(args.task_id)
+        label = "rerun/continue"
+    else:
+        assert plan.source_path is not None  # guarded by plan_rerun refusals
+        result = orchestrator.rerun_task(
+            args.task_id,
+            source_path=plan.source_path,
+            force_reset_remote=args.force_reset_remote,
+        )
+        label = "rerun"
+    suffix = f" → {result.pr_url}" if result.pr_url else ""
+    print(f"{result.task_id}: {result.final_status.value}{suffix} ({label})")
     return _EXIT_BY_STATUS.get(result.final_status, 1)
 
 
@@ -1195,6 +1325,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_upgrade_config(args)
         if args.command == "upgrade-docs":
             return cmd_upgrade_docs(args)
+        if args.command == "rerun":
+            return cmd_rerun(args)
     except (ConfigError, IncompatibleStateError, detect.GhNotAvailableError) as exc:
         print(f"error: {exc}")
         return 2

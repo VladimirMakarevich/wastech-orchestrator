@@ -50,6 +50,11 @@ class LedgerRecord:
     decomposed: bool = False
     subtask_count: int | None = None
     subtasks_completed: int | None = None
+    # Re-run linkage (``rerun`` command): ``attempt`` is 1 for the original run and increments per
+    # re-run; ``rerun_of`` is the task id this record re-attempts (set only when ``attempt`` > 1) so
+    # the failure → retry chain is auditable. Old records omit both keys harmlessly.
+    attempt: int = 1
+    rerun_of: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -69,6 +74,8 @@ class LedgerRecord:
             "decomposed": self.decomposed,
             "subtask_count": self.subtask_count,
             "subtasks_completed": self.subtasks_completed,
+            "attempt": self.attempt,
+            "rerun_of": self.rerun_of,
         }
 
 

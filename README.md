@@ -188,6 +188,10 @@ wastech-orchestrator preflight          check both CLIs' health + the isolation 
 wastech-orchestrator telegram-test      send a real correlated Telegram prompt and wait for reply
                           --timeout-seconds N       smoke-test deadline (default: 60)
 wastech-orchestrator run <task-file>    process exactly one task end to end
+wastech-orchestrator rerun <task-id>    re-attempt a terminal (failed/manual) task; daemon must be idle
+                          --continue                  reuse the branch + re-enter at the failed stage
+                          --force-reset-remote        delete the prior remote branch (closes its PR)
+                          --dry-run  --yes            preview the plan / skip the confirmation
 wastech-orchestrator watch              process pending tasks; loop + periodic git sync
                           --poll-seconds N            override orchestrator.poll_interval_seconds
 wastech-orchestrator stop               stop a running watch daemon (SIGTERM, then SIGKILL)
