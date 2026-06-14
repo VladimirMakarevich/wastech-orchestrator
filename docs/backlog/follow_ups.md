@@ -29,3 +29,13 @@ delete) when addressed.
 | 2026-06-13 | **Defense-in-depth: forbid `--admin` in `find_forbidden_args`** | `merge_pr` builds a fixed argv that never includes `--admin` (so branch protection is respected), and a unit test asserts its absence. As extra hardening, add `--admin` (and other protection-bypassing `gh` flags) to `security/forbidden_args.py` so the prohibition is centralized and also covers any future `gh` call path / `extra_args`. | [auto_merge_bypass.md](auto_merge_bypass.md) §3.5; `security/forbidden_args.py`; `git_manager.py` `merge_pr` | candidate |
 | 2026-06-13 | **Prompt customization v1 shipped; deferred extras** | **Resolved (2026-06-13):** the `prompts:` block (append/replace, strict/fallback, allowlisted path variables, redacted `rendered-prompt.md` audit artifact) is implemented; packaged `templates/prompts/<stage>.md` are now the single source of truth and `_STAGE_PROMPTS` was removed. **Deferred** (the backlog doc's §10 open questions): a global shared preamble across all stages, per-stage `mode`, and managing project agent stubs (`AGENTS.md`/`CLAUDE.md`/skills) via a separate `agent_instructions:` feature. | [prompt_template_customization.md](prompt_template_customization.md); `core/prompts.py`; `config/{schema,loader,validation}.py`; `core/orchestrator.py` | done (extras: backlog / not scheduled) |
 | 2026-06-14 | **Single umbrella `upgrade` command (config + docs)** | Post-upgrade currently needs two steps — `upgrade-config` (materialize new config keys) and the new `upgrade-docs` (refresh the installed `worc/` agent docs to the packaged version). Both resolve the install location the same way (`resolve_config_path`) and are fail-closed/idempotent/`--dry-run`. Fold them into one umbrella `upgrade` (or `doctor`) that runs both — overlaps with the "Schema migration runner" row's deferred config+`state.db` umbrella above; do them together. | `cli.py` `cmd_upgrade_config`/`cmd_upgrade_docs`; [docs/operations.md](../operations.md#upgrading-the-orchestrator); the "Schema migration runner" row above | candidate |
+
+## Post-test-run review improvements
+
+Moved to its own document: **[post_test_run_review.md](post_test_run_review.md)** — improvements found
+while reviewing real orchestrator test runs (first review: the `pr_title` task, 2026-06-14). Record new
+test-run findings there, not here.
+
+  *Refs:* `notify/telegram.py` (`poll_reply`, `send_prompt`/`_drain_pending`, `wait_for_answer`,
+  `check_polling`, `get_webhook_info`); `notify/interface.py` (`AskHandle.update_offset`);
+  `core/hitl.py`; the `pr_title` guardrail (`logs/task-pr-title-override/hitl/guardrail-fixing-cycle-10.json`).
