@@ -18,6 +18,7 @@ The maintainer bumps the package version in `pyproject.toml` on release; `wastec
 ## [Unreleased]
 
 ### Added
+- Add optional `pr_title` front-matter field to override the generated PR title (falls back to `title` when absent or blank).
 - **Agent task-authoring docs (`worc/`)**: a compact, rule-first, copy-paste-oriented guide an AI
   agent can be pointed at to author valid, well-scoped task files without reading the whole `docs/`
   tree. Authored in [`docs/worc/`](docs/worc/README.md) (the task contract + hard validation rules, a

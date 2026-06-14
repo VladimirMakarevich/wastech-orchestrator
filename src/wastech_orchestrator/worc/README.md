@@ -64,6 +64,7 @@ Only the fields below are allowed. **Any other key makes the task rejected** (`u
 | `model` | no | string \| null | Override the model for every stage of this task (e.g. `claude-opus-4-8`). |
 | `reasoning` | no | string \| null | Reasoning effort for this task: `low`, `medium`, `high`, `xhigh`, or `max`. |
 | `stages` | no | mapping | Per-stage `model`/`reasoning` overrides and the `enabled: false` skip toggle. See the decision guide. |
+| `pr_title` | no | string \| null | PR title override; when set, used verbatim as the pull-request title instead of `title`. |
 
 ### Body sections
 

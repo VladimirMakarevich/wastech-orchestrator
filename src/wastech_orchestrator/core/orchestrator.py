@@ -785,7 +785,7 @@ class Orchestrator:
             p,
             "pull request",
             lambda: self._git.create_pr(
-                p.task.id, p.branch, title=f"{p.task.title}", body_path=body_path
+                p.task.id, p.branch, title=p.task.pr_title or p.task.title, body_path=body_path
             ),
         )
         if pr_url and Stage.REVIEW in p.skip and self._auto_merge_on(p.task):

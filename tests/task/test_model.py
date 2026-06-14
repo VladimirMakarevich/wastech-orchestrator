@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from wastech_orchestrator.providers.base import ProviderId, Stage
@@ -59,6 +61,7 @@ def test_schema_constants() -> None:
     assert {
         "id",
         "title",
+        "pr_title",
         "refined",
         "decompose",
         "auto_merge",
@@ -72,7 +75,7 @@ def test_schema_constants() -> None:
     assert REQUIRED_TASK_FIELDS <= ALLOWED_TASK_KEYS
 
 
-def _task(**kwargs: object) -> NormalizedTask:
+def _task(**kwargs: Any) -> NormalizedTask:
     return NormalizedTask(id="t", title="x", description="d", **kwargs)
 
 

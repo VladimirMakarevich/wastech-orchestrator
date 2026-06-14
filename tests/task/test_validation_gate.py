@@ -502,3 +502,87 @@ def test_stages_review_enabled_true_never_gated(config: OrchestratorConfig) -> N
     # Only ``enabled: false`` on review needs the opt-in; an explicit enable is always fine.
     result = _gate(config).validate(_src(_stages_task("stages:\n  review:\n    enabled: true\n")))
     assert result.passed is True
+
+
+# ---------------------------------------------------------------------------
+# pr_title field
+# ---------------------------------------------------------------------------
+
+def test_pr_title_override_stored(config: OrchestratorConfig) -> None:
+    text = (
+        '---\nid: task-001\ntitle: "Task title"\npr_title: "Custom PR title"\n'
+        "---\n\n## Description\n\nDo it.\n"
+    )
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.pr_title == "Custom PR title"
+    assert result.normalized.title == "Task title"
+
+
+def test_pr_title_absent_is_none(config: OrchestratorConfig) -> None:
+    result = _gate(config).validate(_src(_GOOD))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.pr_title is None
+
+
+def test_pr_title_null_is_none(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\npr_title: null\n---\n\n## Description\n\nDo it.\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.pr_title is None
+
+
+def test_pr_title_empty_string_is_none(config: OrchestratorConfig) -> None:
+    text = '---\nid: task-001\ntitle: T\npr_title: ""\n---\n\n## Description\n\nDo it.\n'
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.pr_title is None
+
+
+def test_pr_title_whitespace_only_is_none(config: OrchestratorConfig) -> None:
+    text = '---\nid: task-001\ntitle: T\npr_title: "   "\n---\n\n## Description\n\nDo it.\n'
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.pr_title is None
+
+
+def test_pr_title_flag_shaped_rejected(config: OrchestratorConfig) -> None:
+    text = '---\nid: task-001\ntitle: T\npr_title: "--inject"\n---\n\n## Description\n\nDo it.\n'
+    result = _gate(config).validate(_src(text))
+    assert result.passed is False
+    assert result.reason is ValidationReason.INJECTION_SUSPECTED
+
+
+def test_pr_title_wrong_type_rejected(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\npr_title: 42\n---\n\n## Description\n\nDo it.\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_FIELD_TYPE
+
+
+def test_pr_title_list_type_rejected(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\npr_title:\n  - a\n  - b\n---\n\n## Description\n\nDo it.\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_FIELD_TYPE
+
+
+def test_pr_title_json_task(config: OrchestratorConfig) -> None:
+    text = json.dumps(
+        {
+            "id": "task-json",
+            "title": "Task title",
+            "pr_title": "Custom PR",
+            "description": "Do it. Acceptance: works.",
+        }
+    )
+    result = _gate(config).validate(_src(text, ".json"))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.pr_title == "Custom PR"
+    assert result.normalized.title == "Task title"

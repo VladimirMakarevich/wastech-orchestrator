@@ -53,6 +53,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
 python_version = "3.12"
 strict = true
 files = ["src"]
+exclude = ["^tests/"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -237,10 +237,13 @@ class ValidationGate:
         if finding is not None:
             return _rej(ValidationReason.INJECTION_SUSPECTED, finding.detail)
 
+        raw_pr_title = frontmatter.get("pr_title")
+        pr_title = (str(raw_pr_title).strip() or None) if isinstance(raw_pr_title, str) else None
         task = NormalizedTask(
             id=id_value,
             title=str(title_value),
             description=body.strip(),
+            pr_title=pr_title,
             refined=bool(frontmatter.get("refined", False)),
             decompose=_as_tristate(frontmatter.get("decompose")),
             auto_merge=_as_tristate(frontmatter.get("auto_merge")),
@@ -262,6 +265,8 @@ class ValidationGate:
     def _check_field_types(self, fm: Mapping[str, Any]) -> _Reject | None:
         if not isinstance(fm.get("title"), str):
             return _Reject(ValidationReason.INVALID_FIELD_TYPE, "title must be a string")
+        if "pr_title" in fm and fm["pr_title"] is not None and not isinstance(fm["pr_title"], str):
+            return _Reject(ValidationReason.INVALID_FIELD_TYPE, "pr_title must be a string")
         if "refined" in fm and not isinstance(fm["refined"], bool):
             return _Reject(ValidationReason.INVALID_FIELD_TYPE, "refined must be a boolean")
         if (
