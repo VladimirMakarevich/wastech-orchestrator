@@ -387,10 +387,17 @@ Two axes under `git.footprint` control where `tasks/` and `logs/` live relative 
 | **external** | `external` / `none` | You want **zero footprint** in the customer repo. `tasks/` and `logs/` live under `external_root`, outside the clone. Nothing to ignore, nothing committed. |
 
 In every mode the *code* commit is **scoped** (an explicit pathspec that excludes
-`tasks/`/`logs/`/`workspace/`, plus — under in-repo — the root runtime files `state.db`/`config.yaml`)
-— there is never a `git add .`. The validator rejects the illegal pairings
-(`external`+`exclude_local|commit`, `in_repo`+`none`); under `external`, `external_root` must resolve
-outside `repo.local_path`.
+`tasks/`/`logs/`/`workspace/`/`checks/`, plus — under in-repo — the root runtime files
+`state.db`/`config.yaml`/`orchestrator.pid`) — there is never a `git add .`. The validator rejects the
+illegal pairings (`external`+`exclude_local|commit`, `in_repo`+`none`); under `external`,
+`external_root` must resolve outside `repo.local_path`.
+
+> **One-time cleanup if a prior run leaked `checks/resolved-profile.json`.** Before this fix the
+> generated resolved check profile (`checks/resolved-profile.json`) was not ignored and could ride a
+> code commit. The orchestrator now ignores the whole `checks/` dir and stops tracking it for *future*
+> runs, but it deliberately does not refuse to start on an already-tracked copy. If `git status` or a
+> prior commit shows it tracked, untrack it once: `git rm --cached checks/resolved-profile.json` (and,
+> if present, `git rm --cached orchestrator.pid`), then commit. The file keeps working as a local cache.
 
 ### Auto-merge to the base branch (DANGER: bypasses human review)
 

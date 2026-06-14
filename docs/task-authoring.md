@@ -81,6 +81,7 @@ Allowed fields:
 | `model` | no | string or null | Override the provider model for every stage of this task (e.g. `claude-opus-4-8`). |
 | `reasoning` | no | string or null | Override the reasoning effort level for this task: `low`, `medium`, `high`, `xhigh`, or `max`. |
 | `stages` | no | mapping | Per-stage overrides: `model`/`reasoning` (precedence over the task-wide values) and `enabled: false` to skip a stage. See [`stages`](#stages). |
+| `pr_title` | no | string \| null | PR title override; when set, used verbatim as the pull-request title instead of `title`. |
 
 The current validation gate rejects unknown fields fail-closed. Keep task front matter limited to
 the fields above.

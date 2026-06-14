@@ -141,3 +141,60 @@ def test_cache_invalidated_after_manifest_change(
     (root / "Cargo.toml").write_text("", encoding="utf-8")
     second = resolver.resolve()
     assert [c.argv for c in second.checks] == [("cargo", "test")]
+
+
+def test_reresolve_stamps_reason_note(
+    make_repo: Callable[..., Path],
+    make_checks_config: Callable[..., OrchestratorConfig],
+    tmp_path: Path,
+) -> None:
+    from wastech_orchestrator.checks.resolver import ReResolveReason
+
+    root = make_repo({"go.mod": "module x\n"})
+    config = make_checks_config(local_path=str(root), mode="deterministic")
+    resolver = _resolver(config, root, tmp_path / "art", which=lambda _n: "/usr/bin/go")
+    profile = resolver.reresolve(allow_agent=False, reason=ReResolveReason.LAUNCH_FAILED)
+    assert any("re-resolved: launch_failed" in n for n in profile.notes)
+    # The profile carries a stable signature over its selected commands.
+    assert profile.commands_signature
+
+
+def test_configured_pin_not_replaced_by_detection_when_unlaunchable(
+    make_repo: Callable[..., Path],
+    tmp_path: Path,
+) -> None:
+    # auto mode: a configured `{name: types, argv: [mypy, src]}` pins the `types` slot. The bare
+    # `mypy` is not on PATH, so the pin does not probe launchable — and detection's launchable
+    # `.venv/bin/mypy` must NOT silently fill it (§1.2). `tests` still resolves from detection.
+    root = make_repo(
+        {"pyproject.toml": "[project]\ndependencies=['pytest','mypy']\n"},
+        venv=".venv",
+        venv_tools=("pytest", "mypy"),
+    )
+    text = f"""
+repo:
+  local_path: {str(root)!r}
+agents:
+  allowed: [claude]
+  providers:
+    claude:
+      command: "claude"
+security:
+  allowed_environment: [PATH]
+  denied_commands: []
+checks:
+  discovery:
+    mode: auto
+  commands:
+    - {{name: types, argv: [mypy, src]}}
+"""
+    from wastech_orchestrator.config.loader import loads_config
+
+    config = loads_config(text).config
+    # Nothing is on PATH, so the bare configured `mypy src` is NOT launchable; venv scripts (probed
+    # by file existence) are.
+    resolver = _resolver(config, root, tmp_path / "art", which=lambda _n: None)
+    profile = resolver.resolve()
+    names = {c.name for c in profile.checks}
+    assert "tests" in names  # detection filled the test slot
+    assert "types" not in names  # the configured pin was unlaunchable and was NOT replaced

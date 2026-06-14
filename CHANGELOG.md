@@ -8,7 +8,7 @@ The persisted artifacts that outlive an upgrade carry their own independent sche
 (see the spec's "Versioning and compatibility" section and
 [docs/operations.md](docs/operations.md#upgrading-the-orchestrator)):
 
-- `config.yaml` — top-level `schema_version` (current: **4**)
+- `config.yaml` — top-level `schema_version` (current: **5**)
 - `state.db` — SQLite `PRAGMA user_version` (current: **2**)
 - registry (`registry.json`) — `version` (current: **1**, read forward-tolerantly)
 
@@ -18,6 +18,41 @@ The maintainer bumps the package version in `pyproject.toml` on release; `wastec
 ## [Unreleased]
 
 ### Added
+- **Check discovery v2 — runtime, agent-assisted, human-checked** (post-test-run §1.2). Check
+  discovery now runs inside the state machine at task start (`checks.discovery.run_at_task_start`,
+  default on), so `auto` mode can resolve (and, when opted in with a cheap `checks.discovery.model`,
+  agent-assist) when the task begins — install-time discovery stays a cache-warming option. The
+  commands are re-resolved **only on real infrastructure proof** — a check *launch* failure (bounded
+  to once per task), a changed config/CI fingerprint, or low-confidence detection — and **never**
+  because a check reported failures (a quality failure routes to `fixing`, which must not rewrite its
+  own command). Any **change to the set of check commands** is now a sensitive change: it is written
+  to the resolved profile (`commands_signature` + `approved`/`approved_at`/`approved_interaction_id`,
+  profile schema v2) and requires human approval on first use (fail-closed on denial, timeout, or no
+  notifier); the first-ever resolution is auto-approved and recorded. In `auto` mode a configured
+  command **pins** only the check it names and lets detection fill the rest — a pin is never silently
+  replaced by a detected fallback. The discovery agent is told machine config (`[tool.*]`,
+  package.json scripts, Makefile/lock files) takes precedence over prose; every proposal still goes
+  through the same validate-argv → probe → human-approve funnel. New `checks.discovery.model`/
+  `reasoning`/`agent_fallback`/`run_at_task_start`/`approve_command_changes` are surfaced in
+  `config.example.yaml`. **`config.yaml` schema_version → 5** (adds the `skills:` block and the new
+  discovery keys; `upgrade-config` adds them to an older config). New `CheckResolver.reresolve` /
+  `ReResolveReason`.
+- **Planning-selected repo skill references** (post-test-run §2.1/§2.2): at task start the orchestrator
+  scans the **target repo's** `.claude/skills/*/SKILL.md` for name+description (a cheap, bounded,
+  frontmatter-only inventory, mirroring the check inventory scan), surfaces the relevant ones to the
+  `planning` stage, and planning emits the chosen skills in its structured output. The Core
+  deterministically accepts only names the scan actually found (the "agent proposes, Core decides"
+  rule — an unknown or gate-duplicating name is dropped and recorded in `plan.md`), then passes the
+  chosen `SKILL.md` files to `implementation`/`fixing` as **read-only reference paths** via a new
+  allowlisted `{skills_path}` prompt variable and a path-only `AgentRunRequest.skill_reference_paths`
+  (both providers render an identical advisory "do not execute" footer — never the Claude-only Skill
+  tool, which Codex lacks). Gate-duplicating skills (`run-checks`/`test`/`sync-docs`) are excluded by
+  default. A deterministic, heading-level **de-duplication** (§2.2) records in `plan.md` when a chosen
+  skill's section heading overlaps the operator's appended planning guidance, so the operator's text
+  takes precedence and the agent is not handed the same instruction twice. New `skills:` config block
+  (`scan_root`, `exclude`); new `core/skills.py`. Skill bodies are repo-controlled and only ever
+  surfaced by path — never executed, never used to build argv/env.
+- Add optional `pr_title` front-matter field to override the generated PR title (falls back to `title` when absent or blank).
 - **Agent task-authoring docs (`worc/`)**: a compact, rule-first, copy-paste-oriented guide an AI
   agent can be pointed at to author valid, well-scoped task files without reading the whole `docs/`
   tree. Authored in [`docs/worc/`](docs/worc/README.md) (the task contract + hard validation rules, a
@@ -223,6 +258,39 @@ The maintainer bumps the package version in `pyproject.toml` on release; `wastec
   fixing recovery now restores its failed-check or review context without double-counting a cycle.
 - Isolate rejected-task quarantine paths in test fixtures so test runs cannot write generated task
   files into the repository's real `tasks/rejected/` directory.
+- **Check detection now respects the project's configured tool scope** (post-test-run §1.1). Detection
+  built `mypy .` / `ruff check .` from tool-presence alone; an explicit `.` *overrides* a configured
+  `[tool.mypy] files`/`exclude` (or `[tool.ruff]` `src`/`include`/`exclude`), so the type gate
+  type-checked `tests/` and could loop `testing→fixing` forever. Detection now reads the scope from
+  `pyproject.toml` and emits a scoped command (`mypy src` / a bare `mypy` for exclude-only / `ruff
+  check`) so the gate honors the project's own configuration; with no scope configured the historical
+  `.` target is unchanged. `pyproject.toml` is already in the discovery fingerprint, so the cache
+  invalidates automatically. Unsafe scope paths (absolute / `..`) are rejected, never passed to argv.
+- **`checks/resolved-profile.json` no longer leaks into commits or the operator's `git status`**
+  (post-test-run §3.1). The generated resolved check profile (a runtime cache, like `logs/`) was not
+  ignored and not excluded from the code-commit guard, so it rode a real failed run's commit. `checks/`
+  is now in `EXCLUDED_DIRS`, `_local_only_dirs` (all footprints) and `RUNTIME_GITIGNORE_LINES`, and the
+  Git Manager guarantees the runtime-file ignores exist in the clone it operates in (new
+  `ensure_runtime_excludes`, called at branch-prep). Per-task `logs/<id>/checks/*.log` is unaffected.
+  An already-committed profile from a prior run is left untracked-on-request — preflight deliberately
+  does not gate on it; the operator runs `git rm --cached checks/resolved-profile.json` once.
+- **Telegram Approve/Deny presses are no longer silently lost** (post-test-run §4.1). `poll_reply`
+  advanced the update offset for every update and acknowledged only an exact match, so a near-miss
+  press (stale/duplicate button, wrong message, or an inaccessible `callback_query.message`) was
+  consumed and dropped with no feedback — to the operator it looked like "nothing happened". Now every
+  callback in the configured chat is acknowledged (the matching one continues/denies; a near-miss shows
+  a "this approval is no longer active" alert) and near-misses are logged with a secret-free reason
+  (`wrong_message_id`/`unexpected_data`/`message_none`); a foreign chat's callback is never
+  acknowledged. A second `getUpdates` consumer on the same bot token (Telegram HTTP 409 Conflict — e.g.
+  two orchestrator clones sharing one token) is now detected and surfaced with a clear "only one poller
+  may run per bot token" message at both preflight and run time, instead of a generic transport error.
+  No bot token or raw chat id is ever logged.
+- **Deterministic failure summary is now compact** (post-test-run §5.1). When no agent-authored summary
+  exists, the fallback inlined the full task description *and* the entire diff into the committed
+  `<id>.summary.md` (a real run produced a ~580-line file that was almost all raw diff). It now shows a
+  `git diff --stat` (files + line counts) and links to the task file and to the already-redacted
+  `logs/<id>/current.diff`. This also closes a latent gap where the committed summary could contain an
+  *unredacted* diff (the old fallback inlined the diff without the `current.diff` redaction).
 
 ## [0.0.1]
 

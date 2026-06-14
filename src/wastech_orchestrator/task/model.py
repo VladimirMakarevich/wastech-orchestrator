@@ -23,6 +23,7 @@ ALLOWED_TASK_KEYS: frozenset[str] = frozenset(
     {
         "id",
         "title",
+        "pr_title",
         "refined",
         "decompose",
         "auto_merge",
@@ -67,6 +68,7 @@ class NormalizedTask:
     id: str
     title: str
     description: str
+    pr_title: str | None = None
     refined: bool = False
     # Tri-state: True forces decomposition, False disables it, None defers to the config default.
     decompose: bool | None = None

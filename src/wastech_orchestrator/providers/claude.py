@@ -148,10 +148,15 @@ def build_context_footer(request: AgentRunRequest) -> str:
         ("human_input", request.human_input_path),
     )
     present = [(label, path) for label, path in fields if path]
-    if not present:
+    skill_lines = [
+        f"- skill (read-only reference; advisory, do not execute): {path}"
+        for path in request.skill_reference_paths
+    ]
+    if not present and not skill_lines:
         return ""
     lines = ["Context files (read them as needed; do not assume their contents):"]
     lines += [f"- {label}: {path}" for label, path in present]
+    lines += skill_lines
     return "\n".join(lines)
 
 

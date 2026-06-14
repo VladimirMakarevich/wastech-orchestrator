@@ -96,6 +96,7 @@ def test_planning_output_rejects_malformed_subtask() -> None:
                 "depends_on": [],
             }
         ],
+        "skills": [],
     }
 
     with pytest.raises(StageOutputError, match="positive integer"):

@@ -28,6 +28,7 @@ Dependency direction: `core → router → provider(interface)`. Providers do no
 
 - Stages: `refinement`, `planning`, `implementation`, `testing`, `review`, `fixing`, `summary`, `publishing`.
 - `testing` is executed by the Check Runner; `publishing` by the Git Manager. The rest are agent-driven.
+- Check-command **discovery/resolution** lives in the `CheckResolver` (and an optional advisory discovery agent), invoked by the Core at task start and — only on infrastructure proof — once mid-task; the resolver returns `ResolvedCheck` argv lists. The Core passes those argv to the Check Runner and exchanges only enums/booleans with the resolver — it **never builds CLI argv itself**, preserving "the core does not know the CLI syntax" (§1.2).
 - Default route: refinement/planning/implementation/fixing/summary → primary `claude`, fallback `codex`; review → primary `codex`, fallback `claude`.
 - `refinement` runs first to enrich an incomplete task (no code edits) and is **skipped** by the
   Core for tasks that are already complete or flagged `refined: true`. The skip decision is

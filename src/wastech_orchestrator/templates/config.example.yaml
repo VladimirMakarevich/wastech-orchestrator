@@ -4,7 +4,7 @@
 # repo-root config.example.yaml and with §11 of
 # docs/implementation_stages/00_orchestrator_final_plan.md.
 
-schema_version: 4                   # config format version; the orchestrator refuses newer configs
+schema_version: 5                   # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -104,7 +104,16 @@ checks:
   discovery:
     mode: configured                # auto | deterministic | configured | disabled (see docs/configuration.md)
     refresh: on_change              # on_change | always | never — when a cached profile is recomputed
-  commands:                         # legacy strings and/or structured {name, argv}; non-empty wins in any mode
+    run_at_task_start: true         # resolve checks at task start (auto can agent-assist in-band, §1.2)
+    approve_command_changes: true   # a *changed* command set is human-approved on first use (fail-closed)
+    agent_fallback: true            # allow a read-only agent discovery pass when confidence is low
+    model: ""                       # cheap model id for agent discovery (e.g. a Haiku); empty = disabled
+    reasoning: low                  # low | medium | high | xhigh | max — reasoning for the discovery call
+    # provider: claude              # which provider runs discovery; default = first available allowed
+    # timeout_seconds: 120          # bound on the discovery call
+  commands:                         # legacy strings and/or structured {name, argv}
+    # In `configured` mode these ARE the gate. In `auto` mode each pins only the check it names
+    # (e.g. {name: types, argv: [mypy, src]}) and detection fills the rest.
     - "npm test"
     - "npm run lint"
   timeout_seconds: 7200             # per-command timeout for the Check Runner (argv list, no shell)
@@ -144,4 +153,15 @@ prompts:                            # operator-customizable stage prompts (optio
                                     # extra_args, sandbox/approvals, denied commands/reads, or env.
                                     # Variables: {task_id} {stage} {repo_path} {task_path} {plan_path}
                                     #   {diff_path} {checks_path} {review_path} {subtask_order}
-                                    #   {subtask_count} {subtask_spec_path} (paths/metadata only).
+                                    #   {subtask_count} {subtask_spec_path} {skills_path}
+                                    #   (paths/metadata only).
+
+skills:                             # planning-selected repo skill references (optional, §2.1)
+  scan_root: ""                     # empty = <repo.local_path>/.claude/skills (the target repo's skills)
+  exclude:                          # gate-duplicating skills withheld from planning (orchestrator owns them)
+    - "run-checks"
+    - "test"
+    - "sync-docs"
+  # At task start the orchestrator scans <scan_root>/*/SKILL.md (name+description only). The planning
+  # stage may pick relevant ones; chosen SKILL.md files reach implementation/fixing as read-only
+  # reference paths (never executed, never the Claude Skill tool — Codex has none).

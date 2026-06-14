@@ -171,6 +171,7 @@ def test_exclude_local_under_commit_keeps_tasks_trackable(
     exclude = (git_repo.clone / ".git" / "info" / "exclude").read_text(encoding="utf-8")
     assert "logs/" in exclude
     assert "workspace/" in exclude
+    assert "checks/" in exclude  # generated check profile is local-only in every footprint
     assert "tasks/" not in exclude
 
 
@@ -234,6 +235,84 @@ def test_changed_code_paths_excludes_root_runtime_files(
     assert "real.py" in paths
     assert "state.db" not in paths
     assert "config.yaml" not in paths
+
+
+def test_resolved_profile_not_in_code_commit(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # The generated checks/resolved-profile.json (a runtime cache, §10) must never ride a code
+    # commit — it leaked into a real failed run before `checks/` was excluded (post-test-run §3.1).
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x")
+    (git_repo.clone / "real.py").write_text("code\n", encoding="utf-8")
+    (git_repo.clone / "checks").mkdir(exist_ok=True)
+    (git_repo.clone / "checks" / "resolved-profile.json").write_text("{}\n", encoding="utf-8")
+    sha = gm.commit_code("task-001", "feat: real")
+    assert sha is not None
+    committed = git_run(["show", "--name-only", "--format=", "HEAD"], git_repo.clone).split()
+    assert "real.py" in committed
+    assert not any(f.startswith("checks/") for f in committed)
+    assert "checks/resolved-profile.json" not in gm.changed_code_paths()
+
+
+def test_per_task_checks_logs_still_excluded(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # Excluding top-level `checks/` must not change that per-task `logs/<id>/checks/*.log` is also
+    # excluded — it always was (via `logs/`); `_is_artifact_path` matches a dir prefix only at the
+    # path start, so a `checks` segment mid-path is unaffected. Guards against an over-eager "fix".
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x")
+    (git_repo.clone / "logs" / "task-001" / "checks").mkdir(parents=True)
+    (git_repo.clone / "logs" / "task-001" / "checks" / "run.log").write_text("x", encoding="utf-8")
+    (git_repo.clone / "a.py").write_text("x\n", encoding="utf-8")
+    paths = gm.changed_code_paths()
+    assert "a.py" in paths
+    assert not any(p.startswith("logs/") for p in paths)
+
+
+def test_preflight_ignores_already_tracked_checks_under_commit(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # The bug scenario: a prior run committed checks/resolved-profile.json before it was excluded.
+    # Preflight must NOT refuse to start on it (that would block exactly the repos that hit the
+    # leak); the operator untracks it once with `git rm --cached` (post-test-run §3.1).
+    (git_repo.clone / "checks").mkdir()
+    (git_repo.clone / "checks" / "resolved-profile.json").write_text("{}\n", encoding="utf-8")
+    git_run(["add", "checks/resolved-profile.json"], git_repo.clone)
+    git_run(["commit", "-m", "stray profile"], git_repo.clone)
+    gm = _manager(
+        git_repo, store, tmp_path / "art", make_git_config, location="in_repo", tracking="commit"
+    )
+    gm.preflight_footprint()  # does not raise
+
+
+def test_ensure_runtime_excludes_writes_checks(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    gm = _manager(
+        git_repo, store, tmp_path / "art", make_git_config, location="in_repo", tracking="commit"
+    )
+    gm.ensure_runtime_excludes()
+    gm.ensure_runtime_excludes()  # idempotent
+    exclude = (git_repo.clone / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+    assert exclude.count("checks/") == 1
+    assert "state.db" in exclude and "orchestrator.pid" in exclude
+
+
+def test_diff_stat_returns_stat_only(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # diff_stat() feeds the compact minimal summary (§5.2): files + counts, never the patch body.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x")
+    (git_repo.clone / "mod.py").write_text("a = 1\nb = 2\n", encoding="utf-8")
+    gm.commit_code("task-001", "feat: mod")
+    stat = gm.diff_stat()
+    assert "mod.py" in stat and "changed" in stat
+    assert "diff --git" not in stat and "@@" not in stat
 
 
 def test_refresh_base_pulls_pushed_commits(

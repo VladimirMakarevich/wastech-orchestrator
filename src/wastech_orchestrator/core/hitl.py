@@ -24,6 +24,8 @@ _SIGNAL_STAGES = frozenset({Stage.REFINEMENT, Stage.PLANNING})
 _RISKS = frozenset({"clarification", "deletion", "dependency", "other"})
 _MAX_PATHS = 100
 _MAX_TEXT = 16_000
+_MAX_SKILLS = 20
+_MAX_SKILL_NAME = 128
 
 _HUMAN_INPUT_SCHEMA: dict[str, Any] = {
     "type": ["object", "null"],
@@ -88,6 +90,7 @@ class TypedStageOutput:
     content: str
     human_input: HumanInputSignal | None
     structured: Mapping[str, Any]
+    skills: tuple[str, ...] = ()  # planning-proposed skill names (validated against the inventory)
 
 
 def stage_output_schema(stage: Stage) -> dict[str, Any] | None:
@@ -114,8 +117,13 @@ def stage_output_schema(stage: Stage) -> dict[str, Any] | None:
                     "type": "array",
                     "items": _SUBTASK_SCHEMA,
                 },
+                "skills": {
+                    "type": "array",
+                    "maxItems": _MAX_SKILLS,
+                    "items": {"type": "string", "minLength": 1, "maxLength": _MAX_SKILL_NAME},
+                },
             },
-            "required": ["content", "human_input", "decompose", "subtasks"],
+            "required": ["content", "human_input", "decompose", "subtasks", "skills"],
         }
     return None
 
@@ -132,7 +140,7 @@ def parse_typed_stage_output(
     expected = (
         {"content", "human_input"}
         if stage is Stage.REFINEMENT
-        else {"content", "human_input", "decompose", "subtasks"}
+        else {"content", "human_input", "decompose", "subtasks", "skills"}
     )
     if set(structured) != expected:
         raise StageOutputError(f"{stage.value} output keys must be exactly {sorted(expected)}")
@@ -140,6 +148,7 @@ def parse_typed_stage_output(
     if not isinstance(content, str):
         raise StageOutputError(f"{stage.value}.content must be a string")
 
+    skills: tuple[str, ...] = ()
     if stage is Stage.PLANNING:
         if not isinstance(structured.get("decompose"), bool):
             raise StageOutputError("planning.decompose must be a boolean")
@@ -147,10 +156,13 @@ def parse_typed_stage_output(
         if not isinstance(subtasks, list):
             raise StageOutputError("planning.subtasks must be a list")
         _validate_subtasks(subtasks)
+        skills = _validate_skills(structured.get("skills"))
 
     raw_signal = structured.get("human_input")
     signal = None if raw_signal is None else _parse_signal(raw_signal)
-    return TypedStageOutput(content=content, human_input=signal, structured=structured)
+    return TypedStageOutput(
+        content=content, human_input=signal, structured=structured, skills=skills
+    )
 
 
 def _parse_signal(raw: Any) -> HumanInputSignal:
@@ -220,6 +232,24 @@ def _validate_subtasks(raw_subtasks: list[Any]) -> None:
             )
 
 
+def _validate_skills(raw_skills: Any) -> tuple[str, ...]:
+    """Validate planning's proposed skill names: a bounded list of non-empty bounded strings (§2.1).
+
+    Returns the proposed names verbatim (de-duplication and matching against the actual inventory is
+    the Core's deterministic job in :func:`core.skills.resolve_planning_skills`).
+    """
+    if not isinstance(raw_skills, list):
+        raise StageOutputError("planning.skills must be a list")
+    if len(raw_skills) > _MAX_SKILLS:
+        raise StageOutputError(f"planning.skills may contain at most {_MAX_SKILLS} names")
+    names: list[str] = []
+    for index, item in enumerate(raw_skills):
+        if not isinstance(item, str) or not item.strip() or len(item) > _MAX_SKILL_NAME:
+            raise StageOutputError(f"planning.skills[{index}] must be a non-empty bounded string")
+        names.append(item.strip())
+    return tuple(names)
+
+
 def _normalize_path(raw: Any) -> str:
     if not isinstance(raw, str) or not raw.strip() or len(raw) > 512:
         raise StageOutputError("human_input path must be a non-empty bounded string")
@@ -261,6 +291,18 @@ def interaction_id(task_id: str, stage: Stage, subtask: int | None = None) -> st
     """Return a compact deterministic id that fits Telegram callback-data limits."""
     raw = f"{task_id}:{stage.value}:{subtask if subtask is not None else '-'}"
     return "h" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def discovery_interaction_path(artifacts_root: str | Path, task_id: str) -> Path:
+    """The durable artifact for a check-command-set approval (§1.2), under the task's ``hitl/``."""
+    return task_artifact_dir(artifacts_root, task_id) / "hitl" / "check-discovery.json"
+
+
+def discovery_interaction_id(task_id: str, signature: str) -> str:
+    """A compact deterministic id for a discovery approval, scoped to the command-set signature so a
+    *changed* set yields a fresh interaction (fits Telegram callback-data limits)."""
+    raw = f"{task_id}:check-discovery:{signature}"
+    return "d" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
 def load_interaction(path: Path) -> dict[str, Any] | None:

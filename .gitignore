@@ -38,3 +38,5 @@ tasks/rejected/
 .vscode/
 .DS_Store
 Thumbs.db
+state.db-shm
+state.db-wal

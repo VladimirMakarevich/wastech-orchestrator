@@ -242,6 +242,7 @@ class _FakeProvider:
                 "human_input": None,
                 "decompose": False,
                 "subtasks": [],
+                "skills": [],
             }
         return AgentRunResult(
             status=RunStatus.SUCCEEDED,

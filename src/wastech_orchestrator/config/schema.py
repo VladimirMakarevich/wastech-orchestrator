@@ -24,7 +24,10 @@ from wastech_orchestrator.providers.base import ProviderId, Stage
 # v4: added the optional ``agents.skip_stages`` / ``agents.allow_review_skip`` keys (stage-skip
 # control). Old configs omit them and take the safe defaults (no skips, review-skip disallowed) — no
 # migration flips anything.
-CONFIG_SCHEMA_VERSION = 4
+# v5 (2026-06-14, post-test-run): adds the optional `skills:` block (§2.1) and the
+# `checks.discovery.{run_at_task_start,approve_command_changes}` keys (§1.2). All are
+# backward-compatible (absent => safe defaults); `upgrade-config` adds them to an older config.
+CONFIG_SCHEMA_VERSION = 5
 
 # Stages routed to an agent provider. The remaining stages (``testing``, ``publishing``) are run by
 # the orchestrator itself (Check Runner / Git Manager), so they never appear in ``agents.routing``
@@ -209,6 +212,14 @@ class CheckDiscoveryConfig:
     model: str = ""  # a cheap model id for discovery; empty => skip agent fallback
     reasoning: str | None = "low"  # low | medium | high | xhigh | max
     timeout_seconds: int = 120
+    # Run discovery inside the state machine at task start (not only at install), so `auto` mode can
+    # resolve/agent-assist when the task begins (§1.2). Deterministic install-time discovery stays a
+    # cache-warming option. Default on; the agent fallback still only fires in `auto` + opted-in.
+    run_at_task_start: bool = True
+    # Treat a *changed* set of check commands as a sensitive change: write it to the resolved
+    # profile and require human approval on first use (§1.2). Disabling it under auto/deterministic
+    # is the operator's call but is logged loudly (it decides what "passing" means).
+    approve_command_changes: bool = True
 
 
 @dataclass(frozen=True)
@@ -291,6 +302,21 @@ class PromptsConfig:
 
 
 @dataclass(frozen=True)
+class SkillsConfig:
+    """Planning-selected repo skill references (post-test-run §2.1).
+
+    The orchestrator scans ``<scan_root>`` (default ``<repo.local_path>/.claude/skills``) for
+    ``*/SKILL.md`` name+description, lets ``planning`` pick the relevant ones, and passes the chosen
+    files to downstream stages as read-only reference paths. ``exclude`` is the gate-duplicating
+    denylist withheld from planning. Defaults reproduce the no-config behavior (scan the target repo
+    clone, exclude the three orchestrator-gate skills). ``scan_root`` empty → the default location.
+    """
+
+    scan_root: str = ""
+    exclude: tuple[str, ...] = ("run-checks", "test", "sync-docs")
+
+
+@dataclass(frozen=True)
 class OrchestratorConfig:
     orchestrator: OrchestratorRuntimeConfig
     repo: RepoConfig
@@ -301,3 +327,4 @@ class OrchestratorConfig:
     git: GitConfig
     telegram: TelegramConfig
     prompts: PromptsConfig = PromptsConfig()
+    skills: SkillsConfig = SkillsConfig()

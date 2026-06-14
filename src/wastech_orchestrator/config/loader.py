@@ -45,6 +45,7 @@ from wastech_orchestrator.config.schema import (
     RepoConfig,
     RouteConfig,
     SecurityConfig,
+    SkillsConfig,
     TelegramConfig,
     ValidationConfig,
 )
@@ -549,7 +550,17 @@ def _build_discovery(raw: Any, issues: list[str]) -> CheckDiscoveryConfig:
     m = _mapping(raw, where, issues)
     _check_keys(
         m,
-        {"mode", "agent_fallback", "refresh", "provider", "model", "reasoning", "timeout_seconds"},
+        {
+            "mode",
+            "agent_fallback",
+            "refresh",
+            "provider",
+            "model",
+            "reasoning",
+            "timeout_seconds",
+            "run_at_task_start",
+            "approve_command_changes",
+        },
         where,
         issues,
     )
@@ -589,6 +600,8 @@ def _build_discovery(raw: Any, issues: list[str]) -> CheckDiscoveryConfig:
         model=_str(m, "model", "", where, issues),
         reasoning=reasoning,
         timeout_seconds=_int(m, "timeout_seconds", 120, where, issues),
+        run_at_task_start=_bool(m, "run_at_task_start", True, where, issues),
+        approve_command_changes=_bool(m, "approve_command_changes", True, where, issues),
     )
 
 
@@ -715,6 +728,18 @@ def _build_prompts(raw: Any, issues: list[str]) -> PromptsConfig:
     )
 
 
+def _build_skills(raw: Any, issues: list[str]) -> SkillsConfig:
+    where = "skills"
+    if raw is None:
+        return SkillsConfig()
+    m = _mapping(raw, where, issues)
+    _check_keys(m, {"scan_root", "exclude"}, where, issues)
+    return SkillsConfig(
+        scan_root=_str(m, "scan_root", "", where, issues),
+        exclude=_str_tuple(m, "exclude", ("run-checks", "test", "sync-docs"), where, issues),
+    )
+
+
 _TOP_LEVEL_KEYS = {
     "schema_version",
     "orchestrator",
@@ -726,6 +751,7 @@ _TOP_LEVEL_KEYS = {
     "git",
     "telegram",
     "prompts",
+    "skills",
 }
 
 
@@ -762,6 +788,7 @@ def _parse(raw: Mapping[str, Any], issues: list[str], warnings: list[str]) -> Or
         git=_build_git(raw.get("git"), issues),
         telegram=_build_telegram(raw.get("telegram"), issues),
         prompts=_build_prompts(raw.get("prompts"), issues),
+        skills=_build_skills(raw.get("skills"), issues),
     )
 
 

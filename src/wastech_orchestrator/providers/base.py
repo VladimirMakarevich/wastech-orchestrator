@@ -102,6 +102,8 @@ class AgentRunRequest:
     check_artifacts_path: str | None = None
     review_artifacts_path: str | None = None
     human_input_path: str | None = None
+    # Planning-selected SKILL.md paths — read-only advisory references, never executed (§2.1).
+    skill_reference_paths: tuple[str, ...] = ()
     output_schema: dict[str, Any] | None = None
     model: str | None = None
     extra_args: list[str] = field(default_factory=list)

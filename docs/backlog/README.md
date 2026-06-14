@@ -18,6 +18,8 @@ Backlog documents must not override the hard invariants from [../../CLAUDE.md](.
 | [token_optimization.md](token_optimization.md) | Detailed backlog task for measuring and reducing token usage. |
 | [runtime_provider_capacity_gate.md](runtime_provider_capacity_gate.md) | Detailed backlog task for checking Codex and Claude capacity before autonomous `watch` admits a pending task. |
 | [task_workflow_profiles.md](task_workflow_profiles.md) | Detailed backlog task for implementation, deep-research, and private security-audit workflows with distinct permissions, outputs, and publishing rules. |
+| [task_rerun_command.md](task_rerun_command.md) | Detailed backlog task for a `rerun <task-id>` command that launches a fresh attempt of a terminal task (gate allowance, branch reset-to-base to avoid merge conflicts, ledger attempt chain). |
+| [task_finalize_command.md](task_finalize_command.md) | Detailed backlog task for a `finalize <task-id> --as <done\|failed\|abandoned>` command that reconciles the bookkeeping of an operator-handled task (status, working tree/branch, file move, HITL close-out, ledger) without running the pipeline. |
 
 ## Rules
 

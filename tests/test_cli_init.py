@@ -55,6 +55,7 @@ _RUNTIME_IGNORES = (
     "config.yaml.bak-*",
     "orchestrator.pid",
     "worc/",
+    "checks/",
 )
 
 

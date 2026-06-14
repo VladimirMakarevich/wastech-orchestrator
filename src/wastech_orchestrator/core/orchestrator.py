@@ -14,15 +14,16 @@ import logging
 import re
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from wastech_orchestrator.check_runner import CheckOutcome, CheckRunner
+from wastech_orchestrator.checks.discovery_factory import build_discovery
 from wastech_orchestrator.checks.model import ResolvedCheck
 from wastech_orchestrator.checks.profile import ResolvedCheckProfile
-from wastech_orchestrator.checks.resolver import CheckResolver
+from wastech_orchestrator.checks.resolver import CheckResolver, ReResolveReason
 from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.core.dangerous_diff import (
     DangerousDiff,
@@ -39,6 +40,8 @@ from wastech_orchestrator.core.hitl import (
     HumanInputSignal,
     StageOutputError,
     TypedStageOutput,
+    discovery_interaction_id,
+    discovery_interaction_path,
     guardrail_interaction_path,
     handle_from_artifact,
     interaction_id,
@@ -57,6 +60,15 @@ from wastech_orchestrator.core.recovery import (
     RecoveryAction,
     RecoveryPlan,
     RecoveryReconciler,
+)
+from wastech_orchestrator.core.skills import (
+    SkillDedupEntry,
+    SkillInventory,
+    SkillInventoryScanner,
+    SkillRef,
+    SkillSelection,
+    compute_skill_dedup,
+    resolve_planning_skills,
 )
 from wastech_orchestrator.core.state_machine import Status, assert_transition
 from wastech_orchestrator.git_manager import (
@@ -197,6 +209,12 @@ class _Pipeline:
     slug: str = ""
     session_ids: dict[str, str] = field(default_factory=dict)  # provider_id.value -> session_id
     check_profile: ResolvedCheckProfile | None = None  # resolved at preflight (before any branch)
+    reresolved_once: bool = False  # mid-task check re-resolve is bounded to once per task (§1.2)
+    # Repo skill inventory scanned at task start; planning's chosen subset is surfaced to downstream
+    # stages as read-only reference paths (§2.1). Re-derived per run; `selected_skills` is only set
+    # when the planning agent runs this process (empty on a resume past planning — advisory only).
+    skill_inventory: SkillInventory = field(default_factory=SkillInventory)
+    selected_skills: tuple[SkillRef, ...] = ()
     # Effective stage-skip set (global config ∪ per-task). Re-derived on every run/resume from
     # config + frontmatter, so a restart recovers it without persistence (stage-skip control).
     skip: frozenset[Stage] = frozenset()
@@ -221,6 +239,7 @@ class Orchestrator:
         monotonic: Callable[[], float] = time.monotonic,
         notifier: Notifier | None = None,
         resolver: CheckResolver | None = None,
+        skill_scanner: SkillInventoryScanner | None = None,
     ) -> None:
         self._config = config
         self._router = router
@@ -240,6 +259,18 @@ class Orchestrator:
         # The check resolver runs a deterministic preflight before any branch (automatic check
         # discovery §11). ``None`` skips it — the Check Runner then uses ``checks.commands``.
         self._resolver = resolver
+        # Repo skill inventory scanner (§2.1). Defaults to the target repo clone's `.claude/skills`.
+        self._skill_scanner = skill_scanner or self._default_skill_scanner()
+
+    def _default_skill_scanner(self) -> SkillInventoryScanner:
+        root = self._config.skills.scan_root or str(
+            Path(self._config.repo.local_path) / ".claude" / "skills"
+        )
+        return SkillInventoryScanner(
+            root,
+            denied_read_paths=self._config.security.denied_read_paths,
+            excluded_names=self._config.skills.exclude,
+        )
 
     # --- entry point ----------------------------------------------------------------------
 
@@ -265,6 +296,7 @@ class Orchestrator:
             counters=LoopCounters(),
             decomposition=DecompositionDecision(accepted=False, reason="pending", n=1),
             skip=effective_skip(self._config, task),
+            skill_inventory=self._skill_scanner.collect(),
         )
         try:
             return self._drive(pipeline, completeness)
@@ -384,6 +416,7 @@ class Orchestrator:
             slug=row.slug or slugify(task.title),
             plan_path=str(task_artifact_dir(self._artifacts_root, plan.task_id) / "plan.md"),
             skip=effective_skip(self._config, task),
+            skill_inventory=self._skill_scanner.collect(),
         )
 
         publish_phase = {
@@ -475,16 +508,22 @@ class Orchestrator:
         return self._run_units_and_finish(p)
 
     def _check_preflight(self, p: _Pipeline) -> None:
-        """Resolve (deterministically) the launchable check profile before any branch (§11).
+        """Resolve the launchable check profile at task start, before any branch (§11, §1.2).
 
         Skipped when no resolver is wired (legacy behavior: the Check Runner uses
         ``checks.commands``). A non-ready profile raises :class:`PipelineFailed` — the task fails
-        before a branch is created and without consuming any fix iteration. Agent fallback never
-        runs here (preflight must not spend a provider run); it is an install-time capability.
+        before a branch is created and without consuming any fix iteration. With
+        ``checks.discovery.run_at_task_start`` (default on), ``auto`` mode may run the opt-in agent
+        fallback here (the resolver still gates it on mode + agent_fallback + a configured model). A
+        *changed* set of check commands goes through the sensitive-change approval gate (§1.2).
         """
         if self._resolver is None:
             return
-        profile = self._resolver.resolve(allow_agent=False)
+        prev = self._resolver.store.load()
+        prev_approved_sig = prev.commands_signature if (prev and prev.approved) else ""
+        allow_agent = self._config.checks.discovery.run_at_task_start
+        profile = self._resolver.resolve(allow_agent=allow_agent)
+        profile = self._gate_check_commands(p, profile, prev_approved_sig)
         p.check_profile = profile
         if profile.ready:
             self._log(p.task.id).info(
@@ -500,11 +539,157 @@ class Orchestrator:
             "(set checks.commands, or use checks.discovery.mode to detect them)"
         )
 
+    def _gate_check_commands(
+        self, p: _Pipeline, profile: ResolvedCheckProfile, prev_approved_sig: str
+    ) -> ResolvedCheckProfile:
+        """Approve the *set* of check commands when it changed (§1.2). Returns an approved profile.
+
+        First-ever resolution for a repo is auto-approved and recorded (approval is for a *change*,
+        not for the first ever set); an unchanged set is reused; a changed set requires human
+        approval (fail-closed on deny/timeout/no-notifier) unless the operator disabled the gate.
+        """
+        if not profile.ready or not profile.checks:
+            return (
+                profile  # nothing to run → no command set to approve (readiness handled by caller)
+            )
+        sig = profile.commands_signature
+        if profile.approved and sig == prev_approved_sig:
+            return profile  # already approved this exact set (cache reuse)
+        if sig == prev_approved_sig and prev_approved_sig:
+            return self._stamp_check_approval(profile, "reuse")  # same set as last approved
+        if not prev_approved_sig:
+            return self._stamp_check_approval(
+                profile, "bootstrap"
+            )  # first-ever → record, no prompt
+        # The command set CHANGED from a previously approved set — a sensitive change (§1.2).
+        if not self._config.checks.discovery.approve_command_changes:
+            self._log(p.task.id).warning(
+                "check command set changed; approval gate disabled by config",
+                extra={"signature": sig},
+            )
+            return self._stamp_check_approval(profile, "approval-disabled")
+        if not self._ask_check_command_approval(p, profile):
+            raise ManualActionRequired(
+                "the set of check commands changed and the change was not approved"
+            )
+        return self._stamp_check_approval(profile, discovery_interaction_id(p.task.id, sig))
+
+    def _stamp_check_approval(
+        self, profile: ResolvedCheckProfile, interaction: str
+    ) -> ResolvedCheckProfile:
+        """Record the approval on the profile and persist it (the audit trail, §1.2)."""
+        approved = replace(
+            profile,
+            approved=True,
+            approved_at=self._clock(),
+            approved_interaction_id=interaction,
+        )
+        if self._resolver is not None:
+            self._resolver.store.save(approved)
+        return approved
+
+    def _ask_check_command_approval(self, p: _Pipeline, profile: ResolvedCheckProfile) -> bool:
+        """Ask the human to approve a changed check-command set; fail-closed (§1.2).
+
+        Reuses the durable HITL interaction machinery under a discovery-specific artifact. On a
+        restart it resumes a still-waiting interaction for the *same* command set; a denial,
+        timeout, transport error, or absent notifier raises :class:`ManualActionRequired`.
+        """
+        path = discovery_interaction_path(self._artifacts_root, p.task.id)
+        sig = profile.commands_signature
+        wanted = discovery_interaction_id(p.task.id, sig)
+        persisted = load_interaction(path)
+        if persisted is not None and persisted.get("interaction_id") == wanted:
+            status = str(persisted.get("status", ""))
+            if status in {"answered", "consumed"}:
+                return persisted.get("approved") is True
+            if status == "waiting":
+                handle = handle_from_artifact(persisted)
+                result = self._notifier.wait_for_answer(handle)
+                write_answer(path, result)
+                self._register_artifact(p.task.id, "hitl", str(path))
+                self._require_human_result(p, Stage.PLANNING, "approval", result)
+                if result.approved is True:
+                    mark_consumed(path)
+                return result.approved is True
+
+        commands = "\n".join(f"{c.name}: {' '.join(c.argv)}" for c in profile.checks)
+        signal = HumanInputSignal(
+            kind="approval",
+            question="The set of quality-gate check commands changed. Approve running them?",
+            context=f"Resolved check commands:\n{commands}",
+            risk="other",
+            paths=tuple(c.name for c in profile.checks),
+        )
+        handle = self._notifier.start_ask(
+            question=signal.question,
+            context=signal.context,
+            task_id=p.task.id,
+            kind="approval",
+            timeout_s=self._config.telegram.ask_timeout_s,
+            interaction_id=wanted,
+            contacts=tuple(p.task.contacts),
+        )
+        write_waiting_interaction(
+            path,
+            task_id=p.task.id,
+            stage=Stage.PLANNING,
+            subtask=None,
+            signal=signal,
+            handle=handle,
+        )
+        self._register_artifact(p.task.id, "hitl", str(path))
+        result = self._notifier.wait_for_answer(handle)
+        write_answer(path, result)
+        self._register_artifact(p.task.id, "hitl", str(path))
+        self._require_human_result(p, Stage.PLANNING, "approval", result)
+        if result.approved is True:
+            mark_consumed(path)
+        return result.approved is True
+
+    def _reresolve_on_launch_failure(self, p: _Pipeline) -> bool:
+        """Re-resolve the check commands once after a *launch* failure (§1.2).
+
+        Returns ``True`` when a new, different, ready profile is now active (so checks can be
+        re-run), else ``False`` (the caller then fails the task). Bounded to once per task. Only an
+        infrastructure launch failure reaches here — never a quality failure. A changed command set
+        is routed through the same sensitive-change approval gate (fail-closed on denial). In
+        ``configured`` mode the re-resolve yields the same commands, so this is a no-op (the
+        operator's commands are their responsibility).
+        """
+        if self._resolver is None or p.reresolved_once:
+            return False
+        p.reresolved_once = True
+        prev_sig = p.check_profile.commands_signature if p.check_profile else ""
+        prev_approved_sig = (
+            p.check_profile.commands_signature
+            if (p.check_profile and p.check_profile.approved)
+            else ""
+        )
+        allow_agent = self._config.checks.discovery.run_at_task_start
+        new_profile = self._resolver.reresolve(
+            allow_agent=allow_agent, reason=ReResolveReason.LAUNCH_FAILED
+        )
+        if not new_profile.ready or not new_profile.checks:
+            return False
+        if new_profile.commands_signature == prev_sig:
+            return False  # same set re-resolved → re-running would launch-fail identically
+        gated = self._gate_check_commands(p, new_profile, prev_approved_sig)
+        p.check_profile = gated
+        self._log(p.task.id).info(
+            "checks re-resolved after launch failure",
+            extra={"source": gated.source.value, "checks": len(gated.checks)},
+        )
+        return True
+
     def _prepare_branch(self, p: _Pipeline) -> None:
         """Complete the persisted ``preparing`` checkpoint and attach the task branch."""
         # Branch + footprint preflight (no branch is ever created before this point).
         self._git.preflight_footprint()
         self._git.ensure_exclude_local()
+        # Guarantee runtime-file ignores (state.db, config.yaml, checks/, …) exist in this clone,
+        # regardless of how it was scaffolded, so they never leak into the operator's git status.
+        self._git.ensure_runtime_excludes()
         p.slug = slugify(p.task.title)
         p.branch = self._observe(
             p,
@@ -570,7 +755,8 @@ class Orchestrator:
             self._transition(p, Status.IMPLEMENTING)
             return
         _, typed = self._run_typed_stage(p, Stage.PLANNING)
-        p.plan_path = self._write_artifact(p, "plan.md", typed.content)
+        skill_section = self._resolve_and_render_skills(p, typed.skills)
+        p.plan_path = self._write_artifact(p, "plan.md", typed.content + skill_section)
         gate_on = self._decomposition_gate_on(p.task)
         decision = decide_decomposition(
             typed.structured,
@@ -618,6 +804,63 @@ class Orchestrator:
             )
         self._transition(p, Status.IMPLEMENTING)
 
+    def _resolve_and_render_skills(self, p: _Pipeline, proposed: tuple[str, ...]) -> str:
+        """Resolve planning's proposed skills, run the §2.2 dedup, store the refs, audit (§2.1).
+
+        Returns a deterministic plan.md section (prefixed with a blank line), empty when nothing was
+        proposed or kept. The chosen ``SkillRef`` paths are stored on the pipeline and surfaced to
+        downstream stages as read-only references; the agent can never pick a path the scan did not
+        independently find.
+        """
+        selection = resolve_planning_skills(proposed, p.skill_inventory)
+        p.selected_skills = selection.refs
+        # §2.2: compare chosen skill bodies' headings against the operator's appended planning text.
+        user_text = self._prompts.override_for(Stage.PLANNING)
+        bodies: list[tuple[SkillRef, str]] = []
+        if user_text:
+            for ref in selection.refs:
+                body = self._skill_scanner.read_body(ref)
+                if body is not None:
+                    bodies.append((ref, body))
+        dedup = compute_skill_dedup(user_text, bodies)
+        self._log(p.task.id).info(
+            "skills selected",
+            extra={
+                "selected": [r.name for r in selection.refs],
+                "dropped_unknown": list(selection.dropped_unknown),
+                "dropped_excluded": list(selection.dropped_excluded),
+                "deduped": [e.skill for e in dedup],
+            },
+        )
+        return self._render_skill_section(selection, dedup)
+
+    def _render_skill_section(
+        self, selection: SkillSelection, dedup: tuple[SkillDedupEntry, ...]
+    ) -> str:
+        """Render the deterministic, auditable plan.md skills block (§2.1/§2.2)."""
+        if not (selection.refs or selection.dropped_unknown or selection.dropped_excluded):
+            return ""
+        lines = ["", "## Skills (planning-selected, read-only references)", ""]
+        if selection.refs:
+            lines += [f"- `{ref.name}`: {ref.path}" for ref in selection.refs]
+        else:
+            lines.append("- (none)")
+        dropped = [f"`{n}` (not in the repo skill inventory)" for n in selection.dropped_unknown]
+        dropped += [
+            f"`{n}` (gate-duplicating; owned by the orchestrator)"
+            for n in selection.dropped_excluded
+        ]
+        if dropped:
+            lines += ["", "Dropped: " + "; ".join(dropped) + "."]
+        if dedup:
+            lines += [
+                "",
+                "De-duplication — your appended planning instructions take precedence; these "
+                "referenced skill sections cover the same topics:",
+            ]
+            lines += [f"- `{e.skill}`: {', '.join(e.overlapping_headings)}" for e in dedup]
+        return "\n" + redact_text("\n".join(lines) + "\n")
+
     def _run_unit(
         self, p: _Pipeline, unit: SubtaskSpec | None, *, is_last: bool
     ) -> PipelineResult | None:
@@ -648,11 +891,18 @@ class Orchestrator:
                 elif check.launch_failed:
                     # A check could not be *launched* (missing executable/module): an infrastructure
                     # event, not a quality failure. Never enter fixing — no code change can fix it.
+                    # This is the ONLY mid-task trigger for re-resolving the check commands (§1.2):
+                    # real proof the command is wrong. Bounded to once; a changed set is approved.
+                    if self._reresolve_on_launch_failure(p):
+                        continue  # re-run checks with the newly resolved (and approved) profile
                     raise PipelineFailed(
                         "check launch failure: "
                         f"{check.first_launch_error or 'a configured check could not be launched'}"
                     )
                 else:
+                    # A quality failure (a check ran and reported problems) routes to fixing. It
+                    # must NEVER re-resolve the check commands — that would let the gate quietly
+                    # rewrite its own command until it passes (the anti-pattern §1.2 forbids).
                     p.check_log = check.first_failure_log
                     stuck = self._enter_fixing(p, FixLoop.TEST)
                     if stuck is not None:
@@ -726,16 +976,14 @@ class Orchestrator:
                     p, outcome.result.final_message, outcome.result.structured_output
                 )
             else:
-                # Best-effort stage: no provider could produce it → deterministic minimal summary.
-                diff = self._git.cumulative_committed_diff() or (
-                    Path(p.diff_path).read_text(encoding="utf-8") if p.diff_path else ""
-                )
+                # Best-effort stage: no provider could produce it → compact deterministic summary
+                # (files + counts via `git diff --stat`, never the full diff/description; §5.2).
                 write_minimal_summary(
                     self._artifacts_root,
                     p.task.id,
                     title=p.task.title,
-                    description=p.task.description,
-                    diff=diff,
+                    diff_stat=self._git.diff_stat(),
+                    task_ref=self._task_ref(p),
                 )
         # Append the skipped-stages audit so reviewers see which stages ran (stage-skip control).
         self._append_skip_section(p)
@@ -785,7 +1033,7 @@ class Orchestrator:
             p,
             "pull request",
             lambda: self._git.create_pr(
-                p.task.id, p.branch, title=f"{p.task.title}", body_path=body_path
+                p.task.id, p.branch, title=p.task.pr_title or p.task.title, body_path=body_path
             ),
         )
         if pr_url and Stage.REVIEW in p.skip and self._auto_merge_on(p.task):
@@ -846,20 +1094,23 @@ class Orchestrator:
         """The human-readable summary text; falls back to a deterministic minimal summary (§5.2)."""
         md_path = task_artifact_dir(self._artifacts_root, p.task.id) / "summary.md"
         if not md_path.exists():
-            diff = self._git.cumulative_committed_diff() or (
-                Path(p.diff_path).read_text(encoding="utf-8")
-                if p.diff_path and Path(p.diff_path).exists()
-                else ""
-            )
             write_minimal_summary(
                 self._artifacts_root,
                 p.task.id,
                 title=p.task.title,
-                description=p.task.description,
-                diff=diff,
+                diff_stat=self._git.diff_stat(),
+                task_ref=self._task_ref(p),
             )
             self._append_skip_section(p)
         return md_path.read_text(encoding="utf-8") if md_path.exists() else (p.task.title + "\n")
+
+    def _task_ref(self, p: _Pipeline) -> str | None:
+        """A short sibling-relative pointer to the task file for the committed summary (§5.2).
+
+        The committed ``<id>.summary.md`` lives next to the moved ``<id>.md`` task file, so the
+        basename is the correct, move-independent reference. ``None`` for a synthetic ``run`` path.
+        """
+        return Path(p.task_file).name if p.task_file else None
 
     def _finalize_task_artifacts(self, p: _Pipeline, final: Status) -> Path | None:
         """Move the task into its lifecycle folder; write the committed `<id>.summary.md` alongside.
@@ -1164,6 +1415,7 @@ class Orchestrator:
             check_artifacts_path=p.check_log,
             review_artifacts_path=p.review_findings_path,
             human_input_path=human_input_path,
+            skill_reference_paths=tuple(ref.path for ref in p.selected_skills),
             output_schema=stage_output_schema(stage),
             model=p.task.model_for(stage),
             reasoning=p.task.reasoning_for(stage),
@@ -1538,12 +1790,20 @@ class Orchestrator:
             "diff_path": p.diff_path,
             "checks_path": p.check_log,
             "review_path": p.review_findings_path,
+            "skills_path": self._render_skill_paths(p),
         }
         if unit is not None:
             variables["subtask_order"] = unit.order
             variables["subtask_count"] = p.decomposition.n
             variables["subtask_spec_path"] = str(self._subtask_spec_path(p, unit))
         return variables
+
+    def _render_skill_paths(self, p: _Pipeline) -> str | None:
+        """Newline-joined planning-selected SKILL.md paths for the ``{skills_path}`` template var,
+        or ``None`` when none were chosen (renders to empty, like any other unset path var)."""
+        if not p.selected_skills:
+            return None
+        return "\n".join(ref.path for ref in p.selected_skills)
 
     def _build_prompt(self, p: _Pipeline, stage: Stage, unit: SubtaskSpec | None) -> str:
         prompt = render_prompt(
@@ -2012,7 +2272,12 @@ def build_orchestrator(
         heartbeat_seconds=heartbeat_seconds,
     )
     checks = CheckRunner(config, heartbeat_seconds=heartbeat_seconds)
-    resolver = CheckResolver(config, repo_root=config.repo.local_path, artifacts_root=str(root))
+    # Agent-assisted discovery is opt-in: build_discovery returns None unless agent_fallback + a
+    # cheap model are configured, so default runs stay deterministic (§1.2).
+    discovery = build_discovery(config, providers, str(root))
+    resolver = CheckResolver(
+        config, repo_root=config.repo.local_path, artifacts_root=str(root), discovery=discovery
+    )
     gate = ValidationGate(
         config,
         store_has_task_id=store.task_id_exists,

@@ -388,6 +388,8 @@ checks:
 | `discovery.model` | string | `""` | A **cheap** model id for agent discovery (e.g. a Haiku). Empty disables the agent fallback. |
 | `discovery.reasoning` | enum/null | `low` | Reasoning level for the discovery call. |
 | `discovery.timeout_seconds` | integer | `120` | Bound on the discovery call. |
+| `discovery.run_at_task_start` | bool | `true` | Resolve checks inside the state machine at task start (not only at install), so `auto` mode can resolve/agent-assist in-band (§1.2). |
+| `discovery.approve_command_changes` | bool | `true` | Treat a *changed* set of check commands as a sensitive change requiring human approval on first use (fail-closed). Disabling it under `auto`/`deterministic` is allowed but logged loudly. |
 
 ### Discovery modes
 
@@ -397,11 +399,22 @@ checks:
   `nox` wrappers, local `.venv` interpreters) and probe launchability, preferring any configured
   commands when they probe launchable. Stops before any branch if no check is launchable.
 - **`auto`**: `deterministic`, plus a read-only agent fallback when confidence is low (opt-in: set
-  `discovery.model`). `install` writes `auto` when it could not detect explicit checks.
+  `discovery.model`). `install` writes `auto` when it could not detect explicit checks. With
+  `run_at_task_start` (default), `auto` resolution runs at task start, not only at install.
 - **`disabled`**: an explicit no-check mode with a prominent warning and an audit record.
 
-A **non-empty `commands` list is authoritative regardless of mode**. Resolved profiles are cached at
-`<workspace>/checks/resolved-profile.json` and invalidated by the `refresh` policy. See
+Under **`configured`** a non-empty `commands` list is authoritative (it is the whole gate). Under
+**`auto`** a configured command **pins only the check it names** (e.g. `{name: types, argv: [mypy,
+src]}`) and lets detection fill the rest — a pin is never silently replaced by a detected fallback.
+Detection respects the project's configured tool scope (`[tool.mypy] files`/`exclude`, `[tool.ruff]`),
+so it emits `mypy src` / `ruff check` rather than overriding the scope with `.` (§1.1).
+
+Resolved profiles are cached at `<workspace>/checks/resolved-profile.json` (a generated runtime file,
+git-ignored, never committed) and invalidated by the `refresh` policy. **Re-resolution at run time
+happens only on infrastructure proof** — a check launch failure (bounded to once per task), a changed
+discovery fingerprint, or low-confidence detection — never because a check *reported* failures. A
+change to the *set* of resolved commands is recorded in the profile and **approved by a human on first
+use** (`approve_command_changes`); the first-ever set is auto-approved. See
 [operations.md](operations.md#check-discovery-diagnostics) for `preflight`/`status` diagnostics.
 
 Discovery never installs dependencies or mutates the environment: a candidate that is really a
@@ -539,6 +552,29 @@ paths are confined to `templates_dir` (path traversal and unknown stages are rej
 load). Each rendered prompt is written, redacted, to `logs/<task-id>/stages/<stage>/[sub-NN/]
 rendered-prompt.md` for audit. See [cookbook.md](cookbook.md) for a recipe and
 [operations.md](operations.md) for troubleshooting.
+
+## `skills`
+
+Planning-selected repo skill references (optional, §2.1). At task start the orchestrator scans the
+**target repo's** `.claude/skills/*/SKILL.md` (name + description only — a cheap, bounded,
+frontmatter-only scan). The `planning` stage may pick relevant ones; the chosen `SKILL.md` files are
+passed to `implementation`/`fixing` as **read-only reference paths** (the `{skills_path}` prompt
+variable), advisory only — never executed, never the Claude-only Skill tool (Codex has none).
+
+```yaml
+skills:
+  scan_root: ""                 # empty = <repo.local_path>/.claude/skills
+  exclude: ["run-checks", "test", "sync-docs"]
+```
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `scan_root` | string | `""` | Where to scan for `*/SKILL.md`; empty = the target repo's `.claude/skills`. |
+| `exclude` | list | `["run-checks", "test", "sync-docs"]` | Gate-duplicating skills withheld from planning (the orchestrator already owns those gates). |
+
+Skill bodies are repo-controlled and only ever surfaced by path. The planning agent **proposes** skill
+names; the Core keeps only those the scan actually found and that are not excluded, recording the
+selection (and any dropped names) in `plan.md`.
 
 ## Common Examples
 

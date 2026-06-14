@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "ready": true,
+  "source": "detected",
+  "checks": [
+    {
+      "name": "lint",
+      "argv": [
+        ".venv/bin/ruff",
+        "check",
+        "."
+      ]
+    },
+    {
+      "name": "tests",
+      "argv": [
+        ".venv/bin/pytest"
+      ]
+    },
+    {
+      "name": "types",
+      "argv": [
+        ".venv/bin/mypy",
+        "src"
+      ]
+    }
+  ],
+  "candidates": [
+    {
+      "name": "pytest",
+      "argv": [
+        "pytest"
+      ],
+      "source": "configured",
+      "evidence": [
+        "checks.commands"
+      ],
+      "probe_status": "not_launchable",
+      "selected": false,
+      "rejection": null
+    },
+    {
+      "name": "tests",
+      "argv": [
+        ".venv/bin/pytest"
+      ],
+      "source": "detected",
+      "evidence": [
+        ".venv/bin has pytest"
+      ],
+      "probe_status": "launchable",
+      "selected": true,
+      "rejection": null
+    },
+    {
+      "name": "lint",
+      "argv": [
+        ".venv/bin/ruff",
+        "check",
+        "."
+      ],
+      "source": "detected",
+      "evidence": [
+        ".venv/bin has ruff"
+      ],
+      "probe_status": "launchable",
+      "selected": true,
+      "rejection": null
+    },
+    {
+      "name": "types",
+      "argv": [
+        ".venv/bin/mypy",
+        "src"
+      ],
+      "source": "detected",
+      "evidence": [
+        ".venv/bin has mypy"
+      ],
+      "probe_status": "launchable",
+      "selected": true,
+      "rejection": null
+    },
+    {
+      "name": "tests",
+      "argv": [
+        "pytest"
+      ],
+      "source": "detected",
+      "evidence": [
+        "pyproject.toml present"
+      ],
+      "probe_status": "not_launchable",
+      "selected": false,
+      "rejection": null
+    },
+    {
+      "name": "lint",
+      "argv": [
+        "ruff",
+        "check",
+        "."
+      ],
+      "source": "detected",
+      "evidence": [
+        "ruff declared in pyproject.toml"
+      ],
+      "probe_status": "not_launchable",
+      "selected": false,
+      "rejection": null
+    },
+    {
+      "name": "types",
+      "argv": [
+        "mypy",
+        "."
+      ],
+      "source": "detected",
+      "evidence": [
+        "mypy declared in pyproject.toml"
+      ],
+      "probe_status": "not_launchable",
+      "selected": false,
+      "rejection": null
+    }
+  ],
+  "platform": "darwin",
+  "fingerprint": "ba8af63845f233d6b44ab30cd9240d4ca34b8b23a0ec7d50380d2e1b32c256dd",
+  "created_at": "2026-06-13T23:49:40.603905+00:00",
+  "last_validated_at": "2026-06-13T23:49:40.603905+00:00",
+  "notes": []
+}

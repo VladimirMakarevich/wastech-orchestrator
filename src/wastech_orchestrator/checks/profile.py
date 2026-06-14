@@ -8,6 +8,8 @@ environment values or file contents (§12).
 
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,7 +20,19 @@ from wastech_orchestrator.checks.model import (
 )
 
 # The profile's own format version, independent of the config CONFIG_SCHEMA_VERSION.
-PROFILE_SCHEMA_VERSION = 1
+# v2 (2026-06-14, §1.2): adds commands_signature + the approval fields. A v1 profile lacks them and
+# loads with approved=False, which simply triggers an approval on the next *change* to the set.
+PROFILE_SCHEMA_VERSION = 2
+
+
+def commands_signature(checks: Sequence[ResolvedCheck]) -> str:
+    """A stable, secret-free hash identifying the *set* of check commands (name + argv) (§1.2).
+
+    Order-independent (sorted) so re-ordering the same checks is not a "change". This is the value a
+    changed-command-set approval gate compares against — argv only, never env or file contents.
+    """
+    parts = sorted(check.name + "\x00" + "\x00".join(check.argv) for check in checks)
+    return hashlib.sha256("\x1e".join(parts).encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -85,6 +99,12 @@ class ResolvedCheckProfile:
     created_at: str
     last_validated_at: str
     notes: tuple[str, ...] = ()
+    # The §1.2 sensitive-change approval gate: a stable hash of the selected command set, whether
+    # the operator approved *this* set, and a secret-free link to the approving HITL interaction.
+    commands_signature: str = ""
+    approved: bool = False
+    approved_at: str = ""
+    approved_interaction_id: str = ""
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -98,6 +118,10 @@ class ResolvedCheckProfile:
             "created_at": self.created_at,
             "last_validated_at": self.last_validated_at,
             "notes": list(self.notes),
+            "commands_signature": self.commands_signature,
+            "approved": self.approved,
+            "approved_at": self.approved_at,
+            "approved_interaction_id": self.approved_interaction_id,
         }
 
     @classmethod
@@ -122,6 +146,10 @@ class ResolvedCheckProfile:
                 created_at=str(data.get("created_at", "")),
                 last_validated_at=str(data.get("last_validated_at", "")),
                 notes=tuple(str(n) for n in data.get("notes", [])),
+                commands_signature=str(data.get("commands_signature", "")),
+                approved=bool(data.get("approved", False)),
+                approved_at=str(data.get("approved_at", "")),
+                approved_interaction_id=str(data.get("approved_interaction_id", "")),
             )
         except (KeyError, TypeError, ValueError):
             return None  # an unreadable profile is treated as absent (rediscover)
