@@ -43,8 +43,9 @@ def test_records_empty_when_no_file(tmp_path: Path) -> None:
 def test_rerun_linkage_round_trips(tmp_path: Path) -> None:
     ledger = Ledger(tmp_path)
     ledger.append(
-        LedgerRecord(id="a", title="A", final_status="done", finished_at="t2", attempt=2,
-                     rerun_of="a")
+        LedgerRecord(
+            id="a", title="A", final_status="done", finished_at="t2", attempt=2, rerun_of="a"
+        )
     )
     rec = ledger.records()[0]
     assert rec["attempt"] == 2

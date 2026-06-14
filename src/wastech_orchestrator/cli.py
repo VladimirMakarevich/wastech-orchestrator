@@ -977,8 +977,10 @@ _FINALIZE_STATUS: dict[str, Status] = {
 def _report_finalize_plan(plan: FinalizePlan, *, as_: str) -> None:
     """Print the planned reconciliation for ``finalize --dry-run``; writes nothing."""
     print(f"finalize (dry-run): would finalize {plan.task_id} as {as_}")
-    print(f"  status:    {plan.current_status.value if plan.current_status else '?'} -> "
-          f"{plan.declared.value}")
+    print(
+        f"  status:    {plan.current_status.value if plan.current_status else '?'} -> "
+        f"{plan.declared.value}"
+    )
     if plan.declared is Status.DONE:
         pr = plan.pr_url or "(none)"
         verify = f", verify={plan.verify_state}" if plan.verify_state else ""

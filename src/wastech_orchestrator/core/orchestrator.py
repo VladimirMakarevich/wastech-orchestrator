@@ -216,6 +216,7 @@ def _ledger_attempt_count(ledger: Ledger, task_id: str) -> int:
     """How many terminal records the ledger already holds for ``task_id`` (prior attempts)."""
     return sum(1 for rec in ledger.records() if rec.get("id") == task_id)
 
+
 _SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
 
 
@@ -418,9 +419,7 @@ class Orchestrator:
                 f"task '{task_id}' is {row.status.value}; rerun is for failed / "
                 "manual_action_required tasks (use `run` for a new task)"
             )
-        others = sorted(
-            t.task_id for t in self._store.find_active_tasks() if t.task_id != task_id
-        )
+        others = sorted(t.task_id for t in self._store.find_active_tasks() if t.task_id != task_id)
         if others:
             refusals.append(
                 f"another task is active ({', '.join(others)}); rerun needs an idle slot"
@@ -564,9 +563,7 @@ class Orchestrator:
             if resolved_url is not None and verify:
                 verify_state = self._git.verify_pr_state(resolved_url)
                 if verify_state is not None and verify_state != "MERGED":
-                    warnings.append(
-                        f"the PR is {verify_state}, not merged; recording done anyway"
-                    )
+                    warnings.append(f"the PR is {verify_state}, not merged; recording done anyway")
         return FinalizePlan(
             task_id=task_id,
             declared=declared,

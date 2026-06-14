@@ -94,7 +94,10 @@ def _seed(
     if pr_url is not None:
         store.record_publish_op(
             PublishOpRow(
-                task_id="task-1", kind="pr", fingerprint=branch or "b", status="completed",
+                task_id="task-1",
+                kind="pr",
+                fingerprint=branch or "b",
+                status="completed",
                 result_ref=pr_url,
             )
         )
@@ -184,8 +187,17 @@ def test_finalize_abandoned_marks_outcome(git_repo, tmp_path: Path) -> None:
     config = _seed(project, git_repo.clone)
 
     code = cli.main(
-        ["--config", str(config), "finalize", "task-1", "--as", "abandoned", "--note", "obsolete",
-         "--yes"]
+        [
+            "--config",
+            str(config),
+            "finalize",
+            "task-1",
+            "--as",
+            "abandoned",
+            "--note",
+            "obsolete",
+            "--yes",
+        ]
     )
     assert code == 2  # manual_action_required exit code
     assert _status(project) is Status.MANUAL_ACTION_REQUIRED
@@ -218,8 +230,16 @@ def test_finalize_delete_branch(git_repo, git_run, tmp_path: Path) -> None:
     git_run(["branch", "agent/task-1-t"], git_repo.clone)
 
     code = cli.main(
-        ["--config", str(config), "finalize", "task-1", "--as", "failed",
-         "--delete-branch", "--yes"]
+        [
+            "--config",
+            str(config),
+            "finalize",
+            "task-1",
+            "--as",
+            "failed",
+            "--delete-branch",
+            "--yes",
+        ]
     )
     assert code == 1
     assert git_run(["branch", "--list", "agent/task-1-t"], git_repo.clone) == ""  # deleted
@@ -262,8 +282,18 @@ def test_finalize_dry_run_writes_nothing(
     project.mkdir()
     config = _seed(project, git_repo.clone, pr_url="https://example/pull/9")
 
-    code = cli.main(["--config", str(config), "finalize", "task-1", "--as", "done", "--dry-run",
-                     "--no-verify-pr"])
+    code = cli.main(
+        [
+            "--config",
+            str(config),
+            "finalize",
+            "task-1",
+            "--as",
+            "done",
+            "--dry-run",
+            "--no-verify-pr",
+        ]
+    )
     assert code == 0
     out = capsys.readouterr().out
     assert "dry-run" in out and "recorded" in out  # the PR-url source is named

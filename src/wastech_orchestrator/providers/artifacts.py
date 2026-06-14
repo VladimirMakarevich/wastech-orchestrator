@@ -53,9 +53,7 @@ def task_artifact_dir(artifacts_root: str | Path, task_id: str) -> Path:
     return Path(artifacts_root) / "logs" / task_id
 
 
-def archive_task_artifacts(
-    artifacts_root: str | Path, task_id: str, attempt: int
-) -> Path | None:
+def archive_task_artifacts(artifacts_root: str | Path, task_id: str, attempt: int) -> Path | None:
     """Move a prior attempt's artifacts into ``logs/<task-id>/attempt-<N>/`` for a fresh ``rerun``.
 
     Everything under the task dir except existing ``attempt-*`` archives is moved, so the fresh

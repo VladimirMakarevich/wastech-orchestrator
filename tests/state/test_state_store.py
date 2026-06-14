@@ -452,8 +452,13 @@ def _seed_terminal_task(store: StateStore, *, status: Status = Status.FAILED) ->
     )
     store.insert_subtasks([SubtaskRow("task-001", 1, "a", "A", "committed", (), commit_sha="abc")])
     store.record_publish_op(
-        PublishOpRow(task_id="task-001", kind="pr", fingerprint="b", status="completed",
-                     result_ref="https://example/pull/1")
+        PublishOpRow(
+            task_id="task-001",
+            kind="pr",
+            fingerprint="b",
+            status="completed",
+            result_ref="https://example/pull/1",
+        )
     )
 
 
