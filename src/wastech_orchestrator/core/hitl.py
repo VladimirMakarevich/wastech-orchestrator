@@ -245,9 +245,7 @@ def _validate_skills(raw_skills: Any) -> tuple[str, ...]:
     names: list[str] = []
     for index, item in enumerate(raw_skills):
         if not isinstance(item, str) or not item.strip() or len(item) > _MAX_SKILL_NAME:
-            raise StageOutputError(
-                f"planning.skills[{index}] must be a non-empty bounded string"
-            )
+            raise StageOutputError(f"planning.skills[{index}] must be a non-empty bounded string")
         names.append(item.strip())
     return tuple(names)
 

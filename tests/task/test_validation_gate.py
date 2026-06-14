@@ -508,6 +508,7 @@ def test_stages_review_enabled_true_never_gated(config: OrchestratorConfig) -> N
 # pr_title field
 # ---------------------------------------------------------------------------
 
+
 def test_pr_title_override_stored(config: OrchestratorConfig) -> None:
     text = (
         '---\nid: task-001\ntitle: "Task title"\npr_title: "Custom PR title"\n'
