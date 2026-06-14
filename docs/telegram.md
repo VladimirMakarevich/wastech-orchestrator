@@ -151,7 +151,11 @@ PR.
 
 - `refinement` and `planning` may send one question or approval per checkpoint.
 - Questions require a reply to the exact prompt.
-- Approvals use inline Approve/Deny buttons.
+- Approvals use inline Approve/Deny buttons. **Every** press in the configured chat is acknowledged so
+  you always get feedback: a matching press shows "Approved — continuing." / "Denied — will reconsider.";
+  a stale or duplicate press (a superseded request, or a button left over after a restart) shows an
+  alert, "This approval is no longer active — check the latest message", and is logged as a near-miss
+  rather than silently dropped. Press the button on the **most recent** request.
 - Deletions and dependency manifest/lock changes produced by `implementation` or `fixing` require
   approval unless an exact planning approval already covers the same category and path set.
 - Ordinary diffs and routine commit/push/PR publishing do not require Telegram approval.
@@ -182,9 +186,12 @@ persisted answer.
 
 - Remove the webhook as shown above. Ensure another deployment does not recreate it.
 
-`Conflict: terminated by other getUpdates request`
+`Conflict: terminated by other getUpdates request` / `only one poller may run per bot token`
 
-- Another process is polling the same bot. Stop it or use a separate project bot.
+- Another process is polling the same bot token (Telegram allows exactly one `getUpdates` consumer per
+  token). This is the classic two-working-directories hazard — two orchestrator clones sharing one bot.
+  Preflight and the run-time poller now detect the 409 and report it clearly. Stop the other poller or
+  give each deployment a separate project bot/token.
 
 `chat not found` or `Forbidden`
 
@@ -197,11 +204,14 @@ Prompt arrives but reply times out
 - Confirm the reply is in the configured chat.
 - Ensure only one poller uses the bot.
 
-Approval button keeps spinning
+Approval button keeps spinning, or shows "no longer active"
 
-- The callback did not reach the active poller or did not match the persisted prompt. Check for a
-  second poller, webhook, expired interaction, or restarted task already moved to
-  `manual_action_required`.
+- Every press in the configured chat is now acknowledged, so a perpetually spinning button means the
+  press did not reach the active poller at all — check for a second poller on the same token (the
+  `Conflict` case above) or a webhook.
+- "This approval is no longer active" means the press reached the poller but did not match the active
+  prompt (a superseded request, an expired interaction, a restarted task already moved to
+  `manual_action_required`, or a leftover button from a previous run). Act on the most recent message.
 
 Messages are truncated
 

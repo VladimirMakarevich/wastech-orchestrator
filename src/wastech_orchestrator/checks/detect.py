@@ -78,10 +78,14 @@ class CheckCandidateDetector:
             )
         if "ruff" in venv.tools:
             ruff = f"{venv.bin_dir}/ruff{suffix}"
-            out.append(_c(_LINT, (ruff, "check", "."), [f"{venv.bin_dir} has ruff"]))
+            out.append(
+                _c(_LINT, _ruff_argv((ruff,), ev), [f"{venv.bin_dir} has ruff{_ruff_note(ev)}"])
+            )
         if "mypy" in venv.tools:
             mypy = f"{venv.bin_dir}/mypy{suffix}"
-            out.append(_c(_TYPES, (mypy, "."), [f"{venv.bin_dir} has mypy"]))
+            out.append(
+                _c(_TYPES, _mypy_argv((mypy,), ev), [f"{venv.bin_dir} has mypy{_mypy_note(ev)}"])
+            )
         return out
 
     # --- manifests / lock files ------------------------------------------------------------
@@ -106,9 +110,11 @@ class CheckCandidateDetector:
         if "pytest" in ev.python_tools:
             out.append(_c(_TESTS, (*prefix, "pytest"), [f"{lockfile} present; pytest declared"]))
         if "ruff" in ev.python_tools:
-            out.append(_c(_LINT, (*prefix, "ruff", "check", "."), [f"{lockfile}; ruff declared"]))
+            argv = _ruff_argv((*prefix, "ruff"), ev)
+            out.append(_c(_LINT, argv, [f"{lockfile}; ruff declared{_ruff_note(ev)}"]))
         if "mypy" in ev.python_tools:
-            out.append(_c(_TYPES, (*prefix, "mypy", "."), [f"{lockfile}; mypy declared"]))
+            argv = _mypy_argv((*prefix, "mypy"), ev)
+            out.append(_c(_TYPES, argv, [f"{lockfile}; mypy declared{_mypy_note(ev)}"]))
         return out
 
     def _node_checks(self, ev: RepositoryEvidence) -> list[CheckCandidate]:
@@ -136,9 +142,11 @@ class CheckCandidateDetector:
             return []
         out: list[CheckCandidate] = [_low(_TESTS, ("pytest",), ["pyproject.toml present"])]
         if "ruff" in ev.python_tools:
-            out.append(_low(_LINT, ("ruff", "check", "."), ["ruff declared in pyproject.toml"]))
+            argv = _ruff_argv(("ruff",), ev)
+            out.append(_low(_LINT, argv, [f"ruff declared in pyproject.toml{_ruff_note(ev)}"]))
         if "mypy" in ev.python_tools:
-            out.append(_low(_TYPES, ("mypy", "."), ["mypy declared in pyproject.toml"]))
+            argv = _mypy_argv(("mypy",), ev)
+            out.append(_low(_TYPES, argv, [f"mypy declared in pyproject.toml{_mypy_note(ev)}"]))
         return out
 
 
@@ -160,3 +168,31 @@ def _low(name: str, argv: tuple[str, ...], evidence: list[str]) -> CheckCandidat
         evidence=tuple(evidence),
         confidence=Confidence.LOW,
     )
+
+
+def _ruff_argv(ruff_cmd: tuple[str, ...], ev: RepositoryEvidence) -> tuple[str, ...]:
+    """``<ruff> check`` with a trailing ``.`` only when the project pins no ruff scope (§1.1).
+
+    A configured ``[tool.ruff]`` scope (``src``/``include``/``exclude``) is *overridden* by an
+    explicit ``.``, so we drop it and let ruff read its own config — the post-test-run scope bug.
+    """
+    base = (*ruff_cmd, "check")
+    return base if ev.ruff_has_scope else (*base, ".")
+
+
+def _mypy_argv(mypy_cmd: tuple[str, ...], ev: RepositoryEvidence) -> tuple[str, ...]:
+    """``<mypy>`` targets honoring the project's scope (§1.1): the configured ``[tool.mypy] files``
+    when set, else a bare ``mypy`` when any scope (files/exclude) is configured, else ``mypy .``."""
+    if ev.mypy_files:
+        return (*mypy_cmd, *ev.mypy_files)
+    if ev.mypy_has_scope:
+        return mypy_cmd
+    return (*mypy_cmd, ".")
+
+
+def _ruff_note(ev: RepositoryEvidence) -> str:
+    return "; scope from [tool.ruff]" if ev.ruff_has_scope else ""
+
+
+def _mypy_note(ev: RepositoryEvidence) -> str:
+    return "; scope from [tool.mypy]" if (ev.mypy_files or ev.mypy_has_scope) else ""

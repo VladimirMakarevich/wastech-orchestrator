@@ -10,6 +10,18 @@ backlog item, not current runtime behavior. Nothing here overrides the canonical
 [CLAUDE.md](../../CLAUDE.md), [AGENTS.md](../../AGENTS.md), or the hard invariants in
 [docs/rules/](../rules/).
 
+> **v2 update (2026-06-14, post-test-run §1.1/§1.2).** Two refinements shipped on top of Phases 1–3:
+> (1) **scope-aware detection** — the detector reads `[tool.mypy] files`/`exclude` and the `[tool.ruff]`
+> scope from `pyproject.toml` and emits a scoped command (`mypy src` / bare `mypy` / `ruff check`)
+> instead of an unconditional `.`, which had overridden a project's configured scope. (2) **runtime,
+> human-checked resolution** — discovery runs at task start (`checks.discovery.run_at_task_start`),
+> re-resolves **only on infrastructure proof** (launch failure bounded to once/task, fingerprint
+> change, low confidence — never on a quality failure), pins `auto`-mode configured commands to the
+> slot they name, and treats any *change to the command set* as a sensitive change written to the
+> profile (`commands_signature` + approval fields) and human-approved on first use (fail-closed). See
+> `checks/inspect.py`, `checks/detect.py`, `checks/resolver.py` (`reresolve`/`ReResolveReason`),
+> `checks/profile.py`, and `core/orchestrator.py` (`_check_preflight`/`_gate_check_commands`).
+
 ## 1. Background
 
 The current Check Runner executes `checks.commands` exactly as configured. This keeps the quality

@@ -76,6 +76,13 @@ class RepositoryEvidence:
     venvs: tuple[VenvInfo, ...] = ()
     ci_workflows: tuple[str, ...] = ()
     instruction_docs: tuple[str, ...] = ()
+    # Configured tool scope (§1.1): an explicit `.` argument overrides these, so detection must
+    # honor them instead of hardcoding `mypy .` / `ruff check .`. ``mypy_files`` are the safe,
+    # repo-relative paths from ``[tool.mypy] files``; the ``*_has_scope`` flags mean any scope key
+    # (files/exclude for mypy; src/include/exclude for ruff) is configured.
+    mypy_files: tuple[str, ...] = ()
+    mypy_has_scope: bool = False
+    ruff_has_scope: bool = False
 
     def has(self, name: str) -> bool:
         return name in self.files_present
@@ -90,10 +97,12 @@ class RepositoryInspector:
 
     def collect(self) -> RepositoryEvidence:
         present = frozenset(name for name in _MARKERS if (self._root / name).is_file())
+        text, data = self._pyproject()
+        mypy_files, mypy_has_scope, ruff_has_scope = _tool_scopes(data)
         return RepositoryEvidence(
             repo_root=self._root,
             files_present=present,
-            python_tools=self._python_tools(),
+            python_tools=self._python_tools(text, data),
             node_scripts=self._node_scripts(),
             make_targets=self._targets("Makefile"),
             just_recipes=self._targets("Justfile") | self._targets("justfile"),
@@ -101,6 +110,9 @@ class RepositoryInspector:
             venvs=self._venvs(),
             ci_workflows=self._ci_workflows(),
             instruction_docs=tuple(d for d in _INSTRUCTION_DOCS if (self._root / d).is_file()),
+            mypy_files=mypy_files,
+            mypy_has_scope=mypy_has_scope,
+            ruff_has_scope=ruff_has_scope,
         )
 
     # --- file access -----------------------------------------------------------------------
@@ -121,15 +133,22 @@ class RepositoryInspector:
 
     # --- per-ecosystem parsing -------------------------------------------------------------
 
-    def _python_tools(self) -> frozenset[str]:
+    def _pyproject(self) -> tuple[str | None, dict[str, object] | None]:
+        """Read + parse ``pyproject.toml`` once. ``(text, data)``; ``data`` is ``None`` if absent
+        or unparseable (callers fall back to a loose text scan / an empty scope)."""
         text = self._read_text("pyproject.toml")
         if text is None:
-            return frozenset()
+            return None, None
         try:
-            data = tomllib.loads(text)
-            blob = " ".join(_collect_requirements(data)).lower()
+            return text, tomllib.loads(text)
         except (tomllib.TOMLDecodeError, ValueError):
-            blob = text.lower()  # parse failure: fall back to a loose text scan (probing decides)
+            return text, None
+
+    def _python_tools(self, text: str | None, data: dict[str, object] | None) -> frozenset[str]:
+        if text is None:
+            return frozenset()
+        # parse failure (data is None): fall back to a loose text scan (probing decides)
+        blob = " ".join(_collect_requirements(data)).lower() if data is not None else text.lower()
         return frozenset(tool for tool in _PY_TOOLS if tool in blob)
 
     def _node_scripts(self) -> frozenset[str]:
@@ -204,6 +223,58 @@ class RepositoryInspector:
         except OSError:
             return ()
         return tuple(names)
+
+
+def _tool_scopes(data: dict[str, object] | None) -> tuple[tuple[str, ...], bool, bool]:
+    """``(mypy_files, mypy_has_scope, ruff_has_scope)`` from ``[tool.mypy]``/``[tool.ruff]`` (§1.1).
+
+    Best effort and safe by default: an unparseable/absent ``pyproject.toml`` yields no scope, so
+    detection keeps the historical ``mypy .`` / ``ruff check .``. ``[tool.mypy] exclude`` is a regex
+    (not a pathspec), so it only contributes to ``mypy_has_scope`` — it is never turned into argv.
+    """
+    if not isinstance(data, dict):
+        return (), False, False
+    tool = data.get("tool")
+    if not isinstance(tool, dict):
+        return (), False, False
+    mypy = tool.get("mypy")
+    mypy_files: tuple[str, ...] = ()
+    mypy_has_scope = False
+    if isinstance(mypy, dict):
+        mypy_has_scope = "files" in mypy or "exclude" in mypy
+        mypy_files = _safe_scope_paths(mypy.get("files"))
+    ruff = tool.get("ruff")
+    ruff_has_scope = False
+    if isinstance(ruff, dict):
+        ruff_keys = ("src", "include", "extend-include", "exclude", "extend-exclude")
+        ruff_has_scope = any(key in ruff for key in ruff_keys)
+    return mypy_files, mypy_has_scope, ruff_has_scope
+
+
+def _safe_scope_paths(value: object) -> tuple[str, ...]:
+    """Normalize a ``[tool.mypy] files`` value to safe repo-relative argv tokens (reject, sanitize).
+
+    Accepts a string or list of strings. Drops any entry that is absolute or escapes the repo (a
+    ``..`` segment) — a dropped entry leaves only ``mypy_has_scope`` set, so detection emits a bare
+    ``mypy`` (which reads the project's own config) rather than an unvetted path. Never sanitizes a
+    path into argv; it either passes the check verbatim or is rejected.
+    """
+    if isinstance(value, str):
+        items: list[str] = [value]
+    elif isinstance(value, list):
+        items = [str(item) for item in value]
+    else:
+        return ()
+    out: list[str] = []
+    for raw in items:
+        token = raw.strip()
+        if not token:
+            continue
+        norm = token.replace("\\", "/")
+        if norm.startswith(("/", "~")) or ".." in norm.split("/") or Path(norm).is_absolute():
+            continue  # reject absolute / traversal; a bare `mypy` is emitted instead
+        out.append(norm)
+    return tuple(out)
 
 
 def _collect_requirements(data: object) -> list[str]:

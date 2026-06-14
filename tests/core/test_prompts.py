@@ -146,4 +146,5 @@ def test_allowlist_matches_documented_variables() -> None:
         "subtask_order",
         "subtask_count",
         "subtask_spec_path",
+        "skills_path",
     } == ALLOWED_PROMPT_VARS

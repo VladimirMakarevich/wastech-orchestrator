@@ -45,8 +45,10 @@ from wastech_orchestrator.state_store import PublishOpRow, StateStore
 # Git/gh operations are bounded but slower than a trivial command (network fetch/push allowed).
 GIT_TIMEOUT_SECONDS = 300
 
-# The three artifact directories that must never enter a code commit (§21.1).
-EXCLUDED_DIRS = ("tasks", "logs", "workspace")
+# The artifact directories that must never enter a code commit (§21.1). `checks/` holds the
+# generated resolved check profile (`checks/resolved-profile.json`), a runtime cache like `logs/` —
+# it is regenerated from `artifacts_root` and is never part of any commit (§10).
+EXCLUDED_DIRS = ("tasks", "logs", "workspace", "checks")
 
 # Root-level orchestrator runtime files that must never enter a code commit and must not count as
 # "unaccounted dirty" at terminal cleanup. They only appear inside the clone under the in-repo
@@ -70,6 +72,9 @@ RUNTIME_GITIGNORE_LINES: tuple[str, ...] = (
     # The agent task-authoring docs copied beside config.yaml by `init`/`install` (§21.2): generated
     # per-deployment content, never part of a code commit and kept out of the operator's git status.
     "worc/",
+    # The resolved check profile (`checks/resolved-profile.json`) — a generated runtime cache (§10),
+    # ignored as a whole dir like `logs/` so a re-run never leaves it in the operator's git status.
+    "checks/",
 )
 
 
@@ -316,13 +321,14 @@ class GitManager:
     def _local_only_dirs(self) -> tuple[str, ...]:
         """Artifact dirs this footprint keeps out of git (excluded / never committed) (§21).
 
-        ``commit`` tracks ``tasks/`` (task lifecycle + the committed ``summary.md``) and keeps only
-        ``logs/`` and ``workspace/`` local; ``exclude_local`` keeps all three local; other modes
-        keep nothing in the clone.
+        ``commit`` tracks ``tasks/`` (task lifecycle + the committed ``summary.md``) and keeps
+        ``logs/``, ``workspace/`` and ``checks/`` local; ``exclude_local`` keeps all of them local;
+        other modes keep nothing in the clone. ``checks/`` (the generated check profile) is always
+        local-only — unlike ``tasks/`` it is never committed in any footprint.
         """
         tracking = self._config.git.footprint.tracking
         if tracking is FootprintTracking.COMMIT:
-            return ("logs", "workspace")
+            return ("logs", "workspace", "checks")
         if tracking is FootprintTracking.EXCLUDE_LOCAL:
             return EXCLUDED_DIRS
         return ()
@@ -335,6 +341,11 @@ class GitManager:
         ``base_branch`` a tracked ``tasks/`` is expected, not a defect. Under ``external`` /
         ``exclude_local`` both ``tasks/`` and ``logs/`` are kept out, so a tracked path with either
         name (which ``.git/info/exclude`` cannot untrack) requires manual action (§21.4).
+
+        ``checks/`` is deliberately **not** checked here: a prior run that predates the ignore could
+        already have committed ``checks/resolved-profile.json``, and gating on it would make the
+        orchestrator refuse to start on exactly the repos that hit the leak. The new excludes stop
+        future tracking; the operator untracks the stale file once (``git rm --cached checks/...``).
         """
         tracking = self._config.git.footprint.tracking
         check = ("logs/",) if tracking is FootprintTracking.COMMIT else ("tasks/", "logs/")
@@ -352,6 +363,17 @@ class GitManager:
             return
         exclude_path = Path(self._clone) / ".git" / "info" / "exclude"
         _append_missing_lines(exclude_path, [f"{d}/" for d in dirs])
+
+    def ensure_runtime_excludes(self) -> None:
+        """Ensure the runtime-file ignores exist in the orchestrator's working clone (§21.2).
+
+        ``init``/``install`` normally write these, but a clone scaffolded another way — or created
+        before the ignore set grew (e.g. before ``checks/`` was added) — may lack them. Writing to
+        ``.git/info/exclude`` keeps the operator's *tracked* ``.gitignore`` untouched while ensuring
+        ``state.db``, ``config.yaml``, ``orchestrator.pid``, ``checks/``, … never surface in the
+        operator's ``git status`` under the in-repo footprint. Idempotent; a no-op without ``.git``.
+        """
+        append_runtime_excludes(self._clone)
 
     # --- SnapshotHook (§7.4) --------------------------------------------------------------
 
@@ -705,6 +727,16 @@ class GitManager:
         base = self._config.repo.base_branch
         result = self._git("diff", f"{base}...HEAD")
         return result.stdout
+
+    def diff_stat(self) -> str:
+        """``git diff --stat base...HEAD`` — changed files + line counts only, no patch body.
+
+        Used by the deterministic minimal summary (§5.2) so the committed ``summary.md`` stays
+        compact. ``--stat`` carries only file paths and counts (never patch content), so unlike
+        :meth:`cumulative_committed_diff` there is nothing secret to redact.
+        """
+        base = self._config.repo.base_branch
+        return self._git("diff", "--stat", f"{base}...HEAD").stdout
 
     # --- terminal cleanup (§8.3) ----------------------------------------------------------
 

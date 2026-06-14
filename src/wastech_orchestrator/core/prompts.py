@@ -48,6 +48,7 @@ ALLOWED_PROMPT_VARS: frozenset[str] = frozenset(
         "subtask_order",
         "subtask_count",
         "subtask_spec_path",
+        "skills_path",
     }
 )
 
@@ -130,3 +131,11 @@ class PromptTemplateStore:
         if self._mode is PromptMode.REPLACE:
             return override
         return f"{default}\n\n{override}"
+
+    def override_for(self, stage: Stage) -> str | None:
+        """The operator's override/appended text for *stage* (the user's own guidance), or ``None``.
+
+        Used by the §2.2 skill dedup to compare the operator's appended planning instructions with
+        the chosen skill bodies. This is operator-authored text, never the packaged default.
+        """
+        return self._overrides.get(stage)

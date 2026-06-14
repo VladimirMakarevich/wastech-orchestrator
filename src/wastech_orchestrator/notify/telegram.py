@@ -38,6 +38,12 @@ _TELEGRAM_TEXT_LIMIT = 4096
 _TRUNCATION_SUFFIX = "\n\n[message truncated by wastech-orchestrator]"
 _ALLOWED_UPDATES = ("message", "callback_query")
 
+# Feedback shown on the button itself when a callback is pressed (§4.1). Every press in our chat is
+# acknowledged so the operator never sees "nothing happened"; a stale/duplicate press gets an alert.
+_ACK_APPROVED = "Approved — continuing."
+_ACK_DENIED = "Denied — will reconsider."
+_ACK_STALE = "This approval is no longer active — check the latest message for the current request."
+
 
 @dataclass(frozen=True)
 class _SentPrompt:
@@ -499,10 +505,19 @@ class _HttpTelegramClient:
         import asyncio
 
         from telegram import Bot
+        from telegram.error import Conflict
 
         async def check() -> None:
             async with Bot(self._bot_token) as bot:
-                await bot.get_updates(limit=1, timeout=0, allowed_updates=_ALLOWED_UPDATES)
+                try:
+                    await bot.get_updates(limit=1, timeout=0, allowed_updates=_ALLOWED_UPDATES)
+                except Conflict as exc:
+                    # Another getUpdates consumer already holds this bot token (HTTP 409). Diagnose
+                    # it clearly at preflight so HITL is not silently broken at run time (§4.1).
+                    raise RuntimeError(
+                        "another process is already polling this bot token "
+                        "(Telegram 409 Conflict); only one poller may run per bot token"
+                    ) from exc
 
         with _suppress_transport_request_logs():
             asyncio.run(check())
@@ -567,6 +582,17 @@ class _HttpTelegramClient:
             offset = max(update.update_id for update in updates) + 1
         raise RuntimeError("telegram update backlog is too large to drain safely")
 
+    async def _ack(self, bot: Any, query_id: str, text: str, *, alert: bool = False) -> None:
+        """Acknowledge a callback press (clears the client's spinner and shows ``text``).
+
+        Best-effort: a failure to acknowledge (e.g. a too-old query) must never break the poll loop
+        or mask a matched reply.
+        """
+        try:
+            await bot.answer_callback_query(query_id, text=text, show_alert=alert)
+        except Exception:  # noqa: BLE001 — button feedback is best-effort, never fatal
+            _LOG.debug("telegram answer_callback_query failed", exc_info=True)
+
     def poll_reply(
         self,
         *,
@@ -586,6 +612,8 @@ class _HttpTelegramClient:
         expected_no = f"hitl:{interaction_id}:no"
 
         async def poll() -> _ClientReply | None:
+            from telegram.error import Conflict
+
             offset = update_offset
             async with Bot(self._bot_token) as bot:
                 while True:
@@ -605,7 +633,20 @@ class _HttpTelegramClient:
                         )
                     except TimeoutError:
                         return None
+                    except Conflict as exc:
+                        # Telegram allows one getUpdates consumer per bot token; a second poller
+                        # (e.g. another orchestrator clone sharing it) yields HTTP 409. Surface a
+                        # clear diagnosis — the notifier maps it to a transport_error and fails
+                        # closed — instead of letting presses vanish into the other consumer.
+                        raise RuntimeError(
+                            "another process is consuming getUpdates for this bot token "
+                            "(Telegram 409 Conflict); only one poller may run per bot token"
+                        ) from exc
                     for update in updates:
+                        # Always advance past a consumed update: re-fetching a near-miss forever
+                        # would spin the loop to the deadline. We never advance *silently* — a
+                        # callback in our chat is acknowledged and logged first (§4.1), so a stale
+                        # or duplicate press stays visible to the operator, not dropped.
                         offset = update.update_id + 1
                         if kind == "question":
                             msg = update.message
@@ -620,20 +661,58 @@ class _HttpTelegramClient:
                                 continue
                             return _ClientReply(text=msg.text.strip())
                         query = update.callback_query
-                        if query is None or query.message is None:
-                            continue
+                        if query is None:
+                            continue  # not a callback (e.g. a stray message); nothing to ack
+                        cbmsg = query.message
+                        chat_match = cbmsg is not None and cbmsg.chat.id == target_chat
+                        data = query.data
                         if (
-                            query.message.chat.id != target_chat
-                            or query.message.message_id != prompt_message_id
-                            or query.data not in (expected_yes, expected_no)
+                            chat_match
+                            and cbmsg is not None
+                            and cbmsg.message_id == prompt_message_id
+                            and data in (expected_yes, expected_no)
                         ):
-                            continue
-                        await bot.answer_callback_query(query.id)
-                        approved = query.data == expected_yes
-                        return _ClientReply(
-                            text="approved" if approved else "denied",
-                            approved=approved,
-                        )
+                            approved = data == expected_yes
+                            await self._ack(
+                                bot, query.id, _ACK_APPROVED if approved else _ACK_DENIED
+                            )
+                            return _ClientReply(
+                                text="approved" if approved else "denied",
+                                approved=approved,
+                            )
+                        # A press we cannot act on. If it is (or might be) ours, acknowledge it so
+                        # the operator gets feedback instead of "nothing happened", and log why.
+                        if chat_match or cbmsg is None:
+                            reason = (
+                                "message_none"
+                                if cbmsg is None
+                                else "unexpected_data"
+                                if data not in (expected_yes, expected_no)
+                                else "wrong_message_id"
+                            )
+                            _LOG.warning(
+                                "telegram callback near-miss (%s): acknowledged but not actionable",
+                                reason,
+                                extra={
+                                    "logfmt_fields": {
+                                        "interaction_id": interaction_id,
+                                        "reason": reason,
+                                        "got_data": str(data),
+                                        "got_message_id": str(
+                                            cbmsg.message_id if cbmsg is not None else None
+                                        ),
+                                        "expected_message_id": str(prompt_message_id),
+                                        "chat_match": str(chat_match),
+                                    }
+                                },
+                            )
+                            await self._ack(bot, query.id, _ACK_STALE, alert=True)
+                        else:
+                            # Foreign chat: never acknowledge another chat's callback (§12.15).
+                            _LOG.warning(
+                                "telegram callback from a foreign chat ignored",
+                                extra={"logfmt_fields": {"interaction_id": interaction_id}},
+                            )
 
         with _suppress_transport_request_logs():
             return asyncio.run(poll())

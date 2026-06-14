@@ -1,7 +1,11 @@
 # Backlog: Prompt template customization
 
 Status: **implemented (2026-06-13)** — core feature shipped; the §10 open questions (global
-preamble, per-stage `mode`, `agent_instructions:` for project stubs) remain deferred.
+preamble, per-stage `mode`, `agent_instructions:` for project stubs) remain deferred. **Update
+(2026-06-14):** the *skill-reference* half of the `agent_instructions:` idea shipped as
+planning-selected skill references (the `{skills_path}` variable + `skills:` config block, post-test-run
+§2.1/§2.2); *authoring/managing* the stubs themselves, the shared preamble, and per-stage `mode` are
+still deferred.
 Date: 2026-06-12
 Owner: Vladimir Makarevich
 
@@ -126,6 +130,7 @@ Suggested variables:
 | `{subtask_order}` | Active subtask order, when decomposed. |
 | `{subtask_count}` | Total subtask count, when decomposed. |
 | `{subtask_spec_path}` | Active subtask spec path, when decomposed. |
+| `{skills_path}` | Newline-joined planning-selected `SKILL.md` reference paths, when any (§2.1). |
 
 Important constraint: variables should be metadata and artifact paths only. Do not inject full task
 body, full diffs, check logs, or secrets directly into the prompt template. Large content should

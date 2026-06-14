@@ -105,13 +105,37 @@ def test_write_minimal_summary(tmp_path: Path) -> None:
         tmp_path,
         "task-001",
         title="Add validation",
-        description="Validate the login form",
-        diff="d",
+        diff_stat=" src/app.py | 4 +++-\n 1 file changed, 3 insertions(+), 1 deletion(-)",
+        task_ref="task-001.md",
     )
     summary = json.loads(Path(json_path).read_text(encoding="utf-8"))
+    # The summary.json contract keeps exactly these four keys.
     assert set(summary) == {"what", "how", "integration", "why"}
     assert summary["what"] == "Add validation"
-    assert summary["why"] == "Validate the login form"
+    assert "task-001.md" in summary["why"]  # links to the task file, never the pasted description
     md = Path(md_path).read_text(encoding="utf-8")
     assert "## What" in md and "## Why" in md
+    assert "## Changes" in md and "1 file changed" in md
+    assert "logs/task-001/current.diff" in md  # pointer to the full (redacted) patch
     assert md_path.endswith("summary.md")
+
+
+def test_minimal_summary_is_compact_and_inlines_no_patch(tmp_path: Path) -> None:
+    """The fallback must stay small: no full diff body, no pasted task description (§5.2)."""
+    md_path, _ = write_minimal_summary(
+        tmp_path,
+        "task-002",
+        title="Big change",
+        diff_stat=" a.py | 2 +-\n 1 file changed",
+        task_ref="task-002.md",
+    )
+    md = Path(md_path).read_text(encoding="utf-8")
+    assert "diff --git" not in md and "@@" not in md  # no raw patch body inlined
+    assert md.count("\n") < 30  # compact, unlike the old ~580-line fallback
+
+
+def test_minimal_summary_without_task_ref(tmp_path: Path) -> None:
+    md_path, _ = write_minimal_summary(tmp_path, "t", title="X", diff_stat="")
+    md = Path(md_path).read_text(encoding="utf-8")
+    assert "See the task file for the full description." in md
+    assert "(no committed changes)" in md

@@ -14,7 +14,7 @@ rules must not be violated; the configuration validator is required to reject un
 
 4. Processes receive **only allowlisted** env variables (see `security.allowed_environment` in the config).
 5. Secret files (`.env`, `secrets/**`, …) are excluded from reading by the agent and from logging.
-6. Secrets, tokens, and the full process environment are **not stored** in SQLite, logs, or artifacts. The request artifact stores a **redacted** representation.
+6. Secrets, tokens, and the full process environment are **not stored** in SQLite, logs, or artifacts. The request artifact stores a **redacted** representation. The deterministic minimal summary (§5.2 fallback) links to the already-redacted `logs/<id>/current.diff` and shows only a `git diff --stat` (file paths + counts, no patch body) — it never inlines a raw diff into the committed `summary.md`.
 7. Git credentials and agent credentials are configured outside the orchestrator.
 
 ## Command execution
@@ -22,6 +22,7 @@ rules must not be violated; the configuration validator is required to reject un
 8. CLIs are run **without shell interpolation** of user-supplied strings (argument list). Task content reaches providers **only as file paths** in `AgentRunRequest` (`task_path`, `plan_path`, …); no task field is ever used to build the CLI argv, environment, command path, working paths, or security settings.
 9. The task ID, branch name, and paths go through strict normalization (protection against path traversal and injection). The task `id` must match `^[a-z0-9][a-z0-9._-]{0,63}$`; normalization is **reject, don't sanitize** — a value that changes under normalization is rejected. The §19 validation gate rejects a broken/unsafe task before any branch or provider run, quarantining it to `tasks/rejected/`.
 10. Options that bypass the sandbox/permissions are **forbidden** by the configuration validator; they cannot be enabled through a task or through `extra_args`.
+10a. **Check-command discovery is fail-closed and proof-driven (§1.2).** The commands the quality gate runs are re-resolved **only on infrastructure proof** — a check that fails to *launch* (bounded to once per task), a changed config/CI fingerprint, or low-confidence detection — **never** because a check *reported* failures (that would let the gate quietly rewrite its own command until it passes; a quality failure routes to `fixing`). A change to the *set* of check commands is a **sensitive change**: it is written to the resolved profile and requires human approval on first use (fail-closed on denial, timeout, or no notifier; the first-ever set is auto-approved and recorded). The agent-assisted discovery proposal is untrusted: machine config outranks repo prose, and every proposal still passes the argv validator (no shell, no forbidden/denied/install verbs), a launch probe, and the approval gate before it can run.
 
 ## Action blacklist
 

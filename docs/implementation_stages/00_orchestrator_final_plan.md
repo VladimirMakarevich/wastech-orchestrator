@@ -81,6 +81,8 @@ Orchestrator Core
 
 Manages the sequence of stages, attempt limits, state transitions, and publishing conditions. The Core invokes only the `AgentProvider` interface and does not build provider-specific commands.
 
+At task start the Core also scans the target repo's **skill inventory** (`.claude/skills/*/SKILL.md`, name+description only — a cheap, bounded, frontmatter-only scan that mirrors the check inventory). It offers the relevant, non-gate-duplicating skills to `planning`; planning's chosen subset is validated against the scan and surfaced to downstream stages as read-only reference paths (§2.1, §6). This is provider-neutral (file paths, never the Claude Skill tool) and never builds CLI argv.
+
 ### 4.2. Agent Router
 
 For each stage it determines:
@@ -179,8 +181,13 @@ send_notification(...)
 
 The two-phase contract lets the Core persist a secret-free handle before waiting. Telegram
 questions use ForceReply and require a reply to the exact prompt; approvals use inline buttons and
-require callback data for the exact interaction/message. Replies from other chats and stale updates
-are ignored. Tokens and chat ids remain environment-only.
+require callback data for the exact interaction/message. Replies from other chats are ignored. A
+press in the configured chat that does **not** match the active prompt (a stale/duplicate button, a
+superseded request, or an inaccessible `callback_query.message`) is **acknowledged with a "no longer
+active" alert and logged as a near-miss** rather than silently dropped — so the operator always gets
+feedback and the miss is diagnosable. The poller relies on a single `getUpdates` consumer per bot
+token; a second consumer (Telegram 409 Conflict) is detected and surfaced clearly at preflight and run
+time. Tokens and chat ids remain environment-only and are never logged.
 
 `refinement` and `planning` return strict structured output: `content` plus optional
 `human_input={kind,question,context,risk,paths}`; planning also returns decomposition fields. The
@@ -294,7 +301,7 @@ After the review passes and before publishing, a final **`summary` stage** produ
 
 The stage reads the task, the enriched specification, the plan, the final `git diff`, and the review findings, and produces `summary.md` (human-readable) plus `summary.json` (the four fields, machine-readable). `summary.json` is a working artifact under `logs/<task-id>/`; the human-readable `summary.md` is written **next to the task file** as `tasks/<done|failed>/<id>.summary.md` during finalize (§8.3) so that — under the in-repo footprint — the task and its summary are committed together while `logs/` stays out of git (§10, §21). For a decomposed task (§5.1) it produces one summary for the whole parent (optionally with a short per-subtask section), matching the single PR.
 
-The summary is a **handoff artifact, not a quality gate**: an infrastructure failure falls back to the other provider (§7.2), and if no provider can produce it the Core writes a minimal deterministic summary from the task and diff and proceeds — a reviewed, passing change is never blocked by the prose step. The `publishing` stage uses `summary.md` (the committed `tasks/<done|failed>/<id>.summary.md`) as the Pull Request body, so reviewers read the explanation directly on the PR (§10, §21).
+The summary is a **handoff artifact, not a quality gate**: an infrastructure failure falls back to the other provider (§7.2), and if no provider can produce it the Core writes a minimal deterministic summary and proceeds — a reviewed, passing change is never blocked by the prose step. That deterministic fallback stays **compact**: it shows a `git diff --stat` (changed files + line counts) and links to the task file and to the redacted `logs/<id>/current.diff`, rather than inlining the full task description and the entire patch (which bloated the committed summary and risked an unredacted diff in git). The `publishing` stage uses `summary.md` (the committed `tasks/<done|failed>/<id>.summary.md`) as the Pull Request body, so reviewers read the explanation directly on the PR (§10, §21).
 
 ## 6. Context between stages
 
@@ -310,7 +317,8 @@ artifacts:
 - the findings of the previous review;
 - a redacted human-input interaction artifact when the stage is being resumed after HITL;
 - a description of the previous error or partially completed attempt;
-- when the task was decomposed (§5.1): the active subtask specification and the cumulative diff of the subtasks already committed.
+- when the task was decomposed (§5.1): the active subtask specification and the cumulative diff of the subtasks already committed;
+- the **planning-selected skill references** (§2.1): when `planning` chose relevant repo skills (from the target repo's `.claude/skills/`), the chosen `SKILL.md` files are passed to `implementation`/`fixing` as **read-only reference paths** (via `{skills_path}` and a path-only request field) — advisory guidance the agent may read, never executed, never the Claude-only Skill tool. Skill bodies are repo-controlled; only their paths travel.
 
 This makes it possible to execute the next stage with a different provider and to recover the
 pipeline after a restart.
@@ -607,6 +615,7 @@ Rules:
 - for a decomposed task the `failure_report.json` / `stuck.md` and the `completed.jsonl` record additionally carry the failing subtask index `k` of `n`, the count of already-committed subtasks (with their SHAs), and `decomposed` / `subtask_count` / `subtasks_completed`;
 - the §19 validation gate writes `validation_report.json` for every task (pass or reject); on a reject this is the only artifact, no `stages/` directory is created, the file is moved to `tasks/rejected/`, and the `completed.jsonl` record carries `final_status: failed` plus the `validation_reason`;
 - the `summary` stage (§5.2) produces `summary.md` and `summary.json`; `summary.json` is a working artifact under `logs/<task-id>/`, while the human-readable `summary.md` is committed at `tasks/<done|failed>/<id>.summary.md` (under the in-repo footprint) and used as the Pull Request body. Everything else under `logs/<task-id>/` (plan, review, diffs, stage logs, `summary.json`, `terminal-cleanup.json`) is **never** committed in any footprint mode; only `tasks/` (the task file + its `summary.md`) is committed, and only in the `in_repo` + `commit` audit footprint (§21). The PR description carries the summary regardless of footprint mode.
+- the resolved check profile is a **control-level** generated cache at `<artifacts_root>/checks/resolved-profile.json` (distinct from the per-task `logs/<task-id>/checks/<run-id>.log`). Like `logs/`, it is regenerated from `artifacts_root` and is **never** committed; under the in-repo footprint the whole `checks/` dir is kept out of git (`EXCLUDED_DIRS` + the runtime ignores, §21).
 
 ## 11. Configuration
 
@@ -752,7 +761,7 @@ Configuration requirements:
 7. Options that bypass the sandbox/permissions are forbidden by the configuration validator.
 8. With `strict_isolation: true`, an inability to enable the required isolation fails preflight with an error.
 9. Git credentials and the agents' credentials are configured outside the orchestrator.
-10. Staging in the target repo is a scoped explicit pathspec that excludes `tasks/`/`logs/`/`workspace/`; blanket `git add .`/`-A` is forbidden, so orchestration and task artifacts never enter a code commit. In audit-footprint mode only the orchestrator (never an agent) makes the separate artifact commit (§21).
+10. Staging in the target repo is a scoped explicit pathspec that excludes `tasks/`/`logs/`/`workspace/`/`checks/`; blanket `git add .`/`-A` is forbidden, so orchestration and task artifacts never enter a code commit. In audit-footprint mode only the orchestrator (never an agent) makes the separate artifact commit (§21).
 11. The Pull Request and CI remain a mandatory control layer.
 12. Telegram credentials are environment-only; prompt correlation accepts only the configured chat
     and exact message/callback. `contacts` are plain-text mentions, not authorization.
@@ -812,7 +821,7 @@ The following must not be done automatically:
 - the decomposition accept/reject decision (gate off; gate on and recommended; `n` out of range; a forward/cyclic dependency) and the per-subtask counter reset versus the global budget accumulation (§5.1, §8.1);
 - the §19 validation gate: each Phase-A reason code, required/optional fields, duplicate-id detection, the injection-token scan, and the Phase-B complete/needs-enrichment classification;
 - `init` (§20): an idempotent second run skips everything and exits 0, never overwrites `config.yaml`, `--dry-run` writes nothing, each `--git-mode` writes the matching `git.footprint` defaults, and the packaged templates are discoverable from an installed wheel;
-- the git footprint (§21): scoped staging excludes `tasks/`/`logs/`/`workspace/`, the `.git/info/exclude` append is idempotent, the audit commit is made only by the orchestrator, and the validator rejects the illegal `location`/`tracking` pairings;
+- the git footprint (§21): scoped staging excludes `tasks/`/`logs/`/`workspace/`/`checks/`, the `.git/info/exclude` append is idempotent, the audit commit is made only by the orchestrator, and the validator rejects the illegal `location`/`tracking` pairings;
 - the `summary` stage (§5.2): the handoff artifact is produced, and a provider failure falls back to a deterministic minimal summary without blocking publishing.
 
 ### Integration
@@ -845,7 +854,7 @@ On a temporary Git repository, verify that:
 - the completed-tasks ledger gains exactly one record per terminal transition;
 - a large task with decomposition enabled produces `n` subtasks, `n` sequential commits on one branch, and a single PR, and a restart mid-subtask resumes at `k` without duplicating a subtask commit (§5.1);
 - a broken task is quarantined to `tasks/rejected/` as `failed`, writes `validation_report.json`, and never creates a branch or calls a provider (§19);
-- in every git footprint mode the code commit contains no `tasks/`/`logs/`/`workspace/` paths; `exclude_local` adds all three to `.git/info/exclude`; audit mode adds one orchestrator-made `tasks/` commit (the task + its `summary.md`) and keeps `logs/`/`workspace/` local (§21);
+- in every git footprint mode the code commit contains no `tasks/`/`logs/`/`workspace/`/`checks/` paths; `exclude_local` adds all of them to `.git/info/exclude`; audit mode adds one orchestrator-made `tasks/` commit (the task + its `summary.md`) and keeps `logs/`/`workspace/`/`checks/` local (§21);
 - a successful task produces `summary.md` (what / how / integration / why) which becomes the PR body (§5.2);
 - fake Telegram transport covers clarification/approval, exact correlation, dangerous-diff denial,
   and restart recovery without network access;
@@ -1048,13 +1057,13 @@ The orchestration and task files can be kept entirely out of the customer's repo
 
 ### 21.1. Scoped staging (all modes)
 
-The Git Manager **never** runs `git add .` / `git add -A`. It stages only the agent's intended code paths via an explicit pathspec computed from the post-implementation diff after the output guardrails (`only_allowed_paths`, `no_unexpected_files`), plus belt-and-braces `:(exclude)` pathspecs for the artifact dirs. The exclude guards cover only dirs that are **not** already in `.git/info/exclude` for the active footprint (a dir that is both ignored and present in the worktree makes `git add` fail with "paths are ignored", so it is dropped): under `commit` the guard is `:(exclude)tasks/` (logs/`/`workspace/ are ignored), under `exclude_local` there are none (all three ignored), under `external` all three. This guarantees, in every mode, that orchestration and task files never enter a *code* commit. This rule supersedes the illustrative `git add .` in the high-level overview (codex_git_orchestrator_architecture.md §4.2).
+The Git Manager **never** runs `git add .` / `git add -A`. It stages only the agent's intended code paths via an explicit pathspec computed from the post-implementation diff after the output guardrails (`only_allowed_paths`, `no_unexpected_files`), plus belt-and-braces `:(exclude)` pathspecs for the artifact dirs. The exclude guards cover only dirs that are **not** already in `.git/info/exclude` for the active footprint (a dir that is both ignored and present in the worktree makes `git add` fail with "paths are ignored", so it is dropped): under `commit` the guard is `:(exclude)tasks/` (`logs/`/`workspace/`/`checks/` are ignored), under `exclude_local` there are none (all four ignored), under `external` all four. This guarantees, in every mode, that orchestration and task files never enter a *code* commit. This rule supersedes the illustrative `git add .` in the high-level overview (codex_git_orchestrator_architecture.md §4.2).
 
-Under the in-repo footprint the artifact root **is** the clone, so the orchestrator's own runtime files (`state.db`, its WAL/SHM sidecars, and `config.yaml`/`config.yaml.bak-*`) sit at the repo root. The Git Manager treats these as artifacts: they are excluded from the code staging set and are not counted as "unaccounted dirty" changes at terminal cleanup, so they never reach git and never block the base-branch checkout.
+Under the in-repo footprint the artifact root **is** the clone, so the orchestrator's own runtime files (`state.db`, its WAL/SHM sidecars, `config.yaml`/`config.yaml.bak-*`, and the generated `checks/resolved-profile.json`) sit at the repo root. The Git Manager treats these as artifacts: they are excluded from the code staging set and are not counted as "unaccounted dirty" changes at terminal cleanup, so they never reach git and never block the base-branch checkout.
 
 ### 21.2. Local-only exclude
 
-Before any staging, the Git Manager idempotently appends the footprint's local-only dirs to the clone's `.git/info/exclude` (append-only, de-duplicated): under `exclude_local` that is `tasks/`, `logs/`, `workspace/`; under `commit` it is `logs/` and `workspace/` only (`tasks/` is tracked — it carries the committed task + summary). These entries are per-clone and never committed, so the agent's `git status` stays clean and even a stray `git add .` would skip them.
+Before any staging, the Git Manager idempotently appends the footprint's local-only dirs to the clone's `.git/info/exclude` (append-only, de-duplicated): under `exclude_local` that is `tasks/`, `logs/`, `workspace/`, `checks/`; under `commit` it is `logs/`, `workspace/`, and `checks/` (`tasks/` is tracked — it carries the committed task + summary; `checks/` is the generated profile cache and is never committed in any footprint). These entries are per-clone and never committed, so the agent's `git status` stays clean and even a stray `git add .` would skip them. The Git Manager additionally guarantees the runtime-file ignores (`state.db`, `config.yaml`, `orchestrator.pid`, `checks/`, …) are present in the clone it operates in (`ensure_runtime_excludes`), so they stay ignored regardless of how the clone was scaffolded; the default stays `.git/info/exclude` (per-clone, local) rather than mutating the operator's tracked `.gitignore`.
 
 ### 21.3. `commit` (audit)
 
@@ -1064,7 +1073,7 @@ The **orchestrator** (Git Manager), never an agent, makes a separate **task comm
 
 - The default is `in_repo` + `commit`: `tasks/` (the task + its `summary.md`) lives inside `repo.local_path` and is stored in git via the task commit (§21.3); `logs/`/`workspace/` stay local. The `external` + `none` mode remains supported for operators who want zero footprint in the target repo.
 - The validator rejects the illegal pairings `external` + `exclude_local|commit` and `in_repo` + `none`, and (for `external` only) requires `external_root` to resolve outside `repo.local_path` (normalization, anti-traversal).
-- Preflight edge: the Git Manager refuses to start if the repo already **tracks** a path the footprint must keep out of git (a name collision `.git/info/exclude` cannot untrack) → `manual_action_required`. It checks `tasks/` **and** `logs/` under `external`/`exclude_local`, but only `logs/` under `commit` — there a tracked `tasks/` is **expected** (it is the committed audit trail once a prior task merged into `base_branch`), so checking it would wrongly block the second task in the same repo.
+- Preflight edge: the Git Manager refuses to start if the repo already **tracks** a path the footprint must keep out of git (a name collision `.git/info/exclude` cannot untrack) → `manual_action_required`. It checks `tasks/` **and** `logs/` under `external`/`exclude_local`, but only `logs/` under `commit` — there a tracked `tasks/` is **expected** (it is the committed audit trail once a prior task merged into `base_branch`), so checking it would wrongly block the second task in the same repo. `checks/` is deliberately **not** checked: a run that predates the ignore could already have committed `checks/resolved-profile.json`, and gating on it would block exactly the repos that hit the leak — the new excludes stop future tracking and the operator untracks the stale file once with `git rm --cached checks/resolved-profile.json`.
 
 ## 22. Versioning and compatibility
 
@@ -1072,7 +1081,7 @@ The orchestrator is a CLI, not a long-running daemon. Upgrading the implementati
 
 Three persisted artifacts outlive an upgrade and each carries an **independent** schema version, bumped only when its format changes (not on every release):
 
-- **`config.yaml`** — a top-level `schema_version` (current `4`). The loader **refuses a config newer than it understands** (fail-closed `ConfigError`); an absent or older value is accepted (the older case is the future-migration hook). `install` stamps the current version into generated configs.
+- **`config.yaml`** — a top-level `schema_version` (current `5`). The loader **refuses a config newer than it understands** (fail-closed `ConfigError`); an absent or older value is accepted (the older case is the future-migration hook). `install` stamps the current version into generated configs. (v5 added the optional `skills:` block (§2.1) and the `checks.discovery.{run_at_task_start,approve_command_changes}` keys (§1.2); all are backward-compatible and `upgrade-config` adds them to an older config.)
 - **`state.db`** — `PRAGMA user_version` (current `2`). `open()` refuses a database stamped newer than it understands; on the writable path it **migrates in place** an older or pre-versioning (`0`) database via idempotent `ALTER TABLE` (`_migrate`) and then stamps the current version. `open_readonly` refuses-newer but never writes. (v2 added `stage_runs.skipped`/`skip_reason` for stage-skip control.)
 - **registry** — a `version` field, read **forward-tolerantly**: bindings are plain repo→config paths and are version-stable, so config discovery never hard-fails on a newer registry.
 

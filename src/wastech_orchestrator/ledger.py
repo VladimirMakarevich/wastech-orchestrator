@@ -180,20 +180,36 @@ def write_failure_report(
 
 
 def write_minimal_summary(
-    artifacts_root: str | Path, task_id: str, *, title: str, description: str, diff: str
+    artifacts_root: str | Path,
+    task_id: str,
+    *,
+    title: str,
+    diff_stat: str,
+    task_ref: str | None = None,
 ) -> tuple[str, str]:
-    """Write a deterministic ``summary.md`` + ``summary.json`` from the task + diff (§5.2).
+    """Write a *compact* deterministic ``summary.md`` + ``summary.json`` (§5.2).
 
     The Core's fallback when no provider can produce the ``summary`` stage — a reviewed, passing
-    change is never blocked by the prose step.
+    change is never blocked by the prose step. Deliberately small: it links to the task file and
+    shows a ``git diff --stat`` (files + line counts) instead of inlining the full task description
+    and the entire patch. Inlining bloated the committed summary (a real run produced a ~580-line
+    file that was almost all raw diff) and risked an unredacted diff landing in git; the full,
+    already-redacted patch stays in ``logs/<task-id>/current.diff``.
+
+    ``task_ref`` is a short pointer to the task file (e.g. ``<id>.md``, a sibling of the committed
+    summary); when ``None`` a generic line is used.
     """
     task_dir = task_artifact_dir(artifacts_root, task_id)
     task_dir.mkdir(parents=True, exist_ok=True)
 
     what = title
-    how = "See the diff below; no provider-authored summary was available."
-    integration = "Derived deterministically from the task description and the final diff."
-    why = description.strip() or "(no description)"
+    how = "No provider-authored summary was available; see the changed-files summary below."
+    integration = "Derived deterministically from the task and the committed diff stat."
+    why = (
+        f"See the task file `{task_ref}` for the full description."
+        if task_ref
+        else "See the task file for the full description."
+    )
 
     summary_json = {"what": what, "how": how, "integration": integration, "why": why}
     json_path = task_dir / SUMMARY_JSON_FILENAME
@@ -201,13 +217,15 @@ def write_minimal_summary(
         json.dumps(summary_json, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
 
+    changes = diff_stat.strip() or "(no committed changes)"
     md = (
         f"# {what}\n\n"
         f"## What\n\n{what}\n\n"
         f"## How\n\n{how}\n\n"
         f"## Integration\n\n{integration}\n\n"
         f"## Why\n\n{why}\n\n"
-        f"## Diff\n\n```diff\n{diff}\n```\n"
+        f"## Changes\n\n```\n{changes}\n```\n\n"
+        f"_Full diff: `logs/{task_id}/current.diff`._\n"
     )
     md_path = task_dir / SUMMARY_MD_FILENAME
     md_path.write_text(md, encoding="utf-8")

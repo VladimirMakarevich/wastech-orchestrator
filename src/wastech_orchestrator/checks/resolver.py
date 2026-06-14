@@ -20,7 +20,9 @@ from __future__ import annotations
 import shutil
 import sys
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 
 from wastech_orchestrator.checks.detect import CheckCandidateDetector
@@ -39,6 +41,7 @@ from wastech_orchestrator.checks.profile import (
     PROFILE_SCHEMA_VERSION,
     ProfileCandidateRecord,
     ResolvedCheckProfile,
+    commands_signature,
 )
 from wastech_orchestrator.checks.store import ResolvedCheckProfileStore
 from wastech_orchestrator.checks.validate import CheckCandidateValidator
@@ -53,6 +56,15 @@ RunProcess = Callable[..., ProcessResult]
 
 # The combined project-owned wrapper check; when launchable it supersedes per-language checks (§17).
 _WRAPPER_NAME = "checks"
+
+
+class ReResolveReason(StrEnum):
+    """Why a mid-task re-resolve was triggered — only ever *infrastructure proof*, never a quality
+    failure (§1.2). Recorded in the profile notes for audit."""
+
+    LAUNCH_FAILED = "launch_failed"
+    FINGERPRINT_CHANGED = "fingerprint_changed"
+    LOW_CONFIDENCE = "low_confidence"
 
 
 def _now_iso() -> str:
@@ -108,6 +120,20 @@ class CheckResolver:
                 return cached
 
         profile = self._resolve_fresh(discovery_cfg.mode, allow_agent, fingerprint)
+        self._store.save(profile)
+        return profile
+
+    def reresolve(self, *, allow_agent: bool, reason: ReResolveReason) -> ResolvedCheckProfile:
+        """Force a fresh resolve (ignoring the cache) because of *infrastructure proof* (§1.2).
+
+        Used only when there is real evidence the command is wrong — a launch failure, a changed
+        config/CI fingerprint, or low-confidence detection — never because a check *reported*
+        failures (that would let the gate quietly rewrite its own command until it passes). The
+        reason is stamped into the profile notes for audit.
+        """
+        fingerprint = compute_fingerprint(self._repo_root)
+        profile = self._resolve_fresh(self._config.checks.discovery.mode, allow_agent, fingerprint)
+        profile = replace(profile, notes=(*profile.notes, f"re-resolved: {reason.value}"))
         self._store.save(profile)
         return profile
 
@@ -260,6 +286,7 @@ class CheckResolver:
             created_at=now,
             last_validated_at=now,
             notes=notes,
+            commands_signature=commands_signature(checks),
         )
 
 
@@ -275,15 +302,27 @@ def _has_launchable(candidates: list[CheckCandidate], name: str) -> bool:
 def _select(
     candidates: list[CheckCandidate],
 ) -> tuple[list[CheckCandidate], list[ProfileCandidateRecord]]:
-    """Pick the top-priority launchable candidate per logical name; a launchable wrapper wins."""
+    """Pick the top-priority launchable candidate per logical name; a launchable wrapper wins.
+
+    Pinning (§1.2): when a logical name has a CONFIGURED candidate, only a configured candidate may
+    fill that slot — a deliberate operator pin is never silently replaced by a detected fallback. If
+    the configured pin does not probe launchable, the name is left unchosen (reported not-ready in
+    the records) rather than masked by detection.
+    """
     by_name: dict[str, list[tuple[int, int, CheckCandidate]]] = {}
     for index, candidate in enumerate(candidates):
         by_name.setdefault(candidate.name, []).append((_priority(candidate), index, candidate))
+    pinned = {c.name for c in candidates if c.source is CheckSource.CONFIGURED}
 
     chosen: dict[str, CheckCandidate] = {}
     for name, items in by_name.items():
         ordered = sorted(items, key=lambda t: (-t[0], t[1]))
-        launchable = [c for _, _, c in ordered if c.probe_status is ProbeStatus.LAUNCHABLE]
+        launchable = [
+            c
+            for _, _, c in ordered
+            if c.probe_status is ProbeStatus.LAUNCHABLE
+            and (name not in pinned or c.source is CheckSource.CONFIGURED)
+        ]
         if launchable:
             chosen[name] = launchable[0]
 

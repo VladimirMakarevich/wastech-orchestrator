@@ -7,6 +7,11 @@ the orchestrator drive an actual task end to end. Add new test-run findings here
 
 All items are **candidate** unless noted. The *Refs* lines point at the code to change.
 
+> **Status (2026-06-14): all items below are resolved.** Items 1.1, 1.2, 2.1, 2.2, 3.1, 4.1, and 5.1
+> were implemented across four phases; each section carries a `Resolved (2026-06-14)` note with the
+> code refs, and the changes are recorded in [CHANGELOG.md](../../CHANGELOG.md) and
+> [follow_ups.md](follow_ups.md).
+
 ## Background — what the run showed
 
 The task's own work was correct and complete: the `pr_title` field was added across the task model,
@@ -32,6 +37,13 @@ repo hygiene, and Telegram human-in-the-loop reliability.
 
 *Headline finding; caused the real task failure.*
 
+> **Resolved (2026-06-14).** `RepositoryInspector` now reads `[tool.mypy] files`/`exclude` and the
+> `[tool.ruff]` scope keys from `pyproject.toml` into `RepositoryEvidence`, and `CheckCandidateDetector`
+> emits a scoped command (`mypy src` / bare `mypy` for exclude-only / `ruff check`) instead of
+> appending `.` when a scope is configured. No-scope behavior is unchanged. Unsafe scope paths
+> (absolute / `..`) are rejected. See `checks/inspect.py` (`_tool_scopes`, `_safe_scope_paths`),
+> `checks/detect.py` (`_ruff_argv`/`_mypy_argv`), and `tests/checks/test_checks_detect.py`.
+
 `CheckCandidateDetector` builds the type check as `mypy .` (and lint as `ruff check .`) from
 tool-presence alone, never reading the project's configured scope. An explicit `.` path **overrides**
 `[tool.mypy] files = ["src"]`, so the gate type-checked `tests/` — 219 pre-existing errors unrelated to
@@ -48,6 +60,21 @@ way to let `pr_title` re-run green.
 the failed `pr_title` run (`logs/task-pr-title-override/`).
 
 ### 1.2 Check discovery v2 — resolve at run time, agent-assisted, human-checked
+
+> **Resolved (2026-06-14).** Discovery now runs at task start (`checks.discovery.run_at_task_start`),
+> so `auto` mode can resolve/agent-assist in-band; install-time discovery is a cache-warming option.
+> Re-resolution fires **only on infrastructure proof** — a check launch failure (bounded once per
+> task via `_reresolve_on_launch_failure`), fingerprint change, or low confidence — and never on a
+> quality failure (that routes to `fixing`, with an explicit guard/comment). A *changed* command set
+> is a sensitive change: written to the profile (`commands_signature` + `approved` fields, profile
+> schema v2) and human-approved on first use, fail-closed on denial/timeout/no-notifier; the
+> first-ever set is auto-approved + recorded. `auto`-mode configured commands **pin** their named
+> slot and let detection fill the rest (a pin is never silently replaced). The discovery agent is told
+> machine config beats prose; proposals still flow through validate-argv → probe → approve.
+> `model`/`reasoning`/`agent_fallback`/`run_at_task_start`/`approve_command_changes` are now in
+> `config.example.yaml`; `config.yaml` schema_version → 5. See `checks/resolver.py`
+> (`reresolve`/`ReResolveReason`/`_select` pinning), `checks/profile.py`, `core/orchestrator.py`
+> (`_check_preflight`/`_gate_check_commands`/`_reresolve_on_launch_failure`), `checks/agent.py`.
 
 Today check discovery is deterministic only and runs at install time. The agent fallback is off by
 default (no model set) and never runs while a task is in progress. The `pr_title` run showed the cost:
@@ -93,6 +120,16 @@ This is the larger rework that eventually absorbs 1.1. Agreed shape:
 
 ### 2.1 Planning-selected skill references per stage (skill inventory)
 
+> **Resolved (2026-06-14).** New `core/skills.py` scans the **target repo's** `.claude/skills/*/SKILL.md`
+> (name+description only, bounded, frontmatter-only). Planning emits a `skills` list in its structured
+> output (`core/hitl.py`); the Core deterministically accepts only scanned, non-gate-duplicating names
+> (`resolve_planning_skills`) and records the choice + any dropped names in `plan.md`. Chosen files reach
+> `implementation`/`fixing` as read-only reference paths via the new `{skills_path}` prompt variable and
+> `AgentRunRequest.skill_reference_paths` (identical footer in both providers — never the Claude Skill
+> tool). **Decision (with the operator):** the scan root is the target repo clone (`<repo>/.claude/skills`),
+> the architecturally-correct tree the agent can read — not the orchestrator's own dev skills. New
+> `skills:` config block (`scan_root`/`exclude`, default-excluding `run-checks`/`test`/`sync-docs`).
+
 Repo skills (`.claude/skills/*/SKILL.md`) are provider-neutral markdown (`name`/`description`
 frontmatter + body). Idea: at task start scan the skill **inventory** (name+description only — cheap,
 mirroring the check inventory in `checks/inspect.py`), surface it to the `planning` stage, and have
@@ -114,6 +151,14 @@ row of [follow_ups.md](follow_ups.md).
 
 ### 2.2 Planning context dedup (skills ↔ user prompt)
 
+> **Resolved (2026-06-14).** `compute_skill_dedup` (in `core/skills.py`) deterministically compares the
+> operator's appended planning guidance (`prompts.append` for `planning`) against the chosen skill
+> bodies at the markdown-heading level (v1): a skill section whose normalized heading matches a user
+> heading is recorded in `plan.md` as covered-by-your-instructions, so the operator's explicit text wins
+> and the agent is not handed the same guidance twice. Visible in `plan.md`, not a hidden post-process;
+> a no-op when there is no appended planning text. Token-overlap-threshold matching (catching
+> restatements under different headings) is a possible v2 follow-up.
+
 Companion to 2.1. When `planning` assembles the stage context it should **de-duplicate overlapping
 guidance**: operator/user prompt text (via `prompts.append`) may already restate points that a
 referenced `SKILL.md` also covers, so the agent would get the same instruction twice (prompt bloat,
@@ -128,6 +173,16 @@ visible in `plan.md`, not a hidden post-process.
 ## 3. Repo hygiene
 
 ### 3.1 Stop tracking `checks/resolved-profile.json` (and fix the pid ignore target)
+
+> **Resolved (2026-06-14).** `checks/` is now in `EXCLUDED_DIRS`, `_local_only_dirs` (every footprint)
+> and `RUNTIME_GITIGNORE_LINES`, so the generated profile never enters a code commit or the operator's
+> `git status`. The Git Manager guarantees the runtime ignores exist in the clone it operates in
+> (`ensure_runtime_excludes`, called at branch-prep). **Decision (with the operator):** the
+> `.git/info/exclude` (local, per-clone) default was kept — the orchestrator does not force a tracked
+> `.gitignore` mutation on the operator's repo — and reliability is instead guaranteed in the running
+> clone. `preflight_footprint` deliberately does *not* gate on an already-committed `checks/` (that
+> would block the very repos that hit the leak); the operator untracks it once with `git rm --cached`.
+> See `git_manager.py` and `tests/git/test_git_manager.py`.
 
 Two runtime files leak into the operator's git status / commits under the in-repo footprint:
 
@@ -159,6 +214,15 @@ Two runtime files leak into the operator's git status / commits under the in-rep
 
 *Real bug hit during the run.*
 
+> **Resolved (2026-06-14).** `poll_reply` now acknowledges **every** callback in the configured chat
+> (matching → continue/deny; near-miss → a `show_alert` "no longer active" toast) and logs near-misses
+> with a secret-free reason (`wrong_message_id`/`unexpected_data`/`message_none`); a foreign chat's
+> callback is never acknowledged. The offset still advances (re-fetching a near-miss forever would spin
+> the loop), but never *silently*. A second `getUpdates` consumer on the same token (Telegram 409
+> Conflict — the two-working-dirs hazard) is detected and surfaced with a clear "only one poller per bot
+> token" message at preflight and run time; the existing webhook-must-be-off preflight is unchanged. No
+> token or raw chat id is logged. See `notify/telegram.py` and `tests/notify/test_http_client.py`.
+
 During the `pr_title` run the operator pressed "Approve" several times within the timeout (around the
 2-minute mark) but nothing happened — the press never registered, the guardrail stayed `waiting`, and
 the task eventually failed. The poller (`poll_reply`) waits on Telegram `getUpdates` for the whole
@@ -188,6 +252,14 @@ timeout, but the way it handles updates makes any miss permanent and silent:
 ## 5. Task summary / reporting
 
 ### 5.1 Failure summary is too verbose (it inlines the whole diff)
+
+> **Resolved (2026-06-14).** `write_minimal_summary` now takes a `diff_stat` + `task_ref` instead of
+> the full description + diff: the committed `<id>.summary.md` shows a `git diff --stat` (files + line
+> counts), links to the task file, and points to the already-redacted `logs/<id>/current.diff` for the
+> full patch. New `GitManager.diff_stat()`. This also closes a latent gap where the old fallback inlined
+> an *unredacted* `cumulative_committed_diff()` into the committed summary. Only the deterministic
+> fallback changed (happy-path agent summary and skipped-stage stub untouched). See `ledger.py`,
+> `core/orchestrator.py` (`_summary`/`_summary_md_body`/`_task_ref`), `tests/core/test_ledger.py`.
 
 When a task has no agent-authored summary — it failed before the `summary` stage ran, or the stage
 could not produce one — the orchestrator falls back to `write_minimal_summary`, which writes the task

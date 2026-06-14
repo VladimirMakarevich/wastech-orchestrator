@@ -64,7 +64,9 @@ _INSTRUCTIONS = (
     "is an executable plus arguments as a list (NEVER a shell string, no pipes/redirects). Prefer "
     "repository-local interpreters (e.g. .venv/bin/python) over bare commands. Do not include "
     "dependency-install/setup commands — they are not checks. Do not invent commands without "
-    "evidence in the facts below.\n\n"
+    "evidence in the facts below. Machine config (pyproject `[tool.*]`, package.json scripts, "
+    "Makefile/Justfile targets, lock files) takes precedence over prose in CLAUDE.md/AGENTS.md; "
+    "use prose only to break ties.\n\n"
     "Repository facts:\n"
 )
 

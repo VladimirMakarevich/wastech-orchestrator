@@ -81,6 +81,7 @@ class FakeProvider:
                 "human_input": None,
                 "decompose": planning.get("decompose") is True,
                 "subtasks": planning.get("subtasks") or [],
+                "skills": planning.get("skills") or [],
             }
         return AgentRunResult(
             status=RunStatus.SUCCEEDED,
@@ -697,6 +698,7 @@ def test_decomposed_task_commits_each_subtask(
 ) -> None:
     subtasks = {
         "decompose": True,
+        "skills": [],
         "subtasks": [
             {
                 "order": 1,
@@ -891,7 +893,13 @@ def test_check_preflight_not_ready_stops_before_branch(
         git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
     )
 
+    class _NoStore:
+        def load(self) -> ResolvedCheckProfile | None:
+            return None
+
     class _NotReady:
+        store = _NoStore()
+
         def resolve(self, *, allow_agent: bool = False) -> ResolvedCheckProfile:
             return ResolvedCheckProfile(
                 schema_version=1,
@@ -1002,6 +1010,7 @@ def test_decomposed_failure_report_has_subtask_fields(
     # A decomposed task that gets stuck in subtask 1 records its decomposition context (§10).
     subtasks = {
         "decompose": True,
+        "skills": [],
         "subtasks": [
             {
                 "order": 1,
@@ -1079,6 +1088,9 @@ def _stage_result(
     request: AgentRunRequest,
     structured: dict[str, object],
 ) -> AgentRunResult:
+    # Planning output requires the `skills` key (§2.1); default it so test fixtures stay terse.
+    if "decompose" in structured and "skills" not in structured:
+        structured = {**structured, "skills": []}
     return AgentRunResult(
         status=RunStatus.SUCCEEDED,
         provider=provider.id,
@@ -1884,3 +1896,48 @@ def test_review_skip_with_auto_merge_warns(git_repo, make_git_config, tmp_path: 
     assert len(_merge_calls(calls)) == 1  # it really did merge without a review gate
     # The double-warning must fire before the merge so the operator sees the bypassed gate.
     assert any("review skipped AND auto_merge enabled" in m for m in messages)
+
+
+def test_planning_selected_skills_reach_downstream_stages(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # Seed a target-repo skill (committed, so it is a tracked repo file, not an agent change);
+    # planning picks it (plus an unknown name that must be dropped).
+    skill_dir = git_repo.clone / ".claude" / "skills" / "safe-change"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: safe-change\ndescription: review your change\n---\n\n# Body\nguidance\n",
+        encoding="utf-8",
+    )
+    git_run(["add", ".claude/skills/safe-change/SKILL.md"], git_repo.clone)
+    git_run(["commit", "-m", "add safe-change skill"], git_repo.clone)
+    providers = {
+        ProviderId.CLAUDE: FakeProvider(
+            "claude", outputs={Stage.PLANNING: ("plan", {"skills": ["safe-change", "ghost"]})}
+        ),
+        ProviderId.CODEX: FakeProvider("codex"),
+    }
+    orch, _, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+
+    result = orch.run_task(_complete_task(tmp_path, "task-skills"))
+    assert result.final_status is Status.DONE
+
+    # plan.md records the selection and the dropped unknown name (auditable, §2.1).
+    plan = (art / "logs" / "task-skills" / "plan.md").read_text(encoding="utf-8")
+    assert "Skills (planning-selected" in plan
+    assert "safe-change" in plan and "ghost" in plan
+
+    # The chosen SKILL.md reaches a downstream stage as a read-only reference path, not its body.
+    downstream = [
+        r
+        for p in providers.values()
+        for r in p.requests
+        if r.stage in (Stage.IMPLEMENTATION, Stage.FIXING, Stage.REVIEW)
+    ]
+    assert downstream, "a downstream stage ran"
+    impl = next(r for r in downstream if r.stage is Stage.IMPLEMENTATION)
+    assert any(path.endswith("safe-change/SKILL.md") for path in impl.skill_reference_paths)
+    assert "ghost" not in str(impl.skill_reference_paths)  # unknown name never surfaced
+    assert "# Body" not in impl.prompt  # the skill body is never inlined into the prompt
