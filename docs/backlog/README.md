@@ -20,6 +20,7 @@ Backlog documents must not override the hard invariants from [../../CLAUDE.md](.
 | [task_workflow_profiles.md](task_workflow_profiles.md) | Detailed backlog task for implementation, deep-research, and private security-audit workflows with distinct permissions, outputs, and publishing rules. |
 | [task_rerun_command.md](task_rerun_command.md) | Detailed backlog task for a `rerun <task-id>` command that launches a fresh attempt of a terminal task (gate allowance, branch reset-to-base to avoid merge conflicts, ledger attempt chain). |
 | [task_finalize_command.md](task_finalize_command.md) | Detailed backlog task for a `finalize <task-id> --as <done\|failed\|abandoned>` command that reconciles the bookkeeping of an operator-handled task (status, working tree/branch, file move, HITL close-out, ledger) without running the pipeline. |
+| [task_install_templates_command.md](task_install_templates_command.md) | Detailed backlog task for a separate `install-templates` command that delivers the packaged `templates/` tree into an existing install **add-missing-only** (skip existing, add only what's absent), resolving the install location like `upgrade-docs`; fills the gap that only `init` copies templates and `install` never does. |
 
 ## Rules
 

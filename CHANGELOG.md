@@ -18,6 +18,19 @@ The maintainer bumps the package version in `pyproject.toml` on release; `wastec
 ## [Unreleased]
 
 ### Added
+- **`install-templates` command — deliver the packaged `templates/` tree into an existing install**
+  (backlog: `task_install_templates_command.md`). `worc install-templates` copies the packaged
+  `templates/` tree (stage prompts, skills, agent stubs) beside the resolved `config.yaml`,
+  **add-missing-only**: absent files are written, existing files are **skipped** to preserve operator
+  edits. The install location is resolved like `upgrade-config`/`upgrade-docs` (`--config` →
+  `./config.yaml` → the repo→config registry binding) and the command is fail-closed (exit 2) with an
+  actionable hint when none resolves. This fills the gap that only `init` copied templates and the
+  wizard-based `install` never did, so an install-based setup can now obtain the templates and an
+  upgraded orchestrator can refresh them. Unlike `upgrade-docs` it **never removes** operator-added
+  files (templates are operator-editable) and it never touches `config.yaml`/`prompts.overrides`
+  (activating an edited template stays an operator decision). `--force` overwrites existing files
+  (like `init --force`); `--dry-run` previews the add/skip(/overwrite) plan. `init` and
+  `install-templates` now share one copy helper (`_copy_templates_tree`) so the two cannot drift.
 - **`finalize` command — record + tidy a human-handled task** (backlog: `task_finalize_command.md`).
   `worc finalize <task-id> --as <done|failed|abandoned>` reconciles the orchestrator's bookkeeping for a
   task the operator resolved out-of-band — it **records and tidies only**, never running the pipeline or

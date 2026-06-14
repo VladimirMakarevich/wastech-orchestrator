@@ -207,6 +207,9 @@ wastech-orchestrator upgrade-config     add config keys from a new version, keep
                           --dry-run                   preview the keys that would be added
 wastech-orchestrator upgrade-docs       refresh the installed worc/ task-authoring docs to the packaged version
                           --dry-run                   preview added/updated/removed files
+wastech-orchestrator install-templates  deliver the packaged templates/ tree into an existing install (add-missing)
+                          --force                     overwrite existing templates (default: skip operator edits)
+                          --dry-run                   preview the add/skip(/overwrite) plan
 wastech-orchestrator --version          installed version
 ```
 

@@ -1006,13 +1006,16 @@ wastech-orchestrator init [path]
     task.md                        # task template (mirrors the §5 front matter + body)
     AGENTS.md                      # stub seeded into the TARGET repo (Codex)
     CLAUDE.md                      # stub seeded into the TARGET repo (Claude Code)
-    skills/     .gitkeep
+    skills/                        # packaged reference skills (one dir per skill)
+      safe-change/    SKILL.md
+      self-review/    SKILL.md
+      test-discipline/ SKILL.md
     prompts/
       refinement.md                # per-stage prompt templates with {variables}
-      plan.md
-      implement.md
+      planning.md
+      implementation.md
       review.md
-      fix.md
+      fixing.md
       summary.md
 ```
 
@@ -1044,6 +1047,21 @@ The wizard, in order: (1) detects the Git root, `origin`, current/base branch, a
 - **Generated config (§11).** `repo.local_path` is the bound repo (absolute, native path); the footprint is `location: in_repo`, `tracking: commit` (§21), so the task lifecycle (`tasks/pending|processing|done|failed`), `logs/`, and the SQLite state live **in the repo** and are stored in git via the audit commit — the orchestrator's root runtime files (`state.db`, `config.yaml`) are excluded from commits. `config.yaml` and the rejected-task quarantine (`tasks/rejected/`) live in the sibling workspace, out of the repo. `install` creates the repo's task/log dirs **empty**, so it does not alter the target repo's tracked state. Only the selected providers are written, routing references only allowed providers, and the safe security defaults are immutable. The config is round-tripped through the loader and validator **before it is written**, and no secrets are stored. `install` never installs or authorizes the agent CLIs or `gh`; it only reports what is missing.
 - **Binding + discovery.** `install` records `repo-root -> config.yaml` in a per-user registry (`platformdirs`: `%LOCALAPPDATA%` / `~/Library/Application Support` / the XDG config dir; override with `WASTECH_ORCHESTRATOR_HOME`). Afterwards `preflight`, `watch`, and `status` resolve the config without `--config`, in order: explicit `--config`, then `./config.yaml` (backward compatibility), then the current repo's binding, otherwise a "run `install .`" hint. `watch` reads `tasks/pending` from the artifact root (the bound repo under the in-repo footprint), so it works from any directory.
 - **Idempotency.** A re-run is a no-op (`already configured`); `--reconfigure` writes a timestamped backup and atomically replaces the config; a `config.yaml` that exists but is bound to another repo is never overwritten. After a successful write `install` auto-runs preflight (§6.7); a preflight failure keeps the config but exits non-zero with specific instructions.
+
+### 20.5. Template (re)installation (`install-templates`)
+
+`wastech-orchestrator install-templates` delivers the packaged `templates/` tree (§20.2 — stage prompts, skills, agent stubs) into an **existing** install, beside its `config.yaml`. Only `init` copies the tree at scaffold time and `install` (§20.4) omits it entirely, so this is the supported way for an install-based setup to obtain the templates and for an upgraded orchestrator to refresh a drifted copy. It is operator-run, idempotent, and fail-closed.
+
+```text
+wastech-orchestrator install-templates
+    --force                overwrite existing template files (default: skip operator edits)
+    --dry-run              print the add/skip(/overwrite) plan; write nothing
+```
+
+- **Location resolution.** Like `upgrade-config`/`upgrade-docs`, it resolves the install location in order — explicit `--config PATH`, then `./config.yaml`, then the repo→config registry binding (§20.4) — and writes the tree to `templates/` **beside the resolved `config.yaml`**. Fail-closed (exit 2) with an actionable hint when none resolves.
+- **Add-missing-only.** Per packaged file: absent → **write**; present → **skip** (preserve operator edits); present + `--force` → **overwrite**. `config.example.yaml` is excluded (it is the source for `config.yaml` generation, §20.3, and key materialization via `upgrade-config`). An all-present run is a successful no-op.
+- **Deliberate asymmetry with `upgrade-docs`.** `upgrade-docs` overwrites and removes orphans because the `worc/` docs are generated content; `install-templates` is add-missing and **never removes** operator-added files because templates are operator-editable.
+- **No config mutation.** It copies files only; it never writes `prompts.overrides` or otherwise edits `config.yaml`. Activating an edited prompt template stays an explicit operator decision (the override is opt-in; runtime always loads the packaged default otherwise). `init` and `install-templates` share one copy helper so the two cannot drift.
 
 ## 21. Git footprint in the target repository
 

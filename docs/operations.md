@@ -145,9 +145,32 @@ Unlike `config.yaml`, the `worc/` docs are generated content with **no operator 
 so this is a straight overwrite to the packaged version: it writes missing or changed files, removes
 files no longer shipped, and makes no backup. It is idempotent (an already-current copy is a no-op),
 `--dry-run` writes nothing, and it fails closed (exit 2 with the same hint as `upgrade-config`) when
-no install location can be resolved. After a package upgrade, run **both** `upgrade-config` and
-`upgrade-docs` to bring your deployment fully current. (A single umbrella `upgrade` that does both is
-tracked in [follow-ups](backlog/follow_ups.md).)
+no install location can be resolved.
+
+The `templates/` tree (stage prompts, skills, agent stubs) also ships with the package, but only
+`init` copies it — the wizard-based `install` does not, and an upgrade carries newer templates than an
+already-installed copy. Deliver or refresh them beside `config.yaml` with **`install-templates`**:
+
+```bash
+wastech-orchestrator install-templates           # uses the discovered/bound config location
+wastech-orchestrator install-templates --dry-run # preview the add/skip(/overwrite) plan only
+wastech-orchestrator install-templates --force   # overwrite operator-edited templates too
+```
+
+Unlike `upgrade-docs`, the templates are **operator-editable**, so this is **add-missing-only**:
+absent files are written and existing files are **skipped** to preserve your edits (it never removes
+operator-added files). Use `--force` to overwrite an edited template back to the packaged version. It
+resolves the install location and fails closed the same way as the `upgrade-*` commands, and it never
+touches `config.yaml` or `prompts.overrides` — activating an edited prompt template stays an explicit
+operator decision (list it under `prompts.overrides`; see [configuration.md](configuration.md)).
+**External-footprint caveat:** the templates land beside the workspace `config.yaml`, but the default
+`prompts.templates_dir: "./templates/prompts"` resolves from the *current working directory*; for an
+`external` workspace, run `worc` from the workspace or point `prompts.templates_dir` at the workspace
+path so the overrides are found.
+
+After a package upgrade, run **`upgrade-config`**, **`upgrade-docs`**, and **`install-templates`** to
+bring your deployment fully current. (A single umbrella `upgrade` that does all three is tracked in
+[follow-ups](backlog/follow_ups.md).)
 
 To install or pin a specific published (pre)release, append its tag to the `pipx`/`pip` source — e.g.
 `pipx install "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git@v0.1.1a1"`. Releases
