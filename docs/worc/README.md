@@ -8,8 +8,9 @@ the repository. If you only have a moment, read this file — it is enough to wr
   scoping, constraints, the project's own working rules).
 - **[decision-guide.md](decision-guide.md)** — *when to use what* (run vs watch, decompose, skipping
   stages, model/reasoning, auto-merge, footprint, Telegram).
-- **[examples/task-minimal.md](examples/task-minimal.md)** and
-  **[examples/task-rich.md](examples/task-rich.md)** — copy one and fill it in.
+- **[examples/task-minimal.md](examples/task-minimal.md)** — the smallest valid task (just `id`,
+  `title`, and a body) and **[examples/task-rich.md](examples/task-rich.md)** — a maximal task that
+  exercises *every* front-matter field with inline rule notes. Copy one and fill it in.
 
 ## What the orchestrator does with your task
 

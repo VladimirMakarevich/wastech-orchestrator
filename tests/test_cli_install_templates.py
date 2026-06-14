@@ -3,8 +3,9 @@
 Delivers the packaged ``templates/`` tree (beside ``config.yaml``) add-missing-only: writes absent
 files, **skips** existing ones to preserve operator edits, is idempotent (all present → no-op),
 overwrites under ``--force``, previews with ``--dry-run``, never removes operator-added files
-(unlike ``upgrade-docs``), never touches ``config.yaml``/``prompts.overrides``, and fails closed
-(exit 2) when no config can be resolved. Also pins the shared-helper parity with ``init``.
+(unlike ``upgrade-docs``), never touches ``config.yaml``, and fails closed (exit 2) when no config
+can be resolved. The delivered tree is **prompts-only** (schema v6). Also pins the shared-helper
+parity with ``init``.
 """
 
 from __future__ import annotations
@@ -67,8 +68,27 @@ def test_single_missing_file_added_siblings_skipped(
     assert cli.main(["--config", str(cfg), "install-templates"]) == 0
     out = capsys.readouterr().out
     assert f"+ add {Path('templates') / PROBE}" in out
-    assert f"skip {Path('templates') / 'task.md'}" in out
+    assert f"skip {Path('templates') / 'prompts' / 'implementation.md'}" in out
     assert (tmp_path / "templates" / PROBE).read_bytes() == _packaged()[PROBE]
+
+
+def test_delivered_tree_is_prompts_only(tmp_path: Path) -> None:
+    # Schema v6: only prompts/ ships; skills/, AGENTS.md, CLAUDE.md, task.md are no longer shipped.
+    cfg = _write_config(tmp_path)
+    assert cli.main(["--config", str(cfg), "install-templates"]) == 0
+    delivered = {
+        p.relative_to(tmp_path / "templates").as_posix()
+        for p in (tmp_path / "templates").rglob("*")
+        if p.is_file()
+    }
+    assert delivered == {
+        "prompts/refinement.md",
+        "prompts/planning.md",
+        "prompts/implementation.md",
+        "prompts/review.md",
+        "prompts/fixing.md",
+        "prompts/summary.md",
+    }
 
 
 def test_already_complete_is_noop(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

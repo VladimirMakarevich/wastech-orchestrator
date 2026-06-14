@@ -99,10 +99,10 @@ pipx install "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git
 #    The default in-repo footprint keeps the task & its summary in this repo; config + state
 #    live in a sibling <repo-name>-orchestrator workspace, leaving your tracked files untouched.
 cd /path/to/my-repo
-wastech-orchestrator install .          # interactive wizard (detects origin, branch, agents, checks)
+worc install .          # interactive wizard (detects origin, branch, agents, checks)
 
 # 3. Confirm the agents and isolation policy are ready (read-only).
-wastech-orchestrator preflight
+worc preflight
 ```
 
 Author a task in the repo's `tasks/pending/` directory:
@@ -133,14 +133,14 @@ Then run it:
 
 ```bash
 # Process exactly one task, end to end:
-wastech-orchestrator run tasks/pending/task-001.md
+worc run tasks/pending/task-001.md
 
 # …or run the watch loop: it processes pending tasks and periodically fetch/pulls the base branch
 # so tasks pushed to Git later are picked up automatically (Ctrl-C to stop).
-wastech-orchestrator watch
+worc watch
 
 # Inspect progress / the latest persisted task at any time:
-wastech-orchestrator status
+worc status
 ```
 
 The orchestrator creates `agent/task-001-...`, runs the pipeline and your checks, commits the code
@@ -148,7 +148,7 @@ plus the task and its summary, pushes, and (with `gh` present) opens a PR whose 
 A failed attempt is also committed and pushed for inspection — without opening a PR.
 
 > Prefer a fresh, self-contained layout instead of binding an existing repo? Use
-> `wastech-orchestrator init .` to scaffold folders + `config.yaml` + editable prompt templates,
+> `worc init .` to scaffold folders + `config.yaml` + editable prompt templates,
 > then point `repo.url` / `repo.local_path` at a separate clone. See
 > [docs/operations.md §1](docs/operations.md).
 
@@ -180,37 +180,37 @@ to run `install .`.
 ## Commands
 
 ```text
-wastech-orchestrator init [path]        scaffold folders + config.yaml + templates + worc/ docs (idempotent)
+worc init [path]        scaffold folders + config.yaml + templates + worc/ docs (idempotent)
                           --git-mode in_repo_commit | in_repo_exclude | external   (default: in_repo_commit)
-wastech-orchestrator install [repo]     bind an existing repo, generate config + worc/ docs, record the binding
+worc install [repo]     bind an existing repo, generate config + worc/ docs, record the binding
                           --non-interactive --provider codex|claude|both|auto --no-create-pr --reconfigure
-wastech-orchestrator preflight          check both CLIs' health + the isolation policy (read-only)
-wastech-orchestrator telegram-test      send a real correlated Telegram prompt and wait for reply
+worc preflight          check both CLIs' health + the isolation policy (read-only)
+worc telegram-test      send a real correlated Telegram prompt and wait for reply
                           --timeout-seconds N       smoke-test deadline (default: 60)
-wastech-orchestrator run <task-file>    process exactly one task end to end
-wastech-orchestrator rerun <task-id>    re-attempt a terminal (failed/manual) task; daemon must be idle
+worc run <task-file>    process exactly one task end to end
+worc rerun <task-id>    re-attempt a terminal (failed/manual) task; daemon must be idle
                           --continue                  reuse the branch + re-enter at the failed stage
                           --force-reset-remote        delete the prior remote branch (closes its PR)
                           --dry-run  --yes            preview the plan / skip the confirmation
-wastech-orchestrator finalize <task-id> record + tidy a task you handled by hand (no pipeline/commit/PR)
+worc finalize <task-id> record + tidy a task you handled by hand (no pipeline/commit/PR)
                           --as done|failed|abandoned  the operator-declared terminal outcome (required)
                           --pr-url URL  --note TEXT    merged-PR URL / ledger note (for --as done)
                           --delete-branch  --no-verify-pr  --dry-run  --yes
-wastech-orchestrator watch              process pending tasks; loop + periodic git sync
+worc watch              process pending tasks; loop + periodic git sync
                           --poll-seconds N            override orchestrator.poll_interval_seconds
-wastech-orchestrator stop               stop a running watch daemon (SIGTERM, then SIGKILL)
+worc stop               stop a running watch daemon (SIGTERM, then SIGKILL)
                           --timeout SECONDS           graceful-shutdown wait before SIGKILL (default: 30)
-wastech-orchestrator restart            stop the running watch daemon, then start a fresh one
+worc restart            stop the running watch daemon, then start a fresh one
                           --timeout SECONDS  --poll-seconds N
-wastech-orchestrator status [task-id]   show the active/latest persisted task (no work performed)
-wastech-orchestrator upgrade-config     add config keys from a new version, keeping existing values
+worc status [task-id]   show the active/latest persisted task (no work performed)
+worc upgrade-config     add config keys from a new version, keeping existing values
                           --dry-run                   preview the keys that would be added
-wastech-orchestrator upgrade-docs       refresh the installed worc/ task-authoring docs to the packaged version
+worc upgrade-docs       refresh the installed worc/ task-authoring docs to the packaged version
                           --dry-run                   preview added/updated/removed files
-wastech-orchestrator install-templates  deliver the packaged templates/ tree into an existing install (add-missing)
+worc install-templates  deliver the packaged templates/ tree into an existing install (add-missing)
                           --force                     overwrite existing templates (default: skip operator edits)
                           --dry-run                   preview the add/skip(/overwrite) plan
-wastech-orchestrator --version          installed version
+worc --version          installed version
 ```
 
 Every command is also available under the short alias **`worc`** (e.g. `worc watch`, `worc stop`);

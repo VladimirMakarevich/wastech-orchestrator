@@ -10,6 +10,16 @@ Owner: Vladimir Makarevich
 
 ## Outcome (as implemented)
 
+> **Superseded in part by schema v6** (prompt-templates simplification — see
+> [../backlog/task_prompt_templates_simplification.md](../backlog/task_prompt_templates_simplification.md)).
+> The delivered tree is now **prompts-only**: `skills/`, `AGENTS.md`, `CLAUDE.md`, and `task.md` are no
+> longer shipped, which **resolves** the "Scope of the tree" question below (prompts-only; the deferred
+> `--only prompts|skills` selector is moot). `prompts.templates_dir` now resolves **relative to
+> `config.yaml`** (closes the §6/§11 deferral), and `prompts.overrides`/`prompts.strict` are removed —
+> a delivered `prompts/<stage>.md` is auto-detected by file presence, so "no config mutation" below
+> means there is nothing to opt into. The command behavior (add-missing-only, parity with `init`,
+> fail-closed resolution) is unchanged.
+
 A separate, idempotent `worc install-templates` that delivers the packaged `templates/` tree beside
 the resolved `config.yaml`, **add-missing-only**.
 

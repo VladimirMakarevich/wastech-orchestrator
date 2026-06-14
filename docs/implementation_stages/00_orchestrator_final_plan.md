@@ -1002,14 +1002,7 @@ wastech-orchestrator init [path]
     rejected/   .gitkeep           # quarantine for tasks rejected by the §19 gate
   logs/         .gitkeep
   workspace/    .gitkeep
-  templates/                       # operator-editable copies
-    task.md                        # task template (mirrors the §5 front matter + body)
-    AGENTS.md                      # stub seeded into the TARGET repo (Codex)
-    CLAUDE.md                      # stub seeded into the TARGET repo (Claude Code)
-    skills/                        # packaged reference skills (one dir per skill)
-      safe-change/    SKILL.md
-      self-review/    SKILL.md
-      test-discipline/ SKILL.md
+  templates/                       # operator-editable copies (prompts only, schema v6)
     prompts/
       refinement.md                # per-stage prompt templates with {variables}
       planning.md
@@ -1018,6 +1011,13 @@ wastech-orchestrator init [path]
       fixing.md
       summary.md
 ```
+
+The delivered tree is **prompts-only** (schema v6): `task.md`, `AGENTS.md`, `CLAUDE.md`, and
+`skills/` are no longer delivered — the orchestrator never consumed them from the control directory
+(skills are scanned from the *target* repo's `.claude/skills`; `AGENTS.md`/`CLAUDE.md` are read from
+the *target* repo root; task authoring uses `worc/examples/`). Editing any `prompts/<stage>.md`
+activates it automatically (the `prompts:` config block; see
+[12_prompt_template_customization.md](12_prompt_template_customization.md)); no opt-in map is needed.
 
 ### 20.3. Template source and idempotency
 
@@ -1050,7 +1050,7 @@ The wizard, in order: (1) detects the Git root, `origin`, current/base branch, a
 
 ### 20.5. Template (re)installation (`install-templates`)
 
-`wastech-orchestrator install-templates` delivers the packaged `templates/` tree (§20.2 — stage prompts, skills, agent stubs) into an **existing** install, beside its `config.yaml`. Only `init` copies the tree at scaffold time and `install` (§20.4) omits it entirely, so this is the supported way for an install-based setup to obtain the templates and for an upgraded orchestrator to refresh a drifted copy. It is operator-run, idempotent, and fail-closed.
+`wastech-orchestrator install-templates` delivers the packaged `templates/` tree (§20.2 — the per-stage prompts, the only operator-customizable templates from schema v6) into an **existing** install, beside its `config.yaml`. Only `init` copies the tree at scaffold time and `install` (§20.4) omits it entirely, so this is the supported way for an install-based setup to obtain the templates and for an upgraded orchestrator to refresh a drifted copy. It is operator-run, idempotent, and fail-closed.
 
 ```text
 wastech-orchestrator install-templates
@@ -1061,7 +1061,7 @@ wastech-orchestrator install-templates
 - **Location resolution.** Like `upgrade-config`/`upgrade-docs`, it resolves the install location in order — explicit `--config PATH`, then `./config.yaml`, then the repo→config registry binding (§20.4) — and writes the tree to `templates/` **beside the resolved `config.yaml`**. Fail-closed (exit 2) with an actionable hint when none resolves.
 - **Add-missing-only.** Per packaged file: absent → **write**; present → **skip** (preserve operator edits); present + `--force` → **overwrite**. `config.example.yaml` is excluded (it is the source for `config.yaml` generation, §20.3, and key materialization via `upgrade-config`). An all-present run is a successful no-op.
 - **Deliberate asymmetry with `upgrade-docs`.** `upgrade-docs` overwrites and removes orphans because the `worc/` docs are generated content; `install-templates` is add-missing and **never removes** operator-added files because templates are operator-editable.
-- **No config mutation.** It copies files only; it never writes `prompts.overrides` or otherwise edits `config.yaml`. Activating an edited prompt template stays an explicit operator decision (the override is opt-in; runtime always loads the packaged default otherwise). `init` and `install-templates` share one copy helper so the two cannot drift.
+- **No config mutation.** It copies files only; it never edits `config.yaml`. From schema v6, a delivered `prompts/<stage>.md` is byte-identical to the packaged default and is auto-detected by file presence — editing it is what changes behavior; no config opt-in is involved. `init` and `install-templates` share one copy helper so the two cannot drift.
 
 ## 21. Git footprint in the target repository
 

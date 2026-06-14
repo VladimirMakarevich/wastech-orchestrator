@@ -418,25 +418,20 @@ def test_per_stage_model_reasoning_reaches_provider(
 def test_prompt_override_reaches_provider_and_is_audited(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    """A replace-mode override changes the prompt the provider receives; it is also audited.
+    """An auto-detected replace-mode template changes the prompt the provider gets; it is audited.
 
     The rendered prompt is written per stage run and redacted before storage; provider argv is
     untouched (the prompt only ever travels on the request, never as a CLI arg).
     """
     tdir = tmp_path / "prompts"
     tdir.mkdir()
+    # The file's presence is the activation signal (schema v6) — no overrides map needed.
     # Include a token-shaped secret to prove the audit artifact is redacted defensively.
     (tdir / "implementation.md").write_text(
         "CUSTOM-IMPL-INSTRUCTION leaked=ghp_abcdefghij0123456789ABCDEFGHIJ\n",
         encoding="utf-8",
     )
-    prompts_block = (
-        "prompts:\n"
-        f"  templates_dir: {str(tdir)!r}\n"
-        "  mode: replace\n"
-        "  overrides:\n"
-        "    implementation: 'implementation.md'\n"
-    )
+    prompts_block = "prompts:\n" f"  templates_dir: {str(tdir)!r}\n" "  mode: replace\n"
     providers = _both()
     orch, _store, _, art = _build(
         git_repo,
@@ -473,27 +468,21 @@ def test_prompt_override_reaches_provider_and_is_audited(
     assert "ghp_abcdefghij0123456789ABCDEFGHIJ" not in body  # redacted
 
 
-def test_strict_missing_prompt_override_fails_at_construction(
+def test_missing_prompt_file_falls_back_to_packaged_default(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    from wastech_orchestrator.config.loader import ConfigError
-
-    prompts_block = (
-        "prompts:\n"
-        f"  templates_dir: {str(tmp_path / 'absent')!r}\n"
-        "  strict: true\n"
-        "  overrides:\n"
-        "    implementation: 'implementation.md'\n"
+    # Schema v6: a missing <stage>.md is the normal fallback, never a fail-closed config error —
+    # the orchestrator builds fine and uses the packaged default.
+    prompts_block = "prompts:\n" f"  templates_dir: {str(tmp_path / 'absent')!r}\n"
+    orch, _store, _, _art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        config_kwargs={"prompts_block": prompts_block},
     )
-    with pytest.raises(ConfigError):
-        _build(
-            git_repo,
-            make_git_config,
-            tmp_path,
-            providers=_both(),
-            check_verdicts=[0],
-            config_kwargs={"prompts_block": prompts_block},
-        )
+    assert orch is not None  # construction succeeded; no ConfigError raised
 
 
 def test_vague_task_runs_refinement(git_repo, make_git_config, tmp_path: Path) -> None:

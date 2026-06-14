@@ -16,6 +16,14 @@ and `core/prompts.py`). The notes below are retained as design rationale. Nothin
 [00_orchestrator_final_plan.md](../implementation_stages/00_orchestrator_final_plan.md), [CLAUDE.md](../../CLAUDE.md), or the hard
 invariants in [docs/rules/](../rules/).
 
+> **Superseded in part by schema v6** (see
+> [../backlog/task_prompt_templates_simplification.md](../backlog/task_prompt_templates_simplification.md)):
+> the activation model below — the `prompts.overrides` map and the `prompts.strict` flag — was replaced
+> by **convention over config**. A `prompts/<stage>.md` present in `templates_dir` is now used
+> automatically (its presence is the activation signal); `mode` defaults to `replace`; a missing file
+> falls back to the packaged default (no fail-closed path); and `templates_dir` resolves relative to
+> `config.yaml`. Read references to `overrides`/`strict` below as historical.
+
 Implementation notes that refined this proposal:
 
 - Packaged `templates/prompts/*.md` are renamed to the stage value (`planning.md`,

@@ -24,6 +24,19 @@ Under the default in-repo footprint, a live task belongs in the repo's own `task
 
 Use `true` only for genuinely large work. A small, coherent change should stay a single unit.
 
+## `pr_title` — override the PR title
+
+By default the orchestrator generates the PR title from the task `title`. Set `pr_title` when you
+want the published PR to read differently — most often a conventional-commit-style subject:
+
+```yaml
+title: "Add a bounded retry budget to webhook delivery"
+pr_title: "feat(webhooks): bounded retry budget for delivery"
+```
+
+Omit it to auto-generate. It changes only the PR title text; it does not touch the branch name (still
+`agent/<task-id>-<slug>`), the commit messages, or any routing.
+
 ## Skipping stages — `stages.<stage>.enabled: false`
 
 Skip a stage only when it adds no value for this task. Skippable: `planning`, `testing`, `review`,

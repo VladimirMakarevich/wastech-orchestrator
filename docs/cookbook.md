@@ -378,17 +378,26 @@ security policy.
 ## 7a. Customize Stage Prompts
 
 To add repository-specific engineering rules or a review rubric to a stage without editing Python,
-use the optional `prompts:` block (see [configuration.md](configuration.md#prompts)). `init` already
-scaffolds `templates/prompts/` with the packaged defaults; edit a copy and point an override at it.
+edit the packaged template for that stage (see [configuration.md](configuration.md#prompts)).
+`init`/`install-templates` scaffold `templates/prompts/<stage>.md` with the packaged defaults; **just
+edit the file** — its presence is the activation signal, so no `overrides` entry is needed.
 
-Add house implementation rules on top of the default instruction:
+Replace the review prompt entirely with a security rubric (the default `mode: replace`):
+
+```markdown
+<!-- templates/prompts/review.md -->
+Review for security first. Reject the change unless:
+- all new inputs are validated and outputs encoded;
+- no secret, token, or credential appears in the diff at {diff_path};
+- the plan at {plan_path} is fully implemented.
+```
+
+To instead *add* house rules on top of the packaged default, switch to append mode:
 
 ```yaml
 # config.yaml
 prompts:
   mode: append            # keep the packaged default, then add your text
-  overrides:
-    implementation: "implementation.md"
 ```
 
 ```markdown
@@ -399,22 +408,15 @@ Follow the repository conventions:
 - match the logging style in {repo_path}.
 ```
 
-Replace the review prompt entirely with a security rubric:
-
-```yaml
-prompts:
-  mode: replace           # your template is the whole review prompt
-  overrides:
-    review: "review.md"
-```
-
 Notes:
 
+- A `templates/prompts/<stage>.md` is auto-detected by presence (agent-routed stages only). A stage
+  with no file falls back to the packaged default — a missing file is never an error. Set
+  `prompts.templates_dir: ""` to force the packaged defaults for every stage.
+- A relative `templates_dir` resolves from the `config.yaml` directory, so it works from any CWD.
 - Variables are metadata/paths only — e.g. `{repo_path}`, `{diff_path}`, `{plan_path}`. Large
   content stays in the artifact files the agent reads by path. Unknown `{...}` and literal braces
   pass through unchanged.
-- `strict: true` turns a missing override file into a startup error; the default `false` logs a
-  warning and falls back to the packaged default.
 - The exact text sent each run is saved (redacted) to
   `logs/<task-id>/stages/<stage>/rendered-prompt.md` so you can verify what the agent received.
 - A template is prompt text only: it cannot change the provider, sandbox/approvals, denied

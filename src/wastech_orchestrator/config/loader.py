@@ -12,7 +12,7 @@ This module owns *structural* parsing only. The cross-field §11/§21.4 semantic
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -95,8 +95,18 @@ def _mapping(value: Any, where: str, issues: list[str]) -> dict[str, Any]:
     return {str(k): v for k, v in value.items()}
 
 
-def _check_keys(m: Mapping[str, Any], allowed: set[str], where: str, issues: list[str]) -> None:
-    for key in sorted(set(m) - allowed):
+def _check_keys(
+    m: Mapping[str, Any],
+    allowed: set[str],
+    where: str,
+    issues: list[str],
+    *,
+    tolerated: set[str] | None = None,
+) -> None:
+    # ``tolerated`` keys (e.g. removed-but-legacy config keys) are neither accepted into the schema
+    # nor reported as errors — the caller handles them (typically a deprecation warning).
+    ignore = allowed | (tolerated or set())
+    for key in sorted(set(m) - ignore):
         issues.append(f"{where}: unknown key {key!r}")
 
 
@@ -698,33 +708,23 @@ def _build_telegram(raw: Any, issues: list[str]) -> TelegramConfig:
     )
 
 
-def _build_prompt_overrides(raw: Any, issues: list[str]) -> tuple[tuple[Stage, str], ...]:
-    where = "prompts.overrides"
-    m = _mapping(raw, where, issues)
-    overrides: dict[Stage, str] = {}
-    for key in sorted(m):
-        try:
-            stage = Stage(key)
-        except ValueError:
-            issues.append(f"{where}: unknown stage key {key!r}")
-            continue
-        value = m[key]
-        if not isinstance(value, str):
-            issues.append(f"{where}.{key}: expected a string, got {type(value).__name__}")
-            continue
-        overrides[stage] = value
-    return tuple(overrides.items())
-
-
-def _build_prompts(raw: Any, issues: list[str]) -> PromptsConfig:
+def _build_prompts(raw: Any, issues: list[str], warnings: list[str]) -> PromptsConfig:
     where = "prompts"
     m = _mapping(raw, where, issues)
-    _check_keys(m, {"templates_dir", "mode", "strict", "overrides"}, where, issues)
+    # Prompt overrides are now auto-detected by file presence in ``templates_dir`` (schema v6); the
+    # ``overrides`` map and the ``strict`` flag are gone. Legacy keys are tolerated (ignored) with a
+    # warning so old configs still load fail-open — ``upgrade-config`` strips them.
+    _check_keys(m, {"templates_dir", "mode"}, where, issues, tolerated={"overrides", "strict"})
+    for legacy in ("overrides", "strict"):
+        if legacy in m:
+            warnings.append(
+                f"prompts.{legacy} is no longer used (schema v6: prompt templates are "
+                f"auto-detected by file presence in templates_dir); the key is ignored — run "
+                f"`worc upgrade-config` to remove it"
+            )
     return PromptsConfig(
         templates_dir=_str(m, "templates_dir", "./templates/prompts", where, issues),
-        mode=_enum(m.get("mode"), PromptMode, f"{where}.mode", issues, PromptMode.APPEND),
-        strict=_bool(m, "strict", False, where, issues),
-        overrides=_build_prompt_overrides(m.get("overrides"), issues),
+        mode=_enum(m.get("mode"), PromptMode, f"{where}.mode", issues, PromptMode.REPLACE),
     )
 
 
@@ -787,7 +787,7 @@ def _parse(raw: Mapping[str, Any], issues: list[str], warnings: list[str]) -> Or
         checks=_build_checks(raw.get("checks"), issues),
         git=_build_git(raw.get("git"), issues),
         telegram=_build_telegram(raw.get("telegram"), issues),
-        prompts=_build_prompts(raw.get("prompts"), issues),
+        prompts=_build_prompts(raw.get("prompts"), issues, warnings),
         skills=_build_skills(raw.get("skills"), issues),
     )
 
@@ -812,7 +812,18 @@ def load_config(path: str | Path) -> ConfigLoadResult:
     """Read and parse a config file. Structural problems raise :class:`ConfigError`.
 
     Semantic §11/§21.4 rules are enforced separately by ``config.validation.validate_config``.
+
+    A relative ``prompts.templates_dir`` is anchored to the **config file's directory** (not the
+    CWD), so the file-presence activation switch is CWD-independent. Absolute paths and the empty
+    opt-out (``""``) pass through unchanged.
     """
     file = Path(path)
     text = file.read_text(encoding="utf-8")
-    return loads_config(text, source=str(file))
+    result = loads_config(text, source=str(file))
+    templates_dir = result.config.prompts.templates_dir
+    if templates_dir and not Path(templates_dir).is_absolute():
+        anchored = str(file.resolve().parent / templates_dir)
+        prompts = replace(result.config.prompts, templates_dir=anchored)
+        config = replace(result.config, prompts=prompts)
+        result = ConfigLoadResult(config=config, warnings=result.warnings)
+    return result

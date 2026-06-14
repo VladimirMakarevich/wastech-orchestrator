@@ -1,22 +1,40 @@
 ---
 id: task-webhook-retry-budget
 title: "Add a bounded retry budget to webhook delivery"
-refined: false              # let refinement enrich if needed; criteria below already make it complete
-decompose: false            # one coherent change — keep it a single unit
-agents:                     # per-stage provider override (only providers the operator allows)
-  planning: claude
-  implementation: claude
-  review: codex
-contacts:
+pr_title: "feat(webhooks): bounded retry budget for delivery"  # overrides the auto-generated PR title (omit to auto-generate from title)
+refined: false              # true = skip the refinement stage (criteria below already make it complete)
+decompose: false            # true = force split into subtasks / false = disable / omit = config default
+auto_merge: false           # true = auto-merge (DANGER: skips human review; only if config git.auto_merge_allow_per_task) / false = opt out / omit = config default
+contacts:                   # handles surfaced for human-in-the-loop prompts and approvals
   - "@team-lead"
-model: claude-sonnet-4-6    # task-wide default model for stages not overridden below
-reasoning: low
-stages:                     # per-stage model/reasoning overrides (most-specific wins)
+  - "@webhooks-oncall"
+agents:                     # per-stage provider override — only agent-routed stages; only providers in agents.allowed
+  refinement: claude
+  planning: claude
+  implementation: codex
+  review: claude
+  fixing: codex
+  summary: claude
+model: claude-sonnet-4-6    # task-wide default model for agent-routed stages not overridden under `stages`
+reasoning: medium           # task-wide default reasoning: low | medium | high | xhigh | max
+stages:                     # per-stage overrides; precedence: stages.<stage> -> task-wide -> provider default
+  refinement:
+    model: claude-opus-4-8
   planning:
     model: claude-opus-4-8
     reasoning: high
+  implementation:
+    model: claude-sonnet-4-6
+    reasoning: medium
   review:
-    reasoning: high         # only reasoning overridden — model stays the task-wide one
+    reasoning: high          # only reasoning overridden — model stays the task-wide default
+  fixing:
+    model: claude-sonnet-4-6
+  testing:
+    enabled: true            # testing is skippable but runs no agent -> only `enabled` is valid here (no model/reasoning); false would skip checks (rarely wanted)
+  summary:
+    enabled: false           # (illustrative) skip a stage; routing & `enabled` are independent. Skippable: planning, testing, review, fixing, summary.
+                             # skipping `review` also needs agents.allow_review_skip; implementation/refinement are never skippable; publishing is not per-task.
 ---
 
 ## Description

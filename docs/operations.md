@@ -147,9 +147,10 @@ files no longer shipped, and makes no backup. It is idempotent (an already-curre
 `--dry-run` writes nothing, and it fails closed (exit 2 with the same hint as `upgrade-config`) when
 no install location can be resolved.
 
-The `templates/` tree (stage prompts, skills, agent stubs) also ships with the package, but only
-`init` copies it — the wizard-based `install` does not, and an upgrade carries newer templates than an
-already-installed copy. Deliver or refresh them beside `config.yaml` with **`install-templates`**:
+The `templates/` tree (the per-stage prompts — the only operator-customizable templates from schema
+v6) also ships with the package, but only `init` copies it — the wizard-based `install` does not, and
+an upgrade carries newer templates than an already-installed copy. Deliver or refresh them beside
+`config.yaml` with **`install-templates`**:
 
 ```bash
 wastech-orchestrator install-templates           # uses the discovered/bound config location
@@ -161,12 +162,11 @@ Unlike `upgrade-docs`, the templates are **operator-editable**, so this is **add
 absent files are written and existing files are **skipped** to preserve your edits (it never removes
 operator-added files). Use `--force` to overwrite an edited template back to the packaged version. It
 resolves the install location and fails closed the same way as the `upgrade-*` commands, and it never
-touches `config.yaml` or `prompts.overrides` — activating an edited prompt template stays an explicit
-operator decision (list it under `prompts.overrides`; see [configuration.md](configuration.md)).
-**External-footprint caveat:** the templates land beside the workspace `config.yaml`, but the default
-`prompts.templates_dir: "./templates/prompts"` resolves from the *current working directory*; for an
-`external` workspace, run `worc` from the workspace or point `prompts.templates_dir` at the workspace
-path so the overrides are found.
+touches `config.yaml`. From schema v6 a delivered `prompts/<stage>.md` is **auto-detected by file
+presence** — edit it to take effect; there is no `overrides` map to maintain (see
+[configuration.md](configuration.md#prompts)). A relative `prompts.templates_dir` resolves from the
+`config.yaml` directory, so the templates are found regardless of the current working directory —
+including under an `external` workspace footprint.
 
 After a package upgrade, run **`upgrade-config`**, **`upgrade-docs`**, and **`install-templates`** to
 bring your deployment fully current. (A single umbrella `upgrade` that does all three is tracked in
@@ -598,22 +598,24 @@ logs/
   ledger, and the failure report are all redacted; `denied_read_paths` (`.env`, `secrets/**`) are
   excluded from agent reads and their values are scrubbed from any sink.
 
-- **Custom stage prompts**: when `prompts:` is configured, `stages/<stage>/rendered-prompt.md` is
-  the exact (redacted) instruction the agent received for that stage — read it first to confirm an
-  override took effect and rendered as intended.
+- **Custom stage prompts**: when a `templates/prompts/<stage>.md` is present, `stages/<stage>/rendered-prompt.md`
+  is the exact (redacted) instruction the agent received for that stage — read it first to confirm
+  your edited template took effect and rendered as intended.
 
 Use the operator log for live monitoring. Provider `stdout.log` and `stderr.log` are finalized and
 redacted after the subprocess exits, so do not tail them while an attempt is still running.
 
 ### Troubleshooting prompt templates
 
-- **`ConfigError: prompts.overrides.<stage>: ...` at startup** — the override stage is not
-  agent-routed, the file is not a `.md` inside `templates_dir`, or (in `strict: true`) the file is
-  missing/unreadable. Fix the path/stage, or set `strict: false` to fall back to the packaged
-  default with a warning.
-- **An override "did nothing"** — check the operator log for a
-  `prompt override unreadable; using packaged default` warning (non-strict fallback), confirm
-  `mode` (`append` vs `replace`), and compare `rendered-prompt.md` against your template.
+- **An edited template "did nothing"** — confirm the file is named exactly `<stage>.md` for an
+  agent-routed stage (`refinement`, `planning`, `implementation`, `review`, `fixing`, `summary`) and
+  lives in `prompts.templates_dir` (a relative path resolves from the `config.yaml` directory).
+  Confirm `templates_dir` is not `""` (which forces the packaged defaults), check `mode` (`replace`
+  vs `append`), and compare `rendered-prompt.md` against your file. A whitespace-only file logs
+  `prompt template file is empty; using packaged default` and falls back.
+- **A missing `<stage>.md` is never an error** — a stage with no template file silently uses the
+  packaged default (there is no fail-closed path; the old `prompts.strict` flag was removed in schema
+  v6).
 - **A `{placeholder}` printed literally** — only the allowlisted variables interpolate (see
   [configuration.md](configuration.md#prompts)); any other `{...}` is intentionally left verbatim so
   code/JSON braces survive. A path variable with no value for that stage renders empty.

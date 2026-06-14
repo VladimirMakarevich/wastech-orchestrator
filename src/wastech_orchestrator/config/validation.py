@@ -115,7 +115,6 @@ def validate_config(config: OrchestratorConfig) -> list[str]:
     _validate_footprint(config, issues)
     _validate_checks(config, issues, warnings)
     _validate_telegram(config, issues)
-    _validate_prompts(config, issues)
 
     if issues:
         raise ConfigError(issues)
@@ -213,34 +212,6 @@ def _validate_footprint(config: OrchestratorConfig, issues: list[str]) -> None:
             issues.append(
                 "git.footprint.external_root must resolve outside repo.local_path "
                 f"({footprint.external_root!r} is inside {config.repo.local_path!r})"
-            )
-
-
-def _validate_prompts(config: OrchestratorConfig, issues: list[str]) -> None:
-    """Static checks on the ``prompts`` block (backlog §6). No filesystem access.
-
-    Existence / strict-vs-fallback is enforced when the ``PromptTemplateStore`` is built at
-    orchestrator startup — that is where ``templates_dir`` is actually read and a non-strict
-    fallback can happen — so it fails closed before any agent runs. Here we only reject what is
-    statically wrong: a non-agent-routed stage, a non-``.md`` file, or a path that escapes
-    ``templates_dir``.
-    """
-    prompts = config.prompts
-    base = Path(prompts.templates_dir).resolve()
-    for stage, filename in prompts.overrides:
-        where = f"prompts.overrides.{stage.value}"
-        if stage not in ROUTABLE_STAGES:
-            issues.append(
-                f"{where}: {stage.value!r} is not an agent-routed stage "
-                f"(allowed: {sorted(s.value for s in ROUTABLE_STAGES)})"
-            )
-        if not filename.endswith(".md"):
-            issues.append(f"{where}: template file {filename!r} must have a .md extension")
-        target = (base / filename).resolve()
-        if target == base or not target.is_relative_to(base):
-            issues.append(
-                f"{where}: template file {filename!r} must resolve inside "
-                f"prompts.templates_dir ({prompts.templates_dir!r})"
             )
 
 

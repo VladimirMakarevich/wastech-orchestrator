@@ -589,7 +589,7 @@ def cmd_upgrade_config(args: argparse.Namespace) -> int:
 
     operator = config_upgrade.parse_mapping(text)
     template = config_upgrade.packaged_template_mapping()
-    merged, added = config_upgrade.upgrade_config_mapping(template, operator)
+    merged, added, removed = config_upgrade.upgrade_config_mapping(template, operator)
     old_version = operator.get("schema_version", "absent")
 
     if merged == operator:
@@ -605,6 +605,8 @@ def cmd_upgrade_config(args: argparse.Namespace) -> int:
         print(f"  schema_version: {old_version} -> {CONFIG_SCHEMA_VERSION}")
         for key in added:
             print(f"  + {key}")
+        for key in removed:
+            print(f"  - {key} (removed in this schema version)")
 
     if args.dry_run:
         _report("upgrade-config (dry-run): would update")

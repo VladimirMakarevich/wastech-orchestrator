@@ -65,46 +65,20 @@ def _with_prompts(config: OrchestratorConfig, **changes: object) -> Orchestrator
     return replace(config, prompts=replace(config.prompts, **changes))
 
 
-def test_prompt_override_unknown_stage_is_rejected(base_config: OrchestratorConfig) -> None:
-    bad = _with_prompts(base_config, overrides=((Stage.TESTING, "testing.md"),))
-    with pytest.raises(ConfigError) as exc:
-        validate_config(bad)
-    assert any("agent-routed" in issue for issue in exc.value.issues)
-
-
-def test_prompt_override_non_md_suffix_is_rejected(base_config: OrchestratorConfig) -> None:
-    bad = _with_prompts(base_config, overrides=((Stage.REVIEW, "review.txt"),))
-    with pytest.raises(ConfigError) as exc:
-        validate_config(bad)
-    assert any(".md extension" in issue for issue in exc.value.issues)
-
-
-@pytest.mark.parametrize("escape", ["../escape.md", "/etc/passwd.md", "sub/../../escape.md"])
-def test_prompt_override_path_traversal_is_rejected(
-    base_config: OrchestratorConfig, escape: str
-) -> None:
-    bad = _with_prompts(base_config, overrides=((Stage.IMPLEMENTATION, escape),))
-    with pytest.raises(ConfigError) as exc:
-        validate_config(bad)
-    assert any("templates_dir" in issue for issue in exc.value.issues)
-
-
-def test_prompt_override_inside_templates_dir_is_accepted(
-    base_config: OrchestratorConfig,
-) -> None:
-    good = _with_prompts(
-        base_config,
-        overrides=(
-            (Stage.IMPLEMENTATION, "implementation.md"),
-            (Stage.REVIEW, "nested/review.md"),
-        ),
-    )
-    assert validate_config(good) == []
-
-
 def test_default_prompts_config_validates_clean(base_config: OrchestratorConfig) -> None:
-    assert validate_config(_with_prompts(base_config, overrides=())) == []
+    # Schema v6: prompts resolution is by file presence (no overrides to statically validate); the
+    # block has no semantic checks left, so any well-typed templates_dir/mode validates clean.
     assert isinstance(base_config.prompts, PromptsConfig)
+    assert validate_config(base_config) == []
+
+
+def test_custom_templates_dir_and_mode_validate_clean(base_config: OrchestratorConfig) -> None:
+    from wastech_orchestrator.config.schema import PromptMode
+
+    good = _with_prompts(base_config, templates_dir="./my-prompts", mode=PromptMode.APPEND)
+    assert validate_config(good) == []
+    empty = _with_prompts(base_config, templates_dir="")  # explicit opt-out
+    assert validate_config(empty) == []
 
 
 def test_max_total_below_max_fix_cycles_is_rejected(base_config: OrchestratorConfig) -> None:

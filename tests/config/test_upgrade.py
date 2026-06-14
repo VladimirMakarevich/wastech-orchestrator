@@ -14,7 +14,7 @@ from wastech_orchestrator.config.upgrade import (
 def test_adds_missing_top_level_key() -> None:
     template = {"schema_version": CONFIG_SCHEMA_VERSION, "a": 1, "b": 2}
     operator = {"schema_version": CONFIG_SCHEMA_VERSION, "a": 1}
-    merged, added = upgrade_config_mapping(template, operator)
+    merged, added, _ = upgrade_config_mapping(template, operator)
     assert merged["b"] == 2
     assert added == ["b"]
 
@@ -23,7 +23,7 @@ def test_adds_missing_subkey_under_existing_block() -> None:
     # The real shape: a new key (skip_stages) added under an already-present agents block.
     template = {"agents": {"max_fix_cycles": 15, "skip_stages": [], "allow_review_skip": False}}
     operator = {"agents": {"max_fix_cycles": 15}}
-    merged, added = upgrade_config_mapping(template, operator)
+    merged, added, _ = upgrade_config_mapping(template, operator)
     assert merged["agents"] == {
         "max_fix_cycles": 15,
         "skip_stages": [],
@@ -35,7 +35,7 @@ def test_adds_missing_subkey_under_existing_block() -> None:
 def test_never_overwrites_existing_leaf() -> None:
     template = {"agents": {"max_fix_cycles": 15}}
     operator = {"agents": {"max_fix_cycles": 99}}  # operator tuned it
-    merged, added = upgrade_config_mapping(template, operator)
+    merged, added, _ = upgrade_config_mapping(template, operator)
     assert merged["agents"]["max_fix_cycles"] == 99
     assert added == []
 
@@ -45,7 +45,7 @@ def test_preserves_operator_only_keys() -> None:
     operator = {
         "agents": {"providers": {"claude": {"command": "claude"}, "codex": {"command": "codex"}}}
     }
-    merged, _ = upgrade_config_mapping(template, operator)
+    merged, _, _ = upgrade_config_mapping(template, operator)
     # The operator's extra provider (absent from the template) survives.
     assert merged["agents"]["providers"]["codex"] == {"command": "codex"}
 
@@ -53,20 +53,20 @@ def test_preserves_operator_only_keys() -> None:
 def test_list_values_kept_verbatim() -> None:
     template = {"checks": {"commands": []}}
     operator = {"checks": {"commands": ["pytest", "ruff check ."]}}
-    merged, added = upgrade_config_mapping(template, operator)
+    merged, added, _ = upgrade_config_mapping(template, operator)
     assert merged["checks"]["commands"] == ["pytest", "ruff check ."]
     assert added == []  # the list is a present leaf, not merged element-wise
 
 
 def test_schema_version_forced_to_current() -> None:
-    merged, _ = upgrade_config_mapping({"schema_version": CONFIG_SCHEMA_VERSION}, {"x": 1})
+    merged, _, _ = upgrade_config_mapping({"schema_version": CONFIG_SCHEMA_VERSION}, {"x": 1})
     assert merged["schema_version"] == CONFIG_SCHEMA_VERSION
 
 
 def test_schema_version_absent_in_operator_is_added_and_stamped() -> None:
     template = {"schema_version": CONFIG_SCHEMA_VERSION, "x": 1}
     operator = {"x": 1}  # legacy config with no schema_version
-    merged, added = upgrade_config_mapping(template, operator)
+    merged, added, _ = upgrade_config_mapping(template, operator)
     assert merged["schema_version"] == CONFIG_SCHEMA_VERSION
     assert "schema_version" in added
 
@@ -74,7 +74,7 @@ def test_schema_version_absent_in_operator_is_added_and_stamped() -> None:
 def test_idempotent_when_already_current() -> None:
     template = {"schema_version": CONFIG_SCHEMA_VERSION, "a": 1, "nested": {"b": 2}}
     # An operator config already carrying everything the template has → no additions, equal result.
-    merged, added = upgrade_config_mapping(template, dict(template))
+    merged, added, _ = upgrade_config_mapping(template, dict(template))
     assert added == []
     assert merged == template
 
@@ -83,9 +83,30 @@ def test_packaged_template_is_complete_and_self_idempotent() -> None:
     # Upgrading the packaged template against itself adds nothing — it is the current shape.
     template = packaged_template_mapping()
     assert template  # non-empty
-    merged, added = upgrade_config_mapping(template, dict(template))
+    merged, added, _ = upgrade_config_mapping(template, dict(template))
     assert added == []
     assert merged == template
+    assert merged["schema_version"] == CONFIG_SCHEMA_VERSION
+
+
+def test_strips_legacy_prompts_overrides_and_strict() -> None:
+    # Schema v6 removed prompts.overrides / prompts.strict; upgrade-config drops them.
+    template = {"schema_version": CONFIG_SCHEMA_VERSION, "prompts": {"templates_dir": "./tpl"}}
+    operator = {
+        "schema_version": 5,
+        "prompts": {
+            "templates_dir": "./tpl",
+            "mode": "append",
+            "strict": True,
+            "overrides": {"implementation": "implementation.md"},
+        },
+    }
+    merged, _added, removed = upgrade_config_mapping(template, operator)
+    assert "overrides" not in merged["prompts"]
+    assert "strict" not in merged["prompts"]
+    # An operator-set value that survives (mode) is preserved untouched.
+    assert merged["prompts"]["mode"] == "append"
+    assert sorted(removed) == ["prompts.overrides", "prompts.strict"]
     assert merged["schema_version"] == CONFIG_SCHEMA_VERSION
 
 

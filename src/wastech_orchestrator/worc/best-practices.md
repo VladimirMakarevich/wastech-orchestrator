@@ -35,6 +35,9 @@ One task = one branch = one PR. Keep it to a single, reviewable change:
 - If the work spans several independent changes, split it into separate tasks, or set
   `decompose: true` and let the orchestrator break it into sequential subtasks on one branch.
 - A tightly scoped task plans better, reviews faster, and is far less likely to need a fixing cycle.
+- If your repo expects a conventional-commit-style PR subject that differs from a plain task `title`,
+  set `pr_title` (e.g. `pr_title: "feat(webhooks): bounded retry budget"`); otherwise omit it and let
+  the PR title be generated from `title`.
 
 ## 3. State constraints explicitly
 

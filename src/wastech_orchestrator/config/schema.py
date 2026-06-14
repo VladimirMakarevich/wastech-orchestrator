@@ -27,7 +27,11 @@ from wastech_orchestrator.providers.base import ProviderId, Stage
 # v5 (2026-06-14, post-test-run): adds the optional `skills:` block (§2.1) and the
 # `checks.discovery.{run_at_task_start,approve_command_changes}` keys (§1.2). All are
 # backward-compatible (absent => safe defaults); `upgrade-config` adds them to an older config.
-CONFIG_SCHEMA_VERSION = 5
+# v6 (2026-06-14, prompt-templates-simplification): prompt overrides are now auto-detected by file
+# presence in `prompts.templates_dir` — the `prompts.overrides` map and `prompts.strict` flag are
+# removed, and `prompts.mode` now defaults to `replace`. Legacy `overrides`/`strict` keys are
+# tolerated (ignored) on load; `upgrade-config` strips them. Old configs still load fail-open.
+CONFIG_SCHEMA_VERSION = 6
 
 # Stages routed to an agent provider. The remaining stages (``testing``, ``publishing``) are run by
 # the orchestrator itself (Check Runner / Git Manager), so they never appear in ``agents.routing``
@@ -280,25 +284,24 @@ class TelegramConfig:
 
 
 class PromptMode(StrEnum):
-    """How an operator override combines with the packaged default prompt (backlog §4)."""
+    """How an operator template combines with the packaged default prompt (backlog §5)."""
 
     APPEND = "append"  # packaged default, then the operator template
-    REPLACE = "replace"  # the operator template only, for stages that have an override
+    REPLACE = "replace"  # the operator template only, for stages that have a template file
 
 
 @dataclass(frozen=True)
 class PromptsConfig:
-    """Operator-customizable stage prompts (backlog: prompt_template_customization §4).
+    """Operator-customizable stage prompts (backlog: prompt_template_customization §5).
 
-    Defaults reproduce the previous hardcoded behavior exactly: packaged templates, append mode,
-    non-strict, no overrides. ``overrides`` maps an agent-routed :class:`Stage` to a relative
-    filename inside ``templates_dir``; it is a tuple of pairs to keep the dataclass hashable.
+    A ``<stage>.md`` present in ``templates_dir`` is used **automatically** (no opt-in map); the
+    packaged default is only a per-stage fallback. ``mode`` decides how a present file combines with
+    the packaged default (``replace`` = file only; ``append`` = default + file). An empty
+    ``templates_dir`` forces the packaged defaults for every stage.
     """
 
     templates_dir: str = "./templates/prompts"
-    mode: PromptMode = PromptMode.APPEND
-    strict: bool = False
-    overrides: tuple[tuple[Stage, str], ...] = ()
+    mode: PromptMode = PromptMode.REPLACE
 
 
 @dataclass(frozen=True)
