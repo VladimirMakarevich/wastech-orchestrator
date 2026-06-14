@@ -33,8 +33,10 @@ from wastech_orchestrator.config.schema import (
 )
 from wastech_orchestrator.config.validation import validate_config
 from wastech_orchestrator.core.orchestrator import (
+    FinalizePlan,
     Orchestrator,
     PipelineResult,
+    RerunPlan,
     build_orchestrator,
     build_providers,
 )
@@ -301,6 +303,76 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="print what would change; write nothing"
     )
 
+    install_templates_cmd = sub.add_parser(
+        "install-templates",
+        help="deliver the packaged templates/ tree into an existing install (add-missing-only)",
+    )
+    install_templates_cmd.add_argument(
+        "--force", action="store_true", help="overwrite existing template files (default: skip)"
+    )
+    install_templates_cmd.add_argument(
+        "--dry-run", action="store_true", help="print the add/skip(/overwrite) plan; write nothing"
+    )
+
+    rerun_cmd = sub.add_parser(
+        "rerun",
+        help="re-attempt a terminal task: fresh from base, or --continue from the failed stage",
+    )
+    rerun_cmd.add_argument(
+        "task_id", help="id of the failed / manual_action_required task to re-attempt"
+    )
+    rerun_cmd.add_argument(
+        "--continue",
+        dest="continue_",
+        action="store_true",
+        help="fix-and-continue: reuse the existing branch and re-enter at the stage it failed",
+    )
+    rerun_cmd.add_argument(
+        "--force-reset-remote",
+        action="store_true",
+        help="(fresh mode) delete the prior attempt's remote branch, closing any open PR",
+    )
+    rerun_cmd.add_argument(
+        "--dry-run", action="store_true", help="print the planned reconciliation; write nothing"
+    )
+    rerun_cmd.add_argument(
+        "-y", "--yes", action="store_true", help="skip the interactive confirmation prompt"
+    )
+
+    finalize_cmd = sub.add_parser(
+        "finalize",
+        help="record + tidy a task the operator handled by hand (no pipeline, no commit/push/PR)",
+    )
+    finalize_cmd.add_argument("task_id", help="id of the task to finalize")
+    finalize_cmd.add_argument(
+        "--as",
+        dest="as_",
+        required=True,
+        choices=("done", "failed", "abandoned"),
+        help="the operator-declared terminal outcome",
+    )
+    finalize_cmd.add_argument("--pr-url", help="(--as done) the merged PR URL to record")
+    finalize_cmd.add_argument("--note", help="a short reason recorded in the ledger")
+    finalize_cmd.add_argument(
+        "--delete-branch",
+        action="store_true",
+        help="delete the now-unneeded local agent branch (default: keep it)",
+    )
+    finalize_cmd.add_argument(
+        "--keep-branch", action="store_true", help="keep the agent branch (the default; no-op)"
+    )
+    finalize_cmd.add_argument(
+        "--no-verify-pr",
+        action="store_true",
+        help="(--as done) skip the read-only `gh pr view` merge check",
+    )
+    finalize_cmd.add_argument(
+        "--dry-run", action="store_true", help="print the planned reconciliation; write nothing"
+    )
+    finalize_cmd.add_argument(
+        "-y", "--yes", action="store_true", help="skip confirmation (incl. the WARNING prompts)"
+    )
+
     return parser
 
 
@@ -346,6 +418,35 @@ def _copy_worc_docs(dest_root: Path, *, overwrite: bool, dry: bool) -> tuple[lis
             if not dry:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_bytes((Path(wroot) / rel).read_bytes())
+    return written, skipped
+
+
+def _copy_templates_tree(
+    dest_root: Path, *, overwrite: bool, dry: bool
+) -> tuple[list[str], list[str]]:
+    """Copy the packaged ``templates/`` tree into ``dest_root/templates`` (beside ``config.yaml``).
+
+    Mirrors ``_copy_worc_docs``: existing files are skipped unless ``overwrite``; ``dry`` writes
+    nothing. ``config.example.yaml`` is excluded — it is the source for ``config.yaml`` generation
+    (``init``/``install``) and key materialization (``upgrade-config``), not a verbatim template.
+    Returns ``(written, skipped)`` as ``templates/...`` relative paths for reporting. Shared by
+    ``cmd_init`` (its template-tree step) and ``cmd_install_templates`` so the two cannot drift.
+    """
+    written: list[str] = []
+    skipped: list[str] = []
+    with resources.as_file(_templates_root()) as troot:
+        for rel in _iter_template_files(Path(troot)):
+            if rel.name == "config.example.yaml":
+                continue
+            label = str(Path("templates") / rel)
+            dest = dest_root / "templates" / rel
+            if dest.exists() and not overwrite:
+                skipped.append(label)
+                continue
+            written.append(label)
+            if not dry:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes((Path(troot) / rel).read_bytes())
     return written, skipped
 
 
@@ -398,16 +499,11 @@ def cmd_init(args: argparse.Namespace) -> int:
     )
     add_file("config.yaml", config_text.encode("utf-8"), overwrite=False)
 
-    # 3. The templates/ tree (config.example.yaml is used for config.yaml, not copied verbatim).
-    with resources.as_file(_templates_root()) as troot:
-        for rel_path in _iter_template_files(Path(troot)):
-            if rel_path.name == "config.example.yaml":
-                continue
-            add_file(
-                str(Path("templates") / rel_path),
-                (Path(troot) / rel_path).read_bytes(),
-                overwrite=args.force,
-            )
+    # 3. The templates/ tree (config.example.yaml is the source for config.yaml, not copied here).
+    #    Shared with cmd_install_templates via _copy_templates_tree so the two cannot drift.
+    tmpl_written, tmpl_skipped = _copy_templates_tree(target, overwrite=args.force, dry=dry)
+    created.extend(tmpl_written)
+    skipped.extend(tmpl_skipped)
 
     # 3b. The worc/ agent task-authoring docs, copied beside config.yaml so an agent can author
     #     tasks from a local, self-contained guide. Skip-existing/--force/--dry-run like the rest.
@@ -586,6 +682,53 @@ def cmd_upgrade_docs(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_install_templates(args: argparse.Namespace) -> int:
+    """Deliver the packaged ``templates/`` tree beside ``config.yaml``, add-missing-only.
+
+    Only ``init`` copies the ``templates/`` tree (at scaffold time); the wizard-based ``install``
+    never does and no command refreshes it afterwards, so an install-based setup lacks templates and
+    an upgraded orchestrator's templates drift. This delivers them into an existing install: the
+    location is resolved like ``upgrade-config``/``upgrade-docs`` (``--config`` → ``./config.yaml``
+    → the repo→config registry binding) and the tree lands beside the resolved ``config.yaml``.
+
+    Add-missing by default: absent files are written, existing files are **skipped** to preserve
+    operator edits. ``--force`` overwrites them (explicit, like ``init --force``); ``--dry-run``
+    previews. Unlike ``upgrade-docs`` it never removes operator-added files (templates are
+    operator-editable) and it never touches ``config.yaml`` / ``prompts.overrides``: activating an
+    edited template stays an operator decision. Fail-closed (exit 2) when no location resolves.
+    """
+    path_str = resolve_config_path(args)
+    if path_str is None or not Path(path_str).is_file():
+        target = f" ({path_str})" if path_str is not None else ""
+        print(
+            f"install-templates: no config.yaml found{target} — pass --config PATH, run from a "
+            "directory containing config.yaml, or 'install' to bind this repo"
+        )
+        return 2
+    install_dir = Path(path_str).resolve().parent
+    templates_dir = install_dir / "templates"
+    written, skipped = _copy_templates_tree(install_dir, overwrite=args.force, dry=args.dry_run)
+
+    if not written:  # every packaged template already present (default run) → no-op
+        print(f"install-templates: already complete ({len(skipped)} files in {templates_dir})")
+        return 0
+
+    verb = "~ overwrite" if args.force else "+ add"
+
+    def _report(prefix: str) -> None:
+        print(f"{prefix} {templates_dir}")
+        for rel in written:
+            print(f"  {verb} {rel}")
+        for rel in skipped:
+            print(f"  skip {rel}")
+
+    if args.dry_run:
+        _report("install-templates (dry-run): would update")
+        return 0
+    _report("install-templates: updated")
+    return 0
+
+
 def load_config_for(args: argparse.Namespace) -> OrchestratorConfig | None:
     """Resolve + load a command's config; print an install hint and return ``None`` if not found."""
     path = resolve_config_path(args)
@@ -717,6 +860,195 @@ def cmd_run(args: argparse.Namespace) -> int:
     result = orchestrator.run_task(args.task_file)
     suffix = f" → {result.pr_url}" if result.pr_url else ""
     print(f"{result.task_id}: {result.final_status.value}{suffix}")
+    return _EXIT_BY_STATUS.get(result.final_status, 1)
+
+
+def _confirm(prompt: str) -> bool:
+    """Interactive y/N confirmation for a state-mutating operator command (default: no)."""
+    try:
+        answer = input(prompt)
+    except EOFError:
+        return False
+    return answer.strip().lower() in ("y", "yes")
+
+
+def _report_rerun_plan(plan: RerunPlan) -> None:
+    """Print the planned reconciliation for ``rerun --dry-run``; writes nothing."""
+    mode = "continue" if plan.continue_mode else "fresh"
+    current = plan.current_status.value if plan.current_status else "unknown"
+    print(f"rerun (dry-run): would re-attempt {plan.task_id} [{mode}]")
+    print(f"  current status: {current}")
+    if plan.continue_mode:
+        stage = plan.interrupted_status.value if plan.interrupted_status else "unknown"
+        print(f"  branch:    reuse {plan.branch or '(none)'}")
+        print(f"  re-enter:  {stage}")
+        print("  artifacts: kept; pending HITL prompt reset so the stage re-asks")
+        print("  state:     terminal markers cleared; counters/subtasks/publish-ops kept")
+    else:
+        target = plan.branch or "agent/<id>-<slug>"
+        archive = f"attempt-{max(plan.attempt - 1, 0)}"
+        print(f"  branch:    reset {target} to base '{plan.base_branch}'")
+        print(f"  artifacts: archived to logs/{plan.task_id}/{archive}/")
+        print("  state:     counters, branch/slug, decomposition, subtasks, publish-ops cleared")
+        if plan.has_remote_branch or plan.pr_url:
+            print(f"  remote/PR: delete remote branch (closes PR {plan.pr_url or ''})")
+    rerun_of = plan.task_id if plan.attempt > 1 else None
+    print(
+        f"  ledger:         append a record (attempt={plan.attempt}, rerun_of={rerun_of}); "
+        "prior records kept"
+    )
+
+
+def cmd_rerun(args: argparse.Namespace) -> int:
+    """Re-attempt a terminal task: fresh from base, or ``--continue`` from the failed stage."""
+    _configure_runtime_logging(args)
+    config = load_config_for(args)
+    if config is None:
+        return 2
+    root = artifacts_root_for(config)
+
+    # Rerun drives the pipeline in the shared clone; refuse while a live watch daemon owns it.
+    pid = process_control.read_pid(process_control.pid_file_path(root))
+    if pid is not None and process_control.is_running(pid):
+        print(
+            f"rerun: the watch daemon is running (pid {pid}); stop it first with "
+            "'wastech-orchestrator stop'"
+        )
+        return 1
+
+    if not (Path(root) / "state.db").is_file():
+        print(f"rerun: no state database at {Path(root) / 'state.db'}")
+        return 2
+
+    target_id: str = args.task_id
+    orchestrator = build_orchestrator(
+        config,
+        artifacts_root=root,
+        heartbeat_seconds=args.heartbeat_seconds,
+        is_recovery_rerun=lambda i: i == target_id,
+    )
+    plan = orchestrator.plan_rerun(
+        args.task_id,
+        continue_mode=args.continue_,
+        force_reset_remote=args.force_reset_remote,
+    )
+    if plan.refusals:
+        for reason in plan.refusals:
+            print(f"rerun: {reason}")
+        return 1
+
+    if args.dry_run:
+        _report_rerun_plan(plan)
+        return 0
+
+    if config.git.create_pull_request:
+        detect.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish (§6.7)
+
+    mode = "continue" if args.continue_ else "fresh"
+    if not args.yes and not _confirm(
+        f"Rerun {args.task_id} [{mode}] from base '{plan.base_branch}'? [y/N] "
+    ):
+        print("rerun: aborted")
+        return 0
+
+    if args.continue_:
+        result = orchestrator.continue_task(args.task_id)
+        label = "rerun/continue"
+    else:
+        assert plan.source_path is not None  # guarded by plan_rerun refusals
+        result = orchestrator.rerun_task(
+            args.task_id,
+            source_path=plan.source_path,
+            force_reset_remote=args.force_reset_remote,
+        )
+        label = "rerun"
+    suffix = f" → {result.pr_url}" if result.pr_url else ""
+    print(f"{result.task_id}: {result.final_status.value}{suffix} ({label})")
+    return _EXIT_BY_STATUS.get(result.final_status, 1)
+
+
+_FINALIZE_STATUS: dict[str, Status] = {
+    "done": Status.DONE,
+    "failed": Status.FAILED,
+    "abandoned": Status.MANUAL_ACTION_REQUIRED,  # variant A: manual + outcome="abandoned" in ledger
+}
+
+
+def _report_finalize_plan(plan: FinalizePlan, *, as_: str) -> None:
+    """Print the planned reconciliation for ``finalize --dry-run``; writes nothing."""
+    print(f"finalize (dry-run): would finalize {plan.task_id} as {as_}")
+    print(
+        f"  status:    {plan.current_status.value if plan.current_status else '?'} -> "
+        f"{plan.declared.value}"
+    )
+    if plan.declared is Status.DONE:
+        pr = plan.pr_url or "(none)"
+        verify = f", verify={plan.verify_state}" if plan.verify_state else ""
+        print(f"  pr url:    {pr} (source: {plan.pr_url_source}{verify})")
+    print(f"  cleanup:   checkout base '{plan.base_branch}'")
+    print(f"  branch:    {plan.branch or '(none)'}")
+    abandoned = ", outcome=abandoned" if plan.declared is Status.MANUAL_ACTION_REQUIRED else ""
+    print(f"  ledger:    append a manual record{abandoned}")
+    for warning in plan.warnings:
+        print(f"  WARNING:   {warning}")
+
+
+def cmd_finalize(args: argparse.Namespace) -> int:
+    """Record + tidy a task the operator handled out-of-band (no pipeline, no commit/push/PR)."""
+    _configure_runtime_logging(args)
+    config = load_config_for(args)
+    if config is None:
+        return 2
+    root = artifacts_root_for(config)
+
+    # Finalize runs terminal cleanup (`git checkout base`) in the shared clone; refuse while a live
+    # watch daemon owns it. An orphaned-active task (dead PID) is exactly what finalize reconciles.
+    pid = process_control.read_pid(process_control.pid_file_path(root))
+    if pid is not None and process_control.is_running(pid):
+        print(
+            f"finalize: the watch daemon is running (pid {pid}); stop it first with "
+            "'wastech-orchestrator stop'"
+        )
+        return 1
+
+    if not (Path(root) / "state.db").is_file():
+        print(f"finalize: no state database at {Path(root) / 'state.db'}")
+        return 2
+
+    declared = _FINALIZE_STATUS[args.as_]
+    orchestrator = build_orchestrator(
+        config, artifacts_root=root, heartbeat_seconds=args.heartbeat_seconds
+    )
+    plan = orchestrator.plan_finalize(
+        args.task_id, declared=declared, pr_url=args.pr_url, verify=not args.no_verify_pr
+    )
+    if plan.refusals:
+        for reason in plan.refusals:
+            print(f"finalize: {reason}")
+        return 1
+
+    if args.dry_run:
+        _report_finalize_plan(plan, as_=args.as_)
+        return 0
+
+    if not args.yes:
+        for warning in plan.warnings:
+            print(f"finalize: WARNING — {warning}")
+        prompt = f"Finalize {args.task_id} as {args.as_}"
+        prompt += " (unconfirmed)? [y/N] " if plan.warnings else "? [y/N] "
+        if not _confirm(prompt):
+            print("finalize: aborted")
+            return 0
+
+    result = orchestrator.finalize_task(
+        args.task_id,
+        declared=declared,
+        pr_url=plan.pr_url,
+        note=args.note,
+        delete_branch=args.delete_branch,
+    )
+    suffix = f" → {result.pr_url}" if result.pr_url else ""
+    print(f"{result.task_id}: {result.final_status.value}{suffix} (finalized)")
     return _EXIT_BY_STATUS.get(result.final_status, 1)
 
 
@@ -1195,6 +1527,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_upgrade_config(args)
         if args.command == "upgrade-docs":
             return cmd_upgrade_docs(args)
+        if args.command == "install-templates":
+            return cmd_install_templates(args)
+        if args.command == "rerun":
+            return cmd_rerun(args)
+        if args.command == "finalize":
+            return cmd_finalize(args)
     except (ConfigError, IncompatibleStateError, detect.GhNotAvailableError) as exc:
         print(f"error: {exc}")
         return 2

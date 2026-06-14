@@ -40,6 +40,55 @@ def test_records_empty_when_no_file(tmp_path: Path) -> None:
     assert Ledger(tmp_path / "logs").records() == []
 
 
+def test_rerun_linkage_round_trips(tmp_path: Path) -> None:
+    ledger = Ledger(tmp_path)
+    ledger.append(
+        LedgerRecord(
+            id="a", title="A", final_status="done", finished_at="t2", attempt=2, rerun_of="a"
+        )
+    )
+    rec = ledger.records()[0]
+    assert rec["attempt"] == 2
+    assert rec["rerun_of"] == "a"
+
+
+def test_records_tolerate_missing_rerun_keys(tmp_path: Path) -> None:
+    # A record written before the rerun fields existed omits the keys; reading is unaffected, and a
+    # fresh record defaults to attempt 1 / no rerun_of.
+    ledger = Ledger(tmp_path)
+    ledger.append(LedgerRecord(id="a", title="A", final_status="done", finished_at="t"))
+    rec = ledger.records()[0]
+    assert rec["attempt"] == 1
+    assert rec["rerun_of"] is None
+
+
+def test_finalize_marker_round_trips(tmp_path: Path) -> None:
+    ledger = Ledger(tmp_path)
+    ledger.append(
+        LedgerRecord(
+            id="a",
+            title="A",
+            final_status="manual_action_required",
+            finished_at="t",
+            manual=True,
+            note="dropped, obsolete",
+            outcome="abandoned",
+        )
+    )
+    rec = ledger.records()[0]
+    assert rec["manual"] is True
+    assert rec["note"] == "dropped, obsolete"
+    assert rec["outcome"] == "abandoned"
+
+
+def test_pipeline_record_defaults_to_not_manual(tmp_path: Path) -> None:
+    ledger = Ledger(tmp_path)
+    ledger.append(LedgerRecord(id="a", title="A", final_status="done", finished_at="t"))
+    rec = ledger.records()[0]
+    assert rec["manual"] is False
+    assert rec["note"] is None and rec["outcome"] is None
+
+
 def test_decomposition_fields_in_record(tmp_path: Path) -> None:
     ledger = Ledger(tmp_path)
     ledger.append(

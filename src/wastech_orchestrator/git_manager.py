@@ -292,6 +292,68 @@ class GitManager:
             self._git_checked("checkout", "-b", branch)
         return branch
 
+    def reset_branch_to_base(
+        self, task_id: str, slug: str, *, force_reset_remote: bool = False
+    ) -> str:
+        """Delete the stale task branch so a fresh ``rerun`` rebuilds it from the current base.
+
+        The complement of ``prepare_branch``'s deliberate *reuse*: a failed attempt's commits would
+        otherwise be reused (and stack on a base that moved on). The caller has already verified the
+        tree is clean (fail-closed), so ``checkout base`` is safe; deleting the branch while on base
+        lets the subsequent ``prepare_branch`` take its ``checkout -b`` arm from current base. Force
+        (``-D``) because a failed attempt's commits are unmerged. Idempotent: a missing branch is a
+        no-op, so re-running ``rerun`` after an interruption is safe. Returns the branch name.
+        """
+        base = self._config.repo.base_branch
+        branch = self.branch_name(task_id, slug)
+        self._git("fetch", "origin")
+        self._git_checked("checkout", base)
+        self._git("pull", "--ff-only")
+        if force_reset_remote and self._remote_branch_exists(branch):
+            # Best-effort: deleting the remote branch makes GitHub auto-close any open PR on it.
+            self._git("push", "origin", "--delete", branch)
+        self.delete_branch(branch)
+        return branch
+
+    def delete_branch(self, branch: str) -> bool:
+        """Force-delete a local branch if it exists (idempotent). Returns whether it deleted.
+
+        Used by ``finalize`` to tidy the now-unneeded agent branch (opt-in) and by
+        ``reset_branch_to_base`` for the ``rerun`` reset. ``-D`` because a terminal task's commits
+        may be unmerged; the caller must already be on another branch (``checkout base`` first).
+        """
+        if not self._branch_exists(branch):
+            return False
+        self._git_checked("branch", "-D", branch)
+        return True
+
+    def unaccounted_dirty_paths(self) -> set[str]:
+        """Public read probe for the ``rerun`` fail-closed dirty-tree gate (no mutation)."""
+        return self._unaccounted_dirty_paths()
+
+    def remote_branch_exists(self, branch: str) -> bool:
+        """Public read probe: does ``origin`` still carry this branch? (``rerun`` refuse-gate)."""
+        return self._remote_branch_exists(branch)
+
+    def recorded_pr_url(self, task_id: str) -> str | None:
+        """The PR URL a prior attempt recorded (completed ``pr`` publish op), or ``None``."""
+        existing = self._store.get_publish_op(task_id, KIND_PR, None)
+        if existing is not None and existing.status == _STATUS_COMPLETED:
+            return existing.result_ref
+        return None
+
+    def verify_pr_state(self, pr_url: str) -> str | None:
+        """Read-only PR state for ``finalize``'s merge check: ``MERGED``/``OPEN``/``CLOSED``/None.
+
+        Runs `gh pr view <url> --json state` — strictly **read-only** (never creates/pushes/merges),
+        so it does not weaken the security policy. Best-effort: returns ``None`` when ``gh`` is
+        missing / unauthenticated / offline or the PR is gone, so the caller can skip the check.
+        """
+        result = self._gh(["pr", "view", pr_url, "--json", "state", "-q", ".state"])
+        if not result.ok:
+            return None
+        return result.stdout.strip() or None
+
     def refresh_base(self) -> None:
         """Best-effort fetch + ff-only pull of ``base_branch`` so git-pushed tasks become visible.
 

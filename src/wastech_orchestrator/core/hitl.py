@@ -375,6 +375,46 @@ def mark_interaction_status(path: Path, status: str) -> None:
     _atomic_json(path, payload)
 
 
+def reset_pending_interactions(artifacts_root: str | Path, task_id: str) -> list[str]:
+    """Remove un-answered (``waiting``/``transport_error``) HITL artifacts for a continue (§rerun).
+
+    The infra failure being continued from is often a dropped notifier (the prompt never delivered
+    or never answered). Deleting only those artifacts makes the re-entered stage ask fresh instead
+    of blocking on, or replaying, a stale prompt; ``answered``/``consumed`` artifacts from earlier
+    completed stages are left intact (the resume engine skips those stages). Returns the paths that
+    were reset, for logging.
+    """
+    hitl_dir = task_artifact_dir(artifacts_root, task_id) / "hitl"
+    if not hitl_dir.is_dir():
+        return []
+    reset: list[str] = []
+    for path in sorted(hitl_dir.glob("*.json")):
+        payload = load_interaction(path)
+        if payload is not None and payload.get("status") in ("waiting", "transport_error"):
+            path.unlink()
+            reset.append(str(path))
+    return reset
+
+
+def consume_pending_interactions(artifacts_root: str | Path, task_id: str) -> list[str]:
+    """Close un-answered (``waiting``/``transport_error``) HITL artifacts for a `finalize`.
+
+    Marks them ``consumed`` (not deletes — the audit artifact is preserved) so a later resume can't
+    act on a stale prompt for a task the operator already finalized. ``answered``/``consumed``
+    artifacts are left untouched. Returns the paths that were closed.
+    """
+    hitl_dir = task_artifact_dir(artifacts_root, task_id) / "hitl"
+    if not hitl_dir.is_dir():
+        return []
+    closed: list[str] = []
+    for path in sorted(hitl_dir.glob("*.json")):
+        payload = load_interaction(path)
+        if payload is not None and payload.get("status") in ("waiting", "transport_error"):
+            mark_interaction_status(path, "consumed")
+            closed.append(str(path))
+    return closed
+
+
 def handle_from_artifact(payload: Mapping[str, Any]) -> AskHandle:
     raw = payload.get("handle")
     if not isinstance(raw, Mapping):

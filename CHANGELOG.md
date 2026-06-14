@@ -9,7 +9,7 @@ The persisted artifacts that outlive an upgrade carry their own independent sche
 [docs/operations.md](docs/operations.md#upgrading-the-orchestrator)):
 
 - `config.yaml` — top-level `schema_version` (current: **5**)
-- `state.db` — SQLite `PRAGMA user_version` (current: **2**)
+- `state.db` — SQLite `PRAGMA user_version` (current: **3**)
 - registry (`registry.json`) — `version` (current: **1**, read forward-tolerantly)
 
 The maintainer bumps the package version in `pyproject.toml` on release; `wastech-orchestrator
@@ -18,6 +18,43 @@ The maintainer bumps the package version in `pyproject.toml` on release; `wastec
 ## [Unreleased]
 
 ### Added
+- **`install-templates` command — deliver the packaged `templates/` tree into an existing install**
+  (backlog: `task_install_templates_command.md`). `worc install-templates` copies the packaged
+  `templates/` tree (stage prompts, skills, agent stubs) beside the resolved `config.yaml`,
+  **add-missing-only**: absent files are written, existing files are **skipped** to preserve operator
+  edits. The install location is resolved like `upgrade-config`/`upgrade-docs` (`--config` →
+  `./config.yaml` → the repo→config registry binding) and the command is fail-closed (exit 2) with an
+  actionable hint when none resolves. This fills the gap that only `init` copied templates and the
+  wizard-based `install` never did, so an install-based setup can now obtain the templates and an
+  upgraded orchestrator can refresh them. Unlike `upgrade-docs` it **never removes** operator-added
+  files (templates are operator-editable) and it never touches `config.yaml`/`prompts.overrides`
+  (activating an edited template stays an operator decision). `--force` overwrites existing files
+  (like `init --force`); `--dry-run` previews the add/skip(/overwrite) plan. `init` and
+  `install-templates` now share one copy helper (`_copy_templates_tree`) so the two cannot drift.
+- **`finalize` command — record + tidy a human-handled task** (backlog: `task_finalize_command.md`).
+  `worc finalize <task-id> --as <done|failed|abandoned>` reconciles the orchestrator's bookkeeping for a
+  task the operator resolved out-of-band — it **records and tidies only**, never running the pipeline or
+  committing/pushing/PR-ing. It sets the declared terminal status, runs terminal cleanup (back to
+  `base_branch`, **fail-closed** on an unaccounted-dirty tree), moves the task file, closes any waiting
+  HITL prompt, and appends a `manual` ledger record (with `note`/`outcome`/`pr_url`). For `--as done`
+  the PR URL is resolved by precedence (`--pr-url` > the URL a crashed run recorded in
+  `publish_operations` > none, which warns + asks), and a **read-only** `gh pr view` merge check runs by
+  default (`--no-verify-pr` to skip; warns+asks if not merged). `--as abandoned` is variant A
+  (`manual_action_required` + an `outcome: abandoned` ledger marker). Refuses while the `watch` daemon is
+  live, on a dirty tree, and on a re-finalize; the agent branch is kept unless `--delete-branch`. Flags:
+  `--pr-url`, `--note`, `--delete-branch`, `--keep-branch`, `--no-verify-pr`, `--dry-run`, `--yes`.
+- **`rerun` command — re-attempt a terminal task** (backlog: `task_rerun_command.md`). `worc rerun
+  <task-id>` launches a supported re-attempt of a `failed`/`manual_action_required` task without
+  hand-editing `state.db`/the ledger/git, in two modes on one command: **fresh** (default) resets the
+  agent branch to the current `base_branch`, clears the per-attempt state (counters, decomposition,
+  `subtasks`, `publish_operations`), archives the prior `logs/<id>/` to `logs/<id>/attempt-<N>/`, and
+  drives the pipeline from the start; **`--continue`** keeps the branch and the work already done and
+  re-enters at the stage the task failed (for an infra failure the operator fixed), reusing the crash
+  recovery engine. The §19 duplicate-id gate is bypassed for exactly the named id; the command refuses
+  while the `watch` daemon is live or another task is active, is **fail-closed** on an unaccounted-dirty
+  tree, and refuses (fresh mode) on a prior remote branch / open PR unless `--force-reset-remote`. The
+  ledger gains `attempt`/`rerun_of` linking each re-attempt to the prior record. Flags: `--continue`,
+  `--force-reset-remote`, `--dry-run`, `--yes`.
 - **Check discovery v2 — runtime, agent-assisted, human-checked** (post-test-run §1.2). Check
   discovery now runs inside the state machine at task start (`checks.discovery.run_at_task_start`,
   default on), so `auto` mode can resolve (and, when opted in with a cheap `checks.discovery.model`,
@@ -220,6 +257,9 @@ The maintainer bumps the package version in `pyproject.toml` on release; `wastec
   `error:` message and exit code 2 instead of being misread.
 
 ### Changed
+- **`state.db` schema → v3** (`PRAGMA user_version` 2 → 3): adds `tasks.interrupted_status` (the stage a
+  task was on before going terminal) so `rerun --continue` can re-enter at the failed stage. Migrated in
+  place by an idempotent `ALTER TABLE ADD COLUMN`; existing databases open and upgrade cleanly.
 - **Raised the default fix budget**: `agents.max_fix_cycles` `3 → 15` and
   `agents.max_total_fix_iterations` `5 → 30` (the loader defaults, both `config.example.yaml` copies,
   and the `install` generator). Existing configs are unaffected. The validator invariant

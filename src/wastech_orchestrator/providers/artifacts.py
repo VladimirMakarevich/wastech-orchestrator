@@ -53,6 +53,30 @@ def task_artifact_dir(artifacts_root: str | Path, task_id: str) -> Path:
     return Path(artifacts_root) / "logs" / task_id
 
 
+def archive_task_artifacts(artifacts_root: str | Path, task_id: str, attempt: int) -> Path | None:
+    """Move a prior attempt's artifacts into ``logs/<task-id>/attempt-<N>/`` for a fresh ``rerun``.
+
+    Everything under the task dir except existing ``attempt-*`` archives is moved, so the fresh
+    attempt starts with a clean ``logs/<task-id>/`` while the failure stays fully auditable. Returns
+    the archive directory, or ``None`` when there is nothing to archive. Idempotent: a name already
+    present in the destination (a half-done archive from an interrupted rerun) is skipped.
+    """
+    task_dir = task_artifact_dir(artifacts_root, task_id)
+    if not task_dir.exists():
+        return None
+    entries = [p for p in task_dir.iterdir() if not p.name.startswith("attempt-")]
+    if not entries:
+        return None
+    dest = task_dir / f"attempt-{attempt}"
+    dest.mkdir(parents=True, exist_ok=True)
+    for path in entries:
+        target = dest / path.name
+        if target.exists():
+            continue
+        path.rename(target)
+    return dest
+
+
 def create_attempt_dir(
     artifacts_root: str | Path,
     task_id: str,

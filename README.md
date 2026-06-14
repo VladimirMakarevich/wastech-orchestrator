@@ -188,6 +188,14 @@ wastech-orchestrator preflight          check both CLIs' health + the isolation 
 wastech-orchestrator telegram-test      send a real correlated Telegram prompt and wait for reply
                           --timeout-seconds N       smoke-test deadline (default: 60)
 wastech-orchestrator run <task-file>    process exactly one task end to end
+wastech-orchestrator rerun <task-id>    re-attempt a terminal (failed/manual) task; daemon must be idle
+                          --continue                  reuse the branch + re-enter at the failed stage
+                          --force-reset-remote        delete the prior remote branch (closes its PR)
+                          --dry-run  --yes            preview the plan / skip the confirmation
+wastech-orchestrator finalize <task-id> record + tidy a task you handled by hand (no pipeline/commit/PR)
+                          --as done|failed|abandoned  the operator-declared terminal outcome (required)
+                          --pr-url URL  --note TEXT    merged-PR URL / ledger note (for --as done)
+                          --delete-branch  --no-verify-pr  --dry-run  --yes
 wastech-orchestrator watch              process pending tasks; loop + periodic git sync
                           --poll-seconds N            override orchestrator.poll_interval_seconds
 wastech-orchestrator stop               stop a running watch daemon (SIGTERM, then SIGKILL)
@@ -199,6 +207,9 @@ wastech-orchestrator upgrade-config     add config keys from a new version, keep
                           --dry-run                   preview the keys that would be added
 wastech-orchestrator upgrade-docs       refresh the installed worc/ task-authoring docs to the packaged version
                           --dry-run                   preview added/updated/removed files
+wastech-orchestrator install-templates  deliver the packaged templates/ tree into an existing install (add-missing)
+                          --force                     overwrite existing templates (default: skip operator edits)
+                          --dry-run                   preview the add/skip(/overwrite) plan
 wastech-orchestrator --version          installed version
 ```
 

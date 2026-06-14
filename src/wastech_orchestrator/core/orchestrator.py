@@ -40,6 +40,7 @@ from wastech_orchestrator.core.hitl import (
     HumanInputSignal,
     StageOutputError,
     TypedStageOutput,
+    consume_pending_interactions,
     discovery_interaction_id,
     discovery_interaction_path,
     guardrail_interaction_path,
@@ -50,6 +51,7 @@ from wastech_orchestrator.core.hitl import (
     mark_consumed,
     mark_interaction_status,
     parse_typed_stage_output,
+    reset_pending_interactions,
     stage_output_schema,
     write_answer,
     write_waiting_interaction,
@@ -91,7 +93,11 @@ from wastech_orchestrator.notify import (
     build_notifier,
 )
 from wastech_orchestrator.observability.logging import bind
-from wastech_orchestrator.providers.artifacts import sha256_file, task_artifact_dir
+from wastech_orchestrator.providers.artifacts import (
+    archive_task_artifacts,
+    sha256_file,
+    task_artifact_dir,
+)
 from wastech_orchestrator.providers.base import (
     AgentProvider,
     AgentRunRequest,
@@ -145,6 +151,71 @@ _ARTIFACT_KINDS: dict[str, str] = {
 }
 
 _UNIT_STATUSES = frozenset({Status.IMPLEMENTING, Status.TESTING, Status.REVIEWING, Status.FIXING})
+
+# Statuses ``_resume_task`` can re-enter (mirrors its dispatch). A ``rerun --continue`` revives a
+# terminal task to one of these — the stage it was on before it failed (``interrupted_status``).
+_RESUMABLE_STATUSES = _UNIT_STATUSES | frozenset(
+    {
+        Status.VALIDATED,
+        Status.PREPARING,
+        Status.REFINING,
+        Status.PLANNING,
+        Status.SUMMARIZING,
+        Status.READY_TO_PUBLISH,
+        Status.COMMITTING,
+        Status.PUSHING,
+        Status.CREATING_PR,
+    }
+)
+
+
+@dataclass(frozen=True)
+class RerunPlan:
+    """The reconciled facts + refusals for a ``rerun``/``rerun --continue`` (read-only; §rerun)."""
+
+    task_id: str
+    continue_mode: bool
+    found: bool = False
+    current_status: Status | None = None
+    source_path: str | None = None
+    branch: str | None = None
+    base_branch: str = ""
+    attempt: int = 1
+    interrupted_status: Status | None = None
+    dirty_paths: tuple[str, ...] = ()
+    has_remote_branch: bool = False
+    pr_url: str | None = None
+    refusals: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class FinalizePlan:
+    """The reconciled facts + warnings/refusals for a ``finalize`` (read-only; §finalize)."""
+
+    task_id: str
+    declared: Status
+    found: bool = False
+    current_status: Status | None = None
+    source_path: str | None = None
+    branch: str | None = None
+    base_branch: str = ""
+    pr_url: str | None = None
+    pr_url_source: str = "none"  # explicit | recorded | none
+    verify_state: str | None = None  # gh PR state when checked (MERGED/OPEN/CLOSED)
+    dirty_paths: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()  # non-fatal; require confirmation (no URL / not merged)
+    refusals: tuple[str, ...] = ()  # fatal; abort with exit 1
+
+
+def _ledger_has_manual(ledger: Ledger, task_id: str) -> bool:
+    """True iff the ledger already holds an operator-finalized (``manual``) record for the id."""
+    return any(r.get("id") == task_id and r.get("manual") for r in ledger.records())
+
+
+def _ledger_attempt_count(ledger: Ledger, task_id: str) -> int:
+    """How many terminal records the ledger already holds for ``task_id`` (prior attempts)."""
+    return sum(1 for rec in ledger.records() if rec.get("id") == task_id)
+
 
 _SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
 
@@ -261,6 +332,8 @@ class Orchestrator:
         self._resolver = resolver
         # Repo skill inventory scanner (§2.1). Defaults to the target repo clone's `.claude/skills`.
         self._skill_scanner = skill_scanner or self._default_skill_scanner()
+        # Per-id attempt number stamped onto the next ledger record, set by ``rerun``/``continue``.
+        self._rerun_attempt: dict[str, int] = {}
 
     def _default_skill_scanner(self) -> SkillInventoryScanner:
         root = self._config.skills.scan_root or str(
@@ -310,6 +383,265 @@ class Orchestrator:
     def acquire_slot(self, task_id: str) -> bool:
         """True iff no *other* task currently owns the processing slot (§8.2)."""
         return not any(t.task_id != task_id for t in self._store.find_active_tasks())
+
+    # --- rerun (operator-driven re-attempt of a terminal task) ----------------------------
+
+    @staticmethod
+    def _resumable_or_none(value: str | None) -> Status | None:
+        """A recorded ``interrupted_status`` mapped to a Status the resume engine can re-enter."""
+        if not value:
+            return None
+        try:
+            status = Status(value)
+        except ValueError:
+            return None
+        return status if status in _RESUMABLE_STATUSES else None
+
+    def plan_rerun(
+        self,
+        task_id: str,
+        *,
+        continue_mode: bool = False,
+        force_reset_remote: bool = False,
+    ) -> RerunPlan:
+        """Gather the facts + refusal reasons for a ``rerun`` (read-only; mutates nothing)."""
+        row = self._store.get_task(task_id)
+        if row is None:
+            return RerunPlan(
+                task_id=task_id,
+                continue_mode=continue_mode,
+                found=False,
+                refusals=(f"unknown task id '{task_id}'",),
+            )
+        refusals: list[str] = []
+        if row.status not in (Status.FAILED, Status.MANUAL_ACTION_REQUIRED):
+            refusals.append(
+                f"task '{task_id}' is {row.status.value}; rerun is for failed / "
+                "manual_action_required tasks (use `run` for a new task)"
+            )
+        others = sorted(t.task_id for t in self._store.find_active_tasks() if t.task_id != task_id)
+        if others:
+            refusals.append(
+                f"another task is active ({', '.join(others)}); rerun needs an idle slot"
+            )
+        source_path = row.source_path
+        if not source_path or not Path(source_path).is_file():
+            refusals.append(f"task source file is missing ({source_path or 'unset'}); cannot rerun")
+        dirty = self._git.unaccounted_dirty_paths()
+        if dirty:
+            refusals.append(
+                f"the working tree has unaccounted changes ({', '.join(sorted(dirty))}); "
+                "resolve them before rerun"
+            )
+        interrupted: Status | None = None
+        has_remote = False
+        pr_url: str | None = None
+        if continue_mode:
+            interrupted = self._resumable_or_none(row.interrupted_status)
+            if interrupted is None:
+                refusals.append(
+                    "no recoverable stage was recorded for this task; use a fresh `rerun` "
+                    "(without --continue)"
+                )
+        else:
+            pr_url = self._git.recorded_pr_url(task_id)
+            has_remote = bool(row.branch) and self._git.remote_branch_exists(row.branch or "")
+            if (has_remote or pr_url) and not force_reset_remote:
+                refusals.append(
+                    f"a prior attempt left a remote branch / open PR ({pr_url or row.branch}); "
+                    "resolve it with `finalize` first, or pass --force-reset-remote to delete the "
+                    "remote branch (this closes the PR)"
+                )
+        return RerunPlan(
+            task_id=task_id,
+            continue_mode=continue_mode,
+            found=True,
+            current_status=row.status,
+            source_path=source_path,
+            branch=row.branch,
+            base_branch=self._config.repo.base_branch,
+            attempt=_ledger_attempt_count(self._ledger, task_id) + 1,
+            interrupted_status=interrupted,
+            dirty_paths=tuple(sorted(dirty)),
+            has_remote_branch=has_remote,
+            pr_url=pr_url,
+            refusals=tuple(refusals),
+        )
+
+    def rerun_task(
+        self, task_id: str, *, source_path: str, force_reset_remote: bool = False
+    ) -> PipelineResult:
+        """Fresh attempt of a terminal task from the *current* ``base_branch`` (§rerun).
+
+        Archives the prior attempt's artifacts, resets the branch to base, clears the per-attempt
+        state, then drives the full pipeline via ``run_task`` (the gate admits the id once). The
+        git/fs steps are idempotent and the state reset leaves the status terminal, so an
+        interrupted rerun stays re-runnable.
+        """
+        row = self._store.get_task(task_id)
+        if row is None:
+            raise PipelineFailed(f"unknown task id '{task_id}'")
+        slug = row.slug or slugify(row.title)
+        prior = _ledger_attempt_count(self._ledger, task_id)
+        archive_task_artifacts(self._artifacts_root, task_id, prior)
+        self._git.reset_branch_to_base(task_id, slug, force_reset_remote=force_reset_remote)
+        self._store.reset_task_for_rerun(task_id)
+        self._rerun_attempt[task_id] = prior + 1
+        self._log(task_id).info("rerun: fresh attempt", extra={"attempt": prior + 1})
+        return self.run_task(source_path)
+
+    def continue_task(self, task_id: str) -> PipelineResult:
+        """Fix-and-continue: revive a terminal task at the stage it failed and resume it (§rerun).
+
+        Reuses the existing branch and all prior work; only the terminal markers are cleared and
+        any un-answered HITL prompt is reset so the re-entered stage asks fresh. The whole pipeline
+        re-run is delegated to the resume engine (``resume`` → ``_resume_task``), which
+        idempotently re-enters at the recovered stage.
+        """
+        row = self._store.get_task(task_id)
+        if row is None:
+            raise PipelineFailed(f"unknown task id '{task_id}'")
+        stage = self._resumable_or_none(row.interrupted_status)
+        if stage is None:
+            raise PipelineFailed(
+                f"cannot continue '{task_id}': no recoverable stage recorded; use a fresh rerun"
+            )
+        self._rerun_attempt[task_id] = _ledger_attempt_count(self._ledger, task_id) + 1
+        reset = reset_pending_interactions(self._artifacts_root, task_id)
+        if reset:
+            self._log(task_id).info(
+                "rerun --continue: reset pending HITL", extra={"reset": len(reset)}
+            )
+        self._store.revive_task_for_continue(task_id, stage)
+        self._log(task_id).info("rerun --continue: revived", extra={"stage": stage.value})
+        result = self.resume()
+        if result is None:
+            raise PipelineFailed(f"continue '{task_id}' did not resume (no active task found)")
+        return result
+
+    # --- finalize (operator records + tidies a task they handled out-of-band) -------------
+
+    def plan_finalize(
+        self,
+        task_id: str,
+        *,
+        declared: Status,
+        pr_url: str | None = None,
+        verify: bool = True,
+    ) -> FinalizePlan:
+        """Gather the facts + warnings/refusals for a ``finalize`` (read-only; mutates nothing)."""
+        row = self._store.get_task(task_id)
+        if row is None:
+            return FinalizePlan(
+                task_id=task_id,
+                declared=declared,
+                found=False,
+                refusals=(f"unknown task id '{task_id}'",),
+            )
+        refusals: list[str] = []
+        warnings: list[str] = []
+        if _ledger_has_manual(self._ledger, task_id):
+            refusals.append(
+                f"task '{task_id}' was already finalized (a manual ledger record exists); refusing"
+            )
+        dirty = self._git.unaccounted_dirty_paths()
+        if dirty:
+            refusals.append(
+                f"the working tree has unaccounted changes ({', '.join(sorted(dirty))}); "
+                "resolve them before finalize (it will not discard your work)"
+            )
+        resolved_url: str | None = None
+        source = "none"
+        verify_state: str | None = None
+        if declared is Status.DONE:
+            if pr_url:
+                resolved_url, source = pr_url, "explicit"
+            elif (recorded := self._git.recorded_pr_url(task_id)) is not None:
+                resolved_url, source = recorded, "recorded"
+            else:
+                warnings.append("no PR URL found for this task; recording done without merge proof")
+            if resolved_url is not None and verify:
+                verify_state = self._git.verify_pr_state(resolved_url)
+                if verify_state is not None and verify_state != "MERGED":
+                    warnings.append(f"the PR is {verify_state}, not merged; recording done anyway")
+        return FinalizePlan(
+            task_id=task_id,
+            declared=declared,
+            found=True,
+            current_status=row.status,
+            source_path=row.source_path,
+            branch=row.branch,
+            base_branch=self._config.repo.base_branch,
+            pr_url=resolved_url,
+            pr_url_source=source,
+            verify_state=verify_state,
+            dirty_paths=tuple(sorted(dirty)),
+            warnings=tuple(warnings),
+            refusals=tuple(refusals),
+        )
+
+    def finalize_task(
+        self,
+        task_id: str,
+        *,
+        declared: Status,
+        pr_url: str | None = None,
+        note: str | None = None,
+        delete_branch: bool = False,
+    ) -> PipelineResult:
+        """Reconcile a task the operator handled by hand: set the declared terminal status, tidy the
+        working tree/branch/file/HITL, and append a ``manual`` ledger record. Runs no pipeline and
+        never commits/pushes/PRs. ``pr_url`` is the already-resolved URL (see ``plan_finalize``)."""
+        row = self._store.get_task(task_id)
+        if row is None:
+            raise PipelineFailed(f"unknown task id '{task_id}'")
+        cleanup = self._git.terminal_cleanup(task_id)
+        if not cleanup.safe:
+            # Fail-closed: do not touch status/file/ledger when the tree can't be safely restored.
+            self._store.update_task(
+                task_id,
+                cleanup_target_branch=cleanup.target_branch,
+                cleanup_completed=False,
+                cleanup_last_error=cleanup.error,
+            )
+            raise PipelineFailed(f"finalize blocked: {cleanup.error}")
+        self._store.update_task(
+            task_id,
+            cleanup_target_branch=cleanup.target_branch,
+            cleanup_completed=True,
+            cleanup_completed_at=self._clock(),
+            cleanup_last_error=note,
+            finished_at=self._clock(),
+        )
+        self._store.set_status(task_id, declared)  # out-of-band operator override (no assert)
+        self._relocate_task_file(row.source_path, task_id, declared)
+        consume_pending_interactions(self._artifacts_root, task_id)
+        if delete_branch and row.branch:
+            self._git.delete_branch(row.branch)
+        outcome = "abandoned" if declared is Status.MANUAL_ACTION_REQUIRED else None
+        self._ledger.append(
+            LedgerRecord(
+                id=task_id,
+                title=row.title,
+                branch=row.branch,
+                pr_url=pr_url,
+                final_status=declared.value,
+                fix_iterations=row.fix_iterations,
+                terminal_cleanup="completed",
+                finished_at=self._clock(),
+                failure_report=row.failure_report_path,
+                decomposed=bool(row.decomposition_accepted),
+                subtask_count=row.subtask_count,
+                subtasks_completed=row.subtasks_completed,
+                manual=True,
+                note=note,
+                outcome=outcome,
+            )
+        )
+        self._log(task_id).info(
+            "finalized", extra={"final_status": declared.value, "pr_url": pr_url, "manual": True}
+        )
+        return PipelineResult(task_id=task_id, final_status=declared, pr_url=pr_url)
 
     def refresh_repo(self) -> None:
         """Best-effort fetch/pull of ``base_branch`` so git-pushed tasks become visible (§8.3).
@@ -1278,12 +1610,16 @@ class Orchestrator:
             final = Status.MANUAL_ACTION_REQUIRED
         # Record the terminal-cleanup outcome and the reason this task stopped (when applicable).
         last_error = cleanup.error or manual_reason
+        # Persist the stage in progress before going terminal, so ``rerun --continue`` knows where
+        # to re-enter. Only meaningful for a non-success terminal; ``done`` clears it.
+        interrupted = p.status.value if final is not Status.DONE else None
         self._store.update_task(
             p.task.id,
             cleanup_target_branch=cleanup.target_branch,
             cleanup_completed=cleanup.safe,
             cleanup_completed_at=self._clock() if cleanup.safe else None,
             cleanup_last_error=last_error,
+            interrupted_status=interrupted,
         )
         self._transition(p, final, finished_at=self._clock())
         if not already_moved:
@@ -1305,17 +1641,24 @@ class Orchestrator:
         return PipelineResult(task_id=p.task.id, final_status=final, pr_url=pr_url)
 
     def _move_task_file(self, p: _Pipeline, final: Status) -> Path | None:
-        """Move the task file into its lifecycle folder (``tasks/done`` / ``tasks/failed``, §20.2).
+        """Move the task file to its lifecycle folder; see _relocate_task_file (§20.2)."""
+        return self._relocate_task_file(p.task_file, p.task.id, final)
 
-        ``done`` and ``failed`` (died during processing) move; ``manual_action_required`` stays put
-        for the operator to resolve (§8.3). A §19 gate reject is quarantined separately (§19.4).
-        Idempotent: returns the destination path whether it moved now or was already in place (a
-        restart, or a finalize that already moved it); returns ``None`` when there is nothing to do.
+    def _relocate_task_file(
+        self, task_file: str | None, task_id: str, final: Status
+    ) -> Path | None:
+        """Move a task file into its lifecycle folder (``tasks/done`` / ``tasks/failed``, §20.2).
+
+        Pipeline-free (used by both the pipeline's `_move_task_file` and the operator `finalize`).
+        ``done`` and ``failed`` move; ``manual_action_required`` stays put for the operator to
+        resolve (§8.3) — so a finalize `--as abandoned` leaves the file where it is. A §19 gate
+        reject is quarantined separately (§19.4). Idempotent: returns the destination whether it
+        moved now or was already in place; returns ``None`` when there is nothing to do.
         """
         folder_name = {Status.DONE: "done", Status.FAILED: "failed"}.get(final)
-        if folder_name is None or not p.task_file:
+        if folder_name is None or not task_file:
             return None
-        src = Path(p.task_file)
+        src = Path(task_file)
         parent = src.parent
         if parent.name in ("pending", "processing", "done", "failed"):
             tasks_root = parent.parent
@@ -1329,7 +1672,7 @@ class Orchestrator:
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
             src.replace(dest)
-            self._store.update_task(p.task.id, source_path=str(dest))
+            self._store.update_task(task_id, source_path=str(dest))
         except OSError:
             # Never let a file-move failure mask the terminal outcome; the ledger still records it.
             return None
@@ -2176,6 +2519,7 @@ class Orchestrator:
         merge_outcome: str | None = None,
     ) -> None:
         task_row = self._store.get_task(p.task.id)
+        attempt = self._rerun_attempt.get(p.task.id, 1)
         self._ledger.append(
             LedgerRecord(
                 id=p.task.id,
@@ -2192,6 +2536,8 @@ class Orchestrator:
                 decomposed=p.decomposition.accepted,
                 subtask_count=p.decomposition.n if p.decomposition.accepted else None,
                 subtasks_completed=task_row.subtasks_completed if task_row else None,
+                attempt=attempt,
+                rerun_of=p.task.id if attempt > 1 else None,
             )
         )
 
@@ -2251,12 +2597,16 @@ def build_orchestrator(
     artifacts_root: str | Path,
     gh_runner: Callable[..., Any] | None = None,
     heartbeat_seconds: float = 30.0,
+    is_recovery_rerun: Callable[[str], bool] = lambda _id: False,
 ) -> Orchestrator:
     """Wire the full dependency graph from a validated config (used by the CLI and e2e tests).
 
     Constructs the real provider adapters, Router, State Store (``<artifacts_root>/state.db``),
     ledger (``<artifacts_root>/logs/completed.jsonl``), Git Manager, Check Runner, loop controller,
     and validation gate. The Core depends only on these interfaces — never on a provider directly.
+
+    ``is_recovery_rerun`` is threaded into the §19 gate so the ``rerun`` command can admit exactly
+    the re-run id past the duplicate-id check (scoped to one id; every other gate check still runs).
     """
     root = Path(artifacts_root)
     providers = build_providers(config, artifacts_root=root, heartbeat_seconds=heartbeat_seconds)
@@ -2282,6 +2632,7 @@ def build_orchestrator(
         config,
         store_has_task_id=store.task_id_exists,
         ledger_has_task_id=ledger.has_task_id,
+        is_recovery_rerun=is_recovery_rerun,
     )
     loops = LoopController(config.agents)
     notifier = build_notifier(config.telegram)

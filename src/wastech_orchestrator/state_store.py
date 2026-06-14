@@ -35,7 +35,9 @@ def _utc_now_iso() -> str:
 # "Versioning & compatibility" section.
 # v2: added ``stage_runs.skipped`` / ``stage_runs.skip_reason`` (stage-skip control). Migrated
 # in-place by ``_migrate`` (idempotent ``ALTER TABLE ADD COLUMN``); no data is rewritten.
-DB_SCHEMA_VERSION = 2
+# v3: added ``tasks.interrupted_status`` (the stage a task was on before going terminal), so
+# ``rerun --continue`` can re-enter the pipeline at the failed stage.
+DB_SCHEMA_VERSION = 3
 
 
 class IncompatibleStateError(Exception):
@@ -53,6 +55,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE stage_runs ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0")
     if "skip_reason" not in cols:
         conn.execute("ALTER TABLE stage_runs ADD COLUMN skip_reason TEXT")
+    task_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(tasks)")}
+    if "interrupted_status" not in task_cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN interrupted_status TEXT")
 
 
 def _enforce_schema_version(conn: sqlite3.Connection, *, writable: bool) -> None:
@@ -104,7 +109,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     cleanup_completed INTEGER,
     cleanup_completed_at TEXT,
     cleanup_last_error TEXT,
-    finished_at TEXT
+    finished_at TEXT,
+    interrupted_status TEXT
 );
 
 CREATE TABLE IF NOT EXISTS stage_runs (
@@ -221,6 +227,7 @@ class TaskRow:
     cleanup_completed_at: str | None = None
     cleanup_last_error: str | None = None
     finished_at: str | None = None
+    interrupted_status: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -372,6 +379,9 @@ class StateStore:
     # --- tasks ----------------------------------------------------------------------------
 
     def insert_task(self, row: TaskRow, conn: sqlite3.Connection | None = None) -> None:
+        """Insert a task row, or — when the id already exists (a ``rerun``) — refresh the
+        registration fields in place. Upsert keeps the FK-referenced row (and its audit history)
+        intact; ``reset_task_for_rerun`` has already cleared the per-attempt state."""
         now = self._clock()
         with self._writer(conn) as c:
             c.execute(
@@ -384,8 +394,14 @@ class StateStore:
                     decomposition_enabled, decomposition_accepted, decomposition_reason,
                     subtask_count, active_subtask, subtasks_completed,
                     failure_report_path, cleanup_target_branch, cleanup_completed,
-                    cleanup_completed_at, cleanup_last_error, finished_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    cleanup_completed_at, cleanup_last_error, finished_at, interrupted_status
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    title = excluded.title,
+                    status = excluded.status,
+                    source_path = excluded.source_path,
+                    validation_passed = excluded.validation_passed,
+                    updated_at = excluded.updated_at
                 """,
                 (
                     row.task_id,
@@ -416,6 +432,7 @@ class StateStore:
                     row.cleanup_completed_at,
                     row.cleanup_last_error,
                     row.finished_at,
+                    row.interrupted_status,
                 ),
             )
 
@@ -470,6 +487,71 @@ class StateStore:
         self, task_id: str, status: Status, conn: sqlite3.Connection | None = None
     ) -> None:
         self.update_task(task_id, conn, status=status.value)
+
+    def reset_task_for_rerun(self, task_id: str, conn: sqlite3.Connection | None = None) -> None:
+        """Clear all per-attempt state of a terminal task for a fresh ``rerun`` (one transaction).
+
+        The ``status`` is left at its terminal value on purpose — ``run_task``'s ``insert_task``
+        upsert flips it to ``new`` when it re-registers, so an interrupted rerun stays re-runnable
+        (a terminal row with ``branch IS NULL`` is invisible to both ``find_active_tasks`` and
+        ``find_incomplete_cleanup``). ``branch`` is nulled so the reset row can never be mistaken
+        for an interrupted cleanup. The ``subtasks`` and ``publish_operations`` rows are deleted so
+        a decomposed rerun re-implements every unit and the publish idempotency layer does not
+        short-circuit on the prior attempt's commit/push/PR.
+        """
+        with self._writer(conn) as c:
+            self.update_task(
+                task_id,
+                c,
+                branch=None,
+                slug=None,
+                validation_passed=None,
+                validation_reason=None,
+                refinement_ran=None,
+                refinement_skip_reason=None,
+                stage_attempts=0,
+                test_fix_cycles=0,
+                review_fix_cycles=0,
+                fix_iterations=0,
+                decomposition_enabled=None,
+                decomposition_accepted=None,
+                decomposition_reason=None,
+                subtask_count=None,
+                active_subtask=None,
+                subtasks_completed=0,
+                failure_report_path=None,
+                cleanup_target_branch=None,
+                cleanup_completed=None,
+                cleanup_completed_at=None,
+                cleanup_last_error=None,
+                finished_at=None,
+                interrupted_status=None,
+            )
+            c.execute("DELETE FROM subtasks WHERE task_id = ?", (task_id,))
+            self.clear_publish_operations(task_id, c)
+
+    def revive_task_for_continue(
+        self, task_id: str, stage_status: Status, conn: sqlite3.Connection | None = None
+    ) -> None:
+        """Flip a terminal task back to the stage it failed at for ``rerun --continue``.
+
+        Keeps ``branch``/``slug``/counters/decomposition/``subtasks``/``publish_operations`` — the
+        whole point is to reuse the work already done — and only clears the terminal markers so the
+        resume engine drives the task to a fresh terminal + cleanup. This terminal → active flip is
+        a deliberate operator-driven, out-of-band transition (no ``assert_transition``), mirroring
+        how recovery sets statuses directly.
+        """
+        self.update_task(
+            task_id,
+            conn,
+            status=stage_status.value,
+            finished_at=None,
+            cleanup_completed=None,
+            cleanup_completed_at=None,
+            cleanup_last_error=None,
+            cleanup_target_branch=None,
+            interrupted_status=None,
+        )
 
     # --- loop counters --------------------------------------------------------------------
 
@@ -716,6 +798,13 @@ class StateStore:
             result_ref=row["result_ref"],
         )
 
+    def clear_publish_operations(
+        self, task_id: str, conn: sqlite3.Connection | None = None
+    ) -> None:
+        """Delete a task's publish idempotency rows so a fresh ``rerun`` re-commits/pushes/PRs."""
+        with self._writer(conn) as c:
+            c.execute("DELETE FROM publish_operations WHERE task_id = ?", (task_id,))
+
     # --- subtasks -------------------------------------------------------------------------
 
     def insert_subtasks(
@@ -837,6 +926,7 @@ def _task_from_row(row: sqlite3.Row) -> TaskRow:
         cleanup_completed_at=row["cleanup_completed_at"],
         cleanup_last_error=row["cleanup_last_error"],
         finished_at=row["finished_at"],
+        interrupted_status=row["interrupted_status"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

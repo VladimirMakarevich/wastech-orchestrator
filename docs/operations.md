@@ -145,9 +145,32 @@ Unlike `config.yaml`, the `worc/` docs are generated content with **no operator 
 so this is a straight overwrite to the packaged version: it writes missing or changed files, removes
 files no longer shipped, and makes no backup. It is idempotent (an already-current copy is a no-op),
 `--dry-run` writes nothing, and it fails closed (exit 2 with the same hint as `upgrade-config`) when
-no install location can be resolved. After a package upgrade, run **both** `upgrade-config` and
-`upgrade-docs` to bring your deployment fully current. (A single umbrella `upgrade` that does both is
-tracked in [follow-ups](backlog/follow_ups.md).)
+no install location can be resolved.
+
+The `templates/` tree (stage prompts, skills, agent stubs) also ships with the package, but only
+`init` copies it — the wizard-based `install` does not, and an upgrade carries newer templates than an
+already-installed copy. Deliver or refresh them beside `config.yaml` with **`install-templates`**:
+
+```bash
+wastech-orchestrator install-templates           # uses the discovered/bound config location
+wastech-orchestrator install-templates --dry-run # preview the add/skip(/overwrite) plan only
+wastech-orchestrator install-templates --force   # overwrite operator-edited templates too
+```
+
+Unlike `upgrade-docs`, the templates are **operator-editable**, so this is **add-missing-only**:
+absent files are written and existing files are **skipped** to preserve your edits (it never removes
+operator-added files). Use `--force` to overwrite an edited template back to the packaged version. It
+resolves the install location and fails closed the same way as the `upgrade-*` commands, and it never
+touches `config.yaml` or `prompts.overrides` — activating an edited prompt template stays an explicit
+operator decision (list it under `prompts.overrides`; see [configuration.md](configuration.md)).
+**External-footprint caveat:** the templates land beside the workspace `config.yaml`, but the default
+`prompts.templates_dir: "./templates/prompts"` resolves from the *current working directory*; for an
+`external` workspace, run `worc` from the workspace or point `prompts.templates_dir` at the workspace
+path so the overrides are found.
+
+After a package upgrade, run **`upgrade-config`**, **`upgrade-docs`**, and **`install-templates`** to
+bring your deployment fully current. (A single umbrella `upgrade` that does all three is tracked in
+[follow-ups](backlog/follow_ups.md).)
 
 To install or pin a specific published (pre)release, append its tag to the `pipx`/`pip` source — e.g.
 `pipx install "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git@v0.1.1a1"`. Releases
@@ -271,6 +294,53 @@ python -m wastech_orchestrator status                          # active/latest p
 returns the working copy to `repo.base_branch`; on, it processes pending tasks sequentially, checking
 out the base branch between them. A `manual_action_required` outcome always blocks automatic
 continuation. Exit code: `0` done, `1` failed, `2` manual_action_required.
+
+### Re-attempting a terminal task (`rerun`)
+
+A task that ended `failed` or `manual_action_required` is terminal — `watch`/`resume` never pick it up
+again. `rerun` re-attempts it without hand-editing `state.db`, the ledger, or git. It needs an **idle
+slot** (no other active task) and the **watch daemon stopped**, since it drives the pipeline in the
+shared clone; it records a new ledger entry linked to the prior attempt (`attempt`, `rerun_of`).
+
+```bash
+worc rerun task-001 --dry-run        # show the planned reconciliation; write nothing
+worc rerun task-001 --yes            # fresh attempt from the current base_branch
+worc rerun task-001 --continue --yes # fix-and-continue: reuse the branch, re-enter at the failed stage
+```
+
+- **Fresh** (default) — for a quality failure, a clean redo, or when `base_branch` has moved on: the
+  agent branch is reset to the current base (the stale local branch is deleted and recreated), the
+  per-attempt state is cleared, and the prior attempt's `logs/<id>/` is archived to
+  `logs/<id>/attempt-<N>/`. If a prior **remote branch or open PR** exists it refuses and points you at
+  the `finalize` command; pass `--force-reset-remote` to delete that remote branch (which closes its
+  PR) instead.
+- **`--continue`** — for an **infrastructure** failure you fixed by hand (a missing tool, `PATH`, a
+  dropped Telegram approval): it keeps the existing branch and the work already done and re-enters the
+  pipeline at the stage it failed, reusing the same resume engine as crash recovery. Only available
+  when the failed run recorded a recoverable stage.
+
+### Finalize a task you handled by hand (`finalize`)
+
+When you resolve a `failed`/`manual_action_required` task **out-of-band** — merged the PR yourself,
+fixed it locally, or decided to drop it — `finalize` reconciles the orchestrator's bookkeeping to match.
+It **only records and tidies**: it never runs the pipeline and never commits/pushes/PRs. Like `rerun`
+it needs the `watch` daemon stopped (it checks `base_branch` out in the shared clone).
+
+```bash
+worc finalize task-001 --as failed --note "superseded by task-014"
+worc finalize task-001 --as done --pr-url https://github.com/o/r/pull/42   # records the human merge
+worc finalize task-001 --as abandoned --note "obsolete"                    # deliberately dropped
+```
+
+It sets the declared terminal status, runs terminal cleanup (back to `base_branch`; **fail-closed** on
+an unaccounted-dirty tree — it reports, never discards), moves the task file to the matching folder,
+closes any waiting HITL prompt, and appends a `manual` ledger record. For `--as done` the PR URL is
+taken from `--pr-url`, else the URL a crashed run already recorded; with neither it still finalizes but
+**warns and asks for confirmation**. It also runs a read-only `gh pr view` merge check by default
+(`--no-verify-pr` to skip; warns+asks if the PR isn't merged). `--as abandoned` is recorded as
+`manual_action_required` with an `outcome: abandoned` ledger marker (distinct from a plain failure).
+The agent branch is kept unless `--delete-branch`. `--dry-run` previews the reconciliation;
+re-finalizing an already-finalized task is refused.
 
 By default `watch` is a **long-running loop** (`orchestrator.poll_interval_seconds: 300`, overridable
 with `--poll-seconds N`): each tick it runs `git fetch` + `pull --ff-only` on `base_branch` then

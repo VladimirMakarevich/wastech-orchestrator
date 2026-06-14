@@ -1,6 +1,9 @@
 # Backlog: Re-run a terminal task (`rerun` command)
 
-Status: **backlog / not scheduled**
+Status: **implemented** (2026-06-14) — `worc rerun <id>` with `--continue`. See
+[CHANGELOG](../../CHANGELOG.md) `[Unreleased]`, [docs/operations.md](../operations.md) "Re-attempting a
+terminal task", and the tests in `tests/core/test_cli_rerun.py`. The sections below are the design
+record; the **Outcome** box captures what shipped and the decisions taken.
 Date: 2026-06-14
 Owner: Vladimir Makarevich
 
@@ -10,6 +13,32 @@ must not override the hard invariants in [../../CLAUDE.md](../../CLAUDE.md),
 [../../AGENTS.md](../../AGENTS.md), or [../rules/](../rules/) — in particular: only the orchestrator
 commits/pushes/PRs, the §19 validation gate runs before any branch, and a re-run must not weaken the
 security policy.
+
+## Outcome (as implemented)
+
+One command, two modes (chosen for simplest implementation/maintenance — shared guards, one core-step
+branch into `Orchestrator.rerun_task` vs `continue_task`):
+
+- **Decisions taken.** (1) Statuses accepted: `failed` + `manual_action_required` (`done` deferred to a
+  future `--allow-done`). (2) Fresh mode refuses on a prior remote branch / open PR and points at
+  `finalize`; opt-in `--force-reset-remote` deletes the remote branch. (3) Prior `logs/<id>/` is
+  full-archived to `logs/<id>/attempt-<N>/` (fresh); continue keeps artifacts. (4) Same-name branch
+  reset (delete local, `prepare_branch` recreates). (5) Refuses while a live `watch` daemon owns the
+  clone, plus the single-active-slot check, and is fail-closed on an unaccounted-dirty tree.
+- **`--continue` (fix-and-continue), added during review.** For an infra failure the operator fixed by
+  hand: keep the branch + work, re-enter at the failed stage by reviving the terminal task into the
+  existing resume engine (`resume`/`_resume_task`). Needs the stage it failed at — persisted as the new
+  `tasks.interrupted_status` column (**`state.db` v3**, one `ALTER TABLE` migration). Un-answered HITL
+  prompts are reset so the re-entered stage re-asks.
+- **Gaps closed vs. the original design.** The fresh reset also clears `publish_operations` (else the
+  cached commit/push/PR short-circuits a fresh attempt) and `subtasks` (else committed-unit skipping
+  under-runs a decomposed rerun); the reset is UPDATE-in-place (FK graph) and one transaction; the
+  ledger gains `attempt`/`rerun_of`.
+- **Code.** `cli.cmd_rerun`; `Orchestrator.{plan_rerun,rerun_task,continue_task}` + `RerunPlan`;
+  `StateStore.{reset_task_for_rerun,revive_task_for_continue,clear_publish_operations}` + the
+  `interrupted_status` column/migration; `GitManager.reset_branch_to_base` (+ dirty/remote/PR probes);
+  `artifacts.archive_task_artifacts`; `hitl.reset_pending_interactions`; `LedgerRecord.{attempt,
+  rerun_of}`; the `is_recovery_rerun` gate hook threaded through `build_orchestrator`.
 
 ## 1. Background
 
