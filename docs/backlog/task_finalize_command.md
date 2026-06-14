@@ -1,6 +1,9 @@
 # Backlog: Manually finalize a task (`finalize` command)
 
-Status: **backlog / not scheduled**
+Status: **implemented** (2026-06-14) — `worc finalize <id> --as <done|failed|abandoned>`. See
+[CHANGELOG](../../CHANGELOG.md) `[Unreleased]`, [docs/operations.md](../operations.md) "Finalize a task
+you handled by hand", and `tests/core/test_cli_finalize.py`. The sections below are the design record;
+the **Outcome** box captures what shipped.
 Date: 2026-06-14
 Owner: Vladimir Makarevich
 
@@ -10,6 +13,27 @@ must not override the hard invariants in [../../CLAUDE.md](../../CLAUDE.md),
 [../../AGENTS.md](../../AGENTS.md), or [../rules/](../rules/) — only the orchestrator
 commits/pushes/PRs, and a manual finalize must not weaken the security policy or fake a result it did
 not verify.
+
+## Outcome (as implemented)
+
+Shipped as designed, with one safety correction to the daemon gate:
+
+- **Daemon gate — stricter than §5.1.** `finalize` **refuses whenever the `watch` daemon PID is alive**
+  (not only when *this* task is active), because terminal cleanup runs `git checkout base` in the
+  **shared clone** and would corrupt a daemon working *any* task. The orphaned-crash case (PID dead,
+  task left active) is still allowed and is exactly what finalize reconciles. This matches the `rerun`
+  gate. (§5.1/§10 below describe the original per-task gate; the stricter rule supersedes them.)
+- **Decisions implemented:** `--as done|failed|abandoned`; `abandoned` = variant A
+  (`manual_action_required` + `outcome: abandoned` ledger marker); PR-URL provenance
+  (`--pr-url` > recorded `publish_operations` `kind=pr` > none-with-warning); default-on best-effort
+  read-only `gh pr view` merge check (`--no-verify-pr`); fail-closed on an unaccounted-dirty tree;
+  branch kept unless `--delete-branch`; idempotent (refuses a re-finalize via the `manual` ledger
+  marker); `--dry-run`/`--yes`.
+- **Code.** `cli.cmd_finalize` (+ `_report_finalize_plan`); `Orchestrator.{plan_finalize,finalize_task}`
+  + `FinalizePlan` + the extracted pipeline-free `_relocate_task_file`;
+  `StateStore` reused as-is (no schema change — the `manual` marker lives in the ledger);
+  `git_manager.{verify_pr_state,delete_branch}`; `hitl.consume_pending_interactions`;
+  `LedgerRecord.{manual,note,outcome}`.
 
 ## 1. Background
 

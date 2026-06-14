@@ -18,6 +18,18 @@ The maintainer bumps the package version in `pyproject.toml` on release; `wastec
 ## [Unreleased]
 
 ### Added
+- **`finalize` command — record + tidy a human-handled task** (backlog: `task_finalize_command.md`).
+  `worc finalize <task-id> --as <done|failed|abandoned>` reconciles the orchestrator's bookkeeping for a
+  task the operator resolved out-of-band — it **records and tidies only**, never running the pipeline or
+  committing/pushing/PR-ing. It sets the declared terminal status, runs terminal cleanup (back to
+  `base_branch`, **fail-closed** on an unaccounted-dirty tree), moves the task file, closes any waiting
+  HITL prompt, and appends a `manual` ledger record (with `note`/`outcome`/`pr_url`). For `--as done`
+  the PR URL is resolved by precedence (`--pr-url` > the URL a crashed run recorded in
+  `publish_operations` > none, which warns + asks), and a **read-only** `gh pr view` merge check runs by
+  default (`--no-verify-pr` to skip; warns+asks if not merged). `--as abandoned` is variant A
+  (`manual_action_required` + an `outcome: abandoned` ledger marker). Refuses while the `watch` daemon is
+  live, on a dirty tree, and on a re-finalize; the agent branch is kept unless `--delete-branch`. Flags:
+  `--pr-url`, `--note`, `--delete-branch`, `--keep-branch`, `--no-verify-pr`, `--dry-run`, `--yes`.
 - **`rerun` command — re-attempt a terminal task** (backlog: `task_rerun_command.md`). `worc rerun
   <task-id>` launches a supported re-attempt of a `failed`/`manual_action_required` task without
   hand-editing `state.db`/the ledger/git, in two modes on one command: **fresh** (default) resets the

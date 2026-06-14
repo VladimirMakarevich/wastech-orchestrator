@@ -647,3 +647,41 @@ def test_current_diff_is_redacted(
     diff = Path(gm.write_current_diff("task-001")).read_text(encoding="utf-8")
     assert token not in diff
     assert file_secret not in diff
+
+
+# --- finalize building blocks: read-only PR verify + local branch delete -----------------
+
+
+def test_verify_pr_state_returns_state(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    def gh(args: Sequence[str]) -> GitResult:
+        assert list(args[:2]) == ["pr", "view"]
+        assert "state" in args
+        return GitResult(
+            exit_code=0, stdout="MERGED\n", stderr="", timed_out=False, launch_error=None
+        )
+
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+    assert gm.verify_pr_state("https://example/pull/1") == "MERGED"
+
+
+def test_verify_pr_state_none_when_gh_unavailable(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    def gh(_args: Sequence[str]) -> GitResult:
+        return GitResult(
+            exit_code=1, stdout="", stderr="not found", timed_out=False, launch_error=None
+        )
+
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+    assert gm.verify_pr_state("https://example/pull/1") is None
+
+
+def test_delete_branch_is_idempotent(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    git_run(["branch", "agent/task-001-x"], git_repo.clone)
+    assert gm.delete_branch("agent/task-001-x") is True  # deleted
+    assert gm.delete_branch("agent/task-001-x") is False  # already gone — no-op

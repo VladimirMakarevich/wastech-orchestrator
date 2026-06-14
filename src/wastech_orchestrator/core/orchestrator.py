@@ -40,6 +40,7 @@ from wastech_orchestrator.core.hitl import (
     HumanInputSignal,
     StageOutputError,
     TypedStageOutput,
+    consume_pending_interactions,
     discovery_interaction_id,
     discovery_interaction_path,
     guardrail_interaction_path,
@@ -185,6 +186,30 @@ class RerunPlan:
     has_remote_branch: bool = False
     pr_url: str | None = None
     refusals: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class FinalizePlan:
+    """The reconciled facts + warnings/refusals for a ``finalize`` (read-only; §finalize)."""
+
+    task_id: str
+    declared: Status
+    found: bool = False
+    current_status: Status | None = None
+    source_path: str | None = None
+    branch: str | None = None
+    base_branch: str = ""
+    pr_url: str | None = None
+    pr_url_source: str = "none"  # explicit | recorded | none
+    verify_state: str | None = None  # gh PR state when checked (MERGED/OPEN/CLOSED)
+    dirty_paths: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()  # non-fatal; require confirmation (no URL / not merged)
+    refusals: tuple[str, ...] = ()  # fatal; abort with exit 1
+
+
+def _ledger_has_manual(ledger: Ledger, task_id: str) -> bool:
+    """True iff the ledger already holds an operator-finalized (``manual``) record for the id."""
+    return any(r.get("id") == task_id and r.get("manual") for r in ledger.records())
 
 
 def _ledger_attempt_count(ledger: Ledger, task_id: str) -> int:
@@ -494,6 +519,132 @@ class Orchestrator:
         if result is None:
             raise PipelineFailed(f"continue '{task_id}' did not resume (no active task found)")
         return result
+
+    # --- finalize (operator records + tidies a task they handled out-of-band) -------------
+
+    def plan_finalize(
+        self,
+        task_id: str,
+        *,
+        declared: Status,
+        pr_url: str | None = None,
+        verify: bool = True,
+    ) -> FinalizePlan:
+        """Gather the facts + warnings/refusals for a ``finalize`` (read-only; mutates nothing)."""
+        row = self._store.get_task(task_id)
+        if row is None:
+            return FinalizePlan(
+                task_id=task_id,
+                declared=declared,
+                found=False,
+                refusals=(f"unknown task id '{task_id}'",),
+            )
+        refusals: list[str] = []
+        warnings: list[str] = []
+        if _ledger_has_manual(self._ledger, task_id):
+            refusals.append(
+                f"task '{task_id}' was already finalized (a manual ledger record exists); refusing"
+            )
+        dirty = self._git.unaccounted_dirty_paths()
+        if dirty:
+            refusals.append(
+                f"the working tree has unaccounted changes ({', '.join(sorted(dirty))}); "
+                "resolve them before finalize (it will not discard your work)"
+            )
+        resolved_url: str | None = None
+        source = "none"
+        verify_state: str | None = None
+        if declared is Status.DONE:
+            if pr_url:
+                resolved_url, source = pr_url, "explicit"
+            elif (recorded := self._git.recorded_pr_url(task_id)) is not None:
+                resolved_url, source = recorded, "recorded"
+            else:
+                warnings.append("no PR URL found for this task; recording done without merge proof")
+            if resolved_url is not None and verify:
+                verify_state = self._git.verify_pr_state(resolved_url)
+                if verify_state is not None and verify_state != "MERGED":
+                    warnings.append(
+                        f"the PR is {verify_state}, not merged; recording done anyway"
+                    )
+        return FinalizePlan(
+            task_id=task_id,
+            declared=declared,
+            found=True,
+            current_status=row.status,
+            source_path=row.source_path,
+            branch=row.branch,
+            base_branch=self._config.repo.base_branch,
+            pr_url=resolved_url,
+            pr_url_source=source,
+            verify_state=verify_state,
+            dirty_paths=tuple(sorted(dirty)),
+            warnings=tuple(warnings),
+            refusals=tuple(refusals),
+        )
+
+    def finalize_task(
+        self,
+        task_id: str,
+        *,
+        declared: Status,
+        pr_url: str | None = None,
+        note: str | None = None,
+        delete_branch: bool = False,
+    ) -> PipelineResult:
+        """Reconcile a task the operator handled by hand: set the declared terminal status, tidy the
+        working tree/branch/file/HITL, and append a ``manual`` ledger record. Runs no pipeline and
+        never commits/pushes/PRs. ``pr_url`` is the already-resolved URL (see ``plan_finalize``)."""
+        row = self._store.get_task(task_id)
+        if row is None:
+            raise PipelineFailed(f"unknown task id '{task_id}'")
+        cleanup = self._git.terminal_cleanup(task_id)
+        if not cleanup.safe:
+            # Fail-closed: do not touch status/file/ledger when the tree can't be safely restored.
+            self._store.update_task(
+                task_id,
+                cleanup_target_branch=cleanup.target_branch,
+                cleanup_completed=False,
+                cleanup_last_error=cleanup.error,
+            )
+            raise PipelineFailed(f"finalize blocked: {cleanup.error}")
+        self._store.update_task(
+            task_id,
+            cleanup_target_branch=cleanup.target_branch,
+            cleanup_completed=True,
+            cleanup_completed_at=self._clock(),
+            cleanup_last_error=note,
+            finished_at=self._clock(),
+        )
+        self._store.set_status(task_id, declared)  # out-of-band operator override (no assert)
+        self._relocate_task_file(row.source_path, task_id, declared)
+        consume_pending_interactions(self._artifacts_root, task_id)
+        if delete_branch and row.branch:
+            self._git.delete_branch(row.branch)
+        outcome = "abandoned" if declared is Status.MANUAL_ACTION_REQUIRED else None
+        self._ledger.append(
+            LedgerRecord(
+                id=task_id,
+                title=row.title,
+                branch=row.branch,
+                pr_url=pr_url,
+                final_status=declared.value,
+                fix_iterations=row.fix_iterations,
+                terminal_cleanup="completed",
+                finished_at=self._clock(),
+                failure_report=row.failure_report_path,
+                decomposed=bool(row.decomposition_accepted),
+                subtask_count=row.subtask_count,
+                subtasks_completed=row.subtasks_completed,
+                manual=True,
+                note=note,
+                outcome=outcome,
+            )
+        )
+        self._log(task_id).info(
+            "finalized", extra={"final_status": declared.value, "pr_url": pr_url, "manual": True}
+        )
+        return PipelineResult(task_id=task_id, final_status=declared, pr_url=pr_url)
 
     def refresh_repo(self) -> None:
         """Best-effort fetch/pull of ``base_branch`` so git-pushed tasks become visible (§8.3).
@@ -1493,17 +1644,24 @@ class Orchestrator:
         return PipelineResult(task_id=p.task.id, final_status=final, pr_url=pr_url)
 
     def _move_task_file(self, p: _Pipeline, final: Status) -> Path | None:
-        """Move the task file into its lifecycle folder (``tasks/done`` / ``tasks/failed``, §20.2).
+        """Move the task file to its lifecycle folder; see _relocate_task_file (§20.2)."""
+        return self._relocate_task_file(p.task_file, p.task.id, final)
 
-        ``done`` and ``failed`` (died during processing) move; ``manual_action_required`` stays put
-        for the operator to resolve (§8.3). A §19 gate reject is quarantined separately (§19.4).
-        Idempotent: returns the destination path whether it moved now or was already in place (a
-        restart, or a finalize that already moved it); returns ``None`` when there is nothing to do.
+    def _relocate_task_file(
+        self, task_file: str | None, task_id: str, final: Status
+    ) -> Path | None:
+        """Move a task file into its lifecycle folder (``tasks/done`` / ``tasks/failed``, §20.2).
+
+        Pipeline-free (used by both the pipeline's `_move_task_file` and the operator `finalize`).
+        ``done`` and ``failed`` move; ``manual_action_required`` stays put for the operator to
+        resolve (§8.3) — so a finalize `--as abandoned` leaves the file where it is. A §19 gate
+        reject is quarantined separately (§19.4). Idempotent: returns the destination whether it
+        moved now or was already in place; returns ``None`` when there is nothing to do.
         """
         folder_name = {Status.DONE: "done", Status.FAILED: "failed"}.get(final)
-        if folder_name is None or not p.task_file:
+        if folder_name is None or not task_file:
             return None
-        src = Path(p.task_file)
+        src = Path(task_file)
         parent = src.parent
         if parent.name in ("pending", "processing", "done", "failed"):
             tasks_root = parent.parent
@@ -1517,7 +1675,7 @@ class Orchestrator:
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
             src.replace(dest)
-            self._store.update_task(p.task.id, source_path=str(dest))
+            self._store.update_task(task_id, source_path=str(dest))
         except OSError:
             # Never let a file-move failure mask the terminal outcome; the ledger still records it.
             return None

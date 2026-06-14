@@ -33,6 +33,7 @@ from wastech_orchestrator.config.schema import (
 )
 from wastech_orchestrator.config.validation import validate_config
 from wastech_orchestrator.core.orchestrator import (
+    FinalizePlan,
     Orchestrator,
     PipelineResult,
     RerunPlan,
@@ -325,6 +326,40 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rerun_cmd.add_argument(
         "-y", "--yes", action="store_true", help="skip the interactive confirmation prompt"
+    )
+
+    finalize_cmd = sub.add_parser(
+        "finalize",
+        help="record + tidy a task the operator handled by hand (no pipeline, no commit/push/PR)",
+    )
+    finalize_cmd.add_argument("task_id", help="id of the task to finalize")
+    finalize_cmd.add_argument(
+        "--as",
+        dest="as_",
+        required=True,
+        choices=("done", "failed", "abandoned"),
+        help="the operator-declared terminal outcome",
+    )
+    finalize_cmd.add_argument("--pr-url", help="(--as done) the merged PR URL to record")
+    finalize_cmd.add_argument("--note", help="a short reason recorded in the ledger")
+    finalize_cmd.add_argument(
+        "--delete-branch",
+        action="store_true",
+        help="delete the now-unneeded local agent branch (default: keep it)",
+    )
+    finalize_cmd.add_argument(
+        "--keep-branch", action="store_true", help="keep the agent branch (the default; no-op)"
+    )
+    finalize_cmd.add_argument(
+        "--no-verify-pr",
+        action="store_true",
+        help="(--as done) skip the read-only `gh pr view` merge check",
+    )
+    finalize_cmd.add_argument(
+        "--dry-run", action="store_true", help="print the planned reconciliation; write nothing"
+    )
+    finalize_cmd.add_argument(
+        "-y", "--yes", action="store_true", help="skip confirmation (incl. the WARNING prompts)"
     )
 
     return parser
@@ -850,6 +885,89 @@ def cmd_rerun(args: argparse.Namespace) -> int:
     return _EXIT_BY_STATUS.get(result.final_status, 1)
 
 
+_FINALIZE_STATUS: dict[str, Status] = {
+    "done": Status.DONE,
+    "failed": Status.FAILED,
+    "abandoned": Status.MANUAL_ACTION_REQUIRED,  # variant A: manual + outcome="abandoned" in ledger
+}
+
+
+def _report_finalize_plan(plan: FinalizePlan, *, as_: str) -> None:
+    """Print the planned reconciliation for ``finalize --dry-run``; writes nothing."""
+    print(f"finalize (dry-run): would finalize {plan.task_id} as {as_}")
+    print(f"  status:    {plan.current_status.value if plan.current_status else '?'} -> "
+          f"{plan.declared.value}")
+    if plan.declared is Status.DONE:
+        pr = plan.pr_url or "(none)"
+        verify = f", verify={plan.verify_state}" if plan.verify_state else ""
+        print(f"  pr url:    {pr} (source: {plan.pr_url_source}{verify})")
+    print(f"  cleanup:   checkout base '{plan.base_branch}'")
+    print(f"  branch:    {plan.branch or '(none)'}")
+    abandoned = ", outcome=abandoned" if plan.declared is Status.MANUAL_ACTION_REQUIRED else ""
+    print(f"  ledger:    append a manual record{abandoned}")
+    for warning in plan.warnings:
+        print(f"  WARNING:   {warning}")
+
+
+def cmd_finalize(args: argparse.Namespace) -> int:
+    """Record + tidy a task the operator handled out-of-band (no pipeline, no commit/push/PR)."""
+    _configure_runtime_logging(args)
+    config = load_config_for(args)
+    if config is None:
+        return 2
+    root = artifacts_root_for(config)
+
+    # Finalize runs terminal cleanup (`git checkout base`) in the shared clone; refuse while a live
+    # watch daemon owns it. An orphaned-active task (dead PID) is exactly what finalize reconciles.
+    pid = process_control.read_pid(process_control.pid_file_path(root))
+    if pid is not None and process_control.is_running(pid):
+        print(
+            f"finalize: the watch daemon is running (pid {pid}); stop it first with "
+            "'wastech-orchestrator stop'"
+        )
+        return 1
+
+    if not (Path(root) / "state.db").is_file():
+        print(f"finalize: no state database at {Path(root) / 'state.db'}")
+        return 2
+
+    declared = _FINALIZE_STATUS[args.as_]
+    orchestrator = build_orchestrator(
+        config, artifacts_root=root, heartbeat_seconds=args.heartbeat_seconds
+    )
+    plan = orchestrator.plan_finalize(
+        args.task_id, declared=declared, pr_url=args.pr_url, verify=not args.no_verify_pr
+    )
+    if plan.refusals:
+        for reason in plan.refusals:
+            print(f"finalize: {reason}")
+        return 1
+
+    if args.dry_run:
+        _report_finalize_plan(plan, as_=args.as_)
+        return 0
+
+    if not args.yes:
+        for warning in plan.warnings:
+            print(f"finalize: WARNING — {warning}")
+        prompt = f"Finalize {args.task_id} as {args.as_}"
+        prompt += " (unconfirmed)? [y/N] " if plan.warnings else "? [y/N] "
+        if not _confirm(prompt):
+            print("finalize: aborted")
+            return 0
+
+    result = orchestrator.finalize_task(
+        args.task_id,
+        declared=declared,
+        pr_url=plan.pr_url,
+        note=args.note,
+        delete_branch=args.delete_branch,
+    )
+    suffix = f" → {result.pr_url}" if result.pr_url else ""
+    print(f"{result.task_id}: {result.final_status.value}{suffix} (finalized)")
+    return _EXIT_BY_STATUS.get(result.final_status, 1)
+
+
 def run_preflight(config: OrchestratorConfig) -> tuple[bool, list[str]]:
     """Compute the read-only preflight verdict + report lines (spec §6.7); no task is processed.
 
@@ -1327,6 +1445,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_upgrade_docs(args)
         if args.command == "rerun":
             return cmd_rerun(args)
+        if args.command == "finalize":
+            return cmd_finalize(args)
     except (ConfigError, IncompatibleStateError, detect.GhNotAvailableError) as exc:
         print(f"error: {exc}")
         return 2

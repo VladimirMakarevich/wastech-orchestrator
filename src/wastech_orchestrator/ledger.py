@@ -55,6 +55,13 @@ class LedgerRecord:
     # the failure → retry chain is auditable. Old records omit both keys harmlessly.
     attempt: int = 1
     rerun_of: str | None = None
+    # Operator-finalized marker (``finalize`` command): ``manual`` is true for a record the operator
+    # recorded out-of-band (vs. a pipeline-produced one); ``outcome`` distinguishes a deliberately
+    # dropped task (``"abandoned"``) from a plain failure; ``note`` carries the operator's reason.
+    # Old records omit all three harmlessly.
+    manual: bool = False
+    note: str | None = None
+    outcome: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -76,6 +83,9 @@ class LedgerRecord:
             "subtasks_completed": self.subtasks_completed,
             "attempt": self.attempt,
             "rerun_of": self.rerun_of,
+            "manual": self.manual,
+            "note": self.note,
+            "outcome": self.outcome,
         }
 
 

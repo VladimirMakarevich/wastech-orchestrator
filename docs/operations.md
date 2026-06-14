@@ -289,12 +289,35 @@ worc rerun task-001 --continue --yes # fix-and-continue: reuse the branch, re-en
   agent branch is reset to the current base (the stale local branch is deleted and recreated), the
   per-attempt state is cleared, and the prior attempt's `logs/<id>/` is archived to
   `logs/<id>/attempt-<N>/`. If a prior **remote branch or open PR** exists it refuses and points you at
-  the (planned) `finalize` command; pass `--force-reset-remote` to delete that remote branch (which
-  closes its PR) instead.
+  the `finalize` command; pass `--force-reset-remote` to delete that remote branch (which closes its
+  PR) instead.
 - **`--continue`** — for an **infrastructure** failure you fixed by hand (a missing tool, `PATH`, a
   dropped Telegram approval): it keeps the existing branch and the work already done and re-enters the
   pipeline at the stage it failed, reusing the same resume engine as crash recovery. Only available
   when the failed run recorded a recoverable stage.
+
+### Finalize a task you handled by hand (`finalize`)
+
+When you resolve a `failed`/`manual_action_required` task **out-of-band** — merged the PR yourself,
+fixed it locally, or decided to drop it — `finalize` reconciles the orchestrator's bookkeeping to match.
+It **only records and tidies**: it never runs the pipeline and never commits/pushes/PRs. Like `rerun`
+it needs the `watch` daemon stopped (it checks `base_branch` out in the shared clone).
+
+```bash
+worc finalize task-001 --as failed --note "superseded by task-014"
+worc finalize task-001 --as done --pr-url https://github.com/o/r/pull/42   # records the human merge
+worc finalize task-001 --as abandoned --note "obsolete"                    # deliberately dropped
+```
+
+It sets the declared terminal status, runs terminal cleanup (back to `base_branch`; **fail-closed** on
+an unaccounted-dirty tree — it reports, never discards), moves the task file to the matching folder,
+closes any waiting HITL prompt, and appends a `manual` ledger record. For `--as done` the PR URL is
+taken from `--pr-url`, else the URL a crashed run already recorded; with neither it still finalizes but
+**warns and asks for confirmation**. It also runs a read-only `gh pr view` merge check by default
+(`--no-verify-pr` to skip; warns+asks if the PR isn't merged). `--as abandoned` is recorded as
+`manual_action_required` with an `outcome: abandoned` ledger marker (distinct from a plain failure).
+The agent branch is kept unless `--delete-branch`. `--dry-run` previews the reconciliation;
+re-finalizing an already-finalized task is refused.
 
 By default `watch` is a **long-running loop** (`orchestrator.poll_interval_seconds: 300`, overridable
 with `--poll-seconds N`): each tick it runs `git fetch` + `pull --ff-only` on `base_branch` then

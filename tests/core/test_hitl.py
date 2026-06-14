@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from wastech_orchestrator.core.dangerous_diff import classify_dangerous_diff
 from wastech_orchestrator.core.hitl import (
     StageOutputError,
+    consume_pending_interactions,
     handle_from_artifact,
     parse_typed_stage_output,
 )
@@ -148,3 +152,28 @@ def test_renamed_dependency_counts_as_deletion_and_dependency() -> None:
     )
     assert result is not None
     assert result.risk == "other"
+
+
+def _write_hitl(root: Path, task_id: str, stage: str, status: str) -> Path:
+    hitl = root / "logs" / task_id / "hitl"
+    hitl.mkdir(parents=True, exist_ok=True)
+    path = hitl / f"{stage}.json"
+    path.write_text(json.dumps({"status": status, "stage": stage}), encoding="utf-8")
+    return path
+
+
+def test_consume_pending_interactions_closes_only_unanswered(tmp_path: Path) -> None:
+    waiting = _write_hitl(tmp_path, "task-1", "refinement", "waiting")
+    errored = _write_hitl(tmp_path, "task-1", "planning", "transport_error")
+    answered = _write_hitl(tmp_path, "task-1", "review", "answered")
+
+    closed = consume_pending_interactions(tmp_path, "task-1")
+
+    assert set(closed) == {str(waiting), str(errored)}
+    assert json.loads(waiting.read_text())["status"] == "consumed"
+    assert json.loads(errored.read_text())["status"] == "consumed"
+    assert json.loads(answered.read_text())["status"] == "answered"  # untouched
+
+
+def test_consume_pending_interactions_no_hitl_dir(tmp_path: Path) -> None:
+    assert consume_pending_interactions(tmp_path, "task-missing") == []

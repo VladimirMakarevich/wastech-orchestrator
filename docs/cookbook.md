@@ -258,6 +258,22 @@ environment/infra problem by hand (a missing tool, `PATH`, a dropped Telegram ap
 pick up where it stopped. Each re-attempt appends a ledger record linked to the prior one. See
 [operations.md](operations.md) "Re-attempting a terminal task" for the full rules.
 
+### Record a task you handled by hand (`finalize`)
+
+If you resolved a terminal task **yourself** (merged the PR, fixed it locally, or dropped it),
+`finalize` reconciles the bookkeeping — it records and tidies only, never running the pipeline or
+committing/pushing/PR-ing (daemon must be stopped):
+
+```bash
+worc finalize task-001 --as done --pr-url https://github.com/o/r/pull/42  # you merged it
+worc finalize task-001 --as failed --note "superseded"                    # give up on it
+worc finalize task-001 --as abandoned --note "obsolete"                   # drop it (audited)
+```
+
+It sets the terminal status, returns the working copy to `base_branch` (fail-closed on a dirty tree),
+moves the task file, closes any waiting HITL prompt, and appends a `manual` ledger record. See
+[operations.md](operations.md) "Finalize a task you handled by hand" for the full rules.
+
 ## 6. Use `watch`
 
 `watch` resumes an interrupted task first, then processes pending task files:

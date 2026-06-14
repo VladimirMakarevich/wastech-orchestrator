@@ -61,6 +61,33 @@ def test_records_tolerate_missing_rerun_keys(tmp_path: Path) -> None:
     assert rec["rerun_of"] is None
 
 
+def test_finalize_marker_round_trips(tmp_path: Path) -> None:
+    ledger = Ledger(tmp_path)
+    ledger.append(
+        LedgerRecord(
+            id="a",
+            title="A",
+            final_status="manual_action_required",
+            finished_at="t",
+            manual=True,
+            note="dropped, obsolete",
+            outcome="abandoned",
+        )
+    )
+    rec = ledger.records()[0]
+    assert rec["manual"] is True
+    assert rec["note"] == "dropped, obsolete"
+    assert rec["outcome"] == "abandoned"
+
+
+def test_pipeline_record_defaults_to_not_manual(tmp_path: Path) -> None:
+    ledger = Ledger(tmp_path)
+    ledger.append(LedgerRecord(id="a", title="A", final_status="done", finished_at="t"))
+    rec = ledger.records()[0]
+    assert rec["manual"] is False
+    assert rec["note"] is None and rec["outcome"] is None
+
+
 def test_decomposition_fields_in_record(tmp_path: Path) -> None:
     ledger = Ledger(tmp_path)
     ledger.append(

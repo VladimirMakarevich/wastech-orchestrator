@@ -192,6 +192,10 @@ wastech-orchestrator rerun <task-id>    re-attempt a terminal (failed/manual) ta
                           --continue                  reuse the branch + re-enter at the failed stage
                           --force-reset-remote        delete the prior remote branch (closes its PR)
                           --dry-run  --yes            preview the plan / skip the confirmation
+wastech-orchestrator finalize <task-id> record + tidy a task you handled by hand (no pipeline/commit/PR)
+                          --as done|failed|abandoned  the operator-declared terminal outcome (required)
+                          --pr-url URL  --note TEXT    merged-PR URL / ledger note (for --as done)
+                          --delete-branch  --no-verify-pr  --dry-run  --yes
 wastech-orchestrator watch              process pending tasks; loop + periodic git sync
                           --poll-seconds N            override orchestrator.poll_interval_seconds
 wastech-orchestrator stop               stop a running watch daemon (SIGTERM, then SIGKILL)

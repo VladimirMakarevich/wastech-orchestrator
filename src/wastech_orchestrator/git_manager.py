@@ -312,9 +312,20 @@ class GitManager:
         if force_reset_remote and self._remote_branch_exists(branch):
             # Best-effort: deleting the remote branch makes GitHub auto-close any open PR on it.
             self._git("push", "origin", "--delete", branch)
-        if self._branch_exists(branch):
-            self._git_checked("branch", "-D", branch)
+        self.delete_branch(branch)
         return branch
+
+    def delete_branch(self, branch: str) -> bool:
+        """Force-delete a local branch if it exists (idempotent). Returns whether it deleted.
+
+        Used by ``finalize`` to tidy the now-unneeded agent branch (opt-in) and by
+        ``reset_branch_to_base`` for the ``rerun`` reset. ``-D`` because a terminal task's commits
+        may be unmerged; the caller must already be on another branch (``checkout base`` first).
+        """
+        if not self._branch_exists(branch):
+            return False
+        self._git_checked("branch", "-D", branch)
+        return True
 
     def unaccounted_dirty_paths(self) -> set[str]:
         """Public read probe for the ``rerun`` fail-closed dirty-tree gate (no mutation)."""
@@ -330,6 +341,18 @@ class GitManager:
         if existing is not None and existing.status == _STATUS_COMPLETED:
             return existing.result_ref
         return None
+
+    def verify_pr_state(self, pr_url: str) -> str | None:
+        """Read-only PR state for ``finalize``'s merge check: ``MERGED``/``OPEN``/``CLOSED``/None.
+
+        Runs `gh pr view <url> --json state` — strictly **read-only** (never creates/pushes/merges),
+        so it does not weaken the security policy. Best-effort: returns ``None`` when ``gh`` is
+        missing / unauthenticated / offline or the PR is gone, so the caller can skip the check.
+        """
+        result = self._gh(["pr", "view", pr_url, "--json", "state", "-q", ".state"])
+        if not result.ok:
+            return None
+        return result.stdout.strip() or None
 
     def refresh_base(self) -> None:
         """Best-effort fetch + ff-only pull of ``base_branch`` so git-pushed tasks become visible.
