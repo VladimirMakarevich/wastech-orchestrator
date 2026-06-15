@@ -1,51 +1,51 @@
-# B01 — CLI и операторские команды
+# B01 — CLI and Operator Commands
 
-## Назначение
+## Purpose
 
-Единственный пользовательский интерфейс системы: разбирает аргументы, диспетчеризует подкоманды и возвращает коды завершения. Реализует тонкие драйверы операторских команд `run`, `status`, `preflight`, `telegram-test`, `rerun`, `finalize` и общую инфраструктуру (разрешение/загрузка конфигурации, настройка логирования). Команды установки/апгрейда и `watch`-демон диспетчеризуются здесь, но реализуются в [B03](./B03-installer-and-scaffolding.md)/[B02](./B02-watch-daemon-and-scheduling.md).
+The sole user-facing interface of the system: parses arguments, dispatches subcommands, and returns exit codes. Implements thin drivers for the operator commands `run`, `status`, `preflight`, `telegram-test`, `rerun`, `finalize`, and shared infrastructure (configuration resolution/loading, logging setup). Install/upgrade commands and the `watch` daemon are dispatched here but implemented in [B03](./B03-installer-and-scaffolding.md)/[B02](./B02-watch-daemon-and-scheduling.md).
 
-## Ответственность
+## Responsibilities
 
-- Построить парсер аргументов и все подкоманды + глобальные флаги ([cli.py:114-376](../../../src/wastech_orchestrator/cli.py#L114)).
-- Диспетчеризовать команду и отобразить терминальный статус в код возврата ([cli.py:1497-1541](../../../src/wastech_orchestrator/cli.py#L1497)).
-- Драйверы `run`/`status`/`preflight`/`telegram-test`/`rerun`/`finalize` ([cli.py:849-1148](../../../src/wastech_orchestrator/cli.py#L849)).
-- Разрешить/загрузить конфигурацию и настроить логирование ([cli.py:542-565,734-768](../../../src/wastech_orchestrator/cli.py#L542)).
+- Build the argument parser and all subcommands + global flags ([cli.py:114-376](../../../src/wastech_orchestrator/cli.py#L114)).
+- Dispatch commands and map terminal status to exit code ([cli.py:1497-1541](../../../src/wastech_orchestrator/cli.py#L1497)).
+- Drivers for `run`/`status`/`preflight`/`telegram-test`/`rerun`/`finalize` ([cli.py:849-1148](../../../src/wastech_orchestrator/cli.py#L849)).
+- Resolve/load configuration and configure logging ([cli.py:542-565,734-768](../../../src/wastech_orchestrator/cli.py#L542)).
 
-## Границы блока
+## Block Boundaries
 
-### Входит в ответственность блока
+### In scope
 
-- Разбор аргументов, диспетчеризация, коды возврата, драйверы run/status/preflight/telegram-test/rerun/finalize, helpers разрешения конфигурации, настройка логирования.
+- Argument parsing, dispatching, exit codes, run/status/preflight/telegram-test/rerun/finalize drivers, configuration resolution helpers, logging setup.
 
-### Не входит в ответственность блока
+### Out of scope
 
-- **Сам конвейер** — [B06](./B06-orchestrator-pipeline.md); **демон watch** — [B02](./B02-watch-daemon-and-scheduling.md); **установка/скелет** — [B03](./B03-installer-and-scaffolding.md).
-- **Модель/валидация конфигурации** — [B05](./B05-configuration.md); **стор привязок** — [B04](./B04-install-registry-and-config-discovery.md).
-- **Запуск провайдеров/проверок/git** — соответствующие блоки (CLI лишь оркеструет вызовы фабрик).
+- **The pipeline itself** — [B06](./B06-orchestrator-pipeline.md); **watch daemon** — [B02](./B02-watch-daemon-and-scheduling.md); **install/scaffold** — [B03](./B03-installer-and-scaffolding.md).
+- **Configuration model/validation** — [B05](./B05-configuration.md); **binding store** — [B04](./B04-install-registry-and-config-discovery.md).
+- **Launching providers/checks/git** — respective blocks (CLI only orchestrates factory calls).
 
-## Точки входа
+## Entry Points
 
-- `main(argv=None)` ([cli.py:1497](../../../src/wastech_orchestrator/cli.py#L1497)) — консольные скрипты `wastech-orchestrator`/`worc` ([pyproject.toml:29-32](../../../pyproject.toml#L29)) и `python -m wastech_orchestrator` ([\_\_main\_\_.py](../../../src/wastech_orchestrator/__main__.py)).
+- `main(argv=None)` ([cli.py:1497](../../../src/wastech_orchestrator/cli.py#L1497)) — console scripts `wastech-orchestrator`/`worc` ([pyproject.toml:29-32](../../../pyproject.toml#L29)) and `python -m wastech_orchestrator` ([\_\_main\_\_.py](../../../src/wastech_orchestrator/__main__.py)).
 - `build_parser()` ([cli.py:114](../../../src/wastech_orchestrator/cli.py#L114)).
 - `cmd_run`/`cmd_status`/`cmd_preflight`/`run_preflight`/`cmd_telegram_test`/`cmd_rerun`/`cmd_finalize` ([cli.py:849-1148](../../../src/wastech_orchestrator/cli.py#L849)).
 
-## Входные данные и состояние
+## Inputs and State
 
-Аргументы командной строки; разрешённая конфигурация; окружение (для preflight/telegram). Состояния не хранит — каждая команда исполняется и возвращает код.
+Command-line arguments; resolved configuration; environment (for preflight/telegram). Holds no state — each command executes and returns an exit code.
 
-## Основной сценарий (диспетчеризация)
+## Main Scenario (dispatch)
 
-1. `main` парсит аргументы, валидирует числовые флаги.
-2. По `args.command` вызывается соответствующий драйвер.
-3. `ConfigError`/`IncompatibleStateError`/`GhNotAvailableError` ловятся → сообщение + выход 2 ([cli.py:1538-1540](../../../src/wastech_orchestrator/cli.py#L1538)).
-4. Терминальный статус задачи → код: `done`=0, `failed`=1, `manual_action_required`=2 ([cli.py:62-66](../../../src/wastech_orchestrator/cli.py#L62)).
+1. `main` parses arguments, validates numeric flags.
+2. The corresponding driver is called based on `args.command`.
+3. `ConfigError`/`IncompatibleStateError`/`GhNotAvailableError` are caught → message + exit 2 ([cli.py:1538-1540](../../../src/wastech_orchestrator/cli.py#L1538)).
+4. Terminal task status → exit code: `done`=0, `failed`=1, `manual_action_required`=2 ([cli.py:62-66](../../../src/wastech_orchestrator/cli.py#L62)).
 
-Маршрутизация команд и отображение в код возврата (CLI — тонкий слой: вся «тяжёлая» работа в блоках):
+Command routing and exit code mapping (CLI is a thin layer — all heavy work lives in the blocks):
 
 ```mermaid
 flowchart TB
-    argv(["argv"]) --> parser["build_parser<br/>(глобальные флаги + 14 подкоманд)"]
-    parser --> main["main — диспетчер по args.command"]
+    argv(["argv"]) --> parser["build_parser<br/>(global flags + 14 subcommands)"]
+    parser --> main["main — dispatcher by args.command"]
 
     main --> c_run["run / rerun / finalize"]
     main --> c_watch["watch / stop / restart"]
@@ -53,82 +53,82 @@ flowchart TB
     main --> c_diag["preflight / telegram-test"]
     main --> c_inst["init / install / upgrade-config /<br/>upgrade-docs / install-templates"]
 
-    c_run --> B06["B06 Конвейер"]
-    c_watch --> B02["B02 watch-демон"]
+    c_run --> B06["B06 Pipeline"]
+    c_watch --> B02["B02 watch daemon"]
     c_status -.->|"read-only"| B07["B07 State Store"]
     c_diag --> svc["B18 / B25 / B23 / B26"]
-    c_inst --> B03["B03 Установщик"]
+    c_inst --> B03["B03 Installer"]
 
-    B06 --> codes["терминальный статус → код:<br/>done = 0, failed = 1,<br/>manual_action_required = 2"]
-    main -.->|"ConfigError / IncompatibleStateError /<br/>GhNotAvailableError"| err2["выход 2"]
+    B06 --> codes["terminal status → exit code:<br/>done = 0, failed = 1,<br/>manual_action_required = 2"]
+    main -.->|"ConfigError / IncompatibleStateError /<br/>GhNotAvailableError"| err2["exit 2"]
 ```
 
-## Альтернативные сценарии
+## Alternative Scenarios
 
 ### `run`
 
-Загрузить конфиг, (если PR) `require_gh`, `build_orchestrator`, `run_task`, печать статуса+PR ([cli.py:849-865](../../../src/wastech_orchestrator/cli.py#L849)).
+Load config, (if PR) `require_gh`, `build_orchestrator`, `run_task`, print status + PR ([cli.py:849-865](../../../src/wastech_orchestrator/cli.py#L849)).
 
 ### `status`
 
-Read-only `StateStore.open_readonly`: активная/последняя задача, стадия, ветка, сабтаск, счётчики, профиль проверок — без запуска чего-либо ([cli.py:1266-1329](../../../src/wastech_orchestrator/cli.py#L1266)).
+Read-only `StateStore.open_readonly`: active/last task, stage, branch, subtask, counters, check profile — without launching anything ([cli.py:1266-1329](../../../src/wastech_orchestrator/cli.py#L1266)).
 
 ### `preflight`
 
-`run_preflight`: `provider.preflight()` по разрешённым провайдерам + `check_isolation` + диагностика проверок + telegram-preflight → готовность + строки ([cli.py:1057-1113](../../../src/wastech_orchestrator/cli.py#L1057)).
+`run_preflight`: `provider.preflight()` for resolved providers + `check_isolation` + check diagnostics + telegram-preflight → readiness + lines ([cli.py:1057-1113](../../../src/wastech_orchestrator/cli.py#L1057)).
 
 ### `rerun` / `finalize`
 
-План (`plan_rerun`/`plan_finalize`) → при `--dry-run` печать плана; иначе подтверждение и `rerun_task`/`continue_task` / `finalize_task` ([cli.py:904-1054](../../../src/wastech_orchestrator/cli.py#L904)). Отказ при живом watch-демоне.
+Plan (`plan_rerun`/`plan_finalize`) → if `--dry-run` print plan; otherwise confirm and `rerun_task`/`continue_task` / `finalize_task` ([cli.py:904-1054](../../../src/wastech_orchestrator/cli.py#L904)). Fails if the watch daemon is alive.
 
 ### `telegram-test`
 
-`build_notifier` + `ask_human` — реальный round-trip без обработки задачи ([cli.py:1116-1147](../../../src/wastech_orchestrator/cli.py#L1116)).
+`build_notifier` + `ask_human` — a real round-trip without task processing ([cli.py:1116-1147](../../../src/wastech_orchestrator/cli.py#L1116)).
 
-## Проверки и ограничения
+## Checks and Constraints
 
-- Подкоманда обязательна; числовые флаги (`--heartbeat-seconds`/`--poll-seconds`/`--timeout`) — `>= 0` ([cli.py:1500-1505](../../../src/wastech_orchestrator/cli.py#L1500)).
-- Версионные гейты конфига/БД → чистый выход 2 (не traceback) ([cli.py:1507-1540](../../../src/wastech_orchestrator/cli.py#L1507)).
-- `rerun`/`finalize` отказывают при живом watch-демоне (общий клон) ([cli.py:912-919,1006-1014](../../../src/wastech_orchestrator/cli.py#L912)).
-- `run`/`watch`/`rerun` при `create_pull_request` делают `require_gh` (быстрый отказ).
-- `status` строго read-only (open_readonly, без резолва/проб).
+- Subcommand is required; numeric flags (`--heartbeat-seconds`/`--poll-seconds`/`--timeout`) must be `>= 0` ([cli.py:1500-1505](../../../src/wastech_orchestrator/cli.py#L1500)).
+- Config/DB version gates → clean exit 2 (no traceback) ([cli.py:1507-1540](../../../src/wastech_orchestrator/cli.py#L1507)).
+- `rerun`/`finalize` fail when the watch daemon is alive (shared clone) ([cli.py:912-919,1006-1014](../../../src/wastech_orchestrator/cli.py#L912)).
+- `run`/`watch`/`rerun` call `require_gh` (fast-fail) when `create_pull_request` is enabled.
+- `status` is strictly read-only (open_readonly, no resolution/probing).
 
-## Результат
+## Output
 
-Печать в stdout/stderr и код возврата процесса. Для задач — статус и (опц.) URL PR. Для preflight — строки готовности.
+Print to stdout/stderr and process exit code. For tasks — status and (optionally) PR URL. For preflight — readiness lines.
 
-## Побочные эффекты
+## Side Effects
 
-- Печать; код возврата. Всё «тяжёлое» — через делегируемые блоки (конвейер, провайдеры, git, БД).
-- Настройка логирования ([B27](./B27-observability.md)); для install/upgrade — файловые эффекты в [B03](./B03-installer-and-scaffolding.md).
+- Printing; exit code. All heavy work goes through delegated blocks (pipeline, providers, git, DB).
+- Logging setup ([B27](./B27-observability.md)); for install/upgrade — file-system effects in [B03](./B03-installer-and-scaffolding.md).
 
-## Ошибки и граничные случаи
+## Errors and Edge Cases
 
-- Конфигурация не найдена → подсказка про `install`/`--config` (выход 2) ([cli.py:734-743](../../../src/wastech_orchestrator/cli.py#L734)).
-- Неизвестная команда → `SystemExit` ([cli.py:1541](../../../src/wastech_orchestrator/cli.py#L1541)).
-- Отсутствует `gh` при включённых PR → `GhNotAvailableError` → выход 2.
+- Configuration not found → hint about `install`/`--config` (exit 2) ([cli.py:734-743](../../../src/wastech_orchestrator/cli.py#L734)).
+- Unknown command → `SystemExit` ([cli.py:1541](../../../src/wastech_orchestrator/cli.py#L1541)).
+- `gh` absent when PRs are enabled → `GhNotAvailableError` → exit 2.
 
-## Связи
+## Relationships
 
-### Использует
+### Uses
 
-- [B06 — Конвейер](./B06-orchestrator-pipeline.md) — `build_orchestrator`, `run_task`, `plan_rerun`/`rerun_task`/`continue_task`, `plan_finalize`/`finalize_task`.
-- [B05](./B05-configuration.md)/[B04](./B04-install-registry-and-config-discovery.md) — загрузка и разрешение конфигурации.
-- [B07 — State Store](./B07-state-machine-and-store.md) — `open_readonly` для `status`.
-- [B25](./B25-security-policy.md) (`check_isolation`), [B18](./B18-agent-providers.md) (`build_providers`/`preflight`), [B23](./B23-check-discovery.md) (диагностика проверок), [B26](./B26-notifications-telegram.md) (`build_notifier`/preflight), [B27](./B27-observability.md) (`configure_logging`).
-- [B03 — Установщик](./B03-installer-and-scaffolding.md) и [B02 — watch](./B02-watch-daemon-and-scheduling.md) — диспетчеризуемые команды.
+- [B06 — Pipeline](./B06-orchestrator-pipeline.md) — `build_orchestrator`, `run_task`, `plan_rerun`/`rerun_task`/`continue_task`, `plan_finalize`/`finalize_task`.
+- [B05](./B05-configuration.md)/[B04](./B04-install-registry-and-config-discovery.md) — configuration loading and resolution.
+- [B07 — State Store](./B07-state-machine-and-store.md) — `open_readonly` for `status`.
+- [B25](./B25-security-policy.md) (`check_isolation`), [B18](./B18-agent-providers.md) (`build_providers`/`preflight`), [B23](./B23-check-discovery.md) (check diagnostics), [B26](./B26-notifications-telegram.md) (`build_notifier`/preflight), [B27](./B27-observability.md) (`configure_logging`).
+- [B03 — Installer](./B03-installer-and-scaffolding.md) and [B02 — watch](./B02-watch-daemon-and-scheduling.md) — dispatched commands.
 
-### Используется в
+### Used by
 
-- Конечными операторами (точка входа всей системы).
+- End operators (entry point of the entire system).
 
-## Место в общей системе
+## Place in the Overall System
 
-Это «лицо» оркестратора: каждая операторская операция начинается здесь и делегируется профильному блоку. CLI владеет преобразованием намерения оператора в вызовы и отображением исхода в код возврата, не реализуя бизнес-логику сам.
+This is the "face" of the orchestrator: every operator operation starts here and is delegated to the responsible block. The CLI owns the translation of operator intent into calls and the mapping of outcomes to exit codes, without implementing business logic itself.
 
-## Подтверждение в коде
+## Code Evidence
 
-- [cli.py:114-376](../../../src/wastech_orchestrator/cli.py#L114) — парсер и подкоманды.
-- [cli.py:1497-1541](../../../src/wastech_orchestrator/cli.py#L1497) — диспетчер, маппинг ошибок/кодов.
-- [cli.py:849-1148,1266-1329](../../../src/wastech_orchestrator/cli.py#L849) — драйверы run/preflight/telegram-test/rerun/finalize/status.
-- Тесты: [tests/core/test_cli_pipeline.py](../../../tests/core/test_cli_pipeline.py), [test_cli_rerun.py](../../../tests/core/test_cli_rerun.py), [test_cli_finalize.py](../../../tests/core/test_cli_finalize.py), [tests/test_cli_preflight.py](../../../tests/test_cli_preflight.py), [tests/test_cli_version.py](../../../tests/test_cli_version.py), [tests/test_cli_watch.py](../../../tests/test_cli_watch.py).
+- [cli.py:114-376](../../../src/wastech_orchestrator/cli.py#L114) — parser and subcommands.
+- [cli.py:1497-1541](../../../src/wastech_orchestrator/cli.py#L1497) — dispatcher, error/code mapping.
+- [cli.py:849-1148,1266-1329](../../../src/wastech_orchestrator/cli.py#L849) — run/preflight/telegram-test/rerun/finalize/status drivers.
+- Tests: [tests/core/test_cli_pipeline.py](../../../tests/core/test_cli_pipeline.py), [test_cli_rerun.py](../../../tests/core/test_cli_rerun.py), [test_cli_finalize.py](../../../tests/core/test_cli_finalize.py), [tests/test_cli_preflight.py](../../../tests/test_cli_preflight.py), [tests/test_cli_version.py](../../../tests/test_cli_version.py), [tests/test_cli_watch.py](../../../tests/test_cli_watch.py).

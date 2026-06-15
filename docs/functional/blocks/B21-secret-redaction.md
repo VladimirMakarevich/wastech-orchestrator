@@ -1,108 +1,108 @@
-# B21 — Редактирование секретов (redaction)
+# B21 — Secret Redaction
 
-## Назначение
+## Purpose
 
-Сквозной набор чистых функций, вычищающих секрето-подобные значения из текста и из словарей **до** того, как что-либо попадёт в артефакт, лог или SQLite. Поддерживает системный инвариант «никаких секретов в логах, БД и артефактах»: даже если агент случайно выведет содержимое запретного файла в stdout/stderr, эти значения будут заменены на `[REDACTED]` перед записью.
+A cross-cutting set of pure functions that scrub secret-like values from text and dictionaries **before** anything reaches an artifact, log, or SQLite. Enforces the system invariant "no secrets in logs, DB, or artifacts": even if an agent accidentally prints the contents of a forbidden file to stdout/stderr, those values will be replaced with `[REDACTED]` before being written.
 
-## Ответственность
+## Responsibilities
 
-- Заменить известные секреты в строке: переданные литералы + чувствительные присваивания `NAME=VALUE` + токено-подобные паттерны ([redaction.py:94-105](../../../src/wastech_orchestrator/providers/redaction.py#L94)).
-- Сделать «глубокую» редактированную копию словаря: значения под чувствительными ключами вычищаются целиком, строки — через `redact_text`, списки/словари — рекурсивно ([redaction.py:108-131](../../../src/wastech_orchestrator/providers/redaction.py#L108)).
-- Собрать литералы-секреты из файлов `denied_read_paths` рабочего дерева для последующей редакции ([redaction.py:134-202](../../../src/wastech_orchestrator/providers/redaction.py#L134)).
-- Определить, выглядит ли имя ключа как «секрето-несущее» ([redaction.py:85-91](../../../src/wastech_orchestrator/providers/redaction.py#L85)).
+- Replace known secrets in a string: passed literals + sensitive `NAME=VALUE` assignments + token-like patterns ([redaction.py:94-105](../../../src/wastech_orchestrator/providers/redaction.py#L94)).
+- Produce a "deep" redacted copy of a dictionary: values under sensitive keys are scrubbed entirely, strings are processed through `redact_text`, lists/dicts are handled recursively ([redaction.py:108-131](../../../src/wastech_orchestrator/providers/redaction.py#L108)).
+- Collect secret literals from `denied_read_paths` files in the workspace for subsequent redaction ([redaction.py:134-202](../../../src/wastech_orchestrator/providers/redaction.py#L134)).
+- Determine whether a key name looks like a "secret-bearing" key ([redaction.py:85-91](../../../src/wastech_orchestrator/providers/redaction.py#L85)).
 
-## Границы блока
+## Block Boundaries
 
-### Входит в ответственность блока
+### Within scope
 
-- Чистое преобразование текста/словаря: вход не мутируется.
-- Чтение (только чтение) файлов `denied_read_paths` для сбора литералов-секретов.
+- Pure transformation of text/dictionaries: the input is never mutated.
+- Reading (read-only) `denied_read_paths` files to collect secret literals.
 
-### Не входит в ответственность блока
+### Out of scope
 
-- Решение, **что именно** редактировать у конкретного процесса (какие `extra_secrets` передать) — это вызывающие адаптеры/менеджеры.
-- Запись редактированного контента в артефакты/логи — это [B20](./B20-artifact-layout.md), [B18](./B18-agent-providers.md), [B27](./B27-observability.md).
-- Аллой-лист переменных окружения — это [B25](./B25-security-policy.md).
+- Deciding **what exactly** to redact for a specific process (which `extra_secrets` to pass) — that is the responsibility of the calling adapters/managers.
+- Writing redacted content to artifacts/logs — that is [B20](./B20-artifact-layout.md), [B18](./B18-agent-providers.md), [B27](./B27-observability.md).
+- The environment variable allowlist — that is [B25](./B25-security-policy.md).
 
-## Точки входа
+## Entry Points
 
 - `redact_text(text, *, extra_secrets=())` ([redaction.py:94](../../../src/wastech_orchestrator/providers/redaction.py#L94)).
 - `redact_mapping(obj, *, extra_secrets=())` ([redaction.py:108](../../../src/wastech_orchestrator/providers/redaction.py#L108)).
 - `read_denied_secrets(workspace, denied_read_paths, *, max_bytes=65536)` ([redaction.py:134](../../../src/wastech_orchestrator/providers/redaction.py#L134)).
 - `is_sensitive_key(name)` ([redaction.py:85](../../../src/wastech_orchestrator/providers/redaction.py#L85)).
 
-## Входные данные и состояние
+## Inputs and State
 
-Текст или словарь + набор литералов `extra_secrets`; либо путь к рабочему дереву и список glob-ов `denied_read_paths`. Состояние не хранится.
+Text or a dictionary plus a set of `extra_secrets` literals; or a path to the workspace and a list of `denied_read_paths` globs. No state is stored.
 
-## Основной сценарий
+## Main Scenario
 
 `redact_text`:
 
-1. Литералы из `extra_secrets` длиной ≥ 4 заменяются на `[REDACTED]` (сначала более длинные — сортировка по длине убыв.) ([redaction.py:97-101](../../../src/wastech_orchestrator/providers/redaction.py#L97)).
-2. Чувствительные присваивания `NAME=VALUE`/`NAME: VALUE`/`"NAME":"VALUE"` (имя содержит TOKEN/SECRET/PASSWORD/API_KEY/… ) — имя сохраняется, значение вычищается ([redaction.py:57-59,102](../../../src/wastech_orchestrator/providers/redaction.py#L57)).
-3. Токено-подобные паттерны заменяются: GitHub PAT/OAuth (`gh[opsur]_…`, `github_pat_…`), OpenAI-ключ (`sk-…`), Slack (`xox[baprs]-…`), AWS (`AKIA…`), Bearer-токен, JWT ([redaction.py:41-49](../../../src/wastech_orchestrator/providers/redaction.py#L41)).
+1. Literals from `extra_secrets` with length ≥ 4 are replaced with `[REDACTED]` (longer ones first — sorted by length descending) ([redaction.py:97-101](../../../src/wastech_orchestrator/providers/redaction.py#L97)).
+2. Sensitive `NAME=VALUE` / `NAME: VALUE` / `"NAME":"VALUE"` assignments (where the name contains TOKEN/SECRET/PASSWORD/API_KEY/…) — the name is preserved, the value is scrubbed ([redaction.py:57-59,102](../../../src/wastech_orchestrator/providers/redaction.py#L57)).
+3. Token-like patterns are replaced: GitHub PAT/OAuth (`gh[opsur]_…`, `github_pat_…`), OpenAI key (`sk-…`), Slack (`xox[baprs]-…`), AWS (`AKIA…`), Bearer token, JWT ([redaction.py:41-49](../../../src/wastech_orchestrator/providers/redaction.py#L41)).
 
 `read_denied_secrets`:
 
-1. Каждый glob из `denied_read_paths` раскрывается относительно `workspace`; файлы — добавляются, каталоги — рекурсивно ([redaction.py:148-162](../../../src/wastech_orchestrator/providers/redaction.py#L148)).
-2. Каждый файл читается до `max_bytes`; из непустых не-комментарных строк извлекаются кандидаты: значение после первого `=`, каждый непрерывный не-разделительный фрагмент, и вся строка целиком — с фильтром длины ≥ 8 ([redaction.py:178-202](../../../src/wastech_orchestrator/providers/redaction.py#L178)).
-3. Возвращается дедуплицированный кортеж литералов.
+1. Each glob from `denied_read_paths` is expanded relative to `workspace`; files are added directly, directories are traversed recursively ([redaction.py:148-162](../../../src/wastech_orchestrator/providers/redaction.py#L148)).
+2. Each file is read up to `max_bytes`; from non-empty, non-comment lines candidates are extracted: the value after the first `=`, each continuous non-delimiter fragment, and the whole line — filtered to length ≥ 8 ([redaction.py:178-202](../../../src/wastech_orchestrator/providers/redaction.py#L178)).
+3. A deduplicated tuple of literals is returned.
 
-Два пути: трёхслойная редакция строки и сбор литералов из запретных файлов (которые затем тоже вычищаются из стоков):
+Two paths: three-layer string redaction and literal collection from forbidden files (which are then also scrubbed from sinks):
 
 ```mermaid
 flowchart TB
-    rt(["redact_text(text, extra_secrets)"]) --> l1["1. литералы extra_secrets (длиной ≥ 4),<br/>сначала более длинные → [REDACTED]"]
-    l1 --> l2["2. чувствительные присваивания NAME=VALUE<br/>(TOKEN/SECRET/PASSWORD/API_KEY/...) → значение вычищается"]
-    l2 --> l3["3. токено-паттерны: GitHub PAT, sk-..., Slack, AWS, Bearer, JWT"]
-    l3 --> out["новая строка (вход не мутируется)"]
-    rd(["read_denied_secrets(workspace, denied_read_paths)"]) -.->|"литералы длиной ≥ 8"| extra["extra_secrets"]
+    rt(["redact_text(text, extra_secrets)"]) --> l1["1. extra_secrets literals (length ≥ 4),<br/>longer ones first → [REDACTED]"]
+    l1 --> l2["2. sensitive NAME=VALUE assignments<br/>(TOKEN/SECRET/PASSWORD/API_KEY/...) → value scrubbed"]
+    l2 --> l3["3. token patterns: GitHub PAT, sk-..., Slack, AWS, Bearer, JWT"]
+    l3 --> out["new string (input not mutated)"]
+    rd(["read_denied_secrets(workspace, denied_read_paths)"]) -.->|"literals length ≥ 8"| extra["extra_secrets"]
     extra -.-> rt
 ```
 
-## Проверки и ограничения
+## Checks and Constraints
 
-- Литералы короче 4 символов игнорируются (иначе портили бы обычный текст) ([redaction.py:27-29](../../../src/wastech_orchestrator/providers/redaction.py#L27)).
-- Токены из запретных файлов короче 8 символов игнорируются ([redaction.py:31-34](../../../src/wastech_orchestrator/providers/redaction.py#L31)).
-- Чувствительность ключа определяется по **сегментам** имени, поэтому `access_token`/`API_KEY` чувствительны, а счётчик `input_tokens` (сегмент `tokens`) — нет ([redaction.py:63-91](../../../src/wastech_orchestrator/providers/redaction.py#L63)).
-- Комментарии (`#`) и пустые строки в запретных файлах пропускаются; ошибки glob/чтения молча игнорируются ([redaction.py:156,170,195](../../../src/wastech_orchestrator/providers/redaction.py#L156)).
+- Literals shorter than 4 characters are ignored (otherwise they would corrupt normal text) ([redaction.py:27-29](../../../src/wastech_orchestrator/providers/redaction.py#L27)).
+- Tokens from forbidden files shorter than 8 characters are ignored ([redaction.py:31-34](../../../src/wastech_orchestrator/providers/redaction.py#L31)).
+- Key sensitivity is determined by **segments** of the name, so `access_token`/`API_KEY` are sensitive, but the counter `input_tokens` (segment `tokens`) is not ([redaction.py:63-91](../../../src/wastech_orchestrator/providers/redaction.py#L63)).
+- Comments (`#`) and blank lines in forbidden files are skipped; glob/read errors are silently ignored ([redaction.py:156,170,195](../../../src/wastech_orchestrator/providers/redaction.py#L156)).
 
-## Результат
+## Output
 
-Новая редактированная строка / новый словарь (вход не изменяется), либо кортеж литералов-секретов.
+A new redacted string / new dictionary (input is not modified), or a tuple of secret literals.
 
-## Побочные эффекты
+## Side Effects
 
-- `redact_text` / `redact_mapping` / `is_sensitive_key` — побочных эффектов нет.
-- `read_denied_secrets` — только чтение файлов рабочего дерева (никакой записи); собранные значения никуда не записываются, используются только как литералы для редакции.
+- `redact_text` / `redact_mapping` / `is_sensitive_key` — no side effects.
+- `read_denied_secrets` — reads workspace files only (no writes); collected values are not written anywhere, used only as literals for redaction.
 
-## Ошибки и граничные случаи
+## Errors and Edge Cases
 
-- Отсутствующие пути `denied_read_paths` молча пропускаются.
-- Нестроковые значения в словаре (числа/булевы/None) проходят без изменений, если не под чувствительным ключом ([redaction.py:124-131](../../../src/wastech_orchestrator/providers/redaction.py#L124)).
+- Missing `denied_read_paths` paths are silently skipped.
+- Non-string values in a dictionary (numbers/booleans/None) pass through unchanged unless they are under a sensitive key ([redaction.py:124-131](../../../src/wastech_orchestrator/providers/redaction.py#L124)).
 
-## Связи
+## Relationships
 
-### Использует
+### Uses
 
-- стандартную библиотеку (`re`, `pathlib`). Внешних блоков не использует.
+- Standard library (`re`, `pathlib`). Does not use any external blocks.
 
-### Используется в
+### Used by
 
-- [B18 — Адаптеры провайдеров](./B18-agent-providers.md) — редакция stdout/stderr/request и сбор секретов из запретных файлов.
-- [B22 — Git Manager](./B22-git-manager.md) — редакция stderr git и диффов перед записью.
-- [B27 — Наблюдаемость](./B27-observability.md) — `RedactionFilter` пропускает каждую лог-запись.
-- [B06 — Конвейер](./B06-orchestrator-pipeline.md) — редакция отрендеренного промпта и секции навыков.
-- [B26 — Telegram](./B26-notifications-telegram.md) — редакция исходящих сообщений и ответов.
+- [B18 — Agent Provider Adapters](./B18-agent-providers.md) — redaction of stdout/stderr/request and collection of secrets from forbidden files.
+- [B22 — Git Manager](./B22-git-manager.md) — redaction of git stderr and diffs before writing.
+- [B27 — Observability](./B27-observability.md) — `RedactionFilter` passes every log record through.
+- [B06 — Pipeline](./B06-orchestrator-pipeline.md) — redaction of rendered prompts and skill sections.
+- [B26 — Telegram](./B26-notifications-telegram.md) — redaction of outgoing messages and responses.
 
-## Место в общей системе
+## Role in the Overall System
 
-Это второй (defense-in-depth) рубеж защиты секретов: места вызова логируют/пишут только безопасные идентификаторы, а этот блок дополнительно вычищает любые токено-подобные значения. Совместно с [B25](./B25-security-policy.md) (запрет передачи секретов в окружение) обеспечивает инвариант «нет секретов в артефактах/логах/БД».
+This is the second (defense-in-depth) layer of secret protection: call sites log/write only safe identifiers, and this block additionally scrubs any token-like values. Together with [B25](./B25-security-policy.md) (which prevents secrets from being passed into the environment), it enforces the "no secrets in artifacts/logs/DB" invariant.
 
-## Подтверждение в коде
+## Code Evidence
 
-- [providers/redaction.py:41-59](../../../src/wastech_orchestrator/providers/redaction.py#L41) — паттерны токенов и чувствительных присваиваний.
-- [providers/redaction.py:94-131](../../../src/wastech_orchestrator/providers/redaction.py#L94) — `redact_text` / `redact_mapping` (чистые, вход не мутируется).
-- [providers/redaction.py:134-202](../../../src/wastech_orchestrator/providers/redaction.py#L134) — `read_denied_secrets` (read-only сбор литералов, фильтр длины 8).
-- [tests/providers/test_redaction.py](../../../tests/providers/test_redaction.py), [tests/providers/test_redaction_sinks.py](../../../tests/providers/test_redaction_sinks.py), [tests/security/test_denied_reads.py](../../../tests/security/test_denied_reads.py) — подтверждают паттерны, неизменяемость входа, сбор и применение секретов из `.env`/glob.
+- [providers/redaction.py:41-59](../../../src/wastech_orchestrator/providers/redaction.py#L41) — token patterns and sensitive assignment patterns.
+- [providers/redaction.py:94-131](../../../src/wastech_orchestrator/providers/redaction.py#L94) — `redact_text` / `redact_mapping` (pure, input not mutated).
+- [providers/redaction.py:134-202](../../../src/wastech_orchestrator/providers/redaction.py#L134) — `read_denied_secrets` (read-only literal collection, length filter of 8).
+- [tests/providers/test_redaction.py](../../../tests/providers/test_redaction.py), [tests/providers/test_redaction_sinks.py](../../../tests/providers/test_redaction_sinks.py), [tests/security/test_denied_reads.py](../../../tests/security/test_denied_reads.py) — verify patterns, input immutability, collection and application of secrets from `.env`/glob.

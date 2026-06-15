@@ -1,124 +1,124 @@
-# B17 — Router агентов и политика fallback
+# B17 — Agent Router and Fallback Policy
 
-## Назначение
+## Purpose
 
-Слой между ядром-конвейером и адаптерами провайдеров. Для каждой агентской стадии выбирает пару `(primary, fallback)`, запускает primary и — **только при инфраструктурных ошибках** (плюс условный случай auth/permission) — переключается на fallback, считая попытки. Реализует инвариант «fallback только для инфраструктурных ошибок; качественный провал уходит в fixing, а не на другого провайдера».
+The layer between the core pipeline and provider adapters. For each agent stage it selects a `(primary, fallback)` pair, runs the primary, and — **only on infrastructure errors** (plus the conditional auth/permission case) — switches to the fallback while counting attempts. Implements the invariant "fallback only for infrastructure errors; a quality failure goes to fixing, not to another provider".
 
-## Ответственность
+## Responsibilities
 
-- Разрешить маршрут стадии из `agents.routing` + валидированного task-override, зафиксировать источник маршрута ([router.py:133-169](../../../src/wastech_orchestrator/routing/router.py#L133)).
-- Решить, допускает ли поднятая ошибка fallback (`fallback_allowed`) ([router.py:58-73](../../../src/wastech_orchestrator/routing/router.py#L58)).
-- Прогнать последовательность провайдеров, считая `stage_attempts` (ограничено `max_stage_attempts`), и вернуть `StageOutcome` ([router.py:171-313](../../../src/wastech_orchestrator/routing/router.py#L171)).
-- Передать fallback'у частичный дифф предыдущей попытки, **не откатывая** файлы ([router.py:271-273,315-322](../../../src/wastech_orchestrator/routing/router.py#L271)).
+- Resolve the stage route from `agents.routing` + a validated task-override, and record the route source ([router.py:133-169](../../../src/wastech_orchestrator/routing/router.py#L133)).
+- Decide whether a raised error permits a fallback (`fallback_allowed`) ([router.py:58-73](../../../src/wastech_orchestrator/routing/router.py#L58)).
+- Run the provider sequence, counting `stage_attempts` (bounded by `max_stage_attempts`), and return a `StageOutcome` ([router.py:171-313](../../../src/wastech_orchestrator/routing/router.py#L171)).
+- Pass the partial diff of the previous attempt to the fallback provider **without reverting** files ([router.py:271-273,315-322](../../../src/wastech_orchestrator/routing/router.py#L271)).
 
-## Границы блока
+## Block Boundaries
 
-### Входит в ответственность блока
+### Within this block's responsibility
 
-- Разрешение маршрута (swap-on-collision), решение о fallback, запуск последовательности, подсчёт попыток, передача частичного диффа.
+- Route resolution (swap-on-collision), fallback decision, sequence execution, attempt counting, partial diff handoff.
 
-### Не входит в ответственность блока
+### Outside this block's responsibility
 
-- **Построение команды CLI и запуск провайдера** — это [B18](./B18-agent-providers.md); Router вызывает только `AgentProvider.run` ([router.py:222](../../../src/wastech_orchestrator/routing/router.py#L222)).
-- **Переходы состояний и персист** — это [B06](./B06-orchestrator-pipeline.md); Router не меняет state machine и хранит состояние только в возвращаемом `StageOutcome` ([router.py:12-16](../../../src/wastech_orchestrator/routing/router.py#L12)).
-- **Снимок/дифф рабочего дерева** — контракт `SnapshotHook` реализует [B22](./B22-git-manager.md), объект передаёт [B06](./B06-orchestrator-pipeline.md) ([snapshots.py:43-56](../../../src/wastech_orchestrator/routing/snapshots.py#L43)).
-- **Классификация ошибок** — это [B18](./B18-agent-providers.md); Router лишь потребляет `ErrorClass`.
-- **Что делать с качественным `status=failed`** — это [B06](./B06-orchestrator-pipeline.md).
+- **Building the CLI command and launching the provider** — that is [B18](./B18-agent-providers.md); the Router only calls `AgentProvider.run` ([router.py:222](../../../src/wastech_orchestrator/routing/router.py#L222)).
+- **State transitions and persistence** — that is [B06](./B06-orchestrator-pipeline.md); the Router does not modify the state machine and holds state only in the returned `StageOutcome` ([router.py:12-16](../../../src/wastech_orchestrator/routing/router.py#L12)).
+- **Working-tree snapshot/diff** — the `SnapshotHook` contract is implemented by [B22](./B22-git-manager.md) and the object is passed by [B06](./B06-orchestrator-pipeline.md) ([snapshots.py:43-56](../../../src/wastech_orchestrator/routing/snapshots.py#L43)).
+- **Error classification** — that is [B18](./B18-agent-providers.md); the Router only consumes `ErrorClass`.
+- **What to do with a quality `status=failed`** — that is [B06](./B06-orchestrator-pipeline.md).
 
-## Точки входа
+## Entry Points
 
-- `AgentRouter.resolve_route(stage, override=None)` ([router.py:133](../../../src/wastech_orchestrator/routing/router.py#L133)) — [B06](./B06-orchestrator-pipeline.md) `_run_stage` ([orchestrator.py:1728](../../../src/wastech_orchestrator/core/orchestrator.py#L1728)).
-- `AgentRouter.run_stage(request, route, *, snapshot=None)` ([router.py:171](../../../src/wastech_orchestrator/routing/router.py#L171)) — [B06](./B06-orchestrator-pipeline.md) ([orchestrator.py:1777](../../../src/wastech_orchestrator/core/orchestrator.py#L1777), `snapshot=self._git`).
-- `fallback_allowed(error_class, *, primary_profile, fallback_profile)` ([router.py:58](../../../src/wastech_orchestrator/routing/router.py#L58)) — чистая, отдельно тестируется.
-- Конструируется в `build_orchestrator` ([orchestrator.py:2616](../../../src/wastech_orchestrator/core/orchestrator.py#L2616)).
+- `AgentRouter.resolve_route(stage, override=None)` ([router.py:133](../../../src/wastech_orchestrator/routing/router.py#L133)) — called by [B06](./B06-orchestrator-pipeline.md) `_run_stage` ([orchestrator.py:1728](../../../src/wastech_orchestrator/core/orchestrator.py#L1728)).
+- `AgentRouter.run_stage(request, route, *, snapshot=None)` ([router.py:171](../../../src/wastech_orchestrator/routing/router.py#L171)) — called by [B06](./B06-orchestrator-pipeline.md) ([orchestrator.py:1777](../../../src/wastech_orchestrator/core/orchestrator.py#L1777), `snapshot=self._git`).
+- `fallback_allowed(error_class, *, primary_profile, fallback_profile)` ([router.py:58](../../../src/wastech_orchestrator/routing/router.py#L58)) — pure function, tested in isolation.
+- Constructed in `build_orchestrator` ([orchestrator.py:2616](../../../src/wastech_orchestrator/core/orchestrator.py#L2616)).
 
-## Входные данные и состояние
+## Input Data and State
 
-`AgentRunRequest` (готовит [B06](./B06-orchestrator-pipeline.md)), `ResolvedRoute`, опц. `SnapshotHook`. Router держит словарь экземпляров провайдеров и конфиг; иного состояния нет (stateless помимо возвращаемого `StageOutcome`).
+`AgentRunRequest` (prepared by [B06](./B06-orchestrator-pipeline.md)), `ResolvedRoute`, optional `SnapshotHook`. The Router holds a dict of provider instances and config; it has no other state (stateless beyond the returned `StageOutcome`).
 
-## Основной сценарий (`run_stage`)
+## Happy Path (`run_stage`)
 
-1. Снимок «до» через `snapshot.capture()` (если hook передан).
-2. Формируется последовательность `[primary]` (+ `fallback`, если он не None).
-3. Для каждого провайдера, пока `stage_attempts < max_stage_attempts`: собрать per-attempt запрос, увеличить `stage_attempts`, вызвать `provider.run(req)`.
-4. Если `run` вернул результат (успех **или** качественный `failed`) — записать попытку и **сразу** вернуть `StageOutcome` (fallback не запускается) ([router.py:294-303](../../../src/wastech_orchestrator/routing/router.py#L294)).
-5. Если все попытки подняли `ProviderError` — вернуть `StageOutcome(result=None, terminal_error=...)`.
+1. Take a "before" snapshot via `snapshot.capture()` (if a hook is provided).
+2. Build the sequence `[primary]` (+ `fallback` if it is not None).
+3. For each provider, while `stage_attempts < max_stage_attempts`: assemble a per-attempt request, increment `stage_attempts`, call `provider.run(req)`.
+4. If `run` returned a result (success **or** quality `failed`) — record the attempt and **immediately** return `StageOutcome` (fallback is not invoked) ([router.py:294-303](../../../src/wastech_orchestrator/routing/router.py#L294)).
+5. If all attempts raised `ProviderError` — return `StageOutcome(result=None, terminal_error=...)`.
 
-Цикл попыток с инвариантом «fallback только для инфра-сбоя»: любой возвращённый результат (в т.ч. качественный `failed`) сразу завершает стадию, fallback не вызывается:
+Attempt loop with the invariant "fallback only for infrastructure failure": any returned result (including a quality `failed`) terminates the stage immediately, the fallback is not called:
 
 ```mermaid
 flowchart TB
-    start(["run_stage(request, route)"]) --> cap["snapshot.capture() — снимок «до» (если hook задан)"]
-    cap --> seq["последовательность: primary (+ fallback, если задан)"]
+    start(["run_stage(request, route)"]) --> cap["snapshot.capture() — 'before' snapshot (if hook is set)"]
+    cap --> seq["sequence: primary (+ fallback, if set)"]
     seq --> run["stage_attempts += 1; provider.run(req)"]
-    run --> res{"что вернул провайдер?"}
-    res -->|"результат: success ИЛИ качественный failed"| done["StageOutcome — вернуть сразу<br/>(fallback НЕ вызывается)"]
-    res -->|"ProviderError (инфра-сбой)"| fb{"есть следующий, лимит не исчерпан,<br/>fallback_allowed (профиль не слабее, B25)?"}
-    fb -->|да| diff["partial_change_since(before) → дифф fallback'у<br/>(файлы НЕ откатываются)"]
+    run --> res{"what did the provider return?"}
+    res -->|"result: success OR quality failed"| done["StageOutcome — return immediately<br/>(fallback is NOT called)"]
+    res -->|"ProviderError (infrastructure failure)"| fb{"next provider exists, limit not reached,<br/>fallback_allowed (profile not weaker, B25)?"}
+    fb -->|yes| diff["partial_change_since(before) → diff to fallback<br/>(files are NOT reverted)"]
     diff --> run
-    fb -->|нет| term["StageOutcome(result=None, terminal_error)<br/>→ B06: терминальный failed стадии"]
+    fb -->|no| term["StageOutcome(result=None, terminal_error)<br/>→ B06: terminal stage failed"]
 ```
 
-## Альтернативные сценарии
+## Alternative Scenarios
 
-### Инфраструктурный сбой → fallback
+### Infrastructure failure → fallback
 
-`ProviderError` от primary: записать попытку (status=None); если есть следующий провайдер, лимит не исчерпан и `fallback_allowed(...)` истинно — снять `partial_change_since(before)` и перейти к fallback'у (его запрос получает `diff_path` частичного диффа) ([router.py:244-273](../../../src/wastech_orchestrator/routing/router.py#L244)).
+`ProviderError` from primary: record the attempt (status=None); if the next provider exists, the limit is not reached, and `fallback_allowed(...)` is true — take `partial_change_since(before)` and move to the fallback (its request receives `diff_path` of the partial diff) ([router.py:244-273](../../../src/wastech_orchestrator/routing/router.py#L244)).
 
-### Fallback запрещён → терминально для стадии
+### Fallback not allowed → terminal for the stage
 
-Если `fallback_allowed` ложно (ошибка не инфраструктурная, либо fallback-профиль слабее) — выйти из цикла с `result=None` и `terminal_error` ([router.py:248-262](../../../src/wastech_orchestrator/routing/router.py#L248)).
+If `fallback_allowed` is false (error is not infrastructure-level, or the fallback profile is weaker) — exit the loop with `result=None` and `terminal_error` ([router.py:248-262](../../../src/wastech_orchestrator/routing/router.py#L248)).
 
-### Override маршрута
+### Route override
 
-Task-override перенацеливает **primary** (после `check_task_route_override`); при коллизии с настроенным fallback роли меняются местами; `None`-fallback остаётся `None` ([router.py:151-169](../../../src/wastech_orchestrator/routing/router.py#L151)).
+A task-override retargets **primary** (after `check_task_route_override`); on collision with the configured fallback the roles are swapped; a `None` fallback stays `None` ([router.py:151-169](../../../src/wastech_orchestrator/routing/router.py#L151)).
 
-## Проверки и ограничения
+## Checks and Constraints
 
-- `fallback_allowed`: безусловно для `FALLBACK_ELIGIBLE` ([base.py:60-72](../../../src/wastech_orchestrator/providers/base.py#L60)); условно для `authorization_failed`/`permission_denied` — только если fallback-профиль не слабее (`is_same_or_stricter`); никогда для `task_failure`/`configuration_error` ([router.py:69-73](../../../src/wastech_orchestrator/routing/router.py#L69)).
-- `permission_profile` fallback'у **никогда не ослабляется** ([router.py:318-319](../../../src/wastech_orchestrator/routing/router.py#L318)).
-- `stage_attempts` ограничено `agents.max_stage_attempts`; `max_stage_attempts=1` полностью блокирует fallback.
-- `resolve_route` defensively перепроверяет allowed/configured/наличие экземпляра → `ConfigError` ([router.py:327-345](../../../src/wastech_orchestrator/routing/router.py#L327)).
-- Нет операции отката — частичные изменения не отменяются ([snapshots.py:43-48](../../../src/wastech_orchestrator/routing/snapshots.py#L43)).
+- `fallback_allowed`: unconditionally for `FALLBACK_ELIGIBLE` ([base.py:60-72](../../../src/wastech_orchestrator/providers/base.py#L60)); conditionally for `authorization_failed`/`permission_denied` — only if the fallback profile is not weaker (`is_same_or_stricter`); never for `task_failure`/`configuration_error` ([router.py:69-73](../../../src/wastech_orchestrator/routing/router.py#L69)).
+- The fallback's `permission_profile` is **never weakened** ([router.py:318-319](../../../src/wastech_orchestrator/routing/router.py#L318)).
+- `stage_attempts` is bounded by `agents.max_stage_attempts`; `max_stage_attempts=1` fully blocks fallback.
+- `resolve_route` defensively re-validates allowed/configured/instance presence → `ConfigError` ([router.py:327-345](../../../src/wastech_orchestrator/routing/router.py#L327)).
+- No rollback operation — partial changes are not reverted ([snapshots.py:43-48](../../../src/wastech_orchestrator/routing/snapshots.py#L43)).
 
-## Результат
+## Output
 
-`StageOutcome`: маршрут, итоговый `result` (или `None`, если все попытки — инфра-сбой), `provider_used`, `stage_attempts`, `terminal_error`, кортеж `attempts`, `partial_change`. Решения дальше не принимаются — их принимает [B06](./B06-orchestrator-pipeline.md).
+`StageOutcome`: route, final `result` (or `None` if all attempts were infrastructure failures), `provider_used`, `stage_attempts`, `terminal_error`, `attempts` tuple, `partial_change`. No further decisions are made here — they are made by [B06](./B06-orchestrator-pipeline.md).
 
-## Побочные эффекты
+## Side Effects
 
-- Структурированные лог-записи о маршруте и каждой попытке (через [B27](./B27-observability.md)).
-- Косвенно: запуск провайдером пишет артефакты (это [B18](./B18-agent-providers.md)).
-- Сам Router ничего не пишет в БД/файлы.
+- Structured log records for the route and each attempt (via [B27](./B27-observability.md)).
+- Indirectly: the provider writes artifacts on launch (that is [B18](./B18-agent-providers.md)).
+- The Router itself writes nothing to the DB or files.
 
-## Ошибки и граничные случаи
+## Errors and Edge Cases
 
-- Нет маршрута для стадии или недоступный провайдер → `ConfigError` (из `resolve_route`).
-- Все попытки инфра-сбойны → `result=None` + `terminal_error`; [B06](./B06-orchestrator-pipeline.md) трактует это как терминальный `failed` стадии.
-- Качественный `failed` не считается сбоем Router — он проходит дальше как результат.
+- No route for the stage or unavailable provider → `ConfigError` (from `resolve_route`).
+- All attempts are infrastructure failures → `result=None` + `terminal_error`; [B06](./B06-orchestrator-pipeline.md) treats this as a terminal stage `failed`.
+- A quality `failed` is not treated as a Router failure — it passes through as a result.
 
-## Связи
+## Relationships
 
-### Использует
+### Uses
 
-- [B18 — Адаптеры провайдеров](./B18-agent-providers.md) — `AgentProvider.run`, `ErrorClass`, `FALLBACK_ELIGIBLE`.
-- [B25 — Security](./B25-security-policy.md) — `is_same_or_stricter` (условный fallback).
-- [B05 — Конфигурация](./B05-configuration.md) — маршруты/провайдеры, `check_task_route_override`.
-- [B22 — Git Manager](./B22-git-manager.md) — реализация `SnapshotHook` (снимок/частичный дифф).
-- [B27 — Наблюдаемость](./B27-observability.md) — структурированный лог попыток.
+- [B18 — Provider Adapters](./B18-agent-providers.md) — `AgentProvider.run`, `ErrorClass`, `FALLBACK_ELIGIBLE`.
+- [B25 — Security](./B25-security-policy.md) — `is_same_or_stricter` (conditional fallback).
+- [B05 — Configuration](./B05-configuration.md) — routes/providers, `check_task_route_override`.
+- [B22 — Git Manager](./B22-git-manager.md) — `SnapshotHook` implementation (snapshot/partial diff).
+- [B27 — Observability](./B27-observability.md) — structured attempt log.
 
-### Используется в
+### Used by
 
-- [B06 — Конвейер](./B06-orchestrator-pipeline.md) — единственный вызыватель `resolve_route`/`run_stage`.
+- [B06 — Pipeline](./B06-orchestrator-pipeline.md) — the sole caller of `resolve_route`/`run_stage`.
 
-## Место в общей системе
+## Place in the Overall System
 
-Router изолирует ядро от провайдеров: ядро готовит запрос и реагирует на `StageOutcome`, а Router инкапсулирует «попробуй primary, при инфра-сбое — fallback». Это держит инвариант разделения ответственности (ядро не знает синтаксиса CLI) и инвариант «fallback только для инфраструктуры».
+The Router isolates the core from providers: the core prepares a request and reacts to `StageOutcome`, while the Router encapsulates "try primary, on infrastructure failure — fallback". This upholds the separation-of-responsibility invariant (the core does not know CLI syntax) and the "fallback only for infrastructure" invariant.
 
-## Подтверждение в коде
+## Code Evidence
 
-- [routing/router.py:58-73](../../../src/wastech_orchestrator/routing/router.py#L58) — таблица решений fallback.
-- [routing/router.py:133-169](../../../src/wastech_orchestrator/routing/router.py#L133) — разрешение маршрута + swap-on-collision.
-- [routing/router.py:171-313](../../../src/wastech_orchestrator/routing/router.py#L171) — цикл попыток, fallback, `StageOutcome`.
-- [routing/snapshots.py:43-56](../../../src/wastech_orchestrator/routing/snapshots.py#L43) — `SnapshotHook` без отката.
-- Тесты: [test_fallback_policy.py](../../../tests/routing/test_fallback_policy.py), [test_route_resolution.py](../../../tests/routing/test_route_resolution.py), [test_stage_attempts.py](../../../tests/routing/test_stage_attempts.py), [test_router_integration.py](../../../tests/routing/test_router_integration.py) — eligibility-классы, override/swap, лимит попыток, передача частичного диффа, «качественный failed не вызывает fallback».
+- [routing/router.py:58-73](../../../src/wastech_orchestrator/routing/router.py#L58) — fallback decision table.
+- [routing/router.py:133-169](../../../src/wastech_orchestrator/routing/router.py#L133) — route resolution + swap-on-collision.
+- [routing/router.py:171-313](../../../src/wastech_orchestrator/routing/router.py#L171) — attempt loop, fallback, `StageOutcome`.
+- [routing/snapshots.py:43-56](../../../src/wastech_orchestrator/routing/snapshots.py#L43) — `SnapshotHook` without rollback.
+- Tests: [test_fallback_policy.py](../../../tests/routing/test_fallback_policy.py), [test_route_resolution.py](../../../tests/routing/test_route_resolution.py), [test_stage_attempts.py](../../../tests/routing/test_stage_attempts.py), [test_router_integration.py](../../../tests/routing/test_router_integration.py) — eligibility classes, override/swap, attempt limit, partial diff handoff, "quality failed does not trigger fallback".

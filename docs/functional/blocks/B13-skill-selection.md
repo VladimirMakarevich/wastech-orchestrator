@@ -1,91 +1,91 @@
-# B13 — Инвентарь и выбор навыков (skills)
+# B13 — Skill Inventory and Selection
 
-## Назначение
+## Purpose
 
-Сканирует `SKILL.md`-файлы в целевом репозитории (`<repo>/.claude/skills/*`), даёт стадии `planning` выбрать релевантные, и детерминированно фильтрует выбор (агент предлагает — ядро решает). Выбранные навыки передаются дальше как **read-only ссылки по пути** (никогда не исполняются, не через Claude-only Skill-tool — чтобы оба провайдера вели себя одинаково).
+Scans `SKILL.md` files in the target repository (`<repo>/.claude/skills/*`), allows the `planning` stage to select relevant ones, and deterministically filters the selection (the agent proposes — the core decides). Selected skills are passed downstream as **read-only path references** (never executed, not via the Claude-only Skill tool — so that both providers behave identically).
 
-## Ответственность
+## Responsibilities
 
-- Прочитать инвентарь навыков (frontmatter `name`/`description`), ограниченно и read-only ([skills.py:86-138](../../../src/wastech_orchestrator/core/skills.py#L86)).
-- Оставить из предложенных planning только реально найденные и не входящие в gate-дублирующий денилист ([skills.py:155-186](../../../src/wastech_orchestrator/core/skills.py#L155)).
-- Пометить разделы навыков, чьи заголовки совпадают с инструкциями оператора (дедуп §2.2) ([skills.py:200-229](../../../src/wastech_orchestrator/core/skills.py#L200)).
+- Read the skill inventory (frontmatter `name`/`description`), with size limits and in read-only mode ([skills.py:86-138](../../../src/wastech_orchestrator/core/skills.py#L86)).
+- From the names proposed by planning, keep only those that were actually found and are not on the gate-duplicating denylist ([skills.py:155-186](../../../src/wastech_orchestrator/core/skills.py#L155)).
+- Mark skill sections whose headings match operator instructions (dedup §2.2) ([skills.py:200-229](../../../src/wastech_orchestrator/core/skills.py#L200)).
 
-## Границы блока
+## Block Boundaries
 
-### Входит в ответственность блока
+### Within the block's responsibility
 
-- Read-only инвентарь, детерминированный выбор, дедуп на уровне заголовков.
+- Read-only inventory, deterministic selection, heading-level deduplication.
 
-### Не входит в ответственность блока
+### Outside the block's responsibility
 
-- **Передача навыков стадиям** — это [B06](./B06-orchestrator-pipeline.md): кладёт пути в `request.skill_reference_paths` и рендерит секцию в `plan.md`.
-- **Исполнение навыков** — никогда (только ссылки по пути) ([skills.py:6-8](../../../src/wastech_orchestrator/core/skills.py#L6)).
-- **Валидация имён, предложенных planning** — это [B12 `_validate_skills`](./B12-hitl-and-typed-output.md); здесь имена резолвятся в инвентаре.
-- **Аллой-лист denied-путей** — правило задаёт [B25](./B25-security-policy.md) (используется при чтении).
+- **Passing skills to stages** — that is [B06](./B06-orchestrator-pipeline.md): it places paths in `request.skill_reference_paths` and renders a section in `plan.md`.
+- **Executing skills** — never (path references only) ([skills.py:6-8](../../../src/wastech_orchestrator/core/skills.py#L6)).
+- **Validating names proposed by planning** — that is [B12 `_validate_skills`](./B12-hitl-and-typed-output.md); here names are resolved in the inventory.
+- **The alloy-list of denied paths** — the rule is defined by [B25](./B25-security-policy.md) (used during reading).
 
-## Точки входа
+## Entry Points
 
-- `SkillInventoryScanner(...).collect()` / `read_body(ref)` ([skills.py:86-118](../../../src/wastech_orchestrator/core/skills.py#L86)) — сканер строится в `Orchestrator._default_skill_scanner` ([orchestrator.py:338](../../../src/wastech_orchestrator/core/orchestrator.py#L338)); `collect` вызывается в `run_task`/resume.
+- `SkillInventoryScanner(...).collect()` / `read_body(ref)` ([skills.py:86-118](../../../src/wastech_orchestrator/core/skills.py#L86)) — the scanner is constructed in `Orchestrator._default_skill_scanner` ([orchestrator.py:338](../../../src/wastech_orchestrator/core/orchestrator.py#L338)); `collect` is called in `run_task`/resume.
 - `resolve_planning_skills(proposed, inventory)` → `SkillSelection` ([skills.py:155](../../../src/wastech_orchestrator/core/skills.py#L155)) — [B06 `_resolve_and_render_skills`](./B06-orchestrator-pipeline.md).
 - `compute_skill_dedup(user_text, bodies)` ([skills.py:200](../../../src/wastech_orchestrator/core/skills.py#L200)).
-- Типы: `SkillRef`, `SkillInventory`, `SkillSelection`, `SkillDedupEntry`; `DEFAULT_EXCLUDED_SKILLS`.
+- Types: `SkillRef`, `SkillInventory`, `SkillSelection`, `SkillDedupEntry`; `DEFAULT_EXCLUDED_SKILLS`.
 
-## Входные данные и состояние
+## Input Data and State
 
-Корень навыков (по умолчанию `<repo.local_path>/.claude/skills`), `denied_read_paths`, денилист имён; предложенные planning имена; текст оверрайда planning оператора. Состояния не хранит.
+Skill root (default `<repo.local_path>/.claude/skills`), `denied_read_paths`, name denylist; names proposed by planning; operator planning override text. Holds no state.
 
-## Основной сценарий
+## Main Scenario
 
-1. `collect`: для каждого `<root>/<dir>/SKILL.md` читается frontmatter; валидный `name` → `SkillRef`; денилист-имена помечаются как excluded (присутствуют, но не предлагаются planning).
-2. `resolve_planning_skills`: из предложенных имён оставляются только найденные **relevant** навыки; ненайденные → `dropped_unknown`; найденные только как excluded → `dropped_excluded`; результат дедуплицирован и отсортирован.
-3. (опц.) `compute_skill_dedup`: если есть текст оверрайда planning, разделы выбранных навыков с совпадающими нормализованными заголовками помечаются (приоритет у текста оператора).
+1. `collect`: for each `<root>/<dir>/SKILL.md`, the frontmatter is read; a valid `name` → `SkillRef`; denylist names are marked as excluded (present in inventory but not offered to planning).
+2. `resolve_planning_skills`: from the proposed names, only **relevant** skills that were found are kept; not-found names → `dropped_unknown`; found only as excluded → `dropped_excluded`; the result is deduplicated and sorted.
+3. (optional) `compute_skill_dedup`: if operator planning override text is present, sections of selected skills with matching normalized headings are marked (operator text takes priority).
 
-«Агент предлагает — ядро решает»: выбор возможен только из того, что нашёл скан инвентаря:
+"The agent proposes — the core decides": selection is only possible from what the inventory scan found:
 
 ```mermaid
 flowchart TB
-    collect["collect: сканировать SKILL.md<br/>(frontmatter name/description, read-only, лимит размера)"] --> inv["инвентарь: relevant + excluded (денилист)"]
-    proposed["planning предложил имена"] --> resolve["resolve_planning_skills"]
+    collect["collect: scan SKILL.md<br/>(frontmatter name/description, read-only, size limit)"] --> inv["inventory: relevant + excluded (denylist)"]
+    proposed["planning proposed names"] --> resolve["resolve_planning_skills"]
     inv --> resolve
-    resolve -->|"нет в скане"| du["dropped_unknown"]
-    resolve -->|"только excluded:<br/>run-checks / test / sync-docs"| de["dropped_excluded"]
-    resolve -->|"найдено и relevant"| keep["refs → read-only пути в plan.md (B06)"]
-    keep --> dedup["compute_skill_dedup: пометить разделы,<br/>совпавшие с инструкциями оператора"]
+    resolve -->|"not in scan"| du["dropped_unknown"]
+    resolve -->|"excluded only:<br/>run-checks / test / sync-docs"| de["dropped_excluded"]
+    resolve -->|"found and relevant"| keep["refs → read-only paths in plan.md (B06)"]
+    keep --> dedup["compute_skill_dedup: mark sections<br/>that match operator instructions"]
 ```
 
-## Проверки и ограничения
+## Checks and Constraints
 
-- Чтение ограничено по размеру (262 КБ/файл) и пропускает `denied_read_paths` ([skills.py:140-152](../../../src/wastech_orchestrator/core/skills.py#L140)).
-- Агент не может ввести путь, который скан не нашёл (выбор только из инвентаря) ([skills.py:156-162](../../../src/wastech_orchestrator/core/skills.py#L156)).
-- Денилист по умолчанию: `run-checks`, `test`, `sync-docs` (gate-дублирующие) ([skills.py:35](../../../src/wastech_orchestrator/core/skills.py#L35)).
+- Reading is size-limited (262 KB/file) and skips `denied_read_paths` ([skills.py:140-152](../../../src/wastech_orchestrator/core/skills.py#L140)).
+- The agent cannot introduce a path that the scan did not find (selection is from the inventory only) ([skills.py:156-162](../../../src/wastech_orchestrator/core/skills.py#L156)).
+- Default denylist: `run-checks`, `test`, `sync-docs` (gate-duplicating) ([skills.py:35](../../../src/wastech_orchestrator/core/skills.py#L35)).
 
-## Результат
+## Output
 
-`SkillInventory`; `SkillSelection(refs, dropped_unknown, dropped_excluded)`; кортеж `SkillDedupEntry`. [B06](./B06-orchestrator-pipeline.md) превращает это в read-only пути и детерминированную секцию `plan.md`.
+`SkillInventory`; `SkillSelection(refs, dropped_unknown, dropped_excluded)`; tuple of `SkillDedupEntry`. [B06](./B06-orchestrator-pipeline.md) converts this into read-only paths and a deterministic `plan.md` section.
 
-## Побочные эффекты
+## Side Effects
 
-- Чтение `SKILL.md`-файлов (read-only, ограниченное). Логика выбора/дедупа — чистая.
+- Reading `SKILL.md` files (read-only, size-limited). Selection/dedup logic is pure.
 
-## Ошибки и граничные случаи
+## Errors and Edge Cases
 
-- Нет каталога навыков / нет frontmatter / битый YAML → навык пропускается; инвентарь пуст без ошибки.
+- No skills directory / no frontmatter / malformed YAML → skill is skipped; inventory is empty without error.
 
-## Связи
+## Relationships
 
-### Использует
+### Uses
 
-- [B25 — Security](./B25-security-policy.md) — `denied_read_paths` (при чтении файлов).
+- [B25 — Security](./B25-security-policy.md) — `denied_read_paths` (when reading files).
 
-### Используется в
+### Used by
 
-- [B06 — Конвейер](./B06-orchestrator-pipeline.md) — на старте сканирует инвентарь; в `planning` резолвит выбор и считает дедуп; пути передаёт downstream-стадиям.
+- [B06 — Pipeline](./B06-orchestrator-pipeline.md) — scans the inventory at startup; resolves the selection and computes dedup during `planning`; passes paths to downstream stages.
 
-## Место в общей системе
+## Place in the Overall System
 
-Даёт агентам репозиторий-специфичную процедурную справку, но строго как read-only материал и только из того, что ядро само нашло. Совпадает по принципу с декомпозицией ([B11](./B11-task-decomposition.md)): агент предлагает — ядро решает.
+Gives agents repository-specific procedural reference material, but strictly as read-only content and only from what the core itself discovered. Follows the same principle as decomposition ([B11](./B11-task-decomposition.md)): the agent proposes — the core decides.
 
-## Подтверждение в коде
+## Code Confirmation
 
-- [core/skills.py:86-229](../../../src/wastech_orchestrator/core/skills.py#L86) — сканер, `resolve_planning_skills`, `compute_skill_dedup`.
-- Тест: [tests/core/test_skills.py](../../../tests/core/test_skills.py) — инвентарь, отбрасывание неизвестных/excluded, дедуп заголовков, denied-aware чтение.
+- [core/skills.py:86-229](../../../src/wastech_orchestrator/core/skills.py#L86) — scanner, `resolve_planning_skills`, `compute_skill_dedup`.
+- Test: [tests/core/test_skills.py](../../../tests/core/test_skills.py) — inventory, dropping unknown/excluded, heading dedup, denied-aware reading.

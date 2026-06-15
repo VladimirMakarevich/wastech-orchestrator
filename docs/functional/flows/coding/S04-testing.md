@@ -1,87 +1,87 @@
-# S04 — Стадия testing
+# S04 — testing stage
 
-## Назначение
+## Purpose
 
-Первый «ворот качества» единицы: запустить разрешённый профиль проверок (тесты/линтеры) и решить pass/fail. Это **не агентская** стадия — проверки гоняет Check Runner. Опциональна (`SKIPPABLE`).
+The first unit quality gate: run the allowed check profile (tests/linters) and decide pass/fail. This is **not an agent** stage — checks are run by the Check Runner. Optional (`SKIPPABLE`).
 
-## Ответственность
+## Responsibility
 
-- Запустить проверки и разветвить по исходу: pass → review; качественный провал → fixing (ping-pong); launch-сбой → повторный резолв или терминальный провал ([orchestrator.py:1218-1242](../../../../src/wastech_orchestrator/core/orchestrator.py#L1218)).
+- Run checks and branch on the outcome: pass → review; quality failure → fixing (ping-pong); launch failure → re-resolve or terminal failure ([orchestrator.py:1218-1242](../../../../src/wastech_orchestrator/core/orchestrator.py#L1218)).
 
-## Границы шага
+## Step boundaries
 
-### Входит в ответственность шага
+### Within scope
 
-- Ветвление по исходу проверок; сброс test-счётчика при pass; вход в ping-pong при провале; обработка launch-сбоя (повторный резолв один раз).
+- Branching on check outcome; resetting the test counter on pass; entering ping-pong on failure; handling a launch failure (re-resolve once).
 
-### Не входит в ответственность шага
+### Out of scope
 
-- **Запуск проверок** (argv без shell, логи, различение launch/quality) — [B24](../../blocks/B24-check-execution.md).
-- **Резолв профиля проверок** — [B23](../../blocks/B23-check-discovery.md); **лимиты циклов** — [B09](../../blocks/B09-fix-loop-control.md).
+- **Running checks** (argv without shell, logs, distinguishing launch/quality) — [B24](../../blocks/B24-check-execution.md).
+- **Check profile resolution** — [B23](../../blocks/B23-check-discovery.md); **loop limits** — [B09](../../blocks/B09-fix-loop-control.md).
 
-## Точки входа
+## Entry points
 
-- `_run_unit` ветка `TESTING` ([orchestrator.py:1218](../../../../src/wastech_orchestrator/core/orchestrator.py#L1218)).
+- `_run_unit` branch `TESTING` ([orchestrator.py:1218](../../../../src/wastech_orchestrator/core/orchestrator.py#L1218)).
 - `_run_checks(p, subtask)` ([orchestrator.py:2204](../../../../src/wastech_orchestrator/core/orchestrator.py#L2204)) → [B24](../../blocks/B24-check-execution.md).
 
-## Входные данные и состояние
+## Input data and state
 
-Профиль проверок ([B23](../../blocks/B23-check-discovery.md)); рабочее дерево. Статус `testing`. Артефакты — логи проверок ([B24](../../blocks/B24-check-execution.md)); при провале — `p.check_log` (путь к логу первого провала).
+Check profile ([B23](../../blocks/B23-check-discovery.md)); working tree. Status `testing`. Artifacts — check logs ([B24](../../blocks/B24-check-execution.md)); on failure — `p.check_log` (path to the first failure log).
 
-## Основной сценарий
+## Main scenario
 
 1. `_run_checks` ([B24](../../blocks/B24-check-execution.md)).
-2. `passed` → `on_check_pass` ([B09](../../blocks/B09-fix-loop-control.md)) → переход в `REVIEWING`.
-3. `launch_failed` (инфраструктура) → `_reresolve_on_launch_failure` ([B23](../../blocks/B23-check-discovery.md)) **один раз** → повтор; иначе → `PipelineFailed`.
-4. Иначе (качественный провал) → запомнить `check_log`, `_enter_fixing(TEST)` ([S06](./S06-fixing.md)/[B09](../../blocks/B09-fix-loop-control.md)) → ping-pong.
+2. `passed` → `on_check_pass` ([B09](../../blocks/B09-fix-loop-control.md)) → transition to `REVIEWING`.
+3. `launch_failed` (infrastructure) → `_reresolve_on_launch_failure` ([B23](../../blocks/B23-check-discovery.md)) **once** → retry; otherwise → `PipelineFailed`.
+4. Otherwise (quality failure) → store `check_log`, `_enter_fixing(TEST)` ([S06](./S06-fixing.md)/[B09](../../blocks/B09-fix-loop-control.md)) → ping-pong.
 
 ```mermaid
 flowchart TB
-    start(["вход: testing"]) --> run["_run_checks → профиль (B24)"]
-    run --> r{"исход?"}
-    r -->|проверки прошли| pass["on_check_pass (B09) → S05 review"]
-    r -->|"launch-сбой (инфра)"| rr{"повторный резолв удался?<br/>(B23, один раз)"}
-    rr -->|да| run
-    rr -->|нет| fail["PipelineFailed → терминальный failed"]
-    r -->|качественный провал| fix["check_log; _enter_fixing(TEST) → S06 fixing"]
+    start(["entry: testing"]) --> run["_run_checks → profile (B24)"]
+    run --> r{"outcome?"}
+    r -->|checks passed| pass["on_check_pass (B09) → S05 review"]
+    r -->|"launch failure (infra)"| rr{"re-resolve succeeded?<br/>(B23, once)"}
+    rr -->|yes| run
+    rr -->|no| fail["PipelineFailed → terminal failed"]
+    r -->|quality failure| fix["check_log; _enter_fixing(TEST) → S06 fixing"]
 ```
 
-## Проверки и ограничения
+## Checks and constraints
 
-- testing в `SKIPPABLE_STAGES` ([schema.py:55-63](../../../../src/wastech_orchestrator/config/schema.py#L55)); при пропуске skip фиксируется на стадии implementation, а `_after_edit_target` направляет implementation/fixing сразу к review.
-- launch-сбой ≠ качественный провал: только launch-сбой может перерезолвить команды (один раз); качественный провал команды **не** меняет (§1.2, [B23](../../blocks/B23-check-discovery.md)/[B24](../../blocks/B24-check-execution.md)).
-- Первый провал короткозамыкает — остальные проверки не запускаются ([B24](../../blocks/B24-check-execution.md)).
+- testing is in `SKIPPABLE_STAGES` ([schema.py:55-63](../../../../src/wastech_orchestrator/config/schema.py#L55)); when skipped, the skip is recorded at the implementation stage and `_after_edit_target` routes implementation/fixing directly to review.
+- launch failure ≠ quality failure: only a launch failure can re-resolve commands (once); a quality failure does **not** change commands (§1.2, [B23](../../blocks/B23-check-discovery.md)/[B24](../../blocks/B24-check-execution.md)).
+- The first failure short-circuits — remaining checks are not run ([B24](../../blocks/B24-check-execution.md)).
 
-## Результат / переход
+## Result / transition
 
-pass → [S05 review](./S05-review.md); качественный провал → [S06 fixing](./S06-fixing.md); launch-сбой → повтор или терминальный `failed`.
+pass → [S05 review](./S05-review.md); quality failure → [S06 fixing](./S06-fixing.md); launch failure → retry or terminal `failed`.
 
-## Побочные эффекты
+## Side effects
 
-- Запуск дочерних процессов проверок и запись логов ([B24](../../blocks/B24-check-execution.md)/[B19](../../blocks/B19-subprocess-runner.md)); heartbeat ([B27](../../blocks/B27-observability.md)).
+- Spawning check child processes and writing logs ([B24](../../blocks/B24-check-execution.md)/[B19](../../blocks/B19-subprocess-runner.md)); heartbeat ([B27](../../blocks/B27-observability.md)).
 
-## Ошибки и граничные случаи
+## Errors and edge cases
 
-- Проверку нельзя запустить и повторный резолв не помог → `PipelineFailed` → терминальный `failed` ([orchestrator.py:1230-1233](../../../../src/wastech_orchestrator/core/orchestrator.py#L1230)).
-- Таймаут проверки → провал → fixing ([B24](../../blocks/B24-check-execution.md)).
+- Check cannot be launched and re-resolve did not help → `PipelineFailed` → terminal `failed` ([orchestrator.py:1230-1233](../../../../src/wastech_orchestrator/core/orchestrator.py#L1230)).
+- Check timeout → failure → fixing ([B24](../../blocks/B24-check-execution.md)).
 
-## Связи
+## Relations
 
-### Использует
+### Uses
 
 - [B24](../../blocks/B24-check-execution.md), [B23](../../blocks/B23-check-discovery.md), [B09](../../blocks/B09-fix-loop-control.md), [B19](../../blocks/B19-subprocess-runner.md), [B27](../../blocks/B27-observability.md).
 
-### Используется в
+### Used by
 
-- [S05 review](./S05-review.md) (pass) / [S06 fixing](./S06-fixing.md) (провал); [B06](../../blocks/B06-orchestrator-pipeline.md) — драйвер.
+- [S05 review](./S05-review.md) (pass) / [S06 fixing](./S06-fixing.md) (failure); [B06](../../blocks/B06-orchestrator-pipeline.md) — driver.
 
-## Место в потоке
+## Position in the flow
 
-Первый из двух «ворот качества» единицы; вместе с review образует ping-pong с fixing. См. [обзор потока](./index.md).
+The first of two unit quality gates; together with review it forms a ping-pong with fixing. See [flow overview](./index.md).
 
-## Подтверждение в коде
+## Code confirmation
 
-- [orchestrator.py:1218-1242](../../../../src/wastech_orchestrator/core/orchestrator.py#L1218) — ветка `TESTING`.
+- [orchestrator.py:1218-1242](../../../../src/wastech_orchestrator/core/orchestrator.py#L1218) — `TESTING` branch.
 - [orchestrator.py:982-1015](../../../../src/wastech_orchestrator/core/orchestrator.py#L982) — `_reresolve_on_launch_failure`.
 - [orchestrator.py:2204-2211](../../../../src/wastech_orchestrator/core/orchestrator.py#L2204) — `_run_checks`.
-- Тесты: [tests/check/test_check_runner.py](../../../../tests/check/test_check_runner.py), [tests/core/test_check_discovery_hitl.py](../../../../tests/core/test_check_discovery_hitl.py), [tests/core/test_orchestrator.py](../../../../tests/core/test_orchestrator.py).
+- Tests: [tests/check/test_check_runner.py](../../../../tests/check/test_check_runner.py), [tests/core/test_check_discovery_hitl.py](../../../../tests/core/test_check_discovery_hitl.py), [tests/core/test_orchestrator.py](../../../../tests/core/test_orchestrator.py).

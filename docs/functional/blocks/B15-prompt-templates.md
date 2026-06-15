@@ -1,103 +1,103 @@
-# B15 — Шаблоны промптов и их рендеринг
+# B15 — Prompt Templates and Rendering
 
-## Назначение
+## Purpose
 
-Готовит текст промпта для каждой агентской стадии: разрешает шаблон (упакованный дефолт + опциональный файл-оверрайд оператора) и подставляет в него **аллой-лист** переменных (только метаданные и пути к артефактам, никогда — тело задачи, диффы, логи, env или секреты). Сидит между драйвером стадии [B06](./B06-orchestrator-pipeline.md) и `AgentRunRequest.prompt`.
+Prepares the prompt text for each agent stage: resolves the template (a packaged default plus an optional operator file override) and substitutes into it an **allowlisted** set of variables (only metadata and artifact paths — never the task body, diffs, logs, env, or secrets). Sits between the stage driver [B06](./B06-orchestrator-pipeline.md) and `AgentRunRequest.prompt`.
 
-## Ответственность
+## Responsibilities
 
-- Загрузить упакованный дефолт для каждой routable-стадии и, при наличии `<stage>.md` в `templates_dir`, оверрайд оператора, скомбинировав по `prompts.mode` ([prompts.py:83-130](../../../src/wastech_orchestrator/core/prompts.py#L83)).
-- Подставить только разрешённые `{name}`-токены, оставив всё прочее как есть («безопасный рендерер») ([prompts.py:57-72](../../../src/wastech_orchestrator/core/prompts.py#L57)).
-- Дать текст оверрайда оператора для дедупа навыков ([prompts.py:132-138](../../../src/wastech_orchestrator/core/prompts.py#L132)).
+- Load the packaged default for each routable stage and, when a `<stage>.md` file is present in `templates_dir`, the operator override, combining them according to `prompts.mode` ([prompts.py:83-130](../../../src/wastech_orchestrator/core/prompts.py#L83)).
+- Substitute only the allowed `{name}` tokens, leaving everything else unchanged (the "safe renderer") ([prompts.py:57-72](../../../src/wastech_orchestrator/core/prompts.py#L57)).
+- Provide the operator override text for skill deduplication ([prompts.py:132-138](../../../src/wastech_orchestrator/core/prompts.py#L132)).
 
-## Границы блока
+## Block Boundaries
 
-### Входит в ответственность блока
+### In scope
 
-- Разрешение шаблона стадии и безопасная подстановка переменных-путей/метаданных.
+- Stage template resolution and safe substitution of path/metadata variables.
 
-### Не входит в ответственность блока
+### Out of scope
 
-- **Сбор значений переменных** — это [B06 `_prompt_variables`](./B06-orchestrator-pipeline.md) (только пути/метаданные).
-- **Футер с путями к контексту** в самом промпте — это [B18 `build_context_footer`](./B18-agent-providers.md).
-- **argv/CLI-синтаксис, sandbox/approvals, denied-команды, env, fallback** — модуль их не касается ([prompts.py:13-15](../../../src/wastech_orchestrator/core/prompts.py#L13)).
+- **Collecting variable values** — that is [B06 `_prompt_variables`](./B06-orchestrator-pipeline.md) (paths/metadata only).
+- **The context-path footer in the prompt itself** — that is [B18 `build_context_footer`](./B18-agent-providers.md).
+- **argv/CLI syntax, sandbox/approvals, denied commands, env, fallback** — this module does not touch those ([prompts.py:13-15](../../../src/wastech_orchestrator/core/prompts.py#L13)).
 
-## Точки входа
+## Entry Points
 
-- `PromptTemplateStore(config.prompts)` — строится в `Orchestrator.__init__` ([orchestrator.py:326](../../../src/wastech_orchestrator/core/orchestrator.py#L326)).
+- `PromptTemplateStore(config.prompts)` — constructed in `Orchestrator.__init__` ([orchestrator.py:326](../../../src/wastech_orchestrator/core/orchestrator.py#L326)).
 - `PromptTemplateStore.resolved(stage)` / `override_for(stage)` ([prompts.py:118,132](../../../src/wastech_orchestrator/core/prompts.py#L118)) — [B06 `_build_prompt`/`_resolve_and_render_skills`](./B06-orchestrator-pipeline.md).
 - `render_prompt(template, variables)` ([prompts.py:57](../../../src/wastech_orchestrator/core/prompts.py#L57)); `ALLOWED_PROMPT_VARS` ([prompts.py:37-52](../../../src/wastech_orchestrator/core/prompts.py#L37)).
-- Данные: упакованные `templates/prompts/<stage>.md`.
+- Data: packaged `templates/prompts/<stage>.md`.
 
-## Входные данные и состояние
+## Inputs and State
 
-`PromptsConfig` (`templates_dir`, `mode`); словарь переменных от [B06](./B06-orchestrator-pipeline.md). Состояние — загруженные при старте дефолты и оверрайды по стадиям.
+`PromptsConfig` (`templates_dir`, `mode`); variable dictionary from [B06](./B06-orchestrator-pipeline.md). State — defaults and per-stage overrides loaded at startup.
 
-## Основной сценарий
+## Main Scenario
 
-1. На старте: для каждой `ROUTABLE_STAGES` грузится упакованный дефолт; если в `templates_dir` есть непустой `<stage>.md` — он становится оверрайдом этой стадии (наличие файла = сигнал активации).
-2. `resolved(stage)`: нет файла → дефолт; `mode=replace` → только файл; `mode=append` → дефолт + файл.
-3. `render_prompt`: заменяются только токены из `ALLOWED_PROMPT_VARS` (`None` → пустая строка); неизвестные `{...}` остаются как есть (нет `KeyError`, код/JSON со скобками не ломается).
+1. At startup: the packaged default is loaded for each `ROUTABLE_STAGES`; if a non-empty `<stage>.md` exists in `templates_dir`, it becomes the override for that stage (file presence = activation signal).
+2. `resolved(stage)`: no file → default; `mode=replace` → file only; `mode=append` → default + file.
+3. `render_prompt`: only tokens from `ALLOWED_PROMPT_VARS` are substituted (`None` → empty string); unknown `{...}` tokens are left as-is (no `KeyError`; code/JSON with braces is not broken).
 
-Разрешение шаблона стадии и безопасная подстановка (наличие файла оверрайда = сигнал активации):
+Stage template resolution and safe substitution (presence of an override file = activation signal):
 
 ```mermaid
 flowchart TB
-    start["старт: для каждой ROUTABLE_STAGES<br/>загрузить упакованный дефолт"] --> ovr{"есть непустой файл<br/>стадии в templates_dir?"}
-    ovr -->|нет| def["дефолт"]
-    ovr -->|да| mode{"prompts.mode?"}
-    mode -->|replace| only["только файл оператора"]
-    mode -->|append| both["дефолт + файл"]
+    start["startup: for each ROUTABLE_STAGES<br/>load packaged default"] --> ovr{"non-empty stage file<br/>present in templates_dir?"}
+    ovr -->|no| def["default"]
+    ovr -->|yes| mode{"prompts.mode?"}
+    mode -->|replace| only["operator file only"]
+    mode -->|append| both["default + file"]
     def --> render
     only --> render
-    both --> render["render_prompt: подставить только<br/>ALLOWED_PROMPT_VARS (пути/метаданные);<br/>неизвестные токены оставить как есть"]
+    both --> render["render_prompt: substitute only<br/>ALLOWED_PROMPT_VARS (paths/metadata);<br/>leave unknown tokens as-is"]
     render --> out["AgentRunRequest.prompt (B06)"]
 ```
 
-## Альтернативные сценарии
+## Alternative Scenarios
 
-### Пустой `templates_dir`
+### Empty `templates_dir`
 
-Явный opt-out: для всех стадий используются упакованные дефолты ([prompts.py:101-102](../../../src/wastech_orchestrator/core/prompts.py#L101)).
+Explicit opt-out: packaged defaults are used for all stages ([prompts.py:101-102](../../../src/wastech_orchestrator/core/prompts.py#L101)).
 
-### Пустой файл оверрайда
+### Empty override file
 
-Логируется предупреждение, используется дефолт ([prompts.py:112-116](../../../src/wastech_orchestrator/core/prompts.py#L112)).
+A warning is logged and the default is used ([prompts.py:112-116](../../../src/wastech_orchestrator/core/prompts.py#L112)).
 
-## Проверки и ограничения
+## Checks and Constraints
 
-- Интерполируются только метаданные/пути из `ALLOWED_PROMPT_VARS`; крупный контент не вставляется ([prompts.py:34-52](../../../src/wastech_orchestrator/core/prompts.py#L34)).
-- Отсутствующий файл оверрайда не ошибка (нет fail-closed-on-missing); упакованные дефолты всегда доступны ([prompts.py:86-92](../../../src/wastech_orchestrator/core/prompts.py#L86)).
+- Only metadata/paths from `ALLOWED_PROMPT_VARS` are interpolated; large content is never injected ([prompts.py:34-52](../../../src/wastech_orchestrator/core/prompts.py#L34)).
+- A missing override file is not an error (no fail-closed-on-missing); packaged defaults are always available ([prompts.py:86-92](../../../src/wastech_orchestrator/core/prompts.py#L86)).
 
-## Результат
+## Output
 
-Текст шаблона стадии (`resolved`) и итоговый промпт после подстановки (`render_prompt`) — [B06](./B06-orchestrator-pipeline.md) кладёт его в `AgentRunRequest.prompt`.
+The stage template text (`resolved`) and the final rendered prompt after substitution (`render_prompt`) — [B06](./B06-orchestrator-pipeline.md) places it in `AgentRunRequest.prompt`.
 
-## Побочные эффекты
+## Side Effects
 
-- При старте читает файлы оверрайдов из `templates_dir` (один раз). `render_prompt`/`resolved` — чистые.
+- At startup reads override files from `templates_dir` (once). `render_prompt`/`resolved` are pure.
 
-## Ошибки и граничные случаи
+## Errors and Edge Cases
 
-- Любой нераспознанный `{...}` сохраняется дословно (безопасный рендерер).
-- Относительный `templates_dir` уже привязан к каталогу конфига загрузчиком ([B05](./B05-configuration.md)).
+- Any unrecognized `{...}` is preserved verbatim (safe renderer).
+- A relative `templates_dir` is already anchored to the config directory by the loader ([B05](./B05-configuration.md)).
 
-## Связи
+## Relationships
 
-### Использует
+### Uses
 
-- [B05 — Конфигурация](./B05-configuration.md) — `PromptsConfig`, `PromptMode`, `ROUTABLE_STAGES`.
-- упакованные шаблоны `templates/prompts/*.md` (данные пакета, поставляются [B03](./B03-installer-and-scaffolding.md)).
+- [B05 — Configuration](./B05-configuration.md) — `PromptsConfig`, `PromptMode`, `ROUTABLE_STAGES`.
+- Packaged templates `templates/prompts/*.md` (package data, supplied by [B03](./B03-installer-and-scaffolding.md)).
 
-### Используется в
+### Used by
 
-- [B06 — Конвейер](./B06-orchestrator-pipeline.md) — построение промпта каждой агентской стадии и дедуп навыков (`override_for`).
+- [B06 — Pipeline](./B06-orchestrator-pipeline.md) — building the prompt for each agent stage and skill deduplication (`override_for`).
 
-## Место в общей системе
+## Role in the Overall System
 
-Превращает «стадию» в конкретный текст для агента, позволяя оператору кастомизировать промпты файлами, но не давая шаблону ослабить безопасность или вставить крупный/секретный контент (он остаётся в артефактах, на которые агент ссылается по пути).
+Converts a "stage" into a concrete text for the agent, allowing the operator to customize prompts via files while preventing the template from weakening security or injecting large/secret content (which remains in artifacts that the agent references by path).
 
-## Подтверждение в коде
+## Code Confirmation
 
-- [core/prompts.py:57-138](../../../src/wastech_orchestrator/core/prompts.py#L57) — безопасный рендерер и `PromptTemplateStore` (resolve/override).
-- Тест: [tests/core/test_prompts.py](../../../tests/core/test_prompts.py) — аллой-лист переменных, сохранение неизвестных скобок, режимы replace/append, активация по наличию файла.
+- [core/prompts.py:57-138](../../../src/wastech_orchestrator/core/prompts.py#L57) — safe renderer and `PromptTemplateStore` (resolve/override).
+- Test: [tests/core/test_prompts.py](../../../tests/core/test_prompts.py) — variable allowlist, preservation of unknown braces, replace/append modes, file-presence activation.

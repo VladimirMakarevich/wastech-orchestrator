@@ -1,99 +1,99 @@
-# B20 — Файловая раскладка артефактов запусков
+# B20 — Artifact Layout for Stage Runs
 
-## Назначение
+## Purpose
 
-Единый владелец расположения артефактов на диске и правила **«логи никогда не перезаписываются»**. Даёт детерминированный путь для каждой попытки запуска стадии и для артефактов уровня задачи, чтобы все подсистемы складывали файлы в одно и то же место, а не реконструировали раскладку по отдельности.
+Single owner of the on-disk artifact layout and the **"logs are never overwritten"** invariant. Provides a deterministic path for every stage-run attempt and for task-level artifacts, so that all subsystems write files to the same location rather than each reconstructing the layout independently.
 
-## Ответственность
+## Responsibilities
 
-- Вернуть корень артефактов задачи `<artifacts_root>/logs/<task-id>/` ([artifacts.py:46-53](../../../src/wastech_orchestrator/providers/artifacts.py#L46)).
-- Создать каталог попытки запуска стадии и вернуть пути её файлов (request/stdout/stderr/events/result) ([artifacts.py:80-109](../../../src/wastech_orchestrator/providers/artifacts.py#L80)).
-- Записать уже-редактированный `request.json` и машинный `result.json` ([artifacts.py:112-125](../../../src/wastech_orchestrator/providers/artifacts.py#L112)).
-- Заархивировать артефакты прошлой попытки в `attempt-<N>/` при `rerun` ([artifacts.py:56-77](../../../src/wastech_orchestrator/providers/artifacts.py#L56)).
-- Посчитать sha256 файла для регистрации артефакта в SQLite ([artifacts.py:128-134](../../../src/wastech_orchestrator/providers/artifacts.py#L128)).
+- Return the task artifact root `<artifacts_root>/logs/<task-id>/` ([artifacts.py:46-53](../../../src/wastech_orchestrator/providers/artifacts.py#L46)).
+- Create the stage-run attempt directory and return its file paths (request/stdout/stderr/events/result) ([artifacts.py:80-109](../../../src/wastech_orchestrator/providers/artifacts.py#L80)).
+- Write the already-redacted `request.json` and the machine-readable `result.json` ([artifacts.py:112-125](../../../src/wastech_orchestrator/providers/artifacts.py#L112)).
+- Archive the artifacts of the previous attempt into `attempt-<N>/` on `rerun` ([artifacts.py:56-77](../../../src/wastech_orchestrator/providers/artifacts.py#L56)).
+- Compute the sha256 of a file for registering the artifact in SQLite ([artifacts.py:128-134](../../../src/wastech_orchestrator/providers/artifacts.py#L128)).
 
-## Границы блока
+## Block Boundaries
 
-### Входит в ответственность блока
+### Within scope
 
-- Раскладка каталогов и инвариант «не перезаписывать».
-- Сериализация переданного содержимого в JSON-файлы.
+- Directory layout and the "do not overwrite" invariant.
+- Serialization of provided content into JSON files.
 
-### Не входит в ответственность блока
+### Out of scope
 
-- **Редактирование** содержимого: модуль не импортирует [B21](./B21-secret-redaction.md); request приходит уже редактированным ([artifacts.py:112-114](../../../src/wastech_orchestrator/providers/artifacts.py#L112)).
-- **Регистрация** артефакта в БД (`register_artifact`) — это [B07](./B07-state-machine-and-store.md), вызывается из [B06](./B06-orchestrator-pipeline.md); здесь только вычисляется checksum.
-- Знание о синтаксисе провайдеров.
+- **Redacting** content: this module does not import [B21](./B21-secret-redaction.md); the request arrives already redacted ([artifacts.py:112-114](../../../src/wastech_orchestrator/providers/artifacts.py#L112)).
+- **Registering** the artifact in the database (`register_artifact`) — that is [B07](./B07-state-machine-and-store.md), called from [B06](./B06-orchestrator-pipeline.md); only the checksum is computed here.
+- Knowledge of provider CLI syntax.
 
-## Точки входа
+## Entry Points
 
-- `task_artifact_dir(artifacts_root, task_id)` ([artifacts.py:46](../../../src/wastech_orchestrator/providers/artifacts.py#L46)) — используется повсеместно (B06, B16, B08, B12).
+- `task_artifact_dir(artifacts_root, task_id)` ([artifacts.py:46](../../../src/wastech_orchestrator/providers/artifacts.py#L46)) — used broadly (B06, B16, B08, B12).
 - `create_attempt_dir(artifacts_root, task_id, stage, attempt, provider, *, stage_run_id, subtask=None)` ([artifacts.py:80](../../../src/wastech_orchestrator/providers/artifacts.py#L80)) — [B18](./B18-agent-providers.md).
 - `write_request_artifact` / `write_result_artifact` ([artifacts.py:112,117](../../../src/wastech_orchestrator/providers/artifacts.py#L112)) — [B18](./B18-agent-providers.md).
 - `archive_task_artifacts(artifacts_root, task_id, attempt)` ([artifacts.py:56](../../../src/wastech_orchestrator/providers/artifacts.py#L56)) — [B06](./B06-orchestrator-pipeline.md) `rerun_task`.
 - `sha256_file(path)` ([artifacts.py:128](../../../src/wastech_orchestrator/providers/artifacts.py#L128)) — [B06](./B06-orchestrator-pipeline.md) `_register_artifact`.
 
-## Входные данные и состояние
+## Inputs and State
 
-`artifacts_root`, `task_id`, для попытки — `stage`, `attempt`, `provider`, `stage_run_id`, опц. `subtask`. Состояние не хранится; источник истины о раскладке — сам код путей.
+`artifacts_root`, `task_id`, and for an attempt — `stage`, `attempt`, `provider`, `stage_run_id`, optional `subtask`. No state is stored; the source of truth for the layout is the path-construction code itself.
 
-## Основной сценарий (создание попытки)
+## Main Scenario (creating an attempt)
 
-1. Базовый каталог: `<root>/logs/<task-id>/stages/<stage>/[sub-<NN>/]run-<stage_run_id:06d>/<attempt>-<provider>/`.
-2. `mkdir(parents=True, exist_ok=False)` — каталог **не должен** существовать; коллизия → `FileExistsError` ([artifacts.py:97-101](../../../src/wastech_orchestrator/providers/artifacts.py#L97)).
-3. Возвращается `ArtifactPaths` с путями `request.json`, `stdout.log`, `stderr.log`, `events.jsonl`, `result.json`.
+1. Base directory: `<root>/logs/<task-id>/stages/<stage>/[sub-<NN>/]run-<stage_run_id:06d>/<attempt>-<provider>/`.
+2. `mkdir(parents=True, exist_ok=False)` — the directory **must not** already exist; a collision raises `FileExistsError` ([artifacts.py:97-101](../../../src/wastech_orchestrator/providers/artifacts.py#L97)).
+3. Returns `ArtifactPaths` with paths for `request.json`, `stdout.log`, `stderr.log`, `events.jsonl`, `result.json`.
 
-Детерминированный путь попытки и инвариант «логи не перезаписываются» (`exist_ok=False`):
+Deterministic attempt path and the "logs are not overwritten" invariant (`exist_ok=False`):
 
 ```mermaid
 flowchart TB
-    start(["create_attempt_dir(task, stage, attempt, provider, stage_run_id)"]) --> path["путь: logs/{task-id}/stages/{stage}/<br/>[sub-NN/]run-{stage_run_id:06d}/{attempt}-{provider}/"]
+    start(["create_attempt_dir(task, stage, attempt, provider, stage_run_id)"]) --> path["path: logs/{task-id}/stages/{stage}/<br/>[sub-NN/]run-{stage_run_id:06d}/{attempt}-{provider}/"]
     path --> mk{"mkdir(parents=True, exist_ok=False)"}
-    mk -->|"каталог уже есть"| err["FileExistsError — защита от перезаписи"]
-    mk -->|"создан"| ap["ArtifactPaths: request.json, stdout.log,<br/>stderr.log, events.jsonl, result.json"]
+    mk -->|"directory already exists"| err["FileExistsError — overwrite protection"]
+    mk -->|"created"| ap["ArtifactPaths: request.json, stdout.log,<br/>stderr.log, events.jsonl, result.json"]
 ```
 
-## Альтернативные сценарии
+## Alternative Scenarios
 
-### Архивирование при rerun
+### Archiving on rerun
 
-`archive_task_artifacts` переносит всё из `logs/<task-id>/`, кроме существующих `attempt-*`, в `attempt-<N>/`; если переносить нечего — возвращает `None`; уже существующее имя в назначении пропускается (идемпотентно при прерванном rerun) ([artifacts.py:64-77](../../../src/wastech_orchestrator/providers/artifacts.py#L64)).
+`archive_task_artifacts` moves everything from `logs/<task-id>/`, except existing `attempt-*` directories, into `attempt-<N>/`; if there is nothing to move it returns `None`; an already-existing destination name is skipped (idempotent for an interrupted rerun) ([artifacts.py:64-77](../../../src/wastech_orchestrator/providers/artifacts.py#L64)).
 
-## Проверки и ограничения
+## Checks and Constraints
 
-- `stage_run_id` резервируется в SQLite до старта провайдера, поэтому повторный fixing-цикл или recovery-запуск получает отдельный каталог даже при счётчике попыток, начинающемся с 1 ([artifacts.py:90-96](../../../src/wastech_orchestrator/providers/artifacts.py#L90)).
-- `exist_ok=False` — гарантия «не перезаписывать логи».
+- `stage_run_id` is reserved in SQLite before the provider starts, so a repeated fixing cycle or a recovery run receives its own directory even when the attempt counter starts from 1 ([artifacts.py:90-96](../../../src/wastech_orchestrator/providers/artifacts.py#L90)).
+- `exist_ok=False` — guarantees that logs are never overwritten.
 
-## Результат
+## Output
 
-`ArtifactPaths` (каталог попытки и пути пяти файлов); пути записанных JSON-файлов; путь архива или `None`; hex-строка sha256.
+`ArtifactPaths` (attempt directory and paths to five files); paths to written JSON files; archive path or `None`; sha256 hex string.
 
-## Побочные эффекты
+## Side Effects
 
-- Создание каталогов; запись `request.json`/`result.json` (UTF-8, `indent=2`); перенос файлов при архивировании. `task_artifact_dir`/`sha256_file` — без записи.
+- Directory creation; writing `request.json`/`result.json` (UTF-8, `indent=2`); moving files during archiving. `task_artifact_dir`/`sha256_file` — no writes.
 
-## Ошибки и граничные случаи
+## Errors and Edge Cases
 
-- Коллизия каталога попытки → `FileExistsError` (намеренно, защита от перезаписи).
-- Нечего архивировать → `None`; повторный архив идемпотентен.
+- Attempt directory collision → `FileExistsError` (intentional, overwrite protection).
+- Nothing to archive → `None`; repeated archiving is idempotent.
 
-## Связи
+## Relations
 
-### Использует
+### Uses
 
-- [B18 base](./B18-agent-providers.md) — типы `AgentRunResult`, `Stage` (для сериализации result).
+- [B18 base](./B18-agent-providers.md) — types `AgentRunResult`, `Stage` (for result serialization).
 
-### Используется в
+### Used by
 
-- [B18 — Адаптеры провайдеров](./B18-agent-providers.md) — каталог попытки, запись request/result.
-- [B06 — Конвейер](./B06-orchestrator-pipeline.md) — `task_artifact_dir` для plan/summary/review/…, `archive_task_artifacts` при rerun, `sha256_file` при регистрации.
-- [B16](./B16-task-parsing-and-validation-gate.md), [B08](./B08-ledger-and-failure-reports.md), [B12](./B12-hitl-and-typed-output.md) — присоединяются к `task_artifact_dir`.
+- [B18 — Agent Provider Adapters](./B18-agent-providers.md) — attempt directory, writing request/result.
+- [B06 — Pipeline](./B06-orchestrator-pipeline.md) — `task_artifact_dir` for plan/summary/review/…, `archive_task_artifacts` on rerun, `sha256_file` during registration.
+- [B16](./B16-task-parsing-and-validation-gate.md), [B08](./B08-ledger-and-failure-reports.md), [B12](./B12-hitl-and-typed-output.md) — attach to `task_artifact_dir`.
 
-## Место в общей системе
+## Place in the Overall System
 
-Определяет, где на диске лежат все следы запусков (промпты, ответы агентов, логи проверок, ревью, HITL, отчёты о провале). Раскладка одинакова для свежего запуска и для возобновления, поэтому recovery находит артефакты по тем же путям.
+Defines where on disk all run traces live (prompts, agent responses, check logs, reviews, HITL, failure reports). The layout is identical for a fresh run and for a resume, so recovery finds artifacts via the same paths.
 
-## Подтверждение в коде
+## Code Confirmation
 
-- [providers/artifacts.py:46-134](../../../src/wastech_orchestrator/providers/artifacts.py#L46) — все точки входа и инвариант `exist_ok=False`.
-- [tests/providers/test_artifacts.py](../../../tests/providers/test_artifacts.py) — подтверждает раскладку, отказ при коллизии, поведение архивирования.
+- [providers/artifacts.py:46-134](../../../src/wastech_orchestrator/providers/artifacts.py#L46) — all entry points and the `exist_ok=False` invariant.
+- [tests/providers/test_artifacts.py](../../../tests/providers/test_artifacts.py) — confirms the layout, collision rejection, and archiving behavior.

@@ -1,100 +1,100 @@
-# B10 — Восстановление и возобновление
+# B10 — Recovery and Resume
 
-## Назначение
+## Purpose
 
-На старте сверяет персистентное состояние (SQLite ↔ ветка ↔ артефакты) и решает, что делать с единственной незавершённой операцией: возобновить, завершить прерванную очистку, пометить как требующую ручного вмешательства, или ничего (слот свободен). Это «мозг» идемпотентного перезапуска — само действие выполняет [B06](./B06-orchestrator-pipeline.md).
+On startup, reconciles persistent state (SQLite ↔ branch ↔ artifacts) and decides what to do with the single unfinished operation: resume it, finish an interrupted cleanup, mark it as requiring manual intervention, or do nothing (slot is free). This is the "brain" of the idempotent restart — the actual action is executed by [B06](./B06-orchestrator-pipeline.md).
 
-## Ответственность
+## Responsibilities
 
-- Найти активные задачи и применить правило единого слота §8.2 ([recovery.py:57-74](../../../src/wastech_orchestrator/core/recovery.py#L57)).
-- Для декомпозированной задачи сверить записанные коммиты сабтасков с веткой и найти точку возобновления ([recovery.py:76-107](../../../src/wastech_orchestrator/core/recovery.py#L76)).
-- Вернуть решение `RecoveryPlan` (NONE/RESUME/CLEANUP/MANUAL) — без побочных действий.
+- Find active tasks and apply the single-slot rule §8.2 ([recovery.py:57-74](../../../src/wastech_orchestrator/core/recovery.py#L57)).
+- For a decomposed task, cross-check the recorded subtask commits against the branch and find the resume point ([recovery.py:76-107](../../../src/wastech_orchestrator/core/recovery.py#L76)).
+- Return a `RecoveryPlan` decision (NONE/RESUME/CLEANUP/MANUAL) — without side effects.
 
-## Границы блока
+## Block Boundaries
 
-### Входит в ответственность блока
+### Within block responsibility
 
-- Вычисление решения о восстановлении и точки возобновления; детект несогласованности.
+- Computing the recovery decision and resume point; detecting inconsistencies.
 
-### Не входит в ответственность блока
+### Outside block responsibility
 
-- **Выполнение** решения — это [B06](./B06-orchestrator-pipeline.md) (`resume` → `_resume_task`/`_resume_cleanup`/`_resume_manual`).
-- **Проверка коммита на ветке** делегируется [B22 `commit_on_branch`](./B22-git-manager.md).
-- **Чтение состояния** — [B07](./B07-state-machine-and-store.md); сам блок ничего не пишет.
-- **Идемпотентность публикации** — [B22](./B22-git-manager.md) (fingerprints publish-операций).
+- **Executing** the decision — that is [B06](./B06-orchestrator-pipeline.md) (`resume` → `_resume_task`/`_resume_cleanup`/`_resume_manual`).
+- **Checking whether a commit exists on the branch** is delegated to [B22 `commit_on_branch`](./B22-git-manager.md).
+- **Reading state** — [B07](./B07-state-machine-and-store.md); this block writes nothing.
+- **Publish idempotency** — [B22](./B22-git-manager.md) (fingerprints publish operations).
 
-## Точки входа
+## Entry Points
 
-- `RecoveryReconciler(config, store, git).reconcile()` → `RecoveryPlan` ([recovery.py:49-74](../../../src/wastech_orchestrator/core/recovery.py#L49)); строится и вызывается в [B06 `resume`](./B06-orchestrator-pipeline.md) ([orchestrator.py:661](../../../src/wastech_orchestrator/core/orchestrator.py#L661)).
-- `RecoveryAction`, `RecoveryPlan` — типы решения.
+- `RecoveryReconciler(config, store, git).reconcile()` → `RecoveryPlan` ([recovery.py:49-74](../../../src/wastech_orchestrator/core/recovery.py#L49)); constructed and called in [B06 `resume`](./B06-orchestrator-pipeline.md) ([orchestrator.py:661](../../../src/wastech_orchestrator/core/orchestrator.py#L661)).
+- `RecoveryAction`, `RecoveryPlan` — decision types.
 
-## Входные данные и состояние
+## Input Data and State
 
-Конфиг, `StateStore`, `GitManager`. Решение основано на: списке активных задач, наличии незавершённой очистки, и (для декомпозиции) записях сабтасков + их коммитах на ветке. Состояния не хранит.
+Config, `StateStore`, `GitManager`. The decision is based on: the list of active tasks, whether an incomplete cleanup exists, and (for decomposition) subtask records and their commits on the branch. Does not store state.
 
-## Основной сценарий (`reconcile`)
+## Main Scenario (`reconcile`)
 
-1. `> 1` активной задачи → `MANUAL` (неоднозначно, §8.2) со списком id.
-2. Ровно 1 активная: если декомпозирована → `reconcile_decomposed`; иначе → `RESUME`.
-3. `0` активных: если есть задача с незавершённой очисткой → `CLEANUP`; иначе → `NONE` (слот свободен).
+1. `> 1` active tasks → `MANUAL` (ambiguous, §8.2) with a list of ids.
+2. Exactly 1 active: if decomposed → `reconcile_decomposed`; otherwise → `RESUME`.
+3. `0` active: if there is a task with an incomplete cleanup → `CLEANUP`; otherwise → `NONE` (slot is free).
 
-Решение `reconcile` по числу активных задач (любая неоднозначность — fail-safe в `MANUAL`):
+Decision from `reconcile` based on the number of active tasks (any ambiguity — fail-safe to `MANUAL`):
 
 ```mermaid
 flowchart TB
-    start(["reconcile()"]) --> n{"сколько активных задач?"}
-    n -->|больше одной| manualN["MANUAL — неоднозначно (§8.2)"]
-    n -->|ровно одна| dec{"задача декомпозирована?"}
-    n -->|ноль| cl{"есть незавершённая очистка?"}
-    dec -->|нет| resume["RESUME — продолжить с записанной стадии"]
-    dec -->|да| recon["reconcile_decomposed:<br/>сверить коммиты сабтасков с веткой (B22)"]
-    recon -->|"коммита нет / закоммичено больше счётчика"| manualD["MANUAL — несогласованность"]
-    recon -->|согласовано| resumeK["RESUME с сабтаска (committed + 1)"]
-    cl -->|да| cleanup["CLEANUP — дозавершить очистку"]
-    cl -->|нет| none["NONE — слот свободен"]
+    start(["reconcile()"]) --> n{"how many active tasks?"}
+    n -->|more than one| manualN["MANUAL — ambiguous (§8.2)"]
+    n -->|exactly one| dec{"task is decomposed?"}
+    n -->|zero| cl{"incomplete cleanup exists?"}
+    dec -->|no| resume["RESUME — continue from recorded stage"]
+    dec -->|yes| recon["reconcile_decomposed:<br/>cross-check subtask commits with branch (B22)"]
+    recon -->|"commit missing / more committed than counter"| manualD["MANUAL — inconsistency"]
+    recon -->|consistent| resumeK["RESUME from subtask (committed + 1)"]
+    cl -->|yes| cleanup["CLEANUP — finish the cleanup"]
+    cl -->|no| none["NONE — slot is free"]
 ```
 
-## Альтернативные сценарии
+## Alternative Scenarios
 
-### Сверка декомпозиции
+### Decomposition Reconciliation
 
-Для каждого сабтаска с записанным `commit_sha`: если коммита нет на ветке → `MANUAL` (несогласованность). Если закоммичено больше, чем `subtasks_completed` → `MANUAL`. Иначе точка возобновления = `committed + 1` → `RESUME` ([recovery.py:76-107](../../../src/wastech_orchestrator/core/recovery.py#L76)).
+For each subtask with a recorded `commit_sha`: if the commit is not on the branch → `MANUAL` (inconsistency). If more commits exist than `subtasks_completed` → `MANUAL`. Otherwise the resume point = `committed + 1` → `RESUME` ([recovery.py:76-107](../../../src/wastech_orchestrator/core/recovery.py#L76)).
 
-## Проверки и ограничения
+## Checks and Constraints
 
-- Единый слот: больше одной активной задачи всегда `MANUAL`.
-- Никогда не пере-коммитить записанный SHA и не продолжать при обнаруженной несогласованности — fail-safe в `MANUAL` ([recovery.py:8-16](../../../src/wastech_orchestrator/core/recovery.py#L8)).
+- Single slot: more than one active task always results in `MANUAL`.
+- Never re-commit a recorded SHA or continue when an inconsistency is detected — fail-safe to `MANUAL` ([recovery.py:8-16](../../../src/wastech_orchestrator/core/recovery.py#L8)).
 
-## Результат
+## Result
 
 `RecoveryPlan(action, task_id, resume_subtask, manual_reason, manual_task_ids)`.
 
-## Побочные эффекты
+## Side Effects
 
-Нет — блок только читает состояние и возвращает решение.
+None — the block only reads state and returns a decision.
 
-## Ошибки и граничные случаи
+## Errors and Edge Cases
 
-- Несогласованность коммитов/счётчиков сабтасков → `MANUAL` с понятной причиной.
-- Прерванная терминальная очистка (терминальный статус + ветка + `cleanup_completed` не выставлен) → `CLEANUP`.
+- Inconsistency between subtask commits and counters → `MANUAL` with a clear reason.
+- Interrupted terminal cleanup (terminal status + branch + `cleanup_completed` not set) → `CLEANUP`.
 
-## Связи
+## Connections
 
-### Использует
+### Uses
 
 - [B07 — State Store](./B07-state-machine-and-store.md) — `find_active_tasks`, `get_subtasks`, `find_incomplete_cleanup`.
 - [B22 — Git Manager](./B22-git-manager.md) — `commit_on_branch`.
-- [B05 — Конфигурация](./B05-configuration.md) — типы конфигурации.
+- [B05 — Configuration](./B05-configuration.md) — configuration types.
 
-### Используется в
+### Used by
 
-- [B06 — Конвейер](./B06-orchestrator-pipeline.md) — `resume` и `rerun --continue` (через оживление задачи).
+- [B06 — Pipeline](./B06-orchestrator-pipeline.md) — `resume` and `rerun --continue` (via task revival).
 
-## Место в общей системе
+## Place in the Overall System
 
-Делает перезапуск безопасным: при старте `watch`/`run`/`continue` [B06](./B06-orchestrator-pipeline.md) сначала спрашивает этот блок, и лишь затем продолжает единственную незавершённую задачу или освобождает слот. Совместно с идемпотентностью [B22](./B22-git-manager.md) обеспечивает свойство «падение не повреждает состояние» (§13).
+Makes restarts safe: when `watch`/`run`/`continue` starts, [B06](./B06-orchestrator-pipeline.md) first queries this block, and only then resumes the single unfinished task or frees the slot. Together with the idempotency of [B22](./B22-git-manager.md), this ensures the property "a crash does not corrupt state" (§13).
 
-## Подтверждение в коде
+## Code Confirmation
 
-- [core/recovery.py:49-107](../../../src/wastech_orchestrator/core/recovery.py#L49) — `reconcile` и `reconcile_decomposed`.
-- Тест: [tests/core/test_recovery.py](../../../tests/core/test_recovery.py) — NONE/RESUME/CLEANUP/MANUAL, сверка декомпозиции, точка возобновления.
+- [core/recovery.py:49-107](../../../src/wastech_orchestrator/core/recovery.py#L49) — `reconcile` and `reconcile_decomposed`.
+- Test: [tests/core/test_recovery.py](../../../tests/core/test_recovery.py) — NONE/RESUME/CLEANUP/MANUAL, decomposition reconciliation, resume point.

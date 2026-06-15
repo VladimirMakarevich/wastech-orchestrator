@@ -1,121 +1,121 @@
-# Соглашения и правила поддержки функциональной документации
+# Conventions and Maintenance Rules for Functional Documentation
 
-Этот документ описывает, как поддерживать и актуализировать набор документации в `docs/functional/` (индекс, реестр блоков, сквозные потоки и файлы блоков). Это **мета-документ**: он не описывает поведение системы, а задаёт правила работы с самой документацией.
+This document describes how to maintain and keep current the documentation set in `docs/functional/` (index, block registry, cross-cutting flows, and block files). This is a **meta-document**: it does not describe system behavior — it defines the rules for working with the documentation itself.
 
-## Язык документации
+## Documentation Language
 
-- **Вся документация в `docs/functional/` пишется на русском языке.** Это касается `index.md`, `block-registry.md`, `system-flows.md`, всех файлов в `blocks/` и этого файла.
-- Правило про русский язык действует **только** для `docs/functional/`. Остальная часть репозитория его **не** наследует: исходный код, docstring/комментарии, прочие документы (`docs/rules/`, `docs/implementation_stages/`, `README.md`, `CHANGELOG.md`, `docs/backlog/` и т. д.) и сообщения коммитов ведутся на их собственном, уже принятом языке — переводить их не нужно.
-- Технические идентификаторы внутри русского текста остаются как в коде: имена файлов, функций, классов, статусов, перечислений, флагов и путей не переводятся.
+- **All documentation in `docs/functional/` is written in English.** This applies to `index.md`, `block-registry.md`, `system-flows.md`, all files in `blocks/`, and this file.
+- The English-only rule applies **only** to `docs/functional/`. The rest of the repository does **not** inherit it: source code, docstrings/comments, other documents (`docs/rules/`, `docs/implementation_stages/`, `README.md`, `CHANGELOG.md`, `docs/backlog/`, etc.), and commit messages follow their own established language — do not translate them.
+- Technical identifiers within the text remain as they appear in code: file names, function names, class names, status values, enumerations, flags, and paths are not translated.
 
-## Источник истины
+## Source of Truth
 
-- Документируется **только** то, что подтверждается исполняемым кодом и тестами.
-- Как источник **не используются** (даже вспомогательно): README и существующая документация, архитектурные описания и диаграммы, комментарии/docstring, названия задач/issue/PR, заявления о том, как система «должна» работать.
-- Назначение нельзя выводить из имени файла/каталога/класса/функции/переменной. Подтверждай через фактические вызовы, зависимости, входные данные, условия, изменения состояния, побочные эффекты и возвращаемый результат.
-- Тест — доказательство поведения только по факту подготовки данных, вызова и проверяемого утверждения, а не по своему названию.
+- Document **only** what is confirmed by executable code and tests.
+- The following are **not** used as sources (even as supplementary references): README and existing documentation, architectural descriptions and diagrams, comments/docstrings, task/issue/PR titles, statements about how the system "should" work.
+- Purpose must not be inferred from a file/directory/class/function/variable name. Confirm through actual calls, dependencies, inputs, conditions, state changes, side effects, and return values.
+- A test is evidence of behavior only based on its setup, invocation, and the actual assertion — not based on its name.
 
-## Когда обновлять документацию
+## When to Update Documentation
 
-Обновляй `docs/functional/` **в том же изменении**, что и код, когда меняется:
+Update `docs/functional/` **in the same change** as the code whenever the following changes:
 
-- точка входа, маршрут, подкоманда CLI, фоновая задача или обработчик события;
-- контракт между блоками (сигнатуры, перечисления, схемы, статусы, коды ошибок);
-- внешняя интеграция, хранилище, схема данных или формат артефакта;
-- проверка, ограничение, ветвление, побочный эффект или обработка ошибки внутри блока;
-- появление новой самостоятельной ответственности (новый блок) либо исчезновение существующей.
+- an entry point, route, CLI subcommand, background task, or event handler;
+- a contract between blocks (signatures, enumerations, schemas, statuses, error codes);
+- an external integration, storage, data schema, or artifact format;
+- a check, constraint, branch, side effect, or error handler inside a block;
+- a new independent responsibility appears (new block) or an existing one disappears.
 
-Чисто косметические правки кода, не меняющие границы/поведение/контракты, документацию менять не обязаны.
+Purely cosmetic code changes that do not alter boundaries/behavior/contracts do not require documentation updates.
 
-## Порядок обновления
+## Update Order
 
-1. Определи затронутый блок (по `block-registry.md`). Если ответственность новая — заведи новый блок (см. ниже), а не расширяй чужой.
-2. Перечитай фактический код и тесты затронутого участка; не опирайся на прежний текст документа.
-3. Обнови файл блока `blocks/<id>-<short-name>.md` по шаблону, сверяя каждое утверждение с кодом.
-4. Обнови взаимные ссылки в связанных блоках (разделы «Использует» / «Используется в»).
-5. При изменении точек входа, хранилищ, интеграций или связей — обнови `index.md`.
-6. Если изменился сквозной сценарий — обнови `system-flows.md` (без дублирования деталей блоков).
-7. Обнови `block-registry.md`: назначение, точки входа, зависимости, статус.
-8. Прогони проверки качества (см. чек-лист) и убедись, что все ссылки резолвятся.
+1. Identify the affected block (via `block-registry.md`). If the responsibility is new — create a new block (see below) rather than expanding someone else's.
+2. Re-read the actual code and tests for the affected area; do not rely on the previous documentation text.
+3. Update the block file `blocks/<id>-<short-name>.md` using the template, verifying each statement against the code.
+4. Update mutual references in related blocks (the "Uses" / "Used by" sections).
+5. If entry points, storage, integrations, or relationships have changed — update `index.md`.
+6. If a cross-cutting scenario has changed — update `system-flows.md` (without duplicating block details).
+7. Update `block-registry.md`: purpose, entry points, dependencies, status.
+8. Run the quality checks (see checklist) and verify that all links resolve.
 
-## Что считать отдельным блоком
+## What Counts as a Separate Block
 
-Выноси поведение в отдельный блок, если оно сочетает несколько признаков: самостоятельная задача; отдельная точка входа; собственные правила/ограничения; отдельное состояние/набор данных; отдельная внешняя система; используется несколькими частями; отдельный жизненный цикл; самостоятельный результат/побочный эффект; описуемо независимо от деталей реализации; чёткая граница ответственности.
+Extract behavior into a separate block if it combines several of the following traits: independent task; separate entry point; its own rules/constraints; separate state/dataset; separate external system; used by multiple parts; separate lifecycle; independent result/side effect; describable independently of implementation details; clear responsibility boundary.
 
-- Не создавай блок на каждый файл/класс/функцию/каталог.
-- Не объединяй разные ответственности ради уменьшения числа файлов и не дроби единое поведение лишь из-за расположения в разных модулях.
-- Модуль, не являющийся самостоятельным блоком, помечается в реестре как `excluded` с краткой причиной и приписывается к блоку, частью которого он является.
+- Do not create a block for every file/class/function/directory.
+- Do not merge different responsibilities just to reduce the number of files, and do not split a single behavior just because it is spread across different modules.
+- A module that is not an independent block is marked in the registry as `excluded` with a brief reason and assigned to the block of which it is a part.
 
-## Шаблон файла блока
+## Block File Template
 
-Каждый файл `blocks/<id>-<short-name>.md` содержит разделы: Назначение; Ответственность; Границы блока (Входит / Не входит); Точки входа; Входные данные и состояние; Основной сценарий; Альтернативные сценарии (если есть); Проверки и ограничения; Результат; Побочные эффекты; Ошибки и граничные случаи; Связи (Использует / Используется в); Место в общей системе; Подтверждение в коде; Неопределённости (если есть).
+Each file `blocks/<id>-<short-name>.md` contains the following sections: Purpose; Responsibilities; Block Boundaries (In scope / Out of scope); Entry Points; Inputs and State; Main Scenario; Alternative Scenarios (if any); Checks and Constraints; Result; Side Effects; Errors and Edge Cases; Relationships (Uses / Used by); Place in the Overall System; Code Evidence; Uncertainties (if any).
 
-- Один файл — один логический блок.
-- Идентификаторы блоков (`B01`…`B27`) и короткие имена файлов закреплены; новый блок получает следующий свободный `Bxx` и не переиспользует освободившийся.
+- One file — one logical block.
+- Block identifiers (`B01`…`B27`) and short file names are fixed; a new block receives the next available `Bxx` and does not reuse a freed one.
 
-## Документы потоков исполнения (S-префикс)
+## Execution Flow Documents (S-prefix)
 
-Помимо блоков `B**` (что есть в системе) есть слой **потоков исполнения** в `flows/<категория>/`: по одному документу `S01`…`S0n` на каждый шаг потока плюс обзор `flows/<категория>/index.md`. Первый поток — `flows/coding/` (конвейер кодинга: refinement → … → publishing); рядом в будущем появятся `flows/deep_research/`, `flows/documentation/`, `flows/security/` и т. п. Это тот же шаблон и те же правила, но другой ракурс — **что происходит на шаге**: кто выполняет, опционален ли он, переходы, ping-pong.
+In addition to `B**` blocks (what exists in the system), there is a layer of **execution flows** in `flows/<category>/`: one document `S01`…`S0n` per flow step plus an overview `flows/<category>/index.md`. The first flow is `flows/coding/` (the coding pipeline: refinement → … → publishing); in the future, `flows/deep_research/`, `flows/documentation/`, `flows/security/`, and others will appear alongside it. This uses the same template and the same rules, but from a different perspective — **what happens at a step**: who executes it, whether it is optional, transitions, ping-pong.
 
-- S-документы описывают поток и **ссылаются** на блоки `B**`, реализующие механику, — без дублирования их содержимого.
-- Префикс `S` закреплён за шагами потоков (не переиспользует `B`); нумерация — в порядке шагов внутри своей категории.
-- Те же требования: русский язык, только подтверждённое кодом, ссылки `файл:строка`, диаграмма где уместна.
-- Связанный C4-слой — динамический вид `implementationFlow` в `docs/architecture/` (см. его README).
+- S-documents describe the flow and **reference** the `B**` blocks that implement the mechanics — without duplicating their content.
+- The `S` prefix is reserved for flow steps (does not reuse `B`); numbering follows the order of steps within their category.
+- Same requirements: English, only code-confirmed content, `file:line` references, diagrams where appropriate.
+- The related C4 layer is the dynamic view `implementationFlow` in `docs/architecture/` (see its README).
 
-## Статусы в реестре
+## Registry Statuses
 
-- `discovered` — обнаружен, не исследован; `in-progress` — анализируется; `documented` — исследован и задокументирован; `needs-review` — поведение нельзя восстановить однозначно; `excluded` — рассмотрен, но не самостоятельный блок.
-- Запись блока завершена только в статусе `documented` или `needs-review`. `needs-review` обязателен, когда поведение не удалось установить однозначно (а не «оставить как есть»).
+- `discovered` — identified, not yet investigated; `in-progress` — being analyzed; `documented` — investigated and documented; `needs-review` — behavior cannot be established unambiguously; `excluded` — reviewed, but not an independent block.
+- A block entry is complete only in the `documented` or `needs-review` status. `needs-review` is required when behavior could not be established unambiguously (rather than left as-is).
 
-## Ссылки и доказательная база
+## Links and Evidence
 
-- Используй относительные Markdown-ссылки; делай их взаимными и сопровождай кратким объяснением связи.
-- Каждое существенное утверждение подкрепляй ссылкой на участок кода/тест в формате `файл:строка` (например, `[orchestrator.py:350](../../src/wastech_orchestrator/core/orchestrator.py#L350)`).
-- Пути считаются от расположения файла: из `blocks/<...>.md` до кода — `../../../src/...`; из `index.md`/`system-flows.md`/`block-registry.md` — `../../src/...`.
-- Не ссылайся на несуществующий файл блока без его регистрации в реестре.
+- Use relative Markdown links; make them mutual and accompany them with a brief explanation of the relationship.
+- Back each significant statement with a reference to the code/test location in `file:line` format (e.g., `[orchestrator.py:350](../../src/wastech_orchestrator/core/orchestrator.py#L350)`).
+- Paths are relative to the file's location: from `blocks/<...>.md` to code — `../../../src/...`; from `index.md`/`system-flows.md`/`block-registry.md` — `../../src/...`.
+- Do not reference a non-existent block file without first registering it in the registry.
 
-## Стиль
+## Style
 
-- Пиши кратко и точно; не пересказывай код построчно. Технические детали — только когда они влияют на границы, порядок выполнения, результат, ограничение, ошибку, изменение состояния или связь.
-- Различай собственную работу блока, инициирование, делегирование, использование чужого результата и чужой побочный эффект.
-- Не выдавай недостижимый код за рабочее поведение; помечай его как недостижимый/неподтверждённый.
-- Запрещены формулировки-домыслы: «вероятно», «скорее всего», «по всей видимости» и подобные. Неустановленное помещай в раздел «Неопределённости» с указанием, что именно неизвестно и какие участки проверены.
-- Markdown: проза **без жёсткого переноса** — один абзац = одна строка (перенос только мягкий в редакторе; не вставляй ручные переводы строк в прозу). Заголовки и списки окружай пустыми строками; не используй жирный текст вместо заголовка; уровни заголовков наращивай по одному.
-- Форматирование md единообразит **Prettier** (`proseWrap: never`, см. `.prettierrc.json` в корне): `npx prettier@3 --write "**/*.md"`. Он снимает жёсткий перенос, выравнивает таблицы и пустые строки у заголовков; код-блоки, mermaid и ссылки не трогает. Исключения — в `.prettierignore`.
+- Write concisely and precisely; do not paraphrase code line by line. Include technical details only when they affect boundaries, execution order, result, constraint, error, state change, or relationship.
+- Distinguish between a block's own work, initiation, delegation, use of another block's result, and another block's side effect.
+- Do not present unreachable code as working behavior; mark it as unreachable/unconfirmed.
+- Speculative wording is prohibited: "probably", "most likely", "apparently", and similar. Place unestablished facts in the "Uncertainties" section, specifying what is unknown and which areas were checked.
+- Markdown: prose **without hard wrapping** — one paragraph = one line (wrap only softly in the editor; do not insert manual line breaks in prose). Surround headings and lists with blank lines; do not use bold text instead of a heading; increment heading levels one at a time.
+- Markdown formatting is standardized by **Prettier** (`proseWrap: never`, see `.prettierrc.json` in the root): `npx prettier@3 --write "**/*.md"`. It removes hard wrapping, aligns tables and blank lines around headings; it does not touch code blocks, mermaid, or links. Exceptions are in `.prettierignore`.
 
-## Диаграммы
+## Diagrams
 
-- Диаграммы оформляй блоком кода с языком `mermaid` — он рендерится на GitHub и в VS Code и остаётся текстом, видимым в diff.
-- К диаграмме применяется тот же источник истины, что и к тексту: на ней только то, что подтверждено кодом. Не добавляй рёбра, состояния или связи «для полноты картины», если их нет в коде.
-- Добавляй диаграмму там, где она проясняет порядок, состояние или связи (машина состояний, последовательность вызовов, карта зависимостей), а не дублирует список тривиально.
-- Под нетривиальной диаграммой указывай источник, из которого она выведена (`файл:строка`).
-- Поддерживай диаграмму в актуальности тем же изменением, что и код (как и текст).
-- Подписи — на простом русском; технические идентификаторы, статусы и имена остаются как в коде.
+- Format diagrams as a code block with the `mermaid` language tag — it renders on GitHub and in VS Code and remains as text visible in diffs.
+- The same source-of-truth rule applies to diagrams as to text: only what is confirmed by code. Do not add edges, states, or relationships "for completeness" if they are not in the code.
+- Add a diagram where it clarifies order, state, or relationships (state machine, call sequence, dependency map) rather than trivially duplicating a list.
+- Below a non-trivial diagram, indicate the source from which it was derived (`file:line`).
+- Keep the diagram up to date in the same change as the code (just like the text).
+- Labels should use plain English; technical identifiers, statuses, and names remain as they appear in code.
 
-## Добавление и исключение блоков
+## Adding and Excluding Blocks
 
-- **Новый блок:** добавь запись в `block-registry.md` (статус `discovered`), зарезервируй файл `blocks/<id>-<short-name>.md`, обнови карту в `index.md`, и добавь взаимные ссылки только после подтверждения фактического взаимодействия.
-- **Исключение:** если зарегистрированный элемент оказался не самостоятельным блоком — переведи его в `excluded` с краткой причиной и перенеси описание в поглощающий блок.
+- **New block:** add an entry in `block-registry.md` (status `discovered`), reserve the file `blocks/<id>-<short-name>.md`, update the map in `index.md`, and add mutual references only after confirming actual interaction.
+- **Exclusion:** if a registered element turns out not to be an independent block — move it to `excluded` with a brief reason and transfer its description to the absorbing block.
 
-## Чек-лист перед завершением правки
+## Pre-completion Checklist
 
-- Описание основано только на коде и тестах; найдены все подтверждённые точки входа.
-- Определены границы и то, что блок не делает; основной и альтернативные сценарии подтверждены.
-- Проверки, ограничения, ошибки и побочные эффекты описаны; зависимости и взаимные ссылки корректны.
-- Нет пересказа кода, домыслов, воды; каждое существенное утверждение проверяемо.
-- Реестр, индекс и (при необходимости) сквозные потоки согласованы; все статусы окончательны.
-- Все относительные ссылки (на блоки и на код/тесты) резолвятся.
+- The description is based solely on code and tests; all confirmed entry points have been found.
+- Boundaries and what the block does not do are defined; the main and alternative scenarios are confirmed.
+- Checks, constraints, errors, and side effects are described; dependencies and mutual references are correct.
+- No code paraphrasing, speculation, or filler; every significant statement is verifiable.
+- Registry, index, and (if necessary) cross-cutting flows are consistent; all statuses are final.
+- All relative links (to blocks and to code/tests) resolve.
 
-Быстрая проверка ссылок на файлы блоков и на код/тесты (запускать из `docs/functional/`):
+Quick check for links to block files and to code/tests (run from `docs/functional/`):
 
 ```bash
-# битые ссылки на файлы блоков из index/registry/flows
+# broken links to block files from index/registry/flows
 for f in index.md system-flows.md block-registry.md; do
   grep -oE '\]\(\./[^)]+\.md[^)]*\)' "$f" | sed -E 's/^\]\(//; s/\)$//; s/#.*$//' \
     | sort -u | while read -r t; do [ -f "$t" ] || echo "$f -> $t"; done
 done
 
-# битые ссылки на код/тесты из файлов блоков (../../../<path>)
+# broken links to code/tests from block files (../../../<path>)
 for f in blocks/*.md; do
   grep -oE '\]\(\.\./\.\./\.\./[^)]+\)' "$f" | sed -E 's/^\]\(//; s/\)$//; s/#.*$//' \
     | sort -u | while read -r t; do [ -e "blocks/$t" ] || echo "$f -> $t"; done

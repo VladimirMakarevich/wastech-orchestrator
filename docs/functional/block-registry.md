@@ -1,238 +1,238 @@
-# Реестр функциональных блоков
+# Functional Block Registry
 
-Статусы: `discovered` — обнаружен, не исследован; `in-progress` — анализируется; `documented` — исследован и задокументирован; `needs-review` — поведение нельзя восстановить однозначно; `excluded` — рассмотрен, но не самостоятельный блок.
+Statuses: `discovered` — identified, not yet investigated; `in-progress` — under analysis; `documented` — investigated and documented; `needs-review` — behavior cannot be unambiguously reconstructed; `excluded` — reviewed, but not a standalone block.
 
-Все 27 функциональных блоков (B01–B27) исследованы и имеют статус `documented`. Каждый блок описан в отдельном файле в `blocks/` и подтверждён ссылками на исполняемый код и тесты.
+All 27 functional blocks (B01–B27) have been investigated and carry the status `documented`. Each block is described in a dedicated file under `blocks/` and is confirmed with references to executable code and tests.
 
-> Помимо блоков есть слой **потоков исполнения** — документы `S01`–`S08` (по стадии конвейера) и обзор в [flows/coding/index.md](./flows/coding/index.md). Они описывают «что происходит на шаге» и ссылаются на блоки. Рядом в будущем появятся другие потоки (`flows/deep_research/` и т. п.).
-
----
-
-## Интерфейс и управление запуском
-
-### B01 — CLI и операторские команды
-
-- **Назначение:** разбор аргументов, диспетчеризация подкоманд, коды возврата; тонкие драйверы команд `run`, `status`, `preflight`, `telegram-test`, `rerun`, `finalize`.
-- **Точки входа:** [cli.py main](../../src/wastech_orchestrator/cli.py#L1497), [build_parser](../../src/wastech_orchestrator/cli.py#L114), `cmd_run`/`cmd_status`/`cmd_preflight`/`cmd_telegram_test`/`cmd_rerun`/`cmd_finalize`.
-- **Зависимости:** B06 (оркестратор), B05/B04 (загрузка и обнаружение конфигурации), B07 (read-only `status`), B25 (изоляция в preflight), B26 (telegram-test/preflight).
-- **Статус:** `documented` · [файл](./blocks/B01-cli-and-operator-commands.md)
-
-### B02 — Демон watch и планирование задач
-
-- **Назначение:** периодическое обнаружение pending-задач и подача их в оркестратор по одной; демонизация с PID-файлом, грейсфул-остановка по `SIGTERM`, защита от второго демона.
-- **Точки входа:** [cmd_watch](../../src/wastech_orchestrator/cli.py#L1160), `cmd_stop`, `cmd_restart`, [watch_loop](../../src/wastech_orchestrator/cli.py#L807)/[watch_once](../../src/wastech_orchestrator/cli.py#L778); [process_control.py](../../src/wastech_orchestrator/process_control.py).
-- **Зависимости:** B06 (`resume`, `acquire_slot`, `run_task`, `refresh_repo`), B05.
-- **Статус:** `documented` · [файл](./blocks/B02-watch-daemon-and-scheduling.md)
-
-### B03 — Установщик и развёртывание проекта
-
-- **Назначение:** `init` (скелет каталогов/шаблонов/worc/config), `install` (мастер → генерация валидной `config.yaml` → привязка), `upgrade-config`/`upgrade-docs`/`install-templates`.
-- **Точки входа:** [cmd_init](../../src/wastech_orchestrator/cli.py#L464), [cmd_install](../../src/wastech_orchestrator/cli.py#L1430), [install/wizard.run_wizard](../../src/wastech_orchestrator/install/wizard.py), [install/config_writer.build_and_validate](../../src/wastech_orchestrator/install/config_writer.py), [install/detect.py](../../src/wastech_orchestrator/install/detect.py).
-- **Зависимости:** B05 (валидация сгенерированного конфига), B04 (привязка repo→config), B19 (git-пробы), B25 (denied-команды в дефолтах).
-- **Статус:** `documented` · [файл](./blocks/B03-installer-and-scaffolding.md)
-
-### B04 — Реестр привязок и обнаружение конфигурации
-
-- **Назначение:** персистентный стор `repo-root → config.yaml` и разрешение пути конфигурации по приоритету (`--config` → `./config.yaml` → привязка реестра).
-- **Точки входа:** [install/registry.py](../../src/wastech_orchestrator/install/registry.py) (`bind`/`lookup`/`unbind`), [cli.resolve_config_path](../../src/wastech_orchestrator/cli.py#L549).
-- **Зависимости:** `platformdirs`, B03 (запись привязки при `install`).
-- **Статус:** `documented` · [файл](./blocks/B04-install-registry-and-config-discovery.md)
-
-### B05 — Конфигурация: схема, загрузка, валидация, апгрейд
-
-- **Назначение:** типизированная модель конфигурации, парсинг YAML (fail-closed), семантическая валидация (§11/§21.4), миграция ключей между версиями схемы.
-- **Точки входа:** [config/loader.load_config/loads_config](../../src/wastech_orchestrator/config/loader.py), [config/validation.validate_config](../../src/wastech_orchestrator/config/validation.py), [config/upgrade.py](../../src/wastech_orchestrator/config/upgrade.py), [config/schema.py](../../src/wastech_orchestrator/config/schema.py).
-- **Зависимости:** B25 (`find_forbidden_args` в валидации), B23 (`checks.model` предикаты), PyYAML.
-- **Статус:** `documented` · [файл](./blocks/B05-configuration.md)
+> In addition to blocks, there is an **execution flows** layer — documents `S01`–`S08` (one per pipeline stage) and an overview in [flows/coding/index.md](./flows/coding/index.md). These describe "what happens at a step" and reference the blocks. Other flows (`flows/deep_research/`, etc.) will be added alongside them in the future.
 
 ---
 
-## Ядро оркестрации
+## Interface and Launch Control
 
-### B06 — Конвейер оркестратора
+### B01 — CLI and Operator Commands
 
-- **Назначение:** детерминированный драйвер одной задачи от валидации до публикации и терминальной очистки; вызывает только Router, Check Runner и Git Manager; контекст агентам — только путями.
-- **Точки входа:** [Orchestrator](../../src/wastech_orchestrator/core/orchestrator.py#L294), [run_task](../../src/wastech_orchestrator/core/orchestrator.py#L350), `resume`, `rerun_task`/`continue_task`, `finalize_task`, фабрика [build_orchestrator](../../src/wastech_orchestrator/core/orchestrator.py#L2594).
-- **Зависимости:** почти все блоки ядра и исполнения (см. index).
-- **Статус:** `documented` · [файл](./blocks/B06-orchestrator-pipeline.md)
+- **Purpose:** argument parsing, subcommand dispatch, return codes; thin command drivers for `run`, `status`, `preflight`, `telegram-test`, `rerun`, `finalize`.
+- **Entry points:** [cli.py main](../../src/wastech_orchestrator/cli.py#L1497), [build_parser](../../src/wastech_orchestrator/cli.py#L114), `cmd_run`/`cmd_status`/`cmd_preflight`/`cmd_telegram_test`/`cmd_rerun`/`cmd_finalize`.
+- **Dependencies:** B06 (orchestrator), B05/B04 (config loading and discovery), B07 (read-only `status`), B25 (isolation in preflight), B26 (telegram-test/preflight).
+- **Status:** `documented` · [file](./blocks/B01-cli-and-operator-commands.md)
 
-### B07 — Машина состояний и State Store
+### B02 — Watch Daemon and Task Scheduling
 
-- **Назначение:** канонические статусы и допустимые переходы (§8); персистентное состояние в SQLite, единый слот обработки, транзакции, версионирование схемы БД, read-only режим.
-- **Точки входа:** [core/state_machine.py](../../src/wastech_orchestrator/core/state_machine.py) (`Status`, `assert_transition`, `is_active`/`is_terminal`), [state_store.StateStore](../../src/wastech_orchestrator/state_store.py) (`open`/`open_readonly`, `transaction`, `set_status`, `find_active_tasks`, `update_task`, …).
-- **Зависимости:** `sqlite3`; используется B06 и B22.
-- **Статус:** `documented` · [файл](./blocks/B07-state-machine-and-store.md)
+- **Purpose:** periodic discovery of pending tasks and submission to the orchestrator one at a time; daemonization with a PID file, graceful shutdown on `SIGTERM`, protection against a second daemon instance.
+- **Entry points:** [cmd_watch](../../src/wastech_orchestrator/cli.py#L1160), `cmd_stop`, `cmd_restart`, [watch_loop](../../src/wastech_orchestrator/cli.py#L807)/[watch_once](../../src/wastech_orchestrator/cli.py#L778); [process_control.py](../../src/wastech_orchestrator/process_control.py).
+- **Dependencies:** B06 (`resume`, `acquire_slot`, `run_task`, `refresh_repo`), B05.
+- **Status:** `documented` · [file](./blocks/B02-watch-daemon-and-scheduling.md)
 
-### B08 — Ledger и отчёты о провале
+### B03 — Installer and Project Scaffolding
 
-- **Назначение:** append-only журнал терминальных исходов (`completed.jsonl`); генерация `failure_report.json`/`stuck.md` и компактного `summary.{md,json}` при отсутствии агента.
-- **Точки входа:** [ledger.Ledger](../../src/wastech_orchestrator/ledger.py) (`append`/`records`/`has_task_id`), `write_failure_report`, `write_minimal_summary`.
-- **Зависимости:** только stdlib (`json`); читается B16/B06 (дедуп id), B06 (счётчик попыток).
-- **Статус:** `documented` · [файл](./blocks/B08-ledger-and-failure-reports.md)
+- **Purpose:** `init` (directory/template/worc/config skeleton), `install` (wizard → generate valid `config.yaml` → bind), `upgrade-config`/`upgrade-docs`/`install-templates`.
+- **Entry points:** [cmd_init](../../src/wastech_orchestrator/cli.py#L464), [cmd_install](../../src/wastech_orchestrator/cli.py#L1430), [install/wizard.run_wizard](../../src/wastech_orchestrator/install/wizard.py), [install/config_writer.build_and_validate](../../src/wastech_orchestrator/install/config_writer.py), [install/detect.py](../../src/wastech_orchestrator/install/detect.py).
+- **Dependencies:** B05 (validation of generated config), B04 (repo→config binding), B19 (git probes), B25 (denied commands in defaults).
+- **Status:** `documented` · [file](./blocks/B03-installer-and-scaffolding.md)
 
-### B09 — Контроль циклов исправления
+### B04 — Install Registry and Config Discovery
 
-- **Назначение:** счётчики циклов (test/review fix), правила перехода в `fixing` и определение «застревания» по лимитам.
-- **Точки входа:** [core/loop_control.py](../../src/wastech_orchestrator/core/loop_control.py) (`FixLoop`, `LoopController`, `LoopCounters`).
-- **Зависимости:** конфигурация `agents.*` лимиты; используется B06.
-- **Статус:** `documented` · [файл](./blocks/B09-fix-loop-control.md)
+- **Purpose:** persistent store for `repo-root → config.yaml` and resolution of the config path by priority (`--config` → `./config.yaml` → registry binding).
+- **Entry points:** [install/registry.py](../../src/wastech_orchestrator/install/registry.py) (`bind`/`lookup`/`unbind`), [cli.resolve_config_path](../../src/wastech_orchestrator/cli.py#L549).
+- **Dependencies:** `platformdirs`, B03 (writing the binding on `install`).
+- **Status:** `documented` · [file](./blocks/B04-install-registry-and-config-discovery.md)
 
-### B10 — Восстановление и возобновление
+### B05 — Configuration: Schema, Loading, Validation, Upgrade
 
-- **Назначение:** сверка персистентного состояния на старте и решение, что делать с незавершённой задачей (ничего / пометить manual / завершить очистку / возобновить со стадии).
-- **Точки входа:** [core/recovery.py](../../src/wastech_orchestrator/core/recovery.py) (`RecoveryReconciler.reconcile`, `RecoveryAction`, `RecoveryPlan`).
-- **Зависимости:** B07 (состояние), B22 (состояние git); используется B06 (`resume`).
-- **Статус:** `documented` · [файл](./blocks/B10-recovery-and-resume.md)
-
-### B11 — Декомпозиция задачи
-
-- **Назначение:** решение о разбиении задачи на сабтаски по структурированному выводу planning; спецификации сабтасков и их файловые артефакты; индекс прогресса.
-- **Точки входа:** [core/decomposition.py](../../src/wastech_orchestrator/core/decomposition.py) (`decide_decomposition`, `SubtaskSpec`, `write_subtask_artifacts`, `update_subtask_index`).
-- **Зависимости:** B15/B12 (структурированный вывод planning), B07 (`subtasks`); используется B06.
-- **Статус:** `documented` · [файл](./blocks/B11-task-decomposition.md)
-
-### B12 — HITL и типизированный вывод стадий
-
-- **Назначение:** долговечные взаимодействия «человек в контуре» (persist/resume) и парсинг/валидация структурированного вывода стадий (включая сигнал запроса ввода человека).
-- **Точки входа:** [core/hitl.py](../../src/wastech_orchestrator/core/hitl.py) (`write_waiting_interaction`, `load_interaction`, `parse_typed_stage_output`, `stage_output_schema`, `consume_pending_interactions`, …).
-- **Зависимости:** B26 (транспорт), B20/B21 (артефакты, redaction); используется B06.
-- **Статус:** `documented` · [файл](./blocks/B12-hitl-and-typed-output.md)
-
-### B13 — Инвентарь и выбор навыков (skills)
-
-- **Назначение:** read-only сканирование `SKILL.md` в репозитории; резолвинг навыков, предложенных planning (агент не может выбрать путь, которого скан не нашёл), и дедуп против инструкций оператора.
-- **Точки входа:** [core/skills.py](../../src/wastech_orchestrator/core/skills.py) (`SkillInventoryScanner`, `resolve_planning_skills`, `compute_skill_dedup`).
-- **Зависимости:** B25 (`denied_read_paths`); используется B06 (planning).
-- **Статус:** `documented` · [файл](./blocks/B13-skill-selection.md)
-
-### B14 — Классификация «опасного» диффа
-
-- **Назначение:** чистый классификатор изменений (удаления файлов, правки манифестов/локов зависимостей) → требование согласования человеком.
-- **Точки входа:** [core/dangerous_diff.py](../../src/wastech_orchestrator/core/dangerous_diff.py) (`classify_dangerous_diff`, `DangerousDiff`).
-- **Зависимости:** вход — `changed_code_entries()` из B22; используется B06 (guardrail) совместно с B12.
-- **Статус:** `documented` · [файл](./blocks/B14-dangerous-diff-guardrail.md)
-
-### B15 — Шаблоны промптов и их рендеринг
-
-- **Назначение:** разрешение шаблонов стадий (упакованные дефолты + оверрайды оператора) и рендеринг с аллой-листом переменных (только метаданные и пути к артефактам).
-- **Точки входа:** [core/prompts.py](../../src/wastech_orchestrator/core/prompts.py) (`PromptTemplateStore`, `render_prompt`), [templates/prompts/](../../src/wastech_orchestrator/templates/prompts/).
-- **Зависимости:** B05 (`prompts.*`); используется B06.
-- **Статус:** `documented` · [файл](./blocks/B15-prompt-templates.md)
+- **Purpose:** typed configuration model, YAML parsing (fail-closed), semantic validation (§11/§21.4), key migration between schema versions.
+- **Entry points:** [config/loader.load_config/loads_config](../../src/wastech_orchestrator/config/loader.py), [config/validation.validate_config](../../src/wastech_orchestrator/config/validation.py), [config/upgrade.py](../../src/wastech_orchestrator/config/upgrade.py), [config/schema.py](../../src/wastech_orchestrator/config/schema.py).
+- **Dependencies:** B25 (`find_forbidden_args` in validation), B23 (`checks.model` predicates), PyYAML.
+- **Status:** `documented` · [file](./blocks/B05-configuration.md)
 
 ---
 
-## Вход задачи
+## Orchestration Core
 
-### B16 — Модель задачи, парсинг и шлюз валидации
+### B06 — Orchestrator Pipeline
 
-- **Назначение:** модель `NormalizedTask`; парсинг `.md`/`.json` (фронтматтер+тело, отказ на дубль-ключах); шлюз §19 (жёсткие проверки + классификация полноты), карантин при отказе.
-- **Точки входа:** [task/parser.py](../../src/wastech_orchestrator/task/parser.py) (`read_task_source`, `load_normalized`, `write_normalized`, `slugify`), [task/validation_gate.ValidationGate](../../src/wastech_orchestrator/task/validation_gate.py), [task/model.py](../../src/wastech_orchestrator/task/model.py).
-- **Зависимости:** B25 (`scan_frontmatter`), B05 (лимиты), B08+B07 (дедуп id); используется B06.
-- **Статус:** `documented` · [файл](./blocks/B16-task-parsing-and-validation-gate.md)
+- **Purpose:** deterministic driver for a single task from validation through publishing and terminal cleanup; calls only the Router, Check Runner, and Git Manager; context is passed to agents as paths only.
+- **Entry points:** [Orchestrator](../../src/wastech_orchestrator/core/orchestrator.py#L294), [run_task](../../src/wastech_orchestrator/core/orchestrator.py#L350), `resume`, `rerun_task`/`continue_task`, `finalize_task`, factory [build_orchestrator](../../src/wastech_orchestrator/core/orchestrator.py#L2594).
+- **Dependencies:** almost all core and execution blocks (see index).
+- **Status:** `documented` · [file](./blocks/B06-orchestrator-pipeline.md)
+
+### B07 — State Machine and State Store
+
+- **Purpose:** canonical statuses and valid transitions (§8); persistent state in SQLite, single processing slot, transactions, DB schema versioning, read-only mode.
+- **Entry points:** [core/state_machine.py](../../src/wastech_orchestrator/core/state_machine.py) (`Status`, `assert_transition`, `is_active`/`is_terminal`), [state_store.StateStore](../../src/wastech_orchestrator/state_store.py) (`open`/`open_readonly`, `transaction`, `set_status`, `find_active_tasks`, `update_task`, …).
+- **Dependencies:** `sqlite3`; used by B06 and B22.
+- **Status:** `documented` · [file](./blocks/B07-state-machine-and-store.md)
+
+### B08 — Ledger and Failure Reports
+
+- **Purpose:** append-only log of terminal outcomes (`completed.jsonl`); generation of `failure_report.json`/`stuck.md` and a compact `summary.{md,json}` when no agent is present.
+- **Entry points:** [ledger.Ledger](../../src/wastech_orchestrator/ledger.py) (`append`/`records`/`has_task_id`), `write_failure_report`, `write_minimal_summary`.
+- **Dependencies:** stdlib only (`json`); read by B16/B06 (id dedup), B06 (attempt counter).
+- **Status:** `documented` · [file](./blocks/B08-ledger-and-failure-reports.md)
+
+### B09 — Fix Loop Control
+
+- **Purpose:** loop counters (test/review fix), rules for transitioning to `fixing`, and detection of "stuck" state based on limits.
+- **Entry points:** [core/loop_control.py](../../src/wastech_orchestrator/core/loop_control.py) (`FixLoop`, `LoopController`, `LoopCounters`).
+- **Dependencies:** `agents.*` limits from configuration; used by B06.
+- **Status:** `documented` · [file](./blocks/B09-fix-loop-control.md)
+
+### B10 — Recovery and Resume
+
+- **Purpose:** reconciliation of persistent state on startup and deciding what to do with an unfinished task (do nothing / mark as manual / complete cleanup / resume from a stage).
+- **Entry points:** [core/recovery.py](../../src/wastech_orchestrator/core/recovery.py) (`RecoveryReconciler.reconcile`, `RecoveryAction`, `RecoveryPlan`).
+- **Dependencies:** B07 (state), B22 (git state); used by B06 (`resume`).
+- **Status:** `documented` · [file](./blocks/B10-recovery-and-resume.md)
+
+### B11 — Task Decomposition
+
+- **Purpose:** decision to split a task into subtasks based on structured planning output; subtask specifications and their file artifacts; progress index.
+- **Entry points:** [core/decomposition.py](../../src/wastech_orchestrator/core/decomposition.py) (`decide_decomposition`, `SubtaskSpec`, `write_subtask_artifacts`, `update_subtask_index`).
+- **Dependencies:** B15/B12 (structured planning output), B07 (`subtasks`); used by B06.
+- **Status:** `documented` · [file](./blocks/B11-task-decomposition.md)
+
+### B12 — HITL and Typed Stage Output
+
+- **Purpose:** durable human-in-the-loop interactions (persist/resume) and parsing/validation of typed stage output (including a signal requesting human input).
+- **Entry points:** [core/hitl.py](../../src/wastech_orchestrator/core/hitl.py) (`write_waiting_interaction`, `load_interaction`, `parse_typed_stage_output`, `stage_output_schema`, `consume_pending_interactions`, …).
+- **Dependencies:** B26 (transport), B20/B21 (artifacts, redaction); used by B06.
+- **Status:** `documented` · [file](./blocks/B12-hitl-and-typed-output.md)
+
+### B13 — Skill Inventory and Selection
+
+- **Purpose:** read-only scanning of `SKILL.md` in the repository; resolving skills proposed by planning (an agent cannot select a path that the scan did not find), and deduplication against operator instructions.
+- **Entry points:** [core/skills.py](../../src/wastech_orchestrator/core/skills.py) (`SkillInventoryScanner`, `resolve_planning_skills`, `compute_skill_dedup`).
+- **Dependencies:** B25 (`denied_read_paths`); used by B06 (planning).
+- **Status:** `documented` · [file](./blocks/B13-skill-selection.md)
+
+### B14 — Dangerous Diff Classifier
+
+- **Purpose:** pure change classifier (file deletions, dependency manifest/lock edits) → requires human approval.
+- **Entry points:** [core/dangerous_diff.py](../../src/wastech_orchestrator/core/dangerous_diff.py) (`classify_dangerous_diff`, `DangerousDiff`).
+- **Dependencies:** input — `changed_code_entries()` from B22; used by B06 (guardrail) together with B12.
+- **Status:** `documented` · [file](./blocks/B14-dangerous-diff-guardrail.md)
+
+### B15 — Prompt Templates and Rendering
+
+- **Purpose:** resolution of stage templates (bundled defaults + operator overrides) and rendering with an allowlisted set of variables (metadata and artifact paths only).
+- **Entry points:** [core/prompts.py](../../src/wastech_orchestrator/core/prompts.py) (`PromptTemplateStore`, `render_prompt`), [templates/prompts/](../../src/wastech_orchestrator/templates/prompts/).
+- **Dependencies:** B05 (`prompts.*`); used by B06.
+- **Status:** `documented` · [file](./blocks/B15-prompt-templates.md)
 
 ---
 
-## Исполнение и провайдеры
+## Task Ingestion
 
-### B17 — Router агентов и политика fallback
+### B16 — Task Model, Parsing, and Validation Gate
 
-- **Назначение:** выбор провайдера для стадии (конфиг + валидированный task-override), запуск с fallback только при инфраструктурных ошибках, подсчёт попыток, передача частичного диффа.
-- **Точки входа:** [routing/router.AgentRouter](../../src/wastech_orchestrator/routing/router.py) (`resolve_route`, `run_stage`), [routing/snapshots.py](../../src/wastech_orchestrator/routing/snapshots.py) (`SnapshotHook`).
-- **Зависимости:** B18 (вызов `run`), B25 (`is_same_or_stricter`), B05; используется B06.
-- **Статус:** `documented` · [файл](./blocks/B17-agent-router-and-fallback.md)
+- **Purpose:** `NormalizedTask` model; parsing of `.md`/`.json` (frontmatter + body, failing on duplicate keys); §19 gate (hard checks + completeness classification), quarantine on failure.
+- **Entry points:** [task/parser.py](../../src/wastech_orchestrator/task/parser.py) (`read_task_source`, `load_normalized`, `write_normalized`, `slugify`), [task/validation_gate.ValidationGate](../../src/wastech_orchestrator/task/validation_gate.py), [task/model.py](../../src/wastech_orchestrator/task/model.py).
+- **Dependencies:** B25 (`scan_frontmatter`), B05 (limits), B08+B07 (id dedup); used by B06.
+- **Status:** `documented` · [file](./blocks/B16-task-parsing-and-validation-gate.md)
 
-### B18 — Адаптеры провайдеров и контракт (Codex/Claude)
+---
 
-- **Назначение:** контракт `AgentProvider`; трансляция `AgentRunRequest` в argv CLI, запуск, парсинг вывода, классификация ошибок в `ErrorClass`; `preflight`.
-- **Точки входа:** [providers/base.py](../../src/wastech_orchestrator/providers/base.py), [providers/claude.ClaudeCodeProvider](../../src/wastech_orchestrator/providers/claude.py), [providers/codex.CodexProvider](../../src/wastech_orchestrator/providers/codex.py), [providers/errors.classify](../../src/wastech_orchestrator/providers/errors.py).
-- **Зависимости:** B19 (запуск), B20 (артефакты), B21 (redaction), B25 (env/forbidden/isolation); вызывается только B17.
-- **Статус:** `documented` · [файл](./blocks/B18-agent-providers.md)
+## Execution and Providers
 
-### B19 — Безопасный запуск подпроцессов
+### B17 — Agent Router and Fallback Policy
 
-- **Назначение:** единый примитив запуска: argv-список (без shell), аллой-лист окружения, таймаут, stdin-текст, потоковая запись stdout в файл, захват stderr.
-- **Точки входа:** [providers/process.run_process](../../src/wastech_orchestrator/providers/process.py).
-- **Зависимости:** B25 (`build_child_env`); используется B18, B22, B24, B03/B04 (git-пробы).
-- **Статус:** `documented` · [файл](./blocks/B19-subprocess-runner.md)
+- **Purpose:** provider selection for a stage (config + validated task-override), launch with fallback only on infrastructure errors, attempt counting, partial diff handoff.
+- **Entry points:** [routing/router.AgentRouter](../../src/wastech_orchestrator/routing/router.py) (`resolve_route`, `run_stage`), [routing/snapshots.py](../../src/wastech_orchestrator/routing/snapshots.py) (`SnapshotHook`).
+- **Dependencies:** B18 (`run` call), B25 (`is_same_or_stricter`), B05; used by B06.
+- **Status:** `documented` · [file](./blocks/B17-agent-router-and-fallback.md)
 
-### B20 — Файловая раскладка артефактов запусков
+### B18 — Provider Adapters and Contract (Codex/Claude)
 
-- **Назначение:** детерминированная (never-overwrite) раскладка артефактов на диске; запись request/result, sha256, архивирование артефактов задачи при rerun.
-- **Точки входа:** [providers/artifacts.py](../../src/wastech_orchestrator/providers/artifacts.py) (`task_artifact_dir`, `create_attempt_dir`, `archive_task_artifacts`, `sha256_file`).
-- **Зависимости:** stdlib; используется B18, B06.
-- **Статус:** `documented` · [файл](./blocks/B20-artifact-layout.md)
+- **Purpose:** `AgentProvider` contract; translating `AgentRunRequest` into a CLI argv, launching, parsing output, classifying errors into `ErrorClass`; `preflight`.
+- **Entry points:** [providers/base.py](../../src/wastech_orchestrator/providers/base.py), [providers/claude.ClaudeCodeProvider](../../src/wastech_orchestrator/providers/claude.py), [providers/codex.CodexProvider](../../src/wastech_orchestrator/providers/codex.py), [providers/errors.classify](../../src/wastech_orchestrator/providers/errors.py).
+- **Dependencies:** B19 (launch), B20 (artifacts), B21 (redaction), B25 (env/forbidden/isolation); called only by B17.
+- **Status:** `documented` · [file](./blocks/B18-agent-providers.md)
 
-### B21 — Редактирование секретов (redaction)
+### B19 — Safe Subprocess Runner
 
-- **Назначение:** сквозное вычищение секрето-подобных строк (паттерны токенов + чувствительные присваивания) из текста/словарей; сбор секретов из `denied_read_paths`.
-- **Точки входа:** [providers/redaction.py](../../src/wastech_orchestrator/providers/redaction.py) (`redact_text`, `redact_mapping`, `read_denied_secrets`).
-- **Зависимости:** stdlib; используется B18, B22, B27, B06, B26.
-- **Статус:** `documented` · [файл](./blocks/B21-secret-redaction.md)
+- **Purpose:** single launch primitive: argv list (no shell), environment allowlist, timeout, stdin text, streaming stdout write to file, stderr capture.
+- **Entry points:** [providers/process.run_process](../../src/wastech_orchestrator/providers/process.py).
+- **Dependencies:** B25 (`build_child_env`); used by B18, B22, B24, B03/B04 (git probes).
+- **Status:** `documented` · [file](./blocks/B19-subprocess-runner.md)
+
+### B20 — Run Artifact Layout
+
+- **Purpose:** deterministic (never-overwrite) artifact layout on disk; writing request/result, sha256, archiving task artifacts on rerun.
+- **Entry points:** [providers/artifacts.py](../../src/wastech_orchestrator/providers/artifacts.py) (`task_artifact_dir`, `create_attempt_dir`, `archive_task_artifacts`, `sha256_file`).
+- **Dependencies:** stdlib; used by B18, B06.
+- **Status:** `documented` · [file](./blocks/B20-artifact-layout.md)
+
+### B21 — Secret Redaction
+
+- **Purpose:** end-to-end scrubbing of secret-like strings (token patterns + sensitive assignments) from text/dictionaries; collection of secrets from `denied_read_paths`.
+- **Entry points:** [providers/redaction.py](../../src/wastech_orchestrator/providers/redaction.py) (`redact_text`, `redact_mapping`, `read_denied_secrets`).
+- **Dependencies:** stdlib; used by B18, B22, B27, B06, B26.
+- **Status:** `documented` · [file](./blocks/B21-secret-redaction.md)
 
 ---
 
 ## Git
 
-### B22 — Операции git и GitHub (Git Manager)
+### B22 — Git and GitHub Operations (Git Manager)
 
-- **Назначение:** все git/gh-операции через argv без shell: ветка `agent/<id>-<slug>`, scoped-стейджинг (никогда `git add .`), commit/push/PR/merge с идемпотентностью, footprint/excludes, снапшоты рабочего дерева, терминальная очистка.
-- **Точки входа:** [git_manager.GitManager](../../src/wastech_orchestrator/git_manager.py) (`prepare_branch`, `commit_code`/`commit_subtask`/`commit_audit`, `push`, `create_pr`, `merge_pr`, `terminal_cleanup`, `capture`/`partial_change_since`, …), `append_runtime_excludes`.
-- **Зависимости:** B19, B21, B07 (publish_operations), B25 (env); используется B06, B17 (SnapshotHook), B01.
-- **Статус:** `documented` · [файл](./blocks/B22-git-manager.md)
-
----
-
-## Проверки (quality gate)
-
-### B23 — Обнаружение и резолвинг проверок
-
-- **Назначение:** определить запускаемый набор проверок (детерминированно по «уликам» репозитория или доверять `checks.commands`; опционально — агентский fallback), кэшировать профиль по fingerprint, инвалидировать при изменении; повторный резолвинг при launch-ошибке.
-- **Точки входа:** [checks/resolver.CheckResolver](../../src/wastech_orchestrator/checks/resolver.py) (`resolve`/`reresolve`), [checks/diagnostics.py](../../src/wastech_orchestrator/checks/diagnostics.py), [checks/inspect.py](../../src/wastech_orchestrator/checks/inspect.py), [checks/detect.py](../../src/wastech_orchestrator/checks/detect.py), [checks/probe.py](../../src/wastech_orchestrator/checks/probe.py), [checks/validate.py](../../src/wastech_orchestrator/checks/validate.py), [checks/store.py](../../src/wastech_orchestrator/checks/store.py), [checks/fingerprint.py](../../src/wastech_orchestrator/checks/fingerprint.py), [checks/agent.py](../../src/wastech_orchestrator/checks/agent.py).
-- **Зависимости:** B18 (агентский fallback), B19 (пробы), B25; используется B06, B01, B03.
-- **Статус:** `documented` · [файл](./blocks/B23-check-discovery.md)
-
-### B24 — Выполнение проверок (стадия testing)
-
-- **Назначение:** запуск разрешённых проверок по порядку (argv без shell, аллой-лист env, таймаут), остановка на первом провале, логи, различение launch-ошибки и качественного провала.
-- **Точки входа:** [check_runner.CheckRunner.run](../../src/wastech_orchestrator/check_runner.py) → `CheckOutcome`.
-- **Зависимости:** B19, B25 (env), B21; используется B06 (`testing`).
-- **Статус:** `documented` · [файл](./blocks/B24-check-execution.md)
+- **Purpose:** all git/gh operations via argv without shell: branch `agent/<id>-<slug>`, scoped staging (never `git add .`), commit/push/PR/merge with idempotency, footprint/excludes, working tree snapshots, terminal cleanup.
+- **Entry points:** [git_manager.GitManager](../../src/wastech_orchestrator/git_manager.py) (`prepare_branch`, `commit_code`/`commit_subtask`/`commit_audit`, `push`, `create_pr`, `merge_pr`, `terminal_cleanup`, `capture`/`partial_change_since`, …), `append_runtime_excludes`.
+- **Dependencies:** B19, B21, B07 (publish_operations), B25 (env); used by B06, B17 (SnapshotHook), B01.
+- **Status:** `documented` · [file](./blocks/B22-git-manager.md)
 
 ---
 
-## Безопасность
+## Checks (Quality Gate)
 
-### B25 — Принуждение политики безопасности
+### B23 — Check Discovery and Resolution
 
-- **Назначение:** примитивы неослабляемой политики: аллой-лист переменных окружения, запрет bypass-флагов, скан инъекций во фронтматтере, префлайт изоляции провайдеров, ранжирование строгости профилей разрешений (для условного fallback).
-- **Точки входа:** [security/env.build_child_env](../../src/wastech_orchestrator/security/env.py), [security/forbidden_args.find_forbidden_args](../../src/wastech_orchestrator/security/forbidden_args.py), [security/injection.scan_frontmatter](../../src/wastech_orchestrator/security/injection.py), [security/isolation.check_isolation](../../src/wastech_orchestrator/security/isolation.py), [security/profiles.is_same_or_stricter](../../src/wastech_orchestrator/security/profiles.py).
-- **Зависимости:** stdlib; используется B18, B19, B22, B24, B17, B16, B05, B06, B01.
-- **Статус:** `documented` · [файл](./blocks/B25-security-policy.md)
+- **Purpose:** determine the set of checks to run (deterministically from repository "evidence" or by trusting `checks.commands`; optionally with an agent fallback), cache the profile by fingerprint, invalidate on change; re-resolve on launch error.
+- **Entry points:** [checks/resolver.CheckResolver](../../src/wastech_orchestrator/checks/resolver.py) (`resolve`/`reresolve`), [checks/diagnostics.py](../../src/wastech_orchestrator/checks/diagnostics.py), [checks/inspect.py](../../src/wastech_orchestrator/checks/inspect.py), [checks/detect.py](../../src/wastech_orchestrator/checks/detect.py), [checks/probe.py](../../src/wastech_orchestrator/checks/probe.py), [checks/validate.py](../../src/wastech_orchestrator/checks/validate.py), [checks/store.py](../../src/wastech_orchestrator/checks/store.py), [checks/fingerprint.py](../../src/wastech_orchestrator/checks/fingerprint.py), [checks/agent.py](../../src/wastech_orchestrator/checks/agent.py).
+- **Dependencies:** B18 (agent fallback), B19 (probes), B25; used by B06, B01, B03.
+- **Status:** `documented` · [file](./blocks/B23-check-discovery.md)
 
----
+### B24 — Check Execution (testing stage)
 
-## Интеграции и сквозные сервисы
-
-### B26 — Уведомления и транспорт HITL (Telegram)
-
-- **Назначение:** контракт `Notifier`; реализация Telegram: отправка коррелированного запроса, поллинг ответа с таймаутом, fire-and-forget уведомления; `NullNotifier` при выключенном/непрописанном транспорте; preflight Telegram.
-- **Точки входа:** [notify/interface.py](../../src/wastech_orchestrator/notify/interface.py) (`Notifier`, `NullNotifier`, `AskResult`/`AskHandle`), [notify/telegram.py](../../src/wastech_orchestrator/notify/telegram.py) (`build_notifier`, `check_telegram_preflight`).
-- **Зависимости:** `python-telegram-bot`, B21, B05 (`telegram.*`); используется B06, B12, B01.
-- **Статус:** `documented` · [файл](./blocks/B26-notifications-telegram.md)
-
-### B27 — Наблюдаемость: логирование и heartbeat
-
-- **Назначение:** структурированное логирование без секретов (logfmt/json, ротация файла, фильтр redaction, контекстная привязка) и heartbeat-сообщения во время долгих блокирующих операций.
-- **Точки входа:** [observability/logging.py](../../src/wastech_orchestrator/observability/logging.py) (`configure_logging`, `bind`, `RedactionFilter`), [observability/progress.run_with_heartbeat](../../src/wastech_orchestrator/observability/progress.py).
-- **Зависимости:** B21 (фильтр redaction); используется B06, B18, B22, B24, B01.
-- **Статус:** `documented` · [файл](./blocks/B27-observability.md)
+- **Purpose:** run resolved checks in order (argv without shell, env allowlist, timeout), stop on first failure, logs, distinction between a launch error and a quality failure.
+- **Entry points:** [check_runner.CheckRunner.run](../../src/wastech_orchestrator/check_runner.py) → `CheckOutcome`.
+- **Dependencies:** B19, B25 (env), B21; used by B06 (`testing`).
+- **Status:** `documented` · [file](./blocks/B24-check-execution.md)
 
 ---
 
-## Рассмотрено, но не выделено в отдельный блок (`excluded`)
+## Security
 
-- **`providers/errors.py`** — включён в B18 (правило классификации ошибок адаптеров).
-- **`routing/snapshots.py`** — включён в B17 (контракт частичного диффа Router↔Git).
-- **`checks/model.py`, `checks/profile.py`, `checks/schema_validate.py`, `checks/discovery_factory.py`, `checks/fingerprint.py`** — части B23 (модели/схемы/фабрика обнаружения проверок).
-- **`templates/`, `worc/` (markdown)** — данные пакета, поставляемые B03; не исполняемый код.
-- **`__init__.py` пакетов, `__main__.py`** — реэкспорт/обёртки точек входа (отражены в B01).
+### B25 — Security Policy Enforcement
+
+- **Purpose:** primitives of the non-weakening security policy: environment variable allowlist, bypass-flag prohibition, frontmatter injection scanning, provider isolation preflight, permission-profile strictness ranking (for conditional fallback).
+- **Entry points:** [security/env.build_child_env](../../src/wastech_orchestrator/security/env.py), [security/forbidden_args.find_forbidden_args](../../src/wastech_orchestrator/security/forbidden_args.py), [security/injection.scan_frontmatter](../../src/wastech_orchestrator/security/injection.py), [security/isolation.check_isolation](../../src/wastech_orchestrator/security/isolation.py), [security/profiles.is_same_or_stricter](../../src/wastech_orchestrator/security/profiles.py).
+- **Dependencies:** stdlib; used by B18, B19, B22, B24, B17, B16, B05, B06, B01.
+- **Status:** `documented` · [file](./blocks/B25-security-policy.md)
+
+---
+
+## Integrations and Cross-Cutting Services
+
+### B26 — Notifications and HITL Transport (Telegram)
+
+- **Purpose:** `Notifier` contract; Telegram implementation: sending a correlated request, polling for a response with timeout, fire-and-forget notifications; `NullNotifier` when the transport is disabled or not configured; Telegram preflight.
+- **Entry points:** [notify/interface.py](../../src/wastech_orchestrator/notify/interface.py) (`Notifier`, `NullNotifier`, `AskResult`/`AskHandle`), [notify/telegram.py](../../src/wastech_orchestrator/notify/telegram.py) (`build_notifier`, `check_telegram_preflight`).
+- **Dependencies:** `python-telegram-bot`, B21, B05 (`telegram.*`); used by B06, B12, B01.
+- **Status:** `documented` · [file](./blocks/B26-notifications-telegram.md)
+
+### B27 — Observability: Logging and Heartbeat
+
+- **Purpose:** structured logging without secrets (logfmt/json, file rotation, redaction filter, context binding) and heartbeat messages during long blocking operations.
+- **Entry points:** [observability/logging.py](../../src/wastech_orchestrator/observability/logging.py) (`configure_logging`, `bind`, `RedactionFilter`), [observability/progress.run_with_heartbeat](../../src/wastech_orchestrator/observability/progress.py).
+- **Dependencies:** B21 (redaction filter); used by B06, B18, B22, B24, B01.
+- **Status:** `documented` · [file](./blocks/B27-observability.md)
+
+---
+
+## Reviewed but Not Extracted as Standalone Blocks (`excluded`)
+
+- **`providers/errors.py`** — included in B18 (adapter error classification rules).
+- **`routing/snapshots.py`** — included in B17 (partial diff contract between Router and Git).
+- **`checks/model.py`, `checks/profile.py`, `checks/schema_validate.py`, `checks/discovery_factory.py`, `checks/fingerprint.py`** — parts of B23 (check discovery models/schemas/factory).
+- **`templates/`, `worc/` (markdown)** — package data delivered by B03; not executable code.
+- **`__init__.py` packages, `__main__.py`** — re-exports/wrappers of entry points (reflected in B01).

@@ -1,96 +1,96 @@
-# Architecture as Code (C4 через LikeC4)
+# Architecture as Code (C4 via LikeC4)
 
-«Архитектура как код»: модель системы в [`workspace.likec4`](./workspace.likec4), из которой порождаются согласованные виды C4 с интерактивной навигацией, зумом и кликабельным переходом на документы блоков.
+"Architecture as code": the system model lives in [`workspace.likec4`](./workspace.likec4), from which consistent C4 views are generated with interactive navigation, zoom, and clickable links to block documents.
 
-Модель выведена из исполняемого кода — это та же фактическая модель, что в [`../functional/`](../functional/index.md). Здесь — навигируемая карта верхнего уровня; подробные пошаговые потоки, ошибки и привязки `файл:строка` остаются в `docs/functional/`.
+The model is derived from executable code — it is the same factual model as in [`../functional/`](../functional/index.md). This is a navigable top-level map; detailed step-by-step flows, errors, and `file:line` bindings remain in `docs/functional/`.
 
-## C4 в двух словах
+## C4 in a Nutshell
 
-[C4](https://c4model.com) описывает систему на четырёх уровнях детализации:
+[C4](https://c4model.com) describes a system at four levels of detail:
 
-1. **Context** — система и её окружение (люди, внешние системы).
-2. **Container** — отдельно запускаемые единицы (приложения, БД, хранилища).
-3. **Component** — крупные строительные блоки внутри контейнера.
-4. **Code** — классы/функции (обычно не рисуют).
+1. **Context** — the system and its environment (people, external systems).
+2. **Container** — separately deployable units (applications, databases, storage).
+3. **Component** — major building blocks inside a container.
+4. **Code** — classes/functions (usually not drawn).
 
-Как это ложится на оркестратор:
+How this maps onto the orchestrator:
 
-| Уровень | Здесь | Вид в модели |
+| Level | Here | View in the model |
 | --- | --- | --- |
-| Context | оператор, человек-в-контуре, `codex`/`claude`, `git`/`gh`, Telegram | `landscape` |
-| Container | один процесс + хранилища `state.db` / артефакты / реестр | `containers` |
-| Component | **функциональные блоки B0x–B2x** | `components` |
-| Code | — | (пропущен; детали в `docs/functional/`) |
+| Context | operator, human-in-the-loop, `codex`/`claude`, `git`/`gh`, Telegram | `landscape` |
+| Container | single process + `state.db` / artifacts / registry storage | `containers` |
+| Component | **functional blocks B0x–B2x** | `components` |
+| Code | — | (skipped; details in `docs/functional/`) |
 
-L2 здесь тонкий намеренно: оркестратор — **один процесс**, поэтому «контейнеры» это сам процесс плюс хранилища, которыми он владеет; дочерние CLI — внешние системы, запускаемые как подпроцессы.
+L2 is intentionally thin here: the orchestrator is a **single process**, so "containers" means the process itself plus the storage it owns; child CLIs are external systems launched as subprocesses.
 
-## Требования
+## Requirements
 
-- **Node.js 18+** (LikeC4 — web-native инструмент). Проверка: `node -v`.
-- Больше ничего ставить не нужно: запуск через `npx`. Для редактирования удобно расширение VS Code.
+- **Node.js 18+** (LikeC4 is a web-native tool). Check with: `node -v`.
+- Nothing else to install: run via `npx`. The VS Code extension is convenient for editing.
 
-## Быстрый старт (интерактивный просмотр)
+## Quick Start (interactive view)
 
-Из корня репозитория:
+From the repository root:
 
 ```bash
 npx likec4@latest dev docs/architecture
 ```
 
-Откроется локальный сервер (обычно <http://localhost:5173>): живые диаграммы, hot-reload, клик по элементу проваливается на уровень глубже, клик по ссылке — открывает документ блока. Остановить — `Ctrl+C`.
+A local server opens (usually <http://localhost:5173>): live diagrams, hot-reload, clicking an element drills down a level, clicking a link opens the block document. Stop with `Ctrl+C`.
 
-## Редактирование в VS Code (рекомендуется)
+## Editing in VS Code (recommended)
 
-1. Поставьте расширение **LikeC4** (Marketplace, издатель `likec4`).
-2. Откройте [`workspace.likec4`](./workspace.likec4).
-3. Палитра команд → **LikeC4: Open Preview**.
+1. Install the **LikeC4** extension (Marketplace, publisher `likec4`).
+2. Open [`workspace.likec4`](./workspace.likec4).
+3. Command palette → **LikeC4: Open Preview**.
 
-Расширение даёт живое превью, **валидацию модели** и автодополнение — синтаксические ошибки видны прямо в редакторе (это лучший способ проверить правки).
+The extension provides a live preview, **model validation**, and autocomplete — syntax errors are visible directly in the editor (this is the best way to verify edits).
 
-## Статический сайт и экспорт картинок
+## Static Site and Image Export
 
 ```bash
-# самодостаточный сайт (поделиться с командой); site/ стоит добавить в .gitignore
+# self-contained site (share with the team); consider adding site/ to .gitignore
 npx likec4@latest build docs/architecture -o docs/architecture/site
 
-# PNG по каждому виду (для вставки в md/PR); при первом запуске может подтянуть Chromium
+# PNG for each view (for embedding in md/PR); may download Chromium on first run
 npx likec4@latest export png docs/architecture -o docs/architecture/img
 ```
 
-## Виды в модели
+## Views in the Model
 
-| Вид | Тип | Что показывает |
+| View | Type | What it shows |
 | --- | --- | --- |
-| `landscape` | view | Контекст (C4 L1): система + люди + внешние системы |
-| `containers` | view of `orchestrator` | Контейнеры (C4 L2): процесс + хранилища |
-| `components` | view of `proc` | Компоненты (C4 L3) = функциональные блоки |
-| `crosscutting` | view | Сквозные: безопасность, редакция, наблюдаемость |
-| `happyPath` | **dynamic view** | Пошаговый прогон одной задачи: `run` → … → PR |
+| `landscape` | view | Context (C4 L1): system + people + external systems |
+| `containers` | view of `orchestrator` | Containers (C4 L2): process + storage |
+| `components` | view of `proc` | Components (C4 L3) = functional blocks |
+| `crosscutting` | view | Cross-cutting concerns: security, editing, observability |
+| `happyPath` | **dynamic view** | Step-by-step run of a single task: `run` → … → PR |
 
-`dynamic view` — аналог sequence-диаграммы: показывает порядок взаимодействий во времени.
+A `dynamic view` is analogous to a sequence diagram: it shows the order of interactions over time.
 
-## Трассируемость на код
+## Traceability to Code
 
-Каждый компонент несёт `link` на свой документ блока в `docs/functional/blocks/` — из диаграммы можно кликом перейти к описанию с привязками `файл:строка`. Это и есть мост между абстрактной C4-моделью и выверенной по коду документацией.
+Each component carries a `link` to its block document in `docs/functional/blocks/` — from the diagram you can click through to a description with `file:line` bindings. This is the bridge between the abstract C4 model and the code-verified documentation.
 
-## Применённые best practices и как взять дальше
+## Applied Best Practices and How to Extend
 
-Уже в модели: типизированные виды элементов (`actor`/`system`/`externalSystem`/`container`/`component`/`store`) со стилями (форма, цвет), семантические теги (`spine`/`entrypoint`/`crosscutting`/`external`/`datastore`), описания и `technology`, несколько целевых видов, динамический прогон, `link` на документы блоков.
+Already in the model: typed element kinds (`actor`/`system`/`externalSystem`/`container`/`component`/`store`) with styles (shape, color), semantic tags (`spine`/`entrypoint`/`crosscutting`/`external`/`datastore`), descriptions and `technology`, multiple targeted views, a dynamic run, and `link` to block documents.
 
-Чтобы развить дальше:
+To extend further:
 
-- **Иконки** (выглядит «как в проде»): в `style { … }` элемента добавьте `icon tech:python`, `icon tech:sqlite` и т. п. — каталог иконок см. на сайте LikeC4. (Не добавил по умолчанию, чтобы не завязываться на конкретные имена иконок без локальной проверки.)
-- **Разнести по файлам**: `spec.likec4` / `model.likec4` / `views.likec4` (LikeC4 объединяет все `*.likec4` в каталоге) — удобно, когда модель растёт.
-- **Типизированные связи**: объявить kind-ы связей (`relationship async`, `relationship spawns`) со своим стилем линии.
-- **Все 27 блоков**: сейчас включён репрезентативный набор (~16); остальные перечислены комментарием в `workspace.likec4` и добавляются по тому же шаблону.
-- **CI**: прогонять `likec4 build`/`export` в пайплайне, чтобы ловить рассинхрон и публиковать сайт.
+- **Icons** (looks "production-ready"): in an element's `style { … }` block add `icon tech:python`, `icon tech:sqlite`, etc. — see the icon catalog on the LikeC4 website. (Not added by default to avoid coupling to specific icon names without local verification.)
+- **Split into files**: `spec.likec4` / `model.likec4` / `views.likec4` (LikeC4 merges all `*.likec4` files in the directory) — convenient as the model grows.
+- **Typed relationships**: declare relationship kinds (`relationship async`, `relationship spawns`) with their own line style.
+- **All 27 blocks**: a representative subset (~16) is currently included; the rest are listed as comments in `workspace.likec4` and can be added following the same pattern.
+- **CI**: run `likec4 build`/`export` in the pipeline to catch drift and publish the site.
 
-## Синхронизация с кодом (важно)
+## Keeping in Sync with Code (important)
 
-Модель **ручная** и **без** привязок `файл:строка` (в отличие от `docs/functional/`). Поэтому:
+The model is **manual** and has **no** `file:line` bindings (unlike `docs/functional/`). Therefore:
 
-- при изменении границ блоков, связей, внешних систем или хранилищ обновляйте её **тем же изменением** — это закреплено в skill [`sync-docs`](../../.claude/skills/sync-docs/SKILL.md);
-- держите ровно одного владельца модели;
-- источник истины о деталях — код и `docs/functional/`; здесь — карта верхнего уровня.
+- when block boundaries, relationships, external systems, or storage change, update the model **in the same change** — this is enforced by the skill [`sync-docs`](../../.claude/skills/sync-docs/SKILL.md);
+- keep exactly one model owner;
+- the source of truth for details is the code and `docs/functional/`; this is the top-level map.
 
-> Примечание: при первом `likec4 dev` обратите внимание на возможные предупреждения по `link` и `dynamic view` (их синтаксис не проверялся локально на момент создания файла). Любые правки сразу видны в превью; ошибочную строку проще всего поправить по подсказке валидатора LikeC4.
+> Note: on the first `likec4 dev` run, watch for any warnings about `link` and `dynamic view` (their syntax was not verified locally at the time the file was created). Any edits are immediately visible in the preview; the easiest way to fix a bad line is to follow the LikeC4 validator's suggestion.

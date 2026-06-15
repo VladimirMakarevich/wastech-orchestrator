@@ -1,125 +1,125 @@
-# B02 — Демон watch и планирование задач
+# B02 — Watch Daemon and Task Scheduling
 
-## Назначение
+## Purpose
 
-Периодически обнаруживает pending-задачи и подаёт их в оркестратор по одной, работая как останавливаемый демон. Реализует §8.2/§8.3: возобновить прерванную задачу, затем брать pending только при свободном слоте (одну при выключенном auto-mode; подряд — при включённом), с периодической синхронизацией базовой ветки между тиками.
+Periodically discovers pending tasks and submits them to the orchestrator one at a time, operating as a stoppable daemon. Implements §8.2/§8.3: resume an interrupted task first, then pick up pending tasks only when a slot is free (one task when auto-mode is off; consecutive tasks when auto-mode is on), with periodic base-branch synchronization between ticks.
 
-## Ответственность
+## Responsibilities
 
-- Возобновить активную задачу, затем выбрать pending согласно правилу auto-mode (`watch_once`) ([cli.py:778-804](../../../src/wastech_orchestrator/cli.py#L778)).
-- Гонять цикл с обновлением репозитория и сном между тиками (`watch_loop`) ([cli.py:807-846](../../../src/wastech_orchestrator/cli.py#L807)).
-- Демонизировать: PID-файл, грейсфул-остановка по `SIGTERM`, отказ от второго демона (`cmd_watch`/`cmd_stop`/`cmd_restart`) ([cli.py:1160-1263](../../../src/wastech_orchestrator/cli.py#L1160)).
-- Низкоуровневая PID/сигнальная плумбинг ([process_control.py](../../../src/wastech_orchestrator/process_control.py)).
+- Resume the active task, then select pending tasks according to the auto-mode rule (`watch_once`) ([cli.py:778-804](../../../src/wastech_orchestrator/cli.py#L778)).
+- Run the loop with repository updates and sleep between ticks (`watch_loop`) ([cli.py:807-846](../../../src/wastech_orchestrator/cli.py#L807)).
+- Daemonize: PID file, graceful stop on `SIGTERM`, refuse to start a second daemon (`cmd_watch`/`cmd_stop`/`cmd_restart`) ([cli.py:1160-1263](../../../src/wastech_orchestrator/cli.py#L1160)).
+- Low-level PID/signal plumbing ([process_control.py](../../../src/wastech_orchestrator/process_control.py)).
 
-## Границы блока
+## Block Boundaries
 
-### Входит в ответственность блока
+### Within this block's responsibility
 
-- Периодическое обнаружение/планирование, подача задач по одной, демонизация (PID, сигналы, stop/restart).
+- Periodic discovery/scheduling, submitting tasks one at a time, daemonization (PID, signals, stop/restart).
 
-### Не входит в ответственность блока
+### Outside this block's responsibility
 
-- **Прогон задачи** и возобновление как таковые — [B06](./B06-orchestrator-pipeline.md) (`run_task`/`resume`/`acquire_slot`/`refresh_repo`).
-- **fetch/pull базовой ветки** — реализация в [B22](./B22-git-manager.md) (через `B06.refresh_repo`).
-- **Загрузка конфигурации** — [B05](./B05-configuration.md)/[B04](./B04-install-registry-and-config-discovery.md).
+- **Task execution** and resumption as such — [B06](./B06-orchestrator-pipeline.md) (`run_task`/`resume`/`acquire_slot`/`refresh_repo`).
+- **fetch/pull of the base branch** — implemented in [B22](./B22-git-manager.md) (via `B06.refresh_repo`).
+- **Configuration loading** — [B05](./B05-configuration.md)/[B04](./B04-install-registry-and-config-discovery.md).
 
-## Точки входа
+## Entry Points
 
-- `cmd_watch`/`cmd_stop`/`cmd_restart` — диспетчер [B01](./B01-cli-and-operator-commands.md).
+- `cmd_watch`/`cmd_stop`/`cmd_restart` — dispatcher [B01](./B01-cli-and-operator-commands.md).
 - `watch_once(orchestrator, config, folder)` / `watch_loop(...)` ([cli.py:778,807](../../../src/wastech_orchestrator/cli.py#L778)).
 - `process_control`: `pid_file_path`, `write_pid_file`, `read_pid`, `is_running`, `stop_process`, `StopController` ([process_control.py:36-185](../../../src/wastech_orchestrator/process_control.py#L36)).
 
-## Входные данные и состояние
+## Input Data and State
 
-`OrchestratorConfig` (`poll_interval_seconds`, `auto_mode.enabled`); папка `tasks/pending`; флаги `--poll-seconds`/`--timeout`. Состояние процесса — PID-файл `<artifacts_root>/orchestrator.pid` и `threading.Event` остановки.
+`OrchestratorConfig` (`poll_interval_seconds`, `auto_mode.enabled`); the `tasks/pending` folder; `--poll-seconds`/`--timeout` flags. Process state — PID file `<artifacts_root>/orchestrator.pid` and a `threading.Event` for stopping.
 
-## Основной сценарий (`watch_loop`)
+## Main Scenario (`watch_loop`)
 
-1. На каждом тике: `orchestrator.refresh_repo()` (fetch/pull base через [B22](./B22-git-manager.md)), затем `watch_once`, затем сон `poll_interval` (или один проход при `poll<=0`).
-2. `watch_once`: `resume()` активной задачи; если `manual_action_required` — стоп; затем по pending: брать только при свободном слоте (`acquire_slot`); `run_task`; `manual_action_required` блокирует продолжение; без auto-mode — ровно одна задача.
+1. On each tick: `orchestrator.refresh_repo()` (fetch/pull base via [B22](./B22-git-manager.md)), then `watch_once`, then sleep for `poll_interval` (or a single pass when `poll<=0`).
+2. `watch_once`: `resume()` the active task; if `manual_action_required` — stop; then for pending tasks: take only when a slot is free (`acquire_slot`); `run_task`; `manual_action_required` blocks continuation; without auto-mode — exactly one task.
 
-Логика одного тика и условия остановки. `poll_interval > 0` — демон (PID-файл, грейсфул-стоп по `SIGTERM`); `poll_interval <= 0` — один проход. Результат `manual_action_required` прерывает обработку очереди в текущем тике, но не завершает демон — он продолжит со следующего тика.
+Logic of a single tick and stop conditions. `poll_interval > 0` — daemon (PID file, graceful stop on `SIGTERM`); `poll_interval <= 0` — single pass. A `manual_action_required` result interrupts queue processing in the current tick but does not terminate the daemon — it will continue from the next tick.
 
 ```mermaid
 flowchart TB
-    start(["watch"]) --> mode{"режим запуска"}
-    mode -->|демон| guard{"живой второй watcher?"}
-    guard -->|да| refuse["отказ старта (выход 1)"]
-    guard -->|нет| pid["PID-файл + StopController<br/>(SIGTERM ставит событие)"]
+    start(["watch"]) --> mode{"launch mode"}
+    mode -->|daemon| guard{"another watcher already running?"}
+    guard -->|yes| refuse["refuse to start (exit 1)"]
+    guard -->|no| pid["PID file + StopController<br/>(SIGTERM sets the event)"]
     pid --> refresh
-    mode -->|"один проход"| refresh["тик: refresh_repo — fetch/pull base (B22)"]
+    mode -->|"single pass"| refresh["tick: refresh_repo — fetch/pull base (B22)"]
 
-    refresh --> resume["resume() активной задачи (B06)"]
-    resume --> mq{"итог = manual_action_required?"}
-    mq -->|да| sgate
-    mq -->|нет| psel{"слот свободен и есть pending?"}
-    psel -->|да| run["acquire_slot + run_task (B06)"]
-    run --> rman{"итог = manual?"}
-    rman -->|да| sgate
-    rman -->|нет| au{"auto_mode включён?"}
-    au -->|да| psel
-    au -->|нет| sgate
-    psel -->|нет| sgate{"демон и нет SIGTERM?"}
-    sgate -->|да| sleep["сон poll_interval"]
+    refresh --> resume["resume() active task (B06)"]
+    resume --> mq{"result = manual_action_required?"}
+    mq -->|yes| sgate
+    mq -->|no| psel{"slot free and pending task exists?"}
+    psel -->|yes| run["acquire_slot + run_task (B06)"]
+    run --> rman{"result = manual?"}
+    rman -->|yes| sgate
+    rman -->|no| au{"auto_mode enabled?"}
+    au -->|yes| psel
+    au -->|no| sgate
+    psel -->|no| sgate{"daemon and no SIGTERM?"}
+    sgate -->|yes| sleep["sleep poll_interval"]
     sleep --> refresh
-    sgate -->|нет| cleanup["удалить PID-файл, выход"]
+    sgate -->|no| cleanup["remove PID file, exit"]
 ```
 
-## Альтернативные сценарии
+## Alternative Scenarios
 
-### Демон (poll > 0)
+### Daemon (poll > 0)
 
-Пишет PID-файл, ставит `StopController` (SIGTERM→event), отказывается стартовать при живом втором watcher; грейсфул-остановка между тиками ([cli.py:1186-1224](../../../src/wastech_orchestrator/cli.py#L1186)).
+Writes the PID file, sets up `StopController` (SIGTERM→event), refuses to start if another watcher is already running; graceful stop between ticks ([cli.py:1186-1224](../../../src/wastech_orchestrator/cli.py#L1186)).
 
-### Одиночный проход (poll <= 0)
+### Single pass (poll <= 0)
 
-Без PID-файла и обработчика сигнала — один `watch_loop`-тик ([cli.py:1204-1205](../../../src/wastech_orchestrator/cli.py#L1204)).
+No PID file and no signal handler — a single `watch_loop` tick ([cli.py:1204-1205](../../../src/wastech_orchestrator/cli.py#L1204)).
 
 ### stop / restart
 
-`cmd_stop`: `stop_process` (SIGTERM, затем SIGKILL по таймауту; идемпотентно; чистит PID-файл). `cmd_restart`: остановить предыдущего, затем `cmd_watch` ([cli.py:1227-1263](../../../src/wastech_orchestrator/cli.py#L1227)).
+`cmd_stop`: `stop_process` (SIGTERM, then SIGKILL on timeout; idempotent; cleans up the PID file). `cmd_restart`: stop the previous instance, then `cmd_watch` ([cli.py:1227-1263](../../../src/wastech_orchestrator/cli.py#L1227)).
 
-## Проверки и ограничения
+## Checks and Constraints
 
-- Единый слот соблюдается через `acquire_slot` ([B06](./B06-orchestrator-pipeline.md)); `manual_action_required` блокирует авто-продолжение ([cli.py:791-803](../../../src/wastech_orchestrator/cli.py#L791)).
-- Только один демон на artifact-root (проверка живого PID) ([cli.py:1188-1195](../../../src/wastech_orchestrator/cli.py#L1188)).
-- `SIGTERM` **ставит событие, а не бросает** — текущий тик/стадия завершаются, выход — на следующей проверке ([process_control.py:9-11,167-168](../../../src/wastech_orchestrator/process_control.py#L9)).
-- PID-файл: атомарная запись, толерантное чтение, проба `signal(0)`; stale-файл перезаписывается/чистится ([process_control.py:41-145](../../../src/wastech_orchestrator/process_control.py#L41)).
-- `require_gh` при `create_pull_request` — быстрый отказ до старта цикла ([cli.py:1176-1177](../../../src/wastech_orchestrator/cli.py#L1176)).
+- The single slot is enforced via `acquire_slot` ([B06](./B06-orchestrator-pipeline.md)); `manual_action_required` blocks automatic continuation ([cli.py:791-803](../../../src/wastech_orchestrator/cli.py#L791)).
+- Only one daemon per artifact-root (live PID check) ([cli.py:1188-1195](../../../src/wastech_orchestrator/cli.py#L1188)).
+- `SIGTERM` **sets the event, it does not raise** — the current tick/stage completes; exit happens on the next check ([process_control.py:9-11,167-168](../../../src/wastech_orchestrator/process_control.py#L9)).
+- PID file: atomic write, tolerant read, `signal(0)` probe; stale file is overwritten/cleaned up ([process_control.py:41-145](../../../src/wastech_orchestrator/process_control.py#L41)).
+- `require_gh` on `create_pull_request` — fast failure before the loop starts ([cli.py:1176-1177](../../../src/wastech_orchestrator/cli.py#L1176)).
 
-## Результат
+## Output
 
-Список `PipelineResult` по обработанным задачам (для итогового вывода/кода возврата [B01](./B01-cli-and-operator-commands.md)); побочно — обработанные задачи и состояние демона.
+A list of `PipelineResult` for processed tasks (for final output/exit code in [B01](./B01-cli-and-operator-commands.md)); side effects — processed tasks and daemon state.
 
-## Побочные эффекты
+## Side Effects
 
-- Запись/удаление PID-файла; отправка `SIGTERM`/`SIGKILL`; периодический git fetch/pull (через [B06](./B06-orchestrator-pipeline.md)→[B22](./B22-git-manager.md)); запуск задач (через [B06](./B06-orchestrator-pipeline.md)).
+- Writing/removing the PID file; sending `SIGTERM`/`SIGKILL`; periodic git fetch/pull (via [B06](./B06-orchestrator-pipeline.md)→[B22](./B22-git-manager.md)); launching tasks (via [B06](./B06-orchestrator-pipeline.md)).
 
-## Ошибки и граничные случаи
+## Errors and Edge Cases
 
-- Второй watcher на тот же root → отказ старта (выход 1).
-- `Ctrl-C` (`KeyboardInterrupt`) → чистый выход; PID-файл удаляется в `finally`.
-- `stop` без живого watcher → идемпотентное сообщение; stale PID — чистится.
+- A second watcher on the same root → refuse to start (exit 1).
+- `Ctrl-C` (`KeyboardInterrupt`) → clean exit; PID file is removed in `finally`.
+- `stop` with no live watcher → idempotent message; stale PID is cleaned up.
 
-## Связи
+## Relationships
 
-### Использует
+### Uses
 
-- [B06 — Конвейер](./B06-orchestrator-pipeline.md) — `resume`/`acquire_slot`/`run_task`/`refresh_repo`.
-- [B05 — Конфигурация](./B05-configuration.md) — `poll_interval_seconds`, `auto_mode`.
-- [B27 — Наблюдаемость](./B27-observability.md) — логирование.
+- [B06 — Pipeline](./B06-orchestrator-pipeline.md) — `resume`/`acquire_slot`/`run_task`/`refresh_repo`.
+- [B05 — Configuration](./B05-configuration.md) — `poll_interval_seconds`, `auto_mode`.
+- [B27 — Observability](./B27-observability.md) — logging.
 
-### Используется в
+### Used by
 
-- [B01 — CLI](./B01-cli-and-operator-commands.md) — диспетчер `watch`/`stop`/`restart`.
+- [B01 — CLI](./B01-cli-and-operator-commands.md) — `watch`/`stop`/`restart` dispatcher.
 
-## Место в общей системе
+## Role in the Overall System
 
-Превращает разовый `run` в непрерывный сервис: обнаруживает задачи, добавленные в `tasks/pending` (в т.ч. запушенные в git), и кормит их в [B06](./B06-orchestrator-pipeline.md) строго по одной, переживая управляемую остановку/перезапуск.
+Turns a one-shot `run` into a continuous service: discovers tasks added to `tasks/pending` (including those pushed via git) and feeds them into [B06](./B06-orchestrator-pipeline.md) strictly one at a time, surviving controlled stop/restart.
 
-## Подтверждение в коде
+## Code Confirmation
 
 - [cli.py:771-846](../../../src/wastech_orchestrator/cli.py#L771) — `select_pending`/`watch_once`/`watch_loop`.
 - [cli.py:1160-1263](../../../src/wastech_orchestrator/cli.py#L1160) — `cmd_watch`/`cmd_stop`/`cmd_restart`.
-- [process_control.py:36-185](../../../src/wastech_orchestrator/process_control.py#L36) — PID/сигналы/`StopController`.
-- Тесты: [tests/test_cli_watch.py](../../../tests/test_cli_watch.py), [tests/test_process_control.py](../../../tests/test_process_control.py).
+- [process_control.py:36-185](../../../src/wastech_orchestrator/process_control.py#L36) — PID/signals/`StopController`.
+- Tests: [tests/test_cli_watch.py](../../../tests/test_cli_watch.py), [tests/test_process_control.py](../../../tests/test_process_control.py).

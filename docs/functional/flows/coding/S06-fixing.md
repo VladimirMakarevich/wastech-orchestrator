@@ -1,86 +1,86 @@
-# S06 — Стадия fixing
+# S06 — fixing stage
 
-## Назначение
+## Purpose
 
-Цель ping-pong: после провала тестов или блокирующего ревью агент правит код и возвращает единицу к проверкам/ревью. Входится **только** при провале. Работает под лимитами B09; при их исчерпании (или если fixing выключен) — терминальный `manual_action_required` с отчётом о провале.
+The goal is a ping-pong loop: after a test failure or a blocking review, the agent edits the code and returns the unit to the checks/review gates. Entered **only** on failure. Operates under the limits in B09; when those are exhausted (or if fixing is disabled) — terminal `manual_action_required` with a failure report.
 
-## Ответственность
+## Responsibility
 
-- Решить вход в fixing: выключено (manual), застревание по лимитам (manual + отчёт) или запуск ([orchestrator.py:1468-1501](../../../../src/wastech_orchestrator/core/orchestrator.py#L1468)).
-- Прогнать редактирующую стадию с guardrail и вернуться к testing/review ([orchestrator.py:1265-1274](../../../../src/wastech_orchestrator/core/orchestrator.py#L1265)).
+- Decide whether to enter fixing: disabled (manual), stuck on limits (manual + report), or launch ([orchestrator.py:1468-1501](../../../../src/wastech_orchestrator/core/orchestrator.py#L1468)).
+- Run the editing stage with the guardrail and return to testing/review ([orchestrator.py:1265-1274](../../../../src/wastech_orchestrator/core/orchestrator.py#L1265)).
 
-## Границы шага
+## Step boundaries
 
-### Входит в ответственность шага
+### Within this step's responsibility
 
-- Решение «чинить / застрял / выключено»; запуск edit-стадии fixing; возврат к testing/review.
+- The decision "fix / stuck / disabled"; launching the edit stage of fixing; returning to testing/review.
 
-### Не входит в ответственность шага
+### Outside this step's responsibility
 
-- **Правила счётчиков и лимиты** — [B09](../../blocks/B09-fix-loop-control.md); **отчёт о провале** — [B08](../../blocks/B08-ledger-and-failure-reports.md).
-- **Классификация опасного диффа** — [B14](../../blocks/B14-dangerous-diff-guardrail.md); **запуск агента** — [B17](../../blocks/B17-agent-router-and-fallback.md)/[B18](../../blocks/B18-agent-providers.md).
+- **Counter rules and limits** — [B09](../../blocks/B09-fix-loop-control.md); **failure report** — [B08](../../blocks/B08-ledger-and-failure-reports.md).
+- **Dangerous diff classification** — [B14](../../blocks/B14-dangerous-diff-guardrail.md); **agent launch** — [B17](../../blocks/B17-agent-router-and-fallback.md)/[B18](../../blocks/B18-agent-providers.md).
 
-## Точки входа
+## Entry points
 
-- `_enter_fixing(p, loop)` ([orchestrator.py:1468](../../../../src/wastech_orchestrator/core/orchestrator.py#L1468)) — вызывается из testing/review при провале.
-- `_run_unit` ветка `FIXING` ([orchestrator.py:1265](../../../../src/wastech_orchestrator/core/orchestrator.py#L1265)) — сама правка (тот же guardrail, что в [S03](./S03-implementation.md)).
+- `_enter_fixing(p, loop)` ([orchestrator.py:1468](../../../../src/wastech_orchestrator/core/orchestrator.py#L1468)) — called from testing/review on failure.
+- `_run_unit` branch `FIXING` ([orchestrator.py:1265](../../../../src/wastech_orchestrator/core/orchestrator.py#L1265)) — the actual edit (same guardrail as in [S03](./S03-implementation.md)).
 
-## Входные данные и состояние
+## Input data and state
 
-`LoopCounters` ([B09](../../blocks/B09-fix-loop-control.md)); `FixLoop` (TEST/REVIEW); контекст провала (`fixing-context.json`: путь к логу проверок или к находкам ревью). Статус `fixing`.
+`LoopCounters` ([B09](../../blocks/B09-fix-loop-control.md)); `FixLoop` (TEST/REVIEW); failure context (`fixing-context.json`: path to the checks log or to the review findings). Status `fixing`.
 
-## Основной сценарий
+## Main scenario
 
-1. `_enter_fixing`: если fixing в skip → `record_skip` + отчёт ([B08](../../blocks/B08-ledger-and-failure-reports.md)) + `manual_action_required` («fixing disabled») — первый провал сразу терминален.
-2. Иначе `enter_fixing` ([B09](../../blocks/B09-fix-loop-control.md)) инкрементирует счётчики; если `stuck` → отчёт + `manual_action_required`.
-3. Иначе записать `fixing-context.json`, перейти в `FIXING`; правка через `_run_edit_stage_with_guardrail` ([B14](../../blocks/B14-dangerous-diff-guardrail.md)); `_after_edit_target` → назад к testing (или к review, если testing пропущен).
+1. `_enter_fixing`: if fixing is in skip → `record_skip` + report ([B08](../../blocks/B08-ledger-and-failure-reports.md)) + `manual_action_required` ("fixing disabled") — the first failure is immediately terminal.
+2. Otherwise `enter_fixing` ([B09](../../blocks/B09-fix-loop-control.md)) increments counters; if `stuck` → report + `manual_action_required`.
+3. Otherwise write `fixing-context.json`, transition to `FIXING`; edit via `_run_edit_stage_with_guardrail` ([B14](../../blocks/B14-dangerous-diff-guardrail.md)); `_after_edit_target` → back to testing (or to review if testing is skipped).
 
 ```mermaid
 flowchart TB
-    start(["провал testing/review → _enter_fixing(loop)"]) --> skip{"fixing выключен (skip)?"}
-    skip -->|да| man1["manual_action_required + отчёт (B08)"]
-    skip -->|нет| dec{"enter_fixing: застряли? (B09)"}
-    dec -->|"да, лимит исчерпан"| man2["manual_action_required + отчёт (B08)"]
-    dec -->|нет| fix["FIXING: правка + guardrail опасного диффа (B14)"]
-    fix --> back["_after_edit_target → назад к testing / review"]
+    start(["testing/review failure → _enter_fixing(loop)"]) --> skip{"fixing disabled (skip)?"}
+    skip -->|yes| man1["manual_action_required + report (B08)"]
+    skip -->|no| dec{"enter_fixing: stuck? (B09)"}
+    dec -->|"yes, limit exhausted"| man2["manual_action_required + report (B08)"]
+    dec -->|no| fix["FIXING: edit + dangerous diff guardrail (B14)"]
+    fix --> back["_after_edit_target → back to testing / review"]
 ```
 
-## Проверки и ограничения
+## Checks and constraints
 
-- fixing в `SKIPPABLE_STAGES`: пропуск = «max_fix_attempts: 0» (первый провал → manual + отчёт).
-- Два лимита B09: per-loop `max_fix_cycles` и глобальный `max_total_fix_iterations` (копится через все сабтаски).
-- Guardrail опасного диффа применяется и здесь — так же, как в [S03](./S03-implementation.md).
+- fixing in `SKIPPABLE_STAGES`: skip = "max_fix_attempts: 0" (first failure → manual + report).
+- Two limits in B09: per-loop `max_fix_cycles` and global `max_total_fix_iterations` (accumulated across all subtasks).
+- The dangerous diff guardrail applies here as well — same as in [S03](./S03-implementation.md).
 
-## Результат / переход
+## Result / transition
 
-Назад к [S04 testing](./S04-testing.md) (или к [S05 review](./S05-review.md), если testing пропущен). При застревании/выключении — терминальный `manual_action_required` + `failure_report.json`/`stuck.md` ([B08](../../blocks/B08-ledger-and-failure-reports.md)).
+Back to [S04 testing](./S04-testing.md) (or to [S05 review](./S05-review.md) if testing is skipped). On stuck/disabled — terminal `manual_action_required` + `failure_report.json`/`stuck.md` ([B08](../../blocks/B08-ledger-and-failure-reports.md)).
 
-## Побочные эффекты
+## Side effects
 
-- Запись `fixing-context.json`, `current.diff`; при застревании — отчёт о провале ([B08](../../blocks/B08-ledger-and-failure-reports.md)); правка рабочего дерева агентом.
+- Writing `fixing-context.json`, `current.diff`; on stuck — failure report ([B08](../../blocks/B08-ledger-and-failure-reports.md)); agent editing of the working tree.
 
-## Ошибки и граничные случаи
+## Errors and edge cases
 
-- Застревание по лимиту → `manual_action_required` + отчёт ([orchestrator.py:1489-1497](../../../../src/wastech_orchestrator/core/orchestrator.py#L1489)).
-- Сбой HITL guardrail / опасное осталось после отказа → `manual_action_required` (см. [S03](./S03-implementation.md), [B14](../../blocks/B14-dangerous-diff-guardrail.md)).
+- Stuck on limit → `manual_action_required` + report ([orchestrator.py:1489-1497](../../../../src/wastech_orchestrator/core/orchestrator.py#L1489)).
+- HITL guardrail failure / dangerous content remaining after rejection → `manual_action_required` (see [S03](./S03-implementation.md), [B14](../../blocks/B14-dangerous-diff-guardrail.md)).
 
-## Связи
+## Relations
 
-### Использует
+### Uses
 
-- [B09](../../blocks/B09-fix-loop-control.md), [B08](../../blocks/B08-ledger-and-failure-reports.md), [B14](../../blocks/B14-dangerous-diff-guardrail.md), [B17](../../blocks/B17-agent-router-and-fallback.md)/[B18](../../blocks/B18-agent-providers.md), [B22](../../blocks/B22-git-manager.md) (дифф).
+- [B09](../../blocks/B09-fix-loop-control.md), [B08](../../blocks/B08-ledger-and-failure-reports.md), [B14](../../blocks/B14-dangerous-diff-guardrail.md), [B17](../../blocks/B17-agent-router-and-fallback.md)/[B18](../../blocks/B18-agent-providers.md), [B22](../../blocks/B22-git-manager.md) (diff).
 
-### Используется в
+### Used by
 
-- [S04 testing](./S04-testing.md)/[S05 review](./S05-review.md) — возврат после правки; [B06](../../blocks/B06-orchestrator-pipeline.md) — драйвер.
+- [S04 testing](./S04-testing.md)/[S05 review](./S05-review.md) — return after editing; [B06](../../blocks/B06-orchestrator-pipeline.md) — driver.
 
-## Место в потоке
+## Position in the flow
 
-Закрывает петлю ping-pong: единственный путь из провала проверок/ревью обратно к воротам качества — или в ручной разбор при исчерпании лимита. См. [обзор потока](./index.md).
+Closes the ping-pong loop: the only path from a checks/review failure back to the quality gates — or into manual resolution when the limit is exhausted. See [flow overview](./index.md).
 
-## Подтверждение в коде
+## Code confirmation
 
-- [orchestrator.py:1468-1501](../../../../src/wastech_orchestrator/core/orchestrator.py#L1468) — `_enter_fixing` (skip / stuck / запуск).
-- [orchestrator.py:1265-1274](../../../../src/wastech_orchestrator/core/orchestrator.py#L1265) — ветка `FIXING` в `_run_unit`.
+- [orchestrator.py:1468-1501](../../../../src/wastech_orchestrator/core/orchestrator.py#L1468) — `_enter_fixing` (skip / stuck / launch).
+- [orchestrator.py:1265-1274](../../../../src/wastech_orchestrator/core/orchestrator.py#L1265) — `FIXING` branch in `_run_unit`.
 - [orchestrator.py:1503-1514](../../../../src/wastech_orchestrator/core/orchestrator.py#L1503) — `_write_fixing_context`.
-- Тесты: [tests/core/test_loop_control.py](../../../../tests/core/test_loop_control.py), [tests/core/test_orchestrator.py](../../../../tests/core/test_orchestrator.py).
+- Tests: [tests/core/test_loop_control.py](../../../../tests/core/test_loop_control.py), [tests/core/test_orchestrator.py](../../../../tests/core/test_orchestrator.py).

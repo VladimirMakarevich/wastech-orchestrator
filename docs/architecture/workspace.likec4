@@ -1,13 +1,13 @@
-// wastech-orchestrator — Architecture as Code (C4 через LikeC4).
+// wastech-orchestrator — Architecture as Code (C4 via LikeC4).
 //
-// Эта модель выведена из исполняемого кода — та же фактическая модель, что и в docs/functional/.
-// Она РУЧНАЯ (не генерится из Python и без привязок `файл:строка`): при изменении границ блоков,
-// связей, внешних систем или хранилищ обновляйте её тем же изменением (см. skill `sync-docs`).
-// Детали, ошибки и ссылки на код по каждому блоку — в docs/functional/blocks/.
+// This model is derived from executable code — it is the same factual model as in docs/functional/.
+// It is MANUAL (not generated from Python and has no `file:line` bindings): when block boundaries,
+// relationships, external systems, or stores change, update it in the same change (see skill `sync-docs`).
+// Details, errors, and code references for each block are in docs/functional/blocks/.
 //
-// Структура файла: specification (виды + теги + стили) → model (элементы + связи) → views.
-// Для крупной модели это можно разнести по файлам spec.likec4 / model.likec4 / views.likec4 —
-// LikeC4 объединяет все *.likec4 в каталоге.
+// File structure: specification (kinds + tags + styles) → model (elements + relationships) → views.
+// For a large model this can be split into spec.likec4 / model.likec4 / views.likec4 —
+// LikeC4 merges all *.likec4 files in the directory.
 
 specification {
 
@@ -43,7 +43,7 @@ specification {
     }
   }
 
-  // Семантические теги (видны в легенде; помогают фильтровать и осмыслять модель).
+  // Semantic tags (visible in the legend; useful for filtering and understanding the model).
   tag spine
   tag entrypoint
   tag crosscutting
@@ -53,85 +53,85 @@ specification {
 
 model {
 
-  operator = actor 'Оператор' 'Запускает команды CLI и отвечает на HITL-запросы'
-  human    = actor 'Человек в контуре' 'Согласует планы, опасные диффы, изменившийся набор проверок'
+  operator = actor 'Operator' 'Runs CLI commands and responds to HITL requests'
+  human    = actor 'Human in the loop' 'Approves plans, dangerous diffs, changed check sets'
 
-  // --- Внешние системы (дочерние процессы / сеть) ---
-  codex = externalSystem 'Codex CLI' 'Кодинг-агент (дочерний процесс)' {
+  // --- External systems (child processes / network) ---
+  codex = externalSystem 'Codex CLI' 'Coding agent (child process)' {
     #external
   }
-  claude = externalSystem 'Claude Code CLI' 'Кодинг-агент (дочерний процесс)' {
+  claude = externalSystem 'Claude Code CLI' 'Coding agent (child process)' {
     #external
   }
-  github = externalSystem 'Git / GitHub' 'Ветки, коммиты, Pull Request (git + gh)' {
+  github = externalSystem 'Git / GitHub' 'Branches, commits, Pull Requests (git + gh)' {
     #external
   }
-  telegram = externalSystem 'Telegram Bot API' 'Транспорт HITL и уведомлений' {
+  telegram = externalSystem 'Telegram Bot API' 'HITL and notification transport' {
     #external
   }
 
-  // --- Система в фокусе ---
-  orchestrator = system 'wastech-orchestrator' 'Оркестратор кодинг-агентов: одна задача за раз' {
+  // --- System in focus ---
+  orchestrator = system 'wastech-orchestrator' 'Coding-agent orchestrator: one task at a time' {
 
-    proc = container 'Orchestrator Process' 'Один процесс, детерминированный конвейер' {
+    proc = container 'Orchestrator Process' 'Single process, deterministic pipeline' {
       technology 'Python CLI'
 
-      cli = component 'B01 CLI' 'Разбор аргументов, диспетчер подкоманд, коды возврата' {
+      cli = component 'B01 CLI' 'Argument parsing, subcommand dispatcher, exit codes' {
         #entrypoint
-        link ../functional/blocks/B01-cli-and-operator-commands.md 'Блок B01'
+        link ../functional/blocks/B01-cli-and-operator-commands.md 'Block B01'
       }
-      watch = component 'B02 watch-демон' 'Периодическое обнаружение pending-задач, по одной' {
+      watch = component 'B02 watch daemon' 'Periodic discovery of pending tasks, one at a time' {
         #entrypoint
-        link ../functional/blocks/B02-watch-daemon-and-scheduling.md 'Блок B02'
+        link ../functional/blocks/B02-watch-daemon-and-scheduling.md 'Block B02'
       }
-      config = component 'B05 Конфигурация' 'Загрузка и валидация config.yaml (fail-closed)' {
-        link ../functional/blocks/B05-configuration.md 'Блок B05'
+      config = component 'B05 Configuration' 'Load and validate config.yaml (fail-closed)' {
+        link ../functional/blocks/B05-configuration.md 'Block B05'
       }
-      pipeline = component 'B06 Конвейер' 'Спайн: драйвит задачу через все стадии, владеет статусами' {
+      pipeline = component 'B06 Pipeline' 'Spine: drives a task through all stages, owns statuses' {
         #spine
-        link ../functional/blocks/B06-orchestrator-pipeline.md 'Блок B06'
+        link ../functional/blocks/B06-orchestrator-pipeline.md 'Block B06'
       }
-      state = component 'B07 State Store' 'Машина состояний + персист в SQLite' {
-        link ../functional/blocks/B07-state-machine-and-store.md 'Блок B07'
+      state = component 'B07 State Store' 'State machine + persistence in SQLite' {
+        link ../functional/blocks/B07-state-machine-and-store.md 'Block B07'
       }
-      gate = component 'B16 Шлюз задачи' 'Парсинг и валидация §19 до слота и ветки' {
-        link ../functional/blocks/B16-task-parsing-and-validation-gate.md 'Блок B16'
+      gate = component 'B16 Task Gate' 'Parsing and §19 validation before slot and branch' {
+        link ../functional/blocks/B16-task-parsing-and-validation-gate.md 'Block B16'
       }
-      router = component 'B17 Router' 'Выбор провайдера + fallback (только инфра-сбой)' {
-        link ../functional/blocks/B17-agent-router-and-fallback.md 'Блок B17'
+      router = component 'B17 Router' 'Provider selection + fallback (infrastructure failures only)' {
+        link ../functional/blocks/B17-agent-router-and-fallback.md 'Block B17'
       }
-      providers = component 'B18 Провайдеры' 'Адаптеры Codex/Claude: argv, парсинг, классификация' {
-        link ../functional/blocks/B18-agent-providers.md 'Блок B18'
+      providers = component 'B18 Providers' 'Codex/Claude adapters: argv, parsing, classification' {
+        link ../functional/blocks/B18-agent-providers.md 'Block B18'
       }
-      subprocess = component 'B19 Безопасный запуск' 'run_process: argv без shell, таймаут, env-аллой-лист' {
-        link ../functional/blocks/B19-subprocess-runner.md 'Блок B19'
+      subprocess = component 'B19 Subprocess Runner' 'run_process: argv without shell, timeout, env allowlist' {
+        link ../functional/blocks/B19-subprocess-runner.md 'Block B19'
       }
-      resolver = component 'B23 Резолвинг проверок' 'Какой профиль проверок запускать (кэш по fingerprint)' {
-        link ../functional/blocks/B23-check-discovery.md 'Блок B23'
+      resolver = component 'B23 Check Discovery' 'Which check profile to run (cache by fingerprint)' {
+        link ../functional/blocks/B23-check-discovery.md 'Block B23'
       }
-      checks = component 'B24 Проверки' 'Запуск профиля по порядку; launch-сбой ≠ качество' {
-        link ../functional/blocks/B24-check-execution.md 'Блок B24'
+      checks = component 'B24 Checks' 'Run profile in order; launch failure ≠ quality failure' {
+        link ../functional/blocks/B24-check-execution.md 'Block B24'
       }
-      gitmgr = component 'B22 Git Manager' 'Единственный делает commit/push/PR (идемпотентно)' {
-        link ../functional/blocks/B22-git-manager.md 'Блок B22'
+      gitmgr = component 'B22 Git Manager' 'The only component that does commit/push/PR (idempotent)' {
+        link ../functional/blocks/B22-git-manager.md 'Block B22'
       }
-      security = component 'B25 Security' 'Неослабляемая политика: env, forbidden, инъекции, изоляция' {
+      security = component 'B25 Security' 'Non-weakening policy: env, forbidden, injections, isolation' {
         #crosscutting
-        link ../functional/blocks/B25-security-policy.md 'Блок B25'
+        link ../functional/blocks/B25-security-policy.md 'Block B25'
       }
-      redaction = component 'B21 Redaction' 'Вычистка секретов из стоков/логов/артефактов' {
+      redaction = component 'B21 Redaction' 'Strip secrets from streams/logs/artifacts' {
         #crosscutting
-        link ../functional/blocks/B21-secret-redaction.md 'Блок B21'
+        link ../functional/blocks/B21-secret-redaction.md 'Block B21'
       }
-      notifier = component 'B26 Telegram' 'Контракт Notifier + транспорт Telegram' {
-        link ../functional/blocks/B26-notifications-telegram.md 'Блок B26'
+      notifier = component 'B26 Telegram' 'Notifier contract + Telegram transport' {
+        link ../functional/blocks/B26-notifications-telegram.md 'Block B26'
       }
-      observ = component 'B27 Observability' 'Логирование без секретов + heartbeat' {
+      observ = component 'B27 Observability' 'Secret-free logging + heartbeat' {
         #crosscutting
-        link ../functional/blocks/B27-observability.md 'Блок B27'
+        link ../functional/blocks/B27-observability.md 'Block B27'
       }
 
-      // Остальные блоки — компоненты того же proc; добавляются по тому же шаблону:
+      // Remaining blocks — components of the same proc; added by the same pattern:
       // B03/B04 Install+Registry, B08 Ledger, B09 Fix-loop, B10 Recovery, B11 Decomposition,
       // B12 HITL, B13 Skills, B14 Dangerous-diff, B15 Prompts, B20 Artifact-layout.
     }
@@ -140,9 +140,9 @@ model {
       #datastore
       technology 'SQLite'
     }
-    artifacts = store 'Artifact Store' 'request / result / stdout / логи / HITL / ledger' {
+    artifacts = store 'Artifact Store' 'request / result / stdout / logs / HITL / ledger' {
       #datastore
-      technology 'Файловая система'
+      technology 'Filesystem'
     }
     registry = store 'Binding Registry' 'repo → config.yaml' {
       #datastore
@@ -150,98 +150,98 @@ model {
     }
   }
 
-  // --- Связи (выверены по коду; backbone, без всех сквозных рёбер) ---
-  operator -> cli 'Подкоманды: run / watch / rerun / finalize / status'
-  telegram -> human 'Запрос / ответ'
+  // --- Relationships (verified against code; backbone, without all cross-cutting edges) ---
+  operator -> cli 'Subcommands: run / watch / rerun / finalize / status'
+  telegram -> human 'Request / response'
 
-  cli -> config 'Загрузка + валидация'
-  cli -> registry 'Поиск config.yaml'
-  cli -> watch 'Диспетчер watch / stop / restart'
+  cli -> config 'Load + validate'
+  cli -> registry 'Look up config.yaml'
+  cli -> watch 'Dispatch watch / stop / restart'
   cli -> pipeline 'run / rerun / finalize'
-  watch -> pipeline 'resume / run_task (единый слот)'
+  watch -> pipeline 'resume / run_task (single slot)'
 
-  pipeline -> gate 'Валидация §19 (до слота и ветки)'
-  gate -> security 'scan_frontmatter (инъекции)'
-  pipeline -> state 'Переходы статусов (транзакция)'
-  state -> db 'Читает / пишет'
-  pipeline -> resolver 'Префлайт профиля проверок'
-  pipeline -> router 'Агентские стадии'
+  pipeline -> gate '§19 validation (before slot and branch)'
+  gate -> security 'scan_frontmatter (injections)'
+  pipeline -> state 'Status transitions (transactional)'
+  state -> db 'Read / write'
+  pipeline -> resolver 'Check profile preflight'
+  pipeline -> router 'Agent stages'
   router -> providers 'AgentProvider.run'
   providers -> subprocess 'run_process'
-  providers -> codex 'Запуск (argv, без shell)'
-  providers -> claude 'Запуск (argv, без shell)'
-  providers -> security 'Профиль / env / forbidden'
-  providers -> redaction 'Редакция стоков'
-  pipeline -> checks 'Стадия testing'
+  providers -> codex 'Launch (argv, no shell)'
+  providers -> claude 'Launch (argv, no shell)'
+  providers -> security 'Profile / env / forbidden'
+  providers -> redaction 'Stream redaction'
+  pipeline -> checks 'testing stage'
   checks -> subprocess 'run_process'
-  pipeline -> gitmgr 'Ветка / commit / push / PR'
+  pipeline -> gitmgr 'Branch / commit / push / PR'
   gitmgr -> subprocess 'run_process'
   gitmgr -> github 'git / gh'
-  gitmgr -> db 'publish_operations (идемпотентность)'
-  pipeline -> notifier 'HITL / уведомления'
+  gitmgr -> db 'publish_operations (idempotency)'
+  pipeline -> notifier 'HITL / notifications'
   notifier -> telegram 'send / getUpdates'
 
-  providers -> artifacts 'request / result / логи'
-  checks -> artifacts 'Логи проверок'
-  gitmgr -> artifacts 'Диффы'
+  providers -> artifacts 'request / result / logs'
+  checks -> artifacts 'Check logs'
+  gitmgr -> artifacts 'Diffs'
   observ -> redaction 'RedactionFilter'
 }
 
 views {
 
   view landscape {
-    title 'Контекст системы (C4 L1)'
+    title 'System context (C4 L1)'
     include operator, human, orchestrator, codex, claude, github, telegram
     autoLayout LeftRight
   }
 
   view containers of orchestrator {
-    title 'Контейнеры оркестратора (C4 L2)'
+    title 'Orchestrator containers (C4 L2)'
     include *
     autoLayout LeftRight
   }
 
   view components of proc {
-    title 'Компоненты процесса = функциональные блоки (C4 L3)'
+    title 'Process components = functional blocks (C4 L3)'
     include *
     autoLayout TopBottom
   }
 
   view crosscutting {
-    title 'Сквозные: безопасность, редакция, наблюдаемость'
+    title 'Cross-cutting: security, redaction, observability'
     include security, redaction, observ, providers, gitmgr, checks, subprocess, gate, db, artifacts
     autoLayout
   }
 
   dynamic view happyPath {
-    title 'Happy-path: одна задача от run до PR'
-    operator -> cli 'run: файл задачи'
+    title 'Happy path: one task from run to PR'
+    operator -> cli 'run: task file'
     cli -> pipeline 'run_task'
-    pipeline -> gate 'валидация §19'
-    pipeline -> state 'захват слота, NEW→VALIDATED'
-    pipeline -> resolver 'префлайт профиля проверок'
-    pipeline -> gitmgr 'подготовка ветки'
+    pipeline -> gate '§19 validation'
+    pipeline -> state 'acquire slot, NEW→VALIDATED'
+    pipeline -> resolver 'check profile preflight'
+    pipeline -> gitmgr 'branch preparation'
     pipeline -> router 'implementation / planning'
     router -> providers 'AgentProvider.run'
-    providers -> codex 'argv (без shell)'
+    providers -> codex 'argv (no shell)'
     pipeline -> checks 'testing'
     pipeline -> router 'review'
     pipeline -> gitmgr 'commit / push / PR'
     gitmgr -> github 'gh pr create'
-    pipeline -> notifier 'уведомление об исходе'
+    pipeline -> notifier 'outcome notification'
   }
 
   dynamic view implementationFlow {
-    title 'Поток исполнения единицы: стадии S01-S08 с петлёй ping-pong'
-    pipeline -> router 'S01 refinement (опц.)'
-    pipeline -> router 'S02 planning (опц.) + декомпозиция'
+    title 'Unit execution flow: stages S01-S08 with ping-pong loop'
+    pipeline -> router 'S01 refinement (opt.)'
+    pipeline -> router 'S02 planning (opt.) + decomposition'
     pipeline -> router 'S03 implementation (+ guardrail B14)'
-    pipeline -> checks 'S04 testing (опц.)'
-    checks -> pipeline 'качественный провал'
-    pipeline -> router 'S06 fixing (лимиты B09)'
-    pipeline -> checks 'назад к testing — ping-pong'
-    pipeline -> router 'S05 review (опц.)'
-    router -> pipeline 'блокирующие находки → fixing'
+    pipeline -> checks 'S04 testing (opt.)'
+    checks -> pipeline 'quality failure'
+    pipeline -> router 'S06 fixing (limits B09)'
+    pipeline -> checks 'back to testing — ping-pong'
+    pipeline -> router 'S05 review (opt.)'
+    router -> pipeline 'blocking findings → fixing'
     pipeline -> gitmgr 'S07 summary → S08 commit / push / PR'
     gitmgr -> github 'gh pr create'
   }

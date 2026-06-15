@@ -1,91 +1,91 @@
-# B04 — Реестр привязок и обнаружение конфигурации
+# B04 — Install Registry and Config Discovery
 
-## Назначение
+## Purpose
 
-Персистентный per-user стор, связывающий корень репозитория с его сгенерированной `config.yaml`, и логика разрешения пути конфигурации. Позволяет командам (`preflight`/`watch`/`status`/…) найти конфигурацию из любого места внутри репозитория без `--config`.
+A persistent per-user store that associates a repository root with its generated `config.yaml`, and the logic for resolving the configuration path. Allows commands (`preflight`/`watch`/`status`/…) to find the configuration from anywhere inside the repository without `--config`.
 
-## Ответственность
+## Responsibilities
 
-- Хранить и читать привязки `repo-root → config.yaml` в JSON-файле в пользовательском config-каталоге ([registry.py:88-104](../../../src/wastech_orchestrator/install/registry.py#L88)).
-- Разрешать путь конфигурации по приоритету (`--config` → `./config.yaml` → привязка реестра) ([cli.py:549-565](../../../src/wastech_orchestrator/cli.py#L549)).
+- Store and read `repo-root → config.yaml` bindings in a JSON file in the user config directory ([registry.py:88-104](../../../src/wastech_orchestrator/install/registry.py#L88)).
+- Resolve the configuration path by priority (`--config` → `./config.yaml` → registry binding) ([cli.py:549-565](../../../src/wastech_orchestrator/cli.py#L549)).
 
-## Границы блока
+## Block Boundaries
 
-### Входит в ответственность блока
+### In scope
 
-- Персистентный стор привязок (bind/lookup/unbind) и разрешение пути конфигурации.
+- Persistent binding store (bind/lookup/unbind) and configuration path resolution.
 
-### Не входит в ответственность блока
+### Out of scope
 
-- **Генерация/валидация конфигурации** — [B03](./B03-installer-and-scaffolding.md)/[B05](./B05-configuration.md).
-- **`git_info`** (определение корня репозитория) — [B03 detect](./B03-installer-and-scaffolding.md); `resolve_config_path` лишь использует его.
-- **Загрузка конфигурации** — [B05](./B05-configuration.md).
+- **Configuration generation/validation** — [B03](./B03-installer-and-scaffolding.md)/[B05](./B05-configuration.md).
+- **`git_info`** (repository root detection) — [B03 detect](./B03-installer-and-scaffolding.md); `resolve_config_path` only consumes it.
+- **Configuration loading** — [B05](./B05-configuration.md).
 
-## Точки входа
+## Entry Points
 
 - `registry.bind(repo_root, config_path)` / `lookup(repo_root)` / `unbind(repo_root)` ([registry.py:88-104](../../../src/wastech_orchestrator/install/registry.py#L88)); `registry_dir`/`registry_path`.
-- `cli.resolve_config_path(args)` ([cli.py:549](../../../src/wastech_orchestrator/cli.py#L549)) — используется всеми командами, загружающими конфигурацию.
-- Вызовы: `bind` — [B03 cmd_install](./B03-installer-and-scaffolding.md) ([cli.py:1478](../../../src/wastech_orchestrator/cli.py#L1478)); `lookup` — внутри `resolve_config_path`.
+- `cli.resolve_config_path(args)` ([cli.py:549](../../../src/wastech_orchestrator/cli.py#L549)) — used by all commands that load the configuration.
+- Callers: `bind` — [B03 cmd_install](./B03-installer-and-scaffolding.md) ([cli.py:1478](../../../src/wastech_orchestrator/cli.py#L1478)); `lookup` — inside `resolve_config_path`.
 
-## Входные данные и состояние
+## Inputs and State
 
-Корень репозитория и путь конфигурации (оба нормализуются к абсолютным). Состояние — `registry.json` (`{version, bindings}`) в `$WASTECH_ORCHESTRATOR_HOME` или per-user config-каталоге (`platformdirs`).
+Repository root and configuration path (both normalized to absolute paths). State is `registry.json` (`{version, bindings}`) in `$WASTECH_ORCHESTRATOR_HOME` or the per-user config directory (`platformdirs`).
 
-## Основной сценарий
+## Main Scenario
 
-- `bind`: прочитать карту, добавить/заменить `repo_root → config_path` (абсолютные), записать атомарно.
-- `lookup`: прочитать карту, вернуть путь или `None`.
-- `resolve_config_path`: вернуть `--config`, иначе `./config.yaml` (если есть), иначе `registry.lookup(git_info.root)`, иначе `None`.
+- `bind`: read the map, add/replace `repo_root → config_path` (absolute paths), write atomically.
+- `lookup`: read the map, return the path or `None`.
+- `resolve_config_path`: return `--config` if set, otherwise `./config.yaml` (if it exists), otherwise `registry.lookup(git_info.root)`, otherwise `None`.
 
-Приоритет источников при разрешении пути конфигурации:
+Configuration path resolution source priority:
 
 ```mermaid
 flowchart TB
-    start(["resolve_config_path(args)"]) --> c1{"задан --config?"}
-    c1 -->|да| r1["вернуть --config"]
-    c1 -->|нет| c2{"есть ./config.yaml?"}
-    c2 -->|да| r2["вернуть ./config.yaml"]
-    c2 -->|нет| c3{"найден корень репозитория<br/>и есть привязка в реестре?"}
-    c3 -->|да| r3["вернуть registry.lookup(root)"]
-    c3 -->|нет| r4["None → вызывающий печатает подсказку про install / --config"]
+    start(["resolve_config_path(args)"]) --> c1{"--config provided?"}
+    c1 -->|yes| r1["return --config"]
+    c1 -->|no| c2{"./config.yaml exists?"}
+    c2 -->|yes| r2["return ./config.yaml"]
+    c2 -->|no| c3{"repository root found<br/>and binding exists in registry?"}
+    c3 -->|yes| r3["return registry.lookup(root)"]
+    c3 -->|no| r4["None → caller prints hint about install / --config"]
 ```
 
-## Проверки и ограничения
+## Checks and Constraints
 
-- Ключи нормализуются к абсолютным путям (resolve символлинков/регистра) ([registry.py:44-46](../../../src/wastech_orchestrator/install/registry.py#L44)).
-- Запись атомарна (temp + `os.replace`); чтение **forward-tolerant**: игнорирует `version`, missing/corrupt → `{}` (обнаружение конфигурации не должно падать на реестре от более новой версии) ([registry.py:49-85](../../../src/wastech_orchestrator/install/registry.py#L49)).
-- Секреты не хранятся — только пути.
+- Keys are normalized to absolute paths (resolves symlinks/case) ([registry.py:44-46](../../../src/wastech_orchestrator/install/registry.py#L44)).
+- Writes are atomic (temp + `os.replace`); reads are **forward-tolerant**: ignores `version`, missing/corrupt → `{}` (config discovery must not fail on a registry from a newer version) ([registry.py:49-85](../../../src/wastech_orchestrator/install/registry.py#L49)).
+- No secrets are stored — only paths.
 
-## Результат
+## Output
 
-Путь к `config.yaml` (или `None`); обновлённый `registry.json`.
+Path to `config.yaml` (or `None`); updated `registry.json`.
 
-## Побочные эффекты
+## Side Effects
 
-- Чтение/запись `registry.json` в пользовательском config-каталоге. Никаких секретов.
+- Read/write `registry.json` in the user config directory. No secrets.
 
-## Ошибки и граничные случаи
+## Errors and Edge Cases
 
-- Отсутствующий/битый реестр → пустая карта (без ошибки).
-- `resolve_config_path` вне git-репозитория без `./config.yaml`/`--config` → `None` (вызывающий печатает подсказку).
+- Missing/corrupt registry → empty map (no error).
+- `resolve_config_path` outside a git repository with no `./config.yaml`/`--config` → `None` (caller prints hint).
 
-## Связи
+## Relations
 
-### Использует
+### Uses
 
-- `platformdirs`; [B03 detect.git_info](./B03-installer-and-scaffolding.md) (в `resolve_config_path`).
+- `platformdirs`; [B03 detect.git_info](./B03-installer-and-scaffolding.md) (in `resolve_config_path`).
 
-### Используется в
+### Used by
 
-- [B01 — CLI](./B01-cli-and-operator-commands.md) — `resolve_config_path` во всех командах, загружающих конфигурацию.
-- [B03 — Установщик](./B03-installer-and-scaffolding.md) — `bind` при `install`.
+- [B01 — CLI](./B01-cli-and-operator-commands.md) — `resolve_config_path` in all commands that load the configuration.
+- [B03 — Installer](./B03-installer-and-scaffolding.md) — `bind` during `install`.
 
-## Место в общей системе
+## Role in the Overall System
 
-Связующее звено между установкой и последующими командами: `install` записывает привязку, а любая команда затем находит конфигурацию из любой поддиректории репозитория. Толерантность чтения держит обнаружение конфигурации устойчивым между версиями.
+The link between installation and subsequent commands: `install` writes the binding, and any command can then find the configuration from any subdirectory of the repository. Read tolerance keeps config discovery stable across versions.
 
-## Подтверждение в коде
+## Code Confirmation
 
-- [install/registry.py:31-104](../../../src/wastech_orchestrator/install/registry.py#L31) — пути, чтение/запись, bind/lookup/unbind.
-- [cli.py:549-565](../../../src/wastech_orchestrator/cli.py#L549) — `resolve_config_path` (приоритет источников).
-- Тесты: [tests/install/test_registry.py](../../../tests/install/test_registry.py), [tests/test_cli_config_discovery.py](../../../tests/test_cli_config_discovery.py) — roundtrip bind/lookup, нормализация, версионированный JSON, толерантность к битому файлу, приоритет разрешения.
+- [install/registry.py:31-104](../../../src/wastech_orchestrator/install/registry.py#L31) — paths, read/write, bind/lookup/unbind.
+- [cli.py:549-565](../../../src/wastech_orchestrator/cli.py#L549) — `resolve_config_path` (source priority).
+- Tests: [tests/install/test_registry.py](../../../tests/install/test_registry.py), [tests/test_cli_config_discovery.py](../../../tests/test_cli_config_discovery.py) — roundtrip bind/lookup, normalization, versioned JSON, tolerance for corrupt file, resolution priority.

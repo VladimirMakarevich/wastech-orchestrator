@@ -1,93 +1,93 @@
-# B14 — Классификация «опасного» диффа
+# B14 — Dangerous Diff Classification
 
-## Назначение
+## Purpose
 
-Чистый классификатор изменений рабочего дерева, который определяет, требует ли результат редактирующей стадии согласования человеком. Выделяет два класса риска: удаление файлов и изменение манифестов/локов зависимостей. Это «детектор» для guardrail-а редактирующих стадий — сам guardrail-поток (запрос согласования) реализован в [B06](./B06-orchestrator-pipeline.md).
+A pure classifier for working-tree changes that determines whether the result of an editing stage requires human approval. It identifies two risk classes: file deletions and changes to dependency manifests/lock files. This is the "detector" for the editing-stage guardrail — the guardrail flow itself (approval request) is implemented in [B06](./B06-orchestrator-pipeline.md).
 
-## Ответственность
+## Responsibility
 
-- По списку изменений `ChangedPath` определить удаления и затронутые файлы зависимостей ([dangerous_diff.py:82-109](../../../src/wastech_orchestrator/core/dangerous_diff.py#L82)).
-- Классифицировать риск (`deletion`/`dependency`/`other`) и вернуть точные нормализованные пути.
+- Given a list of `ChangedPath` entries, identify deletions and affected dependency files ([dangerous_diff.py:82-109](../../../src/wastech_orchestrator/core/dangerous_diff.py#L82)).
+- Classify the risk (`deletion`/`dependency`/`other`) and return exact normalized paths.
 
-## Границы блока
+## Block Boundaries
 
-### Входит в ответственность блока
+### Within this block's responsibility
 
-- Чистая классификация диффа в `DangerousDiff` (или `None` для обычного диффа).
+- Pure diff classification into `DangerousDiff` (or `None` for an ordinary diff).
 
-### Не входит в ответственность блока
+### Outside this block's responsibility
 
-- **Получение диффа** — это [B22 `changed_code_entries`](./B22-git-manager.md).
-- **Поток согласования** (HITL-запрос, повторный прогон при отказе, проверка покрытия planning-аппрувом) — это [B06 `_run_edit_stage_with_guardrail`](./B06-orchestrator-pipeline.md) совместно с [B12](./B12-hitl-and-typed-output.md).
+- **Obtaining the diff** — that is [B22 `changed_code_entries`](./B22-git-manager.md).
+- **The approval flow** (HITL request, re-run on rejection, checking planning-approval coverage) — that is [B06 `_run_edit_stage_with_guardrail`](./B06-orchestrator-pipeline.md) together with [B12](./B12-hitl-and-typed-output.md).
 
-## Точки входа
+## Entry Points
 
-- `classify_dangerous_diff(entries)` → `DangerousDiff | None` ([dangerous_diff.py:82](../../../src/wastech_orchestrator/core/dangerous_diff.py#L82)) — вызывается в [B06](./B06-orchestrator-pipeline.md) после редактирующих стадий ([orchestrator.py:1902,1965](../../../src/wastech_orchestrator/core/orchestrator.py#L1902)).
+- `classify_dangerous_diff(entries)` → `DangerousDiff | None` ([dangerous_diff.py:82](../../../src/wastech_orchestrator/core/dangerous_diff.py#L82)) — called in [B06](./B06-orchestrator-pipeline.md) after editing stages ([orchestrator.py:1902,1965](../../../src/wastech_orchestrator/core/orchestrator.py#L1902)).
 - `DangerousDiff` (risk, paths, deleted_paths, dependency_paths).
 
-## Входные данные и состояние
+## Input Data and State
 
-Кортеж `ChangedPath` (status, path, previous_path) из [B22](./B22-git-manager.md). Состояния нет.
+A tuple of `ChangedPath` (status, path, previous_path) from [B22](./B22-git-manager.md). No state is maintained.
 
-## Основной сценарий
+## Main Scenario
 
-1. Для каждой записи: статус `D` (или `R` с `previous_path`) → путь в «удалённые»; базовое имя, совпавшее по `fnmatch` со списком манифестов/локов → в «зависимости».
-2. Нет ни удалений, ни зависимостей → `None` (обычный дифф).
-3. Иначе риск: оба → `other`; только удаления → `deletion`; только зависимости → `dependency`.
-4. Возврат `DangerousDiff` с отсортированным объединением путей.
+1. For each entry: status `D` (or `R` with `previous_path`) → path goes into "deleted"; basename matching a manifest/lock via `fnmatch` → into "dependencies".
+2. No deletions and no dependencies → `None` (ordinary diff).
+3. Otherwise a risk is assigned: both → `other`; deletions only → `deletion`; dependencies only → `dependency`.
+4. Return `DangerousDiff` with a sorted union of paths.
 
-Классификация по найденным изменениям (обычный дифф → guardrail не нужен):
+Classification by discovered changes (ordinary diff → guardrail not needed):
 
 ```mermaid
 flowchart TB
-    start(["classify_dangerous_diff(entries)"]) --> scan["разметить пути:<br/>D или R+previous_path → удаления;<br/>базовое имя ~ манифест/лок (fnmatch) → зависимости"]
-    scan --> q{"что найдено?"}
-    q -->|"ничего"| none["None — обычный дифф"]
-    q -->|"только удаления"| del["DangerousDiff: deletion"]
-    q -->|"только зависимости"| dep["DangerousDiff: dependency"]
-    q -->|"и то, и другое"| other["DangerousDiff: other"]
-    del --> b06["B06: согласование человеком,<br/>если не покрыто аппрувом planning"]
+    start(["classify_dangerous_diff(entries)"]) --> scan["annotate paths:<br/>D or R+previous_path → deletions;<br/>basename ~ manifest/lock (fnmatch) → dependencies"]
+    scan --> q{"what was found?"}
+    q -->|"nothing"| none["None — ordinary diff"]
+    q -->|"deletions only"| del["DangerousDiff: deletion"]
+    q -->|"dependencies only"| dep["DangerousDiff: dependency"]
+    q -->|"both"| other["DangerousDiff: other"]
+    del --> b06["B06: human approval,<br/>if not covered by planning approval"]
     dep --> b06
     other --> b06
 ```
 
-## Проверки и ограничения
+## Checks and Constraints
 
-- Список паттернов зависимостей охватывает множество экосистем (pyproject/locks, package.json, Cargo, go.mod, Gemfile, \*.csproj, gradle, …) ([dangerous_diff.py:10-69](../../../src/wastech_orchestrator/core/dangerous_diff.py#L10)).
-- Сопоставление по **базовому имени** файла через `fnmatch` ([dangerous_diff.py:112-114](../../../src/wastech_orchestrator/core/dangerous_diff.py#L112)).
+- The dependency pattern list covers many ecosystems (pyproject/locks, package.json, Cargo, go.mod, Gemfile, \*.csproj, gradle, …) ([dangerous_diff.py:10-69](../../../src/wastech_orchestrator/core/dangerous_diff.py#L10)).
+- Matching is done on the **basename** of the file via `fnmatch` ([dangerous_diff.py:112-114](../../../src/wastech_orchestrator/core/dangerous_diff.py#L112)).
 
-## Результат
+## Output
 
-`DangerousDiff` (или `None`). Пути нормализованы и отсортированы — [B06](./B06-orchestrator-pipeline.md) сравнивает их с ранее одобренным набором, чтобы не запрашивать согласование повторно для того же набора.
+`DangerousDiff` (or `None`). Paths are normalized and sorted — [B06](./B06-orchestrator-pipeline.md) compares them against the previously approved set to avoid requesting approval again for the same set.
 
-## Побочные эффекты
+## Side Effects
 
-Нет — чистая функция.
+None — pure function.
 
-## Ошибки и граничные случаи
+## Errors and Edge Cases
 
-- Переименование (`R…`) учитывает `previous_path` как удаление исходного пути ([dangerous_diff.py:90-91](../../../src/wastech_orchestrator/core/dangerous_diff.py#L90)).
+- A rename (`R…`) treats `previous_path` as a deletion of the original path ([dangerous_diff.py:90-91](../../../src/wastech_orchestrator/core/dangerous_diff.py#L90)).
 
-## Связи
+## Relations
 
-### Использует
+### Uses
 
-- [B22 — Git Manager](./B22-git-manager.md) — тип `ChangedPath` (вход — из `changed_code_entries`).
+- [B22 — Git Manager](./B22-git-manager.md) — the `ChangedPath` type (input from `changed_code_entries`).
 
-### Используется в
+### Used By
 
-- [B06 — Конвейер](./B06-orchestrator-pipeline.md) — guardrail редактирующих стадий (implementation/fixing).
-- [B12 — HITL](./B12-hitl-and-typed-output.md) — риск/пути попадают в сигнал согласования.
+- [B06 — Pipeline](./B06-orchestrator-pipeline.md) — guardrail for editing stages (implementation/fixing).
+- [B12 — HITL](./B12-hitl-and-typed-output.md) — risk/paths are included in the approval signal.
 
-## Место в общей системе
+## Position in the Overall System
 
-Часть guardrail-а: после редактирующей стадии [B06](./B06-orchestrator-pipeline.md) классифицирует дифф этим блоком и, если он опасен и не покрыт согласованием на planning, запрашивает у человека одобрение через [B12](./B12-hitl-and-typed-output.md)/[B26](./B26-notifications-telegram.md); отказ даёт одну «безопасную» переработку.
+Part of the guardrail: after an editing stage, [B06](./B06-orchestrator-pipeline.md) classifies the diff using this block and, if it is dangerous and not covered by planning approval, requests human approval via [B12](./B12-hitl-and-typed-output.md)/[B26](./B26-notifications-telegram.md); a rejection allows one "safe" rework.
 
-## Подтверждение в коде
+## Code Confirmation
 
-- [core/dangerous_diff.py:82-114](../../../src/wastech_orchestrator/core/dangerous_diff.py#L82) — классификация и список паттернов.
-- Проверяется через guardrail-тесты конвейера ([tests/core/test_orchestrator.py](../../../tests/core/test_orchestrator.py)) и HITL-тесты ([tests/core/test_hitl.py](../../../tests/core/test_hitl.py)).
+- [core/dangerous_diff.py:82-114](../../../src/wastech_orchestrator/core/dangerous_diff.py#L82) — classification and pattern list.
+- Verified via pipeline guardrail tests ([tests/core/test_orchestrator.py](../../../tests/core/test_orchestrator.py)) and HITL tests ([tests/core/test_hitl.py](../../../tests/core/test_hitl.py)).
 
-## Неопределённости
+## Uncertainties
 
-- Отдельного модульного теста `dangerous_diff` в наборе не обнаружено; поведение подтверждается косвенно через guardrail-сценарии конвейера. Прямой unit-тест классификатора не найден.
+- No dedicated unit test for `dangerous_diff` was found in the suite; behavior is confirmed indirectly through pipeline guardrail scenarios. A direct unit test for the classifier has not been found.

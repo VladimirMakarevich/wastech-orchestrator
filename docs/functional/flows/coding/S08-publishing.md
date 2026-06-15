@@ -1,90 +1,90 @@
-# S08 — Стадия publishing
+# S08 — publishing stage
 
-## Назначение
+## Purpose
 
-Выход системы в Git/GitHub: закоммитить, запушить и открыть Pull Request (опционально — авто-merge). Это **не агентская** стадия — всё делает Git Manager; агенты commit/push/PR не делают **никогда**. publishing не пропускается.
+The system's exit point to Git/GitHub: commit, push, and open a Pull Request (optionally with auto-merge). This is **not an agent** stage — everything is done by the Git Manager; agents never perform commit/push/PR operations. publishing is never skipped.
 
-## Ответственность
+## Responsibility
 
-- Финализировать артефакты задачи, провести цепочку `commit → push → PR` (опц. merge) идемпотентно и завершить задачу ([orchestrator.py:1348-1386](../../../../src/wastech_orchestrator/core/orchestrator.py#L1348)).
+- Finalize task artifacts, execute the `commit → push → PR` chain (optionally merge) idempotently, and terminate the task ([orchestrator.py:1348-1386](../../../../src/wastech_orchestrator/core/orchestrator.py#L1348)).
 
-## Границы шага
+## Step boundaries
 
-### Входит в ответственность шага
+### Within this step's responsibility
 
-- Порядок и переходы публикации (`committing → pushing → creating_pr → done`); решение об авто-merge; терминальное завершение.
+- Publishing order and transitions (`committing → pushing → creating_pr → done`); auto-merge decision; terminal completion.
 
-### Не входит в ответственность шага
+### Outside this step's responsibility
 
-- **Сами git/gh-операции, идемпотентность, scoped-стейджинг** — [B22](../../blocks/B22-git-manager.md).
-- **Строки идемпотентности `publish_operations`** — [B07](../../blocks/B07-state-machine-and-store.md); **запись в ledger** — [B08](../../blocks/B08-ledger-and-failure-reports.md).
+- **The git/gh operations themselves, idempotency, scoped staging** — [B22](../../blocks/B22-git-manager.md).
+- **Idempotency strings `publish_operations`** — [B07](../../blocks/B07-state-machine-and-store.md); **ledger writes** — [B08](../../blocks/B08-ledger-and-failure-reports.md).
 
-## Точки входа
+## Entry points
 
-- `_publish(p)` ([orchestrator.py:1348](../../../../src/wastech_orchestrator/core/orchestrator.py#L1348)) — вызывается из `_run_units_and_finish` после summary.
-- `_auto_merge(p, pr_url)` ([orchestrator.py:1388](../../../../src/wastech_orchestrator/core/orchestrator.py#L1388)) — при включённом авто-merge.
+- `_publish(p)` ([orchestrator.py:1348](../../../../src/wastech_orchestrator/core/orchestrator.py#L1348)) — called from `_run_units_and_finish` after summary.
+- `_auto_merge(p, pr_url)` ([orchestrator.py:1388](../../../../src/wastech_orchestrator/core/orchestrator.py#L1388)) — when auto-merge is enabled.
 
-## Входные данные и состояние
+## Input data and state
 
-Ветка `agent/<id>-<slug>`, `summary.md` (тело PR), флаги `git.auto_merge*`. Статус `ready_to_publish` → `committing` → `pushing` → `creating_pr` → `done`. Идемпотентность — через `publish_operations` ([B07](../../blocks/B07-state-machine-and-store.md)).
+Branch `agent/<id>-<slug>`, `summary.md` (PR body), flags `git.auto_merge*`. Status `ready_to_publish` → `committing` → `pushing` → `creating_pr` → `done`. Idempotency is managed via `publish_operations` ([B07](../../blocks/B07-state-machine-and-store.md)).
 
-## Основной сценарий
+## Main scenario
 
-1. Финализировать артефакты (перенос task-файла + `summary.md`) **до** коммита.
-2. `COMMITTING`: `commit_code` (scoped-стейджинг кода) + `commit_audit` (`tasks/`) ([B22](../../blocks/B22-git-manager.md)).
-3. `PUSHING`: `push` ветки в `origin` (отказ пушить в base) ([B22](../../blocks/B22-git-manager.md)).
-4. `CREATING_PR`: `create_pr` (тело из `summary.md`) ([B22](../../blocks/B22-git-manager.md)).
-5. (опц.) при `auto_merge` — `_auto_merge` → `merge_pr`; иначе → `_go_terminal(DONE)` (PR открыт).
+1. Finalize artifacts (move task file + `summary.md`) **before** committing.
+2. `COMMITTING`: `commit_code` (scoped staging of code) + `commit_audit` (`tasks/`) ([B22](../../blocks/B22-git-manager.md)).
+3. `PUSHING`: `push` branch to `origin` (refuses to push to base) ([B22](../../blocks/B22-git-manager.md)).
+4. `CREATING_PR`: `create_pr` (body from `summary.md`) ([B22](../../blocks/B22-git-manager.md)).
+5. (optional) if `auto_merge` — `_auto_merge` → `merge_pr`; otherwise → `_go_terminal(DONE)` (PR opened).
 
 ```mermaid
 flowchart TB
-    start(["вход: ready_to_publish"]) --> fin["финализация: перенос task-файла + summary.md"]
+    start(["entry: ready_to_publish"]) --> fin["finalize: move task file + summary.md"]
     fin --> commit["COMMITTING: commit_code + commit_audit (B22)"]
-    commit --> push["PUSHING: push agent/ветки (B22)"]
-    push --> pr["CREATING_PR: gh pr create, тело из summary.md (B22)"]
-    pr --> am{"auto_merge включён?"}
-    am -->|да| merge["merge_pr (B22): без --admin/force; заблокирован → manual"]
-    am -->|нет| done["DONE (PR открыт)"]
+    commit --> push["PUSHING: push agent/branch (B22)"]
+    push --> pr["CREATING_PR: gh pr create, body from summary.md (B22)"]
+    pr --> am{"auto_merge enabled?"}
+    am -->|yes| merge["merge_pr (B22): no --admin/force; blocked → manual"]
+    am -->|no| done["DONE (PR opened)"]
     merge --> done
 ```
 
-## Проверки и ограничения
+## Checks and constraints
 
-- publishing не в `SKIPPABLE_STAGES` ([schema.py:50-63](../../../../src/wastech_orchestrator/config/schema.py#L50)) — это выход системы.
-- Только оркестратор делает commit/push/PR; всё через argv без shell ([B22](../../blocks/B22-git-manager.md)).
-- Каждый шаг идемпотентен (повтор после рестарта не дублирует операцию, [B22](../../blocks/B22-git-manager.md)/[B07](../../blocks/B07-state-machine-and-store.md)).
-- `review` пропущен **и** `auto_merge` — предупреждение «merge без ревью»; заблокированный merge → `manual_action_required` (PR остаётся открытым; никогда `--admin`/force) ([orchestrator.py:1371-1419](../../../../src/wastech_orchestrator/core/orchestrator.py#L1371)).
+- publishing is not in `SKIPPABLE_STAGES` ([schema.py:50-63](../../../../src/wastech_orchestrator/config/schema.py#L50)) — it is the system's exit point.
+- Only the orchestrator performs commit/push/PR; everything goes through argv without shell ([B22](../../blocks/B22-git-manager.md)).
+- Each step is idempotent (a retry after restart does not duplicate the operation, [B22](../../blocks/B22-git-manager.md)/[B07](../../blocks/B07-state-machine-and-store.md)).
+- `review` skipped **and** `auto_merge` enabled — warning "merge without review"; blocked merge → `manual_action_required` (PR stays open; never `--admin`/force) ([orchestrator.py:1371-1419](../../../../src/wastech_orchestrator/core/orchestrator.py#L1371)).
 
-## Результат / переход
+## Result / transition
 
-Терминальный `done` (через `_go_terminal`) с URL PR; при заблокированном авто-merge — `manual_action_required`. Затем терминальная очистка и запись в [B08](../../blocks/B08-ledger-and-failure-reports.md) (в [B06](../../blocks/B06-orchestrator-pipeline.md)).
+Terminal `done` (via `_go_terminal`) with PR URL; if auto-merge is blocked — `manual_action_required`. Then terminal cleanup and write to [B08](../../blocks/B08-ledger-and-failure-reports.md) (in [B06](../../blocks/B06-orchestrator-pipeline.md)).
 
-## Побочные эффекты
+## Side effects
 
-- Git-мутации (коммиты/ветка), сеть (`push`/PR/merge через `gh`); строки `publish_operations` ([B07](../../blocks/B07-state-machine-and-store.md)); heartbeat ([B27](../../blocks/B27-observability.md)).
+- Git mutations (commits/branch), network (`push`/PR/merge via `gh`); `publish_operations` strings ([B07](../../blocks/B07-state-machine-and-store.md)); heartbeat ([B27](../../blocks/B27-observability.md)).
 
-## Ошибки и граничные случаи
+## Errors and edge cases
 
-- Обязательный git/gh-сбой → `GitCommandError` → терминальный `failed` (best-effort публикация неудачной попытки, [B06](../../blocks/B06-orchestrator-pipeline.md)/[B22](../../blocks/B22-git-manager.md)).
-- Заблокированный merge (защита ветки/конфликт) → `manual_action_required`, PR открыт.
-- Небезопасная терминальная очистка при успехе → итог `manual_action_required` ([B06](../../blocks/B06-orchestrator-pipeline.md)).
+- Required git/gh failure → `GitCommandError` → terminal `failed` (best-effort publication of the failed attempt, [B06](../../blocks/B06-orchestrator-pipeline.md)/[B22](../../blocks/B22-git-manager.md)).
+- Blocked merge (branch protection/conflict) → `manual_action_required`, PR stays open.
+- Unsafe terminal cleanup on success → result `manual_action_required` ([B06](../../blocks/B06-orchestrator-pipeline.md)).
 
-## Связи
+## Relationships
 
-### Использует
+### Uses
 
-- [B22](../../blocks/B22-git-manager.md) (commit/push/PR/merge), [B07](../../blocks/B07-state-machine-and-store.md) (идемпотентность), [B27](../../blocks/B27-observability.md) (heartbeat).
+- [B22](../../blocks/B22-git-manager.md) (commit/push/PR/merge), [B07](../../blocks/B07-state-machine-and-store.md) (idempotency), [B27](../../blocks/B27-observability.md) (heartbeat).
 
-### Используется в
+### Used by
 
-- [B06](../../blocks/B06-orchestrator-pipeline.md) — драйвер; после publishing — терминальная очистка и [B08](../../blocks/B08-ledger-and-failure-reports.md).
+- [B06](../../blocks/B06-orchestrator-pipeline.md) — driver; after publishing — terminal cleanup and [B08](../../blocks/B08-ledger-and-failure-reports.md).
 
-## Место в потоке
+## Position in the flow
 
-Финальная стадия: превращает результат работы в PR. Единственное место, где система пишет в Git. См. [обзор потока](./index.md).
+Final stage: turns the work result into a PR. The only place where the system writes to Git. See [flow overview](./index.md).
 
-## Подтверждение в коде
+## Code confirmation
 
-- [orchestrator.py:1348-1386](../../../../src/wastech_orchestrator/core/orchestrator.py#L1348) — `_publish` (commit/push/PR, переходы).
-- [orchestrator.py:1388-1419](../../../../src/wastech_orchestrator/core/orchestrator.py#L1388) — `_auto_merge` (idempotent, без `--admin`).
-- Тесты: [tests/git/test_git_manager.py](../../../../tests/git/test_git_manager.py), [tests/core/test_orchestrator.py](../../../../tests/core/test_orchestrator.py).
+- [orchestrator.py:1348-1386](../../../../src/wastech_orchestrator/core/orchestrator.py#L1348) — `_publish` (commit/push/PR, transitions).
+- [orchestrator.py:1388-1419](../../../../src/wastech_orchestrator/core/orchestrator.py#L1388) — `_auto_merge` (idempotent, no `--admin`).
+- Tests: [tests/git/test_git_manager.py](../../../../tests/git/test_git_manager.py), [tests/core/test_orchestrator.py](../../../../tests/core/test_orchestrator.py).

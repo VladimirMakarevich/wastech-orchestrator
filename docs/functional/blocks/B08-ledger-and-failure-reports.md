@@ -1,91 +1,91 @@
-# B08 — Ledger и отчёты о провале
+# B08 — Ledger and Failure Reports
 
-## Назначение
+## Purpose
 
-Ведёт append-only журнал терминальных исходов задач (`logs/completed.jsonl`) вне SQLite и пишет артефакты «застревания» (`failure_report.json` + `stuck.md`) и компактный детерминированный fallback-summary, когда ни один провайдер не смог выполнить стадию `summary`. SQLite остаётся авторитетным состоянием; ledger — это удобный индекс выполненного и источник дубликатов id для шлюза §19.
+Maintains an append-only log of terminal task outcomes (`logs/completed.jsonl`) outside of SQLite, and writes "stuck" artifacts (`failure_report.json` + `stuck.md`) along with a compact deterministic fallback summary when no provider was able to complete the `summary` stage. SQLite remains the authoritative state; the ledger is a convenient index of completed work and a source of duplicate id detection for gate §19.
 
-## Ответственность
+## Responsibilities
 
-- Дописывать по одной записи `LedgerRecord` на каждый терминальный переход; читать записи; проверять наличие id ([ledger.py:92-123](../../../src/wastech_orchestrator/ledger.py#L92)).
-- Писать `failure_report.json` (машинный) + `stuck.md` (человекочитаемый) ([ledger.py:136-196](../../../src/wastech_orchestrator/ledger.py#L136)).
-- Писать компактный `summary.md` + `summary.json` как fallback стадии summary ([ledger.py:199-249](../../../src/wastech_orchestrator/ledger.py#L199)).
+- Append one `LedgerRecord` entry per terminal transition; read records; check for id presence ([ledger.py:92-123](../../../src/wastech_orchestrator/ledger.py#L92)).
+- Write `failure_report.json` (machine-readable) + `stuck.md` (human-readable) ([ledger.py:136-196](../../../src/wastech_orchestrator/ledger.py#L136)).
+- Write a compact `summary.md` + `summary.json` as a fallback for the summary stage ([ledger.py:199-249](../../../src/wastech_orchestrator/ledger.py#L199)).
 
-## Границы блока
+## Block Boundaries
 
-### Входит в ответственность блока
+### Within the block's responsibility
 
-- Append-only журнал терминальных записей; артефакты провала; детерминированный минимальный summary.
+- Append-only log of terminal records; failure artifacts; deterministic minimal summary.
 
-### Не входит в ответственность блока
+### Outside the block's responsibility
 
-- **Авторитетное состояние** — это SQLite [B07](./B07-state-machine-and-store.md); ledger — производный индекс.
-- **Решение терминального исхода и когда дописывать** — это [B06](./B06-orchestrator-pipeline.md).
-- **Логика шлюза §19** — это [B16](./B16-task-parsing-and-validation-gate.md) (использует `has_task_id`).
-- **Каталог артефактов** — [B20](./B20-artifact-layout.md).
+- **Authoritative state** — that is SQLite [B07](./B07-state-machine-and-store.md); the ledger is a derived index.
+- **Decision on terminal outcome and when to append** — that is [B06](./B06-orchestrator-pipeline.md).
+- **Gate §19 logic** — that is [B16](./B16-task-parsing-and-validation-gate.md) (uses `has_task_id`).
+- **Artifact directory layout** — [B20](./B20-artifact-layout.md).
 
-## Точки входа
+## Entry Points
 
-- `Ledger(logs_root)` — строится в `build_orchestrator` ([orchestrator.py:2615](../../../src/wastech_orchestrator/core/orchestrator.py#L2615)).
-- `append(record)` — [B06](./B06-orchestrator-pipeline.md) терминальные пути (`_append_ledger`, `_reject`, `_resume_*`, `finalize_task`); `has_task_id` — инъектируется в шлюз [B16](./B16-task-parsing-and-validation-gate.md) ([orchestrator.py:2634](../../../src/wastech_orchestrator/core/orchestrator.py#L2634)); `records` — `_ledger_attempt_count`/`_ledger_has_manual` ([orchestrator.py:210-217](../../../src/wastech_orchestrator/core/orchestrator.py#L210)).
+- `Ledger(logs_root)` — constructed in `build_orchestrator` ([orchestrator.py:2615](../../../src/wastech_orchestrator/core/orchestrator.py#L2615)).
+- `append(record)` — [B06](./B06-orchestrator-pipeline.md) terminal paths (`_append_ledger`, `_reject`, `_resume_*`, `finalize_task`); `has_task_id` — injected into gate [B16](./B16-task-parsing-and-validation-gate.md) ([orchestrator.py:2634](../../../src/wastech_orchestrator/core/orchestrator.py#L2634)); `records` — `_ledger_attempt_count`/`_ledger_has_manual` ([orchestrator.py:210-217](../../../src/wastech_orchestrator/core/orchestrator.py#L210)).
 - `write_failure_report` ([ledger.py:136](../../../src/wastech_orchestrator/ledger.py#L136)) — [B06 `_write_failure_report`](./B06-orchestrator-pipeline.md); `write_minimal_summary` ([ledger.py:199](../../../src/wastech_orchestrator/ledger.py#L199)) — [B06 `_summary`/`_summary_md_body`](./B06-orchestrator-pipeline.md).
 - `LedgerRecord`, `DecomposedFailureInfo`.
 
-## Входные данные и состояние
+## Input Data and State
 
-`logs_root` (= `<artifacts_root>/logs`); `LedgerRecord` поля (id, title, статус, branch, pr*url, auto_merged/merge_outcome, fix_iterations, decomposed/subtask*\*, attempt/rerun_of, manual/note/outcome, validation_reason, …). Состояние — файл `completed.jsonl` (append-only).
+`logs_root` (= `<artifacts_root>/logs`); `LedgerRecord` fields (id, title, status, branch, pr*url, auto_merged/merge_outcome, fix_iterations, decomposed/subtask*\*, attempt/rerun_of, manual/note/outcome, validation_reason, …). State — the `completed.jsonl` file (append-only).
 
-## Основной сценарий
+## Main Scenario
 
-1. На каждый терминальный переход [B06](./B06-orchestrator-pipeline.md) формирует `LedgerRecord` и вызывает `append` — одна JSON-строка дописывается, файл никогда не переписывается.
-2. Шлюз §19 ([B16](./B16-task-parsing-and-validation-gate.md)) использует `has_task_id` для проверки дубликата id (вместе с `task_id_exists` из [B07](./B07-state-machine-and-store.md)).
-3. При застревании пишется `failure_report.json` + `stuck.md`; при отсутствии агента summary — `write_minimal_summary` (компактный, с `git diff --stat`, без полного патча).
+1. On each terminal transition [B06](./B06-orchestrator-pipeline.md) constructs a `LedgerRecord` and calls `append` — one JSON line is appended; the file is never rewritten.
+2. Gate §19 ([B16](./B16-task-parsing-and-validation-gate.md)) uses `has_task_id` to check for a duplicate id (together with `task_id_exists` from [B07](./B07-state-machine-and-store.md)).
+3. On a stuck task, `failure_report.json` + `stuck.md` are written; when no summary agent is available, `write_minimal_summary` is called (compact, with `git diff --stat`, without the full patch).
 
-Три пути записи ledger и один путь чтения (дедуп id для шлюза §19):
+Three ledger write paths and one read path (dedup id for gate §19):
 
 ```mermaid
 flowchart TB
-    term["B06: терминальный переход"] --> append["append(LedgerRecord)<br/>→ completed.jsonl (append-only)"]
-    stuck["B06: застревание — лимит исчерпан (B09)"] --> fr["write_failure_report<br/>→ failure_report.json + stuck.md"]
-    nosum["B06: нет агента для summary"] --> ms["write_minimal_summary<br/>→ summary.md + summary.json (компактный)"]
-    append --> dedup["шлюз §19 (B16): has_task_id<br/>дедуп id (вместе с B07.task_id_exists)"]
+    term["B06: terminal transition"] --> append["append(LedgerRecord)<br/>→ completed.jsonl (append-only)"]
+    stuck["B06: stuck — limit exhausted (B09)"] --> fr["write_failure_report<br/>→ failure_report.json + stuck.md"]
+    nosum["B06: no agent for summary"] --> ms["write_minimal_summary<br/>→ summary.md + summary.json (compact)"]
+    append --> dedup["gate §19 (B16): has_task_id<br/>dedup id (together with B07.task_id_exists)"]
 ```
 
-## Проверки и ограничения
+## Constraints and Invariants
 
-- Журнал строго append-only (одна запись на терминальный переход) ([ledger.py:104-109](../../../src/wastech_orchestrator/ledger.py#L104)).
-- Старые записи без новых ключей читаются без ошибок (толерантный `records`).
-- Минимальный summary намеренно компактен: ссылается на task-файл и показывает stat, а полный (уже редактированный) патч остаётся в `current.diff` ([ledger.py:207-214](../../../src/wastech_orchestrator/ledger.py#L207)).
+- The log is strictly append-only (one record per terminal transition) ([ledger.py:104-109](../../../src/wastech_orchestrator/ledger.py#L104)).
+- Old records without new keys are read without errors (tolerant `records`).
+- The minimal summary is intentionally compact: it references the task file and shows the stat, while the full (already redacted) patch remains in `current.diff` ([ledger.py:207-214](../../../src/wastech_orchestrator/ledger.py#L207)).
 
-## Результат
+## Output
 
-Дописанная строка в `completed.jsonl`; пути `failure_report.json`/`stuck.md`; пути `summary.md`/`summary.json`; `has_task_id`/`records` для вызывающих.
+An appended line in `completed.jsonl`; paths to `failure_report.json`/`stuck.md`; paths to `summary.md`/`summary.json`; `has_task_id`/`records` for callers.
 
-## Побочные эффекты
+## Side Effects
 
-- Дозапись `completed.jsonl`; запись `failure_report.json`, `stuck.md`, `summary.md`, `summary.json` под `logs/<task-id>/`.
+- Appending to `completed.jsonl`; writing `failure_report.json`, `stuck.md`, `summary.md`, `summary.json` under `logs/<task-id>/`.
 
-## Ошибки и граничные случаи
+## Errors and Edge Cases
 
-- Пустой/отсутствующий журнал → `records` возвращает `[]` (без ошибки).
-- `failure_report` для декомпозированной задачи добавляет блок `decomposed` (failing subtask + committed SHAs).
+- Empty or missing log → `records` returns `[]` (no error).
+- `failure_report` for a decomposed task adds a `decomposed` block (failing subtask + committed SHAs).
 
-## Связи
+## Relations
 
-### Использует
+### Uses
 
-- [B20 — Артефакты](./B20-artifact-layout.md) — `task_artifact_dir`.
+- [B20 — Artifacts](./B20-artifact-layout.md) — `task_artifact_dir`.
 
-### Используется в
+### Used by
 
-- [B06 — Конвейер](./B06-orchestrator-pipeline.md) — терминальные записи, отчёты о провале, fallback-summary, подсчёт попыток/manual.
-- [B16 — Шлюз валидации](./B16-task-parsing-and-validation-gate.md) — `has_task_id` (дубликат id).
+- [B06 — Pipeline](./B06-orchestrator-pipeline.md) — terminal records, failure reports, fallback summary, attempt/manual counting.
+- [B16 — Validation Gate](./B16-task-parsing-and-validation-gate.md) — `has_task_id` (duplicate id).
 
-## Место в общей системе
+## Place in the Overall System
 
-Ledger — аудит-след «что и чем закончилось», переживающий любые перезапуски, и половина проверки дубликатов id (вторая — SQLite [B07](./B07-state-machine-and-store.md)). Артефакты провала дают оператору всё для разбора «застрявшей» задачи; минимальный summary гарантирует, что у PR всегда есть тело, даже без агента.
+The ledger is an audit trail of "what completed and how," surviving any restarts, and is one half of the duplicate id check (the other half being SQLite [B07](./B07-state-machine-and-store.md)). Failure artifacts give the operator everything needed to investigate a stuck task; the minimal summary ensures a PR always has a body even without an agent.
 
-## Подтверждение в коде
+## Code Confirmation
 
-- [ledger.py:92-123](../../../src/wastech_orchestrator/ledger.py#L92) — append-only журнал, `has_task_id`/`records`.
+- [ledger.py:92-123](../../../src/wastech_orchestrator/ledger.py#L92) — append-only log, `has_task_id`/`records`.
 - [ledger.py:136-249](../../../src/wastech_orchestrator/ledger.py#L136) — `write_failure_report`, `write_minimal_summary`.
-- Тест: [tests/core/test_ledger.py](../../../tests/core/test_ledger.py) — append-only, дубликат id, линковка rerun, manual/outcome, отчёт о провале (в т.ч. decomposed), компактный summary.
+- Test: [tests/core/test_ledger.py](../../../tests/core/test_ledger.py) — append-only, duplicate id, rerun linking, manual/outcome, failure report (including decomposed), compact summary.

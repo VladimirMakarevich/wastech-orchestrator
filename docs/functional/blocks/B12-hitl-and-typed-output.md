@@ -1,113 +1,113 @@
-# B12 — HITL и типизированный вывод стадий
+# B12 — HITL and Typed Stage Output
 
-## Назначение
+## Purpose
 
-Обеспечивает «человека в контуре» (HITL) и строгий разбор структурированного вывода агентских стадий. Две взаимосвязанные функции: (1) валидировать типизированный вывод `refinement`/`planning` и извлечь из него сигнал запроса к человеку; (2) персистить и возобновлять долговечные HITL-взаимодействия как файлы-артефакты, чтобы прерванный запрос пережил рестарт.
+Provides "human-in-the-loop" (HITL) and strict parsing of structured output from agent stages. Two interconnected functions: (1) validate typed output from `refinement`/`planning` and extract a human-request signal from it; (2) persist and resume durable HITL interactions as artifact files so that an interrupted request survives a process restart.
 
-## Ответственность
+## Responsibilities
 
-- Задать строгие схемы вывода HITL-стадий и провалидировать вывод независимо от провайдера ([hitl.py:96-165](../../../src/wastech_orchestrator/core/hitl.py#L96)).
-- Разобрать сигнал `human_input` (вид, текст, риск, нормализованные repo-относительные пути) ([hitl.py:168-198](../../../src/wastech_orchestrator/core/hitl.py#L168)).
-- Персистить взаимодействие (waiting/answer/consumed/reconsidering) атомарно и уметь его перечитать ([hitl.py:308-415](../../../src/wastech_orchestrator/core/hitl.py#L308)).
-- Давать детерминированные id взаимодействий (под лимиты Telegram callback) ([hitl.py:290-305](../../../src/wastech_orchestrator/core/hitl.py#L290)).
+- Define strict output schemas for HITL stages and validate output independently of the provider ([hitl.py:96-165](../../../src/wastech_orchestrator/core/hitl.py#L96)).
+- Parse the `human_input` signal (kind, text, risk, normalized repo-relative paths) ([hitl.py:168-198](../../../src/wastech_orchestrator/core/hitl.py#L168)).
+- Persist interactions (waiting/answer/consumed/reconsidering) atomically and be able to reload them ([hitl.py:308-415](../../../src/wastech_orchestrator/core/hitl.py#L308)).
+- Produce deterministic interaction IDs (within Telegram callback limits) ([hitl.py:290-305](../../../src/wastech_orchestrator/core/hitl.py#L290)).
 
-## Границы блока
+## Block Boundaries
 
-### Входит в ответственность блока
+### Within this block's responsibility
 
-- Строгая валидация типизированного вывода + сигнала; durable persist/resume HITL-артефактов; детерминированные id; реконструкция `AskHandle` из артефакта.
+- Strict validation of typed output and the signal; durable persist/resume of HITL artifacts; deterministic IDs; reconstruction of `AskHandle` from an artifact.
 
-### Не входит в ответственность блока
+### Outside this block's responsibility
 
-- **Транспорт** (отправка/поллинг ответа) — это [B26 `Notifier`](./B26-notifications-telegram.md).
-- **Оркестрация round-trip** (когда спросить, ждать, перезапустить стадию) — это [B06](./B06-orchestrator-pipeline.md) (`_run_typed_stage`, `_run_edit_stage_with_guardrail`, `_ask_check_command_approval`).
-- **Правила редакции** — [B21](./B21-secret-redaction.md); **каталог артефактов** — [B20](./B20-artifact-layout.md).
-- **Классификация опасного диффа** — [B14](./B14-dangerous-diff-guardrail.md); **приём декомпозиции** — [B11](./B11-task-decomposition.md) (здесь лишь валидируется схема сабтасков).
+- **Transport** (sending/polling for an answer) — that is [B26 `Notifier`](./B26-notifications-telegram.md).
+- **Round-trip orchestration** (when to ask, wait, restart a stage) — that is [B06](./B06-orchestrator-pipeline.md) (`_run_typed_stage`, `_run_edit_stage_with_guardrail`, `_ask_check_command_approval`).
+- **Redaction rules** — [B21](./B21-secret-redaction.md); **artifact catalog** — [B20](./B20-artifact-layout.md).
+- **Dangerous diff classification** — [B14](./B14-dangerous-diff-guardrail.md); **decomposition parsing** — [B11](./B11-task-decomposition.md) (only the subtask schema is validated here).
 
-## Точки входа
+## Entry Points
 
-- `stage_output_schema(stage)` ([hitl.py:96](../../../src/wastech_orchestrator/core/hitl.py#L96)) — кладётся в `AgentRunRequest.output_schema` ([orchestrator.py:1762](../../../src/wastech_orchestrator/core/orchestrator.py#L1762)).
+- `stage_output_schema(stage)` ([hitl.py:96](../../../src/wastech_orchestrator/core/hitl.py#L96)) — placed into `AgentRunRequest.output_schema` ([orchestrator.py:1762](../../../src/wastech_orchestrator/core/orchestrator.py#L1762)).
 - `parse_typed_stage_output(stage, structured)` → `TypedStageOutput` ([hitl.py:131](../../../src/wastech_orchestrator/core/hitl.py#L131)) — [B06 `_typed_output`](./B06-orchestrator-pipeline.md).
-- Взаимодействия: `interaction_path`/`guardrail_interaction_path`/`discovery_interaction_path`, `interaction_id`/`discovery_interaction_id`, `load_interaction`, `write_waiting_interaction`, `write_answer`, `mark_consumed`/`mark_interaction_status`, `reset_pending_interactions`, `consume_pending_interactions`, `handle_from_artifact` — все из [B06](./B06-orchestrator-pipeline.md).
-- Типы: `HumanInputSignal`, `TypedStageOutput`, `StageOutputError`.
+- Interaction utilities: `interaction_path`/`guardrail_interaction_path`/`discovery_interaction_path`, `interaction_id`/`discovery_interaction_id`, `load_interaction`, `write_waiting_interaction`, `write_answer`, `mark_consumed`/`mark_interaction_status`, `reset_pending_interactions`, `consume_pending_interactions`, `handle_from_artifact` — all consumed by [B06](./B06-orchestrator-pipeline.md).
+- Types: `HumanInputSignal`, `TypedStageOutput`, `StageOutputError`.
 
-## Входные данные и состояние
+## Inputs and State
 
-Структурированный вывод стадии; `AskHandle`/`AskResult` от [B26](./B26-notifications-telegram.md); `artifacts_root`, `task_id`, `stage`, опц. `subtask`/`cycle`. Состояние — JSON-артефакты под `logs/<task-id>/hitl/`.
+Structured stage output; `AskHandle`/`AskResult` from [B26](./B26-notifications-telegram.md); `artifacts_root`, `task_id`, `stage`, optional `subtask`/`cycle`. State — JSON artifacts under `logs/<task-id>/hitl/`.
 
-## Основной сценарий (типизированный вывод + запрос)
+## Main Scenario (typed output + request)
 
-1. `parse_typed_stage_output` строго проверяет набор ключей и типы; для planning — `decompose`/`subtasks`/`skills`; извлекает сигнал `human_input` (или `None`).
-2. Если сигнал есть, [B06](./B06-orchestrator-pipeline.md) через [B26](./B26-notifications-telegram.md) отправляет запрос и пишет `write_waiting_interaction` (status `waiting`, редактированные текст/контекст).
-3. `wait_for_answer` ([B26](./B26-notifications-telegram.md)) → `write_answer` (status `answered`/код ошибки, редактированный ответ, `approved`).
-4. После успешного перезапуска стадии — `mark_consumed`.
+1. `parse_typed_stage_output` strictly checks the key set and types; for planning — `decompose`/`subtasks`/`skills`; extracts the `human_input` signal (or `None`).
+2. If a signal is present, [B06](./B06-orchestrator-pipeline.md) sends the request via [B26](./B26-notifications-telegram.md) and writes `write_waiting_interaction` (status `waiting`, redacted text/context).
+3. `wait_for_answer` ([B26](./B26-notifications-telegram.md)) → `write_answer` (status `answered`/error code, redacted answer, `approved`).
+4. After a successful stage restart — `mark_consumed`.
 
-Жизненный цикл HITL-взаимодействия — durable: артефакт на диске позволяет возобновиться после падения процесса прямо во время ожидания ответа:
+The HITL interaction lifecycle is durable: the artifact on disk allows resumption after a process crash even while waiting for an answer:
 
 ```mermaid
 flowchart TB
-    sig["агент вернул сигнал human_input<br/>(refinement / planning)"] --> ask["B06: отправить запрос (B26) +<br/>write_waiting_interaction (status=waiting)"]
+    sig["agent returned human_input signal<br/>(refinement / planning)"] --> ask["B06: send request (B26) +<br/>write_waiting_interaction (status=waiting)"]
     ask --> wait["wait_for_answer (B26)"]
-    wait -->|ответ| ans["write_answer: answered (+approved),<br/>текст редактирован"]
+    wait -->|answer| ans["write_answer: answered (+approved),<br/>text redacted"]
     wait -->|"timeout / transport"| terr["status=transport_error"]
-    ans --> restart["перезапуск стадии"]
+    ans --> restart["stage restart"]
     restart --> consumed["mark_consumed"]
-    crash(["рестарт процесса"]) -.-> load["load_interaction"]
+    crash(["process restart"]) -.-> load["load_interaction"]
     load -->|"waiting / transport_error"| wait
-    load -->|"answered / consumed"| reuse["ответ переиспользуется<br/>(handle_from_artifact)"]
+    load -->|"answered / consumed"| reuse["answer reused<br/>(handle_from_artifact)"]
 ```
 
-## Альтернативные сценарии
+## Alternative Scenarios
 
-### Возобновление после рестарта
+### Resume After Restart
 
-`load_interaction` читает артефакт; `waiting`/`transport_error` → можно дождаться/перезапросить; `answered`/`consumed` → ответ переиспользуется; `handle_from_artifact` восстанавливает `AskHandle` (строгая валидация полей) ([hitl.py:418-459](../../../src/wastech_orchestrator/core/hitl.py#L418)).
+`load_interaction` reads the artifact; `waiting`/`transport_error` → can wait/re-request; `answered`/`consumed` → answer is reused; `handle_from_artifact` reconstructs `AskHandle` (strict field validation) ([hitl.py:418-459](../../../src/wastech_orchestrator/core/hitl.py#L418)).
 
 ### Continue / Finalize
 
-`reset_pending_interactions` удаляет незавершённые (`waiting`/`transport_error`) артефакты для `rerun --continue`; `consume_pending_interactions` помечает их `consumed` для `finalize` ([hitl.py:378-415](../../../src/wastech_orchestrator/core/hitl.py#L378)).
+`reset_pending_interactions` deletes incomplete (`waiting`/`transport_error`) artifacts for `rerun --continue`; `consume_pending_interactions` marks them `consumed` for `finalize` ([hitl.py:378-415](../../../src/wastech_orchestrator/core/hitl.py#L378)).
 
-## Проверки и ограничения
+## Constraints and Checks
 
-- Только `refinement`/`planning` могут запрашивать человека ([hitl.py:23,135-136](../../../src/wastech_orchestrator/core/hitl.py#L23)).
-- Набор ключей вывода должен быть **точным**; `content` — строка; сигнал: `kind∈{question,approval}`, ограниченные `question`/`context`, `risk∈{clarification,deletion,dependency,other}`, пути — repo-относительные, без `..`/абсолютных, ≤100 ([hitl.py:140-198,253-260](../../../src/wastech_orchestrator/core/hitl.py#L140)).
-- Текст/контекст/ответ редактируются перед записью; запись атомарна (temp+replace) ([hitl.py:336-337,356,462-469](../../../src/wastech_orchestrator/core/hitl.py#L336)).
-- Битый артефакт/handle → `StageOutputError` (fail-closed) ([hitl.py:308-315,458-459](../../../src/wastech_orchestrator/core/hitl.py#L308)).
+- Only `refinement`/`planning` may request a human ([hitl.py:23,135-136](../../../src/wastech_orchestrator/core/hitl.py#L23)).
+- The output key set must be **exact**; `content` must be a string; signal: `kind∈{question,approval}`, bounded `question`/`context`, `risk∈{clarification,deletion,dependency,other}`, paths must be repo-relative, no `..`/absolute paths, ≤100 ([hitl.py:140-198,253-260](../../../src/wastech_orchestrator/core/hitl.py#L140)).
+- Text/context/answer are redacted before writing; writes are atomic (temp+replace) ([hitl.py:336-337,356,462-469](../../../src/wastech_orchestrator/core/hitl.py#L336)).
+- Corrupt artifact/handle → `StageOutputError` (fail-closed) ([hitl.py:308-315,458-459](../../../src/wastech_orchestrator/core/hitl.py#L308)).
 
-## Результат
+## Output
 
-`TypedStageOutput(content, human_input, structured, skills)`; JSON-артефакты взаимодействий на диске; восстановленный `AskHandle`. Содержимое HITL-артефакта — редактированное и аудируемое.
+`TypedStageOutput(content, human_input, structured, skills)`; JSON interaction artifacts on disk; reconstructed `AskHandle`. HITL artifact contents are redacted and auditable.
 
-## Побочные эффекты
+## Side Effects
 
-- Запись/чтение/удаление/пометка JSON-артефактов под `logs/<task-id>/hitl/`.
-- Чисто-функциональные `stage_output_schema`/`parse_typed_stage_output` (без IO).
+- Write/read/delete/mark JSON artifacts under `logs/<task-id>/hitl/`.
+- `stage_output_schema`/`parse_typed_stage_output` are pure-functional (no IO).
 
-## Ошибки и граничные случаи
+## Errors and Edge Cases
 
-- Малформный типизированный вывод → `StageOutputError` (Core превращает в `PipelineFailed`).
-- Недоставленный запрос → артефакт со status `transport_error`; ответ-неудача → соответствующий код.
-- Путь вне репозитория/с `..` → `StageOutputError` при нормализации.
+- Malformed typed output → `StageOutputError` (Core converts to `PipelineFailed`).
+- Undelivered request → artifact with status `transport_error`; failed answer → corresponding error code.
+- Path outside the repository or containing `..` → `StageOutputError` during normalization.
 
-## Связи
+## Relationships
 
-### Использует
+### Uses
 
-- [B26 — Telegram](./B26-notifications-telegram.md) — типы `AskHandle`/`AskKind`/`AskResult`.
-- [B21 — Redaction](./B21-secret-redaction.md) — `redact_text` для текста/ответа.
-- [B20 — Артефакты](./B20-artifact-layout.md) — `task_artifact_dir`.
+- [B26 — Telegram](./B26-notifications-telegram.md) — types `AskHandle`/`AskKind`/`AskResult`.
+- [B21 — Redaction](./B21-secret-redaction.md) — `redact_text` for text/answer.
+- [B20 — Artifacts](./B20-artifact-layout.md) — `task_artifact_dir`.
 
-### Используется в
+### Used by
 
-- [B06 — Конвейер](./B06-orchestrator-pipeline.md) — round-trip refinement/planning, guardrail редактирующих стадий, согласование изменённого набора проверок.
-- [B11 — Декомпозиция](./B11-task-decomposition.md) — соседний разбор вывода planning (схема сабтасков).
+- [B06 — Pipeline](./B06-orchestrator-pipeline.md) — round-trip refinement/planning, guardrail for editing stages, approval of changed check sets.
+- [B11 — Decomposition](./B11-task-decomposition.md) — adjacent parsing of planning output (subtask schema).
 
-## Место в общей системе
+## Role in the Overall System
 
-Делает паузы «на человека» долговечными: даже если процесс упал во время ожидания ответа, артефакт позволяет [B06](./B06-orchestrator-pipeline.md) корректно возобновиться. Строгая валидация вывода — граница доверия к агенту: ядро принимает только то, что прошло схему и нормализацию.
+Makes "human pause" points durable: even if the process crashes while waiting for an answer, the artifact allows [B06](./B06-orchestrator-pipeline.md) to resume correctly. Strict output validation is the trust boundary for the agent: the core accepts only what has passed schema validation and normalization.
 
-## Подтверждение в коде
+## Code Evidence
 
-- [core/hitl.py:96-260](../../../src/wastech_orchestrator/core/hitl.py#L96) — схемы и валидация типизированного вывода + сигнала.
-- [core/hitl.py:263-470](../../../src/wastech_orchestrator/core/hitl.py#L263) — пути/id/persist/resume взаимодействий, `handle_from_artifact`.
-- Тесты: [tests/core/test_hitl.py](../../../tests/core/test_hitl.py), [tests/core/test_check_discovery_hitl.py](../../../tests/core/test_check_discovery_hitl.py) — валидация, persist/resume, reset/consume, восстановление handle.
+- [core/hitl.py:96-260](../../../src/wastech_orchestrator/core/hitl.py#L96) — schemas and validation of typed output and signal.
+- [core/hitl.py:263-470](../../../src/wastech_orchestrator/core/hitl.py#L263) — paths/IDs/persist/resume for interactions, `handle_from_artifact`.
+- Tests: [tests/core/test_hitl.py](../../../tests/core/test_hitl.py), [tests/core/test_check_discovery_hitl.py](../../../tests/core/test_check_discovery_hitl.py) — validation, persist/resume, reset/consume, handle reconstruction.

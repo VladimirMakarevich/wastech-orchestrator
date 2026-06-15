@@ -1,126 +1,126 @@
-# B05 — Конфигурация: схема, загрузка, валидация, апгрейд
+# B05 — Configuration: schema, loading, validation, upgrade
 
-## Назначение
+## Purpose
 
-Типизированная модель `config.yaml` и весь её жизненный цикл «как данных»: структурный парсинг YAML в датаклассы (fail-closed), семантическая валидация правил §11/§21.4 и миграция ключей между версиями схемы. Конфигурация задаёт поведение всей системы (провайдеры, маршруты, лимиты циклов, безопасность, footprint, проверки, telegram, промпты, навыки).
+The typed model for `config.yaml` and its full data lifecycle: structural YAML parsing into dataclasses (fail-closed), semantic validation of rules §11/§21.4, and key migration between schema versions. The configuration defines the behavior of the entire system (providers, routes, loop limits, security, footprint, checks, telegram, prompts, skills).
 
-## Ответственность
+## Responsibilities
 
-- Задать формы конфигурации (frozen-датаклассы по блокам) и инварианты-перечисления ([schema.py:105-334](../../../src/wastech_orchestrator/config/schema.py#L105)).
-- Распарсить YAML в типизированный `OrchestratorConfig`, собирая все проблемы и поднимая `ConfigError` ([loader.py:778-808](../../../src/wastech_orchestrator/config/loader.py#L778)).
-- Проверить семантические правила §11/§21.4 и поднять `ConfigError` ([validation.py:69-121](../../../src/wastech_orchestrator/config/validation.py#L69)).
-- Проверить per-task route-override (чистая функция, без исключений) ([validation.py:218-240](../../../src/wastech_orchestrator/config/validation.py#L218)).
-- Слить упакованный шаблон в конфиг оператора (add-missing-only), убрать удалённые ключи, проставить версию ([upgrade.py:58-120](../../../src/wastech_orchestrator/config/upgrade.py#L58)).
+- Define the configuration shapes (frozen dataclasses per block) and invariant enumerations ([schema.py:105-334](../../../src/wastech_orchestrator/config/schema.py#L105)).
+- Parse YAML into a typed `OrchestratorConfig`, collecting all issues and raising `ConfigError` ([loader.py:778-808](../../../src/wastech_orchestrator/config/loader.py#L778)).
+- Validate semantic rules §11/§21.4 and raise `ConfigError` ([validation.py:69-121](../../../src/wastech_orchestrator/config/validation.py#L69)).
+- Validate per-task route-override (pure function, no exceptions) ([validation.py:218-240](../../../src/wastech_orchestrator/config/validation.py#L218)).
+- Merge the packaged template into the operator config (add-missing-only), remove deleted keys, set the version ([upgrade.py:58-120](../../../src/wastech_orchestrator/config/upgrade.py#L58)).
 
-## Границы блока
+## Block boundaries
 
-### Входит в ответственность блока
+### Within the block's responsibility
 
-- Модель данных (shapes), структурный парсинг (типы, неизвестные ключи, версия), семантическая валидация, миграция ключей, привязка относительного `templates_dir` к каталогу конфига.
+- Data model (shapes), structural parsing (types, unknown keys, version), semantic validation, key migration, binding the relative `templates_dir` to the config directory.
 
-### Не входит в ответственность блока
+### Outside the block's responsibility
 
-- **Поиск файла конфигурации** (`resolve_config_path`) и реестр привязок — это [B04](./B04-install-registry-and-config-discovery.md).
-- **Атомарная запись/бэкап** файла конфига — это драйверы CLI/установщика ([B03](./B03-installer-and-scaffolding.md)/[B01](./B01-cli-and-operator-commands.md)).
-- **Определение запрещённых флагов** — делегируется [B25 `find_forbidden_args`](./B25-security-policy.md) ([validation.py:46](../../../src/wastech_orchestrator/config/validation.py#L46)).
-- **Нормализация/проверка команд проверок** — делегируется [B23 (checks.model)](./B23-check-discovery.md) ([validation.py:17-22,154-166](../../../src/wastech_orchestrator/config/validation.py#L154)).
-- **Использование** значений (запуск, маршрутизация) — это блоки-потребители.
+- **Config file discovery** (`resolve_config_path`) and the binding registry — that is [B04](./B04-install-registry-and-config-discovery.md).
+- **Atomic write/backup** of the config file — that belongs to the CLI/installer drivers ([B03](./B03-installer-and-scaffolding.md)/[B01](./B01-cli-and-operator-commands.md)).
+- **Defining forbidden flags** — delegated to [B25 `find_forbidden_args`](./B25-security-policy.md) ([validation.py:46](../../../src/wastech_orchestrator/config/validation.py#L46)).
+- **Normalizing/validating check commands** — delegated to [B23 (checks.model)](./B23-check-discovery.md) ([validation.py:17-22,154-166](../../../src/wastech_orchestrator/config/validation.py#L154)).
+- **Using** the values (launching, routing) — that belongs to the consumer blocks.
 
-## Точки входа
+## Entry points
 
 - `load_config(path)` / `loads_config(text)` → `ConfigLoadResult` ([loader.py:811,795](../../../src/wastech_orchestrator/config/loader.py#L795)); `ConfigError` ([loader.py:67](../../../src/wastech_orchestrator/config/loader.py#L67)).
 - `validate_config(config)` → warnings | raise ([validation.py:69](../../../src/wastech_orchestrator/config/validation.py#L69)); `check_task_route_override(override, config)` ([validation.py:218](../../../src/wastech_orchestrator/config/validation.py#L218)).
 - `upgrade_config_mapping` / `parse_mapping` / `packaged_template_mapping` / `render` ([upgrade.py](../../../src/wastech_orchestrator/config/upgrade.py)).
-- `OrchestratorConfig` + блочные датаклассы + `ROUTABLE_STAGES`/`SKIPPABLE_STAGES`/`CONFIG_SCHEMA_VERSION` ([schema.py](../../../src/wastech_orchestrator/config/schema.py)).
-- Вызовы: CLI `_load_config` (load + validate, fail-closed) ([cli.py:542-546](../../../src/wastech_orchestrator/cli.py#L542)); `cmd_upgrade_config` ([cli.py:568](../../../src/wastech_orchestrator/cli.py#L568)); [B16 шлюз](./B16-task-parsing-and-validation-gate.md) и [B17 Router](./B17-agent-router-and-fallback.md) — `check_task_route_override`.
+- `OrchestratorConfig` + block dataclasses + `ROUTABLE_STAGES`/`SKIPPABLE_STAGES`/`CONFIG_SCHEMA_VERSION` ([schema.py](../../../src/wastech_orchestrator/config/schema.py)).
+- Callers: CLI `_load_config` (load + validate, fail-closed) ([cli.py:542-546](../../../src/wastech_orchestrator/cli.py#L542)); `cmd_upgrade_config` ([cli.py:568](../../../src/wastech_orchestrator/cli.py#L568)); [B16 gate](./B16-task-parsing-and-validation-gate.md) and [B17 Router](./B17-agent-router-and-fallback.md) — `check_task_route_override`.
 
-## Входные данные и состояние
+## Input data and state
 
-Текст/путь `config.yaml`; для апгрейда — упакованный `templates/config.example.yaml`. Состояние не хранится — каждый вызов независим, без побочных эффектов на импорте.
+Text/path of `config.yaml`; for upgrade — the packaged `templates/config.example.yaml`. No state is stored — each call is independent, with no side effects on import.
 
-## Основной сценарий (загрузка + валидация)
+## Main scenario (load + validate)
 
-1. `loads_config`: `yaml.safe_load`; не-mapping корень или YAML-ошибка → `ConfigError`.
-2. `_parse`: проверка неизвестных верхнеуровневых ключей и `schema_version`; сборка каждого блока типизированными ридерами (несовпадение типа → проблема + безопасный дефолт).
-3. Если есть проблемы — `ConfigError` со всем списком; иначе `ConfigLoadResult(config, warnings)`.
-4. `load_config` дополнительно привязывает относительный `prompts.templates_dir` к каталогу конфига.
-5. CLI вызывает `validate_config` (семантика) как fail-closed-шлюз перед использованием.
+1. `loads_config`: `yaml.safe_load`; non-mapping root or YAML error → `ConfigError`.
+2. `_parse`: check unknown top-level keys and `schema_version`; assemble each block with typed readers (type mismatch → issue + safe default).
+3. If there are issues — `ConfigError` with the full list; otherwise `ConfigLoadResult(config, warnings)`.
+4. `load_config` additionally binds the relative `prompts.templates_dir` to the config directory.
+5. CLI calls `validate_config` (semantics) as a fail-closed gate before use.
 
-Загрузка и валидация — два fail-closed-рубежа; на каждом собираются **все** проблемы, а не первая:
+Loading and validation are two fail-closed checkpoints; each collects **all** issues, not just the first:
 
 ```mermaid
 flowchart TB
     start(["load_config(path) / loads_config(text)"]) --> y["yaml.safe_load"]
-    y -->|"не mapping / YAML-ошибка"| e1["ConfigError"]
-    y --> parse["_parse: неизвестные ключи, schema_version,<br/>типы блоков (собрать ВСЕ проблемы)"]
-    parse -->|"есть проблемы"| e1
-    parse --> bind["привязать относительный prompts.templates_dir<br/>к каталогу конфига"]
+    y -->|"non-mapping / YAML error"| e1["ConfigError"]
+    y --> parse["_parse: unknown keys, schema_version,<br/>block types (collect ALL issues)"]
+    parse -->|"issues present"| e1
+    parse --> bind["bind relative prompts.templates_dir<br/>to config directory"]
     bind --> res["ConfigLoadResult(config, warnings)"]
-    res --> val["validate_config: семантика §11/§21.4<br/>(маршруты, лимиты, footprint, extra_args, проверки, telegram)"]
-    val -->|нарушение| e2["ConfigError (все проблемы)"]
-    val --> ok["конфиг допущен в конвейер"]
-    e1 --> exit2["CLI: сообщение + выход 2"]
+    res --> val["validate_config: semantics §11/§21.4<br/>(routes, limits, footprint, extra_args, checks, telegram)"]
+    val -->|violation| e2["ConfigError (all issues)"]
+    val --> ok["config admitted to the pipeline"]
+    e1 --> exit2["CLI: message + exit 2"]
     e2 --> exit2
 ```
 
-## Альтернативные сценарии
+## Alternative scenarios
 
-### Легаси-конфиг без `agents.routing`
+### Legacy config without `agents.routing`
 
-Отсутствие блока маршрутизации → авто-миграция к Codex-маршруту для всех `ROUTABLE_STAGES` + warning ([loader.py:476-485,388-392](../../../src/wastech_orchestrator/config/loader.py#L476)).
+Missing routing block → auto-migration to Codex route for all `ROUTABLE_STAGES` + warning ([loader.py:476-485,388-392](../../../src/wastech_orchestrator/config/loader.py#L476)).
 
-### Удалённые ключи (schema v6)
+### Removed keys (schema v6)
 
-`prompts.overrides`/`prompts.strict` на загрузке толерируются (игнор) с warning; `upgrade-config` вырезает их ([loader.py:711-728](../../../src/wastech_orchestrator/config/loader.py#L711), [upgrade.py:27-30,77-89](../../../src/wastech_orchestrator/config/upgrade.py#L27)).
+`prompts.overrides`/`prompts.strict` are tolerated on load (ignored) with a warning; `upgrade-config` strips them ([loader.py:711-728](../../../src/wastech_orchestrator/config/loader.py#L711), [upgrade.py:27-30,77-89](../../../src/wastech_orchestrator/config/upgrade.py#L27)).
 
-### Апгрейд конфига
+### Config upgrade
 
-`upgrade_config_mapping`: рекурсивный merge шаблона в конфиг оператора — значения оператора всегда побеждают, добавляются только отсутствующие ключи (в т.ч. новые под-ключи), удалённые вырезаются, `schema_version` ставится текущим ([upgrade.py:92-112](../../../src/wastech_orchestrator/config/upgrade.py#L92)).
+`upgrade_config_mapping`: recursive merge of the template into the operator config — operator values always win, only missing keys are added (including new sub-keys), removed keys are stripped, `schema_version` is set to current ([upgrade.py:92-112](../../../src/wastech_orchestrator/config/upgrade.py#L92)).
 
-## Проверки и ограничения
+## Checks and constraints
 
-- **Структурные** (loader): не-mapping корень, неизвестные ключи (верх и блоки), неизвестный stage/provider/enum, неверные типы → `ConfigError`; `schema_version` новее текущего (=6) → `ConfigError` ([loader.py:758-775](../../../src/wastech_orchestrator/config/loader.py#L758)).
-- **Семантические** (validation): маршруты только для `ROUTABLE_STAGES`, primary/fallback ∈ `agents.allowed` и есть в `agents.providers`; `poll_interval_seconds ≥ 0`; `max_total_fix_iterations ≥ max_fix_cycles`; `decomposition.max_subtasks ≥ 2`; `extra_args` без bypass-флагов; footprint-пары (external несовместим с exclude_local/commit; in_repo требует tracking ≠ none) и анти-traversal `external_root` вне `repo.local_path`; команды проверок — argv без shell-метасимволов, без bypass-флагов, не из `denied_commands`; telegram timeout > 0 и валидные имена env-переменных ([validation.py:80-216](../../../src/wastech_orchestrator/config/validation.py#L80)).
-- `check_task_route_override` — те же allowed/configured/routable-проверки, но **чистая** (возвращает список проблем, ничего не поднимает) ([validation.py:228-240](../../../src/wastech_orchestrator/config/validation.py#L228)).
+- **Structural** (loader): non-mapping root, unknown keys (top-level and block-level), unknown stage/provider/enum, wrong types → `ConfigError`; `schema_version` newer than current (=6) → `ConfigError` ([loader.py:758-775](../../../src/wastech_orchestrator/config/loader.py#L758)).
+- **Semantic** (validation): routes only for `ROUTABLE_STAGES`, primary/fallback ∈ `agents.allowed` and present in `agents.providers`; `poll_interval_seconds ≥ 0`; `max_total_fix_iterations ≥ max_fix_cycles`; `decomposition.max_subtasks ≥ 2`; `extra_args` without bypass flags; footprint pairs (external is incompatible with exclude_local/commit; in_repo requires tracking ≠ none) and anti-traversal `external_root` outside `repo.local_path`; check commands — argv without shell metacharacters, without bypass flags, not from `denied_commands`; telegram timeout > 0 and valid env-variable names ([validation.py:80-216](../../../src/wastech_orchestrator/config/validation.py#L80)).
+- `check_task_route_override` — the same allowed/configured/routable checks, but **pure** (returns a list of issues, raises nothing) ([validation.py:228-240](../../../src/wastech_orchestrator/config/validation.py#L228)).
 
-## Результат
+## Output
 
-`ConfigLoadResult(config, warnings)`; список warnings из `validate_config` (например, `disabled` discovery); `(merged, added, removed)` из апгрейда; YAML-текст из `render`. Сам блок ничего не записывает (запись — у вызывающих).
+`ConfigLoadResult(config, warnings)`; list of warnings from `validate_config` (e.g. `disabled` discovery); `(merged, added, removed)` from upgrade; YAML text from `render`. The block itself writes nothing (writing belongs to the callers).
 
-## Побочные эффекты
+## Side effects
 
-- `load_config` читает файл; `packaged_template_mapping` читает упакованный шаблон. Прочие функции — чистые. Запись файла конфига выполняется не здесь.
+- `load_config` reads a file; `packaged_template_mapping` reads the packaged template. All other functions are pure. Writing the config file does not happen here.
 
-## Ошибки и граничные случаи
+## Errors and edge cases
 
-- Любая структурная/семантическая проблема → `ConfigError(issues)` со **всем** списком (не первая).
-- Частичный конфиг догружается безопасными дефолтами §11 (если не нарушает семантику).
-- `schema_version` новее → fail-closed (CLI печатает сообщение + выход 2).
+- Any structural/semantic issue → `ConfigError(issues)` with the **full** list (not just the first).
+- A partial config is supplemented with safe defaults from §11 (if it does not violate semantics).
+- `schema_version` newer than current → fail-closed (CLI prints a message + exits with 2).
 
-## Связи
+## Relations
 
-### Использует
+### Uses
 
-- [B25 — Security](./B25-security-policy.md) — `find_forbidden_args` (валидация `extra_args` и команд).
-- [B23 — Проверки](./B23-check-discovery.md) — `checks.model` (`normalize_check_command`, `argv_matches_denied`, `shell_metachars`) при валидации команд.
+- [B25 — Security](./B25-security-policy.md) — `find_forbidden_args` (validates `extra_args` and commands).
+- [B23 — Checks](./B23-check-discovery.md) — `checks.model` (`normalize_check_command`, `argv_matches_denied`, `shell_metachars`) when validating commands.
 - PyYAML.
 
-### Используется в
+### Used by
 
 - [B01 — CLI](./B01-cli-and-operator-commands.md) — `_load_config`, `cmd_upgrade_config`.
-- [B06 — Конвейер](./B06-orchestrator-pipeline.md) и почти все блоки — читают типы `OrchestratorConfig`.
+- [B06 — Pipeline](./B06-orchestrator-pipeline.md) and almost all blocks — read `OrchestratorConfig` types.
 - [B16](./B16-task-parsing-and-validation-gate.md), [B17](./B17-agent-router-and-fallback.md) — `check_task_route_override`, `ROUTABLE_STAGES`/`SKIPPABLE_STAGES`.
-- [B03 — Установщик](./B03-installer-and-scaffolding.md) — `loads_config` + `validate_config` (проверка сгенерированного конфига), `upgrade.*`.
+- [B03 — Installer](./B03-installer-and-scaffolding.md) — `loads_config` + `validate_config` (validating generated config), `upgrade.*`.
 
-## Место в общей системе
+## Role in the overall system
 
-Конфигурация — единый источник параметров поведения. Fail-closed-загрузка и валидация образуют config-time половину инварианта «политику безопасности нельзя ослабить»: небезопасный или противоречивый конфиг не доходит до конвейера. Версионирование позволяет безопасно эволюционировать формат и мигрировать существующие установки.
+Configuration is the single source of behavioral parameters. Fail-closed loading and validation form the config-time half of the invariant "the security policy cannot be weakened": an unsafe or contradictory config never reaches the pipeline. Versioning enables safe evolution of the format and migration of existing installations.
 
-## Подтверждение в коде
+## Code confirmation
 
-- [config/schema.py:34-334](../../../src/wastech_orchestrator/config/schema.py#L34) — версия формата, `ROUTABLE_STAGES`/`SKIPPABLE_STAGES`, все блочные датаклассы и перечисления.
-- [config/loader.py:778-829](../../../src/wastech_orchestrator/config/loader.py#L778) — `_parse`, `loads_config`, `load_config`, привязка `templates_dir`.
-- [config/loader.py:458-502](../../../src/wastech_orchestrator/config/loader.py#L458) — легаси-миграция маршрутизации, дефолты.
-- [config/validation.py:69-240](../../../src/wastech_orchestrator/config/validation.py#L69) — семантические правила и `check_task_route_override`.
-- [config/upgrade.py:58-120](../../../src/wastech_orchestrator/config/upgrade.py#L58) — merge add-missing, удаление ключей, render.
-- Тесты: [test_loader.py](../../../tests/config/test_loader.py), [test_validation.py](../../../tests/config/test_validation.py), [test_upgrade.py](../../../tests/config/test_upgrade.py), [test_config_schema_version.py](../../../tests/config/test_config_schema_version.py), [test_roundtrip.py](../../../tests/config/test_roundtrip.py), [test_checks_discovery.py](../../../tests/config/test_checks_discovery.py).
+- [config/schema.py:34-334](../../../src/wastech_orchestrator/config/schema.py#L34) — format version, `ROUTABLE_STAGES`/`SKIPPABLE_STAGES`, all block dataclasses and enumerations.
+- [config/loader.py:778-829](../../../src/wastech_orchestrator/config/loader.py#L778) — `_parse`, `loads_config`, `load_config`, `templates_dir` binding.
+- [config/loader.py:458-502](../../../src/wastech_orchestrator/config/loader.py#L458) — legacy routing migration, defaults.
+- [config/validation.py:69-240](../../../src/wastech_orchestrator/config/validation.py#L69) — semantic rules and `check_task_route_override`.
+- [config/upgrade.py:58-120](../../../src/wastech_orchestrator/config/upgrade.py#L58) — add-missing merge, key removal, render.
+- Tests: [test_loader.py](../../../tests/config/test_loader.py), [test_validation.py](../../../tests/config/test_validation.py), [test_upgrade.py](../../../tests/config/test_upgrade.py), [test_config_schema_version.py](../../../tests/config/test_config_schema_version.py), [test_roundtrip.py](../../../tests/config/test_roundtrip.py), [test_checks_discovery.py](../../../tests/config/test_checks_discovery.py).

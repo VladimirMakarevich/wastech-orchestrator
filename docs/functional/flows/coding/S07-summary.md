@@ -1,87 +1,87 @@
-# S07 — Стадия summary
+# S07 — summary stage
 
-## Назначение
+## Purpose
 
-Подготовить тело будущего PR (`summary.md`). Стадия **best-effort** и опциональна (`SKIPPABLE`): если её пропустить или ни один провайдер не справится — пишется компактный детерминированный summary, чтобы у PR всегда было тело.
+Prepare the body of the future PR (`summary.md`). The stage is **best-effort** and optional (`SKIPPABLE`): if it is skipped or no provider succeeds, a compact deterministic summary is written so that the PR always has a body.
 
-## Ответственность
+## Responsibility
 
-- Получить summary одним из трёх путей (агент / stub при пропуске / минимальный при отсутствии агента), дописать аудит пропусков, перейти к публикации ([orchestrator.py:1298-1326](../../../../src/wastech_orchestrator/core/orchestrator.py#L1298)).
+- Obtain a summary via one of three paths (agent / stub on skip / minimal when no agent), append the skipped-stages audit section, and transition to publishing ([orchestrator.py:1298-1326](../../../../src/wastech_orchestrator/core/orchestrator.py#L1298)).
 
-## Границы шага
+## Step boundaries
 
-### Входит в ответственность шага
+### Within the step's responsibility
 
-- Выбор источника summary; запись `summary.{md,json}`; секция пропущенных стадий; переход к публикации.
+- Choosing the summary source; writing `summary.{md,json}`; the skipped-stages section; transitioning to publishing.
 
-### Не входит в ответственность шага
+### Outside the step's responsibility
 
-- **Минимальный fallback-summary** (`git diff --stat`, без полного патча) — [B08](../../blocks/B08-ledger-and-failure-reports.md).
-- **Запуск агента** — [B17](../../blocks/B17-agent-router-and-fallback.md)/[B18](../../blocks/B18-agent-providers.md); **коммит/перенос файла** — [S08](./S08-publishing.md)/[B22](../../blocks/B22-git-manager.md).
+- **Minimal fallback summary** (`git diff --stat`, without the full patch) — [B08](../../blocks/B08-ledger-and-failure-reports.md).
+- **Launching the agent** — [B17](../../blocks/B17-agent-router-and-fallback.md)/[B18](../../blocks/B18-agent-providers.md); **committing/moving the file** — [S08](./S08-publishing.md)/[B22](../../blocks/B22-git-manager.md).
 
-## Точки входа
+## Entry points
 
-- `_summary(p)` ([orchestrator.py:1298](../../../../src/wastech_orchestrator/core/orchestrator.py#L1298)) — вызывается из `_run_units_and_finish` после цикла единиц.
+- `_summary(p)` ([orchestrator.py:1298](../../../../src/wastech_orchestrator/core/orchestrator.py#L1298)) — called from `_run_units_and_finish` after the units loop.
 
-## Входные данные и состояние
+## Input data and state
 
-Итог работы единиц (дифф ветки); опц. вывод агента summary. Статус `summarizing` → `ready_to_publish`. Артефакты — `summary.md` (рядом с задачей, коммитится позже) и `summary.json` (под `logs/`, не коммитится).
+Result of the units' work (branch diff); optional output of the summary agent. Status `summarizing` → `ready_to_publish`. Artifacts — `summary.md` (next to the task, committed later) and `summary.json` (under `logs/`, not committed).
 
-## Основной сценарий
+## Main scenario
 
-1. **Пропуск** (summary в skip): stub-summary, `record_skip`.
-2. Иначе `_run_stage(SUMMARY)` ([B17](../../blocks/B17-agent-router-and-fallback.md)/[B18](../../blocks/B18-agent-providers.md)): успех → summary из вывода агента; иначе best-effort `write_minimal_summary` (файлы + `git diff --stat`, без полного патча; [B08](../../blocks/B08-ledger-and-failure-reports.md)).
-3. Дописать секцию пропущенных стадий; зарегистрировать `summary.json`; перейти в `READY_TO_PUBLISH`.
+1. **Skip** (summary in skip): stub summary, `record_skip`.
+2. Otherwise `_run_stage(SUMMARY)` ([B17](../../blocks/B17-agent-router-and-fallback.md)/[B18](../../blocks/B18-agent-providers.md)): success → summary from agent output; otherwise best-effort `write_minimal_summary` (files + `git diff --stat`, without full patch; [B08](../../blocks/B08-ledger-and-failure-reports.md)).
+3. Append the skipped-stages section; register `summary.json`; transition to `READY_TO_PUBLISH`.
 
 ```mermaid
 flowchart TB
-    start(["вход: summarizing"]) --> skip{"summary пропущен?"}
-    skip -->|да| stub["stub-summary + record_skip"]
-    skip -->|нет| run["агент summary (B17/B18)"]
-    run --> ok{"успех?"}
-    ok -->|да| fromagent["summary из вывода агента"]
-    ok -->|нет| minimal["write_minimal_summary:<br/>файлы + git diff --stat (B08)"]
-    stub --> tail["append секции пропусков; register summary.json"]
+    start(["entry: summarizing"]) --> skip{"summary skipped?"}
+    skip -->|yes| stub["stub summary + record_skip"]
+    skip -->|no| run["summary agent (B17/B18)"]
+    run --> ok{"success?"}
+    ok -->|yes| fromagent["summary from agent output"]
+    ok -->|no| minimal["write_minimal_summary:<br/>files + git diff --stat (B08)"]
+    stub --> tail["append skipped-stages section; register summary.json"]
     fromagent --> tail
     minimal --> tail
     tail --> pub["→ READY_TO_PUBLISH → S08 publishing"]
 ```
 
-## Проверки и ограничения
+## Checks and constraints
 
-- summary в `SKIPPABLE_STAGES` ([schema.py:55-63](../../../../src/wastech_orchestrator/config/schema.py#L55)).
-- Best-effort: отсутствие агента — **не** провал задачи; пишется компактный summary (без полного патча/описания; §5.2, [B08](../../blocks/B08-ledger-and-failure-reports.md)).
-- `summary.md` — рядом с задачей (коммитится при публикации); `summary.json` — рабочий артефакт под `logs/`, не коммитится.
+- summary is in `SKIPPABLE_STAGES` ([schema.py:55-63](../../../../src/wastech_orchestrator/config/schema.py#L55)).
+- Best-effort: absence of an agent is **not** a task failure; a compact summary is written (without full patch/description; §5.2, [B08](../../blocks/B08-ledger-and-failure-reports.md)).
+- `summary.md` — next to the task (committed during publishing); `summary.json` — working artifact under `logs/`, not committed.
 
-## Результат / переход
+## Result / transition
 
-Переход в `READY_TO_PUBLISH` → [S08 publishing](./S08-publishing.md). Артефакты `summary.md`/`summary.json`.
+Transition to `READY_TO_PUBLISH` → [S08 publishing](./S08-publishing.md). Artifacts `summary.md`/`summary.json`.
 
-## Побочные эффекты
+## Side effects
 
-- Запись `summary.md`/`summary.json`; запуск агента ([B18](../../blocks/B18-agent-providers.md)); при fallback — `git diff --stat` через [B22](../../blocks/B22-git-manager.md).
+- Writing `summary.md`/`summary.json`; launching the agent ([B18](../../blocks/B18-agent-providers.md)); on fallback — `git diff --stat` via [B22](../../blocks/B22-git-manager.md).
 
-## Ошибки и граничные случаи
+## Errors and edge cases
 
-- Ни один провайдер не дал summary → минимальный summary (а не провал).
-- Стадия не запрашивает человека (HITL только refinement/planning, [B12](../../blocks/B12-hitl-and-typed-output.md)).
+- No provider produced a summary → minimal summary (not a failure).
+- The stage does not prompt a human (HITL is only for refinement/planning, [B12](../../blocks/B12-hitl-and-typed-output.md)).
 
-## Связи
+## Relationships
 
-### Использует
+### Uses
 
-- [B17](../../blocks/B17-agent-router-and-fallback.md)/[B18](../../blocks/B18-agent-providers.md), [B08](../../blocks/B08-ledger-and-failure-reports.md) (минимальный summary), [B22](../../blocks/B22-git-manager.md) (`diff_stat`).
+- [B17](../../blocks/B17-agent-router-and-fallback.md)/[B18](../../blocks/B18-agent-providers.md), [B08](../../blocks/B08-ledger-and-failure-reports.md) (minimal summary), [B22](../../blocks/B22-git-manager.md) (`diff_stat`).
 
-### Используется в
+### Used by
 
-- [S08 publishing](./S08-publishing.md) — тело PR; [B06](../../blocks/B06-orchestrator-pipeline.md) — драйвер.
+- [S08 publishing](./S08-publishing.md) — PR body; [B06](../../blocks/B06-orchestrator-pipeline.md) — driver.
 
-## Место в потоке
+## Position in the flow
 
-Предпоследняя стадия: гарантирует, что у PR будет тело даже без агента. См. [обзор потока](./index.md).
+Second-to-last stage: guarantees that the PR will have a body even without an agent. See [flow overview](./index.md).
 
-## Подтверждение в коде
+## Code confirmation
 
-- [orchestrator.py:1298-1326](../../../../src/wastech_orchestrator/core/orchestrator.py#L1298) — `_summary` (три источника, секция пропусков, переход).
-- [orchestrator.py:1425-1466](../../../../src/wastech_orchestrator/core/orchestrator.py#L1425) — `_summary_md_body` (тело summary).
-- Тесты: [tests/core/test_ledger.py](../../../../tests/core/test_ledger.py) (минимальный summary), [tests/core/test_orchestrator.py](../../../../tests/core/test_orchestrator.py).
+- [orchestrator.py:1298-1326](../../../../src/wastech_orchestrator/core/orchestrator.py#L1298) — `_summary` (three sources, skipped-stages section, transition).
+- [orchestrator.py:1425-1466](../../../../src/wastech_orchestrator/core/orchestrator.py#L1425) — `_summary_md_body` (summary body).
+- Tests: [tests/core/test_ledger.py](../../../../tests/core/test_ledger.py) (minimal summary), [tests/core/test_orchestrator.py](../../../../tests/core/test_orchestrator.py).

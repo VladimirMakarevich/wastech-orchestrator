@@ -1,112 +1,112 @@
-# Функциональная карта системы
+# Functional Map of the System
 
-> Эта документация восстановлена по исполняемому коду и тестам (`src/wastech_orchestrator/`, `tests/`). Источником истины является только код; README, спецификации, комментарии и docstring в качестве источника не использовались. Каждое существенное утверждение в документах блоков сопровождается ссылкой на подтверждающий участок кода (`файл:строка`).
+> This documentation was reconstructed from executable code and tests (`src/wastech_orchestrator/`, `tests/`). The code is the only source of truth; README files, specifications, comments, and docstrings were not used as sources. Every significant claim in the block documents is accompanied by a reference to the supporting code location (`file:line`).
 
-## Назначение системы (подтверждено кодом)
+## System Purpose (confirmed by code)
 
-Система — это оркестратор, который проводит **одну задачу за раз** через детерминированный конвейер, запуская внешние CLI кодинг-агентов (`codex`, `claude`) как дочерние процессы и публикуя результат в Git (ветка → коммит → push → Pull Request через `gh`).
+The system is an orchestrator that runs **one task at a time** through a deterministic pipeline, launching external CLI coding agents (`codex`, `claude`) as child processes and publishing the result to Git (branch → commit → push → Pull Request via `gh`).
 
-Подтверждается:
+Confirmed by:
 
-- точкой входа CLI и набором подкоманд ([cli.py:114-376](../../src/wastech_orchestrator/cli.py#L114));
-- классом-конвейером [Orchestrator](../../src/wastech_orchestrator/core/orchestrator.py#L294) и его методом `run_task` ([orchestrator.py:350](../../src/wastech_orchestrator/core/orchestrator.py#L350));
-- контрактом провайдера [AgentProvider](../../src/wastech_orchestrator/providers/base.py#L155) с двумя адаптерами `codex` и `claude`;
-- машиной состояний задачи ([state_machine.py:15-113](../../src/wastech_orchestrator/core/state_machine.py#L15));
-- запуском всех внешних команд **списком аргументов без shell-интерполяции** ([process.py](../../src/wastech_orchestrator/providers/process.py), [git_manager.py](../../src/wastech_orchestrator/git_manager.py)).
+- the CLI entry point and set of subcommands ([cli.py:114-376](../../src/wastech_orchestrator/cli.py#L114));
+- the pipeline class [Orchestrator](../../src/wastech_orchestrator/core/orchestrator.py#L294) and its `run_task` method ([orchestrator.py:350](../../src/wastech_orchestrator/core/orchestrator.py#L350));
+- the provider contract [AgentProvider](../../src/wastech_orchestrator/providers/base.py#L155) with two adapters `codex` and `claude`;
+- the task state machine ([state_machine.py:15-113](../../src/wastech_orchestrator/core/state_machine.py#L15));
+- all external commands being launched **as an argument list without shell interpolation** ([process.py](../../src/wastech_orchestrator/providers/process.py), [git_manager.py](../../src/wastech_orchestrator/git_manager.py)).
 
-Ключевые свойства, которые видны в коде:
+Key properties visible in the code:
 
-- **Один слот обработки.** Активной может быть только одна задача; слот проверяется запросом к БД (`acquire_slot` / `find_active_tasks`, [orchestrator.py:383-385](../../src/wastech_orchestrator/core/orchestrator.py#L383)).
-- **Возобновляемость.** Всё состояние персистится в SQLite (`state.db`) и в файловых артефактах, что позволяет продолжить прерванную задачу (`resume`, [orchestrator.py:655](../../src/wastech_orchestrator/core/orchestrator.py#L655)).
-- **Разделение ответственности (инвариант).** Ядро никогда само не строит команду CLI: оно вызывает только Router (агентские стадии), Check Runner (стадия `testing`) и Git Manager (всё, что касается git). Контекст передаётся агентам **только путями к файлам-артефактам** в `AgentRunRequest`.
-- **Fallback только для инфраструктурных ошибок.** Качественные провалы (тесты/ревью) уходят в стадию `fixing`, а не на другого провайдера (Router, [router.py](../../src/wastech_orchestrator/routing/router.py)).
-- **Неослабляемая политика безопасности.** Запрещённые флаги, аллой-лист переменных окружения, изоляция и скан инъекций ([security/](../../src/wastech_orchestrator/security/)).
-- **Человек в контуре (HITL).** Долговечные взаимодействия через Telegram для согласования планов, «опасных» диффов и изменившегося набора проверок ([core/hitl.py](../../src/wastech_orchestrator/core/hitl.py), [notify/telegram.py](../../src/wastech_orchestrator/notify/telegram.py)).
+- **Single processing slot.** Only one task can be active at a time; the slot is checked by a database query (`acquire_slot` / `find_active_tasks`, [orchestrator.py:383-385](../../src/wastech_orchestrator/core/orchestrator.py#L383)).
+- **Resumability.** All state is persisted in SQLite (`state.db`) and in file artifacts, allowing an interrupted task to be continued (`resume`, [orchestrator.py:655](../../src/wastech_orchestrator/core/orchestrator.py#L655)).
+- **Separation of concerns (invariant).** The core never builds a CLI command itself: it only calls the Router (agent stages), Check Runner (the `testing` stage), and Git Manager (everything git-related). Context is passed to agents **only as paths to artifact files** in `AgentRunRequest`.
+- **Fallback only for infrastructure errors.** Quality failures (tests/review) go to the `fixing` stage, not to another provider (Router, [router.py](../../src/wastech_orchestrator/routing/router.py)).
+- **Non-weakening security policy.** Forbidden flags, environment variable allowlist, isolation, and injection scanning ([security/](../../src/wastech_orchestrator/security/)).
+- **Human in the loop (HITL).** Durable interactions via Telegram for approving plans, "dangerous" diffs, and changed check sets ([core/hitl.py](../../src/wastech_orchestrator/core/hitl.py), [notify/telegram.py](../../src/wastech_orchestrator/notify/telegram.py)).
 
-## Контекст системы
+## System Context
 
-Оркестратор — единый процесс, который обрабатывает одну задачу за раз. Снаружи он общается только с файлами, локальным репозиторием и несколькими внешними программами; всё это запускается **списком аргументов без shell-интерполяции**.
+The orchestrator is a single process that handles one task at a time. Externally it communicates only with files, the local repository, and a few external programs; all of these are launched **as an argument list without shell interpolation**.
 
 ```mermaid
 flowchart TB
-    operator(["Оператор"])
-    human(["Человек в контуре"])
+    operator(["Operator"])
+    human(["Human in the loop"])
 
-    subgraph orc["Оркестратор — один процесс, одна задача за раз"]
+    subgraph orc["Orchestrator — single process, one task at a time"]
         cli["B01 CLI / B02 watch"]
-        pipeline["B06 Конвейер<br/>+ машина состояний"]
+        pipeline["B06 Pipeline<br/>+ state machine"]
         cli --> pipeline
     end
 
-    agents["codex / claude<br/>CLI кодинг-агентов"]
+    agents["codex / claude<br/>CLI coding agents"]
     vcs["git / gh — CLI"]
     tg["Telegram Bot API"]
     db[("state.db<br/>SQLite")]
-    fsart[("Артефакты на диске<br/>tasks/ · logs/ · checks/")]
+    fsart[("Artifacts on disk<br/>tasks/ · logs/ · checks/")]
 
-    operator -->|"подкоманды: run, watch, ..."| cli
-    pipeline -->|"argv без shell"| agents
-    pipeline -->|"ветка, commit, push, PR"| vcs
-    pipeline -->|"запрос и ответ (HITL)"| tg
-    tg <-->|"согласование"| human
-    pipeline <-->|"состояние, единый слот"| db
-    pipeline <-->|"request / result / stdout / события"| fsart
+    operator -->|"subcommands: run, watch, ..."| cli
+    pipeline -->|"argv without shell"| agents
+    pipeline -->|"branch, commit, push, PR"| vcs
+    pipeline -->|"request and response (HITL)"| tg
+    tg <-->|"approval"| human
+    pipeline <-->|"state, single slot"| db
+    pipeline <-->|"request / result / stdout / events"| fsart
 ```
 
-Чем подтверждается каждое внешнее взаимодействие: запуск `codex`/`claude` как дочерних процессов — [B18](./blocks/B18-agent-providers.md); `git`/`gh` — [B22](./blocks/B22-git-manager.md); оба класса процессов проходят через единый безопасный запуск [B19](./blocks/B19-subprocess-runner.md); Telegram — [B26](./blocks/B26-notifications-telegram.md); SQLite — [B07](./blocks/B07-state-machine-and-store.md); файловые артефакты — [B20](./blocks/B20-artifact-layout.md).
+What confirms each external interaction: launching `codex`/`claude` as child processes — [B18](./blocks/B18-agent-providers.md); `git`/`gh` — [B22](./blocks/B22-git-manager.md); both process classes go through the single safe launcher [B19](./blocks/B19-subprocess-runner.md); Telegram — [B26](./blocks/B26-notifications-telegram.md); SQLite — [B07](./blocks/B07-state-machine-and-store.md); file artifacts — [B20](./blocks/B20-artifact-layout.md).
 
-Навигируемая версия этих связей как **architecture-as-code** (C4-модель: контекст → контейнеры → компоненты, с кликабельным переходом на документы блоков) — в [docs/architecture/](../architecture/README.md) (LikeC4). Эта функциональная карта остаётся источником детализации и привязок к коду.
+A navigable version of these relationships as **architecture-as-code** (C4 model: context → containers → components, with clickable links to block documents) is in [docs/architecture/](../architecture/README.md) (LikeC4). This functional map remains the source of detail and code bindings.
 
-## Точки входа (подтверждены)
+## Entry Points (confirmed)
 
-- **Консольные скрипты `wastech-orchestrator` и `worc`** ([pyproject.toml:29-32](../../pyproject.toml#L29) → `cli:main`) — разбор аргументов и диспетчеризация подкоманд.
-- **`python -m wastech_orchestrator`** ([\_\_main\_\_.py](../../src/wastech_orchestrator/__main__.py) → `cli:main`) — то же, что консольные скрипты.
-- **Подкоманды CLI** ([cli.py build_parser](../../src/wastech_orchestrator/cli.py#L114), диспетчер [main](../../src/wastech_orchestrator/cli.py#L1497)) — `init`, `install`, `run`, `watch`, `stop`, `restart`, `preflight`, `telegram-test`, `status`, `upgrade-config`, `upgrade-docs`, `install-templates`, `rerun`, `finalize`.
+- **Console scripts `wastech-orchestrator` and `worc`** ([pyproject.toml:29-32](../../pyproject.toml#L29) → `cli:main`) — argument parsing and subcommand dispatch.
+- **`python -m wastech_orchestrator`** ([\_\_main\_\_.py](../../src/wastech_orchestrator/__main__.py) → `cli:main`) — same as the console scripts.
+- **CLI subcommands** ([cli.py build_parser](../../src/wastech_orchestrator/cli.py#L114), dispatcher [main](../../src/wastech_orchestrator/cli.py#L1497)) — `init`, `install`, `run`, `watch`, `stop`, `restart`, `preflight`, `telegram-test`, `status`, `upgrade-config`, `upgrade-docs`, `install-templates`, `rerun`, `finalize`.
 
-Внутренние триггеры (не пользовательские команды), подтверждённые кодом:
+Internal triggers (not user commands), confirmed by code:
 
-- **Цикл `watch`** периодически сканирует папку `tasks/pending` и подаёт задачи в оркестратор по одной ([cli.py watch_loop/watch_once](../../src/wastech_orchestrator/cli.py#L778)).
-- **Обработчик `SIGTERM`** демона `watch` (грейсфул-остановка между тиками) — [process_control.py](../../src/wastech_orchestrator/process_control.py).
-- **Поллинг Telegram** во время ожидания ответа человека (`wait_for_answer`) — [notify/telegram.py](../../src/wastech_orchestrator/notify/telegram.py).
-- **Heartbeat-потоки** во время долгих операций (провайдер/проверки/git) — [observability/progress.py](../../src/wastech_orchestrator/observability/progress.py).
+- **`watch` loop** periodically scans the `tasks/pending` folder and submits tasks to the orchestrator one at a time ([cli.py watch_loop/watch_once](../../src/wastech_orchestrator/cli.py#L778)).
+- **`SIGTERM` handler** of the `watch` daemon (graceful stop between ticks) — [process_control.py](../../src/wastech_orchestrator/process_control.py).
+- **Telegram polling** while waiting for a human response (`wait_for_answer`) — [notify/telegram.py](../../src/wastech_orchestrator/notify/telegram.py).
+- **Heartbeat threads** during long-running operations (provider/checks/git) — [observability/progress.py](../../src/wastech_orchestrator/observability/progress.py).
 
-## Основные сквозные потоки (обзор)
+## Main Cross-Cutting Flows (overview)
 
-Подробные пошаговые сценарии — в [system-flows.md](./system-flows.md); покадровый разбор стадий конвейера (по документу на стадию, S01–S08) — в [flows/coding/index.md](./flows/coding/index.md). Кратко:
+Detailed step-by-step scenarios are in [system-flows.md](./system-flows.md); a frame-by-frame breakdown of pipeline stages (one document per stage, S01–S08) is in [flows/coding/index.md](./flows/coding/index.md). In brief:
 
-1. **Обработка одной задачи (`run` / `watch`).** Чтение и валидация задачи → захват слота → подготовка ветки → (опц.) refinement → planning (+ опц. декомпозиция) → для каждой единицы работы цикл `implementation → testing → review → fixing` → summary → публикация (commit/push/PR, опц. auto-merge) → терминальная очистка → запись в ledger.
-2. **Демон `watch`.** Между тиками: fetch/pull базовой ветки, возобновление прерванной задачи, выбор следующей pending-задачи (одна за раз; back-to-back только при `auto_mode`).
-3. **Возобновление (`resume`).** На старте сверяется персистентное состояние и продолжается единственная незавершённая задача либо завершается прерванная очистка.
-4. **`rerun` / `rerun --continue`.** Повторная попытка терминальной задачи — «с нуля от базы» либо «продолжить со стадии, на которой упала».
-5. **`finalize`.** Оператор фиксирует исход задачи, выполненной вручную (без конвейера и без commit/push/PR).
-6. **`install` / `init` / `preflight`.** Установка/привязка к репозиторию, генерация и проверка конфигурации, диагностика готовности провайдеров и изоляции.
+1. **Single task processing (`run` / `watch`).** Read and validate task → acquire slot → prepare branch → (opt.) refinement → planning (+ opt. decomposition) → for each work unit the loop `implementation → testing → review → fixing` → summary → publish (commit/push/PR, opt. auto-merge) → terminal cleanup → write to ledger.
+2. **`watch` daemon.** Between ticks: fetch/pull base branch, resume interrupted task, pick next pending task (one at a time; back-to-back only with `auto_mode`).
+3. **Resume (`resume`).** On startup, compare persistent state and continue the single unfinished task or complete interrupted cleanup.
+4. **`rerun` / `rerun --continue`.** Retry a terminal task — "from scratch from base" or "continue from the stage where it failed".
+5. **`finalize`.** The operator records the outcome of a task completed manually (without the pipeline and without commit/push/PR).
+6. **`install` / `init` / `preflight`.** Install/bind to a repository, generate and validate configuration, diagnose provider and isolation readiness.
 
-## Конвейер как машина состояний
+## Pipeline as a State Machine
 
-Каждая задача движется по фиксированному набору статусов с разрешёнными переходами. Переходы заданы явной таблицей `ALLOWED_TRANSITIONS` ([core/state_machine.py:70](../../src/wastech_orchestrator/core/state_machine.py#L70)); ядро проверяет каждый переход (`assert_transition`) и атомарно сохраняет новый статус.
+Each task moves through a fixed set of statuses with allowed transitions. Transitions are defined by an explicit `ALLOWED_TRANSITIONS` table ([core/state_machine.py:70](../../src/wastech_orchestrator/core/state_machine.py#L70)); the core validates each transition (`assert_transition`) and atomically persists the new status.
 
 ```mermaid
 stateDiagram-v2
     direction TB
     [*] --> new
 
-    new --> validated: шлюз §19 пройден
-    new --> failed: reject §19 (карантин, без ветки)
+    new --> validated: gate §19 passed
+    new --> failed: reject §19 (quarantine, no branch)
     validated --> preparing
     preparing --> refining
-    preparing --> planning: refinement пропущен
+    preparing --> planning: refinement skipped
     refining --> planning
     planning --> implementing
 
     implementing --> testing
-    implementing --> reviewing: testing пропущен
-    testing --> reviewing: проверки прошли
-    testing --> fixing: качественный провал
-    reviewing --> summarizing: ревью без блокеров
-    reviewing --> fixing: блокирующие находки
-    reviewing --> implementing: следующий сабтаск (k из n)
+    implementing --> reviewing: testing skipped
+    testing --> reviewing: checks passed
+    testing --> fixing: quality failure
+    reviewing --> summarizing: review has no blockers
+    reviewing --> fixing: blocking findings
+    reviewing --> implementing: next subtask (k of n)
     fixing --> testing
-    fixing --> reviewing: testing пропущен
+    fixing --> reviewing: testing skipped
 
     summarizing --> ready_to_publish
     ready_to_publish --> committing
@@ -119,87 +119,87 @@ stateDiagram-v2
     manual_action_required --> [*]
 
     note right of fixing
-      Любой активный статус также может перейти в failed
-      или manual_action_required: инфраструктурный сбой,
-      застревание по лимитам, сбой HITL (fail-closed).
+      Any active status can also transition to failed
+      or manual_action_required: infrastructure failure,
+      limit exhaustion, HITL failure (fail-closed).
     end note
 ```
 
-Терминальные статусы (без исходящих переходов) — `done`, `failed`, `manual_action_required`. Статус `pending` (§8.2) — это ожидание в очереди: задача принята, но ещё не владеет единственным слотом обработки; в таблице из него ведут `pending → validated` и `pending → preparing` (взятие из очереди или возобновление), тогда как нормальный вход в конвейер — статус `new`. Цикл декомпозиции не вводит новых статусов: каждый сабтаск переиспользует `implementing → testing → reviewing`, а его номер (`k` из `n`) хранится в State Store.
+Terminal statuses (no outgoing transitions) — `done`, `failed`, `manual_action_required`. The `pending` status (§8.2) is waiting in the queue: the task has been accepted but does not yet own the single processing slot; the table has `pending → validated` and `pending → preparing` (dequeue or resume), while the normal pipeline entry status is `new`. The decomposition loop does not introduce new statuses: each subtask reuses `implementing → testing → reviewing`, and its number (`k` of `n`) is stored in the State Store.
 
-## Карта функциональных блоков
+## Functional Block Map
 
-Полный список с точками входа, зависимостями и статусом — в [block-registry.md](./block-registry.md). Блоки сгруппированы по роли:
+The full list with entry points, dependencies, and status is in [block-registry.md](./block-registry.md). Blocks are grouped by role:
 
-### Интерфейс и управление запуском
+### Interface and Launch Control
 
-- [B01 — CLI и операторские команды](./blocks/B01-cli-and-operator-commands.md)
-- [B02 — Демон watch и планирование задач](./blocks/B02-watch-daemon-and-scheduling.md)
-- [B03 — Установщик и развёртывание проекта](./blocks/B03-installer-and-scaffolding.md)
-- [B04 — Реестр привязок и обнаружение конфигурации](./blocks/B04-install-registry-and-config-discovery.md)
-- [B05 — Конфигурация: схема, загрузка, валидация, апгрейд](./blocks/B05-configuration.md)
+- [B01 — CLI and Operator Commands](./blocks/B01-cli-and-operator-commands.md)
+- [B02 — Watch Daemon and Task Scheduling](./blocks/B02-watch-daemon-and-scheduling.md)
+- [B03 — Installer and Project Scaffolding](./blocks/B03-installer-and-scaffolding.md)
+- [B04 — Install Registry and Config Discovery](./blocks/B04-install-registry-and-config-discovery.md)
+- [B05 — Configuration: Schema, Loading, Validation, Upgrade](./blocks/B05-configuration.md)
 
-### Ядро оркестрации
+### Orchestration Core
 
-- [B06 — Конвейер оркестратора](./blocks/B06-orchestrator-pipeline.md) — центральный блок
-- [B07 — Машина состояний и State Store](./blocks/B07-state-machine-and-store.md)
-- [B08 — Ledger и отчёты о провале](./blocks/B08-ledger-and-failure-reports.md)
-- [B09 — Контроль циклов исправления](./blocks/B09-fix-loop-control.md)
-- [B10 — Восстановление и возобновление](./blocks/B10-recovery-and-resume.md)
-- [B11 — Декомпозиция задачи](./blocks/B11-task-decomposition.md)
-- [B12 — HITL и типизированный вывод стадий](./blocks/B12-hitl-and-typed-output.md)
-- [B13 — Инвентарь и выбор навыков (skills)](./blocks/B13-skill-selection.md)
-- [B14 — Классификация «опасного» диффа](./blocks/B14-dangerous-diff-guardrail.md)
-- [B15 — Шаблоны промптов и их рендеринг](./blocks/B15-prompt-templates.md)
+- [B06 — Orchestrator Pipeline](./blocks/B06-orchestrator-pipeline.md) — central block
+- [B07 — State Machine and State Store](./blocks/B07-state-machine-and-store.md)
+- [B08 — Ledger and Failure Reports](./blocks/B08-ledger-and-failure-reports.md)
+- [B09 — Fix Loop Control](./blocks/B09-fix-loop-control.md)
+- [B10 — Recovery and Resume](./blocks/B10-recovery-and-resume.md)
+- [B11 — Task Decomposition](./blocks/B11-task-decomposition.md)
+- [B12 — HITL and Typed Stage Output](./blocks/B12-hitl-and-typed-output.md)
+- [B13 — Skill Inventory and Selection](./blocks/B13-skill-selection.md)
+- [B14 — Dangerous Diff Classification](./blocks/B14-dangerous-diff-guardrail.md)
+- [B15 — Prompt Templates and Rendering](./blocks/B15-prompt-templates.md)
 
-### Вход задачи
+### Task Ingestion
 
-- [B16 — Модель задачи, парсинг и шлюз валидации](./blocks/B16-task-parsing-and-validation-gate.md)
+- [B16 — Task Model, Parsing, and Validation Gate](./blocks/B16-task-parsing-and-validation-gate.md)
 
-### Исполнение и провайдеры
+### Execution and Providers
 
-- [B17 — Router агентов и политика fallback](./blocks/B17-agent-router-and-fallback.md)
-- [B18 — Адаптеры провайдеров и контракт (Codex/Claude)](./blocks/B18-agent-providers.md)
-- [B19 — Безопасный запуск подпроцессов](./blocks/B19-subprocess-runner.md)
-- [B20 — Файловая раскладка артефактов запусков](./blocks/B20-artifact-layout.md)
-- [B21 — Редактирование секретов (redaction)](./blocks/B21-secret-redaction.md)
+- [B17 — Agent Router and Fallback Policy](./blocks/B17-agent-router-and-fallback.md)
+- [B18 — Provider Adapters and Contract (Codex/Claude)](./blocks/B18-agent-providers.md)
+- [B19 — Safe Subprocess Launcher](./blocks/B19-subprocess-runner.md)
+- [B20 — Run Artifact File Layout](./blocks/B20-artifact-layout.md)
+- [B21 — Secret Redaction](./blocks/B21-secret-redaction.md)
 
 ### Git
 
-- [B22 — Операции git и GitHub (Git Manager)](./blocks/B22-git-manager.md)
+- [B22 — Git and GitHub Operations (Git Manager)](./blocks/B22-git-manager.md)
 
-### Проверки (quality gate)
+### Checks (quality gate)
 
-- [B23 — Обнаружение и резолвинг проверок](./blocks/B23-check-discovery.md)
-- [B24 — Выполнение проверок (стадия testing)](./blocks/B24-check-execution.md)
+- [B23 — Check Discovery and Resolution](./blocks/B23-check-discovery.md)
+- [B24 — Check Execution (testing stage)](./blocks/B24-check-execution.md)
 
-### Безопасность
+### Security
 
-- [B25 — Принуждение политики безопасности](./blocks/B25-security-policy.md)
+- [B25 — Security Policy Enforcement](./blocks/B25-security-policy.md)
 
-### Интеграции и сквозные сервисы
+### Integrations and Cross-Cutting Services
 
-- [B26 — Уведомления и транспорт HITL (Telegram)](./blocks/B26-notifications-telegram.md)
-- [B27 — Наблюдаемость: логирование и heartbeat](./blocks/B27-observability.md)
+- [B26 — Notifications and HITL Transport (Telegram)](./blocks/B26-notifications-telegram.md)
+- [B27 — Observability: Logging and Heartbeat](./blocks/B27-observability.md)
 
-### Карта зависимостей блоков
+### Block Dependency Map
 
-Упрощённая карта основных связей (полный список — ниже и в [block-registry.md](./block-registry.md)). B06 — спайн: он координирует ядро и инструменты, но никогда сам не строит команду CLI.
+A simplified map of the main relationships (full list below and in [block-registry.md](./block-registry.md)). B06 is the spine: it coordinates the core and tooling but never builds a CLI command itself.
 
 ```mermaid
 flowchart LR
     B01["B01 CLI"]
     B02["B02 watch"]
-    B06["B06 Конвейер — спайн"]
-    B16["B16 Шлюз задачи"]
+    B06["B06 Pipeline — spine"]
+    B16["B16 Task Gate"]
     B07["B07 State Store"]
-    rules["B08-B15 правила ядра:<br/>ledger, циклы fix, recovery,<br/>декомпозиция, HITL, навыки,<br/>guardrail, промпты"]
+    rules["B08-B15 core rules:<br/>ledger, fix loops, recovery,<br/>decomposition, HITL, skills,<br/>guardrail, prompts"]
     B17["B17 Router"]
-    B18["B18 Провайдеры"]
+    B18["B18 Providers"]
     B19["B19 Subprocess"]
     B22["B22 Git Manager"]
-    B23["B23 Резолв проверок"]
-    B24["B24 Проверки (testing)"]
+    B23["B23 Check Resolution"]
+    B24["B24 Checks (testing)"]
     B26["B26 Telegram"]
     B27["B27 Observability"]
     B21["B21 Redaction"]
@@ -221,50 +221,50 @@ flowchart LR
     B24 --> B19
     B22 --> B07
     B01 -.->|"status (read-only)"| B07
-    B25 -.->|"политика"| B18
+    B25 -.->|"policy"| B18
     B25 -.-> B22
     B25 -.-> B24
-    B21 -.->|"секреты"| B18
+    B21 -.->|"secrets"| B18
     B21 -.-> B27
 ```
 
-Ключевое: [B17 Router](./blocks/B17-agent-router-and-fallback.md) — единственный вызыватель [B18 Провайдеров](./blocks/B18-agent-providers.md); все внешние процессы идут через [B19](./blocks/B19-subprocess-runner.md); [B21](./blocks/B21-secret-redaction.md) (redaction) и [B25](./blocks/B25-security-policy.md) (security) — сквозные и используются также в B06, B26, B27 и др.
+Key: [B17 Router](./blocks/B17-agent-router-and-fallback.md) is the sole caller of [B18 Providers](./blocks/B18-agent-providers.md); all external processes go through [B19](./blocks/B19-subprocess-runner.md); [B21](./blocks/B21-secret-redaction.md) (redaction) and [B25](./blocks/B25-security-policy.md) (security) are cross-cutting and are also used by B06, B26, B27, and others.
 
-### Связи на верхнем уровне (подтверждены кодом)
+### Top-Level Relationships (confirmed by code)
 
-- [B06 Конвейер](./blocks/B06-orchestrator-pipeline.md) — спайн: вызывает B07, B08, B09, B10, B11, B12, B13, B14, B15, B16, B17, B22, B24, B26 и читает B23 (профиль проверок). Сборка зависимостей — `build_orchestrator` ([orchestrator.py:2594](../../src/wastech_orchestrator/core/orchestrator.py#L2594)).
-- [B17 Router](./blocks/B17-agent-router-and-fallback.md) — единственный вызыватель [B18 Провайдеров](./blocks/B18-agent-providers.md); ядро провайдеров напрямую не вызывает.
-- [B18](./blocks/B18-agent-providers.md), [B22](./blocks/B22-git-manager.md), [B24](./blocks/B24-check-execution.md), [B03/B04](./blocks/B03-installer-and-scaffolding.md) — все запускают внешние процессы через [B19](./blocks/B19-subprocess-runner.md).
-- [B21 Redaction](./blocks/B21-secret-redaction.md) и [B25 Security](./blocks/B25-security-policy.md) — сквозные: используются B18, B22, B24, B27, B06, B26.
-- [B07 State Store](./blocks/B07-state-machine-and-store.md) — читается/пишется B06 и B22 (идемпотентность публикации); читается B01 (`status`) в режиме read-only.
+- [B06 Pipeline](./blocks/B06-orchestrator-pipeline.md) — spine: calls B07, B08, B09, B10, B11, B12, B13, B14, B15, B16, B17, B22, B24, B26 and reads B23 (check profile). Dependency assembly — `build_orchestrator` ([orchestrator.py:2594](../../src/wastech_orchestrator/core/orchestrator.py#L2594)).
+- [B17 Router](./blocks/B17-agent-router-and-fallback.md) — sole caller of [B18 Providers](./blocks/B18-agent-providers.md); the core does not call providers directly.
+- [B18](./blocks/B18-agent-providers.md), [B22](./blocks/B22-git-manager.md), [B24](./blocks/B24-check-execution.md), [B03/B04](./blocks/B03-installer-and-scaffolding.md) — all launch external processes through [B19](./blocks/B19-subprocess-runner.md).
+- [B21 Redaction](./blocks/B21-secret-redaction.md) and [B25 Security](./blocks/B25-security-policy.md) — cross-cutting: used by B18, B22, B24, B27, B06, B26.
+- [B07 State Store](./blocks/B07-state-machine-and-store.md) — read/written by B06 and B22 (publish idempotency); read by B01 (`status`) in read-only mode.
 
-## Источники данных и состояние (подтверждены)
+## Data Sources and State (confirmed)
 
-- **`state.db`** — `<artifacts_root>/state.db`; SQLite (tasks, stage_runs, provider_attempts, check_runs, artifacts, publish_operations, subtasks); владелец [B07](./blocks/B07-state-machine-and-store.md).
-- **`completed.jsonl`** — `<artifacts_root>/logs/completed.jsonl`; JSONL (append-only); владелец [B08](./blocks/B08-ledger-and-failure-reports.md).
-- **`resolved-profile.json`** — `<artifacts_root>/checks/`; JSON (кэш профиля проверок); владелец [B23](./blocks/B23-check-discovery.md).
-- **Артефакты запусков** — `<artifacts_root>/logs/<task-id>/...`; каталоги с request/result/stdout/stderr/events; владелец [B20](./blocks/B20-artifact-layout.md).
-- **HITL-взаимодействия** — `<artifacts_root>/logs/<task-id>/...`; JSON; владелец [B12](./blocks/B12-hitl-and-typed-output.md).
-- **`registry.json`** — пользовательский config-dir (или `$WASTECH_ORCHESTRATOR_HOME`); JSON (repo → config); владелец [B04](./blocks/B04-install-registry-and-config-discovery.md).
-- **Папки жизненного цикла задач** — `tasks/{pending,processing,done,failed,rejected}`; файлы `.md`/`.json`; владельцы [B06](./blocks/B06-orchestrator-pipeline.md), [B16](./blocks/B16-task-parsing-and-validation-gate.md).
+- **`state.db`** — `<artifacts_root>/state.db`; SQLite (tasks, stage_runs, provider_attempts, check_runs, artifacts, publish_operations, subtasks); owner [B07](./blocks/B07-state-machine-and-store.md).
+- **`completed.jsonl`** — `<artifacts_root>/logs/completed.jsonl`; JSONL (append-only); owner [B08](./blocks/B08-ledger-and-failure-reports.md).
+- **`resolved-profile.json`** — `<artifacts_root>/checks/`; JSON (check profile cache); owner [B23](./blocks/B23-check-discovery.md).
+- **Run artifacts** — `<artifacts_root>/logs/<task-id>/...`; directories with request/result/stdout/stderr/events; owner [B20](./blocks/B20-artifact-layout.md).
+- **HITL interactions** — `<artifacts_root>/logs/<task-id>/...`; JSON; owner [B12](./blocks/B12-hitl-and-typed-output.md).
+- **`registry.json`** — user config dir (or `$WASTECH_ORCHESTRATOR_HOME`); JSON (repo → config); owner [B04](./blocks/B04-install-registry-and-config-discovery.md).
+- **Task lifecycle folders** — `tasks/{pending,processing,done,failed,rejected}`; `.md`/`.json` files; owners [B06](./blocks/B06-orchestrator-pipeline.md), [B16](./blocks/B16-task-parsing-and-validation-gate.md).
 
-## Внешние интеграции (подтверждены)
+## External Integrations (confirmed)
 
-- **Git CLI (`git`)** и **GitHub CLI (`gh`)** — подпроцессы из [B22](./blocks/B22-git-manager.md).
-- **CLI кодинг-агентов `codex` / `claude`** — подпроцессы из [B18](./blocks/B18-agent-providers.md).
-- **Telegram Bot API** через `python-telegram-bot` — [B26](./blocks/B26-notifications-telegram.md).
+- **Git CLI (`git`)** and **GitHub CLI (`gh`)** — subprocesses from [B22](./blocks/B22-git-manager.md).
+- **CLI coding agents `codex` / `claude`** — subprocesses from [B18](./blocks/B18-agent-providers.md).
+- **Telegram Bot API** via `python-telegram-bot` — [B26](./blocks/B26-notifications-telegram.md).
 - **SQLite** (stdlib `sqlite3`) — [B07](./blocks/B07-state-machine-and-store.md).
-- **Файловая система** — артефакты, lifecycle-папки, кэш профиля, реестр привязок.
+- **File system** — artifacts, lifecycle folders, check profile cache, install registry.
 
-## Статус документации
+## Documentation Status
 
-Все 27 блоков (B01–B27) исследованы по исходному коду и тестам и имеют статус `documented` (см. [block-registry.md](./block-registry.md)). Сквозные сценарии — в [system-flows.md](./system-flows.md). Каждый модуль `src/wastech_orchestrator/*` отнесён к одному блоку; вспомогательные модули, не являющиеся самостоятельными блоками, перечислены в реестре в разделе `excluded`.
+All 27 blocks (B01–B27) have been investigated from source code and tests and have status `documented` (see [block-registry.md](./block-registry.md)). Cross-cutting scenarios are in [system-flows.md](./system-flows.md). Each module under `src/wastech_orchestrator/*` is assigned to one block; auxiliary modules that are not standalone blocks are listed in the registry under the `excluded` section.
 
-Правила поддержки и актуализации этой документации, а также правило про язык (русский — только для `docs/functional/`) — в [CONVENTIONS.md](./CONVENTIONS.md).
+Rules for maintaining and keeping this documentation up to date, as well as the language rule (Russian — only for `docs/functional/`) are in [CONVENTIONS.md](./CONVENTIONS.md).
 
-## Неопределённости
+## Uncertainties
 
-Поведение системы восстановлено по коду; ниже — оставшиеся оговорки о доказательной базе (поведение подтверждено чтением кода, но имеет нюанс в тестовом покрытии):
+System behavior was reconstructed from code; below are remaining caveats about the evidence base (behavior confirmed by reading the code, but with a nuance in test coverage):
 
-- **Классификатор «опасного» диффа** ([core/dangerous_diff.py](../../src/wastech_orchestrator/core/dangerous_diff.py), B14) не имеет отдельного модульного теста; его поведение подтверждается чтением чистой функции и косвенно — через guardrail-сценарии конвейера ([tests/core/test_orchestrator.py](../../tests/core/test_orchestrator.py), [tests/core/test_hitl.py](../../tests/core/test_hitl.py)).
-- **Реальный сетевой путь Telegram** (`_HttpTelegramClient` в [notify/telegram.py](../../src/wastech_orchestrator/notify/telegram.py), B26) в тестах подменяется фейковым клиентом; против живого Telegram API он не прогоняется (по дизайну). Контракт и обработка ошибок подтверждены чтением кода и тестами на фейке.
+- **The "dangerous" diff classifier** ([core/dangerous_diff.py](../../src/wastech_orchestrator/core/dangerous_diff.py), B14) has no dedicated unit test; its behavior is confirmed by reading the pure function and indirectly through pipeline guardrail scenarios ([tests/core/test_orchestrator.py](../../tests/core/test_orchestrator.py), [tests/core/test_hitl.py](../../tests/core/test_hitl.py)).
+- **The real Telegram network path** (`_HttpTelegramClient` in [notify/telegram.py](../../src/wastech_orchestrator/notify/telegram.py), B26) is replaced by a fake client in tests; it is not run against the live Telegram API (by design). The contract and error handling are confirmed by reading the code and by tests against the fake.

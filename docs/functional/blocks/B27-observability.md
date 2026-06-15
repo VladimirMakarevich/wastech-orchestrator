@@ -1,100 +1,100 @@
-# B27 — Наблюдаемость: логирование и heartbeat
+# B27 — Observability: Logging and Heartbeat
 
-## Назначение
+## Purpose
 
-Структурированное операторское логирование без секретов и heartbeat-сообщения во время долгих блокирующих операций. Даёт человеку понятный трейс прогона (ключи `task_id`/`stage`/`attempt`/`provider`), гарантируя, что секрет никогда не попадёт в лог-сток.
+Structured operator logging without secrets and heartbeat messages during long blocking operations. Gives the operator a readable trace of a run (keys `task_id`/`stage`/`attempt`/`provider`), guaranteeing that a secret never reaches the log sink.
 
-## Ответственность
+## Responsibility
 
-- Идемпотентно настроить хендлеры (терминал + опц. ротация файла), формат (logfmt/json) и фильтр редакции ([logging.py:42-80](../../../src/wastech_orchestrator/observability/logging.py#L42)).
-- Привязывать контекст к логгеру (`bind`) ([logging.py:83-99](../../../src/wastech_orchestrator/observability/logging.py#L83)).
-- Вычищать каждую запись через `redact_text` (`RedactionFilter`) ([logging.py:102-128](../../../src/wastech_orchestrator/observability/logging.py#L102)).
-- Эмитить heartbeat из демон-потока, пока операция выполняется ([progress.py:17-54](../../../src/wastech_orchestrator/observability/progress.py#L17)).
+- Idempotently configure handlers (terminal + optional file rotation), format (logfmt/json), and redaction filter ([logging.py:42-80](../../../src/wastech_orchestrator/observability/logging.py#L42)).
+- Bind context to a logger (`bind`) ([logging.py:83-99](../../../src/wastech_orchestrator/observability/logging.py#L83)).
+- Scrub every record through `redact_text` (`RedactionFilter`) ([logging.py:102-128](../../../src/wastech_orchestrator/observability/logging.py#L102)).
+- Emit heartbeat from a daemon thread while an operation is running ([progress.py:17-54](../../../src/wastech_orchestrator/observability/progress.py#L17)).
 
-## Границы блока
+## Block Boundaries
 
-### Входит в ответственность блока
+### In scope
 
-- Конфигурация логирования, контекстная привязка, сетка редакции (defense-in-depth), heartbeat.
+- Logging configuration, context binding, redaction net (defense-in-depth), heartbeat.
 
-### Не входит в ответственность блока
+### Out of scope
 
-- **Паттерны редакции** — [B21 `redact_text`](./B21-secret-redaction.md) (фильтр лишь применяет его).
-- **Что логировать** — места вызова (логируют только id/enum/счётчики, не argv/промпты/env).
-- **Машинный аудит** — это SQLite ([B07](./B07-state-machine-and-store.md)), `events.jsonl` ([B20](./B20-artifact-layout.md)), `completed.jsonl` ([B08](./B08-ledger-and-failure-reports.md)).
+- **Redaction patterns** — [B21 `redact_text`](./B21-secret-redaction.md) (the filter only applies them).
+- **What to log** — call sites (log only ids/enums/counters, not argv/prompts/env).
+- **Machine audit** — that is SQLite ([B07](./B07-state-machine-and-store.md)), `events.jsonl` ([B20](./B20-artifact-layout.md)), `completed.jsonl` ([B08](./B08-ledger-and-failure-reports.md)).
 
-## Точки входа
+## Entry Points
 
 - `configure_logging(*, level, fmt, stream, file_path, ...)` ([logging.py:42](../../../src/wastech_orchestrator/observability/logging.py#L42)) — [B01 `_configure_runtime_logging`](./B01-cli-and-operator-commands.md).
-- `bind(logger, **context)` → LoggerAdapter ([logging.py:83](../../../src/wastech_orchestrator/observability/logging.py#L83)) — повсеместно ([B06](./B06-orchestrator-pipeline.md)/[B17](./B17-agent-router-and-fallback.md)/[B18](./B18-agent-providers.md)/[B22](./B22-git-manager.md)/[B24](./B24-check-execution.md)).
+- `bind(logger, **context)` → LoggerAdapter ([logging.py:83](../../../src/wastech_orchestrator/observability/logging.py#L83)) — used throughout ([B06](./B06-orchestrator-pipeline.md)/[B17](./B17-agent-router-and-fallback.md)/[B18](./B18-agent-providers.md)/[B22](./B22-git-manager.md)/[B24](./B24-check-execution.md)).
 - `run_with_heartbeat(operation, *, logger, message, interval_seconds, fields)` ([progress.py:17](../../../src/wastech_orchestrator/observability/progress.py#L17)) — [B18](./B18-agent-providers.md)/[B22](./B22-git-manager.md)/[B24](./B24-check-execution.md).
 - `RedactionFilter` ([logging.py:102](../../../src/wastech_orchestrator/observability/logging.py#L102)).
 
-## Входные данные и состояние
+## Input Data and State
 
-Уровень/формат/путь файла для конфигурации; контекст для `bind`; операция + интервал + поля для heartbeat. Глобальный флаг `_configured` делает настройку идемпотентной.
+Level/format/file path for configuration; context for `bind`; operation + interval + fields for heartbeat. Global flag `_configured` makes setup idempotent.
 
-## Основной сценарий
+## Main Scenario
 
-- `configure_logging`: один раз ставит StreamHandler(stderr) (+ опц. RotatingFileHandler 10 МБ × 5), оба с `RedactionFilter` и выбранным форматтером; `propagate=False`; повторный вызов — no-op.
-- `bind`: возвращает адаптер, складывающий контекст и per-call `extra` в `record.logfmt_fields`.
-- `RedactionFilter.filter`: редактирует `msg`, `args` и строковые значения полей перед стоком.
-- `run_with_heartbeat`: при `interval>0` запускает демон-поток, который каждые `interval` секунд логирует `message` + `elapsed_seconds`; операция выполняется в вызывающем потоке (поведение возврата/исключения неизменно); по завершении поток останавливается.
+- `configure_logging`: sets up StreamHandler(stderr) once (+ optional RotatingFileHandler 10 MB × 5), both with `RedactionFilter` and the chosen formatter; `propagate=False`; repeated calls are a no-op.
+- `bind`: returns an adapter that merges context and per-call `extra` into `record.logfmt_fields`.
+- `RedactionFilter.filter`: redacts `msg`, `args`, and string field values before the sink.
+- `run_with_heartbeat`: when `interval>0`, starts a daemon thread that logs `message` + `elapsed_seconds` every `interval` seconds; the operation runs in the calling thread (return value/exception behavior is unchanged); the thread is stopped when the operation finishes.
 
-Логирование с сеткой редакции (последний барьер «нет секретов») и heartbeat для долгих операций:
+Logging with the redaction net (last barrier for "no secrets") and heartbeat for long operations:
 
 ```mermaid
 flowchart TB
-    cfg["configure_logging (идемпотентно):<br/>StreamHandler(stderr) + опц. RotatingFileHandler"] --> filt["RedactionFilter на каждом хендлере"]
-    bind["bind(logger, task_id/stage/attempt/...)<br/>контекст в logfmt_fields"] --> rec["лог-запись"]
+    cfg["configure_logging (idempotent):<br/>StreamHandler(stderr) + optional RotatingFileHandler"] --> filt["RedactionFilter on each handler"]
+    bind["bind(logger, task_id/stage/attempt/...)<br/>context in logfmt_fields"] --> rec["log record"]
     rec --> filt
-    filt --> redact["redact_text (B21) на msg / args / полях"]
-    redact --> out["logfmt или json в stderr (+ опц. файл)"]
-    hb["run_with_heartbeat(operation, interval)"] --> hbt{"interval больше 0?"}
-    hbt -->|да| thread["демон-поток: каждые interval сек —<br/>message + elapsed_seconds"]
-    hbt -->|нет| op["операция в вызывающем потоке<br/>(результат и исключения неизменны)"]
+    filt --> redact["redact_text (B21) on msg / args / fields"]
+    redact --> out["logfmt or json to stderr (+ optional file)"]
+    hb["run_with_heartbeat(operation, interval)"] --> hbt{"interval > 0?"}
+    hbt -->|yes| thread["daemon thread: every interval sec —<br/>message + elapsed_seconds"]
+    hbt -->|no| op["operation in calling thread<br/>(result and exceptions unchanged)"]
     thread --> op
 ```
 
-## Проверки и ограничения
+## Checks and Constraints
 
-- Два рубежа «никаких секретов»: места вызова логируют безопасное, а `RedactionFilter` — сетка поверх ([logging.py:9-11](../../../src/wastech_orchestrator/observability/logging.py#L9)).
-- logfmt квотирует значения с пробелом/`=`/кавычкой/переводом строки ([logging.py:163-174](../../../src/wastech_orchestrator/observability/logging.py#L163)).
-- `interval_seconds <= 0` полностью отключает heartbeat ([progress.py:31-32](../../../src/wastech_orchestrator/observability/progress.py#L31)).
-- Библиотечные модули только `getLogger`+`bind`, никогда не конфигурируют хендлеры (тесты молчат, нет import-time эффектов).
+- Two layers of "no secrets": call sites log safe data, and `RedactionFilter` is the net on top ([logging.py:9-11](../../../src/wastech_orchestrator/observability/logging.py#L9)).
+- logfmt quotes values containing space/`=`/quote/newline ([logging.py:163-174](../../../src/wastech_orchestrator/observability/logging.py#L163)).
+- `interval_seconds <= 0` disables heartbeat entirely ([progress.py:31-32](../../../src/wastech_orchestrator/observability/progress.py#L31)).
+- Library modules only call `getLogger`+`bind`, never configure handlers (tests stay silent, no import-time side effects).
 
-## Результат
+## Output
 
-Отредактированные строки лога в stderr (и опц. в ротируемый файл); неизменный результат операции под heartbeat'ом.
+Redacted log lines to stderr (and optionally to a rotating file); the operation result under heartbeat is unchanged.
 
-## Побочные эффекты
+## Side Effects
 
-- Установка хендлеров логгера; запись в лог-файл (ротация).
-- Один демон-поток на вызов `run_with_heartbeat` (стартует и присоединяется по завершении операции).
+- Installation of logger handlers; writing to a log file (rotation).
+- One daemon thread per `run_with_heartbeat` call (started and joined on operation completion).
 
-## Ошибки и граничные случаи
+## Errors and Edge Cases
 
-- Нестроковые `args`/значения полей проходят без изменений (редактируются только строки).
-- `run_with_heartbeat` не глотает исключения операции — пробрасывает их как есть.
+- Non-string `args`/field values pass through unchanged (only strings are redacted).
+- `run_with_heartbeat` does not swallow operation exceptions — they propagate as-is.
 
-## Связи
+## Relationships
 
-### Использует
+### Uses
 
-- [B21 — Redaction](./B21-secret-redaction.md) — `redact_text` в `RedactionFilter`.
+- [B21 — Redaction](./B21-secret-redaction.md) — `redact_text` in `RedactionFilter`.
 
-### Используется в
+### Used by
 
 - [B01 — CLI](./B01-cli-and-operator-commands.md) — `configure_logging`.
-- [B06](./B06-orchestrator-pipeline.md), [B17](./B17-agent-router-and-fallback.md), [B18](./B18-agent-providers.md), [B22](./B22-git-manager.md), [B24](./B24-check-execution.md) — `bind` и `run_with_heartbeat`.
+- [B06](./B06-orchestrator-pipeline.md), [B17](./B17-agent-router-and-fallback.md), [B18](./B18-agent-providers.md), [B22](./B22-git-manager.md), [B24](./B24-check-execution.md) — `bind` and `run_with_heartbeat`.
 
-## Место в общей системе
+## Place in the Overall System
 
-Операторский трейс для наблюдения за прогоном в реальном времени, отделённый от машинного аудита. Сетка редакции — последний барьер инварианта «нет секретов в логах», а heartbeat сохраняет видимость прогресса во время долгих синхронных вызовов провайдера/проверок/git.
+Operator trace for observing a run in real time, separated from machine audit. The redaction net is the last barrier of the "no secrets in logs" invariant, and heartbeat preserves progress visibility during long synchronous provider/check/git calls.
 
-## Подтверждение в коде
+## Code References
 
-- [observability/logging.py:42-128](../../../src/wastech_orchestrator/observability/logging.py#L42) — конфигурация, `bind`, `RedactionFilter`.
-- [observability/logging.py:131-174](../../../src/wastech_orchestrator/observability/logging.py#L131) — форматтеры logfmt/json.
+- [observability/logging.py:42-128](../../../src/wastech_orchestrator/observability/logging.py#L42) — configuration, `bind`, `RedactionFilter`.
+- [observability/logging.py:131-174](../../../src/wastech_orchestrator/observability/logging.py#L131) — logfmt/json formatters.
 - [observability/progress.py:17-54](../../../src/wastech_orchestrator/observability/progress.py#L17) — `run_with_heartbeat`.
-- Тесты: [tests/observability/test_logging.py](../../../tests/observability/test_logging.py), [tests/observability/test_progress.py](../../../tests/observability/test_progress.py) — редакция, logfmt/json, идемпотентность, heartbeat и его отключение.
+- Tests: [tests/observability/test_logging.py](../../../tests/observability/test_logging.py), [tests/observability/test_progress.py](../../../tests/observability/test_progress.py) — redaction, logfmt/json, idempotency, heartbeat and its disabling.
