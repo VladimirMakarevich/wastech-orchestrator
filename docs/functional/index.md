@@ -16,7 +16,7 @@ Git (ветка → коммит → push → Pull Request через `gh`).
 - точкой входа CLI и набором подкоманд ([cli.py:114-376](../../src/wastech_orchestrator/cli.py#L114));
 - классом-конвейером [Orchestrator](../../src/wastech_orchestrator/core/orchestrator.py#L294) и его
   методом `run_task` ([orchestrator.py:350](../../src/wastech_orchestrator/core/orchestrator.py#L350));
-- контрактом провайдера [AgentProvider](../../src/wastech_orchestrator/providers/base.py#L154) с двумя
+- контрактом провайдера [AgentProvider](../../src/wastech_orchestrator/providers/base.py#L155) с двумя
   адаптерами `codex` и `claude`;
 - машиной состояний задачи ([state_machine.py:15-113](../../src/wastech_orchestrator/core/state_machine.py#L15));
 - запуском всех внешних команд **списком аргументов без shell-интерполяции**
@@ -38,6 +38,44 @@ Git (ветка → коммит → push → Pull Request через `gh`).
 - **Человек в контуре (HITL).** Долговечные взаимодействия через Telegram для согласования планов,
   «опасных» диффов и изменившегося набора проверок ([core/hitl.py](../../src/wastech_orchestrator/core/hitl.py),
   [notify/telegram.py](../../src/wastech_orchestrator/notify/telegram.py)).
+
+## Контекст системы
+
+Оркестратор — единый процесс, который обрабатывает одну задачу за раз. Снаружи он общается только с
+файлами, локальным репозиторием и несколькими внешними программами; всё это запускается **списком
+аргументов без shell-интерполяции**.
+
+```mermaid
+flowchart TB
+    operator(["Оператор"])
+    human(["Человек в контуре"])
+
+    subgraph orc["Оркестратор — один процесс, одна задача за раз"]
+        cli["B01 CLI / B02 watch"]
+        pipeline["B06 Конвейер<br/>+ машина состояний"]
+        cli --> pipeline
+    end
+
+    agents["codex / claude<br/>CLI кодинг-агентов"]
+    vcs["git / gh — CLI"]
+    tg["Telegram Bot API"]
+    db[("state.db<br/>SQLite")]
+    fsart[("Артефакты на диске<br/>tasks/ · logs/ · checks/")]
+
+    operator -->|"подкоманды: run, watch, ..."| cli
+    pipeline -->|"argv без shell"| agents
+    pipeline -->|"ветка, commit, push, PR"| vcs
+    pipeline -->|"запрос и ответ (HITL)"| tg
+    tg <-->|"согласование"| human
+    pipeline <-->|"состояние, единый слот"| db
+    pipeline <-->|"request / result / stdout / события"| fsart
+```
+
+Чем подтверждается каждое внешнее взаимодействие: запуск `codex`/`claude` как дочерних процессов —
+[B18](./blocks/B18-agent-providers.md); `git`/`gh` — [B22](./blocks/B22-git-manager.md); оба класса
+процессов проходят через единый безопасный запуск [B19](./blocks/B19-subprocess-runner.md); Telegram —
+[B26](./blocks/B26-notifications-telegram.md); SQLite — [B07](./blocks/B07-state-machine-and-store.md);
+файловые артефакты — [B20](./blocks/B20-artifact-layout.md).
 
 ## Точки входа (подтверждены)
 
@@ -74,6 +112,59 @@ Git (ветка → коммит → push → Pull Request через `gh`).
    commit/push/PR).
 6. **`install` / `init` / `preflight`.** Установка/привязка к репозиторию, генерация и проверка
    конфигурации, диагностика готовности провайдеров и изоляции.
+
+## Конвейер как машина состояний
+
+Каждая задача движется по фиксированному набору статусов с разрешёнными переходами. Переходы заданы
+явной таблицей `ALLOWED_TRANSITIONS` ([core/state_machine.py:70](../../src/wastech_orchestrator/core/state_machine.py#L70));
+ядро проверяет каждый переход (`assert_transition`) и атомарно сохраняет новый статус.
+
+```mermaid
+stateDiagram-v2
+    direction TB
+    [*] --> new
+
+    new --> validated: шлюз §19 пройден
+    new --> failed: reject §19 (карантин, без ветки)
+    validated --> preparing
+    preparing --> refining
+    preparing --> planning: refinement пропущен
+    refining --> planning
+    planning --> implementing
+
+    implementing --> testing
+    implementing --> reviewing: testing пропущен
+    testing --> reviewing: проверки прошли
+    testing --> fixing: качественный провал
+    reviewing --> summarizing: ревью без блокеров
+    reviewing --> fixing: блокирующие находки
+    reviewing --> implementing: следующий сабтаск (k из n)
+    fixing --> testing
+    fixing --> reviewing: testing пропущен
+
+    summarizing --> ready_to_publish
+    ready_to_publish --> committing
+    committing --> pushing
+    pushing --> creating_pr
+    creating_pr --> done
+
+    done --> [*]
+    failed --> [*]
+    manual_action_required --> [*]
+
+    note right of fixing
+      Любой активный статус также может перейти в failed
+      или manual_action_required: инфраструктурный сбой,
+      застревание по лимитам, сбой HITL (fail-closed).
+    end note
+```
+
+Терминальные статусы (без исходящих переходов) — `done`, `failed`, `manual_action_required`. Статус
+`pending` (§8.2) — это ожидание в очереди: задача принята, но ещё не владеет единственным слотом
+обработки; в таблице из него ведут `pending → validated` и `pending → preparing` (взятие из очереди или
+возобновление), тогда как нормальный вход в конвейер — статус `new`. Цикл декомпозиции не вводит новых
+статусов: каждый сабтаск переиспользует `implementing → testing → reviewing`, а его номер (`k` из `n`)
+хранится в State Store.
 
 ## Карта функциональных блоков
 
@@ -130,6 +221,58 @@ Git (ветка → коммит → push → Pull Request через `gh`).
 
 - [B26 — Уведомления и транспорт HITL (Telegram)](./blocks/B26-notifications-telegram.md)
 - [B27 — Наблюдаемость: логирование и heartbeat](./blocks/B27-observability.md)
+
+### Карта зависимостей блоков
+
+Упрощённая карта основных связей (полный список — ниже и в [block-registry.md](./block-registry.md)).
+B06 — спайн: он координирует ядро и инструменты, но никогда сам не строит команду CLI.
+
+```mermaid
+flowchart LR
+    B01["B01 CLI"]
+    B02["B02 watch"]
+    B06["B06 Конвейер — спайн"]
+    B16["B16 Шлюз задачи"]
+    B07["B07 State Store"]
+    rules["B08-B15 правила ядра:<br/>ledger, циклы fix, recovery,<br/>декомпозиция, HITL, навыки,<br/>guardrail, промпты"]
+    B17["B17 Router"]
+    B18["B18 Провайдеры"]
+    B19["B19 Subprocess"]
+    B22["B22 Git Manager"]
+    B23["B23 Резолв проверок"]
+    B24["B24 Проверки (testing)"]
+    B26["B26 Telegram"]
+    B27["B27 Observability"]
+    B21["B21 Redaction"]
+    B25["B25 Security"]
+
+    B01 --> B06
+    B02 --> B06
+    B06 --> B16
+    B06 --> B07
+    B06 --> rules
+    B06 --> B17
+    B06 --> B23
+    B06 --> B24
+    B06 --> B22
+    B06 --> B26
+    B17 --> B18
+    B18 --> B19
+    B22 --> B19
+    B24 --> B19
+    B22 --> B07
+    B01 -.->|"status (read-only)"| B07
+    B25 -.->|"политика"| B18
+    B25 -.-> B22
+    B25 -.-> B24
+    B21 -.->|"секреты"| B18
+    B21 -.-> B27
+```
+
+Ключевое: [B17 Router](./blocks/B17-agent-router-and-fallback.md) — единственный вызыватель
+[B18 Провайдеров](./blocks/B18-agent-providers.md); все внешние процессы идут через
+[B19](./blocks/B19-subprocess-runner.md); [B21](./blocks/B21-secret-redaction.md) (redaction) и
+[B25](./blocks/B25-security-policy.md) (security) — сквозные и используются также в B06, B26, B27 и др.
 
 ### Связи на верхнем уровне (подтверждены кодом)
 

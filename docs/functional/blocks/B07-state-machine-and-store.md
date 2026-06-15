@@ -61,19 +61,36 @@ State Store ([state_store.py](../../../src/wastech_orchestrator/state_store.py))
    `save_counters(...)` → опц. `update_task(...)`.
 3. На успехе `COMMIT`, на исключении `ROLLBACK` — БД остаётся в согласованном прежнем состоянии.
 
+Каждый переход статуса — внутри одной транзакции: сначала проверка по §8, затем запись; на исключении —
+полный откат:
+
+```mermaid
+flowchart TB
+    start(["B06: нужно сменить статус"]) --> tx["transaction(): BEGIN IMMEDIATE"]
+    tx --> assert{"assert_transition(src, dst):<br/>переход допустим по §8?"}
+    assert -->|нет| inv["InvalidTransition → ROLLBACK"]
+    assert -->|да| setp["set_status → save_counters<br/>→ опц. update_task"]
+    setp --> ok{"возникло исключение?"}
+    ok -->|нет| commit["COMMIT — новое состояние персистентно"]
+    ok -->|да| rb["ROLLBACK — БД в прежнем согласованном состоянии"]
+```
+
 ## Альтернативные сценарии
 
 ### Внеплановые (operator-driven) статусы
+
 `finalize` и `recovery` выставляют терминальный статус напрямую через `set_status`/`update_task`
 **без** `assert_transition` (намеренная out-of-band смена) — например `revive_task_for_continue`
 делает terminal→active для `rerun --continue` ([state_store.py:533-554](../../../src/wastech_orchestrator/state_store.py#L533)).
 
 ### Сброс/оживление при rerun
+
 `reset_task_for_rerun` чистит всё per-attempt состояние, обнуляет ветку и удаляет `subtasks` +
 `publish_operations`, оставляя статус терминальным (чтобы повторный upsert в `insert_task` перевёл в
 `new`) ([state_store.py:491-531](../../../src/wastech_orchestrator/state_store.py#L491)).
 
 ### Read-only режим
+
 `open_readonly` открывает файл `?mode=ro`, ставит `PRAGMA query_only=ON`, проверяет (не мигрируя)
 версию; используется командой `status` ([state_store.py:342-352](../../../src/wastech_orchestrator/state_store.py#L342)).
 

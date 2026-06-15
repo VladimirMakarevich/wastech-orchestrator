@@ -47,16 +47,48 @@
    брать только при свободном слоте (`acquire_slot`); `run_task`; `manual_action_required` блокирует
    продолжение; без auto-mode — ровно одна задача.
 
+Логика одного тика и условия остановки. `poll_interval > 0` — демон (PID-файл, грейсфул-стоп по
+`SIGTERM`); `poll_interval <= 0` — один проход. Результат `manual_action_required` прерывает обработку
+очереди в текущем тике, но не завершает демон — он продолжит со следующего тика.
+
+```mermaid
+flowchart TB
+    start(["watch"]) --> mode{"режим запуска"}
+    mode -->|демон| guard{"живой второй watcher?"}
+    guard -->|да| refuse["отказ старта (выход 1)"]
+    guard -->|нет| pid["PID-файл + StopController<br/>(SIGTERM ставит событие)"]
+    pid --> refresh
+    mode -->|"один проход"| refresh["тик: refresh_repo — fetch/pull base (B22)"]
+
+    refresh --> resume["resume() активной задачи (B06)"]
+    resume --> mq{"итог = manual_action_required?"}
+    mq -->|да| sgate
+    mq -->|нет| psel{"слот свободен и есть pending?"}
+    psel -->|да| run["acquire_slot + run_task (B06)"]
+    run --> rman{"итог = manual?"}
+    rman -->|да| sgate
+    rman -->|нет| au{"auto_mode включён?"}
+    au -->|да| psel
+    au -->|нет| sgate
+    psel -->|нет| sgate{"демон и нет SIGTERM?"}
+    sgate -->|да| sleep["сон poll_interval"]
+    sleep --> refresh
+    sgate -->|нет| cleanup["удалить PID-файл, выход"]
+```
+
 ## Альтернативные сценарии
 
 ### Демон (poll > 0)
+
 Пишет PID-файл, ставит `StopController` (SIGTERM→event), отказывается стартовать при живом втором
 watcher; грейсфул-остановка между тиками ([cli.py:1186-1224](../../../src/wastech_orchestrator/cli.py#L1186)).
 
 ### Одиночный проход (poll <= 0)
+
 Без PID-файла и обработчика сигнала — один `watch_loop`-тик ([cli.py:1204-1205](../../../src/wastech_orchestrator/cli.py#L1204)).
 
 ### stop / restart
+
 `cmd_stop`: `stop_process` (SIGTERM, затем SIGKILL по таймауту; идемпотентно; чистит PID-файл).
 `cmd_restart`: остановить предыдущего, затем `cmd_watch` ([cli.py:1227-1263](../../../src/wastech_orchestrator/cli.py#L1227)).
 

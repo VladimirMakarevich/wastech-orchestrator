@@ -44,6 +44,19 @@
 - `resolve_config_path`: вернуть `--config`, иначе `./config.yaml` (если есть), иначе
   `registry.lookup(git_info.root)`, иначе `None`.
 
+Приоритет источников при разрешении пути конфигурации:
+
+```mermaid
+flowchart TB
+    start(["resolve_config_path(args)"]) --> c1{"задан --config?"}
+    c1 -->|да| r1["вернуть --config"]
+    c1 -->|нет| c2{"есть ./config.yaml?"}
+    c2 -->|да| r2["вернуть ./config.yaml"]
+    c2 -->|нет| c3{"найден корень репозитория<br/>и есть привязка в реестре?"}
+    c3 -->|да| r3["вернуть registry.lookup(root)"]
+    c3 -->|нет| r4["None → вызывающий печатает подсказку про install / --config"]
+```
+
 ## Проверки и ограничения
 
 - Ключи нормализуются к абсолютным путям (resolve символлинков/регистра) ([registry.py:44-46](../../../src/wastech_orchestrator/install/registry.py#L44)).

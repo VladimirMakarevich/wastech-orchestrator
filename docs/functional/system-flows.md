@@ -25,6 +25,46 @@
    [B08 Ledger](./blocks/B08-ledger-and-failure-reports.md) и шлёт уведомление ([B26](./blocks/B26-notifications-telegram.md)).
    [B01](./blocks/B01-cli-and-operator-commands.md) отображает статус в код возврата.
 
+Та же последовательность во времени (happy path):
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Op as Оператор
+    participant CLI as B01 CLI
+    participant Gate as B16 Шлюз
+    participant Core as B06 Конвейер
+    participant Agent as B17/B18 Агенты
+    participant Checks as B24 Проверки
+    participant Git as B22 Git
+    participant Out as B08 Ledger + B26 Telegram
+
+    Op->>CLI: run {task-file}
+    CLI->>Gate: парсинг + валидация (§19)
+    alt задача отклонена
+        Gate-->>CLI: reject → карантин + ledger (без ветки)
+    else задача принята
+        Gate-->>Core: NormalizedTask
+        Core->>Core: захват слота, регистрация (new→validated)
+        Core->>Core: префлайт изоляции и проверок (до ветки)
+        Core->>Git: подготовка ветки agent/{id}-{slug}
+        Core->>Agent: refinement, planning
+        loop по каждой единице работы
+            Core->>Agent: implementation
+            Core->>Checks: testing
+            Core->>Agent: review
+            opt провал тестов или ревью
+                Core->>Agent: fixing (под лимитами B09)
+            end
+        end
+        Core->>Agent: summary
+        Core->>Git: commit + audit, push, PR (опц. auto-merge)
+        Core->>Out: запись в ledger + уведомление
+        Core-->>CLI: PipelineResult (статус, URL PR)
+    end
+    CLI-->>Op: код возврата
+```
+
 ## Цикл исправления (testing/review → fixing)
 
 1. [B24](./blocks/B24-check-execution.md) сообщает качественный провал; [B06](./blocks/B06-orchestrator-pipeline.md)
@@ -41,6 +81,18 @@
    [B25](./blocks/B25-security-policy.md)) Router снимает частичный дифф ([B22](./blocks/B22-git-manager.md)
    как `SnapshotHook`) и переключается на fallback, передавая дифф.
 3. Качественный `failed` fallback **не** вызывает — он уходит в `fixing` ([B06](./blocks/B06-orchestrator-pipeline.md)).
+
+Развилка «качество против инфраструктуры» — куда уходит проблемная стадия:
+
+```mermaid
+flowchart TD
+    start["Стадия агента или проверки завершилась неуспехом"] --> q{"Тип проблемы?"}
+    q -->|"инфраструктурная:<br/>binary_not_found, timeout,<br/>rate_limited, ..."| infra["B17: fallback на другого провайдера,<br/>если его профиль не слабее (B25)"]
+    q -->|"качественный провал:<br/>тесты или ревью"| fix["B06: стадия fixing<br/>под лимитами B09"]
+    infra --> retry["повтор той же стадии<br/>другим провайдером"]
+    fix --> back["назад к testing / review"]
+    fix -->|"лимит исчерпан"| manual["manual_action_required<br/>+ отчёт о провале (B08)"]
+```
 
 ## Человек в контуре (refinement/planning) и guardrail опасного диффа
 

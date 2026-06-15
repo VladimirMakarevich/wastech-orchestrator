@@ -49,6 +49,21 @@
    `limit_name="max_total_fix_iterations"`.
 4. Иначе `stuck=False` — [B06](./B06-orchestrator-pipeline.md) переходит в `fixing`.
 
+Решение `enter_fixing`: per-loop лимит (`max_fix_cycles`) проверяется раньше глобального
+(`max_total_fix_iterations`):
+
+```mermaid
+flowchart TB
+    start(["enter_fixing(counters, loop)"]) --> inc["fix_iterations += 1;<br/>test_fix_cycles или review_fix_cycles += 1 (по loop)"]
+    inc --> c1{"цикл достиг max_fix_cycles?"}
+    c1 -->|да| stuck1["stuck, limit = max_fix_cycles"]
+    c1 -->|нет| c2{"fix_iterations достиг max_total_fix_iterations?"}
+    c2 -->|да| stuck2["stuck, limit = max_total_fix_iterations"]
+    c2 -->|нет| go["не застрял → B06 входит в fixing"]
+    stuck1 --> manual["B06: manual_action_required + отчёт (B08)"]
+    stuck2 --> manual
+```
+
 ## Проверки и ограничения
 
 - Два независимых лимита: per-loop (`max_fix_cycles`) и глобальный жёсткий стоп

@@ -54,17 +54,36 @@ CLI-флаги (`--git-mode`, `--workspace`, `--provider`, `--check`, `--create-
 4. `registry.bind(repo → config)` ([B04](./B04-install-registry-and-config-discovery.md)); скопировать `worc/`; добавить runtime-excludes ([B22](./B22-git-manager.md)).
 5. Сидировать профиль проверок (опц. агентский резолвинг) и авто-preflight ([cli.py:1390-1494](../../../src/wastech_orchestrator/cli.py#L1390)).
 
+Поток `install` с fail-closed-воротами (мастер не проходит hard-stop, либо сгенерированный конфиг не
+загружается/не валидируется — ничего не записывается):
+
+```mermaid
+flowchart TB
+    start(["install"]) --> wiz["run_wizard: детекция git / провайдеров / проверок<br/>→ InstallSpec (+подтверждение)"]
+    wiz -->|hard-stop| err["InstallError → выход ≠ 0"]
+    wiz --> gen["build_and_validate(spec):<br/>dict с безопасными дефолтами → YAML →<br/>round-trip loads_config + validate_config (B05)"]
+    gen -->|невалидно| err
+    gen --> dirs["создать runtime-каталоги + quarantine,<br/>атомарно записать config.yaml"]
+    dirs --> bind["registry.bind: repo → config (B04)"]
+    bind --> docs["скопировать worc/, добавить runtime-excludes (B22)"]
+    docs --> seed["сидировать профиль проверок (опц. агент: B23/B18)"]
+    seed --> pre["авто-preflight: провайдеры, изоляция, проверки, telegram"]
+```
+
 ## Альтернативные сценарии
 
 ### `init`
+
 Скелет без мастера: каталоги + `config.yaml` (с `--git-mode`) + `templates/` + `worc/` + excludes;
 идемпотентно (skip-existing), `--force`/`--dry-run`/`--quiet` ([cli.py:464-539](../../../src/wastech_orchestrator/cli.py#L464)).
 
 ### Апгрейд/доставка шаблонов
+
 `upgrade-config` (через [B05 upgrade](./B05-configuration.md): add-missing + бэкап + атомарная запись),
 `upgrade-docs` (overwrite `worc/` упакованной версией), `install-templates` (add-missing-only) ([cli.py:568-731](../../../src/wastech_orchestrator/cli.py#L568)).
 
 ### Повторный install
+
 Без `--reconfigure`: no-op при привязке к этому же конфигу; отказ при чужой привязке; с `--reconfigure`
 — бэкап + перегенерация ([cli.py:1461-1473](../../../src/wastech_orchestrator/cli.py#L1461)).
 

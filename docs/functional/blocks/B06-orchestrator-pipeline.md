@@ -64,29 +64,58 @@ checks, store, ledger, loops, gate, notifier, resolver, skill_scanner). Рабо
    `commit_audit`, `push`, `create_pr`, опц. auto-merge) → `_go_terminal` (очистка, статус, перенос
    файла, ledger, уведомление).
 
+Главный путь `run_task` → `_drive`. Ключевая деталь: префлайты изоляции и проверок выполняются **до**
+создания ветки и не тратят fix-бюджет. Операторские пути (`resume`/`rerun`/`finalize`) — в разделе ниже.
+
+```mermaid
+flowchart TB
+    rt(["run_task"]) --> gate{"шлюз §19 (B16)"}
+    gate -->|reject| rej["failed: карантин + ledger, без ветки"]
+    gate -->|ok| slot["acquire_slot — единый слот"]
+    slot --> reg["регистрация: NEW → VALIDATED"]
+    reg --> iso
+
+    subgraph before["до ветки — не тратит fix-бюджет"]
+      iso["префлайт strict_isolation (B25)"] --> chk["префлайт проверок: резолв профиля (B23)<br/>+ HITL при изменении набора"]
+    end
+
+    chk --> branch["PREPARING → ветка agent/id-slug (B22)"]
+    branch --> refine["refinement (правило пропуска)"]
+    refine --> plan["planning + декомпозиция (B11), навыки (B13)"]
+    plan --> units["по каждой единице:<br/>implement → test → review → fix<br/>(машина состояний)"]
+    units --> summ["SUMMARIZING"]
+    summ --> publish["commit + audit, push, PR (B22), опц. auto-merge"]
+    publish --> term["терминальная очистка → ledger (B08) → уведомление (B26)"]
+```
+
 ## Альтернативные сценарии
 
 ### Возобновление (`resume`)
+
 `RecoveryReconciler` ([B10](./B10-recovery-and-resume.md)) → `_resume_task` (восстановить контекст и
 продолжить с записанной стадии), `_resume_cleanup` (дозавершить очистку), `_resume_manual` (пометить
 неоднозначные задачи `manual_action_required`) ([orchestrator.py:655-795](../../../src/wastech_orchestrator/core/orchestrator.py#L655)).
 
 ### Rerun / Continue
+
 `rerun_task`: архивировать артефакты, сбросить ветку к base, очистить per-attempt состояние, прогнать
 `run_task`. `continue_task`: оживить задачу на прерванной стадии (сброс незавершённого HITL) и `resume`
 ([orchestrator.py:471-520](../../../src/wastech_orchestrator/core/orchestrator.py#L471)).
 
 ### Finalize
+
 `finalize_task`: терминальная очистка, выставить заявленный статус **вне** машины состояний, перенести
 файл, дописать `manual`-запись в ledger, опц. удалить ветку — **без** конвейера и без commit/push/PR
 ([orchestrator.py:583-644](../../../src/wastech_orchestrator/core/orchestrator.py#L583)).
 
 ### Пропуск стадий
+
 `planning`/`testing`/`review`/`fixing`/`summary` могут быть пропущены (union глобального и
 per-task `effective_skip`): пишется stub/`record_skip`, переходы корректируются (например, fix после
 ревью при пропущенном testing возвращается к review) ([orchestrator.py:231-239,1068-1088,2249-2251](../../../src/wastech_orchestrator/core/orchestrator.py#L231)).
 
 ### Auto-merge (DANGER)
+
 При `review` skip + auto_merge — предупреждение; при auto_merge — `merge_pr`; заблокированный merge →
 `ManualActionRequired`, PR остаётся открытым ([orchestrator.py:1371-1419](../../../src/wastech_orchestrator/core/orchestrator.py#L1371)).
 

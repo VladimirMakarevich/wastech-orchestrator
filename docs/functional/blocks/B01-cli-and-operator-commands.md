@@ -46,24 +46,52 @@
 3. `ConfigError`/`IncompatibleStateError`/`GhNotAvailableError` ловятся → сообщение + выход 2 ([cli.py:1538-1540](../../../src/wastech_orchestrator/cli.py#L1538)).
 4. Терминальный статус задачи → код: `done`=0, `failed`=1, `manual_action_required`=2 ([cli.py:62-66](../../../src/wastech_orchestrator/cli.py#L62)).
 
+Маршрутизация команд и отображение в код возврата (CLI — тонкий слой: вся «тяжёлая» работа в блоках):
+
+```mermaid
+flowchart TB
+    argv(["argv"]) --> parser["build_parser<br/>(глобальные флаги + 14 подкоманд)"]
+    parser --> main["main — диспетчер по args.command"]
+
+    main --> c_run["run / rerun / finalize"]
+    main --> c_watch["watch / stop / restart"]
+    main --> c_status["status"]
+    main --> c_diag["preflight / telegram-test"]
+    main --> c_inst["init / install / upgrade-config /<br/>upgrade-docs / install-templates"]
+
+    c_run --> B06["B06 Конвейер"]
+    c_watch --> B02["B02 watch-демон"]
+    c_status -.->|"read-only"| B07["B07 State Store"]
+    c_diag --> svc["B18 / B25 / B23 / B26"]
+    c_inst --> B03["B03 Установщик"]
+
+    B06 --> codes["терминальный статус → код:<br/>done = 0, failed = 1,<br/>manual_action_required = 2"]
+    main -.->|"ConfigError / IncompatibleStateError /<br/>GhNotAvailableError"| err2["выход 2"]
+```
+
 ## Альтернативные сценарии
 
 ### `run`
+
 Загрузить конфиг, (если PR) `require_gh`, `build_orchestrator`, `run_task`, печать статуса+PR ([cli.py:849-865](../../../src/wastech_orchestrator/cli.py#L849)).
 
 ### `status`
+
 Read-only `StateStore.open_readonly`: активная/последняя задача, стадия, ветка, сабтаск, счётчики,
 профиль проверок — без запуска чего-либо ([cli.py:1266-1329](../../../src/wastech_orchestrator/cli.py#L1266)).
 
 ### `preflight`
+
 `run_preflight`: `provider.preflight()` по разрешённым провайдерам + `check_isolation` + диагностика
 проверок + telegram-preflight → готовность + строки ([cli.py:1057-1113](../../../src/wastech_orchestrator/cli.py#L1057)).
 
 ### `rerun` / `finalize`
+
 План (`plan_rerun`/`plan_finalize`) → при `--dry-run` печать плана; иначе подтверждение и
 `rerun_task`/`continue_task` / `finalize_task` ([cli.py:904-1054](../../../src/wastech_orchestrator/cli.py#L904)). Отказ при живом watch-демоне.
 
 ### `telegram-test`
+
 `build_notifier` + `ask_human` — реальный round-trip без обработки задачи ([cli.py:1116-1147](../../../src/wastech_orchestrator/cli.py#L1116)).
 
 ## Проверки и ограничения

@@ -49,6 +49,16 @@ validation_reason, …). Состояние — файл `completed.jsonl` (appe
 3. При застревании пишется `failure_report.json` + `stuck.md`; при отсутствии агента summary —
    `write_minimal_summary` (компактный, с `git diff --stat`, без полного патча).
 
+Три пути записи ledger и один путь чтения (дедуп id для шлюза §19):
+
+```mermaid
+flowchart TB
+    term["B06: терминальный переход"] --> append["append(LedgerRecord)<br/>→ completed.jsonl (append-only)"]
+    stuck["B06: застревание — лимит исчерпан (B09)"] --> fr["write_failure_report<br/>→ failure_report.json + stuck.md"]
+    nosum["B06: нет агента для summary"] --> ms["write_minimal_summary<br/>→ summary.md + summary.json (компактный)"]
+    append --> dedup["шлюз §19 (B16): has_task_id<br/>дедуп id (вместе с B07.task_id_exists)"]
+```
+
 ## Проверки и ограничения
 
 - Журнал строго append-only (одна запись на терминальный переход) ([ledger.py:104-109](../../../src/wastech_orchestrator/ledger.py#L104)).

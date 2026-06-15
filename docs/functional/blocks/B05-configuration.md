@@ -57,17 +57,37 @@
 4. `load_config` дополнительно привязывает относительный `prompts.templates_dir` к каталогу конфига.
 5. CLI вызывает `validate_config` (семантика) как fail-closed-шлюз перед использованием.
 
+Загрузка и валидация — два fail-closed-рубежа; на каждом собираются **все** проблемы, а не первая:
+
+```mermaid
+flowchart TB
+    start(["load_config(path) / loads_config(text)"]) --> y["yaml.safe_load"]
+    y -->|"не mapping / YAML-ошибка"| e1["ConfigError"]
+    y --> parse["_parse: неизвестные ключи, schema_version,<br/>типы блоков (собрать ВСЕ проблемы)"]
+    parse -->|"есть проблемы"| e1
+    parse --> bind["привязать относительный prompts.templates_dir<br/>к каталогу конфига"]
+    bind --> res["ConfigLoadResult(config, warnings)"]
+    res --> val["validate_config: семантика §11/§21.4<br/>(маршруты, лимиты, footprint, extra_args, проверки, telegram)"]
+    val -->|нарушение| e2["ConfigError (все проблемы)"]
+    val --> ok["конфиг допущен в конвейер"]
+    e1 --> exit2["CLI: сообщение + выход 2"]
+    e2 --> exit2
+```
+
 ## Альтернативные сценарии
 
 ### Легаси-конфиг без `agents.routing`
+
 Отсутствие блока маршрутизации → авто-миграция к Codex-маршруту для всех `ROUTABLE_STAGES` + warning
 ([loader.py:476-485,388-392](../../../src/wastech_orchestrator/config/loader.py#L476)).
 
 ### Удалённые ключи (schema v6)
+
 `prompts.overrides`/`prompts.strict` на загрузке толерируются (игнор) с warning; `upgrade-config`
 вырезает их ([loader.py:711-728](../../../src/wastech_orchestrator/config/loader.py#L711), [upgrade.py:27-30,77-89](../../../src/wastech_orchestrator/config/upgrade.py#L27)).
 
 ### Апгрейд конфига
+
 `upgrade_config_mapping`: рекурсивный merge шаблона в конфиг оператора — значения оператора всегда
 побеждают, добавляются только отсутствующие ключи (в т.ч. новые под-ключи), удалённые вырезаются,
 `schema_version` ставится текущим ([upgrade.py:92-112](../../../src/wastech_orchestrator/config/upgrade.py#L92)).
