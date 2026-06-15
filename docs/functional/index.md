@@ -77,6 +77,10 @@ flowchart TB
 [B26](./blocks/B26-notifications-telegram.md); SQLite — [B07](./blocks/B07-state-machine-and-store.md);
 файловые артефакты — [B20](./blocks/B20-artifact-layout.md).
 
+Навигируемая версия этих связей как **architecture-as-code** (C4-модель: контекст → контейнеры →
+компоненты, с кликабельным переходом на документы блоков) — в [docs/architecture/](../architecture/README.md)
+(LikeC4). Эта функциональная карта остаётся источником детализации и привязок к коду.
+
 ## Точки входа (подтверждены)
 
 - **Консольные скрипты `wastech-orchestrator` и `worc`** ([pyproject.toml:29-32](../../pyproject.toml#L29) → `cli:main`) — разбор аргументов и диспетчеризация подкоманд.
@@ -96,7 +100,8 @@ flowchart TB
 
 ## Основные сквозные потоки (обзор)
 
-Подробные пошаговые сценарии — в [system-flows.md](./system-flows.md). Кратко:
+Подробные пошаговые сценарии — в [system-flows.md](./system-flows.md); покадровый разбор стадий
+конвейера (по документу на стадию, S01–S08) — в [flows/coding/index.md](./flows/coding/index.md). Кратко:
 
 1. **Обработка одной задачи (`run` / `watch`).** Чтение и валидация задачи → захват слота →
    подготовка ветки → (опц.) refinement → planning (+ опц. декомпозиция) → для каждой единицы
