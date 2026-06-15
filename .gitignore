@@ -13,21 +13,21 @@ venv/
 .coverage
 htmlcov/
 
-# Конфигурация и секреты (НЕ коммитить)
+# Configuration and secrets (DO NOT commit)
 config.yaml
 .env
 secrets/
 *.key
 *.pem
 
-# Рабочая область и артефакты оркестратора
+# Workspace and Orchestrator Artifacts
 workspace/
 logs/
 *.db
 *.sqlite
 *.sqlite3
 
-# Задачи в работе (опционально оставить только pending в git)
+# Tasks in progress (optionally leave only pending in git)
 tasks/processing/
 tasks/done/
 tasks/failed/
@@ -40,3 +40,6 @@ tasks/rejected/
 Thumbs.db
 state.db-shm
 state.db-wal
+
+# Obsidian Vault (if using Obsidian for notes)
+.obsidian/
