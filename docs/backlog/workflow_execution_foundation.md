@@ -39,7 +39,7 @@ rewrite of the orchestrator.
 
 Do **not** build an arbitrary user-defined workflow graph engine in this task.
 
-The initial foundation uses:
+The foundation uses:
 
 ```text
 task file
@@ -51,15 +51,21 @@ task file
   -> existing implementation pipeline
 ```
 
-The first transitional profile version is `implementation-v1`. Its `implementation` runner
-delegates to the current
-orchestrator pipeline and retains the canonical stages, state transitions, checks, Git lifecycle,
-fallback rules, and recovery behavior.
+There is a single built-in `implementation` profile. Its `implementation` runner delegates to the
+current orchestrator pipeline and retains the canonical stages, state transitions, checks, Git
+lifecycle, fallback rules, and recovery behavior.
+
+This is a greenfield MVP with no deployed installations and no production state, so the foundation
+does **not** carry a transitional/versioned cutover and never ships a no-supervisor implementation
+profile. The single `implementation` profile declares `supervisor_policy: required` from the start;
+the foundation contributes only the contract/plumbing layer, and the supervisor component
+(delivered by the [supervisor quality-gate](supervisor_quality_gate.md) task) makes the profile
+runnable end-to-end. `profile_version` is retained only as a forward-looking audit/identity
+attribute for future profile evolution and new task types — there is no protocol for migrating
+between profile versions and no second runtime profile.
 
 Later profile work may add dedicated runners or a common ordered-stage engine after the
 `deep_research` and `security_audit` requirements prove which abstraction is actually needed.
-The mandatory supervisor change upgrades the same runner through a one-way profile cutover to
-`implementation-v2`; it does not keep `implementation-v1` as a selectable runtime path.
 
 This incremental design avoids two unsafe extremes:
 
@@ -91,24 +97,26 @@ WorkflowProfile
   supervisor_policy
   output_policy
   publishing_policy
-  result_policy
 ```
 
 Initial entry:
 
 ```text
 task_type: implementation
-profile_version: implementation-v1
+profile_version: implementation
 runner_kind: implementation
-supervisor_policy: transitional_absent
+supervisor_policy: required
 ```
 
 Profiles are code/configuration owned by the operator and application. Task prose cannot define,
 replace, or mutate a profile.
 
-`transitional_absent` exists only so the foundation can land without changing current runtime
-behavior. The supervisor implementation replaces it with `required` in `implementation-v2` and
-removes executable support for the transitional policy.
+`supervisor_policy` is `required` for the `implementation` profile from the start — no no-supervisor
+implementation profile ever ships. The foundation slices (F1–F4) deliver only the contract/plumbing
+layer and do not themselves invoke agents; an end-to-end runnable implementation profile
+additionally requires the supervisor component, delivered by the
+[supervisor quality-gate](supervisor_quality_gate.md) task. Future profiles (`deep_research`,
+`security_audit`) may declare a different `supervisor_policy`.
 
 This delivers Phase 1 of
 [task workflow profiles](task_workflow_profiles.md#17-rollout-plan). That feature document retains
@@ -130,23 +138,28 @@ ResolvedWorkflowProfile
   supervisor_policy
   output_policy
   publishing_policy
-  result_policy
-  policy_fingerprint
+  profile_fingerprint
 ```
 
-Persist the canonical snapshot or an immutable artifact plus its fingerprint. Recovery,
-`rerun --continue`, and all later stage decisions must reuse the persisted snapshot rather than
-silently re-resolving changed configuration midway through a task.
+Persist the canonical snapshot as a row in `state.db` together with its `profile_fingerprint`.
+Recovery, `rerun --continue`, and all later stage decisions must reuse this persisted snapshot
+rather than silently re-resolving changed configuration midway through a task.
 
 The snapshot must contain no secrets, raw session handles, full environment values, or sensitive
 security findings.
 
-On restart:
+On restart, recovery **trusts the persisted snapshot and never re-resolves the profile from current
+configuration.** It performs only three checks:
 
-- load and verify the persisted snapshot fingerprint;
-- reject an unknown runner/profile version;
-- re-check current hard security capabilities without widening the saved policy;
-- stop in `manual_action_required` when the saved workflow can no longer be executed safely.
+- snapshot integrity: recompute and compare `profile_fingerprint`;
+- profile/runner existence: reject an unknown or no-longer-registered runner/profile version;
+- security capability: re-check current hard security capabilities and refuse to widen the saved
+  policy.
+
+Stop in `manual_action_required` only when one of those checks fails — i.e. the saved workflow can
+no longer be executed safely. A benign, unrelated configuration change must not invalidate an
+in-flight task. (In the foundation-only release this path is effectively dormant: the single
+`implementation` profile is always registered and security can only narrow.)
 
 A fresh rerun creates a new resolved snapshot. A continue rerun preserves the previous one.
 
@@ -157,7 +170,7 @@ Introduce a normalized descriptor used when Core prepares an agent or determinis
 ```text
 ResolvedExecutionPolicy
   workflow_stage_id
-  execution_role
+  run_kind
   route
   model
   reasoning
@@ -175,7 +188,7 @@ remains exclusively in `providers/`.
 
 #### Stage identity
 
-Keep the current canonical `Stage` enum for `implementation_v1`. Add a separate validated
+Keep the current canonical `Stage` enum for the `implementation` profile. Add a separate validated
 workflow-stage identifier at the workflow boundary so future built-in profiles are not forced to
 pretend that `repository_analysis` or `threat_analysis` is an implementation stage.
 
@@ -187,25 +200,63 @@ workflow_stage_id = Stage.value
 
 Do not accept arbitrary task-provided stage IDs.
 
-#### Execution role
+#### Run kind
 
-Execution role identifies why a run exists without creating fake pipeline stages:
+`run_kind` identifies why a run exists without creating fake pipeline stages. There are exactly two
+coarse buckets:
 
 ```text
-pipeline_stage
-supervisor
-testing_agent
+stage       # produces the deliverable (the pipeline author/editor: implementation, fixing, executor, …)
+evaluator   # read-only; judges a produced artifact and returns a bounded verdict
 ```
 
-The foundation introduces the extensible contract and audit field. It does not invoke supervisor
-or testing agents. The implementation runner must nevertheless be able to consume a resolved
-`supervisor_policy`; the follow-on cutover makes that policy unconditionally `required`.
+This is the single canonical name and value set for the run-role audit field. The sibling documents
+consume `run_kind` with these exact values; they must not introduce a parallel `execution_role`
+field, a `pipeline_stage`/`supervisor`/`testing_agent` `run_kind` value, or a `Stage.SUPERVISOR`.
 
-The same workflow checkpoint may use a different execution role. In `implementation-v2`, the
-supervisor executes `workflow_stage_id = summary` with `execution_role = supervisor` when summary
-output is enabled, replacing the old summary provider call while preserving the Core-owned
-`summarizing` lifecycle checkpoint. When summary is skipped, the checkpoint records a skip and
-creates no execution or output artifact.
+Every `evaluator` run also carries a fine-grained `role` discriminator naming its purpose, e.g.:
+
+```text
+role: supervisor | test_quality | critic | verifier
+```
+
+so audit and recovery treat all evaluators uniformly (read-only, own session, bounded loop,
+immutable verdict) while still distinguishing which evaluator produced a given record. (Supervisor
+additionally keeps its `evaluation_kind = stage_output | final_handoff` sub-field.)
+
+##### The shared evaluator-loop primitive
+
+All evaluators are instances of one primitive that the Core owns:
+
+```text
+independent read-only run -> validated verdict (accept | rework)
+  accept -> Core continues
+  rework -> Core applies a bounded QualityAction (enter_fixing | repeat_stage), counted against a budget
+```
+
+Parameters per instance:
+
+- `role` (above);
+- session policy — `fresh_each_pass` (the implementation `supervisor`) or `resume_own_lineage` (an
+  evaluator that holds a multi-round dialogue, e.g. a research `critic`); an evaluator's session is
+  **always its own and never the author's editing lineage**, so independence holds either way;
+- the bounded rework budget — **per-instance and operator-configurable** (granular: one evaluator
+  may allow 1 rework, another 3, another 10, by task complexity/type), derived by counting applied
+  verdicts; plus the shared global `fix_iterations` cap. There is **no single shared rework number**
+  across evaluators. (One deliberate v1 exception: the `deep_research` citation-checker loop is
+  pinned to 1 — see that feature.)
+
+The implementation `supervisor`, the optional `test_quality` evaluator, and the research
+`critic`/`verifier` are all configured instances of this primitive. The foundation introduces the
+contract and audit field; it does not itself invoke any evaluator — the implementation runner
+consumes the resolved `supervisor_policy: required`, and the supervisor component that satisfies it
+is delivered by the supervisor task.
+
+The same workflow checkpoint may use a different run kind. After the supervisor change, the
+supervisor executes `workflow_stage_id = summary` with `run_kind = evaluator`, `role = supervisor`
+when summary output is enabled, replacing the old summary provider call while preserving the
+Core-owned `summarizing` lifecycle checkpoint. When summary is skipped, the checkpoint records a skip
+and creates no execution or output artifact.
 
 #### Session scope
 
@@ -216,12 +267,18 @@ fresh_disposable
 editing_lineage
 ```
 
-`lineage_key` is optional and is meaningful only for a resumable scope. The foundation records the
-policy but does not implement vendor resume or durable lineage; that remains owned by
-[durable sessions](durable_sessions_and_fixing_affinity.md).
+`implementation` and `fixing` (the stage authors) resolve to `editing_lineage`. Evaluator runs use
+**their own** session, never the author's editing lineage: the implementation `supervisor` uses
+`fresh_disposable` (fresh each pass), while an evaluator that holds a multi-round dialogue may
+`resume_own_lineage` (its own resumable session, still independent of the author). `lineage_key` is
+meaningful only for a resumable scope.
 
-Current implementation behavior must not accidentally become durable merely because the contract
-exists.
+In the foundation slice the `editing_lineage` scope is recorded as policy and backed by the
+**existing in-memory session continuity** (Claude `--resume`); the foundation does not yet build a
+durable lineage store or require a persisted, validated `lineage_key`. Durable, per-execution-unit
+lineage and the mandatory `lineage_key` are owned by
+[durable sessions](durable_sessions_and_fixing_affinity.md). Current implementation behavior must
+not accidentally become more durable than it already is merely because the contract exists.
 
 ### 4. Output and artifact policy
 
@@ -233,8 +290,12 @@ ResolvedOutputPolicy
   control_workspace_writes
   artifact_class
   allowed_path_policy
-  publishing_policy
 ```
+
+`publishing_policy` is **not** part of `ResolvedOutputPolicy`. It is a single profile-level field
+(on `WorkflowProfile` / `ResolvedWorkflowProfile`) because publishing is a terminal property of the
+whole workflow, not a per-stage write concern. `ResolvedOutputPolicy` covers only writes, paths, and
+artifact class. This keeps exactly one source of truth for publishing.
 
 Initial policy identifiers should cover the known requirements without embedding feature logic:
 
@@ -284,6 +345,17 @@ QualityAction
   fail
 ```
 
+Each action maps to canonical state-machine behavior so a follow-on feature cannot invent its own
+mapping:
+
+```text
+continue      -> normal next status for the stage
+enter_fixing  -> the `implementing -> fixing` edge
+repeat_stage  -> re-enter the same status from persisted feedback (no new self-loop edge)
+stop_manual   -> manual_action_required
+fail          -> failed
+```
+
 The deterministic Core remains the only component that applies an action. Agents, profiles, and
 providers may return validated facts or verdicts but cannot transition state directly.
 
@@ -325,10 +397,21 @@ task:
 
 run:
   workflow_stage_id
-  execution_role
+  run_kind             # stage | evaluator
+  role                 # evaluator discriminator: supervisor | test_quality | critic | verifier (NULL for run_kind=stage)
   execution_unit
-  resolved_policy_fingerprint
+  execution_policy_fingerprint
 ```
+
+`execution_unit` is the foundation-owned identity of the thing being executed: the pair
+`(task_id, subtask_order)`, where `subtask_order` is `NULL` for the root task and the linear order
+for a decomposed subtask. It reuses the existing nullable `StageRunRow.subtask_order`. Durable
+sessions, hybrid testing, and supervisor key their per-unit state on this identity rather than
+redefining it.
+
+Two fingerprints exist and are named distinctly: `profile_fingerprint` (the resolved profile
+snapshot) and `execution_policy_fingerprint` (a single `ResolvedExecutionPolicy` descriptor). There
+is no third fingerprint name.
 
 Use the next available config/DB schema versions at implementation time. Do not reserve a numeric
 version in this document.
@@ -353,7 +436,8 @@ Feature-specific tables remain feature-owned:
 - no changes to deterministic Check Runner authority;
 - no changes to provider fallback semantics;
 - no changes to Git publishing ownership;
-- no broad renaming of existing statuses or stages.
+- no broad renaming of existing statuses or stages;
+- no transitional/versioned profile cutover or migration machinery (greenfield MVP).
 
 ## Delivery slices
 
@@ -363,12 +447,12 @@ The prerequisite should be implemented as four reviewable slices, not one large 
 
 - parse `task_type`, defaulting to `implementation`;
 - validate known/enabled profiles before side effects;
-- add the built-in registry and transitional `implementation-v1`;
-- persist task type, profile version, and fingerprint;
-- add migration and compatibility tests.
+- add the built-in registry and the single `implementation` profile;
+- persist task type, profile version, and `profile_fingerprint`;
+- add compatibility tests.
 
-Exit condition: old tasks run exactly as before through the explicitly selected implementation
-profile.
+Exit condition: tasks run exactly as before through the explicitly selected `implementation`
+profile. (Greenfield MVP: there is no deployed state to migrate.)
 
 ### Slice F2: resolved execution policy
 
@@ -409,47 +493,38 @@ unchanged.
 |---|---|---|
 | [Task workflow profiles](task_workflow_profiles.md) | Registry, profile snapshot/version, workflow stage IDs, output/publishing policy, runner selection. | `deep_research`, `security_audit`, their runners/stages, result schemas, network policy, private storage, and publishing behavior. |
 | [Durable sessions](durable_sessions_and_fixing_affinity.md) | Execution role, session scope, lineage key, execution unit, persisted policy identity. | Vendor resume, raw handle storage/redaction, lineage transaction, affinity, provider-aware retry/fallback. |
-| [Hybrid agent testing](hybrid_agent_testing.md) | `testing_agent` role, fresh session scope, immutable run artifacts, exact delta/path primitives, output-policy hook. | Testing checkpoint, trusted test-path policy, optional invocation, partial-edit handling, Check Runner integration. |
-| [Supervisor quality-gate](supervisor_quality_gate.md) | `supervisor` role, fresh session scope, immutable run artifacts, quality-action vocabulary, budget key, role/stage separation, persisted `supervisor_policy`, and optional output-artifact vocabulary. | Required verdict schema, evaluation/application persistence, local rework counters, stage integration, final handoff schema, Core-owned optional summary materialisation/skip behavior, read-only mutation guard, and the one-way `implementation-v2` cutover. |
+| [Hybrid agent testing](hybrid_agent_testing.md) | `evaluator` run kind (`role = test_quality`), own session scope, immutable evaluation artifacts, quality-action/bounded-rework vocabulary, Check Runner mutation-guard primitive. | Read-only test-quality verdict schema, evaluation persistence, the rule that tests are authored by the `implementation` agent (the evaluator never writes files), and Check Runner remaining the sole publish gate. |
+| [Supervisor quality-gate](supervisor_quality_gate.md) | `evaluator` run kind (`role = supervisor`), fresh-each-pass session scope, immutable run artifacts, quality-action vocabulary, budget key, run-kind/stage separation, persisted `supervisor_policy`, and optional output-artifact vocabulary. | Required verdict schema, evaluation/application persistence, local rework counters, stage integration, final handoff schema, Core-owned optional summary materialisation/skip behavior, read-only mutation guard, and editing the `implementation` profile in place to `supervisor_policy: required`. |
 
 ## Recommended implementation order
 
 ```text
 workflow execution foundation (F1 -> F4)
-  -> durable sessions and fixing affinity
   -> supervisor quality-gate
+  -> durable sessions and fixing affinity
   -> hybrid agent testing
   -> task workflow profiles: deep_research
   -> task workflow profiles: security_audit
 ```
 
-Durable sessions may land before the required-supervisor cutover. Supervisor should then land
-before hybrid testing so subsequent implementation-workflow work targets only
-`implementation-v2`. `deep_research` and `security_audit` should follow because they benefit from
-the same execution-role, fresh-session, output-policy, and evaluator contracts.
+Supervisor lands **immediately after the foundation**: the `implementation` profile requires it to
+run end-to-end (`supervisor_policy: required`), so supervisor starts on ad-hoc fresh requests before
+the formal session-scope machinery exists. Durable sessions follows — it formalizes the
+fresh/disposable and editing-lineage scopes the supervisor already relies on and adds
+implementation/fixing affinity ordered around the now-existing supervisor evaluation. Hybrid testing
+follows durable sessions, and its flow likewise assumes the mandatory supervisor already runs.
+**Supervisor must therefore precede both durable sessions and hybrid testing.** `deep_research` and
+`security_audit` come last because they benefit from the same run-kind, fresh-session,
+output-policy, and evaluator contracts.
 
-### One-way supervisor cutover
+### Supervisor enablement (no cutover)
 
-The foundation and supervisor are separate delivery tasks, but the resulting product must not
-carry two implementation modes indefinitely:
-
-```text
-foundation release: implementation-v1 is the sole executable profile
-supervisor release: require an empty non-terminal queue, migrate config,
-                    make implementation-v2 the sole executable profile
-```
-
-Historical completed `implementation-v1` records remain readable. No config/task selector and no
-runtime runner may start or resume `implementation-v1` after the cutover. This avoids duplicating
-execution, recovery, summary, and test behavior.
-
-The cutover must also define terminal-task recovery explicitly:
-
-- `rerun --continue` rejects every historical `implementation-v1` attempt after the cutover;
-- a fresh rerun resolves and persists `implementation-v2`;
-- the upgrade refuses every non-terminal or unresolved `manual_action_required`
-  `implementation-v1` task, because it could otherwise require the removed runtime policy;
-- completed, failed, abandoned, or explicitly finalized v1 attempts remain immutable history.
+Because this is a greenfield MVP with no deployed state, there is no versioned profile cutover and no
+transitional no-supervisor profile. The single `implementation` profile requires supervisor from the
+start; the supervisor task delivers the component and wires the mandatory evaluation checkpoints.
+There is no `implementation-v1`/`implementation-v2` pair, no upgrade gate, and no "historical
+version" readability rule. The only ordering constraint is that the supervisor component must exist
+before the implementation profile can run end-to-end.
 
 ## Risks and required decisions
 
@@ -463,7 +538,7 @@ resolved snapshot and fail closed when it cannot be honored.
 
 The current and proposed workflows have different terminal behavior and side effects. A generic
 graph engine before two real workflow implementations exist would encode assumptions that are
-expensive to undo. Keep one `implementation` runner behind a versioned policy boundary.
+expensive to undo. Keep one `implementation` runner behind a stable policy boundary.
 
 ### Stage enum pollution
 
@@ -484,7 +559,7 @@ couple migrations and make independent implementation harder.
 
 ## Minimum tests
 
-- missing `task_type` selects `implementation-v1`;
+- missing `task_type` selects the `implementation` profile;
 - an unknown or disabled task type fails before branch/provider side effects;
 - the registry is deterministic and rejects duplicate task type/version registration;
 - task content cannot select `runner_kind`, stages, permissions, outputs, or publishing policy;
@@ -495,29 +570,29 @@ couple migrations and make independent implementation harder.
 - a task cannot widen profile permissions or publishing authority;
 - route/model/reasoning overrides preserve existing precedence and allowlists;
 - implementation stages map to their existing `Stage.value`;
-- supervisor/testing roles do not become `Stage` values;
-- `fresh_disposable` rejects a lineage key and `editing_lineage` requires a validated lineage key;
+- `evaluator` runs (any `role`) do not become `Stage` values;
+- `fresh_disposable` rejects a lineage key; `editing_lineage` carries an optional `lineage_key` in
+  the foundation (durable sessions later makes it mandatory and validated);
+- `QualityAction` maps to canonical statuses exactly as specified (no new self-loop edge for
+  `repeat_stage`);
 - path normalization rejects traversal and destinations outside their configured root;
 - exact delta helpers distinguish pre-existing implementation changes from later auxiliary edits;
 - existing implementation recovery, fallback, checks, review, summary, and publishing tests remain
   unchanged and green.
 
-The supervisor follow-on must additionally test that the cutover rejects non-terminal and
-unresolved manual-action v1 tasks; rejects `rerun --continue` for historical v1 attempts; resolves
-fresh reruns to `implementation-v2`; and exposes no runtime no-supervisor policy.
-
 ## Definition of done
 
-- `implementation` is an explicit built-in workflow profile and remains the default.
-- Existing implementation tasks retain current behavior in the foundation-only release.
-- Every active task has a persisted, immutable, secret-free resolved profile identity.
-- Provider-neutral execution role, session scope, output policy, and quality-action contracts are
+- `implementation` is the single explicit built-in workflow profile and remains the default.
+- Implementation tasks retain current behavior in the foundation-only release.
+- Every active task has a persisted, immutable, secret-free resolved profile identity (a row in
+  `state.db` with its `profile_fingerprint`).
+- Provider-neutral `run_kind`, session scope, output policy, and quality-action contracts are
   available without provider CLI details entering Core.
 - The four follow-on backlog tasks reference and consume these contracts instead of defining
   parallel foundations.
 - No feature-specific behavior listed under non-goals is accidentally enabled.
-- The foundation leaves an explicit one-way path to mandatory `implementation-v2`; it does not
-  require permanent dual-profile execution support.
+- The `implementation` profile requires supervisor from the start; there is no transitional
+  no-supervisor profile, no versioned cutover, and no dual-profile execution support.
 - `ruff`, `mypy`, and `pytest` pass.
 - The canonical plan, architecture/configuration docs, backlog/follow-ups, and `CHANGELOG.md` are
   updated in the same implementation change.

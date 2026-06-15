@@ -24,8 +24,8 @@ This document is one independently implementable part of the
   policy identity;
 - [Supervisor quality-gate](supervisor_quality_gate.md) always uses fresh read-only sessions and
   cannot update editing lineage;
-- [Hybrid agent testing](hybrid_agent_testing.md) always uses fresh workspace-write sessions and
-  cannot update editing lineage;
+- [Hybrid agent testing](hybrid_agent_testing.md) is a read-only test-quality evaluator (it never
+  writes the workspace); it uses its own evaluator session and cannot update editing lineage;
 - **this document** owns provider resume, durable editing lineage, provider/session affinity,
   provider-aware fallback, recovery, and raw session-handle redaction.
 
@@ -34,16 +34,22 @@ Cross-change contracts:
 1. Artifacts remain the primary source of truth. Session continuity is an optimization and context
    aid, never the only recovery mechanism.
 2. Only `implementation` and `fixing` use the active editing lineage.
-3. Mandatory supervisor quality-gate calls and an enabled final handoff pass, plus testing agent,
-   review, refinement, and planning cannot overwrite editing lineage even when routed to the same
-   provider.
+3. Mandatory supervisor quality-gate calls and an enabled final handoff pass, plus the test-quality
+   evaluator, review, refinement, and planning cannot overwrite editing lineage even when routed to
+   the same provider.
 4. Provider-specific CLI syntax stays in adapters. Core/Router use only normalized session fields
    and session scope.
-5. Database/config migrations use the next available schema version. The current database is v3,
-   so this is v3 -> v4 only if this program item lands first.
+5. Database/config schema changes use the next available schema version (forward only; greenfield —
+   no deployed data to migrate). Supervisor lands before this feature, so increment from the version
+   it shipped rather than assuming v3 -> v4.
 
-After the shared foundation, this is the recommended first feature item because it implements the
-explicit fresh/disposable and editing-lineage behavior consumed by both evaluator features.
+This feature lands **after** the supervisor quality-gate, not before it. Because the `implementation`
+profile requires supervisor from the start (greenfield "fold"), supervisor ships immediately after
+the foundation using ad-hoc fresh requests. This document then formalizes the fresh/disposable and
+editing-lineage scopes the supervisor already relies on, and its implementation/fixing affinity is
+deliberately ordered around the now-existing mandatory supervisor evaluation (see
+[affinity](#implementationfixing-affinity)). It must precede hybrid testing, which also assumes the
+mandatory supervisor.
 
 ## Current reality and defects
 
@@ -71,7 +77,12 @@ explicit fresh/disposable and editing-lineage behavior consumed by both evaluato
   [Codex non-interactive documentation](https://developers.openai.com/codex/noninteractive#make-output-machine-readable).
 - The Codex contract was also verified locally on 2026-06-14 with `codex-cli 0.139.0`.
 
-Production support needs a documented minimum Codex version or side-effect-free capability probe.
+The entire affinity feature depends on `codex exec resume` existing and accepting the same global
+security flags (sandbox/approval) as `codex exec`. The current adapter's `# no --resume equivalent`
+comment is outdated and must be removed. Because the feature is unusable without resume, a documented
+**minimum Codex version or a side-effect-free capability probe is a hard requirement, not optional**:
+an installed Codex that cannot resume safely must fail or explicitly degrade (no silent loss of the
+security flags on the resume path).
 
 ## Durable editing lineage
 
@@ -81,7 +92,7 @@ active lineage per root task/subtask execution unit:
 ```text
 EditingLineage
   task_id
-  execution_unit       # root task or subtask order
+  execution_unit       # the foundation's (task_id, subtask_order); NULL subtask_order = root task
   purpose              # implementation_fixing
   provider
   session_id           # raw value only in state.db
@@ -104,11 +115,13 @@ subtask cannot alter completed lineage or preselect providers for another.
 
 Provider-neutral requests need an explicit scope/intent:
 
-- `editing_lineage`: implementation/fixing may load and update the active lineage;
-- `fresh_disposable`: supervisor/testing-agent and other independent evaluations receive no prior
+- `editing_lineage`: implementation/fixing (the stage authors) may load and update the active
+  lineage;
+- `fresh_disposable`: the implementation supervisor and the test-quality evaluator receive no prior
   session and cannot update editing lineage;
-- optional non-editing continuity, if retained later, must use a separate lineage key and cannot
-  share `implementation_fixing`.
+- an evaluator that holds a multi-round dialogue (e.g. a research `critic`) may instead
+  `resume_own_lineage` — its **own** resumable session under a separate lineage key, still
+  independent of the author and never sharing `implementation_fixing`.
 
 This removes accidental behavior based on “latest session for provider”.
 
@@ -228,10 +241,14 @@ On that error:
 1. record the failed resume attempt;
 2. retry the same provider once without resume using complete artifact context;
 3. if that provider remains unavailable, apply normal eligible infrastructure fallback;
-4. do not consume a quality fix iteration;
+4. do not consume a quality fix iteration (`fix_iterations` is untouched);
 5. record whether continuity was unavailable or broken.
 
-This avoids abandoning a healthy provider merely because its local transcript is gone.
+The retry-without-resume **is a normal Router `stage_attempt`** (it counts against
+`agents.max_stage_attempts` like any other attempt) but it is **not** a quality fix iteration. This
+keeps a single attempt-accounting model: continuity loss never gets a free, unbounded extra attempt,
+and it never spends the fix budget. This avoids abandoning a healthy provider merely because its
+local transcript is gone.
 
 ## Security and redaction
 
@@ -253,10 +270,11 @@ The existing result serializer and request argv representation require changes.
 
 ## Model and context policy
 
-Decide whether “same agent” also pins the effective model:
-
-- recommended: persist and reuse implementation's effective model for fixing;
-- alternative: permit stage-specific model override but document and audit the changed model.
+"Same agent" pins the effective model: persist implementation's `effective_model` on the lineage and
+reuse it for fixing. A conflicting task-level fixing **model** override is rejected/audited while
+affinity is enabled, exactly like the conflicting `agents.fixing` **provider** override — a resumed
+conversation cannot silently switch models. (When affinity is disabled or already broken, the normal
+per-stage model resolution applies.)
 
 Unsupported resume/model combinations use the unavailable-session path.
 
@@ -267,16 +285,17 @@ silently.
 ## Schema/versioning
 
 Add the lineage table and any route/audit fields using the next available `DB_SCHEMA_VERSION`.
-When implemented first against the current code, that is v3 -> v4. If supervisor or testing has
-already migrated the DB, increment from their shipped version.
+Because supervisor lands before this feature (greenfield "fold" ordering), increment from the
+version supervisor shipped — do not assume v3 -> v4. This is forward schema versioning only; there
+is no deployed production database to migrate (a developer's local `state.db` may be recreated).
 
 Update:
 
-- schema creation and idempotent migration;
+- schema creation and idempotent version bump (forward only; no deployed-data migration);
 - row dataclasses/mapping and store APIs;
 - fresh-rerun clearing;
 - continue/recovery preservation;
-- migration compatibility tests;
+- schema-creation/version-bump tests;
 - config schema/version if `agents.session_affinity` is added.
 
 ## Expected touchpoints

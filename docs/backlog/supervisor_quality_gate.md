@@ -28,8 +28,9 @@ This document is one independently implementable part of the
 [agent quality and continuity program](README.md#agent-quality-and-continuity-program):
 
 - [Workflow execution foundation](workflow_execution_foundation.md) is the prerequisite and owns
-  the `supervisor` execution role, fresh-session scope, immutable run-artifact allocation,
-  quality-action vocabulary, and shared policy identity;
+  the read-only `evaluator` run kind (`role = supervisor`), the `fresh_each_pass` session scope,
+  immutable run-artifact allocation, the shared evaluator-loop primitive, quality-action vocabulary,
+  and shared policy identity;
 - **this document** owns supervisor verdicts, persistence, rework accounting, and state-machine
   integration;
 - [Hybrid agent testing](hybrid_agent_testing.md) owns the optional workspace-writing testing agent
@@ -40,11 +41,15 @@ This document is one independently implementable part of the
 
 Cross-change contracts:
 
-1. Supervisor calls always start in a fresh independent session and never read or update the
-   implementation/fixing editing lineage.
-2. Supervisor and testing may share low-level provider invocation, fallback, artifact allocation,
-   schema validation, and audit helpers. They remain separate domain components because supervisor
-   is read-only while testing may edit the workspace.
+1. Supervisor calls always start in a **fresh independent session each pass** (session policy
+   `fresh_each_pass` — the supervisor never resumes its own prior session and never reads or updates
+   the implementation/fixing editing lineage). It reads context from artifacts, not a running
+   conversation.
+2. Supervisor and the test-quality evaluator may share low-level provider invocation, fallback,
+   artifact allocation, schema validation, and audit helpers — both are instances of the foundation's
+   read-only `evaluator` primitive (`role = supervisor` vs `role = test_quality`). They remain
+   separate domain components because they evaluate different things; **neither writes the
+   workspace** (tests are authored by the `implementation` agent, not by an evaluator).
 3. The Core remains the only state-machine owner. Provider adapters remain the only place that
    knows CLI syntax.
 4. Infrastructure fallback remains infrastructure-only. Supervisor criticism is a quality verdict,
@@ -60,9 +65,11 @@ Cross-change contracts:
 8. Supervisor evaluation is mandatory after every successful `implementation` and `fixing` run.
    Neither operator config nor task metadata may remove these checkpoints.
 
-Recommended feature order after the foundation is durable sessions first, supervisor second, and
-hybrid testing third. Supervisor may still be implemented before durable sessions by using fresh
-requests and domain-specific persistence, but it must not expose a temporary disabled mode.
+Because the `implementation` profile requires supervisor from the start (greenfield "fold"),
+supervisor lands **immediately after the foundation** — before durable sessions and hybrid testing.
+It does so using fresh independent requests and domain-specific persistence (the formal
+fresh/disposable session scope is then formalized by durable sessions). It must not expose a
+temporary disabled mode at any point.
 
 ## Current reality
 
@@ -74,8 +81,10 @@ requests and domain-specific persistence, but it must not expose a temporary dis
   re-runs would not automatically consume the global budget.
 - `summary` is currently a separate agent-routed stage. Its provider call becomes redundant once a
   final supervisor evaluation already reads the complete task outcome.
-- Existing installations have no required supervisor configuration. The implementation therefore
-  needs a one-way config/profile migration rather than a permanent old/new runtime branch.
+- This is a greenfield MVP with no deployed installations, so there is no migration: the required
+  supervisor configuration is added to the schema and example config as part of this change and is
+  mandatory from the start. The `implementation` profile requires supervisor from the start and a
+  no-supervisor implementation profile never ships.
 
 ## Proposed component
 
@@ -185,17 +194,18 @@ Outcomes:
   create no final-handoff evaluation, create no `summary.md` / `summary.json` or task-sidecar
   summary, and continue publishing without a summary body.
 
-The final-handoff path replaces `_run_stage(..., Stage.SUMMARY)` in the migrated implementation
+The final-handoff path replaces `_run_stage(..., Stage.SUMMARY)` in the implementation
 workflow. The enabled path invokes supervisor; the skipped path invokes no agent. There is no
-runtime branch that invokes the old summary provider.
+runtime branch that invokes a separate summary provider.
 
 `Stage.SUMMARY` and the `summarizing` state remain as workflow/lifecycle identifiers for
 configuration, audit, recovery, and backward compatibility, but `summary` is removed from the
 agent-routable stage set. Do not add `Stage.SUPERVISOR`.
 
 An effective summary skip, from either `stages.summary.enabled: false` or the existing trusted
-global stage-skip configuration, suppresses the final handoff completely. Unlike current behavior,
-the migrated workflow must not create a skipped-summary stub, deterministic fallback, artifact
+global stage-skip configuration, suppresses the final handoff completely. Unlike the current
+`_summary` behavior (which writes a stub, registers `summary.json`, and falls back to a PR body),
+the implementation workflow must not create a skipped-summary stub, deterministic fallback, artifact
 registration, `logs/<task-id>/summary.{md,json}`, or
 `tasks/<done|failed>/<task-id>.summary.md`.
 
@@ -235,11 +245,28 @@ Every applied supervisor `rework`, including same-status re-runs, must atomicall
 task-wide `fix_iterations` budget. Add a generic `record_rework(...)` decision in
 `LoopController` or equivalent; merely adding `FixLoop.SUPERVISOR` is insufficient.
 
-The local limit is scoped by `(target_stage, subtask_order)`, not one task-wide
-`supervisor_fix_cycles` value. Persist the number of applied reworks for that target and resolve the
-local sequence when the output is accepted. The global budget remains task-wide across subtasks.
-The `final_handoff` pass cannot emit or apply `rework` and therefore consumes no local or global fix
-budget.
+**Single accounting path (no double counting).** The existing `enter_fixing(loop)` already
+increments `fix_iterations` for the test-driven and review-driven loops. Supervisor reworks are a
+third, distinct trigger and must flow through `record_rework(...)` **only** — they must never also
+call `enter_fixing`, or the global budget would be incremented twice for one rework. Concretely:
+
+- test/review red results → `enter_fixing(FixLoop.TEST | FixLoop.REVIEW)` (unchanged);
+- supervisor `rework` (implementation or fixing, including the same-status fixing re-run) →
+  `record_rework(...)`;
+- both paths increment the single task-wide `fix_iterations` counter, and only one path runs per
+  rework.
+
+The `implementing -> fixing` edge taken on an implementation rework is a state transition only; it
+does not itself touch any counter (the `record_rework` call owns the increment).
+
+**Local limit (derived, not a new counter).** The local limit is scoped by
+`(target_stage, subtask_order)`, not one task-wide `supervisor_fix_cycles` value, and is **derived
+by counting applied supervisor evaluations** (`applied = true`) for that target in the persisted
+evaluations table — there is no separate mutable counter column to keep in sync. This is a third
+local dimension alongside the existing per-subtask `test_fix_cycles` / `review_fix_cycles`; all
+three feed the single global `fix_iterations`. The local sequence resolves when the output is
+accepted. The global budget remains task-wide across subtasks. The `final_handoff` pass cannot emit
+or apply `rework` and therefore consumes no local or global fix budget.
 
 Exhaustion follows the existing deterministic terminal policy and cannot create an infinite
 supervisor loop.
@@ -265,6 +292,15 @@ created_at
 Evaluation and application are separate idempotent facts. Applying a rework and consuming its
 budget must be transactional so recovery cannot apply the same verdict twice.
 
+**Recovery while still in `implementing` / `fixing`.** The supervisor has no status of its own (no
+`Stage.SUPERVISOR`, no new state); evaluation runs inline after the edit succeeds but before the
+Core applies its transition, so the task status is still `implementing` or `fixing` during
+evaluation. On restart in those statuses, recovery must therefore first consult the evaluations
+table keyed by the edit's `source_stage_run_id`: if a matching evaluation exists, resume from its
+recorded `outcome`/`applied` state (do not re-run the edit); only if none exists does it run the
+supervisor evaluation. This keeps the read-only evaluation idempotent without adding a "supervising"
+status.
+
 The completed final handoff pass persists its validated result before the Core transitions to
 `ready_to_publish`. If a crash occurs after persistence but before `summary.md` / `summary.json`
 materialisation, recovery reuses the immutable evaluation artifact and writes the files without
@@ -273,14 +309,15 @@ invoking the supervisor again.
 For an effective summary skip, recovery reuses the persisted skipped stage-run record. It must not
 create a final-handoff evaluation or summary artifacts on restart.
 
-Supervisor provider attempts must be distinguishable from pipeline-stage execution. Add a generic
-auditable run role such as `run_kind = stage | supervisor | testing_agent`, or a dedicated
-equivalent compatible with the sibling testing design. Do not introduce `Stage.SUPERVISOR`.
+Supervisor provider attempts must be distinguishable from pipeline-stage execution. Use the
+foundation's canonical `run_kind` audit field (`run_kind = stage | evaluator`); supervisor attempts
+are `run_kind = evaluator` with `role = supervisor`. Do not introduce a parallel `execution_role`
+field, a `run_kind = supervisor` value, or a `Stage.SUPERVISOR`.
 
 For the final pass, `target_stage = summary` identifies the workflow checkpoint while
-`evaluation_kind = final_handoff` and `run_kind = supervisor` identify the actual execution
-semantics. Its input checksum must cover all final context artifacts so recovery cannot reuse a
-handoff produced for an earlier accepted result.
+`evaluation_kind = final_handoff`, `run_kind = evaluator`, and `role = supervisor` identify the
+actual execution semantics. Its input checksum must cover all final context artifacts so recovery
+cannot reuse a handoff produced for an earlier accepted result.
 
 If another program item changes `state.db` first, this feature takes the next schema version rather
 than assuming a fixed version number.
@@ -302,7 +339,8 @@ Each evaluation artifact is immutable and namespaced by the source run. A single
 
 ## Security and failure policy
 
-- Supervisor uses a read-only permission profile and a fresh session.
+- Supervisor uses a read-only permission profile and a fresh session each pass (`fresh_each_pass` —
+  it never resumes a prior supervisor session).
 - Capture workspace snapshots before and after evaluation.
 - For mandatory `implementation`/`fixing` evaluations, provider infrastructure exhaustion or an
   invalid verdict after eligible fallback stops in `manual_action_required`; the Core cannot assume
@@ -335,7 +373,7 @@ agents:
 ```
 
 There is deliberately no `enabled` field. Missing required supervisor configuration fails config
-validation after the migration release.
+validation (this change makes the block mandatory; there is no prior release to migrate from).
 
 The exact provider/model defaults are resolved from existing provider configuration. Mandatory
 blocking targets are always `implementation` and `fixing`; `additional_stages` may contain only
@@ -343,9 +381,9 @@ blocking targets are always `implementation` and `fixing`; `additional_stages` m
 are invalid entries. The `final_handoff` execution kind always runs when summary is not skipped; it
 is not a toggle, an entry in `additional_stages`, or supervision of a pre-existing summary output.
 
-The legacy summary provider route/model is removed. The supervisor's trusted route/model
-configuration is used for the fresh final request. Task-level `agents.summary` and
-`stages.summary.{model,reasoning}` become invalid after migration; only
+Any separate summary provider route/model is removed (it never ships). The supervisor's trusted
+route/model configuration is used for the fresh final request. Task-level `agents.summary` and
+`stages.summary.{model,reasoning}` are invalid; only
 `stages.summary.enabled` remains valid as the summary-output policy. `false` skips the handoff and
 all summary files; omitted/`true` enables the handoff and deterministic fallback. Task content
 cannot disable or reconfigure the mandatory supervisor quality gates, resume an editing session,
@@ -353,36 +391,19 @@ or widen supervisor permissions.
 Startup/preflight validation must also fail before task side effects when neither the primary nor
 eligible fallback route can perform the required read-only supervisor invocation.
 
-## One-way rollout and profile migration
+## Single supervised pipeline (no rollout/migration)
 
 Do not maintain parallel supervisor/no-supervisor pipelines.
 
-The foundation may first ship the current behavior as transitional `implementation-v1`. The
-supervisor implementation performs one deliberate cutover:
+This is a greenfield MVP with no deployed state, so there is **no profile cutover and no migration**.
+The `implementation` profile requires supervisor from the start (`supervisor_policy: required`); a
+no-supervisor implementation profile never ships. There is no `implementation-v1`/`implementation-v2`
+pair, no upgrade gate, no "historical version" readability rule, and no config key or task field that
+can select a no-supervisor profile. The runtime contains exactly one implementation runner and one
+active policy.
 
-```text
-implementation-v1  # historical/transitional, no longer executable after cutover
-        ->
-implementation-v2  # sole executable implementation profile, supervisor required
-```
-
-Migration rules:
-
-- the upgrade refuses every non-terminal or unresolved `manual_action_required`
-  `implementation-v1` task; operators must finish or explicitly finalize it before retrying the
-  upgrade;
-- completed `implementation-v1` rows and artifacts remain readable historical audit data;
-- failed, abandoned, and explicitly finalized v1 attempts remain readable but cannot use
-  `rerun --continue`;
-- a fresh rerun of a historical v1 task resolves a new immutable `implementation-v2` snapshot;
-- pending/new tasks are accepted only after the cutover and resolve to `implementation-v2`;
-- no config key or task field can select `implementation-v1`;
-- `upgrade-config` adds the required supervisor route/settings and removes the obsolete summary
-  provider route/defaults;
-- the runtime contains one implementation runner and one active policy, not two state machines.
-
-This one-time upgrade gate is intentionally stricter than carrying permanent conditional branches
-through execution, recovery, tests, and future workflow extensions.
+The example/default config ships the required `agents.supervisor` block, and any separate summary
+provider route/defaults are simply never introduced (rather than removed by an upgrade step).
 
 ## Expected touchpoints
 
@@ -390,7 +411,8 @@ through execution, recovery, tests, and future workflow extensions.
 - `core/orchestrator.py` stage output/application boundaries;
 - `core/loop_control.py` generic rework accounting;
 - `core/state_machine.py` for `implementing -> fixing`;
-- `state_store.py` for immutable evaluations, application markers, counters, and run role;
+- `state_store.py` for immutable evaluations, application markers, counters, and the
+  `run_kind = evaluator` / `role = supervisor` audit fields;
 - current summary checkpoint/writer to replace the old provider run;
 - finalization and Git publishing interfaces so summary paths/PR bodies are optional on an
   effective summary skip;
@@ -415,7 +437,7 @@ through execution, recovery, tests, and future workflow extensions.
 - malformed handoff uses deterministic summary fallback without rework;
 - final supervisor infrastructure exhaustion records `unavailable`, writes deterministic fallback,
   and remains publishable;
-- no separate `Stage.SUMMARY` provider run exists after migration;
+- no separate `Stage.SUMMARY` provider run exists;
 - task-level summary route/model overrides cannot select or modify the final supervisor;
 - task-level and global summary skips suppress the final handoff pass, persist a skipped checkpoint,
   and create no summary files, fallback, artifact registrations, or task-sidecar summary;
@@ -430,14 +452,18 @@ through execution, recovery, tests, and future workflow extensions.
 - startup/preflight rejects configuration with no usable required supervisor route before task
   side effects;
 - mandatory evaluation infrastructure exhaustion stops in `manual_action_required`;
-- the migration refuses non-terminal and unresolved manual-action `implementation-v1` tasks;
-- historical v1 attempts remain readable, reject continue reruns, and fresh reruns resolve to v2;
+- a supervisor rework increments the global `fix_iterations` exactly once (the `record_rework` path
+  never also calls `enter_fixing`);
+- the local rework limit is derived from the count of applied evaluations for
+  `(target_stage, subtask_order)`, not a separate mutable counter;
+- recovery in `implementing`/`fixing` consults the evaluations table before re-running the edit;
 - read-only workspace mutation fails closed;
 - malformed/unbounded verdicts are rejected;
 - low findings cannot block and rework requires a blocking finding;
 - supervisor never receives or updates implementation/fixing session lineage;
 - enabled summary output remains publishable through deterministic fallback;
-- provider attempts are audited under the supervisor role and artifacts are never overwritten.
+- provider attempts are audited under `run_kind = evaluator` / `role = supervisor` and artifacts are
+  never overwritten.
 
 ## Definition of done
 
@@ -449,8 +475,8 @@ through execution, recovery, tests, and future workflow extensions.
   separate summary provider invocation.
 - Core remains the owner of `summarizing`, optional summary validation/writes, fallback, skip
   auditing, and publishing.
-- Only the migrated `implementation-v2` policy is executable; the codebase does not maintain a
-  no-supervisor runtime path.
+- The `implementation` profile requires supervisor from the start; the codebase never ships and does
+  not maintain a no-supervisor runtime path.
 - `ruff`, `mypy`, and `pytest` pass.
 - Canonical plan, configuration docs/examples, `how-it-works.md`, backlog/follow-ups, and
   `CHANGELOG.md` are updated in the same implementation change.

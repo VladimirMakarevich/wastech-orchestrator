@@ -14,18 +14,19 @@ specification, [CLAUDE.md](../../CLAUDE.md), [AGENTS.md](../../AGENTS.md), or th
 
 This feature depends on the shared
 [workflow execution foundation](workflow_execution_foundation.md). That prerequisite owns
-`task_type` defaulting, the transitional `implementation-v1` profile, immutable resolved-profile
-identity, workflow-stage IDs, execution roles/session scopes, and generic output/audit contracts.
+`task_type` defaulting, the single `implementation` profile, immutable resolved-profile identity,
+workflow-stage IDs, the `run_kind` audit field, session scopes, and generic output/audit contracts.
 
 This document owns the feature behavior above that foundation: `deep_research`, `security_audit`,
 their runners/stages, result schemas, network policy, output enforcement, private report storage,
 and publishing rules. It must extend the shared contracts rather than create a parallel profile or
 execution framework.
 
-The [supervisor quality-gate](supervisor_quality_gate.md) performs a one-way cutover to the sole
-executable `implementation-v2` profile before new workflow types are added. That implementation
-profile always requires supervisor evaluation; there is no supervisor-disabled implementation
-mode.
+The [supervisor quality-gate](supervisor_quality_gate.md) lands immediately after the foundation and
+makes the single `implementation` profile require supervisor evaluation
+(`supervisor_policy: required`) from the start. There is no supervisor-disabled implementation mode
+and no profile-version cutover (greenfield MVP — no deployed state). New workflow types are added
+after that.
 
 ## 1. Background
 
@@ -133,30 +134,48 @@ workflows:
 
     deep_research:
       enabled: true
+      supervisor_policy: not_applicable   # see §10 — research/audit use their own in-graph gates
       output_policy: repository_document
       publishing: documentation_pull_request
 
     security_audit:
       enabled: true
+      supervisor_policy: not_applicable
       output_policy: private_control_workspace_report
       publishing: none
 ```
 
-Conceptual normalized profile:
+Conceptual normalized profile (this **extends** the foundation's `WorkflowProfile` /
+`ResolvedWorkflowProfile`; it does not redefine it):
 
 ```text
-WorkflowProfile
+WorkflowProfile                     # foundation-owned base fields
   task_type
   profile_version
-  stages[]
-  routes
+  runner_kind
+  stages[]                          # workflow_stage_id list (foundation), not the implementation Stage enum
   permission_ceiling
-  network_policy
-  output_contract
-  quality_gates[]
-  publishing_policy
-  result_storage
+  supervisor_policy
+  output_policy                     # scalar identifier resolving to the foundation's ResolvedOutputPolicy
+  publishing_policy                 # single source of truth (profile-level, per the foundation)
+  + feature extensions:
+      routes
+      network_policy
+      quality_gates[]
+      result_storage
 ```
+
+The `output_policy` scalar identifiers map onto the foundation's `ResolvedOutputPolicy`:
+
+```text
+code_change                      -> target_repository_writes: implementation_scoped, control_workspace_writes: normal_artifacts
+repository_document              -> target_repository_writes: approved_document_only, control_workspace_writes: normal_artifacts
+private_control_workspace_report -> target_repository_writes: none,                  control_workspace_writes: private_report
+```
+
+`publishing` maps to the foundation's `publishing_policy` (`pull_request` /
+`documentation_pull_request` / `none`); `local_artifact` (§13) is a feature extension of that
+vocabulary.
 
 The profile registry belongs to the provider-neutral orchestration layer. Provider adapters receive
 ordinary `AgentRunRequest` values with the resolved stage, permissions, model, reasoning, and
@@ -183,9 +202,9 @@ refinement
     -> publishing
 ```
 
-The canonical statuses and deterministic Core transitions remain, but the migrated
-`implementation-v2` policy adds required supervisor evaluations after successful
-`implementation`/`fixing`.
+The canonical statuses and deterministic Core transitions remain; the `implementation` profile adds
+required supervisor evaluations after successful `implementation`/`fixing` (supervisor is mandatory
+from the start — see [supervisor quality-gate](supervisor_quality_gate.md)).
 
 Unless summary output is explicitly skipped, the `summary` lifecycle checkpoint is fulfilled by
 the final fresh supervisor pass: it synthesizes the complete accepted outcome and returns the
@@ -230,32 +249,117 @@ refinement
     -> repository_analysis
     -> external_research
     -> architecture_design
-    -> critical_review
     -> synthesis
+    -> fact_verification      # role=verifier: deterministic citation-checker + agent fact-verifier
+         -> rework: repeat_stage(synthesis)   # citation loop pinned to max 1 in v1
+    -> critical_review        # role=critic: accept | rework
+         -> accept: publishing
+         -> rework: repeat_stage(synthesis)   # bounded critical-review loop (configurable budget)
     -> publishing
 ```
 
 `external_research` may be skipped when the task is fully repository-local. The decision must be
 deterministic from task/profile settings, not silently made by the provider.
 
+#### Bounded critical-review loop (ping-pong)
+
+`critical_review` is an instance of the foundation's read-only evaluator primitive
+(`run_kind = evaluator`, `role = critic`); it reuses the shared immutable evaluation artifacts and
+`QualityAction` vocabulary, but not the implementation supervisor's fixing-edge semantics. Because it
+holds a multi-round dialogue across revisions, its session policy is `resume_own_lineage` — it
+resumes **its own** session between rounds (so it remembers what it already flagged) while staying
+independent of the author's session. It returns `accept` or `rework`:
+
+- `accept` -> continue to `publishing`;
+- `rework` -> the deterministic Core applies `repeat_stage(synthesis)`, re-running `synthesis` from
+  the persisted reviewer feedback. The Core owns the transition; the reviewer never transitions
+  directly.
+
+The reviewer should run on an **independent provider/route** from the author stages
+(`architecture_design` / `synthesis`) so the loop is genuinely adversarial (see §11 and the §18 open
+question on independent providers).
+
+The loop is **bounded** by a research revision budget — a local per-`(role, execution_unit)` limit
+plus the shared global cap — derived by counting applied `rework` evaluations, exactly like the
+supervisor's local limit. This budget is **per-evaluator and operator-configurable** (the `critic`
+may get a different number than other evaluators, by task complexity/type); it is **not** the
+citation-checker's v1 pin of 1 (see Verification below). On exhaustion the workflow does **not**
+`fail`: it publishes the document with the residual disagreements recorded in its **Open questions**
+section. This is the deliberate difference from `implementation`, where unresolved blocking findings
+stop the task.
+
+#### Verification (`fact_verification`, role = verifier)
+
+`fact_verification` checks that the report's claims are actually backed, in **two layers** (mirroring
+hybrid testing: a deterministic gate that is authoritative, plus an agent layer that judges):
+
+**Layer 1 — deterministic citation-checker (authoritative, no LLM, no tokens).** It validates the
+machine-readable evidence manifest (`sources.json` + repo-evidence entries with path/line/snippet),
+not the prose:
+
+- cited repository paths exist, line ranges are in range, quoted snippets match file content
+  (normalized for whitespace/indentation);
+- `sources.json` schema + date sanity (required fields present, valid format, no future dates);
+- internal-link integrity within the research directory.
+
+A *confirmed-broken* citation is **blocking** for that claim (objective broken evidence). Robustness
+contract — the checker must not become a brittle gate:
+
+1. validate the **structured manifest**, never parse citations out of free-form prose;
+2. **per-citation isolation** — iterate the manifest, each entry a pure side-effect-free read (file
+   exists / line in range / snippet match / JSON field); no subprocess, shell, or network, so one
+   bad entry can never abort the run;
+3. three outcomes — `verified` / `broken` (confirmed-invalid → blocking for that claim only) /
+   `uncheckable` (the checker itself could not evaluate the entry → **soft `unverified`, never a task
+   crash**).
+
+**Layer 2 — agent fact-verifier (judgment, `role = verifier`).** Does the source actually support
+the claim; is it current and authoritative; semantic fact-check. Its findings feed `repeat_stage`
+into `synthesis` like the critic.
+
+**Budgets.** The Layer-1 citation-driven rework loop is **pinned to a maximum of 1 iteration in v1**
+(cost guard while the logic is unproven; expandable after field testing). This pin applies **only**
+to the citation loop — Layer 2 and the critic keep their own independently configurable budgets.
+
+**Exhaustion.** A claim whose citation cannot be made valid within budget is **removed or explicitly
+labeled `unverified`/inference** — never shipped as fact. Network URL reachability is out of scope
+for v1 (flaky, side-effecting, proves existence not content); it belongs to agent
+`external_research`. Layer 1 depends on the structured directory output so it has a machine-readable
+input.
+
 ### Permissions
 
 - target repository source files: read-only;
-- configured research output path: write-only for the final document and bounded working
-  artifacts;
+- configured research output **directory**: write-only, bounded to that directory root;
 - network: allowed only according to the configured research policy;
 - Git lifecycle: the provider still cannot commit, push, or create a PR;
-- code changes outside the approved report path: forbidden.
+- writes anywhere outside the approved research directory: forbidden.
 
 ### Output
 
-Recommended default path:
+The result is a **directory**, not a single file (symmetric with `security_audit`'s
+`security-reports/<task-id>/`):
 
 ```text
-docs/research/<task-id>.md
+docs/research/<task-id>/
+  report.md            # required entry document — the output contract is not satisfied without it
+  architecture.md      # optional supporting files (curated by synthesis)
+  options.md
+  sources.json         # machine-readable citations
+  diagrams/            # optional assets
 ```
 
-Suggested report structure:
+Path policy: the foundation's containment primitives bound every write to the directory root; any
+file inside is allowed, nothing outside. The **output contract requires the entry document**
+(`report.md`) to exist — a directory that is empty or missing the entry doc is not a successful task
+(§4 principle 7).
+
+Only the **curated result** is committed to the documentation PR. The raw per-stage trail (each
+stage's intermediate output, reviewer feedback, rework history) stays as **control-workspace working
+artifacts** (auditable, never committed); `synthesis` explicitly promotes the files that belong in
+the published directory.
+
+Suggested entry-document structure:
 
 ```text
 Executive summary
@@ -285,7 +389,7 @@ include dated authoritative sources. Inferences must be labeled as such.
 
 ### Review
 
-A separate critical-review stage should verify:
+The separate critical-review evaluator (see the bounded loop above) verifies:
 
 - consistency with the current codebase and architecture rules;
 - unsupported or outdated claims;
@@ -294,13 +398,21 @@ A separate critical-review stage should verify:
 - whether the recommendation is implementable and testable;
 - whether alternatives were dismissed with sufficient evidence.
 
+A `rework` verdict must carry bounded, structured feedback that `synthesis` consumes on the next
+pass. Each evaluation is an immutable artifact namespaced by its source run; recovery reuses it so a
+restart cannot double-count a revision or lose the loop position.
+
 ### Definition of done
 
-- the required Markdown artifact exists at the approved path;
-- it cites repository evidence and external sources where relevant;
+- the required entry document (`report.md`) exists in the approved research directory, and every
+  written file is contained within that directory;
+- it cites repository evidence and external sources where relevant, and every cited reference passes
+  the deterministic citation-checker (or the claim is labeled `unverified`/removed — never shipped as
+  a fact with a broken citation);
 - it includes an actionable recommendation and implementation plan;
-- critical-review findings are resolved or recorded as open questions;
-- no source-code files were modified.
+- critical-review and verification findings are resolved, or the revision budget is exhausted and the
+  residual findings are recorded in the Open questions section (the loops never run unbounded);
+- no source-code files were modified, and only the curated result was committed.
 
 ### Publishing
 
@@ -538,13 +650,35 @@ evidence remain in the private control-workspace report directory.
 
 ## 10. Stage and state-machine design
 
-Do not force all profiles into the existing implementation stages with renamed prompts. Two
-reasonable designs are:
+Do not force all profiles into the existing implementation stages with renamed prompts. Each profile
+is selected by the foundation's `runner_kind` and its stages are validated `workflow_stage_id`
+values (e.g. `repository_analysis`, `threat_analysis`) — **not** entries in the implementation
+`Stage` enum. The foundation deliberately deferred any generic ordered-stage engine until these
+profiles prove the abstraction; two reasonable designs are:
 
 1. a profile-owned ordered stage list using a common stage execution engine;
 2. separate workflow state machines implementing a shared lifecycle contract.
 
-The first is likely simpler if stages remain linear, but each stage still needs explicit:
+### Quality gates and supervisor applicability
+
+The mandatory `implementation` supervisor evaluates a **code diff** and routes `rework -> fixing`.
+`deep_research` and `security_audit` perform **no code edits** (their outputs are a document and a
+private report), so that exact mechanism does not apply. Their quality is enforced by their own
+in-graph evaluators — `fact_verification` (`role = verifier`) and `critical_review` (`role = critic`)
+for research, `finding_verification` (`role = verifier`) for audit. These are further instances of
+the foundation's shared
+**evaluator-loop primitive** (`run_kind = evaluator`, own session, `QualityAction`/bounded rework,
+immutable verdicts) — the same primitive the implementation `supervisor` and the optional
+`test_quality` evaluator use — but with `repeat_stage` back into their own graph instead of the
+implementation fixing edge. So the implementation supervisor *component* does not curate them; the
+shared evaluator *primitive* does.
+
+Recommended: `supervisor_policy: not_applicable` for `deep_research` and `security_audit`. This is a
+**provisional decision recorded here and bound when each profile's phase (2/3) is designed in
+detail** — the exact stages, verification semantics, and revision loops above must be finalized then.
+See [open questions](#18-open-questions).
+
+The first design is likely simpler if stages remain linear, but each stage still needs explicit:
 
 - permissions;
 - provider route;
@@ -580,8 +714,9 @@ Each workflow may define different routing defaults:
 The configured provider allowlist remains authoritative. Task overrides may select only permitted
 providers and cannot weaken permission, output, or publishing policy.
 
-Per-stage model and reasoning controls should integrate with
-[per-stage model and reasoning overrides](per_stage_model_reasoning.md), not create a second
+Per-stage model and reasoning controls should integrate with the already-implemented
+[per-stage model and reasoning overrides](../implementation_stages/13_per_stage_model_reasoning.md)
+and the foundation's `ResolvedExecutionPolicy` (`model` / `reasoning`), not create a second
 incompatible mechanism.
 
 ## 12. Output guardrails
@@ -591,7 +726,7 @@ Each profile must have an allowlisted output surface:
 | Task type | Target repository writes | Control-workspace writes | Git publishing |
 | --- | --- | --- | --- |
 | `implementation` | Scoped code/docs/tests | Normal artifacts | Pull Request |
-| `deep_research` | Approved research document only | Normal artifacts | Documentation Pull Request |
+| `deep_research` | Approved research directory only | Normal artifacts | Documentation Pull Request |
 | `security_audit` | None | Private security report only | None |
 
 After every provider stage, the orchestrator should compare the working tree and private artifact
@@ -666,8 +801,18 @@ The normalized task should record the resolved profile and profile version for r
 ### Integration tests
 
 - implementation follows the existing code pipeline;
-- deep research creates only the approved Markdown document;
-- deep research critical review rejects an incomplete or unsupported report;
+- deep research writes only inside the approved research directory and produces the required entry
+  document (`report.md`);
+- deep research critical review rejects an incomplete or unsupported report and the Core re-runs
+  `synthesis` from persisted feedback;
+- the critical-review loop is bounded: on revision-budget exhaustion the report publishes with
+  residual findings in Open questions, never unbounded and never `fail`;
+- the deterministic citation-checker flags a hallucinated repo reference (missing path / out-of-range
+  line / snippet mismatch) as `broken`, and a malformed manifest entry as `uncheckable` (soft
+  `unverified`) without crashing the run;
+- the citation-driven rework loop runs at most once in v1, and an unfixable claim is removed or
+  labeled `unverified` rather than shipped as fact;
+- only the curated result is committed; the raw per-stage trail stays in control-workspace artifacts;
 - security audit runs fake scanners and writes only to the control workspace;
 - security audit leaves the target repository byte-for-byte and Git-status clean;
 - security report paths never enter scoped staging, audit commits, push, or PR creation;
@@ -689,23 +834,24 @@ The normalized task should record the resolved profile and profile version for r
 
 ## 17. Rollout plan
 
-### Phase 1: shared foundation and implementation compatibility
+### Phase 1: shared foundation and implementation profile
 
 To be implemented by the prerequisite
 [workflow execution foundation](workflow_execution_foundation.md):
 
 - add `task_type` with `implementation` default;
-- introduce the built-in profile registry and versioning;
+- introduce the built-in profile registry (`profile_version` as a forward audit attribute, no
+  version cutover);
 - persist the immutable resolved-profile snapshot;
-- run the existing pipeline through `implementation-v1` without behavior changes.
+- the foundation slices are plumbing only and do not change pipeline behavior.
 
-### Phase 1b: mandatory supervisor cutover
+### Phase 1b: mandatory supervisor
 
-Implemented by [supervisor quality-gate](supervisor_quality_gate.md):
+Implemented by [supervisor quality-gate](supervisor_quality_gate.md), immediately after the
+foundation (greenfield MVP — no deployed state, no migration/cutover):
 
-- require an empty non-terminal implementation queue during upgrade;
-- migrate required supervisor configuration;
-- replace `implementation-v1` with sole executable `implementation-v2`;
+- the single `implementation` profile requires supervisor from the start
+  (`supervisor_policy: required`); no no-supervisor profile ever ships;
 - require supervisor evaluation after implementation/fixing;
 - replace the summary provider run with the final supervisor handoff when summary output is enabled;
 - retain no runtime selector for a no-supervisor implementation profile.
@@ -713,7 +859,9 @@ Implemented by [supervisor quality-gate](supervisor_quality_gate.md):
 ### Phase 2: deep research
 
 - add read-only repository analysis and controlled external research;
-- add report schema, output guardrails, critical review, and documentation-only publishing.
+- add the research output **directory** + entry-document contract, output guardrails (directory
+  containment), the bounded critical-review loop (`repeat_stage(synthesis)`, independent reviewer,
+  revision budget), and documentation-only publishing of the curated result.
 
 ### Phase 3: security audit
 
@@ -742,17 +890,28 @@ Implemented by [supervisor quality-gate](supervisor_quality_gate.md):
 - Which workflow stages require independent providers rather than the same provider in a new run?
 - Should workflow profiles be built-in only initially, or allow user-defined profiles after the
   contracts stabilize?
+- Confirm `supervisor_policy: not_applicable` for `deep_research`/`security_audit` (§10): are their
+  in-graph `critical_review` / `finding_verification` gates sufficient, and do they reuse the
+  foundation evaluator plumbing? Bind this when each profile's phase is designed in detail.
+- The `fact_verification` two-layer design (deterministic citation-checker + agent fact-verifier) is
+  **accepted and specified in §7 (Verification)**, including its robustness contract and the v1
+  citation-loop pin of 1. Remaining tuning detail (not blocking): exact snippet-match
+  strictness/normalization thresholds.
 
 ## 19. Acceptance criteria
 
 - Tasks support explicit `implementation`, `deep_research`, and `security_audit` types.
-- Missing `task_type` selects the current required-supervisor `implementation-v2` profile.
+- Missing `task_type` selects the single required-supervisor `implementation` profile.
 - The executable implementation profile requires supervisor evaluation and has no disable control.
 - `stages.summary.enabled: false` skips only final handoff/output: no supervisor handoff call,
   summary files, fallback summary, task sidecar, or PR summary body is created.
 - Each type has a distinct persisted stage graph, permission ceiling, output contract, quality
   gates, and publishing policy.
-- Deep research produces an actionable Markdown design document without modifying source code.
+- Deep research produces an actionable research directory (with a required entry document) without
+  modifying source code.
+- Deep research verifies its claims: the deterministic citation-checker rejects broken repository
+  references (blocking) and degrades unprocessable entries to `unverified` without crashing; no claim
+  ships as fact with a broken or missing citation.
 - Security audit produces structured, evidence-based findings without modifying the target
   repository.
 - Security reports are stored under `security-reports/<task-id>/` in the directory containing the

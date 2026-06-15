@@ -2,16 +2,21 @@
 
 Status: **accepted** — not scheduled.
 Date: 2026-06-14
+Updated: 2026-06-15
 Owner: Vladimir Makarevich
 
 ## Goal
 
-Add an optional testing agent that can inspect the implementation and author or repair test files
-before the existing deterministic `CheckRunner` executes. The agent improves test coverage and
-interpretation; it never becomes the publish authority.
+Add an optional **read-only test-quality evaluator**. It inspects the implementation **and the tests
+that the `implementation` agent authored** and returns a bounded `accept` / `rework` verdict on test
+coverage and quality, before the deterministic `CheckRunner` runs. It **never writes files** and
+never becomes the publish authority.
 
-The invariant remains:
+Two invariants frame the whole feature:
 
+> Tests are authored by the `implementation` agent (in its editing lineage), never by this
+> evaluator.
+>
 > Publishing is allowed only by the deterministic approved check profile and its exit codes.
 
 `checks/discovery` is retained because it resolves which command argv the deterministic gate runs.
@@ -21,240 +26,258 @@ The invariant remains:
 This document is one independently implementable part of the
 [agent quality and continuity program](README.md#agent-quality-and-continuity-program):
 
-- [Workflow execution foundation](workflow_execution_foundation.md) is the prerequisite and owns
-  the `testing_agent` execution role, fresh-session scope, immutable run-artifact allocation, and
-  reusable exact-delta/path-containment primitives;
-- [Supervisor quality-gate](supervisor_quality_gate.md) owns read-only AI evaluation and rework
-  verdicts;
-- **this document** owns the optional workspace-writing testing agent, its checkpoint, diff policy,
-  and integration before `CheckRunner`;
+- [Workflow execution foundation](workflow_execution_foundation.md) is the prerequisite and owns the
+  read-only `evaluator` run kind (`role = test_quality`), session scope, immutable run-artifact
+  allocation, the shared evaluator-loop primitive, and the quality-action/bounded-rework vocabulary;
+- [Supervisor quality-gate](supervisor_quality_gate.md) owns the sibling evaluator instance
+  (`role = supervisor`) and the rework-accounting helpers this feature reuses;
+- **this document** owns the test-quality evaluator: its verdict schema, evaluation checkpoint,
+  bounded rework loop, integration before `CheckRunner`, and the always-on Check Runner
+  commit-candidate mutation guard;
 - [Durable sessions and implementation/fixing affinity](durable_sessions_and_fixing_affinity.md)
   owns resumable editing lineage and provider-aware session handling.
 
 Cross-change contracts:
 
-1. The testing agent always starts a fresh session and cannot read or update implementation/fixing
-   editing lineage.
-2. Supervisor and testing can share low-level invocation, fallback, artifact, schema-validation,
-   and audit plumbing, but not a common domain policy: their permissions and outputs differ.
-3. The deterministic Check Runner remains authoritative even when the testing agent disagrees.
-4. Testing-agent fallback remains infrastructure-only. A returned quality failure is not a reason
-   to switch providers.
-5. Database/config migrations use the next available schema version at implementation time.
+1. The test-quality evaluator runs **read-only in its own session** and cannot read or update the
+   implementation/fixing editing lineage. It writes nothing to the workspace.
+2. Supervisor and the test-quality evaluator are both instances of the foundation's read-only
+   `evaluator` primitive (`role = supervisor` vs `role = test_quality`) and may share low-level
+   invocation, fallback, artifact, schema-validation, and audit plumbing. They remain separate domain
+   components because they evaluate different things; **neither writes the workspace.**
+3. The deterministic Check Runner remains the sole publish gate even when the evaluator disagrees.
+4. Evaluator fallback remains infrastructure-only. A returned `rework` verdict is a quality result,
+   not a reason to switch providers.
+5. Database/config schema changes use the next available schema version (forward only; greenfield —
+   no deployed data to migrate). This feature is last in the quality program, so increment from the
+   version durable sessions shipped.
 
-This feature may land before durable sessions by explicitly sending no session ID and discarding
-any returned testing-agent session handle. Once the session feature lands, the same behavior must
-be represented as an explicit fresh/disposable session scope.
+In the canonical order this feature lands **after** supervisor and durable sessions
+(foundation → supervisor → durable → hybrid). It must be after supervisor because the flow below
+assumes the mandatory supervisor evaluation already runs, and it reuses the supervisor's
+evaluator-loop and rework-accounting machinery.
 
 ## Current reality
 
 - `testing` currently runs only `CheckRunner`.
 - `checks/agent.py` performs advisory check-command discovery; it is not a testing-stage agent and
   must not be deleted or repurposed.
-- `Stage.TESTING` exists but is not an agent-routable stage.
-- The code does not currently implement the claimed `only_allowed_paths` /
-  `no_unexpected_files` output guards.
-- A resolved profile with zero commands currently passes; that is unsafe as an implicit hybrid
-  testing gate.
+- `Stage.TESTING` exists but is not an agent-routable stage — and it stays that way: the evaluator
+  runs through its own config route and a non-stage prompt path (like the supervisor), not by adding
+  `Stage.TESTING` to `ROUTABLE_STAGES`.
+- The claimed `only_allowed_paths` / `no_unexpected_files` output guards were never implemented.
+  Under the read-only model they are unnecessary for the evaluator (it writes nothing); the relevant
+  guard is the always-on Check Runner mutation detection below.
+- A resolved profile with zero commands currently passes; that is unsafe — authored tests would
+  never execute.
 
-## Corrected testing flow
+## Testing flow
 
 The mandatory supervisor's fresh read-only evaluation and deterministic dangerous-change guard
-complete before the pipeline enters the flow below. Supervisor rework returns to fixing without
-invoking the testing agent or Check Runner for the rejected edit.
+complete before the pipeline enters this flow. Supervisor rework returns to fixing without invoking
+the test-quality evaluator or Check Runner for the rejected edit.
 
 ```text
-implementation (or first entry for a subtask)
+implementation / fixing edit   # the implementation agent wrote the code AND its tests
+  -> supervisor evaluation (existing; rework -> fixing)
   -> status: testing
-  -> if no completed testing-agent checkpoint for this execution unit:
-       capture pre-agent snapshot
-       run testing agent in a fresh workspace-write session
-       validate exact testing-agent diff delta
-       persist completed/unavailable checkpoint
-       refresh current.diff
+  -> if agents.testing.enabled and no applied test_quality verdict for this source edit run:
+       run the read-only test-quality evaluator (own session)
+         -> accept: continue
+         -> rework (>= medium finding): enter fixing so the implementation agent improves the tests
+              (bounded by the rework budget; on exhaustion continue with the gaps recorded)
+         -> unavailable (all providers exhausted): record unavailable and continue (non-blocking)
   -> capture pre-check snapshot
-  -> deterministic CheckRunner executes the approved resolved profile
-  -> validate that checks left no unexpected commit-candidate changes
+  -> deterministic CheckRunner executes the approved resolved profile   # the sole publish gate
+  -> classify any unexpected commit-candidate changes the checks produced (always-on guard)
   -> green: reviewing
   -> red quality result: fixing
   -> launch failure: existing bounded infrastructure re-resolution path
-
-fixing
-  -> testing
-  -> reuse completed testing-agent checkpoint; do not run the agent again
-  -> deterministic CheckRunner
 ```
 
-The testing agent runs once per root execution unit or decomposed subtask, not on every fixing
-cycle. A fresh operator `rerun` may create a new checkpoint; automatic fixing cycles may not.
+The evaluator re-runs whenever the pipeline reaches `testing` after a test-changing edit (like the
+supervisor evaluates each implementation/fixing), bounded by the rework budget — not "once per
+unit". It is **optional and non-blocking**: unlike the mandatory supervisor checkpoints, if the
+evaluator cannot produce a verdict (provider exhaustion) the pipeline still proceeds to the
+deterministic Check Runner.
 
-## Testing-agent component
+## Test-quality evaluator component
 
-Create a dedicated domain component, not a renamed supervisor. It:
+A dedicated domain component — an instance of the foundation's read-only evaluator primitive
+(`role = test_quality`), not a renamed supervisor. It:
 
-- uses a packaged `testing.md` prompt;
-- runs with `workspace-write`;
-- receives task, plan, current diff, active subtask, and the approved resolved-check-profile path;
-- may add or modify test-owned files;
-- returns bounded advisory output such as `{ran, notes, suggested_checks}`;
-- cannot mutate the approved profile or launch arbitrary suggested commands through the Core;
-- never commits, pushes, or publishes.
+- uses a packaged `testing.md` prompt through a safe **non-stage template path** (as the supervisor
+  uses `supervisor.md`), so `Stage.TESTING` need not become agent-routable;
+- runs **read-only** (no `workspace-write`);
+- receives task, plan, the current diff (including the authored tests), the active subtask, and the
+  approved resolved-check-profile path;
+- returns a strictly validated verdict (the supervisor's shape):
+  `{ verdict: accept|rework, findings: [{ severity, reason, paths }] }`; `rework` requires at least
+  one `medium`/`high` finding, low findings are advisory and cannot block;
+- cannot mutate the approved profile or launch any command through the Core;
+- never writes files, commits, pushes, or publishes.
 
-Consume the foundation's shared low-level invocation contracts. Any additional shared types should
-remain limited to explicit context paths, provider fallback, artifact allocation, and audit
-metadata; testing-specific checkpoint and edit policy stay in this feature.
+Consume the foundation's shared low-level invocation, fallback, artifact-allocation, and audit
+contracts. Test-quality-specific verdict schema and the testing-stage integration stay in this
+feature.
 
 ## Checkpoint and recovery
 
-Persist an idempotent checkpoint containing at least:
+Persist one immutable evaluation per source edit run (the same model as the supervisor), keyed at
+least by:
 
 ```text
 task_id
+evaluation_kind        # test_quality
+target_stage           # testing
 subtask_order
-source_edit_run_id
-pre_agent_diff_checksum
-testing_agent_run_id
-outcome                  # completed | unavailable
-post_agent_diff_checksum
+source_edit_run_id     # the implementation/fixing run whose tests are evaluated
+input_checksum
+outcome                # accept | rework | unavailable
+feedback_path
+applied
 created_at
 ```
 
-Recovery from `testing` consults this checkpoint before invoking the agent. The checkpoint and
-accepted diff-delta result must be durable before the deterministic checks start, so a crash cannot
-apply the workspace-writing agent twice.
+Evaluation and application are separate idempotent facts; applying a `rework` and consuming its
+budget is transactional so recovery cannot apply it twice. Recovery in `testing` consults this table
+keyed by `source_edit_run_id` before invoking the evaluator: a matching record resumes from its
+`outcome`/`applied` state; otherwise the evaluator runs. There are **no pre/post diff checksums** —
+the evaluator writes nothing, so there is nothing to apply twice.
 
-Use a generic auxiliary run role compatible with the supervisor design, such as
-`run_kind = testing_agent`, without pretending that the testing agent is equivalent to a read-only
-supervisor.
+Audit attempts under the foundation's `run_kind = evaluator` with `role = test_quality`. Use the next
+available `DB_SCHEMA_VERSION` (forward only; greenfield), incrementing from the version durable
+sessions shipped.
 
-If another feature migrates `state.db` first, use the next available schema version.
+## Rework limits and termination
 
-## Deterministic edit policy
+Reuse the supervisor's generic rework accounting (`record_rework(...)`), do not invent a parallel
+counter:
 
-Validate the exact workspace delta created by the testing agent, not the entire task diff.
-Pre-existing implementation changes are legitimate input and must not be falsely rejected.
+- every applied test-quality `rework` increments the task-wide `fix_iterations` budget exactly once,
+  through `record_rework` — never also via a second path;
+- the local limit is scoped by `(role=test_quality, target_stage=testing, subtask_order)` and is
+  derived by counting applied test-quality verdicts (no separate mutable counter);
+- on local-budget exhaustion the workflow does **not** fail or block: it continues to review/publish
+  with the residual coverage gaps recorded in the evaluation artifact (the deterministic Check Runner
+  still governs publish).
 
-Default allowed changes:
+## No agent edit policy (the evaluator writes nothing)
 
-- add or modify files under deterministically recognized test roots;
-- add or modify recognized test filenames according to trusted repository policy.
-
-Default forbidden changes:
-
-- production source;
-- CI workflows;
-- check/quality-gate configuration;
-- dependency manifests or lockfiles;
-- orchestration/task artifacts;
-- deletion or rename of existing tests;
-- unrelated tracked or untracked files.
-
-Repository-specific extra test paths belong in trusted operator config, never task content or agent
-output.
-
-After the test-path guard, run dangerous-diff classification over the testing-agent delta as a
-second layer. An out-of-policy production edit is already a violation and cannot become acceptable
-merely because it is not a deletion/dependency change.
+There is **no testing-agent workspace delta to validate** — the evaluator is read-only. Tests are
+authored by the `implementation` agent and are governed by the **existing** implementation
+scoped-staging and dangerous-diff controls, not by a separate test-path guard. This removes the
+former test-path / deletion / dependency / partial-edit machinery entirely.
 
 ## Check Runner authority
 
-- The testing agent may read and explain the approved resolved profile.
-- `suggested_checks` are advisory only and are never launched automatically.
-- A failed test does not trigger profile re-resolution by itself.
-- Existing proof-driven re-resolution and human approval rules remain authoritative.
+- The evaluator may read and explain the approved resolved profile.
+- Its findings are advisory with respect to *which checks run*: it can never launch a command, add a
+  check, or trigger profile re-resolution.
+- A failed test does not trigger profile re-resolution by itself. Existing proof-driven
+  re-resolution and human-approval rules remain authoritative.
 - Hybrid testing requires at least one approved command unless the operator explicitly configured
-  `checks.discovery.mode: disabled`; that no-gate mode must be prominently audited.
+  `checks.discovery.mode: disabled`; that no-gate mode must be prominently audited. Enforced at
+  **preflight/validation**: without a command, the tests the implementation agent authored would
+  never execute, so the task fails closed before reaching the testing stage.
 - Snapshot before and after Check Runner. Unexpected tracked/untracked commit-candidate mutations
-  produced by checks must be classified before review or publish, even when exit code is zero.
+  produced by checks must be classified before review or publish, even when exit code is zero. This
+  guard is **always-on** — it ships with this feature and applies on every run, including when
+  `agents.testing.enabled` is false (a check that auto-formats or regenerates files mutates the
+  workspace regardless of the optional evaluator). It is the one intentional always-on behavior
+  change; see the Definition of done.
 
-## Infrastructure and partial-edit policy
+## Infrastructure policy
 
-If all providers are unavailable and no workspace delta exists, record the testing-agent phase as
-`unavailable` and continue to deterministic checks.
-
-If an infrastructure failure leaves partial edits:
-
-- calculate the exact delta;
-- apply the same test-path, deletion, dependency, and dangerous-change guardrails;
-- pass only a valid partial diff to infrastructure fallback;
-- stop fail-closed on invalid or ambiguous changes.
-
-Agent quality failure remains a returned result and does not trigger provider fallback.
+If all providers for the evaluator are unavailable, record the evaluation `unavailable` and continue
+to the deterministic Check Runner — the evaluator is optional and non-blocking (this differs from the
+mandatory supervisor checkpoints, which stop in `manual_action_required`). A returned `rework`
+verdict is a quality result and never triggers provider fallback.
 
 ## Session isolation
 
-The testing agent is an independent author/reviewer:
+The test-quality evaluator is an independent read-only reviewer:
 
-- request session scope is fresh/disposable;
-- no implementation/fixing session ID is supplied;
-- any returned testing-agent session ID is audit-only or discarded according to the shared
-  redaction policy;
-- it never becomes active editing lineage;
-- each decomposed subtask receives an independent testing-agent run/checkpoint.
+- session policy is `fresh_each_pass` (consistent with the supervisor) — its own session, never
+  resumed into a later stage, and **never** the implementation/fixing editing lineage;
+- no implementation/fixing session ID is supplied; any returned evaluator session ID is audit-only or
+  discarded per the shared redaction policy;
+- each decomposed subtask receives an independent evaluation per source edit run.
 
 See [durable sessions](durable_sessions_and_fixing_affinity.md) for the provider-level contract.
 
 ## Configuration and skip semantics
 
-Add `Stage.TESTING` to agent routing while preserving its existing user-visible stage:
+The evaluator runs through its own trusted route under `agents.testing` (like `agents.supervisor`);
+`Stage.TESTING` is **not** added to the agent-routable stage set.
 
 ```yaml
 agents:
   testing:
     enabled: false
+    primary: codex
+    fallback: claude
     model: null
     reasoning: low
     timeout_seconds: 600
-    allowed_test_paths: []
-  routing:
-    testing:
-      primary: codex
-      fallback: claude
+    max_rework_per_stage: 1
 ```
 
-The feature defaults off. `agents.testing.enabled: false` disables only the optional testing-agent
-phase. `stages.testing.enabled: false` or the existing global stage skip disables both the optional
-agent and deterministic Check Runner, preserving current skip behavior and warnings.
+The feature defaults off. `agents.testing.enabled: false` disables only the optional test-quality
+evaluator. `stages.testing.enabled: false` or the existing global stage skip disables both the
+evaluator and the deterministic Check Runner, preserving current skip behavior and warnings.
 
-Per-task model/reasoning overrides may still apply through the existing `stages.testing` fields,
-but task content cannot expand allowed test paths or replace the approved check profile.
+Per-task model/reasoning overrides may still apply through the existing `stages.testing` fields, but
+task content cannot enable/reconfigure the evaluator's authority or replace the approved check
+profile. (There is no `allowed_test_paths` — the evaluator writes nothing.)
 
 ## Expected touchpoints
 
-- dedicated testing-agent domain component;
+- dedicated read-only test-quality evaluator component (an evaluator-primitive instance);
 - `core/orchestrator.py` testing flow and recovery;
-- deterministic before/after diff-delta guard;
-- `state_store.py` checkpoint and generic auxiliary run role;
-- `config/schema.py`, loader, validation, upgrade, and examples;
-- routing support for `Stage.TESTING`;
+- `core/loop_control.py` — reuse the supervisor's generic `record_rework` accounting;
+- `state_store.py` immutable evaluations and the `run_kind = evaluator` / `role = test_quality` audit
+  fields;
+- `config/schema.py`, loader, validation, upgrade, and examples (`agents.testing` route + budget);
+- a safe non-stage prompt path for `templates/prompts/testing.md` (like `supervisor.md`);
 - provider-neutral `resolved_check_profile_path`;
-- `templates/prompts/testing.md`;
-- Check Runner workspace-mutation detection;
+- Check Runner before/after commit-candidate mutation detection (always-on);
 - canonical plan, user docs, and `CHANGELOG.md`.
 
 ## Minimum tests
 
-- testing agent runs once per execution unit across multiple fixing cycles;
-- decomposed subtasks receive independent checkpoints;
-- restart before/after checkpoint persistence cannot duplicate invocation or edits;
-- only the testing-agent delta is validated;
-- test additions/modifications pass under trusted path policy;
-- production/config/CI/dependency edits and test deletion/rename fail closed;
-- testing starts fresh and cannot update editing lineage;
-- infrastructure exhaustion with no edits continues to Check Runner;
-- invalid partial edits stop and valid partial edits follow infra-only fallback;
-- `suggested_checks` cannot change or execute outside the approved profile;
+- the evaluator is read-only and writes nothing; any attempted workspace mutation fails closed;
+- tests are authored by the `implementation` agent, not the evaluator;
+- an applied test-quality `rework` increments `fix_iterations` exactly once (via `record_rework`,
+  never also a second path) and re-enters fixing;
+- the local test-quality limit is derived from applied verdicts for
+  `(role=test_quality, target_stage=testing, subtask_order)`, independent of the global budget;
+- on rework-budget exhaustion the task continues to review/publish with recorded gaps, never blocks;
+- the evaluator is non-blocking: provider exhaustion records `unavailable` and proceeds to Check
+  Runner (contrast: mandatory supervisor exhaustion stops in `manual_action_required`);
+- recovery in `testing` consults the evaluations table keyed by `source_edit_run_id` before
+  re-running; crash before/after application does not duplicate evaluation or budget use;
+- decomposed subtasks receive independent evaluations;
+- the evaluator starts in its own fresh session and cannot read or update editing lineage;
+- the evaluator cannot launch commands, add checks, or trigger profile re-resolution;
 - an empty profile is accepted only under explicit discovery-disabled mode;
-- green checks that mutate commit-candidate files do not proceed silently;
-- deterministic green/red results override any testing-agent opinion;
-- skip semantics distinguish the optional agent from the entire testing stage.
+- with the testing stage active and no approved command (discovery not disabled), preflight fails;
+- green checks that mutate commit-candidate files do not proceed silently, including when
+  `agents.testing.enabled` is false (the always-on Check Runner mutation guard);
+- deterministic green/red results override any evaluator opinion;
+- `run_kind = evaluator` / `role = test_quality` runs do not become `Stage` values;
+- skip semantics distinguish the optional evaluator from the entire testing stage.
 
 ## Definition of done
 
 - Deterministic checks remain the sole publish gate.
-- Testing-agent execution is once-per-unit, restart-idempotent, and session-isolated.
-- Agent edits are constrained by an implemented deterministic delta policy.
-- Existing behavior is unchanged when `agents.testing.enabled` is false.
+- Tests are authored by the `implementation` agent; the test-quality evaluator is read-only and
+  writes nothing.
+- The evaluator is an instance of the shared read-only evaluator primitive with bounded,
+  restart-idempotent, session-isolated rework; on exhaustion it continues with recorded gaps.
+- Existing testing/check pass-gate behavior is unchanged when `agents.testing.enabled` is false,
+  except for the one intentional always-on addition: the Check Runner commit-candidate mutation guard
+  runs on every task.
 - `ruff`, `mypy`, and `pytest` pass.
 - Canonical plan, configuration docs/examples, `how-it-works.md`, backlog/follow-ups, and
   `CHANGELOG.md` are updated in the same implementation change.
