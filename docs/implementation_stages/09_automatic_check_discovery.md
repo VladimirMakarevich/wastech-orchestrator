@@ -1,32 +1,14 @@
 # Backlog: Automatic check discovery and environment resolution
 
-Status: **in progress — Phases 1–3 implemented** (see [§17 Implementation status](#17-implementation-status))
-Date: 2026-06-12 (updated 2026-06-13)
-Owner: Vladimir Makarevich
+Status: **in progress — Phases 1–3 implemented** (see [§17 Implementation status](#17-implementation-status)) Date: 2026-06-12 (updated 2026-06-13) Owner: Vladimir Makarevich
 
-This document captures the product task of making repository quality checks discoverable and
-portable without requiring every operator to hand-write technology-specific commands. It is a
-backlog item, not current runtime behavior. Nothing here overrides the canonical specification,
-[CLAUDE.md](../../CLAUDE.md), [AGENTS.md](../../AGENTS.md), or the hard invariants in
-[docs/rules/](../rules/).
+This document captures the product task of making repository quality checks discoverable and portable without requiring every operator to hand-write technology-specific commands. It is a backlog item, not current runtime behavior. Nothing here overrides the canonical specification, [CLAUDE.md](../../CLAUDE.md), [AGENTS.md](../../AGENTS.md), or the hard invariants in [docs/rules/](../rules/).
 
-> **v2 update (2026-06-14, post-test-run §1.1/§1.2).** Two refinements shipped on top of Phases 1–3:
-> (1) **scope-aware detection** — the detector reads `[tool.mypy] files`/`exclude` and the `[tool.ruff]`
-> scope from `pyproject.toml` and emits a scoped command (`mypy src` / bare `mypy` / `ruff check`)
-> instead of an unconditional `.`, which had overridden a project's configured scope. (2) **runtime,
-> human-checked resolution** — discovery runs at task start (`checks.discovery.run_at_task_start`),
-> re-resolves **only on infrastructure proof** (launch failure bounded to once/task, fingerprint
-> change, low confidence — never on a quality failure), pins `auto`-mode configured commands to the
-> slot they name, and treats any *change to the command set* as a sensitive change written to the
-> profile (`commands_signature` + approval fields) and human-approved on first use (fail-closed). See
-> `checks/inspect.py`, `checks/detect.py`, `checks/resolver.py` (`reresolve`/`ReResolveReason`),
-> `checks/profile.py`, and `core/orchestrator.py` (`_check_preflight`/`_gate_check_commands`).
+> **v2 update (2026-06-14, post-test-run §1.1/§1.2).** Two refinements shipped on top of Phases 1–3: (1) **scope-aware detection** — the detector reads `[tool.mypy] files`/`exclude` and the `[tool.ruff]` scope from `pyproject.toml` and emits a scoped command (`mypy src` / bare `mypy` / `ruff check`) instead of an unconditional `.`, which had overridden a project's configured scope. (2) **runtime, human-checked resolution** — discovery runs at task start (`checks.discovery.run_at_task_start`), re-resolves **only on infrastructure proof** (launch failure bounded to once/task, fingerprint change, low confidence — never on a quality failure), pins `auto`-mode configured commands to the slot they name, and treats any _change to the command set_ as a sensitive change written to the profile (`commands_signature` + approval fields) and human-approved on first use (fail-closed). See `checks/inspect.py`, `checks/detect.py`, `checks/resolver.py` (`reresolve`/`ReResolveReason`), `checks/profile.py`, and `core/orchestrator.py` (`_check_preflight`/`_gate_check_commands`).
 
 ## 1. Background
 
-The current Check Runner executes `checks.commands` exactly as configured. This keeps the quality
-gate deterministic, but creates a long setup path for repositories that use different ecosystems,
-package managers, virtual environments, or project wrappers.
+The current Check Runner executes `checks.commands` exactly as configured. This keeps the quality gate deterministic, but creates a long setup path for repositories that use different ecosystems, package managers, virtual environments, or project wrappers.
 
 The problem became concrete while running `task-telegram-hitll` against this repository:
 
@@ -34,15 +16,11 @@ The problem became concrete while running `task-telegram-hitll` against this rep
 - the orchestrator's allowlisted `PATH` did not contain the repository's `.venv/bin`;
 - both Check Runner invocations failed to launch `pytest` before any test ran;
 - the launch failure was treated as a quality failure and consumed two fixing iterations;
-- an agent later found `.venv/bin/python -m pytest` and independently proved that all 629 tests
-  passed, but the Check Runner continued using the unresolved configured command.
+- an agent later found `.venv/bin/python -m pytest` and independently proved that all 629 tests passed, but the Check Runner continued using the unresolved configured command.
 
-An absolute path to one developer's `.venv` would fix that single workspace, but would not be
-portable across users, clones, operating systems, CI, or repositories using `uv`, Poetry, npm,
-pnpm, Cargo, Go, Make, tox, or other tooling.
+An absolute path to one developer's `.venv` would fix that single workspace, but would not be portable across users, clones, operating systems, CI, or repositories using `uv`, Poetry, npm, pnpm, Cargo, Go, Make, tox, or other tooling.
 
-The broader requirement is therefore not "configure a better pytest path". The orchestrator should
-discover, validate, remember, and execute the repository's own quality-gate profile.
+The broader requirement is therefore not "configure a better pytest path". The orchestrator should discover, validate, remember, and execute the repository's own quality-gate profile.
 
 ## 2. Goal
 
@@ -59,29 +37,16 @@ install repository
 
 NOTE: it is necessary to provide for, and for a given agent, take a less expensive model and reasoning!
 
-Most repositories should work without manually editing `checks.commands`. Explicit commands remain
-available as an override for unusual or policy-sensitive projects.
+Most repositories should work without manually editing `checks.commands`. Explicit commands remain available as an override for unusual or policy-sensitive projects.
 
 ## 3. Design principles
 
-1. **Discovery may be intelligent; pass/fail remains deterministic.**
-   An agent may propose candidates, but only the orchestrator executes the selected checks and
-   decides their result from exit code, timeout, and process-launch status.
-2. **Deterministic evidence comes first.**
-   Inspect manifests, lock files, CI workflows, project documentation, and local environments before
-   spending a provider run on agent-assisted discovery.
-3. **A launch failure is not a code-quality failure.**
-   A missing executable or module should try the next candidate or fail check preflight. It must not
-   enter `fixing` or consume the fix budget.
-4. **A check never mutates the environment.**
-   Discovering `uv run pytest` is safe and read-only. A dependency-install/setup command (`uv sync`,
-   `npm install`, `pip install`) is not a check: it is rejected as a candidate and never run by the
-   orchestrator.
-5. **Resolved profiles are cached and audited.**
-   Discovery should not repeat before every task when the relevant repository inputs and environment
-   have not changed.
-6. **The Check Runner stays independent from providers.**
-   Providers do not declare a check successful and do not gain control of state transitions.
+1. **Discovery may be intelligent; pass/fail remains deterministic.** An agent may propose candidates, but only the orchestrator executes the selected checks and decides their result from exit code, timeout, and process-launch status.
+2. **Deterministic evidence comes first.** Inspect manifests, lock files, CI workflows, project documentation, and local environments before spending a provider run on agent-assisted discovery.
+3. **A launch failure is not a code-quality failure.** A missing executable or module should try the next candidate or fail check preflight. It must not enter `fixing` or consume the fix budget.
+4. **A check never mutates the environment.** Discovering `uv run pytest` is safe and read-only. A dependency-install/setup command (`uv sync`, `npm install`, `pip install`) is not a check: it is rejected as a candidate and never run by the orchestrator.
+5. **Resolved profiles are cached and audited.** Discovery should not repeat before every task when the relevant repository inputs and environment have not changed.
+6. **The Check Runner stays independent from providers.** Providers do not declare a check successful and do not gain control of state transitions.
 
 ## 4. Proposed architecture
 
@@ -114,8 +79,7 @@ The Core may call this provider-agnostic resolver, but must not learn Codex or C
 Use evidence in approximately this order:
 
 1. explicit operator override in `config.yaml`;
-2. repository-owned quality entry points such as `make check`, `just check`, `task test`, tox, or
-   nox;
+2. repository-owned quality entry points such as `make check`, `just check`, `task test`, tox, or nox;
 3. CI workflows and scripts already used for pull requests;
 4. package manifests and lock files;
 5. repository instructions (`AGENTS.md`, `CLAUDE.md`, README, contributing and operations docs);
@@ -124,29 +88,26 @@ Use evidence in approximately this order:
 
 Examples of deterministic signals:
 
-| Signal | Candidate checks |
-|---|---|
-| `uv.lock` | `uv run pytest`, `uv run ruff check .` |
-| `poetry.lock` | `poetry run pytest` |
-| `.venv/bin/python` | `.venv/bin/python -m pytest` |
-| `.venv/Scripts/python.exe` | `.venv/Scripts/python.exe -m pytest` |
-| `tox.ini` | `tox` |
-| `noxfile.py` | `nox` |
-| `package.json` script `test` | selected package manager plus `test` |
-| `pnpm-lock.yaml` | `pnpm test` |
-| `package-lock.json` | `npm test` or `npm run <script>` |
-| `Cargo.toml` | `cargo test` |
-| `go.mod` | `go test ./...` |
-| `Makefile` target `check` | `make check` |
+| Signal                       | Candidate checks                       |
+| ---------------------------- | -------------------------------------- |
+| `uv.lock`                    | `uv run pytest`, `uv run ruff check .` |
+| `poetry.lock`                | `poetry run pytest`                    |
+| `.venv/bin/python`           | `.venv/bin/python -m pytest`           |
+| `.venv/Scripts/python.exe`   | `.venv/Scripts/python.exe -m pytest`   |
+| `tox.ini`                    | `tox`                                  |
+| `noxfile.py`                 | `nox`                                  |
+| `package.json` script `test` | selected package manager plus `test`   |
+| `pnpm-lock.yaml`             | `pnpm test`                            |
+| `package-lock.json`          | `npm test` or `npm run <script>`       |
+| `Cargo.toml`                 | `cargo test`                           |
+| `go.mod`                     | `go test ./...`                        |
+| `Makefile` target `check`    | `make check`                           |
 
-Detection must inspect the actual manifest before proposing a script or target. File presence alone
-is not enough to claim that a command exists.
+Detection must inspect the actual manifest before proposing a script or target. File presence alone is not enough to claim that a command exists.
 
 ## 6. Agent-assisted discovery
 
-When deterministic detection cannot produce a sufficiently confident profile, run a dedicated
-read-only discovery stage. The agent receives bounded repository metadata and returns structured
-data, not an executable shell script:
+When deterministic detection cannot produce a sufficiently confident profile, run a dedicated read-only discovery stage. The agent receives bounded repository metadata and returns structured data, not an executable shell script:
 
 ```json
 {
@@ -154,7 +115,10 @@ data, not an executable shell script:
     {
       "name": "tests",
       "argv": [".venv/bin/python", "-m", "pytest"],
-      "evidence": [".venv/bin/python exists", "pytest is declared in pyproject.toml"],
+      "evidence": [
+        ".venv/bin/python exists",
+        "pytest is declared in pyproject.toml"
+      ],
       "confidence": "high"
     },
     {
@@ -175,8 +139,7 @@ The agent is advisory:
 - every candidate must pass deterministic validation and probing;
 - task content cannot supply a command or weaken discovery policy.
 
-Agent discovery is an infrastructure capability. Provider failure may use the normal
-infrastructure-only fallback, but discovery must remain bounded.
+Agent discovery is an infrastructure capability. Provider failure may use the normal infrastructure-only fallback, but discovery must remain bounded.
 
 ## 7. Candidate validation and probing
 
@@ -217,10 +180,10 @@ Failed probes try the next candidate. They do not enter `fixing`.
 ```yaml
 checks:
   discovery:
-    mode: auto             # auto | deterministic | configured | disabled
+    mode: auto # auto | deterministic | configured | disabled
     agent_fallback: true
-    refresh: on_change     # on_change | always | never
-  commands: []             # non-empty list is an explicit operator override
+    refresh: on_change # on_change | always | never
+  commands: [] # non-empty list is an explicit operator override
   timeout_seconds: 7200
 ```
 
@@ -231,8 +194,7 @@ Semantics:
 - `configured`: use explicit `commands` as-is (the backward-compatible default);
 - `disabled`: explicit no-check mode with a prominent warning and audit record;
 - non-empty `commands`: authoritative override regardless of discovery mode;
-- an empty `commands` list under `auto` is not a successful no-op: resolution must produce a valid
-  profile or stop before implementation.
+- an empty `commands` list under `auto` is not a successful no-op: resolution must produce a valid profile or stop before implementation.
 
 ## 9. Profile persistence and invalidation
 
@@ -279,8 +241,7 @@ During testing:
 - non-zero exit from a successfully launched check is a quality failure and enters `fixing`;
 - timeout follows the existing bounded check-failure policy, with its cause recorded;
 - the artifact records both the logical check name and resolved argv;
-- fixing agents receive the real check output, not a missing-executable error that they cannot fix in
-  repository code.
+- fixing agents receive the real check output, not a missing-executable error that they cannot fix in repository code.
 
 ## 11. Security and invariants
 
@@ -296,8 +257,7 @@ This feature must preserve:
 - bounded discovery attempts and probes;
 - no security-policy override through task fields or discovered commands.
 
-Discovery must not scan denied paths or feed secret files to an agent. CI files and scripts may
-contain secret variable names; values must never be resolved or persisted.
+Discovery must not scan denied paths or feed secret files to an agent. CI files and scripts may contain secret variable names; values must never be resolved or persisted.
 
 ## 12. Implementation phases
 
@@ -325,11 +285,9 @@ contain secret variable names; values must never be resolved or persisted.
 
 ## 13. Acceptance criteria
 
-- A newly installed common Python, Node.js, Rust, Go, tox/nox, or Make-based repository can resolve
-  a working check profile without manual command editing when sufficient evidence exists.
+- A newly installed common Python, Node.js, Rust, Go, tox/nox, or Make-based repository can resolve a working check profile without manual command editing when sufficient evidence exists.
 - Explicit configured commands remain authoritative.
-- The resolver chooses the repository-local Python environment when that is the valid environment,
-  without storing a user-specific absolute path when a portable relative path is available.
+- The resolver chooses the repository-local Python environment when that is the valid environment, without storing a user-specific absolute path when a portable relative path is available.
 - Missing executables/modules try alternative candidates and do not consume fixing iterations.
 - No task branch or provider implementation run starts when required checks are not launchable.
 - Agent-assisted discovery returns schema-validated candidates and cannot execute or approve checks.
@@ -383,38 +341,15 @@ End-to-end:
 
 ## 17. Implementation status
 
-Implemented 2026-06-13 (Phases 1–3). Code lives in `src/wastech_orchestrator/checks/`; tests in
-`tests/checks/` plus additions to `tests/check/`, `tests/config/`, `tests/install/`, and
-`tests/core/`.
+Implemented 2026-06-13 (Phases 1–3). Code lives in `src/wastech_orchestrator/checks/`; tests in `tests/checks/` plus additions to `tests/check/`, `tests/config/`, `tests/install/`, and `tests/core/`.
 
 ### Done
 
-- **Phase 1 — structured commands + deterministic resolver + the launch/quality split.**
-  Canonical `ResolvedCheck` and the backward-compatible `checks.commands` union (string and
-  `{name, argv}`); `RepositoryInspector` → `CheckCandidateDetector` → `CheckCandidateValidator` →
-  `CheckProbeRunner` → `CheckResolver`; profile persistence + input fingerprint; `CheckRunner` and
-  the orchestrator now treat a **process-launch failure as infrastructure** (terminal/preflight,
-  never `fixing`, no fix-budget spend) and a check-preflight resolves a launchable profile **before
-  any branch** (`checks.discovery.mode`, empty-under-`auto` stops). The decision settled here vs the
-  doc: the default mode is **`configured`** (zero behaviour change on upgrade); discovery is opt-in
-  via `mode` (and `install` writes `auto`).
-- **Phase 2 — installer & diagnostics.** `install` writes `checks.discovery` and (via auto-preflight)
-  seeds the resolved profile; `preflight` reports the resolved commands, evidence, probe status, and
-  rejected candidates; `status` surfaces the cached profile read-only; `refresh: on_change`
-  invalidation via the fingerprint. (`install/detect.py` is retained for the wizard's quick
-  ecosystem hint and not yet consolidated onto `checks/detect.py` — see follow-ups.)
-- **Phase 3 — agent-assisted fallback.** `AgentCheckDiscovery` + strict `schema_validate` +
-  `discovery_factory`; a read-only, advisory, schema-validated provider call (cheap model via
-  `checks.discovery.{provider,model,reasoning,timeout_seconds}`) whose proposals pass the same
-  validator + prober. Runs at install only, opt-in (requires a configured `model`), never inside the
-  state machine, never spends the fix budget.
+- **Phase 1 — structured commands + deterministic resolver + the launch/quality split.** Canonical `ResolvedCheck` and the backward-compatible `checks.commands` union (string and `{name, argv}`); `RepositoryInspector` → `CheckCandidateDetector` → `CheckCandidateValidator` → `CheckProbeRunner` → `CheckResolver`; profile persistence + input fingerprint; `CheckRunner` and the orchestrator now treat a **process-launch failure as infrastructure** (terminal/preflight, never `fixing`, no fix-budget spend) and a check-preflight resolves a launchable profile **before any branch** (`checks.discovery.mode`, empty-under-`auto` stops). The decision settled here vs the doc: the default mode is **`configured`** (zero behaviour change on upgrade); discovery is opt-in via `mode` (and `install` writes `auto`).
+- **Phase 2 — installer & diagnostics.** `install` writes `checks.discovery` and (via auto-preflight) seeds the resolved profile; `preflight` reports the resolved commands, evidence, probe status, and rejected candidates; `status` surfaces the cached profile read-only; `refresh: on_change` invalidation via the fingerprint. (`install/detect.py` is retained for the wizard's quick ecosystem hint and not yet consolidated onto `checks/detect.py` — see follow-ups.)
+- **Phase 3 — agent-assisted fallback.** `AgentCheckDiscovery` + strict `schema_validate` + `discovery_factory`; a read-only, advisory, schema-validated provider call (cheap model via `checks.discovery.{provider,model,reasoning,timeout_seconds}`) whose proposals pass the same validator + prober. Runs at install only, opt-in (requires a configured `model`), never inside the state machine, never spends the fix budget.
 
 ### Deferred (not implemented)
 
-- **Per-stage model/reasoning.** Discovery uses a deliberate one-off knob
-  (`checks.discovery.{model,reasoning}`); a general per-stage system
-  ([per_stage_model_reasoning.md](per_stage_model_reasoning.md)) would later subsume it.
-- **CI-format parsing depth** (only file presence is evidence today), the **confidence threshold**
-  that triggers agent fallback, **wrapper-vs-native precedence** beyond the current "launchable
-  wrapper wins", and **agent discovery at `preflight`** (currently install-only). See §16 + the
-  follow-ups tracker.
+- **Per-stage model/reasoning.** Discovery uses a deliberate one-off knob (`checks.discovery.{model,reasoning}`); a general per-stage system ([per_stage_model_reasoning.md](per_stage_model_reasoning.md)) would later subsume it.
+- **CI-format parsing depth** (only file presence is evidence today), the **confidence threshold** that triggers agent fallback, **wrapper-vs-native precedence** beyond the current "launchable wrapper wins", and **agent discovery at `preflight`** (currently install-only). See §16 + the follow-ups tracker.

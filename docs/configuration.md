@@ -1,9 +1,6 @@
 # Configuration Reference
 
-`config.yaml` controls repositories, providers, routing, security, validation, checks, git publishing,
-and optional notification settings. The packaged example is
-[`config.example.yaml`](../config.example.yaml), and the canonical contract is
-[00_orchestrator_final_plan.md section 11](implementation_stages/00_orchestrator_final_plan.md).
+`config.yaml` controls repositories, providers, routing, security, validation, checks, git publishing, and optional notification settings. The packaged example is [`config.example.yaml`](../config.example.yaml), and the canonical contract is [00_orchestrator_final_plan.md section 11](implementation_stages/00_orchestrator_final_plan.md).
 
 The loader is fail-closed:
 
@@ -64,7 +61,7 @@ orchestrator:
 ```
 
 | Field | Type | Default | Meaning |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `auto_mode.enabled` | boolean | `false` | When `true`, `watch` can pick another pending task after terminal cleanup succeeds. |
 | `poll_interval_seconds` | integer `>= 0` | `300` | `watch` loop interval: each tick runs `git fetch` + `pull --ff-only` on `base_branch` to discover git-pushed tasks, then re-scans. `0` makes `watch` a single pass (no loop, no periodic sync). `--poll-seconds` overrides it. |
 
@@ -75,14 +72,13 @@ Auto mode does not enable concurrency. The v1 contract keeps one active task at 
 Logging and heartbeat settings are global CLI options, not `config.yaml` fields:
 
 | Option | Default | Meaning |
-|---|---:|---|
-| `--log-level debug|info|warning|error` | `info` | Minimum operator log level. |
-| `--log-format logfmt|json` | `logfmt` | Format used for stderr and `--log-file`. |
+| --- | --: | --- | --- | --- | --- |
+| `--log-level debug | info | warning | error` | `info` | Minimum operator log level. |
+| `--log-format logfmt | json` | `logfmt` | Format used for stderr and `--log-file`. |
 | `--log-file PATH` | unset | Also write a rotating 10 MB operator log with five backups. |
 | `--heartbeat-seconds N` | `30` | Progress interval for long provider/check/Git calls; `0` disables. |
 
-The `watch` subcommand also accepts `--poll-seconds N` (placed after `watch`), which overrides
-`orchestrator.poll_interval_seconds` for that run.
+The `watch` subcommand also accepts `--poll-seconds N` (placed after `watch`), which overrides `orchestrator.poll_interval_seconds` for that run.
 
 Place global options before the subcommand:
 
@@ -95,8 +91,7 @@ python -m wastech_orchestrator \
   watch
 ```
 
-Use `python -m wastech_orchestrator --config ./config.yaml status [task-id]` for a read-only snapshot
-from the persisted state database.
+Use `python -m wastech_orchestrator --config ./config.yaml status [task-id]` for a read-only snapshot from the persisted state database.
 
 ## `repo`
 
@@ -111,19 +106,17 @@ repo:
 ```
 
 | Field | Type | Default | Meaning |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `url` | string | `""` | Remote repository URL. |
 | `local_path` | string | `"./workspace/repo"` | Dedicated clone/worktree used for agent runs. |
 | `base_branch` | string | `"main"` | Branch checked out before task branches and after terminal cleanup. |
 | `branch_prefix` | string | `"agent"` | Prefix for task branches: `agent/<task-id>-<slug>`. |
 
-Git credentials are not stored in this file. Configure SSH, a credential helper, or `gh auth login`
-outside the orchestrator.
+Git credentials are not stored in this file. Configure SSH, a credential helper, or `gh auth login` outside the orchestrator.
 
 ## `agents`
 
-Controls provider availability, retry/fix budgets, decomposition, routes, and provider-specific
-settings.
+Controls provider availability, retry/fix budgets, decomposition, routes, and provider-specific settings.
 
 ```yaml
 agents:
@@ -135,12 +128,12 @@ agents:
   max_fix_cycles: 15
   max_total_fix_iterations: 30
 
-  skip_stages: []           # stages skipped for every task
-  allow_review_skip: false  # gate for skipping the review stage
+  skip_stages: [] # stages skipped for every task
+  allow_review_skip: false # gate for skipping the review stage
 ```
 
 | Field | Type | Default | Meaning |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `allowed` | list of `claude`, `codex` | `["claude", "codex"]` | Providers the router may use. |
 | `max_stage_attempts` | integer | `3` | Attempts allowed for a stage/provider route. |
 | `max_fix_cycles` | integer | `15` | Fix cycles for a single local failing loop (test-driven or review-driven, counted separately). |
@@ -148,14 +141,11 @@ agents:
 | `skip_stages` | list of stage names | `[]` | Stages skipped for **every** task. Each must be skippable: `planning`, `testing`, `review`, `fixing`, `summary`. The effective skip set is this ∪ a task's `stages.<stage>.enabled: false`. See [operations.md](operations.md#skipping-pipeline-stages-agentsskip_stages). |
 | `allow_review_skip` | boolean | `false` | Required before `review` may be skipped (from `skip_stages` **or** a task) — disabling review removes the only agent quality gate before commit/PR. |
 
-Validation requires `max_total_fix_iterations >= max_fix_cycles`. Added in `config.yaml`
-`schema_version` **4**: `skip_stages` / `allow_review_skip` (older configs omit them and take the
-safe defaults — no skips, review-skip disallowed).
+Validation requires `max_total_fix_iterations >= max_fix_cycles`. Added in `config.yaml` `schema_version` **4**: `skip_stages` / `allow_review_skip` (older configs omit them and take the safe defaults — no skips, review-skip disallowed).
 
 ### `agents.decomposition`
 
-Planned v1 feature, off by default. It lets planning propose a sequential subtask list for large
-tasks; the Core accepts it only under deterministic rules.
+Planned v1 feature, off by default. It lets planning propose a sequential subtask list for large tasks; the Core accepts it only under deterministic rules.
 
 ```yaml
 agents:
@@ -167,14 +157,13 @@ agents:
 ```
 
 | Field | Type | Default | Meaning |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `enabled` | boolean | `false` | Enables the planning sub-phase for decomposition. |
 | `max_subtasks` | integer | `8` | Maximum accepted split size; must be at least `2`. |
 | `min_size_signal` | string | `"large"` | Advisory size threshold passed to the planning prompt. |
 | `commit_per_subtask` | boolean | `true` | Planned v1: one local commit per accepted subtask. |
 
-A task can set `decompose: true` or `decompose: false`, but that only controls the gate for that
-task. It cannot change `max_subtasks`, routes, or security settings.
+A task can set `decompose: true` or `decompose: false`, but that only controls the gate for that task. It cannot change `max_subtasks`, routes, or security settings.
 
 ### `agents.routing`
 
@@ -209,8 +198,7 @@ Routable stages are:
 refinement, planning, implementation, review, fixing, summary
 ```
 
-`testing` and `publishing` are not routed to providers. The Check Runner owns `testing`; the Git
-Manager owns `publishing`.
+`testing` and `publishing` are not routed to providers. The Check Runner owns `testing`; the Git Manager owns `publishing`.
 
 Rules:
 
@@ -220,9 +208,7 @@ Rules:
 - every named provider must be in `agents.allowed`;
 - every named provider must have an `agents.providers.<provider>` entry.
 
-Fallback is planned only for infrastructure errors such as missing binaries, authentication errors,
-rate limits, provider unavailability, timeouts, process crashes, and invalid provider output. Test
-failures and review findings go to `fixing`, not fallback.
+Fallback is planned only for infrastructure errors such as missing binaries, authentication errors, rate limits, provider unavailability, timeouts, process crashes, and invalid provider output. Test failures and review findings go to `fixing`, not fallback.
 
 ### `agents.providers`
 
@@ -234,7 +220,7 @@ agents:
     claude:
       command: "claude"
       model: ""
-      reasoning: null          # low | medium | high | xhigh (Opus 4.7+ / Fable 5) | max
+      reasoning: null # low | medium | high | xhigh (Opus 4.7+ / Fable 5) | max
       timeout_seconds: 7200
       max_turns: 50
       max_budget_usd: null
@@ -243,7 +229,7 @@ agents:
     codex:
       command: "codex"
       model: ""
-      reasoning: null          # low | medium | high | xhigh | max→xhigh
+      reasoning: null # low | medium | high | xhigh | max→xhigh
       timeout_seconds: 7200
       sandbox: "workspace-write"
       permission_profile: "workspace-write"
@@ -253,7 +239,7 @@ agents:
 Common fields:
 
 | Field | Type | Default | Meaning |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `command` | string | provider id (`"claude"` or `"codex"`) | Executable name or path. |
 | `model` | string | `""` | Provider model setting; empty means provider default. |
 | `reasoning` | string or null | `null` | Reasoning effort level: `low`, `medium`, `high`, `xhigh`, or `max`. Maps to `--effort` for Claude (v2.1+) and `--reasoning-effort` for Codex. Codex supports up to `xhigh`; `max` (Claude-only) is clamped to `xhigh`. `xhigh` requires Opus 4.7+ or Fable 5 for Claude. |
@@ -264,13 +250,12 @@ Common fields:
 Provider-specific fields:
 
 | Provider | Field | Type | Default | Meaning |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | `codex` | `sandbox` | string or null | `null` if omitted | Codex sandbox mode. The example sets `workspace-write`. |
 | `claude` | `max_turns` | integer or null | `null` if omitted | Claude Code turn limit. |
 | `claude` | `max_budget_usd` | number or null | `null` if omitted | Claude Code budget limit when supported. |
 
-Unsafe `extra_args` are rejected by config validation and again by provider command builders. Known
-forbidden examples include:
+Unsafe `extra_args` are rejected by config validation and again by provider command builders. Known forbidden examples include:
 
 ```yaml
 extra_args:
@@ -313,7 +298,7 @@ security:
 ```
 
 | Field | Type | Default | Meaning |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `strict_isolation` | boolean | `true` | Preflight fails if the required isolation cannot be enforced. |
 | `allowed_environment` | list of strings | `PATH`, `HOME`, `USERPROFILE`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR` | Only these environment variables reach child processes. |
 | `denied_read_paths` | list of strings | `.env`, `secrets/**` | Paths agents must not read and artifacts must not expose. |
@@ -323,8 +308,7 @@ Only the orchestrator's Git Manager commits, pushes, and creates PRs. Agent prov
 
 ## `validation`
 
-Controls the task input hardening gate. The gate runs before branch creation and before any provider
-run.
+Controls the task input hardening gate. The gate runs before branch creation and before any provider run.
 
 ```yaml
 validation:
@@ -338,7 +322,7 @@ validation:
 ```
 
 | Field | Type | Default | Meaning |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `max_task_bytes` | integer | `262144` | Maximum task file size. |
 | `max_task_lines` | integer | `5000` | Maximum number of lines. |
 | `max_line_bytes` | integer | `8192` | Maximum UTF-8 byte length for one line. |
@@ -353,24 +337,18 @@ Current task front matter fields are:
 id, title, refined, decompose, agents, contacts, model, reasoning
 ```
 
-A structurally rejected task is terminal `failed`, gets a `validation_report.json`, and never creates
-a branch or calls a provider.
+A structurally rejected task is terminal `failed`, gets a `validation_report.json`, and never creates a branch or calls a provider.
 
 ## `checks`
 
-Configures the Check Runner and **automatic check discovery** (resolve the repository's quality-gate
-commands without hand-writing technology-specific paths). The Check Runner runs each resolved command
-as a bounded external process (argv list, no shell, allowlisted env) and records redacted logs under
-the task artifact directory. A **launch failure** (a missing executable/module) is treated as an
-infrastructure event — it stops the task before any branch and never consumes a fixing iteration —
-distinct from a quality failure (a launched check that exits non-zero), which enters `fixing`.
+Configures the Check Runner and **automatic check discovery** (resolve the repository's quality-gate commands without hand-writing technology-specific paths). The Check Runner runs each resolved command as a bounded external process (argv list, no shell, allowlisted env) and records redacted logs under the task artifact directory. A **launch failure** (a missing executable/module) is treated as an infrastructure event — it stops the task before any branch and never consumes a fixing iteration — distinct from a quality failure (a launched check that exits non-zero), which enters `fixing`.
 
 ```yaml
 checks:
   discovery:
-    mode: auto             # auto | deterministic | configured | disabled
-    refresh: on_change     # on_change | always | never
-  commands:                # legacy strings and/or structured {name, argv}
+    mode: auto # auto | deterministic | configured | disabled
+    refresh: on_change # on_change | always | never
+  commands: # legacy strings and/or structured {name, argv}
     - "ruff check ."
     - name: tests
       argv: [".venv/bin/python", "-m", "pytest"]
@@ -378,7 +356,7 @@ checks:
 ```
 
 | Field | Type | Default | Meaning |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `commands` | list | `[]` | Checks the runner executes. Each item is a legacy shell-style **string** (split with `shlex`, no shell) **or** a structured `{name, argv: [...]}` mapping. |
 | `timeout_seconds` | integer | `7200` | Per-command timeout. |
 | `discovery.mode` | enum | `configured` | How the profile is resolved (see below). |
@@ -389,36 +367,20 @@ checks:
 | `discovery.reasoning` | enum/null | `low` | Reasoning level for the discovery call. |
 | `discovery.timeout_seconds` | integer | `120` | Bound on the discovery call. |
 | `discovery.run_at_task_start` | bool | `true` | Resolve checks inside the state machine at task start (not only at install), so `auto` mode can resolve/agent-assist in-band (§1.2). |
-| `discovery.approve_command_changes` | bool | `true` | Treat a *changed* set of check commands as a sensitive change requiring human approval on first use (fail-closed). Disabling it under `auto`/`deterministic` is allowed but logged loudly. |
+| `discovery.approve_command_changes` | bool | `true` | Treat a _changed_ set of check commands as a sensitive change requiring human approval on first use (fail-closed). Disabling it under `auto`/`deterministic` is allowed but logged loudly. |
 
 ### Discovery modes
 
-- **`configured`** (the default, fully backward compatible): the Check Runner uses `commands`
-  as-is. With empty `commands` the task simply runs no checks.
-- **`deterministic`**: inspect known project evidence (manifests, lock files, `make`/`just`/`tox`/
-  `nox` wrappers, local `.venv` interpreters) and probe launchability, preferring any configured
-  commands when they probe launchable. Stops before any branch if no check is launchable.
-- **`auto`**: `deterministic`, plus a read-only agent fallback when confidence is low (opt-in: set
-  `discovery.model`). `install` writes `auto` when it could not detect explicit checks. With
-  `run_at_task_start` (default), `auto` resolution runs at task start, not only at install.
+- **`configured`** (the default, fully backward compatible): the Check Runner uses `commands` as-is. With empty `commands` the task simply runs no checks.
+- **`deterministic`**: inspect known project evidence (manifests, lock files, `make`/`just`/`tox`/`nox` wrappers, local `.venv` interpreters) and probe launchability, preferring any configured commands when they probe launchable. Stops before any branch if no check is launchable.
+- **`auto`**: `deterministic`, plus a read-only agent fallback when confidence is low (opt-in: set `discovery.model`). `install` writes `auto` when it could not detect explicit checks. With `run_at_task_start` (default), `auto` resolution runs at task start, not only at install.
 - **`disabled`**: an explicit no-check mode with a prominent warning and an audit record.
 
-Under **`configured`** a non-empty `commands` list is authoritative (it is the whole gate). Under
-**`auto`** a configured command **pins only the check it names** (e.g. `{name: types, argv: [mypy,
-src]}`) and lets detection fill the rest — a pin is never silently replaced by a detected fallback.
-Detection respects the project's configured tool scope (`[tool.mypy] files`/`exclude`, `[tool.ruff]`),
-so it emits `mypy src` / `ruff check` rather than overriding the scope with `.` (§1.1).
+Under **`configured`** a non-empty `commands` list is authoritative (it is the whole gate). Under **`auto`** a configured command **pins only the check it names** (e.g. `{name: types, argv: [mypy, src]}`) and lets detection fill the rest — a pin is never silently replaced by a detected fallback. Detection respects the project's configured tool scope (`[tool.mypy] files`/`exclude`, `[tool.ruff]`), so it emits `mypy src` / `ruff check` rather than overriding the scope with `.` (§1.1).
 
-Resolved profiles are cached at `<workspace>/checks/resolved-profile.json` (a generated runtime file,
-git-ignored, never committed) and invalidated by the `refresh` policy. **Re-resolution at run time
-happens only on infrastructure proof** — a check launch failure (bounded to once per task), a changed
-discovery fingerprint, or low-confidence detection — never because a check *reported* failures. A
-change to the *set* of resolved commands is recorded in the profile and **approved by a human on first
-use** (`approve_command_changes`); the first-ever set is auto-approved. See
-[operations.md](operations.md#check-discovery-diagnostics) for `preflight`/`status` diagnostics.
+Resolved profiles are cached at `<workspace>/checks/resolved-profile.json` (a generated runtime file, git-ignored, never committed) and invalidated by the `refresh` policy. **Re-resolution at run time happens only on infrastructure proof** — a check launch failure (bounded to once per task), a changed discovery fingerprint, or low-confidence detection — never because a check _reported_ failures. A change to the _set_ of resolved commands is recorded in the profile and **approved by a human on first use** (`approve_command_changes`); the first-ever set is auto-approved. See [operations.md](operations.md#check-discovery-diagnostics) for `preflight`/`status` diagnostics.
 
-Discovery never installs dependencies or mutates the environment: a candidate that is really a
-dependency-install/setup command (e.g. `uv sync`, `npm ci`) is rejected as a check, not executed.
+Discovery never installs dependencies or mutates the environment: a candidate that is really a dependency-install/setup command (e.g. `uv sync`, `npm ci`) is rejected as a check, not executed.
 
 ## `git`
 
@@ -437,18 +399,16 @@ git:
 ```
 
 | Field | Type | Default | Meaning |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `create_pull_request` | boolean | `true` | Whether publishing creates a PR. |
 | `pr_base` | string | `"main"` | Base branch for PR creation. Usually matches `repo.base_branch`. |
 
-`create_pull_request: false` skips only `gh pr create`. The successful publishing path still makes
-the orchestrator-owned commit and pushes the task branch. Use a disposable fork/test remote for a
-first self-hosting run; a no-push dry-run mode is not implemented.
+`create_pull_request: false` skips only `gh pr create`. The successful publishing path still makes the orchestrator-owned commit and pushes the task branch. Use a disposable fork/test remote for a first self-hosting run; a no-push dry-run mode is not implemented.
 
 ### `git.footprint`
 
 | Field | Values | Default | Meaning |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `location` | `external`, `in_repo` | `in_repo` | Whether artifacts live outside or inside the target clone. |
 | `tracking` | `none`, `exclude_local`, `commit` | `commit` | How artifacts are tracked by git. |
 | `external_root` | string | `"./"` | Artifact root when `location: external` (ignored for `in_repo`); must resolve outside `repo.local_path`. |
@@ -457,11 +417,11 @@ first self-hosting run; a no-push dry-run mode is not implemented.
 
 Valid combinations:
 
-| Mode | `location` | `tracking` |
-|---|---|---|
-| External artifacts | `external` | `none` |
-| In-repo local exclude | `in_repo` | `exclude_local` |
-| In-repo audit commit | `in_repo` | `commit` |
+| Mode                  | `location` | `tracking`      |
+| --------------------- | ---------- | --------------- |
+| External artifacts    | `external` | `none`          |
+| In-repo local exclude | `in_repo`  | `exclude_local` |
+| In-repo audit commit  | `in_repo`  | `commit`        |
 
 Rejected combinations:
 
@@ -470,17 +430,11 @@ Rejected combinations:
 - `location: in_repo` with `tracking: none`;
 - `location: external` when `external_root` resolves inside `repo.local_path`.
 
-The code commit always stages changes with an explicit scoped pathspec and excludes
-`tasks/`, `logs/`, and `workspace/`; under the in-repo footprint it also excludes the orchestrator's
-root runtime files (`state.db` + sidecars, `config.yaml`). With `tracking: commit` only **`tasks/`**
-(the task moved to `done/`/`failed/` + its `<id>.summary.md`) is stored in a *separate*
-orchestrator-made commit; `logs/` (plan, review, diffs, `summary.json`) stays local and is never
-committed.
+The code commit always stages changes with an explicit scoped pathspec and excludes `tasks/`, `logs/`, and `workspace/`; under the in-repo footprint it also excludes the orchestrator's root runtime files (`state.db` + sidecars, `config.yaml`). With `tracking: commit` only **`tasks/`** (the task moved to `done/`/`failed/` + its `<id>.summary.md`) is stored in a _separate_ orchestrator-made commit; `logs/` (plan, review, diffs, `summary.json`) stays local and is never committed.
 
 ## `telegram`
 
-Optional terminal notifications and blocking human-in-the-loop for `refinement`, `planning`, and
-dangerous-diff guardrails.
+Optional terminal notifications and blocking human-in-the-loop for `refinement`, `planning`, and dangerous-diff guardrails.
 
 ```yaml
 telegram:
@@ -491,92 +445,57 @@ telegram:
 ```
 
 | Field | Type | Default | Meaning |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `enabled` | boolean | `false` | Enables Telegram transport. Blocking HITL fails closed if credentials/transport are unavailable. |
 | `bot_token_env` | string | `"TELEGRAM_BOT_TOKEN"` | Valid environment-variable name containing the bot token. |
 | `chat_id_env` | string | `"TELEGRAM_CHAT_ID"` | Valid environment-variable name containing the numeric target chat id. |
 | `ask_timeout_s` | integer | `28800` | Maximum wait for a human reply; must be greater than zero. |
 
-The config stores environment variable **names only**. Token and chat-id values are resolved from the
-orchestrator process environment at startup and are never written to config, SQLite, logs, or
-artifacts. Terminal delivery is best-effort and never changes a completed task outcome. A blocking
-question/approval is fail-closed: disabled/unconfigured transport, timeout, transport failure, or an
-ambiguous approval moves the task to `manual_action_required`.
+The config stores environment variable **names only**. Token and chat-id values are resolved from the orchestrator process environment at startup and are never written to config, SQLite, logs, or artifacts. Terminal delivery is best-effort and never changes a completed task outcome. A blocking question/approval is fail-closed: disabled/unconfigured transport, timeout, transport failure, or an ambiguous approval moves the task to `manual_action_required`.
 
-Preflight requires a non-zero numeric chat id, bot access to the chat, no configured webhook, and a
-working `getUpdates` polling API. Use one bot/chat with one orchestrator poller. See
-[telegram.md](telegram.md) for setup and `telegram-test`.
+Preflight requires a non-zero numeric chat id, bot access to the chat, no configured webhook, and a working `getUpdates` polling API. Use one bot/chat with one orchestrator poller. See [telegram.md](telegram.md) for setup and `telegram-test`.
 
 ## `prompts`
 
-Optional. Lets operators extend or replace the per-stage instructions sent to the agent for the
-agent-routed stages (`refinement`, `planning`, `implementation`, `review`, `fixing`, `summary`)
-without editing Python. **A `<stage>.md` present in `templates_dir` is used automatically** — its
-presence is the activation signal, layered on the packaged default per `mode`. A missing file falls
-back to the packaged default. Added in `config.yaml` `schema_version` **3**; **`schema_version` 6**
-replaced the old `overrides` map and `strict` flag with file-presence auto-detection, flipped `mode`
-to default `replace`, and anchors a relative `templates_dir` to the `config.yaml` directory. Older
-configs that still carry `overrides`/`strict` load fail-open (the keys are ignored with a warning;
-`upgrade-config` strips them).
+Optional. Lets operators extend or replace the per-stage instructions sent to the agent for the agent-routed stages (`refinement`, `planning`, `implementation`, `review`, `fixing`, `summary`) without editing Python. **A `<stage>.md` present in `templates_dir` is used automatically** — its presence is the activation signal, layered on the packaged default per `mode`. A missing file falls back to the packaged default. Added in `config.yaml` `schema_version` **3**; **`schema_version` 6** replaced the old `overrides` map and `strict` flag with file-presence auto-detection, flipped `mode` to default `replace`, and anchors a relative `templates_dir` to the `config.yaml` directory. Older configs that still carry `overrides`/`strict` load fail-open (the keys are ignored with a warning; `upgrade-config` strips them).
 
 ```yaml
 prompts:
-  templates_dir: "./templates/prompts"   # edit templates/prompts/<stage>.md to customize that stage
-  mode: replace          # replace (your file only; default) | append (packaged default + your file)
+  templates_dir: "./templates/prompts" # edit templates/prompts/<stage>.md to customize that stage
+  mode: replace # replace (your file only; default) | append (packaged default + your file)
 ```
 
 | Field | Type | Default | Meaning |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `templates_dir` | string | `"./templates/prompts"` | Directory scanned for `<stage>.md` files. A **relative** path resolves from the `config.yaml` directory (not the CWD or the target repo); absolute paths are honored. Set to `""` to force the packaged defaults for every stage. `init`/`install-templates` scaffold it with the packaged defaults. |
 | `mode` | enum | `replace` | `replace` = your file only (for stages that have one); `append` = packaged default first, then your file. Global for now. |
 
-A `<stage>.md` whose name matches an agent-routed stage (e.g. `implementation.md`) is detected by
-presence — there is no opt-in map and no fail-closed-on-missing path. Because `init`/`install-templates`
-deliver each `<stage>.md` byte-identical to the packaged default, editing one is what changes behavior;
-an unedited copy renders the same text the default would.
+A `<stage>.md` whose name matches an agent-routed stage (e.g. `implementation.md`) is detected by presence — there is no opt-in map and no fail-closed-on-missing path. Because `init`/`install-templates` deliver each `<stage>.md` byte-identical to the packaged default, editing one is what changes behavior; an unedited copy renders the same text the default would.
 
-**Template variables.** A template may reference an allowlisted set of `{name}` tokens; everything
-else (an unknown name, or literal braces in code/JSON) is left verbatim, so a template never breaks
-on stray braces. The variables are **metadata and artifact paths only** — never task bodies, diffs,
-check logs, environment values, or secrets (those stay in the artifact files the agent reads by
-path):
+**Template variables.** A template may reference an allowlisted set of `{name}` tokens; everything else (an unknown name, or literal braces in code/JSON) is left verbatim, so a template never breaks on stray braces. The variables are **metadata and artifact paths only** — never task bodies, diffs, check logs, environment values, or secrets (those stay in the artifact files the agent reads by path):
 
-`{task_id}` `{stage}` `{repo_path}` `{task_path}` `{plan_path}` `{diff_path}` `{checks_path}`
-`{review_path}` `{subtask_order}` `{subtask_count}` `{subtask_spec_path}` `{skills_path}`
+`{task_id}` `{stage}` `{repo_path}` `{task_path}` `{plan_path}` `{diff_path}` `{checks_path}` `{review_path}` `{subtask_order}` `{subtask_count}` `{subtask_spec_path}` `{skills_path}`
 
-A variable with no value for the current stage (e.g. `{plan_path}` before planning) renders as the
-empty string.
+A variable with no value for the current stage (e.g. `{plan_path}` before planning) renders as the empty string.
 
-**Safety.** Templates are prompt **text** only — delivered to the CLI on stdin, never as a command
-argument. A template cannot change the provider, `extra_args`, sandbox/approval mode, denied
-commands, denied reads, the environment allowlist, or fallback policy; it cannot enable `git
-commit`/`git push`/`gh pr create`; and a task's front matter cannot select a template. Only files
-named for an agent-routed stage inside `templates_dir` are read. Each rendered prompt is written, redacted, to `logs/<task-id>/stages/<stage>/[sub-NN/]
-rendered-prompt.md` for audit. See [cookbook.md](cookbook.md) for a recipe and
-[operations.md](operations.md) for troubleshooting.
+**Safety.** Templates are prompt **text** only — delivered to the CLI on stdin, never as a command argument. A template cannot change the provider, `extra_args`, sandbox/approval mode, denied commands, denied reads, the environment allowlist, or fallback policy; it cannot enable `git commit`/`git push`/`gh pr create`; and a task's front matter cannot select a template. Only files named for an agent-routed stage inside `templates_dir` are read. Each rendered prompt is written, redacted, to `logs/<task-id>/stages/<stage>/[sub-NN/] rendered-prompt.md` for audit. See [cookbook.md](cookbook.md) for a recipe and [operations.md](operations.md) for troubleshooting.
 
 ## `skills`
 
-Planning-selected repo skill references (optional, §2.1). At task start the orchestrator scans the
-**target repo's** `.claude/skills/*/SKILL.md` (name + description only — a cheap, bounded,
-frontmatter-only scan). The `planning` stage may pick relevant ones; the chosen `SKILL.md` files are
-passed to `implementation`/`fixing` as **read-only reference paths** (the `{skills_path}` prompt
-variable), advisory only — never executed, never the Claude-only Skill tool (Codex has none).
+Planning-selected repo skill references (optional, §2.1). At task start the orchestrator scans the **target repo's** `.claude/skills/*/SKILL.md` (name + description only — a cheap, bounded, frontmatter-only scan). The `planning` stage may pick relevant ones; the chosen `SKILL.md` files are passed to `implementation`/`fixing` as **read-only reference paths** (the `{skills_path}` prompt variable), advisory only — never executed, never the Claude-only Skill tool (Codex has none).
 
 ```yaml
 skills:
-  scan_root: ""                 # empty = <repo.local_path>/.claude/skills
+  scan_root: "" # empty = <repo.local_path>/.claude/skills
   exclude: ["run-checks", "test", "sync-docs"]
 ```
 
 | Field | Type | Default | Meaning |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `scan_root` | string | `""` | Where to scan for `*/SKILL.md`; empty = the target repo's `.claude/skills`. |
 | `exclude` | list | `["run-checks", "test", "sync-docs"]` | Gate-duplicating skills withheld from planning (the orchestrator already owns those gates). |
 
-Skill bodies are repo-controlled and only ever surfaced by path. The planning agent **proposes** skill
-names; the Core keeps only those the scan actually found and that are not excluded, recording the
-selection (and any dropped names) in `plan.md`.
+Skill bodies are repo-controlled and only ever surfaced by path. The planning agent **proposes** skill names; the Core keeps only those the scan actually found and that are not excluded, recording the selection (and any dropped names) in `plan.md`.
 
 ## Common Examples
 
@@ -651,8 +570,7 @@ agents:
 Before running tasks:
 
 - `python -m wastech_orchestrator preflight` succeeds;
-- `command -v`/`where` resolves provider and `gh` executables in the same environment that launches
-  the orchestrator;
+- `command -v`/`where` resolves provider and `gh` executables in the same environment that launches the orchestrator;
 - every routed provider is in `agents.allowed`;
 - every allowed provider has an `agents.providers` entry;
 - `max_total_fix_iterations >= max_fix_cycles`;

@@ -2,23 +2,15 @@
 
 ## Назначение
 
-Набор небольших чистых примитивов, которые совместно реализуют системный инвариант «политику
-безопасности нельзя ослабить через задачу или `extra_args`». Каждый примитив закрывает свою грань:
-аллой-лист окружения, запрет bypass-флагов, скан инъекций во фронтматтере, префлайт изоляции
-провайдеров и ранжирование строгости профилей разрешений для условного fallback.
+Набор небольших чистых примитивов, которые совместно реализуют системный инвариант «политику безопасности нельзя ослабить через задачу или `extra_args`». Каждый примитив закрывает свою грань: аллой-лист окружения, запрет bypass-флагов, скан инъекций во фронтматтере, префлайт изоляции провайдеров и ранжирование строгости профилей разрешений для условного fallback.
 
 ## Ответственность
 
-- **Окружение:** построить окружение дочернего процесса только из разрешённых ключей
-  ([env.py:18-30](../../../src/wastech_orchestrator/security/env.py#L18)).
-- **Запрещённые флаги:** обнаружить флаги, отключающие sandbox/approvals
-  ([forbidden_args.py:38-58](../../../src/wastech_orchestrator/security/forbidden_args.py#L38)).
-- **Инъекции:** просканировать значения фронтматтера на argv-подобные токены
-  ([injection.py:49-80](../../../src/wastech_orchestrator/security/injection.py#L49)).
-- **Изоляция:** офлайн-проверить, что каждый «могущий запуститься» провайдер может включить требуемую
-  изоляцию ([isolation.py:31-61](../../../src/wastech_orchestrator/security/isolation.py#L31)).
-- **Строгость профилей:** определить, что профиль `candidate` не слабее `reference`
-  ([profiles.py:23-34](../../../src/wastech_orchestrator/security/profiles.py#L23)).
+- **Окружение:** построить окружение дочернего процесса только из разрешённых ключей ([env.py:18-30](../../../src/wastech_orchestrator/security/env.py#L18)).
+- **Запрещённые флаги:** обнаружить флаги, отключающие sandbox/approvals ([forbidden_args.py:38-58](../../../src/wastech_orchestrator/security/forbidden_args.py#L38)).
+- **Инъекции:** просканировать значения фронтматтера на argv-подобные токены ([injection.py:49-80](../../../src/wastech_orchestrator/security/injection.py#L49)).
+- **Изоляция:** офлайн-проверить, что каждый «могущий запуститься» провайдер может включить требуемую изоляцию ([isolation.py:31-61](../../../src/wastech_orchestrator/security/isolation.py#L31)).
+- **Строгость профилей:** определить, что профиль `candidate` не слабее `reference` ([profiles.py:23-34](../../../src/wastech_orchestrator/security/profiles.py#L23)).
 
 ## Границы блока
 
@@ -28,13 +20,9 @@
 
 ### Не входит в ответственность блока
 
-- **Запуск процессов** с построенным окружением — это [B19](./B19-subprocess-runner.md) (получает
-  готовый `env`).
-- **Конкретные правила изоляции провайдера** (sandbox Codex, permission-mode Claude) живут в
-  адаптерах ([B18 `isolation_reasons`](./B18-agent-providers.md)); `isolation.py` лишь диспетчеризует
-  по `ProviderId` и оформляет причины ([isolation.py:22-28](../../../src/wastech_orchestrator/security/isolation.py#L22)).
-- **Решение о fallback** принимает [B17 Router](./B17-agent-router-and-fallback.md); `profiles.py`
-  только сравнивает строгость.
+- **Запуск процессов** с построенным окружением — это [B19](./B19-subprocess-runner.md) (получает готовый `env`).
+- **Конкретные правила изоляции провайдера** (sandbox Codex, permission-mode Claude) живут в адаптерах ([B18 `isolation_reasons`](./B18-agent-providers.md)); `isolation.py` лишь диспетчеризует по `ProviderId` и оформляет причины ([isolation.py:22-28](../../../src/wastech_orchestrator/security/isolation.py#L22)).
+- **Решение о fallback** принимает [B17 Router](./B17-agent-router-and-fallback.md); `profiles.py` только сравнивает строгость.
 - **Где вызывать** проверки и что делать при провале — это вызывающие блоки (B05, B06, B16, B18, B22, B24).
 
 ## Точки входа
@@ -47,29 +35,17 @@
 
 ## Входные данные и состояние
 
-Аллой-лист ключей + родительское окружение; список argv-токенов; словарь фронтматтера; объект
-конфигурации; два имени профилей. Состояния нет — всё чисто.
+Аллой-лист ключей + родительское окружение; список argv-токенов; словарь фронтматтера; объект конфигурации; два имени профилей. Состояния нет — всё чисто.
 
 ## Основной сценарий (по правилам)
 
-- **Окружение:** возвращается свежий dict только из ключей `allowed_keys`, которые есть в родителе, в
-  порядке аллой-листа; отсутствующий ключ пропускается (никогда не пустой)
-  ([env.py:29-30](../../../src/wastech_orchestrator/security/env.py#L29)).
-- **Запрещённые флаги:** для каждого токена берётся часть до `=`; reject, если начинается с
-  `--dangerously` или входит в `{--yolo, --ignore-rules}`; для `--sandbox`/`-s` — reject, если
-  значение `danger-full-access` ([forbidden_args.py:44-54](../../../src/wastech_orchestrator/security/forbidden_args.py#L44)).
-- **Инъекции:** значение reject, если после strip начинается с `-`, либо содержит один из
-  `; \` | $( \n \r`, либо совпадает по форме с запрещённым флагом; вложенные словари/списки —
-  рекурсивно, ключ-путь вида `agents.review` / `contacts[0]`
-  ([injection.py:60-80](../../../src/wastech_orchestrator/security/injection.py#L60)).
-- **Изоляция:** для каждого провайдера «в работе» (`agents.allowed` ∪ все primary/fallback маршрутов)
-  вызывается адаптерный `isolation_reasons`; собираются причины с префиксом id; `[]` = всё ок
-  ([isolation.py:37-61](../../../src/wastech_orchestrator/security/isolation.py#L37)).
-- **Строгость:** `read-only` (ранг 0) строже `workspace-write` (ранг 1); `candidate` ок, если его
-  ранг ≤ ранга `reference` ([profiles.py:17-34](../../../src/wastech_orchestrator/security/profiles.py#L17)).
+- **Окружение:** возвращается свежий dict только из ключей `allowed_keys`, которые есть в родителе, в порядке аллой-листа; отсутствующий ключ пропускается (никогда не пустой) ([env.py:29-30](../../../src/wastech_orchestrator/security/env.py#L29)).
+- **Запрещённые флаги:** для каждого токена берётся часть до `=`; reject, если начинается с `--dangerously` или входит в `{--yolo, --ignore-rules}`; для `--sandbox`/`-s` — reject, если значение `danger-full-access` ([forbidden_args.py:44-54](../../../src/wastech_orchestrator/security/forbidden_args.py#L44)).
+- **Инъекции:** значение reject, если после strip начинается с `-`, либо содержит один из `; \` | $( \n \r`, либо совпадает по форме с запрещённым флагом; вложенные словари/списки — рекурсивно, ключ-путь вида `agents.review`/`contacts[0]` ([injection.py:60-80](../../../src/wastech_orchestrator/security/injection.py#L60)).
+- **Изоляция:** для каждого провайдера «в работе» (`agents.allowed` ∪ все primary/fallback маршрутов) вызывается адаптерный `isolation_reasons`; собираются причины с префиксом id; `[]` = всё ок ([isolation.py:37-61](../../../src/wastech_orchestrator/security/isolation.py#L37)).
+- **Строгость:** `read-only` (ранг 0) строже `workspace-write` (ранг 1); `candidate` ок, если его ранг ≤ ранга `reference` ([profiles.py:17-34](../../../src/wastech_orchestrator/security/profiles.py#L17)).
 
-Пять независимых чистых примитивов — каждый закрывает свою грань инварианта и применяется в своих
-точках (defense-in-depth):
+Пять независимых чистых примитивов — каждый закрывает свою грань инварианта и применяется в своих точках (defense-in-depth):
 
 ```mermaid
 flowchart LR
@@ -89,13 +65,10 @@ flowchart LR
 
 ## Проверки и ограничения
 
-- **Fail-closed везде:** неизвестный профиль в `is_same_or_stricter` → `False` (нельзя ослаблять
-  политику ради fallback) ([profiles.py:32-33](../../../src/wastech_orchestrator/security/profiles.py#L32)).
+- **Fail-closed везде:** неизвестный профиль в `is_same_or_stricter` → `False` (нельзя ослаблять политику ради fallback) ([profiles.py:32-33](../../../src/wastech_orchestrator/security/profiles.py#L32)).
 - `--dangerously*`-префикс ловит любые будущие bypass-флаги.
-- Скан инъекций — «reject, не санитизировать»; применяется только к **значениям фронтматтера**, не к
-  телу задачи ([injection.py:7-8,15-16](../../../src/wastech_orchestrator/security/injection.py#L7)).
-- В изоляции проверяются только провайдеры «в работе», чтобы лишний блок провайдера не ломал запуск
-  ([isolation.py:47-61](../../../src/wastech_orchestrator/security/isolation.py#L47)).
+- Скан инъекций — «reject, не санитизировать»; применяется только к **значениям фронтматтера**, не к телу задачи ([injection.py:7-8,15-16](../../../src/wastech_orchestrator/security/injection.py#L7)).
+- В изоляции проверяются только провайдеры «в работе», чтобы лишний блок провайдера не ломал запуск ([isolation.py:47-61](../../../src/wastech_orchestrator/security/isolation.py#L47)).
 
 ## Результат
 
@@ -107,8 +80,7 @@ flowchart LR
 
 ## Побочные эффекты
 
-Нет. Все функции чистые (изоляция не запускает CLI — она только спрашивает адаптеры по их чистым
-правилам).
+Нет. Все функции чистые (изоляция не запускает CLI — она только спрашивает адаптеры по их чистым правилам).
 
 ## Ошибки и граничные случаи
 
@@ -120,8 +92,7 @@ flowchart LR
 ### Использует
 
 - `forbidden_args` используется внутри `injection.scan_value` ([injection.py:30,66](../../../src/wastech_orchestrator/security/injection.py#L30)).
-- `isolation` импортирует адаптерные `isolation_reasons` из [B18](./B18-agent-providers.md)
-  ([isolation.py:22-23](../../../src/wastech_orchestrator/security/isolation.py#L22)).
+- `isolation` импортирует адаптерные `isolation_reasons` из [B18](./B18-agent-providers.md) ([isolation.py:22-23](../../../src/wastech_orchestrator/security/isolation.py#L22)).
 
 ### Используется в
 
@@ -135,10 +106,7 @@ flowchart LR
 
 ## Место в общей системе
 
-Реализует инвариант «политику безопасности нельзя ослабить» в нескольких точках (defense-in-depth):
-запрещённые флаги проверяются и при загрузке конфигурации, и в адаптерах в момент запуска; окружение
-ограничивается на каждом запуске процесса; изоляция проверяется до создания ветки. Совместно с
-[B21](./B21-secret-redaction.md) образует слой безопасности оркестратора.
+Реализует инвариант «политику безопасности нельзя ослабить» в нескольких точках (defense-in-depth): запрещённые флаги проверяются и при загрузке конфигурации, и в адаптерах в момент запуска; окружение ограничивается на каждом запуске процесса; изоляция проверяется до создания ветки. Совместно с [B21](./B21-secret-redaction.md) образует слой безопасности оркестратора.
 
 ## Подтверждение в коде
 

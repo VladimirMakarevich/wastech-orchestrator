@@ -1,8 +1,6 @@
 # Security rules
 
-The source of truth is
-[00_orchestrator_final_plan.md §12](../implementation_stages/00_orchestrator_final_plan.md). These
-rules must not be violated; the configuration validator is required to reject unsafe settings.
+The source of truth is [00_orchestrator_final_plan.md §12](../implementation_stages/00_orchestrator_final_plan.md). These rules must not be violated; the configuration validator is required to reject unsafe settings.
 
 ## Isolation
 
@@ -21,20 +19,15 @@ rules must not be violated; the configuration validator is required to reject un
 
 8. CLIs are run **without shell interpolation** of user-supplied strings (argument list). Task content reaches providers **only as file paths** in `AgentRunRequest` (`task_path`, `plan_path`, …); no task field is ever used to build the CLI argv, environment, command path, working paths, or security settings.
 9. The task ID, branch name, and paths go through strict normalization (protection against path traversal and injection). The task `id` must match `^[a-z0-9][a-z0-9._-]{0,63}$`; normalization is **reject, don't sanitize** — a value that changes under normalization is rejected. The §19 validation gate rejects a broken/unsafe task before any branch or provider run, quarantining it to `tasks/rejected/`.
-10. Options that bypass the sandbox/permissions are **forbidden** by the configuration validator; they cannot be enabled through a task or through `extra_args`.
-10a. **Check-command discovery is fail-closed and proof-driven (§1.2).** The commands the quality gate runs are re-resolved **only on infrastructure proof** — a check that fails to *launch* (bounded to once per task), a changed config/CI fingerprint, or low-confidence detection — **never** because a check *reported* failures (that would let the gate quietly rewrite its own command until it passes; a quality failure routes to `fixing`). A change to the *set* of check commands is a **sensitive change**: it is written to the resolved profile and requires human approval on first use (fail-closed on denial, timeout, or no notifier; the first-ever set is auto-approved and recorded). The agent-assisted discovery proposal is untrusted: machine config outranks repo prose, and every proposal still passes the argv validator (no shell, no forbidden/denied/install verbs), a launch probe, and the approval gate before it can run.
+10. Options that bypass the sandbox/permissions are **forbidden** by the configuration validator; they cannot be enabled through a task or through `extra_args`. 10a. **Check-command discovery is fail-closed and proof-driven (§1.2).** The commands the quality gate runs are re-resolved **only on infrastructure proof** — a check that fails to _launch_ (bounded to once per task), a changed config/CI fingerprint, or low-confidence detection — **never** because a check _reported_ failures (that would let the gate quietly rewrite its own command until it passes; a quality failure routes to `fixing`). A change to the _set_ of check commands is a **sensitive change**: it is written to the resolved profile and requires human approval on first use (fail-closed on denial, timeout, or no notifier; the first-ever set is auto-approved and recorded). The agent-assisted discovery proposal is untrusted: machine config outranks repo prose, and every proposal still passes the argv validator (no shell, no forbidden/denied/install verbs), a launch probe, and the approval gate before it can run.
 
 ## Action blacklist
 
 11. A global blacklist of forbidden commands and paths (`security.denied_commands`, `denied_read_paths`) is applied before any run.
 12. A direct push to `base_branch` is forbidden; publishing happens only through a PR.
 13. Staging in the target repo is a **scoped** explicit pathspec that excludes `tasks/`/`logs/`/`workspace/`; blanket `git add .`/`-A` is forbidden, so orchestration and task artifacts never enter a code commit. In audit-footprint mode (spec §21) only the orchestrator — never an agent — makes the separate artifact commit.
-14. The implemented output guardrail requires Telegram approval for tracked-file deletion and
-    dependency manifest/lock changes after `implementation`/`fixing`. Approval is correlated to the
-    configured chat and exact prompt, persisted in redacted form, and fails closed. Ordinary diffs
-    and routine orchestrator commit/push/PR remain automatic.
-15. Bot token and chat id are environment-only. They must not enter handles, SQLite, logs, provider
-    argv, or artifacts. Task `contacts` are plain-text mentions only and cannot select a chat.
+14. The implemented output guardrail requires Telegram approval for tracked-file deletion and dependency manifest/lock changes after `implementation`/`fixing`. Approval is correlated to the configured chat and exact prompt, persisted in redacted form, and fails closed. Ordinary diffs and routine orchestrator commit/push/PR remain automatic.
+15. Bot token and chat id are environment-only. They must not enter handles, SQLite, logs, provider argv, or artifacts. Task `contacts` are plain-text mentions only and cannot select a chat.
 
 ## Control layer
 

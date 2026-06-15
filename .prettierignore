@@ -1,0 +1,30 @@
+# Prettier ignore. Markdown docs are formatted with proseWrap:never (no hard line-wrapping).
+# Reflow ONLY documentation — never the categories below.
+
+# VCS / build / caches (match anywhere)
+.git/
+node_modules/
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# --- Not documentation: never reflow ---
+
+# Runtime artifacts (generated agent run logs)
+/logs/
+
+# Lifecycle task files (operator content; the §19 gate enforces max_line_bytes)
+/tasks/
+
+# Shipped package data (delivered by init/install; reformatting changes delivered
+# output and would break copy / round-trip tests)
+/src/
+
+# docs/worc/ is a byte-identical twin of src/.../worc/ enforced by tests/test_worc_docs.py,
+# and its example tasks must pass the §19 gate — keep it as-is, in sync with the package.
+/docs/worc/

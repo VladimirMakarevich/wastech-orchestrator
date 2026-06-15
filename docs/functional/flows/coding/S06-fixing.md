@@ -2,14 +2,11 @@
 
 ## Назначение
 
-Цель ping-pong: после провала тестов или блокирующего ревью агент правит код и возвращает единицу к
-проверкам/ревью. Входится **только** при провале. Работает под лимитами B09; при их исчерпании (или
-если fixing выключен) — терминальный `manual_action_required` с отчётом о провале.
+Цель ping-pong: после провала тестов или блокирующего ревью агент правит код и возвращает единицу к проверкам/ревью. Входится **только** при провале. Работает под лимитами B09; при их исчерпании (или если fixing выключен) — терминальный `manual_action_required` с отчётом о провале.
 
 ## Ответственность
 
-- Решить вход в fixing: выключено (manual), застревание по лимитам (manual + отчёт) или запуск
-  ([orchestrator.py:1468-1501](../../../../src/wastech_orchestrator/core/orchestrator.py#L1468)).
+- Решить вход в fixing: выключено (manual), застревание по лимитам (manual + отчёт) или запуск ([orchestrator.py:1468-1501](../../../../src/wastech_orchestrator/core/orchestrator.py#L1468)).
 - Прогнать редактирующую стадию с guardrail и вернуться к testing/review ([orchestrator.py:1265-1274](../../../../src/wastech_orchestrator/core/orchestrator.py#L1265)).
 
 ## Границы шага
@@ -30,8 +27,7 @@
 
 ## Входные данные и состояние
 
-`LoopCounters` ([B09](../../blocks/B09-fix-loop-control.md)); `FixLoop` (TEST/REVIEW); контекст провала
-(`fixing-context.json`: путь к логу проверок или к находкам ревью). Статус `fixing`.
+`LoopCounters` ([B09](../../blocks/B09-fix-loop-control.md)); `FixLoop` (TEST/REVIEW); контекст провала (`fixing-context.json`: путь к логу проверок или к находкам ревью). Статус `fixing`.
 
 ## Основной сценарий
 
@@ -57,9 +53,7 @@ flowchart TB
 
 ## Результат / переход
 
-Назад к [S04 testing](./S04-testing.md) (или к [S05 review](./S05-review.md), если testing пропущен).
-При застревании/выключении — терминальный `manual_action_required` + `failure_report.json`/`stuck.md`
-([B08](../../blocks/B08-ledger-and-failure-reports.md)).
+Назад к [S04 testing](./S04-testing.md) (или к [S05 review](./S05-review.md), если testing пропущен). При застревании/выключении — терминальный `manual_action_required` + `failure_report.json`/`stuck.md` ([B08](../../blocks/B08-ledger-and-failure-reports.md)).
 
 ## Побочные эффекты
 
@@ -82,8 +76,7 @@ flowchart TB
 
 ## Место в потоке
 
-Закрывает петлю ping-pong: единственный путь из провала проверок/ревью обратно к воротам качества — или
-в ручной разбор при исчерпании лимита. См. [обзор потока](./index.md).
+Закрывает петлю ping-pong: единственный путь из провала проверок/ревью обратно к воротам качества — или в ручной разбор при исчерпании лимита. См. [обзор потока](./index.md).
 
 ## Подтверждение в коде
 

@@ -2,21 +2,17 @@
 
 ## Назначение
 
-Выход системы в Git/GitHub: закоммитить, запушить и открыть Pull Request (опционально — авто-merge).
-Это **не агентская** стадия — всё делает Git Manager; агенты commit/push/PR не делают **никогда**.
-publishing не пропускается.
+Выход системы в Git/GitHub: закоммитить, запушить и открыть Pull Request (опционально — авто-merge). Это **не агентская** стадия — всё делает Git Manager; агенты commit/push/PR не делают **никогда**. publishing не пропускается.
 
 ## Ответственность
 
-- Финализировать артефакты задачи, провести цепочку `commit → push → PR` (опц. merge) идемпотентно и
-  завершить задачу ([orchestrator.py:1348-1386](../../../../src/wastech_orchestrator/core/orchestrator.py#L1348)).
+- Финализировать артефакты задачи, провести цепочку `commit → push → PR` (опц. merge) идемпотентно и завершить задачу ([orchestrator.py:1348-1386](../../../../src/wastech_orchestrator/core/orchestrator.py#L1348)).
 
 ## Границы шага
 
 ### Входит в ответственность шага
 
-- Порядок и переходы публикации (`committing → pushing → creating_pr → done`); решение об авто-merge;
-  терминальное завершение.
+- Порядок и переходы публикации (`committing → pushing → creating_pr → done`); решение об авто-merge; терминальное завершение.
 
 ### Не входит в ответственность шага
 
@@ -30,8 +26,7 @@ publishing не пропускается.
 
 ## Входные данные и состояние
 
-Ветка `agent/<id>-<slug>`, `summary.md` (тело PR), флаги `git.auto_merge*`. Статус `ready_to_publish` →
-`committing` → `pushing` → `creating_pr` → `done`. Идемпотентность — через `publish_operations` ([B07](../../blocks/B07-state-machine-and-store.md)).
+Ветка `agent/<id>-<slug>`, `summary.md` (тело PR), флаги `git.auto_merge*`. Статус `ready_to_publish` → `committing` → `pushing` → `creating_pr` → `done`. Идемпотентность — через `publish_operations` ([B07](../../blocks/B07-state-machine-and-store.md)).
 
 ## Основной сценарий
 
@@ -62,8 +57,7 @@ flowchart TB
 
 ## Результат / переход
 
-Терминальный `done` (через `_go_terminal`) с URL PR; при заблокированном авто-merge — `manual_action_required`.
-Затем терминальная очистка и запись в [B08](../../blocks/B08-ledger-and-failure-reports.md) (в [B06](../../blocks/B06-orchestrator-pipeline.md)).
+Терминальный `done` (через `_go_terminal`) с URL PR; при заблокированном авто-merge — `manual_action_required`. Затем терминальная очистка и запись в [B08](../../blocks/B08-ledger-and-failure-reports.md) (в [B06](../../blocks/B06-orchestrator-pipeline.md)).
 
 ## Побочные эффекты
 
@@ -87,8 +81,7 @@ flowchart TB
 
 ## Место в потоке
 
-Финальная стадия: превращает результат работы в PR. Единственное место, где система пишет в Git. См.
-[обзор потока](./index.md).
+Финальная стадия: превращает результат работы в PR. Единственное место, где система пишет в Git. См. [обзор потока](./index.md).
 
 ## Подтверждение в коде
 

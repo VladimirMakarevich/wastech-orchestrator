@@ -2,21 +2,17 @@
 
 ## Назначение
 
-Второй «ворот качества»: агент-ревьюер ищет блокирующие проблемы. Опциональна (`SKIPPABLE`, требует
-`agents.allow_review_skip`). При блокирующих находках — ping-pong в fixing; иначе — коммит единицы и
-переход к следующей единице или к summary.
+Второй «ворот качества»: агент-ревьюер ищет блокирующие проблемы. Опциональна (`SKIPPABLE`, требует `agents.allow_review_skip`). При блокирующих находках — ping-pong в fixing; иначе — коммит единицы и переход к следующей единице или к summary.
 
 ## Ответственность
 
-- Запустить ревью (или пропустить), классифицировать находки по severity и разветвить: без блокеров →
-  коммит единицы/переход; блокеры → fixing ([orchestrator.py:1244-1263](../../../../src/wastech_orchestrator/core/orchestrator.py#L1244)).
+- Запустить ревью (или пропустить), классифицировать находки по severity и разветвить: без блокеров → коммит единицы/переход; блокеры → fixing ([orchestrator.py:1244-1263](../../../../src/wastech_orchestrator/core/orchestrator.py#L1244)).
 
 ## Границы шага
 
 ### Входит в ответственность шага
 
-- Запуск/пропуск ревью; определение «блокирующих» находок; сброс циклов при прохождении; коммит
-  сабтаска и переход к следующей единице/summary (`_on_review_passed`).
+- Запуск/пропуск ревью; определение «блокирующих» находок; сброс циклов при прохождении; коммит сабтаска и переход к следующей единице/summary (`_on_review_passed`).
 
 ### Не входит в ответственность шага
 
@@ -30,9 +26,7 @@
 
 ## Входные данные и состояние
 
-Типизированный вывод ревью; набор блокирующих severity `_BLOCKING_SEVERITIES = {blocking, critical,
-high}` ([orchestrator.py:137](../../../../src/wastech_orchestrator/core/orchestrator.py#L137)). Статус
-`reviewing`. Артефакты — `review/*` (findings).
+Типизированный вывод ревью; набор блокирующих severity `_BLOCKING_SEVERITIES = {blocking, critical, high}` ([orchestrator.py:137](../../../../src/wastech_orchestrator/core/orchestrator.py#L137)). Статус `reviewing`. Артефакты — `review/*` (findings).
 
 ## Основной сценарий
 
@@ -63,8 +57,7 @@ flowchart TB
 
 ## Результат / переход
 
-Без блокеров и есть ещё сабтаски → следующая [S03 implementation](./S03-implementation.md); иначе →
-[S07 summary](./S07-summary.md). Блокеры → [S06 fixing](./S06-fixing.md).
+Без блокеров и есть ещё сабтаски → следующая [S03 implementation](./S03-implementation.md); иначе → [S07 summary](./S07-summary.md). Блокеры → [S06 fixing](./S06-fixing.md).
 
 ## Побочные эффекты
 

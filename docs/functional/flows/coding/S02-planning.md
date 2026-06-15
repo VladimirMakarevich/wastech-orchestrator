@@ -2,30 +2,24 @@
 
 ## Назначение
 
-Агент строит план (`plan.md`) и, опционально, рекомендует разбить задачу на сабтаски. Здесь же
-резолвятся навыки (skills). Стадию можно пропустить — тогда пишется stub-план и задача идёт одной
-единицей.
+Агент строит план (`plan.md`) и, опционально, рекомендует разбить задачу на сабтаски. Здесь же резолвятся навыки (skills). Стадию можно пропустить — тогда пишется stub-план и задача идёт одной единицей.
 
 ## Ответственность
 
-- При пропуске — записать stub-план, **выключить** декомпозицию, перейти к implementation
-  ([orchestrator.py:1068-1088](../../../../src/wastech_orchestrator/core/orchestrator.py#L1068)).
-- При запуске — прогнать агента, собрать `plan.md` (+ секция навыков), применить правило приёма
-  декомпозиции и записать артефакты/строки сабтасков ([orchestrator.py:1089-1137](../../../../src/wastech_orchestrator/core/orchestrator.py#L1089)).
+- При пропуске — записать stub-план, **выключить** декомпозицию, перейти к implementation ([orchestrator.py:1068-1088](../../../../src/wastech_orchestrator/core/orchestrator.py#L1068)).
+- При запуске — прогнать агента, собрать `plan.md` (+ секция навыков), применить правило приёма декомпозиции и записать артефакты/строки сабтасков ([orchestrator.py:1089-1137](../../../../src/wastech_orchestrator/core/orchestrator.py#L1089)).
 
 ## Границы шага
 
 ### Входит в ответственность шага
 
-- Запуск/пропуск стадии; сборка `plan.md`; вызов решения о декомпозиции и резолва навыков; запись
-  сабтасков; переход к implementation.
+- Запуск/пропуск стадии; сборка `plan.md`; вызов решения о декомпозиции и резолва навыков; запись сабтасков; переход к implementation.
 
 ### Не входит в ответственность шага
 
 - **Правило приёма декомпозиции и артефакты сабтасков** — [B11](../../blocks/B11-task-decomposition.md).
 - **Инвентарь/выбор навыков и дедуп** — [B13](../../blocks/B13-skill-selection.md).
-- **Валидация типизированного вывода и HITL** — [B12](../../blocks/B12-hitl-and-typed-output.md);
-  **резолв `gate_on`** (`decomposition.enabled` + per-task) — [B06 `_decomposition_gate_on`](../../blocks/B06-orchestrator-pipeline.md).
+- **Валидация типизированного вывода и HITL** — [B12](../../blocks/B12-hitl-and-typed-output.md); **резолв `gate_on`** (`decomposition.enabled` + per-task) — [B06 `_decomposition_gate_on`](../../blocks/B06-orchestrator-pipeline.md).
 - **Запуск агента** — [B17](../../blocks/B17-agent-router-and-fallback.md)/[B18](../../blocks/B18-agent-providers.md); **промпт** — [B15](../../blocks/B15-prompt-templates.md).
 
 ## Точки входа
@@ -35,18 +29,12 @@
 
 ## Входные данные и состояние
 
-Типизированный вывод агента (`decompose`, `subtasks[]`, `skills`); `gate_on`; `max_subtasks`.
-Статус: `refining`/`preparing` → `planning` → `implementing`. Артефакты — `plan.md`,
-`subtasks/index.json`, `NN-<slug>.md`; строки `subtasks` в [B07](../../blocks/B07-state-machine-and-store.md).
+Типизированный вывод агента (`decompose`, `subtasks[]`, `skills`); `gate_on`; `max_subtasks`. Статус: `refining`/`preparing` → `planning` → `implementing`. Артефакты — `plan.md`, `subtasks/index.json`, `NN-<slug>.md`; строки `subtasks` в [B07](../../blocks/B07-state-machine-and-store.md).
 
 ## Основной сценарий
 
-1. **Пропуск** (`planning` в `skip`): stub-план из задачи, `DecompositionDecision(accepted=False,
-   reason="planning_skipped")`, `record_skip`, переход к implementation (декомпозиция требует
-   структурированный вывод planning, поэтому без него невозможна).
-2. **Запуск**: `_run_typed_stage` → `plan.md` = контент + секция навыков ([B13](../../blocks/B13-skill-selection.md));
-   `decide_decomposition` ([B11](../../blocks/B11-task-decomposition.md)) с `gate_on`/`max_subtasks`;
-   при принятии — `write_subtask_artifacts` + `insert_subtasks` ([B07](../../blocks/B07-state-machine-and-store.md)); переход к implementation.
+1. **Пропуск** (`planning` в `skip`): stub-план из задачи, `DecompositionDecision(accepted=False, reason="planning_skipped")`, `record_skip`, переход к implementation (декомпозиция требует структурированный вывод planning, поэтому без него невозможна).
+2. **Запуск**: `_run_typed_stage` → `plan.md` = контент + секция навыков ([B13](../../blocks/B13-skill-selection.md)); `decide_decomposition` ([B11](../../blocks/B11-task-decomposition.md)) с `gate_on`/`max_subtasks`; при принятии — `write_subtask_artifacts` + `insert_subtasks` ([B07](../../blocks/B07-state-machine-and-store.md)); переход к implementation.
 
 ```mermaid
 flowchart TB
@@ -68,8 +56,7 @@ flowchart TB
 
 ## Результат / переход
 
-Переход к [S03 implementation](./S03-implementation.md). Артефакты `plan.md` (+ навыки), при
-декомпозиции — `subtasks/index.json` и спеки; `decomposition_*`/`subtask_count`/`active_subtask` в [B07](../../blocks/B07-state-machine-and-store.md).
+Переход к [S03 implementation](./S03-implementation.md). Артефакты `plan.md` (+ навыки), при декомпозиции — `subtasks/index.json` и спеки; `decomposition_*`/`subtask_count`/`active_subtask` в [B07](../../blocks/B07-state-machine-and-store.md).
 
 ## Побочные эффекты
 
@@ -85,19 +72,15 @@ flowchart TB
 
 ### Использует
 
-- [B11](../../blocks/B11-task-decomposition.md), [B13](../../blocks/B13-skill-selection.md),
-  [B12](../../blocks/B12-hitl-and-typed-output.md), [B15](../../blocks/B15-prompt-templates.md),
-  [B17](../../blocks/B17-agent-router-and-fallback.md)/[B18](../../blocks/B18-agent-providers.md), [B07](../../blocks/B07-state-machine-and-store.md).
+- [B11](../../blocks/B11-task-decomposition.md), [B13](../../blocks/B13-skill-selection.md), [B12](../../blocks/B12-hitl-and-typed-output.md), [B15](../../blocks/B15-prompt-templates.md), [B17](../../blocks/B17-agent-router-and-fallback.md)/[B18](../../blocks/B18-agent-providers.md), [B07](../../blocks/B07-state-machine-and-store.md).
 
 ### Используется в
 
-- [S03 implementation](./S03-implementation.md) — следующая стадия (по каждой единице);
-  [B06](../../blocks/B06-orchestrator-pipeline.md) — драйвер.
+- [S03 implementation](./S03-implementation.md) — следующая стадия (по каждой единице); [B06](../../blocks/B06-orchestrator-pipeline.md) — драйвер.
 
 ## Место в потоке
 
-Вторая стадия. Определяет, сколько будет единиц работы (одна или сабтаски) и какой материал-справку
-(навыки) увидят последующие стадии. См. [обзор потока](./index.md).
+Вторая стадия. Определяет, сколько будет единиц работы (одна или сабтаски) и какой материал-справку (навыки) увидят последующие стадии. См. [обзор потока](./index.md).
 
 ## Подтверждение в коде
 

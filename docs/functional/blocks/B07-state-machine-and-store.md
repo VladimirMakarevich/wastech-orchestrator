@@ -2,15 +2,11 @@
 
 ## Назначение
 
-Определяет словарь статусов задачи и допустимые переходы между ними, и персистит всё состояние
-конвейера в одной SQLite-БД (`state.db`). Это «спинной мозг» состояния: единственный слот обработки,
-транзакционные переходы (устойчивые к падению) и идемпотентные записи, благодаря которым прерванную
-задачу можно возобновить.
+Определяет словарь статусов задачи и допустимые переходы между ними, и персистит всё состояние конвейера в одной SQLite-БД (`state.db`). Это «спинной мозг» состояния: единственный слот обработки, транзакционные переходы (устойчивые к падению) и идемпотентные записи, благодаря которым прерванную задачу можно возобновить.
 
 ## Ответственность
 
-- **Машина состояний** (чистая, без IO): перечислить статусы (§8), задать допустимые переходы,
-  проверять/утверждать переход ([state_machine.py:15-143](../../../src/wastech_orchestrator/core/state_machine.py#L15)).
+- **Машина состояний** (чистая, без IO): перечислить статусы (§8), задать допустимые переходы, проверять/утверждать переход ([state_machine.py:15-143](../../../src/wastech_orchestrator/core/state_machine.py#L15)).
 - **State Store**: создать/мигрировать БД и применить схему ([state_store.py:328-340](../../../src/wastech_orchestrator/state_store.py#L328)); хранить 7 сущностей: `tasks`, `stage_runs`, `provider_attempts`, `check_runs`, `artifacts`, `publish_operations`, `subtasks` ([state_store.py:83-196](../../../src/wastech_orchestrator/state_store.py#L83)).
 - Дать транзакции `BEGIN IMMEDIATE`…`COMMIT`/`ROLLBACK` ([state_store.py:359-368](../../../src/wastech_orchestrator/state_store.py#L359)).
 - Отвечать на вопрос «кто владеет слотом» ([state_store.py:455-460](../../../src/wastech_orchestrator/state_store.py#L455)).
@@ -27,20 +23,17 @@
 
 ### Не входит в ответственность блока
 
-- **Решение, какой переход делать** — это [B06 Конвейер](./B06-orchestrator-pipeline.md): он вызывает
-  `assert_transition` затем `set_status` внутри транзакции ([orchestrator.py:2434-2445](../../../src/wastech_orchestrator/core/orchestrator.py#L2434)). Сам стор переход не выбирает; `set_status` пишет любой статус.
-- **Редактирование секретов**: стор пишет ровно то, что дано; ответственность «не передавать секрет в
-  поле» лежит на вызывающих ([state_store.py:8-11](../../../src/wastech_orchestrator/state_store.py#L8)).
+- **Решение, какой переход делать** — это [B06 Конвейер](./B06-orchestrator-pipeline.md): он вызывает `assert_transition` затем `set_status` внутри транзакции ([orchestrator.py:2434-2445](../../../src/wastech_orchestrator/core/orchestrator.py#L2434)). Сам стор переход не выбирает; `set_status` пишет любой статус.
+- **Редактирование секретов**: стор пишет ровно то, что дано; ответственность «не передавать секрет в поле» лежит на вызывающих ([state_store.py:8-11](../../../src/wastech_orchestrator/state_store.py#L8)).
 - **Журнал терминальных исходов** — это отдельный блок [B08 Ledger](./B08-ledger-and-failure-reports.md).
-- **Сами git-операции** — это [B22](./B22-git-manager.md); стор лишь хранит строки идемпотентности
-  публикации (`publish_operations`).
+- **Сами git-операции** — это [B22](./B22-git-manager.md); стор лишь хранит строки идемпотентности публикации (`publish_operations`).
 
 ## Точки входа
 
-Машина состояний: `Status`, `ALLOWED_TRANSITIONS`, `can_transition`, `assert_transition`,
-`is_terminal`, `is_active`, `InvalidTransition` ([state_machine.py](../../../src/wastech_orchestrator/core/state_machine.py)).
+Машина состояний: `Status`, `ALLOWED_TRANSITIONS`, `can_transition`, `assert_transition`, `is_terminal`, `is_active`, `InvalidTransition` ([state_machine.py](../../../src/wastech_orchestrator/core/state_machine.py)).
 
 State Store ([state_store.py](../../../src/wastech_orchestrator/state_store.py)):
+
 - `StateStore.open(db_path)` / `open_readonly(db_path)` ([:328,:342](../../../src/wastech_orchestrator/state_store.py#L328)).
 - `transaction()` ([:359](../../../src/wastech_orchestrator/state_store.py#L359)).
 - Задачи: `insert_task`, `get_task`, `latest_task`, `task_id_exists`, `find_active_tasks`, `find_incomplete_cleanup`, `update_task`, `set_status`, `reset_task_for_rerun`, `revive_task_for_continue`.
@@ -51,18 +44,15 @@ State Store ([state_store.py](../../../src/wastech_orchestrator/state_store.py))
 
 ## Входные данные и состояние
 
-Путь к `state.db`; строки-дата-классы (`TaskRow`, `StageRunRow`, …). Внутреннее состояние —
-единственное соединение SQLite (WAL, `foreign_keys=ON`, ручное управление транзакциями).
+Путь к `state.db`; строки-дата-классы (`TaskRow`, `StageRunRow`, …). Внутреннее состояние — единственное соединение SQLite (WAL, `foreign_keys=ON`, ручное управление транзакциями).
 
 ## Основной сценарий (переход статуса задачи)
 
 1. [B06](./B06-orchestrator-pipeline.md) открывает транзакцию `transaction()` (`BEGIN IMMEDIATE`).
-2. Внутри: `assert_transition(src, dst)` (политика машины состояний) → `set_status(task_id, dst)` →
-   `save_counters(...)` → опц. `update_task(...)`.
+2. Внутри: `assert_transition(src, dst)` (политика машины состояний) → `set_status(task_id, dst)` → `save_counters(...)` → опц. `update_task(...)`.
 3. На успехе `COMMIT`, на исключении `ROLLBACK` — БД остаётся в согласованном прежнем состоянии.
 
-Каждый переход статуса — внутри одной транзакции: сначала проверка по §8, затем запись; на исключении —
-полный откат:
+Каждый переход статуса — внутри одной транзакции: сначала проверка по §8, затем запись; на исключении — полный откат:
 
 ```mermaid
 flowchart TB
@@ -79,42 +69,27 @@ flowchart TB
 
 ### Внеплановые (operator-driven) статусы
 
-`finalize` и `recovery` выставляют терминальный статус напрямую через `set_status`/`update_task`
-**без** `assert_transition` (намеренная out-of-band смена) — например `revive_task_for_continue`
-делает terminal→active для `rerun --continue` ([state_store.py:533-554](../../../src/wastech_orchestrator/state_store.py#L533)).
+`finalize` и `recovery` выставляют терминальный статус напрямую через `set_status`/`update_task` **без** `assert_transition` (намеренная out-of-band смена) — например `revive_task_for_continue` делает terminal→active для `rerun --continue` ([state_store.py:533-554](../../../src/wastech_orchestrator/state_store.py#L533)).
 
 ### Сброс/оживление при rerun
 
-`reset_task_for_rerun` чистит всё per-attempt состояние, обнуляет ветку и удаляет `subtasks` +
-`publish_operations`, оставляя статус терминальным (чтобы повторный upsert в `insert_task` перевёл в
-`new`) ([state_store.py:491-531](../../../src/wastech_orchestrator/state_store.py#L491)).
+`reset_task_for_rerun` чистит всё per-attempt состояние, обнуляет ветку и удаляет `subtasks` + `publish_operations`, оставляя статус терминальным (чтобы повторный upsert в `insert_task` перевёл в `new`) ([state_store.py:491-531](../../../src/wastech_orchestrator/state_store.py#L491)).
 
 ### Read-only режим
 
-`open_readonly` открывает файл `?mode=ro`, ставит `PRAGMA query_only=ON`, проверяет (не мигрируя)
-версию; используется командой `status` ([state_store.py:342-352](../../../src/wastech_orchestrator/state_store.py#L342)).
+`open_readonly` открывает файл `?mode=ro`, ставит `PRAGMA query_only=ON`, проверяет (не мигрируя) версию; используется командой `status` ([state_store.py:342-352](../../../src/wastech_orchestrator/state_store.py#L342)).
 
 ## Проверки и ограничения
 
-- **Допустимые переходы** (§8): «счастливый путь» + у каждого нетерминального статуса добавлены
-  универсальные рёбра `-> failed` и `-> manual_action_required`; терминальные статусы исходящих рёбер
-  не имеют ([state_machine.py:70-113](../../../src/wastech_orchestrator/core/state_machine.py#L70)).
-- **Единый слот**: активны все статусы, кроме `{NEW, PENDING, DONE, FAILED, MANUAL_ACTION_REQUIRED}`
-  ([state_store.py:455-460,872-875](../../../src/wastech_orchestrator/state_store.py#L455)). Это
-  логический слот (запрос к БД), а не блокировка СУБД.
-- **Версия схемы БД** = 3; более новая → `IncompatibleStateError` (на обоих путях открытия); старая
-  мигрируется in-place идемпотентным `ALTER TABLE ADD COLUMN` и переклеймляется
-  ([state_store.py:40-81](../../../src/wastech_orchestrator/state_store.py#L40)).
-- **Идемпотентность**: `insert_task`/`register_artifact`/`record_publish_op`/`insert_subtasks` —
-  upsert по уникальному ключу; `insert_subtasks` не «оживляет» уже закоммиченные сабтаски
-  (`WHERE subtasks.commit_sha IS NULL`) ([state_store.py:818-837](../../../src/wastech_orchestrator/state_store.py#L818)).
-- **Никаких секретов** в схеме (только id, статусы, классы ошибок, пути, sha256, счётчики, отпечатки,
-  SHA коммитов) ([state_store.py:8-11](../../../src/wastech_orchestrator/state_store.py#L8)).
+- **Допустимые переходы** (§8): «счастливый путь» + у каждого нетерминального статуса добавлены универсальные рёбра `-> failed` и `-> manual_action_required`; терминальные статусы исходящих рёбер не имеют ([state_machine.py:70-113](../../../src/wastech_orchestrator/core/state_machine.py#L70)).
+- **Единый слот**: активны все статусы, кроме `{NEW, PENDING, DONE, FAILED, MANUAL_ACTION_REQUIRED}` ([state_store.py:455-460,872-875](../../../src/wastech_orchestrator/state_store.py#L455)). Это логический слот (запрос к БД), а не блокировка СУБД.
+- **Версия схемы БД** = 3; более новая → `IncompatibleStateError` (на обоих путях открытия); старая мигрируется in-place идемпотентным `ALTER TABLE ADD COLUMN` и переклеймляется ([state_store.py:40-81](../../../src/wastech_orchestrator/state_store.py#L40)).
+- **Идемпотентность**: `insert_task`/`register_artifact`/`record_publish_op`/`insert_subtasks` — upsert по уникальному ключу; `insert_subtasks` не «оживляет» уже закоммиченные сабтаски (`WHERE subtasks.commit_sha IS NULL`) ([state_store.py:818-837](../../../src/wastech_orchestrator/state_store.py#L818)).
+- **Никаких секретов** в схеме (только id, статусы, классы ошибок, пути, sha256, счётчики, отпечатки, SHA коммитов) ([state_store.py:8-11](../../../src/wastech_orchestrator/state_store.py#L8)).
 
 ## Результат
 
-Персистентные строки в `state.db`; `TaskRow`/`SubtaskRow`/… при чтении; `run_id` при резервировании
-стадии; `LoopCounters` при чтении счётчиков; список активных/незавершённых задач.
+Персистентные строки в `state.db`; `TaskRow`/`SubtaskRow`/… при чтении; `run_id` при резервировании стадии; `LoopCounters` при чтении счётчиков; список активных/незавершённых задач.
 
 ## Побочные эффекты
 
@@ -145,9 +120,7 @@ flowchart TB
 
 ## Место в общей системе
 
-Все решения конвейера материализуются как переходы статусов и строки в `state.db`. Транзакционность и
-идемпотентность здесь — основа возобновляемости: после падения [B10](./B10-recovery-and-resume.md)
-читает это состояние и решает, продолжать ли задачу.
+Все решения конвейера материализуются как переходы статусов и строки в `state.db`. Транзакционность и идемпотентность здесь — основа возобновляемости: после падения [B10](./B10-recovery-and-resume.md) читает это состояние и решает, продолжать ли задачу.
 
 ## Подтверждение в коде
 

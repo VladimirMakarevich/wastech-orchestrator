@@ -1,50 +1,23 @@
 # WORC → wastech-orchestrator
 
-**A lean orchestrator that turns a written task into a reviewed Pull Request** — using external
-coding agents (**OpenAI Codex CLI** and **Anthropic Claude Code CLI**) to do the editing, while the
-orchestrator owns the process and the Git lifecycle.
+**A lean orchestrator that turns a written task into a reviewed Pull Request** — using external coding agents (**OpenAI Codex CLI** and **Anthropic Claude Code CLI**) to do the editing, while the orchestrator owns the process and the Git lifecycle.
 
-You drop a task file into a repo; the orchestrator parses it, creates a branch, and drives a
-**deterministic stage pipeline** — refine → plan → implement → test → review → fix → summary →
-publish — routing each stage to a coding agent behind a provider abstraction (with automatic
-fallback to the other agent on infrastructure errors). It runs your project's checks, commits the
-change, pushes, and opens a PR whose body is a plain-language summary of what was done and why. The
-agents only edit files inside a dedicated clone; **only the orchestrator commits, pushes, and creates
-PRs.** Every stage is checkpointed to SQLite, so a crash resumes from the last completed step and
-publishing is idempotent.
+You drop a task file into a repo; the orchestrator parses it, creates a branch, and drives a **deterministic stage pipeline** — refine → plan → implement → test → review → fix → summary → publish — routing each stage to a coding agent behind a provider abstraction (with automatic fallback to the other agent on infrastructure errors). It runs your project's checks, commits the change, pushes, and opens a PR whose body is a plain-language summary of what was done and why. The agents only edit files inside a dedicated clone; **only the orchestrator commits, pushes, and creates PRs.** Every stage is checkpointed to SQLite, so a crash resumes from the last completed step and publishing is idempotent.
 
-> **Status: 0.x pre-release.** The full single-task pipeline, provider routing + fallback, the
-> security/isolation gate, scoped Git footprints, SQLite checkpoints + crash recovery, the watch
-> loop with periodic Git sync, and the `init`/`install` setup flows are implemented and covered by an
-> extensive test suite. Telegram notifications and human-in-the-loop for clarification and
-> deletion/dependency approvals are implemented; parallel `git worktree` execution remains on the
-> roadmap (see [docs/backlog/](docs/backlog/)). APIs and config may still change before 1.0.
+> **Status: 0.x pre-release.** The full single-task pipeline, provider routing + fallback, the security/isolation gate, scoped Git footprints, SQLite checkpoints + crash recovery, the watch loop with periodic Git sync, and the `init`/`install` setup flows are implemented and covered by an extensive test suite. Telegram notifications and human-in-the-loop for clarification and deletion/dependency approvals are implemented; parallel `git worktree` execution remains on the roadmap (see [docs/backlog/](docs/backlog/)). APIs and config may still change before 1.0.
 
 ---
 
 ## Why use it
 
-- **Tasks in, PRs out.** Author a task in Markdown; get a branch, the change, your checks run, and a
-  PR with a written summary — no babysitting.
-- **Two agents, one interface.** Codex and Claude Code are interchangeable per stage. If one fails
-  for an *infrastructure* reason (binary missing, timeout, rate limit), the orchestrator falls back
-  to the other; test/review failures instead loop through a bounded `fix` stage.
-- **The orchestrator owns Git.** Agents never commit or push. Branch naming, scoped staging,
-  commit, push, PR, and the safe return to the base branch are all the orchestrator's job.
-- **Tasks and results live in the repo.** By default the task file and its summary are committed to
-  the same repository as the code (in-repo audit footprint); working artifacts (plans, diffs, logs)
-  stay local and never enter Git history. Other footprints are available.
-- **Discovers work pushed to Git.** `watch` runs as a loop that periodically `fetch`/`pull`s the
-  base branch, so a teammate can hand the orchestrator a task simply by committing it to
-  `tasks/pending/` and pushing — no manual sync needed.
-- **Crash-safe and idempotent.** State machine + per-stage checkpoints in SQLite; a restart resumes
-  the one in-flight task and never double-commits, double-pushes, or re-opens a PR.
-- **Optional Telegram HITL.** `refinement`/`planning` can ask one correlated question or approval,
-  and deletions/dependency changes are fail-closed before tests. Waiting state is a recoverable
-  artifact; ordinary diffs and routine publishing remain automatic.
-- **Security can't be weakened by a task.** The sandbox/approval policy and the environment
-  allowlist are config-level invariants; no task or `extra_args` can disable them, and no secrets
-  are written to logs, SQLite, or artifacts.
+- **Tasks in, PRs out.** Author a task in Markdown; get a branch, the change, your checks run, and a PR with a written summary — no babysitting.
+- **Two agents, one interface.** Codex and Claude Code are interchangeable per stage. If one fails for an _infrastructure_ reason (binary missing, timeout, rate limit), the orchestrator falls back to the other; test/review failures instead loop through a bounded `fix` stage.
+- **The orchestrator owns Git.** Agents never commit or push. Branch naming, scoped staging, commit, push, PR, and the safe return to the base branch are all the orchestrator's job.
+- **Tasks and results live in the repo.** By default the task file and its summary are committed to the same repository as the code (in-repo audit footprint); working artifacts (plans, diffs, logs) stay local and never enter Git history. Other footprints are available.
+- **Discovers work pushed to Git.** `watch` runs as a loop that periodically `fetch`/`pull`s the base branch, so a teammate can hand the orchestrator a task simply by committing it to `tasks/pending/` and pushing — no manual sync needed.
+- **Crash-safe and idempotent.** State machine + per-stage checkpoints in SQLite; a restart resumes the one in-flight task and never double-commits, double-pushes, or re-opens a PR.
+- **Optional Telegram HITL.** `refinement`/`planning` can ask one correlated question or approval, and deletions/dependency changes are fail-closed before tests. Waiting state is a recoverable artifact; ordinary diffs and routine publishing remain automatic.
+- **Security can't be weakened by a task.** The sandbox/approval policy and the environment allowlist are config-level invariants; no task or `extra_args` can disable them, and no secrets are written to logs, SQLite, or artifacts.
 
 ---
 
@@ -65,12 +38,9 @@ tasks/pending/task-001.md
         │  auto_mode? → next pending task   |   otherwise idle (keep polling)
 ```
 
-- **One task at a time.** A single processing slot; other tasks wait in `tasks/pending/`. Auto mode
-  (off by default) controls whether the next pending task starts automatically after cleanup.
-- **Footprint modes** decide where `tasks/` and `logs/` live and what is committed — see
-  [Configuration](#configuration).
-- The canonical, detailed contract (state machine, routing, recovery, security, footprints) is
-  [docs/implementation_stages/00_orchestrator_final_plan.md](docs/implementation_stages/00_orchestrator_final_plan.md).
+- **One task at a time.** A single processing slot; other tasks wait in `tasks/pending/`. Auto mode (off by default) controls whether the next pending task starts automatically after cleanup.
+- **Footprint modes** decide where `tasks/` and `logs/` live and what is committed — see [Configuration](#configuration).
+- The canonical, detailed contract (state machine, routing, recovery, security, footprints) is [docs/implementation_stages/00_orchestrator_final_plan.md](docs/implementation_stages/00_orchestrator_final_plan.md).
 
 ---
 
@@ -80,10 +50,7 @@ tasks/pending/task-001.md
 - The agent CLIs you intend to route to on `PATH`: **`codex`** and/or **`claude`**.
 - **GitHub CLI (`gh`)** — only if you want PRs opened automatically (`git.create_pull_request: true`).
 
-The orchestrator **never installs or authorizes** the CLIs and never stores credentials. Authorize
-git push for your remote, `gh auth login`, and sign in to `codex` / `claude` yourself, once, in the
-environment the orchestrator runs in. Only allowlisted environment variables are passed to child
-processes. See [docs/operations.md §2](docs/operations.md).
+The orchestrator **never installs or authorizes** the CLIs and never stores credentials. Authorize git push for your remote, `gh auth login`, and sign in to `codex` / `claude` yourself, once, in the environment the orchestrator runs in. Only allowlisted environment variables are passed to child processes. See [docs/operations.md §2](docs/operations.md).
 
 ---
 
@@ -116,8 +83,7 @@ title: "Add email validation to the signup form"
 
 ## Description
 
-The signup form accepts any string as an email. Validate the `email` field and show a clear error
-for malformed addresses.
+The signup form accepts any string as an email. Validate the `email` field and show a clear error for malformed addresses.
 
 ## Acceptance criteria
 
@@ -125,9 +91,7 @@ for malformed addresses.
 - A unit test covers valid and invalid cases.
 ```
 
-> Only `id` and `title` are required; the gate **rejects unknown fields**. The full allow-list
-> (`id`, `title`, `refined`, `decompose`, `agents`, `contacts`, `model`, `reasoning`) is in
-> [docs/task-authoring.md](docs/task-authoring.md).
+> Only `id` and `title` are required; the gate **rejects unknown fields**. The full allow-list (`id`, `title`, `refined`, `decompose`, `agents`, `contacts`, `model`, `reasoning`) is in [docs/task-authoring.md](docs/task-authoring.md).
 
 Then run it:
 
@@ -143,25 +107,18 @@ worc watch
 worc status
 ```
 
-The orchestrator creates `agent/task-001-...`, runs the pipeline and your checks, commits the code
-plus the task and its summary, pushes, and (with `gh` present) opens a PR whose body is the summary.
-A failed attempt is also committed and pushed for inspection — without opening a PR.
+The orchestrator creates `agent/task-001-...`, runs the pipeline and your checks, commits the code plus the task and its summary, pushes, and (with `gh` present) opens a PR whose body is the summary. A failed attempt is also committed and pushed for inspection — without opening a PR.
 
-> Prefer a fresh, self-contained layout instead of binding an existing repo? Use
-> `worc init .` to scaffold folders + `config.yaml` + editable prompt templates,
-> then point `repo.url` / `repo.local_path` at a separate clone. See
-> [docs/operations.md §1](docs/operations.md).
+> Prefer a fresh, self-contained layout instead of binding an existing repo? Use `worc init .` to scaffold folders + `config.yaml` + editable prompt templates, then point `repo.url` / `repo.local_path` at a separate clone. See [docs/operations.md §1](docs/operations.md).
 
 ---
 
 ## Configuration
 
-`install` writes a validated `config.yaml`; `init` seeds one from `config.example.yaml`. The full
-reference (every field, default, and validation rule) is [docs/configuration.md](docs/configuration.md).
-The knobs you'll touch most:
+`install` writes a validated `config.yaml`; `init` seeds one from `config.example.yaml`. The full reference (every field, default, and validation rule) is [docs/configuration.md](docs/configuration.md). The knobs you'll touch most:
 
 | Setting | What it controls |
-|---|---|
+| --- | --- |
 | `repo.url` / `repo.local_path` / `repo.base_branch` | The target repository and the branch PRs target. |
 | `git.footprint` | Where `tasks/`/`logs/` live and what is committed: **`in_repo` + `commit`** (default — task + summary committed, logs kept local), `in_repo` + `exclude_local` (artifacts in the clone but git-ignored), or `external` (artifacts outside the clone, zero footprint). |
 | `orchestrator.auto_mode.enabled` | Process the next pending task automatically after cleanup (default `false`). |
@@ -172,8 +129,7 @@ The knobs you'll touch most:
 | `telegram.*` | Optional terminal notifications and blocking HITL; credentials stay in environment variables. |
 | `security.*` | Strict isolation, the environment allowlist, denied paths/commands — invariants a task cannot weaken. |
 
-Config discovery order: explicit `--config` → `./config.yaml` → the current repo's binding → a hint
-to run `install .`.
+Config discovery order: explicit `--config` → `./config.yaml` → the current repo's binding → a hint to run `install .`.
 
 ---
 
@@ -213,12 +169,9 @@ worc install-templates  deliver the packaged templates/ tree into an existing in
 worc --version          installed version
 ```
 
-Every command is also available under the short alias **`worc`** (e.g. `worc watch`, `worc stop`);
-`wastech-orchestrator` stays the canonical name.
+Every command is also available under the short alias **`worc`** (e.g. `worc watch`, `worc stop`); `wastech-orchestrator` stays the canonical name.
 
-Global options (before the subcommand): `--config PATH`, `--log-level`, `--log-format logfmt|json`,
-`--log-file PATH`, `--heartbeat-seconds N`. Exit codes: `0` done, `1` failed, `2`
-`manual_action_required`.
+Global options (before the subcommand): `--config PATH`, `--log-level`, `--log-format logfmt|json`, `--log-file PATH`, `--heartbeat-seconds N`. Exit codes: `0` done, `1` failed, `2` `manual_action_required`.
 
 ---
 
@@ -259,15 +212,14 @@ docs/                     # spec, operations, cookbook, configuration, task auth
 tests/                    # unit / integration / e2e (see docs/rules/testing.md)
 ```
 
-Coding agents working *in this repo* follow [CLAUDE.md](CLAUDE.md) (Claude Code) and
-[AGENTS.md](AGENTS.md) (Codex), and the rules under [docs/rules/](docs/rules/).
+Coding agents working _in this repo_ follow [CLAUDE.md](CLAUDE.md) (Claude Code) and [AGENTS.md](AGENTS.md) (Codex), and the rules under [docs/rules/](docs/rules/).
 
 ---
 
 ## Documentation
 
 | Document | Role |
-|----------|------|
+| --- | --- |
 | [docs/implementation_stages/00_orchestrator_final_plan.md](docs/implementation_stages/00_orchestrator_final_plan.md) | **Canonical build spec**: contracts, state machine, routing, fallback, footprints, security, DoD. Source of truth on any discrepancy. |
 | [docs/operations.md](docs/operations.md) | **Operator guide**: install, authorization, preflight, footprint modes, upgrading, diagnostics, and the `manual_action_required` recovery playbook. |
 | [docs/cookbook.md](docs/cookbook.md) | Practical recipes: workspace setup, repo config, running tasks, routing, reading artifacts, recovery. |
@@ -283,15 +235,10 @@ Coding agents working *in this repo* follow [CLAUDE.md](CLAUDE.md) (Claude Code)
 
 ## Design principles
 
-1. **The core never knows a CLI's syntax** — only the `AgentProvider` interface; provider specifics
-   live in `providers/`.
+1. **The core never knows a CLI's syntax** — only the `AgentProvider` interface; provider specifics live in `providers/`.
 2. **A deterministic stage pipeline**, not free-form agent autonomy — predictability over emergence.
-3. **Providers are interchangeable** with per-stage primary/fallback; **fallback is for
-   infrastructure errors only**, never for test/review failures (those go to the bounded `fix` loop).
-4. **Only the orchestrator does commit / push / PR.** Agents are forbidden from touching the Git
-   lifecycle, and the code commit never contains orchestration/task files.
+3. **Providers are interchangeable** with per-stage primary/fallback; **fallback is for infrastructure errors only**, never for test/review failures (those go to the bounded `fix` loop).
+4. **Only the orchestrator does commit / push / PR.** Agents are forbidden from touching the Git lifecycle, and the code commit never contains orchestration/task files.
 5. **Checkpoints at every stage** → crash recovery and idempotent publishing.
-6. **The security policy cannot be weakened** through a task or `extra_args`; no secrets in logs,
-   SQLite, or artifacts.
-7. **Auto mode is opt-in** — by default one task is processed, the working copy returns to
-   `repo.base_branch`, and further pending tasks are left for the operator.
+6. **The security policy cannot be weakened** through a task or `extra_args`; no secrets in logs, SQLite, or artifacts.
+7. **Auto mode is opt-in** — by default one task is processed, the working copy returns to `repo.base_branch`, and further pending tasks are left for the operator.

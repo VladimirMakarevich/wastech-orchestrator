@@ -1,17 +1,13 @@
 # Backlog
 
-This folder is the single place for backlog and deferred-product ideas for
-**wastech-orchestrator**.
+This folder is the single place for backlog and deferred-product ideas for **wastech-orchestrator**.
 
-The canonical contract is
-[00_orchestrator_final_plan.md](../implementation_stages/00_orchestrator_final_plan.md).
-Backlog documents must not override the hard invariants from [../../CLAUDE.md](../../CLAUDE.md),
-[../../AGENTS.md](../../AGENTS.md), or [../rules/](../rules/).
+The canonical contract is [00_orchestrator_final_plan.md](../implementation_stages/00_orchestrator_final_plan.md). Backlog documents must not override the hard invariants from [../../CLAUDE.md](../../CLAUDE.md), [../../AGENTS.md](../../AGENTS.md), or [../rules/](../rules/).
 
 ## Index
 
 | Document | Purpose |
-|---|---|
+| --- | --- |
 | [product_backlog.md](product_backlog.md) | Aggregated product backlog collected from the spec, architecture notes, implementation-stage notes, and scattered v2/candidate lists. |
 | [follow_ups.md](follow_ups.md) | Implementation follow-ups / tech-debt discovered while building (e.g. the schema migration runner) — distinct from product features. Recorded via `/sync-docs`. |
 | [prompt_template_customization.md](prompt_template_customization.md) | Detailed backlog task for user-overridable agent prompt templates. |
@@ -30,11 +26,10 @@ Backlog documents must not override the hard invariants from [../../CLAUDE.md](.
 
 ## Agent quality and continuity program
 
-Workflow profiles and the management-requested supervisor, testing-agent, and session-continuity
-changes are separate backlog items built on one narrow shared prerequisite:
+Workflow profiles and the management-requested supervisor, testing-agent, and session-continuity changes are separate backlog items built on one narrow shared prerequisite:
 
 | Work item | Owns | Must not own |
-|---|---|---|
+| --- | --- | --- |
 | [Workflow execution foundation](workflow_execution_foundation.md) | Single `implementation` profile selection (no version cutover), immutable resolved-profile identity, `run_kind = stage \| evaluator` + `role`, the shared evaluator-loop primitive, session/output vocabulary, common audit and path/delta primitives. | New workflows, vendor resume, testing checkpoints, supervisor verdicts, or feature-specific policy tables. |
 | [Task workflow profiles](task_workflow_profiles.md) | `deep_research` and `security_audit` runners/stages, result contracts, profile-specific output, network, storage, and publishing behavior. | Duplicate execution/session/output foundations or changes to provider CLI boundaries. |
 | [Durable sessions and fixing affinity](durable_sessions_and_fixing_affinity.md) | Claude/Codex resume, editing lineage, provider-aware fallback, recovery/rerun semantics, session redaction, implementation/fixing affinity. | Supervisor verdicts, testing-agent edit policy, deterministic test outcomes. |
@@ -47,27 +42,14 @@ Shared contracts:
 - provider CLI syntax remains inside provider adapters;
 - provider fallback remains infrastructure-only;
 - artifacts remain the primary recovery/context path;
-- recovery reuses the persisted resolved-profile snapshot instead of silently applying changed
-  workflow policy;
-- only `implementation`/`fixing` (the stage authors) may use the active editing lineage; tests are
-  authored by the `implementation` agent, never by an evaluator;
-- all evaluators (`role` = supervisor `fresh_each_pass`, test_quality, research critic/verifier) use
-  their **own** session and cannot read or update the editing lineage;
+- recovery reuses the persisted resolved-profile snapshot instead of silently applying changed workflow policy;
+- only `implementation`/`fixing` (the stage authors) may use the active editing lineage; tests are authored by the `implementation` agent, never by an evaluator;
+- all evaluators (`role` = supervisor `fresh_each_pass`, test_quality, research critic/verifier) use their **own** session and cannot read or update the editing lineage;
 - implementation/fixing output cannot continue without a valid required supervisor verdict;
-- supervisor and the test-quality evaluator are read-only `evaluator` instances that may reuse
-  low-level invocation/audit plumbing but remain separate domain components; neither writes the
-  workspace;
-- each independently implemented change uses the next available DB/config schema version (forward
-  only; greenfield — no deployed data to migrate) rather than assuming another item has not already
-  bumped it.
+- supervisor and the test-quality evaluator are read-only `evaluator` instances that may reuse low-level invocation/audit plumbing but remain separate domain components; neither writes the workspace;
+- each independently implemented change uses the next available DB/config schema version (forward only; greenfield — no deployed data to migrate) rather than assuming another item has not already bumped it.
 
-Recommended order is foundation, supervisor, durable sessions/affinity, hybrid testing, deep
-research, then security audit. Supervisor lands immediately after the foundation because the single
-`implementation` profile requires it from the start (greenfield "fold" — no version cutover); durable
-sessions follows because its affinity is ordered around the now-existing supervisor; hybrid testing
-assumes the supervisor already runs. The optional documentation stage
-([documentation_update_stage.md](documentation_update_stage.md)) slots in after the supervisor
-change.
+Recommended order is foundation, supervisor, durable sessions/affinity, hybrid testing, deep research, then security audit. Supervisor lands immediately after the foundation because the single `implementation` profile requires it from the start (greenfield "fold" — no version cutover); durable sessions follows because its affinity is ordered around the now-existing supervisor; hybrid testing assumes the supervisor already runs. The optional documentation stage ([documentation_update_stage.md](documentation_update_stage.md)) slots in after the supervisor change.
 
 The target implementation loop is:
 
@@ -95,23 +77,11 @@ review succeeds
   -> publishing
 ```
 
-Supervisor `rework` uses the already-persisted editing lineage so fixing can resume the provider
-conversation that produced the rejected edit. A supervisor/testing call can never replace that
-lineage. The supervisor-owned final pass replaces the separate `summary` provider call but not the
-Core-owned `summarizing` checkpoint. When summary is enabled, invalid/unavailable handoff output
-uses deterministic fallback. Supervisor has no enable/disable control; the hybrid test-quality
-evaluator and the documentation stage remain optional. An explicit summary skip suppresses handoff
-generation, fallback, and all summary files/body, but never the mandatory implementation/fixing
-quality gates. The foundation owns the `run_kind = stage | evaluator` audit field plus the evaluator
-`role` discriminator (`supervisor | test_quality | critic | verifier`) in the
-[workflow execution foundation](workflow_execution_foundation.md), even if only one feature lands
-first.
+Supervisor `rework` uses the already-persisted editing lineage so fixing can resume the provider conversation that produced the rejected edit. A supervisor/testing call can never replace that lineage. The supervisor-owned final pass replaces the separate `summary` provider call but not the Core-owned `summarizing` checkpoint. When summary is enabled, invalid/unavailable handoff output uses deterministic fallback. Supervisor has no enable/disable control; the hybrid test-quality evaluator and the documentation stage remain optional. An explicit summary skip suppresses handoff generation, fallback, and all summary files/body, but never the mandatory implementation/fixing quality gates. The foundation owns the `run_kind = stage | evaluator` audit field plus the evaluator `role` discriminator (`supervisor | test_quality | critic | verifier`) in the [workflow execution foundation](workflow_execution_foundation.md), even if only one feature lands first.
 
 ## Rules
 
 - Keep detailed analysis in a dedicated backlog file when the topic needs design context.
 - Keep the short product inventory in [product_backlog.md](product_backlog.md).
-- When a deferred feature is mentioned in another document, link back here instead of creating a new
-  isolated backlog list.
-- Mark status explicitly (`backlog / not scheduled`, `candidate`, `accepted`, or `done`) before
-  implementation starts.
+- When a deferred feature is mentioned in another document, link back here instead of creating a new isolated backlog list.
+- Mark status explicitly (`backlog / not scheduled`, `candidate`, `accepted`, or `done`) before implementation starts.

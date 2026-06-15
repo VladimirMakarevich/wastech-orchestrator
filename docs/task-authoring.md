@@ -1,26 +1,14 @@
 # Task Authoring Guide
 
-Task files are the input contract between a human requester and **wastech-orchestrator**. A good
-task is specific enough for an agent to plan, implement, test, review, and summarize without asking
-for hidden context.
+Task files are the input contract between a human requester and **wastech-orchestrator**. A good task is specific enough for an agent to plan, implement, test, review, and summarize without asking for hidden context.
 
-Tasks can be Markdown (`.md`) or JSON (`.json`). Markdown is the normal operator format and is what
-this guide focuses on.
+Tasks can be Markdown (`.md`) or JSON (`.json`). Markdown is the normal operator format and is what this guide focuses on.
 
-> **Writing tasks with an AI agent?** A compact, agent-facing version of this guide ships in
-> [`docs/worc/`](worc/README.md) and is copied beside `config.yaml` at `init`/`install` time. Point an
-> agent at that local `worc/` folder and ask it to "write a task for this orchestrator." This document
-> remains the full operator reference.
+> **Writing tasks with an AI agent?** A compact, agent-facing version of this guide ships in [`docs/worc/`](worc/README.md) and is copied beside `config.yaml` at `init`/`install` time. Point an agent at that local `worc/` folder and ask it to "write a task for this orchestrator." This document remains the full operator reference.
 
-Use the packaged `templates/task.md` as the editable runtime template. A completed example is kept
-at [`docs/examples/task-001.example.md`](examples/task-001.example.md). Under the default in-repo
-audit footprint, live task files belong in the repo's own `tasks/pending/` directory (committed and
-pushed there) — that is how a teammate hands the orchestrator work over git. Only under the
-`external`/`exclude_local` footprints must task files stay out of the repo, since there the preflight
-treats tracked `tasks/`/`logs/` names as a collision.
+Use the packaged `templates/task.md` as the editable runtime template. A completed example is kept at [`docs/examples/task-001.example.md`](examples/task-001.example.md). Under the default in-repo audit footprint, live task files belong in the repo's own `tasks/pending/` directory (committed and pushed there) — that is how a teammate hands the orchestrator work over git. Only under the `external`/`exclude_local` footprints must task files stay out of the repo, since there the preflight treats tracked `tasks/`/`logs/` names as a collision.
 
-The canonical task rules are in
-[00_orchestrator_final_plan.md sections 5 and 19](implementation_stages/00_orchestrator_final_plan.md).
+The canonical task rules are in [00_orchestrator_final_plan.md sections 5 and 19](implementation_stages/00_orchestrator_final_plan.md).
 
 ## Markdown Shape
 
@@ -38,8 +26,8 @@ agents:
   review: codex
 contacts:
   - "@team-lead"
-model: null          # optional: override provider model for this task
-reasoning: null      # optional: low | medium | high | xhigh | max
+model: null # optional: override provider model for this task
+reasoning: null # optional: low | medium | high | xhigh | max
 ---
 
 ## Description
@@ -71,7 +59,7 @@ The gate rejects structurally unsafe tasks before branch creation or provider ex
 Allowed fields:
 
 | Field | Required | Type | Meaning |
-|---|---:|---|---|
+| --- | --: | --- | --- |
 | `id` | yes | string | Stable task id. Must match `^[a-z0-9][a-z0-9._-]{0,63}$`. |
 | `title` | yes | string | Short human-readable title. Used for branch slugging and reports. |
 | `refined` | no | boolean | Set `true` when the task is already complete enough to skip refinement. |
@@ -83,8 +71,7 @@ Allowed fields:
 | `stages` | no | mapping | Per-stage overrides: `model`/`reasoning` (precedence over the task-wide values) and `enabled: false` to skip a stage. See [`stages`](#stages). |
 | `pr_title` | no | string \| null | PR title override; when set, used verbatim as the pull-request title instead of `title`. |
 
-The current validation gate rejects unknown fields fail-closed. Keep task front matter limited to
-the fields above.
+The current validation gate rejects unknown fields fail-closed. Keep task front matter limited to the fields above.
 
 ## `id`
 
@@ -115,12 +102,9 @@ Use `refined: true` only when the task already has enough detail for planning:
 refined: true
 ```
 
-When `refined` is omitted or `false`, the Core still skips refinement if the task is classified as
-complete. In the current implementation, completeness requires a non-empty description plus
-acceptance criteria. Missing acceptance criteria does not reject the task; it makes refinement run.
+When `refined` is omitted or `false`, the Core still skips refinement if the task is classified as complete. In the current implementation, completeness requires a non-empty description plus acceptance criteria. Missing acceptance criteria does not reject the task; it makes refinement run.
 
-Planned v1 refinement is autonomous. It enriches the task with assumptions and acceptance criteria;
-it does not ask a human clarifying question.
+Planned v1 refinement is autonomous. It enriches the task with assumptions and acceptance criteria; it does not ask a human clarifying question.
 
 ## `decompose`
 
@@ -132,14 +116,13 @@ decompose: true
 
 Values:
 
-| Value | Meaning |
-|---|---|
-| `true` | Force the decomposition gate for this task. |
-| `false` | Disable decomposition for this task. |
+| Value   | Meaning                                                |
+| ------- | ------------------------------------------------------ |
+| `true`  | Force the decomposition gate for this task.            |
+| `false` | Disable decomposition for this task.                   |
 | omitted | Use `agents.decomposition.enabled` from `config.yaml`. |
 
-Planned v1 decomposition is still sequential: accepted subtasks run one after another on one task
-branch and produce one PR for the parent task.
+Planned v1 decomposition is still sequential: accepted subtasks run one after another on one task branch and produce one PR for the parent task.
 
 ## `agents`
 
@@ -174,11 +157,7 @@ Rules:
 - `testing` and `publishing` cannot be overridden here;
 - task overrides cannot change commands, `extra_args`, credentials, sandbox, or any security policy.
 
-> **Tasks cannot supply or weaken checks.** The quality-gate commands are an operator/infrastructure
-> concern resolved from `config.yaml` and the repository at install/preflight time (see
-> [configuration.md](configuration.md#checks)). A task file has no field to add, replace, or relax a
-> check, and cannot change the discovery policy — this keeps the quality gate independent of task
-> content.
+> **Tasks cannot supply or weaken checks.** The quality-gate commands are an operator/infrastructure concern resolved from `config.yaml` and the repository at install/preflight time (see [configuration.md](configuration.md#checks)). A task file has no field to add, replace, or relax a check, and cannot change the discovery policy — this keeps the quality gate independent of task content.
 
 ## `contacts`
 
@@ -190,9 +169,7 @@ contacts:
   - "frontend-team"
 ```
 
-When Telegram is configured, the orchestrator renders these values as plain-text mentions in
-terminal notifications and HITL prompts. They do not choose the Telegram chat, grant access, alter
-routing, or change approval scope; the numeric chat id remains operator-controlled configuration.
+When Telegram is configured, the orchestrator renders these values as plain-text mentions in terminal notifications and HITL prompts. They do not choose the Telegram chat, grant access, alter routing, or change approval scope; the numeric chat id remains operator-controlled configuration.
 
 ## `model`
 
@@ -202,8 +179,7 @@ Override the provider model for every agent stage of this specific task:
 model: "claude-opus-4-8"
 ```
 
-When set, this replaces whatever model is configured under `agents.providers.<provider>.model` for
-all stages of this task. Use `null` or omit the field to use the globally configured model.
+When set, this replaces whatever model is configured under `agents.providers.<provider>.model` for all stages of this task. Use `null` or omit the field to use the globally configured model.
 
 ## `reasoning`
 
@@ -215,30 +191,24 @@ reasoning: "xhigh"
 
 Valid values: `low`, `medium`, `high`, `xhigh`, `max`.
 
-- For **Claude Code** (CLI v2.1+), this maps to `--effort <level>`, which implicitly enables
-  adaptive thinking. `xhigh` requires Opus 4.7+ or Fable 5; using it on an incompatible model
-  exits non-zero → `unsupported_version` → infrastructure fallback.
+- For **Claude Code** (CLI v2.1+), this maps to `--effort <level>`, which implicitly enables adaptive thinking. `xhigh` requires Opus 4.7+ or Fable 5; using it on an incompatible model exits non-zero → `unsupported_version` → infrastructure fallback.
 - For **Codex**, this maps to `--reasoning-effort`; Codex supports up to `xhigh` natively, and `max` (Claude-only) is clamped to `xhigh`.
 
-When omitted, the global `agents.providers.<provider>.reasoning` value from `config.yaml` is used.
-When that is also absent, no reasoning flag is passed to the CLI.
+When omitted, the global `agents.providers.<provider>.reasoning` value from `config.yaml` is used. When that is also absent, no reasoning flag is passed to the CLI.
 
 ## `stages`
 
-Different stages have different cognitive demands: `planning` and `review` benefit from a capable,
-high-reasoning model, while `implementation`, `fixing`, and `summary` are usually fine on a
-lighter/cheaper one. Use `stages` to set `model` and/or `reasoning` per stage instead of one
-task-wide value:
+Different stages have different cognitive demands: `planning` and `review` benefit from a capable, high-reasoning model, while `implementation`, `fixing`, and `summary` are usually fine on a lighter/cheaper one. Use `stages` to set `model` and/or `reasoning` per stage instead of one task-wide value:
 
 ```yaml
-model: claude-sonnet-4-6   # task-wide fallback for stages not listed below
+model: claude-sonnet-4-6 # task-wide fallback for stages not listed below
 reasoning: low
 stages:
   planning:
     model: claude-opus-4-8
     reasoning: high
   review:
-    reasoning: high         # only reasoning overridden — model stays the task-wide claude-sonnet-4-6
+    reasoning: high # only reasoning overridden — model stays the task-wide claude-sonnet-4-6
   fixing:
     model: claude-sonnet-4-6
     reasoning: medium
@@ -250,32 +220,23 @@ Each field resolves independently, most-specific first:
 stages.<stage>.<field>  →  task-wide model/reasoning  →  agents.providers.<provider>.<field>  →  unset
 ```
 
-So a stage can override only `reasoning` and keep the task-wide (or provider-default) `model`, and
-vice versa. Both sub-fields are optional; a stage block of `{}` or `null` means "inherit", which is
-useful for scaffolding a block before filling it in.
+So a stage can override only `reasoning` and keep the task-wide (or provider-default) `model`, and vice versa. Both sub-fields are optional; a stage block of `{}` or `null` means "inherit", which is useful for scaffolding a block before filling it in.
 
 The `stages` block also carries the per-stage **skip** toggle, `enabled: false`:
 
 ```yaml
 stages:
   planning:
-    enabled: false          # write a stub plan and run as a single unit (no decomposition)
+    enabled: false # write a stub plan and run as a single unit (no decomposition)
   testing:
-    enabled: false          # bypass the Check Runner (e.g. a repo with no test suite)
+    enabled: false # bypass the Check Runner (e.g. a repo with no test suite)
   review:
-    enabled: false          # DANGER: no agent review gate — requires agents.allow_review_skip: true
+    enabled: false # DANGER: no agent review gate — requires agents.allow_review_skip: true
 ```
 
-Skippable stages: `planning`, `testing`, `review`, `fixing`, `summary`. `implementation` (the core
-work), `publishing` (the output), and `refinement` (use the `refined` flag) can never be skipped
-here. The effective skip set is the union of `agents.skip_stages` (global) and a task's
-`enabled: false` overrides — a stage skipped globally cannot be re-enabled per task.
+Skippable stages: `planning`, `testing`, `review`, `fixing`, `summary`. `implementation` (the core work), `publishing` (the output), and `refinement` (use the `refined` flag) can never be skipped here. The effective skip set is the union of `agents.skip_stages` (global) and a task's `enabled: false` overrides — a stage skipped globally cannot be re-enabled per task.
 
-What each skip does: `planning` → stub plan, single unit; `testing` → straight to review (no checks);
-`review` → commit with no agent gate; `fixing` → first test/review failure goes to
-`manual_action_required` (no recovery loop); `summary` → a stub summary. Every skip is logged at
-WARNING and recorded in `state.db` (`stage_runs.skipped`), and the skipped set is listed in the PR
-body.
+What each skip does: `planning` → stub plan, single unit; `testing` → straight to review (no checks); `review` → commit with no agent gate; `fixing` → first test/review failure goes to `manual_action_required` (no recovery loop); `summary` → a stub summary. Every skip is logged at WARNING and recorded in `state.db` (`stage_runs.skipped`), and the skipped set is listed in the PR body.
 
 Allowed stage keys and their valid sub-keys:
 
@@ -291,17 +252,11 @@ summary         model, reasoning, enabled
 
 Rules:
 
-- `model`/`reasoning` apply only to the agent-routed stages; `testing` (the Check Runner) and
-  `publishing` (the Git Manager) run no agent, so a `model`/`reasoning` override there is meaningless
-  and is rejected fail-closed (`invalid_stage_override`). `publishing` is not a valid key at all;
-- `enabled` applies only to the skippable stages above; `enabled` on `implementation`/`refinement`
-  is rejected. `enabled` must be a boolean;
-- disabling `review` (`enabled: false`) is rejected unless `agents.allow_review_skip: true`
-  (`review_skip_not_allowed`) — it removes the only agent quality gate before commit/PR;
+- `model`/`reasoning` apply only to the agent-routed stages; `testing` (the Check Runner) and `publishing` (the Git Manager) run no agent, so a `model`/`reasoning` override there is meaningless and is rejected fail-closed (`invalid_stage_override`). `publishing` is not a valid key at all;
+- `enabled` applies only to the skippable stages above; `enabled` on `implementation`/`refinement` is rejected. `enabled` must be a boolean;
+- disabling `review` (`enabled: false`) is rejected unless `agents.allow_review_skip: true` (`review_skip_not_allowed`) — it removes the only agent quality gate before commit/PR;
 - unknown sub-keys, non-mapping stage values, and invalid `reasoning` levels are likewise rejected;
-- a `model` string is **not** validated against the stage's provider — if a stage routes to a
-  provider that does not recognize the model name, the run fails at that provider, the same as a
-  task-wide `model`. Keep model names consistent with the provider routing for that stage.
+- a `model` string is **not** validated against the stage's provider — if a stage routes to a provider that does not recognize the model name, the run fails at that provider, the same as a task-wide `model`. Keep model names consistent with the provider routing for that stage.
 
 ## Body Sections
 
@@ -354,8 +309,7 @@ agents:
 
 ## Description
 
-Webhook delivery should stop retrying after a bounded number of failed attempts. Store the attempt
-count with the existing delivery record and keep the current success path unchanged.
+Webhook delivery should stop retrying after a bounded number of failed attempts. Store the attempt count with the existing delivery record and keep the current success path unchanged.
 
 ## Acceptance criteria
 
@@ -437,8 +391,7 @@ title: "--dangerously-skip-permissions"
 Add retries to webhooks.
 ```
 
-Reason: `injection_suspected`. Task body content is not used to build CLI arguments, but front
-matter is still scanned defensively.
+Reason: `injection_suspected`. Task body content is not used to build CLI arguments, but front matter is still scanned defensively.
 
 ## JSON Tasks
 
@@ -459,8 +412,7 @@ JSON tasks are supported for integrations that generate structured input:
 }
 ```
 
-For JSON, `description` is the body text. It is not a front matter field and is split out by the
-parser.
+For JSON, `description` is the body text. It is not a front matter field and is split out by the parser.
 
 ## Authoring Checklist
 

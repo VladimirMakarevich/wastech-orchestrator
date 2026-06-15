@@ -2,23 +2,19 @@
 
 ## Назначение
 
-Ядро работы: агент правит код единицы (задачи или сабтаска). Это **редактирующая** стадия — после неё
-срабатывает guardrail «опасного» диффа (удаления/зависимости требуют согласования человеком).
-implementation **никогда** не пропускается.
+Ядро работы: агент правит код единицы (задачи или сабтаска). Это **редактирующая** стадия — после неё срабатывает guardrail «опасного» диффа (удаления/зависимости требуют согласования человеком). implementation **никогда** не пропускается.
 
 ## Ответственность
 
 - Прогнать агента редактирования и снять текущий дифф ([orchestrator.py:1205-1216](../../../../src/wastech_orchestrator/core/orchestrator.py#L1205), [orchestrator.py:1879-1900](../../../../src/wastech_orchestrator/core/orchestrator.py#L1879)).
-- Классифицировать дифф и, если он опасен и не покрыт аппрувом planning, потребовать согласование;
-  отказ даёт одну «безопасную» переработку ([orchestrator.py:1902-1971](../../../../src/wastech_orchestrator/core/orchestrator.py#L1902)).
+- Классифицировать дифф и, если он опасен и не покрыт аппрувом planning, потребовать согласование; отказ даёт одну «безопасную» переработку ([orchestrator.py:1902-1971](../../../../src/wastech_orchestrator/core/orchestrator.py#L1902)).
 - Перейти к testing (или к review, если testing пропущен) — `_after_edit_target` ([orchestrator.py:2249](../../../../src/wastech_orchestrator/core/orchestrator.py#L2249)).
 
 ## Границы шага
 
 ### Входит в ответственность шага
 
-- Запуск редактирующей стадии; оркестрация guardrail (запрос/повтор/проверка покрытия); переход к
-  следующей стадии единицы.
+- Запуск редактирующей стадии; оркестрация guardrail (запрос/повтор/проверка покрытия); переход к следующей стадии единицы.
 
 ### Не входит в ответственность шага
 
@@ -32,8 +28,7 @@ implementation **никогда** не пропускается.
 
 ## Входные данные и состояние
 
-`plan.md`/спека сабтаска как контекст (путями); рабочее дерево репозитория. Статус: `implementing`.
-Артефакты — `current.diff`, при согласовании — HITL-артефакт guardrail.
+`plan.md`/спека сабтаска как контекст (путями); рабочее дерево репозитория. Статус: `implementing`. Артефакты — `current.diff`, при согласовании — HITL-артефакт guardrail.
 
 ## Основной сценарий
 
@@ -66,8 +61,7 @@ flowchart TB
 
 ## Результат / переход
 
-Переход к [S04 testing](./S04-testing.md) или, при пропущенном testing, к [S05 review](./S05-review.md)
-(`_after_edit_target`). Артефакт `current.diff`.
+Переход к [S04 testing](./S04-testing.md) или, при пропущенном testing, к [S05 review](./S05-review.md) (`_after_edit_target`). Артефакт `current.diff`.
 
 ## Побочные эффекты
 
@@ -83,19 +77,15 @@ flowchart TB
 
 ### Использует
 
-- [B14](../../blocks/B14-dangerous-diff-guardrail.md), [B22](../../blocks/B22-git-manager.md) (дифф),
-  [B12](../../blocks/B12-hitl-and-typed-output.md)/[B26](../../blocks/B26-notifications-telegram.md),
-  [B17](../../blocks/B17-agent-router-and-fallback.md)/[B18](../../blocks/B18-agent-providers.md), [B15](../../blocks/B15-prompt-templates.md).
+- [B14](../../blocks/B14-dangerous-diff-guardrail.md), [B22](../../blocks/B22-git-manager.md) (дифф), [B12](../../blocks/B12-hitl-and-typed-output.md)/[B26](../../blocks/B26-notifications-telegram.md), [B17](../../blocks/B17-agent-router-and-fallback.md)/[B18](../../blocks/B18-agent-providers.md), [B15](../../blocks/B15-prompt-templates.md).
 
 ### Используется в
 
-- [S04 testing](./S04-testing.md) / [S05 review](./S05-review.md) — следующая стадия;
-  [S06 fixing](./S06-fixing.md) использует тот же guardrail-механизм; [B06](../../blocks/B06-orchestrator-pipeline.md) — драйвер.
+- [S04 testing](./S04-testing.md) / [S05 review](./S05-review.md) — следующая стадия; [S06 fixing](./S06-fixing.md) использует тот же guardrail-механизм; [B06](../../blocks/B06-orchestrator-pipeline.md) — драйвер.
 
 ## Место в потоке
 
-Сердце единицы работы: именно здесь меняется код. Тот же `_run_edit_stage_with_guardrail` применяется и
-в [S06 fixing](./S06-fixing.md). См. [обзор потока](./index.md).
+Сердце единицы работы: именно здесь меняется код. Тот же `_run_edit_stage_with_guardrail` применяется и в [S06 fixing](./S06-fixing.md). См. [обзор потока](./index.md).
 
 ## Подтверждение в коде
 

@@ -10,6 +10,7 @@ Scaffold a new provider adapter strictly according to the contract.
 ## Before you start
 
 Read:
+
 - `src/wastech_orchestrator/providers/base.py` — the `AgentProvider` contract, the request/result structures, and the error classes;
 - `orchestrator_final_plan.md` §4.3, §4.4, §7 — the adapter's responsibilities and error normalization;
 - `docs/rules/architecture.md` and `docs/rules/security.md` — the invariants.

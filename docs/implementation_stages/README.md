@@ -1,23 +1,15 @@
 # Implementation stages
 
-> **Status: build complete.** All six phases below are implemented and tested — these files are now
-> a **historical record** of how the MVP was built. The `implement-phase` / `verify-dod` skills that
-> drove them have been retired. Track ongoing work in [../backlog/follow_ups.md](../backlog/follow_ups.md)
-> and the [product backlog](../backlog/product_backlog.md); keep docs in sync with `/sync-docs`.
+> **Status: build complete.** All six phases below are implemented and tested — these files are now a **historical record** of how the MVP was built. The `implement-phase` / `verify-dod` skills that drove them have been retired. Track ongoing work in [../backlog/follow_ups.md](../backlog/follow_ups.md) and the [product backlog](../backlog/product_backlog.md); keep docs in sync with `/sync-docs`.
 
-This directory records the original six sequential MVP phases plus later implementation records.
-The canonical spec is [00_orchestrator_final_plan.md](00_orchestrator_final_plan.md); these files
-expand its §15 roadmap into concrete, ordered work blocks with a Definition of Done (DoD) per
-phase. In any discrepancy, the spec wins — these documents never override an invariant.
+This directory records the original six sequential MVP phases plus later implementation records. The canonical spec is [00_orchestrator_final_plan.md](00_orchestrator_final_plan.md); these files expand its §15 roadmap into concrete, ordered work blocks with a Definition of Done (DoD) per phase. In any discrepancy, the spec wins — these documents never override an invariant.
 
-> **Rule (spec §15):** the phases run **strictly in sequence**. You may not start phase N+1 until
-> every DoD item of phase N is documented as complete. Within a phase, the logical blocks are also
-> ordered — later blocks build on earlier ones.
+> **Rule (spec §15):** the phases run **strictly in sequence**. You may not start phase N+1 until every DoD item of phase N is documented as complete. Within a phase, the logical blocks are also ordered — later blocks build on earlier ones.
 
 ## Phases
 
 | # | File | Builds | Spec |
-|---|------|--------|------|
+| --- | --- | --- | --- |
 | 1 | [01_contracts_and_config.md](01_contracts_and_config.md) | Provider contracts, canonical enums, config schema + validator, task data model, `init`/templates | §4.3, §7.1, §11, §20, §21.4 |
 | 2 | [02_provider_layer.md](02_provider_layer.md) | Safe process runner, env allowlist, redaction, artifact writer, error normalization, **CodexProvider** | §4.4, §7.1, §10, §12 |
 | 3 | [03_claude_code_adapter.md](03_claude_code_adapter.md) | **ClaudeCodeProvider**, shared fake-CLI integration harness | §4.4, §10, §12 |
@@ -28,7 +20,7 @@ phase. In any discrepancy, the spec wins — these documents never override an i
 Post-MVP implementation records:
 
 | # | File | Scope |
-|---|---|---|
+| --- | --- | --- |
 | 7 | [07_interactive_installer.md](07_interactive_installer.md) | Interactive repository binding and setup |
 | 8 | [08_telegram_integration.md](08_telegram_integration.md) | Telegram transport, typed HITL, durable recovery, dangerous-diff approvals |
 | 9 | [09_automatic_check_discovery.md](09_automatic_check_discovery.md) | Automatic check discovery and environment resolution |
@@ -44,10 +36,7 @@ P1 contracts+config
 
 ## Suggested module layout
 
-Each phase fills in its slice of this `src/wastech_orchestrator/` tree (one component = one
-module/subpackage, per [coding-style.md](../rules/coding-style.md)). It is a target, not a
-contract — adjust names as the code demands, but keep the layer boundaries from
-[architecture.md](../rules/architecture.md) intact.
+Each phase fills in its slice of this `src/wastech_orchestrator/` tree (one component = one module/subpackage, per [coding-style.md](../rules/coding-style.md)). It is a target, not a contract — adjust names as the code demands, but keep the layer boundaries from [architecture.md](../rules/architecture.md) intact.
 
 ```text
 src/wastech_orchestrator/
@@ -81,26 +70,15 @@ src/wastech_orchestrator/
 
 ## Conventions for every phase
 
-- **Tests ship with the code.** Each phase lists the unit/integration/e2e tests it must add
-  (see [testing.md](../rules/testing.md)). A green `ruff check .`, `mypy src`, `pytest`
-  (the `/run-checks` skill) is a precondition for closing the phase.
-- **Invariants are non-negotiable.** Core never knows CLI syntax; only the orchestrator
-  commits/pushes/PRs; fallback is infra-only; the security policy can't be weakened by a task or
-  `extra_args`; no secrets in logs/SQLite/artifacts; CLIs launched as an argv list, never a shell
-  string. See [architecture.md](../rules/architecture.md) and [security.md](../rules/security.md).
-- **Canonical names only.** Providers `codex`/`claude`; the eight stages and the state-machine
-  statuses from the spec; branch prefix `agent/<task-id>-<slug>`. Define enums, don't scatter
-  string literals.
+- **Tests ship with the code.** Each phase lists the unit/integration/e2e tests it must add (see [testing.md](../rules/testing.md)). A green `ruff check .`, `mypy src`, `pytest` (the `/run-checks` skill) is a precondition for closing the phase.
+- **Invariants are non-negotiable.** Core never knows CLI syntax; only the orchestrator commits/pushes/PRs; fallback is infra-only; the security policy can't be weakened by a task or `extra_args`; no secrets in logs/SQLite/artifacts; CLIs launched as an argv list, never a shell string. See [architecture.md](../rules/architecture.md) and [security.md](../rules/security.md).
+- **Canonical names only.** Providers `codex`/`claude`; the eight stages and the state-machine statuses from the spec; branch prefix `agent/<task-id>-<slug>`. Define enums, don't scatter string literals.
 - **DoD is a checklist.** A phase is closed only when every box is ticked and documented.
 
 ## Current starting point (already in the repo)
 
-- `providers/base.py` — the `AgentProvider` Protocol, `Stage`/`RunStatus`/`ErrorClass` enums,
-  `AgentRunRequest`/`AgentRunResult`/`ProviderHealth`/`NormalizedError`, `FALLBACK_ELIGIBLE`.
-- `cli.py` — the `init` command (idempotent scaffolding, `--git-mode`, `--force`, `--dry-run`,
-  `--quiet`); `run`/`watch` are stubs.
-- `templates/` — packaged `config.example.yaml`, `task.md`, `AGENTS.md`, `CLAUDE.md`, and the
-  per-stage prompt templates, shipped as package data.
+- `providers/base.py` — the `AgentProvider` Protocol, `Stage`/`RunStatus`/`ErrorClass` enums, `AgentRunRequest`/`AgentRunResult`/`ProviderHealth`/`NormalizedError`, `FALLBACK_ELIGIBLE`.
+- `cli.py` — the `init` command (idempotent scaffolding, `--git-mode`, `--force`, `--dry-run`, `--quiet`); `run`/`watch` are stubs.
+- `templates/` — packaged `config.example.yaml`, `task.md`, `AGENTS.md`, `CLAUDE.md`, and the per-stage prompt templates, shipped as package data.
 
-Phase 1 treats these as its baseline: it confirms their DoD and adds the config + task-model layers
-around them.
+Phase 1 treats these as its baseline: it confirms their DoD and adds the config + task-model layers around them.

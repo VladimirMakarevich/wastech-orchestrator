@@ -1,31 +1,31 @@
 ---
 id: task-001
 title: "Example task: add login form validation"
-refined: false              # set true to skip the refinement stage (task already complete)
-decompose: false            # keep the first example as a single implementation unit
-agents:                     # optional per-stage override (only from agents.allowed)
+refined: false # set true to skip the refinement stage (task already complete)
+decompose: false # keep the first example as a single implementation unit
+agents: # optional per-stage override (only from agents.allowed)
   refinement: claude
   planning: claude
   implementation: claude
   review: codex
   fixing: claude
   summary: claude
-contacts: ["@team-lead"]    # plain-text Telegram mentions for prompts/terminal notifications
-model: null                 # optional: override model for all stages, e.g. "claude-opus-4-8"
-reasoning: null             # optional: low | medium | high | xhigh (Opus 4.7+) | max
-stages:                     # optional per-stage overrides (each sub-field optional & independent).
-                            # model/reasoning: agent stages (refinement, planning, implementation,
-                            #   review, fixing, summary) — override the task-wide values above.
-                            # enabled: false: SKIP the stage. Skippable: planning, testing, review,
-                            #   fixing, summary. (testing accepts only `enabled`; implementation/
-                            #   refinement/publishing can never be skipped.) A global skip in
-                            #   agents.skip_stages cannot be re-enabled here.
+contacts: ["@team-lead"] # plain-text Telegram mentions for prompts/terminal notifications
+model: null # optional: override model for all stages, e.g. "claude-opus-4-8"
+reasoning: null # optional: low | medium | high | xhigh (Opus 4.7+) | max
+stages: # optional per-stage overrides (each sub-field optional & independent).
+  # model/reasoning: agent stages (refinement, planning, implementation,
+  #   review, fixing, summary) — override the task-wide values above.
+  # enabled: false: SKIP the stage. Skippable: planning, testing, review,
+  #   fixing, summary. (testing accepts only `enabled`; implementation/
+  #   refinement/publishing can never be skipped.) A global skip in
+  #   agents.skip_stages cannot be re-enabled here.
   planning:
-    model: null             # e.g. "claude-opus-4-8"
-    reasoning: null         # e.g. "high"
+    model: null # e.g. "claude-opus-4-8"
+    reasoning: null # e.g. "high"
     # enabled: false        # write a stub plan and run as a single unit (no decomposition)
   testing:
-    enabled: true           # set false when the repo has no meaningful test suite
+    enabled: true # set false when the repo has no meaningful test suite
   review:
     model: null
     reasoning: null
@@ -34,8 +34,7 @@ stages:                     # optional per-stage overrides (each sub-field optio
 
 ## Description
 
-Describe briefly and concretely what needs to be done. Copy this example into the runtime
-`tasks/pending/` directory before running it.
+Describe briefly and concretely what needs to be done. Copy this example into the runtime `tasks/pending/` directory before running it.
 
 ## Acceptance criteria
 

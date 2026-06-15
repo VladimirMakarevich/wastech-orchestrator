@@ -1,19 +1,15 @@
 # Telegram setup and operations
 
-Telegram is optional. When enabled, it provides terminal notifications, clarification questions,
-and narrowly scoped approvals for dangerous diffs. Use a separate bot and chat for each
-orchestrator project.
+Telegram is optional. When enabled, it provides terminal notifications, clarification questions, and narrowly scoped approvals for dangerous diffs. Use a separate bot and chat for each orchestrator project.
 
 ## 1. Create a project bot
 
 1. Open the verified `@BotFather` account in Telegram.
 2. Run `/newbot`.
 3. Choose a project-specific display name and username.
-4. Store the returned token in your secret manager. Do not put it in `config.yaml`, a task file,
-   shell history, logs, or repository files.
+4. Store the returned token in your secret manager. Do not put it in `config.yaml`, a task file, shell history, logs, or repository files.
 
-The supported topology is one bot, one dedicated chat, and one orchestrator poller. Do not attach
-the same bot to a webhook or another application that calls `getUpdates`.
+The supported topology is one bot, one dedicated chat, and one orchestrator poller. Do not attach the same bot to a webhook or another application that calls `getUpdates`.
 
 ## 2. Create and initialize the chat
 
@@ -61,11 +57,9 @@ asyncio.run(main())
 PY
 ```
 
-Private chat ids are normally positive; group/supergroup ids are normally negative. Configure the
-numeric value, not `@username`.
+Private chat ids are normally positive; group/supergroup ids are normally negative. Configure the numeric value, not `@username`.
 
-If no updates appear, send another message to the bot and confirm that no webhook or other poller is
-consuming updates.
+If no updates appear, send another message to the bot and confirm that no webhook or other poller is consuming updates.
 
 ## 4. Configure environment and YAML
 
@@ -86,14 +80,11 @@ telegram:
   ask_timeout_s: 28800
 ```
 
-`ask_timeout_s` must be greater than zero. Environment-variable names must match normal shell env
-name syntax. A service manager such as systemd, launchd, Docker, or Kubernetes must inject the same
-variables into the orchestrator process.
+`ask_timeout_s` must be greater than zero. Environment-variable names must match normal shell env name syntax. A service manager such as systemd, launchd, Docker, or Kubernetes must inject the same variables into the orchestrator process.
 
 ## 5. Remove a webhook
 
-HITL uses long polling. Telegram does not allow `getUpdates` while an outgoing webhook is active.
-Remove it using the environment-held token:
+HITL uses long polling. Telegram does not allow `getUpdates` while an outgoing webhook is active. Remove it using the environment-held token:
 
 ```bash
 python - <<'PY'
@@ -141,31 +132,21 @@ telegram: OK (bot=@project_bot, chat=project-chat, polling ready)
 wastech-orchestrator --config ./config.yaml telegram-test --timeout-seconds 60
 ```
 
-The bot sends a ForceReply message. Reply directly to that message in the configured chat. Success
-means the reply matched the configured chat and exact Telegram message before the deadline.
+The bot sends a ForceReply message. Reply directly to that message in the configured chat. Success means the reply matched the configured chat and exact Telegram message before the deadline.
 
-The command does not run a provider, process a task, edit repository files, commit, push, or open a
-PR.
+The command does not run a provider, process a task, edit repository files, commit, push, or open a PR.
 
 ## 8. Runtime behavior
 
 - `refinement` and `planning` may send one question or approval per checkpoint.
 - Questions require a reply to the exact prompt.
-- Approvals use inline Approve/Deny buttons. **Every** press in the configured chat is acknowledged so
-  you always get feedback: a matching press shows "Approved — continuing." / "Denied — will reconsider.";
-  a stale or duplicate press (a superseded request, or a button left over after a restart) shows an
-  alert, "This approval is no longer active — check the latest message", and is logged as a near-miss
-  rather than silently dropped. Press the button on the **most recent** request.
-- Deletions and dependency manifest/lock changes produced by `implementation` or `fixing` require
-  approval unless an exact planning approval already covers the same category and path set.
+- Approvals use inline Approve/Deny buttons. **Every** press in the configured chat is acknowledged so you always get feedback: a matching press shows "Approved — continuing." / "Denied — will reconsider."; a stale or duplicate press (a superseded request, or a button left over after a restart) shows an alert, "This approval is no longer active — check the latest message", and is logged as a near-miss rather than silently dropped. Press the button on the **most recent** request.
+- Deletions and dependency manifest/lock changes produced by `implementation` or `fixing` require approval unless an exact planning approval already covers the same category and path set.
 - Ordinary diffs and routine commit/push/PR publishing do not require Telegram approval.
-- Timeout, transport failure, ambiguous approval, or a repeated stage request moves the task to
-  `manual_action_required`.
+- Timeout, transport failure, ambiguous approval, or a repeated stage request moves the task to `manual_action_required`.
 - `contacts` from task front matter are plain-text mentions only. They do not select the chat.
 
-Waiting state is stored in `logs/<task-id>/hitl/*.json`, not as a new state-machine status. After a
-restart, the orchestrator resumes the persisted message/deadline or re-runs the stage with the
-persisted answer.
+Waiting state is stored in `logs/<task-id>/hitl/*.json`, not as a new state-machine status. After a restart, the orchestrator resumes the persisted message/deadline or re-runs the stage with the persisted answer.
 
 ## 9. Troubleshooting
 
@@ -175,8 +156,7 @@ persisted answer.
 
 `env var(s) not set`
 
-- Export the exact variables named by `bot_token_env` and `chat_id_env` in the orchestrator
-  process, not only in a different terminal.
+- Export the exact variables named by `bot_token_env` and `chat_id_env` in the orchestrator process, not only in a different terminal.
 
 `chat id must be a numeric Telegram chat id`
 
@@ -188,15 +168,11 @@ persisted answer.
 
 `Conflict: terminated by other getUpdates request` / `only one poller may run per bot token`
 
-- Another process is polling the same bot token (Telegram allows exactly one `getUpdates` consumer per
-  token). This is the classic two-working-directories hazard — two orchestrator clones sharing one bot.
-  Preflight and the run-time poller now detect the 409 and report it clearly. Stop the other poller or
-  give each deployment a separate project bot/token.
+- Another process is polling the same bot token (Telegram allows exactly one `getUpdates` consumer per token). This is the classic two-working-directories hazard — two orchestrator clones sharing one bot. Preflight and the run-time poller now detect the 409 and report it clearly. Stop the other poller or give each deployment a separate project bot/token.
 
 `chat not found` or `Forbidden`
 
-- Send `/start` in a private chat, add the bot to the group, confirm it has not been removed or
-  blocked, and verify the numeric id.
+- Send `/start` in a private chat, add the bot to the group, confirm it has not been removed or blocked, and verify the numeric id.
 
 Prompt arrives but reply times out
 
@@ -206,17 +182,12 @@ Prompt arrives but reply times out
 
 Approval button keeps spinning, or shows "no longer active"
 
-- Every press in the configured chat is now acknowledged, so a perpetually spinning button means the
-  press did not reach the active poller at all — check for a second poller on the same token (the
-  `Conflict` case above) or a webhook.
-- "This approval is no longer active" means the press reached the poller but did not match the active
-  prompt (a superseded request, an expired interaction, a restarted task already moved to
-  `manual_action_required`, or a leftover button from a previous run). Act on the most recent message.
+- Every press in the configured chat is now acknowledged, so a perpetually spinning button means the press did not reach the active poller at all — check for a second poller on the same token (the `Conflict` case above) or a webhook.
+- "This approval is no longer active" means the press reached the poller but did not match the active prompt (a superseded request, an expired interaction, a restarted task already moved to `manual_action_required`, or a leftover button from a previous run). Act on the most recent message.
 
 Messages are truncated
 
-- Telegram limits text messages to 4096 characters. The orchestrator redacts first and appends a
-  truncation marker.
+- Telegram limits text messages to 4096 characters. The orchestrator redacts first and appends a truncation marker.
 
 ## 10. Security checklist
 

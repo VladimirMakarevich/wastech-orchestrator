@@ -31,10 +31,8 @@ The first version includes:
 - a final plain-language summary stage that explains what was done / how it works / how it integrates / why, and becomes the Pull Request body (see §5.2);
 - recovery after a restart;
 - auditing of runs, commands, and artifacts;
-- optional Telegram terminal notifications and human-in-the-loop for one clarification/approval
-  cycle in `refinement` or `planning`;
-- fail-closed approval before tests for tracked-file deletion and dependency manifest/lock changes,
-  with routine commit/push/PR publishing remaining automatic;
+- optional Telegram terminal notifications and human-in-the-loop for one clarification/approval cycle in `refinement` or `planning`;
+- fail-closed approval before tests for tracked-file deletion and dependency manifest/lock changes, with routine commit/push/PR publishing remaining automatic;
 - publishing the result only after successful checks.
 
 The first version does not include:
@@ -179,24 +177,11 @@ ask_human(...) -> AskResult
 send_notification(...)
 ```
 
-The two-phase contract lets the Core persist a secret-free handle before waiting. Telegram
-questions use ForceReply and require a reply to the exact prompt; approvals use inline buttons and
-require callback data for the exact interaction/message. Replies from other chats are ignored. A
-press in the configured chat that does **not** match the active prompt (a stale/duplicate button, a
-superseded request, or an inaccessible `callback_query.message`) is **acknowledged with a "no longer
-active" alert and logged as a near-miss** rather than silently dropped — so the operator always gets
-feedback and the miss is diagnosable. The poller relies on a single `getUpdates` consumer per bot
-token; a second consumer (Telegram 409 Conflict) is detected and surfaced clearly at preflight and run
-time. Tokens and chat ids remain environment-only and are never logged.
+The two-phase contract lets the Core persist a secret-free handle before waiting. Telegram questions use ForceReply and require a reply to the exact prompt; approvals use inline buttons and require callback data for the exact interaction/message. Replies from other chats are ignored. A press in the configured chat that does **not** match the active prompt (a stale/duplicate button, a superseded request, or an inaccessible `callback_query.message`) is **acknowledged with a "no longer active" alert and logged as a near-miss** rather than silently dropped — so the operator always gets feedback and the miss is diagnosable. The poller relies on a single `getUpdates` consumer per bot token; a second consumer (Telegram 409 Conflict) is detected and surfaced clearly at preflight and run time. Tokens and chat ids remain environment-only and are never logged.
 
-`refinement` and `planning` return strict structured output: `content` plus optional
-`human_input={kind,question,context,risk,paths}`; planning also returns decomposition fields. The
-Core validates exact keys/types and safe repository-relative paths independently of provider-side
-schema enforcement. After an answer, the same stage is run once with `human_input_path`. A second
-request at the same checkpoint is `manual_action_required`.
+`refinement` and `planning` return strict structured output: `content` plus optional `human_input={kind,question,context,risk,paths}`; planning also returns decomposition fields. The Core validates exact keys/types and safe repository-relative paths independently of provider-side schema enforcement. After an answer, the same stage is run once with `human_input_path`. A second request at the same checkpoint is `manual_action_required`.
 
-The Core persists each interaction atomically under `logs/<task-id>/hitl/`. The artifact, not a new
-SQLite table or task status, is the source of truth for waiting/answered/consumed recovery.
+The Core persists each interaction atomically under `logs/<task-id>/hitl/`. The artifact, not a new SQLite table or task status, is the source of truth for waiting/answered/consumed recovery.
 
 ## 5. Stages and routing
 
@@ -215,26 +200,20 @@ publishing
 
 `testing` is performed by the Check Runner, and `publishing` is performed by the Git Manager. For the agent stages, the default route is:
 
-| Stage | Primary | Fallback |
-|---|---|---|
-| `refinement` | Claude Code | Codex |
-| `planning` | Claude Code | Codex |
-| `implementation` | Claude Code | Codex |
-| `review` | Codex | Claude Code |
-| `fixing` | Claude Code | Codex |
-| `summary` | Claude Code | Codex |
+| Stage            | Primary     | Fallback    |
+| ---------------- | ----------- | ----------- |
+| `refinement`     | Claude Code | Codex       |
+| `planning`       | Claude Code | Codex       |
+| `implementation` | Claude Code | Codex       |
+| `review`         | Codex       | Claude Code |
+| `fixing`         | Claude Code | Codex       |
+| `summary`        | Claude Code | Codex       |
 
 The `refinement` stage runs first and enriches the task before planning: it clarifies the description, fixes the scope (in/out), derives acceptance criteria, lists the affected modules and the assumptions/risks, and writes the result to `task.enriched.md` (§10). It performs no code edits.
 
 `refinement` is **skipped** (the Core goes straight from `preparing` to `planning`) when the task is already sufficiently complete — that is, it contains both a description and acceptance criteria (plus an explicit scope/constraints), or it is explicitly flagged `refined: true` in the front matter. The skip decision is deterministic, made by the Core, and recorded in the state store and the audit. When refinement cannot safely resolve a material ambiguity from repository evidence, it may request one typed human clarification and then repeat once with the persisted answer.
 
-After `implementation` and `fixing`, before tests, the Core classifies the changed path set. An
-ordinary diff continues automatically. Tracked-file deletion (including the old side of a rename)
-and changes to known dependency manifests/lock files require a yes/no approval. An approved
-planning request is reused only when its risk category and normalized path set match exactly;
-expanded or changed risk requires another approval. A denial returns once to the same editing stage
-for safe reconsideration; remaining danger is `manual_action_required`. Routine publishing does not
-request approval.
+After `implementation` and `fixing`, before tests, the Core classifies the changed path set. An ordinary diff continues automatically. Tracked-file deletion (including the old side of a rename) and changes to known dependency manifests/lock files require a yes/no approval. An approved planning request is reused only when its risk category and normalized path set match exactly; expanded or changed risk requires another approval. A denial returns once to the same editing stage for safe reconsideration; remaining danger is `manual_action_required`. Routine publishing does not request approval.
 
 A route may be overridden in a task only:
 
@@ -248,18 +227,18 @@ Example YAML front matter:
 ```yaml
 ---
 id: task-001
-refined: false          # set true to skip the refinement stage for an already-complete task
-decompose: false        # tri-state: true forces / false disables decomposition; omit = config default (§5.1)
+refined: false # set true to skip the refinement stage for an already-complete task
+decompose: false # tri-state: true forces / false disables decomposition; omit = config default (§5.1)
 agents:
   refinement: claude
   planning: claude
   implementation: codex
   review: claude
   fixing: codex
-model: null             # optional: override provider model for all stages of this task
-reasoning: null         # optional: low | medium | high | xhigh (Opus 4.7+ / Fable 5) | max
-stages:                 # optional: per-stage model/reasoning, overrides the task-wide values above
-  planning:             #   for that stage (agent-routed stages only; both sub-fields optional).
+model: null # optional: override provider model for all stages of this task
+reasoning: null # optional: low | medium | high | xhigh (Opus 4.7+ / Fable 5) | max
+stages: # optional: per-stage model/reasoning, overrides the task-wide values above
+  planning: #   for that stage (agent-routed stages only; both sub-fields optional).
     model: claude-opus-4-8
     reasoning: high
   review:
@@ -267,10 +246,7 @@ stages:                 # optional: per-stage model/reasoning, overrides the tas
 ---
 ```
 
-For a JSON task, an `agents` object with the same keys is used. Per-stage `model`/`reasoning`
-resolve most-specific first: `stages.<stage>.<field>` → task-wide `model`/`reasoning` →
-`agents.providers.<provider>` default. Only the agent-routed stages (`refinement`, `planning`,
-`implementation`, `review`, `fixing`, `summary`) are valid keys under `stages`.
+For a JSON task, an `agents` object with the same keys is used. Per-stage `model`/`reasoning` resolve most-specific first: `stages.<stage>.<field>` → task-wide `model`/`reasoning` → `agents.providers.<provider>` default. Only the agent-routed stages (`refinement`, `planning`, `implementation`, `review`, `fixing`, `summary`) are valid keys under `stages`.
 
 ### 5.1. Decomposition (flag-gated)
 
@@ -305,8 +281,7 @@ The summary is a **handoff artifact, not a quality gate**: an infrastructure fai
 
 ## 6. Context between stages
 
-The vendor session is not the primary source of truth. Each new run receives its context from
-artifacts:
+The vendor session is not the primary source of truth. Each new run receives its context from artifacts:
 
 - the original task;
 - the normalized task manifest;
@@ -320,17 +295,9 @@ artifacts:
 - when the task was decomposed (§5.1): the active subtask specification and the cumulative diff of the subtasks already committed;
 - the **planning-selected skill references** (§2.1): when `planning` chose relevant repo skills (from the target repo's `.claude/skills/`), the chosen `SKILL.md` files are passed to `implementation`/`fixing` as **read-only reference paths** (via `{skills_path}` and a path-only request field) — advisory guidance the agent may read, never executed, never the Claude-only Skill tool. Skill bodies are repo-controlled; only their paths travel.
 
-This makes it possible to execute the next stage with a different provider and to recover the
-pipeline after a restart.
+This makes it possible to execute the next stage with a different provider and to recover the pipeline after a restart.
 
-**Session continuity (Claude only).** Within a single task run, the orchestrator additionally
-threads the Claude session through stages by capturing the `session_id` from each stage's
-`stream-json` output and passing `--resume <session_id>` to the next stage. This preserves
-conversation context across the pipeline and reduces token usage from re-reading artifacts. Session
-IDs are held in memory on the pipeline object; they are never written to SQLite, logs, or artifacts.
-On orchestrator restart, every stage begins a fresh session. On provider fallback, the primary
-provider's session is cleared so the fallback starts fresh. Codex does not support `--resume` and
-ignores the field.
+**Session continuity (Claude only).** Within a single task run, the orchestrator additionally threads the Claude session through stages by capturing the `session_id` from each stage's `stream-json` output and passing `--resume <session_id>` to the next stage. This preserves conversation context across the pipeline and reduces token usage from re-reading artifacts. Session IDs are held in memory on the pipeline object; they are never written to SQLite, logs, or artifacts. On orchestrator restart, every stage begins a fresh session. On provider fallback, the primary provider's session is cleared so the fallback starts fresh. Codex does not support `--resume` and ignores the field.
 
 ## 7. Fallback and errors
 
@@ -452,8 +419,7 @@ Conditions:
 - a transition is performed transactionally;
 - a re-run does not create a second commit, push, or PR;
 - after a restart the unfinished stage is resumed or its result is safely reconciled;
-- HITL waiting is represented by a durable artifact, not a `waiting_human` state; timeout,
-  transport error, ambiguous approval, or repeated signal is `manual_action_required`;
+- HITL waiting is represented by a durable artifact, not a `waiting_human` state; timeout, transport error, ambiguous approval, or repeated signal is `manual_action_required`;
 - publishing is allowed only when checks succeed and there are no blocking findings;
 - the number of agent attempts and fix cycles is bounded by the configuration (see §8.1);
 - a decomposed task (§5.1) repeats the `implementing -> testing -> reviewing` cycle once per subtask in order; no new statuses are introduced — the active subtask index `k` of `n` is carried in the state store (`active_subtask`), and `ready_to_publish` is reached only after the last subtask passes review.
@@ -492,7 +458,7 @@ When `orchestrator.poll_interval_seconds > 0` (default `300`) the `watch` loop i
 
 ### 8.3. Terminal cleanup and auto mode
 
-**Finalize before the commit.** On a `done` outcome — and on a `failed` outcome once a task branch exists — the Core finalizes *before* publishing: it moves the task file into its lifecycle folder (`tasks/done/` or `tasks/failed/`) and writes `tasks/<dir>/<id>.summary.md` next to it, then makes the scoped **code** commit and the separate **task** commit of `tasks/` (the moved task + its summary). This is what puts the task and its summary into the same commit/PR as the code (§6, §21). A `done` task is then pushed and a PR opened; a `failed` task with a branch is committed and pushed (best-effort) so the attempt + summary are recorded in git, but **no PR** is opened. A `failed` outcome with no branch (e.g. an isolation-preflight failure) and `manual_action_required` are **not** published: the latter leaves the task in place for the operator.
+**Finalize before the commit.** On a `done` outcome — and on a `failed` outcome once a task branch exists — the Core finalizes _before_ publishing: it moves the task file into its lifecycle folder (`tasks/done/` or `tasks/failed/`) and writes `tasks/<dir>/<id>.summary.md` next to it, then makes the scoped **code** commit and the separate **task** commit of `tasks/` (the moved task + its summary). This is what puts the task and its summary into the same commit/PR as the code (§6, §21). A `done` task is then pushed and a PR opened; a `failed` task with a branch is committed and pushed (best-effort) so the attempt + summary are recorded in git, but **no PR** is opened. A `failed` outcome with no branch (e.g. an isolation-preflight failure) and `manual_action_required` are **not** published: the latter leaves the task in place for the operator.
 
 When the pipeline reaches a terminal outcome, the Core finishes terminal handling before releasing the processing slot: final artifacts are registered, and the Git Manager performs **terminal cleanup** by safely switching the target repository back to `repo.base_branch`. The completed-tasks ledger is appended exactly once, and any final notification/reporting hook runs, after the final terminal outcome and cleanup state are known.
 
@@ -523,8 +489,7 @@ subtasks
 
 At a minimum the following are stored:
 
-- the identifiers of the task, stage run, and provider attempt; the `stage_runs` row is inserted
-  before provider execution so its persistent ID can namespace artifacts even after a crash;
+- the identifiers of the task, stage run, and provider attempt; the `stage_runs` row is inserted before provider execution so its persistent ID can namespace artifacts even after a crash;
 - the selected primary/fallback and the provider actually used;
 - the status and error class;
 - timestamps and the exit code;
@@ -535,9 +500,7 @@ At a minimum the following are stored:
 - the `stage_attempts`, per-loop `fix_cycles`, and global `fix_iterations` counters (§8.1);
 - a reference to the failure report artifact when the task ends in `manual_action_required` (§10);
 - whether the `refinement` stage ran or was skipped, with the skip reason (§5);
-- for any stage skipped by stage-skip control (`agents.skip_stages` or a task's
-  `stages.<stage>.enabled: false`): a `stage_runs` row with `skipped = 1` and a `skip_reason`, and no
-  provider data;
+- for any stage skipped by stage-skip control (`agents.skip_stages` or a task's `stages.<stage>.enabled: false`): a `stage_runs` row with `skipped = 1` and a `skip_reason`, and no provider data;
 - for decomposition (§5.1): on the `tasks` row whether it was enabled/accepted with the reason, the subtask count `n`, the `active_subtask` index `k`, and `subtasks_completed`; and one `subtasks` row per subtask with its `order`, `slug`, `title`, `status`, `depends_on`, `commit_sha` (the idempotency marker, null until committed), and artifact path;
 - the validation outcome on the `tasks` row (`validation_passed`) and, on rejection, the failing `validation_reason` (§19).
 
@@ -598,13 +561,9 @@ logs/
 Rules:
 
 - all paths are relative to the task artifact directory;
-- logs are not overwritten; the Core reserves a persistent `stage_runs.id` before invoking a
-  provider, and that ID namespaces the run so repeated fixing cycles and recovery runs cannot
-  collide when their provider attempt counters restart at `1`;
+- logs are not overwritten; the Core reserves a persistent `stage_runs.id` before invoking a provider, and that ID namespaces the run so repeated fixing cycles and recovery runs cannot collide when their provider attempt counters restart at `1`;
 - the request artifact stores a redacted representation of the run;
-- HITL artifacts contain the redacted request/answer, approval/failure, processing status, and a
-  secret-free Telegram handle (`interaction_id`, message id, update offset, deadline); writes are
-  atomic and no Telegram credentials are stored;
+- HITL artifacts contain the redacted request/answer, approval/failure, processing status, and a secret-free Telegram handle (`interaction_id`, message id, update offset, deadline); writes are atomic and no Telegram credentials are stored;
 - the machine-readable result is separated from the human-readable summary;
 - artifacts are registered in SQLite with a checksum;
 - `publish/terminal-cleanup.json` records the checkout target (`repo.base_branch`), outcome, timestamps, and any safe-check failure that prevented auto mode from continuing (§8.3);
@@ -625,7 +584,7 @@ Target structure:
 orchestrator:
   auto_mode:
     enabled: false
-  poll_interval_seconds: 300    # watch tick: fetch/pull base_branch + re-scan; 0 = single pass (§8.3)
+  poll_interval_seconds: 300 # watch tick: fetch/pull base_branch + re-scan; 0 = single pass (§8.3)
 
 repo:
   url: "git@github.com:OWNER/REPO.git"
@@ -642,11 +601,11 @@ agents:
   max_fix_cycles: 15
   max_total_fix_iterations: 30
 
-  decomposition:                # optional task decomposition (§5.1); OFF by default
+  decomposition: # optional task decomposition (§5.1); OFF by default
     enabled: false
-    max_subtasks: 8             # a split with n > this (or n < 2) is rejected; runs as a single task
-    min_size_signal: "large"    # advisory threshold passed to the planning prompt
-    commit_per_subtask: true    # one local commit per subtask on the single task branch
+    max_subtasks: 8 # a split with n > this (or n < 2) is rejected; runs as a single task
+    min_size_signal: "large" # advisory threshold passed to the planning prompt
+    commit_per_subtask: true # one local commit per subtask on the single task branch
 
   routing:
     refinement:
@@ -672,7 +631,7 @@ agents:
     claude:
       command: "claude"
       model: ""
-      reasoning: null          # low | medium | high | xhigh (Opus 4.7+ / Fable 5) | max
+      reasoning: null # low | medium | high | xhigh (Opus 4.7+ / Fable 5) | max
       timeout_seconds: 7200
       max_turns: 50
       max_budget_usd: null
@@ -681,7 +640,7 @@ agents:
     codex:
       command: "codex"
       model: ""
-      reasoning: null          # low | medium | high | xhigh | max→xhigh
+      reasoning: null # low | medium | high | xhigh | max→xhigh
       timeout_seconds: 7200
       sandbox: "workspace-write"
       permission_profile: "workspace-write"
@@ -703,7 +662,7 @@ security:
     - "git push"
     - "gh pr create"
 
-validation:                       # input hardening gate (§19); rejects broken tasks before any branch
+validation: # input hardening gate (§19); rejects broken tasks before any branch
   max_task_bytes: 262144
   max_task_lines: 5000
   max_line_bytes: 8192
@@ -720,12 +679,12 @@ checks:
 git:
   create_pull_request: true
   pr_base: "main"
-  footprint:                      # where orchestration/task artifacts live vs. the target repo (§21)
-    location: in_repo             # external | in_repo  (default: in_repo — tasks & logs in the repo)
-    tracking: commit              # none | exclude_local | commit  (default: commit — audit trail)
-    external_root: "./"           # location=external only: where tasks/ & logs/ live, OUTSIDE the clone
-    audit_commit_message: "chore(orchestrator): audit trail for {task_id}"  # tracking=commit only
-    audit_on_branch: task         # task | sibling   (tracking=commit only)
+  footprint: # where orchestration/task artifacts live vs. the target repo (§21)
+    location: in_repo # external | in_repo  (default: in_repo — tasks & logs in the repo)
+    tracking: commit # none | exclude_local | commit  (default: commit — audit trail)
+    external_root: "./" # location=external only: where tasks/ & logs/ live, OUTSIDE the clone
+    audit_commit_message: "chore(orchestrator): audit trail for {task_id}" # tracking=commit only
+    audit_on_branch: task # task | sibling   (tracking=commit only)
 
 telegram:
   enabled: false
@@ -746,9 +705,7 @@ Configuration requirements:
 - `max_total_fix_iterations` must be >= `max_fix_cycles`; it is the hard global cap that stops a task in `manual_action_required` (§8.1);
 - `agents.decomposition.max_subtasks` must be >= 2; decomposition is off unless `agents.decomposition.enabled` is true, and the per-task `decompose` override flips only the gate (never `max_subtasks`, routes, or security);
 - `git.footprint`: reject `location: external` with `tracking: exclude_local|commit`, and `location: in_repo` with `tracking: none`; when `location: external`, `external_root` must resolve outside `repo.local_path` (§21).
-- `telegram.ask_timeout_s` must be greater than zero; `bot_token_env` and `chat_id_env` must be
-  valid environment-variable names; preflight requires a non-zero numeric chat id, bot access to
-  the chat, no webhook, and a usable polling API.
+- `telegram.ask_timeout_s` must be greater than zero; `bot_token_env` and `chat_id_env` must be valid environment-variable names; preflight requires a non-zero numeric chat id, bot access to the chat, no webhook, and a usable polling API.
 
 ## 12. Security model
 
@@ -763,10 +720,8 @@ Configuration requirements:
 9. Git credentials and the agents' credentials are configured outside the orchestrator.
 10. Staging in the target repo is a scoped explicit pathspec that excludes `tasks/`/`logs/`/`workspace/`/`checks/`; blanket `git add .`/`-A` is forbidden, so orchestration and task artifacts never enter a code commit. In audit-footprint mode only the orchestrator (never an agent) makes the separate artifact commit (§21).
 11. The Pull Request and CI remain a mandatory control layer.
-12. Telegram credentials are environment-only; prompt correlation accepts only the configured chat
-    and exact message/callback. `contacts` are plain-text mentions, not authorization.
-13. Human approval is narrow and fail-closed for deletion/dependency changes. It does not delegate
-    Git ownership, weaken sandbox policy, or gate routine orchestrator publishing.
+12. Telegram credentials are environment-only; prompt correlation accepts only the configured chat and exact message/callback. `contacts` are plain-text mentions, not authorization.
+13. Human approval is narrow and fail-closed for deletion/dependency changes. It does not delegate Git ownership, weaken sandbox policy, or gate routine orchestrator publishing.
 
 ## 13. Recovery and idempotency
 
@@ -775,14 +730,8 @@ On startup the orchestrator:
 1. Finds the active task (at most one, see §8.2); more than one task in an active status is an inconsistent state and is moved to `manual_action_required`.
 2. Reconciles SQLite, the task files, the working branch, and the artifacts.
 3. Checks whether the external process has finished and whether a valid result artifact exists.
-4. Continues from the task's persisted status rather than resetting to `implementation`; an
-   interrupted agent stage is re-run, while `testing`, `reviewing`, and `fixing` resume directly.
-   Entering `fixing` writes a task-level `fixing-context.json` checkpoint with the triggering loop
-   and relevant failed-check/review artifact path, so recovery does not lose context or increment
-   fix counters again.
-5. If a HITL artifact is `waiting`, continues polling the original Telegram message using its
-   persisted offset/deadline. If it is `answered`, re-runs the stage with that artifact. An
-   interrupted denied-change reconsideration fails closed instead of risking a duplicate edit run.
+4. Continues from the task's persisted status rather than resetting to `implementation`; an interrupted agent stage is re-run, while `testing`, `reviewing`, and `fixing` resume directly. Entering `fixing` writes a task-level `fixing-context.json` checkpoint with the triggering loop and relevant failed-check/review artifact path, so recovery does not lose context or increment fix counters again.
+5. If a HITL artifact is `waiting`, continues polling the original Telegram message using its persisted offset/deadline. If it is `answered`, re-runs the stage with that artifact. An interrupted denied-change reconsideration fails closed instead of risking a duplicate edit run.
 6. For commit/push/PR it uses the saved fingerprint and checks the remote state.
 7. If a task is already terminal but terminal cleanup was interrupted, performs the checkout back to `repo.base_branch` once when safe.
 8. In an ambiguous state it moves the task to `manual_action_required`.
@@ -806,11 +755,9 @@ The following must not be done automatically:
 - the command builder of both providers;
 - parsing of structured output;
 - strict typed refinement/planning HITL output and safe path normalization;
-- Telegram prompt/callback correlation, offsets, callback acknowledgement, timeouts, webhook
-  conflict, redaction, message bounds, and preflight;
+- Telegram prompt/callback correlation, offsets, callback acknowledgement, timeouts, webhook conflict, redaction, message bounds, and preflight;
 - restart recovery for waiting/answered HITL artifacts and one-round-trip enforcement;
-- ordinary versus dangerous diff classification, exact planning approval reuse, expanded-diff
-  approval, denial reconsideration, and remaining-risk escalation;
+- ordinary versus dangerous diff classification, exact planning approval reuse, expanded-diff approval, denial reconsideration, and remaining-risk escalation;
 - error classification;
 - state machine transitions;
 - redaction and path normalization;
@@ -856,8 +803,7 @@ On a temporary Git repository, verify that:
 - a broken task is quarantined to `tasks/rejected/` as `failed`, writes `validation_report.json`, and never creates a branch or calls a provider (§19);
 - in every git footprint mode the code commit contains no `tasks/`/`logs/`/`workspace/`/`checks/` paths; `exclude_local` adds all of them to `.git/info/exclude`; audit mode adds one orchestrator-made `tasks/` commit (the task + its `summary.md`) and keeps `logs/`/`workspace/`/`checks/` local (§21);
 - a successful task produces `summary.md` (what / how / integration / why) which becomes the PR body (§5.2);
-- fake Telegram transport covers clarification/approval, exact correlation, dangerous-diff denial,
-  and restart recovery without network access;
+- fake Telegram transport covers clarification/approval, exact correlation, dangerous-diff denial, and restart recovery without network access;
 - exhaustion of a fix loop or of the global fix-iteration budget moves the task to `manual_action_required` and writes a failure report, while an unrecoverable error moves the task to `failed`.
 
 ## 15. Implementation stages
@@ -912,10 +858,7 @@ This section records the design decisions and the ideas that are intentionally o
 
 - **Deterministic Core instead of an LLM "supervisor".** The original idea of a supervisor agent that launches and manages the other agents is intentionally not adopted in the first version. Orchestration is handled by a deterministic Orchestrator Core plus the Agent Router (see §4.1–§4.2): predictability and auditability take priority over emergent autonomy. A supervisor-style planning layer may be revisited in v2 on top of this deterministic base.
 - **Stateless stage runs cover "recreate agents per task".** The requirement to refresh agent state/context for each new task is satisfied structurally: every stage is an independent run whose context comes only from artifacts (see §3 and §6); there is no shared in-memory agent state to reset.
-- **Telegram HITL without a new task status.** Human waiting/answers are durable registered
-  artifacts. This preserves the canonical state machine and provides restart recovery without a
-  SQLite migration. Approval scope is deletion/dependency changes; routine publishing remains
-  automatic.
+- **Telegram HITL without a new task status.** Human waiting/answers are durable registered artifacts. This preserves the canonical state machine and provides restart recovery without a SQLite migration. Approval scope is deletion/dependency changes; routine publishing remains automatic.
 
 ### 18.2. Deferred to v2
 
@@ -1012,12 +955,7 @@ wastech-orchestrator init [path]
       summary.md
 ```
 
-The delivered tree is **prompts-only** (schema v6): `task.md`, `AGENTS.md`, `CLAUDE.md`, and
-`skills/` are no longer delivered — the orchestrator never consumed them from the control directory
-(skills are scanned from the *target* repo's `.claude/skills`; `AGENTS.md`/`CLAUDE.md` are read from
-the *target* repo root; task authoring uses `worc/examples/`). Editing any `prompts/<stage>.md`
-activates it automatically (the `prompts:` config block; see
-[12_prompt_template_customization.md](12_prompt_template_customization.md)); no opt-in map is needed.
+The delivered tree is **prompts-only** (schema v6): `task.md`, `AGENTS.md`, `CLAUDE.md`, and `skills/` are no longer delivered — the orchestrator never consumed them from the control directory (skills are scanned from the _target_ repo's `.claude/skills`; `AGENTS.md`/`CLAUDE.md` are read from the _target_ repo root; task authoring uses `worc/examples/`). Editing any `prompts/<stage>.md` activates it automatically (the `prompts:` config block; see [12_prompt_template_customization.md](12_prompt_template_customization.md)); no opt-in map is needed.
 
 ### 20.3. Template source and idempotency
 
@@ -1027,7 +965,7 @@ activates it automatically (the `prompts:` config block; see
 
 ### 20.4. Project binding (`install`)
 
-`wastech-orchestrator install [repo-path]` is the second setup flow. Instead of scaffolding a new layout in place (`init`), it **binds an existing Git repository** to a sibling *control workspace* and generates a validated `config.yaml`. It is operator-run, idempotent, and never modifies the target repo's tracked files.
+`wastech-orchestrator install [repo-path]` is the second setup flow. Instead of scaffolding a new layout in place (`init`), it **binds an existing Git repository** to a sibling _control workspace_ and generates a validated `config.yaml`. It is operator-run, idempotent, and never modifies the target repo's tracked files.
 
 ```text
 wastech-orchestrator install [repo-path]
@@ -1068,14 +1006,14 @@ wastech-orchestrator install-templates
 The orchestration and task files can be kept entirely out of the customer's repository, or committed as an audit trail. This is configured by two orthogonal axes under `git.footprint` (§11), yielding three supported modes (a tracked-`.gitignore` mode is intentionally not offered):
 
 | Mode | `location` | `tracking` | Effect |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | **in-repo, audit** (default) | `in_repo` | `commit` | The **task file and its `summary.md`** live inside the target clone and are committed by the orchestrator (a separate `tasks/` commit after the code commit) — so the task and its outcome are stored in the same repo as the code. The rest of `logs/` (plan, review, diffs, stage logs, `summary.json`) and `workspace/` are kept **local** via `.git/info/exclude` and never committed. |
 | **in-repo, excluded** | `in_repo` | `exclude_local` | All artifacts inside the clone, listed in `.git/info/exclude`; never committed, no change to tracked files. |
 | **external** | `external` | `none` | `tasks/` and `logs/` live outside the target clone (`external_root`); zero footprint, nothing to ignore. |
 
 ### 21.1. Scoped staging (all modes)
 
-The Git Manager **never** runs `git add .` / `git add -A`. It stages only the agent's intended code paths via an explicit pathspec computed from the post-implementation diff after the output guardrails (`only_allowed_paths`, `no_unexpected_files`), plus belt-and-braces `:(exclude)` pathspecs for the artifact dirs. The exclude guards cover only dirs that are **not** already in `.git/info/exclude` for the active footprint (a dir that is both ignored and present in the worktree makes `git add` fail with "paths are ignored", so it is dropped): under `commit` the guard is `:(exclude)tasks/` (`logs/`/`workspace/`/`checks/` are ignored), under `exclude_local` there are none (all four ignored), under `external` all four. This guarantees, in every mode, that orchestration and task files never enter a *code* commit. This rule supersedes the illustrative `git add .` in the high-level overview (codex_git_orchestrator_architecture.md §4.2).
+The Git Manager **never** runs `git add .` / `git add -A`. It stages only the agent's intended code paths via an explicit pathspec computed from the post-implementation diff after the output guardrails (`only_allowed_paths`, `no_unexpected_files`), plus belt-and-braces `:(exclude)` pathspecs for the artifact dirs. The exclude guards cover only dirs that are **not** already in `.git/info/exclude` for the active footprint (a dir that is both ignored and present in the worktree makes `git add` fail with "paths are ignored", so it is dropped): under `commit` the guard is `:(exclude)tasks/` (`logs/`/`workspace/`/`checks/` are ignored), under `exclude_local` there are none (all four ignored), under `external` all four. This guarantees, in every mode, that orchestration and task files never enter a _code_ commit. This rule supersedes the illustrative `git add .` in the high-level overview (codex_git_orchestrator_architecture.md §4.2).
 
 Under the in-repo footprint the artifact root **is** the clone, so the orchestrator's own runtime files (`state.db`, its WAL/SHM sidecars, `config.yaml`/`config.yaml.bak-*`, and the generated `checks/resolved-profile.json`) sit at the repo root. The Git Manager treats these as artifacts: they are excluded from the code staging set and are not counted as "unaccounted dirty" changes at terminal cleanup, so they never reach git and never block the base-branch checkout.
 
@@ -1103,4 +1041,4 @@ Three persisted artifacts outlive an upgrade and each carries an **independent**
 - **`state.db`** — `PRAGMA user_version` (current `3`). `open()` refuses a database stamped newer than it understands; on the writable path it **migrates in place** an older or pre-versioning (`0`) database via idempotent `ALTER TABLE` (`_migrate`) and then stamps the current version. `open_readonly` refuses-newer but never writes. (v2 added `stage_runs.skipped`/`skip_reason` for stage-skip control; v3 added `tasks.interrupted_status` — the stage a task was on before going terminal — so `rerun --continue` can re-enter at the failed stage.)
 - **registry** — a `version` field, read **forward-tolerantly**: bindings are plain repo→config paths and are version-stable, so config discovery never hard-fails on a newer registry.
 
-The policy is **fail-forward-loud**: a workspace written by a *newer* orchestrator is refused with a clean `error:` message and a non-zero exit (2) rather than misread. A *migration runner* for the `<`-than-current cases is intentionally **not** built yet — the version gates are the hooks for it. Operator guidance (backup, the upgrade-between-tasks rule, recovery) lives in [operations.md](../operations.md); per-release changes are recorded in [CHANGELOG.md](../../CHANGELOG.md).
+The policy is **fail-forward-loud**: a workspace written by a _newer_ orchestrator is refused with a clean `error:` message and a non-zero exit (2) rather than misread. A _migration runner_ for the `<`-than-current cases is intentionally **not** built yet — the version gates are the hooks for it. Operator guidance (backup, the upgrade-between-tasks rule, recovery) lives in [operations.md](../operations.md); per-release changes are recorded in [CHANGELOG.md](../../CHANGELOG.md).

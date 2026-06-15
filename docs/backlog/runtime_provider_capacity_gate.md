@@ -1,22 +1,12 @@
 # Backlog: Runtime provider capacity gate for autonomous watch mode
 
-Status: **backlog / not scheduled**
-Date: 2026-06-13
-Owner: Vladimir Makarevich
+Status: **backlog / not scheduled** Date: 2026-06-13 Owner: Vladimir Makarevich
 
-This document captures the product task of checking Codex and Claude Code subscription capacity
-before an autonomous `watch` process admits a pending task into the active pipeline. It is a
-backlog item, not current runtime behavior. Nothing here overrides the canonical specification,
-[CLAUDE.md](../../CLAUDE.md), [AGENTS.md](../../AGENTS.md), or the hard invariants in
-[docs/rules/](../rules/).
+This document captures the product task of checking Codex and Claude Code subscription capacity before an autonomous `watch` process admits a pending task into the active pipeline. It is a backlog item, not current runtime behavior. Nothing here overrides the canonical specification, [CLAUDE.md](../../CLAUDE.md), [AGENTS.md](../../AGENTS.md), or the hard invariants in [docs/rules/](../rules/).
 
 ## 1. Background
 
-The orchestrator is intended to run unattended in `watch` mode. A task may remain pending for
-hours and then be selected after an operator has left the machine. The current provider
-`preflight()` checks executable availability and CLI version, but it does not determine whether
-the authenticated Codex or Claude account has enough current subscription capacity to start a
-multi-stage task.
+The orchestrator is intended to run unattended in `watch` mode. A task may remain pending for hours and then be selected after an operator has left the machine. The current provider `preflight()` checks executable availability and CLI version, but it does not determine whether the authenticated Codex or Claude account has enough current subscription capacity to start a multi-stage task.
 
 Without a runtime capacity gate, the orchestrator can:
 
@@ -24,17 +14,13 @@ Without a runtime capacity gate, the orchestrator can:
 - create its task branch and occupy the single active-task slot;
 - complete one or more stages;
 - then receive a provider rate-limit error because the five-hour or weekly allowance is exhausted;
-- spend attempts on fallback or stop in a partially completed state even though waiting for the
-  provider reset would have been preferable.
+- spend attempts on fallback or stop in a partially completed state even though waiting for the provider reset would have been preferable.
 
-This is different from the operator-facing `wastech-orchestrator preflight` command. Installation
-preflight answers whether the configured CLIs and isolation policy are usable. The proposed gate
-is a runtime admission decision made automatically whenever `watch` considers starting a new task.
+This is different from the operator-facing `wastech-orchestrator preflight` command. Installation preflight answers whether the configured CLIs and isolation policy are usable. The proposed gate is a runtime admission decision made automatically whenever `watch` considers starting a new task.
 
 ## 2. Goal
 
-Before `watch` admits a pending task, determine whether the providers required by that task's
-resolved routes have sufficient reported capacity under configured headroom thresholds.
+Before `watch` admits a pending task, determine whether the providers required by that task's resolved routes have sufficient reported capacity under configured headroom thresholds.
 
 The desired flow is:
 
@@ -48,25 +34,19 @@ watch tick
     -> capacity insufficient: leave the task pending and defer until a later eligible check
 ```
 
-The gate should reduce avoidable mid-task rate-limit failures while preserving deterministic
-routing, infrastructure-only fallback, the single-active-task invariant, and autonomous operation.
+The gate should reduce avoidable mid-task rate-limit failures while preserving deterministic routing, infrastructure-only fallback, the single-active-task invariant, and autonomous operation.
 
 ## 3. Non-goals and limits
 
 The gate cannot prove that a task will finish within the available allowance:
 
 - neither provider reports how many tokens an arbitrary future coding task will consume;
-- subscription limits are generally reported as utilization percentages, not a guaranteed
-  remaining token budget;
-- usage may change concurrently on another device, in another process, or through another product
-  sharing the same allowance;
-- task size, model choice, reasoning effort, tool output, fixes, and review findings make future
-  consumption uncertain;
+- subscription limits are generally reported as utilization percentages, not a guaranteed remaining token budget;
+- usage may change concurrently on another device, in another process, or through another product sharing the same allowance;
+- task size, model choice, reasoning effort, tool output, fixes, and review findings make future consumption uncertain;
 - provider capacity interfaces may be unavailable or change between CLI/SDK versions.
 
-Therefore the feature is a **headroom admission policy**, not a completion guarantee or a token
-estimator. Historical per-stage usage may improve policy later, but it must not be presented as an
-exact prediction.
+Therefore the feature is a **headroom admission policy**, not a completion guarantee or a token estimator. Historical per-stage usage may improve policy later, but it must not be presented as an exact prediction.
 
 This task does not:
 
@@ -90,10 +70,7 @@ The admission policy must distinguish how each provider is authenticated and bil
 | Bedrock, Vertex, Foundry, or another third-party provider | Provider-specific billing and quota controls | Skip subscription thresholds unless a dedicated adapter is configured |
 | Unknown authentication mode | Cannot determine applicable capacity model safely | Apply `unknown_capacity` policy |
 
-Using an API key does not mean that capacity is unlimited. API requests may still fail because of
-rate limits, exhausted prepaid balance, organization/project spend limits, provider availability,
-or an operator-defined task budget. However, these conditions are not equivalent to subscription
-window utilization and should not be evaluated using five-hour/weekly percentage thresholds.
+Using an API key does not mean that capacity is unlimited. API requests may still fail because of rate limits, exhausted prepaid balance, organization/project spend limits, provider availability, or an operator-defined task budget. However, these conditions are not equivalent to subscription window utilization and should not be evaluated using five-hour/weekly percentage thresholds.
 
 The minimum implementation should therefore:
 
@@ -101,8 +78,7 @@ The minimum implementation should therefore:
 2. run subscription headroom checks only for subscription-authenticated providers;
 3. return a distinct `not_applicable` result for usage-based API authentication;
 4. admit API-backed tasks when the subscription gate is the only enabled policy;
-5. continue handling an actual API `429`, quota, or billing failure through the existing normalized
-   provider-error path.
+5. continue handling an actual API `429`, quota, or billing failure through the existing normalized provider-error path.
 
 A later, separate **API budget gate** may enforce operator-defined controls such as:
 
@@ -112,13 +88,11 @@ A later, separate **API budget gate** may enforce operator-defined controls such
 - project/workspace spend ceilings;
 - API request/token headroom derived from supported rate-limit APIs or response headers.
 
-That future gate must not issue a model request merely to discover response headers: the probe
-would consume money/capacity and still would not guarantee availability for the later task.
+That future gate must not issue a model request merely to discover response headers: the probe would consume money/capacity and still would not guarantee availability for the later task.
 
 ## 4. Provider capability research
 
-The following interfaces were available when this backlog item was written on June 13, 2026.
-Their stability must be re-verified immediately before implementation.
+The following interfaces were available when this backlog item was written on June 13, 2026. Their stability must be re-verified immediately before implementation.
 
 ### 4.1. Codex
 
@@ -138,23 +112,18 @@ The response can include:
 - credit availability and balance;
 - multiple named limits through `rateLimitsByLimitId`.
 
-The RPC does not create an agent turn and is suitable for a read-only capacity query. The installed
-Codex CLI still labels App Server as experimental, so the adapter must handle protocol or schema
-changes without crashing the watch loop.
+The RPC does not create an agent turn and is suitable for a read-only capacity query. The installed Codex CLI still labels App Server as experimental, so the adapter must handle protocol or schema changes without crashing the watch loop.
 
-Official reference:
-[Codex App Server account and rate-limit methods](https://developers.openai.com/codex/app-server#6-rate-limits-chatgpt).
+Official reference: [Codex App Server account and rate-limit methods](https://developers.openai.com/codex/app-server#6-rate-limits-chatgpt).
 
 ### 4.2. Claude Code subscriptions
 
-Claude Code's interactive `/usage` command displays session cost and plan usage limits, but its
-human-oriented terminal output should not be scraped.
+Claude Code's interactive `/usage` command displays session cost and plan usage limits, but its human-oriented terminal output should not be scraped.
 
-Starting with Anthropic Claude Agent SDK for TypeScript `0.3.169`, an experimental Query method is
-available:
+Starting with Anthropic Claude Agent SDK for TypeScript `0.3.169`, an experimental Query method is available:
 
 ```typescript
-usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET()
+usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET();
 ```
 
 Its structured response can include:
@@ -166,9 +135,7 @@ Its structured response can include:
 - subscription type;
 - whether subscription rate-limit data is available.
 
-The method name explicitly declares that the API is unstable. An implementation should pin and
-probe a supported SDK version, isolate schema parsing in `ClaudeCodeProvider`, and degrade according
-to configured unknown-capacity policy when the method is unavailable.
+The method name explicitly declares that the API is unstable. An implementation should pin and probe a supported SDK version, isolate schema parsing in `ClaudeCodeProvider`, and degrade according to configured unknown-capacity policy when the method is unavailable.
 
 Official references:
 
@@ -177,21 +144,15 @@ Official references:
 
 ### 4.3. Claude API organization limits are a separate case
 
-Anthropic's Rate Limits Admin API returns configured organization/workspace API limits and requires
-an Admin API key. It is unavailable to individual accounts and is not a direct replacement for
-Claude Code subscription utilization.
+Anthropic's Rate Limits Admin API returns configured organization/workspace API limits and requires an Admin API key. It is unavailable to individual accounts and is not a direct replacement for Claude Code subscription utilization.
 
-If API-key provider backends are added later, API capacity should be treated as a separate
-capability using configured limits, usage data, and response headers. Subscription and API
-capacity must not be conflated.
+If API-key provider backends are added later, API capacity should be treated as a separate capability using configured limits, usage data, and response headers. Subscription and API capacity must not be conflated.
 
-Reference:
-[Anthropic Rate Limits API](https://platform.claude.com/docs/en/manage-claude/rate-limits-api).
+Reference: [Anthropic Rate Limits API](https://platform.claude.com/docs/en/manage-claude/rate-limits-api).
 
 ## 5. Proposed architecture
 
-Extend the provider abstraction with a provider-neutral capacity query. Provider-specific process
-and protocol details remain in `src/wastech_orchestrator/providers/`.
+Extend the provider abstraction with a provider-neutral capacity query. Provider-specific process and protocol details remain in `src/wastech_orchestrator/providers/`.
 
 Conceptual contract:
 
@@ -229,8 +190,7 @@ ProviderCredits
   balance                 # optional redacted/non-secret display value
 ```
 
-The normalized contract should preserve enough provider evidence for a deterministic policy while
-avoiding raw vendor payloads in Core. Unknown fields must be ignored forward-compatibly.
+The normalized contract should preserve enough provider evidence for a deterministic policy while avoiding raw vendor payloads in Core. Unknown fields must be ignored forward-compatibly.
 
 Suggested components:
 
@@ -246,14 +206,11 @@ Watch Loop
     -> normal pipeline
 ```
 
-The Capacity Gate owns provider-neutral admission policy. Each adapter owns command construction,
-SDK/RPC protocol handling, authentication interpretation, response parsing, and provider-specific
-error normalization.
+The Capacity Gate owns provider-neutral admission policy. Each adapter owns command construction, SDK/RPC protocol handling, authentication interpretation, response parsing, and provider-specific error normalization.
 
 ## 6. Admission point and task lifecycle
 
-The capacity gate must run after enough task validation and route resolution to know which
-providers are needed, but before any externally visible task work begins.
+The capacity gate must run after enough task validation and route resolution to know which providers are needed, but before any externally visible task work begins.
 
 Required ordering:
 
@@ -279,25 +236,17 @@ Capacity deferral is queue scheduling, not an attempted task execution.
 
 ## 7. Which providers to check
 
-The gate should inspect providers used by the task's resolved routes, not every provider listed in
-`agents.allowed`.
+The gate should inspect providers used by the task's resolved routes, not every provider listed in `agents.allowed`.
 
-For the current default routes, this normally means both Claude and Codex because Claude handles
-implementation-oriented stages and Codex is the primary reviewer. Task-level route overrides may
-change the set.
+For the current default routes, this normally means both Claude and Codex because Claude handles implementation-oriented stages and Codex is the primary reviewer. Task-level route overrides may change the set.
 
 Policy options should distinguish:
 
-- **all routed providers required:** do not start unless every provider that may be needed has
-  sufficient capacity;
-- **primary providers required:** admit when stage primaries are sufficient, treating fallback
-  capacity as advisory;
-- **first-stage provider only:** weakest policy; not recommended because it readily admits tasks
-  that cannot reach review or fixing.
+- **all routed providers required:** do not start unless every provider that may be needed has sufficient capacity;
+- **primary providers required:** admit when stage primaries are sufficient, treating fallback capacity as advisory;
+- **first-stage provider only:** weakest policy; not recommended because it readily admits tasks that cannot reach review or fixing.
 
-Recommended default: require sufficient capacity for all primary providers across agent-driven
-stages and report fallback-provider capacity separately. A stricter operator setting may require
-both primary and fallback capacity.
+Recommended default: require sufficient capacity for all primary providers across agent-driven stages and report fallback-provider capacity separately. A stricter operator setting may require both primary and fallback capacity.
 
 ## 8. Capacity policy
 
@@ -327,22 +276,16 @@ Possible `unknown_capacity` values:
 - `warn`: admit the task but record that capacity could not be verified;
 - `allow`: admit silently except for audit logging; primarily useful during staged rollout.
 
-Configuration must define global ceilings. A task must not be able to lower headroom thresholds,
-disable the gate, or change unknown-capacity policy. At most, future task metadata may request
-stricter thresholds.
+Configuration must define global ceilings. A task must not be able to lower headroom thresholds, disable the gate, or change unknown-capacity policy. At most, future task metadata may request stricter thresholds.
 
-`not_applicable` is not the same as `unavailable`: it means the adapter successfully determined
-that subscription windows do not apply, for example because the CLI uses an API key. Under a
-subscription-only capacity policy, `not_applicable` passes admission without warning. If a future
-API budget gate is enabled, that separate policy decides whether the API-backed task may start.
+`not_applicable` is not the same as `unavailable`: it means the adapter successfully determined that subscription windows do not apply, for example because the CLI uses an API key. Under a subscription-only capacity policy, `not_applicable` passes admission without warning. If a future API budget gate is enabled, that separate policy decides whether the API-backed task may start.
 
 Threshold evaluation should:
 
 - calculate remaining percentage as `100 - used_percent` when only utilization is reported;
 - evaluate every applicable required window;
 - use the most restrictive relevant window;
-- treat an explicit provider-reported exhausted/rejected state as insufficient regardless of
-  percentage;
+- treat an explicit provider-reported exhausted/rejected state as insufficient regardless of percentage;
 - consider usable paid/extra credits only when operator policy explicitly permits them;
 - preserve provider reset timestamps for scheduling and diagnostics.
 
@@ -356,8 +299,7 @@ When capacity is insufficient:
 4. schedule the next eligibility check no earlier than the configured minimum interval;
 5. when a trustworthy reset time exists, avoid repeated provider queries until near that reset;
 6. re-evaluate automatically in later `watch` ticks;
-7. notify the operator once, then suppress duplicate notifications until the reason changes or the
-   cooldown expires.
+7. notify the operator once, then suppress duplicate notifications until the reason changes or the cooldown expires.
 
 Suggested persisted fields:
 
@@ -374,17 +316,13 @@ reason
 source
 ```
 
-Do not persist raw authentication data, vendor access tokens, full RPC payloads, or full process
-environment.
+Do not persist raw authentication data, vendor access tokens, full RPC payloads, or full process environment.
 
 ### Queue ordering
 
-The first implementation should preserve strict deterministic pending order: if the first eligible
-task is capacity-deferred, the queue waits.
+The first implementation should preserve strict deterministic pending order: if the first eligible task is capacity-deferred, the queue waits.
 
-Skipping a deferred task and considering later tasks may improve throughput, especially when tasks
-use different providers, but it introduces fairness and starvation concerns. That should be a
-separate opt-in policy with:
+Skipping a deferred task and considering later tasks may improve throughput, especially when tasks use different providers, but it introduces fairness and starvation concerns. That should be a separate opt-in policy with:
 
 - a bounded scan of pending tasks;
 - auditable skip reasons;
@@ -393,25 +331,18 @@ separate opt-in policy with:
 
 ## 10. Rechecks during an active task
 
-Task-pickup admission reduces risk but cannot protect a long pipeline from concurrent usage or
-changing limits. The recommended design also supports a capacity recheck immediately before each
-agent-driven stage.
+Task-pickup admission reduces risk but cannot protect a long pipeline from concurrent usage or changing limits. The recommended design also supports a capacity recheck immediately before each agent-driven stage.
 
 Stage rechecks differ from initial admission:
 
 - the task already owns the active slot and may have a branch and partial changes;
-- insufficient capacity should pause/defer the active task rather than return it to the pending
-  queue;
+- insufficient capacity should pause/defer the active task rather than return it to the pending queue;
 - no provider attempt should be created until the stage is actually launched;
-- recovery after restart must preserve the paused stage and resume it after capacity becomes
-  sufficient;
+- recovery after restart must preserve the paused stage and resume it after capacity becomes sufficient;
 - a capacity query failure must follow the configured unknown-capacity policy;
-- an actual provider `rate_limited` error remains an infrastructure error and retains the existing
-  fallback behavior.
+- an actual provider `rate_limited` error remains an infrastructure error and retains the existing fallback behavior.
 
-This active-task pause state needs explicit state-machine design before implementation. If that
-scope is deferred, the minimum viable version may implement pickup-only admission while retaining
-current mid-pipeline fallback behavior.
+This active-task pause state needs explicit state-machine design before implementation. If that scope is deferred, the minimum viable version may implement pickup-only admission while retaining current mid-pipeline fallback behavior.
 
 ## 11. Failure handling
 
@@ -429,8 +360,7 @@ Capacity query failures must be distinguished from provider run failures:
 | API-key auth without subscription windows | `not_applicable` | Skip subscription gate; use future API budget policy if configured |
 | Third-party billing without a dedicated capacity adapter | `not_applicable` | Skip subscription gate; use provider-specific policy if configured |
 
-Do not reinterpret a capacity-query protocol error as a task quality failure. Do not run an agent
-turn merely to test capacity, because that would consume the resource being measured.
+Do not reinterpret a capacity-query protocol error as a task quality failure. Do not run an agent turn merely to test capacity, because that would consume the resource being measured.
 
 ## 12. Security requirements
 
@@ -438,8 +368,7 @@ turn merely to test capacity, because that would consume the resource being meas
 - Capacity subprocesses receive only the existing allowlisted environment.
 - All commands use argv lists without shell interpolation.
 - RPC/SDK output is parsed in memory and normalized before persistence.
-- Logs and artifacts contain no access tokens, cookies, authorization headers, or raw credential
-  files.
+- Logs and artifacts contain no access tokens, cookies, authorization headers, or raw credential files.
 - Provider-specific SDK additions must not introduce proxying or traffic interception.
 - A task and `extra_args` cannot disable the capacity gate or lower configured thresholds.
 - Timeouts are mandatory so a broken capacity endpoint cannot hang `watch`.
@@ -481,16 +410,14 @@ Capacity snapshots should be bounded and retained according to the existing arti
 
 ## 14. Interaction with token usage measurement
 
-This feature complements
-[token optimization](token_optimization.md), especially its Phase 0 measurement:
+This feature complements [token optimization](token_optimization.md), especially its Phase 0 measurement:
 
 - persist `AgentRunResult.usage` per provider attempt;
 - build per-provider, per-model, per-stage distributions;
 - compare admitted headroom with actual task outcomes;
 - tune thresholds from evidence rather than guesses.
 
-A later version may derive conservative estimated task demand from historical percentiles and task
-metadata. Such estimates must include uncertainty and must never claim exact completion guarantees.
+A later version may derive conservative estimated task demand from historical percentiles and task metadata. Such estimates must include uncertainty and must never claim exact completion guarantees.
 
 ## 15. Testing requirements
 
@@ -515,8 +442,7 @@ Use fake provider capacity endpoints/processes:
 
 - both providers sufficient -> task starts;
 - API-key provider -> subscription gate is skipped and task starts;
-- mixed route with one subscription provider and one API-key provider -> check only the
-  subscription provider;
+- mixed route with one subscription provider and one API-key provider -> check only the subscription provider;
 - primary insufficient -> task remains pending with no branch;
 - fallback insufficient under `required_routes: primary` -> task starts with warning;
 - unknown capacity under each configured policy;
@@ -526,13 +452,11 @@ Use fake provider capacity endpoints/processes:
 
 ### End-to-end tests
 
-- autonomous `watch` discovers a task, defers it without side effects, then starts it after a fake
-  reset;
+- autonomous `watch` discovers a task, defers it without side effects, then starts it after a fake reset;
 - strict queue order blocks later tasks while the head task is deferred;
 - optional future skip-deferred policy preserves fairness;
 - pickup capacity checks do not invoke `codex exec` or `claude -p`;
-- stage recheck, if implemented, pauses and resumes without duplicate provider attempts, commits,
-  pushes, or PRs.
+- stage recheck, if implemented, pauses and resumes without duplicate provider attempts, commits, pushes, or PRs.
 
 Real provider accounts must not be required in deterministic CI.
 
@@ -566,29 +490,23 @@ Real provider accounts must not be required in deterministic CI.
 
 ## 17. Open questions
 
-- Should the default unknown-capacity policy be `defer` for fully autonomous operation or `warn`
-  while provider interfaces remain experimental?
+- Should the default unknown-capacity policy be `defer` for fully autonomous operation or `warn` while provider interfaces remain experimental?
 - Should fallback-provider capacity be required at admission or only reported?
 - May paid/extra credits satisfy the gate automatically, or must an operator explicitly opt in?
 - Should an API budget gate be part of this feature or remain a separate backlog task?
-- Which official provider endpoints are sufficiently stable to check API balance/spend without
-  issuing a billable model request?
-- Does pickup-only gating provide enough value for the first release, or is active-task pause/resume
-  required in the same change?
-- Should strict pending order remain mandatory, or should capacity-deferred tasks allow a bounded
-  scan for work that uses a different provider?
+- Which official provider endpoints are sufficiently stable to check API balance/spend without issuing a billable model request?
+- Does pickup-only gating provide enough value for the first release, or is active-task pause/resume required in the same change?
+- Should strict pending order remain mandatory, or should capacity-deferred tasks allow a bounded scan for work that uses a different provider?
 - What initial thresholds are justified before real per-stage usage baselines exist?
 
 ## 18. Acceptance criteria
 
-- In autonomous `watch` mode, a pending task is not claimed or branched when a required provider is
-  below configured capacity thresholds.
+- In autonomous `watch` mode, a pending task is not claimed or branched when a required provider is below configured capacity thresholds.
 - The deferred task remains pending and is reconsidered automatically without operator action.
 - Deferral consumes no stage attempt or fixing budget.
 - Provider-specific capacity protocols remain confined to provider adapters.
 - Unknown/unavailable capacity follows explicit, validated policy.
-- API-key and third-party billing modes skip subscription-window thresholds through an audited
-  `not_applicable` result rather than being treated as unlimited or broken.
+- API-key and third-party billing modes skip subscription-window thresholds through an audited `not_applicable` result rather than being treated as unlimited or broken.
 - Reset times and decisions are audited without storing secrets or raw credentials.
 - Capacity is re-evaluated after restart without duplicate task execution.
 - Existing infrastructure-only fallback semantics remain unchanged for actual provider runs.

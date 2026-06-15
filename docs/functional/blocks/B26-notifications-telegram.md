@@ -2,28 +2,21 @@
 
 ## Назначение
 
-Транспорт «человека в контуре» и терминальных уведомлений через Telegram. Ядро типизировано против
-узкого контракта `Notifier`, поэтому транспорт — деталь реализации: при выключенном или непрописанном
-Telegram возвращается «тихий» `NullNotifier`. Отправляет коррелированный запрос, ждёт ответ с
-таймаутом и шлёт fire-and-forget уведомления о терминальном исходе.
+Транспорт «человека в контуре» и терминальных уведомлений через Telegram. Ядро типизировано против узкого контракта `Notifier`, поэтому транспорт — деталь реализации: при выключенном или непрописанном Telegram возвращается «тихий» `NullNotifier`. Отправляет коррелированный запрос, ждёт ответ с таймаутом и шлёт fire-and-forget уведомления о терминальном исходе.
 
 ## Ответственность
 
-- Задать контракт `Notifier` и его типы (`AskHandle`, `AskResult`) + null-реализацию
-  ([interface.py:54-161](../../../src/wastech_orchestrator/notify/interface.py#L54)).
+- Задать контракт `Notifier` и его типы (`AskHandle`, `AskResult`) + null-реализацию ([interface.py:54-161](../../../src/wastech_orchestrator/notify/interface.py#L54)).
 - Резолвить транспорт из конфигурации + env (`build_notifier`) ([telegram.py:300-345](../../../src/wastech_orchestrator/notify/telegram.py#L300)).
-- Отправить запрос (кнопки approval / ForceReply question) и опросить ответ до дедлайна
-  ([telegram.py:168-264,596-718](../../../src/wastech_orchestrator/notify/telegram.py#L168)).
-- Слать терминальные уведомления best-effort и делать preflight Telegram
-  ([telegram.py:128-144,348-392](../../../src/wastech_orchestrator/notify/telegram.py#L128)).
+- Отправить запрос (кнопки approval / ForceReply question) и опросить ответ до дедлайна ([telegram.py:168-264,596-718](../../../src/wastech_orchestrator/notify/telegram.py#L168)).
+- Слать терминальные уведомления best-effort и делать preflight Telegram ([telegram.py:128-144,348-392](../../../src/wastech_orchestrator/notify/telegram.py#L128)).
 - Редактировать токен/chat_id во всём исходящем и в логах ([telegram.py:283-297](../../../src/wastech_orchestrator/notify/telegram.py#L283)).
 
 ## Границы блока
 
 ### Входит в ответственность блока
 
-- Контракт `Notifier`; отправка/поллинг Telegram; корреляция по `interaction_id` + `message_id`;
-  таймаут; null-путь; preflight; редакция учётных данных.
+- Контракт `Notifier`; отправка/поллинг Telegram; корреляция по `interaction_id` + `message_id`; таймаут; null-путь; preflight; редакция учётных данных.
 
 ### Не входит в ответственность блока
 
@@ -41,22 +34,15 @@ Telegram возвращается «тихий» `NullNotifier`. Отправл�
 
 ## Входные данные и состояние
 
-`TelegramConfig` (`enabled`, `bot_token_env`, `chat_id_env`, `ask_timeout_s`); значения токена/chat_id
-из env (по именам из конфигурации); `AskHandle` (вкл. `expires_at` как wall-clock дедлайн, переживающий
-рестарт). Состояние между вызовами не хранит (короткоживущий event loop на операцию).
+`TelegramConfig` (`enabled`, `bot_token_env`, `chat_id_env`, `ask_timeout_s`); значения токена/chat_id из env (по именам из конфигурации); `AskHandle` (вкл. `expires_at` как wall-clock дедлайн, переживающий рестарт). Состояние между вызовами не хранит (короткоживущий event loop на операцию).
 
 ## Основной сценарий (`ask_human` = start_ask + wait_for_answer)
 
-1. `start_ask`: форматирует и редактирует промпт, отправляет (approval → inline-кнопки
-   `hitl:<id>:yes|no`; question → ForceReply), возвращает `AskHandle` с дедлайном `now + timeout`
-   (ограничен `ask_timeout_s`).
-2. `wait_for_answer`: считает остаток до wall-clock дедлайна, `poll_reply` опрашивает `getUpdates`
-   до дедлайна, сопоставляя ответ с `message_id`/`callback_data` в целевом чате.
-3. Возвращает `AskResult`: успех (text/approved), `timeout`, `transport_error`, либо
-   `invalid_response` (свободный текст вместо кнопки approval).
+1. `start_ask`: форматирует и редактирует промпт, отправляет (approval → inline-кнопки `hitl:<id>:yes|no`; question → ForceReply), возвращает `AskHandle` с дедлайном `now + timeout` (ограничен `ask_timeout_s`).
+2. `wait_for_answer`: считает остаток до wall-clock дедлайна, `poll_reply` опрашивает `getUpdates` до дедлайна, сопоставляя ответ с `message_id`/`callback_data` в целевом чате.
+3. Возвращает `AskResult`: успех (text/approved), `timeout`, `transport_error`, либо `invalid_response` (свободный текст вместо кнопки approval).
 
-Round-trip `ask_human`; любой транспортный сбой — типизированное значение (не исключение), ядро
-трактует его fail-closed:
+Round-trip `ask_human`; любой транспортный сбой — типизированное значение (не исключение), ядро трактует его fail-closed:
 
 ```mermaid
 flowchart TB
@@ -74,31 +60,26 @@ flowchart TB
 
 ### Транспорт выключен / не настроен
 
-`build_notifier` → `NullNotifier` (если `enabled=False` или пустой токен/chat_id); его `ask_*`
-детерминированно возвращают `transport_error` ([interface.py:131-138](../../../src/wastech_orchestrator/notify/interface.py#L131)).
+`build_notifier` → `NullNotifier` (если `enabled=False` или пустой токен/chat*id); его `ask*\*`детерминированно возвращают`transport_error` ([interface.py:131-138](../../../src/wastech_orchestrator/notify/interface.py#L131)).
 
 ### Недоставленный запрос
 
-`start_ask` поймал исключение → `AskHandle(delivered=False)`; `wait_for_answer` сразу
-`transport_error` ([telegram.py:195-218](../../../src/wastech_orchestrator/notify/telegram.py#L195)).
+`start_ask` поймал исключение → `AskHandle(delivered=False)`; `wait_for_answer` сразу `transport_error` ([telegram.py:195-218](../../../src/wastech_orchestrator/notify/telegram.py#L195)).
 
 ### Конфликт поллинга (409)
 
-Второй потребитель `getUpdates` на тот же бот-токен → `RuntimeError` (мапится в `transport_error`),
-а на preflight — явный FAIL ([telegram.py:636-644,504-520](../../../src/wastech_orchestrator/notify/telegram.py#L636)).
+Второй потребитель `getUpdates` на тот же бот-токен → `RuntimeError` (мапится в `transport_error`), а на preflight — явный FAIL ([telegram.py:636-644,504-520](../../../src/wastech_orchestrator/notify/telegram.py#L636)).
 
 ## Проверки и ограничения
 
-- `build_notifier`/preflight FAIL при отсутствии/пустоте env; preflight FAIL при не-числовом chat_id,
-  настроенном webhook (нужен polling), ошибке API ([telegram.py:361-392](../../../src/wastech_orchestrator/notify/telegram.py#L361)).
+- `build_notifier`/preflight FAIL при отсутствии/пустоте env; preflight FAIL при не-числовом chat_id, настроенном webhook (нужен polling), ошибке API ([telegram.py:361-392](../../../src/wastech_orchestrator/notify/telegram.py#L361)).
 - Терминальное уведомление best-effort: исключения ловятся и логируются (редактированно), не пробрасываются ([telegram.py:266-272](../../../src/wastech_orchestrator/notify/telegram.py#L266)).
 - Колбэк из чужого чата никогда не подтверждается (§12.15) ([telegram.py:710-715](../../../src/wastech_orchestrator/notify/telegram.py#L710)).
 - Исходящее редактируется и обрезается до 4096 символов ([telegram.py:296-297,430-434](../../../src/wastech_orchestrator/notify/telegram.py#L296)); транспортные логи (httpx/telegram) приглушаются, чтобы URL с токеном не утёк ([telegram.py:721-745](../../../src/wastech_orchestrator/notify/telegram.py#L721)).
 
 ## Результат
 
-`AskResult` (для HITL), `ProviderHealth`-подобная строка preflight, отправленное уведомление.
-Транспортный сбой — типизированное значение, а не исключение.
+`AskResult` (для HITL), `ProviderHealth`-подобная строка preflight, отправленное уведомление. Транспортный сбой — типизированное значение, а не исключение.
 
 ## Побочные эффекты
 
@@ -107,8 +88,7 @@ flowchart TB
 
 ## Ошибки и граничные случаи
 
-- Все транспортные ошибки возвращаются как `failure` (`timeout`/`transport_error`/`invalid_response`),
-  а ядро применяет fail-closed семантику ([B06](./B06-orchestrator-pipeline.md): `ManualActionRequired`).
+- Все транспортные ошибки возвращаются как `failure` (`timeout`/`transport_error`/`invalid_response`), а ядро применяет fail-closed семантику ([B06](./B06-orchestrator-pipeline.md): `ManualActionRequired`).
 - Бэклог обновлений слишком велик для дренажа → `RuntimeError` ([telegram.py:583](../../../src/wastech_orchestrator/notify/telegram.py#L583)).
 
 ## Связи
@@ -125,9 +105,7 @@ flowchart TB
 
 ## Место в общей системе
 
-Делает паузы «на человека» реальными: согласование плана, опасного диффа и изменившегося набора
-проверок проходит через этот транспорт. Совместно с [B12](./B12-hitl-and-typed-output.md) (долговечность)
-обеспечивает HITL, переживающий рестарты, не давая секретам утечь в логи/сеть.
+Делает паузы «на человека» реальными: согласование плана, опасного диффа и изменившегося набора проверок проходит через этот транспорт. Совместно с [B12](./B12-hitl-and-typed-output.md) (долговечность) обеспечивает HITL, переживающий рестарты, не давая секретам утечь в логи/сеть.
 
 ## Подтверждение в коде
 

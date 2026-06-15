@@ -2,16 +2,12 @@
 
 ## Назначение
 
-Первая (необязательная) стадия конвейера: агент обогащает «сырую» задачу до состояния, пригодного для
-планирования. Пропускается детерминированно, если задача уже полная — тогда конвейер сразу идёт к
-planning.
+Первая (необязательная) стадия конвейера: агент обогащает «сырую» задачу до состояния, пригодного для планирования. Пропускается детерминированно, если задача уже полная — тогда конвейер сразу идёт к planning.
 
 ## Ответственность
 
-- Решить, нужна ли стадия: пропуск при `task.refined` или классификации полноты `COMPLETE`
-  ([orchestrator.py:1049-1056](../../../../src/wastech_orchestrator/core/orchestrator.py#L1049)).
-- При запуске — прогнать агента refinement, записать `task.enriched.md`, отметить `refinement_ran`
-  ([orchestrator.py:1061-1066](../../../../src/wastech_orchestrator/core/orchestrator.py#L1061)).
+- Решить, нужна ли стадия: пропуск при `task.refined` или классификации полноты `COMPLETE` ([orchestrator.py:1049-1056](../../../../src/wastech_orchestrator/core/orchestrator.py#L1049)).
+- При запуске — прогнать агента refinement, записать `task.enriched.md`, отметить `refinement_ran` ([orchestrator.py:1061-1066](../../../../src/wastech_orchestrator/core/orchestrator.py#L1061)).
 
 ## Границы шага
 
@@ -33,15 +29,12 @@ planning.
 
 ## Входные данные и состояние
 
-`NormalizedTask` (флаг `refined`) и `Completeness` из Фазы B ([B16](../../blocks/B16-task-parsing-and-validation-gate.md)).
-Статус: `preparing` → `refining` (или сразу `planning` при пропуске). Артефакт — `task.enriched.md`.
+`NormalizedTask` (флаг `refined`) и `Completeness` из Фазы B ([B16](../../blocks/B16-task-parsing-and-validation-gate.md)). Статус: `preparing` → `refining` (или сразу `planning` при пропуске). Артефакт — `task.enriched.md`.
 
 ## Основной сценарий
 
-1. Если `refined` истинно **или** полнота `COMPLETE` → записать `refinement_ran=False` + причину,
-   перейти к [S02 planning](./S02-planning.md).
-2. Иначе → перейти в `REFINING`, прогнать агента (`_run_typed_stage`, [B12](../../blocks/B12-hitl-and-typed-output.md)/[B17](../../blocks/B17-agent-router-and-fallback.md)),
-   записать `task.enriched.md`, выставить `refinement_ran=True`, перейти к planning.
+1. Если `refined` истинно **или** полнота `COMPLETE` → записать `refinement_ran=False` + причину, перейти к [S02 planning](./S02-planning.md).
+2. Иначе → перейти в `REFINING`, прогнать агента (`_run_typed_stage`, [B12](../../blocks/B12-hitl-and-typed-output.md)/[B17](../../blocks/B17-agent-router-and-fallback.md)), записать `task.enriched.md`, выставить `refinement_ran=True`, перейти к planning.
 
 ```mermaid
 flowchart TB
@@ -54,14 +47,12 @@ flowchart TB
 
 ## Проверки и ограничения
 
-- refinement **не** входит в `SKIPPABLE_STAGES`: опциональность управляется флагом `refined`/полнотой,
-  а не `agents.skip_stages` ([schema.py:50-63](../../../../src/wastech_orchestrator/config/schema.py#L50)).
+- refinement **не** входит в `SKIPPABLE_STAGES`: опциональность управляется флагом `refined`/полнотой, а не `agents.skip_stages` ([schema.py:50-63](../../../../src/wastech_orchestrator/config/schema.py#L50)).
 - Запросить человека (HITL) могут только refinement и planning ([B12](../../blocks/B12-hitl-and-typed-output.md)).
 
 ## Результат / переход
 
-Переход к [S02 planning](./S02-planning.md). При запуске — артефакт `task.enriched.md`; в [B07](../../blocks/B07-state-machine-and-store.md)
-обновлены `refinement_ran`/`refinement_skip_reason`.
+Переход к [S02 planning](./S02-planning.md). При запуске — артефакт `task.enriched.md`; в [B07](../../blocks/B07-state-machine-and-store.md) обновлены `refinement_ran`/`refinement_skip_reason`.
 
 ## Побочные эффекты
 
@@ -77,9 +68,7 @@ flowchart TB
 
 ### Использует
 
-- [B12](../../blocks/B12-hitl-and-typed-output.md), [B15](../../blocks/B15-prompt-templates.md),
-  [B17](../../blocks/B17-agent-router-and-fallback.md)/[B18](../../blocks/B18-agent-providers.md),
-  [B16](../../blocks/B16-task-parsing-and-validation-gate.md) (Completeness), [B07](../../blocks/B07-state-machine-and-store.md).
+- [B12](../../blocks/B12-hitl-and-typed-output.md), [B15](../../blocks/B15-prompt-templates.md), [B17](../../blocks/B17-agent-router-and-fallback.md)/[B18](../../blocks/B18-agent-providers.md), [B16](../../blocks/B16-task-parsing-and-validation-gate.md) (Completeness), [B07](../../blocks/B07-state-machine-and-store.md).
 
 ### Используется в
 
@@ -87,8 +76,7 @@ flowchart TB
 
 ## Место в потоке
 
-Вход конвейера сразу после подготовки ветки. Готовит почву для планирования; на уже полной/`refined`
-задаче проходится мгновенно (без агента). См. [обзор потока](./index.md).
+Вход конвейера сразу после подготовки ветки. Готовит почву для планирования; на уже полной/`refined` задаче проходится мгновенно (без агента). См. [обзор потока](./index.md).
 
 ## Подтверждение в коде
 

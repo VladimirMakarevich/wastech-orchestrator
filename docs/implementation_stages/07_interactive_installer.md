@@ -1,8 +1,6 @@
 # Интерактивный установщик проекта
 
-> **Статус: реализовано.** Поставляется как команда `wastech-orchestrator install`. См. §20.4
-> канонической спецификации ([implementation_stages/00_orchestrator_final_plan.md](../implementation_stages/00_orchestrator_final_plan.md))
-> и [operations.md](../operations.md). Этот файл сохранён как исходная проектная заметка.
+> **Статус: реализовано.** Поставляется как команда `wastech-orchestrator install`. См. §20.4 канонической спецификации ([implementation_stages/00_orchestrator_final_plan.md](../implementation_stages/00_orchestrator_final_plan.md)) и [operations.md](../operations.md). Этот файл сохранён как исходная проектная заметка.
 
 ## Кратко
 

@@ -1,22 +1,15 @@
 # Product Backlog
 
-Status: **backlog / not scheduled**
-Date: 2026-06-12
-Owner: Vladimir Makarevich
+Status: **backlog / not scheduled** Date: 2026-06-12 Owner: Vladimir Makarevich
 
-This document aggregates deferred and candidate functionality that was previously scattered across
-the repository. It is an inventory, not an implementation contract. The source of truth remains
-[00_orchestrator_final_plan.md](../implementation_stages/00_orchestrator_final_plan.md).
+This document aggregates deferred and candidate functionality that was previously scattered across the repository. It is an inventory, not an implementation contract. The source of truth remains [00_orchestrator_final_plan.md](../implementation_stages/00_orchestrator_final_plan.md).
 
 ## Sources Consolidated
 
 - [00_orchestrator_final_plan.md](../implementation_stages/00_orchestrator_final_plan.md) sections 2 and 18.
-- [../codex_git_orchestrator_architecture.md](../codex_git_orchestrator_architecture.md) sections
-  4.7, 4.10, 4.11, 6, 11, and 12.
-- [../implementation_stages/05_pipeline_and_recovery.md](../implementation_stages/05_pipeline_and_recovery.md)
-  "Not in this phase".
-- [../implementation_stages/06_security_and_observability.md](../implementation_stages/06_security_and_observability.md)
-  "Not in this phase".
+- [../codex_git_orchestrator_architecture.md](../codex_git_orchestrator_architecture.md) sections 4.7, 4.10, 4.11, 6, 11, and 12.
+- [../implementation_stages/05_pipeline_and_recovery.md](../implementation_stages/05_pipeline_and_recovery.md) "Not in this phase".
+- [../implementation_stages/06_security_and_observability.md](../implementation_stages/06_security_and_observability.md) "Not in this phase".
 - Detailed backlog files in this folder.
 
 ## Canonical V2 Backlog
@@ -80,8 +73,7 @@ These were described in architecture notes or v1 exclusions but are not schedule
 
 ## Not Backlog
 
-The following are already part of the v1 spec or current implementation plan and should not be
-tracked here as future work unless their scope changes:
+The following are already part of the v1 spec or current implementation plan and should not be tracked here as future work unless their scope changes:
 
 - provider abstraction through `AgentProvider`;
 - infrastructure-only fallback;
@@ -93,8 +85,5 @@ tracked here as future work unless their scope changes:
 - git footprint modes and scoped staging;
 - terminal cleanup and auto mode;
 - state-store recovery and idempotent publishing;
-- Telegram terminal notifications, typed HITL for `refinement`/`planning`, durable interaction
-  recovery, and deletion/dependency diff approvals (see
-  [Stage 08](../implementation_stages/08_telegram_integration.md));
-- automatic check discovery and environment resolution (see
-  [Stage 09](../implementation_stages/09_automatic_check_discovery.md)).
+- Telegram terminal notifications, typed HITL for `refinement`/`planning`, durable interaction recovery, and deletion/dependency diff approvals (see [Stage 08](../implementation_stages/08_telegram_integration.md));
+- automatic check discovery and environment resolution (see [Stage 09](../implementation_stages/09_automatic_check_discovery.md)).

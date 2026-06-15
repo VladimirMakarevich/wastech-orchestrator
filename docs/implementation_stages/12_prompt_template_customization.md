@@ -1,48 +1,21 @@
 # Backlog: Prompt template customization
 
-Status: **implemented (2026-06-13)** — core feature shipped; the §10 open questions (global
-preamble, per-stage `mode`, `agent_instructions:` for project stubs) remain deferred. **Update
-(2026-06-14):** the *skill-reference* half of the `agent_instructions:` idea shipped as
-planning-selected skill references (the `{skills_path}` variable + `skills:` config block, post-test-run
-§2.1/§2.2); *authoring/managing* the stubs themselves, the shared preamble, and per-stage `mode` are
-still deferred.
-Date: 2026-06-12
-Owner: Vladimir Makarevich
+Status: **implemented (2026-06-13)** — core feature shipped; the §10 open questions (global preamble, per-stage `mode`, `agent_instructions:` for project stubs) remain deferred. **Update (2026-06-14):** the _skill-reference_ half of the `agent_instructions:` idea shipped as planning-selected skill references (the `{skills_path}` variable + `skills:` config block, post-test-run §2.1/§2.2); _authoring/managing_ the stubs themselves, the shared preamble, and per-stage `mode` are still deferred. Date: 2026-06-12 Owner: Vladimir Makarevich
 
-This document captured the task of making stage prompts configurable by operators. The core of it
-is now implemented (the `prompts:` config block; see
-[configuration.md](../configuration.md#prompts), [cookbook.md](../cookbook.md#7a-customize-stage-prompts),
-and `core/prompts.py`). The notes below are retained as design rationale. Nothing here overrides
-[00_orchestrator_final_plan.md](../implementation_stages/00_orchestrator_final_plan.md), [CLAUDE.md](../../CLAUDE.md), or the hard
-invariants in [docs/rules/](../rules/).
+This document captured the task of making stage prompts configurable by operators. The core of it is now implemented (the `prompts:` config block; see [configuration.md](../configuration.md#prompts), [cookbook.md](../cookbook.md#7a-customize-stage-prompts), and `core/prompts.py`). The notes below are retained as design rationale. Nothing here overrides [00_orchestrator_final_plan.md](../implementation_stages/00_orchestrator_final_plan.md), [CLAUDE.md](../../CLAUDE.md), or the hard invariants in [docs/rules/](../rules/).
 
-> **Superseded in part by schema v6** (see
-> [../backlog/task_prompt_templates_simplification.md](../backlog/task_prompt_templates_simplification.md)):
-> the activation model below — the `prompts.overrides` map and the `prompts.strict` flag — was replaced
-> by **convention over config**. A `prompts/<stage>.md` present in `templates_dir` is now used
-> automatically (its presence is the activation signal); `mode` defaults to `replace`; a missing file
-> falls back to the packaged default (no fail-closed path); and `templates_dir` resolves relative to
-> `config.yaml`. Read references to `overrides`/`strict` below as historical.
+> **Superseded in part by schema v6** (see [../backlog/task_prompt_templates_simplification.md](../backlog/task_prompt_templates_simplification.md)): the activation model below — the `prompts.overrides` map and the `prompts.strict` flag — was replaced by **convention over config**. A `prompts/<stage>.md` present in `templates_dir` is now used automatically (its presence is the activation signal); `mode` defaults to `replace`; a missing file falls back to the packaged default (no fail-closed path); and `templates_dir` resolves relative to `config.yaml`. Read references to `overrides`/`strict` below as historical.
 
 Implementation notes that refined this proposal:
 
-- Packaged `templates/prompts/*.md` are renamed to the stage value (`planning.md`,
-  `implementation.md`, `fixing.md`) and rewritten to match the previous runtime prompts (paths-only,
-  no embedded task/diff content); they are now the single default source and `_STAGE_PROMPTS` is
-  gone.
-- Variable substitution uses a *safe* renderer: only allowlisted `{name}` tokens interpolate; any
-  other `{...}` (unknown name or literal code/JSON braces) is left verbatim.
-- Strict/existence checks run when the `PromptTemplateStore` is built at orchestrator startup (fail
-  closed before any agent runs); config validation does the static checks (stage, `.md`, traversal).
-- The rendered-prompt audit artifact is written **once per stage run** under
-  `logs/<task-id>/stages/<stage>/[sub-NN/]rendered-prompt.md` (the prompt is deterministic across a
-  stage run's attempts), resolving open question §10/Q2.
+- Packaged `templates/prompts/*.md` are renamed to the stage value (`planning.md`, `implementation.md`, `fixing.md`) and rewritten to match the previous runtime prompts (paths-only, no embedded task/diff content); they are now the single default source and `_STAGE_PROMPTS` is gone.
+- Variable substitution uses a _safe_ renderer: only allowlisted `{name}` tokens interpolate; any other `{...}` (unknown name or literal code/JSON braces) is left verbatim.
+- Strict/existence checks run when the `PromptTemplateStore` is built at orchestrator startup (fail closed before any agent runs); config validation does the static checks (stage, `.md`, traversal).
+- The rendered-prompt audit artifact is written **once per stage run** under `logs/<task-id>/stages/<stage>/[sub-NN/]rendered-prompt.md` (the prompt is deterministic across a stage run's attempts), resolving open question §10/Q2.
 
 ## 1. Goal
 
-Allow users to extend or replace the instructions passed to Codex / Claude Code for each agent-run
-stage (`refinement`, `planning`, `implementation`, `review`, `fixing`, `summary`) without editing
-Python code.
+Allow users to extend or replace the instructions passed to Codex / Claude Code for each agent-run stage (`refinement`, `planning`, `implementation`, `review`, `fixing`, `summary`) without editing Python code.
 
 The main use cases:
 
@@ -54,10 +27,7 @@ The main use cases:
 
 ## 2. Current behavior
 
-The runtime currently uses short hardcoded prompts in
-`src/wastech_orchestrator/core/orchestrator.py` (`_STAGE_PROMPTS`). The packaged files under
-`src/wastech_orchestrator/templates/prompts/*.md` are copied by `init` into `templates/prompts/`,
-but the Core does not read those files when it starts an agent run.
+The runtime currently uses short hardcoded prompts in `src/wastech_orchestrator/core/orchestrator.py` (`_STAGE_PROMPTS`). The packaged files under `src/wastech_orchestrator/templates/prompts/*.md` are copied by `init` into `templates/prompts/`, but the Core does not read those files when it starts an agent run.
 
 Provider adapters then append a deterministic context footer containing artifact file paths:
 
@@ -70,8 +40,7 @@ Context files (read them as needed; do not assume their contents):
 - review: ...
 ```
 
-The prompt is sent to the CLI on stdin. Task content and artifact content are not interpolated into
-the provider argv.
+The prompt is sent to the CLI on stdin. Task content and artifact content are not interpolated into the provider argv.
 
 ## 3. Desired behavior
 
@@ -90,8 +59,7 @@ Target behavior:
 - rendered prompts are registered as artifacts for audit/debugging;
 - provider adapters continue to append context file paths and continue to own CLI-specific syntax.
 
-The Core may know stage names and prompt-template variables, but it must not gain provider-specific
-CLI knowledge.
+The Core may know stage names and prompt-template variables, but it must not gain provider-specific CLI knowledge.
 
 ## 4. Proposed configuration
 
@@ -100,8 +68,8 @@ Add a new top-level block:
 ```yaml
 prompts:
   templates_dir: "./templates/prompts"
-  mode: "append"                 # append | replace
-  strict: false                  # false = fallback to packaged default when a file is missing
+  mode: "append" # append | replace
+  strict: false # false = fallback to packaged default when a file is missing
   overrides:
     implementation: "implementation.md"
     review: "review.md"
@@ -116,8 +84,7 @@ Semantics:
 - `strict: true` fails config validation if an override file is missing.
 - `strict: false` logs a warning and uses the packaged default.
 
-Open decision: whether `mode` should be global only, or allow per-stage mode in a later version.
-Start with global mode to keep the interface small.
+Open decision: whether `mode` should be global only, or allow per-stage mode in a later version. Start with global mode to keep the interface small.
 
 ## 5. Template variables
 
@@ -126,7 +93,7 @@ Use a small allowlisted variable set. Do not expose arbitrary Python objects or 
 Suggested variables:
 
 | Variable | Meaning |
-|---|---|
+| --- | --- |
 | `{task_id}` | Normalized task id. |
 | `{stage}` | Current agent-routed stage. |
 | `{repo_path}` | `repo.local_path`. |
@@ -140,17 +107,14 @@ Suggested variables:
 | `{subtask_spec_path}` | Active subtask spec path, when decomposed. |
 | `{skills_path}` | Newline-joined planning-selected `SKILL.md` reference paths, when any (§2.1). |
 
-Important constraint: variables should be metadata and artifact paths only. Do not inject full task
-body, full diffs, check logs, or secrets directly into the prompt template. Large content should
-remain in artifact files referenced by path.
+Important constraint: variables should be metadata and artifact paths only. Do not inject full task body, full diffs, check logs, or secrets directly into the prompt template. Large content should remain in artifact files referenced by path.
 
 ## 6. Security and invariants
 
 This feature must preserve the existing invariants:
 
 - provider adapters still launch CLIs with argv lists and stdin prompts;
-- user templates cannot change provider command, `extra_args`, credentials, sandbox, approval mode,
-  denied commands, denied reads, or environment allowlists;
+- user templates cannot change provider command, `extra_args`, credentials, sandbox, approval mode, denied commands, denied reads, or environment allowlists;
 - template paths are normalized and must remain inside `prompts.templates_dir`;
 - rendered prompt artifacts are redacted before storage;
 - secrets and full environment values are never available as template variables;
@@ -163,17 +127,13 @@ Suggested components:
 
 - `config.schema`: add `PromptsConfig`.
 - `config.loader`: parse `prompts.templates_dir`, `mode`, `strict`, and `overrides`.
-- `config.validation`: reject unknown stages, path traversal, unsupported modes, and invalid
-  extension/suffixes.
+- `config.validation`: reject unknown stages, path traversal, unsupported modes, and invalid extension/suffixes.
 - `core/prompts.py`: add `PromptTemplateStore` and `PromptRenderer`.
 - `core/orchestrator.py`: replace direct `_STAGE_PROMPTS[stage]` lookup with prompt rendering.
-- `providers/artifacts.py` or Core artifact registration: write `rendered-prompt.md` per stage
-  attempt for audit.
-- `templates/prompts/*.md`: keep packaged defaults in sync with the hardcoded prompts before
-  deleting `_STAGE_PROMPTS`.
+- `providers/artifacts.py` or Core artifact registration: write `rendered-prompt.md` per stage attempt for audit.
+- `templates/prompts/*.md`: keep packaged defaults in sync with the hardcoded prompts before deleting `_STAGE_PROMPTS`.
 
-Keep provider adapters unchanged except for receiving the rendered prompt through the existing
-`AgentRunRequest.prompt` field.
+Keep provider adapters unchanged except for receiving the rendered prompt through the existing `AgentRunRequest.prompt` field.
 
 ## 8. Testing plan
 
@@ -207,8 +167,7 @@ Regression tests:
 When implemented, update:
 
 - [configuration.md](../configuration.md) with the `prompts:` block;
-- [cookbook.md](../cookbook.md) with a recipe for adding repository-specific implementation/review
-  instructions;
+- [cookbook.md](../cookbook.md) with a recipe for adding repository-specific implementation/review instructions;
 - [operations.md](../operations.md) with troubleshooting for missing or malformed templates;
 - packaged `templates/prompts/*.md` comments/examples.
 
@@ -217,5 +176,4 @@ When implemented, update:
 - Should custom templates be append-only by default, or should replace mode be allowed in v1?
 - Should rendered prompts be stored once per stage or once per provider attempt?
 - Should prompt customization support a global preamble shared by all stages?
-- Should project-specific agent stubs (`AGENTS.md`, `CLAUDE.md`, skills) be managed by the same
-  `prompts:` config block or by a separate `agent_instructions:` feature?
+- Should project-specific agent stubs (`AGENTS.md`, `CLAUDE.md`, skills) be managed by the same `prompts:` config block or by a separate `agent_instructions:` feature?

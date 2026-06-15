@@ -14,8 +14,7 @@ There are two levels of git here: (A) how the orchestrator **itself** is develop
 
 ## B. How the orchestrator manages a target repository (implementation contract)
 
-This is a product invariant (see
-[00_orchestrator_final_plan.md §8, §13](../implementation_stages/00_orchestrator_final_plan.md)):
+This is a product invariant (see [00_orchestrator_final_plan.md §8, §13](../implementation_stages/00_orchestrator_final_plan.md)):
 
 - Branch prefix: **`agent/<task-id>-<slug>`**.
 - Sequence: `git fetch` → checkout `base_branch` → `pull` → create the task branch.

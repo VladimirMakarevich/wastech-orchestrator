@@ -2,15 +2,11 @@
 
 ## Назначение
 
-Периодически обнаруживает pending-задачи и подаёт их в оркестратор по одной, работая как
-останавливаемый демон. Реализует §8.2/§8.3: возобновить прерванную задачу, затем брать pending только
-при свободном слоте (одну при выключенном auto-mode; подряд — при включённом), с периодической
-синхронизацией базовой ветки между тиками.
+Периодически обнаруживает pending-задачи и подаёт их в оркестратор по одной, работая как останавливаемый демон. Реализует §8.2/§8.3: возобновить прерванную задачу, затем брать pending только при свободном слоте (одну при выключенном auto-mode; подряд — при включённом), с периодической синхронизацией базовой ветки между тиками.
 
 ## Ответственность
 
-- Возобновить активную задачу, затем выбрать pending согласно правилу auto-mode (`watch_once`)
-  ([cli.py:778-804](../../../src/wastech_orchestrator/cli.py#L778)).
+- Возобновить активную задачу, затем выбрать pending согласно правилу auto-mode (`watch_once`) ([cli.py:778-804](../../../src/wastech_orchestrator/cli.py#L778)).
 - Гонять цикл с обновлением репозитория и сном между тиками (`watch_loop`) ([cli.py:807-846](../../../src/wastech_orchestrator/cli.py#L807)).
 - Демонизировать: PID-файл, грейсфул-остановка по `SIGTERM`, отказ от второго демона (`cmd_watch`/`cmd_stop`/`cmd_restart`) ([cli.py:1160-1263](../../../src/wastech_orchestrator/cli.py#L1160)).
 - Низкоуровневая PID/сигнальная плумбинг ([process_control.py](../../../src/wastech_orchestrator/process_control.py)).
@@ -35,21 +31,14 @@
 
 ## Входные данные и состояние
 
-`OrchestratorConfig` (`poll_interval_seconds`, `auto_mode.enabled`); папка `tasks/pending`; флаги
-`--poll-seconds`/`--timeout`. Состояние процесса — PID-файл `<artifacts_root>/orchestrator.pid` и
-`threading.Event` остановки.
+`OrchestratorConfig` (`poll_interval_seconds`, `auto_mode.enabled`); папка `tasks/pending`; флаги `--poll-seconds`/`--timeout`. Состояние процесса — PID-файл `<artifacts_root>/orchestrator.pid` и `threading.Event` остановки.
 
 ## Основной сценарий (`watch_loop`)
 
-1. На каждом тике: `orchestrator.refresh_repo()` (fetch/pull base через [B22](./B22-git-manager.md)),
-   затем `watch_once`, затем сон `poll_interval` (или один проход при `poll<=0`).
-2. `watch_once`: `resume()` активной задачи; если `manual_action_required` — стоп; затем по pending:
-   брать только при свободном слоте (`acquire_slot`); `run_task`; `manual_action_required` блокирует
-   продолжение; без auto-mode — ровно одна задача.
+1. На каждом тике: `orchestrator.refresh_repo()` (fetch/pull base через [B22](./B22-git-manager.md)), затем `watch_once`, затем сон `poll_interval` (или один проход при `poll<=0`).
+2. `watch_once`: `resume()` активной задачи; если `manual_action_required` — стоп; затем по pending: брать только при свободном слоте (`acquire_slot`); `run_task`; `manual_action_required` блокирует продолжение; без auto-mode — ровно одна задача.
 
-Логика одного тика и условия остановки. `poll_interval > 0` — демон (PID-файл, грейсфул-стоп по
-`SIGTERM`); `poll_interval <= 0` — один проход. Результат `manual_action_required` прерывает обработку
-очереди в текущем тике, но не завершает демон — он продолжит со следующего тика.
+Логика одного тика и условия остановки. `poll_interval > 0` — демон (PID-файл, грейсфул-стоп по `SIGTERM`); `poll_interval <= 0` — один проход. Результат `manual_action_required` прерывает обработку очереди в текущем тике, но не завершает демон — он продолжит со следующего тика.
 
 ```mermaid
 flowchart TB
@@ -80,8 +69,7 @@ flowchart TB
 
 ### Демон (poll > 0)
 
-Пишет PID-файл, ставит `StopController` (SIGTERM→event), отказывается стартовать при живом втором
-watcher; грейсфул-остановка между тиками ([cli.py:1186-1224](../../../src/wastech_orchestrator/cli.py#L1186)).
+Пишет PID-файл, ставит `StopController` (SIGTERM→event), отказывается стартовать при живом втором watcher; грейсфул-остановка между тиками ([cli.py:1186-1224](../../../src/wastech_orchestrator/cli.py#L1186)).
 
 ### Одиночный проход (poll <= 0)
 
@@ -89,15 +77,13 @@ watcher; грейсфул-остановка между тиками ([cli.py:11
 
 ### stop / restart
 
-`cmd_stop`: `stop_process` (SIGTERM, затем SIGKILL по таймауту; идемпотентно; чистит PID-файл).
-`cmd_restart`: остановить предыдущего, затем `cmd_watch` ([cli.py:1227-1263](../../../src/wastech_orchestrator/cli.py#L1227)).
+`cmd_stop`: `stop_process` (SIGTERM, затем SIGKILL по таймауту; идемпотентно; чистит PID-файл). `cmd_restart`: остановить предыдущего, затем `cmd_watch` ([cli.py:1227-1263](../../../src/wastech_orchestrator/cli.py#L1227)).
 
 ## Проверки и ограничения
 
 - Единый слот соблюдается через `acquire_slot` ([B06](./B06-orchestrator-pipeline.md)); `manual_action_required` блокирует авто-продолжение ([cli.py:791-803](../../../src/wastech_orchestrator/cli.py#L791)).
 - Только один демон на artifact-root (проверка живого PID) ([cli.py:1188-1195](../../../src/wastech_orchestrator/cli.py#L1188)).
-- `SIGTERM` **ставит событие, а не бросает** — текущий тик/стадия завершаются, выход — на следующей
-  проверке ([process_control.py:9-11,167-168](../../../src/wastech_orchestrator/process_control.py#L9)).
+- `SIGTERM` **ставит событие, а не бросает** — текущий тик/стадия завершаются, выход — на следующей проверке ([process_control.py:9-11,167-168](../../../src/wastech_orchestrator/process_control.py#L9)).
 - PID-файл: атомарная запись, толерантное чтение, проба `signal(0)`; stale-файл перезаписывается/чистится ([process_control.py:41-145](../../../src/wastech_orchestrator/process_control.py#L41)).
 - `require_gh` при `create_pull_request` — быстрый отказ до старта цикла ([cli.py:1176-1177](../../../src/wastech_orchestrator/cli.py#L1176)).
 
@@ -107,8 +93,7 @@ watcher; грейсфул-остановка между тиками ([cli.py:11
 
 ## Побочные эффекты
 
-- Запись/удаление PID-файла; отправка `SIGTERM`/`SIGKILL`; периодический git fetch/pull (через
-  [B06](./B06-orchestrator-pipeline.md)→[B22](./B22-git-manager.md)); запуск задач (через [B06](./B06-orchestrator-pipeline.md)).
+- Запись/удаление PID-файла; отправка `SIGTERM`/`SIGKILL`; периодический git fetch/pull (через [B06](./B06-orchestrator-pipeline.md)→[B22](./B22-git-manager.md)); запуск задач (через [B06](./B06-orchestrator-pipeline.md)).
 
 ## Ошибки и граничные случаи
 
@@ -130,9 +115,7 @@ watcher; грейсфул-остановка между тиками ([cli.py:11
 
 ## Место в общей системе
 
-Превращает разовый `run` в непрерывный сервис: обнаруживает задачи, добавленные в `tasks/pending`
-(в т.ч. запушенные в git), и кормит их в [B06](./B06-orchestrator-pipeline.md) строго по одной,
-переживая управляемую остановку/перезапуск.
+Превращает разовый `run` в непрерывный сервис: обнаруживает задачи, добавленные в `tasks/pending` (в т.ч. запушенные в git), и кормит их в [B06](./B06-orchestrator-pipeline.md) строго по одной, переживая управляемую остановку/перезапуск.
 
 ## Подтверждение в коде
 

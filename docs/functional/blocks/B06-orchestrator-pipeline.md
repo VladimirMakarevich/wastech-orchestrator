@@ -2,17 +2,11 @@
 
 ## Назначение
 
-Детерминированный «спинной мозг» системы: проводит **одну задачу за раз** через весь конвейер — от
-шлюза валидации до публикации в Git и терминальной очистки — и владеет всеми переходами состояний.
-Ядро **никогда** не строит команду CLI: оно вызывает только Router (агентские стадии), Check Runner
-(стадия `testing`) и Git Manager (всё, что касается git). Контекст агентам передаётся **только путями
-к файлам-артефактам**.
+Детерминированный «спинной мозг» системы: проводит **одну задачу за раз** через весь конвейер — от шлюза валидации до публикации в Git и терминальной очистки — и владеет всеми переходами состояний. Ядро **никогда** не строит команду CLI: оно вызывает только Router (агентские стадии), Check Runner (стадия `testing`) и Git Manager (всё, что касается git). Контекст агентам передаётся **только путями к файлам-артефактам**.
 
 ## Ответственность
 
-- Прогнать задачу: шлюз → слот → префлайт изоляции/проверок → ветка → refinement (правило пропуска)
-  → planning (+декомпозиция, навыки) → по каждой единице `implementation → testing → review → fixing`
-  → summary → публикация → терминальная очистка → ledger ([orchestrator.py:350-381,820-1047](../../../src/wastech_orchestrator/core/orchestrator.py#L820)).
+- Прогнать задачу: шлюз → слот → префлайт изоляции/проверок → ветка → refinement (правило пропуска) → planning (+декомпозиция, навыки) → по каждой единице `implementation → testing → review → fixing` → summary → публикация → терминальная очистка → ledger ([orchestrator.py:350-381,820-1047](../../../src/wastech_orchestrator/core/orchestrator.py#L820)).
 - Атомарно выполнять и персистить каждый переход статуса ([orchestrator.py:2434-2450](../../../src/wastech_orchestrator/core/orchestrator.py#L2434)).
 - Оркестрировать HITL round-trip и guardrail «опасного» диффа ([orchestrator.py:1790-2044](../../../src/wastech_orchestrator/core/orchestrator.py#L1790)).
 - Операторские потоки: `resume`, `rerun`/`continue`, `finalize` ([orchestrator.py:400-644](../../../src/wastech_orchestrator/core/orchestrator.py#L400)).
@@ -22,8 +16,7 @@
 
 ### Входит в ответственность блока
 
-- Последовательность стадий, ветвления (skip/декомпозиция/fixing), все переходы статусов, оркестрация
-  HITL/guardrail, терминальная обработка, операторские `resume`/`rerun`/`finalize`, сборка зависимостей.
+- Последовательность стадий, ветвления (skip/декомпозиция/fixing), все переходы статусов, оркестрация HITL/guardrail, терминальная обработка, операторские `resume`/`rerun`/`finalize`, сборка зависимостей.
 
 ### Не входит в ответственность блока
 
@@ -41,31 +34,18 @@
 
 ## Входные данные и состояние
 
-Путь к файлу задачи или `task_id`; `OrchestratorConfig`; инъектированные зависимости (router, git,
-checks, store, ledger, loops, gate, notifier, resolver, skill_scanner). Рабочее состояние одной задачи
-— в мутируемом `_Pipeline` ([orchestrator.py:264-291](../../../src/wastech_orchestrator/core/orchestrator.py#L264)); персистентное — в [B07](./B07-state-machine-and-store.md).
+Путь к файлу задачи или `task_id`; `OrchestratorConfig`; инъектированные зависимости (router, git, checks, store, ledger, loops, gate, notifier, resolver, skill_scanner). Рабочее состояние одной задачи — в мутируемом `_Pipeline` ([orchestrator.py:264-291](../../../src/wastech_orchestrator/core/orchestrator.py#L264)); персистентное — в [B07](./B07-state-machine-and-store.md).
 
 ## Основной сценарий (`run_task`)
 
-1. `read_task_source` + `gate.validate` ([B16](./B16-task-parsing-and-validation-gate.md)); reject →
-   `_reject` (карантин + ledger, **без ветки**).
-2. `acquire_slot` (иначе `SlotBusyError`); `_register_task` (NEW→VALIDATED, пишет нормализованный
-   манифест + отчёт валидации).
-3. `_drive`: префлайт `strict_isolation` ([B25](./B25-security-policy.md), при провале → `PipelineFailed`
-   до ветки) → `_check_preflight` (резолв запускаемого профиля проверок до ветки; шлюз изменённого
-   набора через HITL; не-ready → `PipelineFailed`) → PREPARING → `_prepare_branch` (footprint-префлайт
-   + excludes + ветка) → `_refinement` (пропуск, если `refined`/complete) → `_planning` (+декомпозиция,
-   навыки) → `_run_units_and_finish`.
-4. По каждой единице (`_run_unit`): **IMPLEMENTING** (правка + guardrail опасного диффа) →
-   **TESTING** (проверки: pass→review; launch-сбой→повторный резолв один раз или провал; качественный
-   провал→`_enter_fixing`) → **REVIEWING** (пропуск или ревью; блокирующие находки→fixing; иначе
-   коммит сабтаска/переход или SUMMARIZING) → **FIXING** (правка + guardrail → обратно к testing/review).
-5. `_summary` (агент / stub / минимальный) → `_publish` (финализация артефактов, `commit_code` +
-   `commit_audit`, `push`, `create_pr`, опц. auto-merge) → `_go_terminal` (очистка, статус, перенос
-   файла, ledger, уведомление).
+1. `read_task_source` + `gate.validate` ([B16](./B16-task-parsing-and-validation-gate.md)); reject → `_reject` (карантин + ledger, **без ветки**).
+2. `acquire_slot` (иначе `SlotBusyError`); `_register_task` (NEW→VALIDATED, пишет нормализованный манифест + отчёт валидации).
+3. `_drive`: префлайт `strict_isolation` ([B25](./B25-security-policy.md), при провале → `PipelineFailed` до ветки) → `_check_preflight` (резолв запускаемого профиля проверок до ветки; шлюз изменённого набора через HITL; не-ready → `PipelineFailed`) → PREPARING → `_prepare_branch` (footprint-префлайт
+   - excludes + ветка) → `_refinement` (пропуск, если `refined`/complete) → `_planning` (+декомпозиция, навыки) → `_run_units_and_finish`.
+4. По каждой единице (`_run_unit`): **IMPLEMENTING** (правка + guardrail опасного диффа) → **TESTING** (проверки: pass→review; launch-сбой→повторный резолв один раз или провал; качественный провал→`_enter_fixing`) → **REVIEWING** (пропуск или ревью; блокирующие находки→fixing; иначе коммит сабтаска/переход или SUMMARIZING) → **FIXING** (правка + guardrail → обратно к testing/review).
+5. `_summary` (агент / stub / минимальный) → `_publish` (финализация артефактов, `commit_code` + `commit_audit`, `push`, `create_pr`, опц. auto-merge) → `_go_terminal` (очистка, статус, перенос файла, ledger, уведомление).
 
-Главный путь `run_task` → `_drive`. Ключевая деталь: префлайты изоляции и проверок выполняются **до**
-создания ветки и не тратят fix-бюджет. Операторские пути (`resume`/`rerun`/`finalize`) — в разделе ниже.
+Главный путь `run_task` → `_drive`. Ключевая деталь: префлайты изоляции и проверок выполняются **до** создания ветки и не тратят fix-бюджет. Операторские пути (`resume`/`rerun`/`finalize`) — в разделе ниже.
 
 ```mermaid
 flowchart TB
@@ -92,37 +72,27 @@ flowchart TB
 
 ### Возобновление (`resume`)
 
-`RecoveryReconciler` ([B10](./B10-recovery-and-resume.md)) → `_resume_task` (восстановить контекст и
-продолжить с записанной стадии), `_resume_cleanup` (дозавершить очистку), `_resume_manual` (пометить
-неоднозначные задачи `manual_action_required`) ([orchestrator.py:655-795](../../../src/wastech_orchestrator/core/orchestrator.py#L655)).
+`RecoveryReconciler` ([B10](./B10-recovery-and-resume.md)) → `_resume_task` (восстановить контекст и продолжить с записанной стадии), `_resume_cleanup` (дозавершить очистку), `_resume_manual` (пометить неоднозначные задачи `manual_action_required`) ([orchestrator.py:655-795](../../../src/wastech_orchestrator/core/orchestrator.py#L655)).
 
 ### Rerun / Continue
 
-`rerun_task`: архивировать артефакты, сбросить ветку к base, очистить per-attempt состояние, прогнать
-`run_task`. `continue_task`: оживить задачу на прерванной стадии (сброс незавершённого HITL) и `resume`
-([orchestrator.py:471-520](../../../src/wastech_orchestrator/core/orchestrator.py#L471)).
+`rerun_task`: архивировать артефакты, сбросить ветку к base, очистить per-attempt состояние, прогнать `run_task`. `continue_task`: оживить задачу на прерванной стадии (сброс незавершённого HITL) и `resume` ([orchestrator.py:471-520](../../../src/wastech_orchestrator/core/orchestrator.py#L471)).
 
 ### Finalize
 
-`finalize_task`: терминальная очистка, выставить заявленный статус **вне** машины состояний, перенести
-файл, дописать `manual`-запись в ledger, опц. удалить ветку — **без** конвейера и без commit/push/PR
-([orchestrator.py:583-644](../../../src/wastech_orchestrator/core/orchestrator.py#L583)).
+`finalize_task`: терминальная очистка, выставить заявленный статус **вне** машины состояний, перенести файл, дописать `manual`-запись в ledger, опц. удалить ветку — **без** конвейера и без commit/push/PR ([orchestrator.py:583-644](../../../src/wastech_orchestrator/core/orchestrator.py#L583)).
 
 ### Пропуск стадий
 
-`planning`/`testing`/`review`/`fixing`/`summary` могут быть пропущены (union глобального и
-per-task `effective_skip`): пишется stub/`record_skip`, переходы корректируются (например, fix после
-ревью при пропущенном testing возвращается к review) ([orchestrator.py:231-239,1068-1088,2249-2251](../../../src/wastech_orchestrator/core/orchestrator.py#L231)).
+`planning`/`testing`/`review`/`fixing`/`summary` могут быть пропущены (union глобального и per-task `effective_skip`): пишется stub/`record_skip`, переходы корректируются (например, fix после ревью при пропущенном testing возвращается к review) ([orchestrator.py:231-239,1068-1088,2249-2251](../../../src/wastech_orchestrator/core/orchestrator.py#L231)).
 
 ### Auto-merge (DANGER)
 
-При `review` skip + auto_merge — предупреждение; при auto_merge — `merge_pr`; заблокированный merge →
-`ManualActionRequired`, PR остаётся открытым ([orchestrator.py:1371-1419](../../../src/wastech_orchestrator/core/orchestrator.py#L1371)).
+При `review` skip + auto_merge — предупреждение; при auto_merge — `merge_pr`; заблокированный merge → `ManualActionRequired`, PR остаётся открытым ([orchestrator.py:1371-1419](../../../src/wastech_orchestrator/core/orchestrator.py#L1371)).
 
 ## Проверки и ограничения
 
-- Каждый переход проходит `assert_transition` ([B07](./B07-state-machine-and-store.md)) в транзакции
-  ([orchestrator.py:2434-2445](../../../src/wastech_orchestrator/core/orchestrator.py#L2434)).
+- Каждый переход проходит `assert_transition` ([B07](./B07-state-machine-and-store.md)) в транзакции ([orchestrator.py:2434-2445](../../../src/wastech_orchestrator/core/orchestrator.py#L2434)).
 - Единый слот (`acquire_slot` через `find_active_tasks`) ([orchestrator.py:383-385](../../../src/wastech_orchestrator/core/orchestrator.py#L383)).
 - Префлайт изоляции и префлайт проверок выполняются **до** создания ветки и не тратят fix-бюджет.
 - Лимиты fix-циклов ([B09](./B09-fix-loop-control.md)); застревание → `manual_action_required` + отчёт о провале.
@@ -132,17 +102,11 @@ per-task `effective_skip`): пишется stub/`record_skip`, переходы 
 
 ## Результат
 
-`PipelineResult(task_id, final_status, pr_url, validation_reason)`. Для оператора — итоговый статус и
-URL PR; на каждом шаге — обновлённое персистентное состояние и артефакты.
+`PipelineResult(task_id, final_status, pr_url, validation_reason)`. Для оператора — итоговый статус и URL PR; на каждом шаге — обновлённое персистентное состояние и артефакты.
 
 ## Побочные эффекты
 
-Преимущественно через делегируемые блоки: переходы и записи в SQLite ([B07](./B07-state-machine-and-store.md)),
-git/PR ([B22](./B22-git-manager.md)), артефакты запусков ([B20](./B20-artifact-layout.md)), записи
-ledger и отчёты о провале ([B08](./B08-ledger-and-failure-reports.md)), Telegram-уведомления
-([B26](./B26-notifications-telegram.md)), HITL-артефакты ([B12](./B12-hitl-and-typed-output.md)).
-Напрямую: пишет `task.enriched.md`/`plan.md`/`fixing-context.json`/`review/*`/`summary.*`/секцию
-пропусков; переносит файл задачи между lifecycle-папками; карантин при reject.
+Преимущественно через делегируемые блоки: переходы и записи в SQLite ([B07](./B07-state-machine-and-store.md)), git/PR ([B22](./B22-git-manager.md)), артефакты запусков ([B20](./B20-artifact-layout.md)), записи ledger и отчёты о провале ([B08](./B08-ledger-and-failure-reports.md)), Telegram-уведомления ([B26](./B26-notifications-telegram.md)), HITL-артефакты ([B12](./B12-hitl-and-typed-output.md)). Напрямую: пишет `task.enriched.md`/`plan.md`/`fixing-context.json`/`review/*`/`summary.*`/секцию пропусков; переносит файл задачи между lifecycle-папками; карантин при reject.
 
 ## Ошибки и граничные случаи
 
@@ -164,10 +128,7 @@ ledger и отчёты о провале ([B08](./B08-ledger-and-failure-reports
 
 ## Место в общей системе
 
-Это узел, связывающий всё: каждый другой блок — это либо вход (валидация, конфиг), либо инструмент
-(провайдеры, проверки, git), либо хранилище (состояние, ledger, артефакты), а конвейер координирует их
-в строгом порядке, владея состоянием и инвариантами (единый слот, разделение ответственности, fallback
-только для инфраструктуры, неослабляемая безопасность).
+Это узел, связывающий всё: каждый другой блок — это либо вход (валидация, конфиг), либо инструмент (провайдеры, проверки, git), либо хранилище (состояние, ledger, артефакты), а конвейер координирует их в строгом порядке, владея состоянием и инвариантами (единый слот, разделение ответственности, fallback только для инфраструктуры, неослабляемая безопасность).
 
 ## Подтверждение в коде
 

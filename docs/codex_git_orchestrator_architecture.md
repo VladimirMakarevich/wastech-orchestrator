@@ -1,7 +1,6 @@
 # Lean orchestrator architecture for coding agents (Codex / Claude) + Git
 
-Date: 2026-06-11 (updated)
-Goal: describe the architecture of a console application that runs on Windows/macOS/Linux, watches a task folder, runs a task through a deterministic stage pipeline using external coding agents (Codex CLI and/or Claude Code CLI), and publishes the result to a dedicated Git branch.
+Date: 2026-06-11 (updated) Goal: describe the architecture of a console application that runs on Windows/macOS/Linux, watches a task folder, runs a task through a deterministic stage pipeline using external coding agents (Codex CLI and/or Claude Code CLI), and publishes the result to a dedicated Git branch.
 
 The document was reworked after studying [crewAI](https://github.com/crewAIInc/crewAI). Decision: **write our own lean orchestrator** (with no framework dependency), but borrow 5 proven patterns from crewAI. Exactly where is marked with the `[← crewAI]` marker.
 
@@ -98,16 +97,17 @@ When a new `.md`/`.json` file appears, it is moved to `processing/` and parsed. 
 ---
 id: task-001
 title: "Add login validation"
-repo: my-service              # binding to the repo/project (#8)
-reasoning: high               # reasoning level (#7)
-complexity: medium            # affects model choice and limits
-provider: auto                # auto | codex | claude
-contacts: ["@team-lead"]      # who to ping on Telegram
-commands:                     # additional commands/hints for the agent
+repo: my-service # binding to the repo/project (#8)
+reasoning: high # reasoning level (#7)
+complexity: medium # affects model choice and limits
+provider: auto # auto | codex | claude
+contacts: ["@team-lead"] # who to ping on Telegram
+commands: # additional commands/hints for the agent
   - "do not touch the billing module"
 ---
 
 ## Description
+
 Add validation for the login form ...
 ```
 
@@ -134,9 +134,7 @@ gh pr create --title "Task 001" --body-file logs/task-001/pr.md --base main --he
 git checkout main
 ```
 
-> Note: `git add .` above is illustrative. The canonical spec uses **scoped staging** — an explicit pathspec that excludes `tasks/`/`logs/`/`workspace/`, never `git add .`/`-A` — see [00_orchestrator_final_plan.md §21.1](implementation_stages/00_orchestrator_final_plan.md). The git footprint mode (external / in-repo-excluded / in-repo-audit) is also defined there.
-> The **default footprint is in-repo audit** (`location: in_repo`, `tracking: commit`): the **task file and its `summary.md`** live inside the target repo and are stored in git — the code change is a scoped **code** commit, and `tasks/` (the task moved to `done/`/`failed/` plus `<id>.summary.md`) is stored via a separate **task commit** the orchestrator (never the agent) makes after it. The working artifacts under `logs/` (plan, review, diffs, stage logs, `summary.json`) and the root runtime files (`state.db`, `config.yaml`) are **not** committed — `logs/`/`workspace/` are kept local via `.git/info/exclude`.
-> The final `git checkout main` is terminal cleanup. In the canonical spec this uses `repo.base_branch`, runs only when safe, and must complete before auto mode may pick another pending task. After cleanup the Git Manager runs `git fetch` + `git pull --ff-only` to refresh the base branch, and the `watch` loop repeats that refresh every `orchestrator.poll_interval_seconds` (default 300s) so tasks pushed to git after the last scan are discovered — watching is not limited to the local filesystem.
+> Note: `git add .` above is illustrative. The canonical spec uses **scoped staging** — an explicit pathspec that excludes `tasks/`/`logs/`/`workspace/`, never `git add .`/`-A` — see [00_orchestrator_final_plan.md §21.1](implementation_stages/00_orchestrator_final_plan.md). The git footprint mode (external / in-repo-excluded / in-repo-audit) is also defined there. The **default footprint is in-repo audit** (`location: in_repo`, `tracking: commit`): the **task file and its `summary.md`** live inside the target repo and are stored in git — the code change is a scoped **code** commit, and `tasks/` (the task moved to `done/`/`failed/` plus `<id>.summary.md`) is stored via a separate **task commit** the orchestrator (never the agent) makes after it. The working artifacts under `logs/` (plan, review, diffs, stage logs, `summary.json`) and the root runtime files (`state.db`, `config.yaml`) are **not** committed — `logs/`/`workspace/` are kept local via `.git/info/exclude`. The final `git checkout main` is terminal cleanup. In the canonical spec this uses `repo.base_branch`, runs only when safe, and must complete before auto mode may pick another pending task. After cleanup the Git Manager runs `git fetch` + `git pull --ff-only` to refresh the base branch, and the `watch` loop repeats that refresh every `orchestrator.poll_interval_seconds` (default 300s) so tasks pushed to git after the last scan are discovered — watching is not limited to the local filesystem.
 
 Parallel tasks — via `git worktree` (v2), so as not to mix them in one clone.
 
@@ -199,6 +197,7 @@ Each stage is a separate function with input from the state and an atomic checkp
 Two layers (in crewAI, guardrails validate only the output — we extend it to actions):
 
 **Layer 1 — action ban (enforce, before execution):**
+
 - run the agent only in `workspace/repo`, sandbox `workspace-write`, approval `on-request`;
 - global blacklist of dangerous commands (`rm -rf`, `git push --force`, access to `~`, to secrets);
 - ban on pushing to `main` directly.
@@ -222,8 +221,7 @@ On failure — the error is returned to the `fix` stage, retrying up to `guardra
 
 ### 4.7. Human-in-the-Loop via Telegram `(#2, #10)` `[← crewAI AskQuestion / human_input]`
 
-A transport-neutral `Notifier` provides terminal messages and one durable question/approval
-round-trip. It blocks only the current checkpoint until an answer or fail-closed timeout.
+A transport-neutral `Notifier` provides terminal messages and one durable question/approval round-trip. It blocks only the current checkpoint until an answer or fail-closed timeout.
 
 ```python
 handle = notifier.start_ask(question=..., kind=..., interaction_id=...)
@@ -233,12 +231,9 @@ rerun_stage(human_input_path=artifact)  # answer never enters CLI argv
 ```
 
 - `refinement`/`planning` may emit one typed `question` or `approval`.
-- Questions use ForceReply; approvals use inline buttons. Only the configured chat and exact
-  prompt/callback are accepted.
-- After `implementation`/`fixing`, tracked-file deletion and dependency manifest/lock changes
-  require approval before tests. Exact approved planning scope may be reused.
-- A denial returns once to the same stage for safe reconsideration; timeout, transport failure,
-  ambiguity, repeated request, or remaining dangerous diff → `manual_action_required`.
+- Questions use ForceReply; approvals use inline buttons. Only the configured chat and exact prompt/callback are accepted.
+- After `implementation`/`fixing`, tracked-file deletion and dependency manifest/lock changes require approval before tests. Exact approved planning scope may be reused.
+- A denial returns once to the same stage for safe reconsideration; timeout, transport failure, ambiguity, repeated request, or remaining dangerous diff → `manual_action_required`.
 - Routine commit/push/PR does not require Telegram approval.
 - Waiting/answer state is stored under `logs/<task-id>/hitl/`; no `waiting_human` state is added.
 - Telegram is also used for final result notifications (`done`/`failed` + link to the PR).
@@ -289,6 +284,7 @@ def run_task(task):
 ### 4.10. Reasoning / Complexity `(#7)` `[← crewAI reasoning_effort]`
 
 The `reasoning` and `complexity` fields from the task map onto:
+
 - the coding agent's model flags/budget (`reasoning_effort` low/med/high, thinking-budget for Claude);
 - model choice, number of fix iterations, and timeouts based on complexity.
 
@@ -317,9 +313,9 @@ templates/
 ```yaml
 orchestrator:
   auto_mode:
-    enabled: false                  # when true, pick the next pending task after terminal cleanup
+    enabled: false # when true, pick the next pending task after terminal cleanup
 
-repos:                                # binding to projects/repos (#8)
+repos: # binding to projects/repos (#8)
   my-service:
     url: "git@github.com:OWNER/my-service.git"
     local_path: "./workspace/my-service"
@@ -327,13 +323,13 @@ repos:                                # binding to projects/repos (#8)
     branch_prefix: "codex"
 
 tasks:
-  pending_folder:    "./tasks/pending"
+  pending_folder: "./tasks/pending"
   processing_folder: "./tasks/processing"
-  done_folder:       "./tasks/done"
-  failed_folder:     "./tasks/failed"
+  done_folder: "./tasks/done"
+  failed_folder: "./tasks/failed"
 
-providers:                            # global enable/disable + fallback (#1)
-  default_order: ["codex", "claude"]  # priority for provider: auto
+providers: # global enable/disable + fallback (#1)
+  default_order: ["codex", "claude"] # priority for provider: auto
   codex:
     enabled: true
     working_dir: "./workspace/repo"
@@ -343,16 +339,16 @@ providers:                            # global enable/disable + fallback (#1)
     enabled: true
     sandbox: "workspace-write"
 
-reasoning:                            # complexity levels (#7)
+reasoning: # complexity levels (#7)
   default: "medium"
-  map:                                # complexity → limits
-    small:  { fix_attempts: 1, timeout_s: 600 }
+  map: # complexity → limits
+    small: { fix_attempts: 1, timeout_s: 600 }
     medium: { fix_attempts: 2, timeout_s: 1200 }
-    large:  { fix_attempts: 3, timeout_s: 2400 }
+    large: { fix_attempts: 3, timeout_s: 2400 }
 
-guardrails:                           # blacklist (#3)
+guardrails: # blacklist (#3)
   forbidden_commands: ["rm -rf", "git push --force", "sudo"]
-  forbidden_paths:    ["~", ".env", "secrets/"]
+  forbidden_paths: ["~", ".env", "secrets/"]
   block_push_to_main: true
   max_retries: 3
 
@@ -365,10 +361,10 @@ git:
   create_pull_request: true
   pr_base: "main"
 
-telegram:                             # HITL + notifications (#2, #10)
+telegram: # HITL + notifications (#2, #10)
   enabled: true
   bot_token_env: "TELEGRAM_BOT_TOKEN"
-  chat_id_env:   "TELEGRAM_CHAT_ID"
+  chat_id_env: "TELEGRAM_CHAT_ID"
   ask_timeout_s: 28800
 ```
 
@@ -411,14 +407,7 @@ telegram:                             # HITL + notifications (#2, #10)
 20. (resume) on a crash at any step — continue from the next incomplete stage
 ```
 
-Steps 15–17 are why the **task and its summary** live in the same repository as the code (the
-in-repo footprint, §21): the summary stage writes the summary and moves the task into `tasks/done/`
-**before** the commit, then the orchestrator makes a scoped **code** commit and a separate **task**
-commit of `tasks/` (the moved task file + `<id>.summary.md`). Working artifacts — plan, review,
-diffs, stage logs, `summary.json` — stay under `logs/` and never enter git history. A **failed**
-task with a branch is finalized the same way (moved to `tasks/failed/`, summary written, code + task
-committed and pushed) but opens **no PR**; `manual_action_required` stays put for the operator. The
-provider fallback `(#1)` triggers transparently inside any `CodingAgent.run`.
+Steps 15–17 are why the **task and its summary** live in the same repository as the code (the in-repo footprint, §21): the summary stage writes the summary and moves the task into `tasks/done/` **before** the commit, then the orchestrator makes a scoped **code** commit and a separate **task** commit of `tasks/` (the moved task file + `<id>.summary.md`). Working artifacts — plan, review, diffs, stage logs, `summary.json` — stay under `logs/` and never enter git history. A **failed** task with a branch is finalized the same way (moved to `tasks/failed/`, summary written, code + task committed and pushed) but opens **no PR**; `manual_action_required` stays put for the operator. The provider fallback `(#1)` triggers transparently inside any `CodingAgent.run`.
 
 ---
 
@@ -453,8 +442,7 @@ Each transition = an atomic write of `stage`+`status` to SQLite. On restart, the
 5. Ban on direct push to `main`; only via PR.
 6. Minimal GitHub token privileges; preferably Docker/VM/a separate OS user.
 7. Log all commands and the agent's output.
-8. Tracked-file deletion and dependency manifest/lock changes require correlated, fail-closed
-   Telegram approval. Routine orchestrator publishing remains automatic.
+8. Tracked-file deletion and dependency manifest/lock changes require correlated, fail-closed Telegram approval. Routine orchestrator publishing remains automatic.
 
 ---
 
@@ -512,6 +500,7 @@ def watch():
 ## 10. Example stage prompts
 
 ### Plan
+
 ```text
 You are working inside a repository. Read the task file.
 Draw up a brief implementation plan:
@@ -521,6 +510,7 @@ Do not change code. If something is ambiguous — ask a clarifying question.
 ```
 
 ### Implementation
+
 ```text
 Implement the task according to the plan. Constraints:
 - change only the necessary files; - do not commit;
@@ -529,12 +519,14 @@ Implement the task according to the plan. Constraints:
 ```
 
 ### Review
+
 ```text
 Review the changes: alignment with the task, bugs, edge cases,
 style, test coverage, absence of extra/accidental files.
 ```
 
 ### Fixing after tests
+
 ```text
 The tests failed. The output is below. Analyze the error, fix the code,
 briefly explain what was changed.
@@ -546,7 +538,7 @@ briefly explain what was changed.
 ## 11. How the 10 original requirements are addressed
 
 | # | Point | Where implemented |
-|---|-------|-----------------|
+| --- | --- | --- |
 | 1 | Globally enable/disable Codex/Claude + fallback | §4.3 CodingAgent + `run_with_fallback`, §5 `providers` |
 | 2 | Answers to clarifying questions + action approval | §4.7 `ask_human(question/approval)`, §6 steps 12/14 |
 | 3 | Global blacklist of forbidden items | §4.6 guardrails (2 layers), §5 `guardrails`, §8 |
@@ -562,9 +554,7 @@ briefly explain what was changed.
 
 ## 12. What to add in the second version
 
-The second-version and candidate feature list has been consolidated into
-[backlog/product_backlog.md](backlog/product_backlog.md). Keep new backlog items there instead of
-adding another local list to this architecture note.
+The second-version and candidate feature list has been consolidated into [backlog/product_backlog.md](backlog/product_backlog.md). Keep new backlog items there instead of adding another local list to this architecture note.
 
 ---
 

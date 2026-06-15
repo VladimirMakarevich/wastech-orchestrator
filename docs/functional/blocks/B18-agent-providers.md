@@ -2,21 +2,13 @@
 
 ## Назначение
 
-Единственное место в системе, знающее синтаксис CLI кодинг-агентов. Определяет контракт
-`AgentProvider` и реализует его для `codex` и `claude`: транслирует `AgentRunRequest` в argv,
-запускает процесс, парсит вывод в нормализованный `AgentRunResult` и классифицирует инфраструктурные
-сбои в `ErrorClass`. Поддерживает инвариант «ядро не знает синтаксиса CLI» — всё CLI-специфичное
-изолировано здесь.
+Единственное место в системе, знающее синтаксис CLI кодинг-агентов. Определяет контракт `AgentProvider` и реализует его для `codex` и `claude`: транслирует `AgentRunRequest` в argv, запускает процесс, парсит вывод в нормализованный `AgentRunResult` и классифицирует инфраструктурные сбои в `ErrorClass`. Поддерживает инвариант «ядро не знает синтаксиса CLI» — всё CLI-специфичное изолировано здесь.
 
 ## Ответственность
 
-- Задать контракт и канонические перечисления/структуры (`AgentProvider`, `ProviderId`, `Stage`,
-  `RunStatus`, `ErrorClass`, `AgentRunRequest`/`AgentRunResult`, `ProviderError`)
-  ([base.py:16-171](../../../src/wastech_orchestrator/providers/base.py#L16)).
-- Построить argv (список, без shell) для `claude -p` и `codex exec`
-  ([claude.py:247-305](../../../src/wastech_orchestrator/providers/claude.py#L247), [codex.py:153-213](../../../src/wastech_orchestrator/providers/codex.py#L153)).
-- Запустить процесс (промпт на stdin, контекст — только путями), редактировать все стоки, парсить
-  событийный поток ([claude.py:449-563](../../../src/wastech_orchestrator/providers/claude.py#L449), [codex.py:354-475](../../../src/wastech_orchestrator/providers/codex.py#L354)).
+- Задать контракт и канонические перечисления/структуры (`AgentProvider`, `ProviderId`, `Stage`, `RunStatus`, `ErrorClass`, `AgentRunRequest`/`AgentRunResult`, `ProviderError`) ([base.py:16-171](../../../src/wastech_orchestrator/providers/base.py#L16)).
+- Построить argv (список, без shell) для `claude -p` и `codex exec` ([claude.py:247-305](../../../src/wastech_orchestrator/providers/claude.py#L247), [codex.py:153-213](../../../src/wastech_orchestrator/providers/codex.py#L153)).
+- Запустить процесс (промпт на stdin, контекст — только путями), редактировать все стоки, парсить событийный поток ([claude.py:449-563](../../../src/wastech_orchestrator/providers/claude.py#L449), [codex.py:354-475](../../../src/wastech_orchestrator/providers/codex.py#L354)).
 - Классифицировать инфраструктурный сбой в `ErrorClass` ([errors.py:63-87](../../../src/wastech_orchestrator/providers/errors.py#L63)).
 - `preflight` (`<cli> --version`) и `isolation_reasons` (офлайн-проверка изоляции).
 
@@ -24,13 +16,11 @@
 
 ### Входит в ответственность блока
 
-- Трансляция запроса в argv, безопасный запуск (через B19), парсинг вывода, классификация ошибок,
-  `preflight`, `isolation_reasons`, редакция стоков и запись артефактов попытки.
+- Трансляция запроса в argv, безопасный запуск (через B19), парсинг вывода, классификация ошибок, `preflight`, `isolation_reasons`, редакция стоков и запись артефактов попытки.
 
 ### Не входит в ответственность блока
 
-- **Fallback/повторы** — это [B17 Router](./B17-agent-router-and-fallback.md); адаптер fallback не
-  делает ([claude.py:9-11](../../../src/wastech_orchestrator/providers/claude.py#L9)).
+- **Fallback/повторы** — это [B17 Router](./B17-agent-router-and-fallback.md); адаптер fallback не делает ([claude.py:9-11](../../../src/wastech_orchestrator/providers/claude.py#L9)).
 - **Машина состояний / персист** — это [B06](./B06-orchestrator-pipeline.md); адаптер её не трогает.
 - **Выбор провайдера/маршрута** — это [B17](./B17-agent-router-and-fallback.md).
 - **Сборка текста промпта** — это [B06](./B06-orchestrator-pipeline.md)/[B15](./B15-prompt-templates.md); адаптер лишь добавляет футер с путями к контексту.
@@ -46,23 +36,17 @@
 
 ## Входные данные и состояние
 
-`AgentRunRequest` (стадия, рабочий каталог, промпт, профиль разрешений, таймаут, пути к контексту,
-output_schema, model/reasoning, session_id). Конфиг провайдера (`ProviderConfig`) и `SecurityConfig`.
-Состояние не хранится между запусками (кроме файловых артефактов).
+`AgentRunRequest` (стадия, рабочий каталог, промпт, профиль разрешений, таймаут, пути к контексту, output_schema, model/reasoning, session_id). Конфиг провайдера (`ProviderConfig`) и `SecurityConfig`. Состояние не хранится между запусками (кроме файловых артефактов).
 
 ## Основной сценарий (`run`)
 
 1. Создаётся каталог попытки ([B20](./B20-artifact-layout.md)); пишется `output-schema.json` (если есть).
-2. Строится argv; при небезопасных `extra_args`/запрещённом профиле — `ProviderError`
-   (`CONFIGURATION_ERROR`), запрос пишется с `argv=None`, ошибка пробрасывается.
+2. Строится argv; при небезопасных `extra_args`/запрещённом профиле — `ProviderError` (`CONFIGURATION_ERROR`), запрос пишется с `argv=None`, ошибка пробрасывается.
 3. Пишется редактированный `request.json`; строится env (аллой-лист).
-4. Запуск `run_process(argv, cwd=working_directory, env, timeout, stdout_path, stdin_text=промпт+футер)`
-   под heartbeat'ом ([claude.py:483-497](../../../src/wastech_orchestrator/providers/claude.py#L483)).
+4. Запуск `run_process(argv, cwd=working_directory, env, timeout, stdout_path, stdin_text=промпт+футер)` под heartbeat'ом ([claude.py:483-497](../../../src/wastech_orchestrator/providers/claude.py#L483)).
 5. Все стоки (stdout/stderr/events) редактируются и пишутся на диск; парсинг идёт по сырому stdout.
-6. При инфра-сбое (`launch_error`/`timed_out`/`exit_code != 0`) — `classify(...)` → запись
-   failure-результата → `raise ProviderError`.
-7. При чистом выходе — парсинг событий: `succeeded` → `SUCCEEDED`, иначе `FAILED` + `TASK_FAILURE`;
-   пишется `result.json`, возвращается `AgentRunResult`.
+6. При инфра-сбое (`launch_error`/`timed_out`/`exit_code != 0`) — `classify(...)` → запись failure-результата → `raise ProviderError`.
+7. При чистом выходе — парсинг событий: `succeeded` → `SUCCEEDED`, иначе `FAILED` + `TASK_FAILURE`; пишется `result.json`, возвращается `AgentRunResult`.
 
 Поток `run` — всё CLI-специфичное изолировано здесь; профиль разрешений никогда не ослабляется:
 
@@ -86,35 +70,29 @@ flowchart TB
 
 ### Невалидный вывод
 
-Нет терминального события в потоке → `ProviderError(INVALID_OUTPUT)` из парсера → finalize + raise
-([claude.py:370-371](../../../src/wastech_orchestrator/providers/claude.py#L370), [codex.py:273-274](../../../src/wastech_orchestrator/providers/codex.py#L273)).
+Нет терминального события в потоке → `ProviderError(INVALID_OUTPUT)` из парсера → finalize + raise ([claude.py:370-371](../../../src/wastech_orchestrator/providers/claude.py#L370), [codex.py:273-274](../../../src/wastech_orchestrator/providers/codex.py#L273)).
 
 ### Codex: файл последнего сообщения
 
-`--output-last-message <path>` пишет финальное сообщение в отдельный файл; он редактируется на диске и
-переопределяет `final_message` из потока ([codex.py:431-437,276-277](../../../src/wastech_orchestrator/providers/codex.py#L431)).
+`--output-last-message <path>` пишет финальное сообщение в отдельный файл; он редактируется на диске и переопределяет `final_message` из потока ([codex.py:431-437,276-277](../../../src/wastech_orchestrator/providers/codex.py#L431)).
 
 ### preflight
 
-`<cli> --version`: launch_error → executable_found=False; ненулевой выход/таймаут → found, но не
-готов; иначе парсится версия ([claude.py:406-447](../../../src/wastech_orchestrator/providers/claude.py#L406)).
+`<cli> --version`: launch_error → executable_found=False; ненулевой выход/таймаут → found, но не готов; иначе парсится версия ([claude.py:406-447](../../../src/wastech_orchestrator/providers/claude.py#L406)).
 
 ## Проверки и ограничения
 
-- **argv-список, без shell**; промпт всегда на stdin (Codex — через трейлинг `-`), контекст — только
-  путями в футере ([claude.py:140-168](../../../src/wastech_orchestrator/providers/claude.py#L140)).
-- **Профиль не ослабляется**: Claude `map_permission` (read-only→`plan`, workspace-write→`acceptEdits`;
-  forbidden/unknown→`CONFIGURATION_ERROR`; никогда `bypassPermissions`) + `_reject_weaker_permission_override`; Codex отвергает `danger-full-access` ([claude.py:201-244](../../../src/wastech_orchestrator/providers/claude.py#L201), [codex.py:174-176](../../../src/wastech_orchestrator/providers/codex.py#L174)).
+- **argv-список, без shell**; промпт всегда на stdin (Codex — через трейлинг `-`), контекст — только путями в футере ([claude.py:140-168](../../../src/wastech_orchestrator/providers/claude.py#L140)).
+- **Профиль не ослабляется**: Claude `map_permission` (read-only→`plan`, workspace-write→`acceptEdits`; forbidden/unknown→`CONFIGURATION_ERROR`; никогда `bypassPermissions`) + `_reject_weaker_permission_override`; Codex отвергает `danger-full-access` ([claude.py:201-244](../../../src/wastech_orchestrator/providers/claude.py#L201), [codex.py:174-176](../../../src/wastech_orchestrator/providers/codex.py#L174)).
 - `find_forbidden_args` отвергает небезопасные `extra_args` (defense-in-depth поверх [B05](./B05-configuration.md)).
-- **Claude** транслирует `denied_commands` → `Bash(<cmd>:*)` и `denied_read_paths` → `Read(<glob>)` в
-  `--disallowedTools` (агент не может публиковать/читать секреты) ([claude.py:171-198,284-286](../../../src/wastech_orchestrator/providers/claude.py#L171)). **Codex** не имеет per-tool-deny — изоляцию даёт sandbox ([codex.py:222-223](../../../src/wastech_orchestrator/providers/codex.py#L222)).
+- **Claude** транслирует `denied_commands` → `Bash(<cmd>:*)` и `denied_read_paths` → `Read(<glob>)` в `--disallowedTools` (агент не может публиковать/читать секреты) ([claude.py:171-198,284-286](../../../src/wastech_orchestrator/providers/claude.py#L171)). **Codex** не имеет per-tool-deny — изоляцию даёт sandbox ([codex.py:222-223](../../../src/wastech_orchestrator/providers/codex.py#L222)).
 - Все стоки и финальное сообщение редактируются перед записью (литералы: секрето-именованные env + содержимое `denied_read_paths`).
 - `classify` precedence: launch → timeout → stderr-сигнатура → `exit 0`=`TASK_FAILURE` → иначе `PROCESS_CRASHED`; сообщение всегда без секретов ([errors.py:77-86](../../../src/wastech_orchestrator/providers/errors.py#L77)).
 
 ## Отличия адаптеров
 
 | Аспект | Claude | Codex |
-|---|---|---|
+| --- | --- | --- |
 | запуск | `claude -p --output-format stream-json --verbose` | `codex --ask-for-approval never exec --json` |
 | изоляция | `--permission-mode {plan\|acceptEdits}` + allow/deny tools | `--sandbox {workspace-write}` |
 | reasoning | `--effort {low…max}` | `--reasoning-effort {low…xhigh}` (`max`→`xhigh`) |
@@ -125,15 +103,12 @@ flowchart TB
 
 ## Результат
 
-`AgentRunResult` (status, provider, stage, attempt, exit_code, final_message, structured_output,
-usage, session_id, пути к stdout/stderr/events, error) — возвращается [B17](./B17-agent-router-and-fallback.md).
-`ProviderHealth` из `preflight`. Инфраструктурный сбой → `ProviderError`.
+`AgentRunResult` (status, provider, stage, attempt, exit_code, final_message, structured_output, usage, session_id, пути к stdout/stderr/events, error) — возвращается [B17](./B17-agent-router-and-fallback.md). `ProviderHealth` из `preflight`. Инфраструктурный сбой → `ProviderError`.
 
 ## Побочные эффекты
 
 - Порождение дочернего процесса CLI (через [B19](./B19-subprocess-runner.md)).
-- Запись артефактов попытки: `request.json`, `stdout.log`, `stderr.log`, `events.jsonl`,
-  `result.json`, опц. `output-schema.json`/`last-message.txt` — все редактированы.
+- Запись артефактов попытки: `request.json`, `stdout.log`, `stderr.log`, `events.jsonl`, `result.json`, опц. `output-schema.json`/`last-message.txt` — все редактированы.
 - Heartbeat-лог во время запуска.
 
 ## Ошибки и граничные случаи
@@ -162,9 +137,7 @@ usage, session_id, пути к stdout/stderr/events, error) — возвраща
 
 ## Место в общей системе
 
-Адаптеры — граница между детерминированным ядром и недетерминированными агентами. Они переводят
-абстрактный «запрос стадии» в конкретный запуск CLI и обратно — в нормализованный результат, скрывая
-все различия Codex/Claude за единым контрактом, который потребляет только Router.
+Адаптеры — граница между детерминированным ядром и недетерминированными агентами. Они переводят абстрактный «запрос стадии» в конкретный запуск CLI и обратно — в нормализованный результат, скрывая все различия Codex/Claude за единым контрактом, который потребляет только Router.
 
 ## Подтверждение в коде
 
