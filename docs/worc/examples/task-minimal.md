@@ -5,9 +5,7 @@ title: "Add page parameter to the users list endpoint"
 
 ## Description
 
-The `GET /users` endpoint currently returns every user in one response. Add an optional `page` query
-parameter that returns a single page using the pagination metadata the API already exposes elsewhere.
-Keep the default (no `page`) behavior unchanged.
+The `GET /users` endpoint currently returns every user in one response. Add an optional `page` query parameter that returns a single page using the pagination metadata the API already exposes elsewhere. Keep the default (no `page`) behavior unchanged.
 
 ## Acceptance criteria
 
