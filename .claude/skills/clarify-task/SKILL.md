@@ -23,12 +23,12 @@ If the task is small and unambiguous — don't ask questions for the sake of it,
 
 ## How to run the conversation
 
-- Ask **2–4 questions at a time**, don't dump a long list.
+- Ask **2–8 questions at a time**, don't dump a long list.
 - Where possible, offer **answer options** (use the question-with-options tool) so the user can pick
   rather than compose from scratch.
 - After each answer, react briefly: "did I understand correctly that…".
 - No jargon. If a term is unavoidable, explain it in one simple sentence right away.
-- No more than 2–3 rounds of questions. The goal is clarity, not an interrogation.
+- No more than 3 rounds of questions. The goal is clarity, not an interrogation.
 
 ## What to find out (in order)
 
