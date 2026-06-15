@@ -60,18 +60,37 @@ Router держит словарь экземпляров провайдеров
    вернуть `StageOutcome` (fallback не запускается) ([router.py:294-303](../../../src/wastech_orchestrator/routing/router.py#L294)).
 5. Если все попытки подняли `ProviderError` — вернуть `StageOutcome(result=None, terminal_error=...)`.
 
+Цикл попыток с инвариантом «fallback только для инфра-сбоя»: любой возвращённый результат (в т.ч.
+качественный `failed`) сразу завершает стадию, fallback не вызывается:
+
+```mermaid
+flowchart TB
+    start(["run_stage(request, route)"]) --> cap["snapshot.capture() — снимок «до» (если hook задан)"]
+    cap --> seq["последовательность: primary (+ fallback, если задан)"]
+    seq --> run["stage_attempts += 1; provider.run(req)"]
+    run --> res{"что вернул провайдер?"}
+    res -->|"результат: success ИЛИ качественный failed"| done["StageOutcome — вернуть сразу<br/>(fallback НЕ вызывается)"]
+    res -->|"ProviderError (инфра-сбой)"| fb{"есть следующий, лимит не исчерпан,<br/>fallback_allowed (профиль не слабее, B25)?"}
+    fb -->|да| diff["partial_change_since(before) → дифф fallback'у<br/>(файлы НЕ откатываются)"]
+    diff --> run
+    fb -->|нет| term["StageOutcome(result=None, terminal_error)<br/>→ B06: терминальный failed стадии"]
+```
+
 ## Альтернативные сценарии
 
 ### Инфраструктурный сбой → fallback
+
 `ProviderError` от primary: записать попытку (status=None); если есть следующий провайдер, лимит не
 исчерпан и `fallback_allowed(...)` истинно — снять `partial_change_since(before)` и перейти к
 fallback'у (его запрос получает `diff_path` частичного диффа) ([router.py:244-273](../../../src/wastech_orchestrator/routing/router.py#L244)).
 
 ### Fallback запрещён → терминально для стадии
+
 Если `fallback_allowed` ложно (ошибка не инфраструктурная, либо fallback-профиль слабее) — выйти из
 цикла с `result=None` и `terminal_error` ([router.py:248-262](../../../src/wastech_orchestrator/routing/router.py#L248)).
 
 ### Override маршрута
+
 Task-override перенацеливает **primary** (после `check_task_route_override`); при коллизии с
 настроенным fallback роли меняются местами; `None`-fallback остаётся `None`
 ([router.py:151-169](../../../src/wastech_orchestrator/routing/router.py#L151)).

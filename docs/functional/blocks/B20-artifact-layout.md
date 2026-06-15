@@ -55,9 +55,20 @@
 3. Возвращается `ArtifactPaths` с путями `request.json`, `stdout.log`, `stderr.log`, `events.jsonl`,
    `result.json`.
 
+Детерминированный путь попытки и инвариант «логи не перезаписываются» (`exist_ok=False`):
+
+```mermaid
+flowchart TB
+    start(["create_attempt_dir(task, stage, attempt, provider, stage_run_id)"]) --> path["путь: logs/{task-id}/stages/{stage}/<br/>[sub-NN/]run-{stage_run_id:06d}/{attempt}-{provider}/"]
+    path --> mk{"mkdir(parents=True, exist_ok=False)"}
+    mk -->|"каталог уже есть"| err["FileExistsError — защита от перезаписи"]
+    mk -->|"создан"| ap["ArtifactPaths: request.json, stdout.log,<br/>stderr.log, events.jsonl, result.json"]
+```
+
 ## Альтернативные сценарии
 
 ### Архивирование при rerun
+
 `archive_task_artifacts` переносит всё из `logs/<task-id>/`, кроме существующих `attempt-*`, в
 `attempt-<N>/`; если переносить нечего — возвращает `None`; уже существующее имя в назначении
 пропускается (идемпотентно при прерванном rerun) ([artifacts.py:64-77](../../../src/wastech_orchestrator/providers/artifacts.py#L64)).

@@ -48,6 +48,21 @@ heartbeat. Глобальный флаг `_configured` делает настро
   логирует `message` + `elapsed_seconds`; операция выполняется в вызывающем потоке (поведение
   возврата/исключения неизменно); по завершении поток останавливается.
 
+Логирование с сеткой редакции (последний барьер «нет секретов») и heartbeat для долгих операций:
+
+```mermaid
+flowchart TB
+    cfg["configure_logging (идемпотентно):<br/>StreamHandler(stderr) + опц. RotatingFileHandler"] --> filt["RedactionFilter на каждом хендлере"]
+    bind["bind(logger, task_id/stage/attempt/...)<br/>контекст в logfmt_fields"] --> rec["лог-запись"]
+    rec --> filt
+    filt --> redact["redact_text (B21) на msg / args / полях"]
+    redact --> out["logfmt или json в stderr (+ опц. файл)"]
+    hb["run_with_heartbeat(operation, interval)"] --> hbt{"interval больше 0?"}
+    hbt -->|да| thread["демон-поток: каждые interval сек —<br/>message + elapsed_seconds"]
+    hbt -->|нет| op["операция в вызывающем потоке<br/>(результат и исключения неизменны)"]
+    thread --> op
+```
+
 ## Проверки и ограничения
 
 - Два рубежа «никаких секретов»: места вызова логируют безопасное, а `RedactionFilter` — сетка

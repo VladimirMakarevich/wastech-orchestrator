@@ -52,6 +52,19 @@ Skill-tool — чтобы оба провайдера вели себя один
 3. (опц.) `compute_skill_dedup`: если есть текст оверрайда planning, разделы выбранных навыков с
    совпадающими нормализованными заголовками помечаются (приоритет у текста оператора).
 
+«Агент предлагает — ядро решает»: выбор возможен только из того, что нашёл скан инвентаря:
+
+```mermaid
+flowchart TB
+    collect["collect: сканировать SKILL.md<br/>(frontmatter name/description, read-only, лимит размера)"] --> inv["инвентарь: relevant + excluded (денилист)"]
+    proposed["planning предложил имена"] --> resolve["resolve_planning_skills"]
+    inv --> resolve
+    resolve -->|"нет в скане"| du["dropped_unknown"]
+    resolve -->|"только excluded:<br/>run-checks / test / sync-docs"| de["dropped_excluded"]
+    resolve -->|"найдено и relevant"| keep["refs → read-only пути в plan.md (B06)"]
+    keep --> dedup["compute_skill_dedup: пометить разделы,<br/>совпавшие с инструкциями оператора"]
+```
+
 ## Проверки и ограничения
 
 - Чтение ограничено по размеру (262 КБ/файл) и пропускает `denied_read_paths` ([skills.py:140-152](../../../src/wastech_orchestrator/core/skills.py#L140)).

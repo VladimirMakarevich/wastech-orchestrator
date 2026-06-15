@@ -55,17 +55,35 @@ Telegram возвращается «тихий» `NullNotifier`. Отправл�
 3. Возвращает `AskResult`: успех (text/approved), `timeout`, `transport_error`, либо
    `invalid_response` (свободный текст вместо кнопки approval).
 
+Round-trip `ask_human`; любой транспортный сбой — типизированное значение (не исключение), ядро
+трактует его fail-closed:
+
+```mermaid
+flowchart TB
+    start(["ask_human = start_ask + wait_for_answer"]) --> nf{"транспорт включён и настроен?"}
+    nf -->|нет| null["NullNotifier → transport_error"]
+    nf -->|да| sa["start_ask: редактировать промпт;<br/>approval → inline-кнопки, question → ForceReply;<br/>AskHandle с дедлайном now + timeout"]
+    sa --> del{"доставлено?"}
+    del -->|нет| te["AskHandle(delivered=False) → transport_error"]
+    del -->|да| wa["wait_for_answer: poll_reply (getUpdates) до дедлайна,<br/>сопоставление по message_id / callback_data в целевом чате"]
+    wa --> res["AskResult: успех (text/approved) |<br/>timeout | transport_error | invalid_response"]
+    res -.->|любой сбой| fc["B06: fail-closed → ManualActionRequired"]
+```
+
 ## Альтернативные сценарии
 
 ### Транспорт выключен / не настроен
+
 `build_notifier` → `NullNotifier` (если `enabled=False` или пустой токен/chat_id); его `ask_*`
 детерминированно возвращают `transport_error` ([interface.py:131-138](../../../src/wastech_orchestrator/notify/interface.py#L131)).
 
 ### Недоставленный запрос
+
 `start_ask` поймал исключение → `AskHandle(delivered=False)`; `wait_for_answer` сразу
 `transport_error` ([telegram.py:195-218](../../../src/wastech_orchestrator/notify/telegram.py#L195)).
 
 ### Конфликт поллинга (409)
+
 Второй потребитель `getUpdates` на тот же бот-токен → `RuntimeError` (мапится в `transport_error`),
 а на preflight — явный FAIL ([telegram.py:636-644,504-520](../../../src/wastech_orchestrator/notify/telegram.py#L636)).
 

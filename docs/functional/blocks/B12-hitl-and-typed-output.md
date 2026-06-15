@@ -54,14 +54,32 @@
    ошибки, редактированный ответ, `approved`).
 4. После успешного перезапуска стадии — `mark_consumed`.
 
+Жизненный цикл HITL-взаимодействия — durable: артефакт на диске позволяет возобновиться после падения
+процесса прямо во время ожидания ответа:
+
+```mermaid
+flowchart TB
+    sig["агент вернул сигнал human_input<br/>(refinement / planning)"] --> ask["B06: отправить запрос (B26) +<br/>write_waiting_interaction (status=waiting)"]
+    ask --> wait["wait_for_answer (B26)"]
+    wait -->|ответ| ans["write_answer: answered (+approved),<br/>текст редактирован"]
+    wait -->|"timeout / transport"| terr["status=transport_error"]
+    ans --> restart["перезапуск стадии"]
+    restart --> consumed["mark_consumed"]
+    crash(["рестарт процесса"]) -.-> load["load_interaction"]
+    load -->|"waiting / transport_error"| wait
+    load -->|"answered / consumed"| reuse["ответ переиспользуется<br/>(handle_from_artifact)"]
+```
+
 ## Альтернативные сценарии
 
 ### Возобновление после рестарта
+
 `load_interaction` читает артефакт; `waiting`/`transport_error` → можно дождаться/перезапросить;
 `answered`/`consumed` → ответ переиспользуется; `handle_from_artifact` восстанавливает `AskHandle`
 (строгая валидация полей) ([hitl.py:418-459](../../../src/wastech_orchestrator/core/hitl.py#L418)).
 
 ### Continue / Finalize
+
 `reset_pending_interactions` удаляет незавершённые (`waiting`/`transport_error`) артефакты для
 `rerun --continue`; `consume_pending_interactions` помечает их `consumed` для `finalize`
 ([hitl.py:378-415](../../../src/wastech_orchestrator/core/hitl.py#L378)).

@@ -68,6 +68,19 @@
    с фильтром длины ≥ 8 ([redaction.py:178-202](../../../src/wastech_orchestrator/providers/redaction.py#L178)).
 3. Возвращается дедуплицированный кортеж литералов.
 
+Два пути: трёхслойная редакция строки и сбор литералов из запретных файлов (которые затем тоже
+вычищаются из стоков):
+
+```mermaid
+flowchart TB
+    rt(["redact_text(text, extra_secrets)"]) --> l1["1. литералы extra_secrets (длиной ≥ 4),<br/>сначала более длинные → [REDACTED]"]
+    l1 --> l2["2. чувствительные присваивания NAME=VALUE<br/>(TOKEN/SECRET/PASSWORD/API_KEY/...) → значение вычищается"]
+    l2 --> l3["3. токено-паттерны: GitHub PAT, sk-..., Slack, AWS, Bearer, JWT"]
+    l3 --> out["новая строка (вход не мутируется)"]
+    rd(["read_denied_secrets(workspace, denied_read_paths)"]) -.->|"литералы длиной ≥ 8"| extra["extra_secrets"]
+    extra -.-> rt
+```
+
 ## Проверки и ограничения
 
 - Литералы короче 4 символов игнорируются (иначе портили бы обычный текст)

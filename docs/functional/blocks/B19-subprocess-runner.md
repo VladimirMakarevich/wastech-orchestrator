@@ -62,13 +62,27 @@
 3. По завершении фиксируются `exit_code` и `stderr_text`.
 4. Возвращается `ProcessResult` с измеренной длительностью.
 
+Контракт безопасного запуска; таймаут и сбой запуска — это **значения** результата, а не исключения:
+
+```mermaid
+flowchart TB
+    start(["run_process(argv, cwd, env, timeout, stdout_path, stdin_text)"]) --> open["открыть stdout_path (wb)"]
+    open --> run["subprocess.run(list(argv), shell=False,<br/>env=dict(env) — без наследования родителя,<br/>input=stdin_text либо stdin=DEVNULL,<br/>stdout=файл, stderr=PIPE, обязательный timeout)"]
+    run --> r{"исход?"}
+    r -->|"завершился"| ok["ProcessResult(exit_code, stderr_text — не редактирован, duration)"]
+    r -->|"TimeoutExpired"| to["ProcessResult(timed_out=True, exit_code=None)"]
+    r -->|"FileNotFoundError / OSError / ..."| le["ProcessResult(launch_error=argv[0]) — без исключения"]
+```
+
 ## Альтернативные сценарии
 
 ### Истечение таймаута
+
 `subprocess.TimeoutExpired` → `timed_out=True`, `exit_code=None`, частичный stderr из исключения
 ([process.py:96-98](../../../src/wastech_orchestrator/providers/process.py#L96)).
 
 ### Невозможность запустить бинарь
+
 `FileNotFoundError/PermissionError/NotADirectoryError/OSError` → ошибка **не пробрасывается**, а
 записывается в `launch_error` (с именем `argv[0]`, без секрета); для пустого `argv` — метка
 `"<empty argv>"` ([process.py:99-102](../../../src/wastech_orchestrator/providers/process.py#L99)).

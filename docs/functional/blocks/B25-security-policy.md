@@ -68,6 +68,25 @@
 - **Строгость:** `read-only` (ранг 0) строже `workspace-write` (ранг 1); `candidate` ок, если его
   ранг ≤ ранга `reference` ([profiles.py:17-34](../../../src/wastech_orchestrator/security/profiles.py#L17)).
 
+Пять независимых чистых примитивов — каждый закрывает свою грань инварианта и применяется в своих
+точках (defense-in-depth):
+
+```mermaid
+flowchart LR
+    subgraph prim["5 примитивов политики (чистые)"]
+        env["build_child_env<br/>аллой-лист окружения"]
+        fa["find_forbidden_args<br/>запрет bypass-флагов"]
+        inj["scan_frontmatter<br/>скан инъекций (reject)"]
+        iso["check_isolation<br/>префлайт изоляции"]
+        prof["is_same_or_stricter<br/>строгость профилей (fail-closed)"]
+    end
+    env --> envc["B19 / B18 / B22 / B24 — запуск процессов"]
+    fa --> fac["B05 (загрузка) + B18 (запуск)"]
+    inj --> injc["B16 — шлюз §19 (значения фронтматтера)"]
+    iso --> isoc["B06 (до ветки) + B01 (preflight)"]
+    prof --> profc["B17 — условный fallback (профиль не слабее)"]
+```
+
 ## Проверки и ограничения
 
 - **Fail-closed везде:** неизвестный профиль в `is_same_or_stricter` → `False` (нельзя ослаблять

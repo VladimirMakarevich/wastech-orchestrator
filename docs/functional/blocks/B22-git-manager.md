@@ -67,17 +67,35 @@ commit/push/PR» и «запуск без shell-интерполяции».
 Все шаги идемпотентны: повторный вызов после рестарта проверяет `publish_operations` и/или удалённое
 состояние и не дублирует операцию.
 
+```mermaid
+flowchart TB
+    start(["публикация (когда — решает B06)"]) --> cc["commit_code: scoped-стейджинг код-путей<br/>(НИКОГДА git add .) → один коммит"]
+    cc --> ca["commit_audit (если tracking=commit):<br/>отдельный коммит только tasks/"]
+    ca --> push["push: agent/id-slug в origin<br/>(отказ пушить в base_branch)"]
+    push --> pr["create_pr: gh pr create, тело из summary.md"]
+    pr --> mg{"auto_merge?"}
+    mg -->|да| merge["merge_pr: gh pr merge --strategy<br/>(никогда --admin/force, одна попытка)"]
+    mg -->|нет| clean
+    merge --> clean["terminal_cleanup: checkout base,<br/>если дерево безопасно"]
+    idem["идемпотентность: publish_operations (B07)<br/>+ проверка удалённого состояния"] -.-> push
+    idem -.-> pr
+    idem -.-> merge
+```
+
 ## Альтернативные сценарии
 
 ### Частичные изменения (SnapshotHook)
+
 `capture` снимает HEAD/porcelain/diff-checksum; `partial_change_since` при изменившемся диффе пишет
 `logs/<task>/partial/NNN.diff` и возвращает `PartialChange` (без отката) ([git_manager.py:451-475](../../../src/wastech_orchestrator/git_manager.py#L451)).
 
 ### Rerun (сброс ветки)
+
 `reset_branch_to_base`: checkout base, опц. удалить удалённую ветку (закрывает PR), force-delete
 локальную ветку — чтобы свежий `prepare_branch` пересоздал её от текущего base ([git_manager.py:295-316](../../../src/wastech_orchestrator/git_manager.py#L295)).
 
 ### Уже смерженный PR
+
 `merge_pr` при неуспехе с маркером «already merged/not open/was merged» считает это идемпотентным
 успехом (`"merged"`), иначе — `GitCommandError` ([git_manager.py:739-748](../../../src/wastech_orchestrator/git_manager.py#L739)).
 

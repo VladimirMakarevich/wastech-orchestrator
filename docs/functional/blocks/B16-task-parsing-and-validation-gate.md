@@ -56,13 +56,28 @@
    приёмки → `COMPLETE`, иначе `NEEDS_ENRICHMENT` ([validation_gate.py:399-413](../../../src/wastech_orchestrator/task/validation_gate.py#L399)).
 3. Возврат `ValidationResult(passed, reason, detail, normalized, completeness)`.
 
+Двухфазный шлюз §19: Фаза A — жёсткий reject с коротким замыканием на первом провале; Фаза B —
+классификация полноты (никогда не reject):
+
+```mermaid
+flowchart TB
+    src(["read_task_source: .md (frontmatter+body) или .json"]) --> checks["Фаза A по порядку:<br/>размер → UTF-8 → контрол-символы → длина →<br/>фронтматтер → поля/типы → валидный id → дубликат id →<br/>route/stage-оверрайды → скан инъекций (B25)"]
+    checks -->|любой провал| rej["reject: одна из 14 ValidationReason<br/>→ B06: карантин + ledger, без ветки"]
+    checks -->|всё ок| nt["собрать NormalizedTask"]
+    nt --> comp{"Фаза B: refined=true, или<br/>есть описание + критерии приёмки?"}
+    comp -->|да| complete["COMPLETE → refinement можно пропустить"]
+    comp -->|нет| enrich["NEEDS_ENRICHMENT → refinement выполняется"]
+```
+
 ## Альтернативные сценарии
 
 ### Recovery-rerun обходит дубликат id
+
 Если `is_recovery_rerun(id)` истинно, проверка `DUPLICATE_TASK_ID` пропускается (тот же id допускается
 к повторному прогону) ([validation_gate.py:219-222](../../../src/wastech_orchestrator/task/validation_gate.py#L219)).
 
 ### `.json` против `.md`
+
 Для `.json` тело берётся из ключа `description`; не-объект на верхнем уровне трактуется как
 «фронтматтер отсутствует» ([parser.py:149-167](../../../src/wastech_orchestrator/task/parser.py#L149)).
 

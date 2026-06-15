@@ -64,17 +64,38 @@ output_schema, model/reasoning, session_id). Конфиг провайдера (
 7. При чистом выходе — парсинг событий: `succeeded` → `SUCCEEDED`, иначе `FAILED` + `TASK_FAILURE`;
    пишется `result.json`, возвращается `AgentRunResult`.
 
+Поток `run` — всё CLI-специфичное изолировано здесь; профиль разрешений никогда не ослабляется:
+
+```mermaid
+flowchart TB
+    start(["run(request)"]) --> dir["каталог попытки (B20)"]
+    dir --> argv["построить argv (список, без shell);<br/>map_permission — профиль не ослабляется"]
+    argv -->|"небезопасный extra_args / профиль / sandbox"| cfg["ProviderError(CONFIGURATION_ERROR) — до запуска"]
+    argv --> req["редактированный request.json (B21); env по аллой-листу (B25)"]
+    req --> proc["run_process: промпт на stdin,<br/>контекст — путями в футере (B19)"]
+    proc --> redact["редактировать stdout/stderr/events и записать (B21)"]
+    redact --> outcome{"исход процесса?"}
+    outcome -->|"launch / timeout / exit≠0"| cls["classify → ErrorClass → ProviderError"]
+    outcome -->|"нет терминального события"| inv["ProviderError(INVALID_OUTPUT)"]
+    outcome -->|"чистый выход + терминальное событие"| parse{"задача выполнена?"}
+    parse -->|да| ok["AgentRunResult: SUCCEEDED"]
+    parse -->|нет| fail["AgentRunResult: FAILED + TASK_FAILURE"]
+```
+
 ## Альтернативные сценарии
 
 ### Невалидный вывод
+
 Нет терминального события в потоке → `ProviderError(INVALID_OUTPUT)` из парсера → finalize + raise
 ([claude.py:370-371](../../../src/wastech_orchestrator/providers/claude.py#L370), [codex.py:273-274](../../../src/wastech_orchestrator/providers/codex.py#L273)).
 
 ### Codex: файл последнего сообщения
+
 `--output-last-message <path>` пишет финальное сообщение в отдельный файл; он редактируется на диске и
 переопределяет `final_message` из потока ([codex.py:431-437,276-277](../../../src/wastech_orchestrator/providers/codex.py#L431)).
 
 ### preflight
+
 `<cli> --version`: launch_error → executable_found=False; ненулевой выход/таймаут → found, но не
 готов; иначе парсится версия ([claude.py:406-447](../../../src/wastech_orchestrator/providers/claude.py#L406)).
 

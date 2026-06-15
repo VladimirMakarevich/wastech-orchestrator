@@ -42,6 +42,21 @@
 3. Иначе риск: оба → `other`; только удаления → `deletion`; только зависимости → `dependency`.
 4. Возврат `DangerousDiff` с отсортированным объединением путей.
 
+Классификация по найденным изменениям (обычный дифф → guardrail не нужен):
+
+```mermaid
+flowchart TB
+    start(["classify_dangerous_diff(entries)"]) --> scan["разметить пути:<br/>D или R+previous_path → удаления;<br/>базовое имя ~ манифест/лок (fnmatch) → зависимости"]
+    scan --> q{"что найдено?"}
+    q -->|"ничего"| none["None — обычный дифф"]
+    q -->|"только удаления"| del["DangerousDiff: deletion"]
+    q -->|"только зависимости"| dep["DangerousDiff: dependency"]
+    q -->|"и то, и другое"| other["DangerousDiff: other"]
+    del --> b06["B06: согласование человеком,<br/>если не покрыто аппрувом planning"]
+    dep --> b06
+    other --> b06
+```
+
 ## Проверки и ограничения
 
 - Список паттернов зависимостей охватывает множество экосистем (pyproject/locks, package.json,

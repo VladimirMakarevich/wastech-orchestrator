@@ -48,12 +48,29 @@
 3. `render_prompt`: заменяются только токены из `ALLOWED_PROMPT_VARS` (`None` → пустая строка);
    неизвестные `{...}` остаются как есть (нет `KeyError`, код/JSON со скобками не ломается).
 
+Разрешение шаблона стадии и безопасная подстановка (наличие файла оверрайда = сигнал активации):
+
+```mermaid
+flowchart TB
+    start["старт: для каждой ROUTABLE_STAGES<br/>загрузить упакованный дефолт"] --> ovr{"есть непустой файл<br/>стадии в templates_dir?"}
+    ovr -->|нет| def["дефолт"]
+    ovr -->|да| mode{"prompts.mode?"}
+    mode -->|replace| only["только файл оператора"]
+    mode -->|append| both["дефолт + файл"]
+    def --> render
+    only --> render
+    both --> render["render_prompt: подставить только<br/>ALLOWED_PROMPT_VARS (пути/метаданные);<br/>неизвестные токены оставить как есть"]
+    render --> out["AgentRunRequest.prompt (B06)"]
+```
+
 ## Альтернативные сценарии
 
 ### Пустой `templates_dir`
+
 Явный opt-out: для всех стадий используются упакованные дефолты ([prompts.py:101-102](../../../src/wastech_orchestrator/core/prompts.py#L101)).
 
 ### Пустой файл оверрайда
+
 Логируется предупреждение, используется дефолт ([prompts.py:112-116](../../../src/wastech_orchestrator/core/prompts.py#L112)).
 
 ## Проверки и ограничения

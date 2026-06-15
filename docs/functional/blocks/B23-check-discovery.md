@@ -60,15 +60,37 @@
    - **disabled**: пустой профиль `ready=True` с предупреждением.
 4. Профиль сохраняется (атомарно) и возвращается.
 
+Резолвинг профиля: сначала кэш по fingerprint, затем — по режиму discovery:
+
+```mermaid
+flowchart TB
+    start(["resolve(allow_agent, refresh)"]) --> fp["вычислить fingerprint входов"]
+    fp --> cache{"кэш валиден?<br/>(не refresh; NEVER, либо fingerprint совпал)"}
+    cache -->|да| reuse["переиспользовать resolved-profile.json"]
+    cache -->|нет| mode{"режим discovery?"}
+    mode -->|configured| conf["довериться checks.commands<br/>(проба для аудита), ready=true"]
+    mode -->|disabled| dis["пустой профиль, ready=true + warning"]
+    mode -->|"deterministic / auto"| det["улики (inspect) → кандидаты (detect)<br/>→ валидация + проба"]
+    det --> ag{"auto + opt-in + нет запускаемого tests?"}
+    ag -->|да| agent["read-only агентский fallback (B18),<br/>тот же валидатор + проба; сбой → пусто"]
+    ag -->|нет| sel
+    agent --> sel["_select: приоритетный запускаемый кандидат,<br/>пиннинг, обёртка вытесняет per-language"]
+    conf --> save
+    dis --> save
+    sel --> save["сохранить профиль (атомарно) + commands_signature"]
+```
+
 ## Альтернативные сценарии
 
 ### Агентский fallback (auto)
+
 Только когда `mode=auto`, `allow_agent`, `agent_fallback`, есть провайдер и нет запускаемого `tests`:
 один **read-only** запуск провайдера (`permission_profile="read-only"`, дешёвая модель, низкий
 reasoning, таймаут) с фактами-уликами (имена, без содержимого/env); вывод строго валидируется и
 проходит тот же валидатор+пробу ([resolver.py:208-215](../../../src/wastech_orchestrator/checks/resolver.py#L208), [agent.py:96-127](../../../src/wastech_orchestrator/checks/agent.py#L96)). Любой сбой → `()` (детерминированный результат остаётся).
 
 ### Повторный резолвинг (`reresolve`)
+
 Принудительный fresh-резолв (игнор кэша) только при «инфраструктурном доказательстве»
 (`launch_failed`/`fingerprint_changed`/`low_confidence`); причина пишется в `notes` профиля
 ([resolver.py:126-138](../../../src/wastech_orchestrator/checks/resolver.py#L126)). Никогда — из-за

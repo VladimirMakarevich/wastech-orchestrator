@@ -58,12 +58,30 @@
    launch_failed, first_launch_error)` (первый провал останавливает).
 6. Все прошли → `CheckOutcome(passed=True, runs=…)`.
 
+Запуск профиля по порядку; первый провал останавливает; launch-сбой отличается от качественного:
+
+```mermaid
+flowchart TB
+    start(["run(clone_dir, task_id, checks)"]) --> set["набор = checks или<br/>normalize_commands(config.checks.commands)"]
+    set --> empty{"набор пуст?"}
+    empty -->|да| passall["CheckOutcome(passed=True) — без запусков"]
+    empty -->|нет| run["run_process(argv, cwd, env по аллой-листу, timeout) (B19);<br/>stdout → неперезаписываемый лог + редакт. stderr"]
+    run --> ok{"exit=0, не timeout, не launch-сбой?"}
+    ok -->|да| next{"ещё проверки?"}
+    next -->|да| run
+    next -->|нет| passall2["CheckOutcome(passed=True)"]
+    ok -->|"launch-сбой"| lf["CheckOutcome(launch_failed=True)<br/>→ B06: повторный резолвинг (B23), НЕ fixing"]
+    ok -->|"качественный провал / timeout"| qf["CheckOutcome(passed=False, first_failure_log)<br/>→ B06: fixing"]
+```
+
 ## Альтернативные сценарии
 
 ### Нет проверок
+
 Пустой набор → `CheckOutcome(passed=True)` без запусков ([check_runner.py:176](../../../src/wastech_orchestrator/check_runner.py#L176); подтверждено тестом `test_no_commands_passes`).
 
 ### Сбой запуска (launch failure)
+
 `result.launch_error is not None` → `launch_failed=True`, `passed=False`, в `CheckOutcome`
 проставляются `launch_failed`/`first_launch_error`; [B06](./B06-orchestrator-pipeline.md) трактует это
 как инфраструктурное событие (повторный резолвинг/префлайт), а не как повод для fixing

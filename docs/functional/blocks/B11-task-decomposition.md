@@ -51,6 +51,24 @@
    (`non_linear_dependencies`).
 6. Иначе → `accepted` с отсортированными `SubtaskSpec`.
 
+Детерминированное правило приёма §5.1 — первая же непройденная проверка даёт «один юнит» с кодом
+причины (агент не может ослабить лимит, маршруты или линейность зависимостей):
+
+```mermaid
+flowchart TB
+    start(["decide_decomposition(output, gate_on, max_subtasks)"]) --> g{"gate_on?"}
+    g -->|нет| one1["один юнит — gate_off"]
+    g -->|да| m{"mapping, decompose=true<br/>и есть список subtasks?"}
+    m -->|нет| one2["один юнит — not_recommended"]
+    m -->|да| rng{"2 ≤ n ≤ max_subtasks?"}
+    rng -->|нет| one3["один юнит — n_out_of_range"]
+    rng -->|да| fld{"поля всех сабтасков корректны?"}
+    fld -->|нет| one4["один юнит — malformed_subtask"]
+    fld -->|да| lin{"order = 1..n и depends_on<br/>только на более ранние?"}
+    lin -->|нет| one5["один юнит — non_linear_dependencies"]
+    lin -->|да| acc["accepted — отсортированные SubtaskSpec"]
+```
+
 ## Проверки и ограничения
 
 - `2 ≤ n ≤ max_subtasks`; `order == 1..n`; `depends_on` — только строго более ранние (линейно, без
