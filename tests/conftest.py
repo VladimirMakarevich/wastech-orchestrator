@@ -115,6 +115,7 @@ def build_git_config(
     auto_merge_allow_per_task: bool = False,
     auto_merge_wait_for_checks: bool = False,
     prompts_block: str | None = None,
+    prompt_audit: bool = False,
 ) -> OrchestratorConfig:
     """Build a config pointing ``repo.local_path`` at the clone, with the given footprint/checks.
 
@@ -170,6 +171,7 @@ git:
   footprint:
     audit_commit_message: "chore(orchestrator): audit trail for {{task_id}}"
     audit_on_branch: {audit_on_branch}
+prompt_audit: {str(prompt_audit).lower()}
 """
     if prompts_block:
         text += "\n" + prompts_block

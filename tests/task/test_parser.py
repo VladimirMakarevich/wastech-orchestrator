@@ -136,6 +136,14 @@ def test_auto_merge_round_trips(tmp_path: Path, value: bool | None) -> None:
     assert load_normalized(tmp_path, "task-001").auto_merge is value
 
 
+@pytest.mark.parametrize("value", [True, False, None])
+def test_prompt_audit_round_trips(tmp_path: Path, value: bool | None) -> None:
+    # Restart-safety: a resumed task must keep its exact prompt-audit tri-state across recovery.
+    task = NormalizedTask(id="task-001", title="T", description="Do it", prompt_audit=value)
+    write_normalized(task, tmp_path)
+    assert load_normalized(tmp_path, "task-001").prompt_audit is value
+
+
 def test_stage_params_round_trip(tmp_path: Path) -> None:
     # Restart-safety: per-stage model/reasoning AND the skip toggle must survive a resume, or a
     # crash could lose a skip and re-run a stage the operator disabled.

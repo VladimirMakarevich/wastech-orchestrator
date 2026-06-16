@@ -36,7 +36,10 @@ from wastech_orchestrator.providers.base import ProviderId, Stage
 # its `<id>.summary.md` stay at the repo root and are audit-committed. The `git.footprint.location`,
 # `.tracking`, and `.external_root` keys are removed; `git.footprint` now carries only
 # `audit_commit_message` + `audit_on_branch`.
-CONFIG_SCHEMA_VERSION = 7
+# v8 (2026-06-16, prompt-audit): adds the optional top-level `prompt_audit` flag (default false).
+# Old configs omit it and take the safe `false` default — no migration flips anything;
+# `upgrade-config` adds it from the packaged template. A per-task `prompt_audit` overrides it.
+CONFIG_SCHEMA_VERSION = 8
 
 # Stages routed to an agent provider. The remaining stages (``testing``, ``publishing``) are run by
 # the orchestrator itself (Check Runner / Git Manager), so they never appear in ``agents.routing``
@@ -321,3 +324,8 @@ class OrchestratorConfig:
     telegram: TelegramConfig
     prompts: PromptsConfig = PromptsConfig()
     skills: SkillsConfig = SkillsConfig()
+    # When true, every task records each step's prompt + who-metadata (provider/model/attempt/
+    # fallback/status) under `logs/<task-id>/prompt-audit/`. A per-task `prompt_audit` always
+    # overrides this (task wins); recording a prompt is not a privilege escalation, so there is no
+    # operator gate.
+    prompt_audit: bool = False

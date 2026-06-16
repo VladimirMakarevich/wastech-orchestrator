@@ -256,6 +256,38 @@ def test_auto_merge_non_boolean_is_rejected(config: OrchestratorConfig) -> None:
     assert "auto_merge" in result.detail
 
 
+def test_prompt_audit_true_passes_and_is_stored(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\nprompt_audit: true\n---\n\n## Description\n\nx.\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.prompt_audit is True
+
+
+def test_prompt_audit_false_is_stored(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\nprompt_audit: false\n---\n\n## Description\n\nx.\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.prompt_audit is False
+
+
+def test_prompt_audit_absent_normalizes_to_none(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\n---\n\n## Description\n\nDo it.\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.prompt_audit is None
+
+
+def test_prompt_audit_non_boolean_is_rejected(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\nprompt_audit: yes-please\n---\n\n## Description\n\nx.\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_FIELD_TYPE
+    assert "prompt_audit" in result.detail
+
+
 def test_model_field_passes_and_is_stored(config: OrchestratorConfig) -> None:
     text = "---\nid: task-001\ntitle: T\nmodel: claude-opus-4-8\n---\n\n## Description\n\nDo it.\n"
     result = _gate(config).validate(_src(text))

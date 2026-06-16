@@ -730,6 +730,7 @@ _TOP_LEVEL_KEYS = {
     "telegram",
     "prompts",
     "skills",
+    "prompt_audit",
 }
 
 
@@ -767,6 +768,7 @@ def _parse(raw: Mapping[str, Any], issues: list[str], warnings: list[str]) -> Or
         telegram=_build_telegram(raw.get("telegram"), issues),
         prompts=_build_prompts(raw.get("prompts"), issues, warnings),
         skills=_build_skills(raw.get("skills"), issues),
+        prompt_audit=_bool(raw, "prompt_audit", False, "<root>", issues),
     )
 
 

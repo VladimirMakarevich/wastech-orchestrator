@@ -73,7 +73,7 @@ For `.json`, the body is taken from the `description` key; a non-object at the t
 - 14 machine reject reasons (`ValidationReason`): file_too_large, not_utf8, binary_or_control_chars, too_long, frontmatter_missing, frontmatter_malformed, unknown_top_level_field, missing_required_field, invalid_field_type, invalid_task_id, duplicate_task_id, invalid_route_override, invalid_stage_override, review_skip_not_allowed, injection_suspected ([validation_gate.py:56-73](../../../src/wastech_orchestrator/task/validation_gate.py#L56)).
 - Duplicate frontmatter keys (YAML and JSON) → `frontmatter_malformed` (not "silently keep last") ([parser.py:67-92](../../../src/wastech_orchestrator/task/parser.py#L67)).
 - `id` — strict `^[a-z0-9][a-z0-9._-]{0,63}$`, **reject, do not sanitize** ([model.py:19-42](../../../src/wastech_orchestrator/task/model.py#L19)).
-- Tristate `decompose`/`auto_merge` (true/false/None); `model`/`reasoning` are validated (reasoning ∈ {low, medium, high, xhigh, max}) ([validation_gate.py:50,426-444](../../../src/wastech_orchestrator/task/validation_gate.py#L426)).
+- Tristate `decompose`/`auto_merge`/`prompt_audit` (true/false/None); `model`/`reasoning` are validated (reasoning ∈ {low, medium, high, xhigh, max}) ([validation_gate.py:50,426-444](../../../src/wastech_orchestrator/task/validation_gate.py#L426)).
 - `stages.<stage>`: `model`/`reasoning` only for `ROUTABLE_STAGES`, `enabled` only for `SKIPPABLE_STAGES`; `stages.review.enabled: false` requires `agents.allow_review_skip` ([validation_gate.py:321-395](../../../src/wastech_orchestrator/task/validation_gate.py#L321)).
 
 ## Output

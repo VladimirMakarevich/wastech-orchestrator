@@ -91,7 +91,7 @@ flowchart TB
 
 ## Place in the Overall System
 
-Defines where on disk all run traces live (prompts, agent responses, check logs, reviews, HITL, failure reports). The layout is identical for a fresh run and for a resume, so recovery finds artifacts via the same paths.
+Defines where on disk all run traces live (prompts, agent responses, check logs, reviews, HITL, failure reports). The layout is identical for a fresh run and for a resume, so recovery finds artifacts via the same paths. The optional prompt audit ([B06](./B06-orchestrator-pipeline.md), gated by `prompt_audit`) is a sibling `logs/<task-id>/prompt-audit/` directory under the same task root, so it too is archived into `attempt-<N>/` on rerun.
 
 ## Code Confirmation
 

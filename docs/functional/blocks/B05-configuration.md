@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The typed model for `config.yaml` and its full data lifecycle: structural YAML parsing into dataclasses (fail-closed), semantic validation of rules §11/§21.4, and key migration between schema versions. The configuration defines the behavior of the entire system (providers, routes, loop limits, security, the git audit footprint, checks, telegram, prompts, skills).
+The typed model for `config.yaml` and its full data lifecycle: structural YAML parsing into dataclasses (fail-closed), semantic validation of rules §11/§21.4, and key migration between schema versions. The configuration defines the behavior of the entire system (providers, routes, loop limits, security, the git audit footprint, checks, telegram, prompts, skills, the prompt audit toggle).
 
 ## Responsibilities
 
@@ -69,9 +69,9 @@ flowchart TB
 
 Missing routing block → auto-migration to Codex route for all `ROUTABLE_STAGES` + warning ([loader.py:476-485,388-392](../../../src/wastech_orchestrator/config/loader.py#L476)).
 
-### Removed keys (schema v6 / v7)
+### Schema changes (v6 / v7 / v8)
 
-v6: `prompts.overrides`/`prompts.strict` are tolerated on load (ignored) with a warning; `upgrade-config` strips them ([loader.py:711-728](../../../src/wastech_orchestrator/config/loader.py#L711), [upgrade.py:27-30,77-89](../../../src/wastech_orchestrator/config/upgrade.py#L27)). v7 (worc-home consolidation): the `git.footprint.location`/`.tracking`/`.external_root` keys are removed — `git.footprint` now carries only `audit_commit_message` + `audit_on_branch` ([schema.py:39,229-236](../../../src/wastech_orchestrator/config/schema.py#L39)); `upgrade-config` strips the removed keys.
+v6: `prompts.overrides`/`prompts.strict` are tolerated on load (ignored) with a warning; `upgrade-config` strips them ([loader.py:711-728](../../../src/wastech_orchestrator/config/loader.py#L711), [upgrade.py:27-30,77-89](../../../src/wastech_orchestrator/config/upgrade.py#L27)). v7 (worc-home consolidation): the `git.footprint.location`/`.tracking`/`.external_root` keys are removed — `git.footprint` now carries only `audit_commit_message` + `audit_on_branch` ([schema.py:39,229-236](../../../src/wastech_orchestrator/config/schema.py#L39)); `upgrade-config` strips the removed keys. v8 (prompt-audit): adds the optional top-level `prompt_audit` boolean (default false); an absent value takes the safe `false`, so no migration flips anything and `upgrade-config` adds it from the template.
 
 ### Config upgrade
 

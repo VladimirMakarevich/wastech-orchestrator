@@ -247,6 +247,7 @@ class ValidationGate:
             refined=bool(frontmatter.get("refined", False)),
             decompose=_as_tristate(frontmatter.get("decompose")),
             auto_merge=_as_tristate(frontmatter.get("auto_merge")),
+            prompt_audit=_as_tristate(frontmatter.get("prompt_audit")),
             agents=agents,
             contacts=[str(c) for c in frontmatter.get("contacts", [])],
             model=frontmatter.get("model") or None,
@@ -281,6 +282,12 @@ class ValidationGate:
             and not isinstance(fm["auto_merge"], bool)
         ):
             return _Reject(ValidationReason.INVALID_FIELD_TYPE, "auto_merge must be a boolean")
+        if (
+            "prompt_audit" in fm
+            and fm["prompt_audit"] is not None
+            and not isinstance(fm["prompt_audit"], bool)
+        ):
+            return _Reject(ValidationReason.INVALID_FIELD_TYPE, "prompt_audit must be a boolean")
         if "agents" in fm and not isinstance(fm["agents"], Mapping):
             return _Reject(ValidationReason.INVALID_FIELD_TYPE, "agents must be a mapping")
         if "contacts" in fm:
