@@ -1,8 +1,7 @@
 # Example configuration for wastech-orchestrator.
 # Copy to config.yaml and fill it in for your project. config.yaml is NOT committed to git.
 # This is the packaged copy used by `wastech-orchestrator init`; keep it in sync with the
-# repo-root config.example.yaml and with §11 of
-# docs/implementation_stages/00_orchestrator_final_plan.md.
+# repo-root config.example.yaml
 
 schema_version: 6                   # config format version; the orchestrator refuses newer configs
 

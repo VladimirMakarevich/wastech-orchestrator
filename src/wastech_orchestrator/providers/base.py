@@ -1,9 +1,3 @@
-"""Agent provider contract.
-
-Implements docs/implementation_stages/00_orchestrator_final_plan.md §4.3 and §7.1.
-Core depends only on this module, not on specific adapters.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field

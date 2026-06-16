@@ -8,21 +8,18 @@ The canonical contract is [00_orchestrator_final_plan.md](../implementation_stag
 
 | Document | Purpose |
 | --- | --- |
-| [product_backlog.md](product_backlog.md) | Aggregated product backlog collected from the spec, architecture notes, implementation-stage notes, and scattered v2/candidate lists. |
-| [follow_ups.md](follow_ups.md) | Implementation follow-ups / tech-debt discovered while building (e.g. the schema migration runner) — distinct from product features. Recorded via `/sync-docs`. |
-| [prompt_template_customization.md](prompt_template_customization.md) | Detailed backlog task for user-overridable agent prompt templates. |
-| [token_optimization.md](token_optimization.md) | Detailed backlog task for measuring and reducing token usage. |
-| [runtime_provider_capacity_gate.md](runtime_provider_capacity_gate.md) | Detailed backlog task for checking Codex and Claude capacity before autonomous `watch` admits a pending task. |
+| [product_backlog.md](product_backlog.md) | Aggregated product inventory: open backlog (program + other deferred features), a Shipped traceability list, and the open detail-file index. |
+| [follow_ups.md](follow_ups.md) | Implementation follow-ups / tech-debt discovered while building — distinct from product features. Recorded via `/sync-docs`. |
 | [workflow_execution_foundation.md](workflow_execution_foundation.md) | Shared prerequisite for built-in workflow selection, immutable resolved-profile identity, execution roles/session scopes, and reusable output/audit contracts. |
-| [task_workflow_profiles.md](task_workflow_profiles.md) | Detailed backlog task for implementation, deep-research, and private security-audit workflows with distinct permissions, outputs, and publishing rules. |
-| [durable_sessions_and_fixing_affinity.md](durable_sessions_and_fixing_affinity.md) | Durable Claude/Codex editing lineage, provider-aware resume/fallback, and implementation/fixing provider-session affinity. |
-| [hybrid_agent_testing.md](hybrid_agent_testing.md) | Optional test-authoring agent before the authoritative deterministic Check Runner, with once-per-unit checkpoints and test-only diff guardrails. |
 | [supervisor_quality_gate.md](supervisor_quality_gate.md) | Mandatory read-only AI quality evaluation that emits bounded verdicts into Core-owned rework loops and optionally generates the final handoff without becoming a controller. |
-| [task_rerun_command.md](task_rerun_command.md) | Detailed backlog task for a `rerun <task-id>` command that launches a fresh attempt of a terminal task (gate allowance, branch reset-to-base to avoid merge conflicts, ledger attempt chain). |
-| [task_finalize_command.md](task_finalize_command.md) | Detailed backlog task for a `finalize <task-id> --as <done\|failed\|abandoned>` command that reconciles the bookkeeping of an operator-handled task (status, working tree/branch, file move, HITL close-out, ledger) without running the pipeline. |
-| [task_install_templates_command.md](task_install_templates_command.md) | Detailed backlog task for a separate `install-templates` command that delivers the packaged `templates/` tree into an existing install **add-missing-only** (skip existing, add only what's absent), resolving the install location like `upgrade-docs`; fills the gap that only `init` copies templates and `install` never does. |
+| [durable_sessions_and_fixing_affinity.md](durable_sessions_and_fixing_affinity.md) | Durable Claude/Codex editing lineage, provider-aware resume/fallback, and implementation/fixing provider-session affinity. |
+| [hybrid_agent_testing.md](hybrid_agent_testing.md) | Optional read-only test-quality evaluator before the authoritative deterministic Check Runner, with once-per-unit checkpoints and test-only diff guardrails. |
+| [task_workflow_profiles.md](task_workflow_profiles.md) | Detailed backlog task for implementation, deep-research, and private security-audit workflows with distinct permissions, outputs, and publishing rules. |
 | [documentation_update_stage.md](documentation_update_stage.md) | Optional, default-on finalizing `implementation` stage: a dedicated doc agent (own prompt/model/reasoning) that updates the target repo's project docs and related `.md` files from the full accepted-outcome context, doc-path-guarded, before summary/publishing. |
-| [task_prompt_templates_simplification.md](task_prompt_templates_simplification.md) | Detailed backlog task to simplify prompt templates: deliver **only** `prompts/` (drop the inert `skills/`/`AGENTS.md`/`CLAUDE.md`/`task.md`) and resolve prompts by convention — a `<stage>.md` in `templates_dir` auto-wins, packaged defaults become a per-stage fallback, `mode` defaults to `replace`, and `prompts.overrides` is removed. Also bundles (Part C) a maximal `task-rich.md` example exercising every task front-matter field (`pr_title`, `auto_merge`, all stages, per-stage model/reasoning/enabled) and actualizes the `worc/` README/best-practices/decision-guide. |
+| [runtime_provider_capacity_gate.md](runtime_provider_capacity_gate.md) | Detailed backlog task for checking Codex and Claude capacity before autonomous `watch` admits a pending task. |
+| [token_optimization.md](token_optimization.md) | Detailed backlog task for measuring and reducing token usage. |
+
+> **Already shipped?** Backlog items that have been implemented (auto-merge, stage-skip, per-stage model/reasoning, the `rerun`/`finalize`/`install-templates` commands, prompt-template customization and its simplification, the UX batch, and the post-test-run review) keep their design records under [../implementation_stages/](../implementation_stages/) (numbered 10–20, historical) and their changes in [CHANGELOG.md](../../CHANGELOG.md). They are listed for traceability in [product_backlog.md § Shipped](product_backlog.md#shipped-implemented).
 
 ## Agent quality and continuity program
 

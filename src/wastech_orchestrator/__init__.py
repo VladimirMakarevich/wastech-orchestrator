@@ -1,8 +1,3 @@
-"""wastech-orchestrator — a lean orchestrator for coding agents (Codex / Claude Code) on top of Git.
-
-Architecture source of truth: docs/implementation_stages/00_orchestrator_final_plan.md.
-"""
-
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 

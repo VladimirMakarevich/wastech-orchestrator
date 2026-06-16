@@ -1,79 +1,99 @@
 # Product Backlog
 
-Status: **backlog / not scheduled** Date: 2026-06-12 Owner: Vladimir Makarevich
+Status: **inventory** Date: 2026-06-16 Owner: Vladimir Makarevich
 
-This document aggregates deferred and candidate functionality that was previously scattered across the repository. It is an inventory, not an implementation contract. The source of truth remains [00_orchestrator_final_plan.md](../implementation_stages/00_orchestrator_final_plan.md).
+This document aggregates deferred and candidate functionality for **wastech-orchestrator**. It is an inventory, not an implementation contract. The source of truth remains [00_orchestrator_final_plan.md](../implementation_stages/00_orchestrator_final_plan.md).
+
+Where to find the design detail:
+
+- **Open items** keep their detailed design in a file in this folder (linked below).
+- **Shipped items** keep their design record under [../implementation_stages/](../implementation_stages/) (numbered, historical) and the change in [CHANGELOG.md](../../CHANGELOG.md). They are listed in [§ Shipped](#shipped-implemented) for traceability.
+- **Build-time tech-debt and implementation follow-ups** live in [follow_ups.md](follow_ups.md), not here.
 
 ## Sources Consolidated
 
 - [00_orchestrator_final_plan.md](../implementation_stages/00_orchestrator_final_plan.md) sections 2 and 18.
-- [../codex_git_orchestrator_architecture.md](../codex_git_orchestrator_architecture.md) sections 4.7, 4.10, 4.11, 6, 11, and 12.
+- [../worc_architecture.md](../worc_architecture.md) sections 4.7, 4.10, 4.11, 6, 11, and 12.
 - [../implementation_stages/05_pipeline_and_recovery.md](../implementation_stages/05_pipeline_and_recovery.md) "Not in this phase".
 - [../implementation_stages/06_security_and_observability.md](../implementation_stages/06_security_and_observability.md) "Not in this phase".
 - Detailed backlog files in this folder.
 
-## Canonical V2 Backlog
+## Open backlog
 
-These are explicitly deferred by the v1 spec.
+### Agent quality and continuity program
 
-| Item | Summary | Notes |
+Five backlog items built on one narrow shared prerequisite. See [README.md § Agent quality and continuity program](README.md#agent-quality-and-continuity-program) for the full ownership/dependency map, shared contracts, recommended order, and the target implementation loop.
+
+| Item | Summary | Status |
 | --- | --- | --- |
-| [Per-stage model and reasoning overrides](per_stage_model_reasoning.md) | Extend the existing task-level `model`/`reasoning` fields with a `stages:` block that sets them independently per stage (`planning`, `review`, `fixing`, etc.), allowing a high-capability model for review/planning and a lighter one for fixing/summary. | **Per-task `stages:` overrides shipped (2026-06-13, §3).** Remaining: config-level `stage_defaults` (§4). See linked detail file. |
-| [Stage skip control (per-task and global)](stage_skip_control.md) | Add a `skip:` list to task frontmatter and a global `agents.skip_stages` config key to bypass individual pipeline stages (`planning`, `testing`, `review`, `fixing`, `summary`). Useful for trivial tasks, repos without test suites, or high-trust automated flows. `implementation` and `publishing` cannot be skipped. | Every skipped stage is audited in `state.db` and logged as WARNING. Interacts with [[auto_merge_bypass]] — double-warning when review is skipped AND auto_merge is on. See linked detail file. |
-| [Workflow execution foundation](workflow_execution_foundation.md) | Add the shared prerequisite for built-in workflow selection, immutable resolved-profile identity, execution roles/session scopes, and reusable output/audit contracts. | Must preserve current `implementation` behavior and must not pre-implement sessions, testing, supervisor, deep research, or security audit. |
-| [Task workflow profiles](task_workflow_profiles.md) | Add explicit `implementation`, `deep_research`, and `security_audit` task types with different stage graphs, permissions, output contracts, quality gates, and publishing behavior. | Security audits are read-only against the target repo and store private reports beside the resolved `config.yaml`, outside the repository, without commit/push/PR. |
-| Richer task parsing | Extract additional structured metadata beyond current `id`, `title`, `refined`, `decompose`, `agents`, `contacts`, `model`, and `reasoning`. | Candidate fields: repo binding, commands/hints, priority, labels, issue links. Must stay fail-closed. |
-| Parallel and graph decomposition | Support graph-shaped subtasks, per-subtask worktrees/branches, and parallel execution. | V1 decomposition is linear, sequential, and uses one task branch. |
-| [Durable sessions and implementation/fixing affinity](durable_sessions_and_fixing_affinity.md) | Persist per-unit Claude/Codex editing lineage and make fixing prefer the provider/session from the successful implementation provider run. | Artifacts remain authoritative; evaluator sessions cannot contaminate editing lineage; infra-only fallback limits the affinity guarantee. |
-| [Hybrid agent testing](hybrid_agent_testing.md) | Add an optional once-per-unit agent that authors/repairs tests before deterministic checks. | `CheckRunner` exit codes remain the only publish authority; agent edits are restricted to trusted test paths. |
-| [Supervisor quality-gate](supervisor_quality_gate.md) | Add a mandatory read-only LLM evaluator that feeds bounded `accept`/`rework` verdicts into Core-owned loops and, when summary output is enabled, returns the final structured handoff. | No quality-gate enable/disable mode: the one-way `implementation-v2` cutover removes the old summary provider path. Summary output remains independently skippable; a skip creates no handoff call/files/body. Supervisor does not replace `review`, and Core owns transitions and optional artifact writes. |
+| [Workflow execution foundation](workflow_execution_foundation.md) | Shared prerequisite: single `implementation` profile selection, immutable resolved-profile identity, execution roles/session scopes, the reusable evaluator-loop primitive, and common output/audit/path/delta contracts. Must preserve current behavior and must not pre-implement the features built on it. | accepted (prerequisite, not scheduled) |
+| [Supervisor quality-gate](supervisor_quality_gate.md) | Mandatory read-only, fresh-session LLM evaluator that emits bounded `accept`/`rework` verdicts into Core-owned rework loops and, when summary output is enabled, returns the final structured handoff. No enable/disable mode; does not replace `review`; Core owns all transitions. | accepted (not scheduled) |
+| [Durable sessions and implementation/fixing affinity](durable_sessions_and_fixing_affinity.md) | Persist per-unit Claude/Codex editing lineage; make `fixing` prefer the provider/session of the successful `implementation` run; provider-aware resume/fallback. Artifacts stay authoritative; evaluator sessions cannot contaminate the lineage. | accepted (not scheduled) |
+| [Hybrid agent testing](hybrid_agent_testing.md) | Optional read-only test-quality evaluator (`role = test_quality`) before the authoritative deterministic Check Runner, with once-per-unit checkpoints and a test-only diff guard. Tests are authored by the `implementation` agent, never by the evaluator. | accepted (not scheduled) |
+| [Task workflow profiles](task_workflow_profiles.md) | Explicit `implementation`, `deep_research`, and `security_audit` task types with distinct stage graphs, permissions, output contracts, quality gates, and publishing behavior. Security audits are read-only and store private reports outside the repo (no commit/push/PR). | backlog / not scheduled |
+| [Documentation update stage](documentation_update_stage.md) | Optional, default-on finalizing `implementation` stage: a dedicated doc agent (own prompt/model/reasoning) updates the target repo's docs from the accepted-outcome context, doc-path-guarded, before summary/publishing. Slots in after the supervisor change. | accepted (not scheduled) |
 
-## Additional Candidate Features
+### Other deferred features
 
-These were described in architecture notes or v1 exclusions but are not scheduled.
+These are deferred by the v1 spec or described in architecture notes; not scheduled.
 
 | Item | Summary | Source / constraint |
 | --- | --- | --- |
+| [Runtime provider capacity gate](runtime_provider_capacity_gate.md) | Before autonomous `watch` claims a pending task, query the capacity of the Codex/Claude accounts its resolved routes need and defer the task when configured headroom is unavailable. | Runtime admission control, not install preflight. Deferred tasks stay pending, consume no attempts, retried after provider reset. |
+| [Token optimization](token_optimization.md) | Measure and reduce token consumption across stages. | Analysis + candidate levers; not part of v1 scope. |
+| Config-level per-stage `stage_defaults` | The §4 complement to the shipped per-task `stages:` overrides: per-stage `{model,reasoning}` defaults under each provider in `config.yaml`. | [13_per_stage_model_reasoning.md §4](../implementation_stages/13_per_stage_model_reasoning.md); tracked in [follow_ups.md](follow_ups.md). Touches schema (+version bump), loader, validation. |
+| Richer task parsing | Extract structured metadata beyond `id`, `title`, `refined`, `decompose`, `agents`, `contacts`, `model`, `reasoning`, `stages`, `pr_title`, `auto_merge`. | Candidate fields: repo binding, commands/hints, priority, labels, issue links. Must stay fail-closed. |
+| Parallel and graph decomposition | Graph-shaped subtasks, per-subtask worktrees/branches, parallel execution. | V1 decomposition is linear, sequential, on one task branch. |
+| Concurrent task processing via worktrees | Process multiple independent tasks at once by giving each its own `git worktree`. | Must not share a mutable working copy between active agents. Breaks the single-active-task invariant only behind worktree isolation. |
+| Queue priorities | Prioritize pending tasks instead of deterministic filename order. | Must preserve single-active-task invariant unless worktree concurrency lands. |
 | PR template support | Generate PR bodies from a configurable template in addition to `summary.md`. | Should integrate with the existing summary stage and Git Manager. |
-| GitHub Issues integration | Link tasks to issues, update issue status, and optionally close issues after PR creation/merge. | Requires GitHub auth through existing external credential model. |
-| Concurrent task processing via worktrees | Process multiple independent tasks at once by assigning each task its own `git worktree`. | Must not share a mutable working copy between active agents. |
-| Queue priorities | Prioritize pending tasks instead of processing purely by deterministic filename order. | Must preserve single-active-task invariant unless worktree concurrency is implemented. |
-| Web UI for tasks and logs | Provide a browser UI for pending/running/done tasks, artifacts, logs, and stuck states. | Read-only first is safer; mutations need auth/audit. |
-| Auto-retry on network errors | Retry transient network/provider failures before fallback or terminal failure. | Must be bounded and audited; should not retry quality failures. |
-| Per-task budget limit | Allow task-level budget/time/token limits. | Must not let a task raise global security or cost ceilings. |
-| [Runtime provider capacity gate](runtime_provider_capacity_gate.md) | Before autonomous `watch` claims a pending task, query the capacity reported by the Codex and Claude accounts required by its resolved routes and defer the task when configured headroom is unavailable. | Capacity checks are runtime admission control, not installation preflight or a completion guarantee. Deferred tasks remain pending, consume no attempts, and are retried automatically after provider reset. |
-| Auto-close stale tasks | Detect stale pending/running/manual tasks and close, archive, or escalate them. | Needs explicit policy and audit trail. |
-| Dry-run without push | Run through planning/check/review/publish preparation without pushing or opening a PR. | Must clearly mark that no publish operation occurred. |
-| Lightweight project memory | Persist small project-level lessons or conventions between tasks. | Optional; must not store secrets or unbounded agent context. |
-| [Auto-merge bypass flags (global and per-task)](auto_merge_bypass.md) | ⚠️ Opt-in flags — both off by default — to skip the manual PR-approval gate: a global `publishing.auto_merge` setting in `config.yaml`, and a per-task `auto_merge` field in task metadata. Full design, safety guardrails, audit trail, and implementation checklist in the linked detail file. | Security-sensitive; see [auto_merge_bypass.md](auto_merge_bypass.md). `extra_args` cannot set this flag. Merge-API failures fall back to `MANUAL_REVIEW`, never force-push. |
-| [UX improvements: stop/restart, WAL gitignore, gh check, worc alias](ux_improvements.md) | Four small independent operator-UX items: `stop`/`restart` commands for the watch loop (PID-file based); suppress `state.db-shm`/`state.db-wal` from `git status` via `.git/info/exclude`; hard pre-flight `gh` check before publish stage; short `worc` alias in `pyproject.toml`. | All additive, no Core changes. See linked detail file for per-item effort estimate and implementation notes. |
-| Dynamic agent selection by model | Let a model choose provider/stage routing dynamically. | Must not bypass configured allowlist, route audit, or deterministic fallback rules. |
-| Provider SDK/API backends | Add OpenAI API / Claude Agent SDK backends in addition to CLIs. | Must remain behind `AgentProvider`; Core must not learn provider syntax. |
+| GitHub Issues integration | Link tasks to issues, update status, optionally close on PR creation/merge. | Requires GitHub auth through the existing external credential model. |
+| Web UI for tasks and logs | Browser UI for pending/running/done tasks, artifacts, logs, stuck states. | Read-only first; mutations need auth/audit. |
+| Auto-retry on network errors | Retry transient network/provider failures before fallback or terminal failure. | Must be bounded and audited; never retry quality failures. |
+| Per-task budget limit | Task-level budget/time/token limits. | Must not let a task raise global security or cost ceilings. |
+| Auto-close stale tasks | Detect and close/archive/escalate stale pending/running/manual tasks. | Needs explicit policy and audit trail. |
+| Dry-run without push | Run planning/check/review/publish prep without pushing or opening a PR. | Must clearly mark that no publish operation occurred. |
+| Lightweight project memory | Persist small project-level lessons/conventions between tasks. | Optional; must not store secrets or unbounded agent context. |
+| Dynamic agent selection by model | Let a model choose provider/stage routing dynamically. | Must not bypass the configured allowlist, route audit, or deterministic fallback rules. |
+| Provider SDK/API backends | OpenAI API / Claude Agent SDK backends in addition to CLIs. | Must remain behind `AgentProvider`; Core must not learn provider syntax. |
 | Automatic CLI installation/authorization | Install or authorize Codex/Claude/GitHub CLIs automatically. | Current policy keeps credentials and auth outside the orchestrator. |
-| Vendor session transfer | Transfer an active vendor session between Codex and Claude Code. | Currently not supported; artifacts, not sessions, are the source of truth. |
+| Vendor session transfer | Transfer an active vendor session between Codex and Claude Code. | Not supported; artifacts, not sessions, are the source of truth. (Per-provider durable resume is the [durable sessions](durable_sessions_and_fixing_affinity.md) item, not cross-provider transfer.) |
 | Multi-repo/project binding | Select a configured repository per task (`repo` field / project map). | Current config targets one repository. Requires validation and workspace isolation. |
-| Agent instruction stubs in target repo | Seed or update target-repo `AGENTS.md`, `CLAUDE.md`, and skills before a run. | Packaged templates exist; runtime seeding needs scoped staging/audit rules. |
+| Agent instruction stubs in target repo | Seed or update target-repo `AGENTS.md`, `CLAUDE.md`, and skills before a run. | **Partial:** the skill-_reference_ half shipped (planning selects target-repo skills, `{skills_path}`); _authoring/managing_ the stubs themselves is still deferred (see [follow_ups.md](follow_ups.md)). |
 
-## Detailed Backlog Files
+## Shipped (implemented)
+
+These were backlog items and have shipped. The design records moved to [../implementation_stages/](../implementation_stages/) (historical) and the changes are recorded in [CHANGELOG.md](../../CHANGELOG.md). Kept here for traceability.
+
+| Item | Shipped | Design record |
+| --- | --- | --- |
+| UX improvements (stop/restart, runtime-file excludes, `gh` pre-flight, `worc` alias) | 2026-06-13 | [10_ux_improvements.md](../implementation_stages/10_ux_improvements.md) |
+| Auto-merge bypass flags (global + per-task) | 2026-06-13 | [11_auto_merge_bypass.md](../implementation_stages/11_auto_merge_bypass.md) |
+| Prompt template customization (core `prompts:` block) | 2026-06-13 | [12_prompt_template_customization.md](../implementation_stages/12_prompt_template_customization.md) |
+| Per-stage model/reasoning — per-task `stages:` overrides (§3) | 2026-06-13 | [13_per_stage_model_reasoning.md](../implementation_stages/13_per_stage_model_reasoning.md) — §4 `stage_defaults` still open (above) |
+| Stage skip control (per-task + global) | 2026-06-13 | [14_stage_skip_control.md](../implementation_stages/14_stage_skip_control.md) |
+| Post-test-run review improvements | 2026-06-14 | [16_post_test_run_review.md](../implementation_stages/16_post_test_run_review.md) |
+| `install-templates` command (add-missing-only) | 2026-06-14 | [17_task_install_templates_command.md](../implementation_stages/17_task_install_templates_command.md) |
+| `rerun` command (fresh + `--continue`) | 2026-06-14 | [18_task_rerun_command.md](../implementation_stages/18_task_rerun_command.md) |
+| `finalize` command (`--as done\|failed\|abandoned`) | 2026-06-14 | [19_task_finalize_command.md](../implementation_stages/19_task_finalize_command.md) |
+| Prompt templates simplification (prompts-only, auto-detect, schema v6) | 2026-06-14 | [20_task_prompt_templates_simplification.md](../implementation_stages/20_task_prompt_templates_simplification.md) |
+
+## Open detail files (in this folder)
 
 | Item | Detail |
 | --- | --- |
-| Prompt template customization | [prompt_template_customization.md](prompt_template_customization.md) |
-| Token optimization | [token_optimization.md](token_optimization.md) |
-| Runtime provider capacity gate for autonomous watch mode | [runtime_provider_capacity_gate.md](runtime_provider_capacity_gate.md) |
 | Workflow execution foundation | [workflow_execution_foundation.md](workflow_execution_foundation.md) |
-| Task workflow profiles | [task_workflow_profiles.md](task_workflow_profiles.md) |
+| Supervisor quality-gate | [supervisor_quality_gate.md](supervisor_quality_gate.md) |
 | Durable sessions and implementation/fixing affinity | [durable_sessions_and_fixing_affinity.md](durable_sessions_and_fixing_affinity.md) |
 | Hybrid agent testing | [hybrid_agent_testing.md](hybrid_agent_testing.md) |
-| Supervisor quality-gate | [supervisor_quality_gate.md](supervisor_quality_gate.md) |
-| Auto-merge bypass flags (global and per-task) | [auto_merge_bypass.md](auto_merge_bypass.md) |
-| UX improvements (stop/restart, WAL gitignore, gh check, worc alias) | [ux_improvements.md](ux_improvements.md) |
-| Per-stage model and reasoning overrides | [per_stage_model_reasoning.md](per_stage_model_reasoning.md) |
-| Stage skip control (per-task and global) | [stage_skip_control.md](stage_skip_control.md) |
+| Task workflow profiles | [task_workflow_profiles.md](task_workflow_profiles.md) |
+| Documentation update stage | [documentation_update_stage.md](documentation_update_stage.md) |
+| Runtime provider capacity gate | [runtime_provider_capacity_gate.md](runtime_provider_capacity_gate.md) |
+| Token optimization | [token_optimization.md](token_optimization.md) |
 
 ## Not Backlog
 
-The following are already part of the v1 spec or current implementation plan and should not be tracked here as future work unless their scope changes:
+The following are already part of the v1 spec / current implementation and should not be tracked here as future work unless their scope changes:
 
 - provider abstraction through `AgentProvider`;
 - infrastructure-only fallback;
