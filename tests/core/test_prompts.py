@@ -101,17 +101,13 @@ def test_empty_templates_dir_forces_packaged_defaults(tmp_path: Path) -> None:
     assert (tdir / "implementation.md").exists()
 
 
-def test_empty_file_warns_and_falls_back(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_empty_file_warns_and_falls_back(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     tdir = _override_dir(tmp_path, implementation="   \n  ")  # whitespace-only → empty after strip
     # The library logger ("wastech_orchestrator") sets propagate=False, so pass a propagating
     # logger to make the warning visible to caplog (which captures on the root logger).
     test_logger = logging.getLogger("test.prompts.empty")
     with caplog.at_level(logging.WARNING):
-        store = PromptTemplateStore(
-            PromptsConfig(templates_dir=str(tdir)), logger=test_logger
-        )
+        store = PromptTemplateStore(PromptsConfig(templates_dir=str(tdir)), logger=test_logger)
     assert store.resolved(Stage.IMPLEMENTATION) == _packaged_text(Stage.IMPLEMENTATION)
     assert any("packaged default" in rec.getMessage() for rec in caplog.records)
 

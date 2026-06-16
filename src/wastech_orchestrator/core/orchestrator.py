@@ -106,7 +106,7 @@ from wastech_orchestrator.providers.base import (
     Stage,
 )
 from wastech_orchestrator.providers.redaction import read_denied_secrets, redact_text
-from wastech_orchestrator.routing.router import AgentRouter, StageOutcome
+from wastech_orchestrator.routing.router import AgentRouter, ResolvedRoute, StageOutcome
 from wastech_orchestrator.security.isolation import check_isolation
 from wastech_orchestrator.state_store import (
     ArtifactRow,
@@ -1775,6 +1775,8 @@ class Orchestrator:
             fields=fields,
         )
         self._record_stage(run_id, outcome)
+        if self._prompt_audit_on(p.task):
+            self._write_prompt_audit(p, stage, subtask, prompt, route, outcome, run_id, started_at)
         p.counters.stage_attempts = outcome.stage_attempts
         if outcome.result is not None and outcome.result.session_id and outcome.provider_used:
             validated = _validate_session_id(outcome.result.session_id)
@@ -2281,6 +2283,63 @@ class Orchestrator:
             self._config.repo.local_path, self._config.security.denied_read_paths
         )
 
+    def _write_prompt_audit(
+        self,
+        p: _Pipeline,
+        stage: Stage,
+        subtask: int | None,
+        prompt: str,
+        route: ResolvedRoute,
+        outcome: StageOutcome,
+        run_id: int,
+        started_at: str,
+    ) -> None:
+        """Record one chronological prompt-audit step (who + redacted prompt) for a stage run.
+
+        Writes a self-contained JSON file per stage execution under
+        ``logs/<task-id>/prompt-audit/``, named by the monotonic ``stage_run_id`` so files sort
+        chronologically, and appends the same record as one compact line to the combined
+        ``timeline.jsonl``. Every agent that ran the prompt (primary plus any fallback) is listed
+        with its attempt #, status, and error — the prompt is identical across attempts, so it is
+        stored once. The prompt is redacted defensively, identically to the rendered-prompt
+        artifact. Gated by :meth:`_prompt_audit_on`.
+        """
+        audit_dir = task_artifact_dir(self._artifacts_root, p.task.id) / "prompt-audit"
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        agents = [
+            {
+                "provider": attempt.provider.value,
+                "attempt": attempt.attempt,
+                "is_fallback": attempt.provider != route.primary,
+                "status": attempt.status.value if attempt.status else None,
+                "error_class": attempt.error_class.value if attempt.error_class else None,
+                "started_at": attempt.result.started_at if attempt.result else None,
+                "finished_at": attempt.result.finished_at if attempt.result else None,
+            }
+            for attempt in outcome.attempts
+        ]
+        record: dict[str, object] = {
+            "stage_run_id": run_id,
+            "stage": stage.value,
+            "subtask": subtask,
+            "route_primary": route.primary.value,
+            "provider_used": outcome.provider_used.value if outcome.provider_used else None,
+            "model": p.task.model_for(stage),
+            "started_at": started_at,
+            "agents": agents,
+            "prompt": redact_text(prompt, extra_secrets=self._prompt_secrets()),
+        }
+        sub = f"-sub{subtask:02d}" if subtask is not None else ""
+        step_path = audit_dir / f"{run_id:06d}-{stage.value}{sub}.json"
+        step_path.write_text(
+            json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        timeline_path = audit_dir / "timeline.jsonl"
+        with timeline_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        self._register_artifact(p.task.id, "prompt_audit", str(step_path))
+        self._register_artifact(p.task.id, "prompt_audit_timeline", str(timeline_path))
+
     def _log(self, task_id: str) -> logging.LoggerAdapter[logging.Logger]:
         """A task-scoped structured logger (§6.6): every record carries ``task_id``."""
         return bind(_LOG, task_id=task_id)
@@ -2414,6 +2473,19 @@ class Orchestrator:
         if task.decompose is False:
             return False
         return self._config.agents.decomposition.enabled
+
+    def _prompt_audit_on(self, task: NormalizedTask) -> bool:
+        """Resolve the effective prompt-audit decision: the task value always overrides the global.
+
+        A per-task ``prompt_audit: true``/``false`` is honored verbatim; absent (None) defers to the
+        global ``config.prompt_audit``. There is no operator gate — unlike auto-merge, recording a
+        prompt is not a privilege escalation.
+        """
+        if task.prompt_audit is True:
+            return True
+        if task.prompt_audit is False:
+            return False
+        return self._config.prompt_audit
 
     def _auto_merge_on(self, task: NormalizedTask) -> bool:
         """Resolve the effective auto-merge decision (DANGER: bypasses human review).

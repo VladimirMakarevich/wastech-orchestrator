@@ -431,7 +431,7 @@ def test_prompt_override_reaches_provider_and_is_audited(
         "CUSTOM-IMPL-INSTRUCTION leaked=ghp_abcdefghij0123456789ABCDEFGHIJ\n",
         encoding="utf-8",
     )
-    prompts_block = "prompts:\n" f"  templates_dir: {str(tdir)!r}\n" "  mode: replace\n"
+    prompts_block = f"prompts:\n  templates_dir: {str(tdir)!r}\n  mode: replace\n"
     providers = _both()
     orch, _store, _, art = _build(
         git_repo,
@@ -473,7 +473,7 @@ def test_missing_prompt_file_falls_back_to_packaged_default(
 ) -> None:
     # Schema v6: a missing <stage>.md is the normal fallback, never a fail-closed config error —
     # the orchestrator builds fine and uses the packaged default.
-    prompts_block = "prompts:\n" f"  templates_dir: {str(tmp_path / 'absent')!r}\n"
+    prompts_block = f"prompts:\n  templates_dir: {str(tmp_path / 'absent')!r}\n"
     orch, _store, _, _art = _build(
         git_repo,
         make_git_config,
@@ -1929,3 +1929,192 @@ def test_planning_selected_skills_reach_downstream_stages(
     assert any(path.endswith("safe-change/SKILL.md") for path in impl.skill_reference_paths)
     assert "ghost" not in str(impl.skill_reference_paths)  # unknown name never surfaced
     assert "# Body" not in impl.prompt  # the skill body is never inlined into the prompt
+
+
+# --- prompt audit (§ who+prompt per step) -----------------------------------------------------
+
+
+def test_prompt_audit_resolution_matrix(git_repo, make_git_config, tmp_path: Path) -> None:
+    """The per-task value always overrides the global; absent (None) defers to the global flag."""
+    from wastech_orchestrator.task.model import NormalizedTask
+
+    orch, _, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+
+    def eff(task_pa: bool | None, cfg_pa: bool) -> bool:
+        orch._config = replace(orch._config, prompt_audit=cfg_pa)
+        task = NormalizedTask(id="t", title="T", description="d", prompt_audit=task_pa)
+        return orch._prompt_audit_on(task)
+
+    # Task True/False win in every global combination (no operator gate).
+    assert eff(True, False) is True
+    assert eff(True, True) is True
+    assert eff(False, True) is False
+    assert eff(False, False) is False
+    # Absent (None) defers to the global flag.
+    assert eff(None, True) is True
+    assert eff(None, False) is False
+
+
+def _audit_dir(art: Path, task_id: str) -> Path:
+    return task_artifact_dir(art, task_id) / "prompt-audit"
+
+
+def test_prompt_audit_records_steps_in_order(git_repo, make_git_config, tmp_path: Path) -> None:
+    """With the global flag on, each stage run is recorded as a self-contained, chronological file
+    plus a combined timeline; the records carry the who-metadata and the prompt."""
+    providers = _both()
+    orch, store, _, art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"prompt_audit": True},
+    )
+    _patch_impl_edit(providers, git_repo)
+    result = orch.run_task(_complete_task(tmp_path))
+    assert result.final_status is Status.DONE
+
+    audit_dir = _audit_dir(art, "task-001")
+    step_files = sorted(audit_dir.glob("*.json"))
+    assert step_files, "per-step audit files were written"
+    # Filenames are zero-padded stage_run_id → lexical sort is chronological.
+    ids = [int(p.name.split("-")[0]) for p in step_files]
+    assert ids == sorted(ids)
+    # refined: true → refinement skipped; planning/implementation/review/summary are agent stages.
+    stages = [json.loads(p.read_text())["stage"] for p in step_files]
+    assert stages == ["planning", "implementation", "review", "summary"]
+
+    # The combined timeline has one line per step, in the same chronological order.
+    lines = (audit_dir / "timeline.jsonl").read_text().splitlines()
+    assert len(lines) == len(step_files)
+    timeline = [json.loads(line) for line in lines]
+    assert [r["stage_run_id"] for r in timeline] == sorted(r["stage_run_id"] for r in timeline)
+    for rec in timeline:
+        assert rec["prompt"]
+        assert rec["agents"] and rec["agents"][0]["status"] == "succeeded"
+        assert "route_primary" in rec and "provider_used" in rec
+
+    # Who-metadata is correct: review's primary route is codex.
+    review = next(r for r in timeline if r["stage"] == "review")
+    assert review["provider_used"] == "codex"
+    assert review["agents"][0]["provider"] == "codex"
+    assert review["agents"][0]["is_fallback"] is False
+
+    # Both artifact kinds are registered in SQLite.
+    rows = store._conn.execute(  # noqa: SLF001
+        "SELECT kind FROM artifacts WHERE task_id = ?", ("task-001",)
+    ).fetchall()
+    kinds = {r["kind"] for r in rows}
+    assert {"prompt_audit", "prompt_audit_timeline"} <= kinds
+
+
+def test_prompt_audit_records_fallback_who(git_repo, make_git_config, tmp_path: Path) -> None:
+    """A stage that falls back records both agents in one step: the failed primary then the
+    successful fallback, in attempt order."""
+    providers = {
+        ProviderId.CLAUDE: FakeProvider("claude", infra_fail={Stage.IMPLEMENTATION}),
+        ProviderId.CODEX: FakeProvider("codex"),
+    }
+    orch, _, _, art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"prompt_audit": True},
+    )
+    # Implementation primary (claude) infra-fails → fallback (codex) runs and must leave a change.
+    orig = providers[ProviderId.CODEX].run
+
+    def codex_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.stage is Stage.IMPLEMENTATION:
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CODEX].run = codex_with_edit  # type: ignore[method-assign]
+
+    result = orch.run_task(_complete_task(tmp_path))
+    assert result.final_status is Status.DONE
+
+    impl = json.loads((_audit_dir(art, "task-001") / "000002-implementation.json").read_text())
+    assert impl["route_primary"] == "claude"
+    assert impl["provider_used"] == "codex"
+    agents = impl["agents"]
+    assert [a["provider"] for a in agents] == ["claude", "codex"]
+    assert agents[0]["status"] is None and agents[0]["error_class"] == "timeout"
+    assert agents[0]["is_fallback"] is False
+    assert agents[1]["status"] == "succeeded" and agents[1]["is_fallback"] is True
+
+
+def test_prompt_audit_redacts_secret(git_repo, make_git_config, tmp_path: Path) -> None:
+    """A token-shaped secret in the prompt is redacted in both the per-step file and timeline."""
+    tdir = tmp_path / "prompts"
+    tdir.mkdir()
+    (tdir / "implementation.md").write_text(
+        "CUSTOM-IMPL-MARKER leaked=ghp_abcdefghij0123456789ABCDEFGHIJ\n",
+        encoding="utf-8",
+    )
+    prompts_block = f"prompts:\n  templates_dir: {str(tdir)!r}\n  mode: replace\n"
+    providers = _both()
+    orch, _, _, art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"prompt_audit": True, "prompts_block": prompts_block},
+    )
+    _patch_impl_edit(providers, git_repo)
+    result = orch.run_task(_complete_task(tmp_path, "task-sec"))
+    assert result.final_status is Status.DONE
+
+    audit_dir = _audit_dir(art, "task-sec")
+    impl_file = next(audit_dir.glob("*-implementation.json"))
+    body = impl_file.read_text()
+    timeline = (audit_dir / "timeline.jsonl").read_text()
+    assert "CUSTOM-IMPL-MARKER" in body  # the benign marker survives
+    assert "ghp_abcdefghij0123456789ABCDEFGHIJ" not in body  # the secret is redacted
+    assert "ghp_abcdefghij0123456789ABCDEFGHIJ" not in timeline
+
+
+def test_prompt_audit_absent_when_disabled(git_repo, make_git_config, tmp_path: Path) -> None:
+    """Global off and no per-task flag → no audit directory, no audit artifacts."""
+    providers = _both()
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+    result = orch.run_task(_complete_task(tmp_path))
+    assert result.final_status is Status.DONE
+
+    assert not _audit_dir(art, "task-001").exists()
+    rows = store._conn.execute(  # noqa: SLF001
+        "SELECT kind FROM artifacts WHERE task_id = ?", ("task-001",)
+    ).fetchall()
+    kinds = {r["kind"] for r in rows}
+    assert "prompt_audit" not in kinds and "prompt_audit_timeline" not in kinds
+
+
+def test_prompt_audit_task_overrides_global_off(git_repo, make_git_config, tmp_path: Path) -> None:
+    """Global off but a per-task ``prompt_audit: true`` → only that task is audited."""
+    providers = _both()
+    orch, _, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+    path = tmp_path / "task-001.md"
+    path.write_text(
+        '---\nid: task-001\ntitle: "Add a thing"\nrefined: true\nprompt_audit: true\n---\n\n'
+        "## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
+        encoding="utf-8",
+    )
+    result = orch.run_task(str(path))
+    assert result.final_status is Status.DONE
+
+    audit_dir = _audit_dir(art, "task-001")
+    assert audit_dir.exists()
+    assert (audit_dir / "timeline.jsonl").exists()
+    assert sorted(audit_dir.glob("*.json"))

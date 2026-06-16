@@ -27,6 +27,7 @@ ALLOWED_TASK_KEYS: frozenset[str] = frozenset(
         "refined",
         "decompose",
         "auto_merge",
+        "prompt_audit",
         "agents",
         "contacts",
         "model",
@@ -75,6 +76,9 @@ class NormalizedTask:
     # Tri-state opt-in to auto-merge (DANGER: bypasses human review). True requests it (honored only
     # when config.git.auto_merge_allow_per_task), False always opts out, None defers to config.
     auto_merge: bool | None = None
+    # Tri-state prompt-audit opt-in: True forces it for this task, False disables it, None defers to
+    # the global config.prompt_audit. The task value always wins (no operator gate).
+    prompt_audit: bool | None = None
     # Per-stage provider override (only agent-routed stages; only providers from agents.allowed).
     agents: dict[Stage, ProviderId] = field(default_factory=dict)
     contacts: list[str] = field(default_factory=list)

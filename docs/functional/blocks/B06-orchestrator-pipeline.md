@@ -9,6 +9,7 @@ The deterministic "spinal cord" of the system: drives **one task at a time** thr
 - Drive a task: gate → slot → isolation/checks preflight → branch → refinement (skip rule) → planning (+decomposition, skills) → for each unit `implementation → testing → review → fixing` → summary → publishing → terminal cleanup → ledger ([orchestrator.py:350-381,820-1047](../../../src/wastech_orchestrator/core/orchestrator.py#L820)).
 - Atomically execute and persist each status transition ([orchestrator.py:2434-2450](../../../src/wastech_orchestrator/core/orchestrator.py#L2434)).
 - Orchestrate the HITL round-trip and the dangerous-diff guardrail ([orchestrator.py:1790-2044](../../../src/wastech_orchestrator/core/orchestrator.py#L1790)).
+- When prompt audit is enabled (`_prompt_audit_on`: per-task value overrides the global `config.prompt_audit`, no operator gate), record each stage run — who (provider/model/attempt/fallback/status) plus the redacted prompt — as a self-contained JSON file under `logs/<task-id>/prompt-audit/` and append it to `timeline.jsonl`, after the router returns so the actual providers are known (`_write_prompt_audit`) ([orchestrator.py:1777-1780](../../../src/wastech_orchestrator/core/orchestrator.py#L1777)).
 - Operator flows: `resume`, `rerun`/`continue`, `finalize` ([orchestrator.py:400-644](../../../src/wastech_orchestrator/core/orchestrator.py#L400)).
 - Wire the full dependency graph (`build_orchestrator`/`build_providers`) ([orchestrator.py:2564-2651](../../../src/wastech_orchestrator/core/orchestrator.py#L2564)).
 
@@ -105,7 +106,7 @@ With `review` skip + auto_merge — a warning is issued; with auto_merge — `me
 
 ## Side Effects
 
-Primarily through delegated blocks: transitions and records in SQLite ([B07](./B07-state-machine-and-store.md)), git/PR ([B22](./B22-git-manager.md)), run artifacts ([B20](./B20-artifact-layout.md)), ledger entries and failure reports ([B08](./B08-ledger-and-failure-reports.md)), Telegram notifications ([B26](./B26-notifications-telegram.md)), HITL artifacts ([B12](./B12-hitl-and-typed-output.md)). Directly: writes `task.enriched.md`/`plan.md`/`fixing-context.json`/`review/*`/`summary.*`/skip section; moves the task file between lifecycle folders; quarantines on reject.
+Primarily through delegated blocks: transitions and records in SQLite ([B07](./B07-state-machine-and-store.md)), git/PR ([B22](./B22-git-manager.md)), run artifacts ([B20](./B20-artifact-layout.md)), ledger entries and failure reports ([B08](./B08-ledger-and-failure-reports.md)), Telegram notifications ([B26](./B26-notifications-telegram.md)), HITL artifacts ([B12](./B12-hitl-and-typed-output.md)). Directly: writes `task.enriched.md`/`plan.md`/`fixing-context.json`/`review/*`/`summary.*`/skip section and, when prompt audit is on, the `prompt-audit/` records + `timeline.jsonl`; moves the task file between lifecycle folders; quarantines on reject.
 
 ## Errors and Edge Cases
 

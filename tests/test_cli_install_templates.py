@@ -172,9 +172,7 @@ def test_does_not_touch_config_or_overrides(tmp_path: Path) -> None:
     assert cfg.read_bytes() == before  # config.yaml / prompts.overrides untouched
 
 
-def test_resolves_via_worc_config_walk_up(
-    monkeypatch: pytest.MonkeyPatch, git_repo: Any
-) -> None:
+def test_resolves_via_worc_config_walk_up(monkeypatch: pytest.MonkeyPatch, git_repo: Any) -> None:
     worc = git_repo.clone / ".worc"
     worc.mkdir()
     _write_config(worc)  # <repo>/.worc/config.yaml, discovered by walking up from the cwd
@@ -202,8 +200,14 @@ def test_install_and_install_templates_produce_same_tree(
     monkeypatch.setattr(
         "shutil.which", lambda n: f"/usr/bin/{n}" if n in {"git", "codex"} else None
     )
-    argv = ["install", str(git_repo.clone), "--provider", "codex", "--skip-preflight",
-            "--non-interactive"]
+    argv = [
+        "install",
+        str(git_repo.clone),
+        "--provider",
+        "codex",
+        "--skip-preflight",
+        "--non-interactive",
+    ]
     assert cli.main(argv) == 0
 
     b = git_repo.clone.parent / "via_install_templates"

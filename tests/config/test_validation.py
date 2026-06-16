@@ -25,8 +25,6 @@ def _with_agents(config: OrchestratorConfig, **changes: object) -> OrchestratorC
     return replace(config, agents=replace(config.agents, **changes))
 
 
-
-
 def test_packaged_config_validates_clean(base_config: OrchestratorConfig) -> None:
     assert validate_config(base_config) == []
 

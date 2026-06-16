@@ -70,6 +70,8 @@ Allowed fields:
 | `reasoning` | no | string or null | Override the reasoning effort level for this task: `low`, `medium`, `high`, `xhigh`, or `max`. |
 | `stages` | no | mapping | Per-stage overrides: `model`/`reasoning` (precedence over the task-wide values) and `enabled: false` to skip a stage. See [`stages`](#stages). |
 | `pr_title` | no | string \| null | PR title override; when set, used verbatim as the pull-request title instead of `title`. |
+| `auto_merge` | no | boolean | `true` requests auto-merge (honored only when the operator allows it), `false` always opts out, omitted uses config. |
+| `prompt_audit` | no | boolean | `true` records each step's prompt + who for this task, `false` disables it, omitted uses config. Always overrides the global. See [`prompt_audit`](#prompt_audit). |
 
 The current validation gate rejects unknown fields fail-closed. Keep task front matter limited to the fields above.
 
@@ -123,6 +125,24 @@ Values:
 | omitted | Use `agents.decomposition.enabled` from `config.yaml`. |
 
 Planned v1 decomposition is still sequential: accepted subtasks run one after another on one task branch and produce one PR for the parent task.
+
+## prompt_audit
+
+Use `prompt_audit` to record, for auditing, **who** (which agent) received **what prompt** at each step of this task:
+
+```yaml
+prompt_audit: true
+```
+
+Values:
+
+| Value   | Meaning                                           |
+| ------- | ------------------------------------------------- |
+| `true`  | Record the prompt audit for this task.            |
+| `false` | Disable the prompt audit for this task.           |
+| omitted | Use the global `prompt_audit` from `config.yaml`. |
+
+The per-task value **always overrides** the global one (in both directions — there is no operator gate). When enabled, each agent-routed stage run is written as a self-contained, redacted JSON record under `<repo>/.worc/logs/<task-id>/prompt-audit/`, in chronological order, plus a combined `timeline.jsonl`. See [configuration.md](configuration.md#prompt_audit) for the file layout.
 
 ## `agents`
 

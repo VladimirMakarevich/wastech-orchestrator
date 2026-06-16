@@ -36,7 +36,7 @@ If `agents.routing` is omitted, the loader treats the file as a legacy Codex-onl
 schema_version: 1
 ```
 
-Optional top-level integer marking the `config.yaml` **format** version (current: `7`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
+Optional top-level integer marking the `config.yaml` **format** version (current: `8`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
 
 ## Config Discovery
 
@@ -333,7 +333,7 @@ validation:
 Current task front matter fields are:
 
 ```text
-id, title, refined, decompose, agents, contacts, model, reasoning
+id, title, pr_title, refined, decompose, auto_merge, prompt_audit, agents, contacts, model, reasoning, stages
 ```
 
 A structurally rejected task is terminal `failed`, gets a `validation_report.json`, and never creates a branch or calls a provider.
@@ -482,6 +482,18 @@ skills:
 | `exclude` | list | `["run-checks", "test", "sync-docs"]` | Gate-duplicating skills withheld from planning (the orchestrator already owns those gates). |
 
 Skill bodies are repo-controlled and only ever surfaced by path. The planning agent **proposes** skill names; the Core keeps only those the scan actually found and that are not excluded, recording the selection (and any dropped names) in `plan.md`.
+
+## `prompt_audit`
+
+Optional top-level boolean (default `false`). Added in `config.yaml` `schema_version` **8**. When enabled, every agent-routed stage run records **who** received **what prompt** — a self-contained, redacted record per stage execution — under `logs/<task-id>/prompt-audit/`, in chronological order, plus a combined `timeline.jsonl`.
+
+```yaml
+prompt_audit: false # record each step's prompt + who (provider/model/attempt/fallback/status)
+```
+
+Each per-step file is named `<stage_run_id:06d>-<stage>[-sub<NN>].json` (the zero-padded `stage_run_id` makes a lexical sort chronological) and lists every agent that ran the prompt — the primary plus any fallback — with its attempt number, status, and error class; the prompt is identical across a stage's attempts, so it is stored once. The prompt text is redacted with the same policy as `rendered-prompt.md` (no secrets in artifacts). The directory is archived into `attempt-<N>/` on `rerun` like the rest of the task's logs.
+
+A per-task `prompt_audit: true|false` in the [task front matter](task-authoring.md) **always overrides** this global value (task wins, in both directions — there is no operator gate). So a global `true` audits every task, while a global `false` plus a per-task `true` audits only that task.
 
 ## Common Examples
 

@@ -1,7 +1,7 @@
 # Example configuration for wastech-orchestrator.
 # Copy to config.yaml and fill it in for your project. config.yaml is NOT committed to git.
 
-schema_version: 7                   # config format version; the orchestrator refuses newer configs
+schema_version: 8                   # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -165,3 +165,7 @@ skills:                             # planning-selected repo skill references (o
   # At task start the orchestrator scans <scan_root>/*/SKILL.md (name+description only). The planning
   # stage may pick relevant ones; chosen SKILL.md files reach implementation/fixing as read-only
   # reference paths (never executed, never the Claude Skill tool — Codex has none).
+
+prompt_audit: false                 # record each step's prompt + who (provider/model/attempt/fallback/
+                                    # status) under logs/<task-id>/prompt-audit/, in chronological order.
+                                    # A per-task `prompt_audit: true|false` always overrides this (task wins).

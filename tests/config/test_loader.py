@@ -309,6 +309,23 @@ def test_auto_merge_strategy_invalid_value_is_rejected() -> None:
     assert any("auto_merge_strategy" in issue for issue in exc.value.issues)
 
 
+# --- prompt audit (§ top-level prompt_audit) ---
+
+
+def test_prompt_audit_defaults_to_false() -> None:
+    assert loads_config(_LEGACY).config.prompt_audit is False
+
+
+def test_prompt_audit_parses() -> None:
+    assert loads_config(_LEGACY + "prompt_audit: true\n").config.prompt_audit is True
+
+
+def test_prompt_audit_non_bool_is_rejected() -> None:
+    with pytest.raises(ConfigError) as exc:
+        loads_config(_LEGACY + "prompt_audit: 3\n")
+    assert any("prompt_audit" in issue for issue in exc.value.issues)
+
+
 def test_auto_merge_must_be_boolean() -> None:
     text = _LEGACY + "git:\n  auto_merge: 3\n"
     with pytest.raises(ConfigError) as exc:
