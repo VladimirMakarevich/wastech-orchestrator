@@ -10,6 +10,8 @@
 ## General principles
 
 - Small, focused functions and modules with a single responsibility.
+- **Keep it simple (KISS), no unrequested complexity.** Build the simplest thing that satisfies the task and these rules; don't add abstractions, configuration, or layers for hypothetical futures.
+- **Add only what the task needs (YAGNI); extensibility through simplicity.** Reuse existing building blocks before adding new ones. The most maintainable code is simple code with clean seams and honest names, not premature abstraction — add an extension point only when a concrete, known requirement needs it.
 - Explicit is better than implicit: no "magic" global state.
 - No side effects at module import time.
 - Errors are surfaced through typed exceptions/results, not "bare" strings.
