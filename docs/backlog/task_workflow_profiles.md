@@ -589,7 +589,7 @@ Each workflow may define different routing defaults:
 
 The configured provider allowlist remains authoritative. Task overrides may select only permitted providers and cannot weaken permission, output, or publishing policy.
 
-Per-stage model and reasoning controls should integrate with the already-implemented [per-stage model and reasoning overrides](../implementation_stages/13_per_stage_model_reasoning.md) and the foundation's `ResolvedExecutionPolicy` (`model` / `reasoning`), not create a second incompatible mechanism.
+Per-stage model and reasoning controls should integrate with the already-implemented [per-stage model and reasoning overrides](../configuration.md) and the foundation's `ResolvedExecutionPolicy` (`model` / `reasoning`), not create a second incompatible mechanism.
 
 ## 12. Output guardrails
 

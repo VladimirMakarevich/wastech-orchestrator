@@ -5,7 +5,7 @@ This document describes how to maintain and keep current the documentation set i
 ## Documentation Language
 
 - **All documentation in `docs/functional/` is written in English.** This applies to `index.md`, `block-registry.md`, `system-flows.md`, all files in `blocks/`, and this file.
-- The English-only rule applies **only** to `docs/functional/`. The rest of the repository does **not** inherit it: source code, docstrings/comments, other documents (`docs/rules/`, `docs/implementation_stages/`, `README.md`, `CHANGELOG.md`, `docs/backlog/`, etc.), and commit messages follow their own established language — do not translate them.
+- The English-only rule applies **only** to `docs/functional/`. The rest of the repository does **not** inherit it: source code, docstrings/comments, other documents (`docs/rules/`, `README.md`, `CHANGELOG.md`, `docs/backlog/`, etc.), and commit messages follow their own established language — do not translate them.
 - Technical identifiers within the text remain as they appear in code: file names, function names, class names, status values, enumerations, flags, and paths are not translated.
 
 ## Source of Truth
@@ -60,7 +60,7 @@ In addition to `B**` blocks (what exists in the system), there is a layer of **e
 - S-documents describe the flow and **reference** the `B**` blocks that implement the mechanics — without duplicating their content.
 - The `S` prefix is reserved for flow steps (does not reuse `B`); numbering follows the order of steps within their category.
 - Same requirements: English, only code-confirmed content, `file:line` references, diagrams where appropriate.
-- The related C4 layer is the dynamic view `implementationFlow` in `docs/architecture/` (see its README).
+- The related C4 layer is the dynamic view `implementationFlow` in `docs/likec4/` (see its README).
 
 ## Registry Statuses
 

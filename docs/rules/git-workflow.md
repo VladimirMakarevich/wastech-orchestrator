@@ -7,14 +7,14 @@ There are two levels of git here: (A) how the orchestrator **itself** is develop
 - Branches off `main`: `feat/<short-description>`, `fix/<…>`, `docs/<…>`, `chore/<…>`.
 - Atomic commits, imperative mood in the subject: `Add provider health preflight`.
 - Before committing — `ruff check .`, `mypy src`, `pytest` (see [testing.md](testing.md)).
-- Keep docs in sync **in the same change** as the code: when behavior, the CLI, config, or architecture changes, update the affected docs (README, operations, configuration, cookbook, architecture, the canonical spec) and add a `CHANGELOG.md` `[Unreleased]` entry — use `/sync-docs`. Record deferred work in [../backlog/follow_ups.md](../backlog/follow_ups.md). The Stop docs-sync gate (`.claude/hooks/docs_sync_gate.py`) blocks once when `src/` changed without any `docs/`/`CHANGELOG.md` change.
+- Keep docs in sync **in the same change** as the code: when behavior, the CLI, config, or architecture changes, update the affected docs (README, operations, configuration, cookbook, architecture, the functional map) and add a `CHANGELOG.md` `[Unreleased]` entry — use `/sync-docs`. Record deferred work in [../backlog/follow_ups.md](../backlog/follow_ups.md). The Stop docs-sync gate (`.claude/hooks/docs_sync_gate.py`) blocks once when `src/` changed without any `docs/`/`CHANGELOG.md` change.
 - Do not commit: `config.yaml`, `.venv/`, `workspace/`, `logs/`, `checks/` (the generated resolved check profile), `*.db`, secrets, the transient task folders `tasks/processing|done|failed|rejected/` (see `.gitignore`).
 - PR into `main`; merge only after checks pass.
 - Do not push to `main` directly.
 
 ## B. How the orchestrator manages a target repository (implementation contract)
 
-This is a product invariant (see [00_orchestrator_final_plan.md §8, §13](../implementation_stages/00_orchestrator_final_plan.md)):
+This is a product invariant (see [architecture.md](architecture.md) and the [Functional Map](../functional/index.md)):
 
 - Branch prefix: **`agent/<task-id>-<slug>`**.
 - Sequence: `git fetch` → checkout `base_branch` → `pull` → create the task branch.

@@ -1,6 +1,6 @@
 # Testing rules
 
-The source of truth is [00_orchestrator_final_plan.md §14](../implementation_stages/00_orchestrator_final_plan.md).
+The source of truth is the code (`src/wastech_orchestrator/`, `tests/`); see the [Functional Map](../functional/index.md).
 
 ## Levels
 

@@ -40,7 +40,7 @@ tasks/pending/task-001.md
 
 - **One task at a time.** A single processing slot; other tasks wait in `tasks/pending/`. Auto mode (off by default) controls whether the next pending task starts automatically after cleanup.
 - **Footprint modes** decide where `tasks/` and `logs/` live and what is committed — see [Configuration](#configuration).
-- The canonical, detailed contract (state machine, routing, recovery, security, footprints) is [docs/implementation_stages/00_orchestrator_final_plan.md](docs/implementation_stages/00_orchestrator_final_plan.md).
+- The detailed, code-derived reference (state machine, routing, recovery, security, footprints) is the [Functional Map](docs/functional/index.md); the design rationale is in [docs/worc_architecture.md](docs/worc_architecture.md).
 
 ---
 
@@ -207,7 +207,7 @@ src/wastech_orchestrator/
   install/                # the install wizard, config writer, detection, registry
   templates/              # scaffolding copied by `init` (config example + per-stage prompts)
   worc/                   # agent task-authoring guide copied beside config.yaml by `init`/`install`
-docs/                     # spec, operations, cookbook, configuration, task authoring, rules, backlog
+docs/                     # functional map, architecture, operations, cookbook, configuration, task authoring, rules, backlog
   worc/                   # authored source for the packaged worc/ guide (kept in sync by a test)
 tests/                    # unit / integration / e2e (see docs/rules/testing.md)
 ```
@@ -220,13 +220,13 @@ Coding agents working _in this repo_ follow [CLAUDE.md](CLAUDE.md) (Claude Code)
 
 | Document | Role |
 | --- | --- |
-| [docs/implementation_stages/00_orchestrator_final_plan.md](docs/implementation_stages/00_orchestrator_final_plan.md) | **Canonical build spec**: contracts, state machine, routing, fallback, footprints, security, DoD. Source of truth on any discrepancy. |
+| [docs/functional/index.md](docs/functional/index.md) | **Functional map** (code-derived): contracts, blocks, state machine, routing, fallback, footprints, security, invariants. The code is the source of truth on any discrepancy. |
 | [docs/operations.md](docs/operations.md) | **Operator guide**: install, authorization, preflight, footprint modes, upgrading, diagnostics, and the `manual_action_required` recovery playbook. |
 | [docs/cookbook.md](docs/cookbook.md) | Practical recipes: workspace setup, repo config, running tasks, routing, reading artifacts, recovery. |
 | [docs/configuration.md](docs/configuration.md) | Full `config.yaml` reference with defaults, allowed values, and validation rules. |
 | [docs/task-authoring.md](docs/task-authoring.md) | How to write valid task files and avoid validation rejects. |
 | [docs/telegram.md](docs/telegram.md) | Bot/chat setup, environment config, preflight, live smoke test, and troubleshooting. |
-| [docs/codex_git_orchestrator_architecture.md](docs/codex_git_orchestrator_architecture.md) | High-level architecture overview and the rationale behind the design. |
+| [docs/worc_architecture.md](docs/worc_architecture.md) | High-level architecture overview and the rationale behind the design. |
 | [docs/rules/](docs/rules/) | Development rules: style, architectural invariants, security, git-flow, testing. |
 | [docs/backlog/](docs/backlog/) | Deferred features and tracked follow-ups. |
 | [CHANGELOG.md](CHANGELOG.md) | Release notes and the `config.yaml` / `state.db` / registry schema versions. |

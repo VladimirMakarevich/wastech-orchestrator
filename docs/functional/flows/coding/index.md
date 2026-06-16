@@ -61,7 +61,7 @@ With decomposition, each subtask is a separate unit `implementation → testing 
 
 - Block-level detail and status transitions — [B06 Pipeline](../../blocks/B06-orchestrator-pipeline.md); state machine — [B07](../../blocks/B07-state-machine-and-store.md).
 - Cross-cutting scenarios (multiple flows) — [system-flows.md](../../system-flows.md); block map — [index.md](../../index.md).
-- C4: dynamic view `implementationFlow` in [docs/architecture/](../../../architecture/README.md).
+- C4: dynamic view `implementationFlow` in [docs/likec4/](../../../likec4/README.md).
 
 ## Code confirmation
 

@@ -2,7 +2,7 @@
 
 Status: **backlog / not scheduled** Date: 2026-06-11 Owner: Vladimir Makarevich
 
-This document captures the idea of reducing token consumption in the orchestrator and the analysis behind it. It is a backlog item, not part of the v1 scope (see [00_orchestrator_final_plan.md §2](../implementation_stages/00_orchestrator_final_plan.md) and §18). Nothing here overrides the canonical spec or the hard invariants in [CLAUDE.md](../../CLAUDE.md) and [docs/rules/](../rules/).
+This document captures the idea of reducing token consumption in the orchestrator and the analysis behind it. It is a backlog item, not part of the v1 scope (see [worc_architecture.md](../worc_architecture.md) §2). Nothing here overrides the canonical reference (the [Functional Map](../functional/index.md)) or the hard invariants in [CLAUDE.md](../../CLAUDE.md) and [docs/rules/](../rules/).
 
 ## 1. Goal
 
@@ -18,7 +18,7 @@ Codex / Claude Code run shell commands (`git`, `pytest`, `npm`, build, …) insi
 
 ### Sink B — context the orchestrator injects
 
-For each stage run the Core assembles a prompt plus artifacts (see [00_orchestrator_final_plan.md §6, §10](../implementation_stages/00_orchestrator_final_plan.md)): `current.diff`, check logs (`checks/<run-id>.log`), `review/findings.json`, `plan.md`, `task.normalized.json`. Large diffs and verbose test logs inflate easily. The Core fully controls this — it builds the `AgentRunRequest` ([src/wastech_orchestrator/providers/base.py](../../src/wastech_orchestrator/providers/base.py)).
+For each stage run the Core assembles a prompt plus artifacts (see the [Functional Map](../functional/index.md)): `current.diff`, check logs (`checks/<run-id>.log`), `review/findings.json`, `plan.md`, `task.normalized.json`. Large diffs and verbose test logs inflate easily. The Core fully controls this — it builds the `AgentRunRequest` ([src/wastech_orchestrator/providers/base.py](../../src/wastech_orchestrator/providers/base.py)).
 
 > Key consequence: a single tool will not cover both sinks. RTK ≈ sink A, Headroom/LLMLingua ≈ sink B, and sink A is typically the bigger one.
 
@@ -28,7 +28,7 @@ Mapped to the existing architecture and invariants. Each phase is independently 
 
 ### Phase 0 — measure first
 
-`AgentRunResult.usage` already exists ([base.py](../../src/wastech_orchestrator/providers/base.py)) and `provider_attempts` is already a State Store entity ([00_orchestrator_final_plan.md §9](../implementation_stages/00_orchestrator_final_plan.md)).
+`AgentRunResult.usage` already exists ([base.py](../../src/wastech_orchestrator/providers/base.py)) and `provider_attempts` is already a State Store entity (see the [Functional Map](../functional/index.md)).
 
 - Persist tokens/cost per attempt in SQLite.
 - Collect a baseline of "tokens per stage" on a few real tasks.
@@ -44,7 +44,7 @@ A new optional context-preparation step in the Core/artifact layer (e.g. `contex
 - cap diff size (head/tail + `... N lines elided ...` marker);
 - write a summary file next to the full log.
 
-Rationale: safest, fully auditable, reversible (the original under `logs/<task-id>/...` is untouched; only the prompt-injected copy is reduced), and aligned with the "deterministic Core" philosophy ([00_orchestrator_final_plan.md §18.1](../implementation_stages/00_orchestrator_final_plan.md)). Likely captures most of the sink-B win **without** any library.
+Rationale: safest, fully auditable, reversible (the original under `logs/<task-id>/...` is untouched; only the prompt-injected copy is reduced), and aligned with the "deterministic Core" philosophy ([worc_architecture.md](../worc_architecture.md) §2). Likely captures most of the sink-B win **without** any library.
 
 ### Phase 2 — RTK for sink A (agent tool output), flagged, **in the provider adapters**
 

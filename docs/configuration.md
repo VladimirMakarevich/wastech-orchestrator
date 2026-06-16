@@ -1,6 +1,6 @@
 # Configuration Reference
 
-`config.yaml` controls repositories, providers, routing, security, validation, checks, git publishing, and optional notification settings. The packaged example is [`config.example.yaml`](../config.example.yaml), and the canonical contract is [00_orchestrator_final_plan.md section 11](implementation_stages/00_orchestrator_final_plan.md).
+`config.yaml` controls repositories, providers, routing, security, validation, checks, git publishing, and optional notification settings. The packaged example is [`config.example.yaml`](../config.example.yaml), and the canonical contract is the config schema in the code (`config/schema.py`); see the [Functional Map](functional/index.md).
 
 The loader is fail-closed:
 

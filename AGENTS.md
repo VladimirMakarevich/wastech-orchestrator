@@ -6,7 +6,7 @@ This file is for Codex. The full set of rules matches [CLAUDE.md](CLAUDE.md) and
 
 ## Before writing code
 
-1. Read **[docs/implementation_stages/00_orchestrator_final_plan.md](docs/implementation_stages/00_orchestrator_final_plan.md)** — the canonical spec (source of truth).
+1. Read the **[Functional Map](docs/functional/index.md)** (`docs/functional/`) — the code-derived reference (source of truth is the code; [docs/worc_architecture.md](docs/worc_architecture.md) gives the design rationale).
 2. Follow the rules in **[docs/rules/](docs/rules/)**: `architecture.md`, `coding-style.md`, `security.md`, `git-workflow.md`, `testing.md`.
 
 ## Hard invariants (must not be violated)
@@ -40,6 +40,6 @@ pytest
 - docs and a `CHANGELOG.md` `[Unreleased]` entry are updated in the same change when behavior/CLI/config/architecture change (use `/sync-docs`), and deferred work is recorded in [docs/backlog/follow_ups.md](docs/backlog/follow_ups.md) — the Stop docs-sync gate enforces this;
 - the invariants above are not violated.
 
-The MVP build (the six phases under [docs/implementation_stages/](docs/implementation_stages/)) is complete; those phase docs are a historical record. Track ongoing work in [docs/backlog/follow_ups.md](docs/backlog/follow_ups.md) and the product backlog.
+The MVP build is complete; the phased build docs have been removed — the [Functional Map](docs/functional/index.md) is the current code-derived reference. Track ongoing work in [docs/backlog/follow_ups.md](docs/backlog/follow_ups.md) and the product backlog.
 
 @RTK.md

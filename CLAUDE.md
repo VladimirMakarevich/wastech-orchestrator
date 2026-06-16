@@ -4,7 +4,7 @@ You are working on **wastech-orchestrator** — an orchestrator that launches co
 
 ## Before writing code
 
-1. Read **[docs/implementation_stages/00_orchestrator_final_plan.md](docs/implementation_stages/00_orchestrator_final_plan.md)** — this is the canonical spec. In case of any discrepancy, it takes precedence over architecture.md.
+1. Read the **[Functional Map](docs/functional/index.md)** (`docs/functional/`) — the canonical, code-derived reference for the system's purpose, blocks, invariants, and flows. The code in `src/wastech_orchestrator/` is the source of truth; [docs/worc_architecture.md](docs/worc_architecture.md) gives the design rationale.
 2. Check against the rules in **[docs/rules/](docs/rules/)** — they are mandatory:
    - [architecture.md](docs/rules/architecture.md) — invariants that must not be violated
    - [coding-style.md](docs/rules/coding-style.md) — Python style
@@ -26,7 +26,7 @@ You are working on **wastech-orchestrator** — an orchestrator that launches co
 - Providers: `codex`, `claude`.
 - Stages: `refinement`, `planning`, `implementation`, `testing`, `review`, `fixing`, `summary`, `publishing`.
 - Branch prefix: `agent/<task-id>-<slug>`.
-- State machine statuses: see [docs/implementation_stages/00_orchestrator_final_plan.md §8](docs/implementation_stages/00_orchestrator_final_plan.md).
+- State machine statuses: see the [system flows](docs/functional/system-flows.md) and `src/wastech_orchestrator/core/state_machine.py`.
 
 ## Commands
 
@@ -42,12 +42,12 @@ There is a skill for running all checks: `/run-checks`.
 ## Working style
 
 - Make minimal, focused changes; follow the style of the surrounding code.
-- For new components, check against the contracts in [docs/implementation_stages/00_orchestrator_final_plan.md](docs/implementation_stages/00_orchestrator_final_plan.md) (§4, §7, §8).
+- For new components, check against the contracts in the [Functional Map](docs/functional/index.md) and [docs/rules/architecture.md](docs/rules/architecture.md).
 - When adding/changing behavior — add or update tests (see docs/rules/testing.md).
 - When you change behavior/CLI/config/architecture — update the affected docs and a `CHANGELOG.md` `[Unreleased]` entry **in the same change** (use `/sync-docs`), and record deferred work in [docs/backlog/follow_ups.md](docs/backlog/follow_ups.md). The Stop docs-sync gate enforces this.
 - **Markdown docs are not hard-wrapped.** Write prose as one paragraph per line (rely on editor soft-wrap); never insert manual mid-paragraph line breaks. Formatting is enforced by Prettier (`proseWrap: never`, `.prettierrc.json`) — run `npx prettier@3 --write "**/*.md"` after editing docs. `logs/`, `tasks/`, `src/`, and `docs/worc/` are excluded (`.prettierignore`); don't reformat them.
 - Before committing, run `ruff`, `mypy`, `pytest`.
-- The MVP build (the six phases under [docs/implementation_stages/](docs/implementation_stages/)) is **complete**; those phase docs are now a historical record. Track ongoing work in [docs/backlog/follow_ups.md](docs/backlog/follow_ups.md) and the product backlog.
+- The MVP build is **complete**; the phased build docs have been removed — the [Functional Map](docs/functional/index.md) is the current code-derived reference. Track ongoing work in [docs/backlog/follow_ups.md](docs/backlog/follow_ups.md) and the product backlog.
 
 <!-- rtk-instructions v2 -->
 
@@ -183,20 +183,3 @@ rtk proxy <cmd>         # Run command without filtering (for debugging)
 rtk init                # Add RTK instructions to CLAUDE.md
 rtk init --global       # Add RTK to ~/.claude/CLAUDE.md
 ```
-
-## Token Savings Overview
-
-| Category         | Commands                       | Typical Savings |
-| ---------------- | ------------------------------ | --------------- |
-| Tests            | vitest, playwright, cargo test | 90-99%          |
-| Build            | next, tsc, lint, prettier      | 70-87%          |
-| Git              | status, log, diff, add, commit | 59-80%          |
-| GitHub           | gh pr, gh run, gh issue        | 26-87%          |
-| Package Managers | pnpm, npm, npx                 | 70-90%          |
-| Files            | ls, read, grep, find           | 60-75%          |
-| Infrastructure   | docker, kubectl                | 85%             |
-| Network          | curl, wget                     | 65-70%          |
-
-Overall average: **60-90% token reduction** on common development operations.
-
-<!-- /rtk-instructions -->

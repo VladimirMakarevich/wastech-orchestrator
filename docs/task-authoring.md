@@ -8,7 +8,7 @@ Tasks can be Markdown (`.md`) or JSON (`.json`). Markdown is the normal operator
 
 Use the packaged `templates/task.md` as the editable runtime template. A completed example is kept at [`docs/examples/task-001.example.md`](examples/task-001.example.md). Under the default in-repo audit footprint, live task files belong in the repo's own `tasks/pending/` directory (committed and pushed there) — that is how a teammate hands the orchestrator work over git. Only under the `external`/`exclude_local` footprints must task files stay out of the repo, since there the preflight treats tracked `tasks/`/`logs/` names as a collision.
 
-The canonical task rules are in [00_orchestrator_final_plan.md sections 5 and 19](implementation_stages/00_orchestrator_final_plan.md).
+The canonical task rules are enforced by the validation gate in the code (`src/wastech_orchestrator/task/`); see the [Functional Map](functional/index.md).
 
 ## Markdown Shape
 

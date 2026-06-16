@@ -2,7 +2,7 @@
 
 This folder is the single place for backlog and deferred-product ideas for **wastech-orchestrator**.
 
-The canonical contract is [00_orchestrator_final_plan.md](../implementation_stages/00_orchestrator_final_plan.md). Backlog documents must not override the hard invariants from [../../CLAUDE.md](../../CLAUDE.md), [../../AGENTS.md](../../AGENTS.md), or [../rules/](../rules/).
+The canonical reference is the [Functional Map](../functional/index.md). Backlog documents must not override the hard invariants from [../../CLAUDE.md](../../CLAUDE.md), [../../AGENTS.md](../../AGENTS.md), or [../rules/](../rules/).
 
 ## Index
 
@@ -19,7 +19,7 @@ The canonical contract is [00_orchestrator_final_plan.md](../implementation_stag
 | [runtime_provider_capacity_gate.md](runtime_provider_capacity_gate.md) | Detailed backlog task for checking Codex and Claude capacity before autonomous `watch` admits a pending task. |
 | [token_optimization.md](token_optimization.md) | Detailed backlog task for measuring and reducing token usage. |
 
-> **Already shipped?** Backlog items that have been implemented (auto-merge, stage-skip, per-stage model/reasoning, the `rerun`/`finalize`/`install-templates` commands, prompt-template customization and its simplification, the UX batch, and the post-test-run review) keep their design records under [../implementation_stages/](../implementation_stages/) (numbered 10–20, historical) and their changes in [CHANGELOG.md](../../CHANGELOG.md). They are listed for traceability in [product_backlog.md § Shipped](product_backlog.md#shipped-implemented).
+> **Already shipped?** Backlog items that have been implemented (auto-merge, stage-skip, per-stage model/reasoning, the `rerun`/`finalize`/`install-templates` commands, prompt-template customization and its simplification, the UX batch, and the post-test-run review) are recorded in [CHANGELOG.md](../../CHANGELOG.md) (their numbered design docs have been removed). They are listed for traceability in [product_backlog.md § Shipped](product_backlog.md#shipped-implemented).
 
 ## Agent quality and continuity program
 

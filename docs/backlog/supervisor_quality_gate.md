@@ -8,7 +8,7 @@ Add an AI supervisor that evaluates selected stage outputs and emits a bounded `
 
 Once this feature ships, the supervisor is a mandatory part of the `implementation` workflow. It cannot be disabled globally or per task. When summary output is enabled, the same component also owns a final fresh read-only handoff pass after successful review. It synthesizes the already accepted task outcome into structured human documentation and replaces the provider invocation for `summary`; the Core still owns the `summarizing` checkpoint, validates the payload, writes `summary.md` / `summary.json`, and applies deterministic fallback.
 
-This reverses the canonical v1 scope decision in [the final plan](../implementation_stages/00_orchestrator_final_plan.md) §18.1. The canonical plan must be amended in the same change that implements this feature, not before.
+This reverses the canonical v1 scope decision (the deterministic-Core philosophy; see [worc_architecture.md](../worc_architecture.md) §2). The canonical reference (the [Functional Map](../functional/index.md) and architecture docs) must be amended in the same change that implements this feature, not before.
 
 ## Program context and sibling changes
 

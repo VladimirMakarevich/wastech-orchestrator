@@ -59,7 +59,7 @@ flowchart TB
 
 What confirms each external interaction: launching `codex`/`claude` as child processes — [B18](./blocks/B18-agent-providers.md); `git`/`gh` — [B22](./blocks/B22-git-manager.md); both process classes go through the single safe launcher [B19](./blocks/B19-subprocess-runner.md); Telegram — [B26](./blocks/B26-notifications-telegram.md); SQLite — [B07](./blocks/B07-state-machine-and-store.md); file artifacts — [B20](./blocks/B20-artifact-layout.md).
 
-A navigable version of these relationships as **architecture-as-code** (C4 model: context → containers → components, with clickable links to block documents) is in [docs/architecture/](../architecture/README.md) (LikeC4). This functional map remains the source of detail and code bindings.
+A navigable version of these relationships as **architecture-as-code** (C4 model: context → containers → components, with clickable links to block documents) is in [docs/likec4/](../likec4/README.md) (LikeC4). This functional map remains the source of detail and code bindings.
 
 ## Entry Points (confirmed)
 

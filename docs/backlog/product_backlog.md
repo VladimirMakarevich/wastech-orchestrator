@@ -2,20 +2,18 @@
 
 Status: **inventory** Date: 2026-06-16 Owner: Vladimir Makarevich
 
-This document aggregates deferred and candidate functionality for **wastech-orchestrator**. It is an inventory, not an implementation contract. The source of truth remains [00_orchestrator_final_plan.md](../implementation_stages/00_orchestrator_final_plan.md).
+This document aggregates deferred and candidate functionality for **wastech-orchestrator**. It is an inventory, not an implementation contract. The source of truth remains the code; the [Functional Map](../functional/index.md) is the code-derived reference.
 
 Where to find the design detail:
 
 - **Open items** keep their detailed design in a file in this folder (linked below).
-- **Shipped items** keep their design record under [../implementation_stages/](../implementation_stages/) (numbered, historical) and the change in [CHANGELOG.md](../../CHANGELOG.md). They are listed in [§ Shipped](#shipped-implemented) for traceability.
+- **Shipped items** are recorded in [CHANGELOG.md](../../CHANGELOG.md) (their numbered design docs have been removed). They are listed in [§ Shipped](#shipped-implemented) for traceability.
 - **Build-time tech-debt and implementation follow-ups** live in [follow_ups.md](follow_ups.md), not here.
 
 ## Sources Consolidated
 
-- [00_orchestrator_final_plan.md](../implementation_stages/00_orchestrator_final_plan.md) sections 2 and 18.
-- [../worc_architecture.md](../worc_architecture.md) sections 4.7, 4.10, 4.11, 6, 11, and 12.
-- [../implementation_stages/05_pipeline_and_recovery.md](../implementation_stages/05_pipeline_and_recovery.md) "Not in this phase".
-- [../implementation_stages/06_security_and_observability.md](../implementation_stages/06_security_and_observability.md) "Not in this phase".
+- The [Functional Map](../functional/index.md) (code-derived reference) and [../worc_architecture.md](../worc_architecture.md) sections 4.7, 4.10, 4.11, 6, 11, and 12.
+- The original v1 spec (§2, §18) and the phase docs' "Not in this phase" sections — since removed from `docs/`.
 - Detailed backlog files in this folder.
 
 ## Open backlog
@@ -41,7 +39,7 @@ These are deferred by the v1 spec or described in architecture notes; not schedu
 | --- | --- | --- |
 | [Runtime provider capacity gate](runtime_provider_capacity_gate.md) | Before autonomous `watch` claims a pending task, query the capacity of the Codex/Claude accounts its resolved routes need and defer the task when configured headroom is unavailable. | Runtime admission control, not install preflight. Deferred tasks stay pending, consume no attempts, retried after provider reset. |
 | [Token optimization](token_optimization.md) | Measure and reduce token consumption across stages. | Analysis + candidate levers; not part of v1 scope. |
-| Config-level per-stage `stage_defaults` | The §4 complement to the shipped per-task `stages:` overrides: per-stage `{model,reasoning}` defaults under each provider in `config.yaml`. | [13_per_stage_model_reasoning.md §4](../implementation_stages/13_per_stage_model_reasoning.md); tracked in [follow_ups.md](follow_ups.md). Touches schema (+version bump), loader, validation. |
+| Config-level per-stage `stage_defaults` | The §4 complement to the shipped per-task `stages:` overrides: per-stage `{model,reasoning}` defaults under each provider in `config.yaml`. | [CHANGELOG.md](../../CHANGELOG.md) (per-task `stages:` overrides, §3); tracked in [follow_ups.md](follow_ups.md). Touches schema (+version bump), loader, validation. |
 | Richer task parsing | Extract structured metadata beyond `id`, `title`, `refined`, `decompose`, `agents`, `contacts`, `model`, `reasoning`, `stages`, `pr_title`, `auto_merge`. | Candidate fields: repo binding, commands/hints, priority, labels, issue links. Must stay fail-closed. |
 | Parallel and graph decomposition | Graph-shaped subtasks, per-subtask worktrees/branches, parallel execution. | V1 decomposition is linear, sequential, on one task branch. |
 | Concurrent task processing via worktrees | Process multiple independent tasks at once by giving each its own `git worktree`. | Must not share a mutable working copy between active agents. Breaks the single-active-task invariant only behind worktree isolation. |
@@ -63,20 +61,20 @@ These are deferred by the v1 spec or described in architecture notes; not schedu
 
 ## Shipped (implemented)
 
-These were backlog items and have shipped. The design records moved to [../implementation_stages/](../implementation_stages/) (historical) and the changes are recorded in [CHANGELOG.md](../../CHANGELOG.md). Kept here for traceability.
+These were backlog items and have shipped. The changes are recorded in [CHANGELOG.md](../../CHANGELOG.md) (the numbered design records have been removed). Kept here for traceability.
 
-| Item | Shipped | Design record |
+| Item | Shipped | Notes |
 | --- | --- | --- |
-| UX improvements (stop/restart, runtime-file excludes, `gh` pre-flight, `worc` alias) | 2026-06-13 | [10_ux_improvements.md](../implementation_stages/10_ux_improvements.md) |
-| Auto-merge bypass flags (global + per-task) | 2026-06-13 | [11_auto_merge_bypass.md](../implementation_stages/11_auto_merge_bypass.md) |
-| Prompt template customization (core `prompts:` block) | 2026-06-13 | [12_prompt_template_customization.md](../implementation_stages/12_prompt_template_customization.md) |
-| Per-stage model/reasoning — per-task `stages:` overrides (§3) | 2026-06-13 | [13_per_stage_model_reasoning.md](../implementation_stages/13_per_stage_model_reasoning.md) — §4 `stage_defaults` still open (above) |
-| Stage skip control (per-task + global) | 2026-06-13 | [14_stage_skip_control.md](../implementation_stages/14_stage_skip_control.md) |
-| Post-test-run review improvements | 2026-06-14 | [16_post_test_run_review.md](../implementation_stages/16_post_test_run_review.md) |
-| `install-templates` command (add-missing-only) | 2026-06-14 | [17_task_install_templates_command.md](../implementation_stages/17_task_install_templates_command.md) |
-| `rerun` command (fresh + `--continue`) | 2026-06-14 | [18_task_rerun_command.md](../implementation_stages/18_task_rerun_command.md) |
-| `finalize` command (`--as done\|failed\|abandoned`) | 2026-06-14 | [19_task_finalize_command.md](../implementation_stages/19_task_finalize_command.md) |
-| Prompt templates simplification (prompts-only, auto-detect, schema v6) | 2026-06-14 | [20_task_prompt_templates_simplification.md](../implementation_stages/20_task_prompt_templates_simplification.md) |
+| UX improvements (stop/restart, runtime-file excludes, `gh` pre-flight, `worc` alias) | 2026-06-13 | — |
+| Auto-merge bypass flags (global + per-task) | 2026-06-13 | — |
+| Prompt template customization (core `prompts:` block) | 2026-06-13 | — |
+| Per-stage model/reasoning — per-task `stages:` overrides (§3) | 2026-06-13 | §4 `stage_defaults` still open (above) |
+| Stage skip control (per-task + global) | 2026-06-13 | — |
+| Post-test-run review improvements | 2026-06-14 | — |
+| `install-templates` command (add-missing-only) | 2026-06-14 | — |
+| `rerun` command (fresh + `--continue`) | 2026-06-14 | — |
+| `finalize` command (`--as done\|failed\|abandoned`) | 2026-06-14 | — |
+| Prompt templates simplification (prompts-only, auto-detect, schema v6) | 2026-06-14 | — |
 
 ## Open detail files (in this folder)
 
@@ -105,5 +103,5 @@ The following are already part of the v1 spec / current implementation and shoul
 - git footprint modes and scoped staging;
 - terminal cleanup and auto mode;
 - state-store recovery and idempotent publishing;
-- Telegram terminal notifications, typed HITL for `refinement`/`planning`, durable interaction recovery, and deletion/dependency diff approvals (see [Stage 08](../implementation_stages/08_telegram_integration.md));
-- automatic check discovery and environment resolution (see [Stage 09](../implementation_stages/09_automatic_check_discovery.md)).
+- Telegram terminal notifications, typed HITL for `refinement`/`planning`, durable interaction recovery, and deletion/dependency diff approvals (see [telegram.md](../telegram.md));
+- automatic check discovery and environment resolution (see [configuration.md](../configuration.md)).

@@ -34,7 +34,7 @@ L2 is intentionally thin here: the orchestrator is a **single process**, so "con
 From the repository root:
 
 ```bash
-npx likec4@latest dev docs/architecture
+npx likec4@latest dev docs/likec4
 ```
 
 A local server opens (usually <http://localhost:5173>): live diagrams, hot-reload, clicking an element drills down a level, clicking a link opens the block document. Stop with `Ctrl+C`.
@@ -51,10 +51,10 @@ The extension provides a live preview, **model validation**, and autocomplete â€
 
 ```bash
 # self-contained site (share with the team); consider adding site/ to .gitignore
-npx likec4@latest build docs/architecture -o docs/architecture/site
+npx likec4@latest build docs/likec4 -o docs/likec4/site
 
 # PNG for each view (for embedding in md/PR); may download Chromium on first run
-npx likec4@latest export png docs/architecture -o docs/architecture/img
+npx likec4@latest export png docs/likec4 -o docs/likec4/img
 ```
 
 ## Views in the Model
