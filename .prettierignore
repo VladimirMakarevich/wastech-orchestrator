@@ -15,8 +15,8 @@ build/
 
 # --- Not documentation: never reflow ---
 
-# Runtime artifacts (generated agent run logs)
-/logs/
+# Orchestrator runtime home (config, state.db, generated agent run logs, templates, guide)
+/.worc/
 
 # Lifecycle task files (operator content; the §19 gate enforces max_line_bytes)
 /tasks/

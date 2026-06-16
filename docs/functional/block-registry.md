@@ -26,16 +26,16 @@ All 27 functional blocks (B01–B27) have been investigated and carry the status
 
 ### B03 — Installer and Project Scaffolding
 
-- **Purpose:** `init` (directory/template/worc/config skeleton), `install` (wizard → generate valid `config.yaml` → bind), `upgrade-config`/`upgrade-docs`/`install-templates`.
-- **Entry points:** [cmd_init](../../src/wastech_orchestrator/cli.py#L464), [cmd_install](../../src/wastech_orchestrator/cli.py#L1430), [install/wizard.run_wizard](../../src/wastech_orchestrator/install/wizard.py), [install/config_writer.build_and_validate](../../src/wastech_orchestrator/install/config_writer.py), [install/detect.py](../../src/wastech_orchestrator/install/detect.py).
-- **Dependencies:** B05 (validation of generated config), B04 (repo→config binding), B19 (git probes), B25 (denied commands in defaults).
+- **Purpose:** `install` (wizard → generate valid `config.yaml`, scaffold `<repo>/.worc/` + repo-root `tasks/`, gitignore `.worc/`), `upgrade-config`/`upgrade-docs`/`install-templates`.
+- **Entry points:** [cmd_install](../../src/wastech_orchestrator/cli.py#L1298), [install/wizard.run_wizard](../../src/wastech_orchestrator/install/wizard.py#L68), [install/config_writer.build_and_validate](../../src/wastech_orchestrator/install/config_writer.py#L182), [install/detect.py](../../src/wastech_orchestrator/install/detect.py).
+- **Dependencies:** B05 (validation of generated config), B04 (config discovery for upgrades), B19 (git probes), B22 (`append_runtime_excludes`), B25 (denied commands in defaults).
 - **Status:** `documented` · [file](./blocks/B03-installer-and-scaffolding.md)
 
-### B04 — Install Registry and Config Discovery
+### B04 — Config Discovery
 
-- **Purpose:** persistent store for `repo-root → config.yaml` and resolution of the config path by priority (`--config` → `./config.yaml` → registry binding).
-- **Entry points:** [install/registry.py](../../src/wastech_orchestrator/install/registry.py) (`bind`/`lookup`/`unbind`), [cli.resolve_config_path](../../src/wastech_orchestrator/cli.py#L549).
-- **Dependencies:** `platformdirs`, B03 (writing the binding on `install`).
+- **Purpose:** resolve the config path by priority (`--config` → `<repo-root>/.worc/config.yaml`, discovered by walking up to the Git root). No persistent registry.
+- **Entry points:** [cli.resolve_config_path](../../src/wastech_orchestrator/cli.py#L411).
+- **Dependencies:** B03 (`detect.git_info` in `resolve_config_path`).
 - **Status:** `documented` · [file](./blocks/B04-install-registry-and-config-discovery.md)
 
 ### B05 — Configuration: Schema, Loading, Validation, Upgrade
@@ -175,7 +175,7 @@ All 27 functional blocks (B01–B27) have been investigated and carry the status
 
 ### B22 — Git and GitHub Operations (Git Manager)
 
-- **Purpose:** all git/gh operations via argv without shell: branch `agent/<id>-<slug>`, scoped staging (never `git add .`), commit/push/PR/merge with idempotency, footprint/excludes, working tree snapshots, terminal cleanup.
+- **Purpose:** all git/gh operations via argv without shell: branch `agent/<id>-<slug>`, scoped staging (never `git add .`), commit/push/PR/merge with idempotency, the task-scoped audit commit + the `.worc/` gitignore exclude, working tree snapshots, terminal cleanup.
 - **Entry points:** [git_manager.GitManager](../../src/wastech_orchestrator/git_manager.py) (`prepare_branch`, `commit_code`/`commit_subtask`/`commit_audit`, `push`, `create_pr`, `merge_pr`, `terminal_cleanup`, `capture`/`partial_change_since`, …), `append_runtime_excludes`.
 - **Dependencies:** B19, B21, B07 (publish_operations), B25 (env); used by B06, B17 (SnapshotHook), B01.
 - **Status:** `documented` · [file](./blocks/B22-git-manager.md)

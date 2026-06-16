@@ -31,7 +31,12 @@ from wastech_orchestrator.providers.base import ProviderId, Stage
 # presence in `prompts.templates_dir` — the `prompts.overrides` map and `prompts.strict` flag are
 # removed, and `prompts.mode` now defaults to `replace`. Legacy `overrides`/`strict` keys are
 # tolerated (ignored) on load; `upgrade-config` strips them. Old configs still load fail-open.
-CONFIG_SCHEMA_VERSION = 6
+# v7 (2026-06-16, worc-home-consolidation): the git footprint collapses to a single canonical
+# layout — all runtime files live under the gitignored `<repo>/.worc/` home, while the task file and
+# its `<id>.summary.md` stay at the repo root and are audit-committed. The `git.footprint.location`,
+# `.tracking`, and `.external_root` keys are removed; `git.footprint` now carries only
+# `audit_commit_message` + `audit_on_branch`.
+CONFIG_SCHEMA_VERSION = 7
 
 # Stages routed to an agent provider. The remaining stages (``testing``, ``publishing``) are run by
 # the orchestrator itself (Check Runner / Git Manager), so they never appear in ``agents.routing``
@@ -63,23 +68,8 @@ SKIPPABLE_STAGES: frozenset[Stage] = frozenset(
 )
 
 
-class FootprintLocation(StrEnum):
-    """Where orchestration/task artifacts live relative to the target repo (spec §21)."""
-
-    EXTERNAL = "external"
-    IN_REPO = "in_repo"
-
-
-class FootprintTracking(StrEnum):
-    """How those artifacts are tracked by git (spec §21)."""
-
-    NONE = "none"
-    EXCLUDE_LOCAL = "exclude_local"
-    COMMIT = "commit"
-
-
 class AuditBranch(StrEnum):
-    """Which branch the audit trail is committed onto (tracking=commit only, spec §21)."""
+    """Which branch the audit trail is committed onto (spec §21)."""
 
     TASK = "task"
     SIBLING = "sibling"
@@ -238,9 +228,9 @@ class ChecksConfig:
 
 @dataclass(frozen=True)
 class FootprintConfig:
-    location: FootprintLocation
-    tracking: FootprintTracking
-    external_root: str
+    """The audit-trail policy. The orchestrator's runtime files always live under the gitignored
+    ``<repo>/.worc/`` home; only the task file and its ``<id>.summary.md`` are committed (§21)."""
+
     audit_commit_message: str
     audit_on_branch: AuditBranch
 

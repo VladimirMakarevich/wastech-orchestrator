@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Single owner of the on-disk artifact layout and the **"logs are never overwritten"** invariant. Provides a deterministic path for every stage-run attempt and for task-level artifacts, so that all subsystems write files to the same location rather than each reconstructing the layout independently.
+Single owner of the on-disk artifact layout and the **"logs are never overwritten"** invariant. Provides a deterministic path for every stage-run attempt and for task-level artifacts, so that all subsystems write files to the same location rather than each reconstructing the layout independently. The `artifacts_root` is the gitignored `<repo>/.worc/` home (`worc_home_for(config)`, [cli.py:606](../../../src/wastech_orchestrator/cli.py#L606)), so all run traces — plan, diffs, stage logs, `summary.json`, validation reports — live under `<repo>/.worc/logs/...`; the committed audit trail (the task file and its `<id>.summary.md`) is separate, at the repo-root `tasks/` (owned by [B06](./B06-orchestrator-pipeline.md)/[B22](./B22-git-manager.md)).
 
 ## Responsibilities
 

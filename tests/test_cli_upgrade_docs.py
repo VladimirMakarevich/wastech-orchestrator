@@ -1,8 +1,8 @@
 """End-to-end `upgrade-docs` command.
 
-Refreshes the installed ``worc/`` task-authoring docs (beside ``config.yaml``) to the packaged
-version: overwrites stale files, adds missing ones, removes orphans, is idempotent (already-current
-→ no-op), previews with ``--dry-run``, and fails closed (exit 2) when no config can be resolved.
+Refreshes the installed ``.worc/guide/`` task-authoring docs to the packaged version: overwrites
+stale files, adds missing ones, removes orphans, is idempotent (already-current → no-op), previews
+with ``--dry-run``, and fails closed (exit 2) when no config can be resolved.
 """
 
 from __future__ import annotations
@@ -28,12 +28,12 @@ def _write_config(tmp_path: Path) -> Path:
 
 
 def _seed_worc(tmp_path: Path, files: dict[Path, bytes]) -> Path:
-    worc = tmp_path / "worc"
+    guide = tmp_path / "guide"  # the installed docs land in <config-dir>/guide/
     for rel, content in files.items():
-        dest = worc / rel
+        dest = guide / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(content)
-    return worc
+    return guide
 
 
 def test_stale_docs_are_updated(tmp_path: Path) -> None:
@@ -83,10 +83,10 @@ def test_orphan_file_is_removed(tmp_path: Path) -> None:
     assert not (worc / "old-removed-doc.md").exists()
 
 
-def test_missing_worc_dir_is_populated(tmp_path: Path) -> None:
-    cfg = _write_config(tmp_path)  # no worc/ beside it yet
+def test_missing_guide_dir_is_populated(tmp_path: Path) -> None:
+    cfg = _write_config(tmp_path)  # no guide/ beside it yet
     assert cli.main(["--config", str(cfg), "upgrade-docs"]) == 0
-    assert (tmp_path / "worc" / "README.md").is_file()
+    assert (tmp_path / "guide" / "README.md").is_file()
 
 
 def test_missing_config_is_reported(

@@ -22,23 +22,11 @@ python -m venv .venv
 pip install -e ".[dev]"             # or: pip install wastech-orchestrator
 ```
 
-Scaffold a project layout (folders + `config.yaml` + editable templates + a `worc/` agent task-authoring guide). `init` is idempotent — a second run skips everything and never overwrites `config.yaml`:
+`install` is the single setup command. It sets up `<repo>/.worc/` in the current repository — a single gitignored home for everything the orchestrator generates: `config.yaml`, editable `templates/`, a `guide/` (the agent task-authoring docs), `state.db`, `logs/`, `workspace/`, and `checks/`. There is no sibling workspace and no separate clone requirement — the orchestrator branches/commits/pushes in the repo you run it in.
 
-```bash
-python -m wastech_orchestrator init .                            # in-repo audit footprint (default)
-python -m wastech_orchestrator init . --git-mode in_repo_exclude # artifacts in the clone, git-ignored
-python -m wastech_orchestrator init . --git-mode external        # artifacts outside the clone (zero footprint)
-```
+### Bind the repository (`install`)
 
-Then copy/adjust `config.yaml` (it mirrors §11 of the spec) and point `repo.url` / `repo.local_path` at the target repository clone.
-
-Alongside `config.yaml`, `init` writes a `worc/` folder — a compact, agent-facing guide for writing task files (the task contract, a decision guide, best practices, and ready-to-adapt examples). Point an AI agent at it and ask it to "write a task for this orchestrator." It is generated content with no operator edits; under an in-repo footprint it is git-ignored alongside the other runtime files, and `upgrade-docs` (below) refreshes it after a package upgrade.
-
-For self-hosting with `init`, the clone in `repo.local_path` must be separate from the checkout used to run the orchestrator. Keep the known-good control process, SQLite state, tasks, and logs outside the target clone. This prevents the IDE, the coding agent, and terminal cleanup from competing over one working tree. (The `install` flow below intentionally binds the checkout you run it in and keeps only the control plane in a sibling workspace — see its repo-cleanliness check.)
-
-### Bind an existing repository (`install`)
-
-`install` is the two-step flow for a repository you already have checked out. Install the CLI once, then bind the repo (the same commands work on Windows and macOS):
+Install the CLI once, then run `install .` in the repo (the same commands work on Windows and macOS):
 
 ```powershell
 pipx install "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git"
@@ -46,9 +34,9 @@ cd C:\projects\my-repo
 wastech-orchestrator install .          # interactive wizard
 ```
 
-The wizard detects the Git root, `origin`, base branch, and cleanliness; proposes a sibling control workspace `<repo-name>-orchestrator`; finds `codex`/`claude`/`gh`; proposes checks from the repo's ecosystem (`pyproject.toml` / `package.json` / `Cargo.toml` / `go.mod`); and writes a validated `config.yaml` into the workspace. It **binds the current checkout** as `repo.local_path` (so the orchestrator branches/commits/pushes there) and keeps `config.yaml`, `tasks/`, `logs/`, the SQLite state, and the `worc/` agent task-authoring guide **only in the sibling workspace** — the installer never touches the target repo's tracked files. (`install --reconfigure` refreshes the `worc/` docs to the packaged version.) It never installs or authorizes the CLIs; it reports what is missing and auto-runs `preflight` at the end (a failed preflight keeps the config but exits non-zero with instructions).
+The wizard detects the Git root, `origin`, base branch, and cleanliness; finds `codex`/`claude`/`gh`; proposes checks from the repo's ecosystem (`pyproject.toml` / `package.json` / `Cargo.toml` / `go.mod`); writes a validated `config.yaml` and the editable `templates/` tree into `<repo>/.worc/`; and copies the packaged `worc/` guide to `.worc/guide/`. It appends a single line `.worc/` to the repo's tracked `.gitignore` so the whole runtime home is ignored (`tasks/` is intentionally left tracked). (`install --reconfigure` refreshes the `.worc/guide/` docs to the packaged version.) It never installs or authorizes the CLIs; it reports what is missing and auto-runs `preflight` at the end (a failed preflight keeps the config but exits non-zero with instructions).
 
-The binding (`repo-root -> config.yaml`) is stored in a per-user directory via `platformdirs` (`%LOCALAPPDATA%` on Windows, `~/Library/Application Support` on macOS, the XDG config dir on Linux; override with `WASTECH_ORCHESTRATOR_HOME`). Subsequent commands then need no `--config` and no WSL paths, run from anywhere inside the repo:
+Subsequent commands need no `--config` — they walk up from the current directory to the Git root and use `<root>/.worc/config.yaml`, run from anywhere inside the repo:
 
 ```text
 wastech-orchestrator preflight
@@ -56,7 +44,7 @@ wastech-orchestrator watch
 wastech-orchestrator status
 ```
 
-Config discovery order: explicit `--config` > `./config.yaml` > the current repo's binding > a hint to run `install .`. Re-running `install` is idempotent; `--reconfigure` writes a timestamped backup and atomically replaces the config; a workspace bound to another repo is never overwritten. For automation: `wastech-orchestrator install . --non-interactive --provider codex --no-create-pr`. As with `init`, `--no-create-pr` disables the PR but not commit/push.
+Config discovery order: explicit `--config` > `<repo-root>/.worc/config.yaml` (walk up to the Git root) > a hint to run `install .`. Re-running `install` is idempotent; `--reconfigure` writes a timestamped backup and atomically replaces the config. For automation: `wastech-orchestrator install . --non-interactive --provider codex --no-create-pr` (`--non-interactive` replaces scripted setup). `--no-create-pr` disables the PR but not commit/push.
 
 ---
 
@@ -71,7 +59,7 @@ wastech-orchestrator --version           # confirm the new version
 
 Do it **between tasks**, not mid-run: an in-flight task holds the single processing slot and a live working branch, and its state lives in `state.db`. Wait until `status` shows no active task, then upgrade and re-run `preflight` / `watch`.
 
-The persisted state survives an upgrade — back it up first so you can roll back. Under the default in-repo footprint that is `config.yaml` (in the control workspace) plus `state.db` and `tasks/`/`logs/` (in the bound repo); under the `external` footprint they all live in the control workspace. Copy at least `config.yaml` + `state.db`. The orchestrator **fail-closes on a backward-incompatible workspace**: if the `config.yaml` `schema_version` or the `state.db` schema is **newer** than the installed version understands, the command prints a clear `error:` and exits non-zero (2) instead of running against a format it cannot read. To recover, upgrade the package to a version that supports it (or, for a throwaway setup, start a fresh workspace via `install --reconfigure`). Older or absent versions are accepted as-is.
+The persisted state survives an upgrade — back it up first so you can roll back. That is everything under `<repo>/.worc/` (`config.yaml` and `state.db` live there), plus the git-tracked `tasks/` lifecycle dirs at the repo root. Copy at least `.worc/config.yaml` + `.worc/state.db`. The orchestrator **fail-closes on a backward-incompatible workspace**: if the `config.yaml` `schema_version` or the `state.db` schema is **newer** than the installed version understands, the command prints a clear `error:` and exits non-zero (2) instead of running against a format it cannot read. To recover, upgrade the package to a version that supports it (or, for a throwaway setup, start a fresh workspace via `install --reconfigure`). Older or absent versions are accepted as-is.
 
 `state.db` migrates itself **forward** in place the first time a newer version opens it (e.g. v1→v2 adds the stage-skip audit columns) — no action needed. `config.yaml` does **not** auto-migrate: a new release may add keys (with safe defaults, so an older config still runs), but to materialize them in your file run **`upgrade-config`** after upgrading the package:
 
@@ -82,7 +70,7 @@ wastech-orchestrator --config path/to/config.yaml upgrade-config --dry-run   # p
 
 It adds any keys the current format introduced (from the packaged template's defaults), **keeps every existing value**, stamps the current `schema_version`, and backs up the original to `config.yaml.bak-<UTC>` before writing. It is idempotent (an already-current config is left untouched) and fail-closed (it refuses a config that is unparsable or already newer than this version, and never writes a config that would fail validation). **Caveat:** when it does rewrite the file it re-emits via YAML and drops inline comments — see `config.example.yaml` / [configuration.md](configuration.md) for field docs. `--dry-run` lists what would be added without writing.
 
-The `worc/` agent task-authoring docs also ship with the package, so an upgrade brings newer docs than your already-installed copy. Refresh the installed copy (beside `config.yaml`) with **`upgrade-docs`**:
+The agent task-authoring docs also ship with the package (packaged source dir `worc/`, copied to `.worc/guide/`), so an upgrade brings newer docs than your already-installed copy. Refresh the installed copy (under `.worc/guide/`) with **`upgrade-docs`**:
 
 ```bash
 wastech-orchestrator upgrade-docs                # uses the discovered/bound config location
@@ -91,7 +79,7 @@ wastech-orchestrator upgrade-docs --dry-run      # preview added/updated/removed
 
 Unlike `config.yaml`, the `worc/` docs are generated content with **no operator edits to preserve**, so this is a straight overwrite to the packaged version: it writes missing or changed files, removes files no longer shipped, and makes no backup. It is idempotent (an already-current copy is a no-op), `--dry-run` writes nothing, and it fails closed (exit 2 with the same hint as `upgrade-config`) when no install location can be resolved.
 
-The `templates/` tree (the per-stage prompts — the only operator-customizable templates from schema v6) also ships with the package, but only `init` copies it — the wizard-based `install` does not, and an upgrade carries newer templates than an already-installed copy. Deliver or refresh them beside `config.yaml` with **`install-templates`**:
+The `templates/` tree (the per-stage prompts — the only operator-customizable templates from schema v6) also ships with the package. `install` copies it into `<repo>/.worc/templates/`, but an upgrade carries newer templates than an already-installed copy. Deliver or refresh them under `.worc/templates/` with **`install-templates`**:
 
 ```bash
 wastech-orchestrator install-templates           # uses the discovered/bound config location
@@ -99,7 +87,7 @@ wastech-orchestrator install-templates --dry-run # preview the add/skip(/overwri
 wastech-orchestrator install-templates --force   # overwrite operator-edited templates too
 ```
 
-Unlike `upgrade-docs`, the templates are **operator-editable**, so this is **add-missing-only**: absent files are written and existing files are **skipped** to preserve your edits (it never removes operator-added files). Use `--force` to overwrite an edited template back to the packaged version. It resolves the install location and fails closed the same way as the `upgrade-*` commands, and it never touches `config.yaml`. From schema v6 a delivered `prompts/<stage>.md` is **auto-detected by file presence** — edit it to take effect; there is no `overrides` map to maintain (see [configuration.md](configuration.md#prompts)). A relative `prompts.templates_dir` resolves from the `config.yaml` directory, so the templates are found regardless of the current working directory — including under an `external` workspace footprint.
+Unlike `upgrade-docs`, the templates are **operator-editable**, so this is **add-missing-only**: absent files are written and existing files are **skipped** to preserve your edits (it never removes operator-added files). Use `--force` to overwrite an edited template back to the packaged version. It resolves the install location and fails closed the same way as the `upgrade-*` commands, and it never touches `config.yaml`. From schema v6 a delivered `prompts/<stage>.md` is **auto-detected by file presence** — edit it to take effect; there is no `overrides` map to maintain (see [configuration.md](configuration.md#prompts)). A relative `prompts.templates_dir` resolves from the `config.yaml` directory (`<repo>/.worc/`), so the templates are found regardless of the current working directory.
 
 After a package upgrade, run **`upgrade-config`**, **`upgrade-docs`**, and **`install-templates`** to bring your deployment fully current. (A single umbrella `upgrade` that does all three is tracked in [follow-ups](backlog/follow_ups.md).)
 
@@ -153,7 +141,7 @@ checks: FAIL (0 resolved, source=detected)
   rejected: lint (git push origin) — matches denied command 'git push'
 ```
 
-- The resolved profile is cached at `<workspace>/checks/resolved-profile.json` with a fingerprint of the discovery inputs (manifests, lock files, CI workflows, local interpreters). It is recomputed per `checks.discovery.refresh` (`on_change` by default) — editing a manifest or lock file refreshes it. Force a refresh by setting `refresh: always`, or re-run `install --reconfigure`.
+- The resolved profile is cached at `<repo>/.worc/checks/resolved-profile.json` with a fingerprint of the discovery inputs (manifests, lock files, CI workflows, local interpreters). It is recomputed per `checks.discovery.refresh` (`on_change` by default) — editing a manifest or lock file refreshes it. Force a refresh by setting `refresh: always`, or re-run `install --reconfigure`.
 - `status` prints a read-only summary of the cached profile (it never resolves, probes, or runs anything):
 
   ```text
@@ -220,7 +208,7 @@ By default `watch` is a **long-running loop** (`orchestrator.poll_interval_secon
 
 ### Managing the daemon (`stop` / `restart`)
 
-When `watch` runs as a background service (systemd, launchd, `nohup &`) you do not need to track its PID. A looping `watch` writes `<artifacts_root>/orchestrator.pid` on start and removes it on exit; two commands act on it from any shell bound to the same repo:
+When `watch` runs as a background service (systemd, launchd, `nohup &`) you do not need to track its PID. A looping `watch` writes `<repo>/.worc/orchestrator.pid` on start and removes it on exit; two commands act on it from any shell in the same repo:
 
 ```bash
 worc stop                  # SIGTERM the watcher; SIGKILL after --timeout (default 30s); idempotent
@@ -289,19 +277,20 @@ python -m wastech_orchestrator --config ./config.yaml status task-001
 
 ---
 
-## 5. Git footprint modes (§21) — when to use each
+## 5. Git footprint and the audit commit
 
-Two axes under `git.footprint` control where `tasks/` and `logs/` live relative to the target clone:
+There is one canonical layout. Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home — `config.yaml`, `templates/`, `guide/`, `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `workspace/`, `checks/`, and the `tasks/rejected` quarantine. The **only** things not under `.worc/` are the `tasks/` lifecycle dirs (`pending`/`processing`/`done`/`failed`), which live at the **repo root** and are **git-tracked**: the task file and its `<id>.summary.md` (in `done/` or `failed/`) are the audit trail. `install` appends a single line `.worc/` to the repo's tracked `.gitignore`; `tasks/` is intentionally not ignored.
 
-| Mode (`--git-mode`) | `location` / `tracking` | Use when |
+Two fields under `git.footprint` shape the audit commit:
+
+| Key | Default | Effect |
 | --- | --- | --- |
-| **in_repo_commit** (default) | `in_repo` / `commit` | You want the **task and its summary stored in git, in the same repo as the code**. The orchestrator (never an agent) makes a separate `tasks/` commit (the task moved to `done/`/`failed/` + `<id>.summary.md`) after the code commit; `logs/` (plan, review, diffs, `summary.json`) stays local, never committed. |
-| **in_repo_exclude** | `in_repo` / `exclude_local` | You want artifacts beside the code for convenience but **never committed**. They are appended to `.git/info/exclude` (per-clone, not tracked). |
-| **external** | `external` / `none` | You want **zero footprint** in the customer repo. `tasks/` and `logs/` live under `external_root`, outside the clone. Nothing to ignore, nothing committed. |
+| `audit_commit_message` | (string) | The commit message the orchestrator uses for the audit commit. |
+| `audit_on_branch` | `task` | `task` commits the audit onto the task branch; `sibling` commits it onto a `<branch>-audit` branch. |
 
-In every mode the _code_ commit is **scoped** (an explicit pathspec that excludes `tasks/`/`logs/`/`workspace/`/`checks/`, plus — under in-repo — the root runtime files `state.db`/`config.yaml`/`orchestrator.pid`) — there is never a `git add .`. The validator rejects the illegal pairings (`external`+`exclude_local|commit`, `in_repo`+`none`); under `external`, `external_root` must resolve outside `repo.local_path`.
+The orchestrator (never an agent) makes the audit commit, staging **only the current task's own files** — `tasks/<state>/<id>.md` plus `<id>.summary.md` — never `git add -- tasks/` wholesale. The _code_ commit is likewise **scoped** via an explicit pathspec that excludes `.worc/` (gitignored) and `tasks/` (rides the audit commit) — there is never a `git add .`.
 
-> **One-time cleanup if a prior run leaked `checks/resolved-profile.json`.** Before this fix the generated resolved check profile (`checks/resolved-profile.json`) was not ignored and could ride a code commit. The orchestrator now ignores the whole `checks/` dir and stops tracking it for _future_ runs, but it deliberately does not refuse to start on an already-tracked copy. If `git status` or a prior commit shows it tracked, untrack it once: `git rm --cached checks/resolved-profile.json` (and, if present, `git rm --cached orchestrator.pid`), then commit. The file keeps working as a local cache.
+> **One-time cleanup if a prior run leaked `.worc/checks/resolved-profile.json`.** Before the `.worc/` layout the generated resolved check profile could ride a code commit. It now lives under `.worc/checks/` and is gitignored, and the orchestrator stops tracking it for _future_ runs, but it deliberately does not refuse to start on an already-tracked copy. If `git status` or a prior commit shows it tracked, untrack it once: `git rm --cached .worc/checks/resolved-profile.json`, then commit. The file keeps working as a local cache.
 
 ### Auto-merge to the base branch (DANGER: bypasses human review)
 
@@ -365,7 +354,7 @@ The effective skip set is the **union** of `agents.skip_stages` and the task's `
 
 ## 6. Diagnostics — reading what a run produced
 
-All artifacts live under `logs/<task-id>/` (`external_root/logs/...` in external mode). SQLite (`state.db`) is the authoritative state; the artifacts and ledger are the human-facing index.
+All artifacts live under `<repo>/.worc/logs/<task-id>/`. SQLite (`<repo>/.worc/state.db`) is the authoritative state; the artifacts and ledger are the human-facing index.
 
 ```text
 logs/
@@ -417,12 +406,11 @@ Common causes and what to do:
 | Cause (from `stuck.md` / logs / `cleanup_last_error`) | Action |
 | --- | --- |
 | **Fix budget exhausted** — `max_fix_cycles` or the global `max_total_fix_iterations` hit. | Read `stuck.md`: the last failing check / blocking findings and the final diff. Fix manually on the task branch, or refine the task, then re-submit. |
-| **Terminal cleanup unsafe** — base-branch checkout would lose uncommitted work or the branch state is ambiguous (§8.3). | Inspect the clone (`git status`); reconcile by hand, commit/stash or discard intentionally, return to `base_branch`, then re-run `watch`. |
-| **Repo already tracks `tasks/`/`logs/`** (footprint preflight, §21.4). | Only under `external`/`exclude_local`: remove/rename the colliding tracked paths. Under the default `in_repo_commit` this is expected (those paths are the audit trail) and the preflight is skipped. |
+| **Terminal cleanup unsafe** — base-branch checkout would lose uncommitted work or the branch state is ambiguous (§8.3). | Inspect the repo (`git status`); reconcile by hand, commit/stash or discard intentionally, return to `base_branch`, then re-run `watch`. |
 | **More than one active task on restart** (inconsistent state, §13). | Only one task may be active. Decide which to keep, mark the others resolved, then re-run. |
 
 A §19-**rejected** task is different: it is terminal `failed`, quarantined to `tasks/rejected/` with a `validation_report.json` (and a `validation_reason` in the ledger), and never gets a branch. Fix the task file (e.g. add a Description, a valid `id`, remove injection-shaped front-matter) and re-submit from `tasks/pending/`.
 
 Recovery is idempotent: re-running `watch`/`run` resumes the single in-flight task, reuses the existing branch, continues from its persisted status (`planning`, `testing`, `reviewing`, `fixing`, and so on), and never re-commits/re-pushes a completed operation. A fixing entry also persists `fixing-context.json`, so the resumed agent receives the same failed-check or review-findings path without incrementing the fix counters a second time.
 
-Under `external`/`exclude_local`, a tracked `tasks/` or `logs/` path is rejected by the footprint preflight (a name collision `.git/info/exclude` cannot untrack); keep task examples under `docs/examples/` or `templates/`. Under the default `in_repo_commit`, tracked `tasks/`/`logs/` are the **expected** audit trail — that is where live task files belong, and the preflight is skipped.
+Tracked `tasks/` at the repo root is the **expected**, git-tracked audit trail — that is where live task files belong. The runtime home `.worc/` is gitignored by `install` (a single `.worc/` line appended to `.gitignore`), so its contents never ride a commit.

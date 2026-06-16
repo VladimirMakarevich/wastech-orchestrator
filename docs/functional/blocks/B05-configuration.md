@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The typed model for `config.yaml` and its full data lifecycle: structural YAML parsing into dataclasses (fail-closed), semantic validation of rules §11/§21.4, and key migration between schema versions. The configuration defines the behavior of the entire system (providers, routes, loop limits, security, footprint, checks, telegram, prompts, skills).
+The typed model for `config.yaml` and its full data lifecycle: structural YAML parsing into dataclasses (fail-closed), semantic validation of rules §11/§21.4, and key migration between schema versions. The configuration defines the behavior of the entire system (providers, routes, loop limits, security, the git audit footprint, checks, telegram, prompts, skills).
 
 ## Responsibilities
 
@@ -20,7 +20,7 @@ The typed model for `config.yaml` and its full data lifecycle: structural YAML p
 
 ### Outside the block's responsibility
 
-- **Config file discovery** (`resolve_config_path`) and the binding registry — that is [B04](./B04-install-registry-and-config-discovery.md).
+- **Config file discovery** (`resolve_config_path`) — that is [B04](./B04-install-registry-and-config-discovery.md).
 - **Atomic write/backup** of the config file — that belongs to the CLI/installer drivers ([B03](./B03-installer-and-scaffolding.md)/[B01](./B01-cli-and-operator-commands.md)).
 - **Defining forbidden flags** — delegated to [B25 `find_forbidden_args`](./B25-security-policy.md) ([validation.py:46](../../../src/wastech_orchestrator/config/validation.py#L46)).
 - **Normalizing/validating check commands** — delegated to [B23 (checks.model)](./B23-check-discovery.md) ([validation.py:17-22,154-166](../../../src/wastech_orchestrator/config/validation.py#L154)).
@@ -56,7 +56,7 @@ flowchart TB
     parse -->|"issues present"| e1
     parse --> bind["bind relative prompts.templates_dir<br/>to config directory"]
     bind --> res["ConfigLoadResult(config, warnings)"]
-    res --> val["validate_config: semantics §11/§21.4<br/>(routes, limits, footprint, extra_args, checks, telegram)"]
+    res --> val["validate_config: semantics §11/§21.4<br/>(routes, limits, extra_args, checks, telegram)"]
     val -->|violation| e2["ConfigError (all issues)"]
     val --> ok["config admitted to the pipeline"]
     e1 --> exit2["CLI: message + exit 2"]
@@ -69,9 +69,9 @@ flowchart TB
 
 Missing routing block → auto-migration to Codex route for all `ROUTABLE_STAGES` + warning ([loader.py:476-485,388-392](../../../src/wastech_orchestrator/config/loader.py#L476)).
 
-### Removed keys (schema v6)
+### Removed keys (schema v6 / v7)
 
-`prompts.overrides`/`prompts.strict` are tolerated on load (ignored) with a warning; `upgrade-config` strips them ([loader.py:711-728](../../../src/wastech_orchestrator/config/loader.py#L711), [upgrade.py:27-30,77-89](../../../src/wastech_orchestrator/config/upgrade.py#L27)).
+v6: `prompts.overrides`/`prompts.strict` are tolerated on load (ignored) with a warning; `upgrade-config` strips them ([loader.py:711-728](../../../src/wastech_orchestrator/config/loader.py#L711), [upgrade.py:27-30,77-89](../../../src/wastech_orchestrator/config/upgrade.py#L27)). v7 (worc-home consolidation): the `git.footprint.location`/`.tracking`/`.external_root` keys are removed — `git.footprint` now carries only `audit_commit_message` + `audit_on_branch` ([schema.py:39,229-236](../../../src/wastech_orchestrator/config/schema.py#L39)); `upgrade-config` strips the removed keys.
 
 ### Config upgrade
 
@@ -79,8 +79,8 @@ Missing routing block → auto-migration to Codex route for all `ROUTABLE_STAGES
 
 ## Checks and constraints
 
-- **Structural** (loader): non-mapping root, unknown keys (top-level and block-level), unknown stage/provider/enum, wrong types → `ConfigError`; `schema_version` newer than current (=6) → `ConfigError` ([loader.py:758-775](../../../src/wastech_orchestrator/config/loader.py#L758)).
-- **Semantic** (validation): routes only for `ROUTABLE_STAGES`, primary/fallback ∈ `agents.allowed` and present in `agents.providers`; `poll_interval_seconds ≥ 0`; `max_total_fix_iterations ≥ max_fix_cycles`; `decomposition.max_subtasks ≥ 2`; `extra_args` without bypass flags; footprint pairs (external is incompatible with exclude_local/commit; in_repo requires tracking ≠ none) and anti-traversal `external_root` outside `repo.local_path`; check commands — argv without shell metacharacters, without bypass flags, not from `denied_commands`; telegram timeout > 0 and valid env-variable names ([validation.py:80-216](../../../src/wastech_orchestrator/config/validation.py#L80)).
+- **Structural** (loader): non-mapping root, unknown keys (top-level and block-level), unknown stage/provider/enum, wrong types → `ConfigError`; `schema_version` newer than current (=7) → `ConfigError` ([loader.py:758-775](../../../src/wastech_orchestrator/config/loader.py#L758)).
+- **Semantic** (validation): routes only for `ROUTABLE_STAGES`, primary/fallback ∈ `agents.allowed` and present in `agents.providers`; `poll_interval_seconds ≥ 0`; `max_total_fix_iterations ≥ max_fix_cycles`; `decomposition.max_subtasks ≥ 2`; `extra_args` without bypass flags; check commands — argv without shell metacharacters, without bypass flags, not from `denied_commands`; telegram timeout > 0 and valid env-variable names ([validation.py:80-216](../../../src/wastech_orchestrator/config/validation.py#L80)).
 - `check_task_route_override` — the same allowed/configured/routable checks, but **pure** (returns a list of issues, raises nothing) ([validation.py:228-240](../../../src/wastech_orchestrator/config/validation.py#L228)).
 
 ## Output

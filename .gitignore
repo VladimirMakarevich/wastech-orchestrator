@@ -13,33 +13,24 @@ venv/
 .coverage
 htmlcov/
 
-# Configuration and secrets (DO NOT commit)
-config.yaml
+# Secrets (DO NOT commit)
 .env
 secrets/
 *.key
 *.pem
 
-# Workspace and Orchestrator Artifacts
-workspace/
-logs/
-*.db
-*.sqlite
-*.sqlite3
-
-# Tasks in progress (optionally leave only pending in git)
-tasks/processing/
-tasks/done/
-tasks/failed/
-tasks/rejected/
+# Orchestrator runtime home — config.yaml, state.db, logs/, workspace/, checks/, templates/, guide/
+# all live here and are local-only. tasks/ (the audit trail) is intentionally NOT ignored (§21).
+.worc/
 
 # IDE / ОС
 .idea/
 .vscode/
 .DS_Store
 Thumbs.db
-state.db-shm
-state.db-wal
+
+# Obsidian Vault (if using Obsidian for notes)
+.obsidian/
 
 # Obsidian Vault (if using Obsidian for notes)
 .obsidian/

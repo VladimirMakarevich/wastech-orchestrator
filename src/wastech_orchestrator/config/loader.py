@@ -33,8 +33,6 @@ from wastech_orchestrator.config.schema import (
     ChecksConfig,
     DecompositionConfig,
     FootprintConfig,
-    FootprintLocation,
-    FootprintTracking,
     GitConfig,
     MergeStrategy,
     OrchestratorConfig,
@@ -551,7 +549,7 @@ def _build_validation(raw: Any, issues: list[str]) -> ValidationConfig:
         max_control_ratio=_float(m, "max_control_ratio", 0.01, where, issues),
         required_fields=_str_tuple(m, "required_fields", ("id", "title"), where, issues),
         reject_unknown_fields=_bool(m, "reject_unknown_fields", True, where, issues),
-        quarantine_folder=_str(m, "quarantine_folder", "./tasks/rejected", where, issues),
+        quarantine_folder=_str(m, "quarantine_folder", "./.worc/tasks/rejected", where, issues),
     )
 
 
@@ -629,28 +627,8 @@ def _build_checks(raw: Any, issues: list[str]) -> ChecksConfig:
 def _build_footprint(raw: Any, issues: list[str]) -> FootprintConfig:
     where = "git.footprint"
     m = _mapping(raw, where, issues)
-    _check_keys(
-        m,
-        {"location", "tracking", "external_root", "audit_commit_message", "audit_on_branch"},
-        where,
-        issues,
-    )
+    _check_keys(m, {"audit_commit_message", "audit_on_branch"}, where, issues)
     return FootprintConfig(
-        location=_enum(
-            m.get("location"),
-            FootprintLocation,
-            f"{where}.location",
-            issues,
-            FootprintLocation.IN_REPO,
-        ),
-        tracking=_enum(
-            m.get("tracking"),
-            FootprintTracking,
-            f"{where}.tracking",
-            issues,
-            FootprintTracking.COMMIT,
-        ),
-        external_root=_str(m, "external_root", "./", where, issues),
         audit_commit_message=_str(m, "audit_commit_message", _DEFAULT_AUDIT_MESSAGE, where, issues),
         audit_on_branch=_enum(
             m.get("audit_on_branch"),

@@ -1,7 +1,7 @@
 # Example configuration for wastech-orchestrator.
 # Copy to config.yaml and fill it in for your project. config.yaml is NOT committed to git.
 
-schema_version: 6                   # config format version; the orchestrator refuses newer configs
+schema_version: 7                   # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -126,12 +126,11 @@ git:
   auto_merge_strategy: squash       # merge | squash | rebase  (used when a merge fires)
   auto_merge_allow_per_task: false  # true: honor a per-task `auto_merge: true` (a per-task false always opts out)
   auto_merge_wait_for_checks: false # true: arm GitHub-native auto-merge (--auto) — merge only after required checks pass
-  footprint:                        # where orchestration/task artifacts live vs. the target repo (§21)
-    location: in_repo               # external | in_repo  (in_repo: tasks/ & logs/ live in the repo)
-    tracking: commit                # none | exclude_local | commit  (commit: audit-commit tasks/ only)
-    external_root: "./"             # location=external only: where tasks/ & logs/ live, OUTSIDE the clone
-    audit_commit_message: "chore(orchestrator): audit trail for {task_id}"  # tracking=commit only
-    audit_on_branch: task           # task | sibling   (tracking=commit only)
+  footprint:                        # audit-trail policy (§21). Runtime files always live under the
+                                    # gitignored <repo>/.worc/ home; only the task file and its
+                                    # <id>.summary.md are committed, at the repo root under tasks/.
+    audit_commit_message: "chore(orchestrator): audit trail for {task_id}"
+    audit_on_branch: task           # task | sibling
 
 telegram:                           # human-in-the-loop + notifications (optional)
   enabled: false

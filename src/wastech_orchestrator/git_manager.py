@@ -7,11 +7,11 @@ no user-string interpolation), with an allowlisted environment.
 Responsibilities:
 
 * branch flow: ``fetch`` → checkout ``base_branch`` → ``pull`` → create ``agent/<task-id>-<slug>``;
-* **scoped staging** (§21.1): stage only the agent's code paths via an explicit pathspec plus
-  belt-and-braces ``:(exclude)tasks/`` / ``logs/`` / ``workspace/`` — **never** ``git add .``;
-* the three footprint modes (§21): ``external`` (zero footprint), ``in_repo``+``exclude_local``
-  (idempotent ``.git/info/exclude`` append), ``in_repo``+``commit`` (a separate orchestrator-made
-  audit commit);
+* **scoped staging** (§21.1): stage only the agent's code paths via an explicit pathspec plus a
+  belt-and-braces ``:(exclude)tasks/`` guard — **never** ``git add .``;
+* the canonical footprint (§21): the orchestrator's runtime files live under the gitignored
+  ``<repo>/.worc/`` home, and a separate orchestrator-made audit commit captures the task file plus
+  its ``<id>.summary.md`` at the repo root under ``tasks/``;
 * idempotent commit/push/PR via an operation fingerprint + remote-state check (§13);
 * terminal cleanup back to ``repo.base_branch`` when provably safe (§8.3);
 * the :class:`~wastech_orchestrator.routing.snapshots.SnapshotHook` for partial-change capture.
@@ -29,7 +29,6 @@ from pathlib import Path
 
 from wastech_orchestrator.config.schema import (
     AuditBranch,
-    FootprintTracking,
     MergeStrategy,
     OrchestratorConfig,
 )
@@ -45,36 +44,17 @@ from wastech_orchestrator.state_store import PublishOpRow, StateStore
 # Git/gh operations are bounded but slower than a trivial command (network fetch/push allowed).
 GIT_TIMEOUT_SECONDS = 300
 
-# The artifact directories that must never enter a code commit (§21.1). `checks/` holds the
-# generated resolved check profile (`checks/resolved-profile.json`), a runtime cache like `logs/` —
-# it is regenerated from `artifacts_root` and is never part of any commit (§10).
-EXCLUDED_DIRS = ("tasks", "logs", "workspace", "checks")
+# The directories that must never enter a code commit (§21.1). `.worc/` is the gitignored runtime
+# home (state.db, logs/, workspace/, checks/, config.yaml, orchestrator.pid, …); `tasks/` is tracked
+# but rides the separate audit commit, so it is kept out of the code commit too (§21.3).
+EXCLUDED_DIRS = (".worc", "tasks")
 
-# Root-level orchestrator runtime files that must never enter a code commit and must not count as
-# "unaccounted dirty" at terminal cleanup. They only appear inside the clone under the in-repo
-# footprint, where the artifact root *is* the clone (§21); the audit commit stages only the
-# `tasks/`/`logs/` dirs, so these never reach git. The `watch` daemon's `orchestrator.pid` lives
-# here too. `config.yaml.bak-<UTC>` backups are matched by prefix.
-_EXCLUDED_FILES = ("state.db", "state.db-wal", "state.db-shm", "config.yaml", "orchestrator.pid")
-_EXCLUDED_FILE_PREFIXES = ("config.yaml.bak-",)
-
-# Runtime-file patterns appended to a target repo's ignore list by `init`/`install` so an operator's
-# own `git status` stays clean under the in-repo footprint (§21.2). Superset of `_EXCLUDED_FILES`
-# expressed as gitignore patterns (the `config.yaml.bak-` prefix becomes a glob).
+# The single ignore line `install` appends to a target repo's tracked `.gitignore` (§21.2): the
+# whole `.worc/` runtime home, so an operator's `git status` stays clean. `tasks/` is intentionally
+# NOT ignored — it carries the committed audit trail.
 RUNTIME_GITIGNORE_LINES: tuple[str, ...] = (
-    "# wastech-orchestrator runtime files (auto-appended by `worc install`)",
-    "state.db",
-    "state.db-shm",
-    "state.db-wal",
-    "config.yaml",
-    "config.yaml.bak-*",
-    "orchestrator.pid",
-    # The agent task-authoring docs copied beside config.yaml by `init`/`install` (§21.2): generated
-    # per-deployment content, never part of a code commit and kept out of the operator's git status.
-    "worc/",
-    # The resolved check profile (`checks/resolved-profile.json`) — a generated runtime cache (§10),
-    # ignored as a whole dir like `logs/` so a re-run never leaves it in the operator's git status.
-    "checks/",
+    "# wastech-orchestrator runtime home (auto-appended by `worc install`)",
+    ".worc/",
 )
 
 
@@ -97,21 +77,12 @@ def _append_missing_lines(target: Path, lines: Sequence[str]) -> list[str]:
     return additions
 
 
-def append_runtime_excludes(repo_root: str | Path, *, tracked: bool = False) -> list[str]:
-    """Idempotently add the runtime-file patterns to a repo's ignore list (§21.2).
+def append_runtime_excludes(repo_root: str | Path) -> list[str]:
+    """Idempotently add the ``.worc/`` ignore line to the repo's tracked ``.gitignore`` (§21.2).
 
-    Writes to ``.git/info/exclude`` by default (per-clone, leaves the tracked ``.gitignore``
-    untouched) or to ``.gitignore`` when ``tracked`` is true. Returns the lines actually appended —
-    empty when everything was already present, or (default mode) when ``repo_root`` has no ``.git``.
+    Returns the lines actually appended — empty when everything was already present.
     """
-    root = Path(repo_root)
-    if tracked:
-        target = root / ".gitignore"
-    elif (root / ".git").is_dir():
-        target = root / ".git" / "info" / "exclude"
-    else:
-        return []
-    return _append_missing_lines(target, RUNTIME_GITIGNORE_LINES)
+    return _append_missing_lines(Path(repo_root) / ".gitignore", RUNTIME_GITIGNORE_LINES)
 
 
 # publish_operations.kind values (idempotency keys, §13).
@@ -380,60 +351,12 @@ class GitManager:
 
     # --- footprint ------------------------------------------------------------------------
 
-    def _local_only_dirs(self) -> tuple[str, ...]:
-        """Artifact dirs this footprint keeps out of git (excluded / never committed) (§21).
-
-        ``commit`` tracks ``tasks/`` (task lifecycle + the committed ``summary.md``) and keeps
-        ``logs/``, ``workspace/`` and ``checks/`` local; ``exclude_local`` keeps all of them local;
-        other modes keep nothing in the clone. ``checks/`` (the generated check profile) is always
-        local-only — unlike ``tasks/`` it is never committed in any footprint.
-        """
-        tracking = self._config.git.footprint.tracking
-        if tracking is FootprintTracking.COMMIT:
-            return ("logs", "workspace", "checks")
-        if tracking is FootprintTracking.EXCLUDE_LOCAL:
-            return EXCLUDED_DIRS
-        return ()
-
-    def preflight_footprint(self) -> None:
-        """Refuse to start if the repo already tracks a path the footprint must keep out of git.
-
-        Under ``commit`` only ``logs/`` is checked — ``tasks/`` is *intentionally* tracked (the task
-        lifecycle and the committed ``summary.md``), so once a prior task's audit commit merged into
-        ``base_branch`` a tracked ``tasks/`` is expected, not a defect. Under ``external`` /
-        ``exclude_local`` both ``tasks/`` and ``logs/`` are kept out, so a tracked path with either
-        name (which ``.git/info/exclude`` cannot untrack) requires manual action (§21.4).
-
-        ``checks/`` is deliberately **not** checked here: a prior run that predates the ignore could
-        already have committed ``checks/resolved-profile.json``, and gating on it would make the
-        orchestrator refuse to start on exactly the repos that hit the leak. The new excludes stop
-        future tracking; the operator untracks the stale file once (``git rm --cached checks/...``).
-        """
-        tracking = self._config.git.footprint.tracking
-        check = ("logs/",) if tracking is FootprintTracking.COMMIT else ("tasks/", "logs/")
-        tracked = self._git("ls-files", "--", *check).stdout.strip()
-        if tracked:
-            raise ManualActionRequired(
-                "target repo already tracks a path the footprint must keep out of git "
-                f"({' '.join(check)}); .git/info/exclude cannot untrack it"
-            )
-
-    def ensure_exclude_local(self) -> None:
-        """Idempotently append the footprint's local-only dirs to ``.git/info/exclude`` (§21.2)."""
-        dirs = self._local_only_dirs()
-        if not dirs:
-            return
-        exclude_path = Path(self._clone) / ".git" / "info" / "exclude"
-        _append_missing_lines(exclude_path, [f"{d}/" for d in dirs])
-
     def ensure_runtime_excludes(self) -> None:
-        """Ensure the runtime-file ignores exist in the orchestrator's working clone (§21.2).
+        """Ensure the repo's tracked ``.gitignore`` ignores the ``.worc/`` runtime home (§21.2).
 
-        ``init``/``install`` normally write these, but a clone scaffolded another way — or created
-        before the ignore set grew (e.g. before ``checks/`` was added) — may lack them. Writing to
-        ``.git/info/exclude`` keeps the operator's *tracked* ``.gitignore`` untouched while ensuring
-        ``state.db``, ``config.yaml``, ``orchestrator.pid``, ``checks/``, … never surface in the
-        operator's ``git status`` under the in-repo footprint. Idempotent; a no-op without ``.git``.
+        ``install`` normally writes this, but a clone scaffolded another way may lack it.
+        Idempotent; keeps ``.worc/`` (state.db, logs/, workspace/, checks/, config.yaml, …) out of
+        the operator's ``git status``. ``tasks/`` stays trackable — it carries the audit trail.
         """
         append_runtime_excludes(self._clone)
 
@@ -519,23 +442,16 @@ class GitManager:
 
     def _is_artifact_path(self, path: str) -> bool:
         normalized = path.replace("\\", "/")
-        if normalized in _EXCLUDED_FILES or normalized.startswith(_EXCLUDED_FILE_PREFIXES):
-            return True
         return any(normalized == d or normalized.startswith(f"{d}/") for d in EXCLUDED_DIRS)
 
     def staged_pathspec(self, paths: Sequence[str]) -> list[str]:
-        """Build the scoped ``git add`` pathspec: code paths plus belt-and-braces excludes (§21.1).
+        """Build the scoped ``git add`` pathspec: code paths plus a belt-and-braces guard (§21.1).
 
-        Only artifact dirs that are **not** locally git-ignored are added as ``:(exclude)`` guards.
-        A dir in ``.git/info/exclude`` (``logs/``/``workspace/`` under ``commit``; all three under
-        ``exclude_local``) is already skipped by ``git add`` — listing it as an exclude pathspec
-        when it also exists in the worktree makes ``git add`` fail with "paths are ignored", so it
-        is dropped here. Under ``commit`` the still-tracked ``tasks/`` is kept as a guard so it
-        never slips into the *code* commit (it rides the separate audit commit instead).
+        ``.worc/`` is gitignored, so ``git add`` skips it without a guard; ``tasks/`` is tracked (it
+        rides the separate audit commit), so it is guarded with ``:(exclude)`` to ensure it never
+        slips into the *code* commit.
         """
-        local = set(self._local_only_dirs())
-        excludes = [f":(exclude){d}/" for d in EXCLUDED_DIRS if d not in local]
-        return [*paths, *excludes]
+        return [*paths, ":(exclude)tasks/"]
 
     def commit_code(self, task_id: str, message: str) -> str | None:
         """Stage the agent's code paths and make one commit. Idempotent. Returns the commit SHA.
@@ -597,16 +513,15 @@ class GitManager:
         return sha
 
     def commit_audit(self, task_id: str) -> str | None:
-        """Make the orchestrator-only commit of the task lifecycle (tracking=commit, §21.3).
+        """Make the orchestrator-only commit of the task lifecycle (§21.3).
 
-        Stages **only** ``tasks/`` — the moved task file plus its `<id>.summary.md`. ``logs/``
-        (plan, review, stage logs, diffs, summary.json) is **not** committed; it stays local via
-        ``.git/info/exclude`` (see :meth:`ensure_exclude_local`). The code change rides in the
-        separate scoped code commit, so this never touches code paths.
+        Stages **only this task's** moved task file plus its `<id>.summary.md` (in ``tasks/done`` or
+        ``tasks/failed``) — never the whole ``tasks/`` tree, so a concurrently-pending task is never
+        swept into this commit. Working artifacts (plan, review, stage logs, diffs, summary.json)
+        live under the gitignored ``.worc/`` home and are never committed. The code change rides in
+        the separate scoped code commit, so this never touches code paths.
         """
         footprint = self._config.git.footprint
-        if footprint.tracking is not FootprintTracking.COMMIT:
-            return None
         existing = self._store.get_publish_op(task_id, KIND_AUDIT_COMMIT, None)
         if existing is not None and existing.status == _STATUS_COMPLETED:
             return existing.result_ref
@@ -621,9 +536,14 @@ class GitManager:
                 self._git_checked("checkout", audit_branch)
 
         message = footprint.audit_commit_message.format(task_id=task_id)
-        add = self._git("add", "--", "tasks/")
+        audit_files = [
+            f"tasks/{state}/{task_id}{suffix}"
+            for state in ("done", "failed")
+            for suffix in (".md", ".summary.md")
+        ]
+        present = [rel for rel in audit_files if (Path(self._clone) / rel).exists()]
         sha: str | None = None
-        if add.ok:
+        if present and self._git("add", "--", *present).ok:
             commit = self._git("commit", "-m", message)
             if commit.ok:
                 sha = self._git_checked("rev-parse", "HEAD")

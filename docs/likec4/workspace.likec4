@@ -132,21 +132,17 @@ model {
       }
 
       // Remaining blocks — components of the same proc; added by the same pattern:
-      // B03/B04 Install+Registry, B08 Ledger, B09 Fix-loop, B10 Recovery, B11 Decomposition,
-      // B12 HITL, B13 Skills, B14 Dangerous-diff, B15 Prompts, B20 Artifact-layout.
+      // B03 Installer, B04 Config-discovery, B08 Ledger, B09 Fix-loop, B10 Recovery,
+      // B11 Decomposition, B12 HITL, B13 Skills, B14 Dangerous-diff, B15 Prompts, B20 Artifact-layout.
     }
 
     db = store 'State Store (state.db)' 'tasks, stage_runs, provider_attempts, check_runs, …' {
       #datastore
       technology 'SQLite'
     }
-    artifacts = store 'Artifact Store' 'request / result / stdout / logs / HITL / ledger' {
+    artifacts = store 'Artifact Store (.worc/)' 'config / state.db / logs / checks / HITL / ledger' {
       #datastore
       technology 'Filesystem'
-    }
-    registry = store 'Binding Registry' 'repo → config.yaml' {
-      #datastore
-      technology 'JSON (per-user)'
     }
   }
 
@@ -154,8 +150,7 @@ model {
   operator -> cli 'Subcommands: run / watch / rerun / finalize / status'
   telegram -> human 'Request / response'
 
-  cli -> config 'Load + validate'
-  cli -> registry 'Look up config.yaml'
+  cli -> config 'Load + validate (discovered from .worc/)'
   cli -> watch 'Dispatch watch / stop / restart'
   cli -> pipeline 'run / rerun / finalize'
   watch -> pipeline 'resume / run_task (single slot)'

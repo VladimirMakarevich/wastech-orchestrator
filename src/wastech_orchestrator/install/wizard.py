@@ -68,7 +68,6 @@ class WizardOutcome:
 def run_wizard(
     *,
     repo_path: Path,
-    workspace: Path | None,
     provider: str,
     checks: list[str] | None,
     create_pr: bool | None,
@@ -97,7 +96,6 @@ def run_wizard(
     )
     _confirm_cleanliness(info.is_clean, non_interactive, prompter)
 
-    resolved_workspace = _resolve_workspace(info.root, workspace, non_interactive, prompter)
     providers, missing = _resolve_providers(provider, prompter)
     resolved_checks = _resolve_checks(checks, info.root, non_interactive, prompter)
     resolved_create_pr = _resolve_create_pr(create_pr, non_interactive, prompter)
@@ -107,7 +105,6 @@ def run_wizard(
         repo_url=info.origin_url,
         repo_local_path=info.root,
         base_branch=base_branch,
-        workspace=resolved_workspace,
         providers=providers,
         checks=resolved_checks,
         create_pull_request=resolved_create_pr,
@@ -133,25 +130,6 @@ def _confirm_cleanliness(is_clean: bool, non_interactive: bool, prompter: Prompt
         prompter.info(f"warning: {message}")
     elif not prompter.confirm(f"{message}. Continue?", default=False):
         raise InstallError("aborted: the repository is not clean")
-
-
-def _resolve_workspace(
-    repo_root: Path, workspace: Path | None, non_interactive: bool, prompter: Prompter
-) -> Path:
-    if workspace is not None:
-        chosen = Path(workspace).resolve()
-    else:
-        proposed = repo_root.parent / f"{repo_root.name}-orchestrator"
-        if non_interactive:
-            chosen = proposed.resolve()
-        else:
-            answer = prompter.ask("Control workspace directory", default=str(proposed))
-            chosen = Path(answer).resolve()
-    if chosen == repo_root or chosen.is_relative_to(repo_root):
-        raise InstallError(
-            f"workspace {chosen} must be outside the repository {repo_root}; choose another path"
-        )
-    return chosen
 
 
 def _resolve_providers(
@@ -216,8 +194,8 @@ def _summary(spec: InstallSpec, missing: tuple[ProviderId, ...]) -> str:
     lines = [
         "",
         "configuration to write:",
-        f"  workspace:   {spec.workspace}",
         f"  repo:        {spec.repo_local_path}",
+        f"  .worc home:  {spec.repo_local_path / '.worc'}",
         f"  base branch: {spec.base_branch}",
         f"  providers:   {providers}",
         f"  checks:      {checks}",

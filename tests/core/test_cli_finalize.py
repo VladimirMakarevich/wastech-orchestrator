@@ -54,18 +54,14 @@ checks:
 git:
   create_pull_request: {str(create_pr).lower()}
   pr_base: "main"
-  footprint:
-    location: external
-    tracking: none
-    external_root: {str(project / "external")!r}
 """,
         encoding="utf-8",
     )
     return config
 
 
-def _ledger_records(project: Path) -> list[dict]:
-    path = project / "external" / "logs" / "completed.jsonl"
+def _ledger_records(clone: Path) -> list[dict]:
+    path = clone / ".worc" / "logs" / "completed.jsonl"
     if not path.exists():
         return []
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -85,7 +81,7 @@ def _seed(
     config = _write_config(project, clone, create_pr=create_pr)
     source = project / "task-1.md"
     source.write_text("---\nid: task-1\ntitle: T\n---\n\nbody\n", encoding="utf-8")
-    db = project / "external" / "state.db"
+    db = clone / ".worc" / "state.db"
     db.parent.mkdir(parents=True, exist_ok=True)
     store = StateStore.open(db)
     store.insert_task(
@@ -105,8 +101,8 @@ def _seed(
     return config
 
 
-def _status(project: Path) -> Status:
-    store = StateStore.open_readonly(project / "external" / "state.db")
+def _status(clone: Path) -> Status:
+    store = StateStore.open_readonly(clone / ".worc" / "state.db")
     row = store.get_task("task-1")
     store.close()
     assert row is not None
@@ -125,8 +121,8 @@ def test_finalize_failed_reconciles(git_repo, git_run, tmp_path: Path) -> None:
     code = cli.main(["--config", str(config), "finalize", "task-1", "--as", "failed", "--yes"])
     assert code == 1  # failed exit code
 
-    assert _status(project) is Status.FAILED
-    records = _ledger_records(project)
+    assert _status(git_repo.clone) is Status.FAILED
+    records = _ledger_records(git_repo.clone)
     assert len(records) == 1
     assert records[0]["final_status"] == "failed" and records[0]["manual"] is True
     assert (project / "failed" / "task-1.md").exists()  # moved into its lifecycle folder
@@ -147,8 +143,8 @@ def test_finalize_done_uses_recorded_pr_url(
     code = cli.main(["--config", str(config), "finalize", "task-1", "--as", "done", "--yes"])
     assert code == 0
 
-    assert _status(project) is Status.DONE
-    rec = _ledger_records(project)[0]
+    assert _status(git_repo.clone) is Status.DONE
+    rec = _ledger_records(git_repo.clone)[0]
     assert rec["final_status"] == "done" and rec["manual"] is True
     assert rec["pr_url"] == "https://example/pull/9"  # picked up from the recorded publish op
     assert (project / "done" / "task-1.md").exists()
@@ -165,8 +161,8 @@ def test_finalize_done_unmerged_pr_needs_confirmation(
 
     code = cli.main(["--config", str(config), "finalize", "task-1", "--as", "done"])
     assert code == 0  # aborted cleanly
-    assert _status(project) is Status.FAILED  # unchanged
-    assert _ledger_records(project) == []
+    assert _status(git_repo.clone) is Status.FAILED  # unchanged
+    assert _ledger_records(git_repo.clone) == []
 
 
 def test_finalize_done_no_url_warns_then_finalizes(git_repo, tmp_path: Path) -> None:
@@ -176,8 +172,8 @@ def test_finalize_done_no_url_warns_then_finalizes(git_repo, tmp_path: Path) -> 
 
     code = cli.main(["--config", str(config), "finalize", "task-1", "--as", "done", "--yes"])
     assert code == 0
-    assert _status(project) is Status.DONE
-    rec = _ledger_records(project)[0]
+    assert _status(git_repo.clone) is Status.DONE
+    rec = _ledger_records(git_repo.clone)[0]
     assert rec["manual"] is True and rec["pr_url"] is None  # recorded done without a URL
 
 
@@ -200,8 +196,8 @@ def test_finalize_abandoned_marks_outcome(git_repo, tmp_path: Path) -> None:
         ]
     )
     assert code == 2  # manual_action_required exit code
-    assert _status(project) is Status.MANUAL_ACTION_REQUIRED
-    rec = _ledger_records(project)[0]
+    assert _status(git_repo.clone) is Status.MANUAL_ACTION_REQUIRED
+    rec = _ledger_records(git_repo.clone)[0]
     assert rec["outcome"] == "abandoned" and rec["manual"] is True and rec["note"] == "obsolete"
 
 
@@ -219,8 +215,8 @@ def test_finalize_fail_closed_on_dirty_tree(
     code = cli.main(["--config", str(config), "finalize", "task-1", "--as", "failed", "--yes"])
     assert code == 1
     assert "unaccounted changes" in capsys.readouterr().out
-    assert _status(project) is Status.FAILED  # status row untouched
-    assert _ledger_records(project) == []
+    assert _status(git_repo.clone) is Status.FAILED  # status row untouched
+    assert _ledger_records(git_repo.clone) == []
 
 
 def test_finalize_delete_branch(git_repo, git_run, tmp_path: Path) -> None:
@@ -266,7 +262,7 @@ def test_finalize_idempotent_refuses_second_time(
     project.mkdir()
     config = _seed(project, git_repo.clone)
     # A prior finalize already wrote a manual record.
-    Ledger(project / "external" / "logs").append(
+    Ledger(git_repo.clone / ".worc" / "logs").append(
         LedgerRecord(id="task-1", title="T", final_status="failed", finished_at="t", manual=True)
     )
 
@@ -297,5 +293,5 @@ def test_finalize_dry_run_writes_nothing(
     assert code == 0
     out = capsys.readouterr().out
     assert "dry-run" in out and "recorded" in out  # the PR-url source is named
-    assert _status(project) is Status.FAILED  # unchanged
-    assert _ledger_records(project) == []
+    assert _status(git_repo.clone) is Status.FAILED  # unchanged
+    assert _ledger_records(git_repo.clone) == []

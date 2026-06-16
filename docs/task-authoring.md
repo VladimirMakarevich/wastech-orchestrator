@@ -4,9 +4,9 @@ Task files are the input contract between a human requester and **wastech-orches
 
 Tasks can be Markdown (`.md`) or JSON (`.json`). Markdown is the normal operator format and is what this guide focuses on.
 
-> **Writing tasks with an AI agent?** A compact, agent-facing version of this guide ships in [`docs/worc/`](worc/README.md) and is copied beside `config.yaml` at `init`/`install` time. Point an agent at that local `worc/` folder and ask it to "write a task for this orchestrator." This document remains the full operator reference.
+> **Writing tasks with an AI agent?** A compact, agent-facing version of this guide ships in [`docs/worc/`](worc/README.md) and is copied to `<repo>/.worc/guide/` at `install` time. Point an agent at that local `.worc/guide/` folder and ask it to "write a task for this orchestrator." This document remains the full operator reference.
 
-Use the packaged `templates/task.md` as the editable runtime template. A completed example is kept at [`docs/examples/task-001.example.md`](examples/task-001.example.md). Under the default in-repo audit footprint, live task files belong in the repo's own `tasks/pending/` directory (committed and pushed there) — that is how a teammate hands the orchestrator work over git. Only under the `external`/`exclude_local` footprints must task files stay out of the repo, since there the preflight treats tracked `tasks/`/`logs/` names as a collision.
+Use the packaged `templates/task.md` as the editable runtime template. A completed example is kept at [`docs/examples/task-001.example.md`](examples/task-001.example.md). Live task files belong in the repo's own `tasks/pending/` directory at the repository root (committed and pushed there) — that is how a teammate hands the orchestrator work over git. The `tasks/` lifecycle directories are git-tracked and intentionally not ignored; only the orchestrator's own `.worc/` home is gitignored.
 
 The canonical task rules are enforced by the validation gate in the code (`src/wastech_orchestrator/task/`); see the [Functional Map](functional/index.md).
 
@@ -418,7 +418,7 @@ For JSON, `description` is the body text. It is not a front matter field and is 
 
 Before placing a task in `tasks/pending/`:
 
-- place it in the orchestrator control workspace, not the target repository clone;
+- place it in the repository's own `tasks/pending/` directory at the repo root (git-tracked), then commit and push;
 - use a lowercase normalized `id`;
 - write a short, specific `title`;
 - include a clear `## Description`;

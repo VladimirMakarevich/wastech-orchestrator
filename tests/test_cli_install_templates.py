@@ -4,20 +4,19 @@ Delivers the packaged ``templates/`` tree (beside ``config.yaml``) add-missing-o
 files, **skips** existing ones to preserve operator edits, is idempotent (all present → no-op),
 overwrites under ``--force``, previews with ``--dry-run``, never removes operator-added files
 (unlike ``upgrade-docs``), never touches ``config.yaml``, and fails closed (exit 2) when no config
-can be resolved. The delivered tree is **prompts-only** (schema v6). Also pins the shared-helper
-parity with ``init``.
+can be resolved. The delivered tree is **prompts-only** (schema v6).
 """
 
 from __future__ import annotations
 
 from importlib import resources
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from wastech_orchestrator import cli
 from wastech_orchestrator.cli import _iter_template_files, _templates_root
-from wastech_orchestrator.install.detect import GitInfo
 
 # A stable file the packaged tree always carries (used as the "one missing file" probe).
 PROBE = Path("prompts/review.md")
@@ -173,30 +172,18 @@ def test_does_not_touch_config_or_overrides(tmp_path: Path) -> None:
     assert cfg.read_bytes() == before  # config.yaml / prompts.overrides untouched
 
 
-def test_resolves_via_local_config_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _write_config(tmp_path)  # ./config.yaml, no --config
-    monkeypatch.chdir(tmp_path)
+def test_resolves_via_worc_config_walk_up(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Any
+) -> None:
+    worc = git_repo.clone / ".worc"
+    worc.mkdir()
+    _write_config(worc)  # <repo>/.worc/config.yaml, discovered by walking up from the cwd
+    nested = git_repo.clone / "src"
+    nested.mkdir()
+    monkeypatch.chdir(nested)
 
     assert cli.main(["install-templates"]) == 0
-    assert (tmp_path / "templates" / PROBE).is_file()
-
-
-def test_resolves_via_registry_binding(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    repo = tmp_path / "repo"
-    workspace = tmp_path / "workspace"
-    repo.mkdir()
-    workspace.mkdir()
-    cfg = _write_config(workspace)
-    monkeypatch.chdir(repo)  # no ./config.yaml here → fall through to the registry binding
-    info = GitInfo(
-        root=repo, origin_url=None, current_branch="main", default_branch="main", is_clean=True
-    )
-    monkeypatch.setattr("wastech_orchestrator.install.detect.git_info", lambda _cwd: info)
-    monkeypatch.setattr("wastech_orchestrator.install.registry.lookup", lambda _root: str(cfg))
-
-    assert cli.main(["install-templates"]) == 0
-    assert (workspace / "templates" / PROBE).is_file()  # lands beside the bound config
-    assert not (repo / "templates").exists()
+    assert (worc / "templates" / PROBE).is_file()  # lands beside the discovered config
 
 
 def test_missing_config_is_reported(
@@ -208,20 +195,23 @@ def test_missing_config_is_reported(
     assert "no config.yaml found" in capsys.readouterr().out
 
 
-def test_init_and_install_templates_produce_same_tree(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_install_and_install_templates_produce_same_tree(
+    git_repo: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Shared-helper parity guard: the cmd_init refactor must produce the same tree."""
-    a = tmp_path / "via_init"
-    b = tmp_path / "via_install_templates"
-    a.mkdir()
+    """Shared-helper parity guard: `install` and `install-templates` deliver the same tree."""
+    monkeypatch.setattr(
+        "shutil.which", lambda n: f"/usr/bin/{n}" if n in {"git", "codex"} else None
+    )
+    argv = ["install", str(git_repo.clone), "--provider", "codex", "--skip-preflight",
+            "--non-interactive"]
+    assert cli.main(argv) == 0
+
+    b = git_repo.clone.parent / "via_install_templates"
     b.mkdir()
-    assert cli.main(["init", str(a), "--quiet"]) == 0
     cfg = _write_config(b)
     assert cli.main(["--config", str(cfg), "install-templates"]) == 0
 
-    def _tree(root: Path) -> dict[Path, bytes]:
-        base = root / "templates"
+    def _tree(base: Path) -> dict[Path, bytes]:
         return {p.relative_to(base): p.read_bytes() for p in base.rglob("*") if p.is_file()}
 
-    assert _tree(a) == _tree(b)
+    assert _tree(git_repo.clone / ".worc" / "templates") == _tree(b / "templates")

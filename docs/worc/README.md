@@ -3,7 +3,7 @@
 **You are an AI agent writing a task file for wastech-orchestrator.** This folder is your single source of truth: read it and you can produce a valid, well-scoped task without reading the rest of the repository. If you only have a moment, read this file — it is enough to write a correct task.
 
 - **[best-practices.md](best-practices.md)** — how to write a _good_ task (testable criteria, scoping, constraints, the project's own working rules).
-- **[decision-guide.md](decision-guide.md)** — _when to use what_ (run vs watch, decompose, skipping stages, model/reasoning, auto-merge, footprint, Telegram).
+- **[decision-guide.md](decision-guide.md)** — _when to use what_ (run vs watch, decompose, skipping stages, model/reasoning, auto-merge, where task files live, Telegram).
 - **[examples/task-minimal.md](examples/task-minimal.md)** — the smallest valid task (just `id`, `title`, and a body) and **[examples/task-rich.md](examples/task-rich.md)** — a maximal task that exercises _every_ front-matter field with inline rule notes. Copy one and fill it in.
 
 ## What the orchestrator does with your task

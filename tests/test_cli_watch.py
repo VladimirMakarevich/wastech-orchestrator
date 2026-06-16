@@ -23,7 +23,6 @@ def test_pending_dir_is_under_the_bound_repo(tmp_path: Path) -> None:
         repo_url="git@github.com:me/my-repo.git",
         repo_local_path=repo,
         base_branch="main",
-        workspace=tmp_path / "my-repo-orchestrator",
         providers=(ProviderId.CODEX,),
         checks=(),
         create_pull_request=False,
@@ -73,7 +72,7 @@ def in_repo_config(
     """An in-repo config whose artifact root (PID-file home) is an isolated clone dir, PR off."""
     clone = tmp_path / "clone"
     clone.mkdir()
-    return make_git_config(clone, location="in_repo", tracking="exclude_local", create_pr=False)
+    return make_git_config(clone, create_pr=False)
 
 
 def test_watch_loop_stops_before_first_tick_when_event_preset(
@@ -131,7 +130,7 @@ def test_stop_clears_stale_pid_file(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr(cli, "load_config_for", lambda args: in_repo_config)
-    pid_path = process_control.pid_file_path(cli.artifacts_root_for(in_repo_config))
+    pid_path = process_control.pid_file_path(cli.worc_home_for(in_repo_config))
     process_control.write_pid_file(pid_path, pid=999111)
     monkeypatch.setattr(process_control, "is_running", lambda pid, **kw: False)
     assert cli.main(["stop"]) == 0
@@ -145,7 +144,7 @@ def test_watch_refuses_to_start_when_already_running(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr(cli, "load_config_for", lambda args: in_repo_config)
-    pid_path = process_control.pid_file_path(cli.artifacts_root_for(in_repo_config))
+    pid_path = process_control.pid_file_path(cli.worc_home_for(in_repo_config))
     process_control.write_pid_file(pid_path, pid=4242)
     monkeypatch.setattr(process_control, "is_running", lambda pid, **kw: True)
     assert cli.main(["watch", "--poll-seconds", "5"]) == 1
@@ -158,7 +157,7 @@ def test_watch_writes_then_removes_pid_file(
     monkeypatch.setattr(cli, "load_config_for", lambda args: in_repo_config)
     monkeypatch.setattr(cli, "build_orchestrator", lambda *a, **k: object())
     monkeypatch.setattr(process_control, "StopController", _FakeController)
-    pid_path = process_control.pid_file_path(cli.artifacts_root_for(in_repo_config))
+    pid_path = process_control.pid_file_path(cli.worc_home_for(in_repo_config))
     seen: dict[str, bool] = {}
 
     def fake_loop(orch: object, config: object, folder: object, **_kw: object) -> list[object]:
@@ -201,7 +200,7 @@ def test_watch_fails_fast_when_gh_missing_and_pr_enabled(
 ) -> None:
     clone = tmp_path / "clone"
     clone.mkdir()
-    config = make_git_config(clone, location="in_repo", tracking="exclude_local", create_pr=True)
+    config = make_git_config(clone, create_pr=True)
     monkeypatch.setattr(cli, "load_config_for", lambda args: config)
     monkeypatch.setattr("shutil.which", lambda name: None)
     assert cli.main(["watch", "--poll-seconds", "5"]) == 2
@@ -216,7 +215,7 @@ def test_run_fails_fast_when_gh_missing_and_pr_enabled(
 ) -> None:
     clone = tmp_path / "clone"
     clone.mkdir()
-    config = make_git_config(clone, location="in_repo", tracking="exclude_local", create_pr=True)
+    config = make_git_config(clone, create_pr=True)
     monkeypatch.setattr(cli, "load_config_for", lambda args: config)
     monkeypatch.setattr("shutil.which", lambda name: None)
     assert cli.main(["run", "task.md"]) == 2

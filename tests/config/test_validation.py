@@ -8,8 +8,6 @@ import pytest
 
 from wastech_orchestrator.config.loader import ConfigError, loads_config
 from wastech_orchestrator.config.schema import (
-    FootprintLocation,
-    FootprintTracking,
     OrchestratorConfig,
     PromptsConfig,
     RouteConfig,
@@ -27,9 +25,6 @@ def _with_agents(config: OrchestratorConfig, **changes: object) -> OrchestratorC
     return replace(config, agents=replace(config.agents, **changes))
 
 
-def _with_footprint(config: OrchestratorConfig, **changes: object) -> OrchestratorConfig:
-    footprint = replace(config.git.footprint, **changes)
-    return replace(config, git=replace(config.git, footprint=footprint))
 
 
 def test_packaged_config_validates_clean(base_config: OrchestratorConfig) -> None:
@@ -132,43 +127,6 @@ def test_claude_skip_permissions_extra_arg_is_rejected(base_config: Orchestrator
         validate_config(_with_agents(base_config, providers=providers))
 
 
-def test_external_with_commit_tracking_is_rejected(base_config: OrchestratorConfig) -> None:
-    bad = _with_footprint(
-        base_config, location=FootprintLocation.EXTERNAL, tracking=FootprintTracking.COMMIT
-    )
-    with pytest.raises(ConfigError):
-        validate_config(bad)
-
-
-def test_external_with_exclude_local_tracking_is_rejected(base_config: OrchestratorConfig) -> None:
-    bad = _with_footprint(
-        base_config, location=FootprintLocation.EXTERNAL, tracking=FootprintTracking.EXCLUDE_LOCAL
-    )
-    with pytest.raises(ConfigError):
-        validate_config(bad)
-
-
-def test_in_repo_with_none_tracking_is_rejected(base_config: OrchestratorConfig) -> None:
-    bad = _with_footprint(
-        base_config, location=FootprintLocation.IN_REPO, tracking=FootprintTracking.NONE
-    )
-    with pytest.raises(ConfigError):
-        validate_config(bad)
-
-
-def test_external_root_inside_local_path_is_rejected(base_config: OrchestratorConfig) -> None:
-    # repo.local_path defaults to ./workspace/repo; an external_root inside it is a traversal.
-    bad = _with_footprint(
-        base_config,
-        location=FootprintLocation.EXTERNAL,
-        tracking=FootprintTracking.NONE,
-        external_root="./workspace/repo/artifacts",
-    )
-    with pytest.raises(ConfigError) as exc:
-        validate_config(bad)
-    assert any("external_root" in issue for issue in exc.value.issues)
-
-
 def test_negative_poll_interval_is_rejected(base_config: OrchestratorConfig) -> None:
     runtime = replace(base_config.orchestrator, poll_interval_seconds=-1)
     bad = replace(base_config, orchestrator=runtime)
@@ -196,13 +154,6 @@ def test_invalid_telegram_env_name_is_rejected(base_config: OrchestratorConfig, 
     with pytest.raises(ConfigError) as exc:
         validate_config(bad)
     assert any(f"telegram.{field}" in issue for issue in exc.value.issues)
-
-
-def test_in_repo_commit_is_accepted(base_config: OrchestratorConfig) -> None:
-    ok = _with_footprint(
-        base_config, location=FootprintLocation.IN_REPO, tracking=FootprintTracking.COMMIT
-    )
-    assert validate_config(ok) == []
 
 
 def test_task_override_must_pick_allowed_routable_provider(

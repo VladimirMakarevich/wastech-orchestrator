@@ -945,7 +945,6 @@ def test_failed_with_branch_commits_and_pushes_task_and_summary(
         tmp_path,
         providers=providers,
         check_verdicts=[0],
-        config_kwargs={"location": "in_repo", "tracking": "commit"},
     )
     pending = git_repo.clone / "tasks" / "pending"
     pending.mkdir(parents=True)
@@ -963,7 +962,7 @@ def test_failed_with_branch_commits_and_pushes_task_and_summary(
     tracked = git_run(["ls-tree", "-r", "--name-only", branch], git_repo.clone)
     assert "tasks/failed/task-fail.md" in tracked  # task moved to failed/ and committed
     assert "tasks/failed/task-fail.summary.md" in tracked  # summary committed beside it
-    assert "logs/" not in tracked  # working artifacts never enter git
+    assert ".worc/" not in tracked  # working artifacts never enter git
     # The failed branch was pushed for inspection; the working copy is back on base.
     assert git_run(["ls-remote", "--heads", "origin", branch], git_repo.clone) != ""
     assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "main"
