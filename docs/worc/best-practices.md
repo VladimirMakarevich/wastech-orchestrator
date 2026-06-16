@@ -48,7 +48,7 @@ A task you author should ask for work that fits how this project (and most well-
 
 - **Minimal, focused changes** that match the style of the surrounding code.
 - **Tests updated with behavior** — new or changed behavior comes with new or updated tests.
-- **Docs and changelog kept in sync** — when the change touches user-facing behavior, CLI, config, or architecture, the docs and `CHANGELOG` are updated in the same change.
+- **Docs kept in sync** — when the change touches user-facing behavior, CLI, config, or architecture, the docs are updated in the same change.
 - **Canonical names** — refer to stages and providers by their real names: stages `refinement, planning, implementation, testing, review, fixing, summary, publishing`; providers `codex`, `claude`.
 
 ## 5. Honor the security invariants

@@ -2,7 +2,7 @@ name: release
 
 # Cut a (pre)release when a version tag is pushed. The package version is derived from the tag by
 # hatch-vcs (e.g. tag `v0.1.1a1` -> version `0.1.0a1`); tags ending in aN/bN/rcN are marked as a
-# GitHub pre-release. See docs/RELEASING.md.
+# GitHub pre-release. Release notes are auto-generated from merged PRs/commits.
 on:
   push:
     tags:
@@ -46,12 +46,4 @@ jobs:
           PRE=""
           # aN / bN / rcN suffix (PEP 440 pre-release) -> mark as a GitHub pre-release.
           if echo "$TAG" | grep -qE '(a|b|rc)[0-9]+$'; then PRE="--prerelease"; fi
-          # Release notes (the "comments") come from this version's CHANGELOG section; if it is
-          # missing, fall back to GitHub's auto-generated notes from merged PRs/commits.
-          NOTES="$(mktemp)"
-          awk -v pre="## [$VERSION]" 'index($0,pre)==1{g=1;next} g&&/^## /{exit} g{print}' CHANGELOG.md > "$NOTES"
-          if [ -s "$NOTES" ]; then
-            gh release create "$TAG" dist/* $PRE --title "$TAG" --notes-file "$NOTES"
-          else
-            gh release create "$TAG" dist/* $PRE --title "$TAG" --generate-notes
-          fi
+          gh release create "$TAG" dist/* $PRE --title "$TAG" --generate-notes

@@ -475,4 +475,4 @@ The foundation owns common profile/run identity only. Adding empty feature-speci
 - No feature-specific behavior listed under non-goals is accidentally enabled.
 - The `implementation` profile requires supervisor from the start; there is no transitional no-supervisor profile, no versioned cutover, and no dual-profile execution support.
 - `ruff`, `mypy`, and `pytest` pass.
-- The canonical plan, architecture/configuration docs, backlog/follow-ups, and `CHANGELOG.md` are updated in the same implementation change.
+- The canonical plan, architecture/configuration docs, and backlog/follow-ups are updated in the same implementation change.

@@ -163,7 +163,7 @@ Per-task model/reasoning overrides may still apply through the existing `stages.
 - a safe non-stage prompt path for `templates/prompts/testing.md` (like `supervisor.md`);
 - provider-neutral `resolved_check_profile_path`;
 - Check Runner before/after commit-candidate mutation detection (always-on);
-- canonical plan, user docs, and `CHANGELOG.md`.
+- canonical plan and user docs.
 
 ## Minimum tests
 
@@ -191,4 +191,4 @@ Per-task model/reasoning overrides may still apply through the existing `stages.
 - The evaluator is an instance of the shared read-only evaluator primitive with bounded, restart-idempotent, session-isolated rework; on exhaustion it continues with recorded gaps.
 - Existing testing/check pass-gate behavior is unchanged when `agents.testing.enabled` is false, except for the one intentional always-on addition: the Check Runner commit-candidate mutation guard runs on every task.
 - `ruff`, `mypy`, and `pytest` pass.
-- Canonical plan, configuration docs/examples, `how-it-works.md`, backlog/follow-ups, and `CHANGELOG.md` are updated in the same implementation change.
+- Canonical plan, configuration docs/examples, `how-it-works.md`, and backlog/follow-ups are updated in the same implementation change.

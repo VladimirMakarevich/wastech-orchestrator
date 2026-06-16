@@ -229,7 +229,6 @@ Coding agents working _in this repo_ follow [CLAUDE.md](CLAUDE.md) (Claude Code)
 | [docs/worc_architecture.md](docs/worc_architecture.md) | High-level architecture overview and the rationale behind the design. |
 | [.agents/rules/](.agents/rules/) | Development rules: style, architectural invariants, security, git-flow, testing. |
 | [docs/backlog/](docs/backlog/) | Deferred features and tracked follow-ups. |
-| [CHANGELOG.md](CHANGELOG.md) | Release notes and the `config.yaml` / `state.db` / registry schema versions. |
 
 ---
 

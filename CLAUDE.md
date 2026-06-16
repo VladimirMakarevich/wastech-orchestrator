@@ -44,7 +44,7 @@ There is a skill for running all checks: `/run-checks`.
 - Make minimal, focused changes; follow the style of the surrounding code.
 - For new components, check against the contracts in the [Functional Map](docs/functional/index.md) and [.agents/rules/architecture.md](.agents/rules/architecture.md).
 - When adding/changing behavior — add or update tests (see .agents/rules/testing.md).
-- When you change behavior/CLI/config/architecture — update the affected docs and a `CHANGELOG.md` `[Unreleased]` entry **in the same change** (use `/sync-docs`), and record deferred work in [docs/backlog/follow_ups.md](docs/backlog/follow_ups.md). The Stop docs-sync gate enforces this.
+- When you change behavior/CLI/config/architecture — update the affected docs **in the same change** (use `/sync-docs`), and record deferred work in [docs/backlog/follow_ups.md](docs/backlog/follow_ups.md). The Stop docs-sync gate enforces this.
 - **Markdown docs are not hard-wrapped.** Write prose as one paragraph per line (rely on editor soft-wrap); never insert manual mid-paragraph line breaks. Formatting is enforced by Prettier (`proseWrap: never`, `.prettierrc.json`) — run `npx prettier@3 --write "**/*.md"` after editing docs. `logs/`, `tasks/`, `src/`, and `docs/worc/` are excluded (`.prettierignore`); don't reformat them.
 - Before committing, run `ruff`, `mypy`, `pytest`.
 - The MVP build is **complete**; the phased build docs have been removed — the [Functional Map](docs/functional/index.md) is the current code-derived reference. Track ongoing work in [docs/backlog/follow_ups.md](docs/backlog/follow_ups.md) and the product backlog.

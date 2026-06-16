@@ -224,7 +224,7 @@ Update:
 - `state_store.py` lineage schema and atomic completion API;
 - rerun/recovery code;
 - config schema/loader/validation/upgrade/examples;
-- `how-it-works.md`, canonical plan, operations/security docs, and `CHANGELOG.md`.
+- `how-it-works.md`, canonical plan, and operations/security docs.
 
 ## Minimum tests
 
@@ -256,4 +256,4 @@ Update:
 - Artifact context remains sufficient when continuity is unavailable.
 - Raw session handles are confined to protected state.
 - `ruff`, `mypy`, and `pytest` pass.
-- Canonical plan, configuration/security/operations docs, `how-it-works.md`, backlog/follow-ups, and `CHANGELOG.md` are updated in the same implementation change.
+- Canonical plan, configuration/security/operations docs, `how-it-works.md`, and backlog/follow-ups are updated in the same implementation change.

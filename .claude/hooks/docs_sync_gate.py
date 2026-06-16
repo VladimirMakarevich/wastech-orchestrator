@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Stop-hook docs-sync gate for wastech-orchestrator.
 
-When a turn ends with code changed under ``src/`` but no docs/CHANGELOG change, this blocks the stop
+When a turn ends with code changed under ``src/`` but no docs change, this blocks the stop
 once and reminds Claude to sync the docs (or to state that the change has no doc impact). It is the
 deterministic backstop for the "keep docs in sync" rule in
 CLAUDE.md / .agents/rules/git-workflow.md; the *how* lives in the ``/sync-docs`` skill.
@@ -20,7 +20,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 # Paths that count as "documentation" for the purpose of this gate (git uses forward slashes).
-_DOC_FILES = ("CHANGELOG.md", "README.md")
+_DOC_FILES = ("README.md",)
 
 
 def _changed_paths() -> list[str]:
@@ -47,7 +47,7 @@ def _changed_paths() -> list[str]:
 
 
 def _should_block(paths: list[str]) -> bool:
-    """True when code under ``src/`` changed but no docs/CHANGELOG/README did (pure, testable)."""
+    """True when code under ``src/`` changed but no docs/README did (pure, testable)."""
     code_changed = any(p.startswith("src/") for p in paths)
     docs_changed = any(
         p.startswith("docs/") or p.startswith(".agents/") or p in _DOC_FILES for p in paths
@@ -67,11 +67,11 @@ def main() -> int:
 
     if _should_block(_changed_paths()):
         reason = (
-            "You changed code under src/ this session but touched no docs/ files or CHANGELOG.md. "
+            "You changed code under src/ this session but touched no docs/ files. "
             "If this affects behavior, the CLI, config, or architecture, update the relevant docs "
-            "and add a CHANGELOG.md [Unreleased] entry in the same change (run /sync-docs), and "
-            "record any deferred work in docs/backlog/follow_ups.md. If the change has no "
-            "documentation impact, say so explicitly and finish."
+            "in the same change (run /sync-docs), and record any deferred work in "
+            "docs/backlog/follow_ups.md. If the change has no documentation impact, say so "
+            "explicitly and finish."
         )
         print(json.dumps({"decision": "block", "reason": reason}))
     return 0

@@ -19,7 +19,7 @@ The canonical reference is the [Functional Map](../functional/index.md). Backlog
 | [runtime_provider_capacity_gate.md](runtime_provider_capacity_gate.md) | Detailed backlog task for checking Codex and Claude capacity before autonomous `watch` admits a pending task. |
 | [token_optimization.md](token_optimization.md) | Detailed backlog task for measuring and reducing token usage. |
 
-> **Already shipped?** Backlog items that have been implemented (auto-merge, stage-skip, per-stage model/reasoning, the `rerun`/`finalize`/`install-templates` commands, prompt-template customization and its simplification, the UX batch, and the post-test-run review) are recorded in [CHANGELOG.md](../../CHANGELOG.md) (their numbered design docs have been removed). They are listed for traceability in [product_backlog.md § Shipped](product_backlog.md#shipped-implemented).
+> **Already shipped?** Backlog items that have been implemented (auto-merge, stage-skip, per-stage model/reasoning, the `rerun`/`finalize`/`install-templates` commands, prompt-template customization and its simplification, the UX batch, and the post-test-run review) have had their numbered design docs removed. They are listed for traceability in [product_backlog.md § Shipped](product_backlog.md#shipped-implemented).
 
 ## Agent quality and continuity program
 

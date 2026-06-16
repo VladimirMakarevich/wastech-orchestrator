@@ -37,7 +37,7 @@ pytest
 
 - the code passes `ruff`, `mypy`, `pytest`;
 - tests are added/updated when behavior changes;
-- docs and a `CHANGELOG.md` `[Unreleased]` entry are updated in the same change when behavior/CLI/config/architecture change (use `/sync-docs`), and deferred work is recorded in [docs/backlog/follow_ups.md](docs/backlog/follow_ups.md) — the Stop docs-sync gate enforces this;
+- docs are updated in the same change when behavior/CLI/config/architecture change (use `/sync-docs`), and deferred work is recorded in [docs/backlog/follow_ups.md](docs/backlog/follow_ups.md) — the Stop docs-sync gate enforces this;
 - the invariants above are not violated.
 
 The MVP build is complete; the phased build docs have been removed — the [Functional Map](docs/functional/index.md) is the current code-derived reference. Track ongoing work in [docs/backlog/follow_ups.md](docs/backlog/follow_ups.md) and the product backlog.

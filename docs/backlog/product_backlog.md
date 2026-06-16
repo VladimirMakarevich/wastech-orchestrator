@@ -7,7 +7,7 @@ This document aggregates deferred and candidate functionality for **wastech-orch
 Where to find the design detail:
 
 - **Open items** keep their detailed design in a file in this folder (linked below).
-- **Shipped items** are recorded in [CHANGELOG.md](../../CHANGELOG.md) (their numbered design docs have been removed). They are listed in [§ Shipped](#shipped-implemented) for traceability.
+- **Shipped items** are listed in [§ Shipped](#shipped-implemented) for traceability (their numbered design docs have been removed).
 - **Build-time tech-debt and implementation follow-ups** live in [follow_ups.md](follow_ups.md), not here.
 
 ## Sources Consolidated
@@ -39,7 +39,7 @@ These are deferred by the v1 spec or described in architecture notes; not schedu
 | --- | --- | --- |
 | [Runtime provider capacity gate](runtime_provider_capacity_gate.md) | Before autonomous `watch` claims a pending task, query the capacity of the Codex/Claude accounts its resolved routes need and defer the task when configured headroom is unavailable. | Runtime admission control, not install preflight. Deferred tasks stay pending, consume no attempts, retried after provider reset. |
 | [Token optimization](token_optimization.md) | Measure and reduce token consumption across stages. | Analysis + candidate levers; not part of v1 scope. |
-| Config-level per-stage `stage_defaults` | The §4 complement to the shipped per-task `stages:` overrides: per-stage `{model,reasoning}` defaults under each provider in `config.yaml`. | [CHANGELOG.md](../../CHANGELOG.md) (per-task `stages:` overrides, §3); tracked in [follow_ups.md](follow_ups.md). Touches schema (+version bump), loader, validation. |
+| Config-level per-stage `stage_defaults` | The §4 complement to the shipped per-task `stages:` overrides: per-stage `{model,reasoning}` defaults under each provider in `config.yaml`. | Tracked in [follow_ups.md](follow_ups.md). Touches schema (+version bump), loader, validation. |
 | Richer task parsing | Extract structured metadata beyond `id`, `title`, `refined`, `decompose`, `agents`, `contacts`, `model`, `reasoning`, `stages`, `pr_title`, `auto_merge`. | Candidate fields: repo binding, commands/hints, priority, labels, issue links. Must stay fail-closed. |
 | Parallel and graph decomposition | Graph-shaped subtasks, per-subtask worktrees/branches, parallel execution. | V1 decomposition is linear, sequential, on one task branch. |
 | Concurrent task processing via worktrees | Process multiple independent tasks at once by giving each its own `git worktree`. | Must not share a mutable working copy between active agents. Breaks the single-active-task invariant only behind worktree isolation. |
@@ -61,7 +61,7 @@ These are deferred by the v1 spec or described in architecture notes; not schedu
 
 ## Shipped (implemented)
 
-These were backlog items and have shipped. The changes are recorded in [CHANGELOG.md](../../CHANGELOG.md) (the numbered design records have been removed). Kept here for traceability.
+These were backlog items and have shipped (the numbered design records have been removed). Kept here for traceability.
 
 | Item | Shipped | Notes |
 | --- | --- | --- |

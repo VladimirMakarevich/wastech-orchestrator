@@ -121,7 +121,7 @@ Doc changes are ordinary repository changes: they are committed (in the scoped c
 - `config/schema.py`, loader, validation, upgrade, and example configuration (`agents.documentation`
   - routing);
 - provider-neutral accepted-outcome context paths;
-- canonical plan, `how-it-works.md`, configuration docs/examples, backlog/follow-ups, and `CHANGELOG.md`.
+- canonical plan, `how-it-works.md`, configuration docs/examples, and backlog/follow-ups.
 
 ## Minimum tests
 
@@ -153,4 +153,4 @@ Doc changes are ordinary repository changes: they are committed (in the scoped c
 - Deterministic doc-path and dangerous-diff guards plus a check re-run keep the publish gate honest; guard violations fail closed.
 - Execution is restart-idempotent; doc changes ship in the same PR.
 - `ruff`, `mypy`, and `pytest` pass.
-- Canonical plan, configuration docs/examples, `how-it-works.md`, backlog/follow-ups, and `CHANGELOG.md` are updated in the same implementation change.
+- Canonical plan, configuration docs/examples, `how-it-works.md`, and backlog/follow-ups are updated in the same implementation change.

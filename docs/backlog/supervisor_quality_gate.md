@@ -270,7 +270,7 @@ The example/default config ships the required `agents.supervisor` block, and any
 - removal of `summary` from agent-routable stages while retaining its lifecycle checkpoint;
 - provider-neutral request/context types;
 - config schema/loader/validation/upgrade and example configuration;
-- canonical plan, user docs, and `CHANGELOG.md`.
+- canonical plan and user docs.
 
 ## Minimum tests
 
@@ -315,4 +315,4 @@ The example/default config ships the required `agents.supervisor` block, and any
 - Core remains the owner of `summarizing`, optional summary validation/writes, fallback, skip auditing, and publishing.
 - The `implementation` profile requires supervisor from the start; the codebase never ships and does not maintain a no-supervisor runtime path.
 - `ruff`, `mypy`, and `pytest` pass.
-- Canonical plan, configuration docs/examples, `how-it-works.md`, backlog/follow-ups, and `CHANGELOG.md` are updated in the same implementation change.
+- Canonical plan, configuration docs/examples, `how-it-works.md`, and backlog/follow-ups are updated in the same implementation change.
