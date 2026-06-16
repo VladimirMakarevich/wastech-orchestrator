@@ -1,5 +1,9 @@
 # Functional Map of the System
 
+```yaml
+LastDateSync: 2026-06-14
+```
+
 > This documentation was reconstructed from executable code and tests (`src/wastech_orchestrator/`, `tests/`). The code is the only source of truth; README files, specifications, comments, and docstrings were not used as sources. Every significant claim in the block documents is accompanied by a reference to the supporting code location (`file:line`).
 
 ## System Purpose (confirmed by code)

@@ -31,4 +31,4 @@ The source of truth is [00_orchestrator_final_plan.md §12](../implementation_st
 
 ## Control layer
 
-16. The Pull Request and CI remain a mandatory control layer — the orchestrator does not replace them and does not auto-merge (in the first version).
+16. The Pull Request and CI remain the mandatory control layer **by default**: the orchestrator always publishes through a PR and never weakens it. Opt-in auto-merge (spec §21, [11_auto_merge_bypass.md](../implementation_stages/11_auto_merge_bypass.md)) is implemented but **off by default** (`git.auto_merge: false`), affects **only** the publish step, and cannot weaken the security policy — the mid-pipeline dangerous-diff approval gate (§14) still fires, auto-merge runs only after checks pass with no blocking findings, it respects branch protection (never `--admin`; a merge failure → `manual_action_required`), and a per-task `auto_merge: true` is honored only when the operator set `git.auto_merge_allow_per_task` (a per-task `false` always opts out).

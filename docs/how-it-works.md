@@ -19,7 +19,7 @@ Every task goes through the same line of steps:
 5. **Review** — an agent reads the change like a code reviewer and flags problems.
 6. **Fixing** — only when testing or review found something. An agent fixes it, and then the change is tested (and reviewed) again. More on this loop below.
 7. **Summary** — an agent writes a short, plain-language explanation of the change. This becomes the description on the pull request.
-8. **Publishing** — the change is committed, pushed, and a pull request is opened.
+8. **Publishing** — the change is committed, pushed, and a pull request is opened. By default the orchestrator stops there and leaves the pull request for a person to review and merge. An operator can optionally turn on **auto-merge** (off by default), in which case the orchestrator also merges the pull request once its checks pass — it still respects the repository's branch-protection rules and never forces a merge.
 
 Before any of this, the orchestrator does a quick sanity check on the task file. If the task is broken or unusable, it is set aside immediately and never starts.
 
@@ -59,7 +59,7 @@ One caveat: that "same conversation" link lasts only while the orchestrator keep
 
 A task always finishes in one of three ways:
 
-- **Done** — testing passed and review was clean. The orchestrator commits the change, pushes the branch, and opens a pull request.
+- **Done** — testing passed and review was clean. The orchestrator commits the change, pushes the branch, and opens a pull request, which by default is left for a person to merge (unless auto-merge has been turned on).
 - **Stopped for a human** — too many fix attempts were used up, or a risky change needs approval, or the situation is unclear. The work so far is kept, with a report.
 - **Rejected up front** — the task file was broken or unusable at the sanity check, so the orchestrator never started on it.
 
