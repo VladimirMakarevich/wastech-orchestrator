@@ -8,8 +8,7 @@ import pytest
 
 from wastech_orchestrator.config.loader import ConfigError, load_config, loads_config
 from wastech_orchestrator.config.schema import (
-    FootprintLocation,
-    FootprintTracking,
+    AuditBranch,
     MergeStrategy,
 )
 from wastech_orchestrator.config.validation import validate_config
@@ -114,11 +113,12 @@ def test_poll_interval_defaults_to_300() -> None:
     assert result.config.orchestrator.poll_interval_seconds == 300
 
 
-def test_footprint_defaults_to_in_repo_commit() -> None:
-    # The operating default keeps tasks + artifacts in the modified repo, audit-committed (§21).
+def test_footprint_defaults_to_task_audit_branch() -> None:
+    # The footprint now carries only the audit-trail policy: the task + summary are committed in the
+    # repo on the task's own branch, while everything else lives under the gitignored .worc/ (§21).
     result = loads_config(_LEGACY)
-    assert result.config.git.footprint.location is FootprintLocation.IN_REPO
-    assert result.config.git.footprint.tracking is FootprintTracking.COMMIT
+    assert result.config.git.footprint.audit_on_branch is AuditBranch.TASK
+    assert "{task_id}" in result.config.git.footprint.audit_commit_message
 
 
 def test_auto_mode_enabled_must_be_boolean() -> None:
@@ -178,8 +178,8 @@ agents:
 
 def test_bad_enum_value_is_rejected() -> None:
     with pytest.raises(ConfigError) as exc:
-        loads_config("git:\n  footprint:\n    location: weird\n")
-    assert any("location" in issue for issue in exc.value.issues)
+        loads_config("git:\n  footprint:\n    audit_on_branch: weird\n")
+    assert any("audit_on_branch" in issue for issue in exc.value.issues)
 
 
 def test_unknown_provider_in_routing_is_rejected() -> None:

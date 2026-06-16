@@ -1,9 +1,9 @@
-"""End-to-end `install` command DoD (backlog: interactive installer).
+"""End-to-end `install` command DoD.
 
 Drives ``main(["install", ...])`` against a real git clone (``git_repo`` fixture), with provider/gh
-discovery faked via ``shutil.which`` and the registry redirected to a temp dir. Covers interactive
-and non-interactive runs, routing modes, idempotency/reconfigure/backup, foreign-workspace refusal,
-dry-run, target-repo immutability, gh-gated PR default, and the post-write preflight wiring.
+discovery faked via ``shutil.which``. Covers interactive and non-interactive runs, routing modes,
+idempotency/reconfigure/backup, dry-run, the ``.worc/`` layout, ``.gitignore`` handling, the
+task-authoring guide copy, and the post-write preflight wiring.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import pytest
 
 from wastech_orchestrator import cli
 from wastech_orchestrator.config.loader import load_config
-from wastech_orchestrator.install import registry
+from wastech_orchestrator.config.schema import AuditBranch
 from wastech_orchestrator.observability import logging as obslog
 from wastech_orchestrator.providers.base import ProviderId
 
@@ -25,9 +25,8 @@ GitRunner = Callable[[list[str], Path], str]
 
 
 @pytest.fixture(autouse=True)
-def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Redirect the registry to a temp dir and reset the package logger around each test."""
-    monkeypatch.setenv(registry.HOME_ENV, str(tmp_path / "registry-home"))
+def _isolate() -> Iterator[None]:
+    """Reset the package logger around each test (install configures runtime logging)."""
     pkg = logging.getLogger(obslog.LOGGER_NAME)
     saved = pkg.handlers[:]
     pkg.handlers.clear()
@@ -50,8 +49,8 @@ def _ni(clone: Path, *extra: str) -> list[str]:
 
 
 def _config_for(clone: Path) -> Path | None:
-    bound = registry.lookup(clone)
-    return Path(bound) if bound is not None else None
+    config_path = clone / ".worc" / "config.yaml"
+    return config_path if config_path.is_file() else None
 
 
 def _loaded(clone: Path) -> Any:
@@ -61,24 +60,23 @@ def _loaded(clone: Path) -> Any:
 
 
 def test_non_interactive_codex_only(git_repo: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    from wastech_orchestrator.config.schema import FootprintLocation, FootprintTracking
-
     _present(monkeypatch, "codex")
     rc = cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight"))
     assert rc == 0
     config_path = _config_for(git_repo.clone)
     assert config_path is not None and config_path.is_file()
-    workspace = config_path.parent
-    assert workspace.name == f"{git_repo.clone.name}-orchestrator"
-    # in_repo footprint: the task lifecycle + artifact dirs live in the repo; the quarantine for
-    # rejected tasks stays in the control workspace, out of the repo (§21).
+    assert config_path == git_repo.clone / ".worc" / "config.yaml"
+    # The task lifecycle dirs live at the repo root (tracked audit trail); everything else —
+    # runtime dirs and the rejected-task quarantine — lives under the gitignored .worc/ (§21).
     assert (git_repo.clone / "tasks" / "pending").is_dir()
-    assert (git_repo.clone / "logs").is_dir()
-    assert (workspace / "tasks" / "rejected").is_dir()
+    assert (git_repo.clone / ".worc" / "logs").is_dir()
+    assert (git_repo.clone / ".worc" / "tasks" / "rejected").is_dir()
     cfg = load_config(config_path).config
     assert cfg.agents.allowed == (ProviderId.CODEX,)
-    assert cfg.git.footprint.location is FootprintLocation.IN_REPO
-    assert cfg.git.footprint.tracking is FootprintTracking.COMMIT
+    assert cfg.git.footprint.audit_on_branch is AuditBranch.TASK
+    assert cfg.validation.quarantine_folder == str(
+        git_repo.clone.resolve() / ".worc" / "tasks" / "rejected"
+    )
     assert cfg.repo.local_path == str(git_repo.clone.resolve())
 
 
@@ -126,8 +124,7 @@ def test_dry_run_writes_nothing(
     assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--dry-run")) == 0
     assert "dry-run" in capsys.readouterr().out
     assert _config_for(git_repo.clone) is None
-    workspace = git_repo.clone.parent / f"{git_repo.clone.name}-orchestrator"
-    assert not (workspace / "config.yaml").exists()
+    assert not (git_repo.clone / ".worc").exists()
 
 
 def test_idempotent_second_run(
@@ -162,28 +159,17 @@ def test_reconfigure_backs_up_and_replaces(git_repo: Any, monkeypatch: pytest.Mo
     }  # regenerated
 
 
-def test_foreign_workspace_is_not_overwritten(
-    git_repo: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    _present(monkeypatch, "codex")
-    workspace = git_repo.clone.parent / f"{git_repo.clone.name}-orchestrator"
-    workspace.mkdir()
-    (workspace / "config.yaml").write_text("# someone else's config\n", encoding="utf-8")
-
-    assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 1
-    assert "not bound" in capsys.readouterr().out
-    assert (workspace / "config.yaml").read_text(encoding="utf-8") == "# someone else's config\n"
-    assert _config_for(git_repo.clone) is None
-
-
-def test_target_repo_is_left_unchanged(
+def test_target_repo_history_is_left_unchanged(
     git_repo: Any, monkeypatch: pytest.MonkeyPatch, git_run: GitRunner
 ) -> None:
     _present(monkeypatch, "codex")
     head_before = git_run(["rev-parse", "HEAD"], git_repo.clone)
     cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight"))
-    assert git_run(["status", "--porcelain"], git_repo.clone) == ""  # nothing staged or created
+    # Install commits nothing; it only writes the gitignored .worc/ home and a .gitignore entry.
     assert git_run(["rev-parse", "HEAD"], git_repo.clone) == head_before
+    porcelain = git_run(["status", "--porcelain"], git_repo.clone)
+    assert ".worc" not in porcelain  # the whole runtime home is ignored
+    assert ".gitignore" in porcelain  # the only new working-tree file
 
 
 def test_explicit_provider_missing_writes_config_but_preflight_fails(
@@ -217,57 +203,45 @@ def test_interactive_run_takes_defaults(git_repo: Any, monkeypatch: pytest.Monke
     assert cfg.git.create_pull_request is True  # gh present + default yes
 
 
-def test_install_excludes_runtime_files_via_git_info_exclude(
+def test_install_ignores_worc_home_via_tracked_gitignore(
     git_repo: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _present(monkeypatch, "codex")
     assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
-    exclude = (git_repo.clone / ".git" / "info" / "exclude").read_text(encoding="utf-8")
-    for pattern in ("state.db", "state.db-wal", "state.db-shm", "orchestrator.pid"):
-        assert pattern in exclude
-    # The default mode never touches the target repo's tracked .gitignore.
-    assert not (git_repo.clone / ".gitignore").exists()
+    gitignore = (git_repo.clone / ".gitignore").read_text(encoding="utf-8")
+    assert ".worc/" in gitignore
 
 
-def test_install_gitignore_tracked_writes_dot_gitignore(
-    git_repo: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _present(monkeypatch, "codex")
-    argv = _ni(git_repo.clone, "--provider", "codex", "--skip-preflight", "--gitignore-tracked")
-    assert cli.main(argv) == 0
-    assert "orchestrator.pid" in (git_repo.clone / ".gitignore").read_text(encoding="utf-8")
-
-
-def test_install_copies_worc_docs_into_workspace(
+def test_install_copies_templates_and_guide_into_worc(
     git_repo: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _present(monkeypatch, "codex")
     assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
-    workspace = git_repo.clone.parent / f"{git_repo.clone.name}-orchestrator"
-    # The agent task-authoring docs land beside config.yaml in the control workspace (out of repo).
-    assert (workspace / "worc" / "README.md").is_file()
-    assert (workspace / "config.yaml").is_file()
+    worc = git_repo.clone / ".worc"
+    # The agent task-authoring guide and the editable prompt templates land under .worc/.
+    assert (worc / "guide" / "README.md").is_file()
+    assert (worc / "templates" / "prompts" / "implementation.md").is_file()
+    assert (worc / "config.yaml").is_file()
 
 
-def test_reconfigure_refreshes_worc_docs(git_repo: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reconfigure_refreshes_guide_docs(git_repo: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     _present(monkeypatch, "codex")
     assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
-    workspace = git_repo.clone.parent / f"{git_repo.clone.name}-orchestrator"
-    readme = workspace / "worc" / "README.md"
+    readme = git_repo.clone / ".worc" / "guide" / "README.md"
     readme.write_text("# stale\n", encoding="utf-8")
     redo = _ni(git_repo.clone, "--provider", "codex", "--reconfigure", "--skip-preflight")
     assert cli.main(redo) == 0
     assert readme.read_text(encoding="utf-8") != "# stale\n"  # refreshed from the package
 
 
-def test_install_runtime_excludes_are_idempotent(
+def test_install_gitignore_append_is_idempotent(
     git_repo: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _present(monkeypatch, "codex")
     assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
-    exclude_path = git_repo.clone / ".git" / "info" / "exclude"
-    first = exclude_path.read_text(encoding="utf-8")
-    # --reconfigure re-runs the append step; it must not duplicate the block.
+    gitignore_path = git_repo.clone / ".gitignore"
+    first = gitignore_path.read_text(encoding="utf-8")
+    # --reconfigure re-runs the append step; it must not duplicate the .worc/ line.
     argv = _ni(git_repo.clone, "--provider", "codex", "--skip-preflight", "--reconfigure")
     assert cli.main(argv) == 0
-    assert exclude_path.read_text(encoding="utf-8") == first
+    assert gitignore_path.read_text(encoding="utf-8") == first

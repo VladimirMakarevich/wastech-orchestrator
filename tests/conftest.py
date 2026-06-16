@@ -99,8 +99,6 @@ class GitRepo:
 def build_git_config(
     clone: Path,
     *,
-    location: str = "external",
-    tracking: str = "none",
     create_pr: bool = True,
     audit_on_branch: str = "task",
     checks: Sequence[str] = (),
@@ -170,9 +168,6 @@ git:
   auto_merge_allow_per_task: {str(auto_merge_allow_per_task).lower()}
   auto_merge_wait_for_checks: {str(auto_merge_wait_for_checks).lower()}
   footprint:
-    location: {location}
-    tracking: {tracking}
-    external_root: "./external"
     audit_commit_message: "chore(orchestrator): audit trail for {{task_id}}"
     audit_on_branch: {audit_on_branch}
 """

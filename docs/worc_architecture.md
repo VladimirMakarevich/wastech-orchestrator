@@ -48,7 +48,7 @@ The application does not replace the coding agent and Git. It acts as an **orche
    │  ├─ STAGE fix        (retry loop, attempt limit)       │
    │  ├─ GUARDRAILS       (action blacklist + diff-checks)  │
    │  ├─ STAGE summary  (move task → done/, write summary)  │
-   │  ├─ git commit (code) + task commit (tasks/, no logs/) │
+   │  ├─ code commit (scoped) + task-scoped audit commit    │
    │  ├─ git push / gh pr create                           │
    │  └─ return_to_base_branch → fetch/pull refresh         │
    └───────────────────────────────────────────────────────┘
@@ -134,7 +134,7 @@ gh pr create --title "Task 001" --body-file logs/task-001/pr.md --base main --he
 git checkout main
 ```
 
-> Note: `git add .` above is illustrative. The orchestrator uses **scoped staging** — an explicit pathspec that excludes `tasks/`/`logs/`/`workspace/`, never `git add .`/`-A` — see [.agents/rules/architecture.md](../.agents/rules/architecture.md). The git footprint mode (external / in-repo-excluded / in-repo-audit) is also defined there. The **default footprint is in-repo audit** (`location: in_repo`, `tracking: commit`): the **task file and its `summary.md`** live inside the target repo and are stored in git — the code change is a scoped **code** commit, and `tasks/` (the task moved to `done/`/`failed/` plus `<id>.summary.md`) is stored via a separate **task commit** the orchestrator (never the agent) makes after it. The working artifacts under `logs/` (plan, review, diffs, stage logs, `summary.json`) and the root runtime files (`state.db`, `config.yaml`) are **not** committed — `logs/`/`workspace/` are kept local via `.git/info/exclude`. The final `git checkout main` is terminal cleanup. In the orchestrator this uses `repo.base_branch`, runs only when safe, and must complete before auto mode may pick another pending task. After cleanup the Git Manager runs `git fetch` + `git pull --ff-only` to refresh the base branch, and the `watch` loop repeats that refresh every `orchestrator.poll_interval_seconds` (default 300s) so tasks pushed to git after the last scan are discovered — watching is not limited to the local filesystem.
+> Note: `git add .` above is illustrative. The orchestrator uses **scoped staging** — an explicit pathspec that excludes `.worc/` and `tasks/`, never `git add .`/`-A` — see [.agents/rules/architecture.md](../.agents/rules/architecture.md). Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home (`config.yaml`, `templates/`, `guide/`, `state.db`, `logs/`, `workspace/`, `checks/`, the `tasks/rejected` quarantine), so the operator's `git status` stays clean. The **only** things outside `.worc/` are the `tasks/` lifecycle dirs (`pending/`/`processing/`/`done/`/`failed/`) at the repo root, which are git-tracked: the **task file and its `<id>.summary.md`** (in `done/` or `failed/`) are the audit trail and are stored in git. The code change is committed by a scoped **code** commit (explicit pathspec excluding `.worc/` and `tasks/`), and the audit trail is stored via a separate **task-scoped audit commit** the orchestrator (never the agent) makes after it — staging only the current task's `tasks/<state>/<id>.md` + `<id>.summary.md`, never `git add -- tasks/` wholesale. The working artifacts under `.worc/logs/` (plan, review, diffs, stage logs, `summary.json`) and the runtime files (`.worc/state.db`, `.worc/config.yaml`) are **not** committed — they sit under the gitignored `.worc/` home (`install` appends a single `.worc/` line to the repo's tracked `.gitignore`; `tasks/` is intentionally not ignored). The final `git checkout main` is terminal cleanup. In the orchestrator this uses `repo.base_branch`, runs only when safe, and must complete before auto mode may pick another pending task. After cleanup the Git Manager runs `git fetch` + `git pull --ff-only` to refresh the base branch, and the `watch` loop repeats that refresh every `orchestrator.poll_interval_seconds` (default 300s) so tasks pushed to git after the last scan are discovered — watching is not limited to the local filesystem.
 
 Parallel tasks — via `git worktree` (v2), so as not to mix them in one clone.
 
@@ -393,9 +393,9 @@ telegram: # HITL + notifications (#2, #10)
                       → exact-scope Telegram approval before tests (#2)
 15. STAGE summary  → produce the change summary; move the task file to tasks/done/ and write
                      tasks/done/<id>.summary.md beside it (these enter the upcoming commit). plan,
-                     review, diffs and summary.json stay under logs/ and are NOT committed (#6, §21) [checkpoint]
-16. STAGE commit   → scoped code commit (code only) + task commit of tasks/ (the moved task file
-                     + its summary.md); logs/ is never committed                                [checkpoint]
+                     review, diffs and summary.json stay under .worc/logs/ and are NOT committed (#6) [checkpoint]
+16. STAGE commit   → scoped code commit (excludes .worc/ and tasks/) + task-scoped audit commit
+                     (only this task's tasks/<state>/<id>.md + <id>.summary.md); .worc/ is never committed [checkpoint]
 17. STAGE push     → git push; optionally gh pr create (summary.md = PR body)                   [checkpoint]
 18. Terminal handling → terminal cleanup: switch back to repo.base_branch, then git fetch +
                      pull --ff-only to refresh the repo; notify via Telegram (#10)
@@ -407,7 +407,7 @@ telegram: # HITL + notifications (#2, #10)
 20. (resume) on a crash at any step — continue from the next incomplete stage
 ```
 
-Steps 15–17 are why the **task and its summary** live in the same repository as the code (the in-repo footprint, §21): the summary stage writes the summary and moves the task into `tasks/done/` **before** the commit, then the orchestrator makes a scoped **code** commit and a separate **task** commit of `tasks/` (the moved task file + `<id>.summary.md`). Working artifacts — plan, review, diffs, stage logs, `summary.json` — stay under `logs/` and never enter git history. A **failed** task with a branch is finalized the same way (moved to `tasks/failed/`, summary written, code + task committed and pushed) but opens **no PR**; `manual_action_required` stays put for the operator. The provider fallback `(#1)` triggers transparently inside any `CodingAgent.run`.
+Steps 15–17 are why the **task and its summary** live in the same repository as the code: the summary stage writes the summary and moves the task into `tasks/done/` **before** the commit, then the orchestrator makes a scoped **code** commit (excluding `.worc/` and `tasks/`) and a separate **task-scoped audit commit** of just that task's `tasks/<state>/<id>.md` + `<id>.summary.md`. The `tasks/` lifecycle dirs sit at the repo root and are git-tracked; everything else the orchestrator produces — plan, review, diffs, stage logs, `summary.json`, the SQLite state, templates and the agent task-authoring `guide/` — lives under the gitignored `.worc/` home and never enters git history. A **failed** task with a branch is finalized the same way (moved to `tasks/failed/`, summary written, code + audit committed and pushed) but opens **no PR**; `manual_action_required` stays put for the operator. The provider fallback `(#1)` triggers transparently inside any `CodingAgent.run`.
 
 ---
 
@@ -487,7 +487,7 @@ def watch():
 
     if guardrails_ok(task):          # (#3)
         run_stage("summary", task)   # move task → tasks/done/, write summary.md, BEFORE the commit
-        commit_and_push(task)        # scoped code commit + task commit of tasks/ (no logs/) (#1)
+        commit_and_push(task)        # scoped code commit (excl .worc/, tasks/) + task-scoped audit commit (#1)
     return_to_base_branch(task)      # must succeed before the next task; then fetch/pull refresh
     notify_telegram(task)            # (#10)
 

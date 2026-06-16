@@ -2,9 +2,9 @@
 
 This cookbook shows common ways to use **wastech-orchestrator**. It is written for operators who run the orchestrator and for developers who want a practical path from "empty workspace" to "task processed into a Pull Request".
 
-The canonical product reference remains the [Functional Map](functional/index.md). Where this guide mentions planned v1 behavior, it is labeled explicitly. The CLI surface described here (`init`, `install`, `preflight`, `run`, `watch`, and `status`) exists in the current codebase.
+The canonical product reference remains the [Functional Map](functional/index.md). Where this guide mentions planned v1 behavior, it is labeled explicitly. The CLI surface described here (`install`, `preflight`, `run`, `watch`, and `status`) exists in the current codebase.
 
-## 1. Initialize A Workspace
+## 1. Install Into A Repository
 
 Install the package in an environment that has Python 3.12+, git, and the provider CLIs you plan to use (`codex`, `claude`) on `PATH`.
 
@@ -20,29 +20,7 @@ On Windows PowerShell, activate the environment with:
 .\.venv\Scripts\Activate.ps1
 ```
 
-Create the runtime layout:
-
-```bash
-python -m wastech_orchestrator init .
-```
-
-This creates `config.yaml`, `tasks/`, `logs/`, `workspace/`, and editable copies of task and prompt templates under `templates/`. The command is idempotent: a second run skips existing files and never overwrites `config.yaml`.
-
-The generated task template is `templates/task.md`. Under the default in-repo audit footprint, live task files belong in the repo's `tasks/pending/` (committed and pushed there). Under the `external`/`exclude_local` footprints, copy examples into the external workspace's `tasks/pending/` instead and do not commit them under a target repo's `tasks/`/`logs/` paths — there the footprint preflight treats tracked paths with those names as a collision.
-
-Choose a footprint mode at initialization when you already know where artifacts should live (the default is `in_repo_commit`):
-
-```bash
-python -m wastech_orchestrator init . --git-mode in_repo_commit   # default: tasks + artifacts in the repo
-python -m wastech_orchestrator init . --git-mode in_repo_exclude
-python -m wastech_orchestrator init . --git-mode external
-```
-
-Use `--dry-run` to inspect the created/skipped plan without writing files.
-
-### Bind An Existing Repository Instead (`install`)
-
-If you already have the target repository checked out, skip `init` + hand-editing and use `install`, which detects settings, generates a validated `config.yaml` in a sibling control workspace, and records a binding so later commands need no `--config`:
+`install` is the single setup command. Run it from inside the target repository checkout — it detects settings, generates a validated `config.yaml`, scaffolds the runtime layout, and needs no later `--config`:
 
 ```powershell
 pipx install "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git"
@@ -55,7 +33,9 @@ wastech-orchestrator install .                 # interactive wizard (same on mac
 wastech-orchestrator install . --non-interactive --provider codex --no-create-pr
 ```
 
-`install` binds the current checkout as `repo.local_path` and keeps `config.yaml`, `tasks/`, `logs/`, and SQLite state only in the `<repo-name>-orchestrator` sibling — it never modifies the target repo. Re-running is idempotent; `--reconfigure` backs up and regenerates; `--dry-run` writes nothing. See [configuration.md](configuration.md) for the discovery order and [operations.md](operations.md) for the full wizard. The remaining recipes also apply to an `install`-bound project — its commands just run from inside the repo without `--config`.
+Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home: `config.yaml`, editable task/prompt `templates/`, the agent task-authoring `guide/` (the packaged `worc/` docs copied to `.worc/guide/`), SQLite `state.db` (with `-wal`/`-shm`), `orchestrator.pid`, `logs/`, `workspace/`, `checks/`, and the `tasks/rejected` quarantine. `install` appends a single `.worc/` line to the repo's tracked `.gitignore`. The only things kept outside `.worc/` are the `tasks/` lifecycle dirs (`pending/`/`processing/`/`done/`/`failed/`) at the repo root — they are intentionally git-tracked, and the task file plus its `<id>.summary.md` (in `done/` or `failed/`) are the audit trail the orchestrator commits.
+
+Re-running is idempotent (existing files are skipped and `config.yaml` is never overwritten); `--reconfigure` backs up and regenerates; `--dry-run` writes nothing. See [configuration.md](configuration.md) for the discovery order and [operations.md](operations.md) for the full wizard. The remaining recipes all run from inside the repo without `--config`.
 
 ## 2. Configure A Target Repository
 
@@ -86,24 +66,23 @@ For all configuration fields, see [configuration.md](configuration.md).
 
 ### Self-host the orchestrator repository
 
-Do not point `repo.local_path` at the source checkout open in your IDE. Use one directory to run a known-good orchestrator build and a separate clone as the target repository:
+Do not point `repo.local_path` at the source checkout open in your IDE. Use one checkout to run a known-good orchestrator build and a separate clone as the target repository:
 
 ```text
 wastech-self/
   .venv/                 # control environment running the known-good orchestrator
-  config.yaml
-  tasks/
-  logs/
+  .worc/                 # orchestrator home (config.yaml, logs/, state.db, workspace/, ...)
+  tasks/                 # git-tracked task lifecycle dirs at the repo root
   workspace/
     repo/                 # separate clone modified by coding agents
 ```
 
 Recommended preparation:
 
-1. Create the control directory outside the source checkout and run `init` there with the external footprint.
-2. Clone `wastech-orchestrator` into `workspace/repo`.
+1. Create the control checkout outside the source checkout and run `install .` there.
+2. Clone `wastech-orchestrator` into the target clone configured in `repo.local_path`.
 3. Confirm the target clone is clean and on `main`.
-4. Confirm `git ls-files -- tasks logs` prints nothing. Runtime task files belong to the control directory, not the target clone.
+4. Confirm the target clone keeps no orchestrator artifacts of its own — the runtime home lives under the control checkout's `.worc/`.
 5. Configure the real Python checks: `ruff check .`, `mypy src`, and `pytest`.
 6. Keep `orchestrator.auto_mode.enabled: false` for the first run.
 7. Use a unique task id and a small, fully specified task before attempting a larger backlog item.
@@ -212,7 +191,7 @@ worc rerun task-001 --yes            # fresh attempt from the current base_branc
 worc rerun task-001 --continue --yes # infra failure you fixed: reuse the branch, re-enter at the failed stage
 ```
 
-Use **fresh** (default) for a quality failure or a clean redo (the branch is reset to base and prior `logs/<id>/` is archived to `logs/<id>/attempt-<N>/`); use **`--continue`** when you fixed an environment/infra problem by hand (a missing tool, `PATH`, a dropped Telegram approval) and want to pick up where it stopped. Each re-attempt appends a ledger record linked to the prior one. See [operations.md](operations.md) "Re-attempting a terminal task" for the full rules.
+Use **fresh** (default) for a quality failure or a clean redo (the branch is reset to base and prior `.worc/logs/<id>/` is archived to `.worc/logs/<id>/attempt-<N>/`); use **`--continue`** when you fixed an environment/infra problem by hand (a missing tool, `PATH`, a dropped Telegram approval) and want to pick up where it stopped. Each re-attempt appends a ledger record linked to the prior one. See [operations.md](operations.md) "Re-attempting a terminal task" for the full rules.
 
 ### Record a task you handled by hand (`finalize`)
 
@@ -313,7 +292,7 @@ Task overrides cannot change provider commands, credentials, sandbox settings, `
 
 ## 7a. Customize Stage Prompts
 
-To add repository-specific engineering rules or a review rubric to a stage without editing Python, edit the packaged template for that stage (see [configuration.md](configuration.md#prompts)). `init`/`install-templates` scaffold `templates/prompts/<stage>.md` with the packaged defaults; **just edit the file** — its presence is the activation signal, so no `overrides` entry is needed.
+To add repository-specific engineering rules or a review rubric to a stage without editing Python, edit the packaged template for that stage (see [configuration.md](configuration.md#prompts)). `install`/`install-templates` scaffold `.worc/templates/prompts/<stage>.md` with the packaged defaults; **just edit the file** — its presence is the activation signal, so no `overrides` entry is needed.
 
 Replace the review prompt entirely with a security rubric (the default `mode: replace`):
 
@@ -350,7 +329,7 @@ Notes:
 - A `templates/prompts/<stage>.md` is auto-detected by presence (agent-routed stages only). A stage with no file falls back to the packaged default — a missing file is never an error. Set `prompts.templates_dir: ""` to force the packaged defaults for every stage.
 - A relative `templates_dir` resolves from the `config.yaml` directory, so it works from any CWD.
 - Variables are metadata/paths only — e.g. `{repo_path}`, `{diff_path}`, `{plan_path}`. Large content stays in the artifact files the agent reads by path. Unknown `{...}` and literal braces pass through unchanged.
-- The exact text sent each run is saved (redacted) to `logs/<task-id>/stages/<stage>/rendered-prompt.md` so you can verify what the agent received.
+- The exact text sent each run is saved (redacted) to `.worc/logs/<task-id>/stages/<stage>/rendered-prompt.md` so you can verify what the agent received.
 - A template is prompt text only: it cannot change the provider, sandbox/approvals, denied commands, or enable `git`/`gh` publishing.
 
 ## 8. Configure Checks
@@ -386,47 +365,38 @@ checks:
 
 See [configuration.md](configuration.md#checks) for every field and [operations.md](operations.md#check-discovery-diagnostics) for the `preflight`/`status` diagnostics.
 
-## 9. Choose A Git Footprint Mode
+## 9. Configure The Audit Commit
 
-The footprint controls where `tasks/` and `logs/` live relative to the target clone.
+There is one canonical layout: the orchestrator's runtime home is the gitignored `<repo>/.worc/` (config, `logs/`, `state.db`, `workspace/`, ...), and the `tasks/` lifecycle dirs live git-tracked at the repo root. The _code_ commit uses scoped staging and excludes `.worc/`; a separate task-scoped **audit commit** records `tasks/` — the task file moved to `done/`/`failed/` plus its `<id>.summary.md`. Everything under `.worc/` (plan, review, diffs, `summary.json`) stays local and is never committed.
 
-| Mode | Config | Best for |
-| --- | --- | --- |
-| `in_repo_commit` (default) | `location: in_repo`, `tracking: commit` | The task + its summary stored in git, in the same repo as the code, via a separate orchestrator-made `tasks/` commit (`logs/` stays local). |
-| `in_repo_exclude` | `location: in_repo`, `tracking: exclude_local` | Artifacts beside the code, excluded through `.git/info/exclude`. |
-| `external` | `location: external`, `tracking: none` | Zero artifact footprint in the target repo. |
-
-Examples:
+`git.footprint` has two settings:
 
 ```yaml
 git:
   footprint:
-    location: in_repo
-    tracking: commit
+    audit_commit_message: "chore: archive task {task_id}"
+    audit_on_branch: task # task (default) | sibling
 ```
 
-```yaml
-git:
-  footprint:
-    location: external
-    tracking: none
-    external_root: "./"
-```
+`audit_on_branch` controls where the audit commit lands:
 
-In every mode the _code_ commit uses scoped staging and excludes `tasks/`/`logs/`/`workspace/` (and, under in-repo, the root runtime files `state.db`/`config.yaml`); audit mode stores **`tasks/`** (the task moved to `done/`/`failed/` + its `<id>.summary.md`) in a _separate_ commit, while `logs/` (plan, review, diffs, `summary.json`) stays local and is never committed.
+| Value | Best for |
+| --- | --- |
+| `task` (default) | The task + its summary committed onto the task branch, beside the code change. |
+| `sibling` | The audit commit goes onto a separate `<branch>-audit` branch, keeping the task branch limited to the code change. |
 
 ## 10. Inspect Logs And Artifacts
 
 The `--log-file` operator trace is the best live view. Start artifact inspection with:
 
 ```bash
-ls logs
+ls .worc/logs
 ```
 
 The most useful files are:
 
 ```text
-logs/
+.worc/logs/
   completed.jsonl
   <task-id>/
     validation_report.json
@@ -456,7 +426,6 @@ Do not live-tail provider `stdout.log` or `stderr.log`: provider output is final
 | Fix budget exhausted | Read `stuck.md`, inspect the final diff, and decide whether to fix manually or refine the task. |
 | Terminal cleanup unsafe | Inspect `repo.local_path` with `git status`, reconcile the branch, and return to `repo.base_branch`. |
 | More than one active task on restart | Decide which task is authoritative, then repair state before rerunning. |
-| Footprint conflict | Only under `external`/`exclude_local`: remove or rename tracked `tasks/`/`logs/` paths (the preflight rejects that collision). Under the default `in_repo_commit` those paths are the expected audit trail and the preflight is skipped. |
 
 After resolving the problem, run:
 

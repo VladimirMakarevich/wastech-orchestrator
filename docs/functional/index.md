@@ -65,7 +65,7 @@ A navigable version of these relationships as **architecture-as-code** (C4 model
 
 - **Console scripts `wastech-orchestrator` and `worc`** ([pyproject.toml:29-32](../../pyproject.toml#L29) → `cli:main`) — argument parsing and subcommand dispatch.
 - **`python -m wastech_orchestrator`** ([\_\_main\_\_.py](../../src/wastech_orchestrator/__main__.py) → `cli:main`) — same as the console scripts.
-- **CLI subcommands** ([cli.py build_parser](../../src/wastech_orchestrator/cli.py#L114), dispatcher [main](../../src/wastech_orchestrator/cli.py#L1497)) — `init`, `install`, `run`, `watch`, `stop`, `restart`, `preflight`, `telegram-test`, `status`, `upgrade-config`, `upgrade-docs`, `install-templates`, `rerun`, `finalize`.
+- **CLI subcommands** ([cli.py build_parser](../../src/wastech_orchestrator/cli.py#L100), dispatcher [main](../../src/wastech_orchestrator/cli.py#L1355)) — `install`, `run`, `watch`, `stop`, `restart`, `preflight`, `telegram-test`, `status`, `upgrade-config`, `upgrade-docs`, `install-templates`, `rerun`, `finalize`.
 
 Internal triggers (not user commands), confirmed by code:
 
@@ -83,7 +83,7 @@ Detailed step-by-step scenarios are in [system-flows.md](./system-flows.md); a f
 3. **Resume (`resume`).** On startup, compare persistent state and continue the single unfinished task or complete interrupted cleanup.
 4. **`rerun` / `rerun --continue`.** Retry a terminal task — "from scratch from base" or "continue from the stage where it failed".
 5. **`finalize`.** The operator records the outcome of a task completed manually (without the pipeline and without commit/push/PR).
-6. **`install` / `init` / `preflight`.** Install/bind to a repository, generate and validate configuration, diagnose provider and isolation readiness.
+6. **`install` / `preflight`.** Set up the orchestrator in a repository under `<repo>/.worc/`, generate and validate configuration, diagnose provider and isolation readiness.
 
 ## Pipeline as a State Machine
 
@@ -140,7 +140,7 @@ The full list with entry points, dependencies, and status is in [block-registry.
 - [B01 — CLI and Operator Commands](./blocks/B01-cli-and-operator-commands.md)
 - [B02 — Watch Daemon and Task Scheduling](./blocks/B02-watch-daemon-and-scheduling.md)
 - [B03 — Installer and Project Scaffolding](./blocks/B03-installer-and-scaffolding.md)
-- [B04 — Install Registry and Config Discovery](./blocks/B04-install-registry-and-config-discovery.md)
+- [B04 — Config Discovery](./blocks/B04-install-registry-and-config-discovery.md)
 - [B05 — Configuration: Schema, Loading, Validation, Upgrade](./blocks/B05-configuration.md)
 
 ### Orchestration Core
@@ -244,13 +244,15 @@ Key: [B17 Router](./blocks/B17-agent-router-and-fallback.md) is the sole caller 
 
 ## Data Sources and State (confirmed)
 
+The `<artifacts_root>` is the gitignored `<repo>/.worc/` home (`worc_home_for(config)`); the task lifecycle dirs are the exception — they sit at the repo root and carry the committed audit trail.
+
 - **`state.db`** — `<artifacts_root>/state.db`; SQLite (tasks, stage_runs, provider_attempts, check_runs, artifacts, publish_operations, subtasks); owner [B07](./blocks/B07-state-machine-and-store.md).
 - **`completed.jsonl`** — `<artifacts_root>/logs/completed.jsonl`; JSONL (append-only); owner [B08](./blocks/B08-ledger-and-failure-reports.md).
 - **`resolved-profile.json`** — `<artifacts_root>/checks/`; JSON (check profile cache); owner [B23](./blocks/B23-check-discovery.md).
 - **Run artifacts** — `<artifacts_root>/logs/<task-id>/...`; directories with request/result/stdout/stderr/events; owner [B20](./blocks/B20-artifact-layout.md).
 - **HITL interactions** — `<artifacts_root>/logs/<task-id>/...`; JSON; owner [B12](./blocks/B12-hitl-and-typed-output.md).
-- **`registry.json`** — user config dir (or `$WASTECH_ORCHESTRATOR_HOME`); JSON (repo → config); owner [B04](./blocks/B04-install-registry-and-config-discovery.md).
-- **Task lifecycle folders** — `tasks/{pending,processing,done,failed,rejected}`; `.md`/`.json` files; owners [B06](./blocks/B06-orchestrator-pipeline.md), [B16](./blocks/B16-task-parsing-and-validation-gate.md).
+- **`config.yaml`** — `<artifacts_root>/config.yaml`; discovered by walking up to the Git root; owner [B04](./blocks/B04-install-registry-and-config-discovery.md)/[B05](./blocks/B05-configuration.md).
+- **Task lifecycle folders** — `tasks/{pending,processing,done,failed}` at the repo root (git-tracked; the task file + `<id>.summary.md` are audit-committed) and `tasks/rejected` under `.worc/` (quarantine); `.md`/`.json` files; owners [B06](./blocks/B06-orchestrator-pipeline.md), [B16](./blocks/B16-task-parsing-and-validation-gate.md).
 
 ## External Integrations (confirmed)
 
@@ -258,7 +260,7 @@ Key: [B17 Router](./blocks/B17-agent-router-and-fallback.md) is the sole caller 
 - **CLI coding agents `codex` / `claude`** — subprocesses from [B18](./blocks/B18-agent-providers.md).
 - **Telegram Bot API** via `python-telegram-bot` — [B26](./blocks/B26-notifications-telegram.md).
 - **SQLite** (stdlib `sqlite3`) — [B07](./blocks/B07-state-machine-and-store.md).
-- **File system** — artifacts, lifecycle folders, check profile cache, install registry.
+- **File system** — the `<repo>/.worc/` home (artifacts, check profile cache, config) and the repo-root `tasks/` lifecycle folders.
 
 ## Documentation Status
 

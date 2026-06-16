@@ -9,7 +9,7 @@ import pytest
 import yaml
 
 from wastech_orchestrator.config.loader import loads_config
-from wastech_orchestrator.config.schema import FootprintLocation, FootprintTracking
+from wastech_orchestrator.config.schema import AuditBranch
 from wastech_orchestrator.config.validation import validate_config
 from wastech_orchestrator.install import config_writer
 from wastech_orchestrator.install.config_writer import InstallSpec, build_and_validate
@@ -38,7 +38,6 @@ def _spec(
         repo_url="git@github.com:me/my-repo.git",
         repo_local_path=tmp_path / "my-repo",
         base_branch="main",
-        workspace=tmp_path / "my-repo-orchestrator",
         providers=providers,
         checks=checks,
         create_pull_request=create_pr,
@@ -77,12 +76,14 @@ def test_both_use_the_default_routing_table(tmp_path: Path) -> None:
     assert cfg.agents.routing[Stage.REVIEW].fallback is ProviderId.CLAUDE
 
 
-def test_generated_config_is_in_repo_commit_footprint_with_absolute_paths(tmp_path: Path) -> None:
+def test_generated_config_uses_worc_home_and_audit_trail(tmp_path: Path) -> None:
     spec = _spec(tmp_path, (ProviderId.CODEX,))
     cfg = loads_config(build_and_validate(spec)).config
-    # Tasks + artifacts live in the bound repo and are audit-committed there (§21).
-    assert cfg.git.footprint.location is FootprintLocation.IN_REPO
-    assert cfg.git.footprint.tracking is FootprintTracking.COMMIT
+    # The task + summary are audit-committed in the repo; the quarantine lives under .worc/ so
+    # rejected tasks are never swept into that commit (§21).
+    assert cfg.git.footprint.audit_on_branch is AuditBranch.TASK
+    expected_quarantine = tmp_path / "my-repo" / ".worc" / "tasks" / "rejected"
+    assert cfg.validation.quarantine_folder == str(expected_quarantine)
     assert cfg.repo.local_path == str(tmp_path / "my-repo")
     assert cfg.orchestrator.poll_interval_seconds == 300
     assert validate_config(cfg) == []

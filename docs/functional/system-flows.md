@@ -119,9 +119,9 @@ flowchart TD
 
 ## Installation and subsequent configuration discovery
 
-1. [B01](./blocks/B01-cli-and-operator-commands.md) → `install` → [B03 Installer](./blocks/B03-installer-and-scaffolding.md): wizard (git/provider/check detection), `config.yaml` generation + validation ([B05](./blocks/B05-configuration.md)), directory creation, runtime-excludes ([B22](./blocks/B22-git-manager.md)).
-2. `repo → config` binding in [B04 Registry](./blocks/B04-install-registry-and-config-discovery.md); auto-preflight.
-3. From then on, any command finds the configuration via `resolve_config_path` ([B04](./blocks/B04-install-registry-and-config-discovery.md)).
+1. [B01](./blocks/B01-cli-and-operator-commands.md) → `install` → [B03 Installer](./blocks/B03-installer-and-scaffolding.md): wizard (git/provider/check detection), `config.yaml` generation + validation ([B05](./blocks/B05-configuration.md)), scaffold the gitignored `<repo>/.worc/` home + the repo-root `tasks/` lifecycle dirs, gitignore `.worc/` ([B22](./blocks/B22-git-manager.md) `append_runtime_excludes`).
+2. Auto-preflight (providers, isolation, checks, telegram).
+3. From then on, any command re-discovers `<repo>/.worc/config.yaml` via `resolve_config_path` — walking up from the cwd to the Git root, no binding to maintain ([B04](./blocks/B04-install-registry-and-config-discovery.md)).
 
 ## Preflight (readiness diagnostics)
 

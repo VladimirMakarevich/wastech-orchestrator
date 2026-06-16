@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from pathlib import Path
 
 from wastech_orchestrator.checks.model import (
     CheckCommandError,
@@ -24,8 +23,6 @@ from wastech_orchestrator.config.loader import ConfigError
 from wastech_orchestrator.config.schema import (
     ROUTABLE_STAGES,
     CheckDiscoveryMode,
-    FootprintLocation,
-    FootprintTracking,
     OrchestratorConfig,
     RouteConfig,
 )
@@ -112,7 +109,6 @@ def validate_config(config: OrchestratorConfig) -> list[str]:
     for pid, provider in agents.providers.items():
         _check_extra_args(pid, provider.extra_args, issues)
 
-    _validate_footprint(config, issues)
     _validate_checks(config, issues, warnings)
     _validate_telegram(config, issues)
 
@@ -186,33 +182,6 @@ def _validate_checks(config: OrchestratorConfig, issues: list[str], warnings: li
         warnings.append(
             "checks.discovery.mode is 'disabled': the quality gate is OFF — no checks will run"
         )
-
-
-def _validate_footprint(config: OrchestratorConfig, issues: list[str]) -> None:
-    footprint = config.git.footprint
-    location = footprint.location
-    tracking = footprint.tracking
-
-    # Illegal pairings (§21.4).
-    if location is FootprintLocation.EXTERNAL and tracking in (
-        FootprintTracking.EXCLUDE_LOCAL,
-        FootprintTracking.COMMIT,
-    ):
-        issues.append(
-            f"git.footprint: location 'external' is incompatible with tracking {tracking.value!r}"
-        )
-    if location is FootprintLocation.IN_REPO and tracking is FootprintTracking.NONE:
-        issues.append("git.footprint: location 'in_repo' requires tracking other than 'none'")
-
-    # Anti-traversal: external artifacts must live outside the clone (§21.4).
-    if location is FootprintLocation.EXTERNAL:
-        external_root = Path(footprint.external_root).resolve()
-        local_path = Path(config.repo.local_path).resolve()
-        if external_root == local_path or external_root.is_relative_to(local_path):
-            issues.append(
-                "git.footprint.external_root must resolve outside repo.local_path "
-                f"({footprint.external_root!r} is inside {config.repo.local_path!r})"
-            )
 
 
 def check_task_route_override(

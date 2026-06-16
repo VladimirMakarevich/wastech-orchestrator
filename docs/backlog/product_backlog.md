@@ -100,7 +100,7 @@ The following are already part of the v1 spec / current implementation and shoul
 - bounded fix loops and global fix-iteration budget;
 - optional v1 decomposition as a sequential planning sub-phase;
 - final summary stage and PR body handoff;
-- git footprint modes and scoped staging;
+- the canonical `.worc/` layout, scoped staging, and the task-scoped audit commit;
 - terminal cleanup and auto mode;
 - state-store recovery and idempotent publishing;
 - Telegram terminal notifications, typed HITL for `refinement`/`planning`, durable interaction recovery, and deletion/dependency diff approvals (see [telegram.md](../telegram.md));

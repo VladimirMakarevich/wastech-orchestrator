@@ -1,5 +1,5 @@
 """Wizard DoD: resolving an InstallSpec from flags/detection/answers, and every hard stop
-(not a repo, no origin, no provider, dirty+declined, workspace-in-repo, aborted confirm)."""
+(not a repo, no origin, no provider, dirty+declined, aborted confirm)."""
 
 from __future__ import annotations
 
@@ -67,7 +67,6 @@ def _patch_detect(
 def _run(monkeypatch: pytest.MonkeyPatch, root: Path, **kwargs: object) -> wizard.WizardOutcome:
     defaults: dict[str, object] = {
         "repo_path": root,
-        "workspace": None,
         "provider": "auto",
         "checks": None,
         "create_pr": None,
@@ -86,7 +85,6 @@ def test_auto_selects_all_present_providers(
     _patch_detect(monkeypatch, root=root, providers=("codex", "claude"))
     outcome = _run(monkeypatch, root)
     assert set(outcome.spec.providers) == {ProviderId.CODEX, ProviderId.CLAUDE}
-    assert outcome.spec.workspace == (tmp_path / "repo-orchestrator").resolve()
     assert outcome.spec.repo_local_path == root
     assert outcome.spec.base_branch == "main"
     assert outcome.missing_providers == ()
@@ -133,13 +131,6 @@ def test_missing_origin_is_an_error(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     _patch_detect(monkeypatch, root=root, origin=None)
     with pytest.raises(InstallError, match="no 'origin' remote"):
         _run(monkeypatch, root)
-
-
-def test_workspace_inside_repo_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    root = tmp_path / "repo"
-    _patch_detect(monkeypatch, root=root)
-    with pytest.raises(InstallError, match="must be outside the repository"):
-        _run(monkeypatch, root, workspace=root / "inside")
 
 
 def test_dirty_repo_warns_but_proceeds_when_non_interactive(

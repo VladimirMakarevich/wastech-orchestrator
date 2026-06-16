@@ -9,7 +9,7 @@ You usually do not choose this — the operator does — but it affects where yo
 - **`run <task-file>`** processes exactly one task file, end to end.
 - **`watch`** polls the `tasks/pending/` folder and processes tasks dropped there, looping with periodic git sync.
 
-Under the default in-repo footprint, a live task belongs in the repo's own `tasks/pending/` directory (committed and pushed there) — that is how a teammate hands work to a watching orchestrator.
+A live task belongs in the repo's own `tasks/pending/` directory (committed and pushed there) — that is how a teammate hands work to a watching orchestrator.
 
 ## `decompose` — split a large task
 
@@ -87,16 +87,9 @@ stages.<stage>.<field>  →  task-wide model/reasoning  →  provider default  �
 
 Set `refined: true` only when the task already has enough detail to plan directly. When `refined` is unset, the orchestrator still skips refinement if the task looks complete — completeness needs a non-empty description **plus** acceptance criteria. Missing acceptance criteria does not reject the task; it just makes refinement run.
 
-## Footprint modes — where task files live
+## Where task files live
 
-The operator picks a git footprint at install time; it determines where task files belong:
-
-| Footprint | Where task files go |
-| --- | --- |
-| `in_repo_commit` (default) | In the repo's own `tasks/pending/` — committed and pushed. |
-| `in_repo_exclude` / `external` | **Outside** the repo (the control workspace), so they never enter git. |
-
-When unsure, drop the task in the orchestrator's control workspace `tasks/pending/`; the operator knows the active footprint.
+There is a single canonical layout. Drop your task file in the repo's own `tasks/pending/` directory at the repo root, where it is git-tracked, committed, and pushed — that is how work reaches a watching orchestrator. Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home; only the `tasks/` lifecycle directories stay at the repo root and are tracked. The orchestrator commits the task file and its `<id>.summary.md` as an audit trail; a rejected task is quarantined under `.worc/tasks/rejected`.
 
 ## `contacts` and Telegram
 

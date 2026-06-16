@@ -4,7 +4,7 @@
 
 You drop a task file into a repo; the orchestrator parses it, creates a branch, and drives a **deterministic stage pipeline** — refine → plan → implement → test → review → fix → summary → publish — routing each stage to a coding agent behind a provider abstraction (with automatic fallback to the other agent on infrastructure errors). It runs your project's checks, commits the change, pushes, and opens a PR whose body is a plain-language summary of what was done and why. The agents only edit files inside a dedicated clone; **only the orchestrator commits, pushes, and creates PRs.** Every stage is checkpointed to SQLite, so a crash resumes from the last completed step and publishing is idempotent.
 
-> **Status: 0.x pre-release.** The full single-task pipeline, provider routing + fallback, the security/isolation gate, scoped Git footprints, SQLite checkpoints + crash recovery, the watch loop with periodic Git sync, and the `init`/`install` setup flows are implemented and covered by an extensive test suite. Telegram notifications and human-in-the-loop for clarification and deletion/dependency approvals are implemented; parallel `git worktree` execution remains on the roadmap (see [docs/backlog/](docs/backlog/)). APIs and config may still change before 1.0.
+> **Status: 0.x pre-release.** The full single-task pipeline, provider routing + fallback, the security/isolation gate, the scoped Git audit commit, SQLite checkpoints + crash recovery, the watch loop with periodic Git sync, and the `install` setup flow are implemented and covered by an extensive test suite. Telegram notifications and human-in-the-loop for clarification and deletion/dependency approvals are implemented; parallel `git worktree` execution remains on the roadmap (see [docs/backlog/](docs/backlog/)). APIs and config may still change before 1.0.
 
 ---
 
@@ -13,7 +13,7 @@ You drop a task file into a repo; the orchestrator parses it, creates a branch, 
 - **Tasks in, PRs out.** Author a task in Markdown; get a branch, the change, your checks run, and a PR with a written summary — no babysitting.
 - **Two agents, one interface.** Codex and Claude Code are interchangeable per stage. If one fails for an _infrastructure_ reason (binary missing, timeout, rate limit), the orchestrator falls back to the other; test/review failures instead loop through a bounded `fix` stage.
 - **The orchestrator owns Git.** Agents never commit or push. Branch naming, scoped staging, commit, push, PR, and the safe return to the base branch are all the orchestrator's job.
-- **Tasks and results live in the repo.** By default the task file and its summary are committed to the same repository as the code (in-repo audit footprint); working artifacts (plans, diffs, logs) stay local and never enter Git history. Other footprints are available.
+- **Tasks and results live in the repo.** The task file and its summary are committed to the same repository as the code (the audit trail under the repo-root `tasks/`); everything else the orchestrator generates lives under a single gitignored `<repo>/.worc/` home and never enters Git history.
 - **Discovers work pushed to Git.** `watch` runs as a loop that periodically `fetch`/`pull`s the base branch, so a teammate can hand the orchestrator a task simply by committing it to `tasks/pending/` and pushing — no manual sync needed.
 - **Crash-safe and idempotent.** State machine + per-stage checkpoints in SQLite; a restart resumes the one in-flight task and never double-commits, double-pushes, or re-opens a PR.
 - **Optional Telegram HITL.** `refinement`/`planning` can ask one correlated question or approval, and deletions/dependency changes are fail-closed before tests. Waiting state is a recoverable artifact; ordinary diffs and routine publishing remain automatic.
@@ -39,8 +39,8 @@ tasks/pending/task-001.md
 ```
 
 - **One task at a time.** A single processing slot; other tasks wait in `tasks/pending/`. Auto mode (off by default) controls whether the next pending task starts automatically after cleanup.
-- **Footprint modes** decide where `tasks/` and `logs/` live and what is committed — see [Configuration](#configuration).
-- The detailed, code-derived reference (state machine, routing, recovery, security, footprints) is the [Functional Map](docs/functional/index.md); the design rationale is in [docs/worc_architecture.md](docs/worc_architecture.md).
+- **One canonical layout.** The task lifecycle dirs (`tasks/pending|processing|done|failed`) sit at the repo root and are git-tracked; everything else — `config.yaml`, `state.db`, `logs/`, the task-authoring guide — lives under the gitignored `<repo>/.worc/` home. See [Configuration](#configuration).
+- The detailed, code-derived reference (state machine, routing, recovery, security, the audit footprint) is the [Functional Map](docs/functional/index.md); the design rationale is in [docs/worc_architecture.md](docs/worc_architecture.md).
 
 ---
 
@@ -62,9 +62,9 @@ Bind an existing repository and let the orchestrator process a task end to end.
 # 1. Install the CLI (isolated, recommended)
 pipx install "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git"
 
-# 2. Bind your repo: generates a validated config.yaml + records the binding.
-#    The default in-repo footprint keeps the task & its summary in this repo; config + state
-#    live in a sibling <repo-name>-orchestrator workspace, leaving your tracked files untouched.
+# 2. Set up your repo: generates a validated config.yaml under <repo>/.worc/.
+#    The task & its summary are committed to this repo; config, state.db, logs/, and the
+#    task-authoring guide all live under the gitignored .worc/ home, leaving tracked files clean.
 cd /path/to/my-repo
 worc install .          # interactive wizard (detects origin, branch, agents, checks)
 
@@ -109,18 +109,16 @@ worc status
 
 The orchestrator creates `agent/task-001-...`, runs the pipeline and your checks, commits the code plus the task and its summary, pushes, and (with `gh` present) opens a PR whose body is the summary. A failed attempt is also committed and pushed for inspection — without opening a PR.
 
-> Prefer a fresh, self-contained layout instead of binding an existing repo? Use `worc init .` to scaffold folders + `config.yaml` + editable prompt templates, then point `repo.url` / `repo.local_path` at a separate clone. See [docs/operations.md §1](docs/operations.md).
-
 ---
 
 ## Configuration
 
-`install` writes a validated `config.yaml`; `init` seeds one from `config.example.yaml`. The full reference (every field, default, and validation rule) is [docs/configuration.md](docs/configuration.md). The knobs you'll touch most:
+`install` writes a validated `config.yaml` under `<repo>/.worc/` (seeded from `config.example.yaml`). The full reference (every field, default, and validation rule) is [docs/configuration.md](docs/configuration.md). The knobs you'll touch most:
 
 | Setting | What it controls |
 | --- | --- |
 | `repo.url` / `repo.local_path` / `repo.base_branch` | The target repository and the branch PRs target. |
-| `git.footprint` | Where `tasks/`/`logs/` live and what is committed: **`in_repo` + `commit`** (default — task + summary committed, logs kept local), `in_repo` + `exclude_local` (artifacts in the clone but git-ignored), or `external` (artifacts outside the clone, zero footprint). |
+| `git.footprint` | The audit trail: `audit_commit_message` (the message for the orchestrator's task+summary commit) and `audit_on_branch` (`task` — commit onto the task branch, the default; `sibling` — onto an `…-audit` branch). |
 | `orchestrator.auto_mode.enabled` | Process the next pending task automatically after cleanup (default `false`). |
 | `orchestrator.poll_interval_seconds` | `watch` tick: fetch/pull + re-scan interval (default `300`; `0` = single pass). |
 | `agents.allowed` / `agents.routing` | Which providers are enabled and the primary/fallback per stage. |
@@ -129,16 +127,14 @@ The orchestrator creates `agent/task-001-...`, runs the pipeline and your checks
 | `telegram.*` | Optional terminal notifications and blocking HITL; credentials stay in environment variables. |
 | `security.*` | Strict isolation, the environment allowlist, denied paths/commands — invariants a task cannot weaken. |
 
-Config discovery order: explicit `--config` → `./config.yaml` → the current repo's binding → a hint to run `install .`.
+Config discovery order: explicit `--config` → `<repo-root>/.worc/config.yaml` (found by walking up from the cwd to the Git root) → a hint to run `install .`.
 
 ---
 
 ## Commands
 
 ```text
-worc init [path]        scaffold folders + config.yaml + templates + worc/ docs (idempotent)
-                          --git-mode in_repo_commit | in_repo_exclude | external   (default: in_repo_commit)
-worc install [repo]     bind an existing repo, generate config + worc/ docs, record the binding
+worc install [repo]     set up the orchestrator under <repo>/.worc/: generate config + guide, gitignore .worc/
                           --non-interactive --provider codex|claude|both|auto --no-create-pr --reconfigure
 worc preflight          check both CLIs' health + the isolation policy (read-only)
 worc telegram-test      send a real correlated Telegram prompt and wait for reply
@@ -195,18 +191,18 @@ Project layout:
 
 ```text
 src/wastech_orchestrator/
-  cli.py                  # init / install / preflight / telegram-test / run / watch / status
+  cli.py                  # install / preflight / telegram-test / run / watch / status
   core/                   # pipeline, HITL, dangerous-diff guardrails, recovery, decomposition
   notify/                 # Notifier contract + Telegram transport
   providers/              # AgentProvider contract + Codex / Claude adapters, redaction
   routing/                # per-stage routing + infrastructure-error fallback
   config/                 # schema, loader, fail-closed validator
-  git_manager.py          # the only commit/push/PR owner; scoped staging + footprints
+  git_manager.py          # the only commit/push/PR owner; scoped staging + the audit commit
   state_store.py          # SQLite checkpoints
   task/                   # parser + §19 validation gate
-  install/                # the install wizard, config writer, detection, registry
-  templates/              # scaffolding copied by `init` (config example + per-stage prompts)
-  worc/                   # agent task-authoring guide copied beside config.yaml by `init`/`install`
+  install/                # the install wizard, config writer, detection
+  templates/              # scaffolding copied into .worc/ (config example + per-stage prompts)
+  worc/                   # agent task-authoring guide copied to .worc/guide/ by `install`
 docs/                     # functional map, architecture, operations, cookbook, configuration, task authoring, rules, backlog
   worc/                   # authored source for the packaged worc/ guide (kept in sync by a test)
 tests/                    # unit / integration / e2e (see .agents/rules/testing.md)
@@ -220,8 +216,8 @@ Coding agents working _in this repo_ follow [CLAUDE.md](CLAUDE.md) (Claude Code)
 
 | Document | Role |
 | --- | --- |
-| [docs/functional/index.md](docs/functional/index.md) | **Functional map** (code-derived): contracts, blocks, state machine, routing, fallback, footprints, security, invariants. The code is the source of truth on any discrepancy. |
-| [docs/operations.md](docs/operations.md) | **Operator guide**: install, authorization, preflight, footprint modes, upgrading, diagnostics, and the `manual_action_required` recovery playbook. |
+| [docs/functional/index.md](docs/functional/index.md) | **Functional map** (code-derived): contracts, blocks, state machine, routing, fallback, the `.worc/` layout, security, invariants. The code is the source of truth on any discrepancy. |
+| [docs/operations.md](docs/operations.md) | **Operator guide**: install, the `.worc/` layout, authorization, preflight, upgrading, diagnostics, and the `manual_action_required` recovery playbook. |
 | [docs/cookbook.md](docs/cookbook.md) | Practical recipes: workspace setup, repo config, running tasks, routing, reading artifacts, recovery. |
 | [docs/configuration.md](docs/configuration.md) | Full `config.yaml` reference with defaults, allowed values, and validation rules. |
 | [docs/task-authoring.md](docs/task-authoring.md) | How to write valid task files and avoid validation rejects. |

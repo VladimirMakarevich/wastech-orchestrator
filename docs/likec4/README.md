@@ -18,7 +18,7 @@ How this maps onto the orchestrator:
 | Level | Here | View in the model |
 | --- | --- | --- |
 | Context | operator, human-in-the-loop, `codex`/`claude`, `git`/`gh`, Telegram | `landscape` |
-| Container | single process + `state.db` / artifacts / registry storage | `containers` |
+| Container | single process + `state.db` / `.worc/` artifact storage | `containers` |
 | Component | **functional blocks B0x–B2x** | `components` |
 | Code | — | (skipped; details in `docs/functional/`) |
 
@@ -62,7 +62,7 @@ npx likec4@latest export png docs/likec4 -o docs/likec4/img
 | View | Type | What it shows |
 | --- | --- | --- |
 | `landscape` | view | Context (C4 L1): system + people + external systems |
-| `containers` | view of `orchestrator` | Containers (C4 L2): process + storage |
+| `containers` | view of `orchestrator` | Containers (C4 L2): process + `state.db` / `.worc/` storage |
 | `components` | view of `proc` | Components (C4 L3) = functional blocks |
 | `crosscutting` | view | Cross-cutting concerns: security, editing, observability |
 | `happyPath` | **dynamic view** | Step-by-step run of a single task: `run` → … → PR |

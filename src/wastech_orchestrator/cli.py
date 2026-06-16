@@ -28,7 +28,6 @@ from wastech_orchestrator.config import upgrade as config_upgrade
 from wastech_orchestrator.config.loader import ConfigError, load_config, loads_config
 from wastech_orchestrator.config.schema import (
     CONFIG_SCHEMA_VERSION,
-    FootprintLocation,
     OrchestratorConfig,
 )
 from wastech_orchestrator.config.validation import validate_config
@@ -42,7 +41,7 @@ from wastech_orchestrator.core.orchestrator import (
 )
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import append_runtime_excludes
-from wastech_orchestrator.install import config_writer, detect, registry, wizard
+from wastech_orchestrator.install import config_writer, detect, wizard
 from wastech_orchestrator.notify import build_notifier
 from wastech_orchestrator.notify.telegram import check_telegram_preflight
 from wastech_orchestrator.observability.logging import configure_logging
@@ -79,36 +78,23 @@ _STATUS_STAGE: dict[Status, Stage] = {
     Status.CREATING_PR: Stage.PUBLISHING,
 }
 
-# Friendly --git-mode names mapped onto the two git.footprint axes (spec §21).
-GIT_MODES: dict[str, tuple[str, str]] = {
-    "external": ("external", "none"),
-    "in_repo_exclude": ("in_repo", "exclude_local"),
-    "in_repo_commit": ("in_repo", "commit"),
-}
+# The orchestrator's runtime home inside the target repo (spec §21). Everything the orchestrator
+# generates or installs lives under `<repo>/.worc/` — gitignored as a whole — except the audit
+# trail: the task lifecycle dirs below sit at the repo root and are audit-committed.
+WORC_HOME = ".worc"
 
-# Runtime directories created by `init`, relative to the target path (spec §20.2).
-RUNTIME_DIRS: tuple[str, ...] = (
+# Task lifecycle dirs created at the repo root by `install` (tracked; the audit commit captures the
+# task file + its `<id>.summary.md` in done/failed). `tasks/rejected` is the §19 quarantine and
+# lives under `.worc/` instead, so rejected tasks are never swept into the audit commit.
+REPO_TASK_DIRS: tuple[str, ...] = (
     "tasks/pending",
     "tasks/processing",
     "tasks/done",
     "tasks/failed",
-    "tasks/rejected",
-    "logs",
-    "workspace",
 )
 
-# `install` binds the existing repo as repo.local_path and uses the in-repo footprint (§21): the
-# task lifecycle + artifact dirs live in the repo (created empty here, so they stay invisible to
-# `git status` until a task writes into them), while config.yaml and the rejected-task quarantine
-# stay in the sibling control workspace, out of the repo.
-INSTALL_REPO_DIRS: tuple[str, ...] = (
-    "tasks/pending",
-    "tasks/processing",
-    "tasks/done",
-    "tasks/failed",
-    "logs",
-)
-INSTALL_WORKSPACE_DIRS: tuple[str, ...] = ("tasks/rejected",)
+# Runtime dirs created under `<repo>/.worc/` by `install` (all gitignored).
+WORC_RUNTIME_DIRS: tuple[str, ...] = ("logs", "workspace", "checks", "tasks/rejected")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -120,7 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         default=None,
-        help="path to config.yaml (default: ./config.yaml, else the bound config from 'install')",
+        help="path to config.yaml (default: <repo-root>/.worc/config.yaml, discovered from cwd)",
     )
     parser.add_argument(
         "--log-level",
@@ -148,42 +134,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command", required=True)
 
-    init_cmd = sub.add_parser("init", help="scaffold the project layout and templates")
-    init_cmd.add_argument(
-        "path", nargs="?", default=".", help="target directory (default: current directory)"
-    )
-    init_cmd.add_argument(
-        "--git-mode",
-        choices=sorted(GIT_MODES),
-        default="in_repo_commit",
-        help="git footprint mode seeded into config.yaml (default: in_repo_commit — tasks & "
-        "artifacts live in the repo and are audit-committed)",
-    )
-    init_cmd.add_argument(
-        "--force", action="store_true", help="re-copy template files (never touches config.yaml)"
-    )
-    init_cmd.add_argument(
-        "--dry-run", action="store_true", help="print the created/skipped plan; write nothing"
-    )
-    init_cmd.add_argument(
-        "--quiet", action="store_true", help="suppress the per-file report (exit code only)"
-    )
-    init_cmd.add_argument(
-        "--gitignore-tracked",
-        action="store_true",
-        help="write runtime-file ignores to the tracked .gitignore (default: .git/info/exclude)",
-    )
-
     install_cmd = sub.add_parser(
-        "install", help="bind the current repo to a sibling workspace and generate config.yaml"
+        "install", help="set up the orchestrator in the current repo under .worc/ and write config"
     )
     install_cmd.add_argument(
         "repo_path", nargs="?", default=".", help="repository path (default: current directory)"
-    )
-    install_cmd.add_argument(
-        "--workspace",
-        default=None,
-        help="control workspace directory (default: a <repo-name>-orchestrator sibling)",
     )
     install_cmd.add_argument(
         "--provider",
@@ -224,11 +179,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--skip-preflight", action="store_true", help="do not run preflight after writing config"
     )
     install_cmd.add_argument("--dry-run", action="store_true", help="print the plan; write nothing")
-    install_cmd.add_argument(
-        "--gitignore-tracked",
-        action="store_true",
-        help="write runtime-file ignores to the tracked .gitignore (default: .git/info/exclude)",
-    )
 
     run_cmd = sub.add_parser("run", help="run a single task from a file")
     run_cmd.add_argument("task_file", help="path to the task file (.md or .json)")
@@ -391,8 +341,8 @@ def _iter_template_files(root: Path) -> Iterator[Path]:
 def _worc_root() -> Traversable:
     """The packaged ``worc/`` agent task-authoring docs (works from a source tree or a wheel).
 
-    These ship as package data next to ``templates/`` and are copied beside ``config.yaml`` by
-    ``init``/``install`` so an AI agent can author tasks from a local, self-contained guide. Unlike
+    These ship as package data next to ``templates/`` and are copied into ``.worc/guide/`` by
+    ``install`` so an AI agent can author tasks from a local, self-contained guide. Unlike
     ``templates/``, they are generated content with no operator edits — ``upgrade-docs`` overwrites
     them to the packaged version.
     """
@@ -400,17 +350,18 @@ def _worc_root() -> Traversable:
 
 
 def _copy_worc_docs(dest_root: Path, *, overwrite: bool, dry: bool) -> tuple[list[str], list[str]]:
-    """Copy the packaged ``worc/`` docs into ``dest_root/worc`` (beside ``config.yaml``).
+    """Copy the packaged ``worc/`` docs into ``dest_root/guide`` (the installed authoring guide).
 
-    Mirrors ``cmd_init``'s file handling: existing files are skipped unless ``overwrite``; ``dry``
-    writes nothing. Returns ``(written, skipped)`` as ``worc/...`` relative paths for reporting.
+    The packaged source dir is ``worc/``; it lands as ``guide/`` so the path reads ``.worc/guide/``
+    rather than the redundant ``.worc/worc/``. Existing files are skipped unless ``overwrite``;
+    ``dry`` writes nothing. Returns ``(written, skipped)`` as ``guide/...`` relative paths.
     """
     written: list[str] = []
     skipped: list[str] = []
     with resources.as_file(_worc_root()) as wroot:
         for rel in _iter_template_files(Path(wroot)):
-            label = str(Path("worc") / rel)
-            dest = dest_root / "worc" / rel
+            label = str(Path("guide") / rel)
+            dest = dest_root / "guide" / rel
             if dest.exists() and not overwrite:
                 skipped.append(label)
                 continue
@@ -430,7 +381,7 @@ def _copy_templates_tree(
     nothing. ``config.example.yaml`` is excluded — it is the source for ``config.yaml`` generation
     (``init``/``install``) and key materialization (``upgrade-config``), not a verbatim template.
     Returns ``(written, skipped)`` as ``templates/...`` relative paths for reporting. Shared by
-    ``cmd_init`` (its template-tree step) and ``cmd_install_templates`` so the two cannot drift.
+    ``cmd_install`` and ``cmd_install_templates`` so the two cannot drift.
     """
     written: list[str] = []
     skipped: list[str] = []
@@ -450,95 +401,6 @@ def _copy_templates_tree(
     return written, skipped
 
 
-def _apply_git_mode(config_text: str, git_mode: str) -> str:
-    """Seed the git.footprint location/tracking for the selected --git-mode (spec §21).
-
-    Anchored on the packaged config's defaults (``in_repo``/``commit``); selecting a different mode
-    rewrites just those two value lines (the trailing comments are left intact).
-    """
-    location, tracking = GIT_MODES[git_mode]
-    config_text = config_text.replace("location: in_repo", f"location: {location}", 1)
-    return config_text.replace("tracking: commit", f"tracking: {tracking}", 1)
-
-
-def cmd_init(args: argparse.Namespace) -> int:
-    """Idempotently scaffold the project layout and templates (spec §20)."""
-    target = Path(args.path).resolve()
-    dry: bool = args.dry_run
-    created: list[str] = []
-    skipped: list[str] = []
-
-    def add_dir(rel: str) -> None:
-        directory = target / rel
-        if directory.is_dir():
-            skipped.append(f"{rel}/")
-            return
-        created.append(f"{rel}/")
-        if not dry:
-            directory.mkdir(parents=True, exist_ok=True)
-
-    def add_file(rel: str, content: bytes, *, overwrite: bool) -> None:
-        file = target / rel
-        if file.exists() and not overwrite:
-            skipped.append(rel)
-            return
-        created.append(rel)
-        if not dry:
-            file.parent.mkdir(parents=True, exist_ok=True)
-            file.write_bytes(content)
-
-    # 1. Runtime directories, each kept by a .gitkeep so empty dirs survive in git.
-    for rel in RUNTIME_DIRS:
-        add_dir(rel)
-        add_file(f"{rel}/.gitkeep", b"", overwrite=False)
-
-    # 2. config.yaml from the packaged example, with the chosen git mode. Never overwritten.
-    config_text = _apply_git_mode(
-        _templates_root().joinpath("config.example.yaml").read_text(encoding="utf-8"),
-        args.git_mode,
-    )
-    add_file("config.yaml", config_text.encode("utf-8"), overwrite=False)
-
-    # 3. The templates/ tree (config.example.yaml is the source for config.yaml, not copied here).
-    #    Shared with cmd_install_templates via _copy_templates_tree so the two cannot drift.
-    tmpl_written, tmpl_skipped = _copy_templates_tree(target, overwrite=args.force, dry=dry)
-    created.extend(tmpl_written)
-    skipped.extend(tmpl_skipped)
-
-    # 3b. The worc/ agent task-authoring docs, copied beside config.yaml so an agent can author
-    #     tasks from a local, self-contained guide. Skip-existing/--force/--dry-run like the rest.
-    worc_written, worc_skipped = _copy_worc_docs(target, overwrite=args.force, dry=dry)
-    created.extend(worc_written)
-    skipped.extend(worc_skipped)
-
-    # 4. Under an in-repo footprint, ignore the orchestrator's runtime files so the operator's own
-    #    `git status` stays clean (§21.2). No-op for external mode (runtime files live outside the
-    #    repo) and, in the default mode, for a target that is not yet a git repo.
-    location, _ = GIT_MODES[args.git_mode]
-    exclude_target = ".gitignore" if args.gitignore_tracked else ".git/info/exclude"
-    in_repo = location == "in_repo"
-    excluded = (
-        append_runtime_excludes(target, tracked=args.gitignore_tracked)
-        if in_repo and not dry
-        else []
-    )
-
-    if not args.quiet:
-        verb_created = "would create" if dry else "create"
-        verb_skipped = "would skip" if dry else "skip"
-        for rel in created:
-            print(f"  {verb_created} {rel}")
-        for rel in skipped:
-            print(f"  {verb_skipped} {rel}")
-        if excluded:
-            print(f"  exclude runtime files via {exclude_target}")
-        elif dry and in_repo and (args.gitignore_tracked or (target / ".git").is_dir()):
-            print(f"  would exclude runtime files via {exclude_target}")
-    summary = "init (dry-run)" if dry else "init"
-    print(f"{summary}: {len(created)} created, {len(skipped)} skipped")
-    return 0
-
-
 def _load_config(path: str) -> OrchestratorConfig:
     """Load and semantically validate the config (fail-closed, §11/§21.4)."""
     config = load_config(path).config
@@ -547,21 +409,21 @@ def _load_config(path: str) -> OrchestratorConfig:
 
 
 def resolve_config_path(args: argparse.Namespace) -> str | None:
-    """Find the config to load (backlog: interactive installer), in priority order:
+    """Find the config to load, in priority order:
 
     1. an explicit ``--config PATH``;
-    2. ``./config.yaml`` in the current directory (backward compatibility with ``init``);
-    3. the binding for the current Git repository recorded by ``install`` (works from any subdir);
-    4. otherwise ``None`` (the caller prints an actionable hint).
+    2. ``<repo-root>/.worc/config.yaml`` — discovered by walking up from the cwd to the Git root, so
+       any command works from any subdirectory of the repo;
+    3. otherwise ``None`` (the caller prints an actionable hint).
     """
     explicit = getattr(args, "config", None)
     if explicit is not None:
         return str(explicit)
-    if Path("config.yaml").is_file():
-        return "config.yaml"
     info = detect.git_info(Path.cwd())
     if info is not None:
-        return registry.lookup(info.root)
+        candidate = info.root / WORC_HOME / "config.yaml"
+        if candidate.is_file():
+            return str(candidate)
     return None
 
 
@@ -577,8 +439,8 @@ def cmd_upgrade_config(args: argparse.Namespace) -> int:
     if path_str is None or not Path(path_str).is_file():
         target = f" ({path_str})" if path_str is not None else ""
         print(
-            f"upgrade-config: no config.yaml found{target} — pass --config PATH, run from a "
-            "directory containing config.yaml, or 'install' to bind this repo"
+            f"upgrade-config: no config.yaml found{target} — pass --config PATH, or run "
+            "'install' in your repo (creates .worc/config.yaml)"
         )
         return 2
     path = Path(path_str).resolve()
@@ -620,9 +482,9 @@ def cmd_upgrade_config(args: argparse.Namespace) -> int:
 
 
 def cmd_upgrade_docs(args: argparse.Namespace) -> int:
-    """Refresh the installed ``worc/`` docs (beside ``config.yaml``) to the packaged version.
+    """Refresh the installed ``.worc/guide/`` docs to the packaged version.
 
-    The worc/ docs ship with the package, so an upgraded orchestrator carries newer docs than an
+    The guide docs ship with the package, so an upgraded orchestrator carries newer docs than an
     already-installed copy. Unlike ``config.yaml`` they are generated content with no operator edits
     to preserve, so this is a straight overwrite-with-the-packaged-version (no backup): missing or
     differing files are written, files no longer in the package are removed. Idempotent — an
@@ -633,11 +495,11 @@ def cmd_upgrade_docs(args: argparse.Namespace) -> int:
     if path_str is None or not Path(path_str).is_file():
         target = f" ({path_str})" if path_str is not None else ""
         print(
-            f"upgrade-docs: no config.yaml found{target} — pass --config PATH, run from a "
-            "directory containing config.yaml, or 'install' to bind this repo"
+            f"upgrade-docs: no config.yaml found{target} — pass --config PATH, or run "
+            "'install' in your repo (creates .worc/config.yaml)"
         )
         return 2
-    worc_dir = Path(path_str).resolve().parent / "worc"
+    worc_dir = Path(path_str).resolve().parent / "guide"
 
     packaged: dict[Path, bytes] = {}
     with resources.as_file(_worc_root()) as wroot:
@@ -666,11 +528,11 @@ def cmd_upgrade_docs(args: argparse.Namespace) -> int:
     def _report(prefix: str) -> None:
         print(f"{prefix} {worc_dir}")
         for rel in to_add:
-            print(f"  + {Path('worc') / rel}")
+            print(f"  + {Path('guide') / rel}")
         for rel in to_update:
-            print(f"  ~ {Path('worc') / rel}")
+            print(f"  ~ {Path('guide') / rel}")
         for rel in to_remove:
-            print(f"  - {Path('worc') / rel}")
+            print(f"  - {Path('guide') / rel}")
 
     if args.dry_run:
         _report("upgrade-docs (dry-run): would update")
@@ -685,26 +547,24 @@ def cmd_upgrade_docs(args: argparse.Namespace) -> int:
 
 
 def cmd_install_templates(args: argparse.Namespace) -> int:
-    """Deliver the packaged ``templates/`` tree beside ``config.yaml``, add-missing-only.
+    """Deliver the packaged ``templates/`` tree into ``.worc/templates/``, add-missing-only.
 
-    Only ``init`` copies the ``templates/`` tree (at scaffold time); the wizard-based ``install``
-    never does and no command refreshes it afterwards, so an install-based setup lacks templates and
-    an upgraded orchestrator's templates drift. This delivers them into an existing install: the
-    location is resolved like ``upgrade-config``/``upgrade-docs`` (``--config`` → ``./config.yaml``
-    → the repo→config registry binding) and the tree lands beside the resolved ``config.yaml``.
+    ``install`` already copies the tree; this refreshes it when an upgraded orchestrator ships new
+    templates. The location is resolved like ``upgrade-config``/``upgrade-docs`` (``--config`` → the
+    ``.worc/config.yaml`` discovered from the Git root) and the tree lands beside ``config.yaml``.
 
     Add-missing by default: absent files are written, existing files are **skipped** to preserve
-    operator edits. ``--force`` overwrites them (explicit, like ``init --force``); ``--dry-run``
-    previews. Unlike ``upgrade-docs`` it never removes operator-added files (templates are
-    operator-editable) and it never touches ``config.yaml`` / ``prompts.overrides``: activating an
-    edited template stays an operator decision. Fail-closed (exit 2) when no location resolves.
+    operator edits. ``--force`` overwrites them (explicit); ``--dry-run`` previews. Unlike
+    ``upgrade-docs`` it never removes operator-added files (templates are operator-editable) and it
+    never touches ``config.yaml``: activating an edited template stays an operator decision.
+    Fail-closed (exit 2) when no location resolves.
     """
     path_str = resolve_config_path(args)
     if path_str is None or not Path(path_str).is_file():
         target = f" ({path_str})" if path_str is not None else ""
         print(
-            f"install-templates: no config.yaml found{target} — pass --config PATH, run from a "
-            "directory containing config.yaml, or 'install' to bind this repo"
+            f"install-templates: no config.yaml found{target} — pass --config PATH, or run "
+            "'install' in your repo (creates .worc/config.yaml)"
         )
         return 2
     install_dir = Path(path_str).resolve().parent
@@ -743,21 +603,28 @@ def load_config_for(args: argparse.Namespace) -> OrchestratorConfig | None:
     return _load_config(path)
 
 
-def artifacts_root_for(config: OrchestratorConfig) -> str:
-    """Where ``logs/<task-id>/`` lives: ``external_root`` for external, else the clone (§21)."""
-    if config.git.footprint.location is FootprintLocation.EXTERNAL:
-        return config.git.footprint.external_root
-    return config.repo.local_path
+def worc_home_for(config: OrchestratorConfig) -> Path:
+    """The orchestrator's gitignored runtime home: ``<repo>/.worc/`` (§21).
+
+    Everything the orchestrator generates — ``state.db``, ``logs/``, ``orchestrator.pid``,
+    ``workspace/``, ``checks/``, the resolved check profile, validation reports — lives here, plus
+    the installed ``config.yaml``, ``templates/``, and ``guide/``. The whole dir is gitignored.
+    """
+    return Path(config.repo.local_path) / WORC_HOME
+
+
+def tasks_root_for(config: OrchestratorConfig) -> Path:
+    """The repo root that holds the tracked ``tasks/`` lifecycle dirs (the audit trail, §21).
+
+    Unlike :func:`worc_home_for`, ``tasks/`` stays at the repo root so the task file and its
+    committed ``<id>.summary.md`` can be audit-committed into the repo's history.
+    """
+    return Path(config.repo.local_path)
 
 
 def pending_dir(config: OrchestratorConfig) -> Path:
-    """The folder ``watch`` scans for new tasks: ``tasks/pending`` under the artifact root (§21).
-
-    For an external footprint this is the control workspace (``external_root``); for an in-repo
-    footprint it is the clone. With ``install``'s absolute ``external_root``, ``watch`` therefore
-    works from anywhere, not only the directory the tasks happen to live in.
-    """
-    return Path(artifacts_root_for(config)) / "tasks" / "pending"
+    """The folder ``watch`` scans for new tasks: ``<repo>/tasks/pending`` (§21)."""
+    return tasks_root_for(config) / "tasks" / "pending"
 
 
 def _configure_runtime_logging(args: argparse.Namespace) -> None:
@@ -856,7 +723,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         detect.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish (§6.7)
     orchestrator = build_orchestrator(
         config,
-        artifacts_root=artifacts_root_for(config),
+        artifacts_root=worc_home_for(config),
         heartbeat_seconds=args.heartbeat_seconds,
     )
     result = orchestrator.run_task(args.task_file)
@@ -907,7 +774,7 @@ def cmd_rerun(args: argparse.Namespace) -> int:
     config = load_config_for(args)
     if config is None:
         return 2
-    root = artifacts_root_for(config)
+    root = worc_home_for(config)
 
     # Rerun drives the pipeline in the shared clone; refuse while a live watch daemon owns it.
     pid = process_control.read_pid(process_control.pid_file_path(root))
@@ -1001,7 +868,7 @@ def cmd_finalize(args: argparse.Namespace) -> int:
     config = load_config_for(args)
     if config is None:
         return 2
-    root = artifacts_root_for(config)
+    root = worc_home_for(config)
 
     # Finalize runs terminal cleanup (`git checkout base`) in the shared clone; refuse while a live
     # watch daemon owns it. An orphaned-active task (dead PID) is exactly what finalize reconciles.
@@ -1063,7 +930,7 @@ def run_preflight(config: OrchestratorConfig) -> tuple[bool, list[str]]:
     contract. Shared by ``cmd_preflight`` and the installer's post-write auto-preflight.
     """
     lines: list[str] = []
-    providers = build_providers(config, artifacts_root=artifacts_root_for(config))
+    providers = build_providers(config, artifacts_root=worc_home_for(config))
     ok = True
     for pid in config.agents.allowed:
         provider = providers.get(pid)
@@ -1088,7 +955,7 @@ def run_preflight(config: OrchestratorConfig) -> tuple[bool, list[str]]:
         enforced = "enforced" if config.security.strict_isolation else "strict_isolation=false"
         lines.append(f"isolation: OK ({enforced})")
 
-    chk_ok, chk_lines = check_diagnostics.check_preflight(config, artifacts_root_for(config))
+    chk_ok, chk_lines = check_diagnostics.check_preflight(config, worc_home_for(config))
     ok = ok and chk_ok
     lines.extend(chk_lines)
 
@@ -1181,7 +1048,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
         else config.orchestrator.poll_interval_seconds
     )
     folder = pending_dir(config)
-    pid_path = process_control.pid_file_path(artifacts_root_for(config))
+    pid_path = process_control.pid_file_path(worc_home_for(config))
 
     # Only the looping mode is a daemon; refuse a second watcher for the same artifact root. A stale
     # PID file (process gone) is overwritten on start.
@@ -1196,7 +1063,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
     orchestrator = build_orchestrator(
         config,
-        artifacts_root=artifacts_root_for(config),
+        artifacts_root=worc_home_for(config),
         heartbeat_seconds=args.heartbeat_seconds,
     )
 
@@ -1230,7 +1097,7 @@ def cmd_stop(args: argparse.Namespace) -> int:
     config = load_config_for(args)
     if config is None:
         return 2
-    pid_path = process_control.pid_file_path(artifacts_root_for(config))
+    pid_path = process_control.pid_file_path(worc_home_for(config))
     outcome = process_control.stop_process(pid_path, timeout=args.timeout)
     if not outcome.found:
         print("stop: no running watcher (no PID file)")
@@ -1253,7 +1120,7 @@ def cmd_restart(args: argparse.Namespace) -> int:
     config = load_config_for(args)
     if config is None:
         return 2
-    pid_path = process_control.pid_file_path(artifacts_root_for(config))
+    pid_path = process_control.pid_file_path(worc_home_for(config))
     outcome = process_control.stop_process(pid_path, timeout=args.timeout)
     if outcome.found and not outcome.already_dead:
         suffix = " (SIGKILL)" if outcome.killed else ""
@@ -1269,7 +1136,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     config = load_config_for(args)
     if config is None:
         return 2
-    db_path = Path(artifacts_root_for(config)) / "state.db"
+    db_path = Path(worc_home_for(config)) / "state.db"
     if not db_path.is_file():
         print(f"status: no state database at {db_path}")
         return 0
@@ -1319,7 +1186,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             print(f"last_error={task.cleanup_last_error}")
 
     # The resolved check profile, read-only (status never resolves, probes, or runs anything).
-    profile = check_diagnostics.load_profile(artifacts_root_for(config))
+    profile = check_diagnostics.load_profile(worc_home_for(config))
     print()
     if profile is None:
         print("checks_profile: none (run preflight or install to resolve)")
@@ -1350,39 +1217,40 @@ def _install_backup_config(path: Path) -> Path:
     return backup
 
 
-def _install_create_dirs(repo_local_path: Path, workspace: Path) -> None:
-    """Create the runtime task/log dirs in the repo and the quarantine in the workspace.
+def _install_create_dirs(repo_local_path: Path) -> None:
+    """Create the tracked task dirs at the repo root and the gitignored ``.worc/`` runtime dirs.
 
-    Idempotent. The repo dirs are created empty, so they do not appear in ``git status`` until a
-    task writes into them (the install leaves the target repo's tracked state untouched, §21).
+    Idempotent. The repo task dirs are created empty, so they do not appear in ``git status`` until
+    a task writes into them; everything under ``.worc/`` is gitignored as a whole (§21).
     """
-    for rel in INSTALL_REPO_DIRS:
+    worc_home = repo_local_path / WORC_HOME
+    for rel in REPO_TASK_DIRS:
         (repo_local_path / rel).mkdir(parents=True, exist_ok=True)
-    for rel in INSTALL_WORKSPACE_DIRS:
-        (workspace / rel).mkdir(parents=True, exist_ok=True)
+    for rel in WORC_RUNTIME_DIRS:
+        (worc_home / rel).mkdir(parents=True, exist_ok=True)
 
 
 def _install_print_plan(
     spec: config_writer.InstallSpec, config_path: Path, missing: tuple[ProviderId, ...]
 ) -> None:
     """Print what ``install`` would do, writing nothing (``--dry-run``)."""
+    worc_home = config_path.parent
     print("install (dry-run): no changes written")
     print(f"  repo:       {spec.repo_local_path}")
     print(f"  origin:     {spec.repo_url}")
     print(f"  base:       {spec.base_branch}")
-    print(f"  workspace:  {spec.workspace}")
     print(f"  config:     {config_path}")
     print(f"  providers:  {', '.join(p.value for p in spec.providers)}")
     print(f"  checks:     {', '.join(spec.checks) or '(none)'}")
     print(f"  discovery:  {spec.discovery_mode}")
     print(f"  create_pr:  {spec.create_pull_request}")
     print(f"  auto_mode:  {spec.auto_mode}")
-    for rel in INSTALL_REPO_DIRS:
+    for rel in REPO_TASK_DIRS:
         print(f"  would create {spec.repo_local_path / rel}")
-    for rel in INSTALL_WORKSPACE_DIRS:
-        print(f"  would create {spec.workspace / rel}")
-    print(f"  would create {spec.workspace / 'worc'}/ (agent task-authoring docs)")
-    print(f"  would bind   {spec.repo_local_path} -> {config_path}")
+    for rel in WORC_RUNTIME_DIRS:
+        print(f"  would create {worc_home / rel}")
+    print(f"  would create {worc_home / 'guide'}/ (agent task-authoring docs)")
+    print(f"  would ignore {WORC_HOME}/ via .gitignore")
     if missing:
         print(f"  note: provider(s) not on PATH: {', '.join(p.value for p in missing)}")
 
@@ -1397,7 +1265,7 @@ def _install_resolve_checks(config: OrchestratorConfig) -> None:
     from wastech_orchestrator.checks.discovery_factory import build_discovery
     from wastech_orchestrator.checks.resolver import CheckResolver
 
-    artifacts_root = artifacts_root_for(config)
+    artifacts_root = str(worc_home_for(config))
     providers = build_providers(config, artifacts_root=artifacts_root)
     discovery = build_discovery(config, providers, artifacts_root)
     if discovery is None:
@@ -1428,18 +1296,17 @@ def _install_run_preflight(config_path: Path, *, skip: bool) -> int:
 
 
 def cmd_install(args: argparse.Namespace) -> int:
-    """Bind the current repo to a sibling control workspace and generate config (backlog).
+    """Set up the orchestrator in the current repo under ``.worc/`` and generate config (§21).
 
     Runs the wizard to resolve settings, then idempotently writes a validated ``config.yaml`` into
-    the workspace and records the ``repo -> config`` binding. Re-running is a no-op unless
-    ``--reconfigure`` (which backs up and regenerates); a config that exists but is bound to another
-    repo is never overwritten. After a successful write it auto-runs preflight (§6.7).
+    ``<repo>/.worc/``, scaffolds the runtime + task dirs, copies the editable templates and the
+    task-authoring guide, and gitignores ``.worc/``. Re-running is a no-op unless ``--reconfigure``
+    (which backs up and regenerates). After a successful write it auto-runs preflight (§6.7).
     """
     _configure_runtime_logging(args)
     try:
         outcome = wizard.run_wizard(
             repo_path=Path(args.repo_path),
-            workspace=Path(args.workspace) if args.workspace else None,
             provider=args.provider,
             checks=args.check,
             create_pr=args.create_pr,
@@ -1452,41 +1319,32 @@ def cmd_install(args: argparse.Namespace) -> int:
         return 1
 
     spec = outcome.spec
-    config_path = (spec.workspace / "config.yaml").resolve()
+    worc_home = (spec.repo_local_path / WORC_HOME).resolve()
+    config_path = worc_home / "config.yaml"
 
     if args.dry_run:
         _install_print_plan(spec, config_path, outcome.missing_providers)
         return 0
 
-    bound = registry.lookup(spec.repo_local_path)
-    bound_to_this = bound is not None and Path(bound).resolve() == config_path
     if config_path.exists():
         if not args.reconfigure:
-            if bound_to_this:
-                print(f"install: already configured at {config_path} (use --reconfigure to redo)")
-                return _install_run_preflight(config_path, skip=args.skip_preflight)
-            print(
-                f"install: {config_path} already exists and is not bound to "
-                f"{spec.repo_local_path}; choose another --workspace or pass --reconfigure"
-            )
-            return 1
+            print(f"install: already configured at {config_path} (use --reconfigure to redo)")
+            return _install_run_preflight(config_path, skip=args.skip_preflight)
         print(f"install: backed up existing config to {_install_backup_config(config_path)}")
 
     text = config_writer.build_and_validate(spec)
-    _install_create_dirs(spec.repo_local_path, spec.workspace)
+    _install_create_dirs(spec.repo_local_path)
     _install_atomic_write(config_path, text)
-    registry.bind(spec.repo_local_path, config_path)
     print(f"install: wrote {config_path}")
-    print(f"install: bound {spec.repo_local_path} -> {config_path}")
-    # The control workspace lives outside the repo, so the worc/ docs there never touch git status.
+    # Editable copies of the packaged templates + the task-authoring guide live in .worc/.
     # --reconfigure refreshes them to the packaged version; a plain re-run leaves existing files.
-    worc_written, _ = _copy_worc_docs(spec.workspace, overwrite=args.reconfigure, dry=False)
+    _copy_templates_tree(worc_home, overwrite=args.reconfigure, dry=False)
+    worc_written, _ = _copy_worc_docs(worc_home, overwrite=args.reconfigure, dry=False)
     if worc_written:
-        print(f"install: wrote agent task-authoring docs to {spec.workspace / 'worc'}")
-    # Install always uses the in-repo footprint, so keep the operator's `git status` clean (§21.2).
-    if append_runtime_excludes(spec.repo_local_path, tracked=args.gitignore_tracked):
-        target = ".gitignore" if args.gitignore_tracked else ".git/info/exclude"
-        print(f"install: excluded runtime files via {target}")
+        print(f"install: wrote agent task-authoring docs to {worc_home / 'guide'}")
+    # Gitignore the whole .worc/ runtime home so the operator's `git status` stays clean (§21.2).
+    if append_runtime_excludes(spec.repo_local_path):
+        print(f"install: ignored {WORC_HOME}/ via .gitignore")
     if outcome.missing_providers:
         names = ", ".join(p.value for p in outcome.missing_providers)
         print(f"install: note — selected provider(s) not on PATH yet: {names}")
@@ -1507,8 +1365,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     # A config/DB written by a newer orchestrator is refused with a clean message + exit 2 here,
     # rather than surfacing as a traceback (fail loud, not ugly). See the versioning gates.
     try:
-        if args.command == "init":
-            return cmd_init(args)
         if args.command == "install":
             return cmd_install(args)
         if args.command == "run":

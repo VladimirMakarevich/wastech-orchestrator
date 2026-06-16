@@ -1016,11 +1016,8 @@ class Orchestrator:
 
     def _prepare_branch(self, p: _Pipeline) -> None:
         """Complete the persisted ``preparing`` checkpoint and attach the task branch."""
-        # Branch + footprint preflight (no branch is ever created before this point).
-        self._git.preflight_footprint()
-        self._git.ensure_exclude_local()
-        # Guarantee runtime-file ignores (state.db, config.yaml, checks/, …) exist in this clone,
-        # regardless of how it was scaffolded, so they never leak into the operator's git status.
+        # Guarantee the `.worc/` runtime home is gitignored in this clone, regardless of how it was
+        # scaffolded, so it never leaks into the operator's git status (no branch exists yet).
         self._git.ensure_runtime_excludes()
         p.slug = slugify(p.task.title)
         p.branch = self._observe(

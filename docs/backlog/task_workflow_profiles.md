@@ -405,12 +405,12 @@ Automated scanner output is evidence, not the final severity decision. The audit
 
 ### Private report location
 
-The security report must be stored outside the target repository in the **control workspace**, the directory containing the resolved `config.yaml`.
+The security report must be stored under the gitignored `<repo>/.worc/` home — the directory containing the resolved `config.yaml` — so it never enters the repo's tracked tree.
 
 Recommended layout:
 
 ```text
-<control-workspace>/
+<repo>/.worc/
   config.yaml
   security-reports/
     <task-id>/
@@ -420,18 +420,18 @@ Recommended layout:
       evidence/
 ```
 
-The location must be derived from the resolved configuration file path:
+The location is derived from the resolved configuration file path:
 
 ```text
-control_workspace = parent(resolve(config_path))
-report_root = control_workspace / "security-reports" / task_id
+worc_home = parent(resolve(config_path))   # <repo>/.worc/
+report_root = worc_home / "security-reports" / task_id
 ```
 
-It must not be derived from the general `artifacts_root`, because with the default in-repo footprint the artifact root is the target repository while `config.yaml` remains in the sibling control workspace.
+This co-locates reports with the other runtime artifacts under `.worc/` (which equals `artifacts_root`); the whole `.worc/` home is gitignored, so reports stay out of every commit.
 
 Required storage rules:
 
-- `security-reports/` must resolve outside `repo.local_path`;
+- `security-reports/` must resolve under the gitignored `<repo>/.worc/` home (never the repo-root `tasks/`);
 - path traversal through `task_id` or task metadata is rejected;
 - reports are never included in code commits, task audit commits, PR bodies, or Git staging;
 - the orchestrator does not automatically copy reports into `tasks/` or `logs/` inside the repo;

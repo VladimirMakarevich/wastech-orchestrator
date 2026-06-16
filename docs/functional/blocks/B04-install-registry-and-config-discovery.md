@@ -1,19 +1,18 @@
-# B04 — Install Registry and Config Discovery
+# B04 — Config Discovery
 
 ## Purpose
 
-A persistent per-user store that associates a repository root with its generated `config.yaml`, and the logic for resolving the configuration path. Allows commands (`preflight`/`watch`/`status`/…) to find the configuration from anywhere inside the repository without `--config`.
+Resolve the path to the orchestrator's `config.yaml` so that commands (`run`/`watch`/`status`/`preflight`/…) find it from anywhere inside the repository without an explicit `--config`. There is no persistent per-user store: discovery is a pure walk-up from the current directory to the Git root.
 
 ## Responsibilities
 
-- Store and read `repo-root → config.yaml` bindings in a JSON file in the user config directory ([registry.py:88-104](../../../src/wastech_orchestrator/install/registry.py#L88)).
-- Resolve the configuration path by priority (`--config` → `./config.yaml` → registry binding) ([cli.py:549-565](../../../src/wastech_orchestrator/cli.py#L549)).
+- Resolve the configuration path by priority: explicit `--config` → `<repo-root>/.worc/config.yaml` (discovered by walking up from the cwd to the Git root) → `None` ([cli.py:411-427](../../../src/wastech_orchestrator/cli.py#L411)).
 
 ## Block Boundaries
 
 ### In scope
 
-- Persistent binding store (bind/lookup/unbind) and configuration path resolution.
+- Configuration path resolution.
 
 ### Out of scope
 
@@ -23,19 +22,15 @@ A persistent per-user store that associates a repository root with its generated
 
 ## Entry Points
 
-- `registry.bind(repo_root, config_path)` / `lookup(repo_root)` / `unbind(repo_root)` ([registry.py:88-104](../../../src/wastech_orchestrator/install/registry.py#L88)); `registry_dir`/`registry_path`.
-- `cli.resolve_config_path(args)` ([cli.py:549](../../../src/wastech_orchestrator/cli.py#L549)) — used by all commands that load the configuration.
-- Callers: `bind` — [B03 cmd_install](./B03-installer-and-scaffolding.md) ([cli.py:1478](../../../src/wastech_orchestrator/cli.py#L1478)); `lookup` — inside `resolve_config_path`.
+- `cli.resolve_config_path(args)` ([cli.py:411](../../../src/wastech_orchestrator/cli.py#L411)) — used by all commands that load the configuration (via `load_config_for`, [cli.py:594](../../../src/wastech_orchestrator/cli.py#L594)).
 
 ## Inputs and State
 
-Repository root and configuration path (both normalized to absolute paths). State is `registry.json` (`{version, bindings}`) in `$WASTECH_ORCHESTRATOR_HOME` or the per-user config directory (`platformdirs`).
+The parsed CLI args (for `--config`) and the current working directory. No persistent state — discovery is recomputed on every call.
 
 ## Main Scenario
 
-- `bind`: read the map, add/replace `repo_root → config_path` (absolute paths), write atomically.
-- `lookup`: read the map, return the path or `None`.
-- `resolve_config_path`: return `--config` if set, otherwise `./config.yaml` (if it exists), otherwise `registry.lookup(git_info.root)`, otherwise `None`.
+`resolve_config_path`: return `--config` if set; otherwise call `detect.git_info(cwd)` and, if inside a repository, return `<root>/.worc/config.yaml` when that file exists; otherwise `None`.
 
 Configuration path resolution source priority:
 
@@ -43,49 +38,43 @@ Configuration path resolution source priority:
 flowchart TB
     start(["resolve_config_path(args)"]) --> c1{"--config provided?"}
     c1 -->|yes| r1["return --config"]
-    c1 -->|no| c2{"./config.yaml exists?"}
-    c2 -->|yes| r2["return ./config.yaml"]
-    c2 -->|no| c3{"repository root found<br/>and binding exists in registry?"}
-    c3 -->|yes| r3["return registry.lookup(root)"]
-    c3 -->|no| r4["None → caller prints hint about install / --config"]
+    c1 -->|no| c2{"inside a Git repo<br/>and &lt;root&gt;/.worc/config.yaml exists?"}
+    c2 -->|yes| r2["return &lt;root&gt;/.worc/config.yaml"]
+    c2 -->|no| r3["None → caller prints hint about install / --config"]
 ```
 
 ## Checks and Constraints
 
-- Keys are normalized to absolute paths (resolves symlinks/case) ([registry.py:44-46](../../../src/wastech_orchestrator/install/registry.py#L44)).
-- Writes are atomic (temp + `os.replace`); reads are **forward-tolerant**: ignores `version`, missing/corrupt → `{}` (config discovery must not fail on a registry from a newer version) ([registry.py:49-85](../../../src/wastech_orchestrator/install/registry.py#L49)).
-- No secrets are stored — only paths.
+- The candidate is `<git-root>/.worc/config.yaml`; it is returned only when it is an existing file. There is no `./config.yaml` fallback and no registry lookup.
 
 ## Output
 
-Path to `config.yaml` (or `None`); updated `registry.json`.
+Path to `config.yaml` (or `None`).
 
 ## Side Effects
 
-- Read/write `registry.json` in the user config directory. No secrets.
+- None — discovery reads only `git_info` (read-only git probes via [B03 detect](./B03-installer-and-scaffolding.md)) and a file-existence check.
 
 ## Errors and Edge Cases
 
-- Missing/corrupt registry → empty map (no error).
-- `resolve_config_path` outside a git repository with no `./config.yaml`/`--config` → `None` (caller prints hint).
+- Outside a Git repository, or no `<root>/.worc/config.yaml`, with no `--config` → `None` (the caller prints an install/`--config` hint).
 
 ## Relations
 
 ### Uses
 
-- `platformdirs`; [B03 detect.git_info](./B03-installer-and-scaffolding.md) (in `resolve_config_path`).
+- [B03 detect.git_info](./B03-installer-and-scaffolding.md) (in `resolve_config_path`).
 
 ### Used by
 
 - [B01 — CLI](./B01-cli-and-operator-commands.md) — `resolve_config_path` in all commands that load the configuration.
-- [B03 — Installer](./B03-installer-and-scaffolding.md) — `bind` during `install`.
 
 ## Role in the Overall System
 
-The link between installation and subsequent commands: `install` writes the binding, and any command can then find the configuration from any subdirectory of the repository. Read tolerance keeps config discovery stable across versions.
+The link between installation and subsequent commands: `install` writes `<repo>/.worc/config.yaml`, and any command then re-discovers it from any subdirectory of the repository by walking up to the Git root — no binding to maintain.
 
 ## Code Confirmation
 
-- [install/registry.py:31-104](../../../src/wastech_orchestrator/install/registry.py#L31) — paths, read/write, bind/lookup/unbind.
-- [cli.py:549-565](../../../src/wastech_orchestrator/cli.py#L549) — `resolve_config_path` (source priority).
-- Tests: [tests/install/test_registry.py](../../../tests/install/test_registry.py), [tests/test_cli_config_discovery.py](../../../tests/test_cli_config_discovery.py) — roundtrip bind/lookup, normalization, versioned JSON, tolerance for corrupt file, resolution priority.
+- [cli.py:411-427](../../../src/wastech_orchestrator/cli.py#L411) — `resolve_config_path` (source priority, `.worc/config.yaml` discovery).
+- [cli.py:594-603](../../../src/wastech_orchestrator/cli.py#L594) — `load_config_for` (resolve + the install/`--config` hint).
+- Tests: [tests/test_cli_config_discovery.py](../../../tests/test_cli_config_discovery.py) — resolution priority and the walk-up to `.worc/config.yaml`.

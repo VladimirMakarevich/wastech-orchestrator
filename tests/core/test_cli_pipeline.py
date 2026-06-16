@@ -154,12 +154,9 @@ def _write_cli_config(
     codex_cmd: str,
     create_pr: bool = False,
     auto_mode: bool = False,
-    location: str = "external",
-    tracking: str = "none",
 ) -> Path:
     env = ["PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "TEMP", "TMP", "APPDATA", "LOCALAPPDATA"]
     env_lines = "\n".join(f"    - {e}" for e in env)
-    external = project / "external"
     config = project / "config.yaml"
     config.write_text(
         f"""
@@ -196,10 +193,6 @@ checks:
 git:
   create_pull_request: {str(create_pr).lower()}
   pr_base: "main"
-  footprint:
-    location: {location}
-    tracking: {tracking}
-    external_root: {str(external)!r}
 """,
         encoding="utf-8",
     )
@@ -246,10 +239,10 @@ def test_cmd_run_happy_path(
     branch = "agent/task-100-add-a-thing"
     committed = git_run(["show", "--name-only", "--format=", branch], git_repo.clone)
     assert "agent_change.py" in committed
-    # Artifacts + exactly one ledger record under the external root.
-    external = project / "external"
-    assert (external / "logs" / "task-100" / "summary.md").exists()
-    ledger_lines = (external / "logs" / "completed.jsonl").read_text(encoding="utf-8").splitlines()
+    # Artifacts + exactly one ledger record under the gitignored .worc/ home in the repo.
+    worc = git_repo.clone / ".worc"
+    assert (worc / "logs" / "task-100" / "summary.md").exists()
+    ledger_lines = (worc / "logs" / "completed.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(ledger_lines) == 1
     assert json.loads(ledger_lines[0])["final_status"] == "done"
     # The task file moved into its lifecycle folder (done), out of the project root.
@@ -285,8 +278,6 @@ def test_in_repo_commit_stores_task_and_summary_not_logs(
         git_repo.clone,
         claude_cmd=claude_cmd,
         codex_cmd=codex_cmd,
-        location="in_repo",
-        tracking="commit",
     )
     # The task lives in the repo's own tasks/pending (how a teammate hands work over via git).
     task_file = git_repo.clone / "tasks" / "pending" / "task-300.md"
@@ -302,13 +293,13 @@ def test_in_repo_commit_stores_task_and_summary_not_logs(
     assert "tasks/done/task-300.md" in tracked  # task moved into done/ and committed
     assert "tasks/done/task-300.summary.md" in tracked  # summary committed next to the task
     assert "agent_change.py" in tracked  # the code change
-    assert "logs/" not in tracked  # plan/review/stage-logs/summary.json never enter git
+    assert ".worc/" not in tracked  # plan/review/stage-logs/summary.json never enter git
     # Code and task lifecycle are distinct commits on the branch.
     subjects = git_run(["log", "--format=%s", "main.." + branch], git_repo.clone)
     assert "feat(task-300)" in subjects
     assert "audit trail for task-300" in subjects
-    # summary.json stays a local-only working artifact in logs/.
-    assert (git_repo.clone / "logs" / "task-300" / "summary.json").exists()
+    # summary.json stays a local-only working artifact under .worc/logs/.
+    assert (git_repo.clone / ".worc" / "logs" / "task-300" / "summary.json").exists()
 
 
 def test_cmd_status_reports_active_task(
@@ -322,7 +313,7 @@ def test_cmd_status_reports_active_task(
         claude_cmd="claude",
         codex_cmd="codex",
     )
-    db_path = project / "external" / "state.db"
+    db_path = git_repo.clone / ".worc" / "state.db"
     store = StateStore.open(db_path)
     store.insert_task(
         TaskRow(
@@ -357,8 +348,8 @@ def test_cmd_run_rejected_task(git_repo, tmp_path: Path) -> None:
 
     code = cli.main(["--config", str(config), "run", str(bad)])
     assert code == 1  # failed
-    external = project / "external"
-    report = external / "logs" / "task-bad" / "validation_report.json"
+    worc = git_repo.clone / ".worc"
+    report = worc / "logs" / "task-bad" / "validation_report.json"
     assert report.exists()
     assert json.loads(report.read_text(encoding="utf-8"))["reason"] == "frontmatter_missing"
     # Quarantined, and no branch was created.
@@ -366,27 +357,32 @@ def test_cmd_run_rejected_task(git_repo, tmp_path: Path) -> None:
 
 
 def test_cmd_watch_auto_mode_two_tasks(
-    git_repo, fake_cli, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    git_repo, fake_cli, git_run, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     project = tmp_path / "project"
-    external = project / "external"
-    # watch scans tasks/pending under the artifact root (external_root), not the cwd (§21).
-    (external / "tasks" / "pending").mkdir(parents=True)
+    project.mkdir()
+    # watch scans tasks/pending at the repo root (the tracked audit trail), not the cwd (§21).
+    (git_repo.clone / "tasks" / "pending").mkdir(parents=True)
     claude_cmd = fake_cli("success_edit", "claude")
     codex_cmd = fake_cli("success_edit", "codex")
     config = _write_cli_config(
         project, git_repo.clone, claude_cmd=claude_cmd, codex_cmd=codex_cmd, auto_mode=True
     )
     for tid in ("task-201", "task-202"):
-        _complete_task_file(external / "tasks" / "pending" / f"{tid}.md", tid)
+        _complete_task_file(git_repo.clone / "tasks" / "pending" / f"{tid}.md", tid)
 
     monkeypatch.chdir(project)
     code = cli.main(["--config", str(config), "watch"])
     assert code == 0
-    ledger_lines = (external / "logs" / "completed.jsonl").read_text(encoding="utf-8").splitlines()
+    worc = git_repo.clone / ".worc"
+    ledger_lines = (worc / "logs" / "completed.jsonl").read_text(encoding="utf-8").splitlines()
     ids = {json.loads(line)["id"] for line in ledger_lines}
     assert ids == {"task-201", "task-202"}  # both ran sequentially under auto mode
-    # Both task files moved out of pending into tasks/done under the artifact root (§20.2, §21).
+    # Each task left pending and was audit-committed (task + summary) on its own agent branch; the
+    # working tree is back on base, so the committed files live in git history, not on disk (§20.2).
     for tid in ("task-201", "task-202"):
-        assert (external / "tasks" / "done" / f"{tid}.md").exists()
-        assert not (external / "tasks" / "pending" / f"{tid}.md").exists()
+        assert not (git_repo.clone / "tasks" / "pending" / f"{tid}.md").exists()
+        branch = f"agent/{tid}-add-a-thing"
+        tracked = git_run(["ls-tree", "-r", "--name-only", branch], git_repo.clone)
+        assert f"tasks/done/{tid}.md" in tracked
+        assert f"tasks/done/{tid}.summary.md" in tracked

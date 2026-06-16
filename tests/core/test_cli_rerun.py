@@ -56,10 +56,6 @@ checks:
 git:
   create_pull_request: {str(create_pr).lower()}
   pr_base: "main"
-  footprint:
-    location: external
-    tracking: none
-    external_root: {str(project / "external")!r}
 """,
         encoding="utf-8",
     )
@@ -75,8 +71,8 @@ def _complete_task_file(path: Path, task_id: str) -> None:
     )
 
 
-def _ledger_records(project: Path) -> list[dict]:
-    path = project / "external" / "logs" / "completed.jsonl"
+def _ledger_records(clone: Path) -> list[dict]:
+    path = clone / ".worc" / "logs" / "completed.jsonl"
     if not path.exists():
         return []
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -102,7 +98,7 @@ def test_real_failure_persists_interrupted_status(git_repo, fake_cli, tmp_path: 
     code = cli.main(["--config", str(config), "--heartbeat-seconds", "0", "run", str(task_file)])
     assert code == 1  # failed
 
-    store = StateStore.open_readonly(project / "external" / "state.db")
+    store = StateStore.open_readonly(git_repo.clone / ".worc" / "state.db")
     row = store.get_task("task-700")
     store.close()
     assert row is not None and row.status is Status.FAILED
@@ -121,7 +117,7 @@ def test_rerun_fresh_failed_to_done(git_repo, fake_cli, git_run, tmp_path: Path)
         claude=fake_cli("success_edit", "claude"),
         codex=fake_cli("success_edit", "codex"),
     )
-    external = project / "external"
+    external = git_repo.clone / ".worc"
 
     # Seed the bookkeeping of a prior pre-publish failure: a FAILED row + ledger line, a stale
     # *local* branch (never pushed), and a stale artifact under logs/<id>/.
@@ -157,7 +153,7 @@ def test_rerun_fresh_failed_to_done(git_repo, fake_cli, git_run, tmp_path: Path)
     assert code == 0  # done
 
     # Two linked ledger records: the prior failure preserved, the rerun marked attempt 2.
-    records = _ledger_records(project)
+    records = _ledger_records(git_repo.clone)
     assert len(records) == 2
     assert records[0]["final_status"] == "failed"
     assert records[1]["final_status"] == "done"
@@ -184,7 +180,7 @@ def test_rerun_fresh_failed_to_done(git_repo, fake_cli, git_run, tmp_path: Path)
 
 def _seed(project: Path, clone: Path, row: TaskRow) -> Path:
     config = _write_config(project, clone, claude="claude", codex="codex")
-    db = project / "external" / "state.db"
+    db = clone / ".worc" / "state.db"
     db.parent.mkdir(parents=True, exist_ok=True)
     store = StateStore.open(db)
     store.insert_task(row)
@@ -246,11 +242,11 @@ def test_rerun_dry_run_writes_nothing(
     out = capsys.readouterr().out
     assert "dry-run" in out
     # Nothing changed: still failed, no ledger record appended.
-    store = StateStore.open_readonly(project / "external" / "state.db")
+    store = StateStore.open_readonly(git_repo.clone / ".worc" / "state.db")
     row = store.get_task("task-1")
     store.close()
     assert row is not None and row.status is Status.FAILED
-    assert _ledger_records(project) == []
+    assert _ledger_records(git_repo.clone) == []
 
 
 # --- continue mode -----------------------------------------------------------------------
@@ -307,7 +303,7 @@ def test_rerun_continue_revives_then_delegates_to_resume(
     assert calls["resume"] == 1  # continue delegated to the resume engine
 
     # The row was revived to the failed stage with the terminal markers cleared, work preserved.
-    store = StateStore.open_readonly(project / "external" / "state.db")
+    store = StateStore.open_readonly(git_repo.clone / ".worc" / "state.db")
     row = store.get_task("task-1")
     store.close()
     assert row is not None
