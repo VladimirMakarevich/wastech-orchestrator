@@ -2,7 +2,7 @@
 
 Status: **backlog / not scheduled** Date: 2026-06-11 Owner: Vladimir Makarevich
 
-This document captures the idea of reducing token consumption in the orchestrator and the analysis behind it. It is a backlog item, not part of the v1 scope (see [worc_architecture.md](../worc_architecture.md) §2). Nothing here overrides the canonical reference (the [Functional Map](../functional/index.md)) or the hard invariants in [CLAUDE.md](../../CLAUDE.md) and [docs/rules/](../rules/).
+This document captures the idea of reducing token consumption in the orchestrator and the analysis behind it. It is a backlog item, not part of the v1 scope (see [worc_architecture.md](../worc_architecture.md) §2). Nothing here overrides the canonical reference (the [Functional Map](../functional/index.md)) or the hard invariants in [CLAUDE.md](../../CLAUDE.md) and [.agents/rules/](../../.agents/rules/).
 
 ## 1. Goal
 

@@ -1,4 +1,4 @@
-"""Secret redaction (spec §12.6, docs/rules/security.md).
+"""Secret redaction (spec §12.6, .agents/rules/security.md).
 
 Pure functions that scrub known-secret shapes from text and from the request representation
 **before** anything is written to an artifact, log, or SQLite. There are two inputs:

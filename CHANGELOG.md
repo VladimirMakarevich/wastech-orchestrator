@@ -57,6 +57,7 @@ The maintainer bumps the package version in `pyproject.toml` on release; `wastec
 - The package version is now derived from the Git tag via `hatch-vcs` (`pyproject.toml` has no static `version`); between tags, builds get a dev version like `0.1.0a1.dev3+g<sha>`.
 - `watch` reads `tasks/pending` from the configured artifact root, not the current directory, so it works from anywhere inside an installed project (under the in-repo footprint default that root is the bound repo itself).
 - A backward-incompatible `config.yaml` / `state.db` now fails loud at the CLI boundary (exit 2) rather than surfacing as a traceback.
+- **Moved the development rules from `docs/rules/` to `.agents/rules/`** (`architecture.md`, `coding-style.md`, `git-workflow.md`, `security.md`, `testing.md`). All references were repointed — root instructions (`CLAUDE.md`/`AGENTS.md`), `README.md`, the other `docs/`, the `.claude/` skills, and in-code docstrings — and the docs-sync Stop-hook (`docs_sync_gate.py`) now also counts a change under `.agents/` as a documentation change. Docs-only relocation; no runtime behavior change.
 
 ### Fixed
 

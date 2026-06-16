@@ -3,7 +3,7 @@
 A child process started by the orchestrator receives **only** the environment variables named in
 ``security.allowed_environment`` that are present in the parent environment — never the parent's
 full environment. No secret or token is ever forwarded implicitly; git/agent credentials are
-configured outside the orchestrator (§12.9, docs/rules/security.md).
+configured outside the orchestrator (§12.9, .agents/rules/security.md).
 
 This module has no provider knowledge and is reused by every adapter (P2/P3) and the Check
 Runner (P5).

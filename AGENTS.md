@@ -2,12 +2,12 @@
 
 You are working on **wastech-orchestrator** — an orchestrator that launches coding agents (Codex / Claude Code) to carry out development tasks and publish the result to Git.
 
-This file is for Codex. The full set of rules matches [CLAUDE.md](CLAUDE.md) and [docs/rules/](docs/rules/); below is the gist.
+This file is for Codex. The full set of rules matches [CLAUDE.md](CLAUDE.md) and [.agents/rules/](.agents/rules/); below is the gist.
 
 ## Before writing code
 
 1. Read the **[Functional Map](docs/functional/index.md)** (`docs/functional/`) — the code-derived reference (source of truth is the code; [docs/worc_architecture.md](docs/worc_architecture.md) gives the design rationale).
-2. Follow the rules in **[docs/rules/](docs/rules/)**: `architecture.md`, `coding-style.md`, `security.md`, `git-workflow.md`, `testing.md`.
+2. Follow the rules in **[.agents/rules/](.agents/rules/)**: `architecture.md`, `coding-style.md`, `security.md`, `git-workflow.md`, `testing.md`.
 
 ## Hard invariants (must not be violated)
 

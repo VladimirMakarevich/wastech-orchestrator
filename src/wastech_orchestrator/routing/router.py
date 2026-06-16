@@ -9,7 +9,7 @@ The layer between the (future) Orchestrator Core and the provider adapters. For 
 * counts ``stage_attempts`` across the fallback, bounded by ``agents.max_stage_attempts`` (§8.1);
 * exposes the §7.4 partial-change diff to the fallback without ever rolling back.
 
-Invariants (docs/rules/architecture.md): the Router depends **only** on the ``AgentProvider``
+Invariants (.agents/rules/architecture.md): the Router depends **only** on the ``AgentProvider``
 contract — no CLI syntax, no provider internals — and it changes no state-machine state. It is
 stateless beyond the :class:`StageOutcome` it returns; persistence and transitions are the Core's
 job (P5). A quality ``AgentRunResult(status=failed)`` is never a fallback trigger; only a raised

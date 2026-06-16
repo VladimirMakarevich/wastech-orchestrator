@@ -1,4 +1,4 @@
-"""Front-matter injection scanner (spec §19.5, §6.2, docs/rules/security.md).
+"""Front-matter injection scanner (spec §19.5, §6.2, .agents/rules/security.md).
 
 The structural guarantee comes first: task content reaches providers **only as file paths** in
 :class:`~wastech_orchestrator.providers.base.AgentRunRequest` (``task_path``, ``plan_path``, …). No

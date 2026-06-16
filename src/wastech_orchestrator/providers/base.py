@@ -151,7 +151,7 @@ class AgentProvider(Protocol):
 
     Adapters implement this protocol. They do NOT perform fallback and do NOT change the
     state machine — that is the responsibility of the Router and Core (see
-    docs/rules/architecture.md).
+    .agents/rules/architecture.md).
     """
 
     id: str

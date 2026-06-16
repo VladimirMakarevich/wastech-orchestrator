@@ -26,4 +26,4 @@ Run the full set of checks for the wastech-orchestrator repository.
 ## Rules
 
 - Do not disable linter/type-checking rules just to get a "green" run — fix the cause.
-- Do not commit while checks are red (see docs/rules/testing.md, git-workflow.md).
+- Do not commit while checks are red (see .agents/rules/testing.md, git-workflow.md).

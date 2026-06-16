@@ -209,10 +209,10 @@ src/wastech_orchestrator/
   worc/                   # agent task-authoring guide copied beside config.yaml by `init`/`install`
 docs/                     # functional map, architecture, operations, cookbook, configuration, task authoring, rules, backlog
   worc/                   # authored source for the packaged worc/ guide (kept in sync by a test)
-tests/                    # unit / integration / e2e (see docs/rules/testing.md)
+tests/                    # unit / integration / e2e (see .agents/rules/testing.md)
 ```
 
-Coding agents working _in this repo_ follow [CLAUDE.md](CLAUDE.md) (Claude Code) and [AGENTS.md](AGENTS.md) (Codex), and the rules under [docs/rules/](docs/rules/).
+Coding agents working _in this repo_ follow [CLAUDE.md](CLAUDE.md) (Claude Code) and [AGENTS.md](AGENTS.md) (Codex), and the rules under [.agents/rules/](.agents/rules/).
 
 ---
 
@@ -227,7 +227,7 @@ Coding agents working _in this repo_ follow [CLAUDE.md](CLAUDE.md) (Claude Code)
 | [docs/task-authoring.md](docs/task-authoring.md) | How to write valid task files and avoid validation rejects. |
 | [docs/telegram.md](docs/telegram.md) | Bot/chat setup, environment config, preflight, live smoke test, and troubleshooting. |
 | [docs/worc_architecture.md](docs/worc_architecture.md) | High-level architecture overview and the rationale behind the design. |
-| [docs/rules/](docs/rules/) | Development rules: style, architectural invariants, security, git-flow, testing. |
+| [.agents/rules/](.agents/rules/) | Development rules: style, architectural invariants, security, git-flow, testing. |
 | [docs/backlog/](docs/backlog/) | Deferred features and tracked follow-ups. |
 | [CHANGELOG.md](CHANGELOG.md) | Release notes and the `config.yaml` / `state.db` / registry schema versions. |
 

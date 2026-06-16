@@ -4,8 +4,8 @@ Builds a plain dict mirroring the packaged ``config.example.yaml`` — only the 
 absolute native paths, routing derived from the provider selection, and **immutable safe security
 defaults** — then renders it with PyYAML. ``build_and_validate`` round-trips the rendered text back
 through the loader and the semantic validator, so the installer can never emit a config that is
-structurally broken, contradictory, or that weakens the sandbox (docs/rules/security.md). No secrets
-are ever written.
+structurally broken, contradictory, or that weakens the sandbox (.agents/rules/security.md).
+No secrets are ever written.
 """
 
 from __future__ import annotations

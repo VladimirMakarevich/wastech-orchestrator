@@ -2,8 +2,8 @@
 
 Enforces every §11 / §21.4 semantic rule so an unsafe or contradictory config never reaches the
 pipeline. This is the config-time half of the "security cannot be weakened" invariant
-(docs/rules/security.md): ``extra_args`` that would disable the sandbox/approvals are rejected here.
-The adversarial test matrix lives in P6.
+(.agents/rules/security.md): ``extra_args`` that would disable the sandbox/approvals are
+rejected here. The adversarial test matrix lives in P6.
 
 All problems are collected and raised together via the typed :class:`ConfigError` from the loader.
 """

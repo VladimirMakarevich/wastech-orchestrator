@@ -5,7 +5,7 @@ description: Scaffold deterministic fake CLI executables and pytest fixtures tha
 
 # fake-cli
 
-Create stub "CLI" executables and the pytest plumbing that point a provider's `command` at them, so integration tests exercise the adapters/router/pipeline without the real Codex or Claude — no network, fully deterministic ([testing.md](../../../docs/rules/testing.md)).
+Create stub "CLI" executables and the pytest plumbing that point a provider's `command` at them, so integration tests exercise the adapters/router/pipeline without the real Codex or Claude — no network, fully deterministic ([testing.md](../../../.agents/rules/testing.md)).
 
 ## Scenarios to cover
 

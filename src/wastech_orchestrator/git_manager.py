@@ -1,4 +1,4 @@
-"""Git Manager (spec §21, docs/rules/git-workflow.md).
+"""Git Manager (spec §21, .agents/rules/git-workflow.md).
 
 The **only** component that commits, pushes, or opens pull requests — agents never do. Every git
 and ``gh`` invocation goes through the P2 safe process runner as an **argv list** (no shell string,

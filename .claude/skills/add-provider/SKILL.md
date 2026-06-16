@@ -13,7 +13,7 @@ Read:
 
 - `src/wastech_orchestrator/providers/base.py` — the `AgentProvider` contract, the request/result structures, and the error classes;
 - `orchestrator_final_plan.md` §4.3, §4.4, §7 — the adapter's responsibilities and error normalization;
-- `docs/rules/architecture.md` and `docs/rules/security.md` — the invariants.
+- `.agents/rules/architecture.md` and `.agents/rules/security.md` — the invariants.
 
 ## Steps
 
@@ -31,7 +31,7 @@ Read:
    - structured output (JSONL / stream-json) → `structured_output`;
    - stdout/stderr/event log → artifact paths (spec §10), redacted request artifact.
 4. **Forbidden** in the adapter: fallback, changing the state machine, commit/push/PR.
-5. Tests (see docs/rules/testing.md):
+5. Tests (see .agents/rules/testing.md):
    - unit: command builder, output parsing, error classification;
    - integration: a fake CLI executable for the success/timeout/crash/malformed/auth-fail scenarios.
 6. Run `/run-checks`.

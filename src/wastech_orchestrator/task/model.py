@@ -15,7 +15,7 @@ from wastech_orchestrator.providers.base import ProviderId, Stage
 
 # A task id is strict and normalized (spec §19.3): a lowercase alphanumeric first char, then up to
 # 63 of [a-z0-9._-]; no whitespace, no leading dot/separator, 1..64 chars. Invalid ids are rejected,
-# never sanitized (docs/rules/security.md). Shared source of truth for P1 and the P5 parser.
+# never sanitized (.agents/rules/security.md). Shared source of truth for P1 and the P5 parser.
 TASK_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 
 # Front-matter schema (spec §5, §19.3).

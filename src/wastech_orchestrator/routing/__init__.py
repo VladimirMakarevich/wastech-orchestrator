@@ -2,7 +2,7 @@
 
 The Agent Router resolves the primary/fallback provider per stage and performs infrastructure-only
 fallback between them. It depends solely on the ``AgentProvider`` contract (no CLI syntax) and
-changes no state-machine state — see docs/rules/architecture.md.
+changes no state-machine state — see .agents/rules/architecture.md.
 """
 
 from __future__ import annotations

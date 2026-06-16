@@ -1,6 +1,6 @@
 # Security rules
 
-The source of truth is the code (`src/wastech_orchestrator/security/`); see the [Functional Map](../functional/index.md). These rules must not be violated; the configuration validator is required to reject unsafe settings.
+The source of truth is the code (`src/wastech_orchestrator/security/`); see the [Functional Map](../../docs/functional/index.md). These rules must not be violated; the configuration validator is required to reject unsafe settings.
 
 ## Isolation
 
@@ -31,4 +31,4 @@ The source of truth is the code (`src/wastech_orchestrator/security/`); see the 
 
 ## Control layer
 
-16. The Pull Request and CI remain the mandatory control layer **by default**: the orchestrator always publishes through a PR and never weakens it. Opt-in auto-merge ([configuration.md](../configuration.md), `git.auto_merge`) is implemented but **off by default** (`git.auto_merge: false`), affects **only** the publish step, and cannot weaken the security policy — the mid-pipeline dangerous-diff approval gate (§14) still fires, auto-merge runs only after checks pass with no blocking findings, it respects branch protection (never `--admin`; a merge failure → `manual_action_required`), and a per-task `auto_merge: true` is honored only when the operator set `git.auto_merge_allow_per_task` (a per-task `false` always opts out).
+16. The Pull Request and CI remain the mandatory control layer **by default**: the orchestrator always publishes through a PR and never weakens it. Opt-in auto-merge ([configuration.md](../../docs/configuration.md), `git.auto_merge`) is implemented but **off by default** (`git.auto_merge: false`), affects **only** the publish step, and cannot weaken the security policy — the mid-pipeline dangerous-diff approval gate (§14) still fires, auto-merge runs only after checks pass with no blocking findings, it respects branch protection (never `--admin`; a merge failure → `manual_action_required`), and a per-task `auto_merge: true` is honored only when the operator set `git.auto_merge_allow_per_task` (a per-task `false` always opts out).

@@ -4,7 +4,7 @@
 When a turn ends with code changed under ``src/`` but no docs/CHANGELOG change, this blocks the stop
 once and reminds Claude to sync the docs (or to state that the change has no doc impact). It is the
 deterministic backstop for the "keep docs in sync" rule in
-CLAUDE.md / docs/rules/git-workflow.md; the *how* lives in the ``/sync-docs`` skill.
+CLAUDE.md / .agents/rules/git-workflow.md; the *how* lives in the ``/sync-docs`` skill.
 
 A loop guard (``stop_hook_active``) surfaces the reminder at most once per stop-cycle — it never
 spins. Cross-platform and side-effect-free: it only reads ``git status`` (fixed argv, no shell) and
@@ -49,7 +49,9 @@ def _changed_paths() -> list[str]:
 def _should_block(paths: list[str]) -> bool:
     """True when code under ``src/`` changed but no docs/CHANGELOG/README did (pure, testable)."""
     code_changed = any(p.startswith("src/") for p in paths)
-    docs_changed = any(p.startswith("docs/") or p in _DOC_FILES for p in paths)
+    docs_changed = any(
+        p.startswith("docs/") or p.startswith(".agents/") or p in _DOC_FILES for p in paths
+    )
     return code_changed and not docs_changed
 
 

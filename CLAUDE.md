@@ -5,12 +5,12 @@ You are working on **wastech-orchestrator** — an orchestrator that launches co
 ## Before writing code
 
 1. Read the **[Functional Map](docs/functional/index.md)** (`docs/functional/`) — the canonical, code-derived reference for the system's purpose, blocks, invariants, and flows. The code in `src/wastech_orchestrator/` is the source of truth; [docs/worc_architecture.md](docs/worc_architecture.md) gives the design rationale.
-2. Check against the rules in **[docs/rules/](docs/rules/)** — they are mandatory:
-   - [architecture.md](docs/rules/architecture.md) — invariants that must not be violated
-   - [coding-style.md](docs/rules/coding-style.md) — Python style
-   - [security.md](docs/rules/security.md) — security policy
-   - [git-workflow.md](docs/rules/git-workflow.md) — branches, commits, PRs
-   - [testing.md](docs/rules/testing.md) — what to test and how
+2. Check against the rules in **[.agents/rules/](.agents/rules/)** — they are mandatory:
+   - [architecture.md](.agents/rules/architecture.md) — invariants that must not be violated
+   - [coding-style.md](.agents/rules/coding-style.md) — Python style
+   - [security.md](.agents/rules/security.md) — security policy
+   - [git-workflow.md](.agents/rules/git-workflow.md) — branches, commits, PRs
+   - [testing.md](.agents/rules/testing.md) — what to test and how
 
 ## Hard invariants (must not be violated)
 
@@ -42,8 +42,8 @@ There is a skill for running all checks: `/run-checks`.
 ## Working style
 
 - Make minimal, focused changes; follow the style of the surrounding code.
-- For new components, check against the contracts in the [Functional Map](docs/functional/index.md) and [docs/rules/architecture.md](docs/rules/architecture.md).
-- When adding/changing behavior — add or update tests (see docs/rules/testing.md).
+- For new components, check against the contracts in the [Functional Map](docs/functional/index.md) and [.agents/rules/architecture.md](.agents/rules/architecture.md).
+- When adding/changing behavior — add or update tests (see .agents/rules/testing.md).
 - When you change behavior/CLI/config/architecture — update the affected docs and a `CHANGELOG.md` `[Unreleased]` entry **in the same change** (use `/sync-docs`), and record deferred work in [docs/backlog/follow_ups.md](docs/backlog/follow_ups.md). The Stop docs-sync gate enforces this.
 - **Markdown docs are not hard-wrapped.** Write prose as one paragraph per line (rely on editor soft-wrap); never insert manual mid-paragraph line breaks. Formatting is enforced by Prettier (`proseWrap: never`, `.prettierrc.json`) — run `npx prettier@3 --write "**/*.md"` after editing docs. `logs/`, `tasks/`, `src/`, and `docs/worc/` are excluded (`.prettierignore`); don't reformat them.
 - Before committing, run `ruff`, `mypy`, `pytest`.

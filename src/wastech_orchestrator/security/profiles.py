@@ -1,4 +1,4 @@
-"""Permission-profile strictness ordering (spec §7.2, docs/rules/security.md).
+"""Permission-profile strictness ordering (spec §7.2, .agents/rules/security.md).
 
 A small, provider-agnostic ordering over the permission profiles a stage can run under. The Agent
 Router (P4) uses it for the **conditional** fallback rule: ``authorization_failed`` /

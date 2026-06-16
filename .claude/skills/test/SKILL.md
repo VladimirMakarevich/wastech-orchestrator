@@ -5,7 +5,7 @@ description: Run and diagnose the wastech-orchestrator pytest suite during devel
 
 # test
 
-Run the project's automated tests to keep a working state and surface bugs _while_ developing. This is the fast inner loop; `/run-checks` is the full quality gate (ruff + format + mypy + pytest) you run before a commit, a PR, or a phase transition. The source of truth for _what_ to test is [docs/rules/testing.md](../../../docs/rules/testing.md) (spec §14).
+Run the project's automated tests to keep a working state and surface bugs _while_ developing. This is the fast inner loop; `/run-checks` is the full quality gate (ruff + format + mypy + pytest) you run before a commit, a PR, or a phase transition. The source of truth for _what_ to test is [.agents/rules/testing.md](../../../.agents/rules/testing.md) (spec §14).
 
 Argument (optional): a path, a `-k` expression, or a flag — e.g. `tests/config`, `-k footprint`, `--lf`, `--cov`. With no argument, run the whole suite.
 
