@@ -36,15 +36,16 @@ flow:
   output_policy: code_change
   publishing: pull_request
   nodes:
-    - { id: refine, kind: agent, role_file: roles/refine.md, permission_profile: workspace-write }
-    - { id: impl, kind: agent, role_file: roles/impl.md, permission_profile: workspace-write }
+    - { id: implementation, kind: agent, role_file: roles/implementation.md,
+        permission_profile: workspace-write }
     - { id: testing, kind: checks, checker: command_profile }
+    - { id: review, kind: evaluator, role: review, role_file: roles/review.md,
+        permission_profile: read-only }
     - { id: publish, kind: publish, policy: pull_request }
   edges:
-    - { from: refine, to: impl }
-    - { from: impl, to: testing }
-    - { from: testing, to: publish, outcome: pass }
-    - { from: testing, to: impl, outcome: fail, budget: 1 }
+    - { from: implementation, to: testing }
+    - { from: testing, to: review, outcome: pass }
+    - { from: review, to: publish, outcome: accept }
 """
 
 
@@ -121,8 +122,8 @@ def test_drive_flow_runs_tiny_flow_to_done(tmp_path: Path) -> None:
     flow_dir = tmp_path / "flow"
     (flow_dir / "roles").mkdir(parents=True)
     (flow_dir / "flow.yaml").write_text(_FLOW, encoding="utf-8")
-    (flow_dir / "roles" / "refine.md").write_text("refine {task_path}", encoding="utf-8")
-    (flow_dir / "roles" / "impl.md").write_text("implement {task_path}", encoding="utf-8")
+    (flow_dir / "roles" / "implementation.md").write_text("implement {task_path}", encoding="utf-8")
+    (flow_dir / "roles" / "review.md").write_text("review {diff_path}", encoding="utf-8")
 
     snapshot = load_flow(flow_dir / "flow.yaml")
     validate_flow(snapshot)
@@ -137,7 +138,7 @@ def test_drive_flow_runs_tiny_flow_to_done(tmp_path: Path) -> None:
         store=store,
         repo_dir=str(tmp_path / "repo"),
         artifacts_root=str(tmp_path),
-        stage_for_node={"refine": Stage.REFINEMENT, "impl": Stage.IMPLEMENTATION},
+        stage_for_node={"implementation": Stage.IMPLEMENTATION, "review": Stage.REVIEW},
         clock=lambda: "ts",
         git=_FakeGit(),
     )
@@ -158,7 +159,7 @@ def test_drive_flow_runs_tiny_flow_to_done(tmp_path: Path) -> None:
     assert result.status is Status.DONE
     assert result.final_node == "publish"
     recorded = [r.node_id for r in store.get_node_runs("task-1")]
-    assert recorded == ["refine", "impl", "testing", "publish"]
+    assert recorded == ["implementation", "testing", "review", "publish"]
     # The checkpoint persisted the terminal node + the flow fingerprint.
     current_node, _counters, fingerprint = store.get_flow_checkpoint("task-1")
     assert current_node == "publish"

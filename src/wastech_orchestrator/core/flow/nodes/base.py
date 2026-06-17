@@ -20,6 +20,7 @@ from typing import Protocol
 from wastech_orchestrator.check_runner import CheckOutcome
 from wastech_orchestrator.checks.model import ResolvedCheck
 from wastech_orchestrator.git_manager import ChangedPath
+from wastech_orchestrator.notify import AskHandle, AskKind, AskResult
 from wastech_orchestrator.providers.base import AgentRunRequest, Stage
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.routing.snapshots import SnapshotHook
@@ -98,6 +99,25 @@ class NodeRunStorePort(Protocol):
     def record_check_run(self, run: CheckRunRow, conn: object | None = None) -> None: ...
 
 
+class NotifierPort(Protocol):
+    """The slice of :class:`~wastech_orchestrator.notify.interface.Notifier` the durable HITL gate
+    uses: start one correlated prompt, then wait for the answer against the persisted deadline."""
+
+    def start_ask(
+        self,
+        *,
+        question: str,
+        context: str,
+        task_id: str,
+        kind: AskKind,
+        timeout_s: int,
+        interaction_id: str,
+        contacts: tuple[str, ...] = (),
+    ) -> AskHandle: ...
+
+    def wait_for_answer(self, handle: AskHandle) -> AskResult: ...
+
+
 class GitPort(Protocol):
     """The slice of :class:`~wastech_orchestrator.git_manager.GitManager` the node runners use.
 
@@ -139,6 +159,9 @@ class NodeServices:
     #: the orchestrator's git manager (it owns git; providers/flows never touch it). Set for any
     #: flow with a publish node or a workspace-write agent node (the dangerous-diff guard).
     git: GitPort | None = None
+    #: durable HITL transport (refinement/planning embedded HITL + dangerous-diff approval).
+    notifier: NotifierPort | None = None
+    ask_timeout_s: int = 0
 
 
 @dataclass
@@ -160,5 +183,7 @@ class NodeInputs:
     pr_title: str | None = None
     summary_body_path: str | None = None
     commit_message: str | None = None
+    #: notification recipients for HITL prompts (the task's contacts).
+    contacts: tuple[str, ...] = ()
     #: in-memory provider -> session id map (legacy parity; durable lineage is P2.2).
     session_ids: dict[str, str] = field(default_factory=dict)

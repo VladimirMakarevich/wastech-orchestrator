@@ -53,6 +53,17 @@ from wastech_orchestrator.routing.router import ResolvedRoute, RouteSource, Stag
 # -- fakes & builders ---------------------------------------------------------
 
 
+def _stage_outcome(route: ResolvedRoute, result: AgentRunResult | None) -> StageOutcome:
+    return StageOutcome(
+        route=route,
+        result=result,
+        provider_used=ProviderId.CODEX if result else None,
+        stage_attempts=1,
+        terminal_error=None,
+        attempts=(),
+    )
+
+
 class FakeRouter:
     def __init__(self, result: AgentRunResult | None) -> None:
         self._result = result
@@ -67,14 +78,7 @@ class FakeRouter:
         self, request: Any, route: ResolvedRoute, *, snapshot: Any = None
     ) -> StageOutcome:
         self.requests.append(request)
-        return StageOutcome(
-            route=route,
-            result=self._result,
-            provider_used=ProviderId.CODEX if self._result else None,
-            stage_attempts=1,
-            terminal_error=None,
-            attempts=(),
-        )
+        return _stage_outcome(route, self._result)
 
 
 class FakeCheckRunner:
@@ -243,16 +247,125 @@ def test_agent_dangerous_diff_goes_manual(tmp_path: Path) -> None:
 
 
 def test_agent_read_only_node_skips_diff_guard(tmp_path: Path) -> None:
+    # summary is a read-only agent node (non-HITL stage) -> simple path, no diff guard.
     (tmp_path / "r.md").write_text("go", "utf-8")
-    node = AgentNode(id="refine", kind="agent", role_file="r.md",
+    node = AgentNode(id="summary", kind="agent", role_file="r.md",
                      permission_profile=PermissionProfile.READ_ONLY)
     git = FakeGit()
-    services = _services(FakeRouter(_result()), FakeStore(), {"refine": Stage.REFINEMENT},
+    services = _services(FakeRouter(_result()), FakeStore(), {"summary": Stage.SUMMARY},
                          FakeCheckRunner(CheckOutcome(passed=True, runs=())), git=git)
     inputs = _inputs(tmp_path)
     AgentNodeRunner(services, inputs).run(node, _ctx(node))
     assert inputs.diff_path is None
     assert git.calls == []
+
+
+# -- embedded HITL (refinement / planning) ------------------------------------
+
+
+class FakeNotifier:
+    """Records the prompt and returns a programmed answer; satisfies NotifierPort."""
+
+    def __init__(self, result: Any) -> None:
+        self._result = result
+        self.asks: list[str] = []
+
+    def start_ask(self, *, question: str, context: str, task_id: str, kind: str,
+                  timeout_s: int, interaction_id: str, contacts: tuple[str, ...] = ()) -> Any:
+        from wastech_orchestrator.notify import AskHandle
+
+        self.asks.append(question)
+        return AskHandle(interaction_id=interaction_id, kind=kind, expires_at=1.0, message_id=1)
+
+    def wait_for_answer(self, handle: Any) -> Any:
+        return self._result
+
+
+def _refinement_node() -> AgentNode:
+    return AgentNode(id="refinement", kind="agent", role_file="r.md",
+                     permission_profile=PermissionProfile.READ_ONLY)
+
+
+def test_agent_hitl_no_signal_proceeds(tmp_path: Path) -> None:
+    (tmp_path / "r.md").write_text("refine", "utf-8")
+    node = _refinement_node()
+    router = FakeRouter(_result({"content": "done", "human_input": None}))
+    services = _services(router, FakeStore(), {"refinement": Stage.REFINEMENT},
+                         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+                         artifacts_root=str(tmp_path))
+    result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "done"
+
+
+def test_agent_hitl_question_round_trip(tmp_path: Path) -> None:
+    from wastech_orchestrator.notify import AskResult
+
+    (tmp_path / "r.md").write_text("refine", "utf-8")
+    node = _refinement_node()
+
+    class TwoShotRouter(FakeRouter):
+        """First run asks a question; the re-run (with the answer) proceeds cleanly."""
+
+        def __init__(self) -> None:
+            super().__init__(None)
+            self._n = 0
+
+        def run_stage(self, request: Any, route: Any, *, snapshot: Any = None) -> Any:
+            self._n += 1
+            signal = (
+                {"kind": "question", "question": "Which API?", "context": "",
+                 "risk": "clarification", "paths": []}
+                if self._n == 1
+                else None
+            )
+            return _stage_outcome(route, _result({"content": "ok", "human_input": signal}))
+
+        @property
+        def calls(self) -> int:
+            return self._n
+
+    router = TwoShotRouter()
+    notifier = FakeNotifier(AskResult(answered=True, text="use v2"))
+    services = NodeServices(
+        router=router,
+        check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        store=FakeStore(),
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path),
+        stage_for_node={"refinement": Stage.REFINEMENT},
+        clock=lambda: "ts",
+        notifier=notifier,
+        ask_timeout_s=60,
+    )
+    result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "done"
+    assert notifier.asks == ["Which API?"]
+    assert router.calls == 2  # initial run + re-run with the answer
+
+
+def test_agent_hitl_timeout_goes_manual(tmp_path: Path) -> None:
+    from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
+    from wastech_orchestrator.notify import AskResult
+
+    (tmp_path / "r.md").write_text("refine", "utf-8")
+    node = _refinement_node()
+    signal = {"kind": "question", "question": "?", "context": "", "risk": "clarification",
+              "paths": []}
+    router = FakeRouter(_result({"content": "ok", "human_input": signal}))
+    notifier = FakeNotifier(AskResult(answered=False, timed_out=True, failure="timeout"))
+    services = NodeServices(
+        router=router,
+        check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        store=FakeStore(),
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path),
+        stage_for_node={"refinement": Stage.REFINEMENT},
+        clock=lambda: "ts",
+        notifier=notifier,
+        ask_timeout_s=60,
+    )
+    with pytest.raises(NodeManualRequired):
+        AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
 
 
 # -- evaluator ----------------------------------------------------------------
