@@ -94,7 +94,7 @@ class NodeRunner(Protocol):
 
 ---
 
-## P1.2 — Обобщение resume / checkpoint ✓ Выполнено (аддитивно; recovery-диспетчеризация — в P1.4)
+## P1.2 — Обобщение resume / checkpoint ◑ Слой персистенции выполнен (resume/recovery-тесты — в P1.4)
 
 Статус (2026-06-17): реализовано **аддитивно** — `node_runs` и родовой `RUNNING` добавлены **рядом** с legacy `stage_runs`/гранулярными статусами, которые остаются до P1.5 (golden-harness P1.4 гоняет обе модели бок о бок, поэтому legacy `_drive` не должен сломаться раньше). Сделано: `state.db` **v4** ([state_store.py](../../../src/wastech_orchestrator/state_store.py)) — таблица `node_runs` + `NodeRunRow` + `record_node_run`/`complete_node_run`/`record_node_skip`/`get_node_runs` + колонки `tasks.current_node`/`flow_run_counters`/`flow_fingerprint` + `save_flow_checkpoint`/`get_flow_checkpoint` (всё через guarded `_migrate`); [`core/flow/recorder.py`](../../../src/wastech_orchestrator/core/flow/recorder.py) — `StateStoreRunRecorder` (реализует `RunRecorder`) + `hydrate_run_state` (resume доверяет сохранённому `flow_fingerprint`, не переразрешает flow); родовой `Status.RUNNING` ([state_machine.py](../../../src/wastech_orchestrator/core/state_machine.py), аддитивно); flow-нейтральный `ledger.write_failure_report` (опциональный `node_id`); движок резюмирует с гидратированного `current_node`. Тесты — `tests/state/test_node_runs.py`, `tests/core/test_flow_recorder.py`, `test_flow_engine.py::test_engine_resumes_at_current_node`. **Отложено в P1.4** (сцеплено с вплетением движка в `run_task`/`resume`): переписывание `RecoveryReconciler` на per-node-progress, decomposed-resume и `rerun --continue` по `interrupted_node`. Удаление гранулярных статусов/`stage_runs`/dispatch-on-status — в P1.5.
 
@@ -168,7 +168,7 @@ Resume по произвольному графу идемпотентен; life
 
 ---
 
-## P1.3 — Обёртки core-owned узлов (без смены механики) ◑ Частично (agent/evaluator/checks + prompt)
+## P1.3 — Обёртки core-owned узлов (без смены механики) ✓ Ядро выполнено (prompt_audit/heartbeat — в P1.4)
 
 Статус (2026-06-17): реализован агентно-детерминированный костяк P1.3 — сборка промпта из `role_file` и три обёртки (agent/evaluator/checks), все тонкие адаптеры над инъектированными коллабораторами, юнит-тесты на фейках. Сделано: [`core/flow/prompt.py`](../../../src/wastech_orchestrator/core/flow/prompt.py) (`render_role_prompt`/`read_role_file` — `role_file` как источник шаблона, path-containment, `render_prompt` неизменён; в `ALLOWED_PROMPT_VARS` добавлен `repo` — единый allowlist); [`core/flow/nodes/`](../../../src/wastech_orchestrator/core/flow/nodes/) — `base.py` (`NodeServices`/`NodeInputs` контракты + `NodeInfraError`, коллабораторы как `Protocol`-порты), `agent.py` (`AgentNodeRunner` → router, строит `AgentRunRequest` из узла+inputs, infra-exhaustion → `NodeInfraError`), `evaluator.py` (`EvaluatorNodeRunner` `role=review` → accept/rework/done, паритет `_is_blocking`), `checks.py` (`ChecksNodeRunner` → `CheckRunner`, pass/fail, launch_failed → `CheckLaunchError`). Обёртки конструируются **на юнит** с `NodeServices`/`NodeInputs`, поэтому generic-движок (P1.1) не тронут. Тесты — `tests/core/test_flow_prompt.py`, `tests/core/test_flow_node_runners.py`. Сделано (P1.4 Step A, wiring-first):
 

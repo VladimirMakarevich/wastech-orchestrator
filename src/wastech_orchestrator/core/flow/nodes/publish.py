@@ -64,9 +64,11 @@ class PublishNodeRunner:
             # no git publishing in P1 (P3 wires private storage / local artifact handling).
             return None
         git = self._s.git
-        if git is None or self._in.branch is None:
+        if git is None or self._in.branch is None or self._in.summary_body_path is None:
             raise PublishConfigError(
-                f"publish node {node.id!r} ({node.policy.value}) requires a GitPublishPort + branch"
+                f"publish node {node.id!r} ({node.policy.value}) requires a GitPort + branch + "
+                "summary_body_path (the orchestrator wrapper resolves the summary/fallback body "
+                "and finalizes the task file before the publish node runs)"
             )
         message = self._in.commit_message or f"feat({ctx.task_id}): publish"
         git.commit_code(ctx.task_id, message)
@@ -76,5 +78,5 @@ class PublishNodeRunner:
             ctx.task_id,
             self._in.branch,
             title=self._in.pr_title or ctx.task_id,
-            body_path=self._in.summary_body_path or "",
+            body_path=self._in.summary_body_path,
         )

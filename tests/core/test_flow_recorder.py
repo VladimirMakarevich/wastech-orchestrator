@@ -88,3 +88,15 @@ def test_hydrate_rebuilds_checkpoint_from_saved_snapshot(tmp_path: Path) -> None
     assert hydrated.current_node == "implementation"
     assert hydrated.loop_counters == {"test_fix": 2}
     assert hydrated.completed_nodes == ["refinement", "planning"]
+
+
+def test_recovery_does_not_rereresolve_flow(tmp_path: Path) -> None:
+    # hydrate_run_state takes only the store + task id — no config/registry — so resume can never
+    # re-resolve the flow from live config; it returns exactly the persisted snapshot fingerprint
+    # (the P1.2 recovery invariant; the orchestrator-level recovery dispatch lands in P1.4).
+    store = _store(tmp_path)
+    StateStoreRunRecorder(store, "t1", artifacts_root=tmp_path).save_checkpoint(
+        FlowRunState(flow_fingerprint="snap-abc123", current_node="review")
+    )
+    hydrated = hydrate_run_state(store, "t1")
+    assert hydrated is not None and hydrated.flow_fingerprint == "snap-abc123"

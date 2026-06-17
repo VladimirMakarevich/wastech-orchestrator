@@ -251,8 +251,9 @@ def test_engine_single_fix_iterations_increment() -> None:
     assert engine.run_state.fix_iterations == 1
 
 
-def test_engine_named_loop_exhaustion_goes_manual() -> None:
-    # test_fix budget 2 => second consecutive fail is stuck (matches LoopController >= semantics).
+def test_engine_budget_exhaustion_goes_manual() -> None:
+    # The named-loop case (spec P1.1). The global-cap and inline-budget cases are the two tests
+    # below. test_fix budget 2 => second consecutive fail is stuck (matches LoopController >=).
     snap = _snapshot(
         [_agent("s"), _checks("t"), _publish("done"), _agent("fix")],
         [

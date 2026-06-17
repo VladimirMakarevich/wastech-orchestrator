@@ -178,7 +178,10 @@ def _inputs(flow_dir: Path, **kw: Any) -> NodeInputs:
 # -- agent --------------------------------------------------------------------
 
 
-def test_agent_node_builds_request_and_returns_done(tmp_path: Path) -> None:
+def test_agent_node_equals_direct_router_call(tmp_path: Path) -> None:
+    # The node builds the AgentRunRequest a direct router.run_stage call would receive (prompt from
+    # role_file + injected paths, node-sourced permission/model) and passes the router's outcome
+    # through unchanged (unconditional "done") — i.e. the wrapper adds no behavior of its own.
     (tmp_path / "roles").mkdir()
     (tmp_path / "roles" / "impl.md").write_text("Implement {task_path} in {repo}", "utf-8")
     node = AgentNode(
@@ -196,12 +199,14 @@ def test_agent_node_builds_request_and_returns_done(tmp_path: Path) -> None:
     inputs = _inputs(tmp_path, task_path="/t/task.md", plan_path="/t/plan.md")
     result = AgentNodeRunner(services, inputs).run(node, _ctx(node))
 
-    assert result.outcome.kind == "done"
+    assert result.outcome.kind == "done"  # outcome passed through, not transformed
+    assert len(router.requests) == 1  # exactly one router call, like a direct invocation
     req = router.requests[0]
     assert req.prompt == "Implement /t/task.md in /repo"
     assert req.permission_profile == "workspace-write"
     assert req.model == "gpt-x"
     assert req.task_path == "/t/task.md"
+    assert req.plan_path == "/t/plan.md"
     assert req.working_directory == "/repo"
     assert store.completed[-1]["outcome"] == "done"
 
@@ -604,6 +609,18 @@ def test_publish_pull_request_requires_branch(tmp_path: Path) -> None:
                          FakeCheckRunner(CheckOutcome(passed=True, runs=())), git=FakeGit())
     with pytest.raises(PublishConfigError):
         PublishNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+
+def test_publish_pull_request_requires_body_path(tmp_path: Path) -> None:
+    # branch present but no summary body path: refuse rather than open a PR with an empty body.
+    node = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
+    git = FakeGit()
+    services = _services(FakeRouter(_result()), FakeStore(), {},
+                         FakeCheckRunner(CheckOutcome(passed=True, runs=())), git=git)
+    inputs = _inputs(tmp_path, branch="agent/task-1-x")  # summary_body_path is None
+    with pytest.raises(PublishConfigError):
+        PublishNodeRunner(services, inputs).run(node, _ctx(node))
+    assert git.calls == []  # nothing committed/pushed/PR'd
 
 
 def test_publish_none_policy_writes_no_git(tmp_path: Path) -> None:
