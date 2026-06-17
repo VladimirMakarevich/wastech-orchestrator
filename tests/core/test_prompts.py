@@ -134,6 +134,7 @@ def test_allowlist_matches_documented_variables() -> None:
         "task_id",
         "stage",
         "repo_path",
+        "repo",  # flow-engine alias for repo_path (flow-engine P1.3)
         "task_path",
         "plan_path",
         "diff_path",

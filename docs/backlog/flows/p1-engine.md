@@ -168,7 +168,9 @@ Resume по произвольному графу идемпотентен; life
 
 ---
 
-## P1.3 — Обёртки core-owned узлов (без смены механики)
+## P1.3 — Обёртки core-owned узлов (без смены механики) ◑ Частично (agent/evaluator/checks + prompt)
+
+Статус (2026-06-17): реализован агентно-детерминированный костяк P1.3 — сборка промпта из `role_file` и три обёртки (agent/evaluator/checks), все тонкие адаптеры над инъектированными коллабораторами, юнит-тесты на фейках. Сделано: [`core/flow/prompt.py`](../../../src/wastech_orchestrator/core/flow/prompt.py) (`render_role_prompt`/`read_role_file` — `role_file` как источник шаблона, path-containment, `render_prompt` неизменён; в `ALLOWED_PROMPT_VARS` добавлен `repo` — единый allowlist); [`core/flow/nodes/`](../../../src/wastech_orchestrator/core/flow/nodes/) — `base.py` (`NodeServices`/`NodeInputs` контракты + `NodeInfraError`, коллабораторы как `Protocol`-порты), `agent.py` (`AgentNodeRunner` → router, строит `AgentRunRequest` из узла+inputs, infra-exhaustion → `NodeInfraError`), `evaluator.py` (`EvaluatorNodeRunner` `role=review` → accept/rework/done, паритет `_is_blocking`), `checks.py` (`ChecksNodeRunner` → `CheckRunner`, pass/fail, launch_failed → `CheckLaunchError`). Обёртки конструируются **на юнит** с `NodeServices`/`NodeInputs`, поэтому generic-движок (P1.1) не тронут. Тесты — `tests/core/test_flow_prompt.py`, `tests/core/test_flow_node_runners.py`. **Отложено в [P1.4](#p14--паритетный-implementationyaml--golden-harness) (сильнее всего сцеплено с оркестратором — нужен живой `_Pipeline` + golden-harness для паритета):** обёртки `publish` (git по политике) и `hitl` (durable Telegram round-trip), встроенный HITL refinement/planning (`node.hitl` + `_run_typed_stage`), dangerous-diff guard после `workspace-write`, запись review-артефакта + `{review_path}`, prompt_audit/heartbeat-наблюдаемость, и реальная конструкция `NodeServices`/`NodeInputs` из `_Pipeline` + карта `node_id→Stage`.
 
 Цель: каждый вид узла — тонкий адаптер к существующему ядру; вызов через узел даёт **тот же результат**, что прямой вызов. Observability `agent`-узла сохраняется как сейчас.
 
