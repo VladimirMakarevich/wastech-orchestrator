@@ -72,7 +72,7 @@ def graph_checks(doc: dict) -> list[str]:
     # bounded loops: rework/fail edges must carry budget or loop
     for e in edges:
         if e.get("outcome") in ("rework", "fail") and "budget" not in e and "loop" not in e:
-            errs.append(f"edge {e['from']}->{e['to']} ({e['outcome']}) unbounded: needs budget or loop")
+            errs.append(f"edge {e['from']}->{e['to']} ({e['outcome']}) unbounded; budget/loop")
 
     # named loops must be declared in budgets
     for e in edges:
@@ -115,7 +115,7 @@ def graph_checks(doc: dict) -> list[str]:
         if la:
             t = by_id.get(la)
             if not t or t.get("kind") != "agent" or t.get("session_scope") != "editing_lineage":
-                errs.append(f"node {n['id']}: lineage_affinity -> {la!r} must be an agent with editing_lineage")
+                errs.append(f"{n['id']}.lineage_affinity={la!r} must be editing_lineage agent")
 
     # decomposition references
     dec = flow.get("decomposition")
@@ -151,11 +151,16 @@ def main() -> None:
             print(f"✓ {fname}: PASS (structural + graph)")
 
     # generality gate: the schema must not hard-code any flow/stage/role name
-    leaked = [
-        w
-        for w in ("implementation", "deep_research", "security_audit", "refinement", "supervisor", "planning")
-        if w in json.dumps(SCHEMA)
-    ]
+    flow_words = (
+        "implementation",
+        "deep_research",
+        "security_audit",
+        "refinement",
+        "supervisor",
+        "planning",
+    )
+    serialized = json.dumps(SCHEMA)
+    leaked = [w for w in flow_words if w in serialized]
     if leaked:
         ok = False
         print(f"✗ schema leaks flow-specific tokens (domain knowledge in engine): {leaked}")
