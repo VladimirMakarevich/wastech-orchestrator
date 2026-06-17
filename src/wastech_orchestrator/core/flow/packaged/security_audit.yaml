@@ -1,0 +1,61 @@
+# Packaged built-in flow: security_audit.
+# Canonical version; co-design reference in docs/backlog/flows/co-design/security_audit.yaml.
+flow:
+  name: security_audit
+  task_type: security_audit
+  permission_ceiling: workspace-write
+  output_policy: private_control_workspace_report
+  publishing: none
+  network_policy: advisories
+
+  defaults:
+    evaluator: { session_scope: fresh_disposable, permission_profile: read-only }
+
+  nodes:
+    - id: scope
+      kind: agent
+      role_file: roles/audit/scope.md
+      session_scope: fresh_disposable
+      permission_profile: read-only
+      hitl: { allow_question: true, allow_approval: false }
+    - id: repository_analysis
+      kind: agent
+      role_file: roles/audit/repository_analysis.md
+      session_scope: fresh_disposable
+      permission_profile: read-only
+    - id: dependency_scan
+      kind: checks
+      checker: dependency_scan
+    - id: threat_analysis
+      kind: agent
+      role_file: roles/audit/threat_analysis.md
+      session_scope: fresh_disposable
+      permission_profile: read-only
+    - id: finding_verification
+      kind: evaluator
+      role: verifier
+      role_file: roles/audit/verifier.md
+      session_scope: fresh_disposable
+      permission_profile: read-only
+      blocking: false
+      max_rework_per_stage: 2
+    - id: report
+      kind: agent
+      role_file: roles/audit/report.md
+      session_scope: fresh_disposable
+      permission_profile: workspace-write
+    - id: private_storage
+      kind: publish
+      policy: private_control_workspace_report
+
+  edges:
+    - { from: scope, to: repository_analysis }
+    - { from: repository_analysis, to: dependency_scan }
+    - { from: dependency_scan, to: threat_analysis, outcome: pass }
+    - { from: threat_analysis, to: finding_verification }
+    - { from: finding_verification, to: report, outcome: accept }
+    - { from: finding_verification, to: threat_analysis, outcome: rework, budget: 2 }
+    - { from: report, to: private_storage }
+
+  budgets:
+    global_revision_iterations: 8

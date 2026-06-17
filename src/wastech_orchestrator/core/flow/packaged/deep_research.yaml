@@ -1,0 +1,80 @@
+# Packaged built-in flow: deep_research.
+# Canonical version; co-design reference in docs/backlog/flows/co-design/deep_research.yaml.
+flow:
+  name: deep_research
+  task_type: deep_research
+  permission_ceiling: workspace-write
+  output_policy: repository_document
+  publishing: documentation_pull_request
+  network_policy: research
+
+  defaults:
+    evaluator: { session_scope: fresh_disposable, permission_profile: read-only }
+
+  nodes:
+    - id: refinement
+      kind: agent
+      role_file: roles/research/refinement.md
+      session_scope: fresh_disposable
+      permission_profile: read-only
+      hitl: { allow_question: true, allow_approval: false }
+      when: { fact: derived.needs_refinement }
+    - id: repository_analysis
+      kind: agent
+      role_file: roles/research/repository_analysis.md
+      session_scope: fresh_disposable
+      permission_profile: read-only
+    - id: external_research
+      kind: agent
+      role_file: roles/research/external_research.md
+      session_scope: fresh_disposable
+      permission_profile: read-only
+      when: { fact: config.external_research }
+    - id: architecture_design
+      kind: agent
+      role_file: roles/research/architecture_design.md
+      session_scope: fresh_disposable
+      permission_profile: workspace-write
+    - id: synthesis
+      kind: agent
+      role_file: roles/research/synthesis.md
+      session_scope: fresh_disposable
+      permission_profile: workspace-write
+    - id: citation_check
+      kind: checks
+      checker: citation
+    - id: fact_verification
+      kind: evaluator
+      role: verifier
+      role_file: roles/research/verifier.md
+      session_scope: fresh_disposable
+      permission_profile: read-only
+      blocking: false
+      max_rework_per_stage: 1
+    - id: critical_review
+      kind: evaluator
+      role: critic
+      role_file: roles/research/critic.md
+      session_scope: resume_own_lineage
+      permission_profile: read-only
+      blocking: false
+      max_rework_per_stage: 3
+    - id: publish
+      kind: publish
+      policy: documentation_pull_request
+
+  edges:
+    - { from: refinement, to: repository_analysis }
+    - { from: repository_analysis, to: external_research }
+    - { from: external_research, to: architecture_design }
+    - { from: architecture_design, to: synthesis }
+    - { from: synthesis, to: citation_check }
+    - { from: citation_check, to: fact_verification, outcome: pass }
+    - { from: citation_check, to: synthesis, outcome: fail, budget: 1 }
+    - { from: fact_verification, to: critical_review, outcome: accept }
+    - { from: fact_verification, to: synthesis, outcome: rework, budget: 2 }
+    - { from: critical_review, to: publish, outcome: accept }
+    - { from: critical_review, to: synthesis, outcome: rework, budget: 3 }
+
+  budgets:
+    global_revision_iterations: 12
