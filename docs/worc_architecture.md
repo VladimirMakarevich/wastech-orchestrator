@@ -2,8 +2,6 @@
 
 Date: 2026-06-11 (updated) Goal: describe the architecture of a console application that runs on Windows/macOS/Linux, watches a task folder, runs a task through a deterministic stage pipeline using external coding agents (Codex CLI and/or Claude Code CLI), and publishes the result to a dedicated Git branch.
 
-The document was reworked after studying [crewAI](https://github.com/crewAIInc/crewAI). Decision: **write our own lean orchestrator** (with no framework dependency), but borrow 5 proven patterns from crewAI. Exactly where is marked with the `[← crewAI]` marker.
-
 ---
 
 ## 1. The idea in one paragraph
@@ -14,13 +12,13 @@ The application does not replace the coding agent and Git. It acts as an **orche
 
 ## 2. Key architectural principles
 
-1. **A deterministic Flow, not emergent behavior.** The stage pipeline is defined explicitly (like a crewAI Flow); agents do not freely "negotiate" among themselves. Predictability matters more than autonomy.
-2. **A thin supervisor on top of the stages** `[← crewAI hierarchical]`. The supervisor plans and routes, but does not replace the coding agent.
+1. **A deterministic Flow, not emergent behavior.** The stage pipeline is defined explicitly; agents do not freely "negotiate" among themselves. Predictability matters more than autonomy.
+2. **A thin supervisor on top of the stages**. The supervisor plans and routes, but does not replace the coding agent.
 3. **The coding agent behind an abstraction.** `Codex CLI` and `Claude Code CLI` are interchangeable implementations of a single interface with fallback.
-4. **Checkpoints at every stage** `[← crewAI @persist]`. After each stage, the state is written atomically to SQLite so it can survive a crash and continue from where it stopped.
-5. **Guardrails in two layers** `[← crewAI guardrails]`. A ban on actions (sandbox/approval) + output validation (diff) before commit.
-6. **Fresh context for each task** `[← crewAI kickoff]`. The supervisor and agent context are reassembled from YAML templates for each new task — no shared state between tasks.
-7. **Human-in-the-loop via Telegram** `[← crewAI AskQuestion/human_input]`. Clarifying questions and approval of dangerous actions go to the human and block the stage until there is an answer.
+4. **Checkpoints at every stage**. After each stage, the state is written atomically to SQLite so it can survive a crash and continue from where it stopped.
+5. **Guardrails in two layers**. A ban on actions (sandbox/approval) + output validation (diff) before commit.
+6. **Fresh context for each task**. The supervisor and agent context are reassembled from YAML templates for each new task — no shared state between tasks.
+7. **Human-in-the-loop via Telegram**. Clarifying questions and approval of dangerous actions go to the human and block the stage until there is an answer.
 
 ---
 
@@ -111,7 +109,7 @@ commands: # additional commands/hints for the agent
 Add validation for the login form ...
 ```
 
-The parsed fields are substituted into the YAML prompt templates as `{variables}` `[← crewAI inputs]`.
+The parsed fields are substituted into the YAML prompt templates as `{variables}`.
 
 ### 4.2. Git Manager `(#8)`
 
@@ -140,8 +138,6 @@ Parallel tasks — via `git worktree` (v2), so as not to mix them in one clone.
 
 ### 4.3. CodingAgent — provider abstraction + fallback `(#1)`
 
-A key piece that **does not exist in crewAI** (there is no native failover there) — we design it ourselves.
-
 ```python
 class CodingAgent(Protocol):
     name: str
@@ -169,7 +165,7 @@ def run_with_fallback(prompt, **kw):
 - Globally disable a provider — a flag in `config.yaml` (`providers.codex.enabled: false`).
 - In a task you can pin `provider: claude` (no fallback) or `provider: auto` (with fallback).
 
-### 4.4. Supervisor `(#4, #5)` `[← crewAI hierarchical manager]`
+### 4.4. Supervisor `(#4, #5)`
 
 A thin layer over the stages. It is responsible for:
 
@@ -178,11 +174,11 @@ A thin layer over the stages. It is responsible for:
 - escalation: when to ask the human a clarifying question (the `AskQuestion` contract) or request action approval;
 - the go/no-go decision after guardrails and tests.
 
-**Recreation for each task `(#5)`:** the supervisor and agent context are assembled anew from YAML templates for the specific parsed task. State is not shared between tasks — this eliminates "leaked" context. (In crewAI this is `kickoff()` with a fresh Crew; here it is simply constructing an object per task.)
+**Recreation for each task `(#5)`:** the supervisor and agent context are assembled anew from YAML templates for the specific parsed task. State is not shared between tasks — this eliminates "leaked" context.
 
-Protection against delegation loops `[← crewAI]`: only the supervisor has the right to escalate/route; the agent's stage calls are "leaf" calls and cannot forward further.
+Protection against delegation loops: only the supervisor has the right to escalate/route; the agent's stage calls are "leaf" calls and cannot forward further.
 
-### 4.5. Stage Pipeline (Flow) `[← crewAI Flow]`
+### 4.5. Stage Pipeline (Flow)
 
 The stages are fixed and deterministic:
 
@@ -192,9 +188,9 @@ STAGES = ["plan", "implement", "review", "test", "fix", "guardrails", "commit", 
 
 Each stage is a separate function with input from the state and an atomic checkpoint on output (see §6). `fix` runs in a retry loop with an attempt limit.
 
-### 4.6. Guardrails — action blacklist + output validation `(#3)` `[← crewAI guardrails]`
+### 4.6. Guardrails — action blacklist + output validation `(#3)`
 
-Two layers (in crewAI, guardrails validate only the output — we extend it to actions):
+Two layers:
 
 **Layer 1 — action ban (enforce, before execution):**
 
@@ -209,7 +205,7 @@ GUARDRAILS = [no_secrets_in_diff, only_allowed_paths, no_unexpected_files, no_pu
 
 def validate(diff):
     result = diff
-    for g in GUARDRAILS:               # a chain, as in crewAI
+    for g in GUARDRAILS:
         ok, out = g(result)
         if not ok:
             return False, out          # the error goes back to the agent to fix
@@ -219,7 +215,7 @@ def validate(diff):
 
 On failure — the error is returned to the `fix` stage, retrying up to `guardrail_max_retries` (3 by default).
 
-### 4.7. Human-in-the-Loop via Telegram `(#2, #10)` `[← crewAI AskQuestion / human_input]`
+### 4.7. Human-in-the-Loop via Telegram `(#2, #10)`
 
 A transport-neutral `Notifier` provides terminal messages and one durable question/approval round-trip. It blocks only the current checkpoint until an answer or fail-closed timeout.
 
@@ -251,7 +247,7 @@ checks:
 
 On failure, the test output is passed to the `fix` stage.
 
-### 4.9. State Store with checkpoints `[← crewAI @persist]`
+### 4.9. State Store with checkpoints
 
 SQLite. The task status = the marker of the last successfully completed stage → resume after a crash.
 
@@ -281,16 +277,16 @@ def run_task(task):
         checkpoint(task.id, stage, "done")        # after — atomically
 ```
 
-### 4.10. Reasoning / Complexity `(#7)` `[← crewAI reasoning_effort]`
+### 4.10. Reasoning / Complexity `(#7)`
 
 The `reasoning` and `complexity` fields from the task map onto:
 
 - the coding agent's model flags/budget (`reasoning_effort` low/med/high, thinking-budget for Claude);
 - model choice, number of fix iterations, and timeouts based on complexity.
 
-The `plan` stage = the analog of crewAI `reasoning=True` (reflect and draw up a plan before edits).
+The `plan` stage reflects and draws up a plan before any edits begin.
 
-### 4.11. AGENTS / CLAUDE / SKILLS stubs `(#6)` `[← crewAI agents.yaml/tasks.yaml]`
+### 4.11. AGENTS / CLAUDE / SKILLS stubs `(#6)`
 
 Stage prompts, roles, and rules are stored in YAML templates with `{variable}` substitution from the task. The stubs for the coding agents, placed into the repository before the run, also go here:
 
@@ -574,7 +570,6 @@ The second-version and candidate feature list has been consolidated into [backlo
 
 ## 14. Sources
 
-- crewAI: https://github.com/crewAIInc/crewAI — the concepts of Flows, hierarchical process, guardrails, reasoning, memory, persistence (source of the borrowed patterns).
 - OpenAI Codex CLI Reference: https://developers.openai.com/codex/cli/reference
 - OpenAI Codex Agent Approvals & Security: https://developers.openai.com/codex/agent-approvals-security
 - OpenAI Codex GitHub Action: https://developers.openai.com/codex/github-action
@@ -584,4 +579,4 @@ The second-version and candidate feature list has been consolidated into [backlo
 
 ## 15. Short conclusion
 
-Conceptually, the orchestrator = a **crewAI Flow** (a deterministic stage pipeline) + a thin **supervisor** in the role of a manager, but **with no framework dependency**. Five patterns are borrowed from crewAI: checkpoint-state, the delegation/clarification contract, guardrails, reasoning levels, and YAML templates with substitution. Three things crewAI does not cover and they are designed independently: provider fallback (#1), repo binding (#8), and the task watcher+parser (#9). The coding agent does the work on the code, Git stores the changes, CI/PR remain the control layer, the human is brought in via Telegram, and the orchestrator ties everything together into a repeatable, crash-resilient process.
+The orchestrator is a **deterministic stage pipeline** with a thin **supervisor** in the role of a manager, built with no framework dependency. Key design patterns: checkpoint-state after every stage, a delegation/clarification contract, two-layer guardrails, reasoning levels mapped from task complexity, and YAML templates with variable substitution. Three capabilities designed independently: provider fallback (#1), repo binding (#8), and the task watcher+parser (#9). The coding agent does the work on the code, Git stores the changes, CI/PR remain the control layer, the human is brought in via Telegram, and the orchestrator ties everything together into a repeatable, crash-resilient process.

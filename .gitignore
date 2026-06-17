@@ -12,6 +12,8 @@ venv/
 .pytest_cache/
 .coverage
 htmlcov/
+site/
+.site-src/
 
 # Secrets (DO NOT commit)
 .env
@@ -28,9 +30,6 @@ secrets/
 .vscode/
 .DS_Store
 Thumbs.db
-
-# Obsidian Vault (if using Obsidian for notes)
-.obsidian/
 
 # Obsidian Vault (if using Obsidian for notes)
 .obsidian/

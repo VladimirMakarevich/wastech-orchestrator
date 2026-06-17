@@ -104,7 +104,7 @@ def stop_process(
     timeout: float = 30.0,
     poll: float = 0.2,
     term_sig: int = signal.SIGTERM,
-    kill_sig: int = signal.SIGKILL,
+    kill_sig: int = getattr(signal, "SIGKILL", signal.SIGTERM),
     kill_fn: KillFn = os.kill,
     sleep_fn: SleepFn = time.sleep,
     now_fn: NowFn = time.monotonic,

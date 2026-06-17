@@ -226,6 +226,8 @@ Coding agents working _in this repo_ follow [CLAUDE.md](CLAUDE.md) (Claude Code)
 | [.agents/rules/](.agents/rules/) | Development rules: style, architectural invariants, security, git-flow, testing. |
 | [docs/backlog/](docs/backlog/) | Deferred features and tracked follow-ups. |
 
+The full documentation is published at **[vladimirmakarevich.github.io/wastech-orchestrator](https://vladimirmakarevich.github.io/wastech-orchestrator/)**.
+
 ---
 
 ## Design principles

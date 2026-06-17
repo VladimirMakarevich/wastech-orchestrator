@@ -25,6 +25,9 @@ dev = [
     "pytest-cov>=5.0",
     "types-PyYAML",
 ]
+docs = [
+    "mkdocs>=1.6",
+]
 
 [project.scripts]
 wastech-orchestrator = "wastech_orchestrator.cli:main"
