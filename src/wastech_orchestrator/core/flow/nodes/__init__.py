@@ -21,6 +21,7 @@ from wastech_orchestrator.core.flow.nodes.agent import AgentNodeRunner
 from wastech_orchestrator.core.flow.nodes.base import NodeInputs, NodeServices
 from wastech_orchestrator.core.flow.nodes.checks import CheckLaunchError, ChecksNodeRunner
 from wastech_orchestrator.core.flow.nodes.evaluator import EvaluatorNodeRunner
+from wastech_orchestrator.core.flow.nodes.publish import PublishConfigError, PublishNodeRunner
 
 __all__ = [
     "AgentNodeRunner",
@@ -29,4 +30,6 @@ __all__ = [
     "EvaluatorNodeRunner",
     "NodeInputs",
     "NodeServices",
+    "PublishConfigError",
+    "PublishNodeRunner",
 ]

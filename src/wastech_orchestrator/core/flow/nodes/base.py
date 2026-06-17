@@ -87,6 +87,25 @@ class NodeRunStorePort(Protocol):
     def record_check_run(self, run: CheckRunRow, conn: object | None = None) -> None: ...
 
 
+class GitPublishPort(Protocol):
+    """The slice of :class:`~wastech_orchestrator.git_manager.GitManager` the publish runner uses.
+
+    Every method is idempotent (keyed by ``publish_operations``), so a resumed run never repeats a
+    commit/push/PR. Git is the orchestrator's sole responsibility — providers and flows never touch
+    it (the hard invariant).
+    """
+
+    def commit_code(self, task_id: str, message: str) -> str | None: ...
+
+    def commit_audit(self, task_id: str) -> str | None: ...
+
+    def push(self, task_id: str, branch: str) -> bool: ...
+
+    def create_pr(
+        self, task_id: str, branch: str, *, title: str, body_path: str
+    ) -> str | None: ...
+
+
 @dataclass(frozen=True)
 class NodeServices:
     """Collaborators shared across a unit's node runners."""
@@ -101,6 +120,8 @@ class NodeServices:
     clock: Callable[[], str]
     default_timeout_seconds: int = 7200
     snapshot: SnapshotHook | None = None  # git snapshot hook for provider observability
+    #: set only for flows with a publish node (the orchestrator owns git; providers/flows do not).
+    git: GitPublishPort | None = None
 
 
 @dataclass
@@ -117,5 +138,10 @@ class NodeInputs:
     subtask_count: int | None = None
     subtask_spec_path: str | None = None
     resolved_checks: tuple[ResolvedCheck, ...] = ()
+    #: publish inputs (set for the unit that reaches a publish node).
+    branch: str | None = None
+    pr_title: str | None = None
+    summary_body_path: str | None = None
+    commit_message: str | None = None
     #: in-memory provider -> session id map (legacy parity; durable lineage is P2.2).
     session_ids: dict[str, str] = field(default_factory=dict)

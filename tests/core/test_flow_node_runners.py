@@ -28,6 +28,8 @@ from wastech_orchestrator.core.flow.nodes import (
     EvaluatorNodeRunner,
     NodeInputs,
     NodeServices,
+    PublishConfigError,
+    PublishNodeRunner,
 )
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import (
@@ -36,6 +38,7 @@ from wastech_orchestrator.core.flow.schema import (
     EvaluatorNode,
     FlowDoc,
     FlowNode,
+    PublishNode,
 )
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
 from wastech_orchestrator.providers.base import (
@@ -133,7 +136,13 @@ def _snapshot(node: FlowNode) -> FlowSnapshot:
     )
 
 
-def _services(router: Any, store: FakeStore, stage_map: dict[str, Stage], check_runner: Any) -> Any:
+def _services(
+    router: Any,
+    store: FakeStore,
+    stage_map: dict[str, Stage],
+    check_runner: Any,
+    git: Any = None,
+) -> Any:
     return NodeServices(
         router=router,
         check_runner=check_runner,
@@ -143,6 +152,7 @@ def _services(router: Any, store: FakeStore, stage_map: dict[str, Stage], check_
         stage_for_node=stage_map,
         clock=lambda: "ts",
         default_timeout_seconds=100,
+        git=git,
     )
 
 
@@ -299,3 +309,59 @@ def test_checks_launch_failure_is_infra(tmp_path: Path) -> None:
                                                       first_launch_error="boom")))
     with pytest.raises(CheckLaunchError):
         ChecksNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+
+# -- publish ------------------------------------------------------------------
+
+
+class FakeGit:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+
+    def commit_code(self, task_id: str, message: str) -> str | None:
+        self.calls.append(("commit_code", task_id, message))
+        return "sha-code"
+
+    def commit_audit(self, task_id: str) -> str | None:
+        self.calls.append(("commit_audit", task_id))
+        return "sha-audit"
+
+    def push(self, task_id: str, branch: str) -> bool:
+        self.calls.append(("push", task_id, branch))
+        return True
+
+    def create_pr(self, task_id: str, branch: str, *, title: str, body_path: str) -> str | None:
+        self.calls.append(("create_pr", task_id, branch, title, body_path))
+        return "https://example/pr/1"
+
+
+def test_publish_pull_request_runs_git_sequence(tmp_path: Path) -> None:
+    node = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
+    git, store = FakeGit(), FakeStore()
+    services = _services(FakeRouter(_result()), store, {},
+                         FakeCheckRunner(CheckOutcome(passed=True, runs=())), git=git)
+    inputs = _inputs(tmp_path, branch="agent/task-1-x", pr_title="My PR",
+                     summary_body_path="/s/summary.md")
+    result = PublishNodeRunner(services, inputs).run(node, _ctx(node))
+    assert result.outcome.kind == "done"
+    assert [c[0] for c in git.calls] == ["commit_code", "commit_audit", "push", "create_pr"]
+    assert git.calls[-1] == ("create_pr", "task-1", "agent/task-1-x", "My PR", "/s/summary.md")
+    assert store.completed[-1]["commit_sha_after"] == "https://example/pr/1"
+
+
+def test_publish_pull_request_requires_branch(tmp_path: Path) -> None:
+    node = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
+    services = _services(FakeRouter(_result()), FakeStore(), {},
+                         FakeCheckRunner(CheckOutcome(passed=True, runs=())), git=FakeGit())
+    with pytest.raises(PublishConfigError):
+        PublishNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+
+def test_publish_none_policy_writes_no_git(tmp_path: Path) -> None:
+    node = PublishNode(id="store", kind="publish", policy=PublishingPolicy.NONE)
+    git, store = FakeGit(), FakeStore()
+    services = _services(FakeRouter(_result()), store, {},
+                         FakeCheckRunner(CheckOutcome(passed=True, runs=())), git=git)
+    result = PublishNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "done"
+    assert git.calls == []
