@@ -1,6 +1,6 @@
 # Supervisor quality-gate
 
-Status: **accepted** — not scheduled. Date: 2026-06-14 Updated: 2026-06-15 Owner: Vladimir Makarevich
+Status: **accepted** — outdated. Date: 2026-06-14 Updated: 2026-06-15 Owner: Vladimir Makarevich
 
 ## Goal
 

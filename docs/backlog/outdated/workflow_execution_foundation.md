@@ -1,6 +1,6 @@
 # Workflow execution foundation
 
-Status: **accepted — prerequisite, not scheduled** Date: 2026-06-14 Owner: Vladimir Makarevich
+Status: **accepted* — outdated. Date: 2026-06-14 Owner: Vladimir Makarevich
 
 ## Goal
 

@@ -1,6 +1,6 @@
 # Documentation update stage
 
-Status: **accepted** — not scheduled. Date: 2026-06-15 Owner: Vladimir Makarevich
+Status: **accepted** — outdated. Date: 2026-06-15 Owner: Vladimir Makarevich
 
 ## Goal
 

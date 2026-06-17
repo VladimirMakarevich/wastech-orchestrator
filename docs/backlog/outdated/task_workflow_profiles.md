@@ -1,6 +1,6 @@
 # Backlog: Task workflow profiles
 
-Status: **backlog / not scheduled** Date: 2026-06-13 Owner: Vladimir Makarevich
+Status: **accepted** — outdated. Date: 2026-06-13 Owner: Vladimir Makarevich
 
 This document captures the product task of supporting several explicit task workflows with different stage graphs, permissions, output contracts, quality gates, and publishing behavior. It is a backlog item, not current runtime behavior. Nothing here overrides the canonical specification, [CLAUDE.md](../../CLAUDE.md), [AGENTS.md](../../AGENTS.md), or the hard invariants in [.agents/rules/](../../.agents/rules/).
 
