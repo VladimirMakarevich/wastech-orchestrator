@@ -7,6 +7,11 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.2.0)"
+        required: true
 
 permissions:
   contents: write          # required to create the GitHub release
@@ -41,7 +46,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${{ inputs.tag || github.ref_name }}"
           VERSION="${TAG#v}"
           PRE=""
           # aN / bN / rcN suffix (PEP 440 pre-release) -> mark as a GitHub pre-release.
