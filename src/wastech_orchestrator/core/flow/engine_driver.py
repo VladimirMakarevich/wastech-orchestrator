@@ -7,13 +7,11 @@ a unit's :class:`~wastech_orchestrator.core.flow.nodes.base.NodeServices` /
 registry into a :class:`FlowEngine` (with the persistence recorder) and runs one unit to a terminal
 :class:`~wastech_orchestrator.core.flow.engine.FlowRunResult`.
 
-The orchestrator's ``run_task``/``resume`` wrapper (P1.4 step B) builds the ``NodeServices`` /
+The orchestrator's ``run_task``/``resume`` wrapper (the cutover step) builds the ``NodeServices`` /
 ``NodeInputs`` from its live ``_Pipeline``, resolves the flow snapshot via the ``FlowRegistry``, and
-calls :func:`drive_flow` — initially behind a dormant seam dual-run against the legacy ``_drive``
-by the golden harness, then as the sole driver once P1.5 removes the legacy path.
-
-The ``hitl`` runner and the agent-node embedded-HITL / dangerous-diff guard are added with the
-golden harness in step B (their durable round-trip is only meaningfully verified end-to-end).
+calls :func:`drive_flow` as **the** driver — replacing the legacy ``_drive``, which is deleted in
+the same cutover step (no dual-run: greenfield, the goal is to preserve every capability, not to
+match the old driver byte-for-byte — see ``docs/backlog/flows/p1-step-b-wiring-draft.md``).
 """
 
 from __future__ import annotations

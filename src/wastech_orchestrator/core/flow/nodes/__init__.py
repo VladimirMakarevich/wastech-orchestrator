@@ -8,9 +8,9 @@ to an existing core capability, so executing a node yields the same result as th
   ``role=review`` evaluator; supervisor/critic/verifier are P2)
 * :class:`~.checks.ChecksNodeRunner` -> :class:`~wastech_orchestrator.check_runner.CheckRunner`
 
-The ``publish`` and ``hitl`` runners (git publishing + durable Telegram round-trip), plus the
-embedded HITL round-trip of refinement/planning agent nodes, are the most orchestrator-coupled and
-land with the P1.4 wiring (where the real ``_Pipeline`` context + the golden-harness pin parity).
+The ``publish`` runner (git publishing) and the agent-node embedded HITL round-trip + dangerous-diff
+guard are implemented here too. Remaining for the orchestrator cutover step: the standalone ``hitl``
+node runner (low priority) and building ``NodeServices``/``NodeInputs`` from the live ``_Pipeline``.
 
 A runner is constructed per execution unit with its collaborators (:class:`~.base.NodeServices`)
 and the unit's inputs (:class:`~.base.NodeInputs`) baked in, so the generic engine stays free of any

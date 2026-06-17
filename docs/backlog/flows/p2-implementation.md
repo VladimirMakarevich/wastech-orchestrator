@@ -2,7 +2,7 @@
 
 Статус: **backlog / инженерная спека (не запланировано к исполнению)** Дата: 2026-06-17 Владелец: Vladimir Makarevich
 
-Детализация фазы P2 из [plan.md](plan.md). Цель: на **доказанном** движке (P1) нарастить целевой implementation, адаптировав три поглощённые программы — [supervisor](../outdated/supervisor_quality_gate.md), [durable sessions](../outdated/durable_sessions_and_fixing_affinity.md), [hybrid testing](../outdated/hybrid_agent_testing.md). База проверки фазы: **тесты из спек трёх программ** покрывают новые узлы (golden-harness P1 анкерит неизменное ядро).
+Детализация фазы P2 из [plan.md](plan.md). Цель: на **доказанном** движке (P1) нарастить целевой implementation, адаптировав три поглощённые программы — [supervisor](../outdated/supervisor_quality_gate.md), [durable sessions](../outdated/durable_sessions_and_fixing_affinity.md), [hybrid testing](../outdated/hybrid_agent_testing.md). База проверки фазы: **тесты из спек трёх программ** покрывают новые узлы (адаптированный на движок интеграционный сьют из P1 анкерит неизменное ядро — golden-harness отменён, см. [plan.md](plan.md)).
 
 Канонический порядок ландинга ([memory: quality-program-canonical-order]): **supervisor → durable → hybrid**. Supervisor стартует на in-memory editing-lineage, которую несёт P1; durable формализует scopes/affinity вокруг уже существующего supervisor; hybrid — последний неблокирующий слой.
 

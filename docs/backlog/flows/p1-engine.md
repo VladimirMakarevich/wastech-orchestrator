@@ -1,16 +1,18 @@
-# P1 — Движок исполнения + core-capability узлы (внутренний чекпоинт паритета)
+# P1 — Движок исполнения + core-capability узлы (cutover на движок)
+
+> **ОБНОВЛЕНИЕ 2026-06-18:** golden-harness / двойной прогон / паритет байт-в-байт с `_drive` **отменены** (greenfield — см. баннер в [plan.md](plan.md)). P1.4 = прямой **cutover** (движок — драйвер в `run_task`), гарантия — **адаптация существующего интеграционного сьюта на движок** (чек-лист возможностей); legacy удаляется в том же шаге (P1.4 + P1.5 слиты). Ниже «golden-harness/двойной прогон» читать в этом ключе. Локальные «паритет с `_write_review`/`reconcile_decomposed`» = «обёртка воспроизводит ту же возможность» — в силе.
 
 Статус: **backlog / инженерная спека (не запланировано к исполнению)** Дата: 2026-06-17 Владелец: Vladimir Makarevich
 
-Детализация фазы P1 из [plan.md](plan.md). Цель фазы: движок исполняет граф из снапшота (P0), существующие капабилити ядра обёрнуты как узлы **без смены механики**, и движок **воспроизводит текущее поведение implementation байт-в-байт на границе** (golden-harness против существующих тестов). На вход берётся валидированный `FlowSnapshot` ([snapshot.py](../../../src/wastech_orchestrator/core/flow/snapshot.py) + [validator.py](../../../src/wastech_orchestrator/core/flow/validator.py)); на выход — единая модель исполнения, вытеснившая хардкодный `_drive`.
+Детализация фазы P1 из [plan.md](plan.md). Цель фазы: движок исполняет граф из снапшота (P0), существующие капабилити ядра обёрнуты как узлы **без смены механики**, и движок **принимает на себя текущее поведение implementation** — все возможности сохранены, переписаны под Flow (проверка — адаптированный интеграционный сьют, не сравнение со старым драйвером). На вход берётся валидированный `FlowSnapshot` ([snapshot.py](../../../src/wastech_orchestrator/core/flow/snapshot.py) + [validator.py](../../../src/wastech_orchestrator/core/flow/validator.py)); на выход — единая модель исполнения, вытеснившая хардкодный `_drive`.
 
 Опорные контракты: палитра и рёбра — [flow-contract.md](flow-contract.md) §2–§5; resume — [index.md](index.md) §6; инварианты ядра — [index.md](index.md) §9. Сквозная витрина — [happy-path.md](happy-path.md).
 
-## Принцип проверки фазы (golden-harness)
+## Принцип проверки фазы (cutover + адаптированный сьют)
 
-P1 не вводит новых фич. Единственный критерий — **существующие тесты implementation зелены через движок** (P1.4). Текущий конвейер (`refinement → planning → implementation → testing → review → fixing → summary → publish`, fix-петли, decomposition) выражается как `implementation.yaml`-фикстура **без** supervisor / durable sessions / hybrid testing (это P2). Паритетный flow из P1.4 — тестовая фикстура, не поставляемый flow.
+P1 не вводит новых фич — переписывает текущие возможности под Flow. Критерий: **существующий интеграционный тест-сьют implementation, адаптированный на движок, зелёный**, и **каждая возможность из чек-листа покрыта ≥1 сценарием** (refinement/HITL, planning+decomposition+skills, implementation/fixing+diff, dangerous-diff guard, testing/checks, review, fix-петли→manual, summary, publish, recovery/resume, rerun, skip-stages). Текущий конвейер (`refinement → planning → implementation → testing → review → fixing → summary → publish`, fix-петли, decomposition) выражается данными во Flow **без** supervisor / durable sessions / hybrid testing (это P2).
 
-Это означает явный **двойной прогон в CI на время P1**: старый драйвер (`_drive`) и движок исполняют один и тот же набор сценариев; их наблюдаемые границы (статусы, артефакты, commit-SHA, publish-операции, ledger-записи) сравниваются. Двойной прогон снимается в P1.5 вместе со старым драйвером.
+**Без dual-run** (greenfield, прода нет): движок **замещает** `_drive` напрямую в `run_task`, а не исполняется параллельно для сравнения. Тесты проверяют, что новая модель ведёт себя корректно (новые статусы/`node_runs`), а не что она побайтово совпадает со старым драйвером. Legacy `_drive` удаляется в том же cutover-шаге (P1.4 + P1.5 слиты).
 
 ## Что уже сделано до P1 (вход фазы)
 
@@ -23,7 +25,7 @@ P1 не вводит новых фич. Единственный критери�
 
 ## P1.1 — Ядро движка ✓ Выполнено
 
-Статус (2026-06-17): реализовано в [`core/flow/engine.py`](../../../src/wastech_orchestrator/core/flow/engine.py) (`FlowEngine`, `NodeOutcome`/`NodeResult`/`NodeRunner`/`NodeContext`/`RunRecorder`/`Finding`/`FlowRunResult`) + [`core/flow/run_state.py`](../../../src/wastech_orchestrator/core/flow/run_state.py) (`FlowRunState`). Тесты — `tests/core/test_flow_engine.py` (10). **Отступление от буквы спеки (зафиксировано):** движок **не** переиспользует `LoopController` (тот несёт implementation-специфичные имена `test_fix`/`review_fix` — это нарушило бы тест абстракции P3 «ноль доменного знания в движке»). Вместо этого движок воспроизводит `>=`-семантику `LoopController` обобщённо над `FlowRunState.loop_counters`: именованные циклы — increment-then-check `>=` (паритет закрепляется golden-harness в P1.4), инлайн `budget: N` — check-then-increment (`budget: 1` = 1 rework, как у supervisor в packaged `implementation.yaml`); глобальный счётчик под ключом `global_fix_iterations`; эффективный cap = `min(flow_budget, config_cap)`. Старый `LoopController` остаётся для legacy `_drive` до P1.5.
+Статус (2026-06-17): реализовано в [`core/flow/engine.py`](../../../src/wastech_orchestrator/core/flow/engine.py) (`FlowEngine`, `NodeOutcome`/`NodeResult`/`NodeRunner`/`NodeContext`/`RunRecorder`/`Finding`/`FlowRunResult`) + [`core/flow/run_state.py`](../../../src/wastech_orchestrator/core/flow/run_state.py) (`FlowRunState`). Тесты — `tests/core/test_flow_engine.py` (10). **Отступление от буквы спеки (зафиксировано):** движок **не** переиспользует `LoopController` (тот несёт implementation-специфичные имена `test_fix`/`review_fix` — это нарушило бы тест абстракции P3 «ноль доменного знания в движке»). Вместо этого движок воспроизводит `>=`-семантику `LoopController` обобщённо над `FlowRunState.loop_counters`: именованные циклы — increment-then-check `>=` (семантика проверяется fix-петлевыми сценариями адаптированного сьюта на cutover-шаге), инлайн `budget: N` — check-then-increment (`budget: 1` = 1 rework, как у supervisor в packaged `implementation.yaml`); глобальный счётчик под ключом `global_fix_iterations`; эффективный cap = `min(flow_budget, config_cap)`. Старый `LoopController` остаётся для legacy `_drive` до P1.5.
 
 Цель: исполнитель узлов с **engine-owned** применением переходов по рёбрам. Узлы возвращают исход (`NodeOutcome`), движок резолвит соответствующее ребро из `adjacency` снапшота и переходит. Узлы не прыгают по графу. Bounded-loop бюджеты + единый `fix_iterations` + гарантия терминальности.
 
@@ -96,7 +98,7 @@ class NodeRunner(Protocol):
 
 ## P1.2 — Обобщение resume / checkpoint ◑ Слой персистенции выполнен (resume/recovery-тесты — в P1.4)
 
-Статус (2026-06-17): реализовано **аддитивно** — `node_runs` и родовой `RUNNING` добавлены **рядом** с legacy `stage_runs`/гранулярными статусами, которые остаются до P1.5 (golden-harness P1.4 гоняет обе модели бок о бок, поэтому legacy `_drive` не должен сломаться раньше). Сделано: `state.db` **v4** ([state_store.py](../../../src/wastech_orchestrator/state_store.py)) — таблица `node_runs` + `NodeRunRow` + `record_node_run`/`complete_node_run`/`record_node_skip`/`get_node_runs` + колонки `tasks.current_node`/`flow_run_counters`/`flow_fingerprint` + `save_flow_checkpoint`/`get_flow_checkpoint` (всё через guarded `_migrate`); [`core/flow/recorder.py`](../../../src/wastech_orchestrator/core/flow/recorder.py) — `StateStoreRunRecorder` (реализует `RunRecorder`) + `hydrate_run_state` (resume доверяет сохранённому `flow_fingerprint`, не переразрешает flow); родовой `Status.RUNNING` ([state_machine.py](../../../src/wastech_orchestrator/core/state_machine.py), аддитивно); flow-нейтральный `ledger.write_failure_report` (опциональный `node_id`); движок резюмирует с гидратированного `current_node`. Тесты — `tests/state/test_node_runs.py`, `tests/core/test_flow_recorder.py`, `test_flow_engine.py::test_engine_resumes_at_current_node`. **Отложено в P1.4** (сцеплено с вплетением движка в `run_task`/`resume`): переписывание `RecoveryReconciler` на per-node-progress, decomposed-resume и `rerun --continue` по `interrupted_node`. Удаление гранулярных статусов/`stage_runs`/dispatch-on-status — в P1.5.
+Статус (2026-06-17, обновлено 2026-06-18): реализовано **аддитивно** — `node_runs` и родовой `RUNNING` добавлены **рядом** с legacy `stage_runs`/гранулярными статусами; legacy остаётся до cutover-шага (P1.4+P1.5), где `_drive`/`stage_runs`/гранулярные статусы удаляются разом. (Раньше аддитивность обосновывалась golden-harness'ом — он отменён; теперь это просто «не ломать legacy до момента cutover».) Сделано: `state.db` **v4** ([state_store.py](../../../src/wastech_orchestrator/state_store.py)) — таблица `node_runs` + `NodeRunRow` + `record_node_run`/`complete_node_run`/`record_node_skip`/`get_node_runs` + колонки `tasks.current_node`/`flow_run_counters`/`flow_fingerprint` + `save_flow_checkpoint`/`get_flow_checkpoint` (всё через guarded `_migrate`); [`core/flow/recorder.py`](../../../src/wastech_orchestrator/core/flow/recorder.py) — `StateStoreRunRecorder` (реализует `RunRecorder`) + `hydrate_run_state` (resume доверяет сохранённому `flow_fingerprint`, не переразрешает flow); родовой `Status.RUNNING` ([state_machine.py](../../../src/wastech_orchestrator/core/state_machine.py), аддитивно); flow-нейтральный `ledger.write_failure_report` (опциональный `node_id`); движок резюмирует с гидратированного `current_node`. Тесты — `tests/state/test_node_runs.py`, `tests/core/test_flow_recorder.py`, `test_flow_engine.py::test_engine_resumes_at_current_node`. **Отложено в P1.4** (сцеплено с вплетением движка в `run_task`/`resume`): переписывание `RecoveryReconciler` на per-node-progress, decomposed-resume и `rerun --continue` по `interrupted_node`. Удаление гранулярных статусов/`stage_runs`/dispatch-on-status — в P1.5.
 
 Цель: чекпоинт = `completed_nodes + current_node + loop_counters + publish_operations`; lifecycle ужат до родового `pending → validated → running → (done | failed | manual)`; recovery доверяет снапшоту и **не переразрешает** flow. **Высокий риск** (см. [plan.md](plan.md) §Риски): опора на существующую идемпотентность `publish_operations`.
 
@@ -184,7 +186,7 @@ Resume по произвольному графу идемпотентен; life
 
 Сделано: **встроенный HITL refinement/planning** в `AgentNodeRunner` — `HumanGate` ([human_gate.py](../../../src/wastech_orchestrator/core/flow/nodes/human_gate.py)) делает один durable round-trip (`start_ask`→persist `waiting`→`wait_for_answer`→`write_answer`), агент-обёртка парсит `parse_typed_stage_output`, на сигнал делает round-trip и перезапускает стадию с `human_input_path`, резюмирует persisted-interaction после рестарта; fail-closed (timeout/transport/invalid) → `NodeManualRequired`. Порт `NotifierPort` + `NodeServices.notifier`/`ask_timeout_s` + `NodeInputs.contacts`. Тесты — `tests/core/test_flow_node_runners.py` (секция embedded HITL: no-signal, question round-trip, timeout→manual).
 
-**Остаётся в Step B:** standalone `hitl`-узел (низкий приоритет — `HitlNode` без текста вопроса); prompt_audit/heartbeat-наблюдаемость; **главный кусок** — реальная конструкция `NodeServices`/`NodeInputs` из `_Pipeline` + карта `node_id→Stage` + воспроизведение per-stage пост-обработки (refinement enriched spec; planning plan-write + decomposition + skills + subtask-specs) через flow для паритета артефактов; дремлющий `_drive_via_engine`-шов в `run_task`; golden-harness dual-run (`_drive` ↔ `FlowEngine` на fake-CLI сценариях); recovery-диспетчеризация.
+**Остаётся в Step B (cutover, см. [p1-step-b-wiring-draft.md](p1-step-b-wiring-draft.md)):** standalone `hitl`-узел (низкий приоритет — `HitlNode` без текста вопроса); prompt_audit/heartbeat-наблюдаемость; **главный кусок** — реальная конструкция `NodeServices`/`NodeInputs` из `_Pipeline` + **data-driven** per-stage пост-обработка (`output_artifact`-слоты: enriched_spec/plan/summary; decomposition через `decomposition.proposed_by` + контракт вывода; skills) — без хардкода имён стадий; decomposition fan-out; вплетение движка в `run_task` **как драйвера** (замена `_drive`, не dual-run); адаптация интеграционного сьюта на движок; recovery-диспетчеризация; удаление legacy в том же шаге.
 
 Цель: каждый вид узла — тонкий адаптер к существующему ядру; вызов через узел даёт **тот же результат**, что прямой вызов. Observability `agent`-узла сохраняется как сейчас.
 
@@ -249,62 +251,44 @@ Resume по произвольному графу идемпотентен; life
 
 ---
 
-## P1.4 — Паритетный `implementation.yaml` + golden-harness
+## P1.4 + P1.5 — Cutover: движок как драйвер + удаление legacy (один шаг)
 
-Цель: текущее поведение (без supervisor, in-memory сессии, review+checks как есть) выражено графом; существующие тесты implementation зелены через движок.
+> Слиты (golden-harness отменён): без dual-run нет смысла держать два драйвера. Движок замещает `_drive` в `run_task`, существующий сьют адаптируется на движок, legacy удаляется. Детальный дизайн — [p1-step-b-wiring-draft.md](p1-step-b-wiring-draft.md).
+
+Цель: одна модель исполнения; текущее поведение (без supervisor, in-memory сессии, review+checks как есть) выражено данными во Flow; все возможности сохранены; мёртвый legacy-код удалён.
 
 ### Touchpoints
 
-- **Новая фикстура** `tests/core/flows/implementation_parity.yaml` — НЕ packaged `implementation.yaml` (тот уже целевой, с supervisor/hybrid). Паритетный flow: `refinement(opt) → planning → implementation → testing(checks) → review(evaluator) → fixing → summary(agent) → publish`, с рёбрами fix-петель и decomposition, **без** supervise_impl/supervise_fix/testing_quality.
-- Golden-harness: существующий набор интеграционных тестов pipeline (использует fake-CLI фикстуры, см. skill `fake-cli`) прогоняется и через старый `_drive`, и через `FlowEngine`; границы сравниваются.
+- **Фикстура/packaged flow** `tests/core/flows/implementation_parity.yaml` (готово) или packaged `implementation.yaml` без supervisor/hybrid: `refinement(opt) → planning → implementation → testing(checks) → review(evaluator) → fixing → summary(agent) → publish`, fix-петли + decomposition.
+- **Вплетение движка** в `run_task`/`resume` как драйвера (замена `_drive`); `core/flow/wiring.py` строит `NodeServices`/`NodeInputs` из `_Pipeline`; data-driven пост-обработка (`output_artifact`-слоты + decomposition через `proposed_by`).
+- **Адаптация интеграционного сьюта** (fake-CLI, skill `fake-cli`) на движок: проверяем НОВУЮ модель (`node_runs`, `RUNNING`), а не совпадение со старым драйвером.
+- **Удаление legacy** ([`core/orchestrator.py`](../../../src/wastech_orchestrator/core/orchestrator.py): `_drive` ≈820, `_run_unit` ≈1193, `_enter_fixing` ≈1465, `_after_edit_target`, dispatch-on-status в `_resume_task` ≈734; [`state_machine.py`](../../../src/wastech_orchestrator/core/state_machine.py): гранулярные статусы + их `ALLOWED_TRANSITIONS`; `stage_runs` в [state_store.py](../../../src/wastech_orchestrator/state_store.py); [`providers/base.py`](../../../src/wastech_orchestrator/providers/base.py) `Stage`-как-конвейер → `node_id`).
 
 ### Поведение
 
-- Паритетный flow воспроизводит `Stage`-конвейер ([providers/base.py](../../../src/wastech_orchestrator/providers/base.py) `Stage`): refinement→agent (optional, `when: derived.needs_refinement`), planning→agent, implementation→agent (editing_lineage), testing→checks, review→evaluator(review), fixing→agent (lineage_affinity:implementation), summary→agent, publishing→publish. fix-петли: `testing fail→fixing (loop test_fix)`, `review rework→fixing (loop review_fix)`.
-- Decomposition-конструкция (P0 снапшот уже парсит `decomposition`) исполняется движком как фан-аут под-flow (паритет `core/decomposition.py` + `_run_units_and_finish`).
+- Flow выражает текущий конвейер: refinement→agent (opt, `when: derived.needs_refinement`), planning→agent, implementation→agent (editing_lineage), testing→checks, review→evaluator, fixing→agent (lineage_affinity:implementation), summary→agent, publishing→publish. fix-петли: `testing fail→fixing (loop test_fix)`, `review rework→fixing (loop review_fix)`.
+- Decomposition исполняется движком как фан-аут под-flow (механика из `core/decomposition.py` + переписанный `_run_units_and_finish` на уровне `engine_driver`).
 
-### Тесты
+### Тесты (чек-лист возможностей — каждая ≥1 зелёный сценарий)
 
-- Весь существующий pipeline-тест-сьют зелёный через движок (happy-path, fix-петли, decomposed, recovery, rerun/continue, manual-исходы).
-- `test_parity_flow_matches_legacy_boundary` — статусы/артефакты/commit-SHA/publish-ops/ledger совпадают между `_drive` и `FlowEngine` на наборе сценариев.
-
-### Exit
-
-Движок воспроизводит текущий конвейер байт-в-байт на наблюдаемой границе.
-
----
-
-## P1.5 — Удаление старого драйвера
-
-Цель: одна модель исполнения; мёртвый код удалён. Делается **только** после зелёного P1.4.
-
-### Touchpoints
-
-- [`core/orchestrator.py`](../../../src/wastech_orchestrator/core/orchestrator.py): снести `_drive` (≈820), `_run_unit` (≈1193), `_enter_fixing` (≈1465), `_after_edit_target`, dispatch-on-status в `_resume_task` (≈734); `run_task`/`resume`-обвязка остаётся, но тело делегирует `FlowEngine`.
-- [`core/state_machine.py`](../../../src/wastech_orchestrator/core/state_machine.py): удалить implementation-специфичные статусы и их `ALLOWED_TRANSITIONS`-рёбра (оставить родовой lifecycle из P1.2).
-- [`providers/base.py`](../../../src/wastech_orchestrator/providers/base.py): `Stage`-перечисление в роли описания конвейера удаляется/депрекейтится (узлы графа теперь источник). Если `Stage` используется в артефакт-раскладке (`stages/<stage>/...`, [providers/artifacts.py](../../../src/wastech_orchestrator/providers/artifacts.py) `create_attempt_dir`) — заменить на `node_id`.
-- Снять двойной CI-прогон из P1.
-
-### Тесты
-
-- Удалить тесты, дублирующие старый драйвер; оставить движковые. Сьют остаётся зелёным.
-- `test_no_drive_symbol` (grep-guard) — `_drive`/`_run_unit` отсутствуют в кодовой базе.
+- happy-path, test-fix петля, review-fix петля, исчерпание бюджета → manual + failure-report, HITL (refinement question, planning approval), dangerous-diff approve/deny/reconsider, decomposed (fan-out, commit-per-subtask), recovery/resume, rerun fresh + `--continue`, skip-stages, manual-исходы.
+- `test_no_drive_symbol` (grep-guard) — `_drive`/`_run_unit`/`_enter_fixing` отсутствуют в кодовой базе.
 
 ### Exit
 
-Одна модель исполнения; `_drive`/реентри-диспетчер/`Stage`-как-конвейер удалены.
+Одна модель исполнения; все возможности из чек-листа зелены на движке; `_drive`/реентри-диспетчер/гранулярные статусы/`stage_runs`/`Stage`-как-конвейер удалены.
 
 ---
 
 ## Сквозной обзор зависимостей P1
 
 ```text
-P1.1 (engine core) ──┬─> P1.3 (node wrappers) ──> P1.4 (parity + golden) ──> P1.5 (delete legacy)
-                     │
-P1.2 (resume/checkpoint, schema v4) ──────────────┘   (P1.4 нужен resume по графу)
+P1.1 (engine core) ──┬─> P1.3 (node wrappers) ──> P1.4+P1.5 (cutover: движок-драйвер,
+                     │                              data-driven пост-обработка, адаптация
+P1.2 (resume/checkpoint, schema v4) ──────────────┘   сьюта, удаление legacy — один шаг)
 ```
 
-P1.1 и P1.2 можно вести параллельно (engine ↔ persistence), но P1.4 требует обоих + P1.3. P1.5 — строго последний.
+P1.1 и P1.2 можно вести параллельно (engine ↔ persistence); cutover-шаг (бывшие P1.4+P1.5) требует обоих + P1.3 и выполняется атомарно (заместить `_drive` + удалить legacy).
 
 ## Контракт выхода P1 → P2
 

@@ -20,7 +20,8 @@ Guarantees:
 Budget bookkeeping is generic on purpose: the engine knows nothing about ``test_fix`` /
 ``review_fix`` / supervisor by name (the P3 abstraction test forbids domain knowledge in the
 engine). It preserves the legacy :class:`~wastech_orchestrator.core.loop_control.LoopController`
-``>=`` semantics — increment then compare — for named loops (the P1.4 golden-harness pins this), and
+``>=`` semantics — increment then compare — for named loops (verified by the cutover suite's
+fix-loop scenarios), and
 uses ``allow N`` semantics for inline ``budget: N`` edges. Flow ``budgets`` parameterize the limits;
 ``agents.max_fix_cycles`` / ``agents.max_total_fix_iterations`` clamp them as the unlosable backstop
 (security-ceiling): the effective cap is ``min(flow_budget, config_cap)``.

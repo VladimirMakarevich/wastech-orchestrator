@@ -319,7 +319,7 @@ flow:
     shared_budget: global_fix_iterations
 ```
 
-Что это доказывает (соответствие нынешнему поведению — golden-harness против существующих тестов):
+Что это доказывает (соответствие нынешнему поведению — проверяется адаптированным на движок интеграционным сьютом; golden-harness/паритет байт-в-байт отменён, см. [plan.md](plan.md)):
 
 - каждая стадия-автор → `agent`-узел; mandatory-supervisor после implementation/fixing → два `evaluator`-узла (`role=supervisor`); review → `evaluator`-узел (не отдельная стадия); testing → `checks` + необязательный `evaluator` (`role=test_quality`); summary → `evaluator` final_handoff; publishing → `publish`;
 - fix-петли (test-driven, review-driven, supervisor-rework) → `rework`/`fail`-рёбра с единым глобальным `fix_iterations` и локальными цикловыми лимитами;
