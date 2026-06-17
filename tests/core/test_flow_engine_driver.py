@@ -96,6 +96,12 @@ class _FakeGit:
     def create_pr(self, task_id: str, branch: str, *, title: str, body_path: str) -> str | None:
         return "https://example/pr/1"
 
+    def write_current_diff(self, task_id: str) -> str:
+        return "/art/current.diff"
+
+    def changed_code_entries(self) -> tuple[Any, ...]:
+        return ()
+
 
 def _agents() -> AgentsConfig:
     return AgentsConfig(

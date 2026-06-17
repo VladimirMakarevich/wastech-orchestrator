@@ -215,6 +215,46 @@ def test_agent_node_infra_exhaustion_raises(tmp_path: Path) -> None:
         AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
 
 
+def test_agent_workspace_write_writes_diff(tmp_path: Path) -> None:
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(id="impl", kind="agent", role_file="r.md",
+                     permission_profile=PermissionProfile.WORKSPACE_WRITE)
+    router, store, git = FakeRouter(_result()), FakeStore(), FakeGit()
+    services = _services(router, store, {"impl": Stage.IMPLEMENTATION},
+                         FakeCheckRunner(CheckOutcome(passed=True, runs=())), git=git)
+    inputs = _inputs(tmp_path)
+    AgentNodeRunner(services, inputs).run(node, _ctx(node))
+    assert inputs.diff_path == "/art/current.diff"
+    assert ("write_current_diff", "task-1") in git.calls
+
+
+def test_agent_dangerous_diff_goes_manual(tmp_path: Path) -> None:
+    from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
+    from wastech_orchestrator.git_manager import ChangedPath
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(id="impl", kind="agent", role_file="r.md",
+                     permission_profile=PermissionProfile.WORKSPACE_WRITE)
+    git = FakeGit(changed=(ChangedPath(status="D", path="src/core.py"),))
+    services = _services(FakeRouter(_result()), FakeStore(), {"impl": Stage.IMPLEMENTATION},
+                         FakeCheckRunner(CheckOutcome(passed=True, runs=())), git=git)
+    with pytest.raises(NodeManualRequired):
+        AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+
+def test_agent_read_only_node_skips_diff_guard(tmp_path: Path) -> None:
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(id="refine", kind="agent", role_file="r.md",
+                     permission_profile=PermissionProfile.READ_ONLY)
+    git = FakeGit()
+    services = _services(FakeRouter(_result()), FakeStore(), {"refine": Stage.REFINEMENT},
+                         FakeCheckRunner(CheckOutcome(passed=True, runs=())), git=git)
+    inputs = _inputs(tmp_path)
+    AgentNodeRunner(services, inputs).run(node, _ctx(node))
+    assert inputs.diff_path is None
+    assert git.calls == []
+
+
 # -- evaluator ----------------------------------------------------------------
 
 
@@ -336,8 +376,9 @@ def test_checks_launch_failure_is_infra(tmp_path: Path) -> None:
 
 
 class FakeGit:
-    def __init__(self) -> None:
+    def __init__(self, changed: tuple[Any, ...] = ()) -> None:
         self.calls: list[tuple[str, ...]] = []
+        self._changed = changed
 
     def commit_code(self, task_id: str, message: str) -> str | None:
         self.calls.append(("commit_code", task_id, message))
@@ -354,6 +395,13 @@ class FakeGit:
     def create_pr(self, task_id: str, branch: str, *, title: str, body_path: str) -> str | None:
         self.calls.append(("create_pr", task_id, branch, title, body_path))
         return "https://example/pr/1"
+
+    def write_current_diff(self, task_id: str) -> str:
+        self.calls.append(("write_current_diff", task_id))
+        return "/art/current.diff"
+
+    def changed_code_entries(self) -> tuple[Any, ...]:
+        return self._changed
 
 
 def test_publish_pull_request_runs_git_sequence(tmp_path: Path) -> None:

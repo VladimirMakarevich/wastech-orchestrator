@@ -19,6 +19,7 @@ from typing import Protocol
 
 from wastech_orchestrator.check_runner import CheckOutcome
 from wastech_orchestrator.checks.model import ResolvedCheck
+from wastech_orchestrator.git_manager import ChangedPath
 from wastech_orchestrator.providers.base import AgentRunRequest, Stage
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.routing.snapshots import SnapshotHook
@@ -32,6 +33,16 @@ class NodeInfraError(Exception):
     *launch* failure both raise this; the orchestrator maps it to terminal ``failed`` — it never
     routes to fixing (no code change can fix infrastructure). Mirrors the legacy ``PipelineFailed``
     + ``CheckOutcome.launch_failed`` handling.
+    """
+
+
+class NodeManualRequired(Exception):
+    """A node needs human action and cannot proceed automatically (terminal manual_action_required).
+
+    Raised by the dangerous-diff guard when a workspace-write edit produced a deletion/dependency
+    change. Mirrors the legacy ``ManualActionRequired``. The orchestrator maps it to terminal
+    ``manual_action_required``. (The full durable approval round-trip — prompt, persist, resume,
+    reconsider-on-denial — is the next Step-B piece; until then a dangerous diff fails closed.)
     """
 
 
@@ -87,12 +98,13 @@ class NodeRunStorePort(Protocol):
     def record_check_run(self, run: CheckRunRow, conn: object | None = None) -> None: ...
 
 
-class GitPublishPort(Protocol):
-    """The slice of :class:`~wastech_orchestrator.git_manager.GitManager` the publish runner uses.
+class GitPort(Protocol):
+    """The slice of :class:`~wastech_orchestrator.git_manager.GitManager` the node runners use.
 
-    Every method is idempotent (keyed by ``publish_operations``), so a resumed run never repeats a
-    commit/push/PR. Git is the orchestrator's sole responsibility — providers and flows never touch
-    it (the hard invariant).
+    The publish operations are idempotent (keyed by ``publish_operations``), so a resumed run never
+    repeats a commit/push/PR; ``write_current_diff``/``changed_code_entries`` capture the post-edit
+    diff for the dangerous-diff guard + ``{diff_path}``. Git is the orchestrator's sole
+    responsibility — providers and flows never touch it (the hard invariant).
     """
 
     def commit_code(self, task_id: str, message: str) -> str | None: ...
@@ -104,6 +116,10 @@ class GitPublishPort(Protocol):
     def create_pr(
         self, task_id: str, branch: str, *, title: str, body_path: str
     ) -> str | None: ...
+
+    def write_current_diff(self, task_id: str) -> str: ...
+
+    def changed_code_entries(self) -> tuple[ChangedPath, ...]: ...
 
 
 @dataclass(frozen=True)
@@ -120,8 +136,9 @@ class NodeServices:
     clock: Callable[[], str]
     default_timeout_seconds: int = 7200
     snapshot: SnapshotHook | None = None  # git snapshot hook for provider observability
-    #: set only for flows with a publish node (the orchestrator owns git; providers/flows do not).
-    git: GitPublishPort | None = None
+    #: the orchestrator's git manager (it owns git; providers/flows never touch it). Set for any
+    #: flow with a publish node or a workspace-write agent node (the dangerous-diff guard).
+    git: GitPort | None = None
 
 
 @dataclass

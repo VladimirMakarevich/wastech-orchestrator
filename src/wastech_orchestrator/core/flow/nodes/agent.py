@@ -16,8 +16,15 @@ from __future__ import annotations
 
 import json
 
+from wastech_orchestrator.core.dangerous_diff import classify_dangerous_diff
+from wastech_orchestrator.core.flow.contracts import PermissionProfile
 from wastech_orchestrator.core.flow.engine import NodeContext, NodeOutcome, NodeResult
-from wastech_orchestrator.core.flow.nodes.base import NodeInfraError, NodeInputs, NodeServices
+from wastech_orchestrator.core.flow.nodes.base import (
+    NodeInfraError,
+    NodeInputs,
+    NodeManualRequired,
+    NodeServices,
+)
 from wastech_orchestrator.core.flow.prompt import render_role_prompt
 from wastech_orchestrator.core.flow.schema import AgentNode, FlowNode
 from wastech_orchestrator.core.hitl import stage_output_schema
@@ -61,7 +68,27 @@ class AgentNodeRunner:
             )
             raise NodeInfraError(f"agent node {node.id!r}: no provider could complete it ({err})")
         self._update_session(outcome, route)
+        self._apply_post_edit_guard(node, ctx)
         return NodeResult(node_id=node.id, outcome=NodeOutcome("done"), node_run_id=run_id)
+
+    def _apply_post_edit_guard(self, node: AgentNode, ctx: NodeContext) -> None:
+        """After a workspace-write edit, write the diff (``{diff_path}``) and gate dangerous diffs.
+
+        Core-owned and automatic — the flow never declares or disables it (flow-contract §2.1). The
+        deletion/dependency classification is exact; the full durable approval round-trip (prompt /
+        persist / resume / reconsider-on-denial, mirroring ``_run_edit_stage_with_guardrail``) is
+        the next Step-B piece, so for now a dangerous diff fails closed to manual review.
+        """
+        resolved = node.permission_profile or ctx.snapshot.doc.permission_ceiling
+        if resolved != PermissionProfile.WORKSPACE_WRITE or self._s.git is None:
+            return
+        self._in.diff_path = self._s.git.write_current_diff(ctx.task_id)
+        dangerous = classify_dangerous_diff(self._s.git.changed_code_entries())
+        if dangerous is not None:
+            raise NodeManualRequired(
+                f"agent node {node.id!r} produced a dangerous diff (risk={dangerous.risk}); "
+                "the approval round-trip is a Step-B follow-up"
+            )
 
     def _build_request(
         self, node: AgentNode, ctx: NodeContext, stage: Stage, route: ResolvedRoute, run_id: int
