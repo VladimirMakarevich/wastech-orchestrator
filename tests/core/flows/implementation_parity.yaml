@@ -1,0 +1,85 @@
+# Parity fixture for the flow-engine golden harness (P1.4 step B). NOT a packaged flow.
+#
+# Reproduces the CURRENT implementation pipeline 1:1 — refinement -> planning -> implementation ->
+# testing(checks) -> review(evaluator) -> fixing -> summary -> publish, with the two fix loops and
+# decomposition — and deliberately WITHOUT supervisor / hybrid testing_quality / durable sessions
+# (those are the target features added in P2). The golden harness drives the same fake-CLI scenarios
+# through the legacy `_drive` and through `FlowEngine` over this fixture and compares the observable
+# boundary (statuses / artifacts / commit-SHA / publish-ops / ledger).
+#
+# Budgets are intentionally large so the engine's effective cap = min(flow_budget, config_cap)
+# resolves to the config cap, matching the legacy LoopController exactly.
+flow:
+  name: implementation_parity
+  task_type: implementation_parity
+  permission_ceiling: workspace-write
+  output_policy: code_change
+  publishing: pull_request
+
+  nodes:
+    - id: refinement
+      kind: agent
+      role_file: roles/refinement.md
+      session_scope: fresh_disposable
+      permission_profile: read-only
+      hitl: { allow_question: true, allow_approval: false }
+      when: { fact: derived.needs_refinement }
+    - id: planning
+      kind: agent
+      role_file: roles/planning.md
+      session_scope: fresh_disposable
+      permission_profile: read-only
+      hitl: { allow_question: true, allow_approval: true }
+    - id: implementation
+      kind: agent
+      role_file: roles/implementation.md
+      session_scope: editing_lineage
+      permission_profile: workspace-write
+    - id: testing
+      kind: checks
+      checker: command_profile
+      discovery: { mode: auto, approve_command_changes: true }
+    - id: review
+      kind: evaluator
+      role: review
+      role_file: roles/review.md
+      session_scope: fresh_disposable
+      permission_profile: read-only
+    - id: fixing
+      kind: agent
+      role_file: roles/fixing.md
+      session_scope: editing_lineage
+      lineage_affinity: implementation
+      permission_profile: workspace-write
+    - id: summary
+      kind: agent
+      role_file: roles/summary.md
+      session_scope: fresh_disposable
+      permission_profile: read-only
+      when: { fact: config.summary_enabled }
+    - id: publish
+      kind: publish
+      policy: pull_request
+
+  edges:
+    - { from: refinement, to: planning }
+    - { from: planning, to: implementation }
+    - { from: implementation, to: testing }
+    - { from: testing, to: review, outcome: pass }
+    - { from: testing, to: fixing, outcome: fail, loop: test_fix }
+    - { from: review, to: summary, outcome: accept }
+    - { from: review, to: fixing, outcome: rework, loop: review_fix }
+    - { from: fixing, to: testing }
+    - { from: summary, to: publish }
+
+  budgets:
+    global_fix_iterations: 999
+    test_fix: 999
+    review_fix: 999
+
+  decomposition:
+    proposed_by: planning
+    gate: { min: 2, max: 8, linear_depends_on: true }
+    sub_flow: [implementation, testing, review, fixing]
+    commit_each_subtask: true
+    shared_budget: global_fix_iterations
