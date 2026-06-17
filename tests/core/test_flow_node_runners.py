@@ -6,6 +6,7 @@ calls the collaborator and maps the result exactly like the direct orchestrator 
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -142,13 +143,14 @@ def _services(
     stage_map: dict[str, Stage],
     check_runner: Any,
     git: Any = None,
+    artifacts_root: str = "/art",
 ) -> Any:
     return NodeServices(
         router=router,
         check_runner=check_runner,
         store=store,
         repo_dir="/repo",
-        artifacts_root="/art",
+        artifacts_root=artifacts_root,
         stage_for_node=stage_map,
         clock=lambda: "ts",
         default_timeout_seconds=100,
@@ -243,7 +245,8 @@ def test_evaluator_maps_blocking_findings(tmp_path: Path, structured: dict[str, 
     node = _evaluator("review")
     router, store = FakeRouter(_result(structured)), FakeStore()
     services = _services(router, store, {"review": Stage.REVIEW},
-                         FakeCheckRunner(CheckOutcome(passed=True, runs=())))
+                         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+                         artifacts_root=str(tmp_path))
     result = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == expected
 
@@ -253,9 +256,27 @@ def test_evaluator_non_blocking_always_accepts(tmp_path: Path) -> None:
     node = _evaluator("tq", blocking=False)
     router, store = FakeRouter(_result({"findings": [{"severity": "critical"}]})), FakeStore()
     services = _services(router, store, {"tq": Stage.REVIEW},
-                         FakeCheckRunner(CheckOutcome(passed=True, runs=())))
+                         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+                         artifacts_root=str(tmp_path))
     result = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "accept"
+
+
+def test_evaluator_review_writes_findings_artifact(tmp_path: Path) -> None:
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    node = _evaluator("review")
+    router = FakeRouter(_result({"findings": [{"title": "x", "severity": "low"}]}))
+    store = FakeStore()
+    inputs = _inputs(tmp_path)
+    services = _services(router, store, {"review": Stage.REVIEW},
+                         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+                         artifacts_root=str(tmp_path))
+    EvaluatorNodeRunner(services, inputs).run(node, _ctx(node))
+    findings_file = Path(inputs.review_path)  # type: ignore[arg-type]
+    assert findings_file.name == "findings.json"
+    assert json.loads(findings_file.read_text("utf-8")) == {
+        "findings": [{"title": "x", "severity": "low"}]
+    }
 
 
 def test_evaluator_final_handoff_is_done(tmp_path: Path) -> None:

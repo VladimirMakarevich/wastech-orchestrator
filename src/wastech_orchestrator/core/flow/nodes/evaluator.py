@@ -12,7 +12,9 @@ Blocking detection mirrors the legacy ``_extract_findings`` / ``_is_blocking``.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from wastech_orchestrator.core.flow.contracts import EvaluationKind
@@ -21,6 +23,7 @@ from wastech_orchestrator.core.flow.nodes.base import NodeInfraError, NodeInputs
 from wastech_orchestrator.core.flow.prompt import render_role_prompt
 from wastech_orchestrator.core.flow.schema import EvaluatorNode, FlowNode
 from wastech_orchestrator.core.hitl import stage_output_schema
+from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.providers.base import AgentRunRequest, Stage
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import NodeRunRow
@@ -63,15 +66,36 @@ class EvaluatorNodeRunner:
                 else "no_provider_available"
             )
             raise NodeInfraError(f"evaluator node {node.id!r}: no provider could run it ({err})")
+        raw_findings = self._extract_findings(outcome.result.structured_output)
+        if node.evaluation_kind == EvaluationKind.STAGE_OUTPUT:
+            # Persist the findings artifact and expose it to downstream fixing as {review_path}
+            # (parity with the legacy ``_write_review``). The parity flow has a single stage_output
+            # evaluator (``review``); the per-evaluator verdict store for supervisor/test_quality is
+            # P2.1.
+            self._write_findings(ctx, raw_findings, outcome.result.final_message)
         findings = tuple(
             Finding(message=str(f.get("title", f)), blocking=self._is_blocking(f))
-            for f in self._extract_findings(outcome.result.structured_output)
+            for f in raw_findings
         )
         return NodeResult(
             node_id=node.id,
             outcome=NodeOutcome(kind, findings=findings),
             node_run_id=run_id,
         )
+
+    def _write_findings(
+        self, ctx: NodeContext, findings: list[dict[str, Any]], summary: str | None
+    ) -> None:
+        review_dir = Path(task_artifact_dir(self._s.artifacts_root, ctx.task_id)) / "review"
+        review_dir.mkdir(parents=True, exist_ok=True)
+        (review_dir / "findings.json").write_text(
+            json.dumps({"findings": findings}, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        (review_dir / "summary.md").write_text(
+            (summary or "(no review summary)") + "\n", encoding="utf-8"
+        )
+        self._in.review_path = str(review_dir / "findings.json")
 
     def _verdict(self, node: EvaluatorNode, outcome: StageOutcome) -> str:
         if node.evaluation_kind == EvaluationKind.FINAL_HANDOFF:
