@@ -246,6 +246,68 @@ def test_agent_dangerous_diff_goes_manual(tmp_path: Path) -> None:
         AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
 
 
+def _ws_node() -> AgentNode:
+    return AgentNode(id="impl", kind="agent", role_file="r.md",
+                     permission_profile=PermissionProfile.WORKSPACE_WRITE)
+
+
+def _guard_services(tmp_path: Path, git: Any, notifier: Any) -> Any:
+    return NodeServices(
+        router=FakeRouter(_result()),
+        check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        store=FakeStore(),
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path),
+        stage_for_node={"impl": Stage.IMPLEMENTATION},
+        clock=lambda: "ts",
+        git=git,
+        notifier=notifier,
+        ask_timeout_s=60,
+    )
+
+
+def test_agent_dangerous_diff_approved_proceeds(tmp_path: Path) -> None:
+    from wastech_orchestrator.git_manager import ChangedPath
+    from wastech_orchestrator.notify import AskResult
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    git = FakeGit(changed=(ChangedPath(status="D", path="src/x.py"),))
+    notifier = FakeNotifier(AskResult(answered=True, approved=True))
+    result = AgentNodeRunner(_guard_services(tmp_path, git, notifier), _inputs(tmp_path)).run(
+        _ws_node(), _ctx(_ws_node())
+    )
+    assert result.outcome.kind == "done"
+    assert notifier.asks  # an approval was requested
+
+
+def test_agent_dangerous_diff_denied_reconsiders_clean(tmp_path: Path) -> None:
+    from wastech_orchestrator.git_manager import ChangedPath
+    from wastech_orchestrator.notify import AskResult
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    # first classify is dangerous; after the denial-driven reconsider re-run, the diff is clean.
+    git = FakeGit(changed_seq=[(ChangedPath(status="D", path="src/x.py"),), ()])
+    notifier = FakeNotifier(AskResult(answered=True, approved=False))
+    result = AgentNodeRunner(_guard_services(tmp_path, git, notifier), _inputs(tmp_path)).run(
+        _ws_node(), _ctx(_ws_node())
+    )
+    assert result.outcome.kind == "done"
+
+
+def test_agent_dangerous_diff_denied_still_dangerous_goes_manual(tmp_path: Path) -> None:
+    from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
+    from wastech_orchestrator.git_manager import ChangedPath
+    from wastech_orchestrator.notify import AskResult
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    git = FakeGit(changed=(ChangedPath(status="D", path="src/x.py"),))  # always dangerous
+    notifier = FakeNotifier(AskResult(answered=True, approved=False))
+    with pytest.raises(NodeManualRequired):
+        AgentNodeRunner(_guard_services(tmp_path, git, notifier), _inputs(tmp_path)).run(
+            _ws_node(), _ctx(_ws_node())
+        )
+
+
 def test_agent_read_only_node_skips_diff_guard(tmp_path: Path) -> None:
     # summary is a read-only agent node (non-HITL stage) -> simple path, no diff guard.
     (tmp_path / "r.md").write_text("go", "utf-8")
@@ -489,9 +551,12 @@ def test_checks_launch_failure_is_infra(tmp_path: Path) -> None:
 
 
 class FakeGit:
-    def __init__(self, changed: tuple[Any, ...] = ()) -> None:
+    def __init__(
+        self, changed: tuple[Any, ...] = (), changed_seq: list[tuple[Any, ...]] | None = None
+    ) -> None:
         self.calls: list[tuple[str, ...]] = []
         self._changed = changed
+        self._changed_seq = changed_seq
 
     def commit_code(self, task_id: str, message: str) -> str | None:
         self.calls.append(("commit_code", task_id, message))
@@ -514,6 +579,8 @@ class FakeGit:
         return "/art/current.diff"
 
     def changed_code_entries(self) -> tuple[Any, ...]:
+        if self._changed_seq:
+            return self._changed_seq.pop(0) if len(self._changed_seq) > 1 else self._changed_seq[0]
         return self._changed
 
 

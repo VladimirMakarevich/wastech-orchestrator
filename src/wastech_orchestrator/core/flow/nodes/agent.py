@@ -24,7 +24,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from wastech_orchestrator.core.dangerous_diff import classify_dangerous_diff
+from wastech_orchestrator.core.dangerous_diff import DangerousDiff, classify_dangerous_diff
 from wastech_orchestrator.core.flow.contracts import PermissionProfile
 from wastech_orchestrator.core.flow.engine import NodeContext, NodeOutcome, NodeResult
 from wastech_orchestrator.core.flow.nodes.base import (
@@ -37,11 +37,14 @@ from wastech_orchestrator.core.flow.nodes.human_gate import HumanGate
 from wastech_orchestrator.core.flow.prompt import render_role_prompt
 from wastech_orchestrator.core.flow.schema import AgentNode, FlowNode
 from wastech_orchestrator.core.hitl import (
+    HumanInputSignal,
     StageOutputError,
     TypedStageOutput,
+    guardrail_interaction_path,
     interaction_path,
     load_interaction,
     mark_consumed,
+    mark_interaction_status,
     parse_typed_stage_output,
     stage_output_schema,
 )
@@ -74,7 +77,7 @@ class AgentNodeRunner:
         self, node: AgentNode, ctx: NodeContext, stage: Stage, route: ResolvedRoute
     ) -> NodeResult:
         run_id, _outcome = self._invoke(node, ctx, stage, route, human_input_path=None)
-        self._apply_post_edit_guard(node, ctx)
+        self._apply_post_edit_guard(node, ctx, stage, route)
         return NodeResult(node_id=node.id, outcome=NodeOutcome("done"), node_run_id=run_id)
 
     # -- embedded HITL (refinement / planning) --------------------------------
@@ -208,24 +211,90 @@ class AgentNodeRunner:
         self._update_session(outcome, route)
         return run_id, outcome
 
-    def _apply_post_edit_guard(self, node: AgentNode, ctx: NodeContext) -> None:
+    def _apply_post_edit_guard(
+        self, node: AgentNode, ctx: NodeContext, stage: Stage, route: ResolvedRoute
+    ) -> None:
         """After a workspace-write edit, write the diff (``{diff_path}``) and gate dangerous diffs.
 
-        Core-owned and automatic — the flow never declares or disables it (flow-contract §2.1). The
-        deletion/dependency classification is exact; the full durable approval round-trip (prompt /
-        persist / resume / reconsider-on-denial, mirroring ``_run_edit_stage_with_guardrail``) is
-        the next Step-B piece, so for now a dangerous diff fails closed to manual review.
+        Core-owned and automatic — the flow never declares or disables it (flow-contract §2.1). A
+        deletion/dependency diff requires a durable human approval (or a matching planning
+        pre-approval); on denial the stage reconsiders once with the denial context and, if the diff
+        is still dangerous, fails closed to manual review. A faithful port of
+        ``_run_edit_stage_with_guardrail`` + ``_resume_guardrail_answer``.
         """
         resolved = node.permission_profile or ctx.snapshot.doc.permission_ceiling
         if resolved != PermissionProfile.WORKSPACE_WRITE or self._s.git is None:
             return
         self._in.diff_path = self._s.git.write_current_diff(ctx.task_id)
         dangerous = classify_dangerous_diff(self._s.git.changed_code_entries())
-        if dangerous is not None:
-            raise NodeManualRequired(
-                f"agent node {node.id!r} produced a dangerous diff (risk={dangerous.risk}); "
-                "the approval round-trip is a Step-B follow-up"
+        if dangerous is None:
+            return
+        path = guardrail_interaction_path(
+            self._s.artifacts_root,
+            ctx.task_id,
+            stage,
+            subtask=ctx.subtask_order,
+            cycle=ctx.run_state.fix_iterations,
+        )
+        persisted = load_interaction(path)
+        if persisted is not None:
+            approved = self._resume_guardrail(node, path, persisted, dangerous)
+        elif self._planning_approval_matches(ctx.task_id, dangerous):
+            return  # the dangerous diff was pre-approved during planning
+        else:
+            result = self._gate().request(
+                task_id=ctx.task_id,
+                stage=stage,
+                subtask=ctx.subtask_order,
+                signal=_dangerous_diff_signal(stage, dangerous),
+                path=path,
             )
+            self._require_human(node, "approval", result)
+            approved = result.approved is True
+        if approved:
+            mark_consumed(path)
+            return
+        self._reconsider(node, ctx, stage, route, path)
+
+    def _resume_guardrail(
+        self, node: AgentNode, path: Any, persisted: Mapping[str, Any], dangerous: DangerousDiff
+    ) -> bool:
+        if not _guardrail_request_matches(persisted, dangerous):
+            raise NodeManualRequired(
+                f"agent node {node.id!r}: dangerous diff expanded after its approval request"
+            )
+        status = str(persisted.get("status", ""))
+        if status == "waiting":
+            result = self._gate().resume(path, dict(persisted))
+            self._require_human(node, "approval", result)
+            return result.approved is True
+        if status in ("answered", "consumed"):
+            self._require_persisted_human(node, persisted)
+            return persisted.get("approved") is True
+        raise NodeManualRequired(
+            f"agent node {node.id!r}: cannot resume dangerous-diff approval from status {status!r}"
+        )
+
+    def _reconsider(
+        self, node: AgentNode, ctx: NodeContext, stage: Stage, route: ResolvedRoute, path: Any
+    ) -> None:
+        """Approval denied: re-run the stage with the denial context, then re-classify."""
+        mark_interaction_status(path, "reconsidering")
+        self._invoke(node, ctx, stage, route, human_input_path=str(path))
+        assert self._s.git is not None
+        self._in.diff_path = self._s.git.write_current_diff(ctx.task_id)
+        if classify_dangerous_diff(self._s.git.changed_code_entries()) is not None:
+            raise NodeManualRequired(
+                f"agent node {node.id!r}: retained dangerous changes after approval was denied"
+            )
+        mark_interaction_status(path, "reconsidered")
+
+    def _planning_approval_matches(self, task_id: str, dangerous: DangerousDiff) -> bool:
+        path = interaction_path(self._s.artifacts_root, task_id, Stage.PLANNING)
+        persisted = load_interaction(path)
+        if persisted is None or persisted.get("approved") is not True:
+            return False
+        return _guardrail_request_matches(persisted, dangerous)
 
     def _build_request(
         self,
@@ -313,6 +382,34 @@ class AgentNodeRunner:
         self._in.session_ids[outcome.provider_used.value] = result.session_id
         if outcome.provider_used != route.primary:
             self._in.session_ids.pop(route.primary.value, None)
+
+
+def _dangerous_diff_signal(stage: Stage, dangerous: DangerousDiff) -> HumanInputSignal:
+    detail: list[str] = []
+    if dangerous.deleted_paths:
+        detail.append("Deleted paths: " + ", ".join(dangerous.deleted_paths))
+    if dangerous.dependency_paths:
+        detail.append("Dependency manifests/locks: " + ", ".join(dangerous.dependency_paths))
+    return HumanInputSignal(
+        kind="approval",
+        question=f"Approve dangerous changes produced by the {stage.value} stage?",
+        context="\n".join(detail),
+        risk=dangerous.risk,
+        paths=dangerous.paths,
+    )
+
+
+def _guardrail_request_matches(persisted: Mapping[str, Any], dangerous: DangerousDiff) -> bool:
+    request = persisted.get("request")
+    if not isinstance(request, Mapping):
+        return False
+    paths = request.get("paths")
+    return (
+        request.get("kind") == "approval"
+        and request.get("risk") == dangerous.risk
+        and isinstance(paths, list)
+        and tuple(sorted(str(path) for path in paths)) == dangerous.paths
+    )
 
 
 def _persisted_kind(persisted: Mapping[str, Any]) -> AskKind | None:
