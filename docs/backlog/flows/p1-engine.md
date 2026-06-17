@@ -21,7 +21,9 @@ P1 не вводит новых фич. Единственный критери�
 
 ---
 
-## P1.1 — Ядро движка
+## P1.1 — Ядро движка ✓ Выполнено
+
+Статус (2026-06-17): реализовано в [`core/flow/engine.py`](../../../src/wastech_orchestrator/core/flow/engine.py) (`FlowEngine`, `NodeOutcome`/`NodeResult`/`NodeRunner`/`NodeContext`/`RunRecorder`/`Finding`/`FlowRunResult`) + [`core/flow/run_state.py`](../../../src/wastech_orchestrator/core/flow/run_state.py) (`FlowRunState`). Тесты — `tests/core/test_flow_engine.py` (10). **Отступление от буквы спеки (зафиксировано):** движок **не** переиспользует `LoopController` (тот несёт implementation-специфичные имена `test_fix`/`review_fix` — это нарушило бы тест абстракции P3 «ноль доменного знания в движке»). Вместо этого движок воспроизводит `>=`-семантику `LoopController` обобщённо над `FlowRunState.loop_counters`: именованные циклы — increment-then-check `>=` (паритет закрепляется golden-harness в P1.4), инлайн `budget: N` — check-then-increment (`budget: 1` = 1 rework, как у supervisor в packaged `implementation.yaml`); глобальный счётчик под ключом `global_fix_iterations`; эффективный cap = `min(flow_budget, config_cap)`. Старый `LoopController` остаётся для legacy `_drive` до P1.5.
 
 Цель: исполнитель узлов с **engine-owned** применением переходов по рёбрам. Узлы возвращают исход (`NodeOutcome`), движок резолвит соответствующее ребро из `adjacency` снапшота и переходит. Узлы не прыгают по графу. Bounded-loop бюджеты + единый `fix_iterations` + гарантия терминальности.
 
@@ -92,7 +94,9 @@ class NodeRunner(Protocol):
 
 ---
 
-## P1.2 — Обобщение resume / checkpoint
+## P1.2 — Обобщение resume / checkpoint ✓ Выполнено (аддитивно; recovery-диспетчеризация — в P1.4)
+
+Статус (2026-06-17): реализовано **аддитивно** — `node_runs` и родовой `RUNNING` добавлены **рядом** с legacy `stage_runs`/гранулярными статусами, которые остаются до P1.5 (golden-harness P1.4 гоняет обе модели бок о бок, поэтому legacy `_drive` не должен сломаться раньше). Сделано: `state.db` **v4** ([state_store.py](../../../src/wastech_orchestrator/state_store.py)) — таблица `node_runs` + `NodeRunRow` + `record_node_run`/`complete_node_run`/`record_node_skip`/`get_node_runs` + колонки `tasks.current_node`/`flow_run_counters`/`flow_fingerprint` + `save_flow_checkpoint`/`get_flow_checkpoint` (всё через guarded `_migrate`); [`core/flow/recorder.py`](../../../src/wastech_orchestrator/core/flow/recorder.py) — `StateStoreRunRecorder` (реализует `RunRecorder`) + `hydrate_run_state` (resume доверяет сохранённому `flow_fingerprint`, не переразрешает flow); родовой `Status.RUNNING` ([state_machine.py](../../../src/wastech_orchestrator/core/state_machine.py), аддитивно); flow-нейтральный `ledger.write_failure_report` (опциональный `node_id`); движок резюмирует с гидратированного `current_node`. Тесты — `tests/state/test_node_runs.py`, `tests/core/test_flow_recorder.py`, `test_flow_engine.py::test_engine_resumes_at_current_node`. **Отложено в P1.4** (сцеплено с вплетением движка в `run_task`/`resume`): переписывание `RecoveryReconciler` на per-node-progress, decomposed-resume и `rerun --continue` по `interrupted_node`. Удаление гранулярных статусов/`stage_runs`/dispatch-on-status — в P1.5.
 
 Цель: чекпоинт = `completed_nodes + current_node + loop_counters + publish_operations`; lifecycle ужат до родового `pending → validated → running → (done | failed | manual)`; recovery доверяет снапшоту и **не переразрешает** flow. **Высокий риск** (см. [plan.md](plan.md) §Риски): опора на существующую идемпотентность `publish_operations`.
 

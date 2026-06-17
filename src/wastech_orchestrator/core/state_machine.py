@@ -40,6 +40,10 @@ class Status(StrEnum):
     MANUAL_ACTION_REQUIRED = "manual_action_required"
     # The §8.2 queue waiting-state: accepted, awaiting the single processing slot.
     PENDING = "pending"
+    # The flow-engine generic running status (flow-engine P1.2). Progress within ``running`` is the
+    # ``current_node`` in ``node_runs``, not a granular status. The granular implementation statuses
+    # above stay until P1.5 removes them (the legacy driver still uses them through P1.4).
+    RUNNING = "running"
 
 
 # Terminal statuses: no outgoing transitions, the slot is released after terminal cleanup (§8.3).
@@ -62,6 +66,7 @@ ACTIVE: frozenset[Status] = frozenset(
         Status.COMMITTING,
         Status.PUSHING,
         Status.CREATING_PR,
+        Status.RUNNING,
     }
 )
 
@@ -70,9 +75,13 @@ ACTIVE: frozenset[Status] = frozenset(
 _BASE_TRANSITIONS: dict[Status, frozenset[Status]] = {
     # new -> validated normally; new -> failed when the §19 gate rejects (quarantined, no branch).
     Status.NEW: frozenset({Status.VALIDATED}),
-    Status.VALIDATED: frozenset({Status.PREPARING}),
-    # preparing -> planning when refinement is deterministically skipped (§5).
-    Status.PREPARING: frozenset({Status.REFINING, Status.PLANNING}),
+    # validated -> preparing on the legacy path; -> running on the flow-engine path.
+    Status.VALIDATED: frozenset({Status.PREPARING, Status.RUNNING}),
+    # preparing -> planning when refinement is deterministically skipped (§5); -> running when the
+    # flow engine drives the unit loop (branch prep stays in the orchestrator wrapper).
+    Status.PREPARING: frozenset({Status.REFINING, Status.PLANNING, Status.RUNNING}),
+    # running -> done when the flow graph reaches its terminal publish node (flow-engine path).
+    Status.RUNNING: frozenset({Status.DONE}),
     Status.REFINING: frozenset({Status.PLANNING}),
     Status.PLANNING: frozenset({Status.IMPLEMENTING}),
     # implementing -> testing normally; -> reviewing when the testing stage is skipped (stage-skip

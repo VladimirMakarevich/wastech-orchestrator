@@ -18,7 +18,8 @@ from wastech_orchestrator.core.state_machine import (
 
 
 def test_all_seventeen_plus_pending_statuses_present() -> None:
-    # The 17 §8 statuses plus the §8.2 ``pending`` queue waiting-state.
+    # The 17 §8 statuses, the §8.2 ``pending`` queue waiting-state, and the flow-engine generic
+    # ``running`` status (flow-engine P1.2; the granular statuses stay until P1.5).
     assert {s.value for s in Status} == {
         "new",
         "validated",
@@ -38,6 +39,7 @@ def test_all_seventeen_plus_pending_statuses_present() -> None:
         "failed",
         "manual_action_required",
         "pending",
+        "running",
     }
 
 

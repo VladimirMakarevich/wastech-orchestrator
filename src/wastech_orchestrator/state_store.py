@@ -37,7 +37,12 @@ def _utc_now_iso() -> str:
 # in-place by ``_migrate`` (idempotent ``ALTER TABLE ADD COLUMN``); no data is rewritten.
 # v3: added ``tasks.interrupted_status`` (the stage a task was on before going terminal), so
 # ``rerun --continue`` can re-enter the pipeline at the failed stage.
-DB_SCHEMA_VERSION = 3
+# v4 (flow-engine P1.2): added the flow-engine execution path **alongside** the legacy driver — the
+# ``node_runs`` table (the generic per-node audit trail that generalizes ``stage_runs``) and the
+# ``tasks.current_node`` / ``tasks.flow_run_counters`` / ``tasks.flow_fingerprint`` columns (the
+# durable :class:`~wastech_orchestrator.core.flow.run_state.FlowRunState` checkpoint). All are
+# additive and nullable; the legacy ``stage_runs`` + granular statuses stay until P1.5 removes them.
+DB_SCHEMA_VERSION = 4
 
 
 class IncompatibleStateError(Exception):
@@ -58,6 +63,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
     task_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(tasks)")}
     if "interrupted_status" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN interrupted_status TEXT")
+    # v4: the FlowRunState checkpoint columns (flow-engine execution path).
+    if "current_node" not in task_cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN current_node TEXT")
+    if "flow_run_counters" not in task_cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN flow_run_counters TEXT")
+    if "flow_fingerprint" not in task_cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN flow_fingerprint TEXT")
 
 
 def _enforce_schema_version(conn: sqlite3.Connection, *, writable: bool) -> None:
@@ -110,7 +122,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     cleanup_completed_at TEXT,
     cleanup_last_error TEXT,
     finished_at TEXT,
-    interrupted_status TEXT
+    interrupted_status TEXT,
+    current_node TEXT,
+    flow_run_counters TEXT,
+    flow_fingerprint TEXT
 );
 
 CREATE TABLE IF NOT EXISTS stage_runs (
@@ -125,6 +140,28 @@ CREATE TABLE IF NOT EXISTS stage_runs (
     provider_used TEXT,
     error_class TEXT,
     stage_attempts INTEGER NOT NULL,
+    commit_sha_before TEXT,
+    commit_sha_after TEXT,
+    started_at TEXT,
+    finished_at TEXT,
+    skipped INTEGER NOT NULL DEFAULT 0,
+    skip_reason TEXT
+);
+
+CREATE TABLE IF NOT EXISTS node_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL REFERENCES tasks(task_id),
+    node_id TEXT NOT NULL,
+    node_kind TEXT NOT NULL,
+    subtask_order INTEGER,
+    status TEXT,
+    outcome TEXT,
+    route_primary TEXT,
+    route_fallback TEXT,
+    route_source TEXT,
+    provider_used TEXT,
+    error_class TEXT,
+    stage_attempts INTEGER NOT NULL DEFAULT 0,
     commit_sha_before TEXT,
     commit_sha_after TEXT,
     started_at TEXT,
@@ -250,6 +287,37 @@ class StageRunRow:
     finished_at: str | None = None
     # Stage-skip audit (stage-skip control): a skipped stage gets a row with ``skipped=True`` and a
     # human-readable ``skip_reason`` and no provider data.
+    skipped: bool = False
+    skip_reason: str | None = None
+    id: int | None = None
+
+
+@dataclass(frozen=True)
+class NodeRunRow:
+    """One flow-graph node execution (flow-engine P1.2 — the generic ``stage_runs`` successor).
+
+    ``node_kind`` is one of ``agent``/``evaluator``/``checks``/``hitl``/``publish``; ``outcome`` is
+    the engine outcome (``accept``/``rework``/``pass``/``fail``/``done``/``route:*``). ``route_*``
+    are ``None`` for non-agent nodes. A skipped node carries ``skipped=True`` + ``skip_reason`` and
+    no provider data (mirrors :meth:`record_skip`).
+    """
+
+    task_id: str
+    node_id: str
+    node_kind: str
+    subtask_order: int | None = None
+    status: str | None = None
+    outcome: str | None = None
+    route_primary: str | None = None
+    route_fallback: str | None = None
+    route_source: str | None = None
+    provider_used: str | None = None
+    error_class: str | None = None
+    stage_attempts: int = 0
+    commit_sha_before: str | None = None
+    commit_sha_after: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
     skipped: bool = False
     skip_reason: str | None = None
     id: int | None = None
@@ -526,8 +594,12 @@ class StateStore:
                 cleanup_last_error=None,
                 finished_at=None,
                 interrupted_status=None,
+                current_node=None,
+                flow_run_counters=None,
+                flow_fingerprint=None,
             )
             c.execute("DELETE FROM subtasks WHERE task_id = ?", (task_id,))
+            c.execute("DELETE FROM node_runs WHERE task_id = ?", (task_id,))
             self.clear_publish_operations(task_id, c)
 
     def revive_task_for_continue(
@@ -680,6 +752,145 @@ class StateStore:
             )
             if cur.rowcount != 1:
                 raise KeyError(run_id)
+
+    # --- node_runs / flow checkpoint (flow-engine P1.2) -----------------------------------
+
+    def record_node_run(self, run: NodeRunRow, conn: sqlite3.Connection | None = None) -> int:
+        """Reserve a flow node-run row before executing the node; returns its id."""
+        with self._writer(conn) as c:
+            cur = c.execute(
+                """
+                INSERT INTO node_runs (
+                    task_id, node_id, node_kind, subtask_order, status, outcome,
+                    route_primary, route_fallback, route_source, provider_used, error_class,
+                    stage_attempts, commit_sha_before, commit_sha_after, started_at, finished_at,
+                    skipped, skip_reason
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    run.task_id,
+                    run.node_id,
+                    run.node_kind,
+                    run.subtask_order,
+                    run.status,
+                    run.outcome,
+                    run.route_primary,
+                    run.route_fallback,
+                    run.route_source,
+                    run.provider_used,
+                    run.error_class,
+                    run.stage_attempts,
+                    run.commit_sha_before,
+                    run.commit_sha_after,
+                    run.started_at,
+                    run.finished_at,
+                    1 if run.skipped else 0,
+                    run.skip_reason,
+                ),
+            )
+            return int(cur.lastrowid or 0)
+
+    def record_node_skip(
+        self,
+        task_id: str,
+        node_id: str,
+        node_kind: str,
+        *,
+        reason: str,
+        subtask_order: int | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> int:
+        """Record a deterministically-skipped node (``when`` false) in the audit trail."""
+        now = self._clock()
+        return self.record_node_run(
+            NodeRunRow(
+                task_id=task_id,
+                node_id=node_id,
+                node_kind=node_kind,
+                subtask_order=subtask_order,
+                status="skipped",
+                skipped=True,
+                skip_reason=reason,
+                started_at=now,
+                finished_at=now,
+            ),
+            conn,
+        )
+
+    def complete_node_run(
+        self,
+        run_id: int,
+        *,
+        status: str,
+        outcome: str | None,
+        provider_used: str | None = None,
+        error_class: str | None = None,
+        stage_attempts: int = 0,
+        finished_at: str,
+        commit_sha_after: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> None:
+        """Finalize a node run reserved by :meth:`record_node_run`."""
+        with self._writer(conn) as c:
+            cur = c.execute(
+                """
+                UPDATE node_runs
+                SET status = ?, outcome = ?, provider_used = ?, error_class = ?,
+                    stage_attempts = ?, finished_at = ?, commit_sha_after = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    outcome,
+                    provider_used,
+                    error_class,
+                    stage_attempts,
+                    finished_at,
+                    commit_sha_after,
+                    run_id,
+                ),
+            )
+            if cur.rowcount != 1:
+                raise KeyError(run_id)
+
+    def get_node_runs(self, task_id: str) -> list[NodeRunRow]:
+        """All node runs for a task in execution order (ascending id)."""
+        cur = self._conn.execute(
+            "SELECT * FROM node_runs WHERE task_id = ? ORDER BY id ASC", (task_id,)
+        )
+        return [_node_run_from_row(row) for row in cur.fetchall()]
+
+    def save_flow_checkpoint(
+        self,
+        task_id: str,
+        *,
+        current_node: str | None,
+        counters_json: str,
+        flow_fingerprint: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> None:
+        """Persist the FlowRunState checkpoint columns on the ``tasks`` row (flow-engine path)."""
+        self.update_task(
+            task_id,
+            conn,
+            current_node=current_node,
+            flow_run_counters=counters_json,
+            flow_fingerprint=flow_fingerprint,
+        )
+
+    def get_flow_checkpoint(self, task_id: str) -> tuple[str | None, str | None, str | None]:
+        """Return ``(current_node, flow_run_counters_json, flow_fingerprint)`` for a task.
+
+        Any element is ``None`` when the flow-engine path has not run (legacy task or fresh row).
+        """
+        cur = self._conn.execute(
+            "SELECT current_node, flow_run_counters, flow_fingerprint FROM tasks WHERE task_id = ?",
+            (task_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise KeyError(task_id)
+        return row["current_node"], row["flow_run_counters"], row["flow_fingerprint"]
 
     def record_provider_attempt(
         self, attempt: ProviderAttemptRow, conn: sqlite3.Connection | None = None
@@ -896,6 +1107,30 @@ def _ob(value: object) -> bool | None:
     if value is None:
         return None
     return bool(value)
+
+
+def _node_run_from_row(row: sqlite3.Row) -> NodeRunRow:
+    return NodeRunRow(
+        task_id=row["task_id"],
+        node_id=row["node_id"],
+        node_kind=row["node_kind"],
+        subtask_order=row["subtask_order"],
+        status=row["status"],
+        outcome=row["outcome"],
+        route_primary=row["route_primary"],
+        route_fallback=row["route_fallback"],
+        route_source=row["route_source"],
+        provider_used=row["provider_used"],
+        error_class=row["error_class"],
+        stage_attempts=row["stage_attempts"],
+        commit_sha_before=row["commit_sha_before"],
+        commit_sha_after=row["commit_sha_after"],
+        started_at=row["started_at"],
+        finished_at=row["finished_at"],
+        skipped=bool(row["skipped"]),
+        skip_reason=row["skip_reason"],
+        id=row["id"],
+    )
 
 
 def _task_from_row(row: sqlite3.Row) -> TaskRow:
