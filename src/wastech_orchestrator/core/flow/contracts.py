@@ -92,6 +92,17 @@ class PublishingPolicy(StrEnum):
     NONE = "none"
 
 
+class NetworkPolicy(StrEnum):
+    """Network access ceiling of a flow (binary levels; absence = no network).
+
+    YAML 1.1 boolean/null tokens (``off``/``no``) are deliberately avoided — a flow grants no
+    network by omitting ``network_policy`` entirely (the loader resolves a missing key to ``None``).
+    """
+
+    ADVISORIES = "advisories"  # fetch vulnerability advisories / package metadata (security_audit)
+    RESEARCH = "research"  # broader external research fetches (deep_research)
+
+
 class QualityAction(StrEnum):
     """The deterministic action the Core applies after a quality result (the foundation vocabulary).
 

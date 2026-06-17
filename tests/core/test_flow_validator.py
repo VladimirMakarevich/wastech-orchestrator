@@ -316,6 +316,38 @@ flow:
     assert _has(vs, "graph", "no terminal")
 
 
+def test_node_cannot_reach_terminal(tmp_path: Path) -> None:
+    # entry reaches the terminal (out), but trap1/trap2 form a cycle with no exit to a terminal.
+    yaml = """\
+flow:
+  name: t
+  task_type: t
+  permission_ceiling: workspace-write
+  output_policy: code_change
+  publishing: pull_request
+  nodes:
+    - id: entry
+      kind: agent
+      role_file: roles/entry.md
+    - id: trap1
+      kind: agent
+      role_file: roles/trap1.md
+    - id: trap2
+      kind: agent
+      role_file: roles/trap2.md
+    - id: out
+      kind: publish
+      policy: pull_request
+  edges:
+    - { from: entry, to: out }
+    - { from: entry, to: trap1 }
+    - { from: trap1, to: trap2 }
+    - { from: trap2, to: trap1 }
+"""
+    vs = _violations(yaml, tmp_path)
+    assert _has(vs, "graph", "cannot reach any terminal")
+
+
 # -- graph: lineage_affinity and decomposition --------------------------------
 
 

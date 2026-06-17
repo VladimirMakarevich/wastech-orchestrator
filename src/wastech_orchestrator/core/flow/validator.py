@@ -156,10 +156,29 @@ def _check_graph(snap: FlowSnapshot) -> list[Violation]:
         if unreached:
             errs.append(g(f"unreachable nodes: {sorted(unreached)}"))
 
-    # 6. At least one terminal node (no outgoing edges).
+    # 6. At least one terminal node (no outgoing edges) + every node can reach a terminal.
     has_outgoing = {edge.from_node for edge in doc.edges}
-    if not (set(snap.nodes_by_id) - has_outgoing):
+    terminals = set(snap.nodes_by_id) - has_outgoing
+    if not terminals:
         errs.append(g("no terminal node (every node has at least one outgoing edge)"))
+    else:
+        # Reverse reachability from terminals: any node that cannot reach a terminal is a dead end
+        # (security-ceiling §4 "есть путь к терминалу"). Bounded loops guarantee runtime
+        # termination, but a structurally trapped node still indicates a malformed graph.
+        reverse: dict[str, list[str]] = {}
+        for edge in doc.edges:
+            reverse.setdefault(edge.to, []).append(edge.from_node)
+        can_reach: set[str] = set()
+        stack = list(terminals)
+        while stack:
+            x = stack.pop()
+            if x in can_reach:
+                continue
+            can_reach.add(x)
+            stack.extend(reverse.get(x, []))
+        trapped = set(snap.nodes_by_id) - can_reach
+        if trapped:
+            errs.append(g(f"nodes cannot reach any terminal: {sorted(trapped)}"))
 
     # 7. lineage_affinity must reference an agent with editing_lineage session scope.
     for node in doc.nodes:

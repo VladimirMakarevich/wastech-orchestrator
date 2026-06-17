@@ -14,6 +14,7 @@ from typing import Literal
 
 from wastech_orchestrator.core.flow.contracts import (
     EvaluationKind,
+    NetworkPolicy,
     OutputPolicy,
     PermissionProfile,
     PublishingPolicy,
@@ -158,5 +159,5 @@ class FlowDoc:
     nodes: tuple[FlowNode, ...]
     edges: tuple[Edge, ...]
     budgets: MappingProxyType[str, int]
-    network_policy: str | None = None
+    network_policy: NetworkPolicy | None = None
     decomposition: DecompositionConfig | None = None

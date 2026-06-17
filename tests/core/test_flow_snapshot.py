@@ -309,6 +309,106 @@ def test_unknown_node_kind_raises(tmp_path: Path) -> None:
         load_flow(p)
 
 
+# -- fail-closed hardening (P0.5) ---------------------------------------------
+
+
+def _write(tmp_path: Path, flow_body: str) -> Path:
+    """Write a flow YAML whose ``flow:`` body is *flow_body* (already indented)."""
+    p = tmp_path / "f.yaml"
+    p.write_text("flow:\n" + flow_body)
+    return p
+
+
+_VALID_BODY = """\
+  name: t
+  task_type: t
+  permission_ceiling: workspace-write
+  output_policy: code_change
+  publishing: pull_request
+  nodes:
+    - id: a
+      kind: agent
+      role_file: roles/a.md
+  edges: []
+"""
+
+
+_PUB = "  publishing: pull_request\n"  # marker the negative tests anchor their mutation on
+_RF = "      role_file: roles/a.md\n"
+
+
+def test_valid_minimal_loads(tmp_path: Path) -> None:
+    # Sanity: the body the negative tests mutate is itself valid.
+    assert load_flow(_write(tmp_path, _VALID_BODY)).doc.name == "t"
+
+
+def test_unknown_flow_field_rejected(tmp_path: Path) -> None:
+    body = _VALID_BODY.replace(_PUB, _PUB + "  bogus: 1\n")
+    with pytest.raises(FlowLoadError, match=r"unknown field.*bogus.*fail-closed"):
+        load_flow(_write(tmp_path, body))
+
+
+def test_unknown_agent_node_field_rejected(tmp_path: Path) -> None:
+    body = _VALID_BODY.replace(_RF, _RF + "      surprise: x\n")
+    with pytest.raises(FlowLoadError, match=r"unknown field.*surprise"):
+        load_flow(_write(tmp_path, body))
+
+
+def test_unknown_edge_field_rejected(tmp_path: Path) -> None:
+    body = _VALID_BODY.replace("  edges: []\n", "  edges:\n    - { from: a, to: a, weight: 3 }\n")
+    with pytest.raises(FlowLoadError, match=r"unknown field.*weight"):
+        load_flow(_write(tmp_path, body))
+
+
+def test_unknown_when_field_rejected(tmp_path: Path) -> None:
+    body = _VALID_BODY.replace(_RF, _RF + "      when: { fact: config.x, unless: true }\n")
+    with pytest.raises(FlowLoadError, match=r"unknown field.*unless"):
+        load_flow(_write(tmp_path, body))
+
+
+def test_bare_when_fact_rejected(tmp_path: Path) -> None:
+    body = _VALID_BODY.replace(_RF, _RF + "      when: { fact: hybrid_testing }\n")
+    with pytest.raises(FlowLoadError, match=r"when.fact.*namespaced"):
+        load_flow(_write(tmp_path, body))
+
+
+def test_namespaced_when_fact_accepted(tmp_path: Path) -> None:
+    body = _VALID_BODY.replace(_RF, _RF + "      when: { fact: derived.needs_refinement }\n")
+    node = load_flow(_write(tmp_path, body)).nodes_by_id["a"]
+    assert isinstance(node, AgentNode)
+    assert node.when is not None and node.when.fact == "derived.needs_refinement"
+
+
+def test_invalid_checker_rejected(tmp_path: Path) -> None:
+    body = _VALID_BODY.replace(
+        "  edges: []\n",
+        "    - { id: c, kind: checks, checker: rogue_scan }\n  edges:\n    - { from: a, to: c }\n",
+    )
+    with pytest.raises(FlowLoadError, match=r"invalid checker 'rogue_scan'"):
+        load_flow(_write(tmp_path, body))
+
+
+def test_invalid_network_policy_rejected(tmp_path: Path) -> None:
+    body = _VALID_BODY.replace(_PUB, _PUB + "  network_policy: firehose\n")
+    with pytest.raises(FlowLoadError, match=r"invalid NetworkPolicy 'firehose'"):
+        load_flow(_write(tmp_path, body))
+
+
+def test_invalid_enum_wrapped_in_flow_load_error(tmp_path: Path) -> None:
+    body = _VALID_BODY.replace(_PUB, "  publishing: telepathy\n")
+    with pytest.raises(FlowLoadError, match=r"invalid PublishingPolicy 'telepathy'"):
+        load_flow(_write(tmp_path, body))
+
+
+def test_unknown_evaluator_default_field_rejected(tmp_path: Path) -> None:
+    body = _VALID_BODY.replace(
+        "  nodes:\n",
+        "  defaults:\n    evaluator: { session_scope: fresh_disposable, bogus: 1 }\n  nodes:\n",
+    )
+    with pytest.raises(FlowLoadError, match=r"unknown field.*bogus.*defaults.evaluator"):
+        load_flow(_write(tmp_path, body))
+
+
 # -- immutability -------------------------------------------------------------
 
 

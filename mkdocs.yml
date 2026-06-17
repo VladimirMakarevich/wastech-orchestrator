@@ -43,7 +43,6 @@ nav:
       - Functional Map: functional/index.md
       - System Flows: functional/system-flows.md
       - Block Registry: functional/block-registry.md
-      - Functional Conventions: functional/CONVENTIONS.md
       - Functional Blocks:
           - B01 CLI and Operator Commands: functional/blocks/B01-cli-and-operator-commands.md
           - B02 Watch Daemon and Scheduling: functional/blocks/B02-watch-daemon-and-scheduling.md
@@ -82,4 +81,3 @@ nav:
           - S06 Fixing: functional/flows/coding/S06-fixing.md
           - S07 Summary: functional/flows/coding/S07-summary.md
           - S08 Publishing: functional/flows/coding/S08-publishing.md
-      - LikeC4: likec4/README.md
