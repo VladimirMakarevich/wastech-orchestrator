@@ -66,9 +66,16 @@ class AgentNodeRunner:
         assert isinstance(node, AgentNode)
         stage = self._s.stage_for_node[node.id]
         route = self._s.router.resolve_route(stage)
-        if _wants_hitl(node):
-            return self._run_with_hitl(node, ctx, stage, route)
-        return self._run_simple(node, ctx, stage, route)
+        try:
+            if _wants_hitl(node):
+                return self._run_with_hitl(node, ctx, stage, route)
+            return self._run_simple(node, ctx, stage, route)
+        except NodeInfraError:
+            if not node.best_effort:
+                raise
+            # Best-effort node (summary, §5.2): the failed attempt is already recorded; continue
+            # with no output so the downstream fallback (the minimal summary) applies.
+            return NodeResult(node_id=node.id, outcome=NodeOutcome("done"), node_run_id=0)
 
     # -- simple (non-HITL) agent run ------------------------------------------
 
@@ -240,6 +247,8 @@ class AgentNodeRunner:
         if resolved != PermissionProfile.WORKSPACE_WRITE or self._s.git is None:
             return
         self._in.diff_path = self._s.git.write_current_diff(ctx.task_id)
+        if self._s.register_artifact is not None:
+            self._s.register_artifact(ctx.task_id, "diff", self._in.diff_path)
         dangerous = classify_dangerous_diff(self._s.git.changed_code_entries())
         if dangerous is None:
             return
@@ -344,8 +353,8 @@ class AgentNodeRunner:
             human_input_path=human_input_path,
             skill_reference_paths=self._in.skill_paths,
             output_schema=output_schema,
-            model=node.model,
-            reasoning=node.reasoning,
+            model=self._in.resolve_model(stage, node.model),
+            reasoning=self._in.resolve_reasoning(stage, node.reasoning),
             extra_args=list(node.extra_args),
             session_id=self._in.session_ids.get(route.primary.value),
         )

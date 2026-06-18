@@ -204,7 +204,9 @@ class NodeInputs:
     skill_paths: tuple[str, ...] = ()
     subtask_count: int | None = None
     subtask_spec_path: str | None = None
-    resolved_checks: tuple[ResolvedCheck, ...] = ()
+    #: resolved check profile, or ``None`` to fall back to ``checks.commands`` (legacy semantics:
+    #: ``None`` ≠ ``()`` — an empty tuple means *run zero checks*, which vacuously passes).
+    resolved_checks: tuple[ResolvedCheck, ...] | None = ()
     #: publish inputs (set for the unit that reaches a publish node).
     branch: str | None = None
     pr_title: str | None = None
@@ -214,3 +216,20 @@ class NodeInputs:
     contacts: tuple[str, ...] = ()
     #: in-memory provider -> session id map (legacy parity; durable lineage is P2.2).
     session_ids: dict[str, str] = field(default_factory=dict)
+    #: per-task model / reasoning overrides keyed by routing stage (``task.model_for`` /
+    #: ``reasoning_for``). When set and they return a value for the node's stage, that value wins
+    #: over the flow node's declared ``model`` / ``reasoning`` — the legacy per-task override.
+    model_for: Callable[[Stage], str | None] | None = None
+    reasoning_for: Callable[[Stage], str | None] | None = None
+
+    def resolve_model(self, stage: Stage, node_model: str | None) -> str | None:
+        """Per-task ``model_for(stage)`` wins over the node's declared model (legacy parity)."""
+        if self.model_for is not None and (m := self.model_for(stage)) is not None:
+            return m
+        return node_model
+
+    def resolve_reasoning(self, stage: Stage, node_reasoning: str | None) -> str | None:
+        """Per-task ``reasoning_for(stage)`` wins over the node's declared reasoning."""
+        if self.reasoning_for is not None and (r := self.reasoning_for(stage)) is not None:
+            return r
+        return node_reasoning

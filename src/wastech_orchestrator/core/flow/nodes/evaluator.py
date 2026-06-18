@@ -145,8 +145,8 @@ class EvaluatorNodeRunner:
             check_artifacts_path=self._in.checks_path,
             review_artifacts_path=self._in.review_path,
             output_schema=stage_output_schema(stage),
-            model=node.model,
-            reasoning=node.reasoning,
+            model=self._in.resolve_model(stage, node.model),
+            reasoning=self._in.resolve_reasoning(stage, node.reasoning),
             session_id=self._in.session_ids.get(route.primary.value),
         )
 

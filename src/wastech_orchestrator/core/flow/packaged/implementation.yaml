@@ -29,6 +29,7 @@ flow:
       permission_profile: read-only
       output_artifact: plan
       hitl: { allow_question: true, allow_approval: true }
+      when: { fact: config.planning_enabled }
     - id: implementation
       kind: agent
       role_file: roles/implementation.md
@@ -38,24 +39,28 @@ flow:
       kind: checks
       checker: command_profile
       discovery: { mode: auto, approve_command_changes: true }
+      when: { fact: config.testing_enabled }
     - id: review
       kind: evaluator
       role: review
       role_file: roles/review.md
       session_scope: fresh_disposable
       permission_profile: read-only
+      when: { fact: config.review_enabled }
     - id: fixing
       kind: agent
       role_file: roles/fixing.md
       session_scope: editing_lineage
       lineage_affinity: implementation
       permission_profile: workspace-write
+      when: { fact: config.fixing_enabled }
     - id: summary
       kind: agent
       role_file: roles/summary.md
       session_scope: fresh_disposable
       permission_profile: read-only
       output_artifact: summary
+      best_effort: true
       when: { fact: config.summary_enabled }
     - id: publish
       kind: publish

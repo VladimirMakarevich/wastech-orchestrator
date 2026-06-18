@@ -64,7 +64,9 @@ class ChecksNodeRunner:
         )
         return NodeResult(node_id=node.id, outcome=NodeOutcome(result_kind), node_run_id=run_id)
 
-    def _run_checks(self, ctx: NodeContext, checks: tuple[ResolvedCheck, ...]) -> CheckOutcome:
+    def _run_checks(
+        self, ctx: NodeContext, checks: tuple[ResolvedCheck, ...] | None
+    ) -> CheckOutcome:
         """Run the check profile and record one ``check_runs`` row per command."""
         outcome = self._s.check_runner.run(
             clone_dir=self._s.repo_dir,

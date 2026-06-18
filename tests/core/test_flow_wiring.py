@@ -69,7 +69,9 @@ def _fake_pipeline(**over: object) -> SimpleNamespace:
         "selected_skills": (SimpleNamespace(path="/skills/a/SKILL.md"),),
         "decomposition": SimpleNamespace(accepted=True, n=3),
         "branch": "agent/task-1-x",
-        "task": SimpleNamespace(contacts=("@me",)),
+        "task": SimpleNamespace(
+            contacts=("@me",), model_for=lambda s: None, reasoning_for=lambda s: None
+        ),
         "session_ids": {"codex": "sess-1"},
     }
     base.update(over)

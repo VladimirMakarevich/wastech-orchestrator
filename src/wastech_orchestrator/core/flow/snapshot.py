@@ -62,8 +62,8 @@ _FLOW_FIELDS = frozenset({
 })
 _AGENT_FIELDS = frozenset({
     "id", "kind", "role_file", "session_scope", "lineage_affinity", "permission_profile",
-    "model", "reasoning", "timeout_seconds", "output_schema", "output_artifact", "hitl",
-    "extra_args", "when",
+    "model", "reasoning", "timeout_seconds", "output_schema", "output_artifact", "best_effort",
+    "hitl", "extra_args", "when",
 })
 _EVALUATOR_FIELDS = frozenset({
     "id", "kind", "role", "role_file", "session_scope", "permission_profile",
@@ -243,6 +243,7 @@ def _parse_agent_node(raw: dict[str, Any]) -> AgentNode:
         timeout_seconds=raw.get("timeout_seconds"),
         output_schema=output_schema,
         output_artifact=output_artifact,
+        best_effort=bool(raw.get("best_effort", False)),
         hitl=_parse_hitl_settings(raw.get("hitl")),
         extra_args=tuple(str(a) for a in raw.get("extra_args", [])),
         when=_parse_when(raw.get("when")),

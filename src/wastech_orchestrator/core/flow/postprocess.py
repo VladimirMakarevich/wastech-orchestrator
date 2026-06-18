@@ -66,10 +66,13 @@ def apply_output_artifact(
     if slot_name is None:
         return None
     slot = OUTPUT_SLOTS[slot_name]  # key validated at load (snapshot._OUTPUT_ARTIFACT_SLOTS)
+    content = _slot_content(outcome)
+    if not content:
+        return None  # nothing to persist (e.g. a best-effort node that failed) — fallback applies
     task_dir = task_artifact_dir(artifacts_root, task_id)
     task_dir.mkdir(parents=True, exist_ok=True)
     path = task_dir / slot.filename
-    path.write_text(_slot_content(outcome), encoding="utf-8")
+    path.write_text(content, encoding="utf-8")
     register(task_id, slot.artifact_kind, str(path))
     if slot.inputs_field is not None:
         setattr(inputs, slot.inputs_field, str(path))

@@ -250,15 +250,12 @@ def test_cmd_run_happy_path(
     messages = {
         json.loads(line)["msg"] for line in operator_log.read_text(encoding="utf-8").splitlines()
     }
+    # The orchestrator-owned preamble/terminal still emit progress markers via `_observe`; per-stage
+    # / commit / push progress now lives in `node_runs` + structured provider/git logging (the
+    # engine node runners do not wrap each step in `_observe`).
     assert {
         "branch preparation started",
         "branch preparation completed",
-        "stage started",
-        "stage completed",
-        "commit started",
-        "commit completed",
-        "push started",
-        "push completed",
         "terminal cleanup started",
         "terminal cleanup completed",
     } <= messages

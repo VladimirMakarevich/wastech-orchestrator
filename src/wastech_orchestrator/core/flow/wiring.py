@@ -107,7 +107,7 @@ def build_node_inputs(
     p: _Pipeline,
     *,
     flow_dir: Path,
-    resolved_checks: tuple[ResolvedCheck, ...] = (),
+    resolved_checks: tuple[ResolvedCheck, ...] | None = (),
     pr_title: str | None = None,
     summary_body_path: str | None = None,
     commit_message: str | None = None,
@@ -138,4 +138,6 @@ def build_node_inputs(
         commit_message=commit_message,
         contacts=tuple(p.task.contacts),
         session_ids=p.session_ids,
+        model_for=p.task.model_for,
+        reasoning_for=p.task.reasoning_for,
     )

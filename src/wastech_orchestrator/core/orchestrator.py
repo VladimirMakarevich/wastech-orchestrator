@@ -388,10 +388,10 @@ class Orchestrator:
             skill_inventory=self._skill_scanner.collect(),
         )
         try:
-            # P1.4 cutover: ``_drive_via_engine`` (the FlowEngine driver) is built and drives the
-            # happy path to DONE+PR; the switch from ``_drive`` lands once the integration suite is
-            # adapted to the node-runs / generic-RUNNING model (the atomic cutover step).
-            return self._drive(pipeline, completeness)
+            # P1.4 cutover: the FlowEngine is the driver. Legacy ``_drive`` stays callable from
+            # ``_resume_task`` (recovery) until the node-based resume lands (slice 6) + legacy
+            # removal (slice 7).
+            return self._drive_via_engine(pipeline, completeness)
         except ManualActionRequired as exc:
             return self._go_terminal(
                 pipeline, Status.MANUAL_ACTION_REQUIRED, manual_reason=exc.reason
@@ -887,7 +887,7 @@ class Orchestrator:
         inputs = build_node_inputs(
             p,
             flow_dir=snapshot.source_path.parent,
-            resolved_checks=self._resolved_checks(p) or (),
+            resolved_checks=self._resolved_checks(p),  # None → CheckRunner uses checks.commands
             pr_title=p.task.pr_title or p.task.title,
             commit_message=f"feat({p.task.id}): {p.task.title}",
             summary_body_path=self._fallback_summary_path(p),
@@ -982,8 +982,23 @@ class Orchestrator:
             )
             if node.output_artifact == "plan" and path is not None:
                 self._engine_apply_skills(p, outcome, inputs, path)
+            if node.output_artifact == "summary" and path is not None:
+                # Mirror legacy ``_summary``: write the local-only summary.json metadata + list the
+                # skipped stages in the summary body (so the PR reviewer sees which stages ran).
+                self._engine_write_summary_json(p, outcome)
+                self._append_skip_section(p)
 
         return post_node
+
+    def _engine_write_summary_json(self, p: _Pipeline, outcome: NodeOutcome) -> None:
+        """Write the local-only summary.json metadata (never committed) — legacy parity (§5.2)."""
+        structured = outcome.structured_output
+        payload = dict(structured) if isinstance(structured, Mapping) else {"what": p.task.title}
+        task_dir = task_artifact_dir(self._artifacts_root, p.task.id)
+        (task_dir / "summary.json").write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        self._register_artifact(p.task.id, "summary_json", str(task_dir / "summary.json"))
 
     def _engine_apply_skills(
         self, p: _Pipeline, outcome: NodeOutcome, inputs: NodeInputs, plan_path: str
