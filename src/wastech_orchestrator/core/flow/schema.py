@@ -56,6 +56,9 @@ class AgentNode:
     reasoning: str | None = None
     timeout_seconds: int | None = None
     output_schema: str | None = None  # JSON-encoded when present
+    #: optional well-known artifact slot the agent's output is persisted to and threaded downstream
+    #: (``enriched_spec`` / ``plan`` / ``summary``); the core writes it after the node runs (P1.4).
+    output_artifact: str | None = None
     hitl: HitlSettings | None = None
     extra_args: tuple[str, ...] = ()
     when: WhenPredicate | None = None

@@ -62,7 +62,8 @@ _FLOW_FIELDS = frozenset({
 })
 _AGENT_FIELDS = frozenset({
     "id", "kind", "role_file", "session_scope", "lineage_affinity", "permission_profile",
-    "model", "reasoning", "timeout_seconds", "output_schema", "hitl", "extra_args", "when",
+    "model", "reasoning", "timeout_seconds", "output_schema", "output_artifact", "hitl",
+    "extra_args", "when",
 })
 _EVALUATOR_FIELDS = frozenset({
     "id", "kind", "role", "role_file", "session_scope", "permission_profile",
@@ -86,6 +87,10 @@ _EVALUATOR_DEFAULTS_FIELDS = frozenset({
 
 # Core checker set (security-ceiling §3): flow may not invent a checker kind.
 _CHECKER_KINDS = frozenset({"command_profile", "citation", "dependency_scan"})
+
+# Output-artifact slots (P1.4): the well-known names an agent node may persist its output to. The
+# slot vocabulary is core-fixed (a flow may not invent a slot — fail-closed at load).
+_OUTPUT_ARTIFACT_SLOTS = frozenset({"enriched_spec", "plan", "summary"})
 
 # ``when`` fact namespaces (co-design notes #2/#63). The exact value allowlist per namespace is
 # finalized when the P1 engine fact resolver lands; here we fail-closed on the namespace prefix so
@@ -219,6 +224,13 @@ def _parse_agent_node(raw: dict[str, Any]) -> AgentNode:
         json.dumps(os_raw, sort_keys=True) if os_raw is not None else None
     )
 
+    output_artifact = raw.get("output_artifact") or None
+    if output_artifact is not None and output_artifact not in _OUTPUT_ARTIFACT_SLOTS:
+        raise FlowLoadError(
+            f"invalid output_artifact {output_artifact!r} in {ctx}; "
+            f"valid slots: {sorted(_OUTPUT_ARTIFACT_SLOTS)}"
+        )
+
     return AgentNode(
         id=nid,
         kind="agent",
@@ -230,6 +242,7 @@ def _parse_agent_node(raw: dict[str, Any]) -> AgentNode:
         reasoning=raw.get("reasoning") or None,
         timeout_seconds=raw.get("timeout_seconds"),
         output_schema=output_schema,
+        output_artifact=output_artifact,
         hitl=_parse_hitl_settings(raw.get("hitl")),
         extra_args=tuple(str(a) for a in raw.get("extra_args", [])),
         when=_parse_when(raw.get("when")),

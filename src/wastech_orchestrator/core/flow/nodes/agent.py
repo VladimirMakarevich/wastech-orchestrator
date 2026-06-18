@@ -74,9 +74,9 @@ class AgentNodeRunner:
     def _run_simple(
         self, node: AgentNode, ctx: NodeContext, stage: Stage, route: ResolvedRoute
     ) -> NodeResult:
-        run_id, _outcome = self._invoke(node, ctx, stage, route, human_input_path=None)
+        run_id, outcome = self._invoke(node, ctx, stage, route, human_input_path=None)
         self._apply_post_edit_guard(node, ctx, stage, route)
-        return NodeResult(node_id=node.id, outcome=NodeOutcome("done"), node_run_id=run_id)
+        return NodeResult(node_id=node.id, outcome=_agent_outcome(outcome), node_run_id=run_id)
 
     # -- embedded HITL (refinement / planning) --------------------------------
 
@@ -97,7 +97,9 @@ class AgentNodeRunner:
         if typed.human_input is None:
             if had_interaction:
                 mark_consumed(path)
-            return NodeResult(node_id=node.id, outcome=NodeOutcome("done"), node_run_id=run_id)
+            return NodeResult(
+                node_id=node.id, outcome=_agent_outcome(outcome), node_run_id=run_id
+            )
         if had_interaction:
             raise NodeManualRequired(f"agent node {node.id!r}: unexpected repeated HITL request")
 
@@ -114,7 +116,7 @@ class AgentNodeRunner:
         if self._typed(node, stage, outcome2).human_input is not None:
             raise NodeManualRequired(f"agent node {node.id!r}: second HITL request after an answer")
         mark_consumed(path)
-        return NodeResult(node_id=node.id, outcome=NodeOutcome("done"), node_run_id=run_id2)
+        return NodeResult(node_id=node.id, outcome=_agent_outcome(outcome2), node_run_id=run_id2)
 
     def _resume_interaction(
         self, node: AgentNode, stage: Stage, path: Any, persisted: Mapping[str, Any]
@@ -380,6 +382,18 @@ class AgentNodeRunner:
         self._in.session_ids[outcome.provider_used.value] = result.session_id
         if outcome.provider_used != route.primary:
             self._in.session_ids.pop(route.primary.value, None)
+
+
+def _agent_outcome(outcome: StageOutcome) -> NodeOutcome:
+    """An agent node's unconditional ``done`` outcome, carrying the agent output so the post-node
+    hook can persist an ``output_artifact`` slot / read the decomposition contract. ``_invoke`` has
+    already raised on infra-exhaustion, so ``result`` is present here; guard defensively anyway."""
+    result = outcome.result
+    return NodeOutcome(
+        "done",
+        structured_output=result.structured_output if result is not None else None,
+        final_message=result.final_message if result is not None else None,
+    )
 
 
 def _wants_hitl(node: AgentNode) -> bool:

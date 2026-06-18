@@ -71,12 +71,15 @@ class NodeOutcome:
 
     ``kind`` is the edge-selecting outcome: ``"accept"`` / ``"rework"`` (evaluator stage_output),
     ``"pass"`` / ``"fail"`` (checks), ``"done"`` (an unconditional node took its single edge), or
-    an explicit ``"route:<label>"``.
+    an explicit ``"route:<label>"``. ``structured_output`` / ``final_message`` carry the agent
+    output so the post-node hook can persist a declared ``output_artifact`` slot and read the
+    decomposition contract — the engine itself never inspects them.
     """
 
     kind: str
     findings: tuple[Finding, ...] = ()
     structured_output: Mapping[str, object] | None = None
+    final_message: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +150,12 @@ def edge_key(edge: Edge) -> str:
     return f"{edge.from_node}->{edge.to}:{edge.outcome}"
 
 
+#: Called after each *executed* (non-skipped) node with ``(node, outcome)`` so the core can persist
+#: a declared ``output_artifact`` slot / read the decomposition contract before the next node runs.
+#: Injected by the driver (P1.4); the engine carries no post-processing knowledge itself.
+PostNodeHook = Callable[[FlowNode, NodeOutcome], None]
+
+
 class FlowEngine:
     """Drives one unit through a validated flow graph; the engine owns every transition."""
 
@@ -161,6 +170,7 @@ class FlowEngine:
         agents: AgentsConfig,
         task_id: str,
         subtask_order: int | None = None,
+        post_node: PostNodeHook | None = None,
     ) -> None:
         self._snapshot = snapshot
         self._run_state = run_state
@@ -170,6 +180,7 @@ class FlowEngine:
         self._agents = agents
         self._task_id = task_id
         self._subtask_order = subtask_order
+        self._post_node = post_node
 
     @property
     def run_state(self) -> FlowRunState:
@@ -237,7 +248,12 @@ class FlowEngine:
             task_id=self._task_id,
             subtask_order=self._subtask_order,
         )
-        return runner.run(node, ctx).outcome
+        outcome = runner.run(node, ctx).outcome
+        if self._post_node is not None:
+            # Core post-processing (output_artifact slot, decomposition contract) runs between the
+            # node completing and the next node — only for executed nodes, never on a skip.
+            self._post_node(node, outcome)
+        return outcome
 
     def _should_skip(self, node: FlowNode) -> bool:
         when = node.when

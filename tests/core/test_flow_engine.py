@@ -232,6 +232,31 @@ def test_engine_when_skip_takes_single_edge() -> None:
     assert [nid for nid, _ in recorder.skips] == ["a"]
 
 
+def test_engine_post_node_hook_runs_for_executed_nodes_only() -> None:
+    # The post-node hook fires after each *executed* node with (node, outcome); a skipped node
+    # (when=false) never fires it — slot writes / decomposition only apply to nodes that ran.
+    snap = _snapshot(
+        [_agent("a", when=WhenPredicate(fact="derived.flag")), _agent("b"), _publish("c")],
+        [Edge("a", "b"), Edge("b", "c")],
+    )
+    runner, recorder = StubRunner(), RecordingRecorder()
+    seen: list[str] = []
+    registry = dict.fromkeys(("agent", "evaluator", "checks", "hitl", "publish"), runner)
+    engine = FlowEngine(
+        snap,
+        FlowRunState(flow_fingerprint="fp"),
+        registry,
+        recorder,
+        facts=lambda fact: False,  # derived.flag false => 'a' is skipped
+        agents=_agents(),
+        task_id="task-1",
+        post_node=lambda node, outcome: seen.append(node.id),
+    )
+    result = engine.run()
+    assert result.status is Status.DONE
+    assert seen == ["b", "c"]  # 'a' skipped => no hook; only executed nodes
+
+
 def test_engine_single_fix_iterations_increment() -> None:
     # ev: rework once then accept; one rework traversal => fix_iterations increments exactly once.
     snap = _snapshot(

@@ -379,6 +379,20 @@ def test_namespaced_when_fact_accepted(tmp_path: Path) -> None:
     assert node.when is not None and node.when.fact == "derived.needs_refinement"
 
 
+def test_output_artifact_slot_accepted(tmp_path: Path) -> None:
+    body = _VALID_BODY.replace(_RF, _RF + "      output_artifact: plan\n")
+    node = load_flow(_write(tmp_path, body)).nodes_by_id["a"]
+    assert isinstance(node, AgentNode)
+    assert node.output_artifact == "plan"
+
+
+def test_invalid_output_artifact_slot_rejected(tmp_path: Path) -> None:
+    # The slot vocabulary is core-fixed; an invented slot fails closed at load.
+    body = _VALID_BODY.replace(_RF, _RF + "      output_artifact: bogus\n")
+    with pytest.raises(FlowLoadError, match=r"invalid output_artifact.*bogus"):
+        load_flow(_write(tmp_path, body))
+
+
 def test_invalid_checker_rejected(tmp_path: Path) -> None:
     body = _VALID_BODY.replace(
         "  edges: []\n",
