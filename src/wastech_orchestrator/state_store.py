@@ -42,7 +42,11 @@ def _utc_now_iso() -> str:
 # ``tasks.current_node`` / ``tasks.flow_run_counters`` / ``tasks.flow_fingerprint`` columns (the
 # durable :class:`~wastech_orchestrator.core.flow.run_state.FlowRunState` checkpoint). All are
 # additive and nullable; the legacy ``stage_runs`` + granular statuses stay until P1.5 removes them.
-DB_SCHEMA_VERSION = 4
+# v5 (flow-engine P1.4 cutover): dropped the ``provider_attempts.stage_run_id`` FK to ``stage_runs``
+# so the flow-engine path can store the ``node_runs`` id there (both monotonic). Greenfield — the
+# local ``state.db`` is recreated, so there is no in-place data migration; the column is renamed to
+# ``node_run_id`` when ``stage_runs`` is dropped (slice 7).
+DB_SCHEMA_VERSION = 5
 
 
 class IncompatibleStateError(Exception):
@@ -172,7 +176,9 @@ CREATE TABLE IF NOT EXISTS node_runs (
 
 CREATE TABLE IF NOT EXISTS provider_attempts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    stage_run_id INTEGER NOT NULL REFERENCES stage_runs(id),
+    -- v5: a plain int, not a FK to stage_runs — the flow-engine path stores the node_runs id here
+    -- (both are monotonic ids). Renamed to node_run_id when stage_runs is dropped (P1.4 slice 7).
+    stage_run_id INTEGER NOT NULL,
     provider TEXT NOT NULL,
     attempt INTEGER NOT NULL,
     status TEXT,

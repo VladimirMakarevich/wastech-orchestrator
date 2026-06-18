@@ -26,6 +26,7 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NodeRunStorePort,
     NodeServices,
     NotifierPort,
+    RegisterArtifact,
     RouterPort,
 )
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
@@ -68,12 +69,18 @@ def build_node_services(
     snapshot_hook: SnapshotHook | None = None,
     default_timeout_seconds: int = 7200,
     ask_timeout_s: int = 0,
+    prompt_audit: bool = False,
+    prompt_secrets: tuple[str, ...] = (),
+    register_artifact: RegisterArtifact | None = None,
+    finalize: Callable[[], str | None] | None = None,
+    check_reresolve: Callable[[], tuple[ResolvedCheck, ...] | None] | None = None,
 ) -> NodeServices:
     """Assemble the unit-shared :class:`NodeServices` (collaborators + the routing map).
 
     ``snapshot_hook`` is the git snapshot hook handed to the router for provider observability
     (the legacy ``run_stage(..., snapshot=git)``); the same git manager satisfies both ``git`` and
-    ``SnapshotHook``, so callers usually pass it for both.
+    ``SnapshotHook``, so callers usually pass it for both. The observability / finalize / re-resolve
+    hooks are orchestrator-provided (see :class:`NodeServices`); they default off for unit tests.
     """
     return NodeServices(
         router=router,
@@ -88,6 +95,11 @@ def build_node_services(
         git=git,
         notifier=notifier,
         ask_timeout_s=ask_timeout_s,
+        prompt_audit=prompt_audit,
+        prompt_secrets=prompt_secrets,
+        register_artifact=register_artifact,
+        finalize=finalize,
+        check_reresolve=check_reresolve,
     )
 
 

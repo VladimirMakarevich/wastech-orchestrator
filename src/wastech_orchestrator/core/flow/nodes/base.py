@@ -52,11 +52,13 @@ class NodeManualRequired(Exception):
 
 
 class RouterPort(Protocol):
-    """The slice of :class:`~wastech_orchestrator.routing.router.AgentRouter` runners use."""
+    """The slice of :class:`~wastech_orchestrator.routing.router.AgentRouter` runners use.
 
-    def resolve_route(
-        self, stage: Stage, override: Mapping[Stage, object] | None = None
-    ) -> ResolvedRoute: ...
+    The runners call ``resolve_route(stage)`` without a per-task override (P1 routes by stage from
+    config); the real router's extra optional ``override`` param still satisfies this protocol.
+    """
+
+    def resolve_route(self, stage: Stage) -> ResolvedRoute: ...
 
     def run_stage(
         self,
@@ -82,9 +84,14 @@ class CheckRunnerPort(Protocol):
 
 
 class NodeRunStorePort(Protocol):
-    """The slice of :class:`~wastech_orchestrator.state_store.StateStore` runners use."""
+    """The slice of :class:`~wastech_orchestrator.state_store.StateStore` runners use.
 
-    def record_node_run(self, run: NodeRunRow, conn: object | None = None) -> int: ...
+    The runners never pass the optional ``conn`` (single-connection store); omitting it here keeps
+    the protocol free of the concrete ``sqlite3.Connection`` type, and the store's extra optional
+    ``conn`` param still satisfies these signatures structurally.
+    """
+
+    def record_node_run(self, run: NodeRunRow) -> int: ...
 
     def complete_node_run(
         self,
@@ -97,14 +104,11 @@ class NodeRunStorePort(Protocol):
         stage_attempts: int = ...,
         finished_at: str,
         commit_sha_after: str | None = ...,
-        conn: object | None = None,
     ) -> None: ...
 
-    def record_check_run(self, run: CheckRunRow, conn: object | None = None) -> None: ...
+    def record_check_run(self, run: CheckRunRow) -> None: ...
 
-    def record_provider_attempt(
-        self, attempt: ProviderAttemptRow, conn: object | None = None
-    ) -> None: ...
+    def record_provider_attempt(self, attempt: ProviderAttemptRow) -> None: ...
 
 
 class NotifierPort(Protocol):

@@ -36,6 +36,19 @@ from wastech_orchestrator.core.decomposition import (
     update_subtask_index,
     write_subtask_artifacts,
 )
+from wastech_orchestrator.core.flow.engine import FlowRunResult, NodeOutcome, entry_node_id
+from wastech_orchestrator.core.flow.engine_driver import drive_flow
+from wastech_orchestrator.core.flow.nodes.base import (
+    NodeInfraError,
+    NodeInputs,
+    NodeManualRequired,
+)
+from wastech_orchestrator.core.flow.postprocess import apply_output_artifact
+from wastech_orchestrator.core.flow.recorder import StateStoreRunRecorder
+from wastech_orchestrator.core.flow.registry import FlowRegistry
+from wastech_orchestrator.core.flow.run_state import FlowRunState
+from wastech_orchestrator.core.flow.schema import AgentNode, FlowNode
+from wastech_orchestrator.core.flow.wiring import build_node_inputs, build_node_services
 from wastech_orchestrator.core.hitl import (
     HumanInputSignal,
     StageOutputError,
@@ -334,6 +347,9 @@ class Orchestrator:
         self._skill_scanner = skill_scanner or self._default_skill_scanner()
         # Per-id attempt number stamped onto the next ledger record, set by ``rerun``/``continue``.
         self._rerun_attempt: dict[str, int] = {}
+        # Flow registry (P1.4 cutover): resolves a task's flow snapshot. Packaged-only in P1;
+        # operator flows (``.worc/flows/``) are wired on the live path in P4.
+        self._flow_registry = FlowRegistry()
 
     def _default_skill_scanner(self) -> SkillInventoryScanner:
         root = self._config.skills.scan_root or str(
@@ -372,6 +388,9 @@ class Orchestrator:
             skill_inventory=self._skill_scanner.collect(),
         )
         try:
+            # P1.4 cutover: ``_drive_via_engine`` (the FlowEngine driver) is built and drives the
+            # happy path to DONE+PR; the switch from ``_drive`` lands once the integration suite is
+            # adapted to the node-runs / generic-RUNNING model (the atomic cutover step).
             return self._drive(pipeline, completeness)
         except ManualActionRequired as exc:
             return self._go_terminal(
@@ -838,6 +857,169 @@ class Orchestrator:
         self._refinement(p, completeness)
         self._planning(p)
         return self._run_units_and_finish(p)
+
+    # --- engine driver (P1.4 cutover): the FlowEngine replaces _drive ---------------------
+
+    def _drive_via_engine(self, p: _Pipeline, completeness: Completeness) -> PipelineResult:
+        """Drive the task through the :class:`FlowEngine` (the cutover replacement for ``_drive``).
+
+        Keeps the orchestrator-owned preamble (isolation + check preflight, branch prep) and the
+        terminal handling (auto-merge + cleanup); the refinement→…→publish body is expressed as the
+        validated flow graph and executed by the engine. Per-node post-processing (artifact slots,
+        skills) runs in the post-node hook; the publish node finalizes the task file + opens the PR.
+        Infra failure → ``failed``; a node needing human action → ``manual_action_required``.
+        """
+        if self._config.security.strict_isolation:
+            reasons = check_isolation(self._config)
+            if reasons:
+                joined = "; ".join(reasons)
+                self._log(p.task.id).warning(
+                    "isolation preflight failed", extra={"reasons": joined}
+                )
+                raise PipelineFailed(f"strict_isolation: {joined}")
+        self._check_preflight(p)
+        self._transition(p, Status.PREPARING)
+        self._prepare_branch(p)
+        self._transition(p, Status.RUNNING)
+
+        snapshot = self._flow_registry.resolve(None)  # P1: every task → the implementation flow
+        assert snapshot.source_path is not None
+        inputs = build_node_inputs(
+            p,
+            flow_dir=snapshot.source_path.parent,
+            resolved_checks=self._resolved_checks(p) or (),
+            pr_title=p.task.pr_title or p.task.title,
+            commit_message=f"feat({p.task.id}): {p.task.title}",
+            summary_body_path=self._fallback_summary_path(p),
+        )
+        services = build_node_services(
+            router=self._router,
+            check_runner=self._checks,
+            store=self._store,
+            repo_dir=self._config.repo.local_path,
+            artifacts_root=str(self._artifacts_root),
+            snapshot=snapshot,
+            clock=self._clock,
+            git=self._git,
+            notifier=self._notifier,
+            snapshot_hook=self._git,
+            ask_timeout_s=self._config.telegram.ask_timeout_s,
+            prompt_audit=self._prompt_audit_on(p.task),
+            prompt_secrets=self._prompt_secrets(),
+            register_artifact=self._register_artifact,
+            finalize=lambda: self._engine_finalize(p),
+            check_reresolve=lambda: self._engine_check_reresolve(p),
+        )
+        run_state = FlowRunState(flow_fingerprint=snapshot.flow_fingerprint)
+        run_state.current_node = entry_node_id(snapshot)  # seed BEFORE the entry node runs
+        recorder = StateStoreRunRecorder(
+            self._store, p.task.id, artifacts_root=self._artifacts_root
+        )
+        recorder.save_checkpoint(run_state)
+        try:
+            result = drive_flow(
+                snapshot=snapshot,
+                run_state=run_state,
+                recorder=recorder,
+                services=services,
+                inputs=inputs,
+                facts=self._engine_facts(p, completeness),
+                agents=self._config.agents,
+                task_id=p.task.id,
+                post_node=self._engine_post_node(p, inputs),
+            )
+        except NodeManualRequired as exc:
+            return self._go_terminal(p, Status.MANUAL_ACTION_REQUIRED, manual_reason=str(exc))
+        except NodeInfraError as exc:
+            return self._fail(p, str(exc))
+        return self._finish_engine_run(p, result)
+
+    def _engine_finalize(self, p: _Pipeline) -> str | None:
+        """The publish node's finalize hook: move the task file + write the committed summary."""
+        summary_md = self._finalize_task_artifacts(p, Status.DONE)
+        return str(summary_md) if summary_md is not None else None
+
+    def _engine_check_reresolve(self, p: _Pipeline) -> tuple[ResolvedCheck, ...] | None:
+        """The checks node's re-resolve hook: re-resolve once on a launch failure (gated)."""
+        if self._reresolve_on_launch_failure(p) and p.check_profile is not None:
+            return p.check_profile.checks
+        return None
+
+    def _engine_facts(
+        self, p: _Pipeline, completeness: Completeness
+    ) -> Callable[[str], bool]:
+        """Resolve a flow ``when`` fact (``derived.*`` / ``config.*_enabled``) to a boolean."""
+        needs_refinement = not (p.task.refined or completeness is Completeness.COMPLETE)
+
+        def facts(fact: str) -> bool:
+            if fact == "derived.needs_refinement":
+                return needs_refinement
+            if fact.startswith("config.") and fact.endswith("_enabled"):
+                name = fact[len("config.") : -len("_enabled")]
+                try:
+                    return Stage(name) not in p.skip
+                except ValueError:
+                    return True  # unknown stage-enabled fact → do not skip
+            return False  # hybrid_testing etc. (P2) default off
+
+        return facts
+
+    def _engine_post_node(
+        self, p: _Pipeline, inputs: NodeInputs
+    ) -> Callable[[FlowNode, NodeOutcome], None]:
+        """Engine post-node hook: persist a node's output_artifact slot + resolve plan skills."""
+
+        def post_node(node: FlowNode, outcome: NodeOutcome) -> None:
+            if not isinstance(node, AgentNode):
+                return
+            path = apply_output_artifact(
+                node,
+                outcome,
+                artifacts_root=self._artifacts_root,
+                task_id=p.task.id,
+                inputs=inputs,
+                register=self._register_artifact,
+            )
+            if node.output_artifact == "plan" and path is not None:
+                self._engine_apply_skills(p, outcome, inputs, path)
+
+        return post_node
+
+    def _engine_apply_skills(
+        self, p: _Pipeline, outcome: NodeOutcome, inputs: NodeInputs, plan_path: str
+    ) -> None:
+        """Resolve planning-proposed skills, surface them downstream, append the plan section."""
+        structured = outcome.structured_output
+        skills_raw = structured.get("skills") if isinstance(structured, Mapping) else None
+        proposed = (
+            tuple(str(s) for s in skills_raw) if isinstance(skills_raw, list | tuple) else ()
+        )
+        selection = resolve_planning_skills(proposed, p.skill_inventory)
+        p.selected_skills = selection.refs
+        inputs.skill_paths = tuple(ref.path for ref in selection.refs)
+        section = self._render_skill_section(selection, ())
+        if section:
+            existing = Path(plan_path).read_text(encoding="utf-8")
+            Path(plan_path).write_text(existing + section, encoding="utf-8")
+
+    def _finish_engine_run(self, p: _Pipeline, result: FlowRunResult) -> PipelineResult:
+        """Map a terminal :class:`FlowRunResult` to a :class:`PipelineResult` (+ auto-merge)."""
+        if result.status is Status.DONE:
+            pr_url = self._git.recorded_pr_url(p.task.id)
+            if pr_url and Stage.REVIEW in p.skip and self._auto_merge_on(p.task):
+                self._log(p.task.id).warning(
+                    "[AUTO-MERGE] review skipped AND auto_merge enabled — task will merge without "
+                    "any review gate",
+                    extra={"pr_url": pr_url},
+                )
+            if pr_url and self._auto_merge_on(p.task):
+                return self._auto_merge(p, pr_url)
+            return self._go_terminal(p, Status.DONE, pr_url=pr_url, already_moved=True)
+        if result.status is Status.MANUAL_ACTION_REQUIRED:
+            return self._go_terminal(
+                p, Status.MANUAL_ACTION_REQUIRED, manual_reason=result.limit_name or "stuck"
+            )
+        return self._fail(p, result.limit_name or "flow run failed")
 
     def _check_preflight(self, p: _Pipeline) -> None:
         """Resolve the launchable check profile at task start, before any branch (§11, §1.2).
