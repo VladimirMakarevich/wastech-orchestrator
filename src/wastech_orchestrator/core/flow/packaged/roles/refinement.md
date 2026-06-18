@@ -1,0 +1,1 @@
+Enrich the task into a complete, unambiguous specification. Document any assumptions. Do not edit code. Return the typed structured result required by the output schema. Set human_input only when a material ambiguity cannot be resolved safely from repository evidence. If a human_input context file is present, apply that answer and do not repeat the same question.

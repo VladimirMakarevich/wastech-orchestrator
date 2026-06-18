@@ -1,5 +1,11 @@
-# Packaged built-in flow: implementation.
-# Canonical version; co-design reference in docs/backlog/flows/co-design/implementation.yaml.
+# Packaged built-in flow: implementation (P1 parity shape — the executable flow the engine drives).
+#
+# This is the pre-refactor pipeline expressed as data: refinement -> planning -> implementation ->
+# testing(checks) -> review(evaluator) -> fixing -> summary -> publish, with the two fix loops and
+# decomposition, and WITHOUT supervisor / hybrid testing_quality / durable sessions. Those are the
+# target features layered on in P2; the TARGET shape (supervise_impl / testing_quality / final-
+# handoff summary) is preserved in docs/backlog/flows/co-design/implementation.yaml + flow-contract
+# §7, and P2.5 grows this packaged file back to it.
 flow:
   name: implementation
   task_type: implementation
@@ -7,18 +13,13 @@ flow:
   output_policy: code_change
   publishing: pull_request
 
-  defaults:
-    evaluator:
-      session_scope: fresh_disposable
-      permission_profile: read-only
-      max_rework_per_stage: 1
-
   nodes:
     - id: refinement
       kind: agent
       role_file: roles/refinement.md
       session_scope: fresh_disposable
       permission_profile: read-only
+      output_artifact: enriched_spec
       hitl: { allow_question: true, allow_approval: false }
       when: { fact: derived.needs_refinement }
     - id: planning
@@ -26,28 +27,13 @@ flow:
       role_file: roles/planning.md
       session_scope: fresh_disposable
       permission_profile: read-only
+      output_artifact: plan
       hitl: { allow_question: true, allow_approval: true }
     - id: implementation
       kind: agent
       role_file: roles/implementation.md
       session_scope: editing_lineage
       permission_profile: workspace-write
-    - id: supervise_impl
-      kind: evaluator
-      role: supervisor
-      role_file: roles/supervisor.md
-      session_scope: fresh_disposable
-      permission_profile: read-only
-      max_rework_per_stage: 1
-    - id: testing_quality
-      kind: evaluator
-      role: test_quality
-      role_file: roles/testing.md
-      session_scope: fresh_disposable
-      permission_profile: read-only
-      blocking: false
-      max_rework_per_stage: 1
-      when: { fact: config.hybrid_testing }
     - id: testing
       kind: checks
       checker: command_profile
@@ -64,21 +50,12 @@ flow:
       session_scope: editing_lineage
       lineage_affinity: implementation
       permission_profile: workspace-write
-    - id: supervise_fix
-      kind: evaluator
-      role: supervisor
-      role_file: roles/supervisor.md
-      session_scope: fresh_disposable
-      permission_profile: read-only
-      max_rework_per_stage: 1
     - id: summary
-      kind: evaluator
-      role: supervisor
-      role_file: roles/supervisor-final.md
+      kind: agent
+      role_file: roles/summary.md
       session_scope: fresh_disposable
       permission_profile: read-only
-      evaluation_kind: final_handoff
-      blocking: false
+      output_artifact: summary
       when: { fact: config.summary_enabled }
     - id: publish
       kind: publish
@@ -87,18 +64,12 @@ flow:
   edges:
     - { from: refinement, to: planning }
     - { from: planning, to: implementation }
-    - { from: implementation, to: supervise_impl }
-    - { from: supervise_impl, to: testing_quality, outcome: accept }
-    - { from: supervise_impl, to: fixing, outcome: rework, budget: 1 }
-    - { from: testing_quality, to: testing, outcome: accept }
-    - { from: testing_quality, to: fixing, outcome: rework, budget: 1 }
+    - { from: implementation, to: testing }
     - { from: testing, to: review, outcome: pass }
     - { from: testing, to: fixing, outcome: fail, loop: test_fix }
     - { from: review, to: summary, outcome: accept }
     - { from: review, to: fixing, outcome: rework, loop: review_fix }
-    - { from: fixing, to: supervise_fix }
-    - { from: supervise_fix, to: testing_quality, outcome: accept }
-    - { from: supervise_fix, to: fixing, outcome: rework, budget: 1 }
+    - { from: fixing, to: testing }
     - { from: summary, to: publish }
 
   budgets:
@@ -109,15 +80,6 @@ flow:
   decomposition:
     proposed_by: planning
     gate: { min: 2, max: 8, linear_depends_on: true }
-    sub_flow:
-      [
-        implementation,
-        supervise_impl,
-        testing_quality,
-        testing,
-        review,
-        fixing,
-        supervise_fix,
-      ]
+    sub_flow: [implementation, testing, review, fixing]
     commit_each_subtask: true
     shared_budget: global_fix_iterations
