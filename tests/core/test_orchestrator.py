@@ -413,79 +413,8 @@ def test_per_stage_model_reasoning_reaches_provider(
     assert (impl.model, impl.reasoning) == ("claude-sonnet-4-6", "low")
 
 
-@pytest.mark.skip(
-    reason="config.prompts override is gone in the flow model — role_file is the template "
-    "(operator customization = edit the role MD / operator flows P4); removed with the config "
-    "schema in slice 7"
-)
-def test_prompt_override_reaches_provider_and_is_audited(
-    git_repo, make_git_config, tmp_path: Path
-) -> None:
-    """An auto-detected replace-mode template changes the prompt the provider gets; it is audited.
-
-    The rendered prompt is written per stage run and redacted before storage; provider argv is
-    untouched (the prompt only ever travels on the request, never as a CLI arg).
-    """
-    tdir = tmp_path / "prompts"
-    tdir.mkdir()
-    # The file's presence is the activation signal (schema v6) — no overrides map needed.
-    # Include a token-shaped secret to prove the audit artifact is redacted defensively.
-    (tdir / "implementation.md").write_text(
-        "CUSTOM-IMPL-INSTRUCTION leaked=ghp_abcdefghij0123456789ABCDEFGHIJ\n",
-        encoding="utf-8",
-    )
-    prompts_block = f"prompts:\n  templates_dir: {str(tdir)!r}\n  mode: replace\n"
-    providers = _both()
-    orch, _store, _, art = _build(
-        git_repo,
-        make_git_config,
-        tmp_path,
-        providers=providers,
-        check_verdicts=[0],
-        config_kwargs={"prompts_block": prompts_block},
-    )
-    task_file = _complete_task(tmp_path, "task-pc1")
-    orig = providers[ProviderId.CLAUDE].run
-
-    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
-        if request.stage is Stage.IMPLEMENTATION:
-            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
-        return orig(request)
-
-    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
-
-    result = orch.run_task(task_file)
-    assert result.final_status is Status.DONE
-
-    impl_request = next(
-        r for r in providers[ProviderId.CLAUDE].requests if r.stage is Stage.IMPLEMENTATION
-    )
-    assert "CUSTOM-IMPL-INSTRUCTION" in impl_request.prompt
-    # Replace mode: the packaged default text is gone.
-    assert "following the plan" not in impl_request.prompt
-
-    rendered = art / "logs" / "task-pc1" / "stages" / "implementation" / "rendered-prompt.md"
-    assert rendered.exists()
-    body = rendered.read_text(encoding="utf-8")
-    assert "CUSTOM-IMPL-INSTRUCTION" in body
-    assert "ghp_abcdefghij0123456789ABCDEFGHIJ" not in body  # redacted
 
 
-def test_missing_prompt_file_falls_back_to_packaged_default(
-    git_repo, make_git_config, tmp_path: Path
-) -> None:
-    # Schema v6: a missing <stage>.md is the normal fallback, never a fail-closed config error —
-    # the orchestrator builds fine and uses the packaged default.
-    prompts_block = f"prompts:\n  templates_dir: {str(tmp_path / 'absent')!r}\n"
-    orch, _store, _, _art = _build(
-        git_repo,
-        make_git_config,
-        tmp_path,
-        providers=_both(),
-        check_verdicts=[0],
-        config_kwargs={"prompts_block": prompts_block},
-    )
-    assert orch is not None  # construction succeeded; no ConfigError raised
 
 
 def test_vague_task_runs_refinement(git_repo, make_git_config, tmp_path: Path) -> None:
@@ -2048,39 +1977,6 @@ def test_prompt_audit_records_fallback_who(git_repo, make_git_config, tmp_path: 
     assert agents[1]["status"] == "succeeded" and agents[1]["is_fallback"] is True
 
 
-@pytest.mark.skip(
-    reason="injected the secret via the removed config.prompts override; prompt-audit redaction "
-    "is unit-tested in tests/core/test_flow_observability.py"
-)
-def test_prompt_audit_redacts_secret(git_repo, make_git_config, tmp_path: Path) -> None:
-    """A token-shaped secret in the prompt is redacted in both the per-step file and timeline."""
-    tdir = tmp_path / "prompts"
-    tdir.mkdir()
-    (tdir / "implementation.md").write_text(
-        "CUSTOM-IMPL-MARKER leaked=ghp_abcdefghij0123456789ABCDEFGHIJ\n",
-        encoding="utf-8",
-    )
-    prompts_block = f"prompts:\n  templates_dir: {str(tdir)!r}\n  mode: replace\n"
-    providers = _both()
-    orch, _, _, art = _build(
-        git_repo,
-        make_git_config,
-        tmp_path,
-        providers=providers,
-        check_verdicts=[0],
-        config_kwargs={"prompt_audit": True, "prompts_block": prompts_block},
-    )
-    _patch_impl_edit(providers, git_repo)
-    result = orch.run_task(_complete_task(tmp_path, "task-sec"))
-    assert result.final_status is Status.DONE
-
-    audit_dir = _audit_dir(art, "task-sec")
-    impl_file = next(audit_dir.glob("*-implementation.json"))
-    body = impl_file.read_text()
-    timeline = (audit_dir / "timeline.jsonl").read_text()
-    assert "CUSTOM-IMPL-MARKER" in body  # the benign marker survives
-    assert "ghp_abcdefghij0123456789ABCDEFGHIJ" not in body  # the secret is redacted
-    assert "ghp_abcdefghij0123456789ABCDEFGHIJ" not in timeline
 
 
 def test_prompt_audit_absent_when_disabled(git_repo, make_git_config, tmp_path: Path) -> None:

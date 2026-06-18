@@ -12,7 +12,7 @@ This module owns *structural* parsing only. The cross-field §11/§21.4 semantic
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -37,8 +37,6 @@ from wastech_orchestrator.config.schema import (
     MergeStrategy,
     OrchestratorConfig,
     OrchestratorRuntimeConfig,
-    PromptMode,
-    PromptsConfig,
     ProviderConfig,
     RepoConfig,
     RouteConfig,
@@ -686,26 +684,6 @@ def _build_telegram(raw: Any, issues: list[str]) -> TelegramConfig:
     )
 
 
-def _build_prompts(raw: Any, issues: list[str], warnings: list[str]) -> PromptsConfig:
-    where = "prompts"
-    m = _mapping(raw, where, issues)
-    # Prompt overrides are now auto-detected by file presence in ``templates_dir`` (schema v6); the
-    # ``overrides`` map and the ``strict`` flag are gone. Legacy keys are tolerated (ignored) with a
-    # warning so old configs still load fail-open — ``upgrade-config`` strips them.
-    _check_keys(m, {"templates_dir", "mode"}, where, issues, tolerated={"overrides", "strict"})
-    for legacy in ("overrides", "strict"):
-        if legacy in m:
-            warnings.append(
-                f"prompts.{legacy} is no longer used (schema v6: prompt templates are "
-                f"auto-detected by file presence in templates_dir); the key is ignored — run "
-                f"`worc upgrade-config` to remove it"
-            )
-    return PromptsConfig(
-        templates_dir=_str(m, "templates_dir", "./templates/prompts", where, issues),
-        mode=_enum(m.get("mode"), PromptMode, f"{where}.mode", issues, PromptMode.REPLACE),
-    )
-
-
 def _build_skills(raw: Any, issues: list[str]) -> SkillsConfig:
     where = "skills"
     if raw is None:
@@ -728,7 +706,6 @@ _TOP_LEVEL_KEYS = {
     "checks",
     "git",
     "telegram",
-    "prompts",
     "skills",
     "prompt_audit",
 }
@@ -755,7 +732,9 @@ def _check_schema_version(raw: Mapping[str, Any], issues: list[str]) -> None:
 
 
 def _parse(raw: Mapping[str, Any], issues: list[str], warnings: list[str]) -> OrchestratorConfig:
-    _check_keys(raw, _TOP_LEVEL_KEYS, "<root>", issues)
+    # ``prompts`` (removed in config v9) is tolerated, not accepted: an old config still loads
+    # fail-open and ``upgrade-config`` strips the dead block.
+    _check_keys(raw, _TOP_LEVEL_KEYS, "<root>", issues, tolerated={"prompts"})
     _check_schema_version(raw, issues)
     return OrchestratorConfig(
         orchestrator=_build_orchestrator(raw.get("orchestrator"), issues),
@@ -766,7 +745,6 @@ def _parse(raw: Mapping[str, Any], issues: list[str], warnings: list[str]) -> Or
         checks=_build_checks(raw.get("checks"), issues),
         git=_build_git(raw.get("git"), issues),
         telegram=_build_telegram(raw.get("telegram"), issues),
-        prompts=_build_prompts(raw.get("prompts"), issues, warnings),
         skills=_build_skills(raw.get("skills"), issues),
         prompt_audit=_bool(raw, "prompt_audit", False, "<root>", issues),
     )
@@ -792,18 +770,7 @@ def load_config(path: str | Path) -> ConfigLoadResult:
     """Read and parse a config file. Structural problems raise :class:`ConfigError`.
 
     Semantic §11/§21.4 rules are enforced separately by ``config.validation.validate_config``.
-
-    A relative ``prompts.templates_dir`` is anchored to the **config file's directory** (not the
-    CWD), so the file-presence activation switch is CWD-independent. Absolute paths and the empty
-    opt-out (``""``) pass through unchanged.
     """
     file = Path(path)
     text = file.read_text(encoding="utf-8")
-    result = loads_config(text, source=str(file))
-    templates_dir = result.config.prompts.templates_dir
-    if templates_dir and not Path(templates_dir).is_absolute():
-        anchored = str(file.resolve().parent / templates_dir)
-        prompts = replace(result.config.prompts, templates_dir=anchored)
-        config = replace(result.config, prompts=prompts)
-        result = ConfigLoadResult(config=config, warnings=result.warnings)
-    return result
+    return loads_config(text, source=str(file))

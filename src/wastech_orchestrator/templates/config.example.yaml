@@ -3,7 +3,7 @@
 # This is the packaged copy used by `wastech-orchestrator init`; keep it in sync with the
 # repo-root config.example.yaml
 
-schema_version: 8                   # config format version; the orchestrator refuses newer configs
+schema_version: 9                   # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -140,23 +140,11 @@ telegram:                           # human-in-the-loop + notifications (optiona
   chat_id_env: "TELEGRAM_CHAT_ID"   # must resolve to a non-zero numeric chat id
   ask_timeout_s: 28800              # > 0; blocking HITL fails closed on timeout
 
-prompts:                            # operator-customizable stage prompts (optional; schema v6)
-  templates_dir: "./templates/prompts"  # relative paths resolve from this config.yaml's directory;
-                                    # set to "" to force the packaged defaults for every stage.
-  mode: replace                     # replace (your file only; default) | append (packaged default + your file)
-                                    # A <stage>.md present in templates_dir is used AUTOMATICALLY — its
-                                    # presence is the activation signal; no opt-in map. Agent-routed
-                                    # stages: refinement, planning, implementation, review, fixing, summary
-                                    # (e.g. edit templates/prompts/implementation.md to customize it).
-                                    # A missing <stage>.md falls back to the packaged default (never an error).
-                                    # `init`/`install-templates` deliver byte-identical copies of every
-                                    # default; edit one to take effect. Templates are prompt text only; they
-                                    # cannot change provider, extra_args, sandbox/approvals, denied
-                                    # commands/reads, or env.
-                                    # Variables: {task_id} {stage} {repo_path} {task_path} {plan_path}
-                                    #   {diff_path} {checks_path} {review_path} {subtask_order}
-                                    #   {subtask_count} {subtask_spec_path} {skills_path}
-                                    #   (paths/metadata only).
+# Prompt templates are not configured here: a flow node's prompt is the content of its `role_file`
+# (packaged flow roles, or `.worc/flows/roles/*.md` for an operator flow). Edit the role file to
+# customize a node's prompt. Role files render only allowlisted path/metadata variables ({task_id}
+# {stage} {repo_path} {task_path} {plan_path} {diff_path} {checks_path} {review_path} {skills_path}
+# {subtask_order} {subtask_count} {subtask_spec_path}) — never task bodies, diffs, env, or secrets.
 
 skills:                             # planning-selected repo skill references (optional, §2.1)
   scan_root: ""                     # empty = <repo.local_path>/.claude/skills (the target repo's skills)

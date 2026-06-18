@@ -9,7 +9,6 @@ import pytest
 from wastech_orchestrator.config.loader import ConfigError, loads_config
 from wastech_orchestrator.config.schema import (
     OrchestratorConfig,
-    PromptsConfig,
     RouteConfig,
 )
 from wastech_orchestrator.config.validation import check_task_route_override, validate_config
@@ -52,26 +51,6 @@ def test_non_routable_stage_in_routing_is_rejected(base_config: OrchestratorConf
     with pytest.raises(ConfigError) as exc:
         validate_config(bad)
     assert any("agent-routed" in issue for issue in exc.value.issues)
-
-
-def _with_prompts(config: OrchestratorConfig, **changes: object) -> OrchestratorConfig:
-    return replace(config, prompts=replace(config.prompts, **changes))
-
-
-def test_default_prompts_config_validates_clean(base_config: OrchestratorConfig) -> None:
-    # Schema v6: prompts resolution is by file presence (no overrides to statically validate); the
-    # block has no semantic checks left, so any well-typed templates_dir/mode validates clean.
-    assert isinstance(base_config.prompts, PromptsConfig)
-    assert validate_config(base_config) == []
-
-
-def test_custom_templates_dir_and_mode_validate_clean(base_config: OrchestratorConfig) -> None:
-    from wastech_orchestrator.config.schema import PromptMode
-
-    good = _with_prompts(base_config, templates_dir="./my-prompts", mode=PromptMode.APPEND)
-    assert validate_config(good) == []
-    empty = _with_prompts(base_config, templates_dir="")  # explicit opt-out
-    assert validate_config(empty) == []
 
 
 def test_max_total_below_max_fix_cycles_is_rejected(base_config: OrchestratorConfig) -> None:

@@ -39,7 +39,10 @@ from wastech_orchestrator.providers.base import ProviderId, Stage
 # v8 (2026-06-16, prompt-audit): adds the optional top-level `prompt_audit` flag (default false).
 # Old configs omit it and take the safe `false` default — no migration flips anything;
 # `upgrade-config` adds it from the packaged template. A per-task `prompt_audit` overrides it.
-CONFIG_SCHEMA_VERSION = 8
+# v9 (flow-engine P1 Slice 7): the `prompts` block (`templates_dir`/`mode`) is removed — a flow
+# node's prompt template is its `role_file`, not a stage-indexed packaged default. `upgrade-config`
+# strips an operator's `prompts:` block; old configs still load fail-open (the key is ignored).
+CONFIG_SCHEMA_VERSION = 9
 
 # Stages routed to an agent provider. The remaining stages (``testing``, ``publishing``) are run by
 # the orchestrator itself (Check Runner / Git Manager), so they never appear in ``agents.routing``
@@ -276,27 +279,6 @@ class TelegramConfig:
     ask_timeout_s: int
 
 
-class PromptMode(StrEnum):
-    """How an operator template combines with the packaged default prompt (backlog §5)."""
-
-    APPEND = "append"  # packaged default, then the operator template
-    REPLACE = "replace"  # the operator template only, for stages that have a template file
-
-
-@dataclass(frozen=True)
-class PromptsConfig:
-    """Operator-customizable stage prompts (backlog: prompt_template_customization §5).
-
-    A ``<stage>.md`` present in ``templates_dir`` is used **automatically** (no opt-in map); the
-    packaged default is only a per-stage fallback. ``mode`` decides how a present file combines with
-    the packaged default (``replace`` = file only; ``append`` = default + file). An empty
-    ``templates_dir`` forces the packaged defaults for every stage.
-    """
-
-    templates_dir: str = "./templates/prompts"
-    mode: PromptMode = PromptMode.REPLACE
-
-
 @dataclass(frozen=True)
 class SkillsConfig:
     """Planning-selected repo skill references (post-test-run §2.1).
@@ -322,7 +304,6 @@ class OrchestratorConfig:
     checks: ChecksConfig
     git: GitConfig
     telegram: TelegramConfig
-    prompts: PromptsConfig = PromptsConfig()
     skills: SkillsConfig = SkillsConfig()
     # When true, every task records each step's prompt + who-metadata (provider/model/attempt/
     # fallback/status) under `logs/<task-id>/prompt-audit/`. A per-task `prompt_audit` always

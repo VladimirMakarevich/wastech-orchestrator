@@ -89,24 +89,16 @@ def test_packaged_template_is_complete_and_self_idempotent() -> None:
     assert merged["schema_version"] == CONFIG_SCHEMA_VERSION
 
 
-def test_strips_legacy_prompts_overrides_and_strict() -> None:
-    # Schema v6 removed prompts.overrides / prompts.strict; upgrade-config drops them.
-    template = {"schema_version": CONFIG_SCHEMA_VERSION, "prompts": {"templates_dir": "./tpl"}}
+def test_strips_legacy_prompts_block() -> None:
+    # config v9 removed the whole `prompts` block; upgrade-config drops it from an operator config.
+    template = {"schema_version": CONFIG_SCHEMA_VERSION}
     operator = {
-        "schema_version": 5,
-        "prompts": {
-            "templates_dir": "./tpl",
-            "mode": "append",
-            "strict": True,
-            "overrides": {"implementation": "implementation.md"},
-        },
+        "schema_version": 8,
+        "prompts": {"templates_dir": "./tpl", "mode": "append"},
     }
     merged, _added, removed = upgrade_config_mapping(template, operator)
-    assert "overrides" not in merged["prompts"]
-    assert "strict" not in merged["prompts"]
-    # An operator-set value that survives (mode) is preserved untouched.
-    assert merged["prompts"]["mode"] == "append"
-    assert sorted(removed) == ["prompts.overrides", "prompts.strict"]
+    assert "prompts" not in merged
+    assert removed == ["prompts"]
     assert merged["schema_version"] == CONFIG_SCHEMA_VERSION
 
 

@@ -63,7 +63,6 @@ from wastech_orchestrator.core.hitl import (
     write_waiting_interaction,
 )
 from wastech_orchestrator.core.loop_control import LoopCounters
-from wastech_orchestrator.core.prompts import PromptTemplateStore
 from wastech_orchestrator.core.recovery import (
     RecoveryAction,
     RecoveryPlan,
@@ -317,9 +316,6 @@ class Orchestrator:
         self._ledger = ledger
         self._gate = gate
         self._artifacts_root = artifacts_root
-        # Resolve stage prompts (packaged defaults + operator overrides). In strict mode a missing
-        # override file fails closed here, before any agent runs (backlog: prompt customization).
-        self._prompts = PromptTemplateStore(config.prompts)
         self._clock = clock
         self._monotonic = monotonic
         self._notifier: Notifier = notifier if notifier is not None else NullNotifier()

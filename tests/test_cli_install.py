@@ -212,15 +212,15 @@ def test_install_ignores_worc_home_via_tracked_gitignore(
     assert ".worc/" in gitignore
 
 
-def test_install_copies_templates_and_guide_into_worc(
+def test_install_writes_config_and_guide_into_worc(
     git_repo: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _present(monkeypatch, "codex")
     assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
     worc = git_repo.clone / ".worc"
-    # The agent task-authoring guide and the editable prompt templates land under .worc/.
+    # The generated config and the agent task-authoring guide land under .worc/. (Prompt templates
+    # are not delivered — a flow node's prompt is its role_file, shipped with the flow.)
     assert (worc / "guide" / "README.md").is_file()
-    assert (worc / "templates" / "prompts" / "implementation.md").is_file()
     assert (worc / "config.yaml").is_file()
 
 

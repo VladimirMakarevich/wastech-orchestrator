@@ -253,17 +253,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="print what would change; write nothing"
     )
 
-    install_templates_cmd = sub.add_parser(
-        "install-templates",
-        help="deliver the packaged templates/ tree into an existing install (add-missing-only)",
-    )
-    install_templates_cmd.add_argument(
-        "--force", action="store_true", help="overwrite existing template files (default: skip)"
-    )
-    install_templates_cmd.add_argument(
-        "--dry-run", action="store_true", help="print the add/skip(/overwrite) plan; write nothing"
-    )
-
     rerun_cmd = sub.add_parser(
         "rerun",
         help="re-attempt a terminal task: fresh from base, or --continue from the failed stage",
@@ -326,11 +315,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _templates_root() -> Traversable:
-    """The packaged templates directory (works from a source tree or an installed wheel)."""
-    return resources.files("wastech_orchestrator").joinpath("templates")
-
-
 def _iter_template_files(root: Path) -> Iterator[Path]:
     """Yield template file paths relative to ``root``, sorted for deterministic output."""
     for path in sorted(root.rglob("*")):
@@ -369,35 +353,6 @@ def _copy_worc_docs(dest_root: Path, *, overwrite: bool, dry: bool) -> tuple[lis
             if not dry:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_bytes((Path(wroot) / rel).read_bytes())
-    return written, skipped
-
-
-def _copy_templates_tree(
-    dest_root: Path, *, overwrite: bool, dry: bool
-) -> tuple[list[str], list[str]]:
-    """Copy the packaged ``templates/`` tree into ``dest_root/templates`` (beside ``config.yaml``).
-
-    Mirrors ``_copy_worc_docs``: existing files are skipped unless ``overwrite``; ``dry`` writes
-    nothing. ``config.example.yaml`` is excluded — it is the source for ``config.yaml`` generation
-    (``init``/``install``) and key materialization (``upgrade-config``), not a verbatim template.
-    Returns ``(written, skipped)`` as ``templates/...`` relative paths for reporting. Shared by
-    ``cmd_install`` and ``cmd_install_templates`` so the two cannot drift.
-    """
-    written: list[str] = []
-    skipped: list[str] = []
-    with resources.as_file(_templates_root()) as troot:
-        for rel in _iter_template_files(Path(troot)):
-            if rel.name == "config.example.yaml":
-                continue
-            label = str(Path("templates") / rel)
-            dest = dest_root / "templates" / rel
-            if dest.exists() and not overwrite:
-                skipped.append(label)
-                continue
-            written.append(label)
-            if not dry:
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes((Path(troot) / rel).read_bytes())
     return written, skipped
 
 
@@ -543,51 +498,6 @@ def cmd_upgrade_docs(args: argparse.Namespace) -> int:
     for rel in to_remove:
         (worc_dir / rel).unlink()
     _report("upgrade-docs: updated")
-    return 0
-
-
-def cmd_install_templates(args: argparse.Namespace) -> int:
-    """Deliver the packaged ``templates/`` tree into ``.worc/templates/``, add-missing-only.
-
-    ``install`` already copies the tree; this refreshes it when an upgraded orchestrator ships new
-    templates. The location is resolved like ``upgrade-config``/``upgrade-docs`` (``--config`` → the
-    ``.worc/config.yaml`` discovered from the Git root) and the tree lands beside ``config.yaml``.
-
-    Add-missing by default: absent files are written, existing files are **skipped** to preserve
-    operator edits. ``--force`` overwrites them (explicit); ``--dry-run`` previews. Unlike
-    ``upgrade-docs`` it never removes operator-added files (templates are operator-editable) and it
-    never touches ``config.yaml``: activating an edited template stays an operator decision.
-    Fail-closed (exit 2) when no location resolves.
-    """
-    path_str = resolve_config_path(args)
-    if path_str is None or not Path(path_str).is_file():
-        target = f" ({path_str})" if path_str is not None else ""
-        print(
-            f"install-templates: no config.yaml found{target} — pass --config PATH, or run "
-            "'install' in your repo (creates .worc/config.yaml)"
-        )
-        return 2
-    install_dir = Path(path_str).resolve().parent
-    templates_dir = install_dir / "templates"
-    written, skipped = _copy_templates_tree(install_dir, overwrite=args.force, dry=args.dry_run)
-
-    if not written:  # every packaged template already present (default run) → no-op
-        print(f"install-templates: already complete ({len(skipped)} files in {templates_dir})")
-        return 0
-
-    verb = "~ overwrite" if args.force else "+ add"
-
-    def _report(prefix: str) -> None:
-        print(f"{prefix} {templates_dir}")
-        for rel in written:
-            print(f"  {verb} {rel}")
-        for rel in skipped:
-            print(f"  skip {rel}")
-
-    if args.dry_run:
-        _report("install-templates (dry-run): would update")
-        return 0
-    _report("install-templates: updated")
     return 0
 
 
@@ -1336,9 +1246,8 @@ def cmd_install(args: argparse.Namespace) -> int:
     _install_create_dirs(spec.repo_local_path)
     _install_atomic_write(config_path, text)
     print(f"install: wrote {config_path}")
-    # Editable copies of the packaged templates + the task-authoring guide live in .worc/.
-    # --reconfigure refreshes them to the packaged version; a plain re-run leaves existing files.
-    _copy_templates_tree(worc_home, overwrite=args.reconfigure, dry=False)
+    # An editable copy of the task-authoring guide lives in .worc/. --reconfigure refreshes it to
+    # the packaged version; a plain re-run leaves existing files.
     worc_written, _ = _copy_worc_docs(worc_home, overwrite=args.reconfigure, dry=False)
     if worc_written:
         print(f"install: wrote agent task-authoring docs to {worc_home / 'guide'}")
@@ -1385,8 +1294,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_upgrade_config(args)
         if args.command == "upgrade-docs":
             return cmd_upgrade_docs(args)
-        if args.command == "install-templates":
-            return cmd_install_templates(args)
         if args.command == "rerun":
             return cmd_rerun(args)
         if args.command == "finalize":

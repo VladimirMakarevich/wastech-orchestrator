@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
-from wastech_orchestrator.config.loader import ConfigError, load_config, loads_config
+from wastech_orchestrator.config.loader import ConfigError, loads_config
 from wastech_orchestrator.config.schema import (
     AuditBranch,
     MergeStrategy,
@@ -339,72 +337,13 @@ def test_denied_commands_default_blocks_gh_pr_merge() -> None:
     assert "gh pr merge" in cfg.security.denied_commands
 
 
-# --- prompts block (backlog: prompt_template_customization) ---
+# --- legacy prompts block (removed in config v9) ---
 
 
-def test_prompts_block_absent_defaults_are_safe() -> None:
-    from wastech_orchestrator.config.schema import PromptMode
-
-    cfg = loads_config(_LEGACY).config
-    assert cfg.prompts.templates_dir == "./templates/prompts"
-    assert cfg.prompts.mode is PromptMode.REPLACE  # schema v6: replace is the default
-
-
-def test_prompts_block_parses() -> None:
-    from wastech_orchestrator.config.schema import PromptMode
-
-    text = _LEGACY + ("prompts:\n  templates_dir: './tpl'\n  mode: append\n")
+def test_legacy_prompts_block_is_tolerated() -> None:
+    # config v9 removed the `prompts` block (a flow node's prompt is its role_file). An old config
+    # carrying one — including any sub-keys — still loads fail-open: the whole block is ignored and
+    # never stored on the schema (`upgrade-config` strips it).
+    text = _LEGACY + "prompts:\n  templates_dir: './tpl'\n  mode: append\n  preamble: 'hi'\n"
     cfg = loads_config(text).config
-    assert cfg.prompts.templates_dir == "./tpl"
-    assert cfg.prompts.mode is PromptMode.APPEND
-
-
-def test_prompts_legacy_overrides_and_strict_are_tolerated_with_warning() -> None:
-    # Schema v6 removed overrides/strict. An old config carrying them still loads fail-open; the
-    # keys are ignored and a deprecation warning is surfaced.
-    text = _LEGACY + (
-        "prompts:\n"
-        "  templates_dir: './tpl'\n"
-        "  strict: true\n"
-        "  overrides:\n"
-        "    implementation: 'implementation.md'\n"
-    )
-    result = loads_config(text)
-    assert result.config.prompts.templates_dir == "./tpl"
-    assert not hasattr(result.config.prompts, "overrides")
-    assert not hasattr(result.config.prompts, "strict")
-    assert any("prompts.overrides" in w for w in result.warnings)
-    assert any("prompts.strict" in w for w in result.warnings)
-
-
-def test_prompts_invalid_mode_is_rejected() -> None:
-    text = _LEGACY + "prompts:\n  mode: merge\n"
-    with pytest.raises(ConfigError) as exc:
-        loads_config(text)
-    assert any("prompts.mode" in issue for issue in exc.value.issues)
-
-
-def test_relative_templates_dir_resolves_against_config_dir(tmp_path: Path) -> None:
-    # load_config anchors a relative templates_dir to the config file's directory (not the CWD).
-    cfg = tmp_path / "config.yaml"
-    cfg.write_text(_LEGACY + "prompts:\n  templates_dir: './templates/prompts'\n", encoding="utf-8")
-    resolved = load_config(cfg).config.prompts.templates_dir
-    assert resolved == str((tmp_path / "templates" / "prompts").resolve())
-
-
-def test_absolute_and_empty_templates_dir_pass_through(tmp_path: Path) -> None:
-    abs_dir = str((tmp_path / "abs").resolve())
-    cfg = tmp_path / "config.yaml"
-    cfg.write_text(_LEGACY + f"prompts:\n  templates_dir: '{abs_dir}'\n", encoding="utf-8")
-    assert load_config(cfg).config.prompts.templates_dir == abs_dir
-
-    cfg2 = tmp_path / "config2.yaml"
-    cfg2.write_text(_LEGACY + "prompts:\n  templates_dir: ''\n", encoding="utf-8")
-    assert load_config(cfg2).config.prompts.templates_dir == ""
-
-
-def test_prompts_unknown_key_is_rejected() -> None:
-    text = _LEGACY + "prompts:\n  preamble: 'hi'\n"
-    with pytest.raises(ConfigError) as exc:
-        loads_config(text)
-    assert any("preamble" in issue for issue in exc.value.issues)
+    assert not hasattr(cfg, "prompts")
