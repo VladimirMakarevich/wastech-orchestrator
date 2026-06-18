@@ -19,20 +19,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from wastech_orchestrator.check_runner import CheckOutcome, CheckRunner
+from wastech_orchestrator.check_runner import CheckRunner
 from wastech_orchestrator.checks.discovery_factory import build_discovery
 from wastech_orchestrator.checks.model import ResolvedCheck
 from wastech_orchestrator.checks.profile import ResolvedCheckProfile
 from wastech_orchestrator.checks.resolver import CheckResolver, ReResolveReason
 from wastech_orchestrator.config.schema import OrchestratorConfig
-from wastech_orchestrator.core.dangerous_diff import (
-    DangerousDiff,
-    classify_dangerous_diff,
-)
 from wastech_orchestrator.core.decomposition import (
     DecompositionDecision,
     SubtaskSpec,
-    decide_decomposition,
     update_subtask_index,
     write_subtask_artifacts,
 )
@@ -57,26 +52,18 @@ from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
 from wastech_orchestrator.core.flow.wiring import build_node_inputs, build_node_services
 from wastech_orchestrator.core.hitl import (
     HumanInputSignal,
-    StageOutputError,
-    TypedStageOutput,
     consume_pending_interactions,
     discovery_interaction_id,
     discovery_interaction_path,
-    guardrail_interaction_path,
     handle_from_artifact,
-    interaction_id,
-    interaction_path,
     load_interaction,
     mark_consumed,
-    mark_interaction_status,
-    parse_typed_stage_output,
     reset_pending_interactions,
-    stage_output_schema,
     write_answer,
     write_waiting_interaction,
 )
-from wastech_orchestrator.core.loop_control import FixLoop, LoopController, LoopCounters
-from wastech_orchestrator.core.prompts import PromptTemplateStore, render_prompt
+from wastech_orchestrator.core.loop_control import LoopController, LoopCounters
+from wastech_orchestrator.core.prompts import PromptTemplateStore
 from wastech_orchestrator.core.recovery import (
     RecoveryAction,
     RecoveryPlan,
@@ -88,7 +75,6 @@ from wastech_orchestrator.core.skills import (
     SkillInventoryScanner,
     SkillRef,
     SkillSelection,
-    compute_skill_dedup,
     resolve_planning_skills,
 )
 from wastech_orchestrator.core.state_machine import Status, assert_transition
@@ -98,10 +84,8 @@ from wastech_orchestrator.git_manager import (
     ManualActionRequired,
 )
 from wastech_orchestrator.ledger import (
-    DecomposedFailureInfo,
     Ledger,
     LedgerRecord,
-    write_failure_report,
     write_minimal_summary,
 )
 from wastech_orchestrator.notify import (
@@ -119,19 +103,14 @@ from wastech_orchestrator.providers.artifacts import (
 )
 from wastech_orchestrator.providers.base import (
     AgentProvider,
-    AgentRunRequest,
     ProviderId,
-    RunStatus,
     Stage,
 )
 from wastech_orchestrator.providers.redaction import read_denied_secrets, redact_text
-from wastech_orchestrator.routing.router import AgentRouter, ResolvedRoute, StageOutcome
+from wastech_orchestrator.routing.router import AgentRouter
 from wastech_orchestrator.security.isolation import check_isolation
 from wastech_orchestrator.state_store import (
     ArtifactRow,
-    CheckRunRow,
-    ProviderAttemptRow,
-    StageRunRow,
     StateStore,
     SubtaskRow,
     TaskRow,
@@ -394,9 +373,8 @@ class Orchestrator:
             skill_inventory=self._skill_scanner.collect(),
         )
         try:
-            # P1.4 cutover: the FlowEngine is the driver. Legacy ``_drive`` stays callable from
-            # ``_resume_task`` (recovery) until the node-based resume lands (slice 6) + legacy
-            # removal (slice 7).
+            # The FlowEngine is the sole driver: the refinement→…→publish pipeline is the validated
+            # flow graph, executed by the engine (both fresh and on resume).
             return self._drive_via_engine(pipeline, completeness)
         except ManualActionRequired as exc:
             return self._go_terminal(
@@ -851,34 +829,10 @@ class Orchestrator:
             subtasks=specs,
         )
 
-    # --- pipeline -------------------------------------------------------------------------
-
-    def _drive(self, p: _Pipeline, completeness: Completeness) -> PipelineResult:
-        # strict_isolation preflight (§12.8): if a provider that may run cannot have its required
-        # isolation enabled, fail here — before any branch — rather than silently downgrading.
-        if self._config.security.strict_isolation:
-            reasons = check_isolation(self._config)
-            if reasons:
-                joined = "; ".join(reasons)
-                self._log(p.task.id).warning(
-                    "isolation preflight failed", extra={"reasons": joined}
-                )
-                raise PipelineFailed(f"strict_isolation: {joined}")
-
-        # Check preflight (automatic check discovery §11): resolve-or-load a launchable profile
-        # BEFORE any branch. A non-ready profile stops here — no branch, no fix budget spent.
-        self._check_preflight(p)
-
-        self._transition(p, Status.PREPARING)
-        self._prepare_branch(p)
-        self._refinement(p, completeness)
-        self._planning(p)
-        return self._run_units_and_finish(p)
-
-    # --- engine driver (P1.4 cutover): the FlowEngine replaces _drive ---------------------
+    # --- pipeline (the FlowEngine is the driver) ------------------------------------------
 
     def _drive_via_engine(self, p: _Pipeline, completeness: Completeness) -> PipelineResult:
-        """Drive the task through the :class:`FlowEngine` (the cutover replacement for ``_drive``).
+        """Drive the task through the :class:`FlowEngine`.
 
         Keeps the orchestrator-owned preamble (isolation + check preflight, branch prep) and the
         terminal handling (auto-merge + cleanup); the refinement→…→publish body is expressed as the
@@ -1384,142 +1338,6 @@ class Orchestrator:
         )
         self._store.update_task(p.task.id, branch=p.branch, slug=p.slug)
 
-    def _run_units_and_finish(self, p: _Pipeline) -> PipelineResult:
-        """Run the per-unit loop (skipping already-committed subtasks) then summary + publish."""
-        units: list[SubtaskSpec | None] = (
-            list(p.decomposition.subtasks) if p.decomposition.accepted else [None]
-        )
-        completed = {s.order for s in self._store.get_subtasks(p.task.id) if s.commit_sha}
-        for index, unit in enumerate(units):
-            if unit is not None and unit.order in completed:
-                continue  # recovery: a subtask with a recorded commit is never re-run (§13)
-            terminal = self._run_unit(p, unit, is_last=index == len(units) - 1)
-            if terminal is not None:
-                return terminal
-
-        self._summary(p)
-        return self._publish(p)
-
-    def _refinement(self, p: _Pipeline, completeness: Completeness) -> None:
-        skip = p.task.refined or completeness is Completeness.COMPLETE
-        if skip:
-            reason = "task flagged refined" if p.task.refined else "task already complete"
-            self._store.update_task(p.task.id, refinement_ran=False, refinement_skip_reason=reason)
-            self._log(p.task.id).info("refinement skipped", extra={"reason": reason})
-            self._transition(p, Status.PLANNING)
-            return
-        self._log(p.task.id).info("refinement running")
-        self._transition(p, Status.REFINING)
-        self._run_refinement(p)
-
-    def _run_refinement(self, p: _Pipeline) -> None:
-        """Run or re-run the persisted ``refining`` checkpoint."""
-        _, typed = self._run_typed_stage(p, Stage.REFINEMENT)
-        p.enriched_path = self._write_artifact(p, "task.enriched.md", typed.content)
-        self._store.update_task(p.task.id, refinement_ran=True)
-        self._transition(p, Status.PLANNING)
-
-    def _planning(self, p: _Pipeline) -> None:
-        if Stage.PLANNING in p.skip:
-            # No planning agent: write a stub plan from the task itself and run as a single unit
-            # (decomposition needs the planning agent's structured output, so it is forced off).
-            stub = (
-                f"# Plan (stub — planning stage skipped)\n\n"
-                f"## {p.task.title}\n\n{p.task.description}\n"
-            )
-            p.plan_path = self._write_artifact(p, "plan.md", stub)
-            p.decomposition = DecompositionDecision(accepted=False, reason="planning_skipped", n=1)
-            self._store.update_task(
-                p.task.id,
-                decomposition_enabled=False,
-                decomposition_accepted=False,
-                decomposition_reason="planning_skipped",
-                subtask_count=None,
-                active_subtask=None,
-            )
-            self._record_skip(p, Stage.PLANNING, self._skip_reason(p, Stage.PLANNING))
-            self._transition(p, Status.IMPLEMENTING)
-            return
-        _, typed = self._run_typed_stage(p, Stage.PLANNING)
-        skill_section = self._resolve_and_render_skills(p, typed.skills)
-        p.plan_path = self._write_artifact(p, "plan.md", typed.content + skill_section)
-        gate_on = self._decomposition_gate_on(p.task)
-        decision = decide_decomposition(
-            typed.structured,
-            gate_on=gate_on,
-            max_subtasks=self._config.agents.decomposition.max_subtasks,
-        )
-        p.decomposition = decision
-        self._log(p.task.id).info(
-            "decomposition decided",
-            extra={
-                "gate_on": gate_on,
-                "accepted": decision.accepted,
-                "n": decision.n,
-                "reason": decision.reason,
-            },
-        )
-        self._store.update_task(
-            p.task.id,
-            decomposition_enabled=gate_on,
-            decomposition_accepted=decision.accepted,
-            decomposition_reason=decision.reason,
-            subtask_count=decision.n if decision.accepted else None,
-            active_subtask=1 if decision.accepted else None,
-        )
-        if decision.accepted:
-            write_subtask_artifacts(decision, self._artifacts_root, p.task.id)
-            subtasks_dir = task_artifact_dir(self._artifacts_root, p.task.id) / "subtasks"
-            self._register_artifact(p.task.id, "subtasks_index", str(subtasks_dir / "index.json"))
-            for s in decision.subtasks:
-                self._register_artifact(
-                    p.task.id, "subtask_spec", str(subtasks_dir / f"{s.order:02d}-{s.slug}.md")
-                )
-            self._store.insert_subtasks(
-                [
-                    SubtaskRow(
-                        task_id=p.task.id,
-                        order=s.order,
-                        slug=s.slug,
-                        title=s.title,
-                        status="pending",
-                        depends_on=s.depends_on,
-                    )
-                    for s in decision.subtasks
-                ]
-            )
-        self._transition(p, Status.IMPLEMENTING)
-
-    def _resolve_and_render_skills(self, p: _Pipeline, proposed: tuple[str, ...]) -> str:
-        """Resolve planning's proposed skills, run the §2.2 dedup, store the refs, audit (§2.1).
-
-        Returns a deterministic plan.md section (prefixed with a blank line), empty when nothing was
-        proposed or kept. The chosen ``SkillRef`` paths are stored on the pipeline and surfaced to
-        downstream stages as read-only references; the agent can never pick a path the scan did not
-        independently find.
-        """
-        selection = resolve_planning_skills(proposed, p.skill_inventory)
-        p.selected_skills = selection.refs
-        # §2.2: compare chosen skill bodies' headings against the operator's appended planning text.
-        user_text = self._prompts.override_for(Stage.PLANNING)
-        bodies: list[tuple[SkillRef, str]] = []
-        if user_text:
-            for ref in selection.refs:
-                body = self._skill_scanner.read_body(ref)
-                if body is not None:
-                    bodies.append((ref, body))
-        dedup = compute_skill_dedup(user_text, bodies)
-        self._log(p.task.id).info(
-            "skills selected",
-            extra={
-                "selected": [r.name for r in selection.refs],
-                "dropped_unknown": list(selection.dropped_unknown),
-                "dropped_excluded": list(selection.dropped_excluded),
-                "deduped": [e.skill for e in dedup],
-            },
-        )
-        return self._render_skill_section(selection, dedup)
-
     def _render_skill_section(
         self, selection: SkillSelection, dedup: tuple[SkillDedupEntry, ...]
     ) -> str:
@@ -1547,138 +1365,6 @@ class Orchestrator:
             lines += [f"- `{e.skill}`: {', '.join(e.overlapping_headings)}" for e in dedup]
         return "\n" + redact_text("\n".join(lines) + "\n")
 
-    def _run_unit(
-        self, p: _Pipeline, unit: SubtaskSpec | None, *, is_last: bool
-    ) -> PipelineResult | None:
-        """Run one unit's implement→test→review→fix loop; return a terminal result if stuck."""
-        subtask = unit.order if unit is not None else None
-        if p.status not in _UNIT_STATUSES:
-            raise PipelineFailed(f"cannot run unit from status {p.status.value}")
-
-        while True:
-            if p.status is Status.IMPLEMENTING:
-                self._run_edit_stage_with_guardrail(
-                    p,
-                    Stage.IMPLEMENTATION,
-                    subtask=subtask,
-                    unit=unit,
-                )
-                if Stage.TESTING in p.skip:
-                    self._record_skip(
-                        p, Stage.TESTING, self._skip_reason(p, Stage.TESTING), subtask=subtask
-                    )
-                self._transition(p, self._after_edit_target(p))
-
-            if p.status is Status.TESTING:
-                check = self._run_checks(p, subtask)
-                if check.passed:
-                    self._loops.on_check_pass(p.counters)
-                    self._transition(p, Status.REVIEWING)
-                elif check.launch_failed:
-                    # A check could not be *launched* (missing executable/module): an infrastructure
-                    # event, not a quality failure. Never enter fixing — no code change can fix it.
-                    # This is the ONLY mid-task trigger for re-resolving the check commands (§1.2):
-                    # real proof the command is wrong. Bounded to once; a changed set is approved.
-                    if self._reresolve_on_launch_failure(p):
-                        continue  # re-run checks with the newly resolved (and approved) profile
-                    raise PipelineFailed(
-                        "check launch failure: "
-                        f"{check.first_launch_error or 'a configured check could not be launched'}"
-                    )
-                else:
-                    # A quality failure (a check ran and reported problems) routes to fixing. It
-                    # must NEVER re-resolve the check commands — that would let the gate quietly
-                    # rewrite its own command until it passes (the anti-pattern §1.2 forbids).
-                    p.check_log = check.first_failure_log
-                    stuck = self._enter_fixing(p, FixLoop.TEST)
-                    if stuck is not None:
-                        return stuck
-                    continue
-
-            if p.status is Status.REVIEWING:
-                if Stage.REVIEW in p.skip:
-                    # No review agent: commit without an agent quality gate (validation has already
-                    # confirmed agents.allow_review_skip). The danger is audited again at publish.
-                    self._record_skip(
-                        p, Stage.REVIEW, self._skip_reason(p, Stage.REVIEW), subtask=subtask
-                    )
-                    self._loops.on_review_pass(p.counters)
-                    self._save_counters(p)
-                    return self._on_review_passed(p, unit, is_last=is_last)
-                outcome = self._run_stage(p, Stage.REVIEW, subtask=subtask, unit=unit)
-                result = self._require_result_outcome(p, outcome, Stage.REVIEW)
-                blocking = self._write_review(p, result.structured_output, result.final_message)
-                if not blocking:
-                    self._loops.on_review_pass(p.counters)
-                    self._save_counters(p)
-                    return self._on_review_passed(p, unit, is_last=is_last)
-                stuck = self._enter_fixing(p, FixLoop.REVIEW)
-                if stuck is not None:
-                    return stuck
-
-            if p.status is Status.FIXING:
-                self._run_edit_stage_with_guardrail(
-                    p,
-                    Stage.FIXING,
-                    subtask=subtask,
-                    unit=unit,
-                )
-                # When testing is skipped a review-driven fix returns to review, not to a skipped
-                # test gate. The testing skip was already audited at IMPLEMENTING for this unit.
-                self._transition(p, self._after_edit_target(p))
-
-    def _on_review_passed(
-        self, p: _Pipeline, unit: SubtaskSpec | None, *, is_last: bool
-    ) -> PipelineResult | None:
-        if unit is not None:
-            # Every subtask — the last one included — gets its own local commit on the single
-            # branch (§5.1, ``commit_per_subtask``); publishing then only pushes + opens the PR.
-            message = f"feat({p.task.id}): subtask {unit.order:02d} {unit.title}"
-            sha = self._git.commit_subtask(p.task.id, unit.order, unit.slug, message)
-            update_subtask_index(
-                self._artifacts_root, p.task.id, unit.order, status="committed", commit_sha=sha
-            )
-            self._store.set_subtask_commit(p.task.id, unit.order, sha, "committed")
-            self._store.update_task(p.task.id, subtasks_completed=unit.order)
-            if not is_last:
-                self._loops.reset_for_next_subtask(p.counters)
-                self._store.update_task(p.task.id, active_subtask=unit.order + 1)
-                self._save_counters(p)
-                self._transition(p, Status.IMPLEMENTING)
-                return None
-        self._transition(p, Status.SUMMARIZING)
-        return None
-
-    def _summary(self, p: _Pipeline) -> None:
-        if Stage.SUMMARY in p.skip:
-            # No summary agent: write a minimal stub so the PR body still has a body.
-            stub = f"# Summary\n\nTask `{p.task.id}`: {p.task.title}\n\n*(summary stage skipped)*\n"
-            self._write_summary_from_agent(p, stub, None)
-            self._record_skip(p, Stage.SUMMARY, self._skip_reason(p, Stage.SUMMARY))
-        else:
-            outcome = self._run_stage(p, Stage.SUMMARY)
-            if outcome.result is not None and outcome.result.status is RunStatus.SUCCEEDED:
-                self._write_summary_from_agent(
-                    p, outcome.result.final_message, outcome.result.structured_output
-                )
-            else:
-                # Best-effort stage: no provider could produce it → compact deterministic summary
-                # (files + counts via `git diff --stat`, never the full diff/description; §5.2).
-                write_minimal_summary(
-                    self._artifacts_root,
-                    p.task.id,
-                    title=p.task.title,
-                    diff_stat=self._git.diff_stat(),
-                    task_ref=self._task_ref(p),
-                )
-        # Append the skipped-stages audit so reviewers see which stages ran (stage-skip control).
-        self._append_skip_section(p)
-        # summary.json stays under logs/ (a working artifact, never committed); the human-readable
-        # summary.md is placed next to the task and committed during finalize (§6, §21.3).
-        task_dir = task_artifact_dir(self._artifacts_root, p.task.id)
-        self._register_artifact(p.task.id, "summary_json", str(task_dir / "summary.json"))
-        self._transition(p, Status.READY_TO_PUBLISH)
-
     def _skip_section_md(self, p: _Pipeline) -> str:
         """A ``## Pipeline stages skipped`` markdown block, or ``""`` when nothing was skipped."""
         if not p.skip:
@@ -1698,46 +1384,6 @@ class Orchestrator:
         if "## Pipeline stages skipped" in existing:
             return
         md_path.write_text(existing.rstrip("\n") + "\n" + section, encoding="utf-8")
-
-    def _publish(self, p: _Pipeline) -> PipelineResult:
-        # Finalize BEFORE the commit so the task move + summary.md enter the task commit (§6, §21):
-        # the scoped code commit carries the code, the audit commit carries `tasks/` (the moved task
-        # file + `<id>.summary.md`); `logs/` is never committed.
-        summary_md = self._finalize_task_artifacts(p, Status.DONE)
-        self._transition(p, Status.COMMITTING)
-        message = f"feat({p.task.id}): {p.task.title}"
-        self._observe(
-            p,
-            "commit",
-            lambda: (self._git.commit_code(p.task.id, message), self._git.commit_audit(p.task.id)),
-        )
-        self._transition(p, Status.PUSHING)
-        self._observe(p, "push", lambda: self._git.push(p.task.id, p.branch))
-        self._transition(p, Status.CREATING_PR)
-        body_path = str(summary_md) if summary_md else self._fallback_summary_path(p)
-        pr_url = self._observe(
-            p,
-            "pull request",
-            lambda: self._git.create_pr(
-                p.task.id, p.branch, title=p.task.pr_title or p.task.title, body_path=body_path
-            ),
-        )
-        if pr_url and Stage.REVIEW in p.skip and self._auto_merge_on(p.task):
-            self._log(p.task.id).warning(
-                "[AUTO-MERGE] review skipped AND auto_merge enabled — task will merge without "
-                "any review gate",
-                extra={"pr_url": pr_url},
-            )
-        if pr_url and self._auto_merge_on(p.task):
-            return self._auto_merge(p, pr_url)
-        if pr_url and p.task.auto_merge is True:
-            # Reached only when a per-task opt-in was ignored (operator has not enabled per-task
-            # overrides and the global flag is off) — surface it rather than silently dropping it.
-            self._log(p.task.id).warning(
-                "[AUTO-MERGE] per-task auto_merge:true ignored; enable "
-                "git.auto_merge_allow_per_task to honor per-task overrides"
-            )
-        return self._go_terminal(p, Status.DONE, pr_url=pr_url, already_moved=True)
 
     def _auto_merge(self, p: _Pipeline, pr_url: str) -> PipelineResult:
         """Merge the just-created PR, bypassing human review. Audited, idempotent, non-destructive.
@@ -1816,102 +1462,6 @@ class Orchestrator:
             return None
         self._register_artifact(p.task.id, "summary_md", str(summary_path))
         return summary_path
-
-    # --- fix-loop control -----------------------------------------------------------------
-
-    def _enter_fixing(self, p: _Pipeline, loop: FixLoop) -> PipelineResult | None:
-        if Stage.FIXING in p.skip:
-            # Recovery disabled: the first test/review failure goes straight to manual review
-            # (effectively max_fix_attempts: 0), with a failure report for the operator.
-            self._record_skip(p, Stage.FIXING, self._skip_reason(p, Stage.FIXING))
-            report_path = self._write_failure_report(p, loop, "fixing_disabled")
-            self._store.update_task(p.task.id, failure_report_path=report_path)
-            return self._go_terminal(
-                p,
-                Status.MANUAL_ACTION_REQUIRED,
-                manual_reason=f"fixing disabled; {loop.value} failed",
-            )
-        decision = self._loops.enter_fixing(p.counters, loop)
-        self._save_counters(p)
-        counters = {
-            "loop": loop.value,
-            "fix_iterations": p.counters.fix_iterations,
-            "test_fix_cycles": p.counters.test_fix_cycles,
-            "review_fix_cycles": p.counters.review_fix_cycles,
-            "stage_attempts": p.counters.stage_attempts,
-        }
-        if decision.stuck:
-            self._log(p.task.id).warning(
-                "task stuck", extra={**counters, "limit": decision.limit_name}
-            )
-            report_path = self._write_failure_report(p, decision.loop, decision.limit_name)
-            self._store.update_task(p.task.id, failure_report_path=report_path)
-            return self._go_terminal(
-                p, Status.MANUAL_ACTION_REQUIRED, manual_reason=f"stuck: {decision.limit_name}"
-            )
-        self._log(p.task.id).info("entering fixing", extra=counters)
-        self._write_fixing_context(p, loop)
-        self._transition(p, Status.FIXING)
-        return None
-
-    def _write_fixing_context(self, p: _Pipeline, loop: FixLoop) -> str:
-        """Persist the current fixing trigger so restart can rebuild the provider request."""
-        payload = {
-            "loop": loop.value,
-            "check_artifacts_path": p.check_log if loop is FixLoop.TEST else None,
-            "review_artifacts_path": (p.review_findings_path if loop is FixLoop.REVIEW else None),
-        }
-        return self._write_artifact(
-            p,
-            "fixing-context.json",
-            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-        )
-
-    def _restore_recovery_context(self, p: _Pipeline, row: TaskRow) -> None:
-        """Restore task-level paths needed by testing/review/fixing after restart."""
-        task_dir = task_artifact_dir(self._artifacts_root, p.task.id)
-        diff_path = task_dir / "current.diff"
-        if diff_path.exists():
-            p.diff_path = str(diff_path)
-
-        if p.status is not Status.FIXING:
-            return
-
-        context_path = task_dir / "fixing-context.json"
-        context: Mapping[str, Any] = {}
-        if context_path.exists():
-            try:
-                loaded = json.loads(context_path.read_text(encoding="utf-8"))
-                if isinstance(loaded, Mapping):
-                    context = loaded
-            except (OSError, json.JSONDecodeError):
-                context = {}
-
-        check_path = context.get("check_artifacts_path")
-        if isinstance(check_path, str) and Path(check_path).exists():
-            p.check_log = check_path
-        review_path = context.get("review_artifacts_path")
-        if isinstance(review_path, str) and Path(review_path).exists():
-            p.review_findings_path = review_path
-
-        # Backward compatibility for tasks that entered fixing before the checkpoint existed.
-        subtask = row.active_subtask if row.decomposition_accepted else None
-        if p.check_log is None:
-            latest_check = self._store.latest_failed_check_log(p.task.id, subtask)
-            if latest_check and Path(latest_check).exists():
-                p.check_log = latest_check
-        if p.review_findings_path is None:
-            fallback_review = task_dir / "review" / "findings.json"
-            if fallback_review.exists():
-                p.review_findings_path = str(fallback_review)
-
-        if p.review_findings_path:
-            try:
-                loaded = json.loads(Path(p.review_findings_path).read_text(encoding="utf-8"))
-                if isinstance(loaded, Mapping):
-                    p.last_review_findings = self._extract_findings(loaded)
-            except (OSError, json.JSONDecodeError):
-                p.last_review_findings = []
 
     # --- terminal handling ----------------------------------------------------------------
 
@@ -2068,350 +1618,7 @@ class Orchestrator:
         except OSError:
             return None
 
-    # --- stage execution + artifacts ------------------------------------------------------
-
-    def _run_stage(
-        self,
-        p: _Pipeline,
-        stage: Stage,
-        *,
-        subtask: int | None = None,
-        unit: SubtaskSpec | None = None,
-        human_input_path: str | None = None,
-    ) -> StageOutcome:
-        route = self._router.resolve_route(stage, p.task.agents)
-        provider_cfg = self._config.agents.providers[route.primary]
-        started_at = self._clock()
-        run_id = self._store.record_stage_run(
-            StageRunRow(
-                task_id=p.task.id,
-                stage=stage.value,
-                subtask_order=subtask,
-                status="running",
-                route_primary=route.primary.value,
-                route_fallback=route.fallback.value if route.fallback else None,
-                route_source=route.source.value,
-                stage_attempts=0,
-                started_at=started_at,
-            )
-        )
-        prompt = self._build_prompt(p, stage, unit)
-        self._write_rendered_prompt(p, stage, subtask, prompt)
-        request = AgentRunRequest(
-            task_id=p.task.id,
-            stage=stage,
-            working_directory=self._config.repo.local_path,
-            prompt=prompt,
-            permission_profile=provider_cfg.permission_profile,
-            timeout_seconds=provider_cfg.timeout_seconds,
-            attempt=1,
-            stage_run_id=run_id,
-            task_path=p.task_file,
-            plan_path=p.plan_path,
-            diff_path=p.diff_path,
-            check_artifacts_path=p.check_log,
-            review_artifacts_path=p.review_findings_path,
-            human_input_path=human_input_path,
-            skill_reference_paths=tuple(ref.path for ref in p.selected_skills),
-            output_schema=stage_output_schema(stage),
-            model=p.task.model_for(stage),
-            reasoning=p.task.reasoning_for(stage),
-            session_id=p.session_ids.get(route.primary.value),
-        )
-        fields: dict[str, object] = {
-            "stage": stage.value,
-            "primary": route.primary.value,
-            "stage_run_id": run_id,
-        }
-        if subtask is not None:
-            fields["subtask"] = subtask
-        outcome = self._observe(
-            p,
-            "stage",
-            lambda: self._router.run_stage(request, route, snapshot=self._git),
-            fields=fields,
-        )
-        self._record_stage(run_id, outcome)
-        if self._prompt_audit_on(p.task):
-            self._write_prompt_audit(p, stage, subtask, prompt, route, outcome, run_id, started_at)
-        p.counters.stage_attempts = outcome.stage_attempts
-        if outcome.result is not None and outcome.result.session_id and outcome.provider_used:
-            validated = _validate_session_id(outcome.result.session_id)
-            if validated:
-                p.session_ids[outcome.provider_used.value] = validated
-            if outcome.provider_used != route.primary:
-                p.session_ids.pop(route.primary.value, None)
-        return outcome
-
-    def _run_typed_stage(
-        self,
-        p: _Pipeline,
-        stage: Stage,
-        *,
-        subtask: int | None = None,
-        unit: SubtaskSpec | None = None,
-    ) -> tuple[StageOutcome, TypedStageOutput]:
-        """Run refinement/planning with at most one durable human round-trip."""
-        path = interaction_path(self._artifacts_root, p.task.id, stage, subtask=subtask)
-        persisted = load_interaction(path)
-        had_interaction = persisted is not None
-        human_input_path: str | None = None
-
-        if persisted is not None:
-            status = str(persisted.get("status", ""))
-            if status == "waiting":
-                handle = handle_from_artifact(persisted)
-                result = self._notifier.wait_for_answer(handle)
-                write_answer(path, result)
-                self._register_artifact(p.task.id, "hitl", str(path))
-                self._require_human_result(p, stage, handle.kind, result)
-                human_input_path = str(path)
-            elif status in {"answered", "consumed"}:
-                self._require_persisted_human_answer(p, stage, persisted)
-                human_input_path = str(path)
-            else:
-                raise ManualActionRequired(
-                    f"{stage.value} HITL cannot resume from interaction status {status!r}"
-                )
-
-        outcome = self._run_stage(
-            p,
-            stage,
-            subtask=subtask,
-            unit=unit,
-            human_input_path=human_input_path,
-        )
-        typed = self._typed_output(p, outcome, stage)
-        signal = typed.human_input
-        if signal is None:
-            if had_interaction:
-                mark_consumed(path)
-                self._register_artifact(p.task.id, "hitl", str(path))
-            return outcome, typed
-        if had_interaction:
-            raise ManualActionRequired(
-                f"{stage.value} requested human input more than once for the same checkpoint"
-            )
-
-        handle = self._notifier.start_ask(
-            question=signal.question,
-            context=signal.context,
-            task_id=p.task.id,
-            kind=signal.kind,
-            timeout_s=self._config.telegram.ask_timeout_s,
-            interaction_id=interaction_id(p.task.id, stage, subtask),
-            contacts=tuple(p.task.contacts),
-        )
-        write_waiting_interaction(
-            path,
-            task_id=p.task.id,
-            stage=stage,
-            subtask=subtask,
-            signal=signal,
-            handle=handle,
-        )
-        self._register_artifact(p.task.id, "hitl", str(path))
-        result = self._notifier.wait_for_answer(handle)
-        write_answer(path, result)
-        self._register_artifact(p.task.id, "hitl", str(path))
-        self._require_human_result(p, stage, signal.kind, result)
-
-        resumed = self._run_stage(
-            p,
-            stage,
-            subtask=subtask,
-            unit=unit,
-            human_input_path=str(path),
-        )
-        resumed_typed = self._typed_output(p, resumed, stage)
-        if resumed_typed.human_input is not None:
-            raise ManualActionRequired(
-                f"{stage.value} requested human input again after receiving an answer"
-            )
-        mark_consumed(path)
-        self._register_artifact(p.task.id, "hitl", str(path))
-        return resumed, resumed_typed
-
-    def _run_edit_stage_with_guardrail(
-        self,
-        p: _Pipeline,
-        stage: Stage,
-        *,
-        subtask: int | None,
-        unit: SubtaskSpec | None,
-    ) -> None:
-        """Run an editing stage and require approval for deletion/dependency changes."""
-        path = guardrail_interaction_path(
-            self._artifacts_root,
-            p.task.id,
-            stage,
-            subtask=subtask,
-            cycle=p.counters.fix_iterations,
-        )
-        persisted = load_interaction(path)
-        if persisted is None:
-            outcome = self._run_stage(p, stage, subtask=subtask, unit=unit)
-            self._require_result(p, outcome, stage)
-
-        p.diff_path = self._git.write_current_diff(p.task.id)
-        self._register_artifact(p.task.id, "diff", p.diff_path)
-        dangerous = classify_dangerous_diff(self._git.changed_code_entries())
-        if dangerous is None:
-            if persisted is not None:
-                mark_consumed(path)
-                self._register_artifact(p.task.id, "hitl", str(path))
-            return
-        if self._planning_approval_matches(p, dangerous):
-            self._log(p.task.id).info(
-                "dangerous diff covered by planning approval",
-                extra={"stage": stage.value, "risk": dangerous.risk, "paths": len(dangerous.paths)},
-            )
-            return
-
-        if persisted is None:
-            signal = self._dangerous_diff_signal(stage, dangerous)
-            handle = self._notifier.start_ask(
-                question=signal.question,
-                context=signal.context,
-                task_id=p.task.id,
-                kind="approval",
-                timeout_s=self._config.telegram.ask_timeout_s,
-                interaction_id=interaction_id(p.task.id, stage, subtask),
-                contacts=tuple(p.task.contacts),
-            )
-            write_waiting_interaction(
-                path,
-                task_id=p.task.id,
-                stage=stage,
-                subtask=subtask,
-                signal=signal,
-                handle=handle,
-            )
-            self._register_artifact(p.task.id, "hitl", str(path))
-            result = self._notifier.wait_for_answer(handle)
-            write_answer(path, result)
-            self._register_artifact(p.task.id, "hitl", str(path))
-            self._require_human_result(p, stage, "approval", result)
-            approved = result.approved
-        else:
-            approved = self._resume_guardrail_answer(p, stage, path, persisted, dangerous)
-
-        if approved is True:
-            mark_consumed(path)
-            self._register_artifact(p.task.id, "hitl", str(path))
-            return
-        if approved is not False:
-            raise ManualActionRequired(f"{stage.value} dangerous diff approval was ambiguous")
-
-        # A denial gets one safe-reconsideration run. Persist the boundary first so a crash cannot
-        # accidentally launch that run more than once.
-        mark_interaction_status(path, "reconsidering")
-        self._register_artifact(p.task.id, "hitl", str(path))
-        outcome = self._run_stage(
-            p,
-            stage,
-            subtask=subtask,
-            unit=unit,
-            human_input_path=str(path),
-        )
-        self._require_result(p, outcome, stage)
-        mark_interaction_status(path, "reconsidered")
-        p.diff_path = self._git.write_current_diff(p.task.id)
-        self._register_artifact(p.task.id, "diff", p.diff_path)
-        remaining = classify_dangerous_diff(self._git.changed_code_entries())
-        if remaining is not None:
-            raise ManualActionRequired(
-                f"{stage.value} retained dangerous changes after approval was denied"
-            )
-        mark_consumed(path)
-        self._register_artifact(p.task.id, "hitl", str(path))
-
-    def _resume_guardrail_answer(
-        self,
-        p: _Pipeline,
-        stage: Stage,
-        path: Path,
-        persisted: Mapping[str, Any],
-        dangerous: DangerousDiff,
-    ) -> bool | None:
-        status = str(persisted.get("status", ""))
-        if not self._guardrail_request_matches(persisted, dangerous):
-            raise ManualActionRequired(
-                f"{stage.value} dangerous diff expanded after its approval request"
-            )
-        if status == "waiting":
-            handle = handle_from_artifact(persisted)
-            result = self._notifier.wait_for_answer(handle)
-            write_answer(path, result)
-            self._register_artifact(p.task.id, "hitl", str(path))
-            self._require_human_result(p, stage, "approval", result)
-            return result.approved
-        if status in {"answered", "consumed"}:
-            self._require_persisted_human_answer(p, stage, persisted)
-            approved = persisted.get("approved")
-            return approved if isinstance(approved, bool) else None
-        if status in {"reconsidering", "reconsidered"}:
-            raise ManualActionRequired(
-                f"{stage.value} restart interrupted denied-change reconsideration"
-            )
-        raise ManualActionRequired(
-            f"{stage.value} guardrail cannot resume from interaction status {status!r}"
-        )
-
-    def _planning_approval_matches(self, p: _Pipeline, dangerous: DangerousDiff) -> bool:
-        path = interaction_path(self._artifacts_root, p.task.id, Stage.PLANNING)
-        persisted = load_interaction(path)
-        if persisted is None or persisted.get("approved") is not True:
-            return False
-        return self._guardrail_request_matches(persisted, dangerous)
-
-    def _guardrail_request_matches(
-        self,
-        persisted: Mapping[str, Any],
-        dangerous: DangerousDiff,
-    ) -> bool:
-        request = persisted.get("request")
-        if not isinstance(request, Mapping):
-            return False
-        paths = request.get("paths")
-        return (
-            request.get("kind") == "approval"
-            and request.get("risk") == dangerous.risk
-            and isinstance(paths, list)
-            and tuple(sorted(str(path) for path in paths)) == dangerous.paths
-        )
-
-    def _dangerous_diff_signal(
-        self,
-        stage: Stage,
-        dangerous: DangerousDiff,
-    ) -> HumanInputSignal:
-        detail: list[str] = []
-        if dangerous.deleted_paths:
-            detail.append("Deleted paths: " + ", ".join(dangerous.deleted_paths))
-        if dangerous.dependency_paths:
-            detail.append("Dependency manifests/locks: " + ", ".join(dangerous.dependency_paths))
-        return HumanInputSignal(
-            kind="approval",
-            question=f"Approve dangerous changes produced by the {stage.value} stage?",
-            context="\n".join(detail),
-            risk=dangerous.risk,
-            paths=dangerous.paths,
-        )
-
-    def _typed_output(
-        self,
-        p: _Pipeline,
-        outcome: StageOutcome,
-        stage: Stage,
-    ) -> TypedStageOutput:
-        result = self._require_result_outcome(p, outcome, stage)
-        try:
-            return parse_typed_stage_output(stage, result.structured_output)
-        except StageOutputError as exc:
-            raise PipelineFailed(
-                f"{stage.value} returned invalid structured output: {exc}"
-            ) from exc
+    # --- human-input guards (check-command approval) --------------------------------------
 
     def _require_human_result(
         self,
@@ -2431,28 +1638,6 @@ class Orchestrator:
             failure = "invalid_response"
         self._raise_human_failure(p, stage, failure)
 
-    def _require_persisted_human_answer(
-        self,
-        p: _Pipeline,
-        stage: Stage,
-        persisted: Mapping[str, Any],
-    ) -> None:
-        failure = persisted.get("failure")
-        if failure is not None:
-            self._raise_human_failure(p, stage, str(failure))
-            return
-        request = persisted.get("request")
-        if not isinstance(request, Mapping):
-            self._raise_human_failure(p, stage, "invalid_response")
-            return
-        kind = request.get("kind")
-        if kind == "approval" and isinstance(persisted.get("approved"), bool):
-            return
-        answer = persisted.get("answer")
-        if kind == "question" and isinstance(answer, str) and answer.strip():
-            return
-        self._raise_human_failure(p, stage, "invalid_response")
-
     def _raise_human_failure(
         self,
         p: _Pipeline,
@@ -2464,86 +1649,6 @@ class Orchestrator:
             extra={"stage": stage.value, "failure": failure},
         )
         raise ManualActionRequired(f"{stage.value} human input failed: {failure}")
-
-    def _subtask_spec_path(self, p: _Pipeline, unit: SubtaskSpec) -> Path:
-        return (
-            task_artifact_dir(self._artifacts_root, p.task.id)
-            / "subtasks"
-            / f"{unit.order:02d}-{unit.slug}.md"
-        )
-
-    def _prompt_variables(
-        self, p: _Pipeline, stage: Stage, unit: SubtaskSpec | None
-    ) -> dict[str, object | None]:
-        """The allowlisted template variables (backlog §5): metadata and artifact **paths** only.
-
-        Never includes task bodies, diffs, check logs, env, or secrets — those stay in the artifact
-        files the provider references by path.
-        """
-        variables: dict[str, object | None] = {
-            "task_id": p.task.id,
-            "stage": stage.value,
-            "repo_path": self._config.repo.local_path,
-            "task_path": p.task_file,
-            "plan_path": p.plan_path,
-            "diff_path": p.diff_path,
-            "checks_path": p.check_log,
-            "review_path": p.review_findings_path,
-            "skills_path": self._render_skill_paths(p),
-        }
-        if unit is not None:
-            variables["subtask_order"] = unit.order
-            variables["subtask_count"] = p.decomposition.n
-            variables["subtask_spec_path"] = str(self._subtask_spec_path(p, unit))
-        return variables
-
-    def _render_skill_paths(self, p: _Pipeline) -> str | None:
-        """Newline-joined planning-selected SKILL.md paths for the ``{skills_path}`` template var,
-        or ``None`` when none were chosen (renders to empty, like any other unset path var)."""
-        if not p.selected_skills:
-            return None
-        return "\n".join(ref.path for ref in p.selected_skills)
-
-    def _build_prompt(self, p: _Pipeline, stage: Stage, unit: SubtaskSpec | None) -> str:
-        prompt = render_prompt(
-            self._prompts.resolved(stage), self._prompt_variables(p, stage, unit)
-        )
-        if unit is not None:
-            spec_path = self._subtask_spec_path(p, unit)
-            prompt += f"\n\nActive subtask {unit.order} of {p.decomposition.n}; spec: {spec_path}"
-        return prompt
-
-    def _record_stage(self, run_id: int, outcome: StageOutcome) -> None:
-        status = outcome.result.status.value if outcome.result is not None else "infra_exhausted"
-        self._store.complete_stage_run(
-            run_id,
-            status=status,
-            provider_used=outcome.provider_used.value if outcome.provider_used else None,
-            error_class=outcome.terminal_error.error_class.value
-            if outcome.terminal_error
-            else None,
-            stage_attempts=outcome.stage_attempts,
-            finished_at=self._clock(),
-        )
-        for attempt in outcome.attempts:
-            attempt_dir = (
-                str(Path(attempt.result.stdout_path).parent)
-                if attempt.result and attempt.result.stdout_path
-                else None
-            )
-            self._store.record_provider_attempt(
-                ProviderAttemptRow(
-                    stage_run_id=run_id,
-                    provider=attempt.provider.value,
-                    attempt=attempt.attempt,
-                    status=attempt.status.value if attempt.status else None,
-                    error_class=attempt.error_class.value if attempt.error_class else None,
-                    exit_code=attempt.result.exit_code if attempt.result else None,
-                    attempt_dir=attempt_dir,
-                    started_at=self._clock(),
-                    finished_at=self._clock(),
-                )
-            )
 
     def _resolved_checks(self, p: _Pipeline) -> tuple[ResolvedCheck, ...] | None:
         """The resolved profile's checks; on resume, fall back to the cached profile (§13)."""
@@ -2557,145 +1662,13 @@ class Orchestrator:
             return cached.checks
         return None
 
-    def _run_checks(self, p: _Pipeline, subtask: int | None) -> CheckOutcome:
-        outcome = self._checks.run(
-            clone_dir=self._config.repo.local_path,
-            artifacts_root=self._artifacts_root,
-            task_id=p.task.id,
-            subtask=subtask,
-            checks=self._resolved_checks(p),
-        )
-        for run in outcome.runs:
-            self._store.record_check_run(
-                CheckRunRow(
-                    task_id=p.task.id,
-                    subtask_order=subtask,
-                    command=run.command,
-                    exit_code=run.exit_code,
-                    timed_out=run.timed_out,
-                    passed=run.passed,
-                    log_path=run.log_path,
-                    started_at=self._clock(),
-                    finished_at=self._clock(),
-                )
-            )
-        return outcome
-
-    # --- stage-skip helpers ---------------------------------------------------------------
-
-    def _record_skip(
-        self, p: _Pipeline, stage: Stage, reason: str, *, subtask: int | None = None
-    ) -> None:
-        """Log (WARNING) and persist a skipped stage to the audit trail (stage-skip control)."""
-        self._log(p.task.id).warning(
-            f"{stage.value} skipped", extra={"reason": reason, "subtask": subtask}
-        )
-        self._store.record_skip(p.task.id, stage.value, reason=reason, subtask_order=subtask)
-
-    def _skip_reason(self, p: _Pipeline, stage: Stage) -> str:
-        """Describe why ``stage`` is being skipped — global config, per-task, or both."""
-        in_global = stage in self._config.agents.skip_stages
-        in_task = stage in p.task.disabled_stages()
-        if in_global and in_task:
-            return "global config and task frontmatter"
-        if in_global:
-            return "global config (agents.skip_stages)"
-        return "task frontmatter (stages.<stage>.enabled: false)"
-
-    def _after_edit_target(self, p: _Pipeline) -> Status:
-        """Where the implement/fix edit hands off: testing, or review when testing is skipped."""
-        return Status.REVIEWING if Stage.TESTING in p.skip else Status.TESTING
-
-    # --- artifact helpers -----------------------------------------------------------------
-
-    def _write_artifact(self, p: _Pipeline, name: str, content: str) -> str:
-        task_dir = task_artifact_dir(self._artifacts_root, p.task.id)
-        task_dir.mkdir(parents=True, exist_ok=True)
-        path = task_dir / name
-        path.write_text(content, encoding="utf-8")
-        self._register_artifact(p.task.id, _artifact_kind(name), str(path))
-        return str(path)
-
-    def _write_rendered_prompt(
-        self, p: _Pipeline, stage: Stage, subtask: int | None, prompt: str
-    ) -> None:
-        """Persist the rendered stage prompt for audit (backlog §7), once per stage run.
-
-        The prompt is deterministic across a stage run's provider attempts and retries (fallback
-        changes the provider, not the prompt), so one copy per stage dir is sufficient. Redacted
-        defensively before storage even though the allowlisted variables are paths/metadata only.
-        """
-        stage_dir = task_artifact_dir(self._artifacts_root, p.task.id) / "stages" / stage.value
-        if subtask is not None:
-            stage_dir = stage_dir / f"sub-{subtask:02d}"
-        stage_dir.mkdir(parents=True, exist_ok=True)
-        path = stage_dir / "rendered-prompt.md"
-        redacted = redact_text(prompt, extra_secrets=self._prompt_secrets())
-        path.write_text(redacted, encoding="utf-8")
-        self._register_artifact(p.task.id, "rendered_prompt", str(path))
+    # --- artifact + logging helpers -------------------------------------------------------
 
     def _prompt_secrets(self) -> tuple[str, ...]:
         """Denied-read file secrets to scrub from the rendered prompt before storage (§6)."""
         return read_denied_secrets(
             self._config.repo.local_path, self._config.security.denied_read_paths
         )
-
-    def _write_prompt_audit(
-        self,
-        p: _Pipeline,
-        stage: Stage,
-        subtask: int | None,
-        prompt: str,
-        route: ResolvedRoute,
-        outcome: StageOutcome,
-        run_id: int,
-        started_at: str,
-    ) -> None:
-        """Record one chronological prompt-audit step (who + redacted prompt) for a stage run.
-
-        Writes a self-contained JSON file per stage execution under
-        ``logs/<task-id>/prompt-audit/``, named by the monotonic ``stage_run_id`` so files sort
-        chronologically, and appends the same record as one compact line to the combined
-        ``timeline.jsonl``. Every agent that ran the prompt (primary plus any fallback) is listed
-        with its attempt #, status, and error — the prompt is identical across attempts, so it is
-        stored once. The prompt is redacted defensively, identically to the rendered-prompt
-        artifact. Gated by :meth:`_prompt_audit_on`.
-        """
-        audit_dir = task_artifact_dir(self._artifacts_root, p.task.id) / "prompt-audit"
-        audit_dir.mkdir(parents=True, exist_ok=True)
-        agents = [
-            {
-                "provider": attempt.provider.value,
-                "attempt": attempt.attempt,
-                "is_fallback": attempt.provider != route.primary,
-                "status": attempt.status.value if attempt.status else None,
-                "error_class": attempt.error_class.value if attempt.error_class else None,
-                "started_at": attempt.result.started_at if attempt.result else None,
-                "finished_at": attempt.result.finished_at if attempt.result else None,
-            }
-            for attempt in outcome.attempts
-        ]
-        record: dict[str, object] = {
-            "stage_run_id": run_id,
-            "stage": stage.value,
-            "subtask": subtask,
-            "route_primary": route.primary.value,
-            "provider_used": outcome.provider_used.value if outcome.provider_used else None,
-            "model": p.task.model_for(stage),
-            "started_at": started_at,
-            "agents": agents,
-            "prompt": redact_text(prompt, extra_secrets=self._prompt_secrets()),
-        }
-        sub = f"-sub{subtask:02d}" if subtask is not None else ""
-        step_path = audit_dir / f"{run_id:06d}-{stage.value}{sub}.json"
-        step_path.write_text(
-            json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
-        timeline_path = audit_dir / "timeline.jsonl"
-        with timeline_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-        self._register_artifact(p.task.id, "prompt_audit", str(step_path))
-        self._register_artifact(p.task.id, "prompt_audit_timeline", str(timeline_path))
 
     def _log(self, task_id: str) -> logging.LoggerAdapter[logging.Logger]:
         """A task-scoped structured logger (§6.6): every record carries ``task_id``."""
@@ -2712,98 +1685,6 @@ class Orchestrator:
             return
         self._store.register_artifact(
             ArtifactRow(task_id=task_id, kind=kind, path=path, checksum=sha256_file(path))
-        )
-
-    def _write_review(
-        self, p: _Pipeline, structured: Mapping[str, Any] | None, message: str | None
-    ) -> bool:
-        review_dir = task_artifact_dir(self._artifacts_root, p.task.id) / "review"
-        review_dir.mkdir(parents=True, exist_ok=True)
-        findings = self._extract_findings(structured)
-        (review_dir / "findings.json").write_text(
-            json.dumps({"findings": findings}, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-        (review_dir / "summary.md").write_text(message or "(no review summary)\n", encoding="utf-8")
-        p.review_findings_path = str(review_dir / "findings.json")
-        p.last_review_findings = findings
-        self._register_artifact(p.task.id, "review_findings", p.review_findings_path)
-        self._register_artifact(p.task.id, "review_summary", str(review_dir / "summary.md"))
-        return any(self._is_blocking(f) for f in findings)
-
-    def _extract_findings(self, structured: Mapping[str, Any] | None) -> list[dict[str, Any]]:
-        if not isinstance(structured, Mapping):
-            return []
-        raw = structured.get("findings")
-        if not isinstance(raw, list):
-            return []
-        return [dict(f) for f in raw if isinstance(f, Mapping)]
-
-    def _is_blocking(self, finding: Mapping[str, Any]) -> bool:
-        if finding.get("blocking") is True:
-            return True
-        severity = str(finding.get("severity", "")).lower()
-        return severity in _BLOCKING_SEVERITIES
-
-    def _write_summary_from_agent(
-        self, p: _Pipeline, message: str | None, structured: Mapping[str, Any] | None
-    ) -> None:
-        task_dir = task_artifact_dir(self._artifacts_root, p.task.id)
-        task_dir.mkdir(parents=True, exist_ok=True)
-        body = message or p.task.title
-        (task_dir / "summary.md").write_text(body + "\n", encoding="utf-8")
-        payload = dict(structured) if isinstance(structured, Mapping) else {"what": p.task.title}
-        (task_dir / "summary.json").write_text(
-            json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
-
-    def _write_failure_report(
-        self, p: _Pipeline, loop: FixLoop | None, limit_name: str | None
-    ) -> str:
-        diff = (
-            Path(p.diff_path).read_text(encoding="utf-8")
-            if p.diff_path and Path(p.diff_path).exists()
-            else ""
-        )
-        check_log = (
-            Path(p.check_log).read_text(encoding="utf-8")
-            if p.check_log and Path(p.check_log).exists()
-            else None
-        )
-        report_path, stuck_path = write_failure_report(
-            self._artifacts_root,
-            p.task.id,
-            loop=loop.value if loop else "unknown",
-            limit_name=limit_name or "unknown",
-            counters={
-                "stage_attempts": p.counters.stage_attempts,
-                "test_fix_cycles": p.counters.test_fix_cycles,
-                "review_fix_cycles": p.counters.review_fix_cycles,
-                "fix_iterations": p.counters.fix_iterations,
-            },
-            last_check_log=check_log,
-            last_review_findings=p.last_review_findings,
-            final_diff=diff,
-            decomposed=self._decomposed_failure_info(p),
-        )
-        self._register_artifact(p.task.id, "failure_report", report_path)
-        self._register_artifact(p.task.id, "stuck", stuck_path)
-        return report_path
-
-    def _decomposed_failure_info(self, p: _Pipeline) -> DecomposedFailureInfo | None:
-        """Build the decomposed failure-report block (§10): failing subtask + committed SHAs."""
-        if not p.decomposition.accepted:
-            return None
-        row = self._store.get_task(p.task.id)
-        subtasks = sorted(self._store.get_subtasks(p.task.id), key=lambda s: s.order)
-        committed = tuple(sha for s in subtasks if (sha := s.commit_sha) is not None)
-        completed = row.subtasks_completed if row else len(committed)
-        failing = row.active_subtask if row and row.active_subtask else len(committed) + 1
-        return DecomposedFailureInfo(
-            subtask_count=p.decomposition.n,
-            subtasks_completed=completed,
-            failing_subtask=failing,
-            committed_shas=committed,
         )
 
     # --- store helpers --------------------------------------------------------------------
@@ -2966,25 +1847,6 @@ class Orchestrator:
                 rerun_of=p.task.id if attempt > 1 else None,
             )
         )
-
-    # --- stage-result guards --------------------------------------------------------------
-
-    def _require_result_outcome(self, p: _Pipeline, outcome: StageOutcome, stage: Stage) -> Any:
-        # Infra-exhausted (no provider could run the stage even after fallback) is unrecoverable →
-        # terminal ``failed`` (§8.1 "no provider available"). A quality FAILED result is NOT fatal:
-        # it flows on through the normal pipeline (testing/review/fixing are the quality gates).
-        if outcome.result is None:
-            error = (
-                outcome.terminal_error.error_class.value
-                if outcome.terminal_error
-                else "no_provider_available"
-            )
-            raise PipelineFailed(f"{stage.value}: no provider could complete it ({error})")
-        return outcome.result
-
-    def _require_result(self, p: _Pipeline, outcome: StageOutcome, stage: Stage) -> str:
-        result = self._require_result_outcome(p, outcome, stage)
-        return result.final_message or ""
 
 
 def build_providers(

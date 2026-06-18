@@ -4,8 +4,8 @@
 node it runs each node through its :class:`NodeRunner`, takes the node's :class:`NodeOutcome`,
 resolves the matching outgoing edge from the snapshot adjacency, and transitions. **Only the engine
 moves execution** — a ``NodeRunner`` returns an outcome but never picks the next node and never
-changes task status. This is the single execution model that replaces the hardcoded
-``orchestrator._run_unit`` dispatch-on-``Status`` loop (removed in P1.5).
+changes task status. This is the single execution model — it replaced the hardcoded
+dispatch-on-``Status`` pipeline loop the orchestrator used before the flow engine.
 
 Guarantees:
 
@@ -26,8 +26,8 @@ uses ``allow N`` semantics for inline ``budget: N`` edges. Flow ``budgets`` para
 ``agents.max_fix_cycles`` / ``agents.max_total_fix_iterations`` clamp them as the unlosable backstop
 (security-ceiling): the effective cap is ``min(flow_budget, config_cap)``.
 
-In P1.1 the node runners are stubs (real core-owned wrappers land in P1.3) and the checkpoint is
-in-memory (persistence is P1.2).
+The node runners are the core-owned wrappers in :mod:`~wastech_orchestrator.core.flow.nodes`; the
+checkpoint is persisted by the :class:`RunRecorder` (see ``core.flow.recorder``).
 """
 
 from __future__ import annotations

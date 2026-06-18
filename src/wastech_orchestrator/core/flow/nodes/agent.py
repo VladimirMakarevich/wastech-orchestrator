@@ -4,18 +4,18 @@ Builds an :class:`~wastech_orchestrator.providers.base.AgentRunRequest` from the
 unit inputs (the node's ``role_file`` is the prompt template; only allowlisted path variables are
 injected), runs it through the router, records a ``node_runs`` row, and returns an unconditional
 ``done`` outcome. Infra-exhaustion (no provider completed the stage) raises
-:class:`~.base.NodeInfraError`; a quality-failed result flows on (downstream evaluator/checks judge
-quality), exactly like the legacy ``_run_stage`` + ``_require_result``.
+:class:`~.base.NodeInfraError`; a quality-failed result flows on (the downstream evaluator/checks
+judge quality).
 
 Two core-owned behaviors wrap the run:
 
 * **Embedded HITL** (refinement/planning): the typed output may carry a human question/approval;
   the runner does at most one durable round-trip via :class:`~.human_gate.HumanGate` and re-runs the
-  stage with the answer, resuming a persisted interaction after a restart — a faithful port of
-  ``_run_typed_stage``.
+  stage with the answer, resuming a persisted interaction after a restart.
 * **Dangerous-diff guard** (after a ``workspace-write`` edit): write the diff (``{diff_path}``) and
-  classify deletion/dependency changes; a dangerous diff fails closed to manual review (the full
-  durable approval round-trip mirroring ``_run_edit_stage_with_guardrail`` is the next step).
+  classify deletion/dependency changes; a dangerous diff requires a durable human approval (a
+  matching planning pre-approval counts), and on denial reconsiders once before failing closed to
+  manual review.
 """
 
 from __future__ import annotations
@@ -240,8 +240,7 @@ class AgentNodeRunner:
         Core-owned and automatic — the flow never declares or disables it (flow-contract §2.1). A
         deletion/dependency diff requires a durable human approval (or a matching planning
         pre-approval); on denial the stage reconsiders once with the denial context and, if the diff
-        is still dangerous, fails closed to manual review. A faithful port of
-        ``_run_edit_stage_with_guardrail`` + ``_resume_guardrail_answer``.
+        is still dangerous, fails closed to manual review.
         """
         resolved = node.permission_profile or ctx.snapshot.doc.permission_ceiling
         if resolved != PermissionProfile.WORKSPACE_WRITE or self._s.git is None:

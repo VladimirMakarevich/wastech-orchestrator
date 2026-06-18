@@ -7,11 +7,9 @@ a unit's :class:`~wastech_orchestrator.core.flow.nodes.base.NodeServices` /
 registry into a :class:`FlowEngine` (with the persistence recorder) and runs one unit to a terminal
 :class:`~wastech_orchestrator.core.flow.engine.FlowRunResult`.
 
-The orchestrator's ``run_task``/``resume`` wrapper (the cutover step) builds the ``NodeServices`` /
-``NodeInputs`` from its live ``_Pipeline``, resolves the flow snapshot via the ``FlowRegistry``, and
-calls :func:`drive_flow` as **the** driver — replacing the legacy ``_drive``, which is deleted in
-the same cutover step (no dual-run: greenfield, the goal is to preserve every capability, not to
-match the old driver byte-for-byte — see ``docs/backlog/flows/p1-step-b-wiring-draft.md``).
+The orchestrator's ``run_task``/``resume`` wrapper builds the ``NodeServices`` / ``NodeInputs`` from
+its live ``_Pipeline``, resolves the flow snapshot via the ``FlowRegistry``, and calls
+:func:`drive_flow` as **the** driver — the single execution model for every task.
 """
 
 from __future__ import annotations

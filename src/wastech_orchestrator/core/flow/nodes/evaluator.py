@@ -82,10 +82,9 @@ class EvaluatorNodeRunner:
             raise NodeInfraError(f"evaluator node {node.id!r}: no provider could run it ({err})")
         raw_findings = self._extract_findings(outcome.result.structured_output)
         if node.evaluation_kind == EvaluationKind.STAGE_OUTPUT:
-            # Persist the findings artifact and expose it to downstream fixing as {review_path}
-            # (parity with the legacy ``_write_review``). The parity flow has a single stage_output
-            # evaluator (``review``); the per-evaluator verdict store for supervisor/test_quality is
-            # P2.1.
+            # Persist the findings artifact and expose it to downstream fixing as {review_path}.
+            # The implementation flow has a single stage_output evaluator (``review``); the
+            # per-evaluator verdict store for supervisor/test_quality is P2.1.
             self._write_findings(ctx, raw_findings, outcome.result.final_message)
         findings = tuple(
             Finding(message=str(f.get("title", f)), blocking=self._is_blocking(f))

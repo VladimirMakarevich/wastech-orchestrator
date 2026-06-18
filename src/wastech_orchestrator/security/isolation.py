@@ -4,7 +4,7 @@ When ``security.strict_isolation`` is true, "an inability to enable the required
 preflight with an error (no silent downgrade)". This module is the deterministic, **offline** check
 that drives that gate: it asks each provider that may run whether its configured isolation can be
 enabled, **without launching any CLI**, so the gate is unit-testable and runs before a branch is
-ever created (see :meth:`Orchestrator._drive`).
+ever created (see :meth:`Orchestrator._drive_via_engine`).
 
 The provider-specific meaning of "required isolation" stays in the adapters (``providers/*.py``
 ``isolation_reasons``) — Codex's sandbox, Claude's permission mode — so this module holds no CLI
