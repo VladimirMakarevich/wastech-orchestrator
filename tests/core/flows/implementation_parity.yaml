@@ -8,7 +8,7 @@
 # boundary (statuses / artifacts / commit-SHA / publish-ops / ledger).
 #
 # Budgets are intentionally large so the engine's effective cap = min(flow_budget, config_cap)
-# resolves to the config cap, matching the legacy LoopController exactly.
+# resolves to the config cap (agents.max_fix_cycles / max_total_fix_iterations).
 flow:
   name: implementation_parity
   task_type: implementation_parity

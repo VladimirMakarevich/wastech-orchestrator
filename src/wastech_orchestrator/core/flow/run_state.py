@@ -69,10 +69,9 @@ class FlowRunState:
     def reset_for_next_subtask(self) -> None:
         """Drop every loop/inline-budget counter EXCEPT the global fix counter (decomposition).
 
-        Mirrors the legacy ``LoopController.reset_for_next_subtask``: each subtask gets fresh
-        per-loop / per-edge budgets, but the global ``fix_iterations`` accumulates across the whole
-        decomposed task (the ``shared_budget`` hard stop). Generic — covers named loops + inline
-        supervisor budgets without naming them.
+        Each subtask gets fresh per-loop / per-edge budgets, but the global ``fix_iterations``
+        accumulates across the whole decomposed task (the ``shared_budget`` hard stop). Generic —
+        covers named loops + inline supervisor budgets without naming them.
         """
         glob = self.loop_counters.get(self.GLOBAL_FIX_KEY)
         self.loop_counters.clear()

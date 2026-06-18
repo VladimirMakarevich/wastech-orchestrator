@@ -275,7 +275,6 @@ def _build_orchestrator(
     notifier: Notifier | None = None,
 ):
     from wastech_orchestrator.check_runner import CheckRunner
-    from wastech_orchestrator.core.loop_control import LoopController
     from wastech_orchestrator.core.orchestrator import Orchestrator
     from wastech_orchestrator.git_manager import GitManager
     from wastech_orchestrator.ledger import Ledger
@@ -318,7 +317,6 @@ def _build_orchestrator(
         checks=CheckRunner(config, run_process=fake_proc),
         store=store,
         ledger=ledger,
-        loops=LoopController(config.agents),
         gate=ValidationGate(
             config, store_has_task_id=store.task_id_exists, ledger_has_task_id=ledger.has_task_id
         ),

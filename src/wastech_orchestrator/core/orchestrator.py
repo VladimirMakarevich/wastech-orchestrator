@@ -62,7 +62,7 @@ from wastech_orchestrator.core.hitl import (
     write_answer,
     write_waiting_interaction,
 )
-from wastech_orchestrator.core.loop_control import LoopController, LoopCounters
+from wastech_orchestrator.core.loop_control import LoopCounters
 from wastech_orchestrator.core.prompts import PromptTemplateStore
 from wastech_orchestrator.core.recovery import (
     RecoveryAction,
@@ -301,7 +301,6 @@ class Orchestrator:
         checks: CheckRunner,
         store: StateStore,
         ledger: Ledger,
-        loops: LoopController,
         gate: ValidationGate,
         artifacts_root: str | Path,
         clock: Callable[[], str] = _utc_now_iso,
@@ -316,7 +315,6 @@ class Orchestrator:
         self._checks = checks
         self._store = store
         self._ledger = ledger
-        self._loops = loops
         self._gate = gate
         self._artifacts_root = artifacts_root
         # Resolve stage prompts (packaged defaults + operator overrides). In strict mode a missing
@@ -1922,7 +1920,6 @@ def build_orchestrator(
         ledger_has_task_id=ledger.has_task_id,
         is_recovery_rerun=is_recovery_rerun,
     )
-    loops = LoopController(config.agents)
     notifier = build_notifier(config.telegram)
     return Orchestrator(
         config,
@@ -1931,7 +1928,6 @@ def build_orchestrator(
         checks=checks,
         store=store,
         ledger=ledger,
-        loops=loops,
         gate=gate,
         artifacts_root=str(root),
         notifier=notifier,

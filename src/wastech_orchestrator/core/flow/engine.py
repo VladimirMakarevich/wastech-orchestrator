@@ -19,10 +19,9 @@ Guarantees:
 
 Budget bookkeeping is generic on purpose: the engine knows nothing about ``test_fix`` /
 ``review_fix`` / supervisor by name (the P3 abstraction test forbids domain knowledge in the
-engine). It preserves the legacy :class:`~wastech_orchestrator.core.loop_control.LoopController`
-``>=`` semantics — increment then compare — for named loops (verified by the cutover suite's
-fix-loop scenarios), and
-uses ``allow N`` semantics for inline ``budget: N`` edges. Flow ``budgets`` parameterize the limits;
+engine). Named loops use ``>=`` semantics — increment then compare (verified by the fix-loop
+scenarios) — and inline ``budget: N`` edges use ``allow N`` semantics. Flow ``budgets`` parameterize
+the limits;
 ``agents.max_fix_cycles`` / ``agents.max_total_fix_iterations`` clamp them as the unlosable backstop
 (security-ceiling): the effective cap is ``min(flow_budget, config_cap)``.
 
@@ -344,8 +343,8 @@ class FlowEngine:
         """Charge a rework/fail edge against the global counter plus its loop/inline budget.
 
         Returns a :class:`_Stuck` when a limit is reached (the edge must not be taken), else
-        ``None``. Mirrors :class:`LoopController`: the per-loop / inline limit is reported before
-        the global cap when both trip on the same entry.
+        ``None``. The per-loop / inline limit is reported before the global cap when both trip on
+        the same entry.
         """
         glob = self._run_state.bump(FlowRunState.GLOBAL_FIX_KEY)
         if edge.loop is not None:
@@ -364,8 +363,8 @@ class FlowEngine:
     def _reset_loops_at(self, node_id: str) -> None:
         """Leaving a node via a forward edge resolves any loop/inline budget anchored at it.
 
-        Mirrors ``LoopController.on_check_pass`` / ``on_review_pass``: a node whose rework/fail
-        back-edge is satisfied resets that counter (the consecutive-cycle count starts over).
+        A node whose rework/fail back-edge is satisfied resets that counter (the consecutive-cycle
+        count starts over).
         """
         for edge in self._snapshot.adjacency.get(node_id, ()):
             if edge.outcome not in _REWORK_OUTCOMES:

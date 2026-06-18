@@ -15,7 +15,6 @@ from pathlib import Path
 import pytest
 
 from wastech_orchestrator.check_runner import CheckRunner
-from wastech_orchestrator.core.loop_control import LoopController
 from wastech_orchestrator.core.orchestrator import Orchestrator, SlotBusyError
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import GitManager, GitResult
@@ -289,7 +288,6 @@ def _build(
         checks=checks,
         store=store,
         ledger=ledger,
-        loops=LoopController(config.agents),
         gate=gate,
         artifacts_root=str(art),
         notifier=notifier,
