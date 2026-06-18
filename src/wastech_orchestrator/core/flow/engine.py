@@ -118,7 +118,13 @@ class RunRecorder(Protocol):
     def save_checkpoint(self, run_state: FlowRunState) -> None: ...
 
     def write_failure_report(
-        self, *, node_id: str, loop: str | None, limit_name: str, run_state: FlowRunState
+        self,
+        *,
+        node_id: str,
+        loop: str | None,
+        limit_name: str,
+        run_state: FlowRunState,
+        subtask_order: int | None = None,
     ) -> str: ...
 
 
@@ -188,6 +194,7 @@ class FlowEngine:
         task_id: str,
         subtask_order: int | None = None,
         post_node: PostNodeHook | None = None,
+        region: frozenset[str] | None = None,
     ) -> None:
         self._snapshot = snapshot
         self._run_state = run_state
@@ -198,6 +205,11 @@ class FlowEngine:
         self._task_id = task_id
         self._subtask_order = subtask_order
         self._post_node = post_node
+        # When set, the run is confined to this node-id set (a decomposition sub_flow region): it
+        # ends when a *forward* edge leaves the region (the driver then runs the next subtask or the
+        # post-region phase). Rework/fail edges always point back into the region, so they never
+        # trigger the exit. ``None`` => run the whole graph to a terminal node.
+        self._region = region
 
     @property
     def run_state(self) -> FlowRunState:
@@ -233,6 +245,7 @@ class FlowEngine:
                         loop=stuck.loop,
                         limit_name=stuck.limit_name,
                         run_state=self._run_state,
+                        subtask_order=self._subtask_order,
                     )
                     self._recorder.save_checkpoint(self._run_state)
                     return FlowRunResult(
@@ -247,6 +260,10 @@ class FlowEngine:
 
             self._run_state.current_node = edge.to
             self._recorder.save_checkpoint(self._run_state)
+            if self._region is not None and edge.to not in self._region:
+                # A forward edge left the region => this region run is complete. ``current_node`` is
+                # the post-region node, so resume continues there; the driver runs the next phase.
+                return FlowRunResult(status=Status.DONE, final_node=node.id)
 
     # -- node execution --------------------------------------------------------
 

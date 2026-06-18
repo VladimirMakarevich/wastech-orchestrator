@@ -676,7 +676,6 @@ def test_summary_fallback_when_provider_fails(git_repo, make_git_config, tmp_pat
     assert "## What" in summary
 
 
-@pytest.mark.skip(reason="decomposition fan-out lands in P1.4 slice 5 (regional engine)")
 def test_decomposed_task_commits_each_subtask(
     git_repo, make_git_config, git_run, tmp_path: Path
 ) -> None:
@@ -987,7 +986,6 @@ def test_artifacts_registered_with_checksums(git_repo, make_git_config, tmp_path
     assert rows and all(len(r["checksum"]) == 64 for r in rows)  # sha256 hex digests
 
 
-@pytest.mark.skip(reason="decomposition fan-out lands in P1.4 slice 5 (regional engine)")
 def test_decomposed_failure_report_has_subtask_fields(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:

@@ -37,17 +37,23 @@ from wastech_orchestrator.core.decomposition import (
     write_subtask_artifacts,
 )
 from wastech_orchestrator.core.flow.engine import FlowRunResult, NodeOutcome, entry_node_id
-from wastech_orchestrator.core.flow.engine_driver import drive_flow
+from wastech_orchestrator.core.flow.engine_driver import (
+    DecompositionRegions,
+    drive_flow,
+    partition_decomposition,
+)
 from wastech_orchestrator.core.flow.nodes.base import (
     NodeInfraError,
     NodeInputs,
     NodeManualRequired,
+    NodeServices,
 )
-from wastech_orchestrator.core.flow.postprocess import apply_output_artifact
+from wastech_orchestrator.core.flow.postprocess import apply_output_artifact, read_decomposition
 from wastech_orchestrator.core.flow.recorder import StateStoreRunRecorder
 from wastech_orchestrator.core.flow.registry import FlowRegistry
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import AgentNode, FlowNode
+from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
 from wastech_orchestrator.core.flow.wiring import build_node_inputs, build_node_services
 from wastech_orchestrator.core.hitl import (
     HumanInputSignal,
@@ -911,28 +917,97 @@ class Orchestrator:
             check_reresolve=lambda: self._engine_check_reresolve(p),
         )
         run_state = FlowRunState(flow_fingerprint=snapshot.flow_fingerprint)
-        run_state.current_node = entry_node_id(snapshot)  # seed BEFORE the entry node runs
         recorder = StateStoreRunRecorder(
             self._store, p.task.id, artifacts_root=self._artifacts_root
         )
-        recorder.save_checkpoint(run_state)
         try:
-            result = drive_flow(
-                snapshot=snapshot,
-                run_state=run_state,
-                recorder=recorder,
-                services=services,
-                inputs=inputs,
-                facts=self._engine_facts(p, completeness),
-                agents=self._config.agents,
-                task_id=p.task.id,
-                post_node=self._engine_post_node(p, inputs),
+            result = self._run_phases(
+                p, snapshot, run_state, recorder, services, inputs, completeness
             )
         except NodeManualRequired as exc:
             return self._go_terminal(p, Status.MANUAL_ACTION_REQUIRED, manual_reason=str(exc))
         except NodeInfraError as exc:
             return self._fail(p, str(exc))
         return self._finish_engine_run(p, result)
+
+    def _run_phases(
+        self,
+        p: _Pipeline,
+        snapshot: FlowSnapshot,
+        run_state: FlowRunState,
+        recorder: StateStoreRunRecorder,
+        services: NodeServices,
+        inputs: NodeInputs,
+        completeness: Completeness,
+    ) -> FlowRunResult:
+        """Drive the flow in phases: a flow with no decomposition runs in one pass; a decomposed one
+        runs pre (entry…proposed_by) once, the sub_flow region once per subtask (commit between),
+        then post once. Each phase seeds ``current_node`` + a checkpoint before its entry node."""
+        post_node = self._engine_post_node(p, inputs, snapshot)
+        facts = self._engine_facts(p, completeness)
+
+        def phase(
+            entry: str, region: frozenset[str] | None, subtask: int | None = None
+        ) -> FlowRunResult:
+            run_state.current_node = entry  # seed BEFORE the phase entry node runs (resume-safe)
+            recorder.save_checkpoint(run_state)
+            return drive_flow(
+                snapshot=snapshot,
+                run_state=run_state,
+                recorder=recorder,
+                services=services,
+                inputs=inputs,
+                facts=facts,
+                agents=self._config.agents,
+                task_id=p.task.id,
+                post_node=post_node,
+                subtask_order=subtask,
+                region=region,
+            )
+
+        if snapshot.doc.decomposition is None:
+            return phase(entry_node_id(snapshot), None)  # whole graph in one pass
+
+        regions = partition_decomposition(snapshot)
+        # The pre phase ends at proposed_by; its post_node sets p.decomposition.
+        pre = phase(entry_node_id(snapshot), regions.pre)
+        if pre.status is not Status.DONE:
+            return pre
+        if not p.decomposition.accepted:
+            return phase(regions.region_entry, None)  # single unit: region + post in one pass
+        return self._fan_out_subtasks(p, run_state, regions, phase)
+
+    def _fan_out_subtasks(
+        self,
+        p: _Pipeline,
+        run_state: FlowRunState,
+        regions: DecompositionRegions,
+        phase: Callable[..., FlowRunResult],
+    ) -> FlowRunResult:
+        """Run the sub_flow region once per subtask (commit each, reset per-subtask counters), then
+        the post-region phase. A subtask with a verified commit is never re-run (recovery, §13)."""
+        units = list(p.decomposition.subtasks)
+        committed = {s.order for s in self._store.get_subtasks(p.task.id) if s.commit_sha}
+        for index, unit in enumerate(units):
+            if unit.order in committed:
+                continue
+            sub = phase(regions.region_entry, regions.region, subtask=unit.order)
+            if sub.status is not Status.DONE:
+                return sub
+            self._commit_subtask(p, unit)
+            if index != len(units) - 1:
+                run_state.reset_for_next_subtask()  # fresh per-loop budgets; global accumulates
+                self._store.update_task(p.task.id, active_subtask=unit.order + 1)
+        return phase(regions.post_entry, None)
+
+    def _commit_subtask(self, p: _Pipeline, unit: SubtaskSpec) -> None:
+        """Commit one completed subtask + persist its SHA (legacy ``_on_review_passed`` parity)."""
+        message = f"feat({p.task.id}): subtask {unit.order:02d} {unit.title}"
+        sha = self._git.commit_subtask(p.task.id, unit.order, unit.slug, message)
+        update_subtask_index(self._artifacts_root, p.task.id, unit.order, status="committed",
+                             commit_sha=sha)
+        self._store.set_subtask_commit(p.task.id, unit.order, sha, "committed")
+        self._store.update_task(p.task.id, subtasks_completed=unit.order)
 
     def _engine_finalize(self, p: _Pipeline) -> str | None:
         """The publish node's finalize hook: move the task file + write the committed summary."""
@@ -965,9 +1040,11 @@ class Orchestrator:
         return facts
 
     def _engine_post_node(
-        self, p: _Pipeline, inputs: NodeInputs
+        self, p: _Pipeline, inputs: NodeInputs, snapshot: FlowSnapshot
     ) -> Callable[[FlowNode, NodeOutcome], None]:
-        """Engine post-node hook: persist a node's output_artifact slot + resolve plan skills."""
+        """Engine post-node hook: persist a node's output_artifact slot, resolve plan skills, and —
+        for the decomposition ``proposed_by`` node — decide + materialize the decomposition."""
+        decomp = snapshot.doc.decomposition
 
         def post_node(node: FlowNode, outcome: NodeOutcome) -> None:
             if not isinstance(node, AgentNode):
@@ -987,8 +1064,49 @@ class Orchestrator:
                 # skipped stages in the summary body (so the PR reviewer sees which stages ran).
                 self._engine_write_summary_json(p, outcome)
                 self._append_skip_section(p)
+            if decomp is not None and node.id == decomp.proposed_by:
+                self._engine_materialize_decomposition(p, outcome)
 
         return post_node
+
+    def _engine_materialize_decomposition(self, p: _Pipeline, outcome: NodeOutcome) -> None:
+        """Decide decomposition from the proposed_by node's contract, persist it + write the subtask
+        specs/rows (legacy ``_planning`` block, triggered by data not the stage name)."""
+        gate_on = self._decomposition_gate_on(p.task)
+        decision = read_decomposition(
+            outcome, gate_on=gate_on, max_subtasks=self._config.agents.decomposition.max_subtasks
+        )
+        p.decomposition = decision
+        self._store.update_task(
+            p.task.id,
+            decomposition_enabled=gate_on,
+            decomposition_accepted=decision.accepted,
+            decomposition_reason=decision.reason,
+            subtask_count=decision.n if decision.accepted else None,
+            active_subtask=1 if decision.accepted else None,
+        )
+        if not decision.accepted:
+            return
+        write_subtask_artifacts(decision, self._artifacts_root, p.task.id)
+        subtasks_dir = task_artifact_dir(self._artifacts_root, p.task.id) / "subtasks"
+        self._register_artifact(p.task.id, "subtasks_index", str(subtasks_dir / "index.json"))
+        for s in decision.subtasks:
+            self._register_artifact(
+                p.task.id, "subtask_spec", str(subtasks_dir / f"{s.order:02d}-{s.slug}.md")
+            )
+        self._store.insert_subtasks(
+            [
+                SubtaskRow(
+                    task_id=p.task.id,
+                    order=s.order,
+                    slug=s.slug,
+                    title=s.title,
+                    status="pending",
+                    depends_on=s.depends_on,
+                )
+                for s in decision.subtasks
+            ]
+        )
 
     def _engine_write_summary_json(self, p: _Pipeline, outcome: NodeOutcome) -> None:
         """Write the local-only summary.json metadata (never committed) — legacy parity (§5.2)."""

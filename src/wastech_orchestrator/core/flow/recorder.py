@@ -19,7 +19,7 @@ from pathlib import Path
 
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import FlowNode
-from wastech_orchestrator.ledger import write_failure_report
+from wastech_orchestrator.ledger import DecomposedFailureInfo, write_failure_report
 from wastech_orchestrator.state_store import StateStore
 
 
@@ -45,7 +45,13 @@ class StateStoreRunRecorder:
         )
 
     def write_failure_report(
-        self, *, node_id: str, loop: str | None, limit_name: str, run_state: FlowRunState
+        self,
+        *,
+        node_id: str,
+        loop: str | None,
+        limit_name: str,
+        run_state: FlowRunState,
+        subtask_order: int | None = None,
     ) -> str:
         report_path, _stuck_path = write_failure_report(
             self._artifacts_root,
@@ -56,10 +62,24 @@ class StateStoreRunRecorder:
             last_check_log=None,
             last_review_findings=None,
             final_diff="",
+            decomposed=self._decomposed_failure(subtask_order),
             node_id=node_id,
         )
         self._store.update_task(self._task_id, failure_report_path=report_path)
         return report_path
+
+    def _decomposed_failure(self, subtask_order: int | None) -> DecomposedFailureInfo | None:
+        """Build the decomposed-failure section when the stuck run was inside a subtask region."""
+        if subtask_order is None:
+            return None
+        subtasks = self._store.get_subtasks(self._task_id)
+        committed = tuple(s.commit_sha for s in subtasks if s.commit_sha)
+        return DecomposedFailureInfo(
+            subtask_count=len(subtasks),
+            subtasks_completed=len(committed),
+            failing_subtask=subtask_order,
+            committed_shas=committed,
+        )
 
 
 def hydrate_run_state(store: StateStore, task_id: str) -> FlowRunState | None:

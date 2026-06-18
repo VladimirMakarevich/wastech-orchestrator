@@ -125,7 +125,13 @@ class RecordingRecorder:
         self.checkpoints += 1
 
     def write_failure_report(
-        self, *, node_id: str, loop: str | None, limit_name: str, run_state: FlowRunState
+        self,
+        *,
+        node_id: str,
+        loop: str | None,
+        limit_name: str,
+        run_state: FlowRunState,
+        subtask_order: int | None = None,
     ) -> str:
         self.failure_reports.append((node_id, loop, limit_name))
         return "/artifacts/failure_report.json"
@@ -255,6 +261,38 @@ def test_engine_post_node_hook_runs_for_executed_nodes_only() -> None:
     result = engine.run()
     assert result.status is Status.DONE
     assert seen == ["b", "c"]  # 'a' skipped => no hook; only executed nodes
+
+
+def test_engine_region_terminates_at_region_exit() -> None:
+    # region = {impl, ev}; the forward edge ev--accept-->pub leaves the region, so the run stops at
+    # the boundary (pub is the post-region phase the driver runs separately). The internal rework
+    # back-edge ev-->impl stays in-region.
+    snap = _snapshot(
+        [_agent("pre"), _agent("impl"), _evaluator("ev"), _publish("pub")],
+        [
+            Edge("pre", "impl"),
+            Edge("impl", "ev"),
+            Edge("ev", "pub", outcome="accept"),
+            Edge("ev", "impl", outcome="rework", budget=2),
+        ],
+    )
+    runner, recorder = StubRunner({"ev": ["accept"]}), RecordingRecorder()
+    registry = dict.fromkeys(("agent", "evaluator", "checks", "hitl", "publish"), runner)
+    run_state = FlowRunState(flow_fingerprint="fp", current_node="impl")
+    engine = FlowEngine(
+        snap,
+        run_state,
+        registry,
+        recorder,
+        facts=lambda fact: False,
+        agents=_agents(),
+        task_id="task-1",
+        region=frozenset({"impl", "ev"}),
+    )
+    result = engine.run()
+    assert result.status is Status.DONE
+    assert runner.calls == ["impl", "ev"]  # 'pub' (post-region) is not run by this region pass
+    assert run_state.current_node == "pub"  # exited to the post-region node
 
 
 def test_engine_single_fix_iterations_increment() -> None:

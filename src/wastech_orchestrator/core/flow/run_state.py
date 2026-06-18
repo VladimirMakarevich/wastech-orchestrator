@@ -65,3 +65,16 @@ class FlowRunState:
     def mark_completed(self, node_id: str) -> None:
         """Append ``node_id`` to the execution trace."""
         self.completed_nodes.append(node_id)
+
+    def reset_for_next_subtask(self) -> None:
+        """Drop every loop/inline-budget counter EXCEPT the global fix counter (decomposition).
+
+        Mirrors the legacy ``LoopController.reset_for_next_subtask``: each subtask gets fresh
+        per-loop / per-edge budgets, but the global ``fix_iterations`` accumulates across the whole
+        decomposed task (the ``shared_budget`` hard stop). Generic — covers named loops + inline
+        supervisor budgets without naming them.
+        """
+        glob = self.loop_counters.get(self.GLOBAL_FIX_KEY)
+        self.loop_counters.clear()
+        if glob is not None:
+            self.loop_counters[self.GLOBAL_FIX_KEY] = glob
