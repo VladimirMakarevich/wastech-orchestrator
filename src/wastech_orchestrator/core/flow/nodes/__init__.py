@@ -8,9 +8,8 @@ to an existing core capability, so executing a node yields the same result as th
   ``role=review`` evaluator; supervisor/critic/verifier are P2)
 * :class:`~.checks.ChecksNodeRunner` -> :class:`~wastech_orchestrator.check_runner.CheckRunner`
 
-The ``publish`` runner (git publishing) and the agent-node embedded HITL round-trip + dangerous-diff
-guard are implemented here too. Remaining for the orchestrator cutover step: the standalone ``hitl``
-node runner (low priority) and building ``NodeServices``/``NodeInputs`` from the live ``_Pipeline``.
+The ``publish`` runner (git publishing), the agent-node embedded HITL round-trip + dangerous-diff
+guard, and the standalone :class:`~.hitl.HitlNodeRunner` gate are implemented here too.
 
 A runner is constructed per execution unit with its collaborators (:class:`~.base.NodeServices`)
 and the unit's inputs (:class:`~.base.NodeInputs`) baked in, so the generic engine stays free of any
@@ -21,6 +20,7 @@ from wastech_orchestrator.core.flow.nodes.agent import AgentNodeRunner
 from wastech_orchestrator.core.flow.nodes.base import NodeInputs, NodeServices
 from wastech_orchestrator.core.flow.nodes.checks import CheckLaunchError, ChecksNodeRunner
 from wastech_orchestrator.core.flow.nodes.evaluator import EvaluatorNodeRunner
+from wastech_orchestrator.core.flow.nodes.hitl import HitlNodeRunner
 from wastech_orchestrator.core.flow.nodes.publish import PublishConfigError, PublishNodeRunner
 
 __all__ = [
@@ -28,6 +28,7 @@ __all__ = [
     "CheckLaunchError",
     "ChecksNodeRunner",
     "EvaluatorNodeRunner",
+    "HitlNodeRunner",
     "NodeInputs",
     "NodeServices",
     "PublishConfigError",

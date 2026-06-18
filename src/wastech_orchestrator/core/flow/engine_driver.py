@@ -32,6 +32,7 @@ from wastech_orchestrator.core.flow.nodes import (
     AgentNodeRunner,
     ChecksNodeRunner,
     EvaluatorNodeRunner,
+    HitlNodeRunner,
     NodeInputs,
     NodeServices,
     PublishNodeRunner,
@@ -98,6 +99,7 @@ def build_node_runners(services: NodeServices, inputs: NodeInputs) -> dict[str, 
         "agent": AgentNodeRunner(services, inputs),
         "evaluator": EvaluatorNodeRunner(services, inputs),
         "checks": ChecksNodeRunner(services, inputs),
+        "hitl": HitlNodeRunner(services, inputs),
         "publish": PublishNodeRunner(services, inputs),
     }
 

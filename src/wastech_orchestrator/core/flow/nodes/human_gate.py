@@ -39,12 +39,17 @@ class HumanGate:
         self,
         *,
         task_id: str,
-        stage: Stage,
+        stage: Stage | str,
         subtask: int | None,
         signal: HumanInputSignal,
         path: Path,
     ) -> AskResult:
-        """Start a fresh prompt, persist the ``waiting`` artifact, wait, and record the answer."""
+        """Start a fresh prompt, persist the ``waiting`` artifact, wait, and record the answer.
+
+        ``stage`` is the interaction key: a routing :class:`Stage` for the embedded refinement/
+        planning HITL and the dangerous-diff guard, or a node id (plain ``str``) for a standalone
+        ``hitl`` gate node.
+        """
         handle = self._notifier.start_ask(
             question=signal.question,
             context=signal.context,

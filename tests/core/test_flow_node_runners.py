@@ -27,6 +27,7 @@ from wastech_orchestrator.core.flow.nodes import (
     CheckLaunchError,
     ChecksNodeRunner,
     EvaluatorNodeRunner,
+    HitlNodeRunner,
     NodeInputs,
     NodeServices,
     PublishConfigError,
@@ -39,6 +40,7 @@ from wastech_orchestrator.core.flow.schema import (
     EvaluatorNode,
     FlowDoc,
     FlowNode,
+    HitlNode,
     HitlSettings,
     PublishNode,
 )
@@ -506,6 +508,121 @@ def test_agent_hitl_timeout_goes_manual(tmp_path: Path) -> None:
     )
     with pytest.raises(NodeManualRequired):
         AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+
+# -- standalone hitl gate node ------------------------------------------------
+
+
+def _hitl_services(tmp_path: Path, notifier: Any, store: FakeStore | None = None) -> NodeServices:
+    return NodeServices(
+        router=FakeRouter(None),
+        check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        store=store or FakeStore(),
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path),
+        stage_for_node={},  # a hitl node is never routed (no Stage)
+        clock=lambda: "ts",
+        notifier=notifier,
+        ask_timeout_s=60,
+    )
+
+
+def test_hitl_node_registered_in_runner_registry(tmp_path: Path) -> None:
+    from wastech_orchestrator.core.flow.engine_driver import build_node_runners
+
+    runners = build_node_runners(_hitl_services(tmp_path, FakeNotifier(None)), _inputs(tmp_path))
+    assert isinstance(runners["hitl"], HitlNodeRunner)
+
+
+def test_hitl_approval_approved_routes_approve(tmp_path: Path) -> None:
+    from wastech_orchestrator.notify import AskResult
+
+    node = HitlNode(id="gate", kind="hitl", signal="approval")
+    notifier = FakeNotifier(AskResult(answered=True, approved=True))
+    store = FakeStore()
+    result = HitlNodeRunner(_hitl_services(tmp_path, notifier, store), _inputs(tmp_path)).run(
+        node, _ctx(node)
+    )
+    assert result.outcome.kind == "route:approve"
+    assert notifier.asks == ["Approval required to continue the flow."]
+    assert store.completed[-1]["outcome"] == "route:approve"
+
+
+def test_hitl_approval_denied_routes_deny(tmp_path: Path) -> None:
+    from wastech_orchestrator.notify import AskResult
+
+    node = HitlNode(id="gate", kind="hitl", signal="approval")
+    notifier = FakeNotifier(AskResult(answered=True, approved=False))
+    result = HitlNodeRunner(_hitl_services(tmp_path, notifier), _inputs(tmp_path)).run(
+        node, _ctx(node)
+    )
+    assert result.outcome.kind == "route:deny"
+
+
+def test_hitl_question_proceeds_done(tmp_path: Path) -> None:
+    from wastech_orchestrator.notify import AskResult
+
+    node = HitlNode(id="gate", kind="hitl", signal="question")
+    notifier = FakeNotifier(AskResult(answered=True, text="proceed"))
+    result = HitlNodeRunner(_hitl_services(tmp_path, notifier), _inputs(tmp_path)).run(
+        node, _ctx(node)
+    )
+    assert result.outcome.kind == "done"
+
+
+def test_hitl_timeout_goes_manual(tmp_path: Path) -> None:
+    from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
+    from wastech_orchestrator.notify import AskResult
+
+    node = HitlNode(id="gate", kind="hitl", signal="approval")
+    notifier = FakeNotifier(AskResult(answered=False, timed_out=True, failure="timeout"))
+    store = FakeStore()
+    with pytest.raises(NodeManualRequired):
+        HitlNodeRunner(_hitl_services(tmp_path, notifier, store), _inputs(tmp_path)).run(
+            node, _ctx(node)
+        )
+    assert store.completed[-1]["status"] == "failed"
+
+
+def test_hitl_no_notifier_goes_manual(tmp_path: Path) -> None:
+    from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
+
+    node = HitlNode(id="gate", kind="hitl", signal="approval")
+    with pytest.raises(NodeManualRequired):
+        HitlNodeRunner(_hitl_services(tmp_path, notifier=None), _inputs(tmp_path)).run(
+            node, _ctx(node)
+        )
+
+
+def test_hitl_resumes_persisted_waiting_interaction(tmp_path: Path) -> None:
+    from wastech_orchestrator.core.hitl import (
+        HumanInputSignal,
+        node_interaction_path,
+        write_waiting_interaction,
+    )
+    from wastech_orchestrator.notify import AskHandle, AskResult
+
+    node = HitlNode(id="gate", kind="hitl", signal="approval")
+    # A previous (interrupted) run left a durable `waiting` interaction; the resume must wait on the
+    # persisted handle (not start a fresh prompt).
+    path = node_interaction_path(str(tmp_path), "task-1", node.id)
+    write_waiting_interaction(
+        path,
+        task_id="task-1",
+        stage=node.id,
+        subtask=None,
+        signal=HumanInputSignal(
+            kind="approval", question="Approval required to continue the flow.",
+            context="hitl gate 'gate'", risk="other", paths=(),
+        ),
+        handle=AskHandle(interaction_id="hxyz", kind="approval", expires_at=1.0, message_id=1),
+    )
+    notifier = FakeNotifier(AskResult(answered=True, approved=True))
+    result = HitlNodeRunner(_hitl_services(tmp_path, notifier), _inputs(tmp_path)).run(
+        node, _ctx(node)
+    )
+    assert result.outcome.kind == "route:approve"
+    assert notifier.asks == []  # resumed the persisted prompt, did not start a fresh one
 
 
 # -- evaluator ----------------------------------------------------------------
