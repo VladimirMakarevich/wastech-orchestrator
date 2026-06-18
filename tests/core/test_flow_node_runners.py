@@ -625,6 +625,54 @@ def test_checks_launch_failure_is_infra(tmp_path: Path) -> None:
         ChecksNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
 
 
+class _SeqCheckRunner:
+    """Returns programmed CheckOutcomes in order (one per run call)."""
+
+    def __init__(self, outcomes: list[CheckOutcome]) -> None:
+        self._outcomes = outcomes
+
+    def run(self, **kwargs: Any) -> CheckOutcome:
+        return self._outcomes.pop(0)
+
+
+def test_checks_reresolve_retries_after_launch_failure(tmp_path: Path) -> None:
+    from wastech_orchestrator.checks.model import ResolvedCheck
+
+    node = _checks_node()
+    store = FakeStore()
+    launch_fail = CheckOutcome(passed=False, runs=(), launch_failed=True, first_launch_error="boom")
+    passed = CheckOutcome(passed=True, runs=(_run(True),))
+    services = NodeServices(
+        router=FakeRouter(_result()),
+        check_runner=_SeqCheckRunner([launch_fail, passed]),
+        store=store,
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path),
+        stage_for_node={},
+        clock=lambda: "ts",
+        check_reresolve=lambda: (ResolvedCheck(name="pytest", argv=("pytest",)),),
+    )
+    result = ChecksNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "pass"  # re-resolved + retried, then passed
+
+
+def test_checks_reresolve_none_still_launch_fails(tmp_path: Path) -> None:
+    node = _checks_node()
+    launch_fail = CheckOutcome(passed=False, runs=(), launch_failed=True, first_launch_error="boom")
+    services = NodeServices(
+        router=FakeRouter(_result()),
+        check_runner=_SeqCheckRunner([launch_fail]),
+        store=FakeStore(),
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path),
+        stage_for_node={},
+        clock=lambda: "ts",
+        check_reresolve=lambda: None,  # no different ready profile -> still infra
+    )
+    with pytest.raises(CheckLaunchError):
+        ChecksNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+
 # -- publish ------------------------------------------------------------------
 
 
@@ -694,6 +742,30 @@ def test_publish_pull_request_requires_body_path(tmp_path: Path) -> None:
     with pytest.raises(PublishConfigError):
         PublishNodeRunner(services, inputs).run(node, _ctx(node))
     assert git.calls == []  # nothing committed/pushed/PR'd
+
+
+def test_publish_finalize_provides_pr_body(tmp_path: Path) -> None:
+    # With a finalize hook, the committed summary it returns is the PR body — no summary_body_path
+    # needed, and finalize runs before the audit commit.
+    node = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
+    git, store = FakeGit(), FakeStore()
+    services = NodeServices(
+        router=FakeRouter(_result()),
+        check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        store=store,
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path),
+        stage_for_node={},
+        clock=lambda: "ts",
+        git=git,
+        finalize=lambda: "/done/task-1.summary.md",
+    )
+    inputs = _inputs(tmp_path, branch="agent/task-1-x", pr_title="PR")  # no summary_body_path
+    result = PublishNodeRunner(services, inputs).run(node, _ctx(node))
+    assert result.outcome.kind == "done"
+    assert git.calls[-1] == (
+        "create_pr", "task-1", "agent/task-1-x", "PR", "/done/task-1.summary.md"
+    )
 
 
 def test_publish_none_policy_writes_no_git(tmp_path: Path) -> None:

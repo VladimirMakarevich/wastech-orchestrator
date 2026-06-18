@@ -176,6 +176,15 @@ class NodeServices:
     prompt_audit: bool = False
     prompt_secrets: tuple[str, ...] = ()
     register_artifact: RegisterArtifact | None = None
+    #: orchestrator hook the publish node calls BEFORE the audit commit: move the task file into its
+    #: lifecycle folder + write the committed ``<id>.summary.md`` (so both enter the audit commit),
+    #: returning that summary path (used as the PR body). ``None`` → no finalize (e.g. a unit test).
+    finalize: Callable[[], str | None] | None = None
+    #: orchestrator hook the checks node calls on a check *launch* failure: re-resolve the check
+    #: command set once (gated by the change-approval), returning the new checks to retry, or
+    #: ``None`` when no different ready profile exists. Bounded to once per task by the hook itself
+    #: (it returns ``None`` after the first re-resolve). Ports the legacy re-resolve-on-launch-fail.
+    check_reresolve: Callable[[], tuple[ResolvedCheck, ...] | None] | None = None
 
 
 @dataclass

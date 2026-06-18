@@ -64,11 +64,19 @@ class PublishNodeRunner:
             # no git publishing in P1 (P3 wires private storage / local artifact handling).
             return None
         git = self._s.git
-        if git is None or self._in.branch is None or self._in.summary_body_path is None:
+        if git is None or self._in.branch is None:
             raise PublishConfigError(
-                f"publish node {node.id!r} ({node.policy.value}) requires a GitPort + branch + "
-                "summary_body_path (the orchestrator wrapper resolves the summary/fallback body "
-                "and finalizes the task file before the publish node runs)"
+                f"publish node {node.id!r} ({node.policy.value}) requires a GitPort + branch"
+            )
+        # Finalize (move the task file + write the committed summary) BEFORE the audit commit so
+        # both land in it (legacy ordering); the committed summary.md is the PR body, falling back
+        # to the logs/ summary slot.
+        committed_summary = self._s.finalize() if self._s.finalize is not None else None
+        body_path = committed_summary or self._in.summary_body_path
+        if body_path is None:
+            raise PublishConfigError(
+                f"publish node {node.id!r} ({node.policy.value}) has no PR body: wire a finalize "
+                "hook or set summary_body_path (refusing to open a PR with an empty body)"
             )
         message = self._in.commit_message or f"feat({ctx.task_id}): publish"
         git.commit_code(ctx.task_id, message)
@@ -78,5 +86,5 @@ class PublishNodeRunner:
             ctx.task_id,
             self._in.branch,
             title=self._in.pr_title or ctx.task_id,
-            body_path=self._in.summary_body_path,
+            body_path=body_path,
         )
