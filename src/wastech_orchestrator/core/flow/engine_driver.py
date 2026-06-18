@@ -22,6 +22,7 @@ from wastech_orchestrator.core.flow.engine import (
     FlowEngine,
     FlowRunResult,
     NodeRunner,
+    PostNodeHook,
     RunRecorder,
 )
 from wastech_orchestrator.core.flow.nodes import (
@@ -57,6 +58,7 @@ def drive_flow(
     agents: AgentsConfig,
     task_id: str,
     subtask_order: int | None = None,
+    post_node: PostNodeHook | None = None,
 ) -> FlowRunResult:
     """Run one unit through the flow engine with the core-owned node runners."""
     engine = FlowEngine(
@@ -68,5 +70,6 @@ def drive_flow(
         agents=agents,
         task_id=task_id,
         subtask_order=subtask_order,
+        post_node=post_node,
     )
     return engine.run()

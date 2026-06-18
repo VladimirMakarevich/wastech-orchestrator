@@ -156,6 +156,23 @@ def edge_key(edge: Edge) -> str:
 PostNodeHook = Callable[[FlowNode, NodeOutcome], None]
 
 
+def entry_node_id(snapshot: FlowSnapshot) -> str:
+    """The single entry node (zero incoming edges). The validator guarantees exactly one.
+
+    Exposed so the driver can seed the first checkpoint (fingerprint + entry) *before* the entry
+    node runs — otherwise a crash during the entry node leaves no checkpoint and resume restarts.
+    """
+    incoming = dict.fromkeys(snapshot.nodes_by_id, 0)
+    for edges in snapshot.adjacency.values():
+        for edge in edges:
+            if edge.to in incoming:
+                incoming[edge.to] += 1
+    entries = [nid for nid, n in incoming.items() if n == 0]
+    if len(entries) != 1:  # the validator guarantees exactly one entry
+        raise EngineInternalError(f"expected exactly one entry node, got {sorted(entries)}")
+    return entries[0]
+
+
 class FlowEngine:
     """Drives one unit through a validated flow graph; the engine owns every transition."""
 
@@ -281,15 +298,7 @@ class FlowEngine:
     # -- edge resolution -------------------------------------------------------
 
     def _entry_node_id(self) -> str:
-        incoming = dict.fromkeys(self._snapshot.nodes_by_id, 0)
-        for edges in self._snapshot.adjacency.values():
-            for edge in edges:
-                if edge.to in incoming:
-                    incoming[edge.to] += 1
-        entries = [nid for nid, n in incoming.items() if n == 0]
-        if len(entries) != 1:  # the validator guarantees exactly one entry
-            raise EngineInternalError(f"expected exactly one entry node, got {sorted(entries)}")
-        return entries[0]
+        return entry_node_id(self._snapshot)
 
     def _select_edge(self, node: FlowNode, edges: tuple[Edge, ...], outcome: NodeOutcome) -> Edge:
         kind = outcome.kind
