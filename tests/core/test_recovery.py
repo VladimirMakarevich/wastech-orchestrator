@@ -385,21 +385,27 @@ def test_resume_interrupted_cleanup_notifies_after_ledger(
     assert notifier.calls == [("task-cleanup", "done")]
 
 
+def _impl_fingerprint() -> str:
+    from wastech_orchestrator.core.flow.registry import FlowRegistry
+
+    return FlowRegistry().resolve("implementation").flow_fingerprint
+
+
 @pytest.mark.parametrize(
-    ("status", "expected_provider", "expected_first_stage"),
+    ("current_node", "expected_provider", "expected_first_stage"),
     [
-        (Status.VALIDATED, ProviderId.CLAUDE, Stage.REFINEMENT),
-        (Status.PREPARING, ProviderId.CLAUDE, Stage.REFINEMENT),
-        (Status.REFINING, ProviderId.CLAUDE, Stage.REFINEMENT),
-        (Status.PLANNING, ProviderId.CLAUDE, Stage.PLANNING),
-        (Status.IMPLEMENTING, ProviderId.CLAUDE, Stage.IMPLEMENTATION),
-        (Status.TESTING, ProviderId.CODEX, Stage.REVIEW),
-        (Status.REVIEWING, ProviderId.CODEX, Stage.REVIEW),
-        (Status.FIXING, ProviderId.CLAUDE, Stage.FIXING),
+        # No checkpoint (interrupted before the engine) → restart from refinement.
+        (None, ProviderId.CLAUDE, Stage.REFINEMENT),
+        ("refinement", ProviderId.CLAUDE, Stage.REFINEMENT),
+        ("planning", ProviderId.CLAUDE, Stage.PLANNING),
+        ("implementation", ProviderId.CLAUDE, Stage.IMPLEMENTATION),
+        ("testing", ProviderId.CODEX, Stage.REVIEW),  # checks node → first agent stage is review
+        ("review", ProviderId.CODEX, Stage.REVIEW),
+        ("fixing", ProviderId.CLAUDE, Stage.FIXING),
     ],
 )
 def test_resume_continues_persisted_checkpoint(
-    status: Status,
+    current_node: str | None,
     expected_provider: ProviderId,
     expected_first_stage: Stage,
     git_repo,
@@ -414,7 +420,7 @@ def test_resume_continues_persisted_checkpoint(
     orch, store, _, art, _ = _build_orchestrator(
         git_repo, make_git_config, tmp_path, providers, [0]
     )
-    task_id = f"resume-{status.value}"
+    task_id = f"resume-{current_node or 'fresh'}"
     title = "Resume checkpoint"
     slug = slugify(title)
     branch = f"agent/{task_id}-{slug}"
@@ -423,26 +429,31 @@ def test_resume_continues_persisted_checkpoint(
         str(art),
     )
 
-    branch_prepared = status not in {Status.VALIDATED, Status.PREPARING}
+    # An interrupted engine task: RUNNING + a flow checkpoint at current_node. No checkpoint
+    # (current_node=None) models an interruption before the engine wrote one → a fresh restart.
+    branch_prepared = current_node is not None
     if branch_prepared:
         git_run(["checkout", "-b", branch], git_repo.clone)
-    if status in {Status.TESTING, Status.REVIEWING, Status.FIXING}:
+    if current_node in {"testing", "review", "fixing"}:
         (git_repo.clone / "feature.py").write_text("implemented = True\n", encoding="utf-8")
 
     store.insert_task(
         TaskRow(
             task_id=task_id,
             title=title,
-            status=status,
+            status=Status.RUNNING if current_node else Status.VALIDATED,
             branch=branch if branch_prepared else None,
             slug=slug if branch_prepared else None,
             decomposition_accepted=False,
-            test_fix_cycles=1 if status is Status.FIXING else 0,
-            fix_iterations=1 if status is Status.FIXING else 0,
         )
     )
+    if current_node is not None:
+        store.save_flow_checkpoint(
+            task_id, current_node=current_node, counters_json="{}",
+            flow_fingerprint=_impl_fingerprint(),
+        )
     failed_check = art / "logs" / task_id / "checks" / "001.log"
-    if status is Status.FIXING:
+    if current_node == "fixing":
         failed_check.parent.mkdir(parents=True, exist_ok=True)
         failed_check.write_text("failed assertion\n", encoding="utf-8")
         store.record_check_run(
@@ -461,12 +472,10 @@ def test_resume_continues_persisted_checkpoint(
     expected = providers[expected_provider]
     assert expected.requests[0].stage is expected_first_stage
     all_requests = [request for provider in providers.values() for request in provider.requests]
-    if status in {Status.TESTING, Status.REVIEWING, Status.FIXING}:
+    if current_node in {"testing", "review", "fixing"}:
         assert all(request.stage is not Stage.IMPLEMENTATION for request in all_requests)
-    if status is Status.FIXING:
+    if current_node == "fixing":
         assert expected.requests[0].check_artifacts_path == str(failed_check)
-        row = store.get_task(task_id)
-        assert row is not None and row.fix_iterations == 1
 
 
 def test_resume_waits_on_persisted_planning_prompt_without_resending(
@@ -504,10 +513,14 @@ def test_resume_waits_on_persisted_planning_prompt_without_resending(
         TaskRow(
             task_id=task_id,
             title=title,
-            status=Status.PLANNING,
+            status=Status.RUNNING,
             branch=branch,
             slug=slug,
+            decomposition_accepted=False,
         )
+    )
+    store.save_flow_checkpoint(
+        task_id, current_node="planning", counters_json="{}", flow_fingerprint=_impl_fingerprint()
     )
 
     path = interaction_path(art, task_id, Stage.PLANNING)
@@ -593,15 +606,18 @@ def test_resume_decomposed_at_subtask_without_duplicate_commit(
         TaskRow(
             task_id=task_id,
             title="Add a thing",
-            status=Status.IMPLEMENTING,
+            status=Status.RUNNING,
             branch=branch,
             slug=slug,
             decomposition_accepted=True,
             subtask_count=2,
             active_subtask=2,
             subtasks_completed=1,
-            refinement_ran=False,
         )
+    )
+    store.save_flow_checkpoint(
+        task_id, current_node="implementation", counters_json="{}",
+        flow_fingerprint=_impl_fingerprint(),
     )
     store.insert_subtasks(
         [

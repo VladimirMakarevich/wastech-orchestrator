@@ -49,7 +49,7 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NodeServices,
 )
 from wastech_orchestrator.core.flow.postprocess import apply_output_artifact, read_decomposition
-from wastech_orchestrator.core.flow.recorder import StateStoreRunRecorder
+from wastech_orchestrator.core.flow.recorder import StateStoreRunRecorder, hydrate_run_state
 from wastech_orchestrator.core.flow.registry import FlowRegistry
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import AgentNode, FlowNode
@@ -462,8 +462,11 @@ class Orchestrator:
         has_remote = False
         pr_url: str | None = None
         if continue_mode:
+            # --continue re-enters at the flow checkpoint (current_node); the legacy granular
+            # ``interrupted_status`` is kept only for the dry-run display.
             interrupted = self._resumable_or_none(row.interrupted_status)
-            if interrupted is None:
+            current_node, _counters, _fingerprint = self._store.get_flow_checkpoint(task_id)
+            if not current_node:
                 refusals.append(
                     "no recoverable stage was recorded for this task; use a fresh `rerun` "
                     "(without --continue)"
@@ -526,8 +529,8 @@ class Orchestrator:
         row = self._store.get_task(task_id)
         if row is None:
             raise PipelineFailed(f"unknown task id '{task_id}'")
-        stage = self._resumable_or_none(row.interrupted_status)
-        if stage is None:
+        current_node, _counters, _fingerprint = self._store.get_flow_checkpoint(task_id)
+        if not current_node:
             raise PipelineFailed(
                 f"cannot continue '{task_id}': no recoverable stage recorded; use a fresh rerun"
             )
@@ -537,8 +540,10 @@ class Orchestrator:
             self._log(task_id).info(
                 "rerun --continue: reset pending HITL", extra={"reset": len(reset)}
             )
-        self._store.revive_task_for_continue(task_id, stage)
-        self._log(task_id).info("rerun --continue: revived", extra={"stage": stage.value})
+        # Revive the terminal task as active; the resume engine re-enters at the persisted
+        # ``current_node`` (the flow checkpoint), reusing the branch + prior work.
+        self._store.revive_task_for_continue(task_id, Status.RUNNING)
+        self._log(task_id).info("rerun --continue: revived", extra={"node": current_node})
         result = self.resume()
         if result is None:
             raise PipelineFailed(f"continue '{task_id}' did not resume (no active task found)")
@@ -776,47 +781,53 @@ class Orchestrator:
             skill_inventory=self._skill_scanner.collect(),
         )
 
-        publish_phase = {
-            Status.SUMMARIZING,
-            Status.READY_TO_PUBLISH,
-            Status.COMMITTING,
-            Status.PUSHING,
-            Status.CREATING_PR,
-        }
         try:
-            if row.status is Status.VALIDATED:
-                return self._drive(p, self._gate.phase_b(task))
-            if row.status is Status.PREPARING:
-                self._prepare_branch(p)
-                self._refinement(p, self._gate.phase_b(task))
-                self._planning(p)
-                return self._run_units_and_finish(p)
-
-            # Re-attach to the existing branch (reused, never recreated) so git ops target it.
-            self._git.prepare_branch(plan.task_id, p.slug)
-
-            if row.status is Status.REFINING:
-                self._run_refinement(p)
-                self._planning(p)
-                return self._run_units_and_finish(p)
-            if row.status is Status.PLANNING:
-                self._planning(p)
-                return self._run_units_and_finish(p)
-            if row.status in _UNIT_STATUSES:
-                self._restore_recovery_context(p, row)
-                return self._run_units_and_finish(p)
-            if row.status in publish_phase:
-                if row.status is Status.SUMMARIZING:
-                    self._summary(p)
-                else:
-                    self._store.set_status(plan.task_id, Status.READY_TO_PUBLISH)
-                    p.status = Status.READY_TO_PUBLISH
-                return self._publish(p)
-            raise PipelineFailed(f"cannot recover task from status {row.status.value}")
+            return self._resume_via_engine(p)
         except ManualActionRequired as exc:
             return self._go_terminal(p, Status.MANUAL_ACTION_REQUIRED, manual_reason=exc.reason)
         except (PipelineFailed, GitCommandError) as exc:
             return self._go_terminal(p, Status.FAILED, manual_reason=str(exc))
+
+    def _resume_via_engine(self, p: _Pipeline) -> PipelineResult:
+        """Resume the engine from the persisted checkpoint (node-based recovery, §13).
+
+        Hydrates the :class:`FlowRunState` from ``node_runs`` + the ``tasks`` checkpoint and
+        continues from ``current_node`` (the decomposed re-entry is handled in :meth:`_run_phases`).
+        A task with no flow checkpoint (interrupted before the engine started, or a flow whose
+        fingerprint no longer matches) restarts from the top. Side-effect idempotency (commit/push/
+        PR) lives in ``publish_operations``, so a resumed run never duplicates them."""
+        snapshot = self._flow_registry.resolve(None)
+        run_state = hydrate_run_state(self._store, p.task.id)
+        if run_state is None or run_state.flow_fingerprint != snapshot.flow_fingerprint:
+            # No usable checkpoint (interrupted before the engine wrote one, or the flow changed) →
+            # restart from the top via the full driver (re-does preflight + branch prep + engine).
+            if p.status not in (Status.NEW, Status.PENDING, Status.VALIDATED):
+                self._store.set_status(p.task.id, Status.VALIDATED)  # reset to re-enter the driver
+                p.status = Status.VALIDATED
+            return self._drive_via_engine(p, self._gate.phase_b(p.task))
+        self._check_preflight(p)  # re-resolve the launchable check profile (idempotent)
+        self._git.prepare_branch(p.task.id, p.slug)  # re-attach the existing branch (reused)
+        return self._engine_run(p, self._gate.phase_b(p.task), resume=True, run_state=run_state)
+
+    def _restore_engine_inputs(self, p: _Pipeline, inputs: NodeInputs) -> None:
+        """Repopulate the artifact paths a resumed fixing/review node reads (port of the legacy
+        ``_restore_recovery_context``): the diff, the latest failed check log, the review findings,
+        and the plan — from disk + the store, scoped to the active subtask when decomposed."""
+        task_dir = task_artifact_dir(self._artifacts_root, p.task.id)
+        diff = task_dir / "current.diff"
+        if diff.exists():
+            inputs.diff_path = str(diff)
+        plan = task_dir / "plan.md"
+        if plan.exists():
+            inputs.plan_path = str(plan)
+        review = task_dir / "review" / "findings.json"
+        if review.exists():
+            inputs.review_path = str(review)
+        # P1: the fixing-resume check log is task-scoped — a decomposed subtask re-runs its region
+        # from the top (region entry), regenerating its own check log.
+        latest_check = self._store.latest_failed_check_log(p.task.id, None)
+        if latest_check and Path(latest_check).exists():
+            inputs.checks_path = latest_check
 
     def _rebuild_decomposition(self, task_id: str, row: TaskRow) -> DecompositionDecision:
         if not row.decomposition_accepted:
@@ -887,9 +898,22 @@ class Orchestrator:
         self._transition(p, Status.PREPARING)
         self._prepare_branch(p)
         self._transition(p, Status.RUNNING)
+        return self._engine_run(p, completeness, resume=False)
 
+    def _engine_run(
+        self,
+        p: _Pipeline,
+        completeness: Completeness,
+        *,
+        resume: bool,
+        run_state: FlowRunState | None = None,
+    ) -> PipelineResult:
+        """Build the node services/inputs and drive the flow (fresh or resumed). The preamble
+        (preflight, branch) + terminal handling live in the callers; this is the engine core."""
         snapshot = self._flow_registry.resolve(None)  # P1: every task → the implementation flow
         assert snapshot.source_path is not None
+        if run_state is None:
+            run_state = FlowRunState(flow_fingerprint=snapshot.flow_fingerprint)
         inputs = build_node_inputs(
             p,
             flow_dir=snapshot.source_path.parent,
@@ -898,6 +922,8 @@ class Orchestrator:
             commit_message=f"feat({p.task.id}): {p.task.title}",
             summary_body_path=self._fallback_summary_path(p),
         )
+        if resume:
+            self._restore_engine_inputs(p, inputs)  # diff/checks/review/plan paths from disk
         services = build_node_services(
             router=self._router,
             check_runner=self._checks,
@@ -916,13 +942,12 @@ class Orchestrator:
             finalize=lambda: self._engine_finalize(p),
             check_reresolve=lambda: self._engine_check_reresolve(p),
         )
-        run_state = FlowRunState(flow_fingerprint=snapshot.flow_fingerprint)
         recorder = StateStoreRunRecorder(
             self._store, p.task.id, artifacts_root=self._artifacts_root
         )
         try:
             result = self._run_phases(
-                p, snapshot, run_state, recorder, services, inputs, completeness
+                p, snapshot, run_state, recorder, services, inputs, completeness, resume=resume
             )
         except NodeManualRequired as exc:
             return self._go_terminal(p, Status.MANUAL_ACTION_REQUIRED, manual_reason=str(exc))
@@ -939,12 +964,19 @@ class Orchestrator:
         services: NodeServices,
         inputs: NodeInputs,
         completeness: Completeness,
+        *,
+        resume: bool = False,
     ) -> FlowRunResult:
-        """Drive the flow in phases: a flow with no decomposition runs in one pass; a decomposed one
-        runs pre (entry…proposed_by) once, the sub_flow region once per subtask (commit between),
-        then post once. Each phase seeds ``current_node`` + a checkpoint before its entry node."""
+        """Drive the flow in phases. Fresh: a flow with no decomposition runs in one pass; a
+        decomposed one runs pre (entry…proposed_by) once, the sub_flow region once per subtask
+        (commit between), then post once. Resume: continue from the hydrated ``current_node`` — a
+        run still in ``pre`` re-runs pre (planning re-decides), a single-unit run continues from
+        ``current_node``, and a decomposed run re-enters the active uncommitted subtask at the
+        region entry (committed subtasks are skipped, never re-committed)."""
         post_node = self._engine_post_node(p, inputs, snapshot)
         facts = self._engine_facts(p, completeness)
+        if resume and run_state.current_node is None:
+            resume = False  # no checkpoint position to resume from → start fresh
 
         def phase(
             entry: str, region: frozenset[str] | None, subtask: int | None = None
@@ -966,15 +998,25 @@ class Orchestrator:
             )
 
         if snapshot.doc.decomposition is None:
-            return phase(entry_node_id(snapshot), None)  # whole graph in one pass
+            entry = run_state.current_node if resume else entry_node_id(snapshot)
+            assert entry is not None
+            return phase(entry, None)  # whole graph in one pass (or continue from current_node)
 
         regions = partition_decomposition(snapshot)
-        # The pre phase ends at proposed_by; its post_node sets p.decomposition.
-        pre = phase(entry_node_id(snapshot), regions.pre)
-        if pre.status is not Status.DONE:
-            return pre
+        current = run_state.current_node
+        in_pre = resume and current is not None and current in regions.pre
+        if not resume or in_pre:
+            # Run pre (fresh from entry) or re-run it (resume still in pre, planning unfinished);
+            # planning's post_node sets p.decomposition.
+            pre = phase(current if in_pre else entry_node_id(snapshot), regions.pre)  # type: ignore[arg-type]
+            if pre.status is not Status.DONE:
+                return pre
         if not p.decomposition.accepted:
-            return phase(regions.region_entry, None)  # single unit: region + post in one pass
+            # Single unit: fresh / resumed-from-pre start at the region entry; a resume already past
+            # pre continues from current_node.
+            if resume and not in_pre and current is not None:
+                return phase(current, None)
+            return phase(regions.region_entry, None)
         return self._fan_out_subtasks(p, run_state, regions, phase)
 
     def _fan_out_subtasks(

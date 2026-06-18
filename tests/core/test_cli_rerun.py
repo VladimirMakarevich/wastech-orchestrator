@@ -100,9 +100,10 @@ def test_real_failure_persists_interrupted_status(git_repo, fake_cli, tmp_path: 
 
     store = StateStore.open_readonly(git_repo.clone / ".worc" / "state.db")
     row = store.get_task("task-700")
+    current_node, _counters, _fingerprint = store.get_flow_checkpoint("task-700")
     store.close()
     assert row is not None and row.status is Status.FAILED
-    assert row.interrupted_status is not None  # the stage it failed at
+    assert current_node is not None  # the flow checkpoint records where --continue re-enters
 
 
 def test_rerun_fresh_failed_to_done(git_repo, fake_cli, git_run, tmp_path: Path) -> None:
@@ -178,12 +179,21 @@ def test_rerun_fresh_failed_to_done(git_repo, fake_cli, git_run, tmp_path: Path)
 # --- guards / refusals (no pipeline run) -------------------------------------------------
 
 
-def _seed(project: Path, clone: Path, row: TaskRow) -> Path:
+def _seed(project: Path, clone: Path, row: TaskRow, *, checkpoint_node: str | None = None) -> Path:
     config = _write_config(project, clone, claude="claude", codex="codex")
     db = clone / ".worc" / "state.db"
     db.parent.mkdir(parents=True, exist_ok=True)
     store = StateStore.open(db)
     store.insert_task(row)
+    if checkpoint_node is not None:  # an interrupted engine task: a flow checkpoint to resume from
+        from wastech_orchestrator.core.flow.registry import FlowRegistry
+
+        store.save_flow_checkpoint(
+            row.task_id,
+            current_node=checkpoint_node,
+            counters_json="{}",
+            flow_fingerprint=FlowRegistry().resolve("implementation").flow_fingerprint,
+        )
     store.close()
     return config
 
@@ -287,8 +297,8 @@ def test_rerun_continue_revives_then_delegates_to_resume(
             fix_iterations=2,
             finished_at="2026-01-01T00:00:00+00:00",
             cleanup_completed=True,
-            interrupted_status="reviewing",
         ),
+        checkpoint_node="review",  # the engine checkpoint --continue re-enters at
     )
 
     calls = {"resume": 0}
@@ -307,6 +317,6 @@ def test_rerun_continue_revives_then_delegates_to_resume(
     row = store.get_task("task-1")
     store.close()
     assert row is not None
-    assert row.status is Status.REVIEWING
+    assert row.status is Status.RUNNING  # revived as active; resume re-enters at the checkpoint
     assert row.finished_at is None and row.cleanup_completed is None
     assert row.branch == "agent/task-1-t" and row.fix_iterations == 2
