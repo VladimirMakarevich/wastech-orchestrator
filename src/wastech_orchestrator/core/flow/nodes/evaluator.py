@@ -20,6 +20,7 @@ from typing import Any
 from wastech_orchestrator.core.flow.contracts import EvaluationKind
 from wastech_orchestrator.core.flow.engine import Finding, NodeContext, NodeOutcome, NodeResult
 from wastech_orchestrator.core.flow.nodes.base import NodeInfraError, NodeInputs, NodeServices
+from wastech_orchestrator.core.flow.observability import record_run_observability
 from wastech_orchestrator.core.flow.prompt import render_role_prompt
 from wastech_orchestrator.core.flow.schema import EvaluatorNode, FlowNode
 from wastech_orchestrator.core.hitl import stage_output_schema
@@ -42,6 +43,7 @@ class EvaluatorNodeRunner:
         assert isinstance(node, EvaluatorNode)
         stage = self._s.stage_for_node[node.id]
         route = self._s.router.resolve_route(stage)
+        started_at = self._s.clock()
         run_id = self._s.store.record_node_run(
             NodeRunRow(
                 task_id=ctx.task_id,
@@ -52,13 +54,25 @@ class EvaluatorNodeRunner:
                 route_primary=route.primary.value,
                 route_fallback=route.fallback.value if route.fallback else None,
                 route_source=route.source.value,
-                started_at=self._s.clock(),
+                started_at=started_at,
             )
         )
         request = self._build_request(node, ctx, stage, route, run_id)
         outcome = self._s.router.run_stage(request, route, snapshot=self._s.snapshot)
         kind = self._verdict(node, outcome)
         self._record_completion(run_id, outcome, kind)
+        record_run_observability(
+            self._s,
+            task_id=ctx.task_id,
+            stage=stage,
+            subtask=ctx.subtask_order,
+            run_id=run_id,
+            prompt=request.prompt,
+            route=route,
+            outcome=outcome,
+            model=node.model,
+            started_at=started_at,
+        )
         if outcome.result is None:
             err = (
                 outcome.terminal_error.error_class.value

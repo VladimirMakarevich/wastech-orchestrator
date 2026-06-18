@@ -24,7 +24,11 @@ from wastech_orchestrator.notify import AskHandle, AskKind, AskResult
 from wastech_orchestrator.providers.base import AgentRunRequest, Stage
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.routing.snapshots import SnapshotHook
-from wastech_orchestrator.state_store import CheckRunRow, NodeRunRow
+from wastech_orchestrator.state_store import CheckRunRow, NodeRunRow, ProviderAttemptRow
+
+#: Register a written artifact in the audit trail: ``(task_id, kind, path)``. The orchestrator's
+#: ``_register_artifact`` (sha256 + upsert, skips a missing file) satisfies it.
+RegisterArtifact = Callable[[str, str, str], None]
 
 
 class NodeInfraError(Exception):
@@ -98,6 +102,10 @@ class NodeRunStorePort(Protocol):
 
     def record_check_run(self, run: CheckRunRow, conn: object | None = None) -> None: ...
 
+    def record_provider_attempt(
+        self, attempt: ProviderAttemptRow, conn: object | None = None
+    ) -> None: ...
+
 
 class NotifierPort(Protocol):
     """The slice of :class:`~wastech_orchestrator.notify.interface.Notifier` the durable HITL gate
@@ -162,6 +170,12 @@ class NodeServices:
     #: durable HITL transport (refinement/planning embedded HITL + dangerous-diff approval).
     notifier: NotifierPort | None = None
     ask_timeout_s: int = 0
+    #: observability (P1.4): whether the prompt-audit JSON is written (per-task/global gate resolved
+    #: by the orchestrator), the denied-read secrets to scrub from stored prompts, and the artifact
+    #: register callback. ``register_artifact=None`` disables the on-disk audit artifacts.
+    prompt_audit: bool = False
+    prompt_secrets: tuple[str, ...] = ()
+    register_artifact: RegisterArtifact | None = None
 
 
 @dataclass

@@ -34,6 +34,7 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NodeServices,
 )
 from wastech_orchestrator.core.flow.nodes.human_gate import HumanGate
+from wastech_orchestrator.core.flow.observability import record_run_observability
 from wastech_orchestrator.core.flow.prompt import render_role_prompt
 from wastech_orchestrator.core.flow.schema import AgentNode, FlowNode
 from wastech_orchestrator.core.hitl import (
@@ -185,6 +186,7 @@ class AgentNodeRunner:
         *,
         human_input_path: str | None,
     ) -> tuple[int, StageOutcome]:
+        started_at = self._s.clock()
         run_id = self._s.store.record_node_run(
             NodeRunRow(
                 task_id=ctx.task_id,
@@ -195,12 +197,24 @@ class AgentNodeRunner:
                 route_primary=route.primary.value,
                 route_fallback=route.fallback.value if route.fallback else None,
                 route_source=route.source.value,
-                started_at=self._s.clock(),
+                started_at=started_at,
             )
         )
         request = self._build_request(node, ctx, stage, route, run_id, human_input_path)
         outcome = self._s.router.run_stage(request, route, snapshot=self._s.snapshot)
         self._record_completion(run_id, outcome)
+        record_run_observability(
+            self._s,
+            task_id=ctx.task_id,
+            stage=stage,
+            subtask=ctx.subtask_order,
+            run_id=run_id,
+            prompt=request.prompt,
+            route=route,
+            outcome=outcome,
+            model=node.model,
+            started_at=started_at,
+        )
         if outcome.result is None:
             err = (
                 outcome.terminal_error.error_class.value

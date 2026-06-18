@@ -16,18 +16,15 @@ decomposition driver (slice 5), which calls :func:`read_decomposition` then orch
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from wastech_orchestrator.core.decomposition import DecompositionDecision, decide_decomposition
 from wastech_orchestrator.core.flow.engine import NodeOutcome
-from wastech_orchestrator.core.flow.nodes.base import NodeInputs
+from wastech_orchestrator.core.flow.nodes.base import NodeInputs, RegisterArtifact
 from wastech_orchestrator.core.flow.schema import AgentNode
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
-
-#: Callback to register a written artifact in the audit trail: ``(task_id, kind, path)``.
-RegisterArtifact = Callable[[str, str, str], None]
 
 
 @dataclass(frozen=True)

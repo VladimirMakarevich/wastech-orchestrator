@@ -95,6 +95,7 @@ class FakeStore:
         self.recorded: list[Any] = []
         self.completed: list[dict[str, Any]] = []
         self.check_runs: list[Any] = []
+        self.provider_attempts: list[Any] = []
         self._next = 1
 
     def record_node_run(self, run: Any, conn: Any = None) -> int:
@@ -108,6 +109,9 @@ class FakeStore:
 
     def record_check_run(self, run: Any, conn: Any = None) -> None:
         self.check_runs.append(run)
+
+    def record_provider_attempt(self, attempt: Any, conn: Any = None) -> None:
+        self.provider_attempts.append(attempt)
 
 
 def _result(structured: dict[str, Any] | None = None) -> AgentRunResult:
@@ -326,6 +330,46 @@ def test_agent_read_only_node_skips_diff_guard(tmp_path: Path) -> None:
     AgentNodeRunner(services, inputs).run(node, _ctx(node))
     assert inputs.diff_path is None
     assert git.calls == []
+
+
+def _audit_services(tmp_path: Path, *, prompt_audit: bool, registered: list[Any]) -> NodeServices:
+    return NodeServices(
+        router=FakeRouter(_result()),
+        check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        store=FakeStore(),
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path),
+        stage_for_node={"implementation": Stage.IMPLEMENTATION},
+        clock=lambda: "ts",
+        prompt_audit=prompt_audit,
+        register_artifact=lambda t, k, p: registered.append((t, k, p)),
+    )
+
+
+def test_agent_node_writes_prompt_audit_when_enabled(tmp_path: Path) -> None:
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(id="implementation", kind="agent", role_file="r.md",
+                     permission_profile=PermissionProfile.READ_ONLY)
+    registered: list[Any] = []
+    AgentNodeRunner(_audit_services(tmp_path, prompt_audit=True, registered=registered), _inputs(
+        tmp_path
+    )).run(node, _ctx(node))
+    kinds = {k for _, k, _ in registered}
+    assert {"rendered_prompt", "prompt_audit", "prompt_audit_timeline"} <= kinds
+
+
+def test_agent_node_no_prompt_audit_when_disabled(tmp_path: Path) -> None:
+    # prompt_audit off: rendered-prompt still written (audit-independent), but no prompt-audit JSON.
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(id="implementation", kind="agent", role_file="r.md",
+                     permission_profile=PermissionProfile.READ_ONLY)
+    registered: list[Any] = []
+    AgentNodeRunner(_audit_services(tmp_path, prompt_audit=False, registered=registered), _inputs(
+        tmp_path
+    )).run(node, _ctx(node))
+    kinds = {k for _, k, _ in registered}
+    assert "rendered_prompt" in kinds
+    assert "prompt_audit" not in kinds
 
 
 # -- embedded HITL (refinement / planning) ------------------------------------
