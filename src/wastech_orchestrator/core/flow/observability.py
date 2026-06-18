@@ -1,12 +1,11 @@
 """Per-node observability (P1.4) — rendered-prompt, prompt-audit, and provider-attempt records.
 
-A faithful port of the legacy ``_write_rendered_prompt`` / ``_write_prompt_audit`` and the
-``_record_stage`` provider-attempts loop, so the engine path produces the same audit surfaces the
-integration suite asserts. The agent/evaluator runners call :func:`record_run_observability` after
-``router.run_stage``; it is keyed by the ``node_runs`` row id (the int that was the ``stage_runs``
-id), so audit files still sort chronologically.
+Writes the rendered prompt + prompt-audit JSON and the per-attempt provider-attempt rows so the
+engine path produces the same audit surfaces the integration suite asserts. The agent/evaluator
+runners call :func:`record_run_observability` after ``router.run_stage``; it is keyed by the
+``node_runs`` row id, so audit files still sort chronologically.
 
-Gating: provider-attempt rows are always recorded (an audit surface, like the legacy). The on-disk
+Gating: provider-attempt rows are always recorded (an audit surface). The on-disk
 rendered-prompt / prompt-audit artifacts are written only when the orchestrator wired a
 ``register_artifact`` callback; the prompt-audit JSON additionally honors the per-task / global
 ``prompt_audit`` gate resolved into ``NodeServices.prompt_audit``.
@@ -77,8 +76,7 @@ def record_run_observability(
 def record_provider_attempts(services: NodeServices, run_id: int, outcome: StageOutcome) -> None:
     """Persist one ``provider_attempts`` row per attempt (primary + any fallback) — always recorded.
 
-    Ports the legacy ``_record_stage`` loop; the row's ``stage_run_id`` now holds the ``node_runs``
-    id (the column is renamed when the legacy ``stage_runs`` table is dropped, P1.4 slice 7).
+    The row's ``node_run_id`` holds the ``node_runs`` id of the run these attempts belong to.
     """
     for attempt in outcome.attempts:
         attempt_dir = (
@@ -88,7 +86,7 @@ def record_provider_attempts(services: NodeServices, run_id: int, outcome: Stage
         )
         services.store.record_provider_attempt(
             ProviderAttemptRow(
-                stage_run_id=run_id,
+                node_run_id=run_id,
                 provider=attempt.provider.value,
                 attempt=attempt.attempt,
                 status=attempt.status.value if attempt.status else None,
@@ -152,7 +150,7 @@ def write_prompt_audit(
         for attempt in outcome.attempts
     ]
     record: dict[str, object] = {
-        "stage_run_id": run_id,
+        "node_run_id": run_id,
         "stage": stage.value,
         "subtask": subtask,
         "route_primary": route.primary.value,

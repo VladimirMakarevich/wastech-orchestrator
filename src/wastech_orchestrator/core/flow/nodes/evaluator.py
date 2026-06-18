@@ -137,7 +137,7 @@ class EvaluatorNodeRunner:
             permission_profile=node.permission_profile.value,
             timeout_seconds=self._s.default_timeout_seconds,
             attempt=1,
-            stage_run_id=run_id,
+            node_run_id=run_id,
             task_path=self._in.task_path,
             plan_path=self._in.plan_path,
             diff_path=self._in.diff_path,

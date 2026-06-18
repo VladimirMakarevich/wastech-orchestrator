@@ -101,7 +101,7 @@ class AgentCheckDiscovery:
             permission_profile="read-only",
             timeout_seconds=self._cfg.timeout_seconds,
             attempt=1,
-            stage_run_id=0,
+            node_run_id=0,
             output_schema=DISCOVERY_OUTPUT_SCHEMA,
             model=self._cfg.model or None,
             reasoning=self._cfg.reasoning,

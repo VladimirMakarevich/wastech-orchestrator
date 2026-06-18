@@ -1,6 +1,6 @@
 """SQLite State Store (spec §9).
 
-The authoritative persisted state for the pipeline: the ``tasks``, ``stage_runs``,
+The authoritative persisted state for the pipeline: the ``tasks``, ``node_runs``,
 ``provider_attempts``, ``check_runs``, ``artifacts``, ``publish_operations`` and ``subtasks``
 entities. State transitions are **transactional** (``BEGIN IMMEDIATE`` … ``COMMIT``) so a crash
 leaves a consistent prior state and a restart can reconcile (§13).
@@ -33,20 +33,17 @@ def _utc_now_iso() -> str:
 # changes (not on every release). ``open()`` adopts a 0 (brand-new, or pre-versioning) database as
 # the current version; both open paths refuse a database stamped newer than this. See the spec's
 # "Versioning & compatibility" section.
-# v2: added ``stage_runs.skipped`` / ``stage_runs.skip_reason`` (stage-skip control). Migrated
-# in-place by ``_migrate`` (idempotent ``ALTER TABLE ADD COLUMN``); no data is rewritten.
-# v3: added ``tasks.interrupted_status`` (the stage a task was on before going terminal), so
-# ``rerun --continue`` can re-enter the pipeline at the failed stage.
-# v4 (flow-engine P1.2): added the flow-engine execution path **alongside** the legacy driver — the
-# ``node_runs`` table (the generic per-node audit trail that generalizes ``stage_runs``) and the
-# ``tasks.current_node`` / ``tasks.flow_run_counters`` / ``tasks.flow_fingerprint`` columns (the
-# durable :class:`~wastech_orchestrator.core.flow.run_state.FlowRunState` checkpoint). All are
-# additive and nullable; the legacy ``stage_runs`` + granular statuses stay until P1.5 removes them.
-# v5 (flow-engine P1.4 cutover): dropped the ``provider_attempts.stage_run_id`` FK to ``stage_runs``
-# so the flow-engine path can store the ``node_runs`` id there (both monotonic). Greenfield — the
-# local ``state.db`` is recreated, so there is no in-place data migration; the column is renamed to
-# ``node_run_id`` when ``stage_runs`` is dropped (slice 7).
-DB_SCHEMA_VERSION = 5
+# v3: added ``tasks.interrupted_status`` (the stage a task was on before going terminal).
+# v4 (flow-engine P1.2): added the ``node_runs`` per-node audit table and the durable
+# :class:`~wastech_orchestrator.core.flow.run_state.FlowRunState` checkpoint columns
+# (``tasks.current_node`` / ``tasks.flow_run_counters`` / ``tasks.flow_fingerprint``).
+# v5 (flow-engine P1.4 cutover): dropped the ``provider_attempts`` FK to ``stage_runs`` so the
+# flow-engine path can store the ``node_runs`` id there (both monotonic). Greenfield — the local
+# ``state.db`` is recreated, so there is no in-place data migration.
+# v6 (flow-engine P1 Slice 7): dropped the legacy ``stage_runs`` table (the engine writes
+# ``node_runs``) and renamed ``provider_attempts.stage_run_id`` -> ``node_run_id``. Greenfield —
+# destructive, no data migration (the local ``state.db`` is recreated).
+DB_SCHEMA_VERSION = 6
 
 
 class IncompatibleStateError(Exception):
@@ -57,13 +54,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     """Bring an existing database up to the current schema (writable open only).
 
     Idempotent: each column add is guarded by a ``PRAGMA table_info`` check, so this is a no-op on
-    a brand-new DB (``_SCHEMA`` already created the columns) and adds only what a pre-v2 DB lacks.
+    a brand-new DB (``_SCHEMA`` already created the columns) and adds only what an older DB lacks.
     """
-    cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(stage_runs)")}
-    if "skipped" not in cols:
-        conn.execute("ALTER TABLE stage_runs ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0")
-    if "skip_reason" not in cols:
-        conn.execute("ALTER TABLE stage_runs ADD COLUMN skip_reason TEXT")
     task_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(tasks)")}
     if "interrupted_status" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN interrupted_status TEXT")
@@ -132,26 +124,6 @@ CREATE TABLE IF NOT EXISTS tasks (
     flow_fingerprint TEXT
 );
 
-CREATE TABLE IF NOT EXISTS stage_runs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id TEXT NOT NULL REFERENCES tasks(task_id),
-    stage TEXT NOT NULL,
-    subtask_order INTEGER,
-    status TEXT,
-    route_primary TEXT NOT NULL,
-    route_fallback TEXT,
-    route_source TEXT NOT NULL,
-    provider_used TEXT,
-    error_class TEXT,
-    stage_attempts INTEGER NOT NULL,
-    commit_sha_before TEXT,
-    commit_sha_after TEXT,
-    started_at TEXT,
-    finished_at TEXT,
-    skipped INTEGER NOT NULL DEFAULT 0,
-    skip_reason TEXT
-);
-
 CREATE TABLE IF NOT EXISTS node_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id TEXT NOT NULL REFERENCES tasks(task_id),
@@ -176,9 +148,8 @@ CREATE TABLE IF NOT EXISTS node_runs (
 
 CREATE TABLE IF NOT EXISTS provider_attempts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    -- v5: a plain int, not a FK to stage_runs — the flow-engine path stores the node_runs id here
-    -- (both are monotonic ids). Renamed to node_run_id when stage_runs is dropped (P1.4 slice 7).
-    stage_run_id INTEGER NOT NULL,
+    -- the ``node_runs`` id this attempt belongs to (a plain monotonic id, not an FK).
+    node_run_id INTEGER NOT NULL,
     provider TEXT NOT NULL,
     attempt INTEGER NOT NULL,
     status TEXT,
@@ -276,36 +247,13 @@ class TaskRow:
 
 
 @dataclass(frozen=True)
-class StageRunRow:
-    task_id: str
-    stage: str
-    route_primary: str
-    route_source: str
-    stage_attempts: int
-    route_fallback: str | None = None
-    subtask_order: int | None = None
-    status: str | None = None
-    provider_used: str | None = None
-    error_class: str | None = None
-    commit_sha_before: str | None = None
-    commit_sha_after: str | None = None
-    started_at: str | None = None
-    finished_at: str | None = None
-    # Stage-skip audit (stage-skip control): a skipped stage gets a row with ``skipped=True`` and a
-    # human-readable ``skip_reason`` and no provider data.
-    skipped: bool = False
-    skip_reason: str | None = None
-    id: int | None = None
-
-
-@dataclass(frozen=True)
 class NodeRunRow:
-    """One flow-graph node execution (flow-engine P1.2 — the generic ``stage_runs`` successor).
+    """One flow-graph node execution — the per-node audit trail row (flow-engine).
 
     ``node_kind`` is one of ``agent``/``evaluator``/``checks``/``hitl``/``publish``; ``outcome`` is
     the engine outcome (``accept``/``rework``/``pass``/``fail``/``done``/``route:*``). ``route_*``
     are ``None`` for non-agent nodes. A skipped node carries ``skipped=True`` + ``skip_reason`` and
-    no provider data (mirrors :meth:`record_skip`).
+    no provider data (see :meth:`record_node_skip`).
     """
 
     task_id: str
@@ -331,7 +279,7 @@ class NodeRunRow:
 
 @dataclass(frozen=True)
 class ProviderAttemptRow:
-    stage_run_id: int
+    node_run_id: int
     provider: str
     attempt: int
     status: str | None = None
@@ -661,105 +609,7 @@ class StateStore:
             fix_iterations=counters.fix_iterations,
         )
 
-    # --- stage_runs / provider_attempts ---------------------------------------------------
-
-    def record_stage_run(self, run: StageRunRow, conn: sqlite3.Connection | None = None) -> int:
-        with self._writer(conn) as c:
-            cur = c.execute(
-                """
-                INSERT INTO stage_runs (
-                    task_id, stage, subtask_order, status, route_primary, route_fallback,
-                    route_source, provider_used, error_class, stage_attempts,
-                    commit_sha_before, commit_sha_after, started_at, finished_at,
-                    skipped, skip_reason
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """,
-                (
-                    run.task_id,
-                    run.stage,
-                    run.subtask_order,
-                    run.status,
-                    run.route_primary,
-                    run.route_fallback,
-                    run.route_source,
-                    run.provider_used,
-                    run.error_class,
-                    run.stage_attempts,
-                    run.commit_sha_before,
-                    run.commit_sha_after,
-                    run.started_at,
-                    run.finished_at,
-                    1 if run.skipped else 0,
-                    run.skip_reason,
-                ),
-            )
-            return int(cur.lastrowid or 0)
-
-    def record_skip(
-        self,
-        task_id: str,
-        stage: str,
-        *,
-        reason: str,
-        subtask_order: int | None = None,
-        conn: sqlite3.Connection | None = None,
-    ) -> int:
-        """Record a skipped stage in the audit trail (stage-skip control).
-
-        A skipped stage runs no provider, so it carries sentinel route fields (``route_primary`` /
-        ``route_source`` are ``NOT NULL``) and ``stage_attempts=0``; ``skipped`` and ``skip_reason``
-        hold the audit detail.
-        """
-        return self.record_stage_run(
-            StageRunRow(
-                task_id=task_id,
-                stage=stage,
-                route_primary="(skipped)",
-                route_source="skip",
-                stage_attempts=0,
-                subtask_order=subtask_order,
-                status="skipped",
-                skipped=True,
-                skip_reason=reason,
-                started_at=self._clock(),
-                finished_at=self._clock(),
-            ),
-            conn,
-        )
-
-    def complete_stage_run(
-        self,
-        run_id: int,
-        *,
-        status: str,
-        provider_used: str | None,
-        error_class: str | None,
-        stage_attempts: int,
-        finished_at: str,
-        conn: sqlite3.Connection | None = None,
-    ) -> None:
-        """Finalize a stage run that was reserved before invoking its provider."""
-        with self._writer(conn) as c:
-            cur = c.execute(
-                """
-                UPDATE stage_runs
-                SET status = ?, provider_used = ?, error_class = ?,
-                    stage_attempts = ?, finished_at = ?
-                WHERE id = ?
-                """,
-                (
-                    status,
-                    provider_used,
-                    error_class,
-                    stage_attempts,
-                    finished_at,
-                    run_id,
-                ),
-            )
-            if cur.rowcount != 1:
-                raise KeyError(run_id)
-
-    # --- node_runs / flow checkpoint (flow-engine P1.2) -----------------------------------
+    # --- node_runs / flow checkpoint (flow-engine) ----------------------------------------
 
     def record_node_run(self, run: NodeRunRow, conn: sqlite3.Connection | None = None) -> int:
         """Reserve a flow node-run row before executing the node; returns its id."""
@@ -905,12 +755,12 @@ class StateStore:
             c.execute(
                 """
                 INSERT INTO provider_attempts (
-                    stage_run_id, provider, attempt, status, error_class, exit_code,
+                    node_run_id, provider, attempt, status, error_class, exit_code,
                     attempt_dir, started_at, finished_at
                 ) VALUES (?,?,?,?,?,?,?,?,?)
                 """,
                 (
-                    attempt.stage_run_id,
+                    attempt.node_run_id,
                     attempt.provider,
                     attempt.attempt,
                     attempt.status,

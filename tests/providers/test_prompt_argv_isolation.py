@@ -28,7 +28,7 @@ def _request(prompt: str) -> AgentRunRequest:
         permission_profile="workspace-write",
         timeout_seconds=10,
         attempt=1,
-        stage_run_id=1,
+        node_run_id=1,
     )
 
 

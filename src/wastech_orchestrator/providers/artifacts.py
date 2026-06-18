@@ -84,12 +84,12 @@ def create_attempt_dir(
     attempt: int,
     provider: str,
     *,
-    stage_run_id: int,
+    node_run_id: int,
     subtask: int | None = None,
 ) -> ArtifactPaths:
     """Create the attempt directory and return its :class:`ArtifactPaths`.
 
-    The directory must not already exist — logs are never overwritten (§10). ``stage_run_id`` is
+    The directory must not already exist — logs are never overwritten (§10). ``node_run_id`` is
     reserved in SQLite before the provider starts, so a repeated fixing cycle or recovery run gets
     a distinct directory even though its provider attempt counter starts again at one. A collision
     raises :class:`FileExistsError`.
@@ -97,7 +97,7 @@ def create_attempt_dir(
     stage_dir = Path(artifacts_root) / "logs" / task_id / "stages" / stage.value
     if subtask is not None:
         stage_dir = stage_dir / f"sub-{subtask:02d}"
-    attempt_dir = stage_dir / f"run-{stage_run_id:06d}" / f"{attempt}-{provider}"
+    attempt_dir = stage_dir / f"run-{node_run_id:06d}" / f"{attempt}-{provider}"
     attempt_dir.mkdir(parents=True, exist_ok=False)
     return ArtifactPaths(
         attempt_dir=str(attempt_dir),

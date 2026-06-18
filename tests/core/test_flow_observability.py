@@ -148,7 +148,7 @@ def test_record_provider_attempts_writes_one_row_per_attempt() -> None:
         _Services(store), run_id=7, outcome=_outcome()
     )
     assert [r.provider for r in store.rows] == ["codex", "claude"]
-    assert [r.stage_run_id for r in store.rows] == [7, 7]
+    assert [r.node_run_id for r in store.rows] == [7, 7]
     assert store.rows[0].error_class == "rate_limited"
     assert store.rows[0].exit_code == 1
 

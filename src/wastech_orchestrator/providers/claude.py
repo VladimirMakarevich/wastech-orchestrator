@@ -455,7 +455,7 @@ class ClaudeCodeProvider:
             request.stage,
             request.attempt,
             self.id,
-            stage_run_id=request.stage_run_id,
+            node_run_id=request.node_run_id,
         )
         self._write_output_schema(paths, request)
 
@@ -595,7 +595,7 @@ class ClaudeCodeProvider:
             "provider": self.id,
             "task_id": request.task_id,
             "stage": request.stage.value,
-            "stage_run_id": request.stage_run_id,
+            "node_run_id": request.node_run_id,
             "attempt": request.attempt,
             "working_directory": request.working_directory,
             "permission_profile": request.permission_profile,

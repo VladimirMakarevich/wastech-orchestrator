@@ -40,41 +40,6 @@ def test_legacy_zero_version_is_adopted_without_error(tmp_path: Path) -> None:
     assert _user_version(db) == DB_SCHEMA_VERSION
 
 
-def _stage_runs_columns(path: Path) -> set[str]:
-    conn = sqlite3.connect(str(path))
-    try:
-        return {str(r[1]) for r in conn.execute("PRAGMA table_info(stage_runs)")}
-    finally:
-        conn.close()
-
-
-def test_v1_database_is_migrated_to_add_skip_columns(tmp_path: Path) -> None:
-    # A pre-v2 stage_runs table lacks the skip columns; opening writable must add them in place.
-    db = tmp_path / "v1.db"
-    conn = sqlite3.connect(str(db))
-    conn.execute(
-        """
-        CREATE TABLE stage_runs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_id TEXT NOT NULL,
-            stage TEXT NOT NULL,
-            route_primary TEXT NOT NULL,
-            route_source TEXT NOT NULL,
-            stage_attempts INTEGER NOT NULL
-        )
-        """
-    )
-    conn.execute("PRAGMA user_version=1")
-    conn.commit()
-    conn.close()
-    assert "skipped" not in _stage_runs_columns(db)
-
-    StateStore.open(db).close()
-    cols = _stage_runs_columns(db)
-    assert {"skipped", "skip_reason"} <= cols
-    assert _user_version(db) == DB_SCHEMA_VERSION
-
-
 def _tasks_columns(path: Path) -> set[str]:
     conn = sqlite3.connect(str(path))
     try:

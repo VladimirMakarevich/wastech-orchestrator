@@ -12,9 +12,9 @@ from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.state_store import (
     ArtifactRow,
     CheckRunRow,
+    NodeRunRow,
     ProviderAttemptRow,
     PublishOpRow,
-    StageRunRow,
     StateStore,
     SubtaskRow,
     TaskRow,
@@ -148,81 +148,29 @@ def test_transaction_commits_atomically(store: StateStore) -> None:
     assert row.slug == "abc"
 
 
-def test_stage_run_and_provider_attempts(store: StateStore) -> None:
+def test_provider_attempts_round_trip(store: StateStore) -> None:
+    # provider_attempts hangs off a node_runs id (node_run_id); node-run reserve/complete/skip
+    # round-trips are covered in tests/state/test_node_runs.py.
     store.insert_task(_new_task())
-    run_id = store.record_stage_run(
-        StageRunRow(
+    run_id = store.record_node_run(
+        NodeRunRow(
             task_id="task-001",
-            stage="planning",
+            node_id="planning",
+            node_kind="agent",
+            status="running",
             route_primary="claude",
             route_fallback="codex",
             route_source="config",
-            provider_used="claude",
-            status="succeeded",
-            stage_attempts=1,
         )
     )
     assert run_id > 0
     store.record_provider_attempt(
-        ProviderAttemptRow(stage_run_id=run_id, provider="claude", attempt=1, status="succeeded")
+        ProviderAttemptRow(node_run_id=run_id, provider="claude", attempt=1, status="succeeded")
     )
     cur = store._conn.execute(  # noqa: SLF001 - inspecting persisted rows in a unit test
-        "SELECT provider FROM provider_attempts WHERE stage_run_id = ?", (run_id,)
+        "SELECT provider FROM provider_attempts WHERE node_run_id = ?", (run_id,)
     )
     assert [r["provider"] for r in cur.fetchall()] == ["claude"]
-
-
-def test_record_skip_writes_audit_row(store: StateStore) -> None:
-    store.insert_task(_new_task())
-    run_id = store.record_skip(
-        "task-001", "testing", reason="global config (agents.skip_stages)", subtask_order=2
-    )
-    assert run_id > 0
-    row = store._conn.execute(  # noqa: SLF001 - inspecting persisted rows in a unit test
-        "SELECT * FROM stage_runs WHERE id = ?", (run_id,)
-    ).fetchone()
-    assert row is not None
-    assert row["stage"] == "testing"
-    assert row["status"] == "skipped"
-    assert row["skipped"] == 1
-    assert row["skip_reason"] == "global config (agents.skip_stages)"
-    assert row["subtask_order"] == 2
-    assert row["provider_used"] is None
-    assert row["stage_attempts"] == 0
-
-
-def test_stage_run_can_be_reserved_then_completed(store: StateStore) -> None:
-    store.insert_task(_new_task())
-    run_id = store.record_stage_run(
-        StageRunRow(
-            task_id="task-001",
-            stage="fixing",
-            route_primary="claude",
-            route_source="config",
-            status="running",
-            stage_attempts=0,
-            started_at="t0",
-        )
-    )
-
-    store.complete_stage_run(
-        run_id,
-        status="succeeded",
-        provider_used="claude",
-        error_class=None,
-        stage_attempts=1,
-        finished_at="t1",
-    )
-
-    row = store._conn.execute(  # noqa: SLF001 - inspecting persisted rows in a unit test
-        "SELECT * FROM stage_runs WHERE id = ?", (run_id,)
-    ).fetchone()
-    assert row is not None
-    assert row["status"] == "succeeded"
-    assert row["provider_used"] == "claude"
-    assert row["stage_attempts"] == 1
-    assert row["started_at"] == "t0"
-    assert row["finished_at"] == "t1"
 
 
 def test_check_run_and_artifact(store: StateStore) -> None:
@@ -409,16 +357,10 @@ def test_no_secret_columns_in_schema(store: StateStore) -> None:
 
 
 def test_foreign_keys_enforced(store: StateStore) -> None:
-    # A stage_run for a non-existent task violates the FK (foreign_keys=ON).
+    # A node_run for a non-existent task violates the FK (foreign_keys=ON).
     with pytest.raises(sqlite3.IntegrityError):
-        store.record_stage_run(
-            StageRunRow(
-                task_id="missing",
-                stage="planning",
-                route_primary="claude",
-                route_source="config",
-                stage_attempts=1,
-            )
+        store.record_node_run(
+            NodeRunRow(task_id="missing", node_id="planning", node_kind="agent")
         )
 
 

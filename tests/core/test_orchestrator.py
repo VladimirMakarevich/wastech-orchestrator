@@ -109,7 +109,7 @@ class ArtifactWritingProvider(FakeProvider):
             request.stage,
             request.attempt,
             self.id,
-            stage_run_id=request.stage_run_id,
+            node_run_id=request.node_run_id,
         )
         result = super().run(request)
         Path(paths.stdout_path).write_text("provider output\n", encoding="utf-8")
@@ -557,7 +557,7 @@ def test_two_fix_cycles_use_distinct_stage_run_artifacts(
     def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
         if request.stage in (Stage.IMPLEMENTATION, Stage.FIXING):
             (git_repo.clone / "f.py").write_text(
-                f"stage_run_id = {request.stage_run_id}\n", encoding="utf-8"
+                f"node_run_id = {request.node_run_id}\n", encoding="utf-8"
             )
         return orig(request)
 
@@ -1977,7 +1977,7 @@ def test_prompt_audit_records_steps_in_order(git_repo, make_git_config, tmp_path
     audit_dir = _audit_dir(art, "task-001")
     step_files = sorted(audit_dir.glob("*.json"))
     assert step_files, "per-step audit files were written"
-    # Filenames are zero-padded stage_run_id → lexical sort is chronological.
+    # Filenames are zero-padded node_run_id → lexical sort is chronological.
     ids = [int(p.name.split("-")[0]) for p in step_files]
     assert ids == sorted(ids)
     # refined: true → refinement skipped; planning/implementation/review/summary are agent stages.
@@ -1988,7 +1988,7 @@ def test_prompt_audit_records_steps_in_order(git_repo, make_git_config, tmp_path
     lines = (audit_dir / "timeline.jsonl").read_text().splitlines()
     assert len(lines) == len(step_files)
     timeline = [json.loads(line) for line in lines]
-    assert [r["stage_run_id"] for r in timeline] == sorted(r["stage_run_id"] for r in timeline)
+    assert [r["node_run_id"] for r in timeline] == sorted(r["node_run_id"] for r in timeline)
     for rec in timeline:
         assert rec["prompt"]
         assert rec["agents"] and rec["agents"][0]["status"] == "succeeded"
