@@ -53,8 +53,6 @@ from wastech_orchestrator.providers.base import AgentRunRequest, Stage
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import NodeRunRow
 
-_HITL_STAGES = frozenset({Stage.REFINEMENT, Stage.PLANNING})
-
 
 class AgentNodeRunner:
     """Run an ``agent`` node through the router (constructed per unit with its services/inputs)."""
@@ -67,7 +65,7 @@ class AgentNodeRunner:
         assert isinstance(node, AgentNode)
         stage = self._s.stage_for_node[node.id]
         route = self._s.router.resolve_route(stage)
-        if stage in _HITL_STAGES:
+        if _wants_hitl(node):
             return self._run_with_hitl(node, ctx, stage, route)
         return self._run_simple(node, ctx, stage, route)
 
@@ -382,6 +380,17 @@ class AgentNodeRunner:
         self._in.session_ids[outcome.provider_used.value] = result.session_id
         if outcome.provider_used != route.primary:
             self._in.session_ids.pop(route.primary.value, None)
+
+
+def _wants_hitl(node: AgentNode) -> bool:
+    """A node opts into the durable HITL round-trip by declaring ``hitl`` with a capability flag.
+
+    Data-driven (flow-contract §2.1): the *decision* to do a human round-trip is the node's
+    declared ``hitl`` settings, never the stage name. The typed-output
+    parsing that follows is still keyed by stage (its schema is stage-specific); only the dispatch
+    is decoupled here.
+    """
+    return node.hitl is not None and (node.hitl.allow_question or node.hitl.allow_approval)
 
 
 def _dangerous_diff_signal(stage: Stage, dangerous: DangerousDiff) -> HumanInputSignal:

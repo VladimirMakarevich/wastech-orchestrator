@@ -39,6 +39,7 @@ from wastech_orchestrator.core.flow.schema import (
     EvaluatorNode,
     FlowDoc,
     FlowNode,
+    HitlSettings,
     PublishNode,
 )
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
@@ -349,8 +350,10 @@ class FakeNotifier:
 
 
 def _refinement_node() -> AgentNode:
+    # Refinement opts into HITL by declaring `hitl` (data-driven dispatch, not the stage name).
     return AgentNode(id="refinement", kind="agent", role_file="r.md",
-                     permission_profile=PermissionProfile.READ_ONLY)
+                     permission_profile=PermissionProfile.READ_ONLY,
+                     hitl=HitlSettings(allow_question=True))
 
 
 def test_agent_hitl_no_signal_proceeds(tmp_path: Path) -> None:
@@ -408,6 +411,32 @@ def test_agent_hitl_question_round_trip(tmp_path: Path) -> None:
     assert result.outcome.kind == "done"
     assert notifier.asks == ["Which API?"]
     assert router.calls == 2  # initial run + re-run with the answer
+
+
+def test_agent_hitl_dispatch_is_data_driven_not_stage(tmp_path: Path) -> None:
+    # A node on the REFINEMENT stage but WITHOUT a declared `hitl` must NOT do a round-trip even if
+    # the agent emits a signal — dispatch is by node.hitl, not the stage name (flow-contract §2.1).
+    (tmp_path / "r.md").write_text("refine", "utf-8")
+    node = AgentNode(id="refinement", kind="agent", role_file="r.md",
+                     permission_profile=PermissionProfile.READ_ONLY)  # no hitl declared
+    signal = {"kind": "question", "question": "ignored?", "context": "",
+              "risk": "clarification", "paths": []}
+    router = FakeRouter(_result({"content": "ok", "human_input": signal}))
+    notifier = FakeNotifier(None)
+    services = NodeServices(
+        router=router,
+        check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        store=FakeStore(),
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path),
+        stage_for_node={"refinement": Stage.REFINEMENT},
+        clock=lambda: "ts",
+        notifier=notifier,
+        ask_timeout_s=60,
+    )
+    result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "done"
+    assert notifier.asks == []  # no human round-trip despite the signal + refinement stage
 
 
 def test_agent_hitl_timeout_goes_manual(tmp_path: Path) -> None:
