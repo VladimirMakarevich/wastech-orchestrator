@@ -171,16 +171,10 @@ repo:
   branch_prefix: "agent"
 agents:
   allowed: [claude, codex]
-  routing:
-    refinement: {{primary: claude, fallback: codex}}
-    planning: {{primary: claude, fallback: codex}}
-    implementation: {{primary: claude, fallback: codex}}
-    review: {{primary: codex, fallback: claude}}
-    fixing: {{primary: claude, fallback: codex}}
-    summary: {{primary: claude, fallback: codex}}
   providers:
     claude:
       command: {claude_cmd!r}
+      primary: true
     codex:
       command: {codex_cmd!r}
 security:
@@ -201,7 +195,7 @@ git:
 
 def _complete_task_file(path: Path, task_id: str) -> None:
     path.write_text(
-        f'---\nid: {task_id}\ntitle: "Add a thing"\nrefined: true\n---\n\n'
+        f'---\nid: {task_id}\ntitle: "Add a thing"\n---\n\n'
         "## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
         encoding="utf-8",
     )

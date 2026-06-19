@@ -1,12 +1,10 @@
-"""Task model: id-regex accept/reject cases, tri-state decompose, schema constants."""
+"""Task model: id-regex accept/reject cases, tri-state flags, the clean-task schema (PRE.3)."""
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 
-from wastech_orchestrator.providers.base import ProviderId, Stage
+from wastech_orchestrator.providers.base import Stage
 from wastech_orchestrator.task.model import (
     ALLOWED_TASK_KEYS,
     REQUIRED_TASK_FIELDS,
@@ -42,85 +40,52 @@ def test_invalid_task_ids(task_id: str) -> None:
     assert not is_valid_task_id(task_id)
 
 
-def test_decompose_is_tri_state() -> None:
-    assert NormalizedTask(id="t", title="x", description="d").decompose is None
-    assert NormalizedTask(id="t", title="x", description="d", decompose=True).decompose is True
-    assert NormalizedTask(id="t", title="x", description="d", decompose=False).decompose is False
+def test_auto_merge_is_tri_state() -> None:
+    assert NormalizedTask(id="t", title="x", description="d").auto_merge is None
+    assert NormalizedTask(id="t", title="x", description="d", auto_merge=True).auto_merge is True
+    assert NormalizedTask(id="t", title="x", description="d", auto_merge=False).auto_merge is False
+
+
+def test_prompt_audit_is_tri_state() -> None:
+    assert NormalizedTask(id="t", title="x", description="d").prompt_audit is None
+    t = NormalizedTask(id="t", title="x", description="d", prompt_audit=True)
+    assert t.prompt_audit is True
 
 
 def test_default_collections_are_independent() -> None:
     a = NormalizedTask(id="a", title="A", description="d")
     b = NormalizedTask(id="b", title="B", description="d")
-    a.agents[Stage.PLANNING] = ProviderId.CODEX
     a.contacts.append("ops")
-    a.stage_params[Stage.PLANNING] = StageParams(model="m")
-    assert b.agents == {} and b.contacts == [] and b.stage_params == {}
+    a.stage_params[Stage.PLANNING] = StageParams(enabled=False)
+    assert b.contacts == [] and b.stage_params == {}
 
 
 def test_schema_constants() -> None:
+    # A clean task carries only identity/dispatch + the two sanctioned exceptions (PRE.3):
+    # ``stages.<stage>.enabled`` (skip) and ``auto_merge`` (task-wins). No provider/model/reasoning/
+    # decompose/refined.
     assert {
         "id",
         "title",
         "pr_title",
-        "refined",
-        "decompose",
         "auto_merge",
         "prompt_audit",
-        "agents",
         "contacts",
-        "model",
-        "reasoning",
         "stages",
     } == ALLOWED_TASK_KEYS
     assert {"id", "title"} == REQUIRED_TASK_FIELDS
     assert REQUIRED_TASK_FIELDS <= ALLOWED_TASK_KEYS
 
 
-def _task(**kwargs: Any) -> NormalizedTask:
-    return NormalizedTask(id="t", title="x", description="d", **kwargs)
-
-
-def test_model_for_falls_back_to_task_wide_when_no_stage_params() -> None:
-    task = _task(model="task-model", reasoning="low")
-    assert task.model_for(Stage.PLANNING) == "task-model"
-    assert task.reasoning_for(Stage.PLANNING) == "low"
-
-
-def test_model_for_uses_stage_override() -> None:
-    task = _task(
-        model="task-model",
-        reasoning="low",
-        stage_params={Stage.PLANNING: StageParams(model="opus", reasoning="high")},
+def test_disabled_stages_reflects_enabled_false_only() -> None:
+    task = NormalizedTask(
+        id="t",
+        title="x",
+        description="d",
+        stage_params={
+            Stage.REVIEW: StageParams(enabled=False),
+            Stage.TESTING: StageParams(enabled=True),
+            Stage.PLANNING: StageParams(),  # unset → default (runs)
+        },
     )
-    assert task.model_for(Stage.PLANNING) == "opus"
-    assert task.reasoning_for(Stage.PLANNING) == "high"
-    # A stage without an override still gets the task-wide value.
-    assert task.model_for(Stage.IMPLEMENTATION) == "task-model"
-    assert task.reasoning_for(Stage.IMPLEMENTATION) == "low"
-
-
-def test_model_and_reasoning_resolved_independently() -> None:
-    # Only reasoning overridden for the stage → model stays task-wide.
-    task = _task(
-        model="task-model",
-        reasoning="low",
-        stage_params={Stage.REVIEW: StageParams(reasoning="high")},
-    )
-    assert task.model_for(Stage.REVIEW) == "task-model"
-    assert task.reasoning_for(Stage.REVIEW) == "high"
-
-
-def test_stage_params_none_fields_inherit_task_wide() -> None:
-    task = _task(
-        model="task-model",
-        reasoning="low",
-        stage_params={Stage.PLANNING: StageParams()},
-    )
-    assert task.model_for(Stage.PLANNING) == "task-model"
-    assert task.reasoning_for(Stage.PLANNING) == "low"
-
-
-def test_model_for_returns_none_when_nothing_set() -> None:
-    task = _task()
-    assert task.model_for(Stage.PLANNING) is None
-    assert task.reasoning_for(Stage.PLANNING) is None
+    assert task.disabled_stages() == frozenset({Stage.REVIEW})

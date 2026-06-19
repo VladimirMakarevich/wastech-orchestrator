@@ -11,7 +11,6 @@ All problems are collected and raised together via the typed :class:`ConfigError
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
 
 from wastech_orchestrator.checks.model import (
     CheckCommandError,
@@ -21,12 +20,10 @@ from wastech_orchestrator.checks.model import (
 )
 from wastech_orchestrator.config.loader import ConfigError
 from wastech_orchestrator.config.schema import (
-    ROUTABLE_STAGES,
     CheckDiscoveryMode,
     OrchestratorConfig,
-    RouteConfig,
 )
-from wastech_orchestrator.providers.base import ProviderId, Stage
+from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.security.forbidden_args import find_forbidden_args
 
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -44,23 +41,26 @@ def _check_extra_args(pid: ProviderId, args: tuple[str, ...], issues: list[str])
         issues.append(f"{where}: {reason}")
 
 
-def _check_route(
-    stage: Stage,
-    route: RouteConfig,
-    allowed: frozenset[ProviderId],
-    providers: frozenset[ProviderId],
-    issues: list[str],
+def _check_global_primary(
+    config: OrchestratorConfig, allowed: frozenset[ProviderId], issues: list[str]
 ) -> None:
-    where = f"agents.routing.{stage.value}"
-    for role, provider in (("primary", route.primary), ("fallback", route.fallback)):
-        if provider is None:
-            continue
-        if provider not in allowed:
-            issues.append(f"{where}.{role}: provider {provider.value!r} is not in agents.allowed")
-        if provider not in providers:
-            issues.append(
-                f"{where}.{role}: provider {provider.value!r} has no agents.providers entry"
-            )
+    """Exactly one configured provider must be the global primary, and it must be allowed (PRE.1).
+
+    The global primary runs any flow node with no ``provider`` field and is the sole
+    infrastructure-fallback target; the router relies on this invariant.
+    """
+    primaries = [pid for pid, p in config.agents.providers.items() if p.primary]
+    if len(primaries) != 1:
+        issues.append(
+            "agents.providers: exactly one provider must set primary: true "
+            f"(found {len(primaries)}: {sorted(p.value for p in primaries)})"
+        )
+        return
+    if primaries[0] not in allowed:
+        issues.append(
+            f"agents.providers.{primaries[0].value}.primary: the global primary must be in "
+            "agents.allowed"
+        )
 
 
 def validate_config(config: OrchestratorConfig) -> list[str]:
@@ -72,17 +72,9 @@ def validate_config(config: OrchestratorConfig) -> list[str]:
     warnings: list[str] = []
     agents = config.agents
     allowed = frozenset(agents.allowed)
-    provider_ids = frozenset(agents.providers)
 
-    # Routes: only agent-routed stages, with primary/fallback known and configured.
-    for stage, route in agents.routing.items():
-        if stage not in ROUTABLE_STAGES:
-            issues.append(
-                f"agents.routing: {stage.value!r} is not an agent-routed stage "
-                f"(allowed: {sorted(s.value for s in ROUTABLE_STAGES)})"
-            )
-            continue
-        _check_route(stage, route, allowed, provider_ids, issues)
+    # Provider routing: exactly one global primary, in agents.allowed (PRE.1 — node-based routing).
+    _check_global_primary(config, allowed, issues)
 
     # Watch poll interval (§8.3): negative is meaningless; 0 means single-pass (no loop).
     if config.orchestrator.poll_interval_seconds < 0:
@@ -182,28 +174,3 @@ def _validate_checks(config: OrchestratorConfig, issues: list[str], warnings: li
         warnings.append(
             "checks.discovery.mode is 'disabled': the quality gate is OFF — no checks will run"
         )
-
-
-def check_task_route_override(
-    override: Mapping[Stage, ProviderId], config: OrchestratorConfig
-) -> list[str]:
-    """Validate a per-task route override (front-matter ``agents``) against the config.
-
-    A task may only pick an allowed, configured provider for an agent-routed stage — it can never
-    change a provider's command, ``extra_args``, or any security setting (that is structurally
-    impossible from the task model, and enforced here). Pure: returns problems, raises nothing.
-    Used by the Router in P4.
-    """
-    issues: list[str] = []
-    allowed = frozenset(config.agents.allowed)
-    provider_ids = frozenset(config.agents.providers)
-    for stage, provider in override.items():
-        where = f"task.agents.{stage.value}"
-        if stage not in ROUTABLE_STAGES:
-            issues.append(f"{where}: {stage.value!r} is not an agent-routed stage")
-            continue
-        if provider not in allowed:
-            issues.append(f"{where}: provider {provider.value!r} is not in agents.allowed")
-        if provider not in provider_ids:
-            issues.append(f"{where}: provider {provider.value!r} has no agents.providers entry")
-    return issues

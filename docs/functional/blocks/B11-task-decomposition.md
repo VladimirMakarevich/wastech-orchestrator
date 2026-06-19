@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Deterministically decides whether to split a task into subtasks based on structured output from the `planning` stage, and persists subtask artifacts. Implements the "agent proposes — core decides" principle: the planner may _recommend_ a split, but the core accepts it only according to a hard rule (the agent cannot relax `max_subtasks`, routing, or security). Disabled by default.
+Deterministically decides whether to split a task into subtasks based on structured output from the `planning` stage, and persists subtask artifacts. Implements the "agent proposes — core decides" principle: the planner may _recommend_ a split, but the core accepts it only according to a hard rule (the agent cannot relax `max_subtasks` or security). Whether decomposition is permitted at all is the config default `agents.decomposition.enabled` (PRE.3 — there is no per-task `decompose` flag); the flow's `decomposition:` block and the planning node's gate proposal decide whether a split actually happens. Disabled by default.
 
 ## Responsibilities
 
@@ -20,12 +20,12 @@ Deterministically decides whether to split a task into subtasks based on structu
 
 - **Launching subtasks** (the implement→test→review→fix cycle per unit) — that is [B06](./B06-orchestrator-pipeline.md).
 - **Persisting subtasks to SQLite** — that is [B07 `insert_subtasks`/`set_subtask_commit`](./B07-state-machine-and-store.md).
-- **Resolving `gate_on`** (config `decomposition.enabled` + per-task `decompose` tri-state) — that is [B06 `_decomposition_gate_on`](./B06-orchestrator-pipeline.md).
+- **Resolving `gate_on`** (the config default `agents.decomposition.enabled`; PRE.3 — no per-task `decompose` flag) — that is [B06 `_decomposition_gate_on`](./B06-orchestrator-pipeline.md) ([orchestrator.py:1759-1763](../../../src/wastech_orchestrator/core/orchestrator.py#L1759)).
 - **Validating the planning output schema** — that is [B12 `parse_typed_stage_output`](./B12-hitl-and-typed-output.md); the input is rechecked defensively here.
 
 ## Entry Points
 
-- `decide_decomposition(structured_output, *, gate_on, max_subtasks)` → `DecompositionDecision` ([decomposition.py:106](../../../src/wastech_orchestrator/core/decomposition.py#L106)) — [B06 `_planning`](./B06-orchestrator-pipeline.md) ([orchestrator.py:1093](../../../src/wastech_orchestrator/core/orchestrator.py#L1093)).
+- `decide_decomposition(structured_output, *, gate_on, max_subtasks)` → `DecompositionDecision` ([decomposition.py:106](../../../src/wastech_orchestrator/core/decomposition.py#L106)) — reached via [B06 `_engine_materialize_decomposition`](./B06-orchestrator-pipeline.md) (the planning node's `proposed_by` post-hook) ([orchestrator.py:1102-1108](../../../src/wastech_orchestrator/core/orchestrator.py#L1102)).
 - `write_subtask_artifacts` / `update_subtask_index` ([decomposition.py:170,202](../../../src/wastech_orchestrator/core/decomposition.py#L170)) — [B06](./B06-orchestrator-pipeline.md).
 - `SubtaskSpec`, `DecompositionDecision`, reason codes, `SUBTASK_*` statuses.
 
@@ -42,7 +42,7 @@ Structured planning output (`decompose`, `subtasks[]`), `gate_on` flag, `max_sub
 5. `order` is not exactly `1..n`, or `depends_on` references non-strictly earlier items → single unit (`non_linear_dependencies`).
 6. Otherwise → `accepted` with sorted `SubtaskSpec`.
 
-The deterministic acceptance rule §5.1 — the first failed check yields "single unit" with a reason code (the agent cannot relax the limit, routing, or dependency linearity):
+The deterministic acceptance rule §5.1 — the first failed check yields "single unit" with a reason code (the agent cannot relax the limit or dependency linearity):
 
 ```mermaid
 flowchart TB

@@ -111,7 +111,6 @@ def build_git_config(
     auto_mode: bool = False,
     auto_merge: bool = False,
     auto_merge_strategy: str = "squash",
-    auto_merge_allow_per_task: bool = False,
     auto_merge_wait_for_checks: bool = False,
     prompt_audit: bool = False,
 ) -> OrchestratorConfig:
@@ -136,16 +135,10 @@ agents:
 {skip_block}  decomposition:
     enabled: {str(decomposition).lower()}
     max_subtasks: {max_subtasks}
-  routing:
-    refinement: {{primary: claude, fallback: codex}}
-    planning: {{primary: claude, fallback: codex}}
-    implementation: {{primary: claude, fallback: codex}}
-    review: {{primary: codex, fallback: claude}}
-    fixing: {{primary: claude, fallback: codex}}
-    summary: {{primary: claude, fallback: codex}}
   providers:
     claude:
       command: "claude"
+      primary: true
     codex:
       command: "codex"
 security:
@@ -160,7 +153,6 @@ git:
   pr_base: "main"
   auto_merge: {str(auto_merge).lower()}
   auto_merge_strategy: {auto_merge_strategy}
-  auto_merge_allow_per_task: {str(auto_merge_allow_per_task).lower()}
   auto_merge_wait_for_checks: {str(auto_merge_wait_for_checks).lower()}
   footprint:
     audit_commit_message: "chore(orchestrator): audit trail for {{task_id}}"

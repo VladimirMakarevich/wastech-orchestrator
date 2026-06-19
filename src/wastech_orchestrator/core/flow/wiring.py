@@ -6,10 +6,11 @@ checks / git / notifier / store) and the per-run ``_Pipeline`` into the data bun
 runners read. Keeping it here (not in ``orchestrator.py``) keeps the node layer free of any
 orchestrator import and makes the mapping unit-testable with fakes.
 
-The ``node_id -> Stage`` map (:func:`build_stage_map`) is **routing data**, not behavior: the
-router still selects a provider by ``Stage``, so each routed (agent / evaluator) node needs a
-stage. It is the single remaining stage-coupling, removed when routing becomes node-based (P4).
-Checks / publish nodes are not routed and never index it (the engine-driver test relies on this).
+Routing is node-based now (a node's ``provider`` field, else the global primary — PRE.1), so the
+``node_id -> Stage`` map (:func:`build_stage_map`) no longer selects a provider. It supplies each
+agent / evaluator node's ``Stage`` *identity* — the request ``stage``, its output schema, HITL
+parsing, and interaction paths — which the ``Stage`` enum still backs until P4. Checks / publish
+nodes have no stage and never index it (the engine-driver test relies on this).
 """
 
 from __future__ import annotations
@@ -41,12 +42,13 @@ _STAGE_VALUES = frozenset(s.value for s in Stage)
 
 
 def build_stage_map(snapshot: FlowSnapshot) -> dict[str, Stage]:
-    """Map each routed node id to its routing ``Stage``.
+    """Map each agent / evaluator node id to its ``Stage`` identity.
 
-    Only agent / evaluator nodes are routed, and in the packaged flows their ids are Stage-aligned
-    (``implementation`` -> ``IMPLEMENTATION`` …). A routed node whose id is not a ``Stage`` value
-    is a P1 limitation (arbitrary operator-flow ids get node-based routing in P4); it is absent
-    from the map, so its runner raises ``KeyError`` — a loud, early failure, not a silent one.
+    In the packaged flows these ids are Stage-aligned (``implementation`` -> ``IMPLEMENTATION`` …).
+    The map supplies the node's request ``stage`` (output schema, HITL parsing, interaction paths),
+    not its provider — routing is node-based (PRE.1). An agent / evaluator node whose id is not a
+    ``Stage`` value is absent from the map, so its runner raises ``KeyError`` — a loud, early
+    failure (a P4 cleanup, when the ``Stage`` enum is removed entirely).
     """
     return {
         node.id: Stage(node.id)
@@ -138,7 +140,4 @@ def build_node_inputs(
         commit_message=commit_message,
         contacts=tuple(p.task.contacts),
         session_ids=p.session_ids,
-        model_for=p.task.model_for,
-        reasoning_for=p.task.reasoning_for,
-        route_override=dict(p.task.agents),
     )

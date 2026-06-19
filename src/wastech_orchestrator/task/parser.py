@@ -22,7 +22,7 @@ from typing import Any
 import yaml
 
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
-from wastech_orchestrator.providers.base import ProviderId, Stage
+from wastech_orchestrator.providers.base import Stage
 from wastech_orchestrator.task.model import NormalizedTask, StageParams
 
 # For a ``.json`` task the body lives in this reserved key (a ``.md`` task carries it as the body
@@ -207,14 +207,9 @@ def write_normalized(task: NormalizedTask, artifacts_root: str | Path) -> str:
         "id": task.id,
         "title": task.title,
         "description": task.description,
-        "refined": task.refined,
-        "decompose": task.decompose,
         "auto_merge": task.auto_merge,
         "prompt_audit": task.prompt_audit,
-        "agents": {stage.value: provider.value for stage, provider in task.agents.items()},
         "contacts": list(task.contacts),
-        "model": task.model,
-        "reasoning": task.reasoning,
         "stages": {stage.value: _stage_params_json(sp) for stage, sp in task.stage_params.items()},
     }
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -224,10 +219,6 @@ def write_normalized(task: NormalizedTask, artifacts_root: str | Path) -> str:
 def _stage_params_json(sp: StageParams) -> dict[str, Any]:
     """Serialize a :class:`StageParams`, omitting unset (``None``) fields."""
     out: dict[str, Any] = {}
-    if sp.model is not None:
-        out["model"] = sp.model
-    if sp.reasoning is not None:
-        out["reasoning"] = sp.reasoning
     if sp.enabled is not None:
         out["enabled"] = sp.enabled
     return out
@@ -237,28 +228,16 @@ def load_normalized(artifacts_root: str | Path, task_id: str) -> NormalizedTask:
     """Read back a ``task.normalized.json`` written by :func:`write_normalized` (recovery, §13)."""
     path = task_artifact_dir(artifacts_root, task_id) / NORMALIZED_FILENAME
     data = json.loads(path.read_text(encoding="utf-8"))
-    agents = {
-        Stage(stage): ProviderId(provider) for stage, provider in (data.get("agents") or {}).items()
-    }
     stage_params = {
-        Stage(stage): StageParams(
-            model=sp.get("model"),
-            reasoning=sp.get("reasoning"),
-            enabled=sp.get("enabled"),
-        )
+        Stage(stage): StageParams(enabled=sp.get("enabled"))
         for stage, sp in (data.get("stages") or {}).items()
     }
     return NormalizedTask(
         id=data["id"],
         title=data["title"],
         description=data.get("description", ""),
-        refined=bool(data.get("refined", False)),
-        decompose=data.get("decompose"),
         auto_merge=data.get("auto_merge"),
         prompt_audit=data.get("prompt_audit"),
-        agents=agents,
         contacts=list(data.get("contacts", [])),
-        model=data.get("model"),
-        reasoning=data.get("reasoning"),
         stage_params=stage_params,
     )

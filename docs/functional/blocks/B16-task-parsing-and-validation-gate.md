@@ -23,8 +23,8 @@ Transforms a task file (`.md` with frontmatter + body, or a `.json` object) into
 
 - **Moving the file** to quarantine/lifecycle folder — that is [B06](./B06-orchestrator-pipeline.md) (`_quarantine`/`_relocate_task_file`); the gate only writes the report and returns a result.
 - **Data source for id dedup** — injected callbacks `store_has_task_id` ([B07](./B07-state-machine-and-store.md)) and `ledger_has_task_id` ([B08](./B08-ledger-and-failure-reports.md)) ([validation_gate.py:108-119](../../../src/wastech_orchestrator/task/validation_gate.py#L108)).
-- **Route override validation** is delegated to [B05 `check_task_route_override`](./B05-configuration.md) ([validation_gate.py:315-318](../../../src/wastech_orchestrator/task/validation_gate.py#L315)).
-- **Injection scan** is delegated to [B25 `scan_frontmatter`](./B25-security-policy.md) ([validation_gate.py:236](../../../src/wastech_orchestrator/task/validation_gate.py#L236)).
+- **Per-task provider routing** — a task can no longer repoint a stage's provider (PRE.3); routing is node-based (the flow node's `provider`). There is no per-task `agents` field to validate.
+- **Injection scan** is delegated to [B25 `scan_frontmatter`](./B25-security-policy.md) ([validation_gate.py](../../../src/wastech_orchestrator/task/validation_gate.py)).
 - Slot acquisition, branch creation, provider launch.
 
 ## Entry Points
@@ -70,11 +70,11 @@ For `.json`, the body is taken from the `description` key; a non-object at the t
 
 ## Checks and Constraints
 
-- 14 machine reject reasons (`ValidationReason`): file_too_large, not_utf8, binary_or_control_chars, too_long, frontmatter_missing, frontmatter_malformed, unknown_top_level_field, missing_required_field, invalid_field_type, invalid_task_id, duplicate_task_id, invalid_route_override, invalid_stage_override, review_skip_not_allowed, injection_suspected ([validation_gate.py:56-73](../../../src/wastech_orchestrator/task/validation_gate.py#L56)).
+- 13 machine reject reasons (`ValidationReason`): file_too_large, not_utf8, binary_or_control_chars, too_long, frontmatter_missing, frontmatter_malformed, unknown_top_level_field, missing_required_field, invalid_field_type, invalid_task_id, duplicate_task_id, invalid_stage_override, review_skip_not_allowed, injection_suspected ([validation_gate.py](../../../src/wastech_orchestrator/task/validation_gate.py)).
 - Duplicate frontmatter keys (YAML and JSON) → `frontmatter_malformed` (not "silently keep last") ([parser.py:67-92](../../../src/wastech_orchestrator/task/parser.py#L67)).
-- `id` — strict `^[a-z0-9][a-z0-9._-]{0,63}$`, **reject, do not sanitize** ([model.py:19-42](../../../src/wastech_orchestrator/task/model.py#L19)).
-- Tristate `decompose`/`auto_merge`/`prompt_audit` (true/false/None); `model`/`reasoning` are validated (reasoning ∈ {low, medium, high, xhigh, max}) ([validation_gate.py:50,426-444](../../../src/wastech_orchestrator/task/validation_gate.py#L426)).
-- `stages.<stage>`: `model`/`reasoning` only for `ROUTABLE_STAGES`, `enabled` only for `SKIPPABLE_STAGES`; `stages.review.enabled: false` requires `agents.allow_review_skip` ([validation_gate.py:321-395](../../../src/wastech_orchestrator/task/validation_gate.py#L321)).
+- `id` — strict `^[a-z0-9][a-z0-9._-]{0,63}$`, **reject, do not sanitize** ([model.py](../../../src/wastech_orchestrator/task/model.py)).
+- The "clean task" allowlist (PRE.3): `id`, `title`, `pr_title`, `auto_merge`, `prompt_audit`, `contacts`, `stages` — any other key is `unknown_top_level_field`. `auto_merge`/`prompt_audit` are tri-state (true/false/None). Provider/model/reasoning/decompose/refined are no longer task fields ([model.py](../../../src/wastech_orchestrator/task/model.py)).
+- `stages.<stage>`: the **only** valid sub-key is `enabled` (the skip toggle), and only for `SKIPPABLE_STAGES`; `stages.review.enabled: false` requires `agents.allow_review_skip` ([validation_gate.py](../../../src/wastech_orchestrator/task/validation_gate.py)).
 
 ## Output
 
@@ -97,7 +97,7 @@ For `.json`, the body is taken from the `description` key; a non-object at the t
 ### Uses
 
 - [B25 — Security](./B25-security-policy.md) — `scan_frontmatter`.
-- [B05 — Configuration](./B05-configuration.md) — `check_task_route_override`, `ROUTABLE_STAGES`/`SKIPPABLE_STAGES`, `validation.*` limits.
+- [B05 — Configuration](./B05-configuration.md) — `SKIPPABLE_STAGES`, `validation.*` limits.
 - [B07](./B07-state-machine-and-store.md) / [B08](./B08-ledger-and-failure-reports.md) — id dedup callbacks (`task_id_exists` / `has_task_id`).
 - [B20](./B20-artifact-layout.md) — `task_artifact_dir` for the normalized manifest and report.
 
@@ -111,7 +111,7 @@ First gate in the pipeline. On `passed` the orchestrator claims a slot and proce
 
 ## Code Evidence
 
-- [task/model.py:19-104](../../../src/wastech_orchestrator/task/model.py#L19) — id regex, key schema, `NormalizedTask`, `model_for`/`reasoning_for`/`disabled_stages`.
+- [task/model.py](../../../src/wastech_orchestrator/task/model.py) — id regex, the clean-task key schema, `NormalizedTask`, `disabled_stages`.
 - [task/parser.py:61-262](../../../src/wastech_orchestrator/task/parser.py#L61) — reading, frontmatter split (reject on duplicates), `extract_section`, `slugify`, normalized manifest.
 - [task/validation_gate.py:121-413](../../../src/wastech_orchestrator/task/validation_gate.py#L121) — Phase A/B, reasons, injection and route override delegation.
 - Tests: [test_model.py](../../../tests/task/test_model.py), [test_parser.py](../../../tests/task/test_parser.py), [test_validation_gate.py](../../../tests/task/test_validation_gate.py) — admit/reject for each reason, duplicate keys, completeness classification.

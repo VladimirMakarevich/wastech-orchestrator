@@ -1,41 +1,21 @@
 ---
+# A "clean" task: identity/dispatch only, plus the two sanctioned exceptions — `stages.<>.enabled`
+# (per-task skip) and `auto_merge` (task-wins). Provider, model, and reasoning live on the FLOW NODE
+# (config.yaml providers + the flow YAML), never the task. Refinement-skip is automatic (a complete
+# task — description + acceptance criteria — skips it); decomposition is decided by the flow.
 id: task-webhook-retry-budget
 title: "Add a bounded retry budget to webhook delivery"
 pr_title: "feat(webhooks): bounded retry budget for delivery" # overrides the auto-generated PR title (omit to auto-generate from title)
-refined: false # true = skip the refinement stage (criteria below already make it complete)
-decompose: false # true = force split into subtasks / false = disable / omit = config default
-auto_merge: false # true = auto-merge (DANGER: skips human review; only if config git.auto_merge_allow_per_task) / false = opt out / omit = config default
+auto_merge: false # true = auto-merge (DANGER: skips human review; the task author owns this call) / false = opt out / omit = config default. The task value wins outright.
 contacts: # handles surfaced for human-in-the-loop prompts and approvals
   - "@team-lead"
   - "@webhooks-oncall"
-agents: # per-stage provider override — only agent-routed stages; only providers in agents.allowed
-  refinement: claude
-  planning: claude
-  implementation: codex
-  review: claude
-  fixing: codex
-  summary: claude
-model: claude-sonnet-4-6 # task-wide default model for agent-routed stages not overridden under `stages`
-reasoning: medium # task-wide default reasoning: low | medium | high | xhigh | max
-stages: # per-stage overrides; precedence: stages.<stage> -> task-wide -> provider default
-  refinement:
-    model: claude-opus-4-8
-  planning:
-    model: claude-opus-4-8
-    reasoning: high
-  implementation:
-    model: claude-sonnet-4-6
-    reasoning: medium
-  review:
-    reasoning: high # only reasoning overridden — model stays the task-wide default
-  fixing:
-    model: claude-sonnet-4-6
+stages: # the ONLY per-stage knob is `enabled` (the skip toggle). Skippable: planning, testing, review, fixing, summary.
   testing:
-    enabled: true # testing is skippable but runs no agent -> only `enabled` is valid here (no model/reasoning); false would skip checks (rarely wanted)
+    enabled: true # explicit default (it runs). false would skip the check gate (rarely wanted).
   summary:
-    enabled:
-      false # (illustrative) skip a stage; routing & `enabled` are independent. Skippable: planning, testing, review, fixing, summary.
-      # skipping `review` also needs agents.allow_review_skip; implementation/refinement are never skippable; publishing is not per-task.
+    enabled: false # (illustrative) skip the summary stage.
+    # skipping `review` also needs agents.allow_review_skip; implementation/refinement are never skippable; publishing is not per-task.
 ---
 
 ## Description

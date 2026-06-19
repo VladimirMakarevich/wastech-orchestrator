@@ -130,8 +130,6 @@ Create `tasks/pending/task-001.md`:
 ---
 id: task-001
 title: "Add login form validation"
-refined: false
-decompose: false
 ---
 
 ## Description
@@ -151,7 +149,7 @@ Add client-side validation to the login form. Show a validation error when the e
 - Add or update focused tests for the login form.
 ```
 
-The validation gate requires front matter, a valid `id`, a non-empty `title`, and a non-empty Description section. Acceptance criteria are not a structural reject, but in the current implementation they make the task complete enough to skip autonomous refinement when `refined: true` is not set. Constraints are still strongly recommended because they keep the implementation scope clear.
+The validation gate requires front matter, a valid `id`, a non-empty `title`, and a non-empty Description section. Acceptance criteria are not a structural reject, but they make the task complete enough to skip autonomous refinement (refinement-skip is deterministic — driven by completeness, with no task flag). Constraints are still strongly recommended because they keep the implementation scope clear.
 
 Task authoring details are in [task-authoring.md](task-authoring.md).
 
@@ -265,30 +263,20 @@ python -m wastech_orchestrator --config ./config.yaml status task-001
 
 Without a task id, `status` shows active tasks or the most recently updated task. It reports the persisted status, current stage when applicable, configured primary provider, branch, subtask, fix counter, last update time, and elapsed time since that update. It opens `state.db` read-only.
 
-## 7. Override Providers Per Stage
+## 7. Choose Which Provider Runs a Node
 
-Global routing lives in `config.yaml` under `agents.routing`. A task may override only the provider for known agent stages, and only to a provider listed in `agents.allowed`.
+Provider routing is **node-based** — it lives on the flow, not the task. Each agent/evaluator node in the flow YAML may declare its own `provider:` (`codex` | `claude`); a node with no `provider` runs on the **global primary** (the one `config.yaml` provider marked `primary: true`, which must be in `agents.allowed`). The global primary is also the sole infrastructure-fallback target.
 
 ```yaml
----
-id: task-002
-title: "Update API pagination"
-agents:
-  planning: codex
-  implementation: claude
-  review: codex
----
+# in an operator flow (.worc/flows/<task_type>.yaml) or a packaged flow node:
+- id: review
+  kind: evaluator
+  role: review
+  role_file: roles/review.md
+  provider: codex # this node runs on codex; omit to use the global primary
 ```
 
-Allowed stage keys are:
-
-```text
-refinement, planning, implementation, review, fixing, summary
-```
-
-`testing` and `publishing` are not provider-routed stages. They are executed by the Check Runner and Git Manager.
-
-Task overrides cannot change provider commands, credentials, sandbox settings, `extra_args`, or any security policy.
+A **task** cannot repoint a stage's provider, set a model, or change reasoning — those are flow/operator concerns (see [configuration.md](configuration.md#agentsproviders)). `testing` and `publishing` run no agent (Check Runner / Git Manager). A node `provider` must be in `agents.allowed` (a fatal preflight error otherwise) and can never change provider commands, credentials, sandbox settings, `extra_args`, or any security policy.
 
 ## 7a. Customize a Node's Prompt
 
@@ -423,13 +411,6 @@ Codex-only:
 agents:
   allowed:
     - codex
-  routing:
-    refinement: { primary: codex, fallback: null }
-    planning: { primary: codex, fallback: null }
-    implementation: { primary: codex, fallback: null }
-    review: { primary: codex, fallback: null }
-    fixing: { primary: codex, fallback: null }
-    summary: { primary: codex, fallback: null }
   providers:
     codex:
       command: "codex"
@@ -438,6 +419,7 @@ agents:
       sandbox: "workspace-write"
       permission_profile: "workspace-write"
       extra_args: []
+      primary: true # the global primary (exactly one; must be in agents.allowed)
 ```
 
 No automatic PR creation:

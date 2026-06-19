@@ -42,7 +42,7 @@ Allowlist of keys + parent environment; list of argv tokens; frontmatter diction
 - **Environment:** returns a fresh dict containing only the `allowed_keys` that exist in the parent, in allowlist order; a missing key is skipped (never empty) ([env.py:29-30](../../../src/wastech_orchestrator/security/env.py#L29)).
 - **Forbidden flags:** for each token the part before `=` is taken; reject if it starts with `--dangerously` or is in `{--yolo, --ignore-rules}`; for `--sandbox`/`-s` — reject if the value is `danger-full-access` ([forbidden_args.py:44-54](../../../src/wastech_orchestrator/security/forbidden_args.py#L44)).
 - **Injections:** a value is rejected if, after stripping, it starts with `-`, or contains any of `; \\ | $( \n \r`, or matches a forbidden flag pattern; nested dicts/lists are processed recursively with key-paths of the form `agents.review`/`contacts[0]` ([injection.py:60-80](../../../src/wastech_orchestrator/security/injection.py#L60)).
-- **Isolation:** for each "in-use" provider (`agents.allowed` ∪ all primary/fallback routes) the adapter's `isolation_reasons` is called; reasons are collected with an id prefix; `[]` = all ok ([isolation.py:37-61](../../../src/wastech_orchestrator/security/isolation.py#L37)).
+- **Isolation:** for each "in-use" provider (`agents.allowed` — every flow node either declares a `provider` that must be in the allowlist or defaults to the global primary, which is also in it) the adapter's `isolation_reasons` is called; reasons are collected with an id prefix; `[]` = all ok ([isolation.py:38-57](../../../src/wastech_orchestrator/security/isolation.py#L38)).
 - **Strictness:** `read-only` (rank 0) is stricter than `workspace-write` (rank 1); `candidate` is ok if its rank ≤ the rank of `reference` ([profiles.py:17-34](../../../src/wastech_orchestrator/security/profiles.py#L17)).
 
 Five independent pure primitives — each covers its own aspect of the invariant and is applied at its own points (defense-in-depth):
@@ -68,7 +68,7 @@ flowchart LR
 - **Fail-closed everywhere:** unknown profile in `is_same_or_stricter` → `False` (policy must not be weakened for fallback) ([profiles.py:32-33](../../../src/wastech_orchestrator/security/profiles.py#L32)).
 - The `--dangerously*` prefix catches any future bypass flags.
 - Injection scan is "reject, not sanitize"; applied only to **frontmatter values**, not to the task body ([injection.py:7-8,15-16](../../../src/wastech_orchestrator/security/injection.py#L7)).
-- Isolation checks only "in-use" providers so that an extra provider block does not break the launch ([isolation.py:47-61](../../../src/wastech_orchestrator/security/isolation.py#L47)).
+- Isolation checks only "in-use" providers (`agents.allowed`) so that an extra, merely-configured provider block does not break the launch ([isolation.py:47-57](../../../src/wastech_orchestrator/security/isolation.py#L47)).
 
 ## Output
 
@@ -113,6 +113,6 @@ Implements the invariant "the security policy cannot be weakened" at multiple po
 - [security/env.py:18-30](../../../src/wastech_orchestrator/security/env.py#L18) — environment allowlist.
 - [security/forbidden_args.py:21-58](../../../src/wastech_orchestrator/security/forbidden_args.py#L21) — lists and `find_forbidden_args`.
 - [security/injection.py:34-80](../../../src/wastech_orchestrator/security/injection.py#L34) — frontmatter scan.
-- [security/isolation.py:25-61](../../../src/wastech_orchestrator/security/isolation.py#L25) — isolation dispatcher + `_providers_in_use`.
+- [security/isolation.py:25-57](../../../src/wastech_orchestrator/security/isolation.py#L25) — isolation dispatcher + `_providers_in_use` (= `agents.allowed`).
 - [security/profiles.py:17-34](../../../src/wastech_orchestrator/security/profiles.py#L17) — strictness ranking (fail-closed).
 - Tests: [test_env.py](../../../tests/security/test_env.py), [test_forbidden_args.py](../../../tests/security/test_forbidden_args.py), [test_injection.py](../../../tests/security/test_injection.py), [test_isolation.py](../../../tests/security/test_isolation.py), [test_no_shell_interpolation.py](../../../tests/security/test_no_shell_interpolation.py), [test_denied_reads.py](../../../tests/security/test_denied_reads.py).

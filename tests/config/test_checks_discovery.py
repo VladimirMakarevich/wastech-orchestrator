@@ -12,8 +12,8 @@ from wastech_orchestrator.config.schema import (
 )
 from wastech_orchestrator.config.validation import validate_config
 
-# No routing block => the loader migrates to a Codex-only routing, so allowed/providers use codex
-# and validate_config passes on routing (leaving only the checks issues we assert on).
+# codex is the lone allowed provider and the global primary, so validate_config passes on routing
+# (leaving only the checks issues we assert on).
 _BASE = """
 repo:
   url: "git@example.com:o/r.git"
@@ -22,6 +22,7 @@ agents:
   providers:
     codex:
       command: "codex"
+      primary: true
 """
 
 

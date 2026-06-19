@@ -204,10 +204,10 @@ Foundation поднимал реальный риск: generic-движок до
 ### 14.2. Становится данными flow
 
 - **Стадии → узлы** [узел]: refinement/planning/implementation/fixing → `agent`; testing → `checks` (checker `command_profile`); review → `evaluator` (`role=review`); summary → **постоянный supervisor-слой** над flow (не узел; наблюдает каждый шаг + финальный summary, §8); publishing → `publish`.
-- **Маршрутизация** [flow]: per-stage `agents.routing` (primary+fallback) → провайдер/fallback на узле; per-task `route_override.<stage>` → override на узле (только из `agents.allowed`, коллизия с fallback меняет роли).
-- **Модель/reasoning** [flow]: порядок резолюции `stages.<>.{model,reasoning}` → task-wide `model`/`reasoning` → provider-default — сохраняется как поля узла + дефолты.
-- **Пропуск стадий** [flow + ядро]: per-task `stages.<>.enabled:false` (глобальный `agents.skip_stages` убран в config v10), `refined:true` → `when`-предикат на узле (`config.*_enabled`/`derived.needs_refinement`) → пропуск узла; аудит-трейл пропуска (`node_runs.skipped`) остаётся ядром.
-- **Decomposition** [flow]: gate (config `decomposition.enabled` + per-task `decompose` tri-state; `max_subtasks`; `commit_per_subtask`; linear `depends_on`; reason-коды) → конструкция фан-аута (§5).
+- **Маршрутизация** [flow] (PRE.1, реализовано): провайдер задаёт **узел** (`provider:`), иначе глобальный primary (`agents.providers.<p>.primary`, ровно один ∈ `agents.allowed`); fallback (инфра-ошибка) → глобальный primary (или нет, если узел уже на нём). `agents.routing` и per-task `route_override` **удалены**.
+- **Модель/reasoning** [flow] (PRE.1/PRE.3, реализовано): поля **узла** (`model`/`reasoning`); per-task task-wide и `stages.<>.{model,reasoning}` оверрайды **удалены** — задача их больше не несёт.
+- **Пропуск стадий** [flow + ядро] (PRE.3, реализовано): per-task `stages.<>.enabled:false` (глобальный `agents.skip_stages` убран в config v10) → `when`-предикат на узле (`config.*_enabled`); refinement-skip — детерминированный по completeness (`derived.needs_refinement`, без флага `refined`); аудит-трейл пропуска (`node_runs.skipped`) остаётся ядром.
+- **Decomposition** [flow] (PRE.3, реализовано): gate = config `decomposition.enabled` (per-task `decompose` **удалён**); split решает flow-блок `decomposition:` + предложение planning (`max_subtasks`; `commit_per_subtask`; linear `depends_on`; reason-коды) → конструкция фан-аута (§5).
 - **Политики** [flow]: output (`code_change`/`repository_document`/`private_control_workspace_report`), publishing (`pull_request`/`documentation_pull_request`/`none`), network — per-flow поля.
 - **Промпты** [flow]: `prompts.{templates_dir,mode}` (append/replace; allowlisted-переменные — только пути/метаданные, не тело/diff/env/секреты) → role-MD узла + безопасная интерполяция.
 - **Skills** [flow]: planning-selected repo skill references (`skills.{scan_root,exclude}`, gate-дублирующие исключаются) → контекст `agent`-узла.

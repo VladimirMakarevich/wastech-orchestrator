@@ -14,7 +14,7 @@ from wastech_orchestrator.core.flow.wiring import (
     build_node_services,
     build_stage_map,
 )
-from wastech_orchestrator.providers.base import ProviderId, Stage
+from wastech_orchestrator.providers.base import Stage
 
 _PARITY = Path(__file__).parent / "flows" / "implementation_parity.yaml"
 
@@ -69,12 +69,7 @@ def _fake_pipeline(**over: object) -> SimpleNamespace:
         "selected_skills": (SimpleNamespace(path="/skills/a/SKILL.md"),),
         "decomposition": SimpleNamespace(accepted=True, n=3),
         "branch": "agent/task-1-x",
-        "task": SimpleNamespace(
-            contacts=("@me",),
-            model_for=lambda s: None,
-            reasoning_for=lambda s: None,
-            agents={Stage.REVIEW: ProviderId.CLAUDE},
-        ),
+        "task": SimpleNamespace(contacts=("@me",)),
         "session_ids": {"codex": "sess-1"},
     }
     base.update(over)
@@ -105,8 +100,6 @@ def test_build_node_inputs_maps_pipeline_paths(tmp_path: Path) -> None:
     assert inputs.commit_message == "feat: x"
     assert inputs.contacts == ("@me",)
     assert inputs.session_ids is p.session_ids  # shared by reference for session continuity
-    # task.agents -> route override
-    assert inputs.route_override == {Stage.REVIEW: ProviderId.CLAUDE}
 
 
 def test_build_node_inputs_no_decomposition_leaves_subtask_count_none(tmp_path: Path) -> None:

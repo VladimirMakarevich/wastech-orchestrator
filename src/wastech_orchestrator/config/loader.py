@@ -21,7 +21,6 @@ import yaml
 
 from wastech_orchestrator.config.schema import (
     CONFIG_SCHEMA_VERSION,
-    ROUTABLE_STAGES,
     AgentsConfig,
     AuditBranch,
     AutoModeConfig,
@@ -38,13 +37,12 @@ from wastech_orchestrator.config.schema import (
     OrchestratorRuntimeConfig,
     ProviderConfig,
     RepoConfig,
-    RouteConfig,
     SecurityConfig,
     SkillsConfig,
     TelegramConfig,
     ValidationConfig,
 )
-from wastech_orchestrator.providers.base import ProviderId, Stage
+from wastech_orchestrator.providers.base import ProviderId
 
 # Defaults mirror §11 / the packaged config.example.yaml so a partial config still loads safely.
 _DEFAULT_AUDIT_MESSAGE = "chore(orchestrator): audit trail for {task_id}"
@@ -311,6 +309,7 @@ def _build_provider(raw: Any, pid: ProviderId, issues: list[str]) -> ProviderCon
             "max_turns",
             "max_budget_usd",
             "reasoning",
+            "primary",
         },
         where,
         issues,
@@ -332,6 +331,7 @@ def _build_provider(raw: Any, pid: ProviderId, issues: list[str]) -> ProviderCon
         max_turns=_opt_int(m, "max_turns", where, issues),
         max_budget_usd=_opt_float(m, "max_budget_usd", where, issues),
         reasoning=reasoning_raw,
+        primary=_bool(m, "primary", False, where, issues),
     )
 
 
@@ -346,45 +346,6 @@ def _build_providers(raw: Any, issues: list[str]) -> dict[ProviderId, ProviderCo
             continue
         providers[pid] = _build_provider(m[key], pid, issues)
     return providers
-
-
-def _build_route(raw: Any, stage: Stage, issues: list[str]) -> RouteConfig:
-    where = f"agents.routing.{stage.value}"
-    m = _mapping(raw, where, issues)
-    _check_keys(m, {"primary", "fallback"}, where, issues)
-    primary_raw = m.get("primary")
-    if primary_raw is None:
-        issues.append(f"{where}.primary: required")
-        primary = ProviderId.CLAUDE  # placeholder; an issue was recorded so loading will fail
-    else:
-        primary = _enum(primary_raw, ProviderId, f"{where}.primary", issues, ProviderId.CLAUDE)
-    fallback_raw = m.get("fallback")
-    fallback = (
-        None
-        if fallback_raw is None
-        else _enum(fallback_raw, ProviderId, f"{where}.fallback", issues, ProviderId.CODEX)
-    )
-    return RouteConfig(primary=primary, fallback=fallback)
-
-
-def _build_routing(raw: Any, issues: list[str]) -> dict[Stage, RouteConfig]:
-    m = _mapping(raw, "agents.routing", issues)
-    routing: dict[Stage, RouteConfig] = {}
-    for key in sorted(m):
-        try:
-            stage = Stage(key)
-        except ValueError:
-            issues.append(f"agents.routing: unknown route key {key!r}")
-            continue
-        routing[stage] = _build_route(m[key], stage, issues)
-    return routing
-
-
-def _legacy_codex_routing() -> dict[Stage, RouteConfig]:
-    return {
-        stage: RouteConfig(primary=ProviderId.CODEX, fallback=None)
-        for stage in sorted(ROUTABLE_STAGES, key=lambda s: s.value)
-    }
 
 
 def _build_decomposition(raw: Any, issues: list[str]) -> DecompositionConfig:
@@ -416,10 +377,11 @@ def _build_allowed(raw: Any, issues: list[str]) -> tuple[ProviderId, ...]:
     return tuple(allowed)
 
 
-def _build_agents(raw: Any, issues: list[str], warnings: list[str]) -> AgentsConfig:
+def _build_agents(raw: Any, issues: list[str]) -> AgentsConfig:
     m = _mapping(raw, "agents", issues)
-    # ``skip_stages`` (removed in config v10) is tolerated, not accepted: an old config still loads
-    # fail-open and ``upgrade-config`` strips the dead key. Per-task ``stages.enabled`` survives.
+    # ``skip_stages`` (removed v10) and the stage-keyed ``routing`` block (removed v11 — a flow node
+    # declares its own ``provider``, else the global ``providers.<id>.primary``) are tolerated, not
+    # accepted: an old config still loads fail-open and ``upgrade-config`` strips the dead keys.
     _check_keys(
         m,
         {
@@ -428,24 +390,13 @@ def _build_agents(raw: Any, issues: list[str], warnings: list[str]) -> AgentsCon
             "max_fix_cycles",
             "max_total_fix_iterations",
             "decomposition",
-            "routing",
             "providers",
             "allow_review_skip",
         },
         "agents",
         issues,
-        tolerated={"skip_stages"},
+        tolerated={"skip_stages", "routing"},
     )
-    if "routing" in m:
-        routing = _build_routing(m["routing"], issues)
-    else:
-        # Legacy Codex-only config: no routing block. Migrate to a Codex route for every agent
-        # stage, with a warning (spec §11).
-        warnings.append(
-            "agents.routing is missing; migrating legacy Codex-only config to a Codex route "
-            "for all agent stages"
-        )
-        routing = _legacy_codex_routing()
     allow_review_skip = _bool(m, "allow_review_skip", False, "agents", issues)
     return AgentsConfig(
         allowed=_build_allowed(m.get("allowed"), issues),
@@ -453,7 +404,6 @@ def _build_agents(raw: Any, issues: list[str], warnings: list[str]) -> AgentsCon
         max_fix_cycles=_int(m, "max_fix_cycles", 15, "agents", issues),
         max_total_fix_iterations=_int(m, "max_total_fix_iterations", 30, "agents", issues),
         decomposition=_build_decomposition(m.get("decomposition"), issues),
-        routing=routing,
         providers=_build_providers(m.get("providers"), issues),
         allow_review_skip=allow_review_skip,
     )
@@ -602,6 +552,9 @@ def _build_footprint(raw: Any, issues: list[str]) -> FootprintConfig:
 def _build_git(raw: Any, issues: list[str]) -> GitConfig:
     where = "git"
     m = _mapping(raw, where, issues)
+    # ``auto_merge_allow_per_task`` (removed v11) is tolerated, not accepted: a per-task
+    # ``auto_merge`` now wins outright (PRE.2), so the gate is gone. Old configs load fail-open;
+    # ``upgrade-config`` strips the dead key.
     _check_keys(
         m,
         {
@@ -610,11 +563,11 @@ def _build_git(raw: Any, issues: list[str]) -> GitConfig:
             "footprint",
             "auto_merge",
             "auto_merge_strategy",
-            "auto_merge_allow_per_task",
             "auto_merge_wait_for_checks",
         },
         where,
         issues,
+        tolerated={"auto_merge_allow_per_task"},
     )
     return GitConfig(
         create_pull_request=_bool(m, "create_pull_request", True, where, issues),
@@ -628,7 +581,6 @@ def _build_git(raw: Any, issues: list[str]) -> GitConfig:
             issues,
             MergeStrategy.SQUASH,
         ),
-        auto_merge_allow_per_task=_bool(m, "auto_merge_allow_per_task", False, where, issues),
         auto_merge_wait_for_checks=_bool(m, "auto_merge_wait_for_checks", False, where, issues),
     )
 
@@ -700,7 +652,7 @@ def _parse(raw: Mapping[str, Any], issues: list[str], warnings: list[str]) -> Or
     return OrchestratorConfig(
         orchestrator=_build_orchestrator(raw.get("orchestrator"), issues),
         repo=_build_repo(raw.get("repo"), issues),
-        agents=_build_agents(raw.get("agents"), issues, warnings),
+        agents=_build_agents(raw.get("agents"), issues),
         security=_build_security(raw.get("security"), issues),
         validation=_build_validation(raw.get("validation"), issues),
         checks=_build_checks(raw.get("checks"), issues),

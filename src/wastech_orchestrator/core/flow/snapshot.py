@@ -42,6 +42,7 @@ from wastech_orchestrator.core.flow.schema import (
     PublishNode,
     WhenPredicate,
 )
+from wastech_orchestrator.providers.base import ProviderId
 
 
 class FlowLoadError(Exception):
@@ -62,12 +63,12 @@ _FLOW_FIELDS = frozenset({
 })
 _AGENT_FIELDS = frozenset({
     "id", "kind", "role_file", "session_scope", "lineage_affinity", "permission_profile",
-    "model", "reasoning", "timeout_seconds", "output_schema", "output_artifact", "best_effort",
-    "hitl", "extra_args", "when",
+    "provider", "model", "reasoning", "timeout_seconds", "output_schema", "output_artifact",
+    "best_effort", "hitl", "extra_args", "when",
 })
 _EVALUATOR_FIELDS = frozenset({
     "id", "kind", "role", "role_file", "session_scope", "permission_profile",
-    "evaluation_kind", "blocking", "max_rework_per_stage", "model", "reasoning", "when",
+    "evaluation_kind", "blocking", "max_rework_per_stage", "provider", "model", "reasoning", "when",
 })
 _CHECKS_FIELDS = frozenset({"id", "kind", "checker", "discovery", "when"})
 _HITL_NODE_FIELDS = frozenset({"id", "kind", "signal", "timeout_s", "when"})
@@ -217,6 +218,9 @@ def _parse_agent_node(raw: dict[str, Any]) -> AgentNode:
     pp_raw = raw.get("permission_profile")
     permission_profile = _enum(PermissionProfile, pp_raw, ctx) if pp_raw is not None else None
 
+    provider_raw = raw.get("provider")
+    provider = _enum(ProviderId, provider_raw, ctx) if provider_raw is not None else None
+
     ss_raw = raw.get("session_scope", SessionScope.FRESH_DISPOSABLE)
 
     os_raw = raw.get("output_schema")
@@ -238,6 +242,7 @@ def _parse_agent_node(raw: dict[str, Any]) -> AgentNode:
         session_scope=_enum(SessionScope, ss_raw, ctx),
         lineage_affinity=raw.get("lineage_affinity") or None,
         permission_profile=permission_profile,
+        provider=provider,
         model=raw.get("model") or None,
         reasoning=raw.get("reasoning") or None,
         timeout_seconds=raw.get("timeout_seconds"),
@@ -261,6 +266,9 @@ def _parse_evaluator_node(raw: dict[str, Any], defaults: EvaluatorDefaults) -> E
     pp_raw = raw.get("permission_profile", defaults.permission_profile)
     ek_raw = raw.get("evaluation_kind", EvaluationKind.STAGE_OUTPUT)
 
+    provider_raw = raw.get("provider")
+    provider = _enum(ProviderId, provider_raw, ctx) if provider_raw is not None else None
+
     return EvaluatorNode(
         id=nid,
         kind="evaluator",
@@ -271,6 +279,7 @@ def _parse_evaluator_node(raw: dict[str, Any], defaults: EvaluatorDefaults) -> E
         evaluation_kind=_enum(EvaluationKind, ek_raw, ctx),
         blocking=bool(raw.get("blocking", True)),
         max_rework_per_stage=int(raw.get("max_rework_per_stage", defaults.max_rework_per_stage)),
+        provider=provider,
         model=raw.get("model") or None,
         reasoning=raw.get("reasoning") or None,
         when=_parse_when(raw.get("when")),

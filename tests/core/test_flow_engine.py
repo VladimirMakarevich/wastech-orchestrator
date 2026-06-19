@@ -52,7 +52,6 @@ def _agents(*, max_fix_cycles: int = 99, max_total: int = 99) -> AgentsConfig:
         decomposition=DecompositionConfig(
             enabled=False, max_subtasks=8, min_size_signal="large", commit_per_subtask=True
         ),
-        routing={},
         providers={},
     )
 

@@ -47,7 +47,7 @@ class EvaluatorNodeRunner:
     def run(self, node: FlowNode, ctx: NodeContext) -> NodeResult:
         assert isinstance(node, EvaluatorNode)
         stage = self._s.stage_for_node[node.id]
-        route = self._s.router.resolve_route(stage, self._in.route_override)
+        route = self._s.router.resolve_route(stage, node.provider)
         started_at = self._s.clock()
         run_id = self._s.store.record_node_run(
             NodeRunRow(
@@ -149,8 +149,8 @@ class EvaluatorNodeRunner:
             check_artifacts_path=self._in.checks_path,
             review_artifacts_path=self._in.review_path,
             output_schema=stage_output_schema(stage),
-            model=self._in.resolve_model(stage, node.model),
-            reasoning=self._in.resolve_reasoning(stage, node.reasoning),
+            model=node.model,
+            reasoning=node.reasoning,
             # Evaluators are read-only and never editing_lineage (validator-enforced), so this is
             # always a fresh session — an evaluation must not inherit an editing agent's session.
             session_id=editing_session_id(

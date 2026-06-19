@@ -1,4 +1,4 @@
-"""Loader: fail-closed structural parsing and the legacy-config migration (spec §11)."""
+"""Loader: fail-closed structural parsing and legacy-key tolerance (spec §11)."""
 
 from __future__ import annotations
 
@@ -9,8 +9,6 @@ from wastech_orchestrator.config.schema import (
     AuditBranch,
     MergeStrategy,
 )
-from wastech_orchestrator.config.validation import validate_config
-from wastech_orchestrator.providers.base import ProviderId, Stage
 
 _LEGACY = """
 repo:
@@ -147,16 +145,13 @@ def test_unknown_checks_key_is_rejected() -> None:
     assert any("retries" in issue for issue in exc.value.issues)
 
 
-def test_unknown_route_key_is_rejected() -> None:
-    text = """
-agents:
-  routing:
-    deployment:
-      primary: codex
-"""
-    with pytest.raises(ConfigError) as exc:
-        loads_config(text)
-    assert any("deployment" in issue for issue in exc.value.issues)
+def test_legacy_routing_block_is_tolerated() -> None:
+    # ``agents.routing`` was removed in v11 (routing is node-based now — a node declares its own
+    # ``provider``, else the global ``providers.<id>.primary``). An old config still carrying it
+    # loads fail-open (the key is ignored, not rejected); ``upgrade-config`` strips it.
+    result = loads_config(_agents("  routing:\n    planning: {primary: codex}\n"))
+    assert not hasattr(result.config.agents, "routing")
+    assert not any("migrat" in w.lower() for w in result.warnings)
 
 
 def test_bad_enum_value_is_rejected() -> None:
@@ -165,31 +160,10 @@ def test_bad_enum_value_is_rejected() -> None:
     assert any("audit_on_branch" in issue for issue in exc.value.issues)
 
 
-def test_unknown_provider_in_routing_is_rejected() -> None:
-    text = """
-agents:
-  routing:
-    planning:
-      primary: gpt
-"""
-    with pytest.raises(ConfigError) as exc:
-        loads_config(text)
-    assert any("gpt" in issue for issue in exc.value.issues)
-
-
 def test_all_issues_collected_not_just_first() -> None:
     with pytest.raises(ConfigError) as exc:
         loads_config("foo: 1\nbar: 2\n")
     assert len(exc.value.issues) >= 2
-
-
-def test_legacy_codex_only_config_migrates_with_warning() -> None:
-    result = loads_config(_LEGACY)
-    assert any("migrat" in w.lower() for w in result.warnings)
-    # Every agent-routed stage now has a Codex primary; the migrated config validates clean.
-    assert result.config.agents.routing[Stage.PLANNING].primary is ProviderId.CODEX
-    assert result.config.agents.routing[Stage.REVIEW].primary is ProviderId.CODEX
-    assert validate_config(result.config) == []
 
 
 _WITH_CLAUDE = (
@@ -266,7 +240,6 @@ def test_auto_merge_keys_default_to_safe_values() -> None:
     cfg = loads_config(_LEGACY).config
     assert cfg.git.auto_merge is False
     assert cfg.git.auto_merge_strategy is MergeStrategy.SQUASH
-    assert cfg.git.auto_merge_allow_per_task is False
     assert cfg.git.auto_merge_wait_for_checks is False
 
 
@@ -275,14 +248,19 @@ def test_auto_merge_keys_parse() -> None:
         "git:\n"
         "  auto_merge: true\n"
         "  auto_merge_strategy: rebase\n"
-        "  auto_merge_allow_per_task: true\n"
         "  auto_merge_wait_for_checks: true\n"
     )
     cfg = loads_config(text).config
     assert cfg.git.auto_merge is True
     assert cfg.git.auto_merge_strategy is MergeStrategy.REBASE
-    assert cfg.git.auto_merge_allow_per_task is True
     assert cfg.git.auto_merge_wait_for_checks is True
+
+
+def test_legacy_auto_merge_allow_per_task_is_tolerated() -> None:
+    # Removed in v11 (a per-task ``auto_merge`` now wins outright). An old config still carrying it
+    # loads fail-open (ignored, not rejected); ``upgrade-config`` strips it.
+    cfg = loads_config(_LEGACY + "git:\n  auto_merge_allow_per_task: true\n").config
+    assert not hasattr(cfg.git, "auto_merge_allow_per_task")
 
 
 def test_auto_merge_strategy_invalid_value_is_rejected() -> None:

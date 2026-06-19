@@ -1,7 +1,7 @@
 # Example configuration for wastech-orchestrator.
 # Copy to config.yaml and fill it in for your project. config.yaml is NOT committed to git.
 
-schema_version: 10                  # config format version; the orchestrator refuses newer configs
+schema_version: 11                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -32,26 +32,9 @@ agents:
     min_size_signal: "large"        # advisory threshold passed to the planning prompt
     commit_per_subtask: true        # one local commit per subtask on the single task branch
 
-  routing:                          # primary/fallback per stage
-    refinement:
-      primary: claude
-      fallback: codex
-    planning:
-      primary: claude
-      fallback: codex
-    implementation:
-      primary: claude
-      fallback: codex
-    review:
-      primary: codex
-      fallback: claude
-    fixing:
-      primary: claude
-      fallback: codex
-    summary:
-      primary: claude
-      fallback: codex
-
+  # Provider routing is node-based: a flow node declares its own `provider` (else the global
+  # primary below). Exactly one configured provider must set `primary: true` — it runs every node
+  # with no `provider` field and is the sole infrastructure-fallback target. It must be in `allowed`.
   providers:
     claude:
       command: "claude"
@@ -62,6 +45,7 @@ agents:
       max_budget_usd: null
       permission_profile: "workspace-write"
       extra_args: []
+      primary: true            # the global primary (exactly one provider; must be in `allowed`)
     codex:
       command: "codex"
       model: ""
@@ -123,8 +107,9 @@ git:
   #     dangerous-diff approval still fires; auto-merge only affects the publish step.
   auto_merge: false                 # true: merge every published PR to pr_base automatically
   auto_merge_strategy: squash       # merge | squash | rebase  (used when a merge fires)
-  auto_merge_allow_per_task: false  # true: honor a per-task `auto_merge: true` (a per-task false always opts out)
   auto_merge_wait_for_checks: false # true: arm GitHub-native auto-merge (--auto) — merge only after required checks pass
+  # NOTE: a per-task `auto_merge: true|false` wins outright over this default (PRE.2). Auto-merge
+  # skips the human PR review — the operator (the task author) owns that call; see docs/operations.md.
   footprint:                        # audit-trail policy (§21). Runtime files always live under the
                                     # gitignored <repo>/.worc/ home; only the task file and its
                                     # <id>.summary.md are committed, at the repo root under tasks/.

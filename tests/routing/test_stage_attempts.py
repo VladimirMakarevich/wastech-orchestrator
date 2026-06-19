@@ -1,8 +1,8 @@
 """`stage_attempts` counting and bounding across fallback (§8.1, phase doc 4.4).
 
-Drives the router with in-memory fakes so each attempt's outcome is deterministic. The default
-route for REVIEW is (codex, claude), so the CODEX fake is the primary and the CLAUDE fake the
-fallback.
+Drives the router with in-memory fakes so each attempt's outcome is deterministic. The node pins
+``provider=codex`` while claude is the global primary, so the route is (codex, claude): the CODEX
+fake is the primary and the CLAUDE fake the (global-primary) fallback.
 """
 
 from __future__ import annotations
@@ -33,7 +33,9 @@ def test_success_on_primary_does_not_invoke_fallback(
     primary = make_fake_provider(ProviderId.CODEX)
     fallback = make_fake_provider(ProviderId.CLAUDE)
     router = _router(config, primary, fallback)
-    outcome = router.run_stage(make_request(stage=Stage.REVIEW), router.resolve_route(Stage.REVIEW))
+    outcome = router.run_stage(
+        make_request(stage=Stage.REVIEW), router.resolve_route(Stage.REVIEW, ProviderId.CODEX)
+    )
     assert outcome.stage_attempts == 1
     assert outcome.provider_used is ProviderId.CODEX
     assert outcome.result is not None and outcome.result.status is RunStatus.SUCCEEDED
@@ -48,7 +50,9 @@ def test_stage_attempts_increment_across_fallback(
     primary = make_fake_provider(ProviderId.CODEX, raises=ErrorClass.TIMEOUT)
     fallback = make_fake_provider(ProviderId.CLAUDE)
     router = _router(config, primary, fallback)
-    outcome = router.run_stage(make_request(stage=Stage.REVIEW), router.resolve_route(Stage.REVIEW))
+    outcome = router.run_stage(
+        make_request(stage=Stage.REVIEW), router.resolve_route(Stage.REVIEW, ProviderId.CODEX)
+    )
     assert outcome.stage_attempts == 2
     assert outcome.provider_used is ProviderId.CLAUDE
     assert outcome.result is not None and outcome.result.status is RunStatus.SUCCEEDED
@@ -65,7 +69,9 @@ def test_max_stage_attempts_one_blocks_fallback(
     primary = make_fake_provider(ProviderId.CODEX, raises=ErrorClass.TIMEOUT)
     fallback = make_fake_provider(ProviderId.CLAUDE)
     router = _router(cfg, primary, fallback)
-    outcome = router.run_stage(make_request(stage=Stage.REVIEW), router.resolve_route(Stage.REVIEW))
+    outcome = router.run_stage(
+        make_request(stage=Stage.REVIEW), router.resolve_route(Stage.REVIEW, ProviderId.CODEX)
+    )
     assert outcome.stage_attempts == 1
     assert fallback.run_count == 0
     assert outcome.result is None
@@ -81,7 +87,9 @@ def test_both_infra_failures_exhaust_the_stage(
     primary = make_fake_provider(ProviderId.CODEX, raises=ErrorClass.TIMEOUT)
     fallback = make_fake_provider(ProviderId.CLAUDE, raises=ErrorClass.RATE_LIMITED)
     router = _router(config, primary, fallback)
-    outcome = router.run_stage(make_request(stage=Stage.REVIEW), router.resolve_route(Stage.REVIEW))
+    outcome = router.run_stage(
+        make_request(stage=Stage.REVIEW), router.resolve_route(Stage.REVIEW, ProviderId.CODEX)
+    )
     assert outcome.stage_attempts == 2
     assert outcome.result is None
     assert outcome.provider_used is None
@@ -99,7 +107,9 @@ def test_non_fallback_infra_error_stops_at_primary(
     primary = make_fake_provider(ProviderId.CODEX, raises=ErrorClass.CONFIGURATION_ERROR)
     fallback = make_fake_provider(ProviderId.CLAUDE)
     router = _router(config, primary, fallback)
-    outcome = router.run_stage(make_request(stage=Stage.REVIEW), router.resolve_route(Stage.REVIEW))
+    outcome = router.run_stage(
+        make_request(stage=Stage.REVIEW), router.resolve_route(Stage.REVIEW, ProviderId.CODEX)
+    )
     assert outcome.stage_attempts == 1
     assert fallback.run_count == 0
     assert outcome.result is None

@@ -20,6 +20,7 @@ from wastech_orchestrator.core.flow.contracts import (
     PublishingPolicy,
     SessionScope,
 )
+from wastech_orchestrator.providers.base import ProviderId
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +53,9 @@ class AgentNode:
     session_scope: SessionScope = SessionScope.FRESH_DISPOSABLE
     lineage_affinity: str | None = None
     permission_profile: PermissionProfile | None = None  # None → resolved from flow ceiling
+    #: which provider runs this node; None → the config's global primary (PRE.1). Validated against
+    #: ``agents.allowed`` at preflight; never relaxes the security ceiling.
+    provider: ProviderId | None = None
     model: str | None = None
     reasoning: str | None = None
     timeout_seconds: int | None = None
@@ -78,6 +82,8 @@ class EvaluatorNode:
     evaluation_kind: EvaluationKind = EvaluationKind.STAGE_OUTPUT
     blocking: bool = True
     max_rework_per_stage: int = 1
+    #: which provider runs this evaluator; None → the config's global primary (PRE.1).
+    provider: ProviderId | None = None
     model: str | None = None
     reasoning: str | None = None
     when: WhenPredicate | None = None

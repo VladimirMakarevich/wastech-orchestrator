@@ -48,7 +48,7 @@ from wastech_orchestrator.core.flow.postprocess import apply_output_artifact, re
 from wastech_orchestrator.core.flow.recorder import StateStoreRunRecorder, hydrate_run_state
 from wastech_orchestrator.core.flow.registry import FlowRegistry
 from wastech_orchestrator.core.flow.run_state import FlowRunState
-from wastech_orchestrator.core.flow.schema import AgentNode, FlowNode
+from wastech_orchestrator.core.flow.schema import AgentNode, EvaluatorNode, FlowNode
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
 from wastech_orchestrator.core.flow.wiring import build_node_inputs, build_node_services
 from wastech_orchestrator.core.hitl import (
@@ -807,6 +807,29 @@ class Orchestrator:
 
     # --- pipeline (the FlowEngine is the driver) ------------------------------------------
 
+    def _check_flow_providers(self) -> None:
+        """Fatal preflight (PRE.1a): every flow node's declared ``provider`` must be in
+        ``agents.allowed``.
+
+        Runs before any branch/provider launch so a node pinned to a disallowed provider fails loud
+        early, not mid-run. This is the config-aware half of flow validation that the load-time
+        validator cannot do (it has no config); the full move into the validator is P4.2.
+        """
+        snapshot = self._flow_registry.resolve(None)
+        allowed = frozenset(self._config.agents.allowed)
+        bad: list[str] = []
+        for node in snapshot.doc.nodes:
+            if (
+                isinstance(node, AgentNode | EvaluatorNode)
+                and node.provider is not None
+                and node.provider not in allowed
+            ):
+                bad.append(
+                    f"node {node.id!r}: provider {node.provider.value!r} not in agents.allowed"
+                )
+        if bad:
+            raise PipelineFailed("flow provider not allowed: " + "; ".join(bad))
+
     def _drive_via_engine(self, p: _Pipeline, completeness: Completeness) -> PipelineResult:
         """Drive the task through the :class:`FlowEngine`.
 
@@ -816,6 +839,7 @@ class Orchestrator:
         skills) runs in the post-node hook; the publish node finalizes the task file + opens the PR.
         Infra failure → ``failed``; a node needing human action → ``manual_action_required``.
         """
+        self._check_flow_providers()
         if self._config.security.strict_isolation:
             reasons = check_isolation(self._config)
             if reasons:
@@ -1028,7 +1052,9 @@ class Orchestrator:
         self, p: _Pipeline, completeness: Completeness
     ) -> Callable[[str], bool]:
         """Resolve a flow ``when`` fact (``derived.*`` / ``config.*_enabled``) to a boolean."""
-        needs_refinement = not (p.task.refined or completeness is Completeness.COMPLETE)
+        # Refinement-skip is deterministic — driven purely by completeness classification, never a
+        # task flag (PRE.3): a ``complete`` task skips refinement, anything else runs it (§5).
+        needs_refinement = completeness is not Completeness.COMPLETE
 
         def facts(fact: str) -> bool:
             if fact == "derived.needs_refinement":
@@ -1076,7 +1102,7 @@ class Orchestrator:
     def _engine_materialize_decomposition(self, p: _Pipeline, outcome: NodeOutcome) -> None:
         """Decide decomposition from the proposed_by node's contract, persist it + write the subtask
         specs/rows (legacy ``_planning`` block, triggered by data not the stage name)."""
-        gate_on = self._decomposition_gate_on(p.task)
+        gate_on = self._decomposition_gate_on()
         decision = read_decomposition(
             outcome, gate_on=gate_on, max_subtasks=self._config.agents.decomposition.max_subtasks
         )
@@ -1730,11 +1756,10 @@ class Orchestrator:
         self._register_artifact(task.id, "validation_report", report_path)
         self._transition_status(task.id, Status.NEW, Status.VALIDATED)
 
-    def _decomposition_gate_on(self, task: NormalizedTask) -> bool:
-        if task.decompose is True:
-            return True
-        if task.decompose is False:
-            return False
+    def _decomposition_gate_on(self) -> bool:
+        """Whether decomposition is permitted at all (PRE.3): the config default. The flow's
+        ``decomposition:`` block + the planning node's gate proposal decide whether a split happens;
+        a clean task carries no decompose flag."""
         return self._config.agents.decomposition.enabled
 
     def _prompt_audit_on(self, task: NormalizedTask) -> bool:
@@ -1753,14 +1778,14 @@ class Orchestrator:
     def _auto_merge_on(self, task: NormalizedTask) -> bool:
         """Resolve the effective auto-merge decision (DANGER: bypasses human review).
 
-        An explicit per-task ``False`` always opts out; a per-task ``True`` is honored only when the
-        operator set ``git.auto_merge_allow_per_task`` — otherwise it falls through to the global
-        policy, so a task file can never grant itself merge rights. Absent → ``git.auto_merge``.
+        The task value wins outright (PRE.2): an explicit per-task ``True``/``False`` is honored
+        verbatim; absent (``None``) defers to the instance default ``git.auto_merge``. Auto-merge
+        is a publishing-policy choice owned by the operator (the same trusted author as the config),
+        not a sandbox/approvals ceiling, so there is no separate operator gate. See
+        ``docs/operations.md``: skipping the human PR review is the operator's call.
         """
-        if task.auto_merge is False:
-            return False
-        if task.auto_merge is True and self._config.git.auto_merge_allow_per_task:
-            return True
+        if task.auto_merge is not None:
+            return task.auto_merge
         return self._config.git.auto_merge
 
     def _transition(self, p: _Pipeline, dst: Status, **fields: object) -> None:

@@ -12,10 +12,10 @@ from dataclasses import replace
 import pytest
 
 from wastech_orchestrator.config.loader import loads_config
-from wastech_orchestrator.config.schema import AgentsConfig, OrchestratorConfig, ProviderConfig
+from wastech_orchestrator.config.schema import OrchestratorConfig, ProviderConfig
 from wastech_orchestrator.providers import claude as claude_mod
 from wastech_orchestrator.providers import codex as codex_mod
-from wastech_orchestrator.providers.base import ProviderId, Stage
+from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.security.isolation import check_isolation
 
 
@@ -110,25 +110,18 @@ def test_claude_full_access_fails_with_provider_prefix(base_config: Orchestrator
     assert any(r.startswith("claude:") for r in reasons)
 
 
-def test_unrouted_unallowed_provider_is_not_checked(base_config: OrchestratorConfig) -> None:
-    # codex has a forbidden sandbox, but it is neither allowed nor routed → must NOT brick the run.
-    claude_only_routes = {
-        stage: replace(route, primary=ProviderId.CLAUDE, fallback=None)
-        for stage, route in base_config.agents.routing.items()
-    }
-    agents: AgentsConfig = replace(
-        base_config.agents, allowed=(ProviderId.CLAUDE,), routing=claude_only_routes
-    )
+def test_unallowed_provider_is_not_checked(base_config: OrchestratorConfig) -> None:
+    # codex has a forbidden sandbox, but it is not in agents.allowed → must NOT brick the run (PRE.1
+    # makes the allowlist the exact set of providers that may run).
+    agents = replace(base_config.agents, allowed=(ProviderId.CLAUDE,))
     cfg = _with_provider(
         replace(base_config, agents=agents), ProviderId.CODEX, sandbox="danger-full-access"
     )
     assert check_isolation(cfg) == []
 
 
-def test_routed_fallback_provider_is_checked(base_config: OrchestratorConfig) -> None:
-    # codex is the review fallback in the default routes, so its bad sandbox must still be flagged
-    # even though no stage names it primary.
-    review = base_config.agents.routing[Stage.REVIEW]
-    assert review.fallback is ProviderId.CLAUDE or review.primary is ProviderId.CODEX
+def test_allowed_provider_is_checked(base_config: OrchestratorConfig) -> None:
+    # codex is in agents.allowed (default), so its bad sandbox must still be flagged.
+    assert ProviderId.CODEX in base_config.agents.allowed
     cfg = _with_provider(base_config, ProviderId.CODEX, sandbox="danger-full-access")
     assert any(r.startswith("codex:") for r in check_isolation(cfg))

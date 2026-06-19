@@ -61,7 +61,7 @@ Do it **between tasks**, not mid-run: an in-flight task holds the single process
 
 The persisted state survives an upgrade — back it up first so you can roll back. That is everything under `<repo>/.worc/` (`config.yaml` and `state.db` live there), plus the git-tracked `tasks/` lifecycle dirs at the repo root. Copy at least `.worc/config.yaml` + `.worc/state.db`. The orchestrator **fail-closes on a backward-incompatible workspace**: if the `config.yaml` `schema_version` or the `state.db` schema is **newer** than the installed version understands, the command prints a clear `error:` and exits non-zero (2) instead of running against a format it cannot read. To recover, upgrade the package to a version that supports it (or, for a throwaway setup, start a fresh workspace via `install --reconfigure`). Older or absent versions are accepted as-is.
 
-The current schema versions are `state.db` **v7** and `config.yaml` `schema_version` **9**. `state.db` migrates itself **forward** in place the first time a newer version opens it (additive columns are added in place) — no action needed. `config.yaml` does **not** auto-migrate: a new release may add keys (with safe defaults, so an older config still runs), but to materialize them in your file run **`upgrade-config`** after upgrading the package:
+The current schema versions are `state.db` **v7** and `config.yaml` `schema_version` **11**. `state.db` migrates itself **forward** in place the first time a newer version opens it (additive columns are added in place) — no action needed. `config.yaml` does **not** auto-migrate: a new release may add keys (with safe defaults, so an older config still runs), but to materialize them in your file run **`upgrade-config`** after upgrading the package:
 
 ```bash
 wastech-orchestrator upgrade-config              # uses the discovered/bound config
@@ -292,13 +292,17 @@ Configured under `git:` (all default to the safe value):
 | --- | --- | --- |
 | `auto_merge` | `false` | When true, every successfully published PR is merged to `pr_base`. |
 | `auto_merge_strategy` | `squash` | `merge` \| `squash` \| `rebase` — passed to `gh pr merge`. |
-| `auto_merge_allow_per_task` | `false` | When true, a task's front-matter `auto_merge: true` is honored. |
 | `auto_merge_wait_for_checks` | `false` | When true, arm GitHub-native auto-merge (`gh pr merge --auto`): GitHub merges only after required checks pass. When false, merge immediately. |
 
-**Per-task override.** A task file may carry `auto_merge: true` / `false` in its front-matter:
+**Per-task override (task wins).** A task file may carry `auto_merge: true` / `false` in its front-matter, and that value **wins outright** over the global `git.auto_merge`:
 
 - `auto_merge: false` **always** opts that task out, even when the global flag is on.
-- `auto_merge: true` is honored **only** when `git.auto_merge_allow_per_task: true`; otherwise it is ignored (with a logged warning) and the task follows the global policy. This is deliberate: write access to `tasks/pending/` would otherwise equal merge-to-`pr_base` rights. Resolution order: per-task `false` → per-task `true` (if allowed) → global `git.auto_merge` → `false`.
+- `auto_merge: true` **always** opts that task in, even when the global flag is off.
+- absent → the task follows the global `git.auto_merge`.
+
+Resolution order: per-task `auto_merge` (if set) → global `git.auto_merge` → `false`.
+
+> There is **no** separate `auto_merge_allow_per_task` operator gate (it was removed in `schema_version` 11). Auto-merge skips the human PR review, but the task author and the `config.yaml` owner are the **same trusted operator**, so letting a task set `auto_merge` is a publishing-policy choice, not a weakening of the agent sandbox or approvals ceiling — there is nothing to gate. (Contrast the security ceiling, which a task can never relax.)
 
 **What auto-merge does _not_ weaken:**
 
@@ -311,7 +315,7 @@ Configured under `git:` (all default to the safe value):
 
 By default the pipeline runs `refinement → planning → [implementation → testing → review → fixing] → summary → publishing`. A **task** can skip a stage that adds no value for it — convenient for debugging/testing and quick one-off runs without authoring a separate flow.
 
-Skippable stages: `planning`, `testing`, `review`, `fixing`, `summary`. `implementation` and `publishing` are never skippable; `refinement` uses the existing `refined: true` task flag.
+Skippable stages: `planning`, `testing`, `review`, `fixing`, `summary`. `implementation` and `publishing` are never skippable; `refinement` is skipped **deterministically** when the task is already complete (completeness classification `COMPLETE`), never via a task flag.
 
 > The global `agents.skip_stages` list was **removed in config `schema_version` 10**: with fully configurable flows, "skip a stage for every task" is redundant — to drop a stage everywhere, remove its node from the flow (or author an operator flow). Per-task skip below is the surviving, bounded mechanism. The `agents.allow_review_skip` gate survives (it now permits the per-task `review` skip).
 

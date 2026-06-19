@@ -48,27 +48,19 @@ from wastech_orchestrator.providers.base import ProviderId, Stage
 # validated toggle (flow-contract §10), and `agents.allow_review_skip` stays (now gating only the
 # per-task review skip). `upgrade-config` strips `agents.skip_stages`; old configs still load
 # fail-open (the key is tolerated/ignored).
-CONFIG_SCHEMA_VERSION = 10
+# v11 (2026-06-19, flow-engine PRE.1/PRE.2): provider routing moves onto the flow node. The
+# stage-keyed `agents.routing` block is removed — a node declares its own `provider` (else the
+# global primary), and exactly one `agents.providers.<id>.primary: true` marks that global primary
+# (the sole infra-fallback target). The per-task auto-merge gate `git.auto_merge_allow_per_task` is
+# also removed: a per-task `auto_merge` now wins outright (PRE.2). `upgrade-config` strips both dead
+# keys; old configs still load fail-open (the keys are tolerated/ignored).
+CONFIG_SCHEMA_VERSION = 11
 
-# Stages routed to an agent provider. The remaining stages (``testing``, ``publishing``) are run by
-# the orchestrator itself (Check Runner / Git Manager), so they never appear in ``agents.routing``
-# (spec §5, §11).
-ROUTABLE_STAGES: frozenset[Stage] = frozenset(
-    {
-        Stage.REFINEMENT,
-        Stage.PLANNING,
-        Stage.IMPLEMENTATION,
-        Stage.REVIEW,
-        Stage.FIXING,
-        Stage.SUMMARY,
-    }
-)
-
-# Stages a task may skip per-task via ``stages.<stage>.enabled: false``. ``refinement`` is excluded
-# — it uses the ``refined: true`` task flag instead — and ``implementation``/``publishing`` are
-# never skippable (the core work and the output). Note this is *not* ``ROUTABLE_STAGES``:
-# ``testing`` is skippable but runs no agent, while ``implementation``/``refinement`` are
-# agent-routed but not skippable (stage-skip control).
+# Stages a task may skip per-task via ``stages.<stage>.enabled: false`` (flow-contract §10 bounded
+# exception). ``refinement`` is excluded — it is skipped deterministically by completeness
+# classification (``derived.needs_refinement``), never a task flag — and
+# ``implementation``/``publishing`` are never skippable (the core work and the output). ``testing``
+# is skippable but runs no agent (it is the Check Runner).
 SKIPPABLE_STAGES: frozenset[Stage] = frozenset(
     {
         Stage.PLANNING,
@@ -134,12 +126,6 @@ class DecompositionConfig:
 
 
 @dataclass(frozen=True)
-class RouteConfig:
-    primary: ProviderId
-    fallback: ProviderId | None
-
-
-@dataclass(frozen=True)
 class ProviderConfig:
     command: str
     model: str
@@ -151,6 +137,9 @@ class ProviderConfig:
     max_turns: int | None = None
     max_budget_usd: float | None = None
     reasoning: str | None = None  # "low" | "medium" | "high" | "xhigh" | "max"
+    # Exactly one configured provider must set ``primary: true`` — the global primary that runs any
+    # flow node with no ``provider`` field, and the single infrastructure-fallback target (PRE.1).
+    primary: bool = False
 
 
 @dataclass(frozen=True)
@@ -160,7 +149,6 @@ class AgentsConfig:
     max_fix_cycles: int
     max_total_fix_iterations: int
     decomposition: DecompositionConfig
-    routing: dict[Stage, RouteConfig]
     providers: dict[ProviderId, ProviderConfig]
     # Gate for the high-risk per-task ``review`` skip (no agent quality gate before commit/PR): a
     # task may disable review via ``stages.review.enabled: false`` only when true, else rejected.
@@ -262,10 +250,6 @@ class GitConfig:
     auto_merge: bool = False
     # Strategy passed to ``gh pr merge`` when a merge fires.
     auto_merge_strategy: MergeStrategy = MergeStrategy.SQUASH
-    # A per-task ``auto_merge: true`` is honored only when this is true; a per-task ``false``
-    # always opts out. Without it, a task file could grant itself merge rights the operator
-    # never intended.
-    auto_merge_allow_per_task: bool = False
     # False: merge immediately (`gh pr merge`). True: arm GitHub-native auto-merge (`--auto`), which
     # merges only after required status checks pass.
     auto_merge_wait_for_checks: bool = False

@@ -1,6 +1,6 @@
 # Configuration Reference
 
-`config.yaml` controls repositories, providers, routing, security, validation, checks, git publishing, and optional notification settings. The packaged example is [`config.example.yaml`](../config.example.yaml), and the canonical contract is the config schema in the code (`config/schema.py`); see the [Functional Map](functional/index.md).
+`config.yaml` controls repositories, providers, security, validation, checks, git publishing, and optional notification settings. The packaged example is [`config.example.yaml`](../config.example.yaml), and the canonical contract is the config schema in the code (`config/schema.py`); see the [Functional Map](functional/index.md).
 
 The loader is fail-closed:
 
@@ -26,9 +26,10 @@ agents:
   providers:
     codex:
       command: "codex"
+      primary: true
 ```
 
-If `agents.routing` is omitted, the loader treats the file as a legacy Codex-only config and creates a Codex route for all agent-routed stages with a warning.
+Exactly one configured provider must set `primary: true` — the **global primary** that runs any flow node with no explicit `provider`, and the sole infrastructure-fallback target. Provider routing is per **flow node** (a node declares its own `provider`, else the global primary); there is no stage-keyed `agents.routing` block (removed in `schema_version` 11). A legacy config that still carries `agents.routing` loads fail-open — the key is tolerated and ignored, and `upgrade-config` strips it.
 
 ## `schema_version`
 
@@ -36,7 +37,7 @@ If `agents.routing` is omitted, the loader treats the file as a legacy Codex-onl
 schema_version: 1
 ```
 
-Optional top-level integer marking the `config.yaml` **format** version (current: `9`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
+Optional top-level integer marking the `config.yaml` **format** version (current: `11`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
 
 ## Config Discovery
 
@@ -115,7 +116,7 @@ Git credentials are not stored in this file. Configure SSH, a credential helper,
 
 ## `agents`
 
-Controls provider availability, retry/fix budgets, decomposition, routes, and provider-specific settings.
+Controls provider availability, retry/fix budgets, decomposition, the global primary, and provider-specific settings.
 
 ```yaml
 agents:
@@ -132,8 +133,8 @@ agents:
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `allowed` | list of `claude`, `codex` | `["claude", "codex"]` | Providers the router may use. |
-| `max_stage_attempts` | integer | `3` | Attempts allowed for a stage/provider route. |
+| `allowed` | list of `claude`, `codex` | `["claude", "codex"]` | Providers the router may use. Every flow node's `provider` (and the global primary) must be in this list. |
+| `max_stage_attempts` | integer | `3` | Attempts allowed for a stage (primary + the global-primary fallback). |
 | `max_fix_cycles` | integer | `15` | Fix cycles for a single local failing loop (test-driven or review-driven, counted separately). |
 | `max_total_fix_iterations` | integer | `30` | Hard global fix cap across the whole task and all subtasks. Must be `>= max_fix_cycles`. |
 | `allow_review_skip` | boolean | `false` | Required before a task may skip `review` (via `stages.review.enabled: false`) — disabling review removes the only agent quality gate before commit/PR. |
@@ -160,52 +161,21 @@ agents:
 | `min_size_signal` | string | `"large"` | Advisory size threshold passed to the planning prompt. |
 | `commit_per_subtask` | boolean | `true` | Planned v1: one local commit per accepted subtask. |
 
-A task can set `decompose: true` or `decompose: false`, but that only controls the gate for that task. It cannot change `max_subtasks`, routes, or security settings.
+Decomposition is **no longer a task flag** (`decompose` was removed in `schema_version` 11). Whether a split is permitted at all is `agents.decomposition.enabled` (above); whether one actually happens is decided by the flow's `decomposition:` block and the planning node's gate proposal, accepted only under the deterministic rules. A task cannot change `enabled`, `max_subtasks`, the provider, or security settings.
 
-### `agents.routing`
+### Provider routing (node-based)
 
-Routes agent-driven stages to a primary provider and optional fallback provider.
+There is no `agents.routing` block. Provider routing lives on the **flow node**: each agent/evaluator node may declare a `provider:` (`codex` | `claude`), and a node with no `provider` runs on the **global primary** — the one configured provider with `primary: true` (see [`agents.providers`](#agentsproviders)). The global primary is also the sole infrastructure-fallback target: when a node's primary differs from it, an infrastructure failure falls back to the global primary; when the node already runs on the global primary, an infrastructure failure is terminal (there is no other target).
 
-```yaml
-agents:
-  routing:
-    refinement:
-      primary: claude
-      fallback: codex
-    planning:
-      primary: claude
-      fallback: codex
-    implementation:
-      primary: claude
-      fallback: codex
-    review:
-      primary: codex
-      fallback: claude
-    fixing:
-      primary: claude
-      fallback: codex
-    summary:
-      primary: claude
-      fallback: codex
-```
+`testing` and `publishing` never run an agent. The Check Runner owns `testing`; the Git Manager owns `publishing`.
 
-Routable stages are:
+Rules (enforced at load/validate and at flow preflight):
 
-```text
-refinement, planning, implementation, review, fixing, summary
-```
+- exactly one configured provider must set `primary: true`, and it must be in `agents.allowed`;
+- every flow node's declared `provider` must be in `agents.allowed` (rejected at preflight otherwise);
+- a legacy `agents.routing` block is tolerated and ignored on load; `upgrade-config` strips it.
 
-`testing` and `publishing` are not routed to providers. The Check Runner owns `testing`; the Git Manager owns `publishing`.
-
-Rules:
-
-- route keys must be known routable stages;
-- `primary` is required;
-- `fallback` may be omitted or set to `null`;
-- every named provider must be in `agents.allowed`;
-- every named provider must have an `agents.providers.<provider>` entry.
-
-Fallback is planned only for infrastructure errors such as missing binaries, authentication errors, rate limits, provider unavailability, timeouts, process crashes, and invalid provider output. Test failures and review findings go to `fixing`, not fallback.
+Fallback is only for infrastructure errors such as missing binaries, authentication errors, rate limits, provider unavailability, timeouts, process crashes, and invalid provider output. Test failures and review findings go to `fixing`, not fallback.
 
 ### `agents.providers`
 
@@ -216,6 +186,7 @@ agents:
   providers:
     claude:
       command: "claude"
+      primary: true # the global primary — runs any node with no provider; sole fallback target
       model: ""
       reasoning: null # low | medium | high | xhigh (Opus 4.7+ / Fable 5) | max
       timeout_seconds: 7200
@@ -238,8 +209,9 @@ Common fields:
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `command` | string | provider id (`"claude"` or `"codex"`) | Executable name or path. |
-| `model` | string | `""` | Provider model setting; empty means provider default. |
-| `reasoning` | string or null | `null` | Reasoning effort level: `low`, `medium`, `high`, `xhigh`, or `max`. Maps to `--effort` for Claude (v2.1+) and `--reasoning-effort` for Codex. Codex supports up to `xhigh`; `max` (Claude-only) is clamped to `xhigh`. `xhigh` requires Opus 4.7+ or Fable 5 for Claude. |
+| `primary` | boolean | `false` | Marks the **global primary**. Exactly one configured provider must set it; that provider runs any flow node with no explicit `provider` and is the sole infrastructure-fallback target. It must also be in `agents.allowed`. |
+| `model` | string | `""` | Provider model setting; empty means provider default. (The default model for the provider; a flow node may override it per node.) |
+| `reasoning` | string or null | `null` | Reasoning effort level: `low`, `medium`, `high`, `xhigh`, or `max`. Maps to `--effort` for Claude (v2.1+) and `--reasoning-effort` for Codex. Codex supports up to `xhigh`; `max` (Claude-only) is clamped to `xhigh`. `xhigh` requires Opus 4.7+ or Fable 5 for Claude. (A flow node may override it per node.) |
 | `timeout_seconds` | integer | `7200` | Timeout for a stage run. |
 | `permission_profile` | string | `"workspace-write"` | Orchestrator permission profile passed into the adapter. |
 | `extra_args` | list of strings | `[]` | Additional provider CLI arguments after safety validation. |
@@ -331,8 +303,10 @@ validation:
 Current task front matter fields are:
 
 ```text
-id, title, pr_title, refined, decompose, auto_merge, prompt_audit, agents, contacts, model, reasoning, stages
+id, title, pr_title, auto_merge, prompt_audit, contacts, stages
 ```
+
+A task is deliberately "clean" (PRE.3): it carries only identity/dispatch fields plus the two sanctioned exceptions — `stages.<stage>.enabled` (per-task stage skip) and `auto_merge` (task-wins). Provider, `model`, and `reasoning` live on the **flow node**, not the task; `decompose` was removed (the flow decides splitting); refinement-skip is deterministic (completeness classification, no `refined` flag). Inside a `stages.<stage>` block only `enabled` is valid.
 
 A structurally rejected task is terminal `failed`, gets a `validation_report.json`, and never creates a branch or calls a provider.
 
@@ -482,34 +456,16 @@ A per-task `prompt_audit: true|false` in the [task front matter](task-authoring.
 
 ## Common Examples
 
-Codex-only routing:
+Codex-only setup (Codex is the global primary; with no other allowed provider, every node runs on it and an infrastructure failure is terminal):
 
 ```yaml
 agents:
   allowed:
     - codex
-  routing:
-    refinement:
-      primary: codex
-      fallback: null
-    planning:
-      primary: codex
-      fallback: null
-    implementation:
-      primary: codex
-      fallback: null
-    review:
-      primary: codex
-      fallback: null
-    fixing:
-      primary: codex
-      fallback: null
-    summary:
-      primary: codex
-      fallback: null
   providers:
     codex:
       command: "codex"
+      primary: true
       model: ""
       timeout_seconds: 7200
       sandbox: "workspace-write"
@@ -540,7 +496,8 @@ Before running tasks:
 
 - `python -m wastech_orchestrator preflight` succeeds;
 - `command -v`/`where` resolves provider and `gh` executables in the same environment that launches the orchestrator;
-- every routed provider is in `agents.allowed`;
+- exactly one provider sets `primary: true`, and it is in `agents.allowed`;
+- every flow node's declared `provider` is in `agents.allowed`;
 - every allowed provider has an `agents.providers` entry;
 - `max_total_fix_iterations >= max_fix_cycles`;
 - `agents.decomposition.max_subtasks >= 2`;

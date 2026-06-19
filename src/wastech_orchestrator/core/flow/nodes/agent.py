@@ -67,7 +67,7 @@ class AgentNodeRunner:
     def run(self, node: FlowNode, ctx: NodeContext) -> NodeResult:
         assert isinstance(node, AgentNode)
         stage = self._s.stage_for_node[node.id]
-        route = self._s.router.resolve_route(stage, self._in.route_override)
+        route = self._s.router.resolve_route(stage, node.provider)
         try:
             if _wants_hitl(node):
                 return self._run_with_hitl(node, ctx, stage, route)
@@ -354,8 +354,8 @@ class AgentNodeRunner:
             human_input_path=human_input_path,
             skill_reference_paths=self._in.skill_paths,
             output_schema=output_schema,
-            model=self._in.resolve_model(stage, node.model),
-            reasoning=self._in.resolve_reasoning(stage, node.reasoning),
+            model=node.model,
+            reasoning=node.reasoning,
             extra_args=list(node.extra_args),
             session_id=editing_session_id(
                 node.session_scope, self._in.session_ids, route.primary.value

@@ -298,7 +298,7 @@ def _build(
 def _complete_task(tmp_path: Path, task_id: str = "task-001") -> str:
     path = tmp_path / f"{task_id}.md"
     path.write_text(
-        f'---\nid: {task_id}\ntitle: "Add a thing"\nrefined: true\n---\n\n'
+        f'---\nid: {task_id}\ntitle: "Add a thing"\n---\n\n'
         "## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
         encoding="utf-8",
     )
@@ -346,7 +346,7 @@ def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: 
 
     row = store.get_task("task-001")
     assert row is not None and row.status is Status.DONE
-    assert "refinement" in _skipped_stages(store)  # refined: true → refinement node skipped
+    assert "refinement" in _skipped_stages(store)  # complete task → refinement node skipped
     # The task file was moved into its lifecycle folder (tasks/done, §20.2).
     assert (tmp_path / "done" / "task-001.md").exists()
     assert not (tmp_path / "task-001.md").exists()
@@ -372,66 +372,15 @@ def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: 
     assert "agent/task-001-add-a-thing" in branches
 
 
-def test_task_agents_override_reaches_live_route(
+def test_live_route_defaults_to_global_primary(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # A front-matter `agents:` override must repoint the stage primary on the live engine path (not
-    # only in the router unit): the implementation node resolves to the task-chosen provider, tagged
-    # RouteSource.TASK_OVERRIDE. Config default for implementation is claude; the task picks codex.
-    # (F2 / MC1.)
+    # Routing is node-based now (PRE.1): the packaged implementation flow declares no per-node
+    # `provider`, so every node resolves to the config's global primary (claude) on the live engine
+    # path, tagged RouteSource.CONFIG. A task can no longer repoint a stage's provider.
     providers = _both()
     orch, store, _, _ = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
-    )
-    path = tmp_path / "task-001.md"
-    path.write_text(
-        '---\nid: task-001\ntitle: "Add a thing"\nrefined: true\n'
-        "agents:\n  implementation: codex\n"
-        "---\n\n## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
-        encoding="utf-8",
-    )
-    orig = providers[ProviderId.CODEX].run
-
-    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
-        if request.stage is Stage.IMPLEMENTATION:
-            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
-        return orig(request)
-
-    providers[ProviderId.CODEX].run = run_with_edit  # type: ignore[method-assign]
-
-    result = orch.run_task(str(path))
-    assert result.final_status is Status.DONE
-
-    runs = {r.node_id: r for r in store.get_node_runs("task-001")}
-    impl = runs["implementation"]
-    assert impl.route_primary == "codex"  # repointed from the config default (claude)
-    assert impl.route_source == "task_override"
-
-
-def test_per_stage_model_reasoning_reaches_provider(
-    git_repo, make_git_config, tmp_path: Path
-) -> None:
-    """A ``stages.<stage>`` override sets the model/reasoning for that stage only; other stages
-    fall back to the task-wide values. The resolved values travel on the AgentRunRequest."""
-    providers = _both()
-    orch, _store, _, _art = _build(
-        git_repo,
-        make_git_config,
-        tmp_path,
-        providers=providers,
-        check_verdicts=[0],
-    )
-    path = tmp_path / "task-001.md"
-    path.write_text(
-        '---\nid: task-001\ntitle: "Add a thing"\nrefined: true\n'
-        "model: claude-sonnet-4-6\n"
-        "reasoning: low\n"
-        "stages:\n"
-        "  planning:\n"
-        "    model: claude-opus-4-8\n"
-        "    reasoning: high\n"
-        "---\n\n## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
-        encoding="utf-8",
     )
     orig = providers[ProviderId.CLAUDE].run
 
@@ -442,17 +391,13 @@ def test_per_stage_model_reasoning_reaches_provider(
 
     providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
 
-    result = orch.run_task(str(path))
+    result = orch.run_task(_complete_task(tmp_path, "task-001"))
     assert result.final_status is Status.DONE
 
-    requests = providers[ProviderId.CLAUDE].requests + providers[ProviderId.CODEX].requests
-    planning = next(r for r in requests if r.stage is Stage.PLANNING)
-    impl = next(r for r in requests if r.stage is Stage.IMPLEMENTATION)
-    # Planning uses the per-stage override; implementation inherits the task-wide values.
-    assert (planning.model, planning.reasoning) == ("claude-opus-4-8", "high")
-    assert (impl.model, impl.reasoning) == ("claude-sonnet-4-6", "low")
-
-
+    runs = {r.node_id: r for r in store.get_node_runs("task-001")}
+    impl = runs["implementation"]
+    assert impl.route_primary == "claude"  # the global primary
+    assert impl.route_source == "config"
 
 
 
@@ -478,7 +423,8 @@ def test_vague_task_runs_refinement(git_repo, make_git_config, tmp_path: Path) -
 
     result = orch.run_task(str(path))
     assert result.final_status is Status.DONE
-    assert "refinement" in _ran_nodes(store, "task-002")  # not refined → refinement node ran
+    # No acceptance criteria → needs_enrichment → refinement node ran (deterministic, PRE.3).
+    assert "refinement" in _ran_nodes(store, "task-002")
     assert (art / "logs" / "task-002" / "task.enriched.md").exists()
 
 
@@ -997,7 +943,8 @@ def test_failed_with_branch_commits_and_pushes_task_and_summary(
     pending.mkdir(parents=True)
     task_file = pending / "task-fail.md"
     task_body = (
-        '---\nid: task-fail\ntitle: "Add a thing"\nrefined: true\n---\n\n## Description\n\nDo it.\n'
+        '---\nid: task-fail\ntitle: "Add a thing"\n---\n\n'
+        "## Description\n\nDo it.\n\n## Acceptance criteria\n\n- works\n"
     )
     task_file.write_text(task_body, encoding="utf-8")
 
@@ -1596,7 +1543,7 @@ def _patch_impl_edit(providers: dict[ProviderId, FakeProvider], git_repo) -> Non
 def _task_with_auto_merge(tmp_path: Path, value: bool, task_id: str = "task-001") -> str:
     path = tmp_path / f"{task_id}.md"
     path.write_text(
-        f'---\nid: {task_id}\ntitle: "Add a thing"\nrefined: true\n'
+        f'---\nid: {task_id}\ntitle: "Add a thing"\n'
         f"auto_merge: {str(value).lower()}\n---\n\n"
         "## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
         encoding="utf-8",
@@ -1616,28 +1563,18 @@ def test_auto_merge_resolution_matrix(git_repo, make_git_config, tmp_path: Path)
     )
     base_git = orch._config.git
 
-    def eff(task_am: bool | None, cfg_am: bool, cfg_allow: bool) -> bool:
-        orch._config = replace(
-            orch._config,
-            git=replace(base_git, auto_merge=cfg_am, auto_merge_allow_per_task=cfg_allow),
-        )
+    def eff(task_am: bool | None, cfg_am: bool) -> bool:
+        orch._config = replace(orch._config, git=replace(base_git, auto_merge=cfg_am))
         task = NormalizedTask(id="t", title="T", description="d", auto_merge=task_am)
         return orch._auto_merge_on(task)
 
-    # Explicit per-task False always opts out, in every config combination.
+    # The per-task value wins outright (PRE.2), in every config combination.
     for cfg_am in (True, False):
-        for cfg_allow in (True, False):
-            assert eff(False, cfg_am, cfg_allow) is False
+        assert eff(False, cfg_am) is False
+        assert eff(True, cfg_am) is True
     # Absent (None) defers to the global flag.
-    assert eff(None, True, False) is True
-    assert eff(None, True, True) is True
-    assert eff(None, False, False) is False
-    assert eff(None, False, True) is False
-    # Per-task True is honored only with operator opt-in; otherwise it falls through to the global.
-    assert eff(True, False, True) is True
-    assert eff(True, True, True) is True
-    assert eff(True, False, False) is False  # ignored → global False
-    assert eff(True, True, False) is True  # ignored → global True
+    assert eff(None, True) is True
+    assert eff(None, False) is False
 
 
 def test_global_auto_merge_merges_pr(git_repo, make_git_config, tmp_path: Path) -> None:
@@ -1680,9 +1617,11 @@ def test_no_auto_merge_leaves_pr_open(git_repo, make_git_config, tmp_path: Path)
     assert ledger.records()[0]["auto_merged"] is False
 
 
-def test_per_task_true_ignored_without_operator_optin(
+def test_per_task_true_wins_over_global_false(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
+    # PRE.2: a per-task ``auto_merge: true`` wins outright over the instance default ``false``;
+    # there is no operator gate. The task author owns the decision (see docs/operations.md).
     providers = _both()
     calls: list[list[str]] = []
     orch, _, _, _ = _build(
@@ -1691,27 +1630,7 @@ def test_per_task_true_ignored_without_operator_optin(
         tmp_path,
         providers=providers,
         check_verdicts=[0],
-        config_kwargs={"auto_merge": False, "auto_merge_allow_per_task": False},
-        gh=_merge_gh(calls),
-    )
-    _patch_impl_edit(providers, git_repo)
-    result = orch.run_task(_task_with_auto_merge(tmp_path, True))
-    assert result.final_status is Status.DONE
-    assert _merge_calls(calls) == []  # per-task opt-in ignored: operator never enabled it
-
-
-def test_per_task_true_honored_with_operator_optin(
-    git_repo, make_git_config, tmp_path: Path
-) -> None:
-    providers = _both()
-    calls: list[list[str]] = []
-    orch, _, _, _ = _build(
-        git_repo,
-        make_git_config,
-        tmp_path,
-        providers=providers,
-        check_verdicts=[0],
-        config_kwargs={"auto_merge": False, "auto_merge_allow_per_task": True},
+        config_kwargs={"auto_merge": False},
         gh=_merge_gh(calls),
     )
     _patch_impl_edit(providers, git_repo)
@@ -1808,7 +1727,7 @@ def test_auto_merge_does_not_fire_when_quality_gate_fails(
 def _task_with_stages(tmp_path: Path, stages_block: str, task_id: str = "task-001") -> str:
     path = tmp_path / f"{task_id}.md"
     path.write_text(
-        f'---\nid: {task_id}\ntitle: "Add a thing"\nrefined: true\n{stages_block}---\n\n'
+        f'---\nid: {task_id}\ntitle: "Add a thing"\n{stages_block}---\n\n'
         "## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
         encoding="utf-8",
     )
@@ -2078,7 +1997,7 @@ def test_prompt_audit_records_steps_in_order(git_repo, make_git_config, tmp_path
     # Filenames are zero-padded node_run_id → lexical sort is chronological.
     ids = [int(p.name.split("-")[0]) for p in step_files]
     assert ids == sorted(ids)
-    # refined: true → refinement skipped; planning/implementation/review/summary are agent stages.
+    # complete task → refinement skipped; planning/implementation/review/summary are agent stages.
     stages = [json.loads(p.read_text())["stage"] for p in step_files]
     assert stages == ["planning", "implementation", "review", "summary"]
 
@@ -2092,10 +2011,10 @@ def test_prompt_audit_records_steps_in_order(git_repo, make_git_config, tmp_path
         assert rec["agents"] and rec["agents"][0]["status"] == "succeeded"
         assert "route_primary" in rec and "provider_used" in rec
 
-    # Who-metadata is correct: review's primary route is codex.
+    # Who-metadata is correct: every node defaults to the global primary (claude) now (PRE.1).
     review = next(r for r in timeline if r["stage"] == "review")
-    assert review["provider_used"] == "codex"
-    assert review["agents"][0]["provider"] == "codex"
+    assert review["provider_used"] == "claude"
+    assert review["agents"][0]["provider"] == "claude"
     assert review["agents"][0]["is_fallback"] is False
 
     # Both artifact kinds are registered in SQLite.
@@ -2106,46 +2025,10 @@ def test_prompt_audit_records_steps_in_order(git_repo, make_git_config, tmp_path
     assert {"prompt_audit", "prompt_audit_timeline"} <= kinds
 
 
-def test_prompt_audit_records_fallback_who(git_repo, make_git_config, tmp_path: Path) -> None:
-    """A stage that falls back records both agents in one step: the failed primary then the
-    successful fallback, in attempt order."""
-    providers = {
-        ProviderId.CLAUDE: FakeProvider("claude", infra_fail={Stage.IMPLEMENTATION}),
-        ProviderId.CODEX: FakeProvider("codex"),
-    }
-    orch, _, _, art = _build(
-        git_repo,
-        make_git_config,
-        tmp_path,
-        providers=providers,
-        check_verdicts=[0],
-        config_kwargs={"prompt_audit": True},
-    )
-    # Implementation primary (claude) infra-fails → fallback (codex) runs and must leave a change.
-    orig = providers[ProviderId.CODEX].run
-
-    def codex_with_edit(request: AgentRunRequest) -> AgentRunResult:
-        if request.stage is Stage.IMPLEMENTATION:
-            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
-        return orig(request)
-
-    providers[ProviderId.CODEX].run = codex_with_edit  # type: ignore[method-assign]
-
-    result = orch.run_task(_complete_task(tmp_path))
-    assert result.final_status is Status.DONE
-
-    impl = json.loads(
-        next(_audit_dir(art, "task-001").glob("*-implementation.json")).read_text()
-    )
-    assert impl["route_primary"] == "claude"
-    assert impl["provider_used"] == "codex"
-    agents = impl["agents"]
-    assert [a["provider"] for a in agents] == ["claude", "codex"]
-    assert agents[0]["status"] is None and agents[0]["error_class"] == "timeout"
-    assert agents[0]["is_fallback"] is False
-    assert agents[1]["status"] == "succeeded" and agents[1]["is_fallback"] is True
-
-
+# NOTE: the live-path "primary fails → fallback runs" prompt-audit scenario no longer exists for the
+# packaged flow: every node defaults to the global primary, whose fallback target is itself (none).
+# Fallback fires only for a node pinned to a non-primary provider. The fallback who-metadata
+# (is_fallback across primary+fallback attempts) is unit-covered in test_flow_observability.py.
 
 
 def test_prompt_audit_absent_when_disabled(git_repo, make_git_config, tmp_path: Path) -> None:
@@ -2175,7 +2058,7 @@ def test_prompt_audit_task_overrides_global_off(git_repo, make_git_config, tmp_p
     _patch_impl_edit(providers, git_repo)
     path = tmp_path / "task-001.md"
     path.write_text(
-        '---\nid: task-001\ntitle: "Add a thing"\nrefined: true\nprompt_audit: true\n---\n\n'
+        '---\nid: task-001\ntitle: "Add a thing"\nprompt_audit: true\n---\n\n'
         "## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
         encoding="utf-8",
     )

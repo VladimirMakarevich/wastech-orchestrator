@@ -74,6 +74,7 @@
       }
     },
     "reasoning": { "enum": ["low", "medium", "high", "xhigh", "max", null] },
+    "provider": { "enum": ["codex", "claude", null] },
     "node": {
       "oneOf": [
         { "$ref": "#/$defs/agentNode" },
@@ -96,6 +97,7 @@
         },
         "lineage_affinity": { "type": ["string", "null"] },
         "permission_profile": { "enum": ["read-only", "workspace-write"] },
+        "provider": { "$ref": "#/$defs/provider" },
         "model": { "type": ["string", "null"] },
         "reasoning": { "$ref": "#/$defs/reasoning" },
         "timeout_seconds": { "type": "integer", "minimum": 1 },
@@ -126,6 +128,7 @@
         "evaluation_kind": { "enum": ["stage_output", "final_handoff"] },
         "blocking": { "type": "boolean" },
         "max_rework_per_stage": { "type": "integer", "minimum": 0 },
+        "provider": { "$ref": "#/$defs/provider" },
         "model": { "type": ["string", "null"] },
         "reasoning": { "$ref": "#/$defs/reasoning" },
         "when": { "$ref": "#/$defs/when" }

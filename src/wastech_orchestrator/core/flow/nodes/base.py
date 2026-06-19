@@ -77,13 +77,13 @@ class NodeManualRequired(Exception):
 class RouterPort(Protocol):
     """The slice of :class:`~wastech_orchestrator.routing.router.AgentRouter` runners use.
 
-    Runners pass the per-task front-matter ``agents`` override (:attr:`NodeInputs.route_override`)
-    to ``resolve_route``; it may only repoint a stage's primary to an allowed, configured provider
-    (validated at the gate, re-validated by the router). An empty override resolves from config.
+    Runners pass the flow node's declared ``provider`` to ``resolve_route``; ``None`` defaults to
+    the config's global primary (PRE.1). ``stage`` is carried for audit/logging only — it no longer
+    selects the provider.
     """
 
     def resolve_route(
-        self, stage: Stage, override: Mapping[Stage, ProviderId] | None = None
+        self, stage: Stage, provider: ProviderId | None = None
     ) -> ResolvedRoute: ...
 
     def run_stage(
@@ -191,7 +191,9 @@ class NodeServices:
     store: NodeRunStorePort
     repo_dir: str
     artifacts_root: str
-    #: node id -> legacy routing ``Stage`` (parity routing map; routing is by ``Stage`` until P1.5).
+    #: node id -> its ``Stage`` identity. Routing is node-based now (the node's ``provider``); this
+    #: map only supplies the request ``stage`` (output schema, HITL parsing, interaction paths). The
+    #: ``Stage`` enum itself is retained for these identities + skip facts until P4.
     stage_for_node: Mapping[str, Stage]
     clock: Callable[[], str]
     default_timeout_seconds: int = 7200
@@ -244,24 +246,3 @@ class NodeInputs:
     contacts: tuple[str, ...] = ()
     #: in-memory provider -> session id map (legacy parity; durable lineage is P2.2).
     session_ids: dict[str, str] = field(default_factory=dict)
-    #: per-task model / reasoning overrides keyed by routing stage (``task.model_for`` /
-    #: ``reasoning_for``). When set and they return a value for the node's stage, that value wins
-    #: over the flow node's declared ``model`` / ``reasoning`` — the legacy per-task override.
-    model_for: Callable[[Stage], str | None] | None = None
-    reasoning_for: Callable[[Stage], str | None] | None = None
-    #: per-task provider override (front-matter ``agents``) keyed by routing stage. Passed to
-    #: ``router.resolve_route`` so a task can repoint a stage's primary provider (validated at the
-    #: gate, re-validated by the router). Empty → route from config.
-    route_override: Mapping[Stage, ProviderId] = field(default_factory=dict)
-
-    def resolve_model(self, stage: Stage, node_model: str | None) -> str | None:
-        """Per-task ``model_for(stage)`` wins over the node's declared model (legacy parity)."""
-        if self.model_for is not None and (m := self.model_for(stage)) is not None:
-            return m
-        return node_model
-
-    def resolve_reasoning(self, stage: Stage, node_reasoning: str | None) -> str | None:
-        """Per-task ``reasoning_for(stage)`` wins over the node's declared reasoning."""
-        if self.reasoning_for is not None and (r := self.reasoning_for(stage)) is not None:
-            return r
-        return node_reasoning

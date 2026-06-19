@@ -25,13 +25,11 @@ from pathlib import Path
 from typing import Any
 
 from wastech_orchestrator.config.schema import (
-    ROUTABLE_STAGES,
     SKIPPABLE_STAGES,
     OrchestratorConfig,
 )
-from wastech_orchestrator.config.validation import check_task_route_override
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
-from wastech_orchestrator.providers.base import ProviderId, Stage
+from wastech_orchestrator.providers.base import Stage
 from wastech_orchestrator.security.injection import scan_frontmatter
 from wastech_orchestrator.task.model import (
     ALLOWED_TASK_KEYS,
@@ -46,8 +44,6 @@ from wastech_orchestrator.task.parser import (
 )
 
 VALIDATION_REPORT_FILENAME = "validation_report.json"
-
-_REASONING_LEVELS: frozenset[str] = frozenset({"low", "medium", "high", "xhigh", "max"})
 
 # Characters allowed alongside printable text (everything else counts as a control char, §19.2).
 _ALLOWED_CONTROL = {"\t", "\n", "\r"}
@@ -67,7 +63,6 @@ class ValidationReason(StrEnum):
     INVALID_FIELD_TYPE = "invalid_field_type"
     INVALID_TASK_ID = "invalid_task_id"
     DUPLICATE_TASK_ID = "duplicate_task_id"
-    INVALID_ROUTE_OVERRIDE = "invalid_route_override"
     INVALID_STAGE_OVERRIDE = "invalid_stage_override"
     REVIEW_SKIP_NOT_ALLOWED = "review_skip_not_allowed"
     INJECTION_SUSPECTED = "injection_suspected"
@@ -97,8 +92,8 @@ class _Reject:
     detail: str
 
 
-# Map a front-matter stage key to the canonical Stage (only the agent-routed stages are valid in a
-# task override). ``implementation`` is the spec's key (not ``implementing``, which is a status).
+# Map a front-matter stage key to the canonical Stage (only skippable stages are valid under the
+# task ``stages`` block). ``implementation`` is the spec's key (not ``implementing``, a status).
 _STAGE_BY_KEY = {stage.value: stage for stage in Stage}
 
 
@@ -221,12 +216,7 @@ class ValidationGate:
         ):
             return _rej(ValidationReason.DUPLICATE_TASK_ID, id_value)
 
-        # invalid_route_override — map the agents override and validate against the config.
-        agents, route_reject = self._build_agents(frontmatter.get("agents"))
-        if route_reject is not None:
-            return route_reject, None
-
-        # invalid_stage_override — map the per-stage model/reasoning override (agent-routed stages).
+        # invalid_stage_override — map the per-stage skip toggle (skippable stages only).
         stage_params, stage_reject = self._build_stage_params(frontmatter.get("stages"))
         if stage_reject is not None:
             return stage_reject, None
@@ -244,14 +234,9 @@ class ValidationGate:
             title=str(title_value),
             description=body.strip(),
             pr_title=pr_title,
-            refined=bool(frontmatter.get("refined", False)),
-            decompose=_as_tristate(frontmatter.get("decompose")),
             auto_merge=_as_tristate(frontmatter.get("auto_merge")),
             prompt_audit=_as_tristate(frontmatter.get("prompt_audit")),
-            agents=agents,
             contacts=[str(c) for c in frontmatter.get("contacts", [])],
-            model=frontmatter.get("model") or None,
-            reasoning=frontmatter.get("reasoning") or None,
             stage_params=stage_params,
         )
         return None, task
@@ -268,14 +253,6 @@ class ValidationGate:
             return _Reject(ValidationReason.INVALID_FIELD_TYPE, "title must be a string")
         if "pr_title" in fm and fm["pr_title"] is not None and not isinstance(fm["pr_title"], str):
             return _Reject(ValidationReason.INVALID_FIELD_TYPE, "pr_title must be a string")
-        if "refined" in fm and not isinstance(fm["refined"], bool):
-            return _Reject(ValidationReason.INVALID_FIELD_TYPE, "refined must be a boolean")
-        if (
-            "decompose" in fm
-            and fm["decompose"] is not None
-            and not isinstance(fm["decompose"], bool)
-        ):
-            return _Reject(ValidationReason.INVALID_FIELD_TYPE, "decompose must be a boolean")
         if (
             "auto_merge" in fm
             and fm["auto_merge"] is not None
@@ -288,8 +265,6 @@ class ValidationGate:
             and not isinstance(fm["prompt_audit"], bool)
         ):
             return _Reject(ValidationReason.INVALID_FIELD_TYPE, "prompt_audit must be a boolean")
-        if "agents" in fm and not isinstance(fm["agents"], Mapping):
-            return _Reject(ValidationReason.INVALID_FIELD_TYPE, "agents must be a mapping")
         if "contacts" in fm:
             contacts = fm["contacts"]
             if not isinstance(contacts, Sequence) or isinstance(contacts, str | bytes):
@@ -298,46 +273,18 @@ class ValidationGate:
                 return _Reject(
                     ValidationReason.INVALID_FIELD_TYPE, "contacts must be a list of strings"
                 )
-        return _validate_model_reasoning(
-            fm.get("model"), fm.get("reasoning"), reason=ValidationReason.INVALID_FIELD_TYPE
-        )
-
-    def _build_agents(self, raw: Any) -> tuple[dict[Stage, ProviderId], _Reject | None]:
-        if raw is None:
-            return {}, None
-        agents: dict[Stage, ProviderId] = {}
-        for key, value in raw.items():
-            stage = _STAGE_BY_KEY.get(str(key))
-            if stage is None:
-                return {}, _Reject(
-                    ValidationReason.INVALID_ROUTE_OVERRIDE, f"unknown stage {key!r}"
-                )
-            try:
-                provider = ProviderId(str(value))
-            except ValueError:
-                return {}, _Reject(
-                    ValidationReason.INVALID_ROUTE_OVERRIDE, f"unknown provider {value!r}"
-                )
-            agents[stage] = provider
-        # Reuse the config-time override validator for allowed/configured/agent-routed checks.
-        issues = check_task_route_override(agents, self._config)
-        if issues:
-            return {}, _Reject(ValidationReason.INVALID_ROUTE_OVERRIDE, "; ".join(issues))
-        return agents, None
+        return None
 
     def _build_stage_params(self, raw: Any) -> tuple[dict[Stage, StageParams], _Reject | None]:
         """Map the ``stages`` front-matter block to ``{Stage: StageParams}`` (fail-closed).
 
-        Each key is a stage; the valid sub-keys depend on the stage:
+        Each key must be a skippable stage (``SKIPPABLE_STAGES``); the only valid sub-key is
+        ``enabled`` — the stage-skip toggle (flow-contract §10, the one sanctioned per-stage knob).
+        ``enabled: false`` skips the stage; ``null``/``{}`` means default (it runs).
+        ``implementation``/``refinement`` cannot be disabled here (refinement-skip is deterministic
+        — completeness classification), and ``publishing`` is never a valid key.
 
-        * ``model`` / ``reasoning``: only for agent-routed stages (``ROUTABLE_STAGES``). The
-          ``testing`` stage runs no agent, so a model/reasoning there is rejected.
-        * ``enabled``: only for skippable stages (``SKIPPABLE_STAGES``); ``enabled: false`` skips
-          it. ``implementation``/``refinement`` cannot be disabled here (refinement uses
-          ``refined``) and ``publishing`` is not a valid key at all.
-
-        A value of ``null``/``{}`` means "inherit / default". Unknown stages, unknown sub-keys, a
-        sub-key not valid for that stage, and non-mapping values all reject with
+        Unknown/non-skippable stages, unknown sub-keys, and non-mapping values all reject with
         ``INVALID_STAGE_OVERRIDE``. Disabling ``review`` additionally requires
         ``agents.allow_review_skip`` (else ``REVIEW_SKIP_NOT_ALLOWED``).
         """
@@ -348,7 +295,7 @@ class ValidationGate:
         stage_params: dict[Stage, StageParams] = {}
         for key, value in raw.items():
             stage = _STAGE_BY_KEY.get(str(key))
-            if stage is None or stage not in (ROUTABLE_STAGES | SKIPPABLE_STAGES):
+            if stage is None or stage not in SKIPPABLE_STAGES:
                 return {}, _Reject(
                     ValidationReason.INVALID_STAGE_OVERRIDE, f"unknown stage {key!r}"
                 )
@@ -360,25 +307,12 @@ class ValidationGate:
                     ValidationReason.INVALID_STAGE_OVERRIDE,
                     f"stages.{stage.value} must be a mapping",
                 )
-            allowed_keys: set[str] = set()
-            if stage in ROUTABLE_STAGES:
-                allowed_keys |= {"model", "reasoning"}
-            if stage in SKIPPABLE_STAGES:
-                allowed_keys |= {"enabled"}
-            unknown = {str(k) for k in value} - allowed_keys
+            unknown = {str(k) for k in value} - {"enabled"}
             if unknown:
                 return {}, _Reject(
                     ValidationReason.INVALID_STAGE_OVERRIDE,
                     f"stages.{stage.value}: unknown keys {sorted(unknown)}",
                 )
-            reject = _validate_model_reasoning(
-                value.get("model"),
-                value.get("reasoning"),
-                reason=ValidationReason.INVALID_STAGE_OVERRIDE,
-                prefix=f"stages.{stage.value} ",
-            )
-            if reject is not None:
-                return {}, reject
             enabled = value.get("enabled")
             if enabled is not None and not isinstance(enabled, bool):
                 return {}, _Reject(
@@ -394,11 +328,7 @@ class ValidationGate:
                     ValidationReason.REVIEW_SKIP_NOT_ALLOWED,
                     "stages.review.enabled: false requires agents.allow_review_skip: true",
                 )
-            stage_params[stage] = StageParams(
-                model=value.get("model") or None,
-                reasoning=value.get("reasoning") or None,
-                enabled=enabled,
-            )
+            stage_params[stage] = StageParams(enabled=enabled)
         return stage_params, None
 
     # --- Phase B --------------------------------------------------------------------------
@@ -406,11 +336,10 @@ class ValidationGate:
     def phase_b(self, task: NormalizedTask) -> Completeness:
         """Classify ``complete`` vs ``needs_enrichment`` (never rejects, §19.1).
 
-        Complete when the task is flagged ``refined: true`` or it carries both a description and
-        acceptance criteria. Anything less is ``needs_enrichment`` — ``refinement`` will run (§5).
+        Complete when the task carries both a description and acceptance criteria; anything less is
+        ``needs_enrichment`` — ``refinement`` will run (§5). This classification is the *only* input
+        to the deterministic refinement-skip (``derived.needs_refinement``); there is no task flag.
         """
-        if task.refined:
-            return Completeness.COMPLETE
         has_description = bool(task.description.strip())
         has_acceptance = extract_section(task.description, "Acceptance criteria") is not None or (
             "acceptance" in task.description.lower()
@@ -427,27 +356,6 @@ def _rej(reason: ValidationReason, detail: str) -> tuple[_Reject, None]:
 def _as_tristate(value: Any) -> bool | None:
     if isinstance(value, bool):
         return value
-    return None
-
-
-def _validate_model_reasoning(
-    model: Any, reasoning: Any, *, reason: ValidationReason, prefix: str = ""
-) -> _Reject | None:
-    """Validate a ``(model, reasoning)`` pair — shared by the top-level fields and each stage block.
-
-    ``model`` must be a string or null; ``reasoning`` must be null or one of ``_REASONING_LEVELS``.
-    ``None`` for either is "unset" and skips its check. ``reason`` selects the reject code
-    (``INVALID_FIELD_TYPE`` for the top-level pair, ``INVALID_STAGE_OVERRIDE`` per stage) and
-    ``prefix`` frames the detail (e.g. ``"stages.planning "``) while keeping the ``model``/
-    ``reasoning`` substrings intact.
-    """
-    if model is not None and not isinstance(model, str):
-        return _Reject(reason, f"{prefix}model must be a string or null")
-    if reasoning is not None:
-        if not isinstance(reasoning, str):
-            return _Reject(reason, f"{prefix}reasoning must be a string or null")
-        if reasoning not in _REASONING_LEVELS:
-            return _Reject(reason, f"{prefix}reasoning must be one of {sorted(_REASONING_LEVELS)}")
     return None
 
 

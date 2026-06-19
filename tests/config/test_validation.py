@@ -1,4 +1,4 @@
-"""Validator: every §11/§21.4 reject path plus the task-override helper."""
+"""Validator: every §11/§21.4 reject path, including the global-primary rule (PRE.1)."""
 
 from __future__ import annotations
 
@@ -7,12 +7,9 @@ from dataclasses import replace
 import pytest
 
 from wastech_orchestrator.config.loader import ConfigError, loads_config
-from wastech_orchestrator.config.schema import (
-    OrchestratorConfig,
-    RouteConfig,
-)
-from wastech_orchestrator.config.validation import check_task_route_override, validate_config
-from wastech_orchestrator.providers.base import ProviderId, Stage
+from wastech_orchestrator.config.schema import OrchestratorConfig
+from wastech_orchestrator.config.validation import validate_config
+from wastech_orchestrator.providers.base import ProviderId
 
 
 @pytest.fixture
@@ -28,29 +25,32 @@ def test_packaged_config_validates_clean(base_config: OrchestratorConfig) -> Non
     assert validate_config(base_config) == []
 
 
-def test_route_primary_not_in_allowed_is_rejected(base_config: OrchestratorConfig) -> None:
-    bad = _with_agents(base_config, allowed=(ProviderId.CODEX,))  # routes still name claude
+def test_global_primary_not_in_allowed_is_rejected(base_config: OrchestratorConfig) -> None:
+    # claude is the global primary in the packaged config; shrinking allowed to codex breaks it.
+    bad = _with_agents(base_config, allowed=(ProviderId.CODEX,))
     with pytest.raises(ConfigError) as exc:
         validate_config(bad)
     assert any("agents.allowed" in issue for issue in exc.value.issues)
 
 
-def test_route_provider_without_providers_entry_is_rejected(
-    base_config: OrchestratorConfig,
-) -> None:
-    providers = {ProviderId.CODEX: base_config.agents.providers[ProviderId.CODEX]}
-    bad = _with_agents(base_config, providers=providers)  # routes still name claude
+def test_no_global_primary_is_rejected(base_config: OrchestratorConfig) -> None:
+    providers = {
+        pid: replace(cfg, primary=False) for pid, cfg in base_config.agents.providers.items()
+    }
+    bad = _with_agents(base_config, providers=providers)
     with pytest.raises(ConfigError) as exc:
         validate_config(bad)
-    assert any("agents.providers" in issue for issue in exc.value.issues)
+    assert any("exactly one provider must set primary" in issue for issue in exc.value.issues)
 
 
-def test_non_routable_stage_in_routing_is_rejected(base_config: OrchestratorConfig) -> None:
-    routing = {**base_config.agents.routing, Stage.TESTING: RouteConfig(ProviderId.CODEX, None)}
-    bad = _with_agents(base_config, routing=routing)
+def test_multiple_global_primaries_are_rejected(base_config: OrchestratorConfig) -> None:
+    providers = {
+        pid: replace(cfg, primary=True) for pid, cfg in base_config.agents.providers.items()
+    }
+    bad = _with_agents(base_config, providers=providers)
     with pytest.raises(ConfigError) as exc:
         validate_config(bad)
-    assert any("agent-routed" in issue for issue in exc.value.issues)
+    assert any("exactly one provider must set primary" in issue for issue in exc.value.issues)
 
 
 def test_max_total_below_max_fix_cycles_is_rejected(base_config: OrchestratorConfig) -> None:
@@ -131,14 +131,3 @@ def test_invalid_telegram_env_name_is_rejected(base_config: OrchestratorConfig, 
     with pytest.raises(ConfigError) as exc:
         validate_config(bad)
     assert any(f"telegram.{field}" in issue for issue in exc.value.issues)
-
-
-def test_task_override_must_pick_allowed_routable_provider(
-    base_config: OrchestratorConfig,
-) -> None:
-    assert check_task_route_override({Stage.PLANNING: ProviderId.CODEX}, base_config) == []
-    # Non-routable stage and unknown providers surface as problems (not exceptions).
-    only_codex = _with_agents(base_config, allowed=(ProviderId.CODEX,))
-    problems = check_task_route_override({Stage.PLANNING: ProviderId.CLAUDE}, only_codex)
-    assert problems
-    assert check_task_route_override({Stage.TESTING: ProviderId.CODEX}, base_config)

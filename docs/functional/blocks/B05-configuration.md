@@ -2,14 +2,14 @@
 
 ## Purpose
 
-The typed model for `config.yaml` and its full data lifecycle: structural YAML parsing into dataclasses (fail-closed), semantic validation of rules §11/§21.4, and key migration between schema versions. The configuration defines the behavior of the entire system (providers, routes, loop limits, security, the git audit footprint, checks, telegram, skills, the prompt audit toggle).
+The typed model for `config.yaml` and its full data lifecycle: structural YAML parsing into dataclasses (fail-closed), semantic validation of rules §11/§21.4, and key migration between schema versions. The configuration defines the behavior of the entire system (providers, the global primary, loop limits, security, the git audit footprint, checks, telegram, skills, the prompt audit toggle).
 
 ## Responsibilities
 
-- Define the configuration shapes (frozen dataclasses per block) and invariant enumerations ([schema.py:105-334](../../../src/wastech_orchestrator/config/schema.py#L105)).
-- Parse YAML into a typed `OrchestratorConfig`, collecting all issues and raising `ConfigError` ([loader.py:778-808](../../../src/wastech_orchestrator/config/loader.py#L778)).
-- Validate semantic rules §11/§21.4 and raise `ConfigError` ([validation.py:69-121](../../../src/wastech_orchestrator/config/validation.py#L69)).
-- Validate per-task route-override (pure function, no exceptions) ([validation.py:218-240](../../../src/wastech_orchestrator/config/validation.py#L218)).
+- Define the configuration shapes (frozen dataclasses per block) and invariant enumerations ([schema.py:99-298](../../../src/wastech_orchestrator/config/schema.py#L99)).
+- Parse YAML into a typed `OrchestratorConfig`, collecting all issues and raising `ConfigError` ([loader.py](../../../src/wastech_orchestrator/config/loader.py)).
+- Validate semantic rules §11/§21.4 and raise `ConfigError` ([validation.py:66-109](../../../src/wastech_orchestrator/config/validation.py#L66)).
+- Enforce the one-global-primary rule (`_check_global_primary`): exactly one `agents.providers.<id>.primary: true`, and it must be in `agents.allowed` ([validation.py:44-63](../../../src/wastech_orchestrator/config/validation.py#L44)).
 - Merge the packaged template into the operator config (add-missing-only), remove deleted keys, set the version ([upgrade.py:58-120](../../../src/wastech_orchestrator/config/upgrade.py#L58)).
 
 ## Block boundaries
@@ -28,11 +28,11 @@ The typed model for `config.yaml` and its full data lifecycle: structural YAML p
 
 ## Entry points
 
-- `load_config(path)` / `loads_config(text)` → `ConfigLoadResult` ([loader.py:811,795](../../../src/wastech_orchestrator/config/loader.py#L795)); `ConfigError` ([loader.py:67](../../../src/wastech_orchestrator/config/loader.py#L67)).
-- `validate_config(config)` → warnings | raise ([validation.py:69](../../../src/wastech_orchestrator/config/validation.py#L69)); `check_task_route_override(override, config)` ([validation.py:218](../../../src/wastech_orchestrator/config/validation.py#L218)).
+- `load_config(path)` / `loads_config(text)` → `ConfigLoadResult`; `ConfigError` ([loader.py:67](../../../src/wastech_orchestrator/config/loader.py#L67)).
+- `validate_config(config)` → warnings | raise ([validation.py:66](../../../src/wastech_orchestrator/config/validation.py#L66)).
 - `upgrade_config_mapping` / `parse_mapping` / `packaged_template_mapping` / `render` ([upgrade.py](../../../src/wastech_orchestrator/config/upgrade.py)).
-- `OrchestratorConfig` + block dataclasses + `ROUTABLE_STAGES`/`SKIPPABLE_STAGES`/`CONFIG_SCHEMA_VERSION` ([schema.py](../../../src/wastech_orchestrator/config/schema.py)).
-- Callers: CLI `_load_config` (load + validate, fail-closed) ([cli.py:542-546](../../../src/wastech_orchestrator/cli.py#L542)); `cmd_upgrade_config` ([cli.py:568](../../../src/wastech_orchestrator/cli.py#L568)); [B16 gate](./B16-task-parsing-and-validation-gate.md) and [B17 Router](./B17-agent-router-and-fallback.md) — `check_task_route_override`.
+- `OrchestratorConfig` + block dataclasses + `SKIPPABLE_STAGES`/`CONFIG_SCHEMA_VERSION` ([schema.py](../../../src/wastech_orchestrator/config/schema.py)).
+- Callers: CLI `_load_config` (load + validate, fail-closed); `cmd_upgrade_config`.
 
 ## Input data and state
 
@@ -54,7 +54,7 @@ flowchart TB
     y --> parse["_parse: unknown keys, schema_version,<br/>block types (collect ALL issues)"]
     parse -->|"issues present"| e1
     parse --> res["ConfigLoadResult(config, warnings)"]
-    res --> val["validate_config: semantics §11/§21.4<br/>(routes, limits, extra_args, checks, telegram)"]
+    res --> val["validate_config: semantics §11/§21.4<br/>(one global primary, limits, extra_args, checks, telegram)"]
     val -->|violation| e2["ConfigError (all issues)"]
     val --> ok["config admitted to the pipeline"]
     e1 --> exit2["CLI: message + exit 2"]
@@ -63,13 +63,13 @@ flowchart TB
 
 ## Alternative scenarios
 
-### Legacy config without `agents.routing`
+### Legacy `agents.routing` is tolerated/ignored (v11)
 
-Missing routing block → auto-migration to Codex route for all `ROUTABLE_STAGES` + warning ([loader.py:476-485,388-392](../../../src/wastech_orchestrator/config/loader.py#L476)).
+The stage-keyed `agents.routing` block was removed in v11 — provider routing is now node-based (a flow node declares its own `provider`, else the global `providers.<id>.primary`). An old config that still carries `agents.routing` (or the removed `agents.skip_stages`) loads fail-open: the key is tolerated and ignored, and `upgrade-config` strips it ([loader.py:382-398](../../../src/wastech_orchestrator/config/loader.py#L382)).
 
-### Schema changes (v6 / v7 / v8 / v9)
+### Schema changes (v6 / v7 / v8 / v9 / v10 / v11)
 
-v6: `prompts.overrides`/`prompts.strict` are tolerated on load (ignored) with a warning; `upgrade-config` strips them ([loader.py:711-728](../../../src/wastech_orchestrator/config/loader.py#L711), [upgrade.py:27-30,77-89](../../../src/wastech_orchestrator/config/upgrade.py#L27)). v7 (worc-home consolidation): the `git.footprint.location`/`.tracking`/`.external_root` keys are removed — `git.footprint` now carries only `audit_commit_message` + `audit_on_branch` ([schema.py:39,229-236](../../../src/wastech_orchestrator/config/schema.py#L39)); `upgrade-config` strips the removed keys. v8 (prompt-audit): adds the optional top-level `prompt_audit` boolean (default false); an absent value takes the safe `false`, so no migration flips anything and `upgrade-config` adds it from the template. v9 (flow-engine P1): the entire `prompts` block (`templates_dir`/`mode`) is removed — a flow node's prompt template is its `role_file`, not a stage-indexed packaged default; an operator's `prompts:` block is tolerated (ignored) on load and `upgrade-config` strips it ([schema.py:42-44](../../../src/wastech_orchestrator/config/schema.py#L42), [loader.py:735-737](../../../src/wastech_orchestrator/config/loader.py#L735), [upgrade.py:25-28](../../../src/wastech_orchestrator/config/upgrade.py#L25)).
+v6: `prompts.overrides`/`prompts.strict` are tolerated on load (ignored) with a warning; `upgrade-config` strips them. v7 (worc-home consolidation): the `git.footprint.location`/`.tracking`/`.external_root` keys are removed — `git.footprint` now carries only `audit_commit_message` + `audit_on_branch` ([schema.py:36-38,225-232](../../../src/wastech_orchestrator/config/schema.py#L36)); `upgrade-config` strips the removed keys. v8 (prompt-audit): adds the optional top-level `prompt_audit` boolean (default false); an absent value takes the safe `false`, so no migration flips anything and `upgrade-config` adds it from the template. v9 (flow-engine P1): the entire `prompts` block (`templates_dir`/`mode`) is removed — a flow node's prompt template is its `role_file`, not a stage-indexed packaged default; an operator's `prompts:` block is tolerated (ignored) on load and `upgrade-config` strips it. v10 (flexible-flow stage-skip): the global `agents.skip_stages` list is removed (per-task `stages.<stage>.enabled: false` survives as the bounded toggle); the key is tolerated/ignored and `upgrade-config` strips it. v11 (flow-engine PRE.1/PRE.2): the stage-keyed `agents.routing` block and the `git.auto_merge_allow_per_task` gate are removed — routing moves onto the flow node (else the global primary) and a per-task `auto_merge` now wins outright; both dead keys are tolerated/ignored on load and `upgrade-config` strips them ([schema.py:51-57](../../../src/wastech_orchestrator/config/schema.py#L51), [loader.py:382-398,555-570](../../../src/wastech_orchestrator/config/loader.py#L382)).
 
 ### Config upgrade
 
@@ -77,9 +77,8 @@ v6: `prompts.overrides`/`prompts.strict` are tolerated on load (ignored) with a 
 
 ## Checks and constraints
 
-- **Structural** (loader): non-mapping root, unknown keys (top-level and block-level), unknown stage/provider/enum, wrong types → `ConfigError`; `schema_version` newer than current (=9) → `ConfigError` ([loader.py:714-730](../../../src/wastech_orchestrator/config/loader.py#L714)).
-- **Semantic** (validation): routes only for `ROUTABLE_STAGES`, primary/fallback ∈ `agents.allowed` and present in `agents.providers`; `poll_interval_seconds ≥ 0`; `max_total_fix_iterations ≥ max_fix_cycles`; `decomposition.max_subtasks ≥ 2`; `extra_args` without bypass flags; check commands — argv without shell metacharacters, without bypass flags, not from `denied_commands`; telegram timeout > 0 and valid env-variable names ([validation.py:80-216](../../../src/wastech_orchestrator/config/validation.py#L80)).
-- `check_task_route_override` — the same allowed/configured/routable checks, but **pure** (returns a list of issues, raises nothing) ([validation.py:228-240](../../../src/wastech_orchestrator/config/validation.py#L228)).
+- **Structural** (loader): non-mapping root, unknown keys (top-level and block-level), unknown stage/provider/enum, wrong types → `ConfigError`; `schema_version` newer than current (=11) → `ConfigError`.
+- **Semantic** (validation): exactly one global primary (`agents.providers.<id>.primary: true`), and it must be in `agents.allowed`; `poll_interval_seconds ≥ 0`; `max_total_fix_iterations ≥ max_fix_cycles`; `decomposition.max_subtasks ≥ 2`; `extra_args` without bypass flags; check commands — argv without shell metacharacters, without bypass flags, not from `denied_commands`; telegram timeout > 0 and valid env-variable names ([validation.py:76-104](../../../src/wastech_orchestrator/config/validation.py#L76)).
 
 ## Output
 
@@ -107,7 +106,7 @@ v6: `prompts.overrides`/`prompts.strict` are tolerated on load (ignored) with a 
 
 - [B01 — CLI](./B01-cli-and-operator-commands.md) — `_load_config`, `cmd_upgrade_config`.
 - [B06 — Pipeline](./B06-orchestrator-pipeline.md) and almost all blocks — read `OrchestratorConfig` types.
-- [B16](./B16-task-parsing-and-validation-gate.md), [B17](./B17-agent-router-and-fallback.md) — `check_task_route_override`, `ROUTABLE_STAGES`/`SKIPPABLE_STAGES`.
+- [B16](./B16-task-parsing-and-validation-gate.md), [B17](./B17-agent-router-and-fallback.md) — `SKIPPABLE_STAGES`, `agents.providers` + the global primary.
 - [B03 — Installer](./B03-installer-and-scaffolding.md) — `loads_config` + `validate_config` (validating generated config), `upgrade.*`.
 
 ## Role in the overall system
@@ -116,9 +115,9 @@ Configuration is the single source of behavioral parameters. Fail-closed loading
 
 ## Code confirmation
 
-- [config/schema.py:34-334](../../../src/wastech_orchestrator/config/schema.py#L34) — format version, `ROUTABLE_STAGES`/`SKIPPABLE_STAGES`, all block dataclasses and enumerations.
-- [config/loader.py:734-777](../../../src/wastech_orchestrator/config/loader.py#L734) — `_parse`, `loads_config`, `load_config`.
-- [config/loader.py:458-502](../../../src/wastech_orchestrator/config/loader.py#L458) — legacy routing migration, defaults.
-- [config/validation.py:69-240](../../../src/wastech_orchestrator/config/validation.py#L69) — semantic rules and `check_task_route_override`.
+- [config/schema.py:16-72](../../../src/wastech_orchestrator/config/schema.py#L16) — `CONFIG_SCHEMA_VERSION` (=11) + version history, `SKIPPABLE_STAGES`.
+- [config/schema.py:128-156](../../../src/wastech_orchestrator/config/schema.py#L128) — `ProviderConfig.primary` (the global primary marker) and `AgentsConfig`.
+- [config/loader.py:380-398,552-571](../../../src/wastech_orchestrator/config/loader.py#L380) — `agents.routing` / `auto_merge_allow_per_task` tolerated-and-ignored on load.
+- [config/validation.py:44-109](../../../src/wastech_orchestrator/config/validation.py#L44) — semantic rules and `_check_global_primary`.
 - [config/upgrade.py:58-120](../../../src/wastech_orchestrator/config/upgrade.py#L58) — add-missing merge, key removal, render.
 - Tests: [test_loader.py](../../../tests/config/test_loader.py), [test_validation.py](../../../tests/config/test_validation.py), [test_upgrade.py](../../../tests/config/test_upgrade.py), [test_config_schema_version.py](../../../tests/config/test_config_schema_version.py), [test_roundtrip.py](../../../tests/config/test_roundtrip.py), [test_checks_discovery.py](../../../tests/config/test_checks_discovery.py).

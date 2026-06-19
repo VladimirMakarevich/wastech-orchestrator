@@ -8,7 +8,7 @@ Stage documents describe the **flow** and reference the B\*\* blocks that implem
 
 ```mermaid
 flowchart TB
-    start(["task passed gate §19, branch ready"]) --> s1["S01 refinement<br/>(opt.: refined / complete)"]
+    start(["task passed gate §19, branch ready"]) --> s1["S01 refinement<br/>(opt.: skipped when COMPLETE)"]
     s1 --> s2["S02 planning<br/>(opt.; + decomposition, skills)"]
     s2 --> unit{{"for each unit of work (subtask)"}}
     unit --> s3["S03 implementation<br/>(+ dangerous-diff guardrail)"]
@@ -29,7 +29,7 @@ flowchart TB
 
 | Stage | Who runs it | Optional? | Document |
 | --- | --- | --- | --- |
-| refinement | agent (B17→B18) | yes — skipped when `refined: true` or `COMPLETE` (via the `refined`/completeness flag, not a stage-skip) | [S01](./S01-refinement.md) |
+| refinement | agent (B17→B18) | yes — skipped when completeness is `COMPLETE` (deterministic, via the `derived.needs_refinement` fact, not a stage-skip and not a task flag) | [S01](./S01-refinement.md) |
 | planning | agent | yes — `SKIPPABLE` (stub plan is used, decomposition is disabled) | [S02](./S02-planning.md) |
 | implementation | agent | **no** — core of the work, cannot be skipped | [S03](./S03-implementation.md) |
 | testing | Check Runner (B24), **not an agent** | yes — `SKIPPABLE` | [S04](./S04-testing.md) |
@@ -38,7 +38,7 @@ flowchart TB
 | summary | agent (or stub / minimal) | yes — `SKIPPABLE`; best-effort | [S07](./S07-summary.md) |
 | publishing | Git Manager (B22), **not an agent** | **no** — exit stage, cannot be skipped | [S08](./S08-publishing.md) |
 
-Each stage is a flow **node**; the engine runs it through its `NodeRunner` ([nodes/](../../../../src/wastech_orchestrator/core/flow/nodes)) and takes the node's outcome. Skip is now a node `when:` condition in the flow graph (e.g. `when: config.testing_enabled`, `when: derived.needs_refinement`); a skipped node yields its pass-through edge ([engine.py:291-312](../../../../src/wastech_orchestrator/core/flow/engine.py#L291)). Classification confirmed by `ROUTABLE_STAGES`/`SKIPPABLE_STAGES` ([schema.py:50-74](../../../../src/wastech_orchestrator/config/schema.py#L50)).
+Each stage is a flow **node**; the engine runs it through its `NodeRunner` ([nodes/](../../../../src/wastech_orchestrator/core/flow/nodes)) and takes the node's outcome. Skip is now a node `when:` condition in the flow graph (e.g. `when: config.testing_enabled`, `when: derived.needs_refinement`); a skipped node yields its pass-through edge ([engine.py:291-312](../../../../src/wastech_orchestrator/core/flow/engine.py#L291)). The skippable set is confirmed by `SKIPPABLE_STAGES` ([schema.py:59-72](../../../../src/wastech_orchestrator/config/schema.py#L59)).
 
 ## Ping-pong (testing/review → fixing)
 
@@ -70,5 +70,5 @@ With decomposition, each subtask is a separate unit `implementation → testing 
 - [orchestrator.py:821-938](../../../../src/wastech_orchestrator/core/orchestrator.py#L821) — `_engine_run` / `_run_phases`: build node services + inputs, drive the flow (whole graph, or pre → per-subtask region → post when decomposed).
 - [implementation.yaml](../../../../src/wastech_orchestrator/core/flow/packaged/implementation.yaml) — the flow graph + edges the engine drives (nodes refinement…publish, the two fix loops, decomposition).
 - Node runners: [nodes/agent.py](../../../../src/wastech_orchestrator/core/flow/nodes/agent.py), [nodes/evaluator.py](../../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py), [nodes/checks.py](../../../../src/wastech_orchestrator/core/flow/nodes/checks.py), [nodes/publish.py](../../../../src/wastech_orchestrator/core/flow/nodes/publish.py).
-- [schema.py:50-74](../../../../src/wastech_orchestrator/config/schema.py#L50) — `ROUTABLE_STAGES` / `SKIPPABLE_STAGES`.
+- [schema.py:59-72](../../../../src/wastech_orchestrator/config/schema.py#L59) — `SKIPPABLE_STAGES`.
 - Tests: [tests/core/test_flow_engine.py](../../../../tests/core/test_flow_engine.py), [tests/core/test_flow_node_runners.py](../../../../tests/core/test_flow_node_runners.py), [tests/core/test_orchestrator.py](../../../../tests/core/test_orchestrator.py), [tests/core/test_cli_pipeline.py](../../../../tests/core/test_cli_pipeline.py).

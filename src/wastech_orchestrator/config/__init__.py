@@ -7,15 +7,11 @@ The loader/validator are the config-time half of the "security can't be weakened
 from __future__ import annotations
 
 from wastech_orchestrator.config.loader import ConfigError, ConfigLoadResult, load_config
-from wastech_orchestrator.config.validation import (
-    check_task_route_override,
-    validate_config,
-)
+from wastech_orchestrator.config.validation import validate_config
 
 __all__ = [
     "ConfigError",
     "ConfigLoadResult",
-    "check_task_route_override",
     "load_config",
     "validate_config",
 ]

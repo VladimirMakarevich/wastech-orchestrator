@@ -13,15 +13,15 @@
 
 ## Сводка приоритетов (финальная оценка до P2)
 
-Все пункты ниже — **дизайн зафиксирован, код не начат** (если не указано иное). Детали — в соответствующих разделах.
+**Статус (2026-06-19): PRE.1 / PRE.1a / PRE.2 / PRE.3 — РЕАЛИЗОВАНЫ в коде** (config schema v11; node-based routing; `providers.<p>.primary`; чистая задача; auto_merge task-wins; сьют зелёный, ruff+mypy чистые). PRE.4 — верификация на реальном CLI (Codex доступен локально, `codex-cli 0.139.0`); остаётся ручной де-риск перед P2.2. Детали — в соответствующих разделах.
 
-| # | Задача | Сложность | Блокирует P2? |
-| --- | --- | --- | --- |
-| PRE.1 | `provider`/`model`/`effort` на узле flow | **High** | да — P2.2 durable провайдер-aware опирается на выбор |
-| PRE.1a | config-aware валидация `provider ∈ agents.allowed` | **Medium** | часть PRE.1 (тянет вперёд отложенный [P4.2](p4-operator.md)) |
-| PRE.2 | `auto_merge` task-wins | **Low** | нет — независимо |
-| PRE.3 | чистая задача: убрать остаток per-task оверрайдов (`decompose`/`refined`/per-task `model`/`reasoning`/`agents`) | **Medium** | да — контракт «чистой задачи» под P2 |
-| PRE.4 | верификация Codex `exec resume` на реальном CLI | **Medium** | да — P2.2 affinity опирается на резюм; де-риск заранее |
+| # | Задача | Сложность | Блокирует P2? | Статус |
+| --- | --- | --- | --- | --- |
+| PRE.1 | `provider`/`model`/`effort` на узле flow | **High** | да — P2.2 durable провайдер-aware опирается на выбор | ✅ реализовано |
+| PRE.1a | config-aware валидация `provider ∈ agents.allowed` | **Medium** | часть PRE.1 (тянет вперёд отложенный [P4.2](p4-operator.md)) | ✅ реализовано (preflight `_check_flow_providers`) |
+| PRE.2 | `auto_merge` task-wins | **Low** | нет — независимо | ✅ реализовано |
+| PRE.3 | чистая задача: убрать остаток per-task оверрайдов (`decompose`/`refined`/per-task `model`/`reasoning`/`agents`) | **Medium** | да — контракт «чистой задачи» под P2 | ✅ реализовано |
+| PRE.4 | верификация Codex `exec resume` на реальном CLI | **Medium** | да — P2.2 affinity опирается на резюм; де-риск заранее | ⏳ ручная проверка (бинарь доступен) |
 
 ### Решения по вопросам контракта (зафиксировано 2026-06-19)
 
@@ -65,6 +65,8 @@
 
 Узел flow полностью задаёт исполнителя (`provider`/`model`/`reasoning`); per-task `agents`-route не нужен; fallback остаётся инфра-only.
 
+**Реализовано (2026-06-19):** поле `provider` на `AgentNode`/`EvaluatorNode` ([schema.py](../../../src/wastech_orchestrator/core/flow/schema.py) + snapshot parse + `flow.schema.json`); `RouteConfig`/`agents.routing` удалены (config v11, legacy-ключ tolerate+strip); `agents.providers.<p>.primary` + валидатор «ровно один primary ∈ allowed» ([validation.py](../../../src/wastech_orchestrator/config/validation.py)); `AgentRouter.resolve_route(stage, provider)` → primary=node.provider|global-primary, fallback=global-primary (или нет, если узел уже на нём); `RouteSource` = `config`|`flow_node`. PRE.1a: фатальный preflight `_check_flow_providers` (`provider ∈ agents.allowed`) до ветки. Stage-enum оставлен под skip-факты до P4.
+
 ---
 
 ## PRE.2 — `auto_merge`: и в задаче, и в конфиге; задача побеждает
@@ -93,6 +95,8 @@ Auto-merge обходит человеческое ревью PR — но это
 
 `auto_merge` задаётся в конфиге и в задаче; значение задачи побеждает; возможность не блокируется; в operations.md — doc-note про ответственность оператора.
 
+**Реализовано (2026-06-19):** `git.auto_merge_allow_per_task` удалён (config v11, tolerate+strip); `_auto_merge_on` → `task.auto_merge` побеждает, иначе `config.git.auto_merge` ([orchestrator.py](../../../src/wastech_orchestrator/core/orchestrator.py)); doc-note добавлен в [operations.md](../../operations.md) и [configuration.md](../../configuration.md).
+
 ---
 
 ## PRE.3 — Чистая задача: убрать остаток per-task оверрайдов (РЕШЕНО 2026-06-19)
@@ -108,7 +112,17 @@ Auto-merge обходит человеческое ревью PR — но это
 | `auto_merge` | задача (task-wins) + config | оставить (PRE.2) |
 | `stages.<>.enabled` | задача (санкц. исключение) | оставить (config v10) |
 
-Итог: задача несёт `id`/`title`/`task_type`/`contacts`/`prompt_audit`/`pr_title` + `stages.<>.enabled` + `auto_merge`. Touchpoints: `task/model.py` `NormalizedTask` (срезать поля), `task/validation_gate.py` (frontmatter-валидация), парсер, использования в `core/orchestrator.py`/роутинге, тесты, доки §214/§10. Ничего не откладываем в P4 — задача чистится здесь.
+Итог: задача несёт `id`/`title`/`contacts`/`prompt_audit`/`pr_title` + `stages.<>.enabled` + `auto_merge`. Touchpoints: `task/model.py` `NormalizedTask` (срезать поля), `task/validation_gate.py` (frontmatter-валидация), парсер, использования в `core/orchestrator.py`/роутинге, тесты, доки §214/§10. Ничего не откладываем в P4 — задача чистится здесь.
+
+**Реализовано (2026-06-19):** `NormalizedTask` срезан до чистого набора; `StageParams` оставляет только `enabled`; `ALLOWED_TASK_KEYS` = `{id,title,pr_title,auto_merge,prompt_audit,contacts,stages}`; gate убрал route-override/model/reasoning/`refined`/`decompose` (reason `invalid_route_override` удалён); `parser.py` сериализация обновлена; `_decomposition_gate_on()` = `config.agents.decomposition.enabled`; `derived.needs_refinement` = «не COMPLETE» (completeness-only, без `task.refined`). `ROUTABLE_STAGES` удалён. Доки (worc/README, decision-guide, task-authoring, cookbook, configuration, functional-map) синхронизированы.
+
+---
+
+## PRE.4 — верификация Codex `exec resume` (де-риск для P2.2)
+
+**Проверено на реальном CLI (2026-06-19, `codex-cli 0.139.0`):** подкоманда существует — `codex exec resume [SESSION_ID] [PROMPT]`. Резюмирует сессию по `SESSION_ID` (UUID/thread-name) либо `--last` (самая свежая), принимает follow-up `PROMPT` (или `-` из stdin), поддерживает `-c key=value`. Codex-адаптер уже извлекает `session_id` из событийного потока ([codex.py](../../../src/wastech_orchestrator/providers/codex.py) `parse_events`), так что P2.2 durable-affinity может его передать в `exec resume`.
+
+**Важно для P2.2:** комментарий в адаптере «no --resume equivalent in the Codex CLI» ([codex.py](../../../src/wastech_orchestrator/providers/codex.py) ≈200) **устарел** — resume есть; проводку `session_scope=resume_own_lineage`/`lineage_affinity` через `codex exec resume` делает P2.2 (не входит в pre-work). Полноценный e2e-прогон (реальная сессия + резюм) требует аутентификации Codex и квоты — оставлен оператору как ручной шаг перед стартом P2.2.
 
 ---
 

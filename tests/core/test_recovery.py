@@ -397,8 +397,9 @@ def _impl_fingerprint() -> str:
         ("refinement", ProviderId.CLAUDE, Stage.REFINEMENT),
         ("planning", ProviderId.CLAUDE, Stage.PLANNING),
         ("implementation", ProviderId.CLAUDE, Stage.IMPLEMENTATION),
-        ("testing", ProviderId.CODEX, Stage.REVIEW),  # checks node → first agent stage is review
-        ("review", ProviderId.CODEX, Stage.REVIEW),
+        # Every node defaults to the global primary (claude) now — routing is node-based (PRE.1).
+        ("testing", ProviderId.CLAUDE, Stage.REVIEW),  # checks node → first agent stage is review
+        ("review", ProviderId.CLAUDE, Stage.REVIEW),
         ("fixing", ProviderId.CLAUDE, Stage.FIXING),
     ],
 )
