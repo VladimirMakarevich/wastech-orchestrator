@@ -1092,8 +1092,6 @@ class Orchestrator:
         def facts(fact: str) -> bool:
             if fact == "derived.needs_refinement":
                 return needs_refinement
-            if fact == "config.hybrid_testing":
-                return self._config.agents.hybrid_testing
             if fact.startswith("config.") and fact.endswith("_enabled"):
                 name = fact[len("config.") : -len("_enabled")]
                 try:

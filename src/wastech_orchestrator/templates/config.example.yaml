@@ -27,7 +27,6 @@ agents:
   max_total_fix_iterations: 30      # hard global cap across all fix loops (and all subtasks); >= max_fix_cycles
 
   allow_review_skip: false          # required before a task's `stages.review.enabled: false` may disable the `review` quality gate
-  hybrid_testing: false             # enables the optional non-blocking `testing_quality` evaluator node (judges the tests the implementation agent wrote)
 
   decomposition:                    # optional task decomposition (§5.1); OFF by default
     enabled: false

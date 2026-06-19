@@ -39,32 +39,22 @@ if TYPE_CHECKING:  # avoid a circular import — orchestrator imports this modul
 
 _ROUTED_KINDS = frozenset({"agent", "evaluator"})
 _STAGE_VALUES = frozenset(s.value for s in Stage)
-#: Node ids that are not themselves ``Stage`` values but borrow an existing stage identity (no new
-#: canonical stage is invented). ``testing_quality`` is the optional hybrid evaluator (P2.4/P2.5);
-#: it carries the ``testing`` stage for the request's output-schema / interaction-path identity only
-#: (routing is node-based, PRE.1).
-_STAGE_ALIASES: dict[str, Stage] = {"testing_quality": Stage.TESTING}
 
 
 def build_stage_map(snapshot: FlowSnapshot) -> dict[str, Stage]:
     """Map each agent / evaluator node id to its ``Stage`` identity.
 
-    In the packaged flows these ids are Stage-aligned (``implementation`` -> ``IMPLEMENTATION`` …),
-    with a small alias table for the variants that borrow a stage (``testing_quality`` -> testing).
+    In the packaged flows these ids are Stage-aligned (``implementation`` -> ``IMPLEMENTATION`` …).
     The map supplies the node's request ``stage`` (output schema, HITL parsing, interaction paths),
-    not its provider — routing is node-based (PRE.1). An agent / evaluator node whose id is neither
-    a ``Stage`` value nor an alias is absent from the map, so its runner raises ``KeyError`` — a
-    loud, early failure (a P4 cleanup, when the ``Stage`` enum is removed entirely).
+    not its provider — routing is node-based (PRE.1). An agent / evaluator node whose id is not a
+    ``Stage`` value is absent from the map, so its runner raises ``KeyError`` — a loud, early
+    failure (a P4 cleanup, when the ``Stage`` enum is removed entirely).
     """
-    stage_map: dict[str, Stage] = {}
-    for node in snapshot.nodes_by_id.values():
-        if node.kind not in _ROUTED_KINDS:
-            continue
-        if node.id in _STAGE_VALUES:
-            stage_map[node.id] = Stage(node.id)
-        elif node.id in _STAGE_ALIASES:
-            stage_map[node.id] = _STAGE_ALIASES[node.id]
-    return stage_map
+    return {
+        node.id: Stage(node.id)
+        for node in snapshot.nodes_by_id.values()
+        if node.kind in _ROUTED_KINDS and node.id in _STAGE_VALUES
+    }
 
 
 def build_node_services(

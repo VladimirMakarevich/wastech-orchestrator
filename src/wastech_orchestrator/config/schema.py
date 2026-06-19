@@ -153,10 +153,6 @@ class AgentsConfig:
     # Gate for the high-risk per-task ``review`` skip (no agent quality gate before commit/PR): a
     # task may disable review via ``stages.review.enabled: false`` only when true, else rejected.
     allow_review_skip: bool = False
-    # Enables the optional non-blocking ``testing_quality`` evaluator node in the implementation
-    # flow (``when: config.hybrid_testing``); off by default. The node judges the tests the
-    # implementation agent wrote — it never writes tests itself (P2.4/P2.5).
-    hybrid_testing: bool = False
 
 
 @dataclass(frozen=True)

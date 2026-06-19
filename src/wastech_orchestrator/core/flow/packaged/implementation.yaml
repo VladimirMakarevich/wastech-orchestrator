@@ -1,18 +1,15 @@
-# Packaged built-in flow: implementation (TARGET shape — the executable flow the engine drives).
+# Packaged built-in flow: implementation — the executable default flow the engine drives.
 #
-# The pipeline expressed as data: refinement -> planning -> implementation -> testing_quality?
-# -> testing(checks) -> review(evaluator) -> fixing -> publish, with the two fix loops and
-# decomposition. As of P2.5 this packaged file is the target graph (flow-contract §7); it mirrors
-# docs/backlog/flows/co-design/implementation.yaml, plus the per-task stage-skip `when` predicates
-# (config.*_enabled — the bounded per-task exception, PRE.3).
+# The pipeline expressed as data: refinement -> planning -> implementation -> testing(checks) ->
+# review(evaluator) -> fixing -> publish, with the two fix loops and decomposition, plus the
+# per-task stage-skip `when` predicates (config.*_enabled — the bounded per-task exception, PRE.3).
 #
 # Layered on across P2: durable sessions (P2.2 `editing_lineage`), review-as-evaluator (P2.3), and
-# the optional hybrid `testing_quality` evaluator + the core-owned commit-candidate mutation guard
-# on `checks` (P2.4). `testing_quality` is non-blocking and OFF by default (`when:
-# config.hybrid_testing`); when on, it self-caps via its own in_flow_verdict COUNT and the inline
-# `budget: 1` edge — exhaustion continues to `testing`, never manual. The mutation guard is a
-# core-owned property of the `checks` node (not declared here) and active whenever `checks` is
-# present.
+# the core-owned commit-candidate mutation guard on `checks` (P2.4 — active whenever a `checks` node
+# is present, not declared here). An optional non-blocking `testing_quality` evaluator (the shared
+# evaluator runner already supports its self-cap) is NOT shipped in this default flow: it is a pure
+# graph-shape choice — an operator who wants it adds the node to their own flow YAML. See the
+# reference graph in docs/backlog/flows/co-design/implementation.yaml.
 #
 # NOTE (2026-06-19 revision): supervisor is NOT a graph node. It is a constant orchestrator layer
 # ABOVE any flow (summary + per-step advisory oversight, configured in config.yaml: supervisor); the
@@ -49,15 +46,6 @@ flow:
       role_file: roles/implementation.md
       session_scope: editing_lineage
       permission_profile: workspace-write
-    - id: testing_quality
-      kind: evaluator
-      role: test_quality
-      role_file: roles/testing.md
-      session_scope: fresh_disposable
-      permission_profile: read-only
-      blocking: false
-      max_rework_per_stage: 1
-      when: { fact: config.hybrid_testing }
     - id: testing
       kind: checks
       checker: command_profile
@@ -84,14 +72,12 @@ flow:
   edges:
     - { from: refinement, to: planning }
     - { from: planning, to: implementation }
-    - { from: implementation, to: testing_quality }
-    - { from: testing_quality, to: testing, outcome: accept } # skipped (hybrid off) → pass-through
-    - { from: testing_quality, to: fixing, outcome: rework, budget: 1 } # non-blocking self-cap
+    - { from: implementation, to: testing }
     - { from: testing, to: review, outcome: pass }
     - { from: testing, to: fixing, outcome: fail, loop: test_fix }
     - { from: review, to: publish, outcome: accept } # summary + advisory oversight = supervisor layer
     - { from: review, to: fixing, outcome: rework, loop: review_fix }
-    - { from: fixing, to: testing_quality }
+    - { from: fixing, to: testing }
 
   budgets:
     global_fix_iterations: 30
@@ -101,6 +87,6 @@ flow:
   decomposition:
     proposed_by: planning
     gate: { min: 2, max: 8, linear_depends_on: true }
-    sub_flow: [implementation, testing_quality, testing, review, fixing]
+    sub_flow: [implementation, testing, review, fixing]
     commit_each_subtask: true
     shared_budget: global_fix_iterations

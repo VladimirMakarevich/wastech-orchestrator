@@ -393,14 +393,12 @@ def _build_agents(raw: Any, issues: list[str]) -> AgentsConfig:
             "decomposition",
             "providers",
             "allow_review_skip",
-            "hybrid_testing",
         },
         "agents",
         issues,
         tolerated={"skip_stages", "routing"},
     )
     allow_review_skip = _bool(m, "allow_review_skip", False, "agents", issues)
-    hybrid_testing = _bool(m, "hybrid_testing", False, "agents", issues)
     return AgentsConfig(
         allowed=_build_allowed(m.get("allowed"), issues),
         max_stage_attempts=_int(m, "max_stage_attempts", 3, "agents", issues),
@@ -409,7 +407,6 @@ def _build_agents(raw: Any, issues: list[str]) -> AgentsConfig:
         decomposition=_build_decomposition(m.get("decomposition"), issues),
         providers=_build_providers(m.get("providers"), issues),
         allow_review_skip=allow_review_skip,
-        hybrid_testing=hybrid_testing,
     )
 
 

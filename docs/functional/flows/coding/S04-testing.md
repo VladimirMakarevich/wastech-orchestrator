@@ -6,7 +6,6 @@ The first unit quality gate: run the allowed check profile (tests/linters) and d
 
 - Run checks and return a `pass`/`fail` outcome; the engine takes the matching edge (pass → review, fail → fixing with `loop: test_fix`). A launch failure is re-resolved once (gated) or raises `CheckLaunchError` ([nodes/checks.py:25](../../../../src/wastech_orchestrator/core/flow/nodes/checks.py#L25), `run()` at [nodes/checks.py:32](../../../../src/wastech_orchestrator/core/flow/nodes/checks.py#L32)).
 - **Mutation guard (P2.4, core-owned).** The runner snapshots the working tree before and after the checks; if a _passing_ check mutated commit-candidate files (e.g. an auto-formatter rewrote sources), it fails closed to `NodeManualRequired` — a green-but-dirtying check must not pass silently. The guard is a property of the `checks` node (it cannot be declared away by a flow) and is active whenever a `checks` node is present; a flow without one simply has no guard. No-op when no snapshot hook is wired.
-- In the packaged implementation flow the optional non-blocking `testing_quality` evaluator runs **before** `testing` (`when: config.hybrid_testing`, off by default); when off it is skipped and passes through to `testing`. See [S05 review](./S05-review.md) for the shared evaluator/self-cap mechanics.
 
 ## Step boundaries
 

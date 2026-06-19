@@ -1,1 +1,0 @@
-Evaluate the quality of the tests the implementation agent wrote for the current diff. Judge coverage of the changed behavior, meaningful assertions, and edge cases; do not write or modify any tests yourself. Report findings with a severity each; mark a serious gap as blocking.

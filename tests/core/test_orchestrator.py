@@ -679,49 +679,6 @@ def test_review_blocking_then_fix(git_repo, make_git_config, tmp_path: Path) -> 
     assert _ran_nodes(store, "task-005").count("fixing") == 1
 
 
-def test_target_implementation_full_graph(git_repo, make_git_config, tmp_path: Path) -> None:
-    # P2.5: the target packaged graph with the optional hybrid testing_quality node ON executes
-    # end-to-end, including the non-blocking testing_quality rework loop: it blocks once (→ fixing →
-    # back), then its self-cap accepts (→ checks → review → publish), never manual. The constant
-    # supervisor layer writes the summary. The test_fix/review_fix loops and decomposition on this
-    # same graph are covered by the sibling loop / decomposition tests.
-    tq_outputs = [
-        ("tests thin", {"findings": [{"title": "no edge-case test", "severity": "high"}]}),
-        ("tests ok", {"findings": []}),
-    ]
-    state = {"i": 0}
-
-    class HybridProvider(FakeProvider):
-        def run(self, request: AgentRunRequest) -> AgentRunResult:
-            if request.stage is Stage.IMPLEMENTATION:
-                (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
-            if request.stage is Stage.TESTING:  # the testing_quality evaluator borrows TESTING
-                msg, structured = tq_outputs[min(state["i"], 1)]
-                state["i"] += 1
-                return AgentRunResult(
-                    status=RunStatus.SUCCEEDED, provider=self.id, stage=request.stage,
-                    attempt=request.attempt, exit_code=0, started_at="t", finished_at="t",
-                    final_message=msg, structured_output=structured,
-                )
-            return super().run(request)
-
-    providers = {
-        ProviderId.CLAUDE: HybridProvider("claude"),
-        ProviderId.CODEX: HybridProvider("codex"),
-    }
-    orch, store, _, art = _build(
-        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0],
-        config_kwargs={"hybrid_testing": True},
-    )
-    result = orch.run_task(_complete_task(tmp_path, "task-tgt"))
-    assert result.final_status is Status.DONE
-    ran = _ran_nodes(store, "task-tgt")
-    assert ran.count("testing_quality") == 2  # blocked once, then self-capped to accept
-    assert ran.count("fixing") == 1  # the testing_quality rework drove exactly one fixing pass
-    assert "testing" in ran and "review" in ran  # checks + review still ran after the accept
-    assert (task_artifact_dir(art, "task-tgt") / "summary.md").exists()  # supervisor wrote summary
-
-
 _MINIMAL_FLOW = """
 flow:
   name: implementation
