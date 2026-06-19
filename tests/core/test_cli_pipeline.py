@@ -316,11 +316,15 @@ def test_cmd_status_reports_active_task(
         TaskRow(
             task_id="task-active",
             title="Active task",
-            status=Status.PLANNING,
+            status=Status.RUNNING,
             branch="agent/task-active-active-task",
             fix_iterations=2,
             updated_at="2026-06-12T10:00:00+00:00",
         )
+    )
+    # The flow checkpoint surfaces where the engine will resume (replaces the granular-stage view).
+    store.save_flow_checkpoint(
+        "task-active", current_node="implementation", counters_json="{}", flow_fingerprint="fp"
     )
     store.close()
 
@@ -329,9 +333,8 @@ def test_cmd_status_reports_active_task(
     assert code == 0
     output = capsys.readouterr().out
     assert "task_id=task-active" in output
-    assert "status=planning" in output
-    assert "stage=planning" in output
-    assert "configured_primary=claude" in output
+    assert "status=running" in output
+    assert "node=implementation" in output
     assert "branch=agent/task-active-active-task" in output
     assert "fix_iterations=2" in output
 

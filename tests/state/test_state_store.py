@@ -83,7 +83,7 @@ def test_set_status_and_update_task(store: StateStore) -> None:
 
 
 def test_find_active_tasks_excludes_terminal_and_pending(store: StateStore) -> None:
-    store.insert_task(TaskRow(task_id="a", title="a", status=Status.IMPLEMENTING))
+    store.insert_task(TaskRow(task_id="a", title="a", status=Status.RUNNING))
     store.insert_task(TaskRow(task_id="b", title="b", status=Status.PENDING))
     store.insert_task(TaskRow(task_id="c", title="c", status=Status.DONE))
     store.insert_task(TaskRow(task_id="d", title="d", status=Status.NEW))
@@ -104,7 +104,7 @@ def test_latest_task_uses_updated_at(store: StateStore) -> None:
         TaskRow(
             task_id="newer",
             title="newer",
-            status=Status.PLANNING,
+            status=Status.RUNNING,
             updated_at="2026-01-02T00:00:00+00:00",
         )
     )
@@ -389,7 +389,6 @@ def _seed_terminal_task(store: StateStore, *, status: Status = Status.FAILED) ->
             cleanup_completed=True,
             cleanup_completed_at="2026-01-01T00:00:00+00:00",
             finished_at="2026-01-01T00:00:00+00:00",
-            interrupted_status=Status.REVIEWING.value,
         )
     )
     store.insert_subtasks([SubtaskRow("task-001", 1, "a", "A", "committed", (), commit_sha="abc")])
@@ -419,22 +418,20 @@ def test_reset_task_for_rerun_clears_per_attempt_state(store: StateStore) -> Non
     assert row.failure_report_path is None
     assert row.cleanup_completed is None and row.cleanup_completed_at is None
     assert row.cleanup_target_branch is None and row.finished_at is None
-    assert row.interrupted_status is None
     assert store.get_subtasks("task-001") == []  # subtasks deleted
     assert store.get_publish_op("task-001", "pr") is None  # publish idempotency cleared
 
 
 def test_revive_task_for_continue_preserves_work(store: StateStore) -> None:
     _seed_terminal_task(store)
-    store.revive_task_for_continue("task-001", Status.REVIEWING)
+    store.revive_task_for_continue("task-001", Status.RUNNING)
 
     row = store.get_task("task-001")
     assert row is not None
-    assert row.status is Status.REVIEWING  # revived to the failed stage
+    assert row.status is Status.RUNNING  # revived to the generic in-flight status
     assert row.finished_at is None
     assert row.cleanup_completed is None and row.cleanup_completed_at is None
     assert row.cleanup_target_branch is None
-    assert row.interrupted_status is None
     # The work is kept — that is the whole point of continue.
     assert row.branch == "agent/task-001-a-task"
     assert row.fix_iterations == 4 and row.review_fix_cycles == 1

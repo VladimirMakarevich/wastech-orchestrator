@@ -120,15 +120,15 @@ def test_no_active_task_is_none(store, make_git_config, git_repo) -> None:
 
 
 def test_one_active_task_resumes(store, make_git_config, git_repo) -> None:
-    store.insert_task(TaskRow(task_id="t1", title="t", status=Status.IMPLEMENTING))
+    store.insert_task(TaskRow(task_id="t1", title="t", status=Status.RUNNING))
     plan = _reconciler(store, make_git_config, git_repo).reconcile()
     assert plan.action is RecoveryAction.RESUME
     assert plan.task_id == "t1"
 
 
 def test_more_than_one_active_is_manual(store, make_git_config, git_repo) -> None:
-    store.insert_task(TaskRow(task_id="a", title="a", status=Status.IMPLEMENTING))
-    store.insert_task(TaskRow(task_id="b", title="b", status=Status.REVIEWING))
+    store.insert_task(TaskRow(task_id="a", title="a", status=Status.RUNNING))
+    store.insert_task(TaskRow(task_id="b", title="b", status=Status.RUNNING))
     plan = _reconciler(store, make_git_config, git_repo).reconcile()
     assert plan.action is RecoveryAction.MANUAL
     assert set(plan.manual_task_ids) == {"a", "b"}
@@ -153,7 +153,7 @@ def _decomposed(store: StateStore, *, completed: int, shas: dict[int, str]) -> N
         TaskRow(
             task_id="d",
             title="d",
-            status=Status.IMPLEMENTING,
+            status=Status.RUNNING,
             branch="agent/d-x",
             decomposition_accepted=True,
             subtask_count=2,
@@ -345,8 +345,8 @@ def test_resume_more_than_one_active_marks_manual(
         [0],
         notifier=notifier,
     )
-    store.insert_task(TaskRow(task_id="a", title="a", status=Status.IMPLEMENTING))
-    store.insert_task(TaskRow(task_id="b", title="b", status=Status.REVIEWING))
+    store.insert_task(TaskRow(task_id="a", title="a", status=Status.RUNNING))
+    store.insert_task(TaskRow(task_id="b", title="b", status=Status.RUNNING))
     result = orch.resume()
     assert result is not None and result.final_status is Status.MANUAL_ACTION_REQUIRED
     assert store.get_task("a").status is Status.MANUAL_ACTION_REQUIRED

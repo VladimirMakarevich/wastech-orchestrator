@@ -82,8 +82,8 @@ def _ledger_records(clone: Path) -> list[dict]:
 # --- fresh re-attempt: failed -> rerun -> done -------------------------------------------
 
 
-def test_real_failure_persists_interrupted_status(git_repo, fake_cli, tmp_path: Path) -> None:
-    """A real terminal failure records the stage it stopped at, so ``--continue`` can re-enter."""
+def test_real_failure_persists_flow_checkpoint(git_repo, fake_cli, tmp_path: Path) -> None:
+    """A real terminal failure leaves a flow checkpoint (current_node) for ``--continue``."""
     project = tmp_path / "project"
     project.mkdir()
     config = _write_config(
@@ -136,7 +136,6 @@ def test_rerun_fresh_failed_to_done(git_repo, fake_cli, git_run, tmp_path: Path)
             branch="agent/task-700-add-a-thing",
             slug="add-a-thing",
             cleanup_completed=True,
-            interrupted_status="planning",
         )
     )
     store.close()
@@ -214,10 +213,10 @@ def test_rerun_refuses_non_terminal_task(
 ) -> None:
     project = tmp_path / "project"
     project.mkdir()
-    config = _seed(project, git_repo.clone, TaskRow("task-1", "T", Status.PLANNING))
+    config = _seed(project, git_repo.clone, TaskRow("task-1", "T", Status.RUNNING))
     code = cli.main(["--config", str(config), "rerun", "task-1"])
     assert code == 1
-    assert "is planning" in capsys.readouterr().out
+    assert "is running" in capsys.readouterr().out
 
 
 def test_rerun_refuses_when_daemon_running(
@@ -243,9 +242,7 @@ def test_rerun_dry_run_writes_nothing(
     config = _seed(
         project,
         git_repo.clone,
-        TaskRow(
-            "task-1", "T", Status.FAILED, source_path=str(source), interrupted_status="planning"
-        ),
+        TaskRow("task-1", "T", Status.FAILED, source_path=str(source)),
     )
     code = cli.main(["--config", str(config), "rerun", "task-1", "--dry-run"])
     assert code == 0
@@ -269,13 +266,13 @@ def test_rerun_continue_refuses_without_recoverable_stage(
     project.mkdir()
     source = project / "failed" / "task-1.md"
     _complete_task_file(source, "task-1")
-    # interrupted_status unset -> continue cannot know where to re-enter.
+    # No flow checkpoint recorded -> --continue cannot know which node to re-enter.
     config = _seed(
         project, git_repo.clone, TaskRow("task-1", "T", Status.FAILED, source_path=str(source))
     )
     code = cli.main(["--config", str(config), "rerun", "task-1", "--continue"])
     assert code == 1
-    assert "no recoverable stage" in capsys.readouterr().out
+    assert "no recoverable node" in capsys.readouterr().out
 
 
 def test_rerun_continue_revives_then_delegates_to_resume(

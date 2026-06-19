@@ -33,7 +33,6 @@ def _utc_now_iso() -> str:
 # changes (not on every release). ``open()`` adopts a 0 (brand-new, or pre-versioning) database as
 # the current version; both open paths refuse a database stamped newer than this. See the spec's
 # "Versioning & compatibility" section.
-# v3: added ``tasks.interrupted_status`` (the stage a task was on before going terminal).
 # v4 (flow-engine P1.2): added the ``node_runs`` per-node audit table and the durable
 # :class:`~wastech_orchestrator.core.flow.run_state.FlowRunState` checkpoint columns
 # (``tasks.current_node`` / ``tasks.flow_run_counters`` / ``tasks.flow_fingerprint``).
@@ -41,9 +40,11 @@ def _utc_now_iso() -> str:
 # flow-engine path can store the ``node_runs`` id there (both monotonic). Greenfield — the local
 # ``state.db`` is recreated, so there is no in-place data migration.
 # v6 (flow-engine P1 Slice 7): dropped the legacy ``stage_runs`` table (the engine writes
-# ``node_runs``) and renamed ``provider_attempts.stage_run_id`` -> ``node_run_id``. Greenfield —
-# destructive, no data migration (the local ``state.db`` is recreated).
-DB_SCHEMA_VERSION = 6
+# ``node_runs``) and renamed ``provider_attempts.stage_run_id`` -> ``node_run_id``.
+# v7 (flow-engine P1 Slice 7): dropped ``tasks.interrupted_status`` — the granular statuses it
+# stored are gone; ``rerun --continue`` re-enters at the ``current_node`` flow checkpoint.
+# Greenfield throughout — destructive, no data migration (the local ``state.db`` is recreated).
+DB_SCHEMA_VERSION = 7
 
 
 class IncompatibleStateError(Exception):
@@ -57,8 +58,6 @@ def _migrate(conn: sqlite3.Connection) -> None:
     a brand-new DB (``_SCHEMA`` already created the columns) and adds only what an older DB lacks.
     """
     task_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(tasks)")}
-    if "interrupted_status" not in task_cols:
-        conn.execute("ALTER TABLE tasks ADD COLUMN interrupted_status TEXT")
     # v4: the FlowRunState checkpoint columns (flow-engine execution path).
     if "current_node" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN current_node TEXT")
@@ -118,7 +117,6 @@ CREATE TABLE IF NOT EXISTS tasks (
     cleanup_completed_at TEXT,
     cleanup_last_error TEXT,
     finished_at TEXT,
-    interrupted_status TEXT,
     current_node TEXT,
     flow_run_counters TEXT,
     flow_fingerprint TEXT
@@ -241,7 +239,6 @@ class TaskRow:
     cleanup_completed_at: str | None = None
     cleanup_last_error: str | None = None
     finished_at: str | None = None
-    interrupted_status: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -416,8 +413,8 @@ class StateStore:
                     decomposition_enabled, decomposition_accepted, decomposition_reason,
                     subtask_count, active_subtask, subtasks_completed,
                     failure_report_path, cleanup_target_branch, cleanup_completed,
-                    cleanup_completed_at, cleanup_last_error, finished_at, interrupted_status
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    cleanup_completed_at, cleanup_last_error, finished_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(task_id) DO UPDATE SET
                     title = excluded.title,
                     status = excluded.status,
@@ -454,7 +451,6 @@ class StateStore:
                     row.cleanup_completed_at,
                     row.cleanup_last_error,
                     row.finished_at,
-                    row.interrupted_status,
                 ),
             )
 
@@ -547,7 +543,6 @@ class StateStore:
                 cleanup_completed_at=None,
                 cleanup_last_error=None,
                 finished_at=None,
-                interrupted_status=None,
                 current_node=None,
                 flow_run_counters=None,
                 flow_fingerprint=None,
@@ -576,7 +571,6 @@ class StateStore:
             cleanup_completed_at=None,
             cleanup_last_error=None,
             cleanup_target_branch=None,
-            interrupted_status=None,
         )
 
     # --- loop counters --------------------------------------------------------------------
@@ -1017,7 +1011,6 @@ def _task_from_row(row: sqlite3.Row) -> TaskRow:
         cleanup_completed_at=row["cleanup_completed_at"],
         cleanup_last_error=row["cleanup_last_error"],
         finished_at=row["finished_at"],
-        interrupted_status=row["interrupted_status"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

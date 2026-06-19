@@ -45,7 +45,7 @@ from wastech_orchestrator.install import config_writer, detect, wizard
 from wastech_orchestrator.notify import build_notifier
 from wastech_orchestrator.notify.telegram import check_telegram_preflight
 from wastech_orchestrator.observability.logging import configure_logging
-from wastech_orchestrator.providers.base import ProviderId, Stage
+from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.security.isolation import check_isolation
 from wastech_orchestrator.state_store import IncompatibleStateError, StateStore
 
@@ -62,20 +62,6 @@ _EXIT_BY_STATUS: dict[Status, int] = {
     Status.DONE: 0,
     Status.FAILED: 1,
     Status.MANUAL_ACTION_REQUIRED: 2,
-}
-
-_STATUS_STAGE: dict[Status, Stage] = {
-    Status.REFINING: Stage.REFINEMENT,
-    Status.PLANNING: Stage.PLANNING,
-    Status.IMPLEMENTING: Stage.IMPLEMENTATION,
-    Status.TESTING: Stage.TESTING,
-    Status.REVIEWING: Stage.REVIEW,
-    Status.FIXING: Stage.FIXING,
-    Status.SUMMARIZING: Stage.SUMMARY,
-    Status.READY_TO_PUBLISH: Stage.PUBLISHING,
-    Status.COMMITTING: Stage.PUBLISHING,
-    Status.PUSHING: Stage.PUBLISHING,
-    Status.CREATING_PR: Stage.PUBLISHING,
 }
 
 # The orchestrator's runtime home inside the target repo (spec §21). Everything the orchestrator
@@ -658,10 +644,10 @@ def _report_rerun_plan(plan: RerunPlan) -> None:
     print(f"rerun (dry-run): would re-attempt {plan.task_id} [{mode}]")
     print(f"  current status: {current}")
     if plan.continue_mode:
-        stage = plan.interrupted_status.value if plan.interrupted_status else "unknown"
+        node = plan.interrupted_node or "unknown"
         print(f"  branch:    reuse {plan.branch or '(none)'}")
-        print(f"  re-enter:  {stage}")
-        print("  artifacts: kept; pending HITL prompt reset so the stage re-asks")
+        print(f"  re-enter:  {node}")
+        print("  artifacts: kept; pending HITL prompt reset so the node re-asks")
         print("  state:     terminal markers cleared; counters/subtasks/publish-ops kept")
     else:
         target = plan.branch or "agent/<id>-<slug>"
@@ -1061,6 +1047,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             if not tasks:
                 latest = store.latest_task()
                 tasks = [] if latest is None else [latest]
+        current_nodes = {t.task_id: store.get_flow_checkpoint(t.task_id)[0] for t in tasks}
     finally:
         store.close()
 
@@ -1076,12 +1063,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"task_id={task.task_id}")
         print(f"title={task.title}")
         print(f"status={task.status.value}")
-        stage = _STATUS_STAGE.get(task.status)
-        if stage is not None:
-            print(f"stage={stage.value}")
-            route = config.agents.routing.get(stage)
-            if route is not None:
-                print(f"configured_primary={route.primary.value}")
+        node = current_nodes.get(task.task_id)
+        if node:
+            print(f"node={node}")  # the flow checkpoint: where the engine will resume
         if task.branch:
             print(f"branch={task.branch}")
         if task.active_subtask is not None and task.subtask_count is not None:

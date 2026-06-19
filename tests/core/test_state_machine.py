@@ -1,4 +1,4 @@
-"""Unit tests for the §8 state machine."""
+"""Unit tests for the §8 state machine (generic lifecycle)."""
 
 from __future__ import annotations
 
@@ -17,29 +17,18 @@ from wastech_orchestrator.core.state_machine import (
 )
 
 
-def test_all_seventeen_plus_pending_statuses_present() -> None:
-    # The 17 §8 statuses, the §8.2 ``pending`` queue waiting-state, and the flow-engine generic
-    # ``running`` status (flow-engine P1.2; the granular statuses stay until P1.5).
+def test_status_set_is_the_generic_lifecycle() -> None:
+    # The generic lifecycle: new -> validated -> preparing -> running -> terminal, plus the §8.2
+    # ``pending`` queue waiting-state. Progress within ``running`` is the flow ``current_node``.
     assert {s.value for s in Status} == {
         "new",
         "validated",
         "preparing",
-        "refining",
-        "planning",
-        "implementing",
-        "testing",
-        "reviewing",
-        "fixing",
-        "summarizing",
-        "ready_to_publish",
-        "committing",
-        "pushing",
-        "creating_pr",
+        "running",
         "done",
         "failed",
         "manual_action_required",
         "pending",
-        "running",
     }
 
 
@@ -55,24 +44,10 @@ def test_terminal_statuses() -> None:
     [
         (Status.NEW, Status.VALIDATED),
         (Status.VALIDATED, Status.PREPARING),
-        (Status.PREPARING, Status.REFINING),
-        (Status.PREPARING, Status.PLANNING),  # refinement skipped
-        (Status.REFINING, Status.PLANNING),
-        (Status.PLANNING, Status.IMPLEMENTING),
-        (Status.IMPLEMENTING, Status.TESTING),
-        (Status.IMPLEMENTING, Status.REVIEWING),  # testing skipped
-        (Status.TESTING, Status.REVIEWING),  # checks pass
-        (Status.TESTING, Status.FIXING),  # checks fail
-        (Status.REVIEWING, Status.SUMMARIZING),  # review pass
-        (Status.REVIEWING, Status.FIXING),  # blocking findings
-        (Status.REVIEWING, Status.IMPLEMENTING),  # decomposed: next subtask
-        (Status.FIXING, Status.TESTING),
-        (Status.FIXING, Status.REVIEWING),  # testing skipped: review-driven fix returns to review
-        (Status.SUMMARIZING, Status.READY_TO_PUBLISH),
-        (Status.READY_TO_PUBLISH, Status.COMMITTING),
-        (Status.COMMITTING, Status.PUSHING),
-        (Status.PUSHING, Status.CREATING_PR),
-        (Status.CREATING_PR, Status.DONE),
+        (Status.PREPARING, Status.RUNNING),
+        (Status.RUNNING, Status.DONE),
+        (Status.PENDING, Status.VALIDATED),
+        (Status.PENDING, Status.PREPARING),
     ],
 )
 def test_allowed_happy_path_transitions(src: Status, dst: Status) -> None:
@@ -95,13 +70,11 @@ def test_every_active_status_can_bail_out(status: Status) -> None:
 @pytest.mark.parametrize(
     ("src", "dst"),
     [
-        (Status.NEW, Status.PLANNING),  # cannot skip the gate/prepare
-        (Status.PLANNING, Status.TESTING),  # must implement first
-        (Status.TESTING, Status.DONE),  # cannot publish without review/summary
-        (Status.READY_TO_PUBLISH, Status.PUSHING),  # must commit first
-        (Status.DONE, Status.PUSHING),  # terminal has no outgoing edges
+        (Status.NEW, Status.RUNNING),  # cannot skip validate/prepare
+        (Status.VALIDATED, Status.RUNNING),  # must go through preparing
+        (Status.PREPARING, Status.DONE),  # only the engine reaches done (from running)
+        (Status.DONE, Status.RUNNING),  # terminal has no outgoing edges
         (Status.FAILED, Status.VALIDATED),
-        (Status.SUMMARIZING, Status.IMPLEMENTING),
     ],
 )
 def test_disallowed_transitions_raise(src: Status, dst: Status) -> None:

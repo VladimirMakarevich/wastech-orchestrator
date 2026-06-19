@@ -147,25 +147,6 @@ _ARTIFACT_KINDS: dict[str, str] = {
     "rendered-prompt.md": "rendered_prompt",
 }
 
-_UNIT_STATUSES = frozenset({Status.IMPLEMENTING, Status.TESTING, Status.REVIEWING, Status.FIXING})
-
-# Statuses ``_resume_task`` can re-enter (mirrors its dispatch). A ``rerun --continue`` revives a
-# terminal task to one of these — the stage it was on before it failed (``interrupted_status``).
-_RESUMABLE_STATUSES = _UNIT_STATUSES | frozenset(
-    {
-        Status.VALIDATED,
-        Status.PREPARING,
-        Status.REFINING,
-        Status.PLANNING,
-        Status.SUMMARIZING,
-        Status.READY_TO_PUBLISH,
-        Status.COMMITTING,
-        Status.PUSHING,
-        Status.CREATING_PR,
-    }
-)
-
-
 @dataclass(frozen=True)
 class RerunPlan:
     """The reconciled facts + refusals for a ``rerun``/``rerun --continue`` (read-only; §rerun)."""
@@ -178,7 +159,7 @@ class RerunPlan:
     branch: str | None = None
     base_branch: str = ""
     attempt: int = 1
-    interrupted_status: Status | None = None
+    interrupted_node: str | None = None  # the flow checkpoint's current_node, for the dry-run view
     dirty_paths: tuple[str, ...] = ()
     has_remote_branch: bool = False
     pr_url: str | None = None
@@ -383,17 +364,6 @@ class Orchestrator:
 
     # --- rerun (operator-driven re-attempt of a terminal task) ----------------------------
 
-    @staticmethod
-    def _resumable_or_none(value: str | None) -> Status | None:
-        """A recorded ``interrupted_status`` mapped to a Status the resume engine can re-enter."""
-        if not value:
-            return None
-        try:
-            status = Status(value)
-        except ValueError:
-            return None
-        return status if status in _RESUMABLE_STATUSES else None
-
     def plan_rerun(
         self,
         task_id: str,
@@ -430,17 +400,17 @@ class Orchestrator:
                 f"the working tree has unaccounted changes ({', '.join(sorted(dirty))}); "
                 "resolve them before rerun"
             )
-        interrupted: Status | None = None
+        interrupted_node: str | None = None
         has_remote = False
         pr_url: str | None = None
         if continue_mode:
-            # --continue re-enters at the flow checkpoint (current_node); the legacy granular
-            # ``interrupted_status`` is kept only for the dry-run display.
-            interrupted = self._resumable_or_none(row.interrupted_status)
+            # --continue re-enters at the flow checkpoint (current_node); the node id is surfaced
+            # in the dry-run view.
             current_node, _counters, _fingerprint = self._store.get_flow_checkpoint(task_id)
+            interrupted_node = current_node
             if not current_node:
                 refusals.append(
-                    "no recoverable stage was recorded for this task; use a fresh `rerun` "
+                    "no recoverable node was recorded for this task; use a fresh `rerun` "
                     "(without --continue)"
                 )
         else:
@@ -461,7 +431,7 @@ class Orchestrator:
             branch=row.branch,
             base_branch=self._config.repo.base_branch,
             attempt=_ledger_attempt_count(self._ledger, task_id) + 1,
-            interrupted_status=interrupted,
+            interrupted_node=interrupted_node,
             dirty_paths=tuple(sorted(dirty)),
             has_remote_branch=has_remote,
             pr_url=pr_url,
@@ -1510,14 +1480,12 @@ class Orchestrator:
         last_error = cleanup.error or manual_reason
         # Persist the stage in progress before going terminal, so ``rerun --continue`` knows where
         # to re-enter. Only meaningful for a non-success terminal; ``done`` clears it.
-        interrupted = p.status.value if final is not Status.DONE else None
         self._store.update_task(
             p.task.id,
             cleanup_target_branch=cleanup.target_branch,
             cleanup_completed=cleanup.safe,
             cleanup_completed_at=self._clock() if cleanup.safe else None,
             cleanup_last_error=last_error,
-            interrupted_status=interrupted,
         )
         self._transition(p, final, finished_at=self._clock())
         if not already_moved:

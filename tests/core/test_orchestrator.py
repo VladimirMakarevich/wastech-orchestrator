@@ -686,7 +686,7 @@ def test_single_active_slot_blocks(git_repo, make_git_config, tmp_path: Path) ->
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
     )
     # Pre-seed another active task occupying the slot.
-    store.insert_task(TaskRow(task_id="other", title="o", status=Status.IMPLEMENTING))
+    store.insert_task(TaskRow(task_id="other", title="o", status=Status.RUNNING))
     with pytest.raises(SlotBusyError):
         orch.run_task(_complete_task(tmp_path, "task-008"))
 

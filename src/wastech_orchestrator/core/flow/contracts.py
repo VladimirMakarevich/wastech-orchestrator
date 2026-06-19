@@ -21,9 +21,6 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Literal
-
-from wastech_orchestrator.core.state_machine import Status
 
 
 class RunKind(StrEnum):
@@ -101,55 +98,6 @@ class NetworkPolicy(StrEnum):
 
     ADVISORIES = "advisories"  # fetch vulnerability advisories / package metadata (security_audit)
     RESEARCH = "research"  # broader external research fetches (deep_research)
-
-
-class QualityAction(StrEnum):
-    """The deterministic action the Core applies after a quality result (the foundation vocabulary).
-
-    Only the Core ever applies an action; agents, profiles, and providers return validated verdicts
-    but never transition state directly.
-    """
-
-    CONTINUE = "continue"
-    ENTER_FIXING = "enter_fixing"
-    REPEAT_STAGE = "repeat_stage"
-    STOP_MANUAL = "stop_manual"
-    FAIL = "fail"
-
-
-@dataclass(frozen=True, slots=True)
-class LifecycleEffect:
-    """How a :class:`QualityAction` maps onto the canonical state machine.
-
-    ``kind`` is one of:
-
-    - ``"advance"`` — to the stage's normal next status (relative; resolved against the graph);
-    - ``"reenter_same"`` — re-enter the current status from persisted feedback (no self-loop edge);
-    - ``"goto"`` — a fixed ``target`` status.
-    """
-
-    kind: Literal["advance", "reenter_same", "goto"]
-    target: Status | None = None
-
-
-# foundation mapping (each action maps to canonical state-machine behavior; do not duplicate it):
-#   continue     -> normal next status for the stage
-#   enter_fixing -> the implementing -> fixing edge
-#   repeat_stage -> re-enter the same status (no new self-loop edge)
-#   stop_manual  -> manual_action_required
-#   fail         -> failed
-QUALITY_ACTION_EFFECT: dict[QualityAction, LifecycleEffect] = {
-    QualityAction.CONTINUE: LifecycleEffect("advance"),
-    QualityAction.ENTER_FIXING: LifecycleEffect("goto", Status.FIXING),
-    QualityAction.REPEAT_STAGE: LifecycleEffect("reenter_same"),
-    QualityAction.STOP_MANUAL: LifecycleEffect("goto", Status.MANUAL_ACTION_REQUIRED),
-    QualityAction.FAIL: LifecycleEffect("goto", Status.FAILED),
-}
-
-
-def quality_action_effect(action: QualityAction) -> LifecycleEffect:
-    """Return the canonical lifecycle effect for ``action`` (total over :class:`QualityAction`)."""
-    return QUALITY_ACTION_EFFECT[action]
 
 
 @dataclass(frozen=True, slots=True)
