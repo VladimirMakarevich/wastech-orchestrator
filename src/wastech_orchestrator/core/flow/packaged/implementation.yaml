@@ -1,17 +1,25 @@
-# Packaged built-in flow: implementation (P1 parity shape — the executable flow the engine drives).
+# Packaged built-in flow: implementation (TARGET shape — the executable flow the engine drives).
 #
-# This is the pre-refactor pipeline expressed as data: refinement -> planning -> implementation ->
-# testing(checks) -> review(evaluator) -> fixing -> summary -> publish, with the two fix loops and
-# decomposition, and WITHOUT hybrid testing_quality / durable sessions. Those are the target
-# features layered on in P2; the TARGET shape (optional testing_quality + mutation guard on checks,
-# durable sessions) is preserved in docs/backlog/flows/co-design/implementation.yaml + flow-contract
-# §7, and P2.5 grows this packaged file to it.
+# The pipeline expressed as data: refinement -> planning -> implementation -> testing_quality?
+# -> testing(checks) -> review(evaluator) -> fixing -> publish, with the two fix loops and
+# decomposition. As of P2.5 this packaged file is the target graph (flow-contract §7); it mirrors
+# docs/backlog/flows/co-design/implementation.yaml, plus the per-task stage-skip `when` predicates
+# (config.*_enabled — the bounded per-task exception, PRE.3).
+#
+# Layered on across P2: durable sessions (P2.2 `editing_lineage`), review-as-evaluator (P2.3), and
+# the optional hybrid `testing_quality` evaluator + the core-owned commit-candidate mutation guard
+# on `checks` (P2.4). `testing_quality` is non-blocking and OFF by default (`when:
+# config.hybrid_testing`); when on, it self-caps via its own in_flow_verdict COUNT and the inline
+# `budget: 1` edge — exhaustion continues to `testing`, never manual. The mutation guard is a
+# core-owned property of the `checks` node (not declared here) and active whenever `checks` is
+# present.
 #
 # NOTE (2026-06-19 revision): supervisor is NOT a graph node. It is a constant orchestrator layer
-# ABOVE any flow (summary + terminal advisory control, configured in config.yaml: supervisor); the
-# supervise_impl/supervise_fix nodes and the summary-as-node were removed from the target. The
-# `summary` agent node below is the current P1-parity summary writer; P2.1 replaces it with the
-# constant supervisor layer. See p2-implementation.md §P2.1, flow-contract §2.2/§7.
+# ABOVE any flow (summary + per-step advisory oversight, configured in config.yaml: supervisor); the
+# supervise_impl/supervise_fix nodes and the summary-as-node were removed from the target. There is
+# NO `summary` node here: the constant supervisor layer writes the summary at whole-task close
+# (before publish) and observes every completed step. See p2-implementation.md §P2.1,
+# flow-contract §2.2/§7.
 flow:
   name: implementation
   task_type: implementation
@@ -41,6 +49,15 @@ flow:
       role_file: roles/implementation.md
       session_scope: editing_lineage
       permission_profile: workspace-write
+    - id: testing_quality
+      kind: evaluator
+      role: test_quality
+      role_file: roles/testing.md
+      session_scope: fresh_disposable
+      permission_profile: read-only
+      blocking: false
+      max_rework_per_stage: 1
+      when: { fact: config.hybrid_testing }
     - id: testing
       kind: checks
       checker: command_profile
@@ -60,14 +77,6 @@ flow:
       lineage_affinity: implementation
       permission_profile: workspace-write
       when: { fact: config.fixing_enabled }
-    - id: summary
-      kind: agent
-      role_file: roles/summary.md
-      session_scope: fresh_disposable
-      permission_profile: read-only
-      output_artifact: summary
-      best_effort: true
-      when: { fact: config.summary_enabled }
     - id: publish
       kind: publish
       policy: pull_request
@@ -75,13 +84,14 @@ flow:
   edges:
     - { from: refinement, to: planning }
     - { from: planning, to: implementation }
-    - { from: implementation, to: testing }
+    - { from: implementation, to: testing_quality }
+    - { from: testing_quality, to: testing, outcome: accept } # skipped (hybrid off) → pass-through
+    - { from: testing_quality, to: fixing, outcome: rework, budget: 1 } # non-blocking self-cap
     - { from: testing, to: review, outcome: pass }
     - { from: testing, to: fixing, outcome: fail, loop: test_fix }
-    - { from: review, to: summary, outcome: accept }
+    - { from: review, to: publish, outcome: accept } # summary + advisory oversight = supervisor layer
     - { from: review, to: fixing, outcome: rework, loop: review_fix }
-    - { from: fixing, to: testing }
-    - { from: summary, to: publish }
+    - { from: fixing, to: testing_quality }
 
   budgets:
     global_fix_iterations: 30
@@ -91,6 +101,6 @@ flow:
   decomposition:
     proposed_by: planning
     gate: { min: 2, max: 8, linear_depends_on: true }
-    sub_flow: [implementation, testing, review, fixing]
+    sub_flow: [implementation, testing_quality, testing, review, fixing]
     commit_each_subtask: true
     shared_budget: global_fix_iterations

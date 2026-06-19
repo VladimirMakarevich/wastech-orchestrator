@@ -255,7 +255,7 @@ def test_engine_post_node_hook_runs_for_executed_nodes_only() -> None:
         facts=lambda fact: False,  # derived.flag false => 'a' is skipped
         agents=_agents(),
         task_id="task-1",
-        post_node=lambda node, outcome: seen.append(node.id),
+        post_node=lambda node, outcome, node_run_id: seen.append(node.id),
     )
     result = engine.run()
     assert result.status is Status.DONE

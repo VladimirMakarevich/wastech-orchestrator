@@ -129,6 +129,7 @@ agents:
   max_total_fix_iterations: 30
 
   allow_review_skip: false # gate for a task disabling the review stage
+  hybrid_testing: false # enables the optional testing_quality evaluator node TODO: NEED TO REMOVE IT.
 ```
 
 | Field | Type | Default | Meaning |
@@ -138,6 +139,7 @@ agents:
 | `max_fix_cycles` | integer | `15` | Fix cycles for a single local failing loop (test-driven or review-driven, counted separately). |
 | `max_total_fix_iterations` | integer | `30` | Hard global fix cap across the whole task and all subtasks. Must be `>= max_fix_cycles`. |
 | `allow_review_skip` | boolean | `false` | Required before a task may skip `review` (via `stages.review.enabled: false`) — disabling review removes the only agent quality gate before commit/PR. |
+| `hybrid_testing` | boolean | `false` | Enables the optional non-blocking `testing_quality` evaluator node in the implementation flow (`when: config.hybrid_testing`). It judges the tests the implementation agent wrote — it never writes tests itself — and self-caps its rework via its own verdict count, then continues (never manual). |
 
 Validation requires `max_total_fix_iterations >= max_fix_cycles`. Stage-skip is **per-task only** (`stages.<stage>.enabled: false` in a task; see [operations.md](operations.md#skipping-pipeline-stages-per-task)) — the global `agents.skip_stages` list was **removed in `schema_version` 10** (redundant with configurable flows: to drop a stage everywhere, remove its node from the flow). `allow_review_skip` was added in **4** and survives. Older configs that still carry `skip_stages` load fail-open (it is ignored); `upgrade-config` strips it.
 

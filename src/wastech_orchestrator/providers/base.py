@@ -46,6 +46,11 @@ class ErrorClass(StrEnum):
     PERMISSION_DENIED = "permission_denied"
     CONFIGURATION_ERROR = "configuration_error"
     TASK_FAILURE = "task_failure"
+    # The provider could not resume the requested session (lost transcript / provider reset it). The
+    # Router retries the SAME provider once with a fresh session — it is infra (durable sessions,
+    # P2.2), never a quality failure, so it never falls back to another provider and never charges a
+    # fix iteration. Deliberately NOT in FALLBACK_ELIGIBLE.
+    SESSION_UNAVAILABLE = "session_unavailable"
 
 
 # Error classes that unconditionally allow fallback (spec §7.2).

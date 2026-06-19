@@ -23,7 +23,7 @@ import re
 import tempfile
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -50,7 +50,9 @@ from wastech_orchestrator.providers.base import (
 from wastech_orchestrator.providers.errors import classify, make_signatures, message_for
 from wastech_orchestrator.providers.process import ProcessResult, run_process
 from wastech_orchestrator.providers.redaction import (
+    REDACTED,
     is_sensitive_key,
+    normalized_session_id,
     read_denied_secrets,
     redact_mapping,
     redact_text,
@@ -75,6 +77,11 @@ _FAILURE_STATUSES = frozenset({"error", "failed", "failure", "incomplete", "abor
 # Codex stderr signatures → normalized error classes (most specific first).
 _CODEX_SIGNATURES = make_signatures(
     [
+        (
+            ErrorClass.SESSION_UNAVAILABLE,
+            r"session not found|no such session|unknown session|conversation not found"
+            r"|no conversation with|thread not found|cannot resume",
+        ),
         (ErrorClass.RATE_LIMITED, r"rate limit|\b429\b|too many requests|quota exceeded"),
         (
             ErrorClass.AUTHENTICATION_FAILED,
@@ -182,6 +189,13 @@ def build_codex_argv(
         "--ask-for-approval",
         "never",
         "exec",
+    ]
+    # Durable session resume (P2.2; verified on codex-cli 0.139.0): ``codex exec resume <ID>``
+    # continues the prior session and accepts the same global security flags + exec options. The
+    # SESSION_ID is positional, right after ``resume``; the follow-up prompt is read from stdin (-).
+    if request.session_id:
+        argv += ["resume", request.session_id]
+    argv += [
         "--cd",
         request.working_directory,
         "--sandbox",
@@ -197,7 +211,7 @@ def build_codex_argv(
         argv += ["--model", model]
     # Codex --reasoning-effort accepts none/low/medium/high/xhigh (aliases: extra_high, extra-high).
     # "max" is Claude-only; clamp it to xhigh (Codex's ceiling).
-    # session_id is not passed to Codex (no --resume equivalent in the Codex CLI).
+    # Session resume is handled above via ``exec resume <SESSION_ID>`` (durable sessions, P2.2).
     _CODEX_EFFORT_MAP: dict[str, str] = {
         "low": "low",
         "medium": "medium",
@@ -256,6 +270,10 @@ def parse_events(stdout_text: str, last_message_text: str | None = None) -> Pars
         event_type = str(event.get("type", ""))
         if event_type in ("session", "session.created") or "session_id" in event:
             session_id = event.get("session_id", session_id)
+        # ``codex exec`` emits ``{"type":"thread.started","thread_id":"..."}`` — the thread id is
+        # the resumable session id passed back to ``codex exec resume <id>`` (durable sessions).
+        if event_type == "thread.started":
+            session_id = event.get("thread_id", session_id)
         if event_type in ("message", "assistant", "agent_message"):
             text = event.get("text") or event.get("message")
             if isinstance(text, str):
@@ -440,6 +458,12 @@ class CodexProvider:
             self._finalize_failure(paths, request, started_at, finished_at, proc, error)
             raise
 
+        # The raw session id lives ONLY in state.db (durable sessions, P2.2). The resume id was
+        # already redacted via ``extra_secrets``; scrub the freshly emitted id from the on-disk
+        # streams too, while keeping the raw id on the in-memory result for the lineage store.
+        if parsed.session_id:
+            self._scrub_raw_session(paths, parsed.session_id)
+
         final_message = (
             redact_text(parsed.final_message, extra_secrets=extra_secrets)
             if parsed.final_message
@@ -471,10 +495,19 @@ class CodexProvider:
             event_log_path=paths.events_path,
             error=error_obj,
         )
-        write_result_artifact(paths, result)
+        # The on-disk result.json carries the normalized (non-secret) session id; the raw id is
+        # returned in-memory for the orchestrator's editing_lineage store (state.db only).
+        write_result_artifact(paths, _redact_result_session(result))
         return result
 
     # --- internals ---
+
+    def _scrub_raw_session(self, paths: ArtifactPaths, raw_session_id: str) -> None:
+        """Replace a raw session id with :data:`REDACTED` in the on-disk stdout/events streams."""
+        for path in (paths.stdout_path, paths.events_path):
+            existing = _read_text(path)
+            if raw_session_id and raw_session_id in existing:
+                Path(path).write_text(existing.replace(raw_session_id, REDACTED), encoding="utf-8")
 
     def _write_output_schema(self, paths: ArtifactPaths, request: AgentRunRequest) -> str | None:
         if request.output_schema is None:
@@ -545,9 +578,14 @@ class CodexProvider:
         write_result_artifact(paths, result)
 
     def _extra_secrets(self, request: AgentRunRequest) -> tuple[str, ...]:
-        """Literal secrets to redact: secret-named parent env values + denied-read file contents."""
-        return self._secret_env_values() + read_denied_secrets(
-            request.working_directory, self._security.denied_read_paths
+        """Literal secrets to redact: secret-named parent env values + denied-read file contents +
+        the raw resume session id (durable sessions, P2.2 — it must never leave state.db, so it is
+        scrubbed from the request argv / stdout / stderr / events / result)."""
+        session = (request.session_id,) if request.session_id else ()
+        return (
+            self._secret_env_values()
+            + read_denied_secrets(request.working_directory, self._security.denied_read_paths)
+            + session
         )
 
     def _secret_env_values(self) -> tuple[str, ...]:
@@ -565,6 +603,17 @@ def _read_text(path: str) -> str:
     if not candidate.exists():
         return ""
     return candidate.read_text(encoding="utf-8", errors="replace")
+
+
+def _redact_result_session(result: AgentRunResult) -> AgentRunResult:
+    """A copy of ``result`` whose session id is the normalized (non-secret) form, for the artifact.
+
+    The raw session id is kept on the in-memory result (so the orchestrator can persist it to the
+    ``editing_lineage`` store, state.db only) and never written to ``result.json``.
+    """
+    if result.session_id is None:
+        return result
+    return replace(result, session_id=normalized_session_id(result.session_id))
 
 
 def _parse_version(text: str) -> str | None:

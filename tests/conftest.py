@@ -108,6 +108,7 @@ def build_git_config(
     max_total_fix_iterations: int = 5,
     quarantine: str | None = None,
     allow_review_skip: bool = False,
+    hybrid_testing: bool = False,
     auto_mode: bool = False,
     auto_merge: bool = False,
     auto_merge_strategy: str = "squash",
@@ -117,7 +118,10 @@ def build_git_config(
     """Build a config pointing ``repo.local_path`` at the clone, with the given footprint/checks."""
     env_lines = "\n".join(f"    - {e}" for e in _TEST_ALLOWED_ENV)
     check_lines = "\n".join(f"    - {c!r}" for c in checks)
-    skip_block = f"  allow_review_skip: {str(allow_review_skip).lower()}\n"
+    skip_block = (
+        f"  allow_review_skip: {str(allow_review_skip).lower()}\n"
+        f"  hybrid_testing: {str(hybrid_testing).lower()}\n"
+    )
     validation_block = f"validation:\n  quarantine_folder: {quarantine!r}\n" if quarantine else ""
     text = f"""
 orchestrator:

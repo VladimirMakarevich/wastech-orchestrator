@@ -96,7 +96,7 @@ No terminal event in the stream → `ProviderError(INVALID_OUTPUT)` from the par
 | launch | `claude -p --output-format stream-json --verbose` | `codex --ask-for-approval never exec --json` |
 | isolation | `--permission-mode {plan\|acceptEdits}` + allow/deny tools | `--sandbox {workspace-write}` |
 | reasoning | `--effort {low…max}` | `--reasoning-effort {low…xhigh}` (`max`→`xhigh`) |
-| session | `--resume <id>` | none (session_id is not passed) |
+| session | `--resume <id>` | `exec resume <id>` (durable sessions, P2.2; thread id from `thread.started`) |
 | final message | from the `result` event | file `--output-last-message` (takes priority) |
 | terminal event | `type=result` | `result`/`task_complete`/`turn.completed` |
 | success | `subtype=success and not is_error` | `status ∉ {error,failed,failure,incomplete,aborted}` |

@@ -18,7 +18,6 @@ from typing import Any
 import yaml
 
 from wastech_orchestrator.core.flow.contracts import (
-    EvaluationKind,
     NetworkPolicy,
     OutputPolicy,
     PermissionProfile,
@@ -68,7 +67,7 @@ _AGENT_FIELDS = frozenset({
 })
 _EVALUATOR_FIELDS = frozenset({
     "id", "kind", "role", "role_file", "session_scope", "permission_profile",
-    "evaluation_kind", "blocking", "max_rework_per_stage", "provider", "model", "reasoning", "when",
+    "blocking", "max_rework_per_stage", "provider", "model", "reasoning", "when",
 })
 _CHECKS_FIELDS = frozenset({"id", "kind", "checker", "discovery", "when"})
 _HITL_NODE_FIELDS = frozenset({"id", "kind", "signal", "timeout_s", "when"})
@@ -264,7 +263,6 @@ def _parse_evaluator_node(raw: dict[str, Any], defaults: EvaluatorDefaults) -> E
 
     ss_raw = raw.get("session_scope", defaults.session_scope)
     pp_raw = raw.get("permission_profile", defaults.permission_profile)
-    ek_raw = raw.get("evaluation_kind", EvaluationKind.STAGE_OUTPUT)
 
     provider_raw = raw.get("provider")
     provider = _enum(ProviderId, provider_raw, ctx) if provider_raw is not None else None
@@ -276,7 +274,6 @@ def _parse_evaluator_node(raw: dict[str, Any], defaults: EvaluatorDefaults) -> E
         role_file=role_file,
         session_scope=_enum(SessionScope, ss_raw, ctx),
         permission_profile=_enum(PermissionProfile, pp_raw, ctx),
-        evaluation_kind=_enum(EvaluationKind, ek_raw, ctx),
         blocking=bool(raw.get("blocking", True)),
         max_rework_per_stage=int(raw.get("max_rework_per_stage", defaults.max_rework_per_stage)),
         provider=provider,

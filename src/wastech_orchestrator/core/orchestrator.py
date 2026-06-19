@@ -78,6 +78,7 @@ from wastech_orchestrator.core.skills import (
     resolve_planning_skills,
 )
 from wastech_orchestrator.core.state_machine import Status, assert_transition
+from wastech_orchestrator.core.supervisor import Supervisor
 from wastech_orchestrator.git_manager import (
     GitCommandError,
     GitManager,
@@ -257,7 +258,6 @@ class _Pipeline:
     last_review_findings: list[dict[str, Any]] = field(default_factory=list)
     branch: str = ""
     slug: str = ""
-    session_ids: dict[str, str] = field(default_factory=dict)  # provider_id.value -> session_id
     check_profile: ResolvedCheckProfile | None = None  # resolved at preflight (before any branch)
     reresolved_once: bool = False  # mid-task check re-resolve is bounded to once per task (§1.2)
     # Repo skill inventory scanned at task start; planning's chosen subset is surfaced to downstream
@@ -312,6 +312,9 @@ class Orchestrator:
         # Flow registry (P1.4 cutover): resolves a task's flow snapshot. Packaged-only in P1;
         # operator flows (``.worc/flows/``) are wired on the live path in P4.
         self._flow_registry = FlowRegistry()
+        # The constant supervisor layer (P2.1) — rebuilt per task in ``_engine_run`` (it carries the
+        # task's own resume_own_lineage session). Single-slot, so one live instance at a time.
+        self._supervisor: Supervisor | None = None
 
     def _default_skill_scanner(self) -> SkillInventoryScanner:
         root = self._config.skills.scan_root or str(
@@ -868,6 +871,9 @@ class Orchestrator:
         assert snapshot.source_path is not None
         if run_state is None:
             run_state = FlowRunState(flow_fingerprint=snapshot.flow_fingerprint)
+        # The constant supervisor layer starts at task start and lives the whole cycle (P2.1); it
+        # carries this task's own resume_own_lineage session.
+        self._supervisor = self._build_supervisor(snapshot)
         inputs = build_node_inputs(
             p,
             flow_dir=snapshot.source_path.parent,
@@ -1037,8 +1043,35 @@ class Orchestrator:
         self._store.set_subtask_commit(p.task.id, unit.order, sha, "committed")
         self._store.update_task(p.task.id, subtasks_completed=unit.order)
 
+    def _build_supervisor(self, snapshot: FlowSnapshot) -> Supervisor:
+        """Construct the per-task supervisor layer from ``config.yaml: supervisor`` (P2.1).
+
+        It runs read-only on the global primary; ``role_file`` is resolved inside the packaged flow
+        dir (same containment as a node ``role_file``). Built fresh per task so its own session does
+        not leak across tasks.
+        """
+        assert snapshot.source_path is not None
+        return Supervisor(
+            settings=self._config.supervisor,
+            router=self._router,
+            store=self._store,
+            repo_dir=self._config.repo.local_path,
+            artifacts_root=str(self._artifacts_root),
+            flow_dir=snapshot.source_path.parent,
+            register_artifact=self._register_artifact,
+        )
+
     def _engine_finalize(self, p: _Pipeline) -> str | None:
-        """The publish node's finalize hook: move the task file + write the committed summary."""
+        """The publish node's finalize hook: write the supervisor summary, move the task file, and
+        write the committed summary (P2.1).
+
+        The constant supervisor layer synthesizes ``summary.{md,json}`` at whole-task close (before
+        publish, so the ``summary.md`` is the PR body); ``_finalize_task_artifacts`` then falls back
+        to the deterministic minimal summary when the advisory synthesis could not run — so a
+        summary is *always* written, one way or the other (``config.summary_enabled`` is gone)."""
+        if self._supervisor is not None:
+            self._supervisor.finalize(task_id=p.task.id, task_title=p.task.title)
+        self._append_skip_section(p)  # note skipped stages on the supervisor summary (idempotent)
         summary_md = self._finalize_task_artifacts(p, Status.DONE)
         return str(summary_md) if summary_md is not None else None
 
@@ -1059,24 +1092,37 @@ class Orchestrator:
         def facts(fact: str) -> bool:
             if fact == "derived.needs_refinement":
                 return needs_refinement
+            if fact == "config.hybrid_testing":
+                return self._config.agents.hybrid_testing
             if fact.startswith("config.") and fact.endswith("_enabled"):
                 name = fact[len("config.") : -len("_enabled")]
                 try:
                     return Stage(name) not in p.skip
                 except ValueError:
                     return True  # unknown stage-enabled fact → do not skip
-            return False  # hybrid_testing etc. (P2) default off
+            return False  # unknown fact → default off
 
         return facts
 
     def _engine_post_node(
         self, p: _Pipeline, inputs: NodeInputs, snapshot: FlowSnapshot
-    ) -> Callable[[FlowNode, NodeOutcome], None]:
-        """Engine post-node hook: persist a node's output_artifact slot, resolve plan skills, and —
-        for the decomposition ``proposed_by`` node — decide + materialize the decomposition."""
+    ) -> Callable[[FlowNode, NodeOutcome, int], None]:
+        """Engine post-node hook: let the supervisor layer observe the completed step, persist a
+        node's output_artifact slot, resolve plan skills, and — for the decomposition
+        ``proposed_by`` node — decide + materialize the decomposition."""
         decomp = snapshot.doc.decomposition
 
-        def post_node(node: FlowNode, outcome: NodeOutcome) -> None:
+        def post_node(node: FlowNode, outcome: NodeOutcome, node_run_id: int) -> None:
+            # The constant supervisor layer observes every completed step read-only (advisory) —
+            # except the terminal publish node, whose finalize hook already wrote the summary.
+            if self._supervisor is not None and node.kind != "publish":
+                self._supervisor.observe(
+                    task_id=p.task.id,
+                    node_id=node.id,
+                    node_run_id=node_run_id,
+                    outcome_kind=outcome.kind,
+                    final_message=outcome.final_message,
+                )
             if not isinstance(node, AgentNode):
                 return
             path = apply_output_artifact(
@@ -1089,11 +1135,6 @@ class Orchestrator:
             )
             if node.output_artifact == "plan" and path is not None:
                 self._engine_apply_skills(p, outcome, inputs, path)
-            if node.output_artifact == "summary" and path is not None:
-                # Mirror legacy ``_summary``: write the local-only summary.json metadata + list the
-                # skipped stages in the summary body (so the PR reviewer sees which stages ran).
-                self._engine_write_summary_json(p, outcome)
-                self._append_skip_section(p)
             if decomp is not None and node.id == decomp.proposed_by:
                 self._engine_materialize_decomposition(p, outcome)
 
@@ -1137,16 +1178,6 @@ class Orchestrator:
                 for s in decision.subtasks
             ]
         )
-
-    def _engine_write_summary_json(self, p: _Pipeline, outcome: NodeOutcome) -> None:
-        """Write the local-only summary.json metadata (never committed) — legacy parity (§5.2)."""
-        structured = outcome.structured_output
-        payload = dict(structured) if isinstance(structured, Mapping) else {"what": p.task.title}
-        task_dir = task_artifact_dir(self._artifacts_root, p.task.id)
-        (task_dir / "summary.json").write_text(
-            json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
-        self._register_artifact(p.task.id, "summary_json", str(task_dir / "summary.json"))
 
     def _engine_apply_skills(
         self, p: _Pipeline, outcome: NodeOutcome, inputs: NodeInputs, plan_path: str

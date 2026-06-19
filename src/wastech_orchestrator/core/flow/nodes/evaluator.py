@@ -1,13 +1,19 @@
-"""Evaluator node runner (P1.3) — minimal ``role=review`` evaluator.
+"""Evaluator node runner (P1.3/P2.1) — the shared in-flow evaluator primitive.
 
 Runs the evaluator's ``role_file`` prompt (read-only) through the router and maps its structured
-verdict to an engine outcome: blocking findings -> ``rework``, a clean verdict -> ``accept``. A
-``final_handoff`` evaluator is unconditional (-> ``done``); a non-blocking evaluator never gates
-(-> ``accept``). This is the P1.3 parity of the legacy review stage; the full evaluator primitive
-(supervisor/critic/verifier/test_quality, immutable verdict store, the review findings artifact +
-``{review_path}`` wiring) lands in P2.1/P2.3 and the P1.4 wiring.
+verdict to an engine outcome: a blocking finding (severity ``medium``/``high``) -> ``rework``, a
+clean verdict -> ``accept``. A **blocking** evaluator gates every time it finds a blocking issue;
+the engine's named-loop budget bounds the rework cycles (exhaustion -> manual). A **non-blocking**
+evaluator (e.g. ``test_quality``) self-caps: it reworks until its own per-instance budget
+(``max_rework_per_stage``) is spent, then takes the ``accept`` edge (-> continue), **never** manual
+(P2.4). Each pass writes an immutable ``evaluations`` row (``in_flow_verdict``) namespaced by the
+source ``node_run`` id — the per-instance rework limit is derived by COUNTing those verdicts, not a
+mutable counter (flow-contract §2.2), so the core stays domain-free (the cap is the node's declared
+budget, not knowledge of the role). One mechanism serves every in-flow role (review / test_quality /
+critic / verifier / operator-defined); only the prompt, blocking flag, and budget differ.
 
-Blocking detection mirrors the legacy ``_extract_findings`` / ``_is_blocking``.
+Supervision is **not** an evaluator: the constant orchestrator layer above the flow owns
+per-step + final advisory observation (see ``core/supervisor.py``).
 """
 
 from __future__ import annotations
@@ -17,13 +23,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from wastech_orchestrator.core.flow.contracts import EvaluationKind
 from wastech_orchestrator.core.flow.engine import Finding, NodeContext, NodeOutcome, NodeResult
 from wastech_orchestrator.core.flow.nodes.base import (
     NodeInfraError,
     NodeInputs,
     NodeServices,
-    editing_session_id,
 )
 from wastech_orchestrator.core.flow.observability import record_run_observability
 from wastech_orchestrator.core.flow.prompt import render_role_prompt
@@ -32,9 +36,12 @@ from wastech_orchestrator.core.hitl import stage_output_schema
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.providers.base import AgentRunRequest, Stage
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
-from wastech_orchestrator.state_store import NodeRunRow
+from wastech_orchestrator.state_store import EvaluationRow, NodeRunRow
 
 _BLOCKING_SEVERITIES = frozenset({"blocking", "critical", "high"})
+#: severity tokens the verdict treats as blocking (medium/high), normalized to the ``Finding`` set.
+_HIGH_SEVERITIES = frozenset({"blocking", "critical", "high"})
+_MEDIUM_SEVERITIES = frozenset({"medium", "moderate"})
 
 
 class EvaluatorNodeRunner:
@@ -64,7 +71,7 @@ class EvaluatorNodeRunner:
         )
         request = self._build_request(node, ctx, stage, route, run_id)
         outcome = self._s.router.run_stage(request, route, snapshot=self._s.snapshot)
-        kind = self._verdict(node, outcome)
+        kind = self._verdict(node, ctx, outcome)
         self._record_completion(run_id, outcome, kind)
         record_run_observability(
             self._s,
@@ -86,14 +93,21 @@ class EvaluatorNodeRunner:
             )
             raise NodeInfraError(f"evaluator node {node.id!r}: no provider could run it ({err})")
         raw_findings = self._extract_findings(outcome.result.structured_output)
-        if node.evaluation_kind == EvaluationKind.STAGE_OUTPUT:
-            # Persist the findings artifact and expose it to downstream fixing as {review_path}.
-            # The implementation flow has a single stage_output evaluator (``review``); the
-            # per-evaluator verdict store for supervisor/test_quality is P2.1.
-            self._write_findings(ctx, raw_findings, outcome.result.final_message)
-        findings = tuple(
-            Finding(message=str(f.get("title", f)), blocking=self._is_blocking(f))
-            for f in raw_findings
+        findings = tuple(_to_finding(f) for f in raw_findings)
+        # Persist the findings artifact and expose it to downstream fixing as {review_path}.
+        self._write_findings(ctx, raw_findings, outcome.result.final_message)
+        # Immutable in-flow verdict (append-only, namespaced by the source node_run id). The
+        # per-instance rework limit derives from COUNT(rework) — there is no mutable counter.
+        self._s.store.record_evaluation(
+            EvaluationRow(
+                task_id=ctx.task_id,
+                node_id=node.id,
+                source_node_run_id=run_id,
+                subtask_order=ctx.subtask_order,
+                kind="in_flow_verdict",
+                verdict=kind,
+                findings_json=_findings_json(findings),
+            )
         )
         return NodeResult(
             node_id=node.id,
@@ -115,13 +129,24 @@ class EvaluatorNodeRunner:
         )
         self._in.review_path = str(review_dir / "findings.json")
 
-    def _verdict(self, node: EvaluatorNode, outcome: StageOutcome) -> str:
-        if node.evaluation_kind == EvaluationKind.FINAL_HANDOFF:
-            return "done"
-        if not node.blocking or outcome.result is None:
+    def _verdict(self, node: EvaluatorNode, ctx: NodeContext, outcome: StageOutcome) -> str:
+        if outcome.result is None:
             return "accept"
         findings = self._extract_findings(outcome.result.structured_output)
-        return "rework" if any(self._is_blocking(f) for f in findings) else "accept"
+        if not any(self._is_blocking(f) for f in findings):
+            return "accept"
+        if node.blocking:
+            # A blocking evaluator gates every time it finds a blocking issue; the engine's
+            # named-loop budget bounds the rework cycles (exhaustion → manual).
+            return "rework"
+        # A non-blocking evaluator (e.g. test_quality) self-caps: rework until its own per-instance
+        # budget (max_rework_per_stage) is spent — counted from the immutable in_flow_verdict rows
+        # (flow-contract §2.2), not a mutable counter — then accept (→ continue), never manual. The
+        # core stays domain-free: the cap is the node's declared budget, not knowledge of the role.
+        prior_rework = self._s.store.count_rework_verdicts(
+            ctx.task_id, node_id=node.id, subtask_order=ctx.subtask_order
+        )
+        return "rework" if prior_rework < node.max_rework_per_stage else "accept"
 
     def _build_request(
         self,
@@ -151,11 +176,10 @@ class EvaluatorNodeRunner:
             output_schema=stage_output_schema(stage),
             model=node.model,
             reasoning=node.reasoning,
-            # Evaluators are read-only and never editing_lineage (validator-enforced), so this is
-            # always a fresh session — an evaluation must not inherit an editing agent's session.
-            session_id=editing_session_id(
-                node.session_scope, self._in.session_ids, route.primary.value
-            ),
+            # Evaluators are read-only and never editing_lineage (validator-enforced): a fresh
+            # session each pass, never inheriting an author's editing lineage (durable sessions,
+            # P2.2). A multi-round ``resume_own_lineage`` evaluator (research critic) is P3.
+            session_id=None,
         )
 
     def _prompt_variables(self, ctx: NodeContext, stage: Stage) -> dict[str, object | None]:
@@ -203,3 +227,26 @@ class EvaluatorNodeRunner:
         if finding.get("blocking") is True:
             return True
         return str(finding.get("severity", "")).lower() in _BLOCKING_SEVERITIES
+
+
+def _to_finding(raw: Mapping[str, Any]) -> Finding:
+    """Map a raw structured finding to the typed :class:`Finding` (severity / reason / paths)."""
+    sev_token = str(raw.get("severity", "")).lower()
+    if raw.get("blocking") is True or sev_token in _HIGH_SEVERITIES:
+        severity: str = "high"
+    elif sev_token in _MEDIUM_SEVERITIES:
+        severity = "medium"
+    else:
+        severity = "low"
+    reason = str(raw.get("reason") or raw.get("title") or raw.get("message") or raw)
+    paths_raw = raw.get("paths")
+    paths = tuple(str(p) for p in paths_raw) if isinstance(paths_raw, list | tuple) else ()
+    return Finding(severity=severity, reason=reason, paths=paths)  # type: ignore[arg-type]
+
+
+def _findings_json(findings: tuple[Finding, ...]) -> str:
+    """Serialize findings for the immutable ``evaluations`` row."""
+    return json.dumps(
+        [{"severity": f.severity, "reason": f.reason, "paths": list(f.paths)} for f in findings],
+        ensure_ascii=False,
+    )

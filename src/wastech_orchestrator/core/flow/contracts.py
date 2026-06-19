@@ -33,22 +33,16 @@ class RunKind(StrEnum):
 class EvaluatorRole(StrEnum):
     """The fine-grained discriminator carried by every ``EVALUATOR`` run.
 
-    These are the roles that ship; operator-authored flows may use other role strings (they get the
-    default evaluator behavior). Only ``final_handoff`` triggers special core handling.
+    These are the in-flow evaluator roles that ship; operator-authored flows may use other role
+    strings (they get the default evaluator behavior). Supervision is **not** an evaluator role:
+    summary + per-step advisory oversight is a constant orchestrator layer above the flow, not a
+    graph node (2026-06-19 revision; see ``docs/backlog/flows/flow-contract.md`` §2.2).
     """
 
-    SUPERVISOR = "supervisor"
     REVIEW = "review"
     CRITIC = "critic"
     VERIFIER = "verifier"
     TEST_QUALITY = "test_quality"
-
-
-class EvaluationKind(StrEnum):
-    """An evaluator's sub-mode: a blocking stage verdict vs the final read-only handoff pass."""
-
-    STAGE_OUTPUT = "stage_output"
-    FINAL_HANDOFF = "final_handoff"
 
 
 class SessionScope(StrEnum):

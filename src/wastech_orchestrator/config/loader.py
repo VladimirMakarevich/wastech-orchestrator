@@ -39,6 +39,7 @@ from wastech_orchestrator.config.schema import (
     RepoConfig,
     SecurityConfig,
     SkillsConfig,
+    SupervisorConfig,
     TelegramConfig,
     ValidationConfig,
 )
@@ -392,12 +393,14 @@ def _build_agents(raw: Any, issues: list[str]) -> AgentsConfig:
             "decomposition",
             "providers",
             "allow_review_skip",
+            "hybrid_testing",
         },
         "agents",
         issues,
         tolerated={"skip_stages", "routing"},
     )
     allow_review_skip = _bool(m, "allow_review_skip", False, "agents", issues)
+    hybrid_testing = _bool(m, "hybrid_testing", False, "agents", issues)
     return AgentsConfig(
         allowed=_build_allowed(m.get("allowed"), issues),
         max_stage_attempts=_int(m, "max_stage_attempts", 3, "agents", issues),
@@ -406,6 +409,7 @@ def _build_agents(raw: Any, issues: list[str]) -> AgentsConfig:
         decomposition=_build_decomposition(m.get("decomposition"), issues),
         providers=_build_providers(m.get("providers"), issues),
         allow_review_skip=allow_review_skip,
+        hybrid_testing=hybrid_testing,
     )
 
 
@@ -609,6 +613,26 @@ def _build_skills(raw: Any, issues: list[str]) -> SkillsConfig:
     )
 
 
+def _build_supervisor(raw: Any, issues: list[str]) -> SupervisorConfig:
+    where = "supervisor"
+    if raw is None:
+        return SupervisorConfig()
+    m = _mapping(raw, where, issues)
+    _check_keys(m, {"role_file", "model", "reasoning"}, where, issues)
+    reasoning = _opt_str(m, "reasoning", where, issues)
+    if reasoning is not None and reasoning not in _REASONING_LEVELS:
+        issues.append(
+            f"{where}.reasoning: invalid value {reasoning!r}, "
+            f"expected one of {sorted(_REASONING_LEVELS)}"
+        )
+        reasoning = None
+    return SupervisorConfig(
+        role_file=_str(m, "role_file", "roles/supervisor.md", where, issues),
+        model=_opt_str(m, "model", where, issues),
+        reasoning=reasoning,
+    )
+
+
 _TOP_LEVEL_KEYS = {
     "schema_version",
     "orchestrator",
@@ -620,6 +644,7 @@ _TOP_LEVEL_KEYS = {
     "git",
     "telegram",
     "skills",
+    "supervisor",
     "prompt_audit",
 }
 
@@ -659,6 +684,7 @@ def _parse(raw: Mapping[str, Any], issues: list[str], warnings: list[str]) -> Or
         git=_build_git(raw.get("git"), issues),
         telegram=_build_telegram(raw.get("telegram"), issues),
         skills=_build_skills(raw.get("skills"), issues),
+        supervisor=_build_supervisor(raw.get("supervisor"), issues),
         prompt_audit=_bool(raw, "prompt_audit", False, "<root>", issues),
     )
 

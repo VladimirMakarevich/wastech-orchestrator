@@ -18,6 +18,10 @@ is just the data shape:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from wastech_orchestrator.core.flow.run_state import FlowRunState
 
 
 @dataclass
@@ -28,3 +32,19 @@ class LoopCounters:
     test_fix_cycles: int = 0
     review_fix_cycles: int = 0
     fix_iterations: int = 0
+
+
+def record_rework(run_state: FlowRunState) -> int:
+    """The single rework-accounting path: increment the global ``fix_iterations`` once (P2.1).
+
+    Every in-flow rework/fail edge the engine takes — the test-driven loop (``test_fix``) and the
+    review-driven loop (``review_fix``) alike — charges its global cost here and **only** here, so a
+    rework is counted exactly once and never double-incremented (the failure mode the old
+    ``supervise_fix → fixing`` edge risked, now structurally impossible: the supervisor is an
+    advisory layer that never reworks). Returns the new global counter value.
+
+    The named-loop / inline-edge budgets stay with the engine's edge bookkeeping; this owns only the
+    one global counter. The immutable per-verdict audit lives in the ``evaluations`` table, written
+    by the evaluator node — recording a verdict never touches this counter.
+    """
+    return run_state.bump(run_state.GLOBAL_FIX_KEY)

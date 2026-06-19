@@ -23,7 +23,6 @@ from dataclasses import dataclass
 from typing import Literal
 
 from wastech_orchestrator.core.flow.contracts import (
-    EvaluationKind,
     PermissionProfile,
     SessionScope,
 )
@@ -65,12 +64,11 @@ def validate_flow(snapshot: FlowSnapshot) -> None:
 
 # -- allowed outcome sets per node kind ---------------------------------------
 #
-# Evaluators emit a structured verdict; checks emit pass/fail; all other node
+# Evaluators emit a structured verdict (accept/rework); checks emit pass/fail; all other node
 # kinds proceed unconditionally (no outcome on their outgoing edges).
 # ``route:<name>`` is always allowed (explicit routing in any flow).
 
 _EVAL_STAGE_OUTCOMES: frozenset[str | None] = frozenset({"accept", "rework"})
-_EVAL_FINAL_OUTCOMES: frozenset[str | None] = frozenset({None})  # unconditional only
 _CHECKS_OUTCOMES: frozenset[str | None] = frozenset({"pass", "fail"})
 _UNCONDITIONAL: frozenset[str | None] = frozenset({None})
 
@@ -100,11 +98,7 @@ def _check_graph(snap: FlowSnapshot) -> list[Violation]:
             continue
         if node.kind == "evaluator":
             assert isinstance(node, EvaluatorNode)
-            allowed: frozenset[str | None] = (
-                _EVAL_FINAL_OUTCOMES
-                if node.evaluation_kind == EvaluationKind.FINAL_HANDOFF
-                else _EVAL_STAGE_OUTCOMES
-            )
+            allowed: frozenset[str | None] = _EVAL_STAGE_OUTCOMES
         elif node.kind == "checks":
             allowed = _CHECKS_OUTCOMES
         else:
@@ -180,7 +174,9 @@ def _check_graph(snap: FlowSnapshot) -> list[Violation]:
         if trapped:
             errs.append(g(f"nodes cannot reach any terminal: {sorted(trapped)}"))
 
-    # 7. lineage_affinity must reference an agent with editing_lineage session scope.
+    # 7. lineage_affinity must reference an agent with editing_lineage session scope, and the two
+    #    nodes must not declare conflicting explicit providers (you cannot resume one provider's
+    #    editing session on another — durable sessions, P2.2).
     for node in doc.nodes:
         if not isinstance(node, AgentNode) or node.lineage_affinity is None:
             continue
@@ -196,6 +192,16 @@ def _check_graph(snap: FlowSnapshot) -> list[Violation]:
             errs.append(g(
                 f"node {node.id!r}: lineage_affinity {node.lineage_affinity!r} must be "
                 "an agent with session_scope=editing_lineage"
+            ))
+        elif (
+            node.provider is not None
+            and target.provider is not None
+            and node.provider != target.provider
+        ):
+            errs.append(g(
+                f"node {node.id!r}: provider {node.provider.value!r} conflicts with "
+                f"lineage_affinity {node.lineage_affinity!r} provider "
+                f"{target.provider.value!r} (cannot resume a session across providers)"
             ))
 
     # 8. Decomposition references must resolve.

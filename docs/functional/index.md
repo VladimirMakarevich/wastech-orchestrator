@@ -78,7 +78,7 @@ Internal triggers (not user commands), confirmed by code:
 
 Detailed step-by-step scenarios are in [system-flows.md](./system-flows.md); a frame-by-frame breakdown of pipeline stages (one document per stage, S01–S08) is in [flows/coding/index.md](./flows/coding/index.md). In brief:
 
-1. **Single task processing (`run` / `watch`).** Read and validate task → acquire slot → prepare branch → (opt.) refinement → planning (+ opt. decomposition) → for each work unit the loop `implementation → testing → review → fixing` → summary → publish (commit/push/PR, opt. auto-merge) → terminal cleanup → write to ledger.
+1. **Single task processing (`run` / `watch`).** Read and validate task → acquire slot → prepare branch → (opt.) refinement → planning (+ opt. decomposition) → for each work unit the loop `implementation → testing → review → fixing` → publish (commit/push/PR, opt. auto-merge) → terminal cleanup → write to ledger. The summary is no longer a pipeline node: a constant supervisor layer above the flow (flow-engine P2.1) observes each completed step read-only and writes the summary at whole-task close (before publish).
 2. **`watch` daemon.** Between ticks: fetch/pull base branch, resume interrupted task, pick next pending task (one at a time; back-to-back only with `auto_mode`).
 3. **Resume (`resume`).** On startup, compare persistent state and continue the single unfinished task or complete interrupted cleanup.
 4. **`rerun` / `rerun --continue`.** Retry a terminal task — "from scratch from base" or "continue from the flow checkpoint node where it stopped".
@@ -231,7 +231,7 @@ Key: [B17 Router](./blocks/B17-agent-router-and-fallback.md) is the sole caller 
 
 The `<artifacts_root>` is the gitignored `<repo>/.worc/` home (`worc_home_for(config)`); the task lifecycle dirs are the exception — they sit at the repo root and carry the committed audit trail.
 
-- **`state.db`** — `<artifacts_root>/state.db`; SQLite (tasks, node_runs, provider_attempts, check_runs, artifacts, publish_operations, subtasks); owner [B07](./blocks/B07-state-machine-and-store.md).
+- **`state.db`** — `<artifacts_root>/state.db`; SQLite (tasks, node_runs, provider_attempts, check_runs, artifacts, publish_operations, subtasks, evaluations, editing_lineage); owner [B07](./blocks/B07-state-machine-and-store.md).
 - **`completed.jsonl`** — `<artifacts_root>/logs/completed.jsonl`; JSONL (append-only); owner [B08](./blocks/B08-ledger-and-failure-reports.md).
 - **`resolved-profile.json`** — `<artifacts_root>/checks/`; JSON (check profile cache); owner [B23](./blocks/B23-check-discovery.md).
 - **Run artifacts** — `<artifacts_root>/logs/<task-id>/...`; directories with request/result/stdout/stderr/events; owner [B20](./blocks/B20-artifact-layout.md).

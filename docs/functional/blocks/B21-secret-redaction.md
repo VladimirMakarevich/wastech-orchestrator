@@ -10,6 +10,7 @@ A cross-cutting set of pure functions that scrub secret-like values from text an
 - Produce a "deep" redacted copy of a dictionary: values under sensitive keys are scrubbed entirely, strings are processed through `redact_text`, lists/dicts are handled recursively ([redaction.py:108-131](../../../src/wastech_orchestrator/providers/redaction.py#L108)).
 - Collect secret literals from `denied_read_paths` files in the workspace for subsequent redaction ([redaction.py:134-202](../../../src/wastech_orchestrator/providers/redaction.py#L134)).
 - Determine whether a key name looks like a "secret-bearing" key ([redaction.py:85-91](../../../src/wastech_orchestrator/providers/redaction.py#L85)).
+- Produce the **normalized (non-secret) form** of a provider session id — a short SHA-256 prefix — so artifacts/logs correlate runs without exposing the resumable raw session id (durable sessions, P2.2: the raw id lives only in `state.db`'s `editing_lineage`; the adapters redact the resume id via `extra_secrets` and write the normalized id to `result.json`) ([redaction.py](../../../src/wastech_orchestrator/providers/redaction.py)).
 
 ## Block Boundaries
 

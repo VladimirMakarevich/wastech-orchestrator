@@ -49,7 +49,16 @@ def _utc_now_iso() -> str:
 # ``node_runs``) and ``provider_attempts.stage_run_id`` was renamed to ``node_run_id``.
 # v7 (flow-engine P1 Slice 7): ``tasks.interrupted_status`` was dropped — the granular statuses it
 # stored are gone; ``rerun --continue`` re-enters at the ``current_node`` flow checkpoint.
-DB_SCHEMA_VERSION = 7
+# v8 (flow-engine P2.1): added the immutable, append-only ``evaluations`` table — the per-verdict
+# audit for in-flow evaluators (``in_flow_verdict``) and the constant supervisor layer's per-step /
+# final advisory observations (``supervisor_step`` / ``supervisor_final``). A fresh database creates
+# it via ``_SCHEMA``; a brand-new (``0``) database adopts it (no additive column to migrate).
+# v9 (flow-engine P2.2): added the ``editing_lineage`` table — the durable per-execution-unit
+# editing session (provider + raw session id), the **only** place a raw session id is ever stored
+# (it is redacted everywhere else). One active editing session per ``(task_id, subtask_order)``;
+# resume for Claude/Codex reads it, the author nodes (implementation/fixing) update it. Created on a
+# fresh DB by ``_SCHEMA`` (no additive column to migrate).
+DB_SCHEMA_VERSION = 9
 
 
 class IncompatibleStateError(Exception):
@@ -226,6 +235,27 @@ CREATE TABLE IF NOT EXISTS subtasks (
     artifact_path TEXT,
     UNIQUE(task_id, "order")
 );
+
+CREATE TABLE IF NOT EXISTS evaluations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL REFERENCES tasks(task_id),
+    node_id TEXT,
+    source_node_run_id INTEGER,
+    subtask_order INTEGER,
+    kind TEXT NOT NULL,
+    verdict TEXT NOT NULL,
+    findings_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS editing_lineage (
+    task_id TEXT NOT NULL REFERENCES tasks(task_id),
+    subtask_order INTEGER NOT NULL DEFAULT -1,
+    provider TEXT NOT NULL,
+    raw_session_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (task_id, subtask_order)
+);
 """
 
 
@@ -354,6 +384,48 @@ class SubtaskRow:
     depends_on: tuple[int, ...]
     commit_sha: str | None = None
     artifact_path: str | None = None
+
+
+@dataclass(frozen=True)
+class EvaluationRow:
+    """One immutable, append-only evaluation record (flow-engine P2.1).
+
+    Carries three kinds (``kind``): an in-flow evaluator's ``in_flow_verdict`` (``accept`` /
+    ``rework`` with its findings, namespaced by ``source_node_run_id``); and the supervisor layer's
+    advisory ``supervisor_step`` (one per completed node, namespaced by
+    ``(subtask_order, source_node_run_id)``) and ``supervisor_final`` (one per whole task). The
+    supervisor never routes, so its ``verdict`` is always ``advisory``. The in-flow per-instance
+    rework limit is derived by **counting** ``rework`` verdicts — there is no mutable counter.
+    ``node_id`` is the in-flow evaluator node, or ``None`` for the supervisor layer (not a node).
+    """
+
+    task_id: str
+    kind: str  # in_flow_verdict | supervisor_step | supervisor_final
+    verdict: str  # accept | rework (in-flow); advisory (supervisor — never routes)
+    findings_json: str = "[]"
+    node_id: str | None = None
+    source_node_run_id: int | None = None
+    subtask_order: int | None = None
+    created_at: str | None = None
+    id: int | None = None
+
+
+@dataclass(frozen=True)
+class EditingLineageRow:
+    """The durable editing session for one execution unit (flow-engine P2.2).
+
+    ``execution_unit = (task_id, subtask_order)`` (``contracts.ExecutionUnit``); there is exactly
+    one active editing session per unit. ``raw_session_id`` is the provider's real session id — it
+    **never** leaves ``state.db`` (it is redacted in every artifact/log/argv). ``provider`` binds
+    the lineage to the provider that produced it: a node resumes it only when its resolved provider
+    matches (you cannot resume a Claude session on Codex).
+    """
+
+    task_id: str
+    provider: str  # claude | codex
+    raw_session_id: str
+    subtask_order: int | None = None
+    updated_at: str | None = None
 
 
 # ``publish_operations`` uses -1 as the "no subtask" sentinel so the UNIQUE constraint works
@@ -576,6 +648,7 @@ class StateStore:
             c.execute("DELETE FROM subtasks WHERE task_id = ?", (task_id,))
             c.execute("DELETE FROM node_runs WHERE task_id = ?", (task_id,))
             self.clear_publish_operations(task_id, c)
+            self.clear_editing_lineage(task_id, c)
 
     def revive_task_for_continue(
         self, task_id: str, stage_status: Status, conn: sqlite3.Connection | None = None
@@ -962,6 +1035,110 @@ class StateStore:
                 (commit_sha, status, task_id, order),
             )
 
+    # --- evaluations (immutable, append-only) ---------------------------------------------
+
+    def record_evaluation(self, row: EvaluationRow, conn: sqlite3.Connection | None = None) -> int:
+        """Append one immutable evaluation row (in-flow verdict or supervisor observation). Returns
+        its id. The table is append-only — there is no update/delete (audit + recovery)."""
+        now = self._clock()
+        with self._writer(conn) as c:
+            cur = c.execute(
+                """
+                INSERT INTO evaluations (
+                    task_id, node_id, source_node_run_id, subtask_order, kind, verdict,
+                    findings_json, created_at
+                ) VALUES (?,?,?,?,?,?,?,?)
+                """,
+                (
+                    row.task_id,
+                    row.node_id,
+                    row.source_node_run_id,
+                    row.subtask_order,
+                    row.kind,
+                    row.verdict,
+                    row.findings_json,
+                    row.created_at or now,
+                ),
+            )
+            return int(cur.lastrowid or 0)
+
+    def get_evaluations(self, task_id: str) -> list[EvaluationRow]:
+        """All evaluation rows for a task in append order (ascending id)."""
+        cur = self._conn.execute(
+            "SELECT * FROM evaluations WHERE task_id = ? ORDER BY id ASC", (task_id,)
+        )
+        return [_evaluation_from_row(r) for r in cur.fetchall()]
+
+    def count_rework_verdicts(
+        self, task_id: str, *, node_id: str | None = None, subtask_order: int | None = None
+    ) -> int:
+        """Count applied in-flow ``rework`` verdicts — the per-instance rework limit derives from
+        this count, not a mutable counter (flow-contract §2.2). Scoped to ``node_id`` /
+        ``subtask_order`` when given (``subtask_order`` matched with ``IS`` so ``NULL`` works)."""
+        sql = (
+            "SELECT COUNT(*) FROM evaluations "
+            "WHERE task_id = ? AND kind = 'in_flow_verdict' AND verdict = 'rework'"
+        )
+        params: list[object] = [task_id]
+        if node_id is not None:
+            sql += " AND node_id = ?"
+            params.append(node_id)
+        if subtask_order is not None:
+            sql += " AND subtask_order = ?"
+            params.append(subtask_order)
+        row = self._conn.execute(sql, params).fetchone()
+        return int(row[0]) if row is not None else 0
+
+    # --- editing_lineage (durable sessions) -----------------------------------------------
+
+    def get_editing_lineage(
+        self, task_id: str, subtask_order: int | None = None
+    ) -> EditingLineageRow | None:
+        """The active editing session for an execution unit, or ``None`` if none yet (P2.2)."""
+        subtask = _NO_SUBTASK if subtask_order is None else subtask_order
+        cur = self._conn.execute(
+            "SELECT provider, raw_session_id, updated_at FROM editing_lineage "
+            "WHERE task_id = ? AND subtask_order = ?",
+            (task_id, subtask),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return EditingLineageRow(
+            task_id=task_id,
+            provider=row["provider"],
+            raw_session_id=row["raw_session_id"],
+            subtask_order=subtask_order,
+            updated_at=row["updated_at"],
+        )
+
+    def upsert_editing_lineage(
+        self, row: EditingLineageRow, conn: sqlite3.Connection | None = None
+    ) -> None:
+        """Insert or replace the active editing session for an execution unit (one per unit)."""
+        now = self._clock()
+        subtask = _NO_SUBTASK if row.subtask_order is None else row.subtask_order
+        with self._writer(conn) as c:
+            c.execute(
+                """
+                INSERT INTO editing_lineage (
+                    task_id, subtask_order, provider, raw_session_id, updated_at
+                ) VALUES (?,?,?,?,?)
+                ON CONFLICT(task_id, subtask_order) DO UPDATE SET
+                    provider = excluded.provider,
+                    raw_session_id = excluded.raw_session_id,
+                    updated_at = excluded.updated_at
+                """,
+                (row.task_id, subtask, row.provider, row.raw_session_id, row.updated_at or now),
+            )
+
+    def clear_editing_lineage(
+        self, task_id: str, conn: sqlite3.Connection | None = None
+    ) -> None:
+        """Delete a task's editing sessions so a fresh ``rerun`` starts new provider sessions."""
+        with self._writer(conn) as c:
+            c.execute("DELETE FROM editing_lineage WHERE task_id = ?", (task_id,))
+
 
 # Statuses in which a task does NOT own the processing slot.
 _NON_ACTIVE: frozenset[Status] = frozenset(
@@ -1012,6 +1189,20 @@ def _node_run_from_row(row: sqlite3.Row) -> NodeRunRow:
         finished_at=row["finished_at"],
         skipped=bool(row["skipped"]),
         skip_reason=row["skip_reason"],
+        id=row["id"],
+    )
+
+
+def _evaluation_from_row(row: sqlite3.Row) -> EvaluationRow:
+    return EvaluationRow(
+        task_id=row["task_id"],
+        kind=row["kind"],
+        verdict=row["verdict"],
+        findings_json=row["findings_json"],
+        node_id=row["node_id"],
+        source_node_run_id=row["source_node_run_id"],
+        subtask_order=row["subtask_order"],
+        created_at=row["created_at"],
         id=row["id"],
     )
 

@@ -1,10 +1,10 @@
 # P2 — Целевые возможности implementation как узлы
 
-Статус: **backlog / инженерная спека (не запланировано к исполнению)** Дата: 2026-06-17 (ревизия 2026-06-19) Владелец: Vladimir Makarevich
+Статус: **backlog / инженерная спека (запланировано к исполнению)** Дата: 2026-06-17 (ревизия 2026-06-19) Владелец: Vladimir Makarevich
 
 Детализация фазы P2 из [plan.md](plan.md). Цель: на **доказанном** движке (P1) нарастить целевой implementation, адаптировав три поглощённые программы — [supervisor](../outdated/supervisor_quality_gate.md), [durable sessions](../outdated/durable_sessions_and_fixing_affinity.md), [hybrid testing](../outdated/hybrid_agent_testing.md). База проверки фазы: **тесты из спек трёх программ** покрывают новые узлы (адаптированный на движок интеграционный сьют из P1 анкерит неизменное ядро — golden-harness отменён, см. [plan.md](plan.md)).
 
-> **Ревизия архитектуры supervisor (2026-06-19).** Зафиксировано: flow — **полностью конфигурируемый граф любых узлов**; оператор вправе описать ЛЮБОЙ flow и любое число агентов в YAML — вплоть до одного implement-агента без проверок, ревью и чеков. **Единственная константа — supervisor, который живёт отдельным слоем НАД flow** (на уровне оркестратора, не узлом графа): стартует при старте задачи, **живёт весь цикл и проверяет каждый завершённый шаг** (read-only, своя `resume_own_lineage`-сессия, advisory — не блокирует), а при закрытии всей задачи пишет `summary` + advise. Отдельных блокирующих per-stage supervisor-узлов (`supervise_impl`/`supervise_fix`) в графе **больше нет** — кому нужны блокирующие пер-стейдж гейты, добавляет опциональные `review`/`test_quality` (или operator-defined) evaluator-узлы в YAML. Детали — P2.1; целевой граф — P2.5; зеркальные правки контракта — [flow-contract.md](flow-contract.md) §2.2/§4/§7, [security-ceiling.md](security-ceiling.md) §3.
+> **Ревизия архитектуры supervisor (2026-06-19).** Зафиксировано: flow — **полностью конфигурируемый граф любых узлов**; оператор вправе описать ЛЮБОЙ flow и любое число агентов в YAML — вплоть до одного implement-агента без проверок, ревью и чеков. **Единственная константа — supervisor, который живёт отдельным слоем НАД flow** (на уровне оркестратора, не узлом графа): стартует при старте задачи, **живёт весь цикл и проверяет каждый завершённый шаг** (read-only, своя `resume_own_lineage`-сессия, advisory — не блокирует), а при закрытии всей задачи пишет `summary` + advises. Отдельных блокирующих per-stage supervisor-узлов (`supervise_impl`/`supervise_fix`) в графе **больше нет** — кому нужны блокирующие пер-стейдж гейты, добавляет опциональные `review`/`test_quality` (или operator-defined) evaluator-узлы в YAML. Детали — P2.1; целевой граф — P2.5; зеркальные правки контракта — [flow-contract.md](flow-contract.md) §2.2/§4/§7, [security-ceiling.md](security-ceiling.md) §3.
 
 Канонический порядок ландинга ([memory: quality-program-canonical-order]): **supervisor → durable → hybrid**. Supervisor стартует первым (постоянный слой-наблюдатель + общий evaluator-примитив; своя сессия пока in-memory, durable — в P2.2); durable формализует scopes/affinity (включая durable `resume_own_lineage` для supervisor'а); hybrid — последний неблокирующий слой.
 
@@ -94,6 +94,8 @@ class EvaluationRow:
 
 Supervisor — постоянный конфигурируемый слой-наблюдатель над **любым** flow (per-step advisory весь цикл + финальный summary/advise один на задачу, всегда), не узел; блокирующих supervisor-узлов в графе нет; `final_handoff` удалён; evaluator-примитив готов для in-flow `review`/`test_quality`.
 
+> **Статус: ✓ Реализовано (2026-06-19).** [`core/supervisor.py`](../../../src/wastech_orchestrator/core/supervisor.py) (константный слой: per-step `observe` в своей `resume_own_lineage`-сессии + финальный `finalize`-summary, advisory, встроен в оркестратор — post-node-хук + `_engine_finalize`); `evaluations`-таблица (immutable, schema v8) + `EvaluationRow`/`record_evaluation`/`count_rework_verdicts` в [`state_store.py`](../../../src/wastech_orchestrator/state_store.py); `record_rework` в [`core/loop_control.py`](../../../src/wastech_orchestrator/core/loop_control.py) (единый global-fix инкремент, зовётся движком); `config.yaml: supervisor:{model,reasoning,role_file}` (схема/лоадер/валидатор под потолком); `EvaluationKind`/`final_handoff` и summary-узел/`config.summary_enabled` удалены (`summary` убран из `SKIPPABLE_STAGES`); enriched `Finding(severity/reason/paths)`. Тесты: `tests/core/test_supervisor.py` + supervisor-e2e в `tests/core/test_orchestrator.py` (ruff/mypy/pytest зелёные, 1141). Открыто: durable `resume_own_lineage` (P2.2); полный re-sync line-ref'ов функциональной карты — в конце P2 (см. follow_ups).
+
 ---
 
 ## P2.2 — Durable sessions (ядровая возможность)
@@ -147,6 +149,8 @@ class EditingLineageRow:
 
 Editing-lineage переживает рестарт, evaluator/supervisor её не перетирают, объявленная во flow affinity работает; raw session-id не утекает.
 
+> **Статус: ✓ Реализовано (2026-06-19).** `editing_lineage`-таблица (schema v9, raw session-id **только** там) + `EditingLineageRow`/`get_editing_lineage`/`upsert_editing_lineage`/`clear_editing_lineage` ([state_store.py](../../../src/wastech_orchestrator/state_store.py)); Codex `exec resume <id>` + парс `thread.started.thread_id` ([codex.py](../../../src/wastech_orchestrator/providers/codex.py), контракт PRE.4); Claude `--resume` подключён к стору; durable `session_scope` в [`agent.py`](../../../src/wastech_orchestrator/core/flow/nodes/agent.py) (`_resume_session_id`/`_persist_session` через стор — in-memory `session_ids`-карта удалена); `lineage_affinity` реализован общей editing-сессией на execution*unit (validator отвергает конфликтующий explicit `provider`); `session_unavailable` → fresh-ретрай того же провайдера в [`router.py`](../../../src/wastech_orchestrator/routing/router.py) (новый `ErrorClass.SESSION_UNAVAILABLE`, не fallback, не тратит fix-итерацию); redaction raw session-id во всех артефактах/argv/логах + `normalized_session_id` в `result.json` ([redaction.py](../../../src/wastech_orchestrator/providers/redaction.py)). Тесты: `tests/routing/test_session_unavailable.py`, durable-кейсы в `tests/core/test_flow_node_runners.py` + `test_flow_validator.py` + `test_supervisor.py`, `editing_lineage` в `tests/state/test_state_store.py`, Codex resume/redaction в `tests/providers/test_codex*{command,parsing,run}.py`(ruff/mypy/pytest зелёные). **Отложено:** durable`resume_own_lineage` для supervisor-слоя (его собственная сессия пока in-memory — переживает один цикл, но не рестарт; нет блокирующего теста, finalize идемпотентен на resume) — см. follow_ups.
+
 ### Решения (зафиксировано 2026-06-17)
 
 - **Codex `exec resume` — сначала верификация на реальном CLI.** P2.2 Codex-resume **гейтится** на проверке реального CLI-контракта (точная форма `codex exec resume <id>` vs флаг; формат события `thread.started`) **до** реализации; результат фиксируется fake-CLI фикстурой (skill `fake-cli`). Почему: durable-affinity опирается на резюм; ошибка в контракте сломала бы ядровую возможность и дала бы ложно-зелёные фикстуры.
@@ -171,58 +175,23 @@ Editing-lineage переживает рестарт, evaluator/supervisor её �
 
 review — обычный конфигурируемый evaluator-узел в YAML, не отдельная стадия и не константа; легко добавляется и убирается из flow.
 
+> **Статус: ✓ Реализовано (2026-06-19).** Полный evaluator-контракт уже даёт P2.1 (унифицированный [`evaluator.py`](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py): immutable `in_flow_verdict`, severity-findings, accept/rework). `review` — узел `kind: evaluator, role: review` в packaged [implementation.yaml](../../../src/wastech_orchestrator/core/flow/packaged/implementation.yaml), опционален (`when: config.review_enabled`), блокирующий → `rework` по ребру `review_fix`, полностью удаляем. Тесты: `test_review_is_ordinary_evaluator` (review = обычный evaluator, immutable-вердикт) + существующие `test_evaluator_maps_blocking_findings` (blocking→rework / clean→accept), e2e `test_review_blocking_then_fix` и `test_skip_review_commits_without_review` (удаляемость).
+
 ---
 
 ## P2.4 — Hybrid testing evaluator + mutation guard
 
-`role=test_quality` перед `checks`, **неблокирующий** (исчерпание → continue); **опциональный** commit-candidate mutation guard как свойство узла `checks`; reuse `record_rework`; тесты пишет implementation-агент, не evaluator.
+Детали: [p2.4-hybrid-testing.md](p2.4-hybrid-testing.md).
 
-### Touchpoints
-
-- [`core/flow/nodes/evaluator.py`](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py) — `role=test_quality`, `blocking: false` — **конфигурируемый опциональный evaluator-узел** на уровне YAML (`when: config.hybrid_testing`, по умолчанию выключен).
-- [`core/flow/nodes/checks.py`](../../../src/wastech_orchestrator/core/flow/nodes/checks.py) — commit-candidate mutation guard как core-owned свойство узла `checks` (детект, что чек ничего не намусорил в рабочем дереве перед commit-кандидатом). Опирается на [`check_runner.py`](../../../src/wastech_orchestrator/check_runner.py) `CheckOutcome`.
-- [`core/loop_control.py`](../../../src/wastech_orchestrator/core/loop_control.py) — reuse `record_rework` (P2.1).
-
-### Поведение
-
-- `test_quality` оценивает качество тестов, написанных implementation-агентом (не пишет тесты сам). Неблокирующий: исход `rework` ограничен `budget`; на исчерпании flow идёт по `accept`-ребру (→ checks), **не** в manual.
-- **mutation guard — опционален через отсутствие `checks`.** Это core-owned свойство узла `checks`: пока узел `checks` присутствует — guard действует и flow его не отключает (часть security-стойки, [security-ceiling.md](security-ceiling.md) §3). Но **flow без узла `checks`** (например, один implement-агент или любой граф без проверок) **guard'а не имеет и работает без него** — это и есть «опционально». Security не ослабляется: убрать guard при наличии `checks` нельзя; убрать сам `checks` — можно (это выбор формы flow, а не обход гейта).
-
-### Тесты
-
-Из [hybrid §minimum tests](../outdated/hybrid_agent_testing.md#minimum-tests):
-
-- `test_test_quality_non_blocking_exhaustion_continues` — исчерпание budget → continue к checks, не manual.
-- `test_test_quality_rework_to_fixing` — блокирующий findings → fixing.
-- `test_mutation_guard_active_when_checks_present` — guard срабатывает на узле checks (когда `checks` есть) независимо от прочего flow.
-- `test_flow_without_checks_has_no_mutation_guard` — flow без узла `checks` валиден и исполняется без guard'а.
-- `test_test_quality_does_not_write_tests` — evaluator read-only; тесты пишет implementation.
-
-### Exit
-
-Опциональный test-quality-узел + mutation guard, действующий при наличии `checks` и отсутствующий без него.
+> **Статус: ✓ Реализовано (2026-06-19).** Неблокирующий evaluator самокапируется через COUNT собственных `in_flow_verdict`-строк (`max_rework_per_stage`): первый блокирующий проход → `rework`, на исчерпании бюджета → `accept` (→ continue), **не** manual ([`core/flow/nodes/evaluator.py`](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py)). Mutation guard — core-owned свойство узла `checks`: snapshot рабочего дерева до/после прогона, зелёный-но-грязнящий чек fail-closed → manual ([`core/flow/nodes/checks.py`](../../../src/wastech_orchestrator/core/flow/nodes/checks.py)). Узел `testing_quality` в packaged `implementation.yaml` ещё не добавлен — это P2.5 (рост packaged-файла к целевой форме); поведение и тесты готовы.
 
 ---
 
 ## P2.5 — Целевой `implementation.yaml` + тесты из спек
 
-Полный граф исполняется данными; тесты из спек трёх программ зелены. Целевой граф ([flow-contract.md](flow-contract.md) §7): refinement → planning → implementation → testing(`checks`) → review(evaluator) → fixing → publish, с двумя fix-петлями (`test_fix`, `review_fix`), опциональным `testing_quality`-узлом и decomposition. **`supervise_impl`/`supervise_fix` и summary-узел в графе отсутствуют** — supervisor (summary + advisory) делает константный слой оркестратора перед `publish` (P2.1).
+Детали: [p2.5-target-yaml.md](p2.5-target-yaml.md).
 
-### Touchpoints
-
-- Packaged [implementation.yaml](../../../src/wastech_orchestrator/core/flow/packaged/implementation.yaml) — P2.5 наращивает P1-parity форму до целевого графа: добавляет опциональный `testing_quality`-узел и mutation-guard-свойство `checks`; **не** добавляет supervisor-узлы (их роль ушла в константный слой).
-- Константный supervisor-проход оркестратора (P2.1) встраивается в финал любого flow перед `publish`.
-- Тест-сьют объединяет durable + hybrid + review spec-тесты на одном flow + supervisor-слой поверх.
-
-### Тесты
-
-- `test_target_implementation_full_graph` — целевой граф исполняется end-to-end (happy + rework-петли test/review + decomposition) с константным supervisor-слоем сверху, как в [happy-path.md](happy-path.md) §4.
-- `test_minimal_flow_implement_only` — degenerate flow (`implementation → publish`) валиден и исполняется; supervisor-слой всё равно пишет summary.
-- Все spec-тесты P2.1–P2.4 зелены на packaged `implementation.yaml`.
-
-### Exit
-
-Целевой implementation исполняется данными; три программы растворены: durable/hybrid — в узлах и ядре, supervisor — в константном слое над flow.
+> **Статус: ✓ Реализовано (2026-06-19).** Packaged [`implementation.yaml`](../../../src/wastech_orchestrator/core/flow/packaged/implementation.yaml) вырос до целевого графа: добавлен опциональный `testing_quality`-узел (`when: config.hybrid_testing`, off by default) с рёбрами `implementation→testing_quality`, `testing_quality→testing` (accept), `testing_quality→fixing` (rework, `budget: 1`), `fixing→testing_quality`; `testing_quality` входит в `sub_flow`. Флаг `config.hybrid_testing` проброшен через `agents.hybrid_testing` (config-schema, loader, `_engine_facts`). Mutation guard на `checks` — из P2.4. Тесты `test_target_implementation_full_graph` (hybrid on, рабочая петля testing_quality) и `test_minimal_flow_implement_only` (degenerate `implementation→publish`, supervisor пишет summary) зелёные; spec-тесты P2.1–P2.4 зелены на packaged-графе. `testing_quality` берёт stage-identity `testing` через alias в `build_stage_map` (новый canonical stage не вводится).
 
 ---
 

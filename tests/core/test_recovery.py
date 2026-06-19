@@ -469,12 +469,20 @@ def test_resume_continues_persisted_checkpoint(
 
     assert result is not None and result.final_status is Status.DONE
     expected = providers[expected_provider]
-    assert expected.requests[0].stage is expected_first_stage
-    all_requests = [request for provider in providers.values() for request in provider.requests]
+    # Ignore the constant supervisor layer's per-step observations (read-only, SUMMARY-stage, on the
+    # global primary) — they interleave with node requests but are not graph-node calls.
+    node_requests = [r for r in expected.requests if r.stage is not Stage.SUMMARY]
+    assert node_requests[0].stage is expected_first_stage
+    all_requests = [
+        request
+        for provider in providers.values()
+        for request in provider.requests
+        if request.stage is not Stage.SUMMARY
+    ]
     if current_node in {"testing", "review", "fixing"}:
         assert all(request.stage is not Stage.IMPLEMENTATION for request in all_requests)
     if current_node == "fixing":
-        assert expected.requests[0].check_artifacts_path == str(failed_check)
+        assert node_requests[0].check_artifacts_path == str(failed_check)
 
 
 def test_resume_restores_planning_selected_skills(

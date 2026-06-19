@@ -49,6 +49,7 @@ flowchart TB
 
 - review is in `SKIPPABLE_STAGES` ([schema.py:66-74](../../../../src/wastech_orchestrator/config/schema.py#L66)); review-skip (the `when: config.review_enabled` node condition) requires `agents.allow_review_skip` (validated on entry, [B16](../../blocks/B16-task-parsing-and-validation-gate.md)/[B05](../../blocks/B05-configuration.md)).
 - "Blocking" = severities `blocking`/`critical`/`high` ([nodes/evaluator.py:32](../../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L32), `_is_blocking` at [nodes/evaluator.py:192-196](../../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L192)).
+- `review` is a **blocking** evaluator: it reworks every time it finds a blocking issue, and the engine's named-loop budget bounds the cycles (exhaustion → manual). The same runner also serves **non-blocking** evaluators such as the optional `testing_quality` node (P2.4): a non-blocking evaluator reworks only until its own per-instance budget (`max_rework_per_stage`) is spent — counted from its immutable `in_flow_verdict` rows — then takes `accept` (→ continue), never manual ([nodes/evaluator.py](../../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py), `_verdict`).
 - Each subtask (including the last one) receives a local commit on the single branch — the driver commits between region runs, not the node ([orchestrator.py:963-970](../../../../src/wastech_orchestrator/core/orchestrator.py#L963), [B22](../../blocks/B22-git-manager.md) §5.1).
 
 ## Result / transition

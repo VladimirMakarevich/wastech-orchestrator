@@ -33,10 +33,9 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
 from wastech_orchestrator.config.schema import AgentsConfig
-from wastech_orchestrator.core.flow.contracts import EvaluationKind
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import (
     ChecksNode,
@@ -45,6 +44,7 @@ from wastech_orchestrator.core.flow.schema import (
     FlowNode,
 )
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
+from wastech_orchestrator.core.loop_control import record_rework
 from wastech_orchestrator.core.state_machine import Status
 
 #: Resolves a ``when.fact`` (``derived.*`` / ``config.*``) to a boolean. Injected so the engine
@@ -58,10 +58,22 @@ class EngineInternalError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class Finding:
-    """A single evaluator finding. Minimal in P1; P2 enriches it (severity, location, …)."""
+    """A single evaluator finding (the shared evaluator primitive, P2.1).
 
-    message: str
-    blocking: bool = True
+    ``severity`` drives blocking: a ``medium``/``high`` finding blocks (an evaluator verdict of
+    ``rework`` requires at least one), a ``low`` finding is advisory only. ``paths`` are the
+    files/locations the finding concerns. Carried on :class:`NodeOutcome` for the audit trail (the
+    immutable ``evaluations`` row) — the engine never inspects it to route.
+    """
+
+    severity: Literal["low", "medium", "high"]
+    reason: str
+    paths: tuple[str, ...] = ()
+
+    @property
+    def blocking(self) -> bool:
+        """A finding blocks (drives ``rework``) iff its severity is ``medium`` or ``high``."""
+        return self.severity in ("medium", "high")
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,10 +167,12 @@ def edge_key(edge: Edge) -> str:
     return f"{edge.from_node}->{edge.to}:{edge.outcome}"
 
 
-#: Called after each *executed* (non-skipped) node with ``(node, outcome)`` so the core can persist
-#: a declared ``output_artifact`` slot / read the decomposition contract before the next node runs.
-#: Injected by the driver (P1.4); the engine carries no post-processing knowledge itself.
-PostNodeHook = Callable[[FlowNode, NodeOutcome], None]
+#: Called after each *executed* (non-skipped) node with ``(node, outcome, node_run_id)`` so the core
+#: can persist a declared ``output_artifact`` slot / read the decomposition contract and let the
+#: orchestrator's supervisor layer observe the completed step (keyed by its ``node_run_id``) before
+#: the next node runs. Injected by the driver (P1.4); the engine carries no post-processing
+#: knowledge itself — passing the run id it already holds is generic, not domain knowledge.
+PostNodeHook = Callable[[FlowNode, NodeOutcome, int], None]
 
 
 def entry_node_id(snapshot: FlowSnapshot) -> str:
@@ -281,12 +295,13 @@ class FlowEngine:
             task_id=self._task_id,
             subtask_order=self._subtask_order,
         )
-        outcome = runner.run(node, ctx).outcome
+        result = runner.run(node, ctx)
         if self._post_node is not None:
-            # Core post-processing (output_artifact slot, decomposition contract) runs between the
-            # node completing and the next node — only for executed nodes, never on a skip.
-            self._post_node(node, outcome)
-        return outcome
+            # Core post-processing (output_artifact slot, decomposition contract) + the supervisor
+            # layer's per-step observation run between the node completing and the next node — only
+            # for executed nodes, never on a skip. The node_run_id keys the observation.
+            self._post_node(node, result.outcome, result.node_run_id)
+        return result.outcome
 
     def _should_skip(self, node: FlowNode) -> bool:
         when = node.when
@@ -304,8 +319,6 @@ class FlowEngine:
     def _skip_outcome(node: FlowNode) -> NodeOutcome:
         """A skipped node yields its pass-through outcome so the engine takes the forward edge."""
         if isinstance(node, EvaluatorNode):
-            if node.evaluation_kind == EvaluationKind.FINAL_HANDOFF:
-                return NodeOutcome("done")
             return NodeOutcome("accept")
         if isinstance(node, ChecksNode):
             return NodeOutcome("pass")
@@ -345,8 +358,13 @@ class FlowEngine:
         Returns a :class:`_Stuck` when a limit is reached (the edge must not be taken), else
         ``None``. The per-loop / inline limit is reported before the global cap when both trip on
         the same entry.
+
+        The single global ``fix_iterations`` increment goes through
+        :func:`~wastech_orchestrator.core.loop_control.record_rework` — the one accounting path
+        shared by every in-flow rework/fail edge (``test_fix`` and ``review_fix`` alike), so a
+        rework is never double-counted (anchored by ``test_record_rework_single_increment``).
         """
-        glob = self._run_state.bump(FlowRunState.GLOBAL_FIX_KEY)
+        glob = record_rework(self._run_state)
         if edge.loop is not None:
             cycles = self._run_state.bump(edge.loop)
             if cycles >= self._loop_cap(edge.loop):

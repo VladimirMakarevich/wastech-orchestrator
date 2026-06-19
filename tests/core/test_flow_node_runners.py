@@ -15,7 +15,6 @@ import pytest
 
 from wastech_orchestrator.check_runner import CheckOutcome, CheckRunResult
 from wastech_orchestrator.core.flow.contracts import (
-    EvaluationKind,
     OutputPolicy,
     PermissionProfile,
     PublishingPolicy,
@@ -37,6 +36,7 @@ from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import (
     AgentNode,
     ChecksNode,
+    Edge,
     EvaluatorNode,
     FlowDoc,
     FlowNode,
@@ -52,6 +52,7 @@ from wastech_orchestrator.providers.base import (
     Stage,
 )
 from wastech_orchestrator.routing.router import ResolvedRoute, RouteSource, StageOutcome
+from wastech_orchestrator.state_store import EditingLineageRow
 
 # -- fakes & builders ---------------------------------------------------------
 
@@ -98,6 +99,8 @@ class FakeStore:
         self.completed: list[dict[str, Any]] = []
         self.check_runs: list[Any] = []
         self.provider_attempts: list[Any] = []
+        self.evaluations: list[Any] = []
+        self.editing_lineage: dict[tuple[str, int | None], EditingLineageRow] = {}
         self._next = 1
 
     def record_node_run(self, run: Any, conn: Any = None) -> int:
@@ -114,6 +117,29 @@ class FakeStore:
 
     def record_provider_attempt(self, attempt: Any, conn: Any = None) -> None:
         self.provider_attempts.append(attempt)
+
+    def record_evaluation(self, row: Any, conn: Any = None) -> int:
+        self.evaluations.append(row)
+        return len(self.evaluations)
+
+    def count_rework_verdicts(
+        self, task_id: str, *, node_id: str | None = None, subtask_order: int | None = None
+    ) -> int:
+        return sum(
+            1
+            for e in self.evaluations
+            if e.kind == "in_flow_verdict"
+            and e.verdict == "rework"
+            and (node_id is None or e.node_id == node_id)
+        )
+
+    def get_editing_lineage(
+        self, task_id: str, subtask_order: int | None = None
+    ) -> EditingLineageRow | None:
+        return self.editing_lineage.get((task_id, subtask_order))
+
+    def upsert_editing_lineage(self, row: EditingLineageRow, conn: Any = None) -> None:
+        self.editing_lineage[(row.task_id, row.subtask_order)] = row
 
 
 def _result(structured: dict[str, Any] | None = None) -> AgentRunResult:
@@ -155,6 +181,7 @@ def _services(
     check_runner: Any,
     git: Any = None,
     artifacts_root: str = "/art",
+    snapshot: Any = None,
 ) -> Any:
     return NodeServices(
         router=router,
@@ -166,6 +193,7 @@ def _services(
         clock=lambda: "ts",
         default_timeout_seconds=100,
         git=git,
+        snapshot=snapshot,
     )
 
 
@@ -219,41 +247,98 @@ def test_agent_node_equals_direct_router_call(tmp_path: Path) -> None:
 
 
 def test_fresh_disposable_node_does_not_inherit_or_leak_session(tmp_path: Path) -> None:
-    # F3 / MC6: a fresh_disposable node must NOT inherit a prior provider session (e.g. an editing
-    # agent's), and must NOT write its own session back — otherwise it would leak into a later
-    # editing_lineage node routed to the same provider. Only editing_lineage uses the session map.
+    # F3 / MC6 (durable, P2.2): a fresh_disposable node must NOT resume the unit's editing lineage
+    # and must NOT write a lineage back — otherwise it would leak into a later editing_lineage node.
     from dataclasses import replace
 
     (tmp_path / "r.md").write_text("go", "utf-8")
     node = AgentNode(id="reviewish", kind="agent", role_file="r.md",
                      session_scope=SessionScope.FRESH_DISPOSABLE,
                      permission_profile=PermissionProfile.READ_ONLY)
-    router = FakeRouter(replace(_result(), session_id="fresh-sess"))
-    services = _services(router, FakeStore(), {"reviewish": Stage.IMPLEMENTATION},
+    router, store = FakeRouter(replace(_result(), session_id="fresh-sess")), FakeStore()
+    store.upsert_editing_lineage(  # left by a prior editing node on the same provider
+        EditingLineageRow(task_id="task-1", provider="codex", raw_session_id="editing-sess")
+    )
+    services = _services(router, store, {"reviewish": Stage.IMPLEMENTATION},
                          FakeCheckRunner(CheckOutcome(passed=True, runs=())))
-    sessions = {"codex": "editing-sess"}  # left by a prior editing node on the same provider
-    AgentNodeRunner(services, _inputs(tmp_path, session_ids=sessions)).run(node, _ctx(node))
-    assert router.requests[0].session_id is None  # did not inherit the editing session
-    assert sessions == {"codex": "editing-sess"}  # did not leak its own session back
+    AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert router.requests[0].session_id is None  # did not resume the editing lineage
+    # did not overwrite the editing lineage with its own session
+    assert store.get_editing_lineage("task-1").raw_session_id == "editing-sess"  # type: ignore[union-attr]
 
 
 def test_editing_lineage_node_continues_and_persists_session(tmp_path: Path) -> None:
-    # F3 / MC6: an editing_lineage node continues the provider's in-memory session and writes the
-    # new one back, so a later editing node (fixing after implementation) keeps the lineage (P1
-    # in-memory parity; durable lineage + lineage_affinity binding is P2.2).
+    # F3 / MC6 (durable, P2.2): an editing_lineage node resumes the unit's durable editing session
+    # (when the provider matches) and writes the new session back, so a later editing node (fixing
+    # after implementation) keeps the lineage.
     from dataclasses import replace
 
     (tmp_path / "r.md").write_text("go", "utf-8")
     node = AgentNode(id="impl", kind="agent", role_file="r.md",
                      session_scope=SessionScope.EDITING_LINEAGE,
                      permission_profile=PermissionProfile.WORKSPACE_WRITE)
-    router = FakeRouter(replace(_result(), session_id="impl-sess-2"))
-    services = _services(router, FakeStore(), {"impl": Stage.IMPLEMENTATION},
+    router, store = FakeRouter(replace(_result(), session_id="impl-sess-2")), FakeStore()
+    store.upsert_editing_lineage(
+        EditingLineageRow(task_id="task-1", provider="codex", raw_session_id="impl-sess-1")
+    )
+    services = _services(router, store, {"impl": Stage.IMPLEMENTATION},
                          FakeCheckRunner(CheckOutcome(passed=True, runs=())))
-    sessions = {"codex": "impl-sess-1"}
-    AgentNodeRunner(services, _inputs(tmp_path, session_ids=sessions)).run(node, _ctx(node))
-    assert router.requests[0].session_id == "impl-sess-1"  # continued the editing session
-    assert sessions["codex"] == "impl-sess-2"  # persisted the new session for the lineage
+    AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert router.requests[0].session_id == "impl-sess-1"  # resumed the editing session
+    row = store.get_editing_lineage("task-1")
+    assert row is not None and row.raw_session_id == "impl-sess-2"  # persisted the new session
+
+
+def test_affinity_resumes_declared_node_session(tmp_path: Path) -> None:
+    # P2.2: lineage_affinity (fixing → implementation) is realized by the one editing session per
+    # execution unit — implementation establishes it, fixing resumes that same session.
+    from dataclasses import replace
+
+    (tmp_path / "impl.md").write_text("impl", "utf-8")
+    (tmp_path / "fix.md").write_text("fix", "utf-8")
+    store = FakeStore()
+    check = FakeCheckRunner(CheckOutcome(passed=True, runs=()))
+
+    impl = AgentNode(id="implementation", kind="agent", role_file="impl.md",
+                     session_scope=SessionScope.EDITING_LINEAGE,
+                     permission_profile=PermissionProfile.WORKSPACE_WRITE)
+    router_impl = FakeRouter(replace(_result(), session_id="impl-session"))
+    AgentNodeRunner(
+        _services(router_impl, store, {"implementation": Stage.IMPLEMENTATION}, check),
+        _inputs(tmp_path),
+    ).run(impl, _ctx(impl))
+    assert router_impl.requests[0].session_id is None  # no lineage yet → fresh
+
+    fixing = AgentNode(id="fixing", kind="agent", role_file="fix.md",
+                       session_scope=SessionScope.EDITING_LINEAGE,
+                       lineage_affinity="implementation",
+                       permission_profile=PermissionProfile.WORKSPACE_WRITE)
+    router_fix = FakeRouter(replace(_result(), session_id="fix-session"))
+    AgentNodeRunner(
+        _services(router_fix, store, {"fixing": Stage.FIXING}, check), _inputs(tmp_path)
+    ).run(fixing, _ctx(fixing))
+    assert router_fix.requests[0].session_id == "impl-session"  # resumed implementation's session
+    row = store.get_editing_lineage("task-1")
+    assert row is not None and row.raw_session_id == "fix-session"  # fixing updated the lineage
+
+
+def test_evaluator_fresh_disposable_does_not_touch_lineage(tmp_path: Path) -> None:
+    # P2.2: an in-flow evaluator (fresh_disposable) never resumes nor writes the author's editing
+    # lineage — it gets a fresh session and the unit's editing session is left untouched.
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    store = FakeStore()
+    store.upsert_editing_lineage(
+        EditingLineageRow(task_id="task-1", provider="codex", raw_session_id="author-session")
+    )
+    router = FakeRouter(_result({"findings": []}))
+    services = _services(router, store, {"review": Stage.REVIEW},
+                         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+                         artifacts_root=str(tmp_path))
+    node = _evaluator("review")
+    EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert router.requests[0].session_id is None  # evaluator never resumes the author lineage
+    row = store.get_editing_lineage("task-1")
+    assert row is not None and row.raw_session_id == "author-session"  # left untouched
 
 
 def test_agent_node_infra_exhaustion_raises(tmp_path: Path) -> None:
@@ -666,15 +751,13 @@ def test_hitl_resumes_persisted_waiting_interaction(tmp_path: Path) -> None:
 # -- evaluator ----------------------------------------------------------------
 
 
-def _evaluator(node_id: str, *, blocking: bool = True,
-               kind: EvaluationKind = EvaluationKind.STAGE_OUTPUT) -> EvaluatorNode:
+def _evaluator(node_id: str, *, blocking: bool = True) -> EvaluatorNode:
     return EvaluatorNode(
         id=node_id,
         kind="evaluator",
         role="review",
         role_file="r.md",
         permission_profile=PermissionProfile.READ_ONLY,
-        evaluation_kind=kind,
         blocking=blocking,
     )
 
@@ -699,15 +782,57 @@ def test_evaluator_maps_blocking_findings(tmp_path: Path, structured: dict[str, 
     assert result.outcome.kind == expected
 
 
-def test_evaluator_non_blocking_always_accepts(tmp_path: Path) -> None:
+def _test_quality(max_rework_per_stage: int = 1) -> EvaluatorNode:
+    return EvaluatorNode(
+        id="testing_quality", kind="evaluator", role="test_quality", role_file="r.md",
+        permission_profile=PermissionProfile.READ_ONLY, blocking=False,
+        max_rework_per_stage=max_rework_per_stage,
+    )
+
+
+def test_test_quality_rework_to_fixing(tmp_path: Path) -> None:
+    # P2.4: a non-blocking test_quality evaluator with a blocking finding and budget remaining
+    # routes to fixing (→ rework), exactly like a blocking evaluator — the non-blocking part only
+    # governs what happens at exhaustion, not the first blocking finding.
     (tmp_path / "r.md").write_text("review", "utf-8")
-    node = _evaluator("tq", blocking=False)
-    router, store = FakeRouter(_result({"findings": [{"severity": "critical"}]})), FakeStore()
-    services = _services(router, store, {"tq": Stage.REVIEW},
+    node = _test_quality()
+    router, store = FakeRouter(_result({"findings": [{"severity": "high"}]})), FakeStore()
+    services = _services(router, store, {"testing_quality": Stage.REVIEW},
                          FakeCheckRunner(CheckOutcome(passed=True, runs=())),
                          artifacts_root=str(tmp_path))
     result = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
-    assert result.outcome.kind == "accept"
+    assert result.outcome.kind == "rework"
+
+
+def test_test_quality_non_blocking_exhaustion_continues(tmp_path: Path) -> None:
+    # P2.4: a non-blocking evaluator self-caps via the COUNT of its own in_flow_verdict rows. With
+    # budget 1, the first blocking pass reworks; the second (budget spent) ACCEPTS — flow takes the
+    # accept edge (→ checks), never manual. The core never learns the role: the cap is the node's
+    # declared max_rework_per_stage.
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    node = _test_quality(max_rework_per_stage=1)
+    store = FakeStore()
+    router = FakeRouter(_result({"findings": [{"severity": "critical"}]}))
+    services = _services(router, store, {"testing_quality": Stage.REVIEW},
+                         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+                         artifacts_root=str(tmp_path))
+    first = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert first.outcome.kind == "rework"  # budget remaining → rework
+    second = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert second.outcome.kind == "accept"  # budget spent → continue, not manual
+
+
+def test_test_quality_does_not_write_tests(tmp_path: Path) -> None:
+    # P2.4: the evaluator judges the tests the implementation agent wrote; it never writes tests
+    # itself. Realized by the read-only request it issues (validator forbids any other profile).
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    node = _test_quality()
+    router, store = FakeRouter(_result({"findings": []})), FakeStore()
+    services = _services(router, store, {"testing_quality": Stage.REVIEW},
+                         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+                         artifacts_root=str(tmp_path))
+    EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert router.requests[0].permission_profile == "read-only"
 
 
 def test_evaluator_review_writes_findings_artifact(tmp_path: Path) -> None:
@@ -727,14 +852,23 @@ def test_evaluator_review_writes_findings_artifact(tmp_path: Path) -> None:
     }
 
 
-def test_evaluator_final_handoff_is_done(tmp_path: Path) -> None:
-    (tmp_path / "r.md").write_text("summary", "utf-8")
-    node = _evaluator("summary", blocking=False, kind=EvaluationKind.FINAL_HANDOFF)
-    router, store = FakeRouter(_result({"findings": [{"severity": "high"}]})), FakeStore()
-    services = _services(router, store, {"summary": Stage.SUMMARY},
-                         FakeCheckRunner(CheckOutcome(passed=True, runs=())))
+def test_review_is_ordinary_evaluator(tmp_path: Path) -> None:
+    # P2.3: review is just ``role=review`` on the shared evaluator runner — the same verdict path,
+    # immutable ``in_flow_verdict``, and blocking→rework mechanics as any in-flow evaluator (not a
+    # special stage). A blocking finding routes to fixing via the flow's ``review_fix`` edge.
+    (tmp_path / "r.md").write_text("review {diff_path}", "utf-8")
+    node = _evaluator("review")  # kind=evaluator, role=review
+    store = FakeStore()
+    services = _services(
+        FakeRouter(_result({"findings": [{"title": "bug", "severity": "high"}]})),
+        store, {"review": Stage.REVIEW},
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())), artifacts_root=str(tmp_path),
+    )
     result = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
-    assert result.outcome.kind == "done"
+    assert result.outcome.kind == "rework"  # blocking review → rework (→ fixing)
+    # recorded an immutable in_flow_verdict, exactly like every other in-flow evaluator role
+    assert [e.kind for e in store.evaluations] == ["in_flow_verdict"]
+    assert store.evaluations[0].verdict == "rework" and store.evaluations[0].node_id == "review"
 
 
 # -- checks -------------------------------------------------------------------
@@ -826,6 +960,82 @@ def test_checks_reresolve_none_still_launch_fails(tmp_path: Path) -> None:
     )
     with pytest.raises(CheckLaunchError):
         ChecksNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+
+# -- checks mutation guard (P2.4) --------------------------------------------
+
+
+class FakeSnapshot:
+    """SnapshotHook stub: capture() returns the next programmed working-tree checksum."""
+
+    def __init__(self, checksums: list[str]) -> None:
+        from wastech_orchestrator.routing.snapshots import WorkingTreeSnapshot
+
+        self._cls = WorkingTreeSnapshot
+        self._checksums = checksums
+        self.captures = 0
+
+    def capture(self) -> Any:
+        cs = self._checksums[min(self.captures, len(self._checksums) - 1)]
+        self.captures += 1
+        return self._cls(commit_sha="sha", porcelain_status="", diff_checksum=cs, artifacts=())
+
+    def partial_change_since(self, before: Any) -> Any:
+        return None
+
+
+def test_mutation_guard_active_when_checks_present(tmp_path: Path) -> None:
+    # P2.4: a passing check that mutated the working tree (commit-candidate files changed across
+    # the run, e.g. an auto-formatter) fails closed to manual — a green-but-dirtying check must not
+    # pass silently. The guard is a checks-node property, active regardless of the rest of the flow.
+    from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
+
+    node = _checks_node()
+    store = FakeStore()
+    services = _services(FakeRouter(_result()), store, {},
+                         FakeCheckRunner(CheckOutcome(passed=True, runs=(_run(True),))),
+                         snapshot=FakeSnapshot(["before", "after"]))  # checksum changed → mutated
+    with pytest.raises(NodeManualRequired):
+        ChecksNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert store.completed[-1]["status"] == "dirtied_working_tree"
+
+
+def test_mutation_guard_clean_check_still_passes(tmp_path: Path) -> None:
+    # The guard does not false-positive: a passing check that left the tree untouched (same
+    # checksum before/after) yields the ordinary "pass" outcome even with a snapshot hook wired.
+    node = _checks_node()
+    services = _services(FakeRouter(_result()), FakeStore(), {},
+                         FakeCheckRunner(CheckOutcome(passed=True, runs=(_run(True),))),
+                         snapshot=FakeSnapshot(["same"]))  # capture() returns "same" both times
+    result = ChecksNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "pass"
+
+
+def test_flow_without_checks_has_no_mutation_guard(tmp_path: Path) -> None:
+    # P2.4: the guard belongs to the checks node — a flow without one is a valid graph shape and
+    # simply has no guard (optional via graph shape, not by disabling a gate). Such a flow validates
+    # and contains no checks node for the guard to attach to.
+    from wastech_orchestrator.core.flow.validator import validate_flow
+
+    impl = AgentNode(id="implementation", kind="agent", role_file="r.md",
+                     permission_profile=PermissionProfile.WORKSPACE_WRITE)
+    publish = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
+    doc = FlowDoc(
+        name="t", task_type="t", permission_ceiling=PermissionProfile.WORKSPACE_WRITE,
+        output_policy=OutputPolicy.CODE_CHANGE, publishing=PublishingPolicy.PULL_REQUEST,
+        nodes=(impl, publish),
+        edges=(Edge(from_node="implementation", to="publish"),),
+        budgets=MappingProxyType({}),
+    )
+    snap = FlowSnapshot(
+        doc=doc,
+        nodes_by_id=MappingProxyType({"implementation": impl, "publish": publish}),
+        adjacency=MappingProxyType({"implementation": (Edge(from_node="implementation",
+                                                            to="publish"),)}),
+        flow_fingerprint="fp",
+    )
+    validate_flow(snap)  # a checks-less flow is valid …
+    assert not any(n.kind == "checks" for n in snap.nodes_by_id.values())  # … with no guard node
 
 
 # -- publish ------------------------------------------------------------------

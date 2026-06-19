@@ -13,7 +13,6 @@ from types import MappingProxyType
 from typing import Literal
 
 from wastech_orchestrator.core.flow.contracts import (
-    EvaluationKind,
     NetworkPolicy,
     OutputPolicy,
     PermissionProfile,
@@ -79,7 +78,6 @@ class EvaluatorNode:
     role_file: str
     session_scope: SessionScope = SessionScope.FRESH_DISPOSABLE
     permission_profile: PermissionProfile = PermissionProfile.READ_ONLY  # const per schema
-    evaluation_kind: EvaluationKind = EvaluationKind.STAGE_OUTPUT
     blocking: bool = True
     max_rework_per_stage: int = 1
     #: which provider runs this evaluator; None → the config's global primary (PRE.1).

@@ -10,12 +10,13 @@ auto_merge: false # true = auto-merge (DANGER: skips human review; the task auth
 contacts: # handles surfaced for human-in-the-loop prompts and approvals
   - "@team-lead"
   - "@webhooks-oncall"
-stages: # the ONLY per-stage knob is `enabled` (the skip toggle). Skippable: planning, testing, review, fixing, summary.
+stages: # the ONLY per-stage knob is `enabled` (the skip toggle). Skippable: planning, testing, review, fixing.
   testing:
     enabled: true # explicit default (it runs). false would skip the check gate (rarely wanted).
-  summary:
-    enabled: false # (illustrative) skip the summary stage.
-    # skipping `review` also needs agents.allow_review_skip; implementation/refinement are never skippable; publishing is not per-task.
+  fixing:
+    enabled: false # (illustrative) skip the fixing stage — a failed check then goes to manual.
+    # skipping `review` also needs agents.allow_review_skip; implementation/refinement are never
+    # skippable; publishing is not per-task; the summary is always written by the supervisor layer.
 ---
 
 ## Description

@@ -126,7 +126,9 @@ def test_operator_dir_no_matching_file_falls_back_to_packaged(tmp_path: Path) ->
     flows_dir = tmp_path / "flows"
     flows_dir.mkdir()
     snap = FlowRegistry(operator_flows_dir=flows_dir).resolve("implementation")
-    assert len(snap.doc.nodes) == 8  # packaged implementation (P1 parity)
+    # packaged implementation (P2.5 target): refinement, planning, implementation, testing_quality,
+    # testing, review, fixing, publish — no summary node (the constant supervisor layer writes it).
+    assert len(snap.doc.nodes) == 8
 
 
 def test_no_operator_dir_uses_packaged_only() -> None:

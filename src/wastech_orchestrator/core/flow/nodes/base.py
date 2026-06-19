@@ -2,7 +2,7 @@
 
 :class:`NodeServices` — the collaborators a runner needs, constructed once per orchestrator and
 shared across units. :class:`NodeInputs` — the per-execution-unit data bundle (artifact paths,
-resolved checks, the in-memory session map), constructed per unit. Both are injected into a runner
+resolved checks), constructed per unit. Both are injected into a runner
 at construction so the engine and :class:`~wastech_orchestrator.core.flow.engine.NodeContext` stay
 free of per-run context.
 
@@ -13,45 +13,28 @@ The collaborator fields are typed as narrow :class:`Protocol`\\ s so the real
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from wastech_orchestrator.check_runner import CheckOutcome
 from wastech_orchestrator.checks.model import ResolvedCheck
-from wastech_orchestrator.core.flow.contracts import SessionScope
 from wastech_orchestrator.git_manager import ChangedPath
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult
 from wastech_orchestrator.providers.base import AgentRunRequest, ProviderId, Stage
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.routing.snapshots import SnapshotHook
-from wastech_orchestrator.state_store import CheckRunRow, NodeRunRow, ProviderAttemptRow
+from wastech_orchestrator.state_store import (
+    CheckRunRow,
+    EditingLineageRow,
+    EvaluationRow,
+    NodeRunRow,
+    ProviderAttemptRow,
+)
 
 #: Register a written artifact in the audit trail: ``(task_id, kind, path)``. The orchestrator's
 #: ``_register_artifact`` (sha256 + upsert, skips a missing file) satisfies it.
 RegisterArtifact = Callable[[str, str, str], None]
-
-
-def editing_session_id(
-    scope: SessionScope, session_ids: Mapping[str, str], primary: str
-) -> str | None:
-    """The in-memory session a node should continue, honoring ``session_scope`` (P1 parity).
-
-    Only ``editing_lineage`` nodes reuse the provider-keyed in-memory session; ``fresh_disposable``
-    (and the durable ``resume_own_lineage``, which is P2.2) start clean so an independent node never
-    inherits an editing agent's session. Durable lineage + ``lineage_affinity`` binding to a
-    specific node's session is P2.2; P1 approximates ``editing_lineage`` continuity per provider.
-    """
-    return session_ids.get(primary) if scope is SessionScope.EDITING_LINEAGE else None
-
-
-def persists_session(scope: SessionScope) -> bool:
-    """Whether a completed node writes its session back to the in-memory map (editing lineage only).
-
-    A ``fresh_disposable`` node must not persist its session, or it would leak into a later
-    ``editing_lineage`` node routed to the same provider (breaking that node's lineage).
-    """
-    return scope is SessionScope.EDITING_LINEAGE
 
 
 class NodeInfraError(Exception):
@@ -135,6 +118,18 @@ class NodeRunStorePort(Protocol):
     def record_check_run(self, run: CheckRunRow) -> None: ...
 
     def record_provider_attempt(self, attempt: ProviderAttemptRow) -> None: ...
+
+    def record_evaluation(self, row: EvaluationRow) -> int: ...
+
+    def count_rework_verdicts(
+        self, task_id: str, *, node_id: str | None = ..., subtask_order: int | None = ...
+    ) -> int: ...
+
+    def get_editing_lineage(
+        self, task_id: str, subtask_order: int | None = ...
+    ) -> EditingLineageRow | None: ...
+
+    def upsert_editing_lineage(self, row: EditingLineageRow) -> None: ...
 
 
 class NotifierPort(Protocol):
@@ -244,5 +239,3 @@ class NodeInputs:
     commit_message: str | None = None
     #: notification recipients for HITL prompts (the task's contacts).
     contacts: tuple[str, ...] = ()
-    #: in-memory provider -> session id map (legacy parity; durable lineage is P2.2).
-    session_ids: dict[str, str] = field(default_factory=dict)

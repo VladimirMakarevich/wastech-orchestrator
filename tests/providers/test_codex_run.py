@@ -266,6 +266,33 @@ def test_request_json_redacts_prompt_secret(
     assert FAKE_GH_TOKEN not in request_json
 
 
+def test_raw_session_id_redacted_in_artifacts(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # Durable sessions (P2.2): the raw session id lives ONLY in state.db. The resume id we pass via
+    # ``exec resume <id>`` and the freshly emitted id (``sess-99``) must not appear verbatim in any
+    # artifact (request argv / stdout / events / result.json) — but the in-memory result keeps the
+    # raw emitted id so the orchestrator can persist it to the editing_lineage store.
+    fake = FakeRun(stdout=_success_stream(), last_message="done")
+    provider = _provider(codex_config, security_config, tmp_path, fake)
+    result = provider.run(make_request(session_id="raw-resume-id-1234"))
+
+    assert result.session_id == "sess-99"  # raw emitted id returned in-memory (for state.db only)
+    attempt = _attempt_dir(tmp_path)
+    blobs = {
+        name: (attempt / name).read_text(encoding="utf-8")
+        for name in ("request.json", "stdout.log", "events.jsonl", "result.json")
+    }
+    for name, blob in blobs.items():
+        assert "raw-resume-id-1234" not in blob, name  # the resume id never lands on disk
+        assert "sess-99" not in blob, name  # the emitted raw id is scrubbed / normalized
+    assert "resume" in blobs["request.json"]  # the argv shows the resume subcommand (id redacted)
+    assert "session:" in blobs["result.json"]  # result.json records the normalized correlator
+
+
 def test_preflight_reports_version_when_binary_runs(
     codex_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
 ) -> None:

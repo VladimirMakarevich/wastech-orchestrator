@@ -418,7 +418,7 @@ def test_stages_testing_enabled_false_accepted(config: OrchestratorConfig) -> No
 
 
 def test_stages_enabled_true_is_not_a_skip(config: OrchestratorConfig) -> None:
-    result = _gate(config).validate(_src(_stages_task("stages:\n  summary:\n    enabled: true\n")))
+    result = _gate(config).validate(_src(_stages_task("stages:\n  planning:\n    enabled: true\n")))
     assert result.passed is True
     assert result.normalized is not None
     assert result.normalized.disabled_stages() == frozenset()

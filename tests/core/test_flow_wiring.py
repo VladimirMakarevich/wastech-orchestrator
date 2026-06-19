@@ -70,7 +70,6 @@ def _fake_pipeline(**over: object) -> SimpleNamespace:
         "decomposition": SimpleNamespace(accepted=True, n=3),
         "branch": "agent/task-1-x",
         "task": SimpleNamespace(contacts=("@me",)),
-        "session_ids": {"codex": "sess-1"},
     }
     base.update(over)
     return SimpleNamespace(**base)
@@ -99,7 +98,8 @@ def test_build_node_inputs_maps_pipeline_paths(tmp_path: Path) -> None:
     assert inputs.summary_body_path == "/s/summary.md"
     assert inputs.commit_message == "feat: x"
     assert inputs.contacts == ("@me",)
-    assert inputs.session_ids is p.session_ids  # shared by reference for session continuity
+    # Editing-session continuity is durable now (the editing_lineage store, P2.2), not an in-memory
+    # map threaded through NodeInputs.
 
 
 def test_build_node_inputs_no_decomposition_leaves_subtask_count_none(tmp_path: Path) -> None:

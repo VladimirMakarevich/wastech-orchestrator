@@ -12,6 +12,8 @@ from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.state_store import (
     ArtifactRow,
     CheckRunRow,
+    EditingLineageRow,
+    EvaluationRow,
     NodeRunRow,
     ProviderAttemptRow,
     PublishOpRow,
@@ -469,3 +471,82 @@ def test_insert_task_upsert_refreshes_registration_fields(store: StateStore) -> 
     assert row.title == "New" and row.status is Status.NEW
     assert row.source_path == "b.md" and row.validation_passed is True
     assert row.created_at == created  # creation timestamp preserved
+
+
+# --- editing_lineage (durable sessions, P2.2) ---------------------------------------------
+
+
+def test_editing_lineage_roundtrip_and_one_per_unit(store: StateStore) -> None:
+    store.insert_task(_new_task())
+    assert store.get_editing_lineage("task-001") is None  # none yet
+    store.upsert_editing_lineage(
+        EditingLineageRow(task_id="task-001", provider="claude", raw_session_id="sess-a")
+    )
+    row = store.get_editing_lineage("task-001")
+    assert row is not None and row.provider == "claude" and row.raw_session_id == "sess-a"
+    # Upsert replaces in place — exactly one active editing session per execution unit.
+    store.upsert_editing_lineage(
+        EditingLineageRow(task_id="task-001", provider="claude", raw_session_id="sess-b")
+    )
+    row = store.get_editing_lineage("task-001")
+    assert row is not None and row.raw_session_id == "sess-b"
+    count = store._conn.execute(  # noqa: SLF001
+        "SELECT COUNT(*) FROM editing_lineage WHERE task_id = ?", ("task-001",)
+    ).fetchone()[0]
+    assert count == 1
+
+
+def test_editing_lineage_survives_restart(tmp_path: Path) -> None:
+    db = tmp_path / "state.db"
+    store = StateStore.open(db)
+    store.insert_task(_new_task())
+    store.upsert_editing_lineage(
+        EditingLineageRow(task_id="task-001", provider="codex", raw_session_id="sess-durable")
+    )
+    store.close()
+    # A restart (a fresh store on the same file) rehydrates the editing session.
+    store2 = StateStore.open(db)
+    row = store2.get_editing_lineage("task-001")
+    assert row is not None and row.provider == "codex" and row.raw_session_id == "sess-durable"
+    store2.close()
+
+
+def test_editing_lineage_root_and_subtask_are_distinct(store: StateStore) -> None:
+    store.insert_task(_new_task())
+    store.upsert_editing_lineage(
+        EditingLineageRow(task_id="task-001", provider="claude", raw_session_id="root")
+    )
+    store.upsert_editing_lineage(
+        EditingLineageRow(
+            task_id="task-001", subtask_order=2, provider="claude", raw_session_id="sub-2"
+        )
+    )
+    assert store.get_editing_lineage("task-001").raw_session_id == "root"  # type: ignore[union-attr]
+    assert store.get_editing_lineage("task-001", 2).raw_session_id == "sub-2"  # type: ignore[union-attr]
+
+
+def test_reset_for_rerun_clears_editing_lineage(store: StateStore) -> None:
+    store.insert_task(_new_task())
+    store.upsert_editing_lineage(
+        EditingLineageRow(task_id="task-001", provider="claude", raw_session_id="sess")
+    )
+    store.reset_task_for_rerun("task-001")
+    assert store.get_editing_lineage("task-001") is None  # a fresh rerun starts new sessions
+
+
+def test_evaluations_append_only_and_counted(store: StateStore) -> None:
+    store.insert_task(_new_task())
+    for i, verdict in enumerate(("rework", "accept", "rework"), start=1):
+        store.record_evaluation(
+            EvaluationRow(
+                task_id="task-001",
+                node_id="review",
+                source_node_run_id=i,
+                kind="in_flow_verdict",
+                verdict=verdict,
+                findings_json="[]",
+            )
+        )
+    rows = store.get_evaluations("task-001")
+    assert [r.verdict for r in rows] == ["rework", "accept", "rework"]  # append-only
+    assert store.count_rework_verdicts("task-001") == 2  # the per-instance limit derives from COUNT

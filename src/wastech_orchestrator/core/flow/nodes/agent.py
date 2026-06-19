@@ -25,15 +25,13 @@ from collections.abc import Mapping
 from typing import Any
 
 from wastech_orchestrator.core.dangerous_diff import DangerousDiff, classify_dangerous_diff
-from wastech_orchestrator.core.flow.contracts import PermissionProfile
+from wastech_orchestrator.core.flow.contracts import PermissionProfile, SessionScope
 from wastech_orchestrator.core.flow.engine import NodeContext, NodeOutcome, NodeResult
 from wastech_orchestrator.core.flow.nodes.base import (
     NodeInfraError,
     NodeInputs,
     NodeManualRequired,
     NodeServices,
-    editing_session_id,
-    persists_session,
 )
 from wastech_orchestrator.core.flow.nodes.human_gate import HumanGate
 from wastech_orchestrator.core.flow.observability import record_run_observability
@@ -54,7 +52,7 @@ from wastech_orchestrator.core.hitl import (
 from wastech_orchestrator.notify import AskKind, AskResult
 from wastech_orchestrator.providers.base import AgentRunRequest, Stage
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
-from wastech_orchestrator.state_store import NodeRunRow
+from wastech_orchestrator.state_store import EditingLineageRow, NodeRunRow
 
 
 class AgentNodeRunner:
@@ -231,7 +229,7 @@ class AgentNodeRunner:
                 else "no_provider_available"
             )
             raise NodeInfraError(f"agent node {node.id!r}: no provider could complete it ({err})")
-        self._update_session(node, outcome, route)
+        self._persist_session(node, ctx, outcome)
         return run_id, outcome
 
     def _apply_post_edit_guard(
@@ -357,9 +355,7 @@ class AgentNodeRunner:
             model=node.model,
             reasoning=node.reasoning,
             extra_args=list(node.extra_args),
-            session_id=editing_session_id(
-                node.session_scope, self._in.session_ids, route.primary.value
-            ),
+            session_id=self._resume_session_id(node, ctx, route),
         )
 
     def _prompt_variables(self, ctx: NodeContext, stage: Stage) -> dict[str, object | None]:
@@ -401,19 +397,45 @@ class AgentNodeRunner:
             finished_at=self._s.clock(),
         )
 
-    def _update_session(
-        self, node: AgentNode, outcome: StageOutcome, route: ResolvedRoute
-    ) -> None:
-        # Only editing-lineage nodes persist their session into the in-memory map; a fresh node
-        # must not leak its session into a later editing node on the same provider (F3 / P2.2).
-        if not persists_session(node.session_scope):
+    def _resume_session_id(
+        self, node: AgentNode, ctx: NodeContext, route: ResolvedRoute
+    ) -> str | None:
+        """The durable editing session to resume for this node (durable sessions, P2.2).
+
+        Only an ``editing_lineage`` node resumes the execution unit's editing session, and only when
+        the stored lineage was produced by the same provider it resolves to (you cannot resume a
+        Claude session on Codex). ``fresh_disposable`` always starts clean; ``resume_own_lineage``
+        (a node's own multi-round session) is not used by the implementation flow's author nodes.
+        ``lineage_affinity`` is realized here: every editing node on the unit shares this one
+        session, so ``fixing`` (affinity → ``implementation``) continues the session that
+        ``implementation`` established."""
+        if node.session_scope is not SessionScope.EDITING_LINEAGE:
+            return None
+        row = self._s.store.get_editing_lineage(ctx.task_id, ctx.subtask_order)
+        if row is None or row.provider != route.primary.value:
+            return None  # no editing session yet, or it belongs to a different provider → fresh
+        return row.raw_session_id
+
+    def _persist_session(self, node: AgentNode, ctx: NodeContext, outcome: StageOutcome) -> None:
+        """Persist the unit's editing session after a successful editing-lineage run (durable).
+
+        A ``fresh_disposable`` / ``resume_own_lineage`` node never writes the editing lineage, so it
+        cannot leak its session into a later author node (validator-enforced read-only evaluators
+        never reach here). The raw session id is stored ONLY in ``state.db``."""
+        if node.session_scope is not SessionScope.EDITING_LINEAGE:
             return
         result = outcome.result
         if result is None or not result.session_id or outcome.provider_used is None:
             return
-        self._in.session_ids[outcome.provider_used.value] = result.session_id
-        if outcome.provider_used != route.primary:
-            self._in.session_ids.pop(route.primary.value, None)
+        self._s.store.upsert_editing_lineage(
+            EditingLineageRow(
+                task_id=ctx.task_id,
+                subtask_order=ctx.subtask_order,
+                provider=outcome.provider_used.value,
+                raw_session_id=result.session_id,
+                updated_at=self._s.clock(),
+            )
+        )
 
 
 def _agent_outcome(outcome: StageOutcome) -> NodeOutcome:

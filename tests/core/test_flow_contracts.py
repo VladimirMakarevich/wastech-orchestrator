@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from wastech_orchestrator.core.flow.contracts import (
-    EvaluationKind,
     EvaluatorRole,
     ExecutionUnit,
     OutputPolicy,
@@ -21,7 +20,6 @@ def test_enum_values_are_yaml_safe() -> None:
     enums = (
         RunKind,
         EvaluatorRole,
-        EvaluationKind,
         SessionScope,
         PermissionProfile,
         OutputPolicy,
@@ -38,7 +36,7 @@ def test_canonical_enum_values() -> None:
     assert SessionScope.EDITING_LINEAGE == "editing_lineage"
     assert PermissionProfile.READ_ONLY == "read-only"
     assert PublishingPolicy.NONE == "none"
-    assert EvaluationKind.FINAL_HANDOFF == "final_handoff"
+    assert EvaluatorRole.REVIEW == "review"
 
 
 def test_execution_unit_root_vs_subtask() -> None:

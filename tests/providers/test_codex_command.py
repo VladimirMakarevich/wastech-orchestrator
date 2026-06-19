@@ -178,8 +178,21 @@ def test_no_reasoning_means_no_reasoning_effort_flag(
     assert "--reasoning-effort" not in argv
 
 
-def test_session_id_is_not_passed_to_codex(
+def test_session_id_builds_exec_resume(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    argv = _argv(codex_config, make_request(session_id="some-session"))
-    assert "--resume" not in argv
+    # Durable sessions (P2.2): a session id builds ``codex exec resume <SESSION_ID>`` (verified on
+    # codex-cli 0.139.0) — resume right after exec, the id positional, the prompt still on stdin,
+    # and the global security flags preserved.
+    argv = _argv(codex_config, make_request(session_id="sess-123"))
+    assert argv[argv.index("exec") + 1] == "resume"
+    assert argv[argv.index("resume") + 1] == "sess-123"
+    assert argv[-1] == "-"  # prompt still comes from stdin
+    assert "--sandbox" in argv and "--ask-for-approval" in argv  # security flags preserved
+    assert argv[argv.index("--output-last-message") + 1] == LAST_MSG
+
+
+def test_no_session_id_has_no_resume(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    assert "resume" not in _argv(codex_config, make_request())

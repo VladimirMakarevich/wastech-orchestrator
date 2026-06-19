@@ -5,6 +5,8 @@
 The first unit quality gate: run the allowed check profile (tests/linters) and decide pass/fail. This is **not an agent** stage — checks are run by the Check Runner. Optional (`SKIPPABLE`).
 
 - Run checks and return a `pass`/`fail` outcome; the engine takes the matching edge (pass → review, fail → fixing with `loop: test_fix`). A launch failure is re-resolved once (gated) or raises `CheckLaunchError` ([nodes/checks.py:25](../../../../src/wastech_orchestrator/core/flow/nodes/checks.py#L25), `run()` at [nodes/checks.py:32](../../../../src/wastech_orchestrator/core/flow/nodes/checks.py#L32)).
+- **Mutation guard (P2.4, core-owned).** The runner snapshots the working tree before and after the checks; if a _passing_ check mutated commit-candidate files (e.g. an auto-formatter rewrote sources), it fails closed to `NodeManualRequired` — a green-but-dirtying check must not pass silently. The guard is a property of the `checks` node (it cannot be declared away by a flow) and is active whenever a `checks` node is present; a flow without one simply has no guard. No-op when no snapshot hook is wired.
+- In the packaged implementation flow the optional non-blocking `testing_quality` evaluator runs **before** `testing` (`when: config.hybrid_testing`, off by default); when off it is skipped and passes through to `testing`. See [S05 review](./S05-review.md) for the shared evaluator/self-cap mechanics.
 
 ## Step boundaries
 
@@ -48,6 +50,7 @@ flowchart TB
 
 - testing is in `SKIPPABLE_STAGES` ([schema.py:66-74](../../../../src/wastech_orchestrator/config/schema.py#L66)); when the `when: config.testing_enabled` node condition is false the engine records the skip and the node yields its pass-through `pass` outcome, so the `testing → review` edge is taken (and the `fixing → testing` return edge reaches a skipped node that immediately passes through to review) ([engine.py:303-312](../../../../src/wastech_orchestrator/core/flow/engine.py#L303)).
 - launch failure ≠ quality failure: only a launch failure can re-resolve commands (once); a quality failure does **not** change commands (§1.2, [B23](../../blocks/B23-check-discovery.md)/[B24](../../blocks/B24-check-execution.md)).
+- mutation guard: a passing check that changed the working-tree diff checksum across the run → `NodeManualRequired` (terminal `manual_action_required`), recorded as a `dirtied_working_tree` node run ([nodes/checks.py](../../../../src/wastech_orchestrator/core/flow/nodes/checks.py)).
 - The first failure short-circuits — remaining checks are not run ([B24](../../blocks/B24-check-execution.md)).
 
 ## Result / transition

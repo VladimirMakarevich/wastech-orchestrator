@@ -240,6 +240,58 @@ class AgentRouter:
                         "duration_seconds": duration,
                     },
                 )
+                # Resume safety net (durable sessions, P2.2): the requested session is gone
+                # (``session_unavailable``) → retry the SAME provider once with a fresh session.
+                # This is infrastructure, not a quality failure: it never falls back to another
+                # provider and never charges a fix iteration (the fix loop is engine-owned; this
+                # stays inside one node run). Differs from a quality ``status=failed`` → fixing.
+                if (
+                    exc.error_class is ErrorClass.SESSION_UNAVAILABLE
+                    and req.session_id is not None
+                    and stage_attempts < max_attempts
+                ):
+                    fresh_no = stage_attempts + 1
+                    fresh_req = replace(req, session_id=None, attempt=fresh_no)
+                    stage_attempts += 1
+                    log.info(
+                        "session unavailable; retrying fresh (no resume)",
+                        extra={"provider": pid.value, "attempt": fresh_no},
+                    )
+                    try:
+                        result = self._providers[pid].run(fresh_req)
+                    except ProviderError as fresh_exc:
+                        last_error = NormalizedError(
+                            error_class=fresh_exc.error_class, message=str(fresh_exc)
+                        )
+                        attempts.append(
+                            ProviderAttempt(
+                                provider=pid,
+                                attempt=fresh_no,
+                                status=None,
+                                error_class=fresh_exc.error_class,
+                                result=None,
+                            )
+                        )
+                        exc = fresh_exc  # the fallback decision below uses the fresh error
+                    else:
+                        attempts.append(
+                            ProviderAttempt(
+                                provider=pid,
+                                attempt=fresh_no,
+                                status=result.status,
+                                error_class=result.error.error_class if result.error else None,
+                                result=result,
+                            )
+                        )
+                        return StageOutcome(
+                            route=route,
+                            result=result,
+                            provider_used=pid,
+                            stage_attempts=stage_attempts,
+                            attempts=tuple(attempts),
+                            terminal_error=None,
+                            partial_change=partial,
+                        )
                 has_next = index + 1 < len(sequence)
                 if not has_next or stage_attempts >= max_attempts:
                     continue  # exhausted — the loop will exit and surface last_error

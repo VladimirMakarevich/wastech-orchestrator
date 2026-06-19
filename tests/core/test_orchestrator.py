@@ -372,6 +372,90 @@ def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: 
     assert "agent/task-001-add-a-thing" in branches
 
 
+def _evaluations(store: StateStore, task_id: str) -> list:
+    return store._conn.execute(  # noqa: SLF001
+        "SELECT node_id, kind, verdict FROM evaluations WHERE task_id = ? ORDER BY id", (task_id,)
+    ).fetchall()
+
+
+def test_supervisor_layer_observes_each_step_and_writes_one_summary(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # P2.1: the constant supervisor layer runs above any flow — it observes every executed
+    # (non-publish) node read-only (advisory), and synthesizes the summary once at whole-task close.
+    providers = _both()
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-sup"))
+    assert result.final_status is Status.DONE
+
+    rows = _evaluations(store, "task-sup")
+    supervisor_rows = [r for r in rows if r["kind"].startswith("supervisor_")]
+    # Every supervisor record is advisory and carries no node_id (it is a layer, not a node).
+    assert {r["verdict"] for r in supervisor_rows} == {"advisory"}
+    assert all(r["node_id"] is None for r in supervisor_rows)
+    steps = [r for r in rows if r["kind"] == "supervisor_step"]
+    finals = [r for r in rows if r["kind"] == "supervisor_final"]
+    # One observation per executed non-publish node (planning, implementation, testing, review).
+    assert len(steps) >= 4
+    assert len(finals) == 1  # the summary synthesis is once per whole task
+    # The in-flow review evaluator also recorded an immutable verdict (a separate kind).
+    assert any(r["kind"] == "in_flow_verdict" and r["node_id"] == "review" for r in rows)
+    # The summary is always written (no config.summary_enabled gate) and committed as the PR body.
+    assert (task_artifact_dir(art, "task-sup") / "summary.md").exists()
+    # There is no summary graph node anymore — the layer owns it.
+    assert "summary" not in _ran_nodes(store, "task-sup")
+
+
+def test_supervisor_summary_once_per_whole_task_not_subtask(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # P2.1: with decomposition the summary synthesis is once at whole-task close — not per subtask.
+    subtasks = {
+        "decompose": True,
+        "skills": [],
+        "subtasks": [
+            {"order": 1, "title": "First", "slug": "first",
+             "acceptance_criteria": ["a"], "depends_on": []},
+            {"order": 2, "title": "Second", "slug": "second",
+             "acceptance_criteria": ["b"], "depends_on": [1]},
+        ],
+    }
+    state = {"n": 0}
+
+    class DecompProvider(FakeProvider):
+        def run(self, request: AgentRunRequest) -> AgentRunResult:
+            if request.stage is Stage.PLANNING:
+                return AgentRunResult(
+                    status=RunStatus.SUCCEEDED, provider=self.id, stage=request.stage,
+                    attempt=request.attempt, exit_code=0, started_at="t", finished_at="t",
+                    final_message="plan",
+                    structured_output={"content": "plan", "human_input": None, **subtasks},
+                )
+            if request.stage is Stage.IMPLEMENTATION:
+                (git_repo.clone / f"impl-{state['n']}.py").write_text("x\n", encoding="utf-8")
+                state["n"] += 1
+            return super().run(request)
+
+    providers = {
+        ProviderId.CLAUDE: DecompProvider("claude"),
+        ProviderId.CODEX: DecompProvider("codex"),
+    }
+    orch, store, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers,
+        check_verdicts=[0], config_kwargs={"decomposition": True},
+    )
+    result = orch.run_task(_complete_task(tmp_path, "task-sup-dec"))
+    assert result.final_status is Status.DONE
+
+    rows = _evaluations(store, "task-sup-dec")
+    finals = [r for r in rows if r["kind"] == "supervisor_final"]
+    assert len(finals) == 1  # exactly one, despite two subtasks
+
+
 def test_live_route_defaults_to_global_primary(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
@@ -593,6 +677,95 @@ def test_review_blocking_then_fix(git_repo, make_git_config, tmp_path: Path) -> 
     assert result.final_status is Status.DONE
     # Review blocked once → one review-driven fixing node ran, then review passed.
     assert _ran_nodes(store, "task-005").count("fixing") == 1
+
+
+def test_target_implementation_full_graph(git_repo, make_git_config, tmp_path: Path) -> None:
+    # P2.5: the target packaged graph with the optional hybrid testing_quality node ON executes
+    # end-to-end, including the non-blocking testing_quality rework loop: it blocks once (→ fixing →
+    # back), then its self-cap accepts (→ checks → review → publish), never manual. The constant
+    # supervisor layer writes the summary. The test_fix/review_fix loops and decomposition on this
+    # same graph are covered by the sibling loop / decomposition tests.
+    tq_outputs = [
+        ("tests thin", {"findings": [{"title": "no edge-case test", "severity": "high"}]}),
+        ("tests ok", {"findings": []}),
+    ]
+    state = {"i": 0}
+
+    class HybridProvider(FakeProvider):
+        def run(self, request: AgentRunRequest) -> AgentRunResult:
+            if request.stage is Stage.IMPLEMENTATION:
+                (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+            if request.stage is Stage.TESTING:  # the testing_quality evaluator borrows TESTING
+                msg, structured = tq_outputs[min(state["i"], 1)]
+                state["i"] += 1
+                return AgentRunResult(
+                    status=RunStatus.SUCCEEDED, provider=self.id, stage=request.stage,
+                    attempt=request.attempt, exit_code=0, started_at="t", finished_at="t",
+                    final_message=msg, structured_output=structured,
+                )
+            return super().run(request)
+
+    providers = {
+        ProviderId.CLAUDE: HybridProvider("claude"),
+        ProviderId.CODEX: HybridProvider("codex"),
+    }
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0],
+        config_kwargs={"hybrid_testing": True},
+    )
+    result = orch.run_task(_complete_task(tmp_path, "task-tgt"))
+    assert result.final_status is Status.DONE
+    ran = _ran_nodes(store, "task-tgt")
+    assert ran.count("testing_quality") == 2  # blocked once, then self-capped to accept
+    assert ran.count("fixing") == 1  # the testing_quality rework drove exactly one fixing pass
+    assert "testing" in ran and "review" in ran  # checks + review still ran after the accept
+    assert (task_artifact_dir(art, "task-tgt") / "summary.md").exists()  # supervisor wrote summary
+
+
+_MINIMAL_FLOW = """
+flow:
+  name: implementation
+  task_type: implementation
+  permission_ceiling: workspace-write
+  output_policy: code_change
+  publishing: pull_request
+  nodes:
+    - id: implementation
+      kind: agent
+      role_file: roles/implementation.md
+      session_scope: editing_lineage
+      permission_profile: workspace-write
+    - id: publish
+      kind: publish
+      policy: pull_request
+  edges:
+    - { from: implementation, to: publish }
+"""
+
+
+def test_minimal_flow_implement_only(git_repo, make_git_config, tmp_path: Path) -> None:
+    # P2.5: a degenerate flow (implementation → publish, no checks / review / fixing) is a valid
+    # graph shape and executes; the constant supervisor layer still writes the summary. A flow
+    # without a checks node simply has no mutation guard (optional via graph shape).
+    from wastech_orchestrator.core.flow.registry import FlowRegistry
+
+    flows = tmp_path / "flows"
+    (flows / "roles").mkdir(parents=True)
+    (flows / "roles" / "implementation.md").write_text("Implement {task_path}.", "utf-8")
+    (flows / "implementation.yaml").write_text(_MINIMAL_FLOW, "utf-8")
+    providers = _both()
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)  # noqa: SLF001
+    _patch_impl_edit(providers, git_repo)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-min"))
+    assert result.final_status is Status.DONE
+    ran = _ran_nodes(store, "task-min")
+    assert set(ran) == {"implementation", "publish"}  # only the two declared nodes ran
+    assert "testing" not in ran and "review" not in ran  # degenerate: no checks / review nodes
+    assert (task_artifact_dir(art, "task-min") / "summary.md").exists()  # supervisor still wrote it
 
 
 def test_summary_fallback_when_provider_fails(git_repo, make_git_config, tmp_path: Path) -> None:
@@ -1827,21 +2000,6 @@ def test_skip_fixing_routes_to_manual_on_failure(git_repo, make_git_config, tmp_
     assert "fixing" in _skipped_stages(store)
 
 
-def test_skip_summary_writes_stub(git_repo, make_git_config, tmp_path: Path) -> None:
-    providers = _both()
-    orch, store, _, art = _build(
-        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
-    )
-    _patch_impl_edit(providers, git_repo)
-    block = "stages:\n  summary:\n    enabled: false\n"
-    result = orch.run_task(_task_with_stages(tmp_path, block))
-    assert result.final_status is Status.DONE
-    assert all(r.stage is not Stage.SUMMARY for r in providers[ProviderId.CLAUDE].requests)
-    # Summary skipped → the minimal-summary fallback is written, and lists summary as skipped.
-    assert "## Pipeline stages skipped" in _summary_text(art)
-    assert "summary" in _skipped_stages(store)
-
-
 def test_skipped_stages_listed_in_summary(git_repo, make_git_config, tmp_path: Path) -> None:
     providers = _both()
     orch, _, _, art = _build(
@@ -1997,9 +2155,10 @@ def test_prompt_audit_records_steps_in_order(git_repo, make_git_config, tmp_path
     # Filenames are zero-padded node_run_id → lexical sort is chronological.
     ids = [int(p.name.split("-")[0]) for p in step_files]
     assert ids == sorted(ids)
-    # complete task → refinement skipped; planning/implementation/review/summary are agent stages.
+    # complete task → refinement skipped; planning/implementation/review run agents. The summary is
+    # written by the supervisor layer now (not a graph node), so no summary step is audited.
     stages = [json.loads(p.read_text())["stage"] for p in step_files]
-    assert stages == ["planning", "implementation", "review", "summary"]
+    assert stages == ["planning", "implementation", "review"]
 
     # The combined timeline has one line per step, in the same chronological order.
     lines = (audit_dir / "timeline.jsonl").read_text().splitlines()

@@ -106,35 +106,6 @@ flow:
     assert _has(vs, "graph", "'accept'")
 
 
-def test_wrong_outcome_on_final_handoff_evaluator(tmp_path: Path) -> None:
-    yaml = """\
-flow:
-  name: t
-  task_type: t
-  permission_ceiling: workspace-write
-  output_policy: code_change
-  publishing: pull_request
-  nodes:
-    - id: entry
-      kind: agent
-      role_file: roles/entry.md
-    - id: summary
-      kind: evaluator
-      role: supervisor
-      role_file: roles/supervisor.md
-      evaluation_kind: final_handoff
-    - id: out
-      kind: publish
-      policy: pull_request
-  edges:
-    - { from: entry, to: summary }
-    - { from: summary, to: out, outcome: accept }
-"""
-    vs = _violations(yaml, tmp_path)
-    assert _has(vs, "graph", "'accept'")
-    assert _has(vs, "graph", "summary")
-
-
 # -- graph: bounded loops -----------------------------------------------------
 
 
@@ -382,6 +353,40 @@ flow:
     vs = _violations(yaml, tmp_path)
     assert _has(vs, "graph", "lineage_affinity")
     assert _has(vs, "graph", "editing_lineage")
+
+
+def test_conflicting_provider_override_rejected_under_affinity(tmp_path: Path) -> None:
+    # Durable sessions (P2.2): a node cannot resume another provider's editing session, so an
+    # explicit provider that differs from its lineage_affinity target's provider is rejected.
+    yaml = """\
+flow:
+  name: t
+  task_type: t
+  permission_ceiling: workspace-write
+  output_policy: code_change
+  publishing: pull_request
+  nodes:
+    - id: implementation
+      kind: agent
+      role_file: roles/impl.md
+      session_scope: editing_lineage
+      provider: claude
+    - id: fixing
+      kind: agent
+      role_file: roles/fix.md
+      session_scope: editing_lineage
+      lineage_affinity: implementation
+      provider: codex
+    - id: out
+      kind: publish
+      policy: pull_request
+  edges:
+    - { from: implementation, to: fixing }
+    - { from: fixing, to: out }
+"""
+    vs = _violations(yaml, tmp_path)
+    assert _has(vs, "graph", "conflicts with")
+    assert _has(vs, "graph", "across providers")
 
 
 def test_decomposition_proposed_by_unknown(tmp_path: Path) -> None:

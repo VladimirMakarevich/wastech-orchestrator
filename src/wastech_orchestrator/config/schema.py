@@ -60,14 +60,14 @@ CONFIG_SCHEMA_VERSION = 11
 # exception). ``refinement`` is excluded — it is skipped deterministically by completeness
 # classification (``derived.needs_refinement``), never a task flag — and
 # ``implementation``/``publishing`` are never skippable (the core work and the output). ``testing``
-# is skippable but runs no agent (it is the Check Runner).
+# is skippable but runs no agent (it is the Check Runner). ``summary`` is no longer skippable: the
+# summary is always written by the constant supervisor layer (flow-engine P2.1), not a graph node.
 SKIPPABLE_STAGES: frozenset[Stage] = frozenset(
     {
         Stage.PLANNING,
         Stage.TESTING,
         Stage.REVIEW,
         Stage.FIXING,
-        Stage.SUMMARY,
     }
 )
 
@@ -153,6 +153,10 @@ class AgentsConfig:
     # Gate for the high-risk per-task ``review`` skip (no agent quality gate before commit/PR): a
     # task may disable review via ``stages.review.enabled: false`` only when true, else rejected.
     allow_review_skip: bool = False
+    # Enables the optional non-blocking ``testing_quality`` evaluator node in the implementation
+    # flow (``when: config.hybrid_testing``); off by default. The node judges the tests the
+    # implementation agent wrote — it never writes tests itself (P2.4/P2.5).
+    hybrid_testing: bool = False
 
 
 @dataclass(frozen=True)
@@ -281,6 +285,24 @@ class SkillsConfig:
 
 
 @dataclass(frozen=True)
+class SupervisorConfig:
+    """The constant supervisor layer (flow-engine P2.1) — oversight ABOVE any flow, not a node.
+
+    It exists for every task under any flow shape: it observes each completed step read-only through
+    its own ``resume_own_lineage`` session (~1 LLM call/step) and synthesizes the summary + advisory
+    caveats at whole-task close. Trusted at the ``config.yaml`` level and validated under the same
+    ceiling as flow nodes: ``permission_profile`` is forced ``read-only`` in code, ``reasoning`` ∈
+    the allowlist (loader), and ``role_file`` is path-contained (validator). The own session is
+    in-memory in P2.1; durable ``resume_own_lineage`` is P2.2. ``model``/``reasoning`` empty → the
+    provider default; the layer runs on the global primary provider.
+    """
+
+    role_file: str = "roles/supervisor.md"
+    model: str | None = None
+    reasoning: str | None = None
+
+
+@dataclass(frozen=True)
 class OrchestratorConfig:
     orchestrator: OrchestratorRuntimeConfig
     repo: RepoConfig
@@ -291,6 +313,7 @@ class OrchestratorConfig:
     git: GitConfig
     telegram: TelegramConfig
     skills: SkillsConfig = SkillsConfig()
+    supervisor: SupervisorConfig = field(default_factory=SupervisorConfig)
     # When true, every task records each step's prompt + who-metadata (provider/model/attempt/
     # fallback/status) under `logs/<task-id>/prompt-audit/`. A per-task `prompt_audit` always
     # overrides this (task wins); recording a prompt is not a privilege escalation, so there is no

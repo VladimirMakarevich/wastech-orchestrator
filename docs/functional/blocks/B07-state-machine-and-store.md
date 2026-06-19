@@ -7,18 +7,18 @@ Defines the task status vocabulary and the allowed transitions between statuses,
 ## Responsibilities
 
 - **State machine** (pure, no IO): enumerate the generic lifecycle statuses (§8), define allowed transitions, validate/assert transitions ([state_machine.py:18-107](../../../src/wastech_orchestrator/core/state_machine.py#L18)).
-- **State Store**: create/migrate the database and apply the schema ([state_store.py:348-377](../../../src/wastech_orchestrator/state_store.py#L348)); store 7 entities: `tasks`, `node_runs`, `provider_attempts`, `check_runs`, `artifacts`, `publish_operations`, `subtasks` ([state_store.py:90-213](../../../src/wastech_orchestrator/state_store.py#L90)).
+- **State Store**: create/migrate the database and apply the schema ([state_store.py](../../../src/wastech_orchestrator/state_store.py)); store 9 entities: `tasks`, `node_runs`, `provider_attempts`, `check_runs`, `artifacts`, `publish_operations`, `subtasks`, `evaluations` (the immutable, append-only per-verdict audit — in-flow evaluator verdicts + the constant supervisor layer's per-step / final advisory observations, flow-engine P2.1), and `editing_lineage` (the durable per-execution-unit editing session — provider + raw session id, the **only** place a raw session id is stored; flow-engine P2.2) ([state_store.py](../../../src/wastech_orchestrator/state_store.py#L111)).
 - Persist and rehydrate the flow checkpoint (`tasks.current_node` / `flow_run_counters` / `flow_fingerprint`) so a resumed run continues from the node where it stopped ([state_store.py:713-744](../../../src/wastech_orchestrator/state_store.py#L713)).
 - Provide `BEGIN IMMEDIATE`…`COMMIT`/`ROLLBACK` transactions ([state_store.py:379-388](../../../src/wastech_orchestrator/state_store.py#L379)).
 - Answer the question "who owns the slot" ([state_store.py:473-476](../../../src/wastech_orchestrator/state_store.py#L473)).
-- Version the database schema; reject a newer version, and refuse an older incompatible (pre-v7) one fail-closed ([state_store.py:70-87](../../../src/wastech_orchestrator/state_store.py#L70)).
+- Version the database schema; reject a newer version, and refuse an older incompatible (pre-v9) one fail-closed ([state_store.py:75-108](../../../src/wastech_orchestrator/state_store.py#L75)).
 
 ## Block Boundaries
 
 ### Within scope
 
 - Status vocabulary and transition table (policy).
-- Persistence and reading of all 7 entities; loop counters; idempotent upserts.
+- Persistence and reading of all 9 entities; loop counters; idempotent upserts; append-only `evaluations`; durable `editing_lineage`.
 - Querying active tasks (slot) and tasks with incomplete cleanup (recovery).
 - Transactions, schema migration and versioning, read-only mode.
 
@@ -112,7 +112,7 @@ Source: [state_machine.py:26-76](../../../src/wastech_orchestrator/core/state_ma
 
 - **Allowed transitions** (§8): the generic lifecycle "happy path" (`new → validated → preparing → running → done`, plus `pending → {validated, preparing}`) plus universal edges `-> failed` and `-> manual_action_required` for every non-terminal status; terminal statuses have no outgoing edges ([state_machine.py:48-76](../../../src/wastech_orchestrator/core/state_machine.py#L48)). The granular per-stage statuses are gone — progress within `running` is the flow `current_node`.
 - **Single slot**: all statuses except `{NEW, PENDING, DONE, FAILED, MANUAL_ACTION_REQUIRED}` are considered active (`find_active_tasks` over `_NON_ACTIVE`; the `ACTIVE` set is `{VALIDATED, PREPARING, RUNNING}`) ([state_store.py:473-476,934-936](../../../src/wastech_orchestrator/state_store.py#L473), [state_machine.py:42-44](../../../src/wastech_orchestrator/core/state_machine.py#L42)). This is a logical slot (a database query), not a DBMS lock.
-- **Schema version** = 7; a newer version raises `IncompatibleStateError` (on both open paths). An older _versioned_ database (`1 ≤ v < 7`) is also **refused fail-closed**: the v5–v7 changes are destructive and `_migrate` only _adds_ columns, so an old shape cannot be reshaped in place (greenfield — recreate the local `state.db`); stamping the current version onto an old shape would pass the gate and then crash on the first write to a reshaped table. Only a brand-new / pre-versioning `0` database is adopted (created at the current shape by `_SCHEMA`, then the additive `_migrate` columns + stamp) ([state_store.py:47-87](../../../src/wastech_orchestrator/state_store.py#L47)). v7 is greenfield-destructive: it dropped the legacy `stage_runs` table (the engine writes `node_runs`), renamed `provider_attempts.stage_run_id` → `node_run_id`, and dropped `tasks.interrupted_status` (rerun --continue re-enters at `current_node`, not a saved granular status).
+- **Schema version** = 9; a newer version raises `IncompatibleStateError` (on both open paths). An older _versioned_ database (`1 ≤ v < 9`) is also **refused fail-closed**: the v5–v7 changes are destructive and `_migrate` only _adds_ columns, so an old shape cannot be reshaped in place (greenfield — recreate the local `state.db`); stamping the current version onto an old shape would pass the gate and then crash on the first write to a reshaped table. Only a brand-new / pre-versioning `0` database is adopted (created at the current shape by `_SCHEMA`, then the additive `_migrate` columns + stamp) ([state_store.py:75-108](../../../src/wastech_orchestrator/state_store.py#L75)). v7 dropped the legacy `stage_runs` table (the engine writes `node_runs`), renamed `provider_attempts.stage_run_id` → `node_run_id`, and dropped `tasks.interrupted_status` (rerun --continue re-enters at `current_node`); v8 (flow-engine P2.1) added the append-only `evaluations` table; v9 (flow-engine P2.2) added the `editing_lineage` table — both created on a fresh DB by `_SCHEMA`, no additive column to migrate.
 - **Idempotency**: `insert_task`/`register_artifact`/`record_publish_op`/`insert_subtasks` are upserts keyed on a unique key; `insert_subtasks` does not "revive" already-committed subtasks (`WHERE subtasks.commit_sha IS NULL`) ([state_store.py:871-905](../../../src/wastech_orchestrator/state_store.py#L871)).
 - **No secrets** in the schema (only ids, statuses, error classes, paths, sha256, counters, fingerprints, commit SHAs) ([state_store.py:8-11](../../../src/wastech_orchestrator/state_store.py#L8)).
 
@@ -128,7 +128,7 @@ Persistent rows in `state.db`; `TaskRow`/`SubtaskRow`/… on read; the `node_run
 
 ## Errors and Edge Cases
 
-- Newer schema version → `IncompatibleStateError` (caught by CLI → exit 2); an older incompatible (pre-v7) version → `IncompatibleStateError` too (delete `state.db` / fresh workspace).
+- Newer schema version → `IncompatibleStateError` (caught by CLI → exit 2); an older incompatible (pre-v9) version → `IncompatibleStateError` too (delete `state.db` / fresh workspace).
 - `complete_node_run`/`get_counters` on a non-existent id → `KeyError`.
 - FK enabled: inserting a `node_run` without a matching `tasks` row will violate the FK constraint. `provider_attempts.node_run_id` is a plain monotonic id, **not** an FK (so the engine can store either a `node_runs` id there) ([state_store.py:147-159](../../../src/wastech_orchestrator/state_store.py#L147)).
 
@@ -154,7 +154,7 @@ All pipeline decisions materialize as status transitions and rows in `state.db`.
 ## Code References
 
 - [core/state_machine.py:18-107](../../../src/wastech_orchestrator/core/state_machine.py#L18) — the 8 generic statuses, transition table, `ACTIVE`/`TERMINAL`, checks.
-- [state_store.py:90-213](../../../src/wastech_orchestrator/state_store.py#L90) — schema of 7 tables (`node_runs`, `provider_attempts.node_run_id`, the `tasks` flow-checkpoint columns).
+- [state_store.py:111-229](../../../src/wastech_orchestrator/state_store.py#L111) — schema of 9 tables (`node_runs`, `provider_attempts.node_run_id`, the `tasks` flow-checkpoint columns, the append-only `evaluations`, the durable `editing_lineage`).
 - [state_store.py:47-87](../../../src/wastech_orchestrator/state_store.py#L47) — schema version 7, migration, version gate.
 - [state_store.py:348-377](../../../src/wastech_orchestrator/state_store.py#L348) — open/open_readonly, pragmas, version.
 - [state_store.py:473-489](../../../src/wastech_orchestrator/state_store.py#L473) — slot and incomplete cleanup; [state_store.py:713-744](../../../src/wastech_orchestrator/state_store.py#L713) — flow checkpoint save/get.

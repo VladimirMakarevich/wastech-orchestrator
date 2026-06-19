@@ -103,10 +103,25 @@ def validate_config(config: OrchestratorConfig) -> list[str]:
 
     _validate_checks(config, issues, warnings)
     _validate_telegram(config, issues)
+    _validate_supervisor(config, issues)
 
     if issues:
         raise ConfigError(issues)
     return warnings
+
+
+def _validate_supervisor(config: OrchestratorConfig, issues: list[str]) -> None:
+    """The supervisor layer is validated under the same ceiling as a flow node (P2.1).
+
+    ``permission_profile`` is forced ``read-only`` in code (the layer never writes), ``reasoning``
+    is already allowlisted by the loader; here we enforce that ``role_file`` contains no path
+    traversal (``..`` or an absolute path) — the same containment rule the flow validator applies to
+    a node ``role_file``.
+    """
+    role_file = config.supervisor.role_file
+    parts = role_file.replace("\\", "/").split("/")
+    if ".." in parts or role_file.startswith("/"):
+        issues.append(f"supervisor.role_file {role_file!r} contains path traversal")
 
 
 def _validate_telegram(config: OrchestratorConfig, issues: list[str]) -> None:
