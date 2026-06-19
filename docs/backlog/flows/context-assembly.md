@@ -32,7 +32,7 @@
 
 ## A. Flow `implementation`
 
-Порядок happy-path: refinement → planning → implementation → testing_quality → **testing** (checks) → review → [fixing]\* → **publish**. Supervisor — **не узел**, а константный слой оркестратора перед publish (summary + advisory; см. A8).
+Порядок happy-path: refinement → planning → implementation → testing_quality → **testing** (checks) → review → [fixing]\* → **publish**. Supervisor — **не узел**, а постоянный слой-наблюдатель оркестратора на весь цикл: проверяет каждый завершённый шаг (read-only) + финальный summary при закрытии всей задачи (см. A8).
 
 ### A1. `refinement` (agent, read-only) — `when: derived.needs_refinement`
 
@@ -82,7 +82,7 @@
 - **role_file** `roles/review.md`: «ревью текущего diff против задачи и плана; findings с severity; блокирующее — то, что должно измениться до merge».
 - **Интерполируемые пути**: `{diff_path}`, `{checks_path}` (результаты тестов), `{task_path}`, `{plan_path}`.
 - **output_schema**: вердикт + findings (блокирующие → rework).
-- **После узла**: создаётся `review_path`. `accept`→publish (через константный supervisor-слой, A8); блокирующее → fixing (`loop: review_fix`).
+- **После узла**: создаётся `review_path`. `accept`→publish (supervisor-слой пишет финальный summary перед publish, A8); блокирующее → fixing (`loop: review_fix`).
 
 ### A7. `fixing` (agent, **workspace-write**, `editing_lineage`, `lineage_affinity: implementation`)
 
@@ -92,14 +92,15 @@
 - **AgentRunRequest**: `permission_profile=workspace-write`, `session_id` = **сессия implementation** (affinity); конфликтующий per-attempt провайдер/модель отвергается, пока affinity активна.
 - **После узла**: dangerous-diff guard; обновляется `diff_path`; → testing_quality (повторная оценка после фикса) → checks.
 
-### A8. Supervisor-слой (константа над flow, **не узел**) — всегда, перед publish
+### A8. Supervisor-слой (постоянный наблюдатель весь цикл, **не узел**)
 
-- **Где**: на уровне оркестратора, а не в графе. Запускается **поверх любого flow** (включая degenerate из одного агента) терминальным проходом перед `publish`. Использует ту же prompt-машинерию, что и узлы (контекст по путям), но конфигурируется из `config.yaml`, а не из YAML-узла.
+- **Где/когда**: на уровне оркестратора, не в графе. Стартует **при старте задачи**, живёт весь цикл (все шаги + подзадачи); поверх **любого** flow (включая degenerate из одного агента). После **каждого** завершённого узла делает read-only наблюдение; финальный summary — при закрытии **всей задачи** перед `publish`. Использует ту же prompt-машинерию, что и узлы (контекст по путям), но конфигурируется из `config.yaml`, не из YAML-узла.
+- **session/права**: `resume_own_lineage` — **своя** сессия на весь цикл задачи (копит контекст по шагам; не editing-lineage авторов), `read-only`. _In-memory в P1, durable — P2.2._
 - **Конфиг**: `config.yaml: supervisor { model, reasoning, role_file }`; `permission_profile` принудительно `read-only`, `model`/`reasoning` ∈ allowlist, `role_file` — path-containment ([security-ceiling.md](security-ceiling.md) §8).
-- **role_file** (по умолчанию `roles/supervisor-final.md`): «связный итог принятого изменения (что/как/интеграция/почему) + advisory-замечания; не править код».
-- **Интерполируемые пути**: `{task_path}`, `{plan_path}`, `{diff_path}`, `{checks_path}`, `{review_path}`.
-- **output_schema**: summary + advisory-findings.
-- **Особое**: терминальный — **не может** выдать rework/переоткрыть задачу; ядро валидирует и пишет `summary.{md,json}` (или детерминированный fallback) + advisory в `evaluations`. Заменяет и старый summary-провайдер, и блокирующие per-stage supervisor-узлы.
+- **role_file** (по умолчанию `roles/supervisor.md`): «следить за каждым шагом; в конце — связный итог (что/как/интеграция/почему) + advisory-замечания; не править код».
+- **Интерполируемые пути**: на шаге — артефакт текущего шага (`{diff_path}`/`{checks_path}`/`{review_path}` и т.п.); на финале — `{task_path}`, `{plan_path}`, `{diff_path}`, `{checks_path}`, `{review_path}`.
+- **output_schema**: пошагово — advisory-наблюдение; финал — summary + advisory-findings.
+- **Особое**: advisory — **не может** выдать rework/переоткрыть/маршрутизировать; ядро пишет `summary.{md,json}` (или детерминированный fallback) **всегда** (`config.summary_enabled` убран), один на задачу; пошаговые наблюдения + финал — в `evaluations`. Заменяет старый summary-провайдер и блокирующие per-stage supervisor-узлы.
 
 ### A9. `publish` (publish, `pull_request`) — **нет промпта**
 

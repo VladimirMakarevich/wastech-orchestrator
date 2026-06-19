@@ -49,7 +49,7 @@ flow:
   session_scope: editing_lineage # editing_lineage | fresh_disposable | resume_own_lineage
   lineage_affinity: null # id узла, чью editing-сессию переиспользовать (см. §5)
   permission_profile: workspace-write # ≤ permission_ceiling (clamp в C)
-  provider: null # claude | codex; кто исполняет узел. null = дефолт-маршрут из config.yaml. ∈ agents.allowed
+  provider: null # claude | codex; кто исполняет узел. null = глобальный primary (config.yaml providers). ∈ agents.allowed
   model: null # пусто = дефолт провайдера
   reasoning: null # low|medium|high|xhigh|max (как в configuration.md) — «effort» узла
   timeout_seconds: 7200
@@ -61,13 +61,13 @@ flow:
 
 - **Входы** — только провайдер-нейтральные пути к артефактам (task/plan/diff/…); тело задачи не встраивается в argv. Маппится на нынешний `AgentRunRequest`.
 - **Выходы** — `final_message`, `structured_output`, нормализованный `session_id` (raw только в state.db), артефакты stdout/events (после redaction).
-- **Узел сам выбирает исполнителя** (решение 2026-06-19): `provider` (`claude`/`codex`), `model` и `reasoning` («effort») — поля **узла** во flow YAML, так что каждый узел задаёт «кто/какая модель/какой effort». `provider` валидируется против `agents.allowed` (`config.yaml`); `null` → дефолт-маршрут из `config.yaml`. Это переносит выбор провайдера с per-task `agents`-оверрайда и со стадийно-ключённого `agents.routing` **на узел**; провайдер-fallback остаётся **только на инфраструктурные ошибки** (не на провал качества). Ландинг — [p2-pre-work.md](p2-pre-work.md).
+- **Узел сам выбирает исполнителя** (решение 2026-06-19): `provider` (`claude`/`codex`), `model` и `reasoning` («effort») — поля **узла** во flow YAML, так что каждый узел задаёт «кто/какая модель/какой effort». `provider` валидируется против `agents.allowed` (`config.yaml`); `null` → **глобальный primary** (`config.yaml providers.<p>.primary: true`, ровно один). Стадийный `agents.routing` **удаляется**: выбор провайдера — на узле, иначе глобальный primary; провайдер-fallback (инфра-ошибка) ведёт на глобальный primary, никогда на провал качества. Per-task `agents`-оверрайд тоже убирается. Ландинг — [p2-pre-work.md](p2-pre-work.md).
 - **crew не поддерживается** — мультиагентность выражается узлами графа (несколько `agent`/`evaluator`-узлов с рёбрами), а не несколькими агентами внутри одного узла: так у каждого агента свой permission-профиль, session-lineage и чекпоинт, и шаг остаётся resume-able. Возможный будущий параллелизм — явная map-конструкция движка (как decomposition), не «crew»-узел.
 - **dangerous-diff** — после любого `agent`-узла с `workspace-write` ядро **автоматически** прогоняет детерминированную классификацию опасного diff и, при необходимости, HITL-одобрение (`core/dangerous_diff.py`). Это core-owned guard: flow его не объявляет и **не может отключить** (security). Конфигурируема только политика одобрения в пределах, разрешённых C.
 
 ### 2.2. `evaluator` (доменный, read-only)
 
-Общий примитив «оценка + bounded rework» для **in-flow** оценщиков. Один механизм для review / critic / verifier / test_quality / operator-defined — различается только `role`, промптом, session-политикой и бюджетом. Никогда не пишет в workspace. (Финальный summary + терминальный контроль — **не** evaluator-узел, а константный supervisor-слой оркестратора; см. ниже и [p2-implementation.md](p2-implementation.md) §P2.1.)
+Общий примитив «оценка + bounded rework» для **in-flow** оценщиков. Один механизм для review / critic / verifier / test_quality / operator-defined — различается только `role`, промптом, session-политикой и бюджетом. Никогда не пишет в workspace. (Надзор за каждым шагом + финальный summary/advise — **не** evaluator-узел, а постоянный supervisor-слой оркестратора, живущий весь цикл задачи; см. ниже и [p2-implementation.md](p2-implementation.md) §P2.1.)
 
 ```yaml
 - id: review
@@ -85,7 +85,7 @@ flow:
 - **Вердикт** — строго валидируемый: `{ verdict: accept|rework, findings: [{ severity, reason, paths }] }`. `rework` требует ≥1 `medium`/`high`. Низкие — advisory, не блокируют. `accept` не содержит блокирующих.
 - **Immutable** — каждая оценка — неизменяемый артефакт, неймспейснутый по source-run; локальный лимит **выводится подсчётом** применённых вердиктов, без отдельного мутабельного счётчика.
 - **role open-ended**: механика одинакова; набор `role` расширяем под flow (review — обычный evaluator-узел, а не отдельная стадия). Никакого привилегированного `core/supervisor.py`-узла в графе нет.
-- **Supervisor — не evaluator-узел, а константный слой.** Финальный summary + лёгкий терминальный контроль выполняет supervisor-слой оркестратора **поверх любого flow** (всегда, даже для degenerate-графа из одного агента). Он терминален (не может `rework`/переоткрыть задачу), пишет `summary.{md,json}` (или детерминированный fallback) и advisory-findings; конфигурируется через `config.yaml` (`supervisor: { model, reasoning, role_file }`) под тем же потолком (read-only, allowlist, containment). Заменяет и старый summary-провайдер, и блокирующие per-stage supervisor-узлы. Детали — [p2-implementation.md](p2-implementation.md) §P2.1.
+- **Supervisor — не evaluator-узел, а постоянный слой-наблюдатель оркестратора.** Стартует **при старте задачи** и **живёт весь цикл** (через все шаги и подзадачи) **поверх любого flow** (всегда, даже для degenerate-графа из одного агента). **Проверяет каждый завершённый шаг** read-only через **свою сессию `resume_own_lineage`** (копит контекст; ~один вызов LLM/шаг). **Advisory** — не `rework`/не переоткрывает/не маршрутизирует (блокировка — дело in-flow `review`/`test_quality`). При закрытии **всей задачи** (все подзадачи готовы) пишет `summary.{md,json}` + advise (или детерминированный fallback) — один на задачу, не на подзадачу; summary пишется **всегда**. Конфигурируется через `config.yaml` (`supervisor: { model, reasoning, role_file }`) под потолком (read-only, allowlist, containment). Заменяет старый summary-провайдер и блокирующие per-stage supervisor-узлы. _Будущее: владелец памяти оркестратора — обогащает контексты конкретных узлов._ Детали — [p2-implementation.md](p2-implementation.md) §P2.1.
 
 ### 2.3. `checks` (core-owned, детерминированный)
 
@@ -143,7 +143,7 @@ edges:
 - **`outcome`** — исход узла: `accept`/`rework` (evaluator), `pass`/`fail` (checks), `route:<label>` (явное ветвление), либо отсутствует (безусловное ребро). Набор возможных исходов узла объявлен; движок проверяет, что выбор ∈ объявленного набора (аналог crewAI `emit`). Ключ назван `outcome`, **не** `on`: YAML 1.1 трактует `on`/`off`/`yes`/`no` как булевы (ключ `on:` распарсился бы в `true`) — подтверждено в co-design (см. co-design/notes.md).
 - **`budget` / `loop`** — `rework`-рёбра ограничены. `budget: N` — локальный лимит per-edge (для evaluator выводится подсчётом применённых вердиктов). `loop: <name>` — именованный цикловой счётчик (нынешние `test_fix_cycles`/`review_fix_cycles`).
 - **Единый учёт** — любое прохождение `rework`/`fail`-ребра инкрементит **единый** глобальный `fix_iterations` ровно один раз (как в supervisor §rework: один путь учёта, без двойного счёта). Исчерпание глобального бюджета или любого локального → детерминированный `manual_action_required`. Движок гарантирует терминальность — бесконечный цикл невозможен.
-- **Evaluator = bounded routing**: evaluator-узел выбирает только из объявленных исходящих рёбер текущего узла. Граф он не придумывает. (Константный supervisor-слой не маршрутизирует вовсе — он терминален.)
+- **Evaluator = bounded routing**: evaluator-узел выбирает только из объявленных исходящих рёбер текущего узла. Граф он не придумывает. (Supervisor-слой не маршрутизирует вовсе — он наблюдает весь цикл, advisory.)
 
 ```yaml
 budgets:
@@ -157,8 +157,8 @@ budgets:
 ## 4. session_scope и affinity
 
 - `editing_lineage` — узлы-авторы (implementation, fixing) грузят и обновляют активную editing-сессию (durable lineage из ядра).
-- `fresh_disposable` — evaluator (review, test_quality) и константный supervisor-слой получают свежую сессию, не читают и не пишут editing-lineage.
-- `resume_own_lineage` — evaluator с многораундовым диалогом (research `critic`) продолжает **свою** сессию, независимую от автора.
+- `fresh_disposable` — in-flow evaluator (review, test_quality) получает свежую сессию, не читает и не пишет editing-lineage.
+- `resume_own_lineage` — многораундовый read-only участник со **своей** сессией, независимой от авторов: research `critic` **и константный supervisor-слой** (живёт весь цикл задачи, копит контекст по шагам — см. §2.2).
 - **Affinity — общий механизм**, объявляется во flow: `lineage_affinity: <node_id>` на узле-авторе означает «продолжить editing-сессию указанного узла». Ядро это гарантирует (durable sessions), flow только декларирует связь. В `implementation.yaml` это `lineage_affinity: implementation` на `fixing` — но это выбор данного flow, **а не захардкоженное правило `fixing→implementation`**: оператор волен связать любые два узла-автора или не связывать вовсе. Конфликтующий task-override провайдера/модели отвергается, пока affinity активна.
 
 ## 5. Decomposition — конструкция движка
@@ -183,7 +183,7 @@ decomposition:
 
 ## 7. Эталон: `implementation.yaml` (доказательство абстракции)
 
-Текущий implementation-конвейер (refinement → planning → implementation → testing → review → fixing → publish, с decomposition и **константным supervisor-слоем над графом**, дающим summary + терминальный контроль перед publish) — целиком данными:
+Текущий implementation-конвейер (refinement → planning → implementation → testing → review → fixing → publish, с decomposition и **постоянным supervisor-слоем над графом**, наблюдающим каждый шаг весь цикл и дающим финальный summary/advise) — целиком данными:
 
 ```yaml
 flow:
@@ -251,7 +251,7 @@ flow:
       }
     - { id: publish, kind: publish, policy: pull_request }
     # supervise_impl / supervise_fix / summary-узлов в графе НЕТ:
-    # summary + терминальный контроль даёт константный supervisor-слой
+    # summary + надзор за каждым шагом даёт постоянный supervisor-слой
     # оркестратора перед publish (config.yaml: supervisor); см. §2.2, p2-implementation.md §P2.1.
 
   edges:
@@ -279,10 +279,10 @@ flow:
 
 Что это доказывает (соответствие нынешнему поведению — проверяется адаптированным на движок интеграционным сьютом; golden-harness/паритет байт-в-байт отменён, см. [plan.md](plan.md)):
 
-- каждая стадия-автор → `agent`-узел; supervisor (summary + терминальный контроль) → **константный слой оркестратора над flow**, не узел; review → `evaluator`-узел (не отдельная стадия); testing → `checks` + необязательный `evaluator` (`role=test_quality`); publishing → `publish`;
+- каждая стадия-автор → `agent`-узел; supervisor (надзор за каждым шагом + финальный summary/advise) → **постоянный слой оркестратора над flow**, не узел; review → `evaluator`-узел (не отдельная стадия); testing → `checks` + необязательный `evaluator` (`role=test_quality`); publishing → `publish`;
 - fix-петли (test-driven, review-driven) → `rework`/`fail`-рёбра с единым глобальным `fix_iterations` и локальными цикловыми лимитами;
 - decomposition → конструкция фан-аута над под-flow;
-- dangerous-diff после implementation/fixing, durable-HITL, объявляемая во flow lineage-affinity (в этом flow fixing→implementation), idempotent publish, **константный supervisor-слой (summary + advisory) перед publish** — **не во flow-графе**, а ядровые/оркестраторные гарантии, на которые flow опирается.
+- dangerous-diff после implementation/fixing, durable-HITL, объявляемая во flow lineage-affinity (в этом flow fixing→implementation), idempotent publish, **постоянный supervisor-слой (надзор за каждым шагом весь цикл + финальный summary/advise)** — **не во flow-графе**, а ядровые/оркестраторные гарантии, на которые flow опирается.
 
 **Движок при этом не знает ничего доменного**: он исполняет узлы, следует объявленным рёбрам в пределах бюджетов и зовёт ядро для core-owned узлов. Никакого `if task_type == implementation`.
 

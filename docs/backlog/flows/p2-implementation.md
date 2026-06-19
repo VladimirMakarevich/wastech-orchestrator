@@ -4,9 +4,9 @@
 
 Детализация фазы P2 из [plan.md](plan.md). Цель: на **доказанном** движке (P1) нарастить целевой implementation, адаптировав три поглощённые программы — [supervisor](../outdated/supervisor_quality_gate.md), [durable sessions](../outdated/durable_sessions_and_fixing_affinity.md), [hybrid testing](../outdated/hybrid_agent_testing.md). База проверки фазы: **тесты из спек трёх программ** покрывают новые узлы (адаптированный на движок интеграционный сьют из P1 анкерит неизменное ядро — golden-harness отменён, см. [plan.md](plan.md)).
 
-> **Ревизия архитектуры supervisor (2026-06-19).** Зафиксировано: flow — **полностью конфигурируемый граф любых узлов**; оператор вправе описать ЛЮБОЙ flow и любое число агентов в YAML — вплоть до одного implement-агента без проверок, ревью и чеков. **Единственная константа — supervisor, который живёт отдельным слоем НАД flow** (на уровне оркестратора, не узлом графа): он всегда запускается в конце, пишет `summary` и делает лёгкий терминальный контроль (advisory). Отдельных блокирующих per-stage supervisor-узлов (`supervise_impl`/`supervise_fix`) в графе **больше нет** — кому нужны блокирующие пер-стейдж гейты, добавляет опциональные `review`/`test_quality` (или operator-defined) evaluator-узлы в YAML. Детали — P2.1; целевой граф — P2.5; зеркальные правки контракта — [flow-contract.md](flow-contract.md) §2.2/§4/§7, [security-ceiling.md](security-ceiling.md) §3.
+> **Ревизия архитектуры supervisor (2026-06-19).** Зафиксировано: flow — **полностью конфигурируемый граф любых узлов**; оператор вправе описать ЛЮБОЙ flow и любое число агентов в YAML — вплоть до одного implement-агента без проверок, ревью и чеков. **Единственная константа — supervisor, который живёт отдельным слоем НАД flow** (на уровне оркестратора, не узлом графа): стартует при старте задачи, **живёт весь цикл и проверяет каждый завершённый шаг** (read-only, своя `resume_own_lineage`-сессия, advisory — не блокирует), а при закрытии всей задачи пишет `summary` + advise. Отдельных блокирующих per-stage supervisor-узлов (`supervise_impl`/`supervise_fix`) в графе **больше нет** — кому нужны блокирующие пер-стейдж гейты, добавляет опциональные `review`/`test_quality` (или operator-defined) evaluator-узлы в YAML. Детали — P2.1; целевой граф — P2.5; зеркальные правки контракта — [flow-contract.md](flow-contract.md) §2.2/§4/§7, [security-ceiling.md](security-ceiling.md) §3.
 
-Канонический порядок ландинга ([memory: quality-program-canonical-order]): **supervisor → durable → hybrid**. Supervisor стартует первым (даёт константный слой + общий evaluator-примитив на in-memory editing-lineage, которую несёт P1); durable формализует scopes/affinity вокруг уже существующего primitive; hybrid — последний неблокирующий слой.
+Канонический порядок ландинга ([memory: quality-program-canonical-order]): **supervisor → durable → hybrid**. Supervisor стартует первым (постоянный слой-наблюдатель + общий evaluator-примитив; своя сессия пока in-memory, durable — в P2.2); durable формализует scopes/affinity (включая durable `resume_own_lineage` для supervisor'а); hybrid — последний неблокирующий слой.
 
 Вход: целевой evaluator-примитив ([flow-contract.md](flow-contract.md) §2.2), session_scope ([flow-contract.md](flow-contract.md) §4), packaged [implementation.yaml](../../../src/wastech_orchestrator/core/flow/packaged/implementation.yaml) (сейчас — P1-parity форма: refinement → planning → implementation → testing → review → fixing → summary → publish, без supervisor/hybrid/durable; P2 наслаивает целевые узлы, P2.5 приводит файл к целевому графу).
 
@@ -16,16 +16,19 @@
 
 Ландит **первым** в P2 — даёт сразу две вещи: (1) константный **supervisor-слой над flow** и (2) общий **evaluator-примитив**, который переиспользуют опциональные in-flow evaluator'ы (`review` — P2.3, `test_quality` — P2.4) и P3 (`verifier`/`critic`).
 
-### Архитектура: supervisor — константа НАД flow (не узел)
+### Архитектура: supervisor — постоянный наблюдатель НАД flow (не узел)
 
-- **Supervisor — не узел графа.** Он живёт отдельным слоем на уровне **оркестратора** и запускается **всегда**, поверх любого flow (даже если flow — это один implement-агент без проверок). Это единственная доменная константа; сам **движок остаётся без доменного знания** ([flow-contract.md](flow-contract.md) §7) — он исполняет граф, supervisor его не касается.
-- **Функции:** пишет `summary.{md,json}` и делает **лёгкий терминальный контроль** (см. «advisory» ниже). Заменяет собой и старый summary-провайдер, и старые узлы `supervise_impl`/`supervise_fix` — **отдельного summary-провайдера и блокирующих supervisor-узлов в графе нет**.
-- **Терминальный:** supervisor идёт прямо перед core-owned `publish`; он **не может** выдать `rework`, переоткрыть задачу или уйти в петлю. Кому нужны блокирующие пер-стейдж гейты — добавляет опциональные `review`/`test_quality`/operator-defined evaluator-узлы **в** flow (они умеют `rework` → `fixing`).
-- **Конфигурируем оператором, но не задачей и не flow-графом.** Модель, `reasoning`/effort и промпт (`role_file`) задаются в `config.yaml` (новая секция `supervisor:`), валидируются под тем же потолком, что и узлы: `model`/`reasoning` ∈ allowlist, `role_file` — path-containment, `permission_profile` принудительно `read-only` ([security-ceiling.md](security-ceiling.md) §3). Так supervisor остаётся гибко настраиваемым, но не уезжает во flow-граф и не ослабляется задачей.
+- **Не узел графа.** Живёт отдельным слоем на уровне **оркестратора**; **движок остаётся без доменного знания** ([flow-contract.md](flow-contract.md) §7) — он исполняет граф, supervisor его не касается. Единственная доменная константа: есть у **каждой** задачи при любой форме flow (даже один implement-агент без проверок).
+- **Жизненный цикл:** стартует **при старте задачи**, **живёт весь цикл** (все шаги + все подзадачи), завершается перед `publish`. **Один** supervisor на задачу (охватывает подзадачи).
+- **Проверяет каждый завершённый шаг** read-only: после завершения каждого узла оркестратор даёт supervisor посмотреть результат шага (≈один вызов LLM/шаг), копя контекст в **своей сессии `resume_own_lineage`** (независима от editing-lineage авторов). _В P1 own-session — in-memory; durable `resume_own_lineage` (переживает рестарт) формализуется в [P2.2](#p22--durable-sessions-ядровая-возможность)._
+- **Advisory, не блокирует.** Не выдаёт `rework` / не переоткрывает / не маршрутизирует — пошаговые наблюдения и финал записываются и показываются человеку, но маршрут движка не меняют. Блокирующие пер-стейдж гейты — опциональные in-flow `review`/`test_quality`/operator-defined evaluator-узлы (умеют `rework` → `fixing`). Заменяет старый summary-провайдер и узлы `supervise_impl`/`supervise_fix` — их в графе нет.
+- **Финал — один на задачу.** При закрытии **всей задачи** (все подзадачи готовы) синтезирует накопленный контекст → `summary` + advise. **Не** per-subtask. `summary` пишется **всегда** (`config.summary_enabled` убирается).
+- **Конфиг оператора, не задачи/не flow-графа.** Модель, `reasoning`/effort и промпт (`role_file`) — в `config.yaml` (новая секция `supervisor:`), под тем же потолком, что узлы: `model`/`reasoning` ∈ allowlist, `role_file` — path-containment, `permission_profile` принудительно `read-only` ([security-ceiling.md](security-ceiling.md) §3).
+- **Будущее (вне scope P2):** когда добавим память оркестратора — supervisor становится **владельцем/контролёром памяти**, обогащая контексты конкретных узлов. Поэтому он и спроектирован как сквозной наблюдатель, а не финальный проход.
 
 ### Advisory — что это, кому, где
 
-«Advisory» = вывод, который **записывается и показывается человеку, но не меняет маршрут движка** (не уводит в `fixing`, не переоткрывает задачу). Поскольку supervisor терминален, любые его findings advisory по **позиции** (а не по severity):
+«Advisory» = вывод, который **записывается и показывается человеку, но не меняет маршрут движка** (не уводит в `fixing`, не переоткрывает задачу). И пошаговые наблюдения supervisor, и его финальные findings — advisory **по конструкции** (он не маршрутизирует вовсе):
 
 - **Кто получает:** человек — автор задачи / ревьюер. Через (1) тело PR (summary становится описанием PR) и (2) Telegram-уведомление о завершении. Движок его для маршрутизации **не потребляет**.
 - **Где сохраняется:** (1) артефакт `summary.{md,json}` — основной носитель, advisory-замечания отдельной секцией («caveats / follow-ups»); (2) immutable-строка в таблице `evaluations` (вердикт + `findings_json`) — для аудита/recovery; raw-данные остаются в `state.db`.
@@ -33,12 +36,13 @@
 
 ### Touchpoints
 
-- [`core/flow/nodes/evaluator.py`](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py) (создан минимально в P1.3 для review) — носитель **evaluator-примитива** (вердикт + findings) для in-flow ролей `review`/`test_quality`. Константный supervisor переиспользует те же типы вердикта/findings, но исполняется не как узел, а терминальным проходом оркестратора.
-- **Новый метод** [`core/loop_control.py`](../../../src/wastech_orchestrator/core/loop_control.py) `record_rework(...)` рядом с `enter_fixing` (≈63) — **единый** путь учёта rework для **in-flow петель** (`test_fix`, `review_fix`); никогда не двойной инкремент `fix_iterations`. Константный supervisor его **не зовёт** (он не делает rework).
-- [`state_store.py`](../../../src/wastech_orchestrator/state_store.py): **новая feature-таблица** `evaluations` (immutable-вердикты), schema bump. Локальный лимит rework in-flow evaluator'ов **выводится подсчётом** применённых вердиктов (как supervisor §rework), без отдельного мутабельного счётчика. Терминальный вердикт supervisor пишется сюда же — для аудита.
-- [`core/orchestrator.py`](../../../src/wastech_orchestrator/core/orchestrator.py) (≈1345, `_publish`-обвязка): **константный supervisor-проход** перед `publish` — свежий read-only проход, синтезирует summary + advisory; переиспользует существующую summary-запись (`summary.{md,json}` или детерминированный fallback). **Отдельный summary-провайдер не вводится никогда.**
+- [`core/flow/nodes/evaluator.py`](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py) (создан минимально в P1.3 для review) — носитель **evaluator-примитива** (вердикт + findings) для in-flow ролей `review`/`test_quality`. Supervisor переиспользует те же типы findings, но исполняется не как узел, а оркестраторным хуком.
+- **Новый метод** [`core/loop_control.py`](../../../src/wastech_orchestrator/core/loop_control.py) `record_rework(...)` рядом с `enter_fixing` (≈63) — **единый** путь учёта rework для **in-flow петель** (`test_fix`, `review_fix`); никогда не двойной инкремент `fix_iterations`. Supervisor его **не зовёт** (он не делает rework).
+- [`core/orchestrator.py`](../../../src/wastech_orchestrator/core/orchestrator.py): **post-node хук** (рядом с `_engine_post_node` ≈1046) — после **каждого** завершённого узла зовёт supervisor-наблюдение (read-only, в своей `resume_own_lineage`-сессии). **Финальный** `summary` + advise — при терминале **всей задачи** (`_publish`-обвязка ≈1345), синтез накопленного контекста; переиспользует существующую summary-запись (`summary.{md,json}` или детерминированный fallback). `config.summary_enabled` **убирается** — summary пишется всегда. Отдельный summary-провайдер не вводится.
+- [`state_store.py`](../../../src/wastech_orchestrator/state_store.py): **новая feature-таблица** `evaluations` (immutable), schema bump. Хранит: пошаговые supervisor-наблюдения, финальный supervisor-итог, и in-flow evaluator-вердикты. Локальный лимит rework in-flow evaluator'ов **выводится подсчётом** вердиктов, без мутабельного счётчика.
+- [`core/flow/snapshot.py`](../../../src/wastech_orchestrator/core/flow/snapshot.py)/[`validator.py`](../../../src/wastech_orchestrator/core/flow/validator.py): **удалить мёртвый** `evaluation_kind: final_handoff` (supervisor — не узел; решение P.5c).
 - `config.yaml`: **новая секция** `supervisor: { model, reasoning, role_file }`; валидируется под потолком (provider-allowlist + path-containment + `read-only`).
-- Recovery: терминальный вердикт неймспейснут по `execution_unit` (`(task_id, subtask_order)`); resume перед `publish` не дублирует summary, если вердикт уже записан. In-flow evaluator-вердикты неймспейснуты по `source_node_run_id`.
+- Recovery: supervisor own-session регидратируется (durable — P2.2); финальный summary не дублируется на resume; пошаговые наблюдения неймспейснуты по `(execution_unit, source_node_run_id)`. In-flow evaluator-вердикты — по `source_node_run_id`.
 
 ### Новые типы / схема
 
@@ -54,37 +58,41 @@ class Finding:
 @dataclass(frozen=True)
 class EvaluationRow:
     task_id: str
-    node_id: str | None           # узел-evaluator; None = терминальный supervisor-слой
-    source_node_run_id: int | None # какой node_run оценивался (None для терминального слоя)
+    node_id: str | None           # in-flow evaluator-узел; None = supervisor-слой
+    source_node_run_id: int | None # какой шаг/node_run оценивался
     subtask_order: int | None
-    verdict: str                  # accept | rework  (терминальный supervisor — всегда accept)
+    kind: str                     # in_flow_verdict | supervisor_step | supervisor_final
+    verdict: str                  # accept|rework (in-flow); advisory (supervisor — не маршрутизирует)
     findings_json: str            # сериализованные Finding[]
     created_at: str
-    # UNIQUE неявно: append-only; in-flow лимит выводится COUNT(verdict='rework')
+    # append-only; in-flow лимит = COUNT(kind='in_flow_verdict' AND verdict='rework')
 ```
 
-Вердикт строго валидируется ([flow-contract.md](flow-contract.md) §2.2): для **in-flow** evaluator'ов `rework` требует ≥1 `medium`/`high`; `accept` не содержит блокирующих; `low` — advisory. Для **терминального supervisor** вердикт всегда `accept` (он не маршрутизирует), findings — advisory.
+Вердикт строго валидируется ([flow-contract.md](flow-contract.md) §2.2): для **in-flow** evaluator'ов `rework` требует ≥1 `medium`/`high`; `accept` не содержит блокирующих; `low` — advisory. **Supervisor** маршрут не выбирает — его пошаговые наблюдения (`supervisor_step`) и финал (`supervisor_final`) всегда advisory.
 
 ### Поведение
 
 - **In-flow evaluator'ы** (`review`/`test_quality`) — read-only, `fresh_disposable`. Исход `accept` → следующий узел; `rework` → ребро на `fixing`. Прохождение rework-ребра зовёт `record_rework` → один инкремент `fix_iterations` (тот же путь, что `enter_fixing` для test-петли — без двойного счёта). Локальный per-instance лимит (`max_rework_per_stage`/`budget`) — `COUNT` rework-вердиктов; превышение учитывается движком как исчерпание budget-ребра.
-- **Константный supervisor** — свежий read-only проход на уровне оркестратора перед `publish`: синтезирует принятый итог, пишет `summary.{md,json}`, прикрепляет advisory-findings. **Не может** выдать rework / переоткрыть задачу / запустить петлю. Запускается **всегда**, независимо от формы flow (включая degenerate `implementation → publish`).
+- **Supervisor** — постоянный read-only наблюдатель на уровне оркестратора: после **каждого** завершённого шага получает его результат и копит контекст в своей `resume_own_lineage`-сессии (≈один вызов LLM/шаг); при закрытии **всей задачи** (все подзадачи) синтезирует `summary` + advise (всегда, не per-subtask). **Не может** выдать rework / переоткрыть задачу / маршрутизировать. Запускается **всегда**, при любой форме flow (включая degenerate `implementation → publish`).
 
 ### Тесты
 
 Адаптированные на новую модель (из [supervisor §minimum tests](../outdated/supervisor_quality_gate.md#minimum-tests)):
 
-- `test_supervisor_runs_above_any_flow` — supervisor пишет summary даже для degenerate-flow (один implement-агент, без checks/review).
-- `test_supervisor_terminal_cannot_rework` — терминальный supervisor пишет summary, вердикт всегда `accept`, не может выдать rework/переоткрыть.
-- `test_supervisor_advisory_persisted_and_surfaced` — advisory-findings попадают в `summary.{md,json}` + `evaluations`, отражаются в PR-описании; маршрут не меняют.
-- `test_supervisor_config_from_config_yaml` — `model`/`reasoning`/`role_file` берутся из `config.yaml` и валидируются под потолком (read-only, allowlist, containment).
+- `test_supervisor_runs_above_any_flow` — supervisor работает + пишет summary даже для degenerate-flow (один implement-агент, без checks/review).
+- `test_supervisor_observes_each_completed_step` — после каждого завершённого узла идёт read-only supervisor-наблюдение в его `resume_own_lineage`-сессии.
+- `test_supervisor_advisory_never_reworks` — supervisor не может выдать rework / переоткрыть / маршрутизировать; наблюдения и финал advisory.
+- `test_supervisor_summary_once_per_whole_task_not_subtask` — при decomposition summary пишется один раз при закрытии всей задачи, не на каждую подзадачу.
+- `test_summary_always_written_no_config_gate` — `config.summary_enabled` удалён; summary пишется всегда.
+- `test_supervisor_config_from_config_yaml` — `model`/`reasoning`/`role_file` из `config.yaml`, валидируются под потолком (read-only, allowlist, containment).
+- `test_supervisor_own_session_not_editing_lineage` — supervisor в `resume_own_lineage`, не читает/не пишет editing-lineage авторов.
 - `test_record_rework_single_increment` — один rework in-flow evaluator'а = один `fix_iterations` (нет двойного счёта с test-петлёй).
-- `test_evaluation_immutable_and_counted` — вердикты append-only; in-flow лимит = COUNT, не мутабельный счётчик.
-- `test_supervisor_recovery_terminal_verdict` — resume перед publish не дублирует summary, если терминальный вердикт уже записан.
+- `test_evaluation_immutable_and_counted` — вердикты/наблюдения append-only; in-flow лимит = COUNT, не мутабельный счётчик.
+- `test_supervisor_recovery` — resume не дублирует финальный summary; накопленный контекст регидратируется (durable — P2.2).
 
 ### Exit
 
-Supervisor — постоянный конфигурируемый слой над **любым** flow (summary + advisory), не узел; блокирующих supervisor-узлов в графе нет; отдельного summary-провайдера нет; evaluator-примитив готов для in-flow `review`/`test_quality`.
+Supervisor — постоянный конфигурируемый слой-наблюдатель над **любым** flow (per-step advisory весь цикл + финальный summary/advise один на задачу, всегда), не узел; блокирующих supervisor-узлов в графе нет; `final_handoff` удалён; evaluator-примитив готов для in-flow `review`/`test_quality`.
 
 ---
 
@@ -117,10 +125,10 @@ class EditingLineageRow:
 
 ### Поведение
 
-- `editing_lineage` (implementation/fixing) — грузят и обновляют активную editing-сессию из стора. `fresh_disposable` (evaluator, supervisor) — свежая сессия, не читает/не пишет lineage. `resume_own_lineage` (research critic, P3) — продолжает **свою** сессию.
+- `editing_lineage` (implementation/fixing) — грузят и обновляют активную editing-сессию из стора. `fresh_disposable` (in-flow evaluator) — свежая сессия, не читает/не пишет lineage. `resume_own_lineage` — продолжает **свою** сессию: research critic (P3) **и supervisor-слой** (своя сессия на весь цикл задачи).
 - **Affinity — общий YAML-механизм.** `lineage_affinity: <node_id>` на узле-авторе означает «продолжить editing-сессию указанного узла»; ядро это гарантирует (durable sessions), **flow только декларирует связь** ([flow-contract.md](flow-contract.md) §4). В packaged [implementation.yaml](../../../src/wastech_orchestrator/core/flow/packaged/implementation.yaml) это используется так: `lineage_affinity: implementation` на `fixing` (≈54) → fixing продолжает editing-сессию узла implementation. **Это не захардкоженное правило `fixing→implementation`, а то, что объявил данный flow** — оператор волен связать любые два узла-автора (или не связывать вовсе). Валидатор проверяет, что `lineage_affinity` указывает на существующий `agent`-узел с `editing_lineage` ([validator.py](../../../src/wastech_orchestrator/core/flow/validator.py) ≈165). Конфликтующий per-attempt провайдер/модель отвергается, пока affinity активна.
 - **`session_unavailable`** (потерян транскрипт/провайдер сбросил сессию): ретрай без resume (fresh), **не тратит** fix-итерацию. Отличается от quality-fail (тот тратит). Новый error-подкласс или флаг в router-обработке.
-- **Lineage переживает рестарт**: editing_lineage регидратируется до вызова провайдера (recovery, [happy-path.md](happy-path.md) §6). Evaluator/supervisor её **не перетирают** (fresh_disposable).
+- **Lineage переживает рестарт**: editing_lineage регидратируется до вызова провайдера (recovery, [happy-path.md](happy-path.md) §6). In-flow evaluator её **не трогает** (`fresh_disposable`); supervisor работает в **своей** `resume_own_lineage`-сессии, editing-lineage авторов не перетирает.
 
 ### Тесты
 
@@ -129,7 +137,7 @@ class EditingLineageRow:
 - `test_claude_resume_uses_lineage_session` — `--resume` берёт session_id из lineage-стора.
 - `test_codex_exec_resume_parses_thread_started` — Codex `exec resume <id>`, парс `thread.started`.
 - `test_affinity_resumes_declared_node_session` — узел с `lineage_affinity: X` продолжает editing-сессию узла X (в packaged-флоу: fixing → implementation).
-- `test_evaluator_fresh_disposable_does_not_touch_lineage` — evaluator/supervisor не читают/не пишут editing_lineage.
+- `test_evaluator_fresh_disposable_does_not_touch_lineage` — in-flow evaluator (`fresh_disposable`) и supervisor (`resume_own_lineage`) не читают/не пишут editing_lineage авторов.
 - `test_session_unavailable_retries_without_resume_no_fix_iteration` — потеря сессии → fresh-ретрай, `fix_iterations` не растёт.
 - `test_raw_session_id_redacted_in_artifacts` — raw session-id только в state.db; в логах/argv/артефактах — redacted.
 - `test_lineage_survives_restart` — editing_lineage регидратируется на resume.
@@ -239,5 +247,5 @@ P1 (engine + evaluator(review) + node_runs)
 ## Пересечения для ревью (потенциальные противоречия)
 
 - **Единый учёт rework.** `record_rework` (P2.1) обслуживает **только in-flow петли** (`test_fix`, `review_fix`) и делит **один** инкремент `fix_iterations`. Константный supervisor rework не делает, поэтому риск двойного счёта на ребре `supervise_fix → fixing` (был в старой модели) **снят вместе с удалением supervise-узлов**. Остаётся свести `testing fail → fixing` и `review rework → fixing` к одному helper в `loop_control`; анкерит `test_record_rework_single_increment`.
-- **session_scope evaluator/supervisor.** Валидатор P0.3 запрещает `editing_lineage` для evaluator ([validator.py](../../../src/wastech_orchestrator/core/flow/validator.py) ≈215); константный supervisor — тоже `fresh_disposable`. P2.2 не должен это ослаблять.
+- **session_scope evaluator/supervisor.** Валидатор P0.3 запрещает `editing_lineage` для evaluator ([validator.py](../../../src/wastech_orchestrator/core/flow/validator.py) ≈215); in-flow evaluator — `fresh_disposable`, supervisor — `resume_own_lineage` (своя сессия, не editing-lineage авторов). P2.2 не должен это ослаблять.
 - **Конфигурация supervisor.** Секция `config.yaml:supervisor` валидируется тем же потолком, что и узлы (read-only, allowlist `model`/`reasoning`, containment `role_file`). Задача и flow её не переопределяют ([security-ceiling.md](security-ceiling.md) §2 порядок authority).

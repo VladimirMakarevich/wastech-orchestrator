@@ -4,7 +4,7 @@
 
 Сквозной прогон целевой v1-системы на примере `implementation`-flow, задействующий **максимум** возможностей (конфигов и функций) в одном happy-path — от `worc install` до влитого PR. Это витрина того, как складываются вместе ядро ([index.md](index.md)), контракт ([flow-contract.md](flow-contract.md) §7) и потолок ([security-ceiling.md](security-ceiling.md)); служит ещё и нарративной co-design-проверкой (всё ли стыкуется).
 
-Иллюстрируется **target**-состояние v1 (с константным supervisor-слоем / durable sessions / hybrid testing из [index.md](index.md) §8) — не текущий код. Supervisor здесь — **не узел графа**, а слой оркестратора над flow (summary + терминальный advisory-контроль перед publish; см. §4.5). Метки `[задействует: …]` отмечают покрытую возможность/конфиг; сводный чеклист — в §6.
+Иллюстрируется **target**-состояние v1 (с константным supervisor-слоем / durable sessions / hybrid testing из [index.md](index.md) §8) — не текущий код. Supervisor здесь — **не узел графа**, а постоянный слой-наблюдатель оркестратора: живёт весь цикл задачи, проверяет каждый завершённый шаг (read-only, advisory), а в конце пишет summary + advise (см. §4.5). Метки `[задействует: …]` отмечают покрытую возможность/конфиг; сводный чеклист — в §6.
 
 ## 0. Диаграммы
 
@@ -39,7 +39,7 @@ flowchart TD
     review -->|rework · loop review_fix| fixing
     fixing --> tq
     commit -->|следующая подзадача| impl
-    commit -->|последняя| sup["supervisor-слой<br/>константа · summary + advisory<br/>(оркестратор, не узел)"]
+    commit -->|последняя| sup["supervisor-слой (весь цикл · не узел)<br/>наблюдает каждый шаг · advisory<br/>финал: summary + advise"]
     sup --> publish["publish<br/>commit + audit + push + PR + auto-merge"]
     publish --> done(["DONE"])
     review -.->|бюджеты исчерпаны| manual(["MANUAL_ACTION_REQUIRED"])
@@ -232,9 +232,9 @@ Add a configurable per-IP rate limiter to the public API gateway...
 
 `[задействует: review rework → fixing (loop review_fix), fixing affinity (durable session resume), session_unavailable-путь (ретрай без resume не тратит fix-итерацию — на случай потери транскрипта), test-driven fix loop, единый fix_iterations (record_rework без двойного инкремента — оба in-flow триггера делят один путь), терминальность бюджетов → manual]`
 
-### 4.5. supervisor-слой (константа над flow · не узел · перед publish)
+### 4.5. supervisor-слой (постоянный наблюдатель весь цикл · не узел)
 
-После принятой последней подзадачи — терминальный проход **константного supervisor-слоя оркестратора** (а не узла графа), который запускается поверх **любого** flow: свежий read-only синтез принятого итога (`what`/`how`/`integration`/`why`) + advisory-замечания; ядро валидирует и пишет `summary.md`/`summary.json` (advisory дублируется в `evaluations`). **Не может** выдать rework/переоткрыть задачу. Конфигурируется из `config.yaml: supervisor { model, reasoning, role_file }` под потолком (read-only). `[задействует: константный supervisor-слой (summary + advisory) над flow, конфиг через config.yaml, ядро пишет summary, терминальный — без rework]`
+**Supervisor-слой оркестратора** стартовал при старте задачи и **наблюдал каждый завершённый шаг** по ходу §4.3–4.4 (read-only, своя `resume_own_lineage`-сессия, ~1 вызов/шаг, advisory — маршрут не меняет; пошаговые наблюдения в `evaluations`). После закрытия **всей задачи** (обе подзадачи готовы) синтезирует накопленный контекст → `summary` + advise (`what`/`how`/`integration`/`why` + caveats); ядро пишет `summary.md`/`summary.json` — **один на задачу, не на подзадачу**, и **всегда** (`config.summary_enabled` убран). **Не может** выдать rework/переоткрыть. Конфигурируется из `config.yaml: supervisor { model, reasoning, role_file }` под потолком (read-only). `[задействует: постоянный supervisor-слой (наблюдает каждый шаг + финальный summary/advise), своя resume_own_lineage-сессия, summary всегда, конфиг через config.yaml, advisory без rework]`
 
 ### 4.6. publish (core-owned)
 
@@ -259,7 +259,7 @@ Add a configurable per-IP rate limiter to the public API gateway...
 | Конфиг | repo, orchestrator (auto_mode/poll), agents (allowed, лимиты, providers со всеми полями), security (4 ключа), validation, checks.discovery, git (PR/footprint/auto_merge\*), telegram, skills, prompt_audit |
 | Flow-данные | граф узлов, рёбра accept/rework/fail, бюджеты, decomposition, session_scope, lineage_affinity, output/publishing/network/permission_ceiling, role-MD |
 | Интейк | watch + periodic git sync, single-slot, validation §19 (Phase A/B), injection-scan, dup-id 2-source, quarantine, flow-резолюция + fingerprint, branch prep |
-| Узлы | agent (read-only/workspace-write), evaluator (test_quality/review), checks (command_profile + discovery + approval + mutation-guard), hitl (question/approval), publish; **константный supervisor-слой** (summary + advisory) — над flow, не узел |
+| Узлы | agent (read-only/workspace-write), evaluator (test_quality/review), checks (command_profile + discovery + approval + mutation-guard), hitl (question/approval), publish; **постоянный supervisor-слой** (наблюдает каждый шаг + финальный summary, своя resume_own_lineage) — над flow, не узел |
 | Петли | review rework, test-driven fix, единый fix_iterations + локальные циклы (оба in-flow триггера через `record_rework`), терминальность → manual |
 | Сессии | durable editing_lineage, fixing-affinity (resume), session_unavailable-путь, fresh_disposable для evaluator |
 | HITL | refinement question, planning approval, dangerous-diff approval, check-set-change approval — все durable |

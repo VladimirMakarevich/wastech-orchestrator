@@ -20,16 +20,16 @@
 | PRE.1 | `provider`/`model`/`effort` на узле flow | **High** | да — P2.2 durable провайдер-aware опирается на выбор |
 | PRE.1a | config-aware валидация `provider ∈ agents.allowed` | **Medium** | часть PRE.1 (тянет вперёд отложенный [P4.2](p4-operator.md)) |
 | PRE.2 | `auto_merge` task-wins | **Low** | нет — независимо |
-| PRE.3 | сверка остатка per-task оверрайдов (`decompose`/`refined`/per-task `model`/`reasoning`/`agents`) | **Medium** | частично — нужна ясность контракта (можно отложить в P4) |
+| PRE.3 | чистая задача: убрать остаток per-task оверрайдов (`decompose`/`refined`/per-task `model`/`reasoning`/`agents`) | **Medium** | да — контракт «чистой задачи» под P2 |
 | PRE.4 | верификация Codex `exec resume` на реальном CLI | **Medium** | да — P2.2 affinity опирается на резюм; де-риск заранее |
 
-### Открытые вопросы (уточнить до старта P2)
+### Решения по вопросам контракта (зафиксировано 2026-06-19)
 
-1. **`Stage`-enum и роутинг (под PRE.1).** Provider-на-узле пересекается со стадийно-ключённым роутингом — `Stage` сохранён до P4 ([memory: flow-engine-p1-build]). Тянем полный node-based routing сейчас (убрать `Stage`-маршрутизацию) **или** кладём `provider`-на-узле поверх `Stage` (минимальный путь), оставив удаление `Stage` на P4? Учесть: `Stage` ещё используется в резолвере skip-фактов (`config.<stage>_enabled` → `Stage(name)`, [orchestrator.py](../../../src/wastech_orchestrator/core/orchestrator.py) ≈1036).
-2. **Судьба `config.yaml agents.routing`.** Если каждый узел задаёт `provider`, нужен ли `agents.routing` вообще? Предложение: оставить как дефолт при `provider: null` + источник fallback-цепочки. Зафиксировать.
-3. **`git.auto_merge_allow_per_task` (под PRE.2).** Удалить ключ совсем или оставить как no-op до общей чистки? Config-bump в любом случае.
-4. **Граница задачи (под PRE.3).** `decompose` → блок `decomposition:` во flow? `refined` → derived-вход (`derived.needs_refinement`)? per-task `model`/`reasoning`/`agents` — вычищать сейчас или отложить в P4? Что отложено — **явно пометить**, чтобы P2 не строился на двусмысленном контракте.
-5. **Supervisor-слой (уточнить на старте P2.1, не блокирует пред-работу).** Запускается per-subtask или один раз в конце (взаимодействие с decomposition)? `summary` пишется всегда или остаётся config-тогл (`config.summary_enabled`)? Когда удаляем ставший мёртвым `evaluation_kind: final_handoff` из кода ([snapshot.py](../../../src/wastech_orchestrator/core/flow/snapshot.py)/validator)?
+1. **`Stage`-enum (под PRE.1) — РЕШЕНО (2026-06-19):** роутинг (кто исполняет узел) становится **node-based сейчас** — следствие удаления `agents.routing` (вопрос 2): узел задаёт `provider`, иначе глобальный primary; стадийно-ключённого роутинга нет. Сам `Stage`-enum **остаётся только ради skip-фактов** (`config.<stage>_enabled` → `Stage(name)`, [orchestrator.py](../../../src/wastech_orchestrator/core/orchestrator.py) ≈1036) — его полное удаление + остаточная Stage-логика переносятся в **P4**. _Комментарий: трогаем только маршрутизацию (делаем node-based); сам enum — технический долг, дочищаем в P4, это не блокирует P2._
+2. **Судьба `config.yaml agents.routing` — РЕШЕНО (2026-06-19):** `agents.routing` (стадийный primary/fallback) **удаляется**. Вместо неё в `config.yaml providers` ровно один провайдер помечается `primary: true` (валидатор: **строго один** глобальный primary ∈ `agents.allowed`). Узел с `provider: null` → глобальный primary; провайдер-fallback (инфра-ошибка) → тоже глобальный primary — **единственный** fallback-таргет, без per-stage цепочек (если падает сам primary → infra-error/manual).
+3. **`git.auto_merge_allow_per_task` (под PRE.2) — РЕШЕНО (2026-06-19):** ключ **удаляется** из конфига. Глобальный `git.auto_merge` остаётся (включить auto-merge для всех задач инстанса); per-task `auto_merge` **побеждает** (PRE.2), поэтому отдельный гейт-разрешение не нужен. Config-bump.
+4. **Граница задачи (под PRE.3) — РЕШЕНО (2026-06-19):** из задачи убирается **всё** — `decompose` (решает flow-`decomposition:`), `refined` (refinement-skip определяется completeness-классификацией, `derived.needs_refinement` без флага), per-task `model`/`reasoning`/`agents` (переезжают на узел, PRE.1). Задача несёт только идентичность/диспетчеризацию + два санкционированных исключения: `stages.<>.enabled` (skip) и `auto_merge` (task-wins). Это и есть «чистая задача» из [index.md](index.md) §214 — теперь реализуется, не только декларируется.
+5. **Supervisor-слой — РЕШЕНО (2026-06-19):** модель — **постоянный слой-наблюдатель весь цикл задачи** (стартует на старте задачи, проверяет **каждый** завершённый шаг read-only через свою сессию `resume_own_lineage` ~1 вызов LLM/шаг, advisory — не блокирует; блокировка = in-flow `review`/`test_quality`). (a) **один** supervisor на весь цикл задачи **и всех подзадач**; `summary` + advise — только при закрытии **всей задачи**, не подзадачи. (b) `config.summary_enabled` **убирается**; summary пишется **всегда**. (c) мёртвый `evaluation_kind: final_handoff` удаляется **в P2.1**. _Будущее: когда добавим память оркестратора — supervisor становится владельцем/контролёром памяти, обогащает контексты конкретных узлов._ Полная модель — [flow-contract.md](flow-contract.md) §2.2 + [p2-implementation.md](p2-implementation.md) §P2.1.
 
 ### Уже закрыто (не висит)
 
@@ -43,21 +43,23 @@
 
 ### Поведение
 
-- Новое поле узла `provider` (агент/evaluator). `null` → дефолт-маршрут из `config.yaml` (обратная совместимость). Непустое → этот провайдер исполняет узел.
+- Новое поле узла `provider` (агент/evaluator). Непустое → этот провайдер исполняет узел. `null` → **глобальный primary** (`config.yaml providers.<p>.primary: true`, ровно один).
 - `provider` валидируется против `agents.allowed` (`config.yaml`); неизвестный/не-allowed → фатально на загрузке/preflight.
+- **`agents.routing` удаляется** (вопрос 2 решён): стадийного primary/fallback нет; дефолт и единственный fallback-таргет — глобальный primary.
 - `model`/`reasoning` уже поля узла ([flow-contract.md](flow-contract.md) §2.1) — остаются; вместе с `provider` дают полную спецификацию «кто/модель/effort» на узел.
-- Провайдер-fallback остаётся **только на инфраструктурные ошибки** (`binary_not_found`/`timeout`/`rate_limited`/…), никогда на провал качества — инвариант ядра не меняется.
+- Провайдер-fallback остаётся **только на инфраструктурные ошибки** (`binary_not_found`/`timeout`/`rate_limited`/…) и ведёт на глобальный primary; никогда на провал качества — инвариант ядра не меняется.
 
 ### Touchpoints
 
 - [`core/flow/schema.py`](../../../src/wastech_orchestrator/core/flow/schema.py) / [`snapshot.py`](../../../src/wastech_orchestrator/core/flow/snapshot.py) — поле `provider` в node-датаклассах + JSON-Schema (co-design `flow.schema.json`).
 - [`core/flow/validator.py`](../../../src/wastech_orchestrator/core/flow/validator.py) — `provider ∈ agents.allowed` (требует config-aware валидации — сейчас отложена в [P4.2](p4-operator.md); PRE.1 тянет её часть вперёд, либо валидирует формат на загрузке + allowed-проверку на реестре/preflight).
-- [`routing/router.py`](../../../src/wastech_orchestrator/routing/router.py) `resolve_route`, [`core/flow/wiring.py`](../../../src/wastech_orchestrator/core/flow/wiring.py) `build_stage_map` — выбор провайдера по полю узла, а не по `Stage`-ключу.
+- [`routing/router.py`](../../../src/wastech_orchestrator/routing/router.py) `resolve_route`, [`core/flow/wiring.py`](../../../src/wastech_orchestrator/core/flow/wiring.py) `build_stage_map` — выбор провайдера по полю узла `provider`, иначе глобальный primary; стадийный роутинг убирается.
+- [`config/schema.py`](../../../src/wastech_orchestrator/config/schema.py) / [`config/loader.py`](../../../src/wastech_orchestrator/config/loader.py) — **убрать `agents.routing`/`RouteConfig`**; добавить `providers.<p>.primary` (валидатор: **ровно один** primary ∈ `agents.allowed`). Config-bump.
 - [security-ceiling.md](security-ceiling.md) §3 — `provider` уже добавлен в allowlist (settable, ∈ `agents.allowed`).
 
-### Открытый вопрос / зависимость
+### Зависимость (уточнено вопросами 1–2)
 
-- **Пересечение с P4.** [memory: flow-engine-p1-build] фиксирует: `Stage`-enum **сохранён** для роутинга до P4 (роутер выбирает провайдера по `Stage`; полное удаление `Stage` + node-based routing — P4). Provider-на-узле — это и есть часть node-based routing. Решить: тянуть полное node-based routing вперёд (удалить `Stage`-маршрутизацию сейчас) **или** добавить `provider`-на-узле как дополнительный слой поверх `Stage` (минимальный путь), оставив удаление `Stage` на P4.
+- Provider-routing становится **node-based уже сейчас** (следствие удаления `agents.routing`): узел задаёт `provider`, иначе глобальный primary. `Stage`-enum остаётся **только** для skip-фактов до P4; полное удаление `Stage` и любой остаточной Stage-логики — P4.
 
 ### Exit
 
@@ -93,22 +95,20 @@ Auto-merge обходит человеческое ревью PR — но это
 
 ---
 
-## PRE.3 (связанное, к решению) — Сверка per-task оверрайдов дизайн↔код
+## PRE.3 — Чистая задача: убрать остаток per-task оверрайдов (РЕШЕНО 2026-06-19)
 
-Не отдельная новая задача, а фиксация существующего расхождения, которое PRE.1/PRE.2 частично закрывают. [index.md](index.md) §214 / [flow-contract.md](flow-contract.md) §10 декларируют «задача не патчит граф/параметры», но **код P1 всё ещё держит** на уровне задачи `model`/`reasoning`/`agents`-route/`refined`/`decompose`/`auto_merge` (`NormalizedTask`, [task/model.py](../../../src/wastech_orchestrator/task/model.py)).
-
-Целевое распределение после PRE.1/PRE.2:
+[index.md](index.md) §214 / [flow-contract.md](flow-contract.md) §10 декларировали «задача не патчит граф/параметры», но код P1 всё ещё держит на уровне задачи `model`/`reasoning`/`agents`-route/`refined`/`decompose` (`NormalizedTask`, [task/model.py](../../../src/wastech_orchestrator/task/model.py)). **Решение: убрать всё** — задача становится «чистой» (только идентичность/диспетчеризация + два исключения). Аспирация §214 теперь реализуется, а не только декларируется.
 
 | Ручка | Целевой дом | Статус |
 | --- | --- | --- |
-| `provider`/`model`/`reasoning` | узел flow | PRE.1 |
-| `auto_merge` | задача (task-wins) + config | PRE.2 |
-| `stages.<>.enabled` | задача (санкц. исключение) | сделано (config v10) |
-| `decompose` | блок `decomposition:` flow | к решению |
-| `refined` | операционный вход → `derived.needs_refinement` | к решению |
-| `agents`-route (per-task провайдер) | удаляется (→ узел, PRE.1) | PRE.1 |
+| `provider`/`model`/`reasoning` | узел flow | убрать из задачи (PRE.1) |
+| `agents`-route (per-task провайдер) | узел flow | убрать из задачи (PRE.1) |
+| `decompose` | блок `decomposition:` flow (gate решает) | **убрать из задачи** |
+| `refined` | нет — refinement-skip по completeness (`derived.needs_refinement` без флага) | **убрать из задачи** |
+| `auto_merge` | задача (task-wins) + config | оставить (PRE.2) |
+| `stages.<>.enabled` | задача (санкц. исключение) | оставить (config v10) |
 
-Решить до P2: ландить ли остаток (`decompose`/`refined`/удаление per-task `agents`/`model`/`reasoning`) сейчас или отложить в P4 «операторская поверхность». Что отложено — явно пометить, чтобы P2 не строился на двусмысленном контракте.
+Итог: задача несёт `id`/`title`/`task_type`/`contacts`/`prompt_audit`/`pr_title` + `stages.<>.enabled` + `auto_merge`. Touchpoints: `task/model.py` `NormalizedTask` (срезать поля), `task/validation_gate.py` (frontmatter-валидация), парсер, использования в `core/orchestrator.py`/роутинге, тесты, доки §214/§10. Ничего не откладываем в P4 — задача чистится здесь.
 
 ---
 
