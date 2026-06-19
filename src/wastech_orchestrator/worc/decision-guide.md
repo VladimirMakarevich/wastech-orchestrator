@@ -54,7 +54,7 @@ What each skip does:
 | `fixing` | The first test/review failure goes straight to `manual_action_required` (no recovery loop). |
 | `summary` | A stub summary instead of a written one. |
 
-**Skipping `review` is high-risk** — it removes the only agent quality gate before commit/PR. It is rejected (`review_skip_not_allowed`) unless the operator set `agents.allow_review_skip: true`. Do not skip review unless you know that flag is enabled. The effective skip set is the union of the operator's global `agents.skip_stages` and your per-task skips; a globally skipped stage cannot be re-enabled per task.
+**Skipping `review` is high-risk** — it removes the only agent quality gate before commit/PR. It is rejected (`review_skip_not_allowed`) unless the operator set `agents.allow_review_skip: true`. Do not skip review unless you know that flag is enabled. Stage-skip is per-task only (`stages.<stage>.enabled: false`); the global `agents.skip_stages` list was removed in config v10.
 
 ## Per-stage `model` / `reasoning`
 

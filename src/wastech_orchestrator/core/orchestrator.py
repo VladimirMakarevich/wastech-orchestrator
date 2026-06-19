@@ -207,15 +207,15 @@ def _artifact_kind(name: str) -> str:
     return _ARTIFACT_KINDS.get(name, name)
 
 
-def effective_skip(config: OrchestratorConfig, task: NormalizedTask) -> frozenset[Stage]:
-    """The stages skipped for ``task``: the union of the global config list and the task's own
-    ``stages.<stage>.enabled: false`` overrides (stage-skip control).
+def effective_skip(task: NormalizedTask) -> frozenset[Stage]:
+    """The stages skipped for ``task`` — its own ``stages.<stage>.enabled: false`` overrides
+    (per-task stage-skip control; flow-contract §10 bounded exception).
 
-    Union, no opt-out: a stage skipped globally cannot be re-enabled per task. Validation has
-    already guaranteed every member is in ``SKIPPABLE_STAGES`` and that any ``review`` skip is
-    permitted, so the orchestrator can trust this set unconditionally.
+    Validation has already guaranteed every member is in ``SKIPPABLE_STAGES`` and that any
+    ``review`` skip is permitted (``agents.allow_review_skip``), so the orchestrator can trust this
+    set unconditionally.
     """
-    return frozenset(config.agents.skip_stages) | task.disabled_stages()
+    return task.disabled_stages()
 
 
 @dataclass(frozen=True)
@@ -346,7 +346,7 @@ class Orchestrator:
             status=Status.VALIDATED,
             counters=LoopCounters(),
             decomposition=DecompositionDecision(accepted=False, reason="pending", n=1),
-            skip=effective_skip(self._config, task),
+            skip=effective_skip(task),
             skill_inventory=self._skill_scanner.collect(),
         )
         try:
@@ -721,7 +721,7 @@ class Orchestrator:
             branch=row.branch or "",
             slug=row.slug or slugify(task.title),
             plan_path=str(task_artifact_dir(self._artifacts_root, plan.task_id) / "plan.md"),
-            skip=effective_skip(self._config, task),
+            skip=effective_skip(task),
             skill_inventory=self._skill_scanner.collect(),
         )
 

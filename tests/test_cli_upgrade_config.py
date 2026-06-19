@@ -20,10 +20,9 @@ from wastech_orchestrator.config.validation import validate_config
 
 
 def _old_config_text(**agent_overrides: object) -> str:
-    """The packaged template as it would look one version back: no skip-stage keys, version 3."""
+    """The packaged template as it would look at an older version (no ``allow_review_skip``, v3)."""
     m = packaged_template_mapping()
     m["schema_version"] = 3
-    m["agents"].pop("skip_stages", None)
     m["agents"].pop("allow_review_skip", None)
     m["agents"].update(agent_overrides)
     return yaml.safe_dump(m, sort_keys=False)
@@ -42,7 +41,7 @@ def test_upgrade_adds_new_keys_and_bumps_version(tmp_path: Path) -> None:
 
     data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
     assert data["schema_version"] == CONFIG_SCHEMA_VERSION
-    assert "skip_stages" in data["agents"]
+    assert "skip_stages" not in data["agents"]  # removed key is never re-added
     assert "allow_review_skip" in data["agents"]
     # A timestamped backup of the original was written, and the result loads + validates clean.
     assert len(list(tmp_path.glob("config.yaml.bak-*"))) == 1
@@ -65,7 +64,7 @@ def test_dry_run_writes_nothing(tmp_path: Path, capsys: pytest.CaptureFixture[st
     assert list(tmp_path.glob("config.yaml.bak-*")) == []  # no backup
     out = capsys.readouterr().out
     assert "dry-run" in out
-    assert "skip_stages" in out
+    assert "allow_review_skip" in out  # a key the upgrade adds (v3 → current)
 
 
 def test_already_current_is_noop(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

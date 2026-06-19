@@ -49,8 +49,9 @@ flow:
   session_scope: editing_lineage # editing_lineage | fresh_disposable | resume_own_lineage
   lineage_affinity: null # id узла, чью editing-сессию переиспользовать (см. §5)
   permission_profile: workspace-write # ≤ permission_ceiling (clamp в C)
+  provider: null # claude | codex; кто исполняет узел. null = дефолт-маршрут из config.yaml. ∈ agents.allowed
   model: null # пусто = дефолт провайдера
-  reasoning: null # low|medium|high|xhigh|max (как в configuration.md)
+  reasoning: null # low|medium|high|xhigh|max (как в configuration.md) — «effort» узла
   timeout_seconds: 7200
   output_schema: null # необязательная схема structured_output
   optional: false # допускается детерминированный skip (как refinement)
@@ -60,6 +61,7 @@ flow:
 
 - **Входы** — только провайдер-нейтральные пути к артефактам (task/plan/diff/…); тело задачи не встраивается в argv. Маппится на нынешний `AgentRunRequest`.
 - **Выходы** — `final_message`, `structured_output`, нормализованный `session_id` (raw только в state.db), артефакты stdout/events (после redaction).
+- **Узел сам выбирает исполнителя** (решение 2026-06-19): `provider` (`claude`/`codex`), `model` и `reasoning` («effort») — поля **узла** во flow YAML, так что каждый узел задаёт «кто/какая модель/какой effort». `provider` валидируется против `agents.allowed` (`config.yaml`); `null` → дефолт-маршрут из `config.yaml`. Это переносит выбор провайдера с per-task `agents`-оверрайда и со стадийно-ключённого `agents.routing` **на узел**; провайдер-fallback остаётся **только на инфраструктурные ошибки** (не на провал качества). Ландинг — [p2-pre-work.md](p2-pre-work.md).
 - **crew не поддерживается** — мультиагентность выражается узлами графа (несколько `agent`/`evaluator`-узлов с рёбрами), а не несколькими агентами внутри одного узла: так у каждого агента свой permission-профиль, session-lineage и чекпоинт, и шаг остаётся resume-able. Возможный будущий параллелизм — явная map-конструкция движка (как decomposition), не «crew»-узел.
 - **dangerous-diff** — после любого `agent`-узла с `workspace-write` ядро **автоматически** прогоняет детерминированную классификацию опасного diff и, при необходимости, HITL-одобрение (`core/dangerous_diff.py`). Это core-owned guard: flow его не объявляет и **не может отключить** (security). Конфигурируема только политика одобрения в пределах, разрешённых C.
 
@@ -469,6 +471,6 @@ flow:
 - **Supervisor — константный слой над flow, не evaluator-узел** (решение 2026-06-19): summary + терминальный advisory-контроль на уровне оркестратора, запускается поверх **любого** flow (включая degenerate из одного агента); конфигурируется через `config.yaml` (`supervisor: { model, reasoning, role_file }`) под потолком (read-only, allowlist, containment); не может `rework`/переоткрыть. Блокирующих per-stage supervisor-узлов и отдельного summary-провайдера в графе нет; блокирующие пер-стейдж гейты выражаются опциональными `review`/`test_quality`/operator-defined evaluator-узлами.
 - **Условный пропуск узла — единый детерминированный предикат `when`** (резолвится из config/task на загрузке, не агентом); `optional`/`enabled`/`enabled_policy` сводятся к нему (примеры §7–§8 ещё в старой форме, мигрируют в P0).
 - **Decomposition — только implementation в v1**; research/audit линейны.
-- **Per-task оверрайды графа/узлов не поддерживаются**: flow — единственный источник графа и параметров узлов; задача несёт только идентичность/диспетчеризацию (`task_type`) + операционные входы (`contacts`, `prompt_audit`). Вариация = другой flow.
+- **Per-task оверрайды графа/узлов не поддерживаются — с одним ограниченным санкционированным исключением** (решение 2026-06-19). flow — источник графа и параметров узлов; задача несёт идентичность/диспетчеризацию (`task_type`) + операционные входы (`contacts`, `prompt_audit`). Вариация поведения = другой flow. **Исключение:** per-task `stages.<stage>.enabled: false` может **выключить** заранее объявленный skippable-узел (из `SKIPPABLE_STAGES`: `planning`/`testing`/`review`/`fixing`/`summary`) — удобно для отладки/тестов и быстрых правок без дублирования YAML. Это ограниченный валидируемый тумблер «присутствия» узла, **не** патч графа: задача не может добавить узел/ребро, переназначить провайдер/модель или изменить параметры узла; выключение `review` дополнительно гейтится `agents.allow_review_skip`. **Глобального `agents.skip_stages` больше нет** (убран в config v10): «выключить узел везде» = убрать его из flow или завести операторский flow.
 - **Файловая раскладка**: встроенные flow запакованы; операторские — в `.worc/flows/`; `config.yaml` = инфраструктура + дефолты провайдера, на которые узел падает при `null`.
 - JSON-Schema flow + строгий фатальный валидатор фиксируются на P0.2/P0.3 ([security-ceiling.md](security-ceiling.md) §4).

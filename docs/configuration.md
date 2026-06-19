@@ -127,8 +127,7 @@ agents:
   max_fix_cycles: 15
   max_total_fix_iterations: 30
 
-  skip_stages: [] # stages skipped for every task
-  allow_review_skip: false # gate for skipping the review stage
+  allow_review_skip: false # gate for a task disabling the review stage
 ```
 
 | Field | Type | Default | Meaning |
@@ -137,10 +136,9 @@ agents:
 | `max_stage_attempts` | integer | `3` | Attempts allowed for a stage/provider route. |
 | `max_fix_cycles` | integer | `15` | Fix cycles for a single local failing loop (test-driven or review-driven, counted separately). |
 | `max_total_fix_iterations` | integer | `30` | Hard global fix cap across the whole task and all subtasks. Must be `>= max_fix_cycles`. |
-| `skip_stages` | list of stage names | `[]` | Stages skipped for **every** task. Each must be skippable: `planning`, `testing`, `review`, `fixing`, `summary`. The effective skip set is this ∪ a task's `stages.<stage>.enabled: false`. See [operations.md](operations.md#skipping-pipeline-stages-agentsskip_stages). |
-| `allow_review_skip` | boolean | `false` | Required before `review` may be skipped (from `skip_stages` **or** a task) — disabling review removes the only agent quality gate before commit/PR. |
+| `allow_review_skip` | boolean | `false` | Required before a task may skip `review` (via `stages.review.enabled: false`) — disabling review removes the only agent quality gate before commit/PR. |
 
-Validation requires `max_total_fix_iterations >= max_fix_cycles`. Added in `config.yaml` `schema_version` **4**: `skip_stages` / `allow_review_skip` (older configs omit them and take the safe defaults — no skips, review-skip disallowed).
+Validation requires `max_total_fix_iterations >= max_fix_cycles`. Stage-skip is **per-task only** (`stages.<stage>.enabled: false` in a task; see [operations.md](operations.md#skipping-pipeline-stages-per-task)) — the global `agents.skip_stages` list was **removed in `schema_version` 10** (redundant with configurable flows: to drop a stage everywhere, remove its node from the flow). `allow_review_skip` was added in **4** and survives. Older configs that still carry `skip_stages` load fail-open (it is ignored); `upgrade-config` strips it.
 
 ### `agents.decomposition`
 

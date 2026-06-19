@@ -59,7 +59,7 @@
 
 | Поле | Класс | Ограничение |
 | --- | --- | --- |
-| `role_file`, `model`, `reasoning`, `timeout_seconds`, `output_schema`, `optional`, `hitl`, `session_scope`, `lineage_affinity` | settable | `model`/`reasoning` ∈ allowlist; путь `role_file` — containment |
+| `role_file`, `provider`, `model`, `reasoning`, `timeout_seconds`, `output_schema`, `optional`, `hitl`, `session_scope`, `lineage_affinity` | settable | `provider` ∈ `agents.allowed`; `model`/`reasoning` ∈ allowlist; путь `role_file` — containment |
 | `permission_profile` | settable | **clamp** к `permission_ceiling`; никогда выше |
 | `extra_args` | settable | проходит `find_forbidden_args`; иначе фатально |
 | dangerous-diff guard | core-fixed | авто после `workspace-write`; **нельзя отключить** |

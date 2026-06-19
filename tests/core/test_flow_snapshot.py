@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from wastech_orchestrator.core.flow.contracts import (
-    EvaluationKind,
     OutputPolicy,
     PermissionProfile,
     PublishingPolicy,
@@ -45,8 +44,8 @@ def test_load_implementation_yaml(impl_snap: FlowSnapshot) -> None:
     assert doc.permission_ceiling == PermissionProfile.WORKSPACE_WRITE
     assert doc.output_policy == OutputPolicy.CODE_CHANGE
     assert doc.publishing == PublishingPolicy.PULL_REQUEST
-    assert len(doc.nodes) == 11
-    assert len(doc.edges) == 15
+    assert len(doc.nodes) == 8
+    assert len(doc.edges) == 10
 
 
 def test_load_deep_research_yaml() -> None:
@@ -86,16 +85,15 @@ def test_fingerprint_differs_across_flows(
 
 def test_nodes_by_id_all_reachable(impl_snap: FlowSnapshot) -> None:
     expected_ids = {
-        "refinement", "planning", "implementation", "supervise_impl",
-        "testing_quality", "testing", "review", "fixing", "supervise_fix",
-        "summary", "publish",
+        "refinement", "planning", "implementation",
+        "testing_quality", "testing", "review", "fixing", "publish",
     }
     assert set(impl_snap.nodes_by_id.keys()) == expected_ids
 
 
 def test_nodes_by_id_kinds(impl_snap: FlowSnapshot) -> None:
     assert isinstance(impl_snap.nodes_by_id["implementation"], AgentNode)
-    assert isinstance(impl_snap.nodes_by_id["supervise_impl"], EvaluatorNode)
+    assert isinstance(impl_snap.nodes_by_id["review"], EvaluatorNode)
     assert isinstance(impl_snap.nodes_by_id["testing"], ChecksNode)
     assert isinstance(impl_snap.nodes_by_id["publish"], PublishNode)
 
@@ -104,12 +102,12 @@ def test_nodes_by_id_kinds(impl_snap: FlowSnapshot) -> None:
 
 
 def test_adjacency_multi_outcome_node(impl_snap: FlowSnapshot) -> None:
-    # supervise_impl has two outgoing edges: accept → testing_quality, rework → fixing
-    edges = impl_snap.adjacency["supervise_impl"]
+    # review has two outgoing edges: accept → publish, rework → fixing
+    edges = impl_snap.adjacency["review"]
     outcomes = {e.outcome for e in edges}
     assert outcomes == {"accept", "rework"}
     targets = {e.to for e in edges}
-    assert targets == {"testing_quality", "fixing"}
+    assert targets == {"publish", "fixing"}
 
 
 def test_adjacency_terminal_node_absent(impl_snap: FlowSnapshot) -> None:
@@ -227,13 +225,6 @@ def test_agent_node_hitl(impl_snap: FlowSnapshot) -> None:
     assert planning.hitl is not None
     assert planning.hitl.allow_question is True
     assert planning.hitl.allow_approval is True
-
-
-def test_evaluator_final_handoff(impl_snap: FlowSnapshot) -> None:
-    summary = impl_snap.nodes_by_id["summary"]
-    assert isinstance(summary, EvaluatorNode)
-    assert summary.evaluation_kind == EvaluationKind.FINAL_HANDOFF
-    assert summary.blocking is False
 
 
 def test_checks_node_discovery(impl_snap: FlowSnapshot) -> None:

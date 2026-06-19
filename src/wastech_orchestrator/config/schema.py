@@ -42,7 +42,13 @@ from wastech_orchestrator.providers.base import ProviderId, Stage
 # v9 (flow-engine P1 Slice 7): the `prompts` block (`templates_dir`/`mode`) is removed — a flow
 # node's prompt template is its `role_file`, not a stage-indexed packaged default. `upgrade-config`
 # strips an operator's `prompts:` block; old configs still load fail-open (the key is ignored).
-CONFIG_SCHEMA_VERSION = 9
+# v10 (2026-06-19, flexible-flow stage-skip): the global `agents.skip_stages` list is removed — with
+# fully configurable flows, "skip a stage for every task" is redundant (drop the node from the flow,
+# or author an operator flow). Per-task `stages.<stage>.enabled: false` survives as a bounded,
+# validated toggle (flow-contract §10), and `agents.allow_review_skip` stays (now gating only the
+# per-task review skip). `upgrade-config` strips `agents.skip_stages`; old configs still load
+# fail-open (the key is tolerated/ignored).
+CONFIG_SCHEMA_VERSION = 10
 
 # Stages routed to an agent provider. The remaining stages (``testing``, ``publishing``) are run by
 # the orchestrator itself (Check Runner / Git Manager), so they never appear in ``agents.routing``
@@ -58,11 +64,11 @@ ROUTABLE_STAGES: frozenset[Stage] = frozenset(
     }
 )
 
-# Stages an operator may skip (globally via ``agents.skip_stages`` or per-task via
-# ``stages.<stage>.enabled: false``). ``refinement`` is excluded — it uses the ``refined: true``
-# task flag instead — and ``implementation``/``publishing`` are never skippable (the core work and
-# the output). Note this is *not* ``ROUTABLE_STAGES``: ``testing`` is skippable but runs no agent,
-# while ``implementation``/``refinement`` are agent-routed but not skippable (stage-skip control).
+# Stages a task may skip per-task via ``stages.<stage>.enabled: false``. ``refinement`` is excluded
+# — it uses the ``refined: true`` task flag instead — and ``implementation``/``publishing`` are
+# never skippable (the core work and the output). Note this is *not* ``ROUTABLE_STAGES``:
+# ``testing`` is skippable but runs no agent, while ``implementation``/``refinement`` are
+# agent-routed but not skippable (stage-skip control).
 SKIPPABLE_STAGES: frozenset[Stage] = frozenset(
     {
         Stage.PLANNING,
@@ -156,12 +162,8 @@ class AgentsConfig:
     decomposition: DecompositionConfig
     routing: dict[Stage, RouteConfig]
     providers: dict[ProviderId, ProviderConfig]
-    # Stages skipped for every task processed by this instance (subset of SKIPPABLE_STAGES). The
-    # effective skip set for a task is this ∪ the task's own ``stages.<stage>.enabled: false`` — a
-    # global skip cannot be re-enabled per task (stage-skip control).
-    skip_stages: tuple[Stage, ...] = ()
-    # Gate for the high-risk ``review`` skip (no agent quality gate before commit/PR): a task or
-    # the global config may disable review only when this is true, else it is rejected.
+    # Gate for the high-risk per-task ``review`` skip (no agent quality gate before commit/PR): a
+    # task may disable review via ``stages.review.enabled: false`` only when true, else rejected.
     allow_review_skip: bool = False
 
 

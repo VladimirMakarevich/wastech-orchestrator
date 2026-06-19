@@ -16,10 +16,10 @@ reasoning: null # optional: low | medium | high | xhigh (Opus 4.7+) | max
 stages: # optional per-stage overrides (each sub-field optional & independent).
   # model/reasoning: agent stages (refinement, planning, implementation,
   #   review, fixing, summary) — override the task-wide values above.
-  # enabled: false: SKIP the stage. Skippable: planning, testing, review,
-  #   fixing, summary. (testing accepts only `enabled`; implementation/
-  #   refinement/publishing can never be skipped.) A global skip in
-  #   agents.skip_stages cannot be re-enabled here.
+  # enabled: false: SKIP the stage (per-task). Skippable: planning, testing,
+  #   review, fixing, summary. (testing accepts only `enabled`; implementation/
+  #   refinement/publishing can never be skipped.) Skipping `review` requires
+  #   agents.allow_review_skip: true.
   planning:
     model: null # e.g. "claude-opus-4-8"
     reasoning: null # e.g. "high"

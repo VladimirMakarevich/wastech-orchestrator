@@ -60,6 +60,10 @@ co-design здесь: написать `implementation.yaml`, `deep_research.yam
 - **P1.4** Cutover: движок — драйвер в `run_task`; per-stage пост-обработка и decomposition fan-out выражены во Flow (data-driven); существующий интеграционный сьют адаптирован на движок (чек-лист возможностей вместо golden-harness).
 - **P1.5** Удаление старого драйвера (`_drive`, реентри-диспетчер, гранулярные статусы, `stage_runs`, `Stage`-как-конвейер) — в том же cutover-шаге, что и P1.4 (двух драйверов не держим).
 
+## Пред-работа к P2 (уточнения flow-контракта) → [p2-pre-work.md](p2-pre-work.md)
+
+Закрыть **до** P2: provider/model/effort на уровне узла flow (PRE.1); `auto_merge` task-wins (PRE.2, + security-фиксация); сверка остатка per-task оверрайдов (PRE.3). Уже сделано в этом направлении (2026-06-19): supervisor → константный слой над flow; глобальный `agents.skip_stages` убран (config v10), per-task skip оставлен.
+
 ## P2 — Целевые возможности implementation как узлы → [p2-implementation.md](p2-implementation.md)
 
 Цель: на доказанном движке нарастить целевой implementation; адаптировать три программы. Порядок: supervisor → durable → hybrid.

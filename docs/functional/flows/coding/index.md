@@ -29,7 +29,7 @@ flowchart TB
 
 | Stage | Who runs it | Optional? | Document |
 | --- | --- | --- | --- |
-| refinement | agent (B17→B18) | yes — skipped when `refined: true` or `COMPLETE` (not via `skip_stages`) | [S01](./S01-refinement.md) |
+| refinement | agent (B17→B18) | yes — skipped when `refined: true` or `COMPLETE` (via the `refined`/completeness flag, not a stage-skip) | [S01](./S01-refinement.md) |
 | planning | agent | yes — `SKIPPABLE` (stub plan is used, decomposition is disabled) | [S02](./S02-planning.md) |
 | implementation | agent | **no** — core of the work, cannot be skipped | [S03](./S03-implementation.md) |
 | testing | Check Runner (B24), **not an agent** | yes — `SKIPPABLE` | [S04](./S04-testing.md) |

@@ -47,40 +47,25 @@ def _agents(body: str) -> str:
     )
 
 
-def test_skip_stages_default_empty() -> None:
+def test_allow_review_skip_default_false() -> None:
     result = loads_config(_LEGACY)
-    assert result.config.agents.skip_stages == ()
     assert result.config.agents.allow_review_skip is False
 
 
-def test_skip_stages_parsed() -> None:
-    result = loads_config(_agents("  skip_stages: [testing, summary]\n"))
-    assert result.config.agents.skip_stages == (Stage.TESTING, Stage.SUMMARY)
-
-
-def test_skip_stages_unknown_name_is_issue() -> None:
-    with pytest.raises(ConfigError) as exc:
-        loads_config(_agents("  skip_stages: [nonsense]\n"))
-    assert any("skip_stages" in issue and "nonsense" in issue for issue in exc.value.issues)
-
-
-def test_skip_stages_non_skippable_is_issue() -> None:
-    # ``implementation`` is a real stage but cannot be skipped.
-    with pytest.raises(ConfigError) as exc:
-        loads_config(_agents("  skip_stages: [implementation]\n"))
-    assert any("not skippable" in issue for issue in exc.value.issues)
-
-
-def test_skip_stages_review_requires_opt_in() -> None:
-    with pytest.raises(ConfigError) as exc:
-        loads_config(_agents("  skip_stages: [review]\n"))
-    assert any("allow_review_skip" in issue for issue in exc.value.issues)
-
-
-def test_skip_stages_review_allowed_with_opt_in() -> None:
-    result = loads_config(_agents("  skip_stages: [review]\n  allow_review_skip: true\n"))
-    assert result.config.agents.skip_stages == (Stage.REVIEW,)
+def test_allow_review_skip_parsed() -> None:
+    # ``allow_review_skip`` survives global-skip removal: it now gates the per-task
+    # ``stages.review.enabled: false`` override (validated by the task gate).
+    result = loads_config(_agents("  allow_review_skip: true\n"))
     assert result.config.agents.allow_review_skip is True
+
+
+def test_legacy_skip_stages_tolerated_not_error() -> None:
+    # ``agents.skip_stages`` was removed in config v10 (global stage-skip dropped for flexible
+    # flows — drop the node from the flow instead). An old config still carrying it loads fail-open
+    # (the key is ignored, not rejected); ``upgrade-config`` strips it.
+    result = loads_config(_agents("  skip_stages: [testing, review]\n"))
+    assert not hasattr(result.config.agents, "skip_stages")
+    assert result.config.agents.allow_review_skip is False  # loaded cleanly, dead key ignored
 
 
 def test_auto_mode_defaults_to_false() -> None:

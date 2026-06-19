@@ -168,7 +168,7 @@ Foundation поднимал реальный риск: generic-движок до
 - **Палитра минимальна и доказана**: `agent`/`evaluator`/`checks`/`hitl`/`publish` + рёбра + decomposition выразили три flow данными без доменного знания в движке.
 - **Decomposition — только implementation в v1**; research/audit линейны. Конструкция (под-flow = упорядоченный список node-id, общий глобальный бюджет, per-subtask commit на одной ветке) общая, но используется одним flow.
 - **Граница config↔flow**: встроенные flow (`implementation`/`research`/`audit`) запакованы, операторские — в `.worc/flows/`, `config.yaml` = инфраструктура + дефолты провайдера (см. §7, §14.3).
-- **Per-task оверрайды графа/узлов убраны**: задача несёт только идентичность/диспетчеризацию/операционные входы; вариация = другой flow (см. §14.2).
+- **Per-task оверрайды графа/узлов убраны** — с санкционированными исключениями: задача несёт идентичность/диспетчеризацию/операционные входы; вариация = другой flow (см. §14.2). Исключения: (1) per-task `stages.<stage>.enabled: false` (выключить заранее объявленный skippable-узел; ограниченный валидируемый тумблер, не патч графа; глобальный `agents.skip_stages` убран в config v10); (2) per-task `auto_merge` (резолвится и в задаче, и в `config.yaml`, **задача побеждает** — публикационная политика, не граф). Выбор провайдера/модели/effort переезжает **на узел flow** (`provider`/`model`/`reasoning`), не в задачу. См. [flow-contract.md](flow-contract.md) §10 + [p2-pre-work.md](p2-pre-work.md).
 - **State-store**: родовой `node_run` + ядровые `tasks`/`provider_attempts`/`artifacts`/`publish_operations`/`flow_snapshot`; feature-таблицы (editing_lineage, evaluations, subtasks) — feature-owned.
 - **research/audit гейты**: `citation_check`/`dependency_scan` — ядровые детерминированные чекеры вида `checks`; `fact_verification`/`finding_verification`/`critical_review` — обычные `evaluator`-узлы.
 - **Прочее** (route как метка ребра, review как `role`, единый предикат `when`, файловое доверие операторскому flow, бинарный `network_policy`, dangerous-diff core-fixed) — [flow-contract.md](flow-contract.md) §10, [security-ceiling.md](security-ceiling.md) §8.
@@ -206,12 +206,16 @@ Foundation поднимал реальный риск: generic-движок до
 - **Стадии → узлы** [узел]: refinement/planning/implementation/fixing → `agent`; testing → `checks` (checker `command_profile`); review → `evaluator` (`role=review`); summary → **константный supervisor-слой** над flow (не узел; summary + advisory, §8); publishing → `publish`.
 - **Маршрутизация** [flow]: per-stage `agents.routing` (primary+fallback) → провайдер/fallback на узле; per-task `route_override.<stage>` → override на узле (только из `agents.allowed`, коллизия с fallback меняет роли).
 - **Модель/reasoning** [flow]: порядок резолюции `stages.<>.{model,reasoning}` → task-wide `model`/`reasoning` → provider-default — сохраняется как поля узла + дефолты.
-- **Пропуск стадий** [flow + ядро]: `agents.skip_stages` ∪ per-task `stages.<>.enabled:false`, `refined:true` → отсутствие/`optional` узла; аудит-трейл пропуска (`stage_runs.skip_reason`) остаётся ядром.
+- **Пропуск стадий** [flow + ядро]: per-task `stages.<>.enabled:false` (глобальный `agents.skip_stages` убран в config v10), `refined:true` → `when`-предикат на узле (`config.*_enabled`/`derived.needs_refinement`) → пропуск узла; аудит-трейл пропуска (`node_runs.skipped`) остаётся ядром.
 - **Decomposition** [flow]: gate (config `decomposition.enabled` + per-task `decompose` tri-state; `max_subtasks`; `commit_per_subtask`; linear `depends_on`; reason-коды) → конструкция фан-аута (§5).
 - **Политики** [flow]: output (`code_change`/`repository_document`/`private_control_workspace_report`), publishing (`pull_request`/`documentation_pull_request`/`none`), network — per-flow поля.
 - **Промпты** [flow]: `prompts.{templates_dir,mode}` (append/replace; allowlisted-переменные — только пути/метаданные, не тело/diff/env/секреты) → role-MD узла + безопасная интерполяция.
 - **Skills** [flow]: planning-selected repo skill references (`skills.{scan_root,exclude}`, gate-дублирующие исключаются) → контекст `agent`-узла.
-- **Task-файл** [ядро]: несёт только не-flow поля — `id`/`title`, `task_type` (диспетчеризация в flow), `contacts` (нотификации), `prompt_audit` (тогл аудита), опц. `pr_title`. Оверрайды графа/узлов (`model`/`reasoning`/`stages.*`/`agents`-route/`refined`/`decompose`/`auto_merge`) **убраны** — flow единственный источник графа и параметров; вариация поведения = другой flow. Возможности (per-node model/reasoning, маршрут, пропуск, decomposition, publishing) сохранены на узлах flow, не теряются.
+- **Task-файл** [ядро]: несёт не-flow поля — `id`/`title`, `task_type` (диспетчеризация в flow), `contacts` (нотификации), `prompt_audit` (тогл аудита), опц. `pr_title`. Целевое распределение остальных ручек (решения 2026-06-19):
+  - `provider`/`model`/`reasoning` (кто/модель/effort) → **поля узла flow** (не задача, не стадийно-ключённый `agents.routing`); `provider` ∈ `agents.allowed`.
+  - `decompose` → блок `decomposition:` во flow; `refined` → операционный вход, питающий `derived.needs_refinement`.
+  - **Санкционированные task-level исключения:** `stages.<stage>.enabled: false` (skip skippable-узла; flow-contract §10) и `auto_merge` (резолвится в задаче **и** в `config.yaml`, **задача побеждает**). Глобальный `agents.skip_stages` убран в config v10.
+  - **Статус: дизайн опережает код.** P1 всё ещё держит `model`/`reasoning`/`agents`-route/`refined`/`decompose`/`auto_merge` на уровне задачи; перенос (provider-на-узел, auto_merge task-wins) — пред-работа к P2: [p2-pre-work.md](p2-pre-work.md).
 
 ### 14.3. Карта текущего конфига
 
@@ -222,7 +226,7 @@ Foundation поднимал реальный риск: generic-движок до
 | `agents.routing.*` | [flow] (per-node провайдер+fallback) |
 | `agents.providers.<p>.{command,timeout_seconds,sandbox,permission_profile,extra_args,max_turns,max_budget_usd}` | [ядро]/[потолок] |
 | `agents.providers.<p>.{model,reasoning}` | [flow] (дефолт, переопределяемый узлом) |
-| `agents.{skip_stages,allow_review_skip}` | [flow] (присутствие узла) + [ядро] (гейт) |
+| `agents.allow_review_skip` (гейт per-task review-skip; глобальный `skip_stages` убран v10) | [flow] (`when` на узле) + [ядро] (гейт) |
 | `agents.decomposition.*` | [flow] (конструкция decomposition) |
 | per-task оверрайды (`model`/`reasoning`/`stages.*`/`agents`-route/`refined`/`decompose`/`auto_merge`) | **убрано** — flow источник; задача только `id`/`title`/`task_type`/`contacts`/`prompt_audit` |
 | `security.*` | [потолок] |

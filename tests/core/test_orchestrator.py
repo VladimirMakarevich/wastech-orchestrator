@@ -1802,7 +1802,7 @@ def test_auto_merge_does_not_fire_when_quality_gate_fails(
     assert _merge_calls(calls) == []
 
 
-# --- stage-skip control (stages.<stage>.enabled / agents.skip_stages) ---------------------
+# --- stage-skip control (per-task stages.<stage>.enabled: false) ---------------------
 
 
 def _task_with_stages(tmp_path: Path, stages_block: str, task_id: str = "task-001") -> str:
@@ -1855,10 +1855,10 @@ def test_skip_testing_bypasses_checks(git_repo, make_git_config, tmp_path: Path)
         tmp_path,
         providers=providers,
         check_verdicts=[1] * 20,
-        config_kwargs={"skip_stages": ["testing"]},
     )
     _patch_impl_edit(providers, git_repo)
-    result = orch.run_task(_complete_task(tmp_path))
+    block = "stages:\n  testing:\n    enabled: false\n"
+    result = orch.run_task(_task_with_stages(tmp_path, block))
     assert result.final_status is Status.DONE
     n_checks = store._conn.execute(  # noqa: SLF001
         "SELECT COUNT(*) AS n FROM check_runs"
@@ -1894,10 +1894,10 @@ def test_skip_fixing_routes_to_manual_on_failure(git_repo, make_git_config, tmp_
         tmp_path,
         providers=providers,
         check_verdicts=[1] * 20,  # first check fails
-        config_kwargs={"skip_stages": ["fixing"]},
     )
     _patch_impl_edit(providers, git_repo)
-    result = orch.run_task(_complete_task(tmp_path))
+    block = "stages:\n  fixing:\n    enabled: false\n"
+    result = orch.run_task(_task_with_stages(tmp_path, block))
     # Fixing disabled → the failure still ends at manual review (the preserved capability). The
     # engine is domain-agnostic, so it does NOT special-case "no fixing → straight to manual": it
     # runs the declared test-fix loop (the skipped fixing node is a no-op each cycle) until the cap,
@@ -1931,10 +1931,9 @@ def test_skipped_stages_listed_in_summary(git_repo, make_git_config, tmp_path: P
         tmp_path,
         providers=providers,
         check_verdicts=[0],
-        config_kwargs={"skip_stages": ["testing"]},
     )
     _patch_impl_edit(providers, git_repo)
-    block = "stages:\n  planning:\n    enabled: false\n"
+    block = "stages:\n  planning:\n    enabled: false\n  testing:\n    enabled: false\n"
     result = orch.run_task(_task_with_stages(tmp_path, block))
     assert result.final_status is Status.DONE
     summary = _summary_text(art)
@@ -1954,7 +1953,6 @@ def test_review_skip_with_auto_merge_warns(git_repo, make_git_config, tmp_path: 
         providers=providers,
         check_verdicts=[0],
         config_kwargs={
-            "skip_stages": ["review"],
             "allow_review_skip": True,
             "auto_merge": True,
         },
@@ -1972,8 +1970,9 @@ def test_review_skip_with_auto_merge_warns(git_repo, make_git_config, tmp_path: 
     logger = logging.getLogger("wastech_orchestrator.core.orchestrator")
     handler = _Capture()
     logger.addHandler(handler)
+    block = "stages:\n  review:\n    enabled: false\n"
     try:
-        result = orch.run_task(_complete_task(tmp_path))
+        result = orch.run_task(_task_with_stages(tmp_path, block))
     finally:
         logger.removeHandler(handler)
     assert result.final_status is Status.DONE

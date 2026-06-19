@@ -307,26 +307,15 @@ Configured under `git:` (all default to the safe value):
 
 **Audit.** Every auto-merge writes a `[AUTO-MERGE]` `WARNING` log line, records the merge in the append-only ledger (`auto_merged` + `merge_outcome` = the merge SHA, `"merged"`, or `"armed"`), and persists a `pr_merge` row in `state.db`. The terminal Telegram notification carries the PR URL.
 
-### Skipping pipeline stages (`agents.skip_stages`)
+### Skipping pipeline stages (per-task)
 
-By default the pipeline runs `refinement → planning → [implementation → testing → review → fixing] → summary → publishing`. An operator can skip stages that add no value for a given workload — globally for every task, or per-task in front-matter.
+By default the pipeline runs `refinement → planning → [implementation → testing → review → fixing] → summary → publishing`. A **task** can skip a stage that adds no value for it — convenient for debugging/testing and quick one-off runs without authoring a separate flow.
 
 Skippable stages: `planning`, `testing`, `review`, `fixing`, `summary`. `implementation` and `publishing` are never skippable; `refinement` uses the existing `refined: true` task flag.
 
-Global config under `agents:`:
+> The global `agents.skip_stages` list was **removed in config `schema_version` 10**: with fully configurable flows, "skip a stage for every task" is redundant — to drop a stage everywhere, remove its node from the flow (or author an operator flow). Per-task skip below is the surviving, bounded mechanism. The `agents.allow_review_skip` gate survives (it now permits the per-task `review` skip).
 
-| Key | Default | Effect |
-| --- | --- | --- |
-| `skip_stages` | `[]` | Stages skipped for **every** task, e.g. `[testing]` for a repo with no test suite. Each entry must be a skippable stage (else the config is rejected). |
-| `allow_review_skip` | `false` | Must be `true` before `review` may be skipped from **either** source. Disabling review removes the only agent quality gate before commit/PR. |
-
-```yaml
-agents:
-  skip_stages: [testing] # this repo has no meaningful automated tests
-  allow_review_skip: false
-```
-
-**Per-task override.** A task disables a stage with `enabled: false` in its `stages:` block (see [task-authoring.md](task-authoring.md#stages)):
+**Per-task skip.** A task disables a stage with `enabled: false` in its `stages:` block (see [task-authoring.md](task-authoring.md#stages)):
 
 ```yaml
 stages:
@@ -334,7 +323,7 @@ stages:
   testing: { enabled: false }
 ```
 
-The effective skip set is the **union** of `agents.skip_stages` and the task's `enabled: false` overrides — a stage skipped globally **cannot** be re-enabled per task.
+Disabling `review` additionally requires `agents.allow_review_skip: true` in config (it removes the only agent quality gate before commit/PR), else the task is rejected.
 
 **What each skip does:** `planning` → a stub `plan.md` and a single implementation unit (no decomposition); `testing` → straight from implementation to review, the Check Runner never runs; `review` → commit with no agent review gate; `fixing` → the first test/review failure goes to `manual_action_required` with a `stuck.md` report (no recovery loop, 0 fix iterations); `summary` → a stub summary.
 

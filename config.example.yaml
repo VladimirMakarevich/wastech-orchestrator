@@ -1,7 +1,7 @@
 # Example configuration for wastech-orchestrator.
 # Copy to config.yaml and fill it in for your project. config.yaml is NOT committed to git.
 
-schema_version: 9                   # config format version; the orchestrator refuses newer configs
+schema_version: 10                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -24,8 +24,7 @@ agents:
   max_fix_cycles: 15
   max_total_fix_iterations: 30      # hard global cap across all fix loops (and all subtasks); >= max_fix_cycles
 
-  skip_stages: []                   # stages skipped for every task: any of [planning, testing, review, fixing, summary]
-  allow_review_skip: false          # required before any task (or skip_stages) may disable the `review` quality gate
+  allow_review_skip: false          # required before a task's `stages.review.enabled: false` may disable the `review` quality gate
 
   decomposition:                    # optional task decomposition (§5.1); OFF by default
     enabled: false

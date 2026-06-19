@@ -23,9 +23,11 @@ from wastech_orchestrator.config.schema import CONFIG_SCHEMA_VERSION
 # Dotted paths of keys removed by a past schema bump. ``upgrade-config`` strips them from an
 # operator's config so the regenerated file matches the current schema. Each entry is (parent-path,
 # key); an empty parent-path means a top-level key. (v9: the whole ``prompts`` block is gone — a
-# flow node's prompt template is its ``role_file``.)
+# flow node's prompt template is its ``role_file``. v10: ``agents.skip_stages`` is gone — global
+# stage-skip is redundant with configurable flows; per-task ``stages.enabled`` survives.)
 _REMOVED_KEYS: tuple[tuple[str, str], ...] = (
     ("", "prompts"),
+    ("agents", "skip_stages"),
 )
 
 _UPGRADE_HEADER = (

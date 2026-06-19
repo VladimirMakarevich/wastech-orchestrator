@@ -47,7 +47,7 @@ flowchart TB
 
 ## Checks and constraints
 
-- refinement is **not** part of `SKIPPABLE_STAGES`: optionality is controlled by the `refined` flag/completeness (the `when: derived.needs_refinement` node condition), not by `agents.skip_stages` ([schema.py:66-74](../../../../src/wastech_orchestrator/config/schema.py#L66)).
+- refinement is **not** part of `SKIPPABLE_STAGES`: optionality is controlled by the `refined` flag/completeness (the `when: derived.needs_refinement` node condition), not by a per-task stage-skip ([schema.py](../../../../src/wastech_orchestrator/config/schema.py#L66)). The global `agents.skip_stages` list was removed in config v10; per-task `stages.<stage>.enabled: false` is the surviving skip and does not cover refinement.
 - Only refinement and planning may request human input (HITL) ([B12](../../blocks/B12-hitl-and-typed-output.md)).
 
 ## Result / transition
