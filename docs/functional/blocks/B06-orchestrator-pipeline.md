@@ -118,7 +118,7 @@ Primarily through delegated blocks: transitions and records in SQLite ([B07](./B
 ## Errors and Edge Cases
 
 - Reject §19 → `failed` without a branch (quarantine + ledger).
-- `PipelineFailed`/`GitCommandError` → `_fail` (if a branch exists — best-effort publish of the failed attempt).
+- `PipelineFailed`/`GitCommandError` → `_fail` (if a branch exists — best-effort publish of the failed attempt). Exception: a git failure inside the `publish` node _after_ finalize moved the task file to `done/` raises `NodeManualRequired` → resumable `manual_action_required` (not `_fail`): the deliverable is committed, only the push/PR is incomplete, and the idempotent `publish_operations` let `rerun --continue` finish it without a `done/`-committed `FAILED`.
 - `ManualActionRequired` → `manual_action_required` (HITL failure, stall, blocked auto-merge, ambiguous recovery).
 - Unsafe terminal cleanup on success → result `manual_action_required` ([orchestrator.py:1608-1610](../../../src/wastech_orchestrator/core/orchestrator.py#L1608)).
 

@@ -32,6 +32,8 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NodeInputs,
     NodeManualRequired,
     NodeServices,
+    editing_session_id,
+    persists_session,
 )
 from wastech_orchestrator.core.flow.nodes.human_gate import HumanGate
 from wastech_orchestrator.core.flow.observability import record_run_observability
@@ -65,7 +67,7 @@ class AgentNodeRunner:
     def run(self, node: FlowNode, ctx: NodeContext) -> NodeResult:
         assert isinstance(node, AgentNode)
         stage = self._s.stage_for_node[node.id]
-        route = self._s.router.resolve_route(stage)
+        route = self._s.router.resolve_route(stage, self._in.route_override)
         try:
             if _wants_hitl(node):
                 return self._run_with_hitl(node, ctx, stage, route)
@@ -229,7 +231,7 @@ class AgentNodeRunner:
                 else "no_provider_available"
             )
             raise NodeInfraError(f"agent node {node.id!r}: no provider could complete it ({err})")
-        self._update_session(outcome, route)
+        self._update_session(node, outcome, route)
         return run_id, outcome
 
     def _apply_post_edit_guard(
@@ -355,7 +357,9 @@ class AgentNodeRunner:
             model=self._in.resolve_model(stage, node.model),
             reasoning=self._in.resolve_reasoning(stage, node.reasoning),
             extra_args=list(node.extra_args),
-            session_id=self._in.session_ids.get(route.primary.value),
+            session_id=editing_session_id(
+                node.session_scope, self._in.session_ids, route.primary.value
+            ),
         )
 
     def _prompt_variables(self, ctx: NodeContext, stage: Stage) -> dict[str, object | None]:
@@ -397,7 +401,13 @@ class AgentNodeRunner:
             finished_at=self._s.clock(),
         )
 
-    def _update_session(self, outcome: StageOutcome, route: ResolvedRoute) -> None:
+    def _update_session(
+        self, node: AgentNode, outcome: StageOutcome, route: ResolvedRoute
+    ) -> None:
+        # Only editing-lineage nodes persist their session into the in-memory map; a fresh node
+        # must not leak its session into a later editing node on the same provider (F3 / P2.2).
+        if not persists_session(node.session_scope):
+            return
         result = outcome.result
         if result is None or not result.session_id or outcome.provider_used is None:
             return

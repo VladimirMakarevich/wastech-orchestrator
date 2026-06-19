@@ -83,7 +83,8 @@ def test_node_runs_ordered_by_execution(tmp_path: Path) -> None:
 def test_flow_checkpoint_roundtrip(tmp_path: Path) -> None:
     store = _store(tmp_path)
     store.save_flow_checkpoint(
-        "t1", current_node="review", counters_json='{"test_fix": 2}', flow_fingerprint="fp-1"
+        "t1", current_node="review", counters_json='{"test_fix": 2}',
+        flow_fingerprint="fp-1", fix_iterations=0,
     )
     assert store.get_flow_checkpoint("t1") == ("review", '{"test_fix": 2}', "fp-1")
 
@@ -97,7 +98,8 @@ def test_rerun_reset_clears_flow_state(tmp_path: Path) -> None:
     store = _store(tmp_path)
     store.record_node_run(NodeRunRow(task_id="t1", node_id="a", node_kind="agent"))
     store.save_flow_checkpoint(
-        "t1", current_node="a", counters_json='{"x": 1}', flow_fingerprint="fp-1"
+        "t1", current_node="a", counters_json='{"x": 1}',
+        flow_fingerprint="fp-1", fix_iterations=0,
     )
     store.reset_task_for_rerun("t1")
     assert store.get_flow_checkpoint("t1") == (None, None, None)

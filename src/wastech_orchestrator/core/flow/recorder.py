@@ -42,6 +42,7 @@ class StateStoreRunRecorder:
             current_node=run_state.current_node,
             counters_json=json.dumps(run_state.loop_counters, sort_keys=True),
             flow_fingerprint=run_state.flow_fingerprint,
+            fix_iterations=run_state.fix_iterations,
         )
 
     def write_failure_report(

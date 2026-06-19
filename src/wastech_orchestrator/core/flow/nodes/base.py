@@ -19,9 +19,10 @@ from typing import Protocol
 
 from wastech_orchestrator.check_runner import CheckOutcome
 from wastech_orchestrator.checks.model import ResolvedCheck
+from wastech_orchestrator.core.flow.contracts import SessionScope
 from wastech_orchestrator.git_manager import ChangedPath
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult
-from wastech_orchestrator.providers.base import AgentRunRequest, Stage
+from wastech_orchestrator.providers.base import AgentRunRequest, ProviderId, Stage
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.routing.snapshots import SnapshotHook
 from wastech_orchestrator.state_store import CheckRunRow, NodeRunRow, ProviderAttemptRow
@@ -29,6 +30,28 @@ from wastech_orchestrator.state_store import CheckRunRow, NodeRunRow, ProviderAt
 #: Register a written artifact in the audit trail: ``(task_id, kind, path)``. The orchestrator's
 #: ``_register_artifact`` (sha256 + upsert, skips a missing file) satisfies it.
 RegisterArtifact = Callable[[str, str, str], None]
+
+
+def editing_session_id(
+    scope: SessionScope, session_ids: Mapping[str, str], primary: str
+) -> str | None:
+    """The in-memory session a node should continue, honoring ``session_scope`` (P1 parity).
+
+    Only ``editing_lineage`` nodes reuse the provider-keyed in-memory session; ``fresh_disposable``
+    (and the durable ``resume_own_lineage``, which is P2.2) start clean so an independent node never
+    inherits an editing agent's session. Durable lineage + ``lineage_affinity`` binding to a
+    specific node's session is P2.2; P1 approximates ``editing_lineage`` continuity per provider.
+    """
+    return session_ids.get(primary) if scope is SessionScope.EDITING_LINEAGE else None
+
+
+def persists_session(scope: SessionScope) -> bool:
+    """Whether a completed node writes its session back to the in-memory map (editing lineage only).
+
+    A ``fresh_disposable`` node must not persist its session, or it would leak into a later
+    ``editing_lineage`` node routed to the same provider (breaking that node's lineage).
+    """
+    return scope is SessionScope.EDITING_LINEAGE
 
 
 class NodeInfraError(Exception):
@@ -54,11 +77,14 @@ class NodeManualRequired(Exception):
 class RouterPort(Protocol):
     """The slice of :class:`~wastech_orchestrator.routing.router.AgentRouter` runners use.
 
-    The runners call ``resolve_route(stage)`` without a per-task override (P1 routes by stage from
-    config); the real router's extra optional ``override`` param still satisfies this protocol.
+    Runners pass the per-task front-matter ``agents`` override (:attr:`NodeInputs.route_override`)
+    to ``resolve_route``; it may only repoint a stage's primary to an allowed, configured provider
+    (validated at the gate, re-validated by the router). An empty override resolves from config.
     """
 
-    def resolve_route(self, stage: Stage) -> ResolvedRoute: ...
+    def resolve_route(
+        self, stage: Stage, override: Mapping[Stage, ProviderId] | None = None
+    ) -> ResolvedRoute: ...
 
     def run_stage(
         self,
@@ -223,6 +249,10 @@ class NodeInputs:
     #: over the flow node's declared ``model`` / ``reasoning`` — the legacy per-task override.
     model_for: Callable[[Stage], str | None] | None = None
     reasoning_for: Callable[[Stage], str | None] | None = None
+    #: per-task provider override (front-matter ``agents``) keyed by routing stage. Passed to
+    #: ``router.resolve_route`` so a task can repoint a stage's primary provider (validated at the
+    #: gate, re-validated by the router). Empty → route from config.
+    route_override: Mapping[Stage, ProviderId] = field(default_factory=dict)
 
     def resolve_model(self, stage: Stage, node_model: str | None) -> str | None:
         """Per-task ``model_for(stage)`` wins over the node's declared model (legacy parity)."""

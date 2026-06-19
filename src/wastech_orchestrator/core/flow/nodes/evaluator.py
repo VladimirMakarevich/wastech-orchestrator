@@ -19,7 +19,12 @@ from typing import Any
 
 from wastech_orchestrator.core.flow.contracts import EvaluationKind
 from wastech_orchestrator.core.flow.engine import Finding, NodeContext, NodeOutcome, NodeResult
-from wastech_orchestrator.core.flow.nodes.base import NodeInfraError, NodeInputs, NodeServices
+from wastech_orchestrator.core.flow.nodes.base import (
+    NodeInfraError,
+    NodeInputs,
+    NodeServices,
+    editing_session_id,
+)
 from wastech_orchestrator.core.flow.observability import record_run_observability
 from wastech_orchestrator.core.flow.prompt import render_role_prompt
 from wastech_orchestrator.core.flow.schema import EvaluatorNode, FlowNode
@@ -42,7 +47,7 @@ class EvaluatorNodeRunner:
     def run(self, node: FlowNode, ctx: NodeContext) -> NodeResult:
         assert isinstance(node, EvaluatorNode)
         stage = self._s.stage_for_node[node.id]
-        route = self._s.router.resolve_route(stage)
+        route = self._s.router.resolve_route(stage, self._in.route_override)
         started_at = self._s.clock()
         run_id = self._s.store.record_node_run(
             NodeRunRow(
@@ -146,7 +151,11 @@ class EvaluatorNodeRunner:
             output_schema=stage_output_schema(stage),
             model=self._in.resolve_model(stage, node.model),
             reasoning=self._in.resolve_reasoning(stage, node.reasoning),
-            session_id=self._in.session_ids.get(route.primary.value),
+            # Evaluators are read-only and never editing_lineage (validator-enforced), so this is
+            # always a fresh session — an evaluation must not inherit an editing agent's session.
+            session_id=editing_session_id(
+                node.session_scope, self._in.session_ids, route.primary.value
+            ),
         )
 
     def _prompt_variables(self, ctx: NodeContext, stage: Stage) -> dict[str, object | None]:

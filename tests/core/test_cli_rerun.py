@@ -192,6 +192,7 @@ def _seed(project: Path, clone: Path, row: TaskRow, *, checkpoint_node: str | No
             current_node=checkpoint_node,
             counters_json="{}",
             flow_fingerprint=FlowRegistry().resolve("implementation").flow_fingerprint,
+            fix_iterations=row.fix_iterations,  # checkpoint mirrors the seeded task's fix counter
         )
     store.close()
     return config

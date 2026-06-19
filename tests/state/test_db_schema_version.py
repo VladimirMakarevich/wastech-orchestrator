@@ -51,3 +51,27 @@ def test_newer_version_is_refused_on_both_open_paths(tmp_path: Path) -> None:
         StateStore.open(db)
     with pytest.raises(IncompatibleStateError):
         StateStore.open_readonly(db)
+
+
+def test_pre_v7_incompatible_shape_is_refused_not_stamped(tmp_path: Path) -> None:
+    # F4 / MC5: an older versioned database carries a now-incompatible shape (here the legacy
+    # `provider_attempts.stage_run_id`, before the v6 rename to `node_run_id`). Because the v5-v7
+    # changes are destructive and `_migrate` is additive-only, open() must refuse fail-closed — it
+    # must NOT stamp the current version onto the old shape (which previously passed the gate and
+    # then crashed on the first provider-attempt write). Greenfield: the fix is refusal, not a
+    # destructive migration.
+    db = tmp_path / "v6.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TABLE provider_attempts (id INTEGER PRIMARY KEY, stage_run_id INTEGER NOT NULL)"
+    )
+    conn.execute(f"PRAGMA user_version={DB_SCHEMA_VERSION - 1}")  # a pre-v7 (legacy) database
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(IncompatibleStateError, match="predates an incompatible"):
+        StateStore.open(db)
+    with pytest.raises(IncompatibleStateError):
+        StateStore.open_readonly(db)
+    # The refusal left the file untouched (no version stamp), so it is not silently wedged.
+    assert _user_version(db) == DB_SCHEMA_VERSION - 1

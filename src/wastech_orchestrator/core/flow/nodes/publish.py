@@ -2,7 +2,9 @@
 
 Publishing is the orchestrator's sole responsibility (the hard invariant: providers and flows never
 touch git). The runner maps the flow's ``PublishingPolicy`` to the idempotent git operations and
-returns an unconditional ``done`` outcome.
+returns an unconditional ``done`` outcome on success. A git failure *after* finalize has already
+moved the task file into ``tasks/done/`` raises ``NodeManualRequired`` (a resumable manual stop)
+rather than a terminal failure — see :meth:`PublishNodeRunner.run` for why.
 
 In P1 only ``pull_request`` / ``documentation_pull_request`` are wired (the implementation parity
 path): commit code, commit the audit trail, push the branch, open the PR — each idempotent via
@@ -16,8 +18,13 @@ from __future__ import annotations
 
 from wastech_orchestrator.core.flow.contracts import PublishingPolicy
 from wastech_orchestrator.core.flow.engine import NodeContext, NodeOutcome, NodeResult
-from wastech_orchestrator.core.flow.nodes.base import NodeInputs, NodeServices
+from wastech_orchestrator.core.flow.nodes.base import (
+    NodeInputs,
+    NodeManualRequired,
+    NodeServices,
+)
 from wastech_orchestrator.core.flow.schema import FlowNode, PublishNode
+from wastech_orchestrator.git_manager import GitCommandError
 from wastech_orchestrator.state_store import NodeRunRow
 
 _PR_POLICIES = frozenset(
@@ -48,12 +55,34 @@ class PublishNodeRunner:
                 started_at=self._s.clock(),
             )
         )
-        result_ref = self._publish(node, ctx)
+        try:
+            result_ref = self._publish(node, ctx)
+        except GitCommandError as exc:
+            # finalize() has already moved the task file into tasks/done/ and committed the audit
+            # trail, so the deliverable is committed but publishing did not finish. Surface a
+            # resumable manual stop instead of a terminal failure: a terminal `failed` here would
+            # both mislabel a done-committed task AND strand its file in tasks/done/ (the failure
+            # path cannot relocate a file it can no longer find at the pre-finalize path). The git
+            # operations are idempotent via `publish_operations`, so `rerun --continue` re-enters
+            # this node and completes the push/PR without duplicating the commits.
+            self._s.store.complete_node_run(
+                run_id,
+                status="failed",
+                outcome=None,
+                error_class="publish_failed",
+                finished_at=self._s.clock(),
+            )
+            raise NodeManualRequired(
+                f"publish node {node.id!r} ({node.policy.value}) could not complete the git "
+                f"publish (resumable via rerun --continue): {exc}"
+            ) from exc
         self._s.store.complete_node_run(
             run_id,
             status="published",
             outcome="done",
             finished_at=self._s.clock(),
+            # `commit_sha_after` is the node's result reference; for a publish node that is the PR
+            # URL (a PR policy) or None (no-git policies) — not a commit SHA. See NodeRunRow.
             commit_sha_after=result_ref,
         )
         return NodeResult(node_id=node.id, outcome=NodeOutcome("done"), node_run_id=run_id)

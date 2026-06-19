@@ -28,6 +28,7 @@ from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.core.decomposition import (
     DecompositionDecision,
     SubtaskSpec,
+    subtask_spec_path,
     update_subtask_index,
     write_subtask_artifacts,
 )
@@ -260,8 +261,9 @@ class _Pipeline:
     check_profile: ResolvedCheckProfile | None = None  # resolved at preflight (before any branch)
     reresolved_once: bool = False  # mid-task check re-resolve is bounded to once per task (§1.2)
     # Repo skill inventory scanned at task start; planning's chosen subset is surfaced to downstream
-    # stages as read-only reference paths (§2.1). Re-derived per run; `selected_skills` is only set
-    # when the planning agent runs this process (empty on a resume past planning — advisory only).
+    # stages as read-only reference paths (§2.1). Re-derived per run; `selected_skills` is set when
+    # the planning agent runs this process and is persisted to `selected_skills.json`, so a resume
+    # past planning restores it (see `_persist_selected_skills` / `_restore_engine_inputs`).
     skill_inventory: SkillInventory = field(default_factory=SkillInventory)
     selected_skills: tuple[SkillRef, ...] = ()
     # Effective stage-skip set (global config ∪ per-task). Re-derived on every run/resume from
@@ -765,6 +767,16 @@ class Orchestrator:
         review = task_dir / "review" / "findings.json"
         if review.exists():
             inputs.review_path = str(review)
+        # Restore the planning-selected skills (in-memory only otherwise; lost on a resume past
+        # planning) so resumed edit nodes keep {skills_path} / skill_reference_paths.
+        skills_file = task_dir / "selected_skills.json"
+        if skills_file.exists():
+            refs = tuple(
+                SkillRef(name=d["name"], description=d["description"], path=d["path"])
+                for d in json.loads(skills_file.read_text(encoding="utf-8"))
+            )
+            p.selected_skills = refs
+            inputs.skill_paths = tuple(r.path for r in refs)
         # P1: the fixing-resume check log is task-scoped — a decomposed subtask re-runs its region
         # from the top (region entry), regenerating its own check log.
         latest_check = self._store.latest_failed_check_log(p.task.id, None)
@@ -868,10 +880,29 @@ class Orchestrator:
                 p, snapshot, run_state, recorder, services, inputs, completeness, resume=resume
             )
         except NodeManualRequired as exc:
+            self._sync_counters_from_run_state(p, run_state)
             return self._go_terminal(p, Status.MANUAL_ACTION_REQUIRED, manual_reason=str(exc))
         except NodeInfraError as exc:
+            self._sync_counters_from_run_state(p, run_state)
             return self._fail(p, str(exc))
+        self._sync_counters_from_run_state(p, run_state)
         return self._finish_engine_run(p, result)
+
+    def _sync_counters_from_run_state(self, p: _Pipeline, run_state: FlowRunState) -> None:
+        """Mirror the engine's authoritative loop counters into the operator-facing LoopCounters.
+
+        The engine owns counting in ``FlowRunState.loop_counters``; the legacy ``tasks`` counter
+        columns back the operator surfaces (the ledger ``_append_ledger``, CLI ``status`` via
+        ``get_counters``, ``finalize``). Syncing here before the terminal transition keeps them from
+        reading 0 after the engine ran fix loops. The global ``fix_iterations`` is generic; the
+        named loop mirrors apply to the implementation flow's ``test_fix`` / ``review_fix`` loops.
+        """
+        p.counters = replace(
+            p.counters,
+            fix_iterations=run_state.fix_iterations,
+            test_fix_cycles=run_state.counter("test_fix"),
+            review_fix_cycles=run_state.counter("review_fix"),
+        )
 
     def _run_phases(
         self,
@@ -935,7 +966,7 @@ class Orchestrator:
             if resume and not in_pre and current is not None:
                 return phase(current, None)
             return phase(regions.region_entry, None)
-        return self._fan_out_subtasks(p, run_state, regions, phase)
+        return self._fan_out_subtasks(p, run_state, regions, phase, inputs)
 
     def _fan_out_subtasks(
         self,
@@ -943,14 +974,26 @@ class Orchestrator:
         run_state: FlowRunState,
         regions: DecompositionRegions,
         phase: Callable[..., FlowRunResult],
+        inputs: NodeInputs,
     ) -> FlowRunResult:
         """Run the sub_flow region once per subtask (commit each, reset per-subtask counters), then
-        the post-region phase. A subtask with a verified commit is never re-run (recovery, §13)."""
+        the post-region phase. A subtask with a verified commit is never re-run (recovery, §13).
+
+        Before each subtask's region runs, the active immutable spec is injected as
+        ``inputs.subtask_spec_path`` so the edit nodes' ``{subtask_spec_path}`` (plus
+        ``{subtask_order}`` / ``{subtask_count}``) scopes them to that one subtask. The post-region
+        phase is whole-task again, so the spec path is cleared first."""
         units = list(p.decomposition.subtasks)
+        # Decomposition is decided during planning (after `inputs` was built), so the count was None
+        # at build time; surface it now for the edit nodes' "subtask N of M" context.
+        inputs.subtask_count = p.decomposition.n
         committed = {s.order for s in self._store.get_subtasks(p.task.id) if s.commit_sha}
         for index, unit in enumerate(units):
             if unit.order in committed:
                 continue
+            inputs.subtask_spec_path = str(
+                subtask_spec_path(self._artifacts_root, p.task.id, unit.order, unit.slug)
+            )
             sub = phase(regions.region_entry, regions.region, subtask=unit.order)
             if sub.status is not Status.DONE:
                 return sub
@@ -958,6 +1001,7 @@ class Orchestrator:
             if index != len(units) - 1:
                 run_state.reset_for_next_subtask()  # fresh per-loop budgets; global accumulates
                 self._store.update_task(p.task.id, active_subtask=unit.order + 1)
+        inputs.subtask_spec_path = None  # post-region phase is whole-task, not subtask-scoped
         return phase(regions.post_entry, None)
 
     def _commit_subtask(self, p: _Pipeline, unit: SubtaskSpec) -> None:
@@ -1090,10 +1134,24 @@ class Orchestrator:
         selection = resolve_planning_skills(proposed, p.skill_inventory)
         p.selected_skills = selection.refs
         inputs.skill_paths = tuple(ref.path for ref in selection.refs)
+        self._persist_selected_skills(p, selection.refs)
         section = self._render_skill_section(selection, ())
         if section:
             existing = Path(plan_path).read_text(encoding="utf-8")
             Path(plan_path).write_text(existing + section, encoding="utf-8")
+
+    def _persist_selected_skills(self, p: _Pipeline, refs: tuple[SkillRef, ...]) -> None:
+        """Persist the planning-selected skills so a resume past planning can restore them (§2.1).
+
+        ``p.selected_skills`` is in-memory only (set when planning runs this process), so without
+        this a resumed implementation/fixing node would lose ``{skills_path}`` /
+        ``skill_reference_paths``. The fresh run still embeds the skills in plan.md; this restores
+        the dedicated reference-path channel (see :meth:`_restore_engine_inputs`)."""
+        task_dir = task_artifact_dir(self._artifacts_root, p.task.id)
+        data = [{"name": r.name, "description": r.description, "path": r.path} for r in refs]
+        path = task_dir / "selected_skills.json"
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        self._register_artifact(p.task.id, "selected_skills", str(path))
 
     def _finish_engine_run(self, p: _Pipeline, result: FlowRunResult) -> PipelineResult:
         """Map a terminal :class:`FlowRunResult` to a :class:`PipelineResult` (+ auto-merge)."""
@@ -1478,8 +1536,6 @@ class Orchestrator:
             final = Status.MANUAL_ACTION_REQUIRED
         # Record the terminal-cleanup outcome and the reason this task stopped (when applicable).
         last_error = cleanup.error or manual_reason
-        # Persist the stage in progress before going terminal, so ``rerun --continue`` knows where
-        # to re-enter. Only meaningful for a non-success terminal; ``done`` clears it.
         self._store.update_task(
             p.task.id,
             cleanup_target_branch=cleanup.target_branch,
@@ -1487,6 +1543,13 @@ class Orchestrator:
             cleanup_completed_at=self._clock() if cleanup.safe else None,
             cleanup_last_error=last_error,
         )
+        # The flow checkpoint marks where ``rerun --continue`` re-enters — meaningful only for a
+        # non-success terminal. A ``done`` task has no resume position, so clear it (``node_runs``
+        # stay for the audit trail); otherwise keep ``current_node`` for the operator to continue.
+        if final is Status.DONE:
+            self._store.update_task(
+                p.task.id, current_node=None, flow_run_counters=None, flow_fingerprint=None
+            )
         self._transition(p, final, finished_at=self._clock())
         if not already_moved:
             self._move_task_file(p, final)

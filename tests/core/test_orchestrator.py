@@ -17,7 +17,7 @@ import pytest
 from wastech_orchestrator.check_runner import CheckRunner
 from wastech_orchestrator.core.orchestrator import Orchestrator, SlotBusyError
 from wastech_orchestrator.core.state_machine import Status
-from wastech_orchestrator.git_manager import GitManager, GitResult
+from wastech_orchestrator.git_manager import GitCommandError, GitManager, GitResult
 from wastech_orchestrator.ledger import Ledger
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult, Notifier
 from wastech_orchestrator.providers.artifacts import create_attempt_dir, task_artifact_dir
@@ -350,6 +350,10 @@ def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: 
     # The task file was moved into its lifecycle folder (tasks/done, §20.2).
     assert (tmp_path / "done" / "task-001.md").exists()
     assert not (tmp_path / "task-001.md").exists()
+    # A done task has no resume position: the flow checkpoint is cleared (no stale node= in status),
+    # while node_runs remain for the audit trail (Secondary obs 1).
+    assert store.get_flow_checkpoint("task-001") == (None, None, None)
+    assert store.get_node_runs("task-001")  # the per-node audit trail is retained
     # Exactly one ledger record; back on the base branch.
     records = ledger.records()
     assert len(records) == 1 and records[0]["final_status"] == "done"
@@ -366,6 +370,42 @@ def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: 
     # The commit landed on the task branch.
     branches = git_run(["branch", "--list", "agent/task-001-add-a-thing"], git_repo.clone)
     assert "agent/task-001-add-a-thing" in branches
+
+
+def test_task_agents_override_reaches_live_route(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # A front-matter `agents:` override must repoint the stage primary on the live engine path (not
+    # only in the router unit): the implementation node resolves to the task-chosen provider, tagged
+    # RouteSource.TASK_OVERRIDE. Config default for implementation is claude; the task picks codex.
+    # (F2 / MC1.)
+    providers = _both()
+    orch, store, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    path = tmp_path / "task-001.md"
+    path.write_text(
+        '---\nid: task-001\ntitle: "Add a thing"\nrefined: true\n'
+        "agents:\n  implementation: codex\n"
+        "---\n\n## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
+        encoding="utf-8",
+    )
+    orig = providers[ProviderId.CODEX].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.stage is Stage.IMPLEMENTATION:
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CODEX].run = run_with_edit  # type: ignore[method-assign]
+
+    result = orch.run_task(str(path))
+    assert result.final_status is Status.DONE
+
+    runs = {r.node_id: r for r in store.get_node_runs("task-001")}
+    impl = runs["implementation"]
+    assert impl.route_primary == "codex"  # repointed from the config default (claude)
+    assert impl.route_source == "task_override"
 
 
 def test_per_stage_model_reasoning_reaches_provider(
@@ -462,6 +502,34 @@ def test_failed_checks_then_fix_then_pass(git_repo, make_git_config, tmp_path: P
     assert result.final_status is Status.DONE
     # The test-fix loop ran exactly one fixing node (checks failed once, then passed on retry).
     assert _ran_nodes(store, "task-003").count("fixing") == 1
+
+
+def test_fix_iterations_synced_to_operator_surfaces(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # F6: the engine owns loop counting in FlowRunState; the operator-facing tasks.fix_iterations
+    # (CLI status / get_counters) and the ledger must reflect it, not stay at the stale 0 they read
+    # before the cutover synced them. One test-fix cycle => fix_iterations == 1 on both surfaces.
+    providers = _both()
+    orch, store, ledger, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[1, 0]
+    )
+    task_file = _complete_task(tmp_path, "task-009")
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.stage in (Stage.IMPLEMENTATION, Stage.FIXING):
+            (git_repo.clone / "f.py").write_text("z = 3\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    result = orch.run_task(task_file)
+    assert result.final_status is Status.DONE
+    assert _ran_nodes(store, "task-009").count("fixing") == 1
+    row = store.get_task("task-009")
+    assert row is not None and row.fix_iterations == 1  # synced from the engine, not stale 0
+    assert ledger.records()[0]["fix_iterations"] == 1  # ledger reflects the engine's count
 
 
 def test_two_fix_cycles_use_distinct_stage_run_artifacts(
@@ -680,6 +748,64 @@ def test_decomposed_task_commits_each_subtask(
     assert all(s.commit_sha for s in subs)
 
 
+def test_decomposed_subtask_spec_path_reaches_implementation_prompt(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # F5 / MC3: in decomposition mode each subtask's edit nodes must be scoped to that subtask — the
+    # active immutable spec path (and "subtask N of M") is rendered into the implementation prompt,
+    # so subtask 1 sees 01-first.md and subtask 2 sees 02-second.md.
+    subtasks = {
+        "decompose": True,
+        "skills": [],
+        "subtasks": [
+            {"order": 1, "title": "First", "slug": "first",
+             "acceptance_criteria": ["a"], "depends_on": []},
+            {"order": 2, "title": "Second", "slug": "second",
+             "acceptance_criteria": ["b"], "depends_on": [1]},
+        ],
+    }
+
+    class DecompProvider(FakeProvider):
+        def run(self, request: AgentRunRequest) -> AgentRunResult:
+            if request.stage is Stage.PLANNING:
+                return AgentRunResult(
+                    status=RunStatus.SUCCEEDED,
+                    provider=self.id,
+                    stage=request.stage,
+                    attempt=request.attempt,
+                    exit_code=0,
+                    started_at="t",
+                    finished_at="t",
+                    final_message="plan",
+                    structured_output={"content": "plan", "human_input": None, **subtasks},
+                )
+            if request.stage is Stage.IMPLEMENTATION:
+                (git_repo.clone / f"impl-{state['n']}.py").write_text("x\n", encoding="utf-8")
+                state["n"] += 1
+            return super().run(request)
+
+    state = {"n": 0}
+    providers = {
+        ProviderId.CLAUDE: DecompProvider("claude"),
+        ProviderId.CODEX: DecompProvider("codex"),
+    }
+    orch, _store, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers,
+        check_verdicts=[0], config_kwargs={"decomposition": True},
+    )
+    result = orch.run_task(_complete_task(tmp_path, "task-007"))
+    assert result.final_status is Status.DONE
+
+    impl_prompts = [
+        r.prompt
+        for r in providers[ProviderId.CLAUDE].requests
+        if r.stage is Stage.IMPLEMENTATION
+    ]
+    assert len(impl_prompts) == 2  # one implementation run per subtask, each subtask-scoped
+    assert "01-first.md" in impl_prompts[0] and "subtask 1 of 2" in impl_prompts[0].lower()
+    assert "02-second.md" in impl_prompts[1] and "subtask 2 of 2" in impl_prompts[1].lower()
+
+
 def test_single_active_slot_blocks(git_repo, make_git_config, tmp_path: Path) -> None:
     providers = _both()
     orch, store, _, _ = _build(
@@ -888,6 +1014,46 @@ def test_failed_with_branch_commits_and_pushes_task_and_summary(
     assert git_run(["ls-remote", "--heads", "origin", branch], git_repo.clone) != ""
     assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "main"
     assert ledger.records()[0]["final_status"] == "failed"
+
+
+def test_publish_failure_after_finalize_is_manual_not_stranded_done(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # A git failure during publishing AFTER finalize has moved the task file to tasks/done/ and
+    # committed the audit trail must not mislabel the work: the deliverable is committed, only the
+    # push/PR did not finish → resumable MANUAL_ACTION_REQUIRED, with the task file consistently in
+    # done/ (never stranded as a failed/ artifact, never marked FAILED). (F1 / MC2.)
+    providers = _both()
+    orch, store, ledger, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    task_file = _complete_task(tmp_path)
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.stage is Stage.IMPLEMENTATION:
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    def boom(*args: object, **kwargs: object) -> str:
+        raise GitCommandError("simulated PR creation failure")
+
+    orch._git.create_pr = boom  # type: ignore[method-assign]
+
+    result = orch.run_task(task_file)
+
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED  # not FAILED, not DONE
+    assert result.pr_url is None
+    row = store.get_task("task-001")
+    assert row is not None and row.status is Status.MANUAL_ACTION_REQUIRED
+    # The task file stays in its done/ lifecycle folder — never stranded as failed/, never left in
+    # the queue root.
+    assert (tmp_path / "done" / "task-001.md").exists()
+    assert not (tmp_path / "failed" / "task-001.md").exists()
+    assert not (tmp_path / "task-001.md").exists()
+    assert ledger.records()[0]["final_status"] == "manual_action_required"
 
 
 def test_artifacts_registered_with_checksums(git_repo, make_git_config, tmp_path: Path) -> None:
@@ -1732,9 +1898,13 @@ def test_skip_fixing_routes_to_manual_on_failure(git_repo, make_git_config, tmp_
     )
     _patch_impl_edit(providers, git_repo)
     result = orch.run_task(_complete_task(tmp_path))
-    # Fixing disabled → the first test failure goes straight to manual review (0 fix iterations).
+    # Fixing disabled → the failure still ends at manual review (the preserved capability). The
+    # engine is domain-agnostic, so it does NOT special-case "no fixing → straight to manual": it
+    # runs the declared test-fix loop (the skipped fixing node is a no-op each cycle) until the cap,
+    # then exhausts → manual. So fix_iterations honestly reflects the bounded loop, not 0 — F6 made
+    # this visible (it was masked by the stale-0 counter before); see Verification Additional #7.
     assert result.final_status is Status.MANUAL_ACTION_REQUIRED
-    assert store.get_counters("task-001").fix_iterations == 0
+    assert store.get_counters("task-001").fix_iterations == orch._config.agents.max_fix_cycles
     assert "fixing" in _skipped_stages(store)
 
 

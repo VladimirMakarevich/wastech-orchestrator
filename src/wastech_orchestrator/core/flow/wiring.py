@@ -140,4 +140,5 @@ def build_node_inputs(
         session_ids=p.session_ids,
         model_for=p.task.model_for,
         reasoning_for=p.task.reasoning_for,
+        route_override=dict(p.task.agents),
     )

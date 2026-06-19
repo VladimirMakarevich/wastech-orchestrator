@@ -448,7 +448,7 @@ def test_resume_continues_persisted_checkpoint(
     if current_node is not None:
         store.save_flow_checkpoint(
             task_id, current_node=current_node, counters_json="{}",
-            flow_fingerprint=_impl_fingerprint(),
+            flow_fingerprint=_impl_fingerprint(), fix_iterations=0,
         )
     failed_check = art / "logs" / task_id / "checks" / "001.log"
     if current_node == "fixing":
@@ -474,6 +474,65 @@ def test_resume_continues_persisted_checkpoint(
         assert all(request.stage is not Stage.IMPLEMENTATION for request in all_requests)
     if current_node == "fixing":
         assert expected.requests[0].check_artifacts_path == str(failed_check)
+
+
+def test_resume_restores_planning_selected_skills(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # F7 / MC4: planning selected a skill before the interruption (persisted to
+    # selected_skills.json); a resume past planning must restore it so the resumed implementation
+    # node still receives the skill reference path. `p.selected_skills` is in-memory only, so
+    # without the restore the dedicated skill_reference_paths channel is lost on resume.
+    import json
+
+    from wastech_orchestrator.task.model import NormalizedTask
+    from wastech_orchestrator.task.parser import slugify, write_normalized
+
+    providers = _make_providers(git_repo)
+    orch, store, _, art, _ = _build_orchestrator(
+        git_repo, make_git_config, tmp_path, providers, [0]
+    )
+    task_id = "resume-skills"
+    title = "Resume checkpoint"
+    slug = slugify(title)
+    branch = f"agent/{task_id}-{slug}"
+    write_normalized(
+        NormalizedTask(id=task_id, title=title, description="Implement the requested change."),
+        str(art),
+    )
+    git_run(["checkout", "-b", branch], git_repo.clone)
+    store.insert_task(
+        TaskRow(
+            task_id=task_id,
+            title=title,
+            status=Status.RUNNING,
+            branch=branch,
+            slug=slug,
+            decomposition_accepted=False,
+        )
+    )
+    store.save_flow_checkpoint(
+        task_id, current_node="implementation", counters_json="{}",
+        flow_fingerprint=_impl_fingerprint(), fix_iterations=0,
+    )
+    # Planning ran before the interruption and persisted its skill selection.
+    skill_md = git_repo.clone / ".claude" / "skills" / "safe-change" / "SKILL.md"
+    skill_md.parent.mkdir(parents=True, exist_ok=True)
+    skill_md.write_text("---\nname: safe-change\ndescription: d\n---\n# Body\n", encoding="utf-8")
+    skills_json = art / "logs" / task_id / "selected_skills.json"
+    skills_json.parent.mkdir(parents=True, exist_ok=True)
+    skills_json.write_text(
+        json.dumps([{"name": "safe-change", "description": "d", "path": str(skill_md)}]),
+        encoding="utf-8",
+    )
+
+    result = orch.resume()
+    assert result is not None and result.final_status is Status.DONE
+
+    impl = next(
+        r for p in providers.values() for r in p.requests if r.stage is Stage.IMPLEMENTATION
+    )
+    assert any(path.endswith("safe-change/SKILL.md") for path in impl.skill_reference_paths)
 
 
 def test_resume_waits_on_persisted_planning_prompt_without_resending(
@@ -518,7 +577,8 @@ def test_resume_waits_on_persisted_planning_prompt_without_resending(
         )
     )
     store.save_flow_checkpoint(
-        task_id, current_node="planning", counters_json="{}", flow_fingerprint=_impl_fingerprint()
+        task_id, current_node="planning", counters_json="{}",
+        flow_fingerprint=_impl_fingerprint(), fix_iterations=0,
     )
 
     path = interaction_path(art, task_id, Stage.PLANNING)
@@ -615,7 +675,7 @@ def test_resume_decomposed_at_subtask_without_duplicate_commit(
     )
     store.save_flow_checkpoint(
         task_id, current_node="implementation", counters_json="{}",
-        flow_fingerprint=_impl_fingerprint(),
+        flow_fingerprint=_impl_fingerprint(), fix_iterations=0,
     )
     store.insert_subtasks(
         [

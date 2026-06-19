@@ -30,20 +30,25 @@ def _utc_now_iso() -> str:
 
 
 # The SQLite schema version, stamped into ``PRAGMA user_version``. Bumped only when the schema
-# changes (not on every release). ``open()`` adopts a 0 (brand-new, or pre-versioning) database as
-# the current version; both open paths refuse a database stamped newer than this. See the spec's
-# "Versioning & compatibility" section.
+# changes (not on every release). ``open()`` adopts a ``0`` (brand-new, or pre-versioning) database
+# as the current version (``_SCHEMA`` creates it at the current shape); both open paths refuse a
+# database stamped newer than this. Because every bump below is **destructive** and ``_migrate``
+# only adds columns, a database stamped ``1..DB_SCHEMA_VERSION-1`` cannot be reshaped in place and
+# is also refused fail-closed (see :func:`_enforce_schema_version`) — greenfield means there is no
+# production data to migrate, so the local ``state.db`` is simply recreated.
+#
+# The entries below describe how the **current** ``_SCHEMA`` differs from each past version (they
+# document the cutover, they are NOT migration steps ``_migrate`` performs):
 # v4 (flow-engine P1.2): added the ``node_runs`` per-node audit table and the durable
 # :class:`~wastech_orchestrator.core.flow.run_state.FlowRunState` checkpoint columns
-# (``tasks.current_node`` / ``tasks.flow_run_counters`` / ``tasks.flow_fingerprint``).
-# v5 (flow-engine P1.4 cutover): dropped the ``provider_attempts`` FK to ``stage_runs`` so the
-# flow-engine path can store the ``node_runs`` id there (both monotonic). Greenfield — the local
-# ``state.db`` is recreated, so there is no in-place data migration.
-# v6 (flow-engine P1 Slice 7): dropped the legacy ``stage_runs`` table (the engine writes
-# ``node_runs``) and renamed ``provider_attempts.stage_run_id`` -> ``node_run_id``.
-# v7 (flow-engine P1 Slice 7): dropped ``tasks.interrupted_status`` — the granular statuses it
+# (``tasks.current_node`` / ``tasks.flow_run_counters`` / ``tasks.flow_fingerprint``). These are the
+# only **additive** columns ``_migrate`` knows how to add to a ``0``/new database.
+# v5 (flow-engine P1.4 cutover): the ``provider_attempts`` FK to ``stage_runs`` was dropped so the
+# flow-engine path can store the ``node_runs`` id there (both monotonic).
+# v6 (flow-engine P1 Slice 7): the legacy ``stage_runs`` table was dropped (the engine writes
+# ``node_runs``) and ``provider_attempts.stage_run_id`` was renamed to ``node_run_id``.
+# v7 (flow-engine P1 Slice 7): ``tasks.interrupted_status`` was dropped — the granular statuses it
 # stored are gone; ``rerun --continue`` re-enters at the ``current_node`` flow checkpoint.
-# Greenfield throughout — destructive, no data migration (the local ``state.db`` is recreated).
 DB_SCHEMA_VERSION = 7
 
 
@@ -70,15 +75,31 @@ def _migrate(conn: sqlite3.Connection) -> None:
 def _enforce_schema_version(conn: sqlite3.Connection, *, writable: bool) -> None:
     """Verify (and, when ``writable``, migrate + stamp) ``PRAGMA user_version``.
 
-    A database newer than this orchestrator is refused (fail-loud). On the writable path an older or
-    pre-versioning (``0``) database is migrated in place by :func:`_migrate` and then stamped to
-    ``DB_SCHEMA_VERSION``. The read-only path only verifies the bound (it never mutates the file).
+    Two databases are refused fail-loud on both open paths: a **newer** one (beyond this
+    orchestrator), and an **older versioned** one (``1 <= v < DB_SCHEMA_VERSION``) — its shape
+    predates a destructive change and :func:`_migrate` is additive-only, so it cannot be reshaped in
+    place (greenfield: recreate it). Only a brand-new / pre-versioning (``0``) database is adopted:
+    on the writable path :func:`_migrate` adds any missing additive columns and the version is
+    stamped to ``DB_SCHEMA_VERSION``. The read-only path only verifies these bounds (never mutates).
     """
     current = int(conn.execute("PRAGMA user_version").fetchone()[0])
     if current > DB_SCHEMA_VERSION:
         raise IncompatibleStateError(
             f"state.db schema version {current} is newer than this orchestrator supports "
             f"({DB_SCHEMA_VERSION}); upgrade wastech-orchestrator or start a fresh workspace"
+        )
+    if 0 < current < DB_SCHEMA_VERSION:
+        # The v5-v7 schema changes were destructive (dropped/renamed tables and columns) and
+        # ``_migrate`` only *adds* columns, so an older database cannot be reshaped in place.
+        # Greenfield (no production data): refuse fail-closed rather than stamp the current version
+        # onto a still-old shape — which used to pass the version gate and then crash on the first
+        # write to a reshaped table (e.g. ``provider_attempts.node_run_id``). A brand-new / pre-
+        # versioning database (``current == 0``) is created at the current shape by ``_SCHEMA`` and
+        # is adopted normally below.
+        raise IncompatibleStateError(
+            f"state.db schema version {current} predates an incompatible (destructive) schema "
+            f"change and cannot be migrated in place; delete the local state.db or start a fresh "
+            f"workspace (greenfield — there is no production data to preserve)"
         )
     if writable:
         _migrate(conn)
@@ -251,6 +272,11 @@ class NodeRunRow:
     the engine outcome (``accept``/``rework``/``pass``/``fail``/``done``/``route:*``). ``route_*``
     are ``None`` for non-agent nodes. A skipped node carries ``skipped=True`` + ``skip_reason`` and
     no provider data (see :meth:`record_node_skip`).
+
+    ``commit_sha_after`` is the node's **result reference**: the commit SHA a code/audit/subtask
+    node produced, or — for a ``publish`` node opening a PR — the PR URL (the authoritative PR URL
+    also lives in ``publish_operations``; this is the audit-trail copy). The name reads "commit sha"
+    for the common case; the publish overload is intentional and documented here.
     """
 
     task_id: str
@@ -717,15 +743,22 @@ class StateStore:
         current_node: str | None,
         counters_json: str,
         flow_fingerprint: str,
+        fix_iterations: int,
         conn: sqlite3.Connection | None = None,
     ) -> None:
-        """Persist the FlowRunState checkpoint columns on the ``tasks`` row (flow-engine path)."""
+        """Persist the FlowRunState checkpoint columns on the ``tasks`` row (flow-engine path).
+
+        ``fix_iterations`` mirrors the engine's single global fix counter into the operator-facing
+        ``tasks.fix_iterations`` column on every checkpoint, so live ``status`` reflects the loops
+        the engine has run (the legacy column is otherwise never advanced on the engine path).
+        """
         self.update_task(
             task_id,
             conn,
             current_node=current_node,
             flow_run_counters=counters_json,
             flow_fingerprint=flow_fingerprint,
+            fix_iterations=fix_iterations,
         )
 
     def get_flow_checkpoint(self, task_id: str) -> tuple[str | None, str | None, str | None]:

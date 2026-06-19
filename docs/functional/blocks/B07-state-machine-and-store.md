@@ -11,7 +11,7 @@ Defines the task status vocabulary and the allowed transitions between statuses,
 - Persist and rehydrate the flow checkpoint (`tasks.current_node` / `flow_run_counters` / `flow_fingerprint`) so a resumed run continues from the node where it stopped ([state_store.py:713-744](../../../src/wastech_orchestrator/state_store.py#L713)).
 - Provide `BEGIN IMMEDIATE`…`COMMIT`/`ROLLBACK` transactions ([state_store.py:379-388](../../../src/wastech_orchestrator/state_store.py#L379)).
 - Answer the question "who owns the slot" ([state_store.py:473-476](../../../src/wastech_orchestrator/state_store.py#L473)).
-- Version the database schema and reject a newer version ([state_store.py:70-87](../../../src/wastech_orchestrator/state_store.py#L70)).
+- Version the database schema; reject a newer version, and refuse an older incompatible (pre-v7) one fail-closed ([state_store.py:70-87](../../../src/wastech_orchestrator/state_store.py#L70)).
 
 ## Block Boundaries
 
@@ -112,7 +112,7 @@ Source: [state_machine.py:26-76](../../../src/wastech_orchestrator/core/state_ma
 
 - **Allowed transitions** (§8): the generic lifecycle "happy path" (`new → validated → preparing → running → done`, plus `pending → {validated, preparing}`) plus universal edges `-> failed` and `-> manual_action_required` for every non-terminal status; terminal statuses have no outgoing edges ([state_machine.py:48-76](../../../src/wastech_orchestrator/core/state_machine.py#L48)). The granular per-stage statuses are gone — progress within `running` is the flow `current_node`.
 - **Single slot**: all statuses except `{NEW, PENDING, DONE, FAILED, MANUAL_ACTION_REQUIRED}` are considered active (`find_active_tasks` over `_NON_ACTIVE`; the `ACTIVE` set is `{VALIDATED, PREPARING, RUNNING}`) ([state_store.py:473-476,934-936](../../../src/wastech_orchestrator/state_store.py#L473), [state_machine.py:42-44](../../../src/wastech_orchestrator/core/state_machine.py#L42)). This is a logical slot (a database query), not a DBMS lock.
-- **Schema version** = 7; a newer version raises `IncompatibleStateError` (on both open paths); an older version is migrated in-place with idempotent `ALTER TABLE ADD COLUMN` and re-claimed ([state_store.py:47-87](../../../src/wastech_orchestrator/state_store.py#L47)). v7 is greenfield-destructive: it dropped the legacy `stage_runs` table (the engine writes `node_runs`), renamed `provider_attempts.stage_run_id` → `node_run_id`, and dropped `tasks.interrupted_status` (rerun --continue re-enters at `current_node`, not a saved granular status).
+- **Schema version** = 7; a newer version raises `IncompatibleStateError` (on both open paths). An older _versioned_ database (`1 ≤ v < 7`) is also **refused fail-closed**: the v5–v7 changes are destructive and `_migrate` only _adds_ columns, so an old shape cannot be reshaped in place (greenfield — recreate the local `state.db`); stamping the current version onto an old shape would pass the gate and then crash on the first write to a reshaped table. Only a brand-new / pre-versioning `0` database is adopted (created at the current shape by `_SCHEMA`, then the additive `_migrate` columns + stamp) ([state_store.py:47-87](../../../src/wastech_orchestrator/state_store.py#L47)). v7 is greenfield-destructive: it dropped the legacy `stage_runs` table (the engine writes `node_runs`), renamed `provider_attempts.stage_run_id` → `node_run_id`, and dropped `tasks.interrupted_status` (rerun --continue re-enters at `current_node`, not a saved granular status).
 - **Idempotency**: `insert_task`/`register_artifact`/`record_publish_op`/`insert_subtasks` are upserts keyed on a unique key; `insert_subtasks` does not "revive" already-committed subtasks (`WHERE subtasks.commit_sha IS NULL`) ([state_store.py:871-905](../../../src/wastech_orchestrator/state_store.py#L871)).
 - **No secrets** in the schema (only ids, statuses, error classes, paths, sha256, counters, fingerprints, commit SHAs) ([state_store.py:8-11](../../../src/wastech_orchestrator/state_store.py#L8)).
 
@@ -128,7 +128,7 @@ Persistent rows in `state.db`; `TaskRow`/`SubtaskRow`/… on read; the `node_run
 
 ## Errors and Edge Cases
 
-- Newer schema version → `IncompatibleStateError` (caught by CLI → exit 2).
+- Newer schema version → `IncompatibleStateError` (caught by CLI → exit 2); an older incompatible (pre-v7) version → `IncompatibleStateError` too (delete `state.db` / fresh workspace).
 - `complete_node_run`/`get_counters` on a non-existent id → `KeyError`.
 - FK enabled: inserting a `node_run` without a matching `tasks` row will violate the FK constraint. `provider_attempts.node_run_id` is a plain monotonic id, **not** an FK (so the engine can store either a `node_runs` id there) ([state_store.py:147-159](../../../src/wastech_orchestrator/state_store.py#L147)).
 

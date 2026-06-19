@@ -218,6 +218,44 @@ def test_agent_node_equals_direct_router_call(tmp_path: Path) -> None:
     assert store.completed[-1]["outcome"] == "done"
 
 
+def test_fresh_disposable_node_does_not_inherit_or_leak_session(tmp_path: Path) -> None:
+    # F3 / MC6: a fresh_disposable node must NOT inherit a prior provider session (e.g. an editing
+    # agent's), and must NOT write its own session back — otherwise it would leak into a later
+    # editing_lineage node routed to the same provider. Only editing_lineage uses the session map.
+    from dataclasses import replace
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(id="reviewish", kind="agent", role_file="r.md",
+                     session_scope=SessionScope.FRESH_DISPOSABLE,
+                     permission_profile=PermissionProfile.READ_ONLY)
+    router = FakeRouter(replace(_result(), session_id="fresh-sess"))
+    services = _services(router, FakeStore(), {"reviewish": Stage.IMPLEMENTATION},
+                         FakeCheckRunner(CheckOutcome(passed=True, runs=())))
+    sessions = {"codex": "editing-sess"}  # left by a prior editing node on the same provider
+    AgentNodeRunner(services, _inputs(tmp_path, session_ids=sessions)).run(node, _ctx(node))
+    assert router.requests[0].session_id is None  # did not inherit the editing session
+    assert sessions == {"codex": "editing-sess"}  # did not leak its own session back
+
+
+def test_editing_lineage_node_continues_and_persists_session(tmp_path: Path) -> None:
+    # F3 / MC6: an editing_lineage node continues the provider's in-memory session and writes the
+    # new one back, so a later editing node (fixing after implementation) keeps the lineage (P1
+    # in-memory parity; durable lineage + lineage_affinity binding is P2.2).
+    from dataclasses import replace
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(id="impl", kind="agent", role_file="r.md",
+                     session_scope=SessionScope.EDITING_LINEAGE,
+                     permission_profile=PermissionProfile.WORKSPACE_WRITE)
+    router = FakeRouter(replace(_result(), session_id="impl-sess-2"))
+    services = _services(router, FakeStore(), {"impl": Stage.IMPLEMENTATION},
+                         FakeCheckRunner(CheckOutcome(passed=True, runs=())))
+    sessions = {"codex": "impl-sess-1"}
+    AgentNodeRunner(services, _inputs(tmp_path, session_ids=sessions)).run(node, _ctx(node))
+    assert router.requests[0].session_id == "impl-sess-1"  # continued the editing session
+    assert sessions["codex"] == "impl-sess-2"  # persisted the new session for the lineage
+
+
 def test_agent_node_infra_exhaustion_raises(tmp_path: Path) -> None:
     (tmp_path / "r.md").write_text("go", "utf-8")
     node = AgentNode(id="impl", kind="agent", role_file="r.md",
@@ -838,6 +876,8 @@ def test_publish_pull_request_runs_git_sequence(tmp_path: Path) -> None:
     assert result.outcome.kind == "done"
     assert [c[0] for c in git.calls] == ["commit_code", "commit_audit", "push", "create_pr"]
     assert git.calls[-1] == ("create_pr", "task-1", "agent/task-1-x", "My PR", "/s/summary.md")
+    # commit_sha_after is the node's result reference; for a publish node that is the PR URL (an
+    # intentional, documented overload — see NodeRunRow / Secondary obs 2), not a commit SHA.
     assert store.completed[-1]["commit_sha_after"] == "https://example/pr/1"
 
 
@@ -893,3 +933,39 @@ def test_publish_none_policy_writes_no_git(tmp_path: Path) -> None:
     result = PublishNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "done"
     assert git.calls == []
+
+
+def test_publish_git_failure_after_finalize_raises_manual(tmp_path: Path) -> None:
+    # A git failure during publishing (here: push) AFTER finalize moved the task file to done/ and
+    # committed the audit trail surfaces a resumable manual stop, not a terminal failure — so a
+    # done-committed task is never mislabeled and its file is never stranded in done/ while marked
+    # failed. The node run is recorded as failed for the audit trail. (F1 / MC2.)
+    from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
+    from wastech_orchestrator.git_manager import GitCommandError
+
+    class FailingPushGit(FakeGit):
+        def push(self, task_id: str, branch: str) -> bool:
+            self.calls.append(("push", task_id, branch))
+            raise GitCommandError("simulated push failure")
+
+    node = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
+    git, store = FailingPushGit(), FakeStore()
+    services = NodeServices(
+        router=FakeRouter(_result()),
+        check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        store=store,
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path),
+        stage_for_node={},
+        clock=lambda: "ts",
+        git=git,
+        finalize=lambda: "/done/task-1.summary.md",  # finalize already ran (file moved + summary)
+    )
+    inputs = _inputs(tmp_path, branch="agent/task-1-x", pr_title="PR")
+    with pytest.raises(NodeManualRequired):
+        PublishNodeRunner(services, inputs).run(node, _ctx(node))
+    # commit_code + commit_audit committed before push failed; create_pr never reached.
+    assert [c[0] for c in git.calls] == ["commit_code", "commit_audit", "push"]
+    # The node run is closed as failed (not left dangling, not "published").
+    assert store.completed[-1]["status"] == "failed"
+    assert store.completed[-1]["error_class"] == "publish_failed"
