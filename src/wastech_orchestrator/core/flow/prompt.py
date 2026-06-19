@@ -1,9 +1,7 @@
 """Flow agent/evaluator prompt assembly (P1.3).
 
-The flow model keeps the **prompt machinery** as fixed core and changes only the **template
-source**: instead of the stage-indexed ``PromptTemplateStore`` (removed with ``Stage`` in P1.5), a
-node's prompt template is the contents of its ``role_file``.
-The security-critical renderer is unchanged:
+A node's prompt template is the contents of its ``role_file``; the security-critical renderer (the
+fixed core) is unchanged:
 
     prompt = render_prompt(read(<flow_dir>/role_file), <allowlisted path variables>)
 
