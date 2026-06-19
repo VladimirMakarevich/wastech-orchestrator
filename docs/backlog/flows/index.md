@@ -59,8 +59,8 @@
 | Вид узла | Агент? | Класс | Что инкапсулирует |
 | --- | --- | --- | --- |
 | `agent` | да | доменный | запуск CLI codex/claude с моделью/reasoning и промптом (один агент на узел; мультиагентность — узлами графа, не crew) |
-| `evaluator` | агент, read-only | доменный | supervisor / critic / verifier / test-quality — общий примитив «оценка + bounded rework» (`accept`/`rework`), immutable-вердикты, бюджеты циклов |
-| `checks` | нет | core-owned | детерминированный `CheckRunner` (pytest/ruff/…), discovery, гейт одобрения смены набора команд, always-on commit-candidate mutation guard; exit-коды авторитетны |
+| `evaluator` | агент, read-only | доменный | review / critic / verifier / test_quality (in-flow) — общий примитив «оценка + bounded rework» (`accept`/`rework`), immutable-вердикты, бюджеты циклов. (Supervisor — не evaluator-узел, а константный слой над flow, §8.) |
+| `checks` | нет | core-owned | детерминированный `CheckRunner` (pytest/ruff/…), discovery, гейт одобрения смены набора команд, commit-candidate mutation guard (core-owned, действует при наличии узла `checks`); exit-коды авторитетны |
 | `hitl` | нет (человек) | core-owned (транспорт) | типизированный человеческий ввод/одобрение через Telegram; durable, переживает рестарт |
 | `publish` / `git` | нет | core-owned | ветка/commit/push/PR/merge/возврат — идемпотентно, **исключительно силами оркестратора** |
 
@@ -71,7 +71,7 @@
 ## 5. Граф, рёбра, циклы
 
 - **Рёбра объявлены в данных и валидируются заранее.** Все возможные рёбра графа перечислены во flow; движок проверяет резолв всех рёбер, что выбор роутера ⊆ объявленного набора, и достижимость — до запуска. Агент не «прыгает» по статусам сам.
-- **Supervisor = bounded routing.** Узел-роутер объявляет набор исходов; evaluator выбирает **только из заранее объявленных оператором рёбер**: `accept` → следующий узел; `rework` → возврат на объявленный узел (с учётом бюджета); `route` → выбор между объявленными ветками. Это сохраняет инвариант «агент не меняет workflow молча»: каждое ребро объявлено и аудируется.
+- **Evaluator = bounded routing.** Узел-роутер объявляет набор исходов; evaluator выбирает **только из заранее объявленных оператором рёбер**: `accept` → следующий узел; `rework` → возврат на объявленный узел (с учётом бюджета); `route` → выбор между объявленными ветками. Это сохраняет инвариант «агент не меняет workflow молча»: каждое ребро объявлено и аудируется. (Константный supervisor-слой §8 не маршрутизирует — он терминален.)
 - **Ограниченные циклы.** Рёбра `rework` несут бюджет; движок обязан гарантировать терминальность (исчерпание бюджета → детерминированный `manual_action_required`, не бесконечный цикл). Бюджеты per-edge/per-evaluator и операторски-конфигурируемые; единый глобальный счётчик (аналог нынешнего `fix_iterations` в `core/loop_control.py`) сохраняется как страховка.
 - **Decomposition — конструкция движка, а не вид узла.** Это фан-аут/цикл над под-flow: на каждую подзадачу прогоняется один и тот же под-граф, с общим глобальным бюджетом и последовательными коммитами на одной ветке (как сейчас в `core/decomposition.py`). Движку нужны не только узлы+рёбра, но и явная семантика цикла/map над под-flow. Точная форма — в [flow-contract.md](flow-contract.md).
 
@@ -102,19 +102,21 @@ flow:
       session_scope: editing_lineage
       model: ...
       reasoning: ...
-    - id: supervise_impl
+    - id: review
       kind: evaluator
-      role: supervisor
-      role_file: roles/supervisor.md
+      role: review
+      role_file: roles/review.md
       session_scope: fresh_disposable
     - id: testing
       kind: checks
     - id: publish
       kind: publish
   edges:
-    - { from: implementation, to: supervise_impl }
-    - { from: supervise_impl, to: testing, outcome: accept }
-    - { from: supervise_impl, to: fixing, outcome: rework, budget: 1 }
+    - { from: implementation, to: testing }
+    - { from: testing, to: review, outcome: pass }
+    - { from: testing, to: fixing, outcome: fail, loop: test_fix }
+    - { from: review, to: publish, outcome: accept }
+    - { from: review, to: fixing, outcome: rework, loop: review_fix }
     # …
 ```
 
@@ -125,9 +127,9 @@ flow:
 Это прямой ответ на требование «реализовать их в рамках рефактора, адаптировав идеи к текущим требованиям». Почти весь _смысл_ программ выживает; умирает _машинерия отдельных компонентов и хардкод-фрейминг_.
 
 - **[workflow execution foundation](../outdated/workflow_execution_foundation.md)** — её **контракты становятся словарём движка**: `run_kind`/`role`, evaluator-primitive, `QualityAction`, `session_scope`, `ResolvedExecutionPolicy`, resolved-snapshot + fingerprint, `execution_unit`, порядок precedence прав, output-policy-словарь. Умирает её центральное решение — «built-in registry одного профиля + `runner_kind`-диспетчеризация + не трогать implementation state machine». Этот документ сознательно разворачивает её non-goal «no arbitrary YAML-defined workflow graph» (снятие риска — §11).
-- **[supervisor quality-gate](../outdated/supervisor_quality_gate.md)** — становится `evaluator`-узлом (`role=supervisor`) + ребро `rework`→fixing + бюджет. Отдельный привилегированный `core/supervisor.py` **умирает**. «Mandatory, нельзя выключить» переосмысляется: supervisor обязателен не глобальным правилом, а тем, что он **присутствует в `implementation.yaml`**; «выключить» = отредактировать flow. final-handoff/summary — тоже узел (evaluator с `fresh_disposable`).
+- **[supervisor quality-gate](../outdated/supervisor_quality_gate.md)** — становится **константным supervisor-слоем над flow** (решение 2026-06-19): не узел графа, а слой оркестратора, который всегда запускается поверх **любого** flow, пишет `summary` и делает терминальный advisory-контроль (не может `rework`/переоткрыть). Конфигурируется через `config.yaml` (`supervisor: { model, reasoning, role_file }`) под потолком. Отдельный привилегированный `core/supervisor.py` и блокирующие per-stage supervisor-узлы **умирают**; блокирующие пер-стейдж гейты, если нужны, = опциональные `review`/`test_quality`-узлы. Отдельного summary-провайдера/summary-узла нет — это слой. Детали — [flow-contract.md](flow-contract.md) §2.2, [p2-implementation.md](p2-implementation.md) §P2.1.
 - **[durable sessions and fixing affinity](../outdated/durable_sessions_and_fixing_affinity.md)** — в основном **ядровая возможность** (lineage-стор, provider resume, redaction session-handle), выживает почти целиком в ядре. Узлы подключаются через `session_scope` (`editing_lineage`/`fresh_disposable`/`resume_own_lineage`). Affinity «fixing продолжает сессию implementation» = flow объявляет, что узел fixing делит lineage с узлом implementation, а ядро это гарантирует.
-- **[hybrid agent testing](../outdated/hybrid_agent_testing.md)** — `evaluator`-узел (`role=test_quality`) перед узлом `checks`. Машинерия почти не умирает — он и так спроектирован как инстанс evaluator-примитива. Always-on commit-candidate mutation guard остаётся **ядровым свойством** узла `checks`.
+- **[hybrid agent testing](../outdated/hybrid_agent_testing.md)** — опциональный `evaluator`-узел (`role=test_quality`) перед узлом `checks`. Машинерия почти не умирает — он и так спроектирован как инстанс evaluator-примитива. Commit-candidate mutation guard остаётся **ядровым свойством** узла `checks` (действует при наличии `checks`; flow без `checks` его не имеет).
 - **[task workflow profiles](../outdated/task_workflow_profiles.md)** — крупнейший передел. «Registry / `runner_kind` / три захардкоженных профиля» **умирает**. implementation / deep_research / security_audit становятся **тремя примерами YAML+MD flow**. Их семантика выживает как: (а) новые доменные/core виды узлов (детерминированный `citation_check`, `dependency_scan`, `private_report`); (б) per-flow политики output/publishing/network/permission; (в) ядровые потолки (приватный отчёт security_audit мимо git, read-only для research). Это главный источник требований к палитре узлов.
 
 ## 9. Твёрдые инварианты ядра (flow не может ослабить)
@@ -201,7 +203,7 @@ Foundation поднимал реальный риск: generic-движок до
 
 ### 14.2. Становится данными flow
 
-- **Стадии → узлы** [узел]: refinement/planning/implementation/fixing → `agent`; testing → `checks` (checker `command_profile`); review → `evaluator` (`role=review`); summary → `agent` (станет `evaluator` final_handoff с supervisor, §8); publishing → `publish`.
+- **Стадии → узлы** [узел]: refinement/planning/implementation/fixing → `agent`; testing → `checks` (checker `command_profile`); review → `evaluator` (`role=review`); summary → **константный supervisor-слой** над flow (не узел; summary + advisory, §8); publishing → `publish`.
 - **Маршрутизация** [flow]: per-stage `agents.routing` (primary+fallback) → провайдер/fallback на узле; per-task `route_override.<stage>` → override на узле (только из `agents.allowed`, коллизия с fallback меняет роли).
 - **Модель/reasoning** [flow]: порядок резолюции `stages.<>.{model,reasoning}` → task-wide `model`/`reasoning` → provider-default — сохраняется как поля узла + дефолты.
 - **Пропуск стадий** [flow + ядро]: `agents.skip_stages` ∪ per-task `stages.<>.enabled:false`, `refined:true` → отсутствие/`optional` узла; аудит-трейл пропуска (`stage_runs.skip_reason`) остаётся ядром.

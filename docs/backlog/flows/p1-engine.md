@@ -193,10 +193,10 @@ Resume по произвольному графу идемпотентен; life
 ### Touchpoints (узел → существующий код)
 
 - **Новый** `core/flow/nodes/agent.py` → [`routing/router.py`](../../../src/wastech_orchestrator/routing/router.py) `AgentRouter.resolve_route`/`run_stage` (≈133/≈171); строит `AgentRunRequest` ([providers/base.py](../../../src/wastech_orchestrator/providers/base.py)) из полей узла (`role_file`→prompt, `model`/`reasoning`/`permission_profile`/`timeout_seconds`/`extra_args`/`output_schema`/`session_scope`). dangerous-diff guard ([core/dangerous_diff.py](../../../src/wastech_orchestrator/core/dangerous_diff.py) `classify_dangerous_diff`) **автоматически** после `workspace-write`-узла — core-owned, flow не отключает.
-- **Новый** `core/flow/nodes/checks.py` → [`check_runner.py`](../../../src/wastech_orchestrator/check_runner.py) `CheckRunner.run`; discovery + `approve_command_changes`-гейт + always-on mutation guard; exit-коды авторитетны (`CheckOutcome.passed`). `launch_failed` → инфра-путь (не quality-fail), как `_reresolve_on_launch_failure` сейчас.
+- **Новый** `core/flow/nodes/checks.py` → [`check_runner.py`](../../../src/wastech_orchestrator/check_runner.py) `CheckRunner.run`; discovery + `approve_command_changes`-гейт + mutation guard (core-owned, действует при наличии узла `checks`); exit-коды авторитетны (`CheckOutcome.passed`). `launch_failed` → инфра-путь (не quality-fail), как `_reresolve_on_launch_failure` сейчас.
 - **Новый** `core/flow/nodes/hitl.py` → Telegram durable-транспорт (как `_run_typed_stage`, ≈1789, делает HITL round-trip).
 - **Новый** `core/flow/nodes/publish.py` → [`git_manager.py`](../../../src/wastech_orchestrator/git_manager.py) `commit_code`/`commit_subtask`/`commit_audit`/`push`/`create_pr`/`merge_pr`; идемпотентность через `publish_operations` (фингерпринт), без изменений.
-- **Новый** `core/flow/nodes/evaluator.py` — в P1.3 минимальная обёртка под `role=review` (паритет текущего review-стейджа); полный evaluator-примитив (supervisor/critic/verifier/test_quality, immutable-вердикты) — P2.1/P2.3.
+- **Новый** `core/flow/nodes/evaluator.py` — в P1.3 минимальная обёртка под `role=review` (паритет текущего review-стейджа); полный evaluator-примитив (in-flow `review`/`test_quality`, далее `critic`/`verifier`; immutable-вердикты) — P2.1/P2.3. (Supervisor — не evaluator-узел, а константный слой оркестратора, P2.1.)
 - Observability сохраняется: prompt_audit (рендеренный промпт + метаданные per-run в `logs/<task>/prompt-audit/`, global+per-task tri-state, task wins, без гейта), structured logging (logfmt/json + redaction-filter), heartbeat — всё как в текущем `_run_stage` (≈1716).
 
 ### Поведение
@@ -242,8 +242,8 @@ Resume по произвольному графу идемпотентен; life
 | `refinement` (agent) | `roles/refinement.md` | `{task_path}` | refinement-spec |
 | `implementation` (agent) | `roles/implementation.md` | `{plan_path}`, `{skills_path}`, `{task_path}` | — |
 | `fixing` (agent) | `roles/fixing.md` | `{diff_path}`, `{checks_path}`, `{review_path}` | — |
-| `supervise_impl` (evaluator, supervisor) | `roles/supervisor.md` | `{task_path}`, `{diff_path}` | `{verdict, findings[]}` |
-| `summary` (evaluator, final_handoff) | `roles/supervisor-final.md` | `{task_path}`, `{diff_path}` | summary-schema |
+| `review` (evaluator, review) | `roles/review.md` | `{task_path}`, `{diff_path}`, `{checks_path}` | `{verdict, findings[]}` |
+| supervisor-слой (константный, не узел) | `config.yaml: supervisor.role_file` | `{task_path}`, `{diff_path}` | summary + advisory-findings |
 | `synthesis` (agent, research) | `roles/research/synthesis.md` | `{repo}`, `{research_dir}` | — |
 | `testing` / `publish` / `hitl` | — (нет промпта) | — | — |
 

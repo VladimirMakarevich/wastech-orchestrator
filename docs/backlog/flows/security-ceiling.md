@@ -78,7 +78,7 @@
 | --- | --- | --- |
 | `checker` | settable | из ядрового набора (`command_profile`/`citation`/`dependency_scan`) |
 | `discovery` (mode, approve_command_changes) | settable | разрешённые режимы; гейт одобрения смены команд — core |
-| конкретные команды, mutation guard, авторитет exit-кодов | core-fixed | flow команды не задаёт; ими правит discovery+approval |
+| конкретные команды, mutation guard, авторитет exit-кодов | core-fixed | flow команды не задаёт; ими правит discovery+approval. Mutation guard действует, **пока в графе есть узел `checks`**; flow без `checks` его не имеет (опционально через форму графа, не через отключение гейта) |
 
 Уровень узла `publish`:
 
@@ -150,5 +150,7 @@
 - **`network_policy` — бинарные уровни** (`off`/`advisories`/`research`); per-host allowlist отложен.
 - **Реестр flow — файловая раскладка** (`.worc/flows/` + запакованные встроенные); отдельный версионируемый registry в v1 не вводится.
 - **dangerous-diff — целиком core-fixed**: guard всегда после workspace-write `agent`-узла, маршрут одобрения через HITL — ядро; flow его не тюнит.
+- **Mutation guard — core-owned, scoped к узлу `checks`** (решение 2026-06-19): пока узел `checks` в графе есть — guard действует и flow его не отключает; flow **без** `checks` (например, один implement-агент) guard'а не имеет. Это «опциональность через форму графа», а не ослабление гейта — модель угроз «сделать `checks` неавторитетным» (§1) сохраняется.
+- **Supervisor — константный слой над flow, конфигурируется в `config.yaml`** (решение 2026-06-19, см. [flow-contract.md](flow-contract.md) §2.2): секция `supervisor: { model, reasoning, role_file }` доверена на уровне `config.yaml` и валидируется под тем же потолком, что и узлы — `permission_profile` принудительно `read-only`, `model`/`reasoning` ∈ allowlist, `role_file` — path-containment. Задача и flow её не переопределяют (порядок authority §2). Терминальный (не может `rework`/публиковать сам).
 - **Task-оверрайды поверх flow убраны** ([flow-contract.md](flow-contract.md) §10): задача не патчит граф/узлы, поэтому вопрос «пределов оверрайдов» снят — задача несёт только идентичность/диспетчеризацию/операционные входы под потолком.
 - Точный allowlist полей и полные правила валидатора фиксируются на P0.3 из §3–§4.

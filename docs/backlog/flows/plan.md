@@ -10,7 +10,7 @@
 
 ## Объём v1 (зафиксирован)
 
-v1 поставляет **всё**: движок + целевой `implementation` (с mandatory supervisor + durable sessions + hybrid testing) + `deep_research` + `security_audit` + операторская YAML-поверхность с фатальным валидатором (C). crew **не реализуется** (мультиагентность — узлами графа; см. [flow-contract.md](flow-contract.md) §2.1).
+v1 поставляет **всё**: движок + целевой `implementation` (с константным supervisor-слоем + durable sessions + hybrid testing) + `deep_research` + `security_audit` + операторская YAML-поверхность с фатальным валидатором (C). crew **не реализуется** (мультиагентность — узлами графа; см. [flow-contract.md](flow-contract.md) §2.1).
 
 Фазы ниже — **порядок сборки по зависимостям внутри одного v1**, а не релизные гейты. «Целевой implementation» означает: конечное состояние v1 — полный целевой конвейер. При этом сборка проходит через **внутренний чекпоинт корректности движка** (P1.4): движок сначала воспроизводит текущее поведение как тест самого себя, и только потом P2 наслаивает целевые фичи. Паритетный `implementation.yaml` из P1.4 — тестовая фикстура, не поставляемый flow.
 
@@ -64,10 +64,10 @@ co-design здесь: написать `implementation.yaml`, `deep_research.yam
 
 Цель: на доказанном движке нарастить целевой implementation; адаптировать три программы. Порядок: supervisor → durable → hybrid.
 
-- **P2.1** Supervisor как evaluator-узел (`record_rework`, immutable `evaluations`, final_handoff заменяет summary-провайдер).
-- **P2.2** Durable sessions (lineage-стор, Codex `exec resume`, Claude `--resume`, affinity `fixing→implementation`, `session_unavailable`-путь).
-- **P2.3** review как обычный evaluator-узел.
-- **P2.4** Hybrid `test_quality` (неблокирующий) + always-on mutation guard на `checks`.
+- **P2.1** Supervisor как **константный слой над flow** (config.yaml: model/effort/role_file; summary + терминальный advisory-контроль, не узел) + evaluator-примитив (`record_rework`, immutable `evaluations`) для in-flow `review`/`test_quality`.
+- **P2.2** Durable sessions (lineage-стор, Codex `exec resume`, Claude `--resume`, объявляемая affinity — в impl-flow `fixing→implementation`, `session_unavailable`-путь).
+- **P2.3** review как обычный конфигурируемый evaluator-узел (опционален, удаляем).
+- **P2.4** Hybrid `test_quality` (опциональный, неблокирующий) + mutation guard на `checks` (действует при наличии узла `checks`).
 - **P2.5** Целевой packaged `implementation.yaml` + тесты из спек трёх программ.
 
 ## P3 — Flows research + audit → [p3-research-audit.md](p3-research-audit.md)
@@ -98,7 +98,7 @@ co-design здесь: написать `implementation.yaml`, `deep_research.yam
 | Backlog-программа | Куда уходит | Что меняется vs оригинал |
 | --- | --- | --- |
 | [foundation](../outdated/workflow_execution_foundation.md) | P0 (словарь, снапшот, диспетчеризация) | Контракты сохранены дословно; «registry одного профиля + `runner_kind` + не трогать state machine» **удалено** (заменено движком из данных) |
-| [supervisor](../outdated/supervisor_quality_gate.md) | P2.1 | Становится `evaluator`-узлом; привилегированный `core/supervisor.py` **удалён**; «mandatory» = присутствие узла в `implementation.yaml`; `record_rework`/final_handoff сохранены |
+| [supervisor](../outdated/supervisor_quality_gate.md) | P2.1 | Становится **константным слоем над flow** (оркестратор, config.yaml-configured: model/effort/role_file), summary + терминальный advisory-контроль; привилегированный `core/supervisor.py` и блокирующие per-stage supervisor-узлы **удалены**; `record_rework` сохранён для in-flow петель; блокирующие пер-стейдж гейты = опциональные `review`/`test_quality`-узлы |
 | [durable sessions](../outdated/durable_sessions_and_fixing_affinity.md) | P2.2 | Почти целиком ядровая возможность; узлы цепляются через `session_scope`; affinity объявляется во flow |
 | [hybrid testing](../outdated/hybrid_agent_testing.md) | P2.4 | `evaluator`-узел перед `checks`; mutation guard — свойство узла `checks`; машинерия почти не меняется |
 | [profiles](../outdated/task_workflow_profiles.md) | P3 (+ P3.2 политики) | «3 захардкоженных профиля + `runner_kind`» **удалено**; три flow = данные; семантика → новые чекеры `checks` + политики + ядровые потолки |
@@ -106,7 +106,7 @@ co-design здесь: написать `implementation.yaml`, `deep_research.yam
 ## Что удаляется и когда
 
 - P1.5: `_drive`, реентри-диспетчер по статусам, `Stage`-как-конвейер.
-- P2.2: отдельный summary-провайдер (никогда не вводится — заменён final_handoff-узлом); привилегированный supervisor-компонент.
+- P2.1: отдельный summary-провайдер (никогда не вводится — заменён константным supervisor-слоем); привилегированный supervisor-компонент; блокирующие per-stage supervisor-узлы (`supervise_impl`/`supervise_fix`) в графе не вводятся.
 - P0.4/P4.1: фрейминг profile-registry/`runner_kind` (никогда не строится — заменён flow-реестром).
 - P4.3: пять backlog-доков → `docs/backlog/outdated/`.
 

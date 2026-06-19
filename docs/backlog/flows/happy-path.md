@@ -4,7 +4,7 @@
 
 Сквозной прогон целевой v1-системы на примере `implementation`-flow, задействующий **максимум** возможностей (конфигов и функций) в одном happy-path — от `worc install` до влитого PR. Это витрина того, как складываются вместе ядро ([index.md](index.md)), контракт ([flow-contract.md](flow-contract.md) §7) и потолок ([security-ceiling.md](security-ceiling.md)); служит ещё и нарративной co-design-проверкой (всё ли стыкуется).
 
-Иллюстрируется **target**-состояние v1 (с supervisor / durable sessions / hybrid testing из [index.md](index.md) §8) — не текущий код. Метки `[задействует: …]` отмечают покрытую возможность/конфиг; сводный чеклист — в §6.
+Иллюстрируется **target**-состояние v1 (с константным supervisor-слоем / durable sessions / hybrid testing из [index.md](index.md) §8) — не текущий код. Supervisor здесь — **не узел графа**, а слой оркестратора над flow (summary + терминальный advisory-контроль перед publish; см. §4.5). Метки `[задействует: …]` отмечают покрытую возможность/конфиг; сводный чеклист — в §6.
 
 ## 0. Диаграммы
 
@@ -30,23 +30,19 @@ flowchart TD
     planning --> dec{{"decomposition<br/>фан-аут по подзадачам<br/>(общий бюджет, commit на ветку)"}}
     dec --> impl["implementation<br/>agent · workspace-write · editing_lineage"]
     impl --> dd{"dangerous-diff?<br/>core-guard"}
-    dd -->|HITL approve / clean| sup1["supervise_impl<br/>evaluator · role=supervisor"]
-    sup1 -->|accept| tq["testing_quality<br/>evaluator · role=test_quality · non-blocking"]
-    sup1 -->|rework · budget 1| fixing["fixing<br/>agent · affinity→implementation"]
+    dd -->|HITL approve / clean| tq["testing_quality<br/>evaluator · role=test_quality · non-blocking"]
     tq -->|accept| checks["testing<br/>checks · command_profile"]
-    tq -->|rework| fixing
+    tq -->|rework| fixing["fixing<br/>agent · affinity→implementation"]
     checks -->|pass| review["review<br/>evaluator · role=review"]
     checks -->|fail · loop test_fix| fixing
     review -->|accept| commit["subtask commit"]
     review -->|rework · loop review_fix| fixing
-    fixing --> sup2["supervise_fix<br/>evaluator · role=supervisor"]
-    sup2 -->|accept| tq
-    sup2 -->|rework · budget 1| fixing
+    fixing --> tq
     commit -->|следующая подзадача| impl
-    commit -->|последняя| summary["summary<br/>evaluator · final_handoff"]
-    summary --> publish["publish<br/>commit + audit + push + PR + auto-merge"]
+    commit -->|последняя| sup["supervisor-слой<br/>константа · summary + advisory<br/>(оркестратор, не узел)"]
+    sup --> publish["publish<br/>commit + audit + push + PR + auto-merge"]
     publish --> done(["DONE"])
-    sup1 -.->|бюджеты исчерпаны| manual(["MANUAL_ACTION_REQUIRED"])
+    review -.->|бюджеты исчерпаны| manual(["MANUAL_ACTION_REQUIRED"])
     checks -.->|fix_iterations исчерпан| manual
 ```
 
@@ -213,33 +209,32 @@ Add a configurable per-IP rate limiter to the public API gateway...
 
 - **implementation** (agent · workspace-write · `editing_lineage`): пишет код лимитера + тесты. Сессия фиксируется в durable lineage.
 - **dangerous-diff guard** (core): diff трогает `pyproject.toml` (новая зависимость) → классифицирован `dependency` → не покрыт planning-одобрением → HITL-`approval` опасного diff → «Approve».
-- **supervise_impl** (evaluator · `role=supervisor` · fresh_disposable): читает diff read-only → `accept`.
 - **testing_quality** (evaluator · `role=test_quality` · non-blocking): оценивает качество тестов, написанных implementation-агентом → `accept`.
-- **testing** (checks · `command_profile`): checks-discovery резолвит профиль; набор команд изменился относительно одобренного → **HITL-approval смены набора** → «Approve»; запуск `pytest -q`, `ruff check .`, `mypy src` → **pass** (exit 0). Always-on commit-candidate mutation guard: чек ничего не намусорил.
+- **testing** (checks · `command_profile`): checks-discovery резолвит профиль; набор команд изменился относительно одобренного → **HITL-approval смены набора** → «Approve»; запуск `pytest -q`, `ruff check .`, `mypy src` → **pass** (exit 0). Commit-candidate mutation guard (узел `checks` присутствует): чек ничего не намусорил.
 - **review** (evaluator · `role=review`): блокирующих findings нет → `accept`.
 - **subtask commit**: scoped staging (только пути кода, `:(exclude)tasks/`, никогда `git add .`), commit подзадачи на ветке; SHA в state.db; per-subtask счётчики циклов сброшены (глобальный `fix_iterations` — нет).
 
-`[задействует: implementation agent workspace-write + editing_lineage (durable session), dangerous-diff (dependency) + HITL approval, supervisor evaluator accept, hybrid test_quality non-blocking accept, checks discovery + approve_command_changes HITL + exit-коды + mutation-guard, review evaluator accept, scoped staging + per-subtask commit, loop counters reset]`
+`[задействует: implementation agent workspace-write + editing_lineage (durable session), dangerous-diff (dependency) + HITL approval, hybrid test_quality non-blocking accept, checks discovery + approve_command_changes HITL + exit-коды + mutation-guard, review evaluator accept, scoped staging + per-subtask commit, loop counters reset]`
 
 ### 4.4. Подзадача 2 — `gateway-wiring` (с rework-петлями)
 
-Здесь срабатывают петли — показываем все три триггера fixing через единый учёт.
+Здесь срабатывают петли — показываем **оба in-flow триггера** fixing (review-driven и test-driven) через единый учёт.
 
 - **implementation** → diff.
-- **supervise_impl** → `rework` (нашёл, что не покрыт edge-case 429 Retry-After; severity high). Ребро `rework · budget 1` → **fixing**. `record_rework` инкрементит **единый** `fix_iterations` (только этот путь, без двойного счёта).
-- **fixing** (agent · `lineage_affinity → implementation`): **продолжает сессию** implementation (durable resume того же провайдера/сессии), доправляет.
-- **supervise_fix** (evaluator · supervisor) → `accept` → возврат на **testing_quality** (повторная оценка тестов после правки) → `accept` → **testing**.
-- **testing** (checks): один тест красный (exit≠0) → quality-fail → ребро `fail · loop test_fix` → **fixing** (test_fix_cycle++ , fix_iterations++) → supervise_fix `accept` → testing → **pass**.
+- **testing_quality** (non-blocking) → `accept`. **testing** (checks) → **pass**.
+- **review** (evaluator · `role=review`) → `rework` (нашёл, что не покрыт edge-case 429 Retry-After; severity high). Ребро `rework · loop review_fix` → **fixing**. `record_rework` инкрементит **единый** `fix_iterations` (только этот путь, без двойного счёта).
+- **fixing** (agent · `lineage_affinity → implementation`): **продолжает сессию** implementation (durable resume того же провайдера/сессии), доправляет → возврат на **testing_quality** → **testing**.
+- **testing** (checks): один тест красный (exit≠0) → quality-fail → ребро `fail · loop test_fix` → **fixing** (test_fix_cycle++, `fix_iterations`++ через тот же `record_rework`) → testing_quality → testing → **pass**.
 - **review** (evaluator) → `accept`.
 - **subtask commit** (последняя подзадача).
 
 Если бы петли упёрлись в `max_fix_cycles` или `max_total_fix_iterations` — детерминированный `MANUAL_ACTION_REQUIRED` + `failure_report.json`/`stuck.md` (не бесконечный цикл).
 
-`[задействует: supervisor rework → fixing (budget 1), fixing affinity (durable session resume), session_unavailable-путь (ретрай без resume не тратит fix-итерацию — на случай потери транскрипта), test-driven fix loop, единый fix_iterations (record_rework без двойного инкремента), терминальность бюджетов → manual]`
+`[задействует: review rework → fixing (loop review_fix), fixing affinity (durable session resume), session_unavailable-путь (ретрай без resume не тратит fix-итерацию — на случай потери транскрипта), test-driven fix loop, единый fix_iterations (record_rework без двойного инкремента — оба in-flow триггера делят один путь), терминальность бюджетов → manual]`
 
-### 4.5. summary (evaluator · final_handoff · fresh_disposable)
+### 4.5. supervisor-слой (константа над flow · не узел · перед publish)
 
-После принятой последней подзадачи — один свежий read-only проход `final_handoff`: синтезирует принятый итог (`what`/`how`/`integration`/`why`); ядро валидирует и пишет `summary.md`/`summary.json`. Не может выдать rework/переоткрыть задачу. (Если `summary` выключен политикой — пропуск без артефактов; здесь включён.) `[задействует: final_handoff заменяет summary-провайдер, ядро пишет summary, неблокирующий]`
+После принятой последней подзадачи — терминальный проход **константного supervisor-слоя оркестратора** (а не узла графа), который запускается поверх **любого** flow: свежий read-only синтез принятого итога (`what`/`how`/`integration`/`why`) + advisory-замечания; ядро валидирует и пишет `summary.md`/`summary.json` (advisory дублируется в `evaluations`). **Не может** выдать rework/переоткрыть задачу. Конфигурируется из `config.yaml: supervisor { model, reasoning, role_file }` под потолком (read-only). `[задействует: константный supervisor-слой (summary + advisory) над flow, конфиг через config.yaml, ядро пишет summary, терминальный — без rework]`
 
 ### 4.6. publish (core-owned)
 
@@ -264,8 +259,8 @@ Add a configurable per-IP rate limiter to the public API gateway...
 | Конфиг | repo, orchestrator (auto_mode/poll), agents (allowed, лимиты, providers со всеми полями), security (4 ключа), validation, checks.discovery, git (PR/footprint/auto_merge\*), telegram, skills, prompt_audit |
 | Flow-данные | граф узлов, рёбра accept/rework/fail, бюджеты, decomposition, session_scope, lineage_affinity, output/publishing/network/permission_ceiling, role-MD |
 | Интейк | watch + periodic git sync, single-slot, validation §19 (Phase A/B), injection-scan, dup-id 2-source, quarantine, flow-резолюция + fingerprint, branch prep |
-| Узлы | agent (read-only/workspace-write), evaluator (supervisor/test_quality/review/final_handoff), checks (command_profile + discovery + approval + mutation-guard), hitl (question/approval), publish |
-| Петли | supervisor rework, test-driven fix, единый fix_iterations + локальные циклы, терминальность → manual |
+| Узлы | agent (read-only/workspace-write), evaluator (test_quality/review), checks (command_profile + discovery + approval + mutation-guard), hitl (question/approval), publish; **константный supervisor-слой** (summary + advisory) — над flow, не узел |
+| Петли | review rework, test-driven fix, единый fix_iterations + локальные циклы (оба in-flow триггера через `record_rework`), терминальность → manual |
 | Сессии | durable editing_lineage, fixing-affinity (resume), session_unavailable-путь, fresh_disposable для evaluator |
 | HITL | refinement question, planning approval, dangerous-diff approval, check-set-change approval — все durable |
 | Git/publish | scoped staging, code-commit, task-scoped audit-commit, push + base-protection, PR, auto-merge (wait_for_checks), идемпотентность |

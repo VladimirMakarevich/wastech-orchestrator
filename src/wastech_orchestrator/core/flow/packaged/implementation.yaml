@@ -2,10 +2,16 @@
 #
 # This is the pre-refactor pipeline expressed as data: refinement -> planning -> implementation ->
 # testing(checks) -> review(evaluator) -> fixing -> summary -> publish, with the two fix loops and
-# decomposition, and WITHOUT supervisor / hybrid testing_quality / durable sessions. Those are the
-# target features layered on in P2; the TARGET shape (supervise_impl / testing_quality / final-
-# handoff summary) is preserved in docs/backlog/flows/co-design/implementation.yaml + flow-contract
-# §7, and P2.5 grows this packaged file back to it.
+# decomposition, and WITHOUT hybrid testing_quality / durable sessions. Those are the target
+# features layered on in P2; the TARGET shape (optional testing_quality + mutation guard on checks,
+# durable sessions) is preserved in docs/backlog/flows/co-design/implementation.yaml + flow-contract
+# §7, and P2.5 grows this packaged file to it.
+#
+# NOTE (2026-06-19 revision): supervisor is NOT a graph node. It is a constant orchestrator layer
+# ABOVE any flow (summary + terminal advisory control, configured in config.yaml: supervisor); the
+# supervise_impl/supervise_fix nodes and the summary-as-node were removed from the target. The
+# `summary` agent node below is the current P1-parity summary writer; P2.1 replaces it with the
+# constant supervisor layer. See p2-implementation.md §P2.1, flow-contract §2.2/§7.
 flow:
   name: implementation
   task_type: implementation

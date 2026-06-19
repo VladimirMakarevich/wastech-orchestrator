@@ -1,6 +1,11 @@
 # Эталонный flow `implementation` (co-design, Step 0). Целевое состояние v1.
 # Финальная форма контракта: ключ исхода ребра `outcome` (не `on` — YAML 1.1 bool-ловушка),
 # условный пропуск узла — предикат `when`, decomposition — отдельный блок.
+#
+# Ревизия 2026-06-19: supervisor — НЕ узел графа, а константный слой оркестратора над любым
+# flow (summary + терминальный advisory-контроль, config.yaml: supervisor). Узлы supervise_impl/
+# supervise_fix и summary-узел убраны; блокирующие пер-стейдж гейты = опциональные review/
+# test_quality-узлы. См. flow-contract.md §2.2/§7, p2-implementation.md §P2.1.
 flow:
   name: implementation
   task_type: implementation
@@ -33,13 +38,6 @@ flow:
       role_file: roles/implementation.md
       session_scope: editing_lineage
       permission_profile: workspace-write
-    - id: supervise_impl
-      kind: evaluator
-      role: supervisor
-      role_file: roles/supervisor.md
-      session_scope: fresh_disposable
-      permission_profile: read-only
-      max_rework_per_stage: 1
     - id: testing_quality
       kind: evaluator
       role: test_quality
@@ -65,42 +63,23 @@ flow:
       session_scope: editing_lineage
       lineage_affinity: implementation
       permission_profile: workspace-write
-    - id: supervise_fix
-      kind: evaluator
-      role: supervisor
-      role_file: roles/supervisor.md
-      session_scope: fresh_disposable
-      permission_profile: read-only
-      max_rework_per_stage: 1
-    - id: summary
-      kind: evaluator
-      role: supervisor
-      role_file: roles/supervisor-final.md
-      session_scope: fresh_disposable
-      permission_profile: read-only
-      evaluation_kind: final_handoff
-      blocking: false
-      when: { fact: config.summary_enabled }
     - id: publish
       kind: publish
       policy: pull_request
+    # supervise_impl/supervise_fix/summary-узлов нет: summary + терминальный контроль
+    # даёт константный supervisor-слой оркестратора перед publish (config.yaml: supervisor).
 
   edges:
     - { from: refinement, to: planning }
     - { from: planning, to: implementation }
-    - { from: implementation, to: supervise_impl }
-    - { from: supervise_impl, to: testing_quality, outcome: accept }
-    - { from: supervise_impl, to: fixing, outcome: rework, budget: 1 }
+    - { from: implementation, to: testing_quality }
     - { from: testing_quality, to: testing, outcome: accept }
     - { from: testing_quality, to: fixing, outcome: rework, budget: 1 }
     - { from: testing, to: review, outcome: pass }
     - { from: testing, to: fixing, outcome: fail, loop: test_fix }
-    - { from: review, to: summary, outcome: accept }
+    - { from: review, to: publish, outcome: accept }
     - { from: review, to: fixing, outcome: rework, loop: review_fix }
-    - { from: fixing, to: supervise_fix }
-    - { from: supervise_fix, to: testing_quality, outcome: accept }
-    - { from: supervise_fix, to: fixing, outcome: rework, budget: 1 }
-    - { from: summary, to: publish }
+    - { from: fixing, to: testing_quality }
 
   budgets:
     global_fix_iterations: 30
@@ -110,15 +89,6 @@ flow:
   decomposition:
     proposed_by: planning
     gate: { min: 2, max: 8, linear_depends_on: true }
-    sub_flow:
-      [
-        implementation,
-        supervise_impl,
-        testing_quality,
-        testing,
-        review,
-        fixing,
-        supervise_fix,
-      ]
+    sub_flow: [implementation, testing_quality, testing, review, fixing]
     commit_each_subtask: true
     shared_budget: global_fix_iterations

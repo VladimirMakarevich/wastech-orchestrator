@@ -32,7 +32,7 @@
 
 ## A. Flow `implementation`
 
-Порядок happy-path: refinement → planning → implementation → supervise_impl → testing_quality → **testing** (checks) → review → [fixing → supervise_fix]\* → summary → **publish**.
+Порядок happy-path: refinement → planning → implementation → testing_quality → **testing** (checks) → review → [fixing]\* → **publish**. Supervisor — **не узел**, а константный слой оркестратора перед publish (summary + advisory; см. A8).
 
 ### A1. `refinement` (agent, read-only) — `when: derived.needs_refinement`
 
@@ -63,16 +63,7 @@
 - **AgentRunRequest**: `permission_profile=workspace-write`, `session_id` = editing-сессия (P2.2), `plan_path`/`task_path`/`skill_reference_paths` заданы.
 - **После узла**: **dangerous-diff guard** (core, авто): классификация diff (deletion/dependency) → при необходимости HITL-approval; затем чекпоинт. Создаётся `diff_path` для следующих узлов.
 
-### A4. `supervise_impl` (evaluator, role=supervisor, read-only, `fresh_disposable`)
-
-- **session/права**: `fresh_disposable` (свежая сессия, **не** трогает editing-lineage автора), `read-only` (жёстко для evaluator).
-- **role_file** `roles/supervisor.md`: «оценить diff против задачи/плана read-only; вернуть вердикт accept|rework + findings с severity; rework только при ≥1 medium/high».
-- **Интерполируемые пути**: `{diff_path}` (из A3), `{task_path}`, `{plan_path}`.
-- **output_schema**: `{ verdict: accept|rework, findings: [{severity, reason, paths}] }` (строго валидируется ядром).
-- **AgentRunRequest**: `permission_profile=read-only`, `session_id=None`.
-- **После узла**: вердикт — immutable-артефакт (`evaluations`, P2.1). Исход `accept` → A5; `rework` → ребро на `fixing` (инлайн `budget:1`), `record_rework` инкрементит единый `fix_iterations`.
-
-### A5. `testing_quality` (evaluator, role=test_quality, read-only, **неблокирующий**) — `when: config.hybrid_testing`
+### A4. `testing_quality` (evaluator, role=test_quality, read-only, **неблокирующий**) — `when: config.hybrid_testing`
 
 - **Гейт**: только если `config.hybrid_testing` включён.
 - **session/права**: `fresh_disposable`, `read-only`; `blocking: false`.
@@ -81,41 +72,38 @@
 - **output_schema**: вердикт + findings.
 - **Неблокирующий**: исчерпание `budget:1` → идём по `accept`-ребру (→ testing), **не** в manual.
 
-### A6. `testing` (checks, `command_profile`) — **нет промпта**
+### A5. `testing` (checks, `command_profile`) — **нет промпта**
 
-Детерминированный `CheckRunner` (pytest/ruff/…); discovery + approve_command_changes (HITL) + always-on mutation guard; exit-коды авторитетны. Создаёт `checks_path`. Исход `pass`→review, `fail`→fixing (`loop: test_fix`).
+Детерминированный `CheckRunner` (pytest/ruff/…); discovery + approve_command_changes (HITL) + mutation guard (core-owned, действует при наличии узла `checks`); exit-коды авторитетны. Создаёт `checks_path`. Исход `pass`→review, `fail`→fixing (`loop: test_fix`).
 
-### A7. `review` (evaluator, role=review, read-only, `fresh_disposable`)
+### A6. `review` (evaluator, role=review, read-only, `fresh_disposable`)
 
 - **session/права**: `fresh_disposable`, `read-only`.
 - **role_file** `roles/review.md`: «ревью текущего diff против задачи и плана; findings с severity; блокирующее — то, что должно измениться до merge».
 - **Интерполируемые пути**: `{diff_path}`, `{checks_path}` (результаты тестов), `{task_path}`, `{plan_path}`.
 - **output_schema**: вердикт + findings (блокирующие → rework).
-- **После узла**: создаётся `review_path`. `accept`→summary; блокирующее → fixing (`loop: review_fix`).
+- **После узла**: создаётся `review_path`. `accept`→publish (через константный supervisor-слой, A8); блокирующее → fixing (`loop: review_fix`).
 
-### A8. `fixing` (agent, **workspace-write**, `editing_lineage`, `lineage_affinity: implementation`)
+### A7. `fixing` (agent, **workspace-write**, `editing_lineage`, `lineage_affinity: implementation`)
 
 - **session/права**: `editing_lineage` с **affinity → implementation** — **продолжает editing-сессию** узла implementation (durable resume того же провайдера/сессии, P2.2), `workspace-write`.
 - **role_file** `roles/fixing.md`: «устранить упавшие checks и/или блокирующие review-findings из контекст-файлов; минимальное изменение; учесть отказ опасного изменения из human_input».
 - **Интерполируемые пути**: `{diff_path}`, `{checks_path}` (что упало), `{review_path}` (блокирующее), `{skills_path}`.
 - **AgentRunRequest**: `permission_profile=workspace-write`, `session_id` = **сессия implementation** (affinity); конфликтующий per-attempt провайдер/модель отвергается, пока affinity активна.
-- **После узла**: dangerous-diff guard; обновляется `diff_path`; → supervise_fix.
+- **После узла**: dangerous-diff guard; обновляется `diff_path`; → testing_quality (повторная оценка после фикса) → checks.
 
-### A9. `supervise_fix` (evaluator, role=supervisor, read-only, `fresh_disposable`)
+### A8. Supervisor-слой (константа над flow, **не узел**) — всегда, перед publish
 
-Идентично A4 (тот же `roles/supervisor.md`, тот же output_schema), но оценивает diff **после фикса**. `accept` → возврат на testing_quality (повторная оценка) → checks; `rework` → fixing (`budget:1`).
+- **Где**: на уровне оркестратора, а не в графе. Запускается **поверх любого flow** (включая degenerate из одного агента) терминальным проходом перед `publish`. Использует ту же prompt-машинерию, что и узлы (контекст по путям), но конфигурируется из `config.yaml`, а не из YAML-узла.
+- **Конфиг**: `config.yaml: supervisor { model, reasoning, role_file }`; `permission_profile` принудительно `read-only`, `model`/`reasoning` ∈ allowlist, `role_file` — path-containment ([security-ceiling.md](security-ceiling.md) §8).
+- **role_file** (по умолчанию `roles/supervisor-final.md`): «связный итог принятого изменения (что/как/интеграция/почему) + advisory-замечания; не править код».
+- **Интерполируемые пути**: `{task_path}`, `{plan_path}`, `{diff_path}`, `{checks_path}`, `{review_path}`.
+- **output_schema**: summary + advisory-findings.
+- **Особое**: терминальный — **не может** выдать rework/переоткрыть задачу; ядро валидирует и пишет `summary.{md,json}` (или детерминированный fallback) + advisory в `evaluations`. Заменяет и старый summary-провайдер, и блокирующие per-stage supervisor-узлы.
 
-### A10. `summary` (evaluator, **final_handoff**, read-only, неблокирующий) — `when: config.summary_enabled`
+### A9. `publish` (publish, `pull_request`) — **нет промпта**
 
-- **session/права**: `fresh_disposable`, `read-only`, `evaluation_kind: final_handoff`, `blocking: false`.
-- **role_file** `roles/supervisor-final.md` (≈ `summary.md`): «связный итог принятого изменения: что/как/интеграция/почему; не править код».
-- **Интерполируемые пути**: `{task_path}`, `{plan_path}`, `{diff_path}`.
-- **output_schema**: summary-схема (what/how/integration/why).
-- **Особое**: final_handoff **не может** выдать rework/переоткрыть задачу; ядро валидирует и пишет `summary.{md,json}` (или детерминированный fallback). Заменяет старый summary-провайдер.
-
-### A11. `publish` (publish, `pull_request`) — **нет промпта**
-
-Core-owned: scoped commit + task-scoped audit-commit + push + PR + (опц.) auto-merge; идемпотентно через `publish_operations`.
+Core-owned: scoped commit + task-scoped audit-commit + push + PR + (опц.) auto-merge; идемпотентно через `publish_operations`. Тело PR — из `summary.{md}` (A8).
 
 ---
 
@@ -179,7 +167,7 @@ Core-owned: сохраняет отчёт под gitignored `<repo>/.worc/securi
 | editing-lineage | implementation/fixing (`editing_lineage` + affinity) | нет (все agent — `fresh_disposable`) |
 | пишущие узлы | implementation/fixing (код) | report (только приватный отчёт) |
 | гейт checks | `command_profile` (pass/fail гейтит) | `dependency_scan` (evidence, не гейтит) |
-| evaluator-исход на исчерпании | supervisor blocking → manual | verifier non-blocking → continue |
+| evaluator-исход на исчерпании | review blocking → manual (test_quality non-blocking → continue) | verifier non-blocking → continue |
 | публикация | PR (+auto-merge) | none (приватный отчёт мимо git) |
 | сеть | default | advisories |
 | dangerous-diff guard | срабатывает (workspace-write правит код) | срабатывает на report, но src не меняется |
