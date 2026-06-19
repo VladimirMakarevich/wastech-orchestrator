@@ -1,4 +1,4 @@
----
+<!-- ---
 name: sync-docs
 description: After a behavior/CLI/config/architecture change in wastech-orchestrator, bring the docs (including the docs/functional map and the docs/likec4 C4 model) and the follow-ups tracker in sync with the code. Use after implementing a change (the Stop docs-sync gate reminds you), before a commit, or whenever the docs no longer match the code.
 ---
@@ -26,4 +26,4 @@ Keep the documentation in lockstep with the code. Run this after changing behavi
 - Update docs **in the same change** as the code, not "later". The Stop docs-sync gate (`.claude/hooks/docs_sync_gate.py`) blocks once when `src/` changed without any `docs/`/`.agents/` change.
 - Don't claim "docs updated" without naming the specific files you touched.
 - If a change genuinely has **no** documentation impact (pure internal refactor, test-only), say so explicitly — that satisfies the rule; do not invent doc churn.
-- Match the surrounding doc style; keep edits minimal and accurate. Don't introduce broken links.
+- Match the surrounding doc style; keep edits minimal and accurate. Don't introduce broken links. -->
