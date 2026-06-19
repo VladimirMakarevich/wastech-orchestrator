@@ -6,9 +6,9 @@ The core of the work: the agent edits the code of a unit (task or subtask). This
 
 ## Responsibility
 
-- Run the editing agent and capture the current diff ([orchestrator.py:1205-1216](../../../../src/wastech_orchestrator/core/orchestrator.py#L1205), [orchestrator.py:1879-1900](../../../../src/wastech_orchestrator/core/orchestrator.py#L1879)).
-- Classify the diff and, if it is dangerous and not covered by a planning approval, request human sign-off; a rejection grants one "safe" rework ([orchestrator.py:1902-1971](../../../../src/wastech_orchestrator/core/orchestrator.py#L1902)).
-- Transition to testing (or to review if testing is skipped) — `_after_edit_target` ([orchestrator.py:2249](../../../../src/wastech_orchestrator/core/orchestrator.py#L2249)).
+- Run the editing agent and capture the current diff — the `AgentNodeRunner` for the `implementation` node ([nodes/agent.py:65](../../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L65)); the diff is written in `_apply_post_edit_guard` ([nodes/agent.py:235-248](../../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L235)).
+- Classify the diff and, if it is dangerous and not covered by a planning approval, request human sign-off; a rejection grants one "safe" rework — same `_apply_post_edit_guard` ([nodes/agent.py:235-312](../../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L235)).
+- Return an unconditional `done` outcome; the engine takes the forward edge to testing (or to review when testing is skipped — that routing is the graph/`when`, not the node).
 
 ## Step Boundaries
 
@@ -23,12 +23,12 @@ The core of the work: the agent edits the code of a unit (task or subtask). This
 
 ## Entry Points
 
-- `_run_unit` branch `IMPLEMENTING` ([orchestrator.py:1205-1216](../../../../src/wastech_orchestrator/core/orchestrator.py#L1205)).
-- `_run_edit_stage_with_guardrail(p, Stage.IMPLEMENTATION, …)` ([orchestrator.py:1879](../../../../src/wastech_orchestrator/core/orchestrator.py#L1879)).
+- `AgentNodeRunner.run` for the `implementation` node ([nodes/agent.py:65](../../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L65)).
+- `_apply_post_edit_guard` ([nodes/agent.py:235](../../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L235)) — the core-owned dangerous-diff guard that runs after any `workspace-write` edit.
 
 ## Input Data and State
 
-`plan.md` / subtask spec as context (by path); repository working tree. Status: `implementing`. Artifacts: `current.diff`; on approval, a HITL guardrail artifact.
+`plan.md` / subtask spec as context (by path); repository working tree. The task status is `running` (`current_node = implementation`). Artifacts: `current.diff`; on approval, a HITL guardrail artifact.
 
 ## Main Scenario
 
@@ -40,7 +40,7 @@ The core of the work: the agent edits the code of a unit (task or subtask). This
 
 ```mermaid
 flowchart TB
-    start(["entry: implementing"]) --> edit["agent edits code (B17/B18) → current.diff (B22)"]
+    start(["entry: running (current_node=implementation)"]) --> edit["agent edits code (B17/B18) → current.diff (B22)"]
     edit --> cls{"dangerous diff? (B14)"}
     cls -->|no| next
     cls -->|"yes, covered by planning approval"| next
@@ -55,13 +55,13 @@ flowchart TB
 
 ## Checks and Constraints
 
-- implementation is **not** in `SKIPPABLE_STAGES` ([schema.py:50-63](../../../../src/wastech_orchestrator/config/schema.py#L50)) — it cannot be skipped.
-- A dangerous diff means file deletions or edits to dependency manifests/lock files ([B14](../../blocks/B14-dangerous-diff-guardrail.md)); approval is checked against the previously approved set to avoid re-asking for the same set.
-- The "safe rework" boundary is persisted before launch (a restart will not trigger it twice) ([orchestrator.py:1950-1962](../../../../src/wastech_orchestrator/core/orchestrator.py#L1950)).
+- implementation is **not** in `SKIPPABLE_STAGES` ([schema.py:66-74](../../../../src/wastech_orchestrator/config/schema.py#L66)) — it has no `when:` condition and cannot be skipped.
+- A dangerous diff means file deletions or edits to dependency manifests/lock files ([B14](../../blocks/B14-dangerous-diff-guardrail.md)); approval is checked against the previously approved set to avoid re-asking for the same set ([nodes/agent.py:447-457](../../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L447)).
+- The dangerous-diff approval is a durable interaction (a restart resumes it, never re-asking twice); the guard resumes from the persisted status ([nodes/agent.py:281-298](../../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L281)).
 
 ## Result / Transition
 
-Transition to [S04 testing](./S04-testing.md) or, when testing is skipped, to [S05 review](./S05-review.md) (`_after_edit_target`). Artifact: `current.diff`.
+Forward edge to [S04 testing](./S04-testing.md) or, when testing is skipped, to [S05 review](./S05-review.md) (the engine routes the graph edges; the implementation→testing edge plus the `testing` node's `when` decide the target). Artifact: `current.diff`.
 
 ## Side Effects
 
@@ -69,9 +69,9 @@ Transition to [S04 testing](./S04-testing.md) or, when testing is skipped, to [S
 
 ## Errors and Edge Cases
 
-- HITL approval failure → `manual_action_required` (fail-closed).
-- Diff "expanded" after the approval request on resume → `manual_action_required` ([orchestrator.py:1982-1985](../../../../src/wastech_orchestrator/core/orchestrator.py#L1982)).
-- No stage result (infrastructure failure on all attempts) → terminal stage failure ([B17](../../blocks/B17-agent-router-and-fallback.md)).
+- HITL approval failure → `manual_action_required` (fail-closed, `NodeManualRequired`).
+- Diff "expanded" after the approval request on resume → `manual_action_required` ([nodes/agent.py:284-287](../../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L284)).
+- No node result (infrastructure failure on all attempts) → `NodeInfraError` → terminal stage failure ([B17](../../blocks/B17-agent-router-and-fallback.md)).
 
 ## Relationships
 
@@ -85,11 +85,11 @@ Transition to [S04 testing](./S04-testing.md) or, when testing is skipped, to [S
 
 ## Position in the Flow
 
-The heart of a unit of work: this is where the code changes. The same `_run_edit_stage_with_guardrail` is also used in [S06 fixing](./S06-fixing.md). See the [flow overview](./index.md).
+The heart of a unit of work: this is where the code changes. The same `AgentNodeRunner` + `_apply_post_edit_guard` runs the `fixing` node in [S06 fixing](./S06-fixing.md). See the [flow overview](./index.md).
 
 ## Code Confirmation
 
-- [orchestrator.py:1205-1216](../../../../src/wastech_orchestrator/core/orchestrator.py#L1205) — `IMPLEMENTING` branch in `_run_unit`.
-- [orchestrator.py:1879-1971](../../../../src/wastech_orchestrator/core/orchestrator.py#L1879) — `_run_edit_stage_with_guardrail` (classification, approval, rework).
-- [orchestrator.py:2249-2251](../../../../src/wastech_orchestrator/core/orchestrator.py#L2249) — `_after_edit_target`.
-- Tests: [tests/core/test_orchestrator.py](../../../../tests/core/test_orchestrator.py), [tests/core/test_hitl.py](../../../../tests/core/test_hitl.py).
+- [nodes/agent.py:58](../../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L58) — `AgentNodeRunner` (the `implementation` node runner); `run()` at [nodes/agent.py:65](../../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L65).
+- [nodes/agent.py:235-312](../../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L235) — `_apply_post_edit_guard` (diff capture, classification, approval, reconsider).
+- [implementation.yaml:33-37,72](../../../../src/wastech_orchestrator/core/flow/packaged/implementation.yaml#L33) — the `implementation` node + the `implementation → testing` edge.
+- Tests: [tests/core/test_flow_node_runners.py](../../../../tests/core/test_flow_node_runners.py), [tests/core/test_orchestrator.py](../../../../tests/core/test_orchestrator.py), [tests/core/test_hitl.py](../../../../tests/core/test_hitl.py).

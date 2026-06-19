@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The typed model for `config.yaml` and its full data lifecycle: structural YAML parsing into dataclasses (fail-closed), semantic validation of rules §11/§21.4, and key migration between schema versions. The configuration defines the behavior of the entire system (providers, routes, loop limits, security, the git audit footprint, checks, telegram, prompts, skills, the prompt audit toggle).
+The typed model for `config.yaml` and its full data lifecycle: structural YAML parsing into dataclasses (fail-closed), semantic validation of rules §11/§21.4, and key migration between schema versions. The configuration defines the behavior of the entire system (providers, routes, loop limits, security, the git audit footprint, checks, telegram, skills, the prompt audit toggle).
 
 ## Responsibilities
 
@@ -16,7 +16,7 @@ The typed model for `config.yaml` and its full data lifecycle: structural YAML p
 
 ### Within the block's responsibility
 
-- Data model (shapes), structural parsing (types, unknown keys, version), semantic validation, key migration, binding the relative `templates_dir` to the config directory.
+- Data model (shapes), structural parsing (types, unknown keys, version), semantic validation, key migration.
 
 ### Outside the block's responsibility
 
@@ -43,8 +43,7 @@ Text/path of `config.yaml`; for upgrade — the packaged `templates/config.examp
 1. `loads_config`: `yaml.safe_load`; non-mapping root or YAML error → `ConfigError`.
 2. `_parse`: check unknown top-level keys and `schema_version`; assemble each block with typed readers (type mismatch → issue + safe default).
 3. If there are issues — `ConfigError` with the full list; otherwise `ConfigLoadResult(config, warnings)`.
-4. `load_config` additionally binds the relative `prompts.templates_dir` to the config directory.
-5. CLI calls `validate_config` (semantics) as a fail-closed gate before use.
+4. CLI calls `validate_config` (semantics) as a fail-closed gate before use.
 
 Loading and validation are two fail-closed checkpoints; each collects **all** issues, not just the first:
 
@@ -54,8 +53,7 @@ flowchart TB
     y -->|"non-mapping / YAML error"| e1["ConfigError"]
     y --> parse["_parse: unknown keys, schema_version,<br/>block types (collect ALL issues)"]
     parse -->|"issues present"| e1
-    parse --> bind["bind relative prompts.templates_dir<br/>to config directory"]
-    bind --> res["ConfigLoadResult(config, warnings)"]
+    parse --> res["ConfigLoadResult(config, warnings)"]
     res --> val["validate_config: semantics §11/§21.4<br/>(routes, limits, extra_args, checks, telegram)"]
     val -->|violation| e2["ConfigError (all issues)"]
     val --> ok["config admitted to the pipeline"]
@@ -69,9 +67,9 @@ flowchart TB
 
 Missing routing block → auto-migration to Codex route for all `ROUTABLE_STAGES` + warning ([loader.py:476-485,388-392](../../../src/wastech_orchestrator/config/loader.py#L476)).
 
-### Schema changes (v6 / v7 / v8)
+### Schema changes (v6 / v7 / v8 / v9)
 
-v6: `prompts.overrides`/`prompts.strict` are tolerated on load (ignored) with a warning; `upgrade-config` strips them ([loader.py:711-728](../../../src/wastech_orchestrator/config/loader.py#L711), [upgrade.py:27-30,77-89](../../../src/wastech_orchestrator/config/upgrade.py#L27)). v7 (worc-home consolidation): the `git.footprint.location`/`.tracking`/`.external_root` keys are removed — `git.footprint` now carries only `audit_commit_message` + `audit_on_branch` ([schema.py:39,229-236](../../../src/wastech_orchestrator/config/schema.py#L39)); `upgrade-config` strips the removed keys. v8 (prompt-audit): adds the optional top-level `prompt_audit` boolean (default false); an absent value takes the safe `false`, so no migration flips anything and `upgrade-config` adds it from the template.
+v6: `prompts.overrides`/`prompts.strict` are tolerated on load (ignored) with a warning; `upgrade-config` strips them ([loader.py:711-728](../../../src/wastech_orchestrator/config/loader.py#L711), [upgrade.py:27-30,77-89](../../../src/wastech_orchestrator/config/upgrade.py#L27)). v7 (worc-home consolidation): the `git.footprint.location`/`.tracking`/`.external_root` keys are removed — `git.footprint` now carries only `audit_commit_message` + `audit_on_branch` ([schema.py:39,229-236](../../../src/wastech_orchestrator/config/schema.py#L39)); `upgrade-config` strips the removed keys. v8 (prompt-audit): adds the optional top-level `prompt_audit` boolean (default false); an absent value takes the safe `false`, so no migration flips anything and `upgrade-config` adds it from the template. v9 (flow-engine P1): the entire `prompts` block (`templates_dir`/`mode`) is removed — a flow node's prompt template is its `role_file`, not a stage-indexed packaged default; an operator's `prompts:` block is tolerated (ignored) on load and `upgrade-config` strips it ([schema.py:42-44](../../../src/wastech_orchestrator/config/schema.py#L42), [loader.py:735-737](../../../src/wastech_orchestrator/config/loader.py#L735), [upgrade.py:25-28](../../../src/wastech_orchestrator/config/upgrade.py#L25)).
 
 ### Config upgrade
 
@@ -79,7 +77,7 @@ v6: `prompts.overrides`/`prompts.strict` are tolerated on load (ignored) with a 
 
 ## Checks and constraints
 
-- **Structural** (loader): non-mapping root, unknown keys (top-level and block-level), unknown stage/provider/enum, wrong types → `ConfigError`; `schema_version` newer than current (=7) → `ConfigError` ([loader.py:758-775](../../../src/wastech_orchestrator/config/loader.py#L758)).
+- **Structural** (loader): non-mapping root, unknown keys (top-level and block-level), unknown stage/provider/enum, wrong types → `ConfigError`; `schema_version` newer than current (=9) → `ConfigError` ([loader.py:714-730](../../../src/wastech_orchestrator/config/loader.py#L714)).
 - **Semantic** (validation): routes only for `ROUTABLE_STAGES`, primary/fallback ∈ `agents.allowed` and present in `agents.providers`; `poll_interval_seconds ≥ 0`; `max_total_fix_iterations ≥ max_fix_cycles`; `decomposition.max_subtasks ≥ 2`; `extra_args` without bypass flags; check commands — argv without shell metacharacters, without bypass flags, not from `denied_commands`; telegram timeout > 0 and valid env-variable names ([validation.py:80-216](../../../src/wastech_orchestrator/config/validation.py#L80)).
 - `check_task_route_override` — the same allowed/configured/routable checks, but **pure** (returns a list of issues, raises nothing) ([validation.py:228-240](../../../src/wastech_orchestrator/config/validation.py#L228)).
 
@@ -119,7 +117,7 @@ Configuration is the single source of behavioral parameters. Fail-closed loading
 ## Code confirmation
 
 - [config/schema.py:34-334](../../../src/wastech_orchestrator/config/schema.py#L34) — format version, `ROUTABLE_STAGES`/`SKIPPABLE_STAGES`, all block dataclasses and enumerations.
-- [config/loader.py:778-829](../../../src/wastech_orchestrator/config/loader.py#L778) — `_parse`, `loads_config`, `load_config`, `templates_dir` binding.
+- [config/loader.py:734-777](../../../src/wastech_orchestrator/config/loader.py#L734) — `_parse`, `loads_config`, `load_config`.
 - [config/loader.py:458-502](../../../src/wastech_orchestrator/config/loader.py#L458) — legacy routing migration, defaults.
 - [config/validation.py:69-240](../../../src/wastech_orchestrator/config/validation.py#L69) — semantic rules and `check_task_route_override`.
 - [config/upgrade.py:58-120](../../../src/wastech_orchestrator/config/upgrade.py#L58) — add-missing merge, key removal, render.

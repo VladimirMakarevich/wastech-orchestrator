@@ -28,18 +28,18 @@ Single owner of the on-disk artifact layout and the **"logs are never overwritte
 ## Entry Points
 
 - `task_artifact_dir(artifacts_root, task_id)` ([artifacts.py:46](../../../src/wastech_orchestrator/providers/artifacts.py#L46)) — used broadly (B06, B16, B08, B12).
-- `create_attempt_dir(artifacts_root, task_id, stage, attempt, provider, *, stage_run_id, subtask=None)` ([artifacts.py:80](../../../src/wastech_orchestrator/providers/artifacts.py#L80)) — [B18](./B18-agent-providers.md).
+- `create_attempt_dir(artifacts_root, task_id, stage, attempt, provider, *, node_run_id, subtask=None)` ([artifacts.py:80](../../../src/wastech_orchestrator/providers/artifacts.py#L80)) — [B18](./B18-agent-providers.md).
 - `write_request_artifact` / `write_result_artifact` ([artifacts.py:112,117](../../../src/wastech_orchestrator/providers/artifacts.py#L112)) — [B18](./B18-agent-providers.md).
 - `archive_task_artifacts(artifacts_root, task_id, attempt)` ([artifacts.py:56](../../../src/wastech_orchestrator/providers/artifacts.py#L56)) — [B06](./B06-orchestrator-pipeline.md) `rerun_task`.
 - `sha256_file(path)` ([artifacts.py:128](../../../src/wastech_orchestrator/providers/artifacts.py#L128)) — [B06](./B06-orchestrator-pipeline.md) `_register_artifact`.
 
 ## Inputs and State
 
-`artifacts_root`, `task_id`, and for an attempt — `stage`, `attempt`, `provider`, `stage_run_id`, optional `subtask`. No state is stored; the source of truth for the layout is the path-construction code itself.
+`artifacts_root`, `task_id`, and for an attempt — `stage`, `attempt`, `provider`, `node_run_id`, optional `subtask`. No state is stored; the source of truth for the layout is the path-construction code itself.
 
 ## Main Scenario (creating an attempt)
 
-1. Base directory: `<root>/logs/<task-id>/stages/<stage>/[sub-<NN>/]run-<stage_run_id:06d>/<attempt>-<provider>/`.
+1. Base directory: `<root>/logs/<task-id>/stages/<stage>/[sub-<NN>/]run-<node_run_id:06d>/<attempt>-<provider>/`.
 2. `mkdir(parents=True, exist_ok=False)` — the directory **must not** already exist; a collision raises `FileExistsError` ([artifacts.py:97-101](../../../src/wastech_orchestrator/providers/artifacts.py#L97)).
 3. Returns `ArtifactPaths` with paths for `request.json`, `stdout.log`, `stderr.log`, `events.jsonl`, `result.json`.
 
@@ -47,7 +47,7 @@ Deterministic attempt path and the "logs are not overwritten" invariant (`exist_
 
 ```mermaid
 flowchart TB
-    start(["create_attempt_dir(task, stage, attempt, provider, stage_run_id)"]) --> path["path: logs/{task-id}/stages/{stage}/<br/>[sub-NN/]run-{stage_run_id:06d}/{attempt}-{provider}/"]
+    start(["create_attempt_dir(task, stage, attempt, provider, node_run_id)"]) --> path["path: logs/{task-id}/stages/{stage}/<br/>[sub-NN/]run-{node_run_id:06d}/{attempt}-{provider}/"]
     path --> mk{"mkdir(parents=True, exist_ok=False)"}
     mk -->|"directory already exists"| err["FileExistsError — overwrite protection"]
     mk -->|"created"| ap["ArtifactPaths: request.json, stdout.log,<br/>stderr.log, events.jsonl, result.json"]
@@ -61,7 +61,7 @@ flowchart TB
 
 ## Checks and Constraints
 
-- `stage_run_id` is reserved in SQLite before the provider starts, so a repeated fixing cycle or a recovery run receives its own directory even when the attempt counter starts from 1 ([artifacts.py:90-96](../../../src/wastech_orchestrator/providers/artifacts.py#L90)).
+- `node_run_id` is reserved in SQLite before the provider starts, so a repeated fixing cycle or a recovery run receives its own directory even when the attempt counter starts from 1 ([artifacts.py:90-96](../../../src/wastech_orchestrator/providers/artifacts.py#L90)).
 - `exist_ok=False` — guarantees that logs are never overwritten.
 
 ## Output

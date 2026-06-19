@@ -15,7 +15,7 @@ Confirmed by:
 - the CLI entry point and set of subcommands ([cli.py:114-376](../../src/wastech_orchestrator/cli.py#L114));
 - the pipeline class [Orchestrator](../../src/wastech_orchestrator/core/orchestrator.py#L294) and its `run_task` method ([orchestrator.py:350](../../src/wastech_orchestrator/core/orchestrator.py#L350));
 - the provider contract [AgentProvider](../../src/wastech_orchestrator/providers/base.py#L155) with two adapters `codex` and `claude`;
-- the task state machine ([state_machine.py:15-113](../../src/wastech_orchestrator/core/state_machine.py#L15));
+- the task state machine ([state_machine.py:18-107](../../src/wastech_orchestrator/core/state_machine.py#L18));
 - all external commands being launched **as an argument list without shell interpolation** ([process.py](../../src/wastech_orchestrator/providers/process.py), [git_manager.py](../../src/wastech_orchestrator/git_manager.py)).
 
 Key properties visible in the code:
@@ -65,7 +65,7 @@ A navigable version of these relationships as **architecture-as-code** (C4 model
 
 - **Console scripts `wastech-orchestrator` and `worc`** ([pyproject.toml:29-32](../../pyproject.toml#L29) → `cli:main`) — argument parsing and subcommand dispatch.
 - **`python -m wastech_orchestrator`** ([\_\_main\_\_.py](../../src/wastech_orchestrator/__main__.py) → `cli:main`) — same as the console scripts.
-- **CLI subcommands** ([cli.py build_parser](../../src/wastech_orchestrator/cli.py#L100), dispatcher [main](../../src/wastech_orchestrator/cli.py#L1355)) — `install`, `run`, `watch`, `stop`, `restart`, `preflight`, `telegram-test`, `status`, `upgrade-config`, `upgrade-docs`, `install-templates`, `rerun`, `finalize`.
+- **CLI subcommands** ([cli.py build_parser](../../src/wastech_orchestrator/cli.py#L86), dispatcher [main](../../src/wastech_orchestrator/cli.py#L1248)) — `install`, `run`, `watch`, `stop`, `restart`, `preflight`, `telegram-test`, `status`, `upgrade-config`, `upgrade-docs`, `rerun`, `finalize`.
 
 Internal triggers (not user commands), confirmed by code:
 
@@ -81,13 +81,13 @@ Detailed step-by-step scenarios are in [system-flows.md](./system-flows.md); a f
 1. **Single task processing (`run` / `watch`).** Read and validate task → acquire slot → prepare branch → (opt.) refinement → planning (+ opt. decomposition) → for each work unit the loop `implementation → testing → review → fixing` → summary → publish (commit/push/PR, opt. auto-merge) → terminal cleanup → write to ledger.
 2. **`watch` daemon.** Between ticks: fetch/pull base branch, resume interrupted task, pick next pending task (one at a time; back-to-back only with `auto_mode`).
 3. **Resume (`resume`).** On startup, compare persistent state and continue the single unfinished task or complete interrupted cleanup.
-4. **`rerun` / `rerun --continue`.** Retry a terminal task — "from scratch from base" or "continue from the stage where it failed".
+4. **`rerun` / `rerun --continue`.** Retry a terminal task — "from scratch from base" or "continue from the flow checkpoint node where it stopped".
 5. **`finalize`.** The operator records the outcome of a task completed manually (without the pipeline and without commit/push/PR).
 6. **`install` / `preflight`.** Set up the orchestrator in a repository under `<repo>/.worc/`, generate and validate configuration, diagnose provider and isolation readiness.
 
 ## Pipeline as a State Machine
 
-Each task moves through a fixed set of statuses with allowed transitions. Transitions are defined by an explicit `ALLOWED_TRANSITIONS` table ([core/state_machine.py:70](../../src/wastech_orchestrator/core/state_machine.py#L70)); the core validates each transition (`assert_transition`) and atomically persists the new status.
+Each task moves through a small, generic set of statuses with allowed transitions; progress _within_ `running` (which flow node is executing) is the `current_node` in `node_runs`, not a status. Transitions are defined by an explicit `ALLOWED_TRANSITIONS` table ([core/state_machine.py:48-76](../../src/wastech_orchestrator/core/state_machine.py#L48)); the core validates each transition (`assert_transition`) and atomically persists the new status.
 
 ```mermaid
 stateDiagram-v2
@@ -96,40 +96,25 @@ stateDiagram-v2
 
     new --> validated: gate §19 passed
     new --> failed: reject §19 (quarantine, no branch)
+    pending --> validated: dequeue
+    pending --> preparing: resume
     validated --> preparing
-    preparing --> refining
-    preparing --> planning: refinement skipped
-    refining --> planning
-    planning --> implementing
-
-    implementing --> testing
-    implementing --> reviewing: testing skipped
-    testing --> reviewing: checks passed
-    testing --> fixing: quality failure
-    reviewing --> summarizing: review has no blockers
-    reviewing --> fixing: blocking findings
-    reviewing --> implementing: next subtask (k of n)
-    fixing --> testing
-    fixing --> reviewing: testing skipped
-
-    summarizing --> ready_to_publish
-    ready_to_publish --> committing
-    committing --> pushing
-    pushing --> creating_pr
-    creating_pr --> done
+    preparing --> running: hand the flow graph to the engine
+    running --> done: flow reached its terminal node
 
     done --> [*]
     failed --> [*]
     manual_action_required --> [*]
 
-    note right of fixing
-      Any active status can also transition to failed
-      or manual_action_required: infrastructure failure,
-      limit exhaustion, HITL failure (fail-closed).
+    note right of running
+      Progress within running is the flow current_node
+      in node_runs, not a status. Any non-terminal status
+      can also transition to failed or manual_action_required:
+      infrastructure failure, exhausted budget, fail-closed HITL.
     end note
 ```
 
-Terminal statuses (no outgoing transitions) — `done`, `failed`, `manual_action_required`. The `pending` status (§8.2) is waiting in the queue: the task has been accepted but does not yet own the single processing slot; the table has `pending → validated` and `pending → preparing` (dequeue or resume), while the normal pipeline entry status is `new`. The decomposition loop does not introduce new statuses: each subtask reuses `implementing → testing → reviewing`, and its number (`k` of `n`) is stored in the State Store.
+Terminal statuses (no outgoing transitions) — `done`, `failed`, `manual_action_required`. The `pending` status (§8.2) is waiting in the queue: the task has been accepted but does not yet own the single processing slot; the table has `pending → validated` and `pending → preparing` (dequeue or resume), while the normal pipeline entry status is `new`. Progress within `running` is the flow `current_node` (in `node_runs`), not a status. The decomposition loop does not introduce new statuses either: each subtask re-runs the flow's `sub_flow` region (the `implementation → testing → review → fixing` nodes), and its number (`k` of `n`) is stored in the State Store ([state_machine.py:26-76](../../src/wastech_orchestrator/core/state_machine.py#L26)).
 
 ## Functional Block Map
 
@@ -246,7 +231,7 @@ Key: [B17 Router](./blocks/B17-agent-router-and-fallback.md) is the sole caller 
 
 The `<artifacts_root>` is the gitignored `<repo>/.worc/` home (`worc_home_for(config)`); the task lifecycle dirs are the exception — they sit at the repo root and carry the committed audit trail.
 
-- **`state.db`** — `<artifacts_root>/state.db`; SQLite (tasks, stage_runs, provider_attempts, check_runs, artifacts, publish_operations, subtasks); owner [B07](./blocks/B07-state-machine-and-store.md).
+- **`state.db`** — `<artifacts_root>/state.db`; SQLite (tasks, node_runs, provider_attempts, check_runs, artifacts, publish_operations, subtasks); owner [B07](./blocks/B07-state-machine-and-store.md).
 - **`completed.jsonl`** — `<artifacts_root>/logs/completed.jsonl`; JSONL (append-only); owner [B08](./blocks/B08-ledger-and-failure-reports.md).
 - **`resolved-profile.json`** — `<artifacts_root>/checks/`; JSON (check profile cache); owner [B23](./blocks/B23-check-discovery.md).
 - **Run artifacts** — `<artifacts_root>/logs/<task-id>/...`; directories with request/result/stdout/stderr/events; owner [B20](./blocks/B20-artifact-layout.md).

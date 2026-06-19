@@ -6,8 +6,8 @@ The first (optional) stage of the pipeline: the agent enriches a "raw" task into
 
 ## Responsibility
 
-- Decide whether the stage is needed: skip if `task.refined` is set or if completeness classification returns `COMPLETE` ([orchestrator.py:1049-1056](../../../../src/wastech_orchestrator/core/orchestrator.py#L1049)).
-- When running — execute the refinement agent, write `task.enriched.md`, set `refinement_ran` ([orchestrator.py:1061-1066](../../../../src/wastech_orchestrator/core/orchestrator.py#L1061)).
+- Decide whether the node runs: the `refinement` node carries `when: derived.needs_refinement` — the engine skips it when that fact is false (`task.refined` set or completeness classification `COMPLETE`) and takes the forward edge to planning. The orchestrator computes the fact in `_engine_facts` ([orchestrator.py:983-1000](../../../../src/wastech_orchestrator/core/orchestrator.py#L983)).
+- When the node runs — the `AgentNodeRunner` executes the refinement agent and records a `node_runs` row ([nodes/agent.py:58](../../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L58)); the post-node hook persists the enriched-spec artifact slot ([orchestrator.py:1002-1030](../../../../src/wastech_orchestrator/core/orchestrator.py#L1002)).
 
 ## Stage boundaries
 
@@ -24,39 +24,39 @@ The first (optional) stage of the pipeline: the agent enriches a "raw" task into
 
 ## Entry points
 
-- `_refinement(p, completeness)` ([orchestrator.py:1049](../../../../src/wastech_orchestrator/core/orchestrator.py#L1049)) — called from `_drive`.
-- `_run_refinement(p)` ([orchestrator.py:1061](../../../../src/wastech_orchestrator/core/orchestrator.py#L1061)) — launch/restart of the persistent checkpoint `refining`.
+- `AgentNodeRunner.run` for the `refinement` node ([nodes/agent.py:65](../../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L65)) — runs the refinement agent and returns an unconditional `done` outcome.
+- The skip is the engine's `when:` check ([engine.py:291-312](../../../../src/wastech_orchestrator/core/flow/engine.py#L291)); the `derived.needs_refinement` fact is resolved by `_engine_facts` ([orchestrator.py:983-1000](../../../../src/wastech_orchestrator/core/orchestrator.py#L983)).
 
 ## Input data and state
 
-`NormalizedTask` (flag `refined`) and `Completeness` from Phase B ([B16](../../blocks/B16-task-parsing-and-validation-gate.md)). Status: `preparing` → `refining` (or directly to `planning` on skip). Artifact — `task.enriched.md`.
+`NormalizedTask` (flag `refined`) and `Completeness` from Phase B ([B16](../../blocks/B16-task-parsing-and-validation-gate.md)). The task status is `running` throughout the pipeline body; progress is the flow `current_node` (recorded in `node_runs`). On skip the engine records the skip and takes the forward edge to the `planning` node. Artifact — `task.enriched.md`.
 
 ## Main scenario
 
-1. If `refined` is true **or** completeness is `COMPLETE` → write `refinement_ran=False` + reason, transition to [S02 planning](./S02-planning.md).
-2. Otherwise → transition to `REFINING`, run the agent (`_run_typed_stage`, [B12](../../blocks/B12-hitl-and-typed-output.md)/[B17](../../blocks/B17-agent-router-and-fallback.md)), write `task.enriched.md`, set `refinement_ran=True`, transition to planning.
+1. If `refined` is true **or** completeness is `COMPLETE` (i.e. `derived.needs_refinement` is false) → the engine records the node skip and takes the forward edge to [S02 planning](./S02-planning.md).
+2. Otherwise → the `AgentNodeRunner` runs the refinement agent ([B17](../../blocks/B17-agent-router-and-fallback.md)/[B18](../../blocks/B18-agent-providers.md), typed output [B12](../../blocks/B12-hitl-and-typed-output.md)) and writes `task.enriched.md`; the engine then takes the forward edge to planning.
 
 ```mermaid
 flowchart TB
-    start(["entry: preparing"]) --> q{"refined=true or COMPLETE?"}
-    q -->|yes| skip["refinement_ran=false + skip reason"]
-    q -->|no| run["REFINING: agent → task.enriched.md<br/>(B17/B18, typed output B12)"]
+    start(["entry: running (current_node=refinement)"]) --> q{"needs_refinement?<br/>(refined=true or COMPLETE → false)"}
+    q -->|no| skip["engine records node skip"]
+    q -->|yes| run["refinement node: agent → task.enriched.md<br/>(B17/B18, typed output B12)"]
     skip --> plan["→ S02 planning"]
     run --> plan
 ```
 
 ## Checks and constraints
 
-- refinement is **not** part of `SKIPPABLE_STAGES`: optionality is controlled by the `refined` flag/completeness, not by `agents.skip_stages` ([schema.py:50-63](../../../../src/wastech_orchestrator/config/schema.py#L50)).
+- refinement is **not** part of `SKIPPABLE_STAGES`: optionality is controlled by the `refined` flag/completeness (the `when: derived.needs_refinement` node condition), not by `agents.skip_stages` ([schema.py:66-74](../../../../src/wastech_orchestrator/config/schema.py#L66)).
 - Only refinement and planning may request human input (HITL) ([B12](../../blocks/B12-hitl-and-typed-output.md)).
 
 ## Result / transition
 
-Transition to [S02 planning](./S02-planning.md). When run — artifact `task.enriched.md`; `refinement_ran`/`refinement_skip_reason` updated in [B07](../../blocks/B07-state-machine-and-store.md).
+Forward edge to [S02 planning](./S02-planning.md). When run — artifact `task.enriched.md`; on skip the engine records a `node_runs` skip row with the reason ([B07](../../blocks/B07-state-machine-and-store.md)).
 
 ## Side effects
 
-- Writing `task.enriched.md`; updating task fields in [B07](../../blocks/B07-state-machine-and-store.md).
+- Writing `task.enriched.md`; recording the `node_runs` row (run or skip) in [B07](../../blocks/B07-state-machine-and-store.md).
 - Via delegates: agent launch ([B18](../../blocks/B18-agent-providers.md)), HITL transport ([B26](../../blocks/B26-notifications-telegram.md)).
 
 ## Errors and edge cases
@@ -80,6 +80,8 @@ Pipeline entry point immediately after branch preparation. Prepares the ground f
 
 ## Code confirmation
 
-- [orchestrator.py:1049-1066](../../../../src/wastech_orchestrator/core/orchestrator.py#L1049) — `_refinement` / `_run_refinement`.
-- [schema.py:50-63](../../../../src/wastech_orchestrator/config/schema.py#L50) — refinement outside `SKIPPABLE_STAGES`.
+- [nodes/agent.py:58](../../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L58) — `AgentNodeRunner` (the `refinement` node runner); `run()` at [nodes/agent.py:65](../../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L65).
+- [engine.py:291-312](../../../../src/wastech_orchestrator/core/flow/engine.py#L291) — `_should_skip` / `_skip_outcome` (the `when: derived.needs_refinement` skip).
+- [orchestrator.py:983-1000](../../../../src/wastech_orchestrator/core/orchestrator.py#L983) — `_engine_facts`: resolves `derived.needs_refinement`.
+- [schema.py:66-74](../../../../src/wastech_orchestrator/config/schema.py#L66) — refinement outside `SKIPPABLE_STAGES`.
 - Tests: [tests/core/test_orchestrator.py](../../../../tests/core/test_orchestrator.py) (skip rule), [tests/core/test_hitl.py](../../../../tests/core/test_hitl.py).

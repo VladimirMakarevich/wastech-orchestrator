@@ -256,7 +256,7 @@ stages:
 
 Skippable stages: `planning`, `testing`, `review`, `fixing`, `summary`. `implementation` (the core work), `publishing` (the output), and `refinement` (use the `refined` flag) can never be skipped here. The effective skip set is the union of `agents.skip_stages` (global) and a task's `enabled: false` overrides — a stage skipped globally cannot be re-enabled per task.
 
-What each skip does: `planning` → stub plan, single unit; `testing` → straight to review (no checks); `review` → commit with no agent gate; `fixing` → first test/review failure goes to `manual_action_required` (no recovery loop); `summary` → a stub summary. Every skip is logged at WARNING and recorded in `state.db` (`stage_runs.skipped`), and the skipped set is listed in the PR body.
+What each skip does: `planning` → stub plan, single unit; `testing` → straight to review (no checks); `review` → commit with no agent gate; `fixing` → first test/review failure goes to `manual_action_required` (no recovery loop); `summary` → a stub summary. Every skip is logged at WARNING and recorded in `state.db` (`node_runs.skipped`), and the skipped set is listed in the PR body.
 
 Allowed stage keys and their valid sub-keys:
 

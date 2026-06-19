@@ -36,7 +36,7 @@ If `agents.routing` is omitted, the loader treats the file as a legacy Codex-onl
 schema_version: 1
 ```
 
-Optional top-level integer marking the `config.yaml` **format** version (current: `8`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
+Optional top-level integer marking the `config.yaml` **format** version (current: `9`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
 
 ## Config Discovery
 
@@ -441,30 +441,17 @@ The config stores environment variable **names only**. Token and chat-id values 
 
 Preflight requires a non-zero numeric chat id, bot access to the chat, no configured webhook, and a working `getUpdates` polling API. Use one bot/chat with one orchestrator poller. See [telegram.md](telegram.md) for setup and `telegram-test`.
 
-## `prompts`
+## Prompt templates (no longer a config block)
 
-Optional. Lets operators extend or replace the per-stage instructions sent to the agent for the agent-routed stages (`refinement`, `planning`, `implementation`, `review`, `fixing`, `summary`) without editing Python. **A `<stage>.md` present in `templates_dir` is used automatically** — its presence is the activation signal, layered on the packaged default per `mode`. A missing file falls back to the packaged default. Added in `config.yaml` `schema_version` **3**; **`schema_version` 6** replaced the old `overrides` map and `strict` flag with file-presence auto-detection, flipped `mode` to default `replace`, and anchors a relative `templates_dir` to the `config.yaml` directory. Older configs that still carry `overrides`/`strict` load fail-open (the keys are ignored with a warning; `upgrade-config` strips them).
+There is no `prompts` config block. A flow node's prompt template is the content of its **`role_file`** — the packaged flow ships its role files alongside the flow YAML, and an operator flow keeps them under `.worc/flows/roles/*.md`. To customize a node's prompt, edit its role file. (Removed in `config.yaml` `schema_version` **9**; an older config that still carries a `prompts` block loads fail-open — the key is ignored — and `upgrade-config` strips it.)
 
-```yaml
-prompts:
-  templates_dir: "./templates/prompts" # edit templates/prompts/<stage>.md to customize that stage
-  mode: replace # replace (your file only; default) | append (packaged default + your file)
-```
+**Template variables.** A role file may reference an allowlisted set of `{name}` tokens; everything else (an unknown name, or literal braces in code/JSON) is left verbatim, so a template never breaks on stray braces. The variables are **metadata and artifact paths only** — never task bodies, diffs, check logs, environment values, or secrets (those stay in the artifact files the agent reads by path):
 
-| Field | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `templates_dir` | string | `"./templates/prompts"` | Directory scanned for `<stage>.md` files. A **relative** path resolves from the `config.yaml` directory (i.e. `<repo>/.worc/`, not the CWD or the target repo); absolute paths are honored. Set to `""` to force the packaged defaults for every stage. `install`/`install-templates` scaffold it with the packaged defaults. |
-| `mode` | enum | `replace` | `replace` = your file only (for stages that have one); `append` = packaged default first, then your file. Global for now. |
+`{task_id}` `{stage}` `{repo_path}` `{repo}` `{task_path}` `{plan_path}` `{diff_path}` `{checks_path}` `{review_path}` `{subtask_order}` `{subtask_count}` `{subtask_spec_path}` `{skills_path}`
 
-A `<stage>.md` whose name matches an agent-routed stage (e.g. `implementation.md`) is detected by presence — there is no opt-in map and no fail-closed-on-missing path. Because `install`/`install-templates` deliver each `<stage>.md` byte-identical to the packaged default, editing one is what changes behavior; an unedited copy renders the same text the default would.
+A variable with no value for the current node (e.g. `{plan_path}` before planning) renders as the empty string.
 
-**Template variables.** A template may reference an allowlisted set of `{name}` tokens; everything else (an unknown name, or literal braces in code/JSON) is left verbatim, so a template never breaks on stray braces. The variables are **metadata and artifact paths only** — never task bodies, diffs, check logs, environment values, or secrets (those stay in the artifact files the agent reads by path):
-
-`{task_id}` `{stage}` `{repo_path}` `{task_path}` `{plan_path}` `{diff_path}` `{checks_path}` `{review_path}` `{subtask_order}` `{subtask_count}` `{subtask_spec_path}` `{skills_path}`
-
-A variable with no value for the current stage (e.g. `{plan_path}` before planning) renders as the empty string.
-
-**Safety.** Templates are prompt **text** only — delivered to the CLI on stdin, never as a command argument. A template cannot change the provider, `extra_args`, sandbox/approval mode, denied commands, denied reads, the environment allowlist, or fallback policy; it cannot enable `git commit`/`git push`/`gh pr create`; and a task's front matter cannot select a template. Only files named for an agent-routed stage inside `templates_dir` are read. Each rendered prompt is written, redacted, to `logs/<task-id>/stages/<stage>/[sub-NN/] rendered-prompt.md` for audit. See [cookbook.md](cookbook.md) for a recipe and [operations.md](operations.md) for troubleshooting.
+**Safety.** Role files are prompt **text** only — delivered to the CLI on stdin, never as a command argument. A role file cannot change the provider, `extra_args`, sandbox/approval mode, denied commands, denied reads, the environment allowlist, or fallback policy; it cannot enable `git commit`/`git push`/`gh pr create`. Each rendered prompt is written, redacted, to `logs/<task-id>/stages/<stage>/[sub-NN/] rendered-prompt.md` for audit. See [operations.md](operations.md) for troubleshooting.
 
 ## `skills`
 

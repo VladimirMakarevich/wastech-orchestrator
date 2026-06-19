@@ -16,7 +16,7 @@ Dependency direction: `core → router → provider(interface)`. Providers do no
 - `AgentProvider`: `id`, `preflight() -> ProviderHealth`, `run(AgentRunRequest) -> AgentRunResult`.
 - `Notifier`: two-phase `start_ask` / `wait_for_answer` with a durable secret-free handle, plus the `ask_human` facade and best-effort terminal notifications.
 - Each stage run is **independent** and receives all context through files/artifacts and the prompt — the vendor session is **not** a source of truth.
-- The Core persists the `stage_runs` row before invoking a provider and passes its ID through `AgentRunRequest`; providers use it only to namespace artifacts. Provider fallback attempts share that stage-run ID and have distinct attempt numbers.
+- The Core persists the `node_runs` row before invoking a provider and passes its ID (`AgentRunRequest.node_run_id`) through; providers use it only to namespace artifacts. Provider fallback attempts share that node-run ID and have distinct attempt numbers.
 - The `AgentRunRequest` / `AgentRunResult` / `ProviderHealth` structures are as defined in §4.3. Do not add hidden state channels beyond them.
 
 ## Stages and routing

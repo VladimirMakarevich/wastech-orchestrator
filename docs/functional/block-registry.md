@@ -26,7 +26,7 @@ All 27 functional blocks (B01–B27) have been investigated and carry the status
 
 ### B03 — Installer and Project Scaffolding
 
-- **Purpose:** `install` (wizard → generate valid `config.yaml`, scaffold `<repo>/.worc/` + repo-root `tasks/`, gitignore `.worc/`), `upgrade-config`/`upgrade-docs`/`install-templates`.
+- **Purpose:** `install` (wizard → generate valid `config.yaml`, scaffold `<repo>/.worc/` + repo-root `tasks/`, gitignore `.worc/`), `upgrade-config`/`upgrade-docs`.
 - **Entry points:** [cmd_install](../../src/wastech_orchestrator/cli.py#L1298), [install/wizard.run_wizard](../../src/wastech_orchestrator/install/wizard.py#L68), [install/config_writer.build_and_validate](../../src/wastech_orchestrator/install/config_writer.py#L182), [install/detect.py](../../src/wastech_orchestrator/install/detect.py).
 - **Dependencies:** B05 (validation of generated config), B04 (config discovery for upgrades), B19 (git probes), B22 (`append_runtime_excludes`), B25 (denied commands in defaults).
 - **Status:** `documented` · [file](./blocks/B03-installer-and-scaffolding.md)
@@ -72,8 +72,8 @@ All 27 functional blocks (B01–B27) have been investigated and carry the status
 
 ### B09 — Fix Loop Control
 
-- **Purpose:** loop counters (test/review fix), rules for transitioning to `fixing`, and detection of "stuck" state based on limits.
-- **Entry points:** [core/loop_control.py](../../src/wastech_orchestrator/core/loop_control.py) (`FixLoop`, `LoopController`, `LoopCounters`).
+- **Purpose:** persisted per-task loop counters (`LoopCounters`); the fix-loop budgets (test/review fix attempts) are enforced generically by the FlowEngine over `FlowRunState.loop_counters`, not by a dedicated controller.
+- **Entry points:** [core/loop_control.py](../../src/wastech_orchestrator/core/loop_control.py) (`LoopCounters`); engine budget bookkeeping in [core/flow/engine.py](../../src/wastech_orchestrator/core/flow/engine.py).
 - **Dependencies:** `agents.*` limits from configuration; used by B06.
 - **Status:** `documented` · [file](./blocks/B09-fix-loop-control.md)
 
@@ -114,9 +114,9 @@ All 27 functional blocks (B01–B27) have been investigated and carry the status
 
 ### B15 — Prompt Templates and Rendering
 
-- **Purpose:** resolution of stage templates (bundled defaults + operator overrides) and rendering with an allowlisted set of variables (metadata and artifact paths only).
-- **Entry points:** [core/prompts.py](../../src/wastech_orchestrator/core/prompts.py) (`PromptTemplateStore`, `render_prompt`), [templates/prompts/](../../src/wastech_orchestrator/templates/prompts/).
-- **Dependencies:** B05 (`prompts.*`); used by B06.
+- **Purpose:** a flow node's prompt template is the content of its `role_file`; this block is the safe renderer (allowlisted variables — metadata and artifact paths only) plus role-file resolution. No bundled-template store.
+- **Entry points:** [core/prompts.py](../../src/wastech_orchestrator/core/prompts.py) (`render_prompt`, `ALLOWED_PROMPT_VARS`), [core/flow/prompt.py](../../src/wastech_orchestrator/core/flow/prompt.py) (`read_role_file`, `render_role_prompt`).
+- **Dependencies:** used by B06.
 - **Status:** `documented` · [file](./blocks/B15-prompt-templates.md)
 
 ---
@@ -234,5 +234,5 @@ All 27 functional blocks (B01–B27) have been investigated and carry the status
 - **`providers/errors.py`** — included in B18 (adapter error classification rules).
 - **`routing/snapshots.py`** — included in B17 (partial diff contract between Router and Git).
 - **`checks/model.py`, `checks/profile.py`, `checks/schema_validate.py`, `checks/discovery_factory.py`, `checks/fingerprint.py`** — parts of B23 (check discovery models/schemas/factory).
-- **`templates/`, `worc/` (markdown)** — package data delivered by B03; not executable code.
+- **`templates/`, `worc/` (markdown)** — package data delivered by B03; not executable code. The packaged flow role files live separately under `core/flow/packaged/roles/` (read by B15).
 - **`__init__.py` packages, `__main__.py`** — re-exports/wrappers of entry points (reflected in B01).

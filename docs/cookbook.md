@@ -290,14 +290,14 @@ refinement, planning, implementation, review, fixing, summary
 
 Task overrides cannot change provider commands, credentials, sandbox settings, `extra_args`, or any security policy.
 
-## 7a. Customize Stage Prompts
+## 7a. Customize a Node's Prompt
 
-To add repository-specific engineering rules or a review rubric to a stage without editing Python, edit the packaged template for that stage (see [configuration.md](configuration.md#prompts)). `install`/`install-templates` scaffold `.worc/templates/prompts/<stage>.md` with the packaged defaults; **just edit the file** — its presence is the activation signal, so no `overrides` entry is needed.
+To add repository-specific engineering rules or a review rubric to a stage without editing Python, edit that node's **`role_file`** (see [configuration.md](configuration.md#prompt-templates-no-longer-a-config-block)). A packaged flow ships its role files beside the flow YAML; an operator flow keeps them under `.worc/flows/roles/`. The role file's content **is** the prompt template — edit it and the change takes effect on the next run.
 
-Replace the review prompt entirely with a security rubric (the default `mode: replace`):
+For example, a review node's role file replaced with a security rubric:
 
 ```markdown
-<!-- templates/prompts/review.md -->
+<!-- roles/review.md -->
 
 Review for security first. Reject the change unless:
 
@@ -306,28 +306,8 @@ Review for security first. Reject the change unless:
 - the plan at {plan_path} is fully implemented.
 ```
 
-To instead _add_ house rules on top of the packaged default, switch to append mode:
-
-```yaml
-# config.yaml
-prompts:
-  mode: append # keep the packaged default, then add your text
-```
-
-```markdown
-<!-- templates/prompts/implementation.md -->
-
-Follow the repository conventions:
-
-- keep functions under 40 lines; extract helpers otherwise;
-- never add a runtime dependency without a note in the summary;
-- match the logging style in {repo_path}.
-```
-
 Notes:
 
-- A `templates/prompts/<stage>.md` is auto-detected by presence (agent-routed stages only). A stage with no file falls back to the packaged default — a missing file is never an error. Set `prompts.templates_dir: ""` to force the packaged defaults for every stage.
-- A relative `templates_dir` resolves from the `config.yaml` directory, so it works from any CWD.
 - Variables are metadata/paths only — e.g. `{repo_path}`, `{diff_path}`, `{plan_path}`. Large content stays in the artifact files the agent reads by path. Unknown `{...}` and literal braces pass through unchanged.
 - The exact text sent each run is saved (redacted) to `.worc/logs/<task-id>/stages/<stage>/rendered-prompt.md` so you can verify what the agent received.
 - A template is prompt text only: it cannot change the provider, sandbox/approvals, denied commands, or enable `git`/`gh` publishing.

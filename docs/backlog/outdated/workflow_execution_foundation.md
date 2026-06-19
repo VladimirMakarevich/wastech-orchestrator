@@ -1,6 +1,6 @@
 # Workflow execution foundation
 
-Status: **accepted* — outdated. Date: 2026-06-14 Owner: Vladimir Makarevich
+Status: \*_accepted_ — outdated. Date: 2026-06-14 Owner: Vladimir Makarevich
 
 ## Goal
 

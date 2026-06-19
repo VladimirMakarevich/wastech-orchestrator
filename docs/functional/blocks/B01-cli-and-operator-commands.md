@@ -6,9 +6,9 @@ The sole user-facing interface of the system: parses arguments, dispatches subco
 
 ## Responsibilities
 
-- Build the argument parser and all subcommands + global flags ([cli.py:100-326](../../../src/wastech_orchestrator/cli.py#L100)).
-- Dispatch commands and map terminal status to exit code ([cli.py:1355-1397](../../../src/wastech_orchestrator/cli.py#L1355)).
-- Drivers for `run`/`status`/`preflight`/`telegram-test`/`rerun`/`finalize` ([cli.py:716-1196](../../../src/wastech_orchestrator/cli.py#L716)).
+- Build the argument parser and all subcommands + global flags ([cli.py:86-301](../../../src/wastech_orchestrator/cli.py#L86)).
+- Dispatch commands and map terminal status to exit code ([cli.py:1248-1288](../../../src/wastech_orchestrator/cli.py#L1248)).
+- Drivers for `run`/`status`/`preflight`/`telegram-test`/`rerun`/`finalize` ([cli.py:612-1090](../../../src/wastech_orchestrator/cli.py#L612)).
 - Resolve/load configuration and configure logging; the `worc_home_for` / `tasks_root_for` path split (gitignored `<repo>/.worc/` vs the tracked repo-root `tasks/`) ([cli.py:594-635](../../../src/wastech_orchestrator/cli.py#L594)).
 
 ## Block Boundaries
@@ -25,9 +25,9 @@ The sole user-facing interface of the system: parses arguments, dispatches subco
 
 ## Entry Points
 
-- `main(argv=None)` ([cli.py:1355](../../../src/wastech_orchestrator/cli.py#L1355)) — console scripts `wastech-orchestrator`/`worc` ([pyproject.toml:29-32](../../../pyproject.toml#L29)) and `python -m wastech_orchestrator` ([\_\_main\_\_.py](../../../src/wastech_orchestrator/__main__.py)).
-- `build_parser()` ([cli.py:100](../../../src/wastech_orchestrator/cli.py#L100)).
-- `cmd_run`/`cmd_status`/`cmd_preflight`/`run_preflight`/`cmd_telegram_test`/`cmd_rerun`/`cmd_finalize` ([cli.py:716-1196](../../../src/wastech_orchestrator/cli.py#L716)).
+- `main(argv=None)` ([cli.py:1248](../../../src/wastech_orchestrator/cli.py#L1248)) — console scripts `wastech-orchestrator`/`worc` ([pyproject.toml:29-32](../../../pyproject.toml#L29)) and `python -m wastech_orchestrator` ([\_\_main\_\_.py](../../../src/wastech_orchestrator/__main__.py)).
+- `build_parser()` ([cli.py:86](../../../src/wastech_orchestrator/cli.py#L86)).
+- `cmd_run`/`cmd_status`/`cmd_preflight`/`run_preflight`/`cmd_telegram_test`/`cmd_rerun`/`cmd_finalize` ([cli.py:612-1090](../../../src/wastech_orchestrator/cli.py#L612)).
 
 ## Inputs and State
 
@@ -37,21 +37,21 @@ Command-line arguments; resolved configuration; environment (for preflight/teleg
 
 1. `main` parses arguments, validates numeric flags.
 2. The corresponding driver is called based on `args.command`.
-3. `ConfigError`/`IncompatibleStateError`/`GhNotAvailableError` are caught → message + exit 2 ([cli.py:1394-1396](../../../src/wastech_orchestrator/cli.py#L1394)).
+3. `ConfigError`/`IncompatibleStateError`/`GhNotAvailableError` are caught → message + exit 2 ([cli.py:1285-1287](../../../src/wastech_orchestrator/cli.py#L1285)).
 4. Terminal task status → exit code: `done`=0, `failed`=1, `manual_action_required`=2 ([cli.py:61-65](../../../src/wastech_orchestrator/cli.py#L61)).
 
 Command routing and exit code mapping (CLI is a thin layer — all heavy work lives in the blocks):
 
 ```mermaid
 flowchart TB
-    argv(["argv"]) --> parser["build_parser<br/>(global flags + 13 subcommands)"]
+    argv(["argv"]) --> parser["build_parser<br/>(global flags + 12 subcommands)"]
     parser --> main["main — dispatcher by args.command"]
 
     main --> c_run["run / rerun / finalize"]
     main --> c_watch["watch / stop / restart"]
     main --> c_status["status"]
     main --> c_diag["preflight / telegram-test"]
-    main --> c_inst["install / upgrade-config /<br/>upgrade-docs / install-templates"]
+    main --> c_inst["install / upgrade-config /<br/>upgrade-docs"]
 
     c_run --> B06["B06 Pipeline"]
     c_watch --> B02["B02 watch daemon"]
@@ -71,7 +71,7 @@ Load config, (if PR) `require_gh`, `build_orchestrator` (artifacts under `worc_h
 
 ### `status`
 
-Read-only `StateStore.open_readonly` (DB at `worc_home_for(config)/state.db`): active/last task, stage, branch, subtask, counters, check profile — without launching anything ([cli.py:1133-1196](../../../src/wastech_orchestrator/cli.py#L1133)).
+Read-only `StateStore.open_readonly` (DB at `worc_home_for(config)/state.db`): active/last task, current flow node (`node=`), branch, subtask, counters, check profile — without launching anything ([cli.py:1029-1090](../../../src/wastech_orchestrator/cli.py#L1029)).
 
 ### `preflight`
 
@@ -128,8 +128,8 @@ This is the "face" of the orchestrator: every operator operation starts here and
 
 ## Code Evidence
 
-- [cli.py:100-326](../../../src/wastech_orchestrator/cli.py#L100) — parser and subcommands.
-- [cli.py:1355-1397](../../../src/wastech_orchestrator/cli.py#L1355) — dispatcher, error/code mapping.
-- [cli.py:716-1196](../../../src/wastech_orchestrator/cli.py#L716) — run/preflight/telegram-test/rerun/finalize/status drivers.
+- [cli.py:86-301](../../../src/wastech_orchestrator/cli.py#L86) — parser and subcommands.
+- [cli.py:1248-1288](../../../src/wastech_orchestrator/cli.py#L1248) — dispatcher, error/code mapping.
+- [cli.py:612-1090](../../../src/wastech_orchestrator/cli.py#L612) — run/preflight/telegram-test/rerun/finalize/status drivers.
 - [cli.py:606-635](../../../src/wastech_orchestrator/cli.py#L606) — `worc_home_for` / `tasks_root_for` / `pending_dir` path split.
 - Tests: [tests/core/test_cli_pipeline.py](../../../tests/core/test_cli_pipeline.py), [test_cli_rerun.py](../../../tests/core/test_cli_rerun.py), [test_cli_finalize.py](../../../tests/core/test_cli_finalize.py), [tests/test_cli_preflight.py](../../../tests/test_cli_preflight.py), [tests/test_cli_version.py](../../../tests/test_cli_version.py), [tests/test_cli_watch.py](../../../tests/test_cli_watch.py).

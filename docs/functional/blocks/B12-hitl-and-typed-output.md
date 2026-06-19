@@ -20,7 +20,7 @@ Provides "human-in-the-loop" (HITL) and strict parsing of structured output from
 ### Outside this block's responsibility
 
 - **Transport** (sending/polling for an answer) — that is [B26 `Notifier`](./B26-notifications-telegram.md).
-- **Round-trip orchestration** (when to ask, wait, restart a stage) — that is [B06](./B06-orchestrator-pipeline.md) (`_run_typed_stage`, `_run_edit_stage_with_guardrail`, `_ask_check_command_approval`).
+- **Round-trip orchestration** (when to ask, wait, restart a node) — the durable round-trip is the flow `HumanGate` ([core/flow/nodes/human_gate.py](../../../src/wastech_orchestrator/core/flow/nodes/human_gate.py)) driven by the agent/evaluator node runners and the standalone `hitl` gate node ([core/flow/nodes/hitl.py](../../../src/wastech_orchestrator/core/flow/nodes/hitl.py)); the check-set-change approval at preflight is [B06](./B06-orchestrator-pipeline.md) `_ask_check_command_approval` ([orchestrator.py:1198](../../../src/wastech_orchestrator/core/orchestrator.py#L1198)).
 - **Redaction rules** — [B21](./B21-secret-redaction.md); **artifact catalog** — [B20](./B20-artifact-layout.md).
 - **Dangerous diff classification** — [B14](./B14-dangerous-diff-guardrail.md); **decomposition parsing** — [B11](./B11-task-decomposition.md) (only the subtask schema is validated here).
 

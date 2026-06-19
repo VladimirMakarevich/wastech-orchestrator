@@ -159,9 +159,6 @@ worc upgrade-config     add config keys from a new version, keeping existing val
                           --dry-run                   preview the keys that would be added
 worc upgrade-docs       refresh the installed worc/ task-authoring docs to the packaged version
                           --dry-run                   preview added/updated/removed files
-worc install-templates  deliver the packaged templates/ tree into an existing install (add-missing)
-                          --force                     overwrite existing templates (default: skip operator edits)
-                          --dry-run                   preview the add/skip(/overwrite) plan
 worc --version          installed version
 ```
 
@@ -201,7 +198,7 @@ src/wastech_orchestrator/
   state_store.py          # SQLite checkpoints
   task/                   # parser + §19 validation gate
   install/                # the install wizard, config writer, detection
-  templates/              # scaffolding copied into .worc/ (config example + per-stage prompts)
+  templates/              # the packaged config.example.yaml (source for `init`/`upgrade-config`)
   worc/                   # agent task-authoring guide copied to .worc/guide/ by `install`
 docs/                     # functional map, architecture, operations, cookbook, configuration, task authoring, rules, backlog
   worc/                   # authored source for the packaged worc/ guide (kept in sync by a test)

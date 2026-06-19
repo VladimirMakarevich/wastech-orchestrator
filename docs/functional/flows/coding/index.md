@@ -38,11 +38,11 @@ flowchart TB
 | summary | agent (or stub / minimal) | yes — `SKIPPABLE`; best-effort | [S07](./S07-summary.md) |
 | publishing | Git Manager (B22), **not an agent** | **no** — exit stage, cannot be skipped | [S08](./S08-publishing.md) |
 
-Classification confirmed by `ROUTABLE_STAGES`/`SKIPPABLE_STAGES` ([schema.py:39-63](../../../../src/wastech_orchestrator/config/schema.py#L39)).
+Each stage is a flow **node**; the engine runs it through its `NodeRunner` ([nodes/](../../../../src/wastech_orchestrator/core/flow/nodes)) and takes the node's outcome. Skip is now a node `when:` condition in the flow graph (e.g. `when: config.testing_enabled`, `when: derived.needs_refinement`); a skipped node yields its pass-through edge ([engine.py:291-312](../../../../src/wastech_orchestrator/core/flow/engine.py#L291)). Classification confirmed by `ROUTABLE_STAGES`/`SKIPPABLE_STAGES` ([schema.py:50-74](../../../../src/wastech_orchestrator/config/schema.py#L50)).
 
 ## Ping-pong (testing/review → fixing)
 
-On a **quality** check failure ([S04](./S04-testing.md)) or **blocking** review findings ([S05](./S05-review.md)), the unit enters [S06 fixing](./S06-fixing.md): the agent edits the code and returns to testing (or directly to review if testing is skipped — `_after_edit_target`). Passing resets the counters (B09: `on_check_pass` resets the test cycle, `on_review_pass` resets both). Two limits (`max_fix_cycles` per-loop and `max_total_fix_iterations` global) prevent infinite loops; on exhaustion — `manual_action_required` + failure report ([B08](../../blocks/B08-ledger-and-failure-reports.md)). A check launch failure is **not** a ping-pong event: it is an infrastructure issue → single re-resolve attempt ([S04](./S04-testing.md)/[B23](../../blocks/B23-check-discovery.md)).
+On a **quality** check failure ([S04](./S04-testing.md)) or **blocking** review findings ([S05](./S05-review.md)), the engine takes a `fail`/`rework` edge into the `fixing` node ([S06](./S06-fixing.md)): the agent edits the code and the engine routes the `fixing` node's forward edge back to `testing` (or to `review` when testing is skipped). The engine resets a loop counter when a forward edge leaves the node ([engine.py `_reset_loops_at`](../../../../src/wastech_orchestrator/core/flow/engine.py#L363)). Two limits (`max_fix_cycles` per-loop and `max_total_fix_iterations` global) prevent infinite loops; the engine enforces them generically over the run's loop counters and on exhaustion ends the run at `manual_action_required` + failure report ([engine.py:342-382](../../../../src/wastech_orchestrator/core/flow/engine.py#L342), [B08](../../blocks/B08-ledger-and-failure-reports.md)). A check launch failure is **not** a ping-pong event: it is an infrastructure issue → single re-resolve attempt ([S04](./S04-testing.md)/[B23](../../blocks/B23-check-discovery.md)).
 
 With decomposition, each subtask is a separate unit `implementation → testing → review → fixing` with its own local commit ([B11](../../blocks/B11-task-decomposition.md)); the global `fix_iterations` counter accumulates across all subtasks so that decomposition cannot bypass the hard stop ([B09](../../blocks/B09-fix-loop-control.md)).
 
@@ -65,7 +65,10 @@ With decomposition, each subtask is a separate unit `implementation → testing 
 
 ## Code confirmation
 
-- [orchestrator.py:1033-1047](../../../../src/wastech_orchestrator/core/orchestrator.py#L1033) — `_run_units_and_finish`: loop over units → summary → publish.
-- [orchestrator.py:1196-1296](../../../../src/wastech_orchestrator/core/orchestrator.py#L1196) — `_run_unit`: `implementing → testing → reviewing → fixing` loop (ping-pong) and transition to summary.
-- [schema.py:39-63](../../../../src/wastech_orchestrator/config/schema.py#L39) — `ROUTABLE_STAGES` / `SKIPPABLE_STAGES`.
-- Tests: [tests/core/test_orchestrator.py](../../../../tests/core/test_orchestrator.py), [tests/core/test_cli_pipeline.py](../../../../tests/core/test_cli_pipeline.py).
+- [engine.py:217-265](../../../../src/wastech_orchestrator/core/flow/engine.py#L217) — `FlowEngine.run`: run each node → take its outcome → `_select_edge` → transition (the single execution model; the hardcoded dispatch-on-`Status` loop is gone).
+- [engine_driver.py:94-136](../../../../src/wastech_orchestrator/core/flow/engine_driver.py#L94) — `build_node_runners` / `drive_flow`: assemble the per-kind runners and run one unit to a terminal result.
+- [orchestrator.py:821-938](../../../../src/wastech_orchestrator/core/orchestrator.py#L821) — `_engine_run` / `_run_phases`: build node services + inputs, drive the flow (whole graph, or pre → per-subtask region → post when decomposed).
+- [implementation.yaml](../../../../src/wastech_orchestrator/core/flow/packaged/implementation.yaml) — the flow graph + edges the engine drives (nodes refinement…publish, the two fix loops, decomposition).
+- Node runners: [nodes/agent.py](../../../../src/wastech_orchestrator/core/flow/nodes/agent.py), [nodes/evaluator.py](../../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py), [nodes/checks.py](../../../../src/wastech_orchestrator/core/flow/nodes/checks.py), [nodes/publish.py](../../../../src/wastech_orchestrator/core/flow/nodes/publish.py).
+- [schema.py:50-74](../../../../src/wastech_orchestrator/config/schema.py#L50) — `ROUTABLE_STAGES` / `SKIPPABLE_STAGES`.
+- Tests: [tests/core/test_flow_engine.py](../../../../tests/core/test_flow_engine.py), [tests/core/test_flow_node_runners.py](../../../../tests/core/test_flow_node_runners.py), [tests/core/test_orchestrator.py](../../../../tests/core/test_orchestrator.py), [tests/core/test_cli_pipeline.py](../../../../tests/core/test_cli_pipeline.py).

@@ -2,11 +2,11 @@
 
 ## Purpose
 
-Creates and maintains the on-disk installation of the orchestrator in a target repository: `install` (wizard → generate a valid `config.yaml` and scaffold the `<repo>/.worc/` home + the repo-root `tasks/` lifecycle dirs) plus maintenance commands (`upgrade-config`, `upgrade-docs`, `install-templates`). Environment detection is read-only. `install` is the single setup command; `--non-interactive` resolves everything from flags/detection without prompting.
+Creates and maintains the on-disk installation of the orchestrator in a target repository: `install` (wizard → generate a valid `config.yaml` and scaffold the `<repo>/.worc/` home + the repo-root `tasks/` lifecycle dirs) plus maintenance commands (`upgrade-config`, `upgrade-docs`). Environment detection is read-only. `install` is the single setup command; `--non-interactive` resolves everything from flags/detection without prompting.
 
 ## Responsibilities
 
-- `install`: run the wizard → `InstallSpec`, generate + validate `config.yaml` under `<repo>/.worc/`, create the runtime + task dirs, copy `templates/` and the `guide/` docs, gitignore `.worc/`, seed checks, auto-preflight ([cli.py:1298-1352](../../../src/wastech_orchestrator/cli.py#L1298)).
+- `install`: run the wizard → `InstallSpec`, generate + validate `config.yaml` under `<repo>/.worc/`, create the runtime + task dirs, copy the `guide/` task-authoring docs, gitignore `.worc/`, seed checks, auto-preflight ([cli.py:1192-1245](../../../src/wastech_orchestrator/cli.py#L1192)).
 - Wizard: detect git / providers / checks, resolve settings, hard-stops ([wizard.py:68-119](../../../src/wastech_orchestrator/install/wizard.py#L68)).
 - Configuration generation with safe defaults + round-trip validation ([config_writer.py:99-191](../../../src/wastech_orchestrator/install/config_writer.py#L99)).
 - Read-only environment detection ([detect.py](../../../src/wastech_orchestrator/install/detect.py)).
@@ -15,7 +15,7 @@ Creates and maintains the on-disk installation of the orchestrator in a target r
 
 ### Within this block's responsibility
 
-- Installation wizard, config generation + validation, `<repo>/.worc/` scaffolding, environment detection, upgrade / template-delivery commands.
+- Installation wizard, config generation + validation, `<repo>/.worc/` scaffolding, environment detection, upgrade commands.
 
 ### Outside this block's responsibility
 
@@ -26,7 +26,7 @@ Creates and maintains the on-disk installation of the orchestrator in a target r
 
 ## Entry Points
 
-- `cmd_install` / `cmd_upgrade_config` / `cmd_upgrade_docs` / `cmd_install_templates` — dispatcher [B01](./B01-cli-and-operator-commands.md).
+- `cmd_install` / `cmd_upgrade_config` / `cmd_upgrade_docs` — dispatcher [B01](./B01-cli-and-operator-commands.md).
 - `wizard.run_wizard(...)` → `WizardOutcome` ([wizard.py:68](../../../src/wastech_orchestrator/install/wizard.py#L68)).
 - `config_writer.build_and_validate(spec)` ([config_writer.py:182](../../../src/wastech_orchestrator/install/config_writer.py#L182)).
 - `detect.git_info` / `detect_providers` / `detect_checks` / `has_gh` / `require_gh` ([detect.py](../../../src/wastech_orchestrator/install/detect.py)) — `require_gh` is also called from [B01/B02](./B01-cli-and-operator-commands.md) on `run` / `watch` / `rerun`.
@@ -40,7 +40,7 @@ CLI flags (`--provider`, `--check`, `--create-pr`, `--auto-mode`, `--non-interac
 1. `run_wizard`: verify git; `git_info` (root / origin / branch / cleanliness); resolve providers / checks / create_pr / auto_mode → `InstallSpec` (+ confirmation).
 2. `build_and_validate(spec)`: build a dict with safe defaults, render YAML, round-trip through `loads_config` + `validate_config`.
 3. Create the tracked repo-root task dirs (`tasks/{pending,processing,done,failed}`) and the gitignored `<repo>/.worc/` runtime dirs (`logs/`, `workspace/`, `checks/`, `tasks/rejected`); atomically write `<repo>/.worc/config.yaml`.
-4. Copy `templates/` and the `guide/` docs into `.worc/`; append the single `.worc/` line to the repo's tracked `.gitignore` ([B22](./B22-git-manager.md) `append_runtime_excludes`).
+4. Copy the `guide/` task-authoring docs into `.worc/`; append the single `.worc/` line to the repo's tracked `.gitignore` ([B22](./B22-git-manager.md) `append_runtime_excludes`).
 5. Seed the checks profile (optional agent-based resolution) and auto-preflight ([cli.py:1336-1352](../../../src/wastech_orchestrator/cli.py#L1336)).
 
 `install` flow with fail-closed gates (if the wizard hits a hard-stop, or the generated config fails to load / validate, nothing is written):
@@ -52,20 +52,20 @@ flowchart TB
     wiz --> gen["build_and_validate(spec):<br/>dict with safe defaults → YAML →<br/>round-trip loads_config + validate_config (B05)"]
     gen -->|invalid| err
     gen --> dirs["create repo-root tasks/ + gitignored .worc/ dirs,<br/>atomically write .worc/config.yaml"]
-    dirs --> docs["copy templates/ + guide/, gitignore .worc/ (B22)"]
+    dirs --> docs["copy guide/, gitignore .worc/ (B22)"]
     docs --> seed["seed checks profile (optional agent: B23/B18)"]
     seed --> pre["auto-preflight: providers, isolation, checks, telegram"]
 ```
 
 ## Alternative Scenarios
 
-### Upgrade / Template Delivery
+### Upgrade
 
-`upgrade-config` (via [B05 upgrade](./B05-configuration.md): add-missing + backup + atomic write), `upgrade-docs` (overwrite `.worc/guide/` with the packaged version), `install-templates` (add-missing-only into `.worc/templates/`) ([cli.py:430-591](../../../src/wastech_orchestrator/cli.py#L430)).
+`upgrade-config` (via [B05 upgrade](./B05-configuration.md): add-missing + backup + atomic write), `upgrade-docs` (overwrite `.worc/guide/` with the packaged version) ([cli.py:371-489](../../../src/wastech_orchestrator/cli.py#L371)).
 
 ### Re-install
 
-Without `--reconfigure`: no-op when `.worc/config.yaml` already exists (still runs auto-preflight); with `--reconfigure` — backup + regeneration (and the templates/guide are refreshed to the packaged version) ([cli.py:1329-1344](../../../src/wastech_orchestrator/cli.py#L1329)).
+Without `--reconfigure`: no-op when `.worc/config.yaml` already exists (still runs auto-preflight); with `--reconfigure` — backup + regeneration (and the guide is refreshed to the packaged version) ([cli.py:1223-1237](../../../src/wastech_orchestrator/cli.py#L1223)).
 
 ## Validations and Constraints
 
@@ -76,7 +76,7 @@ Without `--reconfigure`: no-op when `.worc/config.yaml` already exists (still ru
 
 ## Output
 
-Created directories / files (`<repo>/.worc/config.yaml`, `.worc/templates/`, `.worc/guide/`, repo-root `tasks/` dirs), a single `.worc/` line in `.gitignore`; auto-preflight result. Return codes are printed by [B01](./B01-cli-and-operator-commands.md).
+Created directories / files (`<repo>/.worc/config.yaml`, `.worc/guide/`, repo-root `tasks/` dirs), a single `.worc/` line in `.gitignore`; auto-preflight result. Return codes are printed by [B01](./B01-cli-and-operator-commands.md).
 
 ## Side Effects
 
@@ -111,8 +111,8 @@ Entry point for deployment: transforms "a repository + operator machine" into a 
 
 ## Code Confirmation
 
-- [cli.py:430-591,1298-1352](../../../src/wastech_orchestrator/cli.py#L430) — `cmd_install` / upgrades.
+- [cli.py:371-489,1192-1245](../../../src/wastech_orchestrator/cli.py#L371) — `cmd_install` / upgrades.
 - [install/wizard.py:68-208](../../../src/wastech_orchestrator/install/wizard.py#L68) — wizard and hard-stops.
 - [install/config_writer.py:99-191](../../../src/wastech_orchestrator/install/config_writer.py#L99) — generation + round-trip validation.
 - [install/detect.py](../../../src/wastech_orchestrator/install/detect.py) — read-only detection.
-- Tests: [tests/install/](../../../tests/install/), [tests/test_cli_install.py](../../../tests/test_cli_install.py), [tests/test_cli_install_templates.py](../../../tests/test_cli_install_templates.py), [tests/test_cli_upgrade_config.py](../../../tests/test_cli_upgrade_config.py), [tests/test_cli_upgrade_docs.py](../../../tests/test_cli_upgrade_docs.py), [tests/test_cli_preflight.py](../../../tests/test_cli_preflight.py).
+- Tests: [tests/install/](../../../tests/install/), [tests/test_cli_install.py](../../../tests/test_cli_install.py), [tests/test_cli_upgrade_config.py](../../../tests/test_cli_upgrade_config.py), [tests/test_cli_upgrade_docs.py](../../../tests/test_cli_upgrade_docs.py), [tests/test_cli_preflight.py](../../../tests/test_cli_preflight.py).
