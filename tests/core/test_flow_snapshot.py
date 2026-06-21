@@ -21,7 +21,7 @@ from wastech_orchestrator.core.flow.schema import (
 )
 from wastech_orchestrator.core.flow.snapshot import FlowLoadError, FlowSnapshot, load_flow
 
-CODESIGN = Path(__file__).parent.parent.parent / "docs" / "backlog" / "flows" / "co-design"
+CODESIGN = Path(__file__).parent.parent.parent / "src" / "wastech_orchestrator" / "core" / "flow" / "packaged"
 
 
 @pytest.fixture(scope="module")
@@ -44,8 +44,8 @@ def test_load_implementation_yaml(impl_snap: FlowSnapshot) -> None:
     assert doc.permission_ceiling == PermissionProfile.WORKSPACE_WRITE
     assert doc.output_policy == OutputPolicy.CODE_CHANGE
     assert doc.publishing == PublishingPolicy.PULL_REQUEST
-    assert len(doc.nodes) == 8
-    assert len(doc.edges) == 10
+    assert len(doc.nodes) == 7
+    assert len(doc.edges) == 8
 
 
 def test_load_deep_research_yaml() -> None:
@@ -88,7 +88,6 @@ def test_nodes_by_id_all_reachable(impl_snap: FlowSnapshot) -> None:
         "refinement",
         "planning",
         "implementation",
-        "testing_quality",
         "testing",
         "review",
         "fixing",
@@ -130,15 +129,15 @@ def test_when_fact_only_defaults_equals_true(impl_snap: FlowSnapshot) -> None:
 
 
 def test_when_config_fact(impl_snap: FlowSnapshot) -> None:
-    testing_quality = impl_snap.nodes_by_id["testing_quality"]
-    assert isinstance(testing_quality, EvaluatorNode)
-    assert testing_quality.when == WhenPredicate(fact="config.hybrid_testing", equals=True)
+    planning = impl_snap.nodes_by_id["planning"]
+    assert isinstance(planning, AgentNode)
+    assert planning.when == WhenPredicate(fact="config.planning_enabled", equals=True)
 
 
 def test_no_when_is_none(impl_snap: FlowSnapshot) -> None:
-    planning = impl_snap.nodes_by_id["planning"]
-    assert isinstance(planning, AgentNode)
-    assert planning.when is None
+    implementation = impl_snap.nodes_by_id["implementation"]
+    assert isinstance(implementation, AgentNode)
+    assert implementation.when is None
 
 
 # -- defaults application -----------------------------------------------------
