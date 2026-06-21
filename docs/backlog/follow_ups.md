@@ -1,6 +1,6 @@
 # Implementation follow-ups
 
-Append-only log of **implementation** next-steps and tech-debt discovered while building — distinct from [product_backlog.md](product_backlog.md), which tracks _product features_. Use this for "we deferred X; here's the hook and the context" items. Record new ones via `/sync-docs` as you create them (date them absolute, link where they're referenced, mark status). Move an item to `done` (don't delete) when addressed.
+Append-only log of **implementation** next-steps and tech-debt discovered while building — distinct from [README.md](README.md), which tracks _product features_. Use this for "we deferred X; here's the hook and the context" items. Record new ones via `/sync-docs` as you create them (date them absolute, link where they're referenced, mark status). Move an item to `done` (don't delete) when addressed.
 
 | Date | Item | Context & next step | Referenced in | Status |
 | --- | --- | --- | --- | --- |
