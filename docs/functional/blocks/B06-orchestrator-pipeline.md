@@ -1,141 +1,97 @@
 # B06 — Orchestrator Pipeline
 
-## Purpose
+> Reconstructed from code (`src/wastech_orchestrator/core/orchestrator.py`) and tests (`tests/core/test_orchestrator.py`, `tests/e2e/`). The code is the only source of truth; this document was rebuilt from the implementation, not from prose or comments. Significant claims carry a `file:line` reference.
 
-The deterministic "spinal cord" of the system: drives **one task at a time** through the entire pipeline — from the validation gate to Git publication and terminal cleanup — and owns all state transitions. The core **never** builds a CLI command: it only calls the Router (agent stages), Check Runner (the `testing` stage), and Git Manager (everything git-related). Context is passed to agents **only as paths to artifact files**.
+**Status:** documented · **Source module:** `core/orchestrator.py`
 
-## Responsibilities
+## Responsibility
 
-- Drive a task: gate → slot → isolation/checks preflight → branch → refinement (skip rule) → planning (+decomposition, skills) → for each unit `implementation → testing → review → fixing` → summary → publishing → terminal cleanup → ledger ([orchestrator.py:350-381,820-1047](../../../src/wastech_orchestrator/core/orchestrator.py#L820)).
-- Atomically execute and persist each status transition ([orchestrator.py:2434-2450](../../../src/wastech_orchestrator/core/orchestrator.py#L2434)).
-- Orchestrate the HITL round-trip and the dangerous-diff guardrail ([orchestrator.py:1790-2044](../../../src/wastech_orchestrator/core/orchestrator.py#L1790)).
-- When prompt audit is enabled (`_prompt_audit_on`: per-task value overrides the global `config.prompt_audit`, no operator gate), record each stage run — who (provider/model/attempt/fallback/status) plus the redacted prompt — as a self-contained JSON file under `logs/<task-id>/prompt-audit/` and append it to `timeline.jsonl`, after the router returns so the actual providers are known (`_write_prompt_audit`) ([orchestrator.py:1777-1780](../../../src/wastech_orchestrator/core/orchestrator.py#L1777)).
-- Operator flows: `resume`, `rerun`/`continue`, `finalize` ([orchestrator.py:400-644](../../../src/wastech_orchestrator/core/orchestrator.py#L400)).
-- Wire the full dependency graph (`build_orchestrator`/`build_providers`) ([orchestrator.py:2564-2651](../../../src/wastech_orchestrator/core/orchestrator.py#L2564)).
+The orchestrator is the single-slot pipeline spine, but it is **no longer** a hardcoded stage loop — it is a thin wrapper around the [flow engine](B28-flow-engine.md). It owns everything the engine and node runners must not: the validation gate, slot acquisition, the orchestrator-owned preamble (flow resolution, isolation/check preflight, branch prep), the engine wiring (`NodeServices`/`NodeInputs`, the fact resolver, the post-node hook, the supervisor), phase driving for decomposed tasks, terminal handling (cleanup, ledger, auto-merge), and the operator commands `rerun` / `finalize` / `resume`. **The core never builds a CLI command** — it calls only the Router (agent nodes), the Check Runner (checks nodes), and the Git Manager (publish), and hands context to agents **only as artifact file paths**.
 
-## Block Boundaries
+## Public surface
 
-### In scope
+- `Orchestrator` ([orchestrator.py:281](../../../src/wastech_orchestrator/core/orchestrator.py#L281)) — one instance drives one task at a time.
+- `run_task(task_file)` ([orchestrator.py:342](../../../src/wastech_orchestrator/core/orchestrator.py#L342)) — process one task end to end.
+- `acquire_slot(task_id)` ([orchestrator.py:377](../../../src/wastech_orchestrator/core/orchestrator.py#L377)) — the single-slot guard (§8.2).
+- `resume()` ([orchestrator.py:643](../../../src/wastech_orchestrator/core/orchestrator.py#L643)) — reconcile and resume the one unfinished task on startup.
+- `plan_rerun` / `rerun_task` / `continue_task` ([orchestrator.py:383-508](../../../src/wastech_orchestrator/core/orchestrator.py#L383)) — operator re-attempt (fresh or `--continue`).
+- `plan_finalize` / `finalize_task` ([orchestrator.py:512-632](../../../src/wastech_orchestrator/core/orchestrator.py#L512)) — operator records an out-of-band outcome.
+- `refresh_repo()` ([orchestrator.py:634](../../../src/wastech_orchestrator/core/orchestrator.py#L634)) — between-tick base-branch fetch/pull for `watch`.
+- `build_orchestrator(config, ...)` ([orchestrator.py:1974](../../../src/wastech_orchestrator/core/orchestrator.py#L1974)) and `build_providers` ([orchestrator.py:1944](../../../src/wastech_orchestrator/core/orchestrator.py#L1944)) — the dependency-injection assembly.
+- `PipelineResult` ([orchestrator.py:229](../../../src/wastech_orchestrator/core/orchestrator.py#L229)), `_Pipeline` ([orchestrator.py:251](../../../src/wastech_orchestrator/core/orchestrator.py#L251)) (the mutable per-run context), `SlotBusyError` / `PipelineFailed` ([orchestrator.py:239-248](../../../src/wastech_orchestrator/core/orchestrator.py#L239)).
 
-- Stage sequence, branching (skip/decomposition/fixing), all status transitions, HITL/guardrail orchestration, terminal handling, operator `resume`/`rerun`/`finalize`, dependency wiring.
+## Behavior
 
-### Out of scope
+### `run_task` → drive via the engine
 
-- **Building/launching the agent CLI** — that is [B17 Router](./B17-agent-router-and-fallback.md)/[B18](./B18-agent-providers.md); the core only calls `router.run_stage`.
-- **Running checks** — [B24](./B24-check-execution.md); **git/gh** — [B22](./B22-git-manager.md).
-- **Component rules**: transition validity — [B07](./B07-state-machine-and-store.md); loop limits — [B09](./B09-fix-loop-control.md); recovery decision — [B10](./B10-recovery-and-resume.md); decomposition intake — [B11](./B11-task-decomposition.md); HITL output validation — [B12](./B12-hitl-and-typed-output.md); skills — [B13](./B13-skill-selection.md); dangerous-diff classification — [B14](./B14-dangerous-diff-guardrail.md); prompts — [B15](./B15-prompt-templates.md); gate §19 — [B16](./B16-task-parsing-and-validation-gate.md).
-- **CLI dispatch and the watch loop** — [B01](./B01-cli-and-operator-commands.md)/[B02](./B02-watch-daemon-and-scheduling.md).
-
-## Entry Points
-
-- `run_task(task_file)` ([orchestrator.py:350](../../../src/wastech_orchestrator/core/orchestrator.py#L350)) — [B01 run](./B01-cli-and-operator-commands.md)/[B02 watch](./B02-watch-daemon-and-scheduling.md).
-- `resume()` ([orchestrator.py:655](../../../src/wastech_orchestrator/core/orchestrator.py#L655)) and `refresh_repo()`/`acquire_slot()` — [B02](./B02-watch-daemon-and-scheduling.md).
-- `plan_rerun`/`rerun_task`/`continue_task` ([orchestrator.py:400-520](../../../src/wastech_orchestrator/core/orchestrator.py#L400)); `plan_finalize`/`finalize_task` ([orchestrator.py:524-644](../../../src/wastech_orchestrator/core/orchestrator.py#L524)) — [B01 rerun/finalize](./B01-cli-and-operator-commands.md).
-- `build_orchestrator`/`build_providers` ([orchestrator.py:2564,2594](../../../src/wastech_orchestrator/core/orchestrator.py#L2564)) — [B01](./B01-cli-and-operator-commands.md).
-
-## Input Data and State
-
-Path to the task file or `task_id`; `OrchestratorConfig`; injected dependencies (router, git, checks, store, ledger, loops, gate, notifier, resolver, skill_scanner). Working state for a single task is held in the mutable `_Pipeline` ([orchestrator.py:264-291](../../../src/wastech_orchestrator/core/orchestrator.py#L264)); persistent state is in [B07](./B07-state-machine-and-store.md).
-
-## Main Scenario (`run_task`)
-
-1. `read_task_source` + `gate.validate` ([B16](./B16-task-parsing-and-validation-gate.md)); reject → `_reject` (quarantine + ledger, **no branch**).
-2. `acquire_slot` (otherwise `SlotBusyError`); `_register_task` (NEW→VALIDATED, writes the normalized manifest + validation report).
-3. `_drive`: `strict_isolation` preflight ([B25](./B25-security-policy.md), on failure → `PipelineFailed` before the branch) → `_check_preflight` (resolve the active checks profile before the branch; gate any changed set through HITL; not-ready → `PipelineFailed`) → PREPARING → `_prepare_branch` (`ensure_runtime_excludes`: gitignore `.worc/`, then attach the branch) → `_refinement` (skipped if `refined`/complete) → `_planning` (+decomposition, skills) → `_run_units_and_finish`.
-4. For each unit (`_run_unit`): **IMPLEMENTING** (edit + dangerous-diff guardrail) → **TESTING** (checks: pass→review; launch failure→single re-resolve or fail; quality failure→`_enter_fixing`) → **REVIEWING** (skip or review; blocking findings→fixing; otherwise commit subtask/transition or SUMMARIZING) → **FIXING** (edit + guardrail → back to testing/review).
-5. `_summary` (agent / stub / minimal) → `_publish` (finalize artifacts, `commit_code` + `commit_audit`, `push`, `create_pr`, optional auto-merge) → `_go_terminal` (cleanup, status, file move, ledger, notification).
-
-The main path is `run_task` → `_drive`. Key detail: isolation and checks preflights run **before** branch creation and do not consume the fix budget. Operator paths (`resume`/`rerun`/`finalize`) are described in the section below.
+`run_task` ([orchestrator.py:342](../../../src/wastech_orchestrator/core/orchestrator.py#L342)) validates the source through the gate ([B16](B16-task-parsing-and-validation-gate.md)); a reject quarantines and ledgers without a branch (`_reject`, [orchestrator.py:1678](../../../src/wastech_orchestrator/core/orchestrator.py#L1678)). On pass it acquires the slot (else `SlotBusyError`), registers the task, builds the `_Pipeline`, and calls `_drive_via_engine` ([orchestrator.py:839](../../../src/wastech_orchestrator/core/orchestrator.py#L839)):
 
 ```mermaid
-flowchart TB
-    rt(["run_task"]) --> gate{"gate §19 (B16)"}
-    gate -->|reject| rej["failed: quarantine + ledger, no branch"]
-    gate -->|ok| slot["acquire_slot — single slot"]
-    slot --> reg["register: NEW → VALIDATED"]
-    reg --> iso
-
-    subgraph before["before branch — does not consume fix budget"]
-      iso["strict_isolation preflight (B25)"] --> chk["checks preflight: resolve profile (B23)<br/>+ HITL on set change"]
-    end
-
-    chk --> branch["PREPARING → branch agent/id-slug (B22)"]
-    branch --> refine["refinement (skip rule)"]
-    refine --> plan["planning + decomposition (B11), skills (B13)"]
-    plan --> units["for each unit:<br/>implement → test → review → fix<br/>(state machine)"]
-    units --> summ["SUMMARIZING"]
-    summ --> publish["commit + audit, push, PR (B22), optional auto-merge"]
-    publish --> term["terminal cleanup → ledger (B08) → notification (B26)"]
+flowchart TD
+    rt["run_task"] --> gate{"§19 gate"}
+    gate -->|reject| rej["_reject → quarantine + ledger (no branch)"]
+    gate -->|pass| slot{"acquire_slot"}
+    slot -->|busy| busy["SlotBusyError"]
+    slot -->|free| drive["_drive_via_engine"]
+    drive --> rflow["resolve flow (fail-closed)"]
+    rflow --> iso["strict_isolation preflight"]
+    iso --> pre["_check_preflight (resolve check profile)"]
+    pre --> prep["PREPARING → _prepare_branch"]
+    prep --> run["RUNNING → _engine_run"]
+    run --> phases["_run_phases → drive_flow (engine)"]
+    phases --> finish["_finish_engine_run → auto-merge? → _go_terminal"]
 ```
 
-## Alternative Scenarios
+`_drive_via_engine` resolves the flow up front so an unknown/invalid `task_type` fails before any side effect (`_resolve_flow`, [orchestrator.py:824](../../../src/wastech_orchestrator/core/orchestrator.py#L824)), runs the strict-isolation preflight ([orchestrator.py:849](../../../src/wastech_orchestrator/core/orchestrator.py#L849)), resolves the launchable check profile (`_check_preflight`, [orchestrator.py:1243](../../../src/wastech_orchestrator/core/orchestrator.py#L1243)), then transitions `PREPARING` → prepares the branch → `RUNNING` → `_engine_run`.
 
-### Resume (`resume`)
+### Engine wiring (`_engine_run`)
 
-`RecoveryReconciler` ([B10](./B10-recovery-and-resume.md)) → `_resume_task` (restore context and continue from the recorded stage), `_resume_cleanup` (complete pending cleanup), `_resume_manual` (mark ambiguous tasks `manual_action_required`) ([orchestrator.py:655-795](../../../src/wastech_orchestrator/core/orchestrator.py#L655)).
+`_engine_run` ([orchestrator.py:863](../../../src/wastech_orchestrator/core/orchestrator.py#L863)) builds the data bundles and collaborators the node runners need ([B30](B30-flow-node-runners.md), via `build_node_inputs`/`build_node_services`), constructs the per-task `Supervisor` ([B31](B31-supervisor.md), `_build_supervisor`, [orchestrator.py:1055](../../../src/wastech_orchestrator/core/orchestrator.py#L1055)), wires four orchestrator-owned hooks, and drives the phases:
 
-### Rerun / Continue
+- **finalize hook** (`_engine_finalize`, [orchestrator.py:1073](../../../src/wastech_orchestrator/core/orchestrator.py#L1073)) — the publish node calls it to write the supervisor summary, move the task file, and write the committed `<id>.summary.md` (the PR body) before the audit commit.
+- **check-reresolve hook** (`_engine_check_reresolve`, [orchestrator.py:1087](../../../src/wastech_orchestrator/core/orchestrator.py#L1087)) — re-resolve the command set once on a launch failure (gated).
+- **fact resolver** (`_engine_facts`, [orchestrator.py:1093](../../../src/wastech_orchestrator/core/orchestrator.py#L1093)) — resolves `derived.needs_refinement` (purely from the gate's completeness classification — never a task flag), `config.external_research` (true iff the flow grants network), and `config.<stage>_enabled` (a per-task `stages.<stage>.enabled: false` removes the node by skipping it). An unknown fact defaults off; an unknown `*_enabled` stage does not skip.
+- **post-node hook** (`_engine_post_node`, [orchestrator.py:1120](../../../src/wastech_orchestrator/core/orchestrator.py#L1120)) — after each executed node: the supervisor observes the step (read-only, except the terminal publish node); an `output_artifact` slot is persisted; for a `plan` slot the planning-selected skills are resolved ([B13](B13-skill-selection.md)); for the decomposition `proposed_by` node the decomposition is decided and materialized (`_engine_materialize_decomposition`, [orchestrator.py:1156](../../../src/wastech_orchestrator/core/orchestrator.py#L1156)).
 
-`rerun_task`: archive artifacts, reset branch to base, clear per-attempt state, run `run_task`. `continue_task`: revive the task at the interrupted stage (reset incomplete HITL) and `resume` ([orchestrator.py:471-520](../../../src/wastech_orchestrator/core/orchestrator.py#L471)).
+`_engine_run` catches `NodeManualRequired` → `manual_action_required`, `NodeInfraError` → `failed`, and syncs the engine's authoritative loop counters back into the operator-facing `tasks` columns before the terminal transition (`_sync_counters_from_run_state`, [orchestrator.py:929](../../../src/wastech_orchestrator/core/orchestrator.py#L929)).
 
-### Finalize
+### Phase driving and decomposition
 
-`finalize_task`: terminal cleanup, set the declared status **outside** the state machine, move the file, append a `manual` entry to the ledger, optionally delete the branch — **without** the pipeline and without commit/push/PR ([orchestrator.py:583-644](../../../src/wastech_orchestrator/core/orchestrator.py#L583)).
+`_run_phases` ([orchestrator.py:945](../../../src/wastech_orchestrator/core/orchestrator.py#L945)) runs a flow with no decomposition in one pass; a decomposed flow runs the `pre` region once (entry…`proposed_by`), the `sub_flow` region once per subtask with a commit between (`_fan_out_subtasks`, [orchestrator.py:1009](../../../src/wastech_orchestrator/core/orchestrator.py#L1009)), then `post` once. A subtask with a verified commit is never re-run; per-loop counters reset between subtasks while the global fix counter accumulates (the shared budget). Each phase seeds `current_node` before its entry node runs so resume is crash-safe.
 
-### Stage Skipping
+### Resume, rerun, finalize
 
-`planning`/`testing`/`review`/`fixing`/`summary` can be skipped (union of global and per-task `effective_skip`): a stub/`record_skip` is written, transitions are adjusted (e.g., fix after review with testing skipped returns to review) ([orchestrator.py:231-239,1068-1088,2249-2251](../../../src/wastech_orchestrator/core/orchestrator.py#L231)).
+- `resume()` ([orchestrator.py:643](../../../src/wastech_orchestrator/core/orchestrator.py#L643)) delegates to the `RecoveryReconciler` ([B10](B10-recovery-and-resume.md)) → `NONE` (free slot), `MANUAL` (ambiguous → mark `manual_action_required`), `CLEANUP` (finish interrupted cleanup), or resume the one active task. `_resume_via_engine` ([orchestrator.py:749](../../../src/wastech_orchestrator/core/orchestrator.py#L749)) hydrates the `FlowRunState` from the checkpoint and continues from `current_node`; a missing checkpoint or a fingerprint mismatch restarts from the top via the full driver.
+- `rerun_task` ([orchestrator.py:457](../../../src/wastech_orchestrator/core/orchestrator.py#L457)) archives prior artifacts, resets the branch to base, clears per-attempt state, and re-runs from scratch; `continue_task` ([orchestrator.py:479](../../../src/wastech_orchestrator/core/orchestrator.py#L479)) revives the terminal task and resumes at the flow checkpoint. `plan_rerun` / `plan_finalize` are read-only fact-gatherers for the dry-run views.
+- `finalize_task` ([orchestrator.py:571](../../../src/wastech_orchestrator/core/orchestrator.py#L571)) records an out-of-band outcome: terminal cleanup (fail-closed if unsafe), set the declared status (operator override, no `assert_transition`), relocate the file, append a `manual` ledger record — no pipeline, no commit/push/PR.
 
-### Auto-merge (DANGER)
+### Terminal handling
 
-With `review` skip + auto_merge — a warning is issued; with auto_merge — `merge_pr`; a blocked merge → `ManualActionRequired`, the PR remains open ([orchestrator.py:1371-1419](../../../src/wastech_orchestrator/core/orchestrator.py#L1371)).
+`_finish_engine_run` ([orchestrator.py:1224](../../../src/wastech_orchestrator/core/orchestrator.py#L1224)) maps the `FlowRunResult` to a `PipelineResult`: `DONE` with a recorded PR URL and auto-merge on → `_auto_merge` ([orchestrator.py:1478](../../../src/wastech_orchestrator/core/orchestrator.py#L1478), DANGER: bypasses review; a blocked merge → `manual_action_required`, never force/`--admin`), else `_go_terminal`. `_go_terminal` ([orchestrator.py:1582](../../../src/wastech_orchestrator/core/orchestrator.py#L1582)) runs terminal cleanup, clears the flow checkpoint on `DONE` (keeps it on a non-success terminal for `rerun --continue`), transitions, moves the task file, appends exactly one ledger record, and sends the best-effort terminal notification. `_fail` ([orchestrator.py:1558](../../../src/wastech_orchestrator/core/orchestrator.py#L1558)) publishes a failed attempt (commit/push, no PR) when a branch exists.
 
-## Checks and Constraints
+### Dependency injection
 
-- Every transition goes through `assert_transition` ([B07](./B07-state-machine-and-store.md)) inside a transaction ([orchestrator.py:2434-2445](../../../src/wastech_orchestrator/core/orchestrator.py#L2434)).
-- Single slot (`acquire_slot` via `find_active_tasks`) ([orchestrator.py:383-385](../../../src/wastech_orchestrator/core/orchestrator.py#L383)).
-- Isolation preflight and checks preflight run **before** branch creation and do not consume the fix budget.
-- Fix-loop limits ([B09](./B09-fix-loop-control.md)); stall → `manual_action_required` + failure report.
-- Blocking review findings: `blocking`/`critical`/`high` ([orchestrator.py:137](../../../src/wastech_orchestrator/core/orchestrator.py#L137)).
-- Checks re-resolve — only on launch failure and at most once per task ([orchestrator.py:982-1015](../../../src/wastech_orchestrator/core/orchestrator.py#L982)).
-- HITL failure (timeout/transport/invalid response) → `ManualActionRequired` ([orchestrator.py:2060-2110](../../../src/wastech_orchestrator/core/orchestrator.py#L2060)).
+`build_orchestrator` ([orchestrator.py:1974](../../../src/wastech_orchestrator/core/orchestrator.py#L1974)) wires the full graph from a validated config: the provider adapters ([B18](B18-agent-providers.md)), `AgentRouter` ([B17](B17-agent-router-and-fallback.md)), `StateStore` at `<artifacts_root>/state.db` ([B07](B07-state-machine-and-store.md)), `Ledger` ([B08](B08-ledger-and-failure-reports.md)), `GitManager` ([B22](B22-git-manager.md)), `CheckRunner` ([B24](B24-check-execution.md)), `CheckResolver` ([B23](B23-check-discovery.md)), `ValidationGate` ([B16](B16-task-parsing-and-validation-gate.md)), and the notifier ([B26](B26-notifications-telegram.md)). The `FlowRegistry` ([B29](B29-flow-definition-and-validation.md)) is constructed in `__init__` with the operator flows dir (`<repo>/.worc/flows/`) and the config (turning on the config-aware validation layer).
 
-## Output
+## Invariants & guarantees
 
-`PipelineResult(task_id, final_status, pr_url, validation_reason)`. For the operator — the final status and PR URL; at each step — updated persistent state and artifacts.
+- **The engine is the sole driver** — `run_task` and `resume` both go through `drive_flow`; there is no parallel hardcoded loop ([orchestrator.py:366-369](../../../src/wastech_orchestrator/core/orchestrator.py#L366)).
+- **Core builds no CLI** — only the Router/Check Runner/Git Manager touch external processes; context to agents is paths only.
+- **One slot** — `acquire_slot` refuses a second active task; the state machine ([B07](B07-state-machine-and-store.md)) `ACTIVE` set defines "owns the slot".
+- **One ledger record per terminal** — appended in `_go_terminal` / `_fail` / `_reject` / finalize, never twice.
+- **Resume is idempotent** — checkpoint + `publish_operations` dedup means a resumed run never repeats a commit/push/PR.
 
-## Side Effects
+## Dependencies
 
-Primarily through delegated blocks: transitions and records in SQLite ([B07](./B07-state-machine-and-store.md)), git/PR ([B22](./B22-git-manager.md)), run artifacts ([B20](./B20-artifact-layout.md)), ledger entries and failure reports ([B08](./B08-ledger-and-failure-reports.md)), Telegram notifications ([B26](./B26-notifications-telegram.md)), HITL artifacts ([B12](./B12-hitl-and-typed-output.md)). Directly: writes `task.enriched.md`/`plan.md`/`fixing-context.json`/`review/*`/`summary.*`/skip section and, when prompt audit is on, the `prompt-audit/` records + `timeline.jsonl`; moves the task file between lifecycle folders; quarantines on reject.
+- **Drives:** [B28](B28-flow-engine.md)/[B30](B30-flow-node-runners.md) (engine + runners), [B31](B31-supervisor.md) (supervisor). **Calls:** [B16](B16-task-parsing-and-validation-gate.md), [B07](B07-state-machine-and-store.md), [B08](B08-ledger-and-failure-reports.md), [B09](B09-fix-loop-control.md), [B10](B10-recovery-and-resume.md), [B11](B11-task-decomposition.md), [B12](B12-hitl-and-typed-output.md), [B13](B13-skill-selection.md), [B17](B17-agent-router-and-fallback.md), [B22](B22-git-manager.md), [B23](B23-check-discovery.md)/[B24](B24-check-execution.md), [B26](B26-notifications-telegram.md). Reads the check profile from [B23](B23-check-discovery.md).
+- **Used by:** [B01](B01-cli-and-operator-commands.md) (CLI dispatch), [B02](B02-watch-daemon-and-scheduling.md) (watch loop).
 
-## Errors and Edge Cases
+## Audit candidates
 
-- Reject §19 → `failed` without a branch (quarantine + ledger).
-- `PipelineFailed`/`GitCommandError` → `_fail` (if a branch exists — best-effort publish of the failed attempt).
-- `ManualActionRequired` → `manual_action_required` (HITL failure, stall, blocked auto-merge, ambiguous recovery).
-- Unsafe terminal cleanup on success → result `manual_action_required` ([orchestrator.py:1608-1610](../../../src/wastech_orchestrator/core/orchestrator.py#L1608)).
+- The module docstring ([orchestrator.py:1-8](../../../src/wastech_orchestrator/core/orchestrator.py#L1)) still describes the pre-flow-engine linear pipeline "→ summary → publishing" as stages — stale since the summary became the supervisor layer ([B31](B31-supervisor.md)).
+- `_ask_check_command_approval` ([orchestrator.py:1324](../../../src/wastech_orchestrator/core/orchestrator.py#L1324)) hand-rolls the durable interaction round-trip (`start_ask`/`write_waiting_interaction`/`wait_for_answer`/`write_answer`/resume) instead of reusing the `HumanGate` primitive ([B30](B30-flow-node-runners.md)) — duplication of the HITL machinery.
+- Production `assert` statements stand in for guards on the resume/run paths (e.g. [orchestrator.py:349](../../../src/wastech_orchestrator/core/orchestrator.py#L349), [orchestrator.py:724](../../../src/wastech_orchestrator/core/orchestrator.py#L724), [orchestrator.py:726](../../../src/wastech_orchestrator/core/orchestrator.py#L726)); `_resume_task` reads `load_normalized` / counters **before** its try/except ([orchestrator.py:727-740](../../../src/wastech_orchestrator/core/orchestrator.py#L727)), so a corrupt artifact crashes resume rather than degrading to manual. See [the audit](../../backlog/2026-06-21-audit.md).
 
-## Relationships
+## Tests
 
-### Uses
-
-- [B16](./B16-task-parsing-and-validation-gate.md), [B07](./B07-state-machine-and-store.md), [B17](./B17-agent-router-and-fallback.md), [B22](./B22-git-manager.md), [B24](./B24-check-execution.md), [B23](./B23-check-discovery.md), [B08](./B08-ledger-and-failure-reports.md), [B09](./B09-fix-loop-control.md), [B10](./B10-recovery-and-resume.md), [B11](./B11-task-decomposition.md), [B12](./B12-hitl-and-typed-output.md), [B13](./B13-skill-selection.md), [B14](./B14-dangerous-diff-guardrail.md), [B15](./B15-prompt-templates.md), [B26](./B26-notifications-telegram.md), [B27](./B27-observability.md), [B20](./B20-artifact-layout.md), [B21](./B21-secret-redaction.md), [B25](./B25-security-policy.md).
-
-### Used by
-
-- [B01 — CLI](./B01-cli-and-operator-commands.md) — `run`/`status`-adjacent commands, `rerun`, `finalize`.
-- [B02 — Watch Daemon](./B02-watch-daemon-and-scheduling.md) — `resume`/`acquire_slot`/`run_task`/`refresh_repo`.
-
-## Place in the Overall System
-
-This is the node that ties everything together: every other block is either an input (validation, config), a tool (providers, checks, git), or a store (state, ledger, artifacts), and the pipeline coordinates them in strict order, owning the state and the invariants (single slot, separation of concerns, fallback only for infrastructure errors, non-weakenable security).
-
-## Code Confirmation
-
-- [orchestrator.py:350-385](../../../src/wastech_orchestrator/core/orchestrator.py#L350) — `run_task`/`acquire_slot`.
-- [orchestrator.py:820-1047](../../../src/wastech_orchestrator/core/orchestrator.py#L820) — `_drive`, preflights, branch, refinement/planning, unit loop.
-- [orchestrator.py:1196-1419](../../../src/wastech_orchestrator/core/orchestrator.py#L1196) — `_run_unit`, review, publishing, auto-merge.
-- [orchestrator.py:1468-1641](../../../src/wastech_orchestrator/core/orchestrator.py#L1468) — fixing, failure reports, terminal handling.
-- [orchestrator.py:1719-1877](../../../src/wastech_orchestrator/core/orchestrator.py#L1719) — stage launch, HITL round-trip.
-- [orchestrator.py:2434-2651](../../../src/wastech_orchestrator/core/orchestrator.py#L2434) — transitions and dependency wiring.
-- Tests: [test_orchestrator.py](../../../tests/core/test_orchestrator.py), [test_cli_pipeline.py](../../../tests/core/test_cli_pipeline.py), [test_cli_rerun.py](../../../tests/core/test_cli_rerun.py), [test_cli_finalize.py](../../../tests/core/test_cli_finalize.py), [test_recovery.py](../../../tests/core/test_recovery.py), [test_check_discovery_hitl.py](../../../tests/core/test_check_discovery_hitl.py).
+- `tests/core/test_orchestrator.py`, `tests/core/test_hitl.py`, `tests/e2e/` — gate→slot→engine flow, decomposition fan-out, resume/rerun/continue, auto-merge guardrail, terminal cleanup, check-command approval.

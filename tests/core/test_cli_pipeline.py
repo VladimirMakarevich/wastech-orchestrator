@@ -171,16 +171,10 @@ repo:
   branch_prefix: "agent"
 agents:
   allowed: [claude, codex]
-  routing:
-    refinement: {{primary: claude, fallback: codex}}
-    planning: {{primary: claude, fallback: codex}}
-    implementation: {{primary: claude, fallback: codex}}
-    review: {{primary: codex, fallback: claude}}
-    fixing: {{primary: claude, fallback: codex}}
-    summary: {{primary: claude, fallback: codex}}
   providers:
     claude:
       command: {claude_cmd!r}
+      primary: true
     codex:
       command: {codex_cmd!r}
 security:
@@ -201,7 +195,7 @@ git:
 
 def _complete_task_file(path: Path, task_id: str) -> None:
     path.write_text(
-        f'---\nid: {task_id}\ntitle: "Add a thing"\nrefined: true\n---\n\n'
+        f'---\nid: {task_id}\ntitle: "Add a thing"\n---\n\n'
         "## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
         encoding="utf-8",
     )
@@ -250,15 +244,12 @@ def test_cmd_run_happy_path(
     messages = {
         json.loads(line)["msg"] for line in operator_log.read_text(encoding="utf-8").splitlines()
     }
+    # The orchestrator-owned preamble/terminal still emit progress markers via `_observe`; per-stage
+    # / commit / push progress now lives in `node_runs` + structured provider/git logging (the
+    # engine node runners do not wrap each step in `_observe`).
     assert {
         "branch preparation started",
         "branch preparation completed",
-        "stage started",
-        "stage completed",
-        "commit started",
-        "commit completed",
-        "push started",
-        "push completed",
         "terminal cleanup started",
         "terminal cleanup completed",
     } <= messages
@@ -319,11 +310,19 @@ def test_cmd_status_reports_active_task(
         TaskRow(
             task_id="task-active",
             title="Active task",
-            status=Status.PLANNING,
+            status=Status.RUNNING,
             branch="agent/task-active-active-task",
             fix_iterations=2,
             updated_at="2026-06-12T10:00:00+00:00",
         )
+    )
+    # The flow checkpoint surfaces where the engine will resume (replaces the granular-stage view).
+    store.save_flow_checkpoint(
+        "task-active",
+        current_node="implementation",
+        counters_json="{}",
+        flow_fingerprint="fp",
+        fix_iterations=2,  # checkpoint mirrors the task's fix counter
     )
     store.close()
 
@@ -332,9 +331,8 @@ def test_cmd_status_reports_active_task(
     assert code == 0
     output = capsys.readouterr().out
     assert "task_id=task-active" in output
-    assert "status=planning" in output
-    assert "stage=planning" in output
-    assert "configured_primary=claude" in output
+    assert "status=running" in output
+    assert "node=implementation" in output
     assert "branch=agent/task-active-active-task" in output
     assert "fix_iterations=2" in output
 

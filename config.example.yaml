@@ -1,7 +1,7 @@
 # Example configuration for wastech-orchestrator.
 # Copy to config.yaml and fill it in for your project. config.yaml is NOT committed to git.
 
-schema_version: 8                   # config format version; the orchestrator refuses newer configs
+schema_version: 11                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -24,8 +24,7 @@ agents:
   max_fix_cycles: 15
   max_total_fix_iterations: 30      # hard global cap across all fix loops (and all subtasks); >= max_fix_cycles
 
-  skip_stages: []                   # stages skipped for every task: any of [planning, testing, review, fixing, summary]
-  allow_review_skip: false          # required before any task (or skip_stages) may disable the `review` quality gate
+  allow_review_skip: false          # required before a task's `stages.review.enabled: false` may disable the `review` quality gate
 
   decomposition:                    # optional task decomposition (§5.1); OFF by default
     enabled: false
@@ -33,26 +32,9 @@ agents:
     min_size_signal: "large"        # advisory threshold passed to the planning prompt
     commit_per_subtask: true        # one local commit per subtask on the single task branch
 
-  routing:                          # primary/fallback per stage
-    refinement:
-      primary: claude
-      fallback: codex
-    planning:
-      primary: claude
-      fallback: codex
-    implementation:
-      primary: claude
-      fallback: codex
-    review:
-      primary: codex
-      fallback: claude
-    fixing:
-      primary: claude
-      fallback: codex
-    summary:
-      primary: claude
-      fallback: codex
-
+  # Provider routing is node-based: a flow node declares its own `provider` (else the global
+  # primary below). Exactly one configured provider must set `primary: true` — it runs every node
+  # with no `provider` field and is the sole infrastructure-fallback target. It must be in `allowed`.
   providers:
     claude:
       command: "claude"
@@ -63,6 +45,7 @@ agents:
       max_budget_usd: null
       permission_profile: "workspace-write"
       extra_args: []
+      primary: true            # the global primary (exactly one provider; must be in `allowed`)
     codex:
       command: "codex"
       model: ""
@@ -124,8 +107,9 @@ git:
   #     dangerous-diff approval still fires; auto-merge only affects the publish step.
   auto_merge: false                 # true: merge every published PR to pr_base automatically
   auto_merge_strategy: squash       # merge | squash | rebase  (used when a merge fires)
-  auto_merge_allow_per_task: false  # true: honor a per-task `auto_merge: true` (a per-task false always opts out)
   auto_merge_wait_for_checks: false # true: arm GitHub-native auto-merge (--auto) — merge only after required checks pass
+  # NOTE: a per-task `auto_merge: true|false` wins outright over this default (PRE.2). Auto-merge
+  # skips the human PR review — the operator (the task author) owns that call; see docs/operations.md.
   footprint:                        # audit-trail policy (§21). Runtime files always live under the
                                     # gitignored <repo>/.worc/ home; only the task file and its
                                     # <id>.summary.md are committed, at the repo root under tasks/.
@@ -138,23 +122,11 @@ telegram:                           # human-in-the-loop + notifications (optiona
   chat_id_env: "TELEGRAM_CHAT_ID"   # must resolve to a non-zero numeric chat id
   ask_timeout_s: 28800              # > 0; blocking HITL fails closed on timeout
 
-prompts:                            # operator-customizable stage prompts (optional; schema v6)
-  templates_dir: "./templates/prompts"  # relative paths resolve from this config.yaml's directory;
-                                    # set to "" to force the packaged defaults for every stage.
-  mode: replace                     # replace (your file only; default) | append (packaged default + your file)
-                                    # A <stage>.md present in templates_dir is used AUTOMATICALLY — its
-                                    # presence is the activation signal; no opt-in map. Agent-routed
-                                    # stages: refinement, planning, implementation, review, fixing, summary
-                                    # (e.g. edit templates/prompts/implementation.md to customize it).
-                                    # A missing <stage>.md falls back to the packaged default (never an error).
-                                    # `init`/`install-templates` deliver byte-identical copies of every
-                                    # default; edit one to take effect. Templates are prompt text only; they
-                                    # cannot change provider, extra_args, sandbox/approvals, denied
-                                    # commands/reads, or env.
-                                    # Variables: {task_id} {stage} {repo_path} {task_path} {plan_path}
-                                    #   {diff_path} {checks_path} {review_path} {subtask_order}
-                                    #   {subtask_count} {subtask_spec_path} {skills_path}
-                                    #   (paths/metadata only).
+# Prompt templates are not configured here: a flow node's prompt is the content of its `role_file`
+# (packaged flow roles, or `.worc/flows/roles/*.md` for an operator flow). Edit the role file to
+# customize a node's prompt. Role files render only allowlisted path/metadata variables ({task_id}
+# {stage} {repo_path} {task_path} {plan_path} {diff_path} {checks_path} {review_path} {skills_path}
+# {subtask_order} {subtask_count} {subtask_spec_path}) — never task bodies, diffs, env, or secrets.
 
 skills:                             # planning-selected repo skill references (optional, §2.1)
   scan_root: ""                     # empty = <repo.local_path>/.claude/skills (the target repo's skills)

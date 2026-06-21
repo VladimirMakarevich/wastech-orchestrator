@@ -82,6 +82,12 @@ class CheckRunner:
         self._heartbeat_seconds = heartbeat_seconds
         self._monotonic = monotonic
 
+    @property
+    def run_process(self) -> RunProcess:
+        """The injected safe process runner — shared with the flow's ``dependency_scan`` checker so
+        a test's fake runner drives both, and production uses the one real argv launcher."""
+        return self._run_process
+
     def run(
         self,
         *,

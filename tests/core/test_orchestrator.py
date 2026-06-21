@@ -15,10 +15,9 @@ from pathlib import Path
 import pytest
 
 from wastech_orchestrator.check_runner import CheckRunner
-from wastech_orchestrator.core.loop_control import LoopController
 from wastech_orchestrator.core.orchestrator import Orchestrator, SlotBusyError
 from wastech_orchestrator.core.state_machine import Status
-from wastech_orchestrator.git_manager import GitManager, GitResult
+from wastech_orchestrator.git_manager import GitCommandError, GitManager, GitResult
 from wastech_orchestrator.ledger import Ledger
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult, Notifier
 from wastech_orchestrator.providers.artifacts import create_attempt_dir, task_artifact_dir
@@ -110,7 +109,7 @@ class ArtifactWritingProvider(FakeProvider):
             request.stage,
             request.attempt,
             self.id,
-            stage_run_id=request.stage_run_id,
+            node_run_id=request.node_run_id,
         )
         result = super().run(request)
         Path(paths.stdout_path).write_text("provider output\n", encoding="utf-8")
@@ -289,7 +288,6 @@ def _build(
         checks=checks,
         store=store,
         ledger=ledger,
-        loops=LoopController(config.agents),
         gate=gate,
         artifacts_root=str(art),
         notifier=notifier,
@@ -300,7 +298,7 @@ def _build(
 def _complete_task(tmp_path: Path, task_id: str = "task-001") -> str:
     path = tmp_path / f"{task_id}.md"
     path.write_text(
-        f'---\nid: {task_id}\ntitle: "Add a thing"\nrefined: true\n---\n\n'
+        f'---\nid: {task_id}\ntitle: "Add a thing"\n---\n\n'
         "## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
         encoding="utf-8",
     )
@@ -348,10 +346,14 @@ def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: 
 
     row = store.get_task("task-001")
     assert row is not None and row.status is Status.DONE
-    assert row.refinement_ran is False  # refined: true → skipped
+    assert "refinement" in _skipped_stages(store)  # complete task → refinement node skipped
     # The task file was moved into its lifecycle folder (tasks/done, §20.2).
     assert (tmp_path / "done" / "task-001.md").exists()
     assert not (tmp_path / "task-001.md").exists()
+    # A done task has no resume position: the flow checkpoint is cleared (no stale node= in status),
+    # while node_runs remain for the audit trail (Secondary obs 1).
+    assert store.get_flow_checkpoint("task-001") == (None, None, None)
+    assert store.get_node_runs("task-001")  # the per-node audit trail is retained
     # Exactly one ledger record; back on the base branch.
     records = ledger.records()
     assert len(records) == 1 and records[0]["final_status"] == "done"
@@ -370,30 +372,116 @@ def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: 
     assert "agent/task-001-add-a-thing" in branches
 
 
-def test_per_stage_model_reasoning_reaches_provider(
+def _evaluations(store: StateStore, task_id: str) -> list:
+    return store._conn.execute(  # noqa: SLF001
+        "SELECT node_id, kind, verdict FROM evaluations WHERE task_id = ? ORDER BY id", (task_id,)
+    ).fetchall()
+
+
+def test_supervisor_layer_observes_each_step_and_writes_one_summary(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    """A ``stages.<stage>`` override sets the model/reasoning for that stage only; other stages
-    fall back to the task-wide values. The resolved values travel on the AgentRunRequest."""
+    # P2.1: the constant supervisor layer runs above any flow — it observes every executed
+    # (non-publish) node read-only (advisory), and synthesizes the summary once at whole-task close.
     providers = _both()
-    orch, _store, _, _art = _build(
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-sup"))
+    assert result.final_status is Status.DONE
+
+    rows = _evaluations(store, "task-sup")
+    supervisor_rows = [r for r in rows if r["kind"].startswith("supervisor_")]
+    # Every supervisor record is advisory and carries no node_id (it is a layer, not a node).
+    assert {r["verdict"] for r in supervisor_rows} == {"advisory"}
+    assert all(r["node_id"] is None for r in supervisor_rows)
+    steps = [r for r in rows if r["kind"] == "supervisor_step"]
+    finals = [r for r in rows if r["kind"] == "supervisor_final"]
+    # One observation per executed non-publish node (planning, implementation, testing, review).
+    assert len(steps) >= 4
+    assert len(finals) == 1  # the summary synthesis is once per whole task
+    # The in-flow review evaluator also recorded an immutable verdict (a separate kind).
+    assert any(r["kind"] == "in_flow_verdict" and r["node_id"] == "review" for r in rows)
+    # The summary is always written (no config.summary_enabled gate) and committed as the PR body.
+    assert (task_artifact_dir(art, "task-sup") / "summary.md").exists()
+    # There is no summary graph node anymore — the layer owns it.
+    assert "summary" not in _ran_nodes(store, "task-sup")
+
+
+def test_supervisor_summary_once_per_whole_task_not_subtask(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # P2.1: with decomposition the summary synthesis is once at whole-task close — not per subtask.
+    subtasks = {
+        "decompose": True,
+        "skills": [],
+        "subtasks": [
+            {
+                "order": 1,
+                "title": "First",
+                "slug": "first",
+                "acceptance_criteria": ["a"],
+                "depends_on": [],
+            },
+            {
+                "order": 2,
+                "title": "Second",
+                "slug": "second",
+                "acceptance_criteria": ["b"],
+                "depends_on": [1],
+            },
+        ],
+    }
+    state = {"n": 0}
+
+    class DecompProvider(FakeProvider):
+        def run(self, request: AgentRunRequest) -> AgentRunResult:
+            if request.stage is Stage.PLANNING:
+                return AgentRunResult(
+                    status=RunStatus.SUCCEEDED,
+                    provider=self.id,
+                    stage=request.stage,
+                    attempt=request.attempt,
+                    exit_code=0,
+                    started_at="t",
+                    finished_at="t",
+                    final_message="plan",
+                    structured_output={"content": "plan", "human_input": None, **subtasks},
+                )
+            if request.stage is Stage.IMPLEMENTATION:
+                (git_repo.clone / f"impl-{state['n']}.py").write_text("x\n", encoding="utf-8")
+                state["n"] += 1
+            return super().run(request)
+
+    providers = {
+        ProviderId.CLAUDE: DecompProvider("claude"),
+        ProviderId.CODEX: DecompProvider("codex"),
+    }
+    orch, store, _, _ = _build(
         git_repo,
         make_git_config,
         tmp_path,
         providers=providers,
         check_verdicts=[0],
+        config_kwargs={"decomposition": True},
     )
-    path = tmp_path / "task-001.md"
-    path.write_text(
-        '---\nid: task-001\ntitle: "Add a thing"\nrefined: true\n'
-        "model: claude-sonnet-4-6\n"
-        "reasoning: low\n"
-        "stages:\n"
-        "  planning:\n"
-        "    model: claude-opus-4-8\n"
-        "    reasoning: high\n"
-        "---\n\n## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
-        encoding="utf-8",
+    result = orch.run_task(_complete_task(tmp_path, "task-sup-dec"))
+    assert result.final_status is Status.DONE
+
+    rows = _evaluations(store, "task-sup-dec")
+    finals = [r for r in rows if r["kind"] == "supervisor_final"]
+    assert len(finals) == 1  # exactly one, despite two subtasks
+
+
+def test_live_route_defaults_to_global_primary(git_repo, make_git_config, tmp_path: Path) -> None:
+    # Routing is node-based now (PRE.1): the packaged implementation flow declares no per-node
+    # `provider`, so every node resolves to the config's global primary (claude) on the live engine
+    # path, tagged RouteSource.CONFIG. A task can no longer repoint a stage's provider.
+    providers = _both()
+    orch, store, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
     )
     orig = providers[ProviderId.CLAUDE].run
 
@@ -404,85 +492,13 @@ def test_per_stage_model_reasoning_reaches_provider(
 
     providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
 
-    result = orch.run_task(str(path))
+    result = orch.run_task(_complete_task(tmp_path, "task-001"))
     assert result.final_status is Status.DONE
 
-    requests = providers[ProviderId.CLAUDE].requests + providers[ProviderId.CODEX].requests
-    planning = next(r for r in requests if r.stage is Stage.PLANNING)
-    impl = next(r for r in requests if r.stage is Stage.IMPLEMENTATION)
-    # Planning uses the per-stage override; implementation inherits the task-wide values.
-    assert (planning.model, planning.reasoning) == ("claude-opus-4-8", "high")
-    assert (impl.model, impl.reasoning) == ("claude-sonnet-4-6", "low")
-
-
-def test_prompt_override_reaches_provider_and_is_audited(
-    git_repo, make_git_config, tmp_path: Path
-) -> None:
-    """An auto-detected replace-mode template changes the prompt the provider gets; it is audited.
-
-    The rendered prompt is written per stage run and redacted before storage; provider argv is
-    untouched (the prompt only ever travels on the request, never as a CLI arg).
-    """
-    tdir = tmp_path / "prompts"
-    tdir.mkdir()
-    # The file's presence is the activation signal (schema v6) — no overrides map needed.
-    # Include a token-shaped secret to prove the audit artifact is redacted defensively.
-    (tdir / "implementation.md").write_text(
-        "CUSTOM-IMPL-INSTRUCTION leaked=ghp_abcdefghij0123456789ABCDEFGHIJ\n",
-        encoding="utf-8",
-    )
-    prompts_block = f"prompts:\n  templates_dir: {str(tdir)!r}\n  mode: replace\n"
-    providers = _both()
-    orch, _store, _, art = _build(
-        git_repo,
-        make_git_config,
-        tmp_path,
-        providers=providers,
-        check_verdicts=[0],
-        config_kwargs={"prompts_block": prompts_block},
-    )
-    task_file = _complete_task(tmp_path, "task-pc1")
-    orig = providers[ProviderId.CLAUDE].run
-
-    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
-        if request.stage is Stage.IMPLEMENTATION:
-            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
-        return orig(request)
-
-    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
-
-    result = orch.run_task(task_file)
-    assert result.final_status is Status.DONE
-
-    impl_request = next(
-        r for r in providers[ProviderId.CLAUDE].requests if r.stage is Stage.IMPLEMENTATION
-    )
-    assert "CUSTOM-IMPL-INSTRUCTION" in impl_request.prompt
-    # Replace mode: the packaged default text is gone.
-    assert "following the plan" not in impl_request.prompt
-
-    rendered = art / "logs" / "task-pc1" / "stages" / "implementation" / "rendered-prompt.md"
-    assert rendered.exists()
-    body = rendered.read_text(encoding="utf-8")
-    assert "CUSTOM-IMPL-INSTRUCTION" in body
-    assert "ghp_abcdefghij0123456789ABCDEFGHIJ" not in body  # redacted
-
-
-def test_missing_prompt_file_falls_back_to_packaged_default(
-    git_repo, make_git_config, tmp_path: Path
-) -> None:
-    # Schema v6: a missing <stage>.md is the normal fallback, never a fail-closed config error —
-    # the orchestrator builds fine and uses the packaged default.
-    prompts_block = f"prompts:\n  templates_dir: {str(tmp_path / 'absent')!r}\n"
-    orch, _store, _, _art = _build(
-        git_repo,
-        make_git_config,
-        tmp_path,
-        providers=_both(),
-        check_verdicts=[0],
-        config_kwargs={"prompts_block": prompts_block},
-    )
-    assert orch is not None  # construction succeeded; no ConfigError raised
+    runs = {r.node_id: r for r in store.get_node_runs("task-001")}
+    impl = runs["implementation"]
+    assert impl.route_primary == "claude"  # the global primary
+    assert impl.route_source == "config"
 
 
 def test_vague_task_runs_refinement(git_repo, make_git_config, tmp_path: Path) -> None:
@@ -506,8 +522,8 @@ def test_vague_task_runs_refinement(git_repo, make_git_config, tmp_path: Path) -
 
     result = orch.run_task(str(path))
     assert result.final_status is Status.DONE
-    row = store.get_task("task-002")
-    assert row is not None and row.refinement_ran is True
+    # No acceptance criteria → needs_enrichment → refinement node ran (deterministic, PRE.3).
+    assert "refinement" in _ran_nodes(store, "task-002")
     assert (art / "logs" / "task-002" / "task.enriched.md").exists()
 
 
@@ -529,13 +545,36 @@ def test_failed_checks_then_fix_then_pass(git_repo, make_git_config, tmp_path: P
 
     result = orch.run_task(task_file)
     assert result.final_status is Status.DONE
-    row = store.get_task("task-003")
-    assert row is not None and row.fix_iterations == 1  # one fixing entry
-    context = json.loads(
-        (art / "logs" / "task-003" / "fixing-context.json").read_text(encoding="utf-8")
+    # The test-fix loop ran exactly one fixing node (checks failed once, then passed on retry).
+    assert _ran_nodes(store, "task-003").count("fixing") == 1
+
+
+def test_fix_iterations_synced_to_operator_surfaces(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # F6: the engine owns loop counting in FlowRunState; the operator-facing tasks.fix_iterations
+    # (CLI status / get_counters) and the ledger must reflect it, not stay at the stale 0 they read
+    # before the cutover synced them. One test-fix cycle => fix_iterations == 1 on both surfaces.
+    providers = _both()
+    orch, store, ledger, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[1, 0]
     )
-    assert context["loop"] == "test"
-    assert context["check_artifacts_path"]
+    task_file = _complete_task(tmp_path, "task-009")
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.stage in (Stage.IMPLEMENTATION, Stage.FIXING):
+            (git_repo.clone / "f.py").write_text("z = 3\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    result = orch.run_task(task_file)
+    assert result.final_status is Status.DONE
+    assert _ran_nodes(store, "task-009").count("fixing") == 1
+    row = store.get_task("task-009")
+    assert row is not None and row.fix_iterations == 1  # synced from the engine, not stale 0
+    assert ledger.records()[0]["fix_iterations"] == 1  # ledger reflects the engine's count
 
 
 def test_two_fix_cycles_use_distinct_stage_run_artifacts(
@@ -560,7 +599,7 @@ def test_two_fix_cycles_use_distinct_stage_run_artifacts(
     def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
         if request.stage in (Stage.IMPLEMENTATION, Stage.FIXING):
             (git_repo.clone / "f.py").write_text(
-                f"stage_run_id = {request.stage_run_id}\n", encoding="utf-8"
+                f"node_run_id = {request.node_run_id}\n", encoding="utf-8"
             )
         return orig(request)
 
@@ -570,8 +609,8 @@ def test_two_fix_cycles_use_distinct_stage_run_artifacts(
 
     assert result.final_status is Status.DONE
     rows = store._conn.execute(  # noqa: SLF001 - cross-checking SQLite against artifact paths
-        "SELECT id FROM stage_runs WHERE task_id = ? AND stage = ? ORDER BY id",
-        ("task-two-fixes", Stage.FIXING.value),
+        "SELECT id FROM node_runs WHERE task_id = ? AND node_id = ? AND skipped = 0 ORDER BY id",
+        ("task-two-fixes", "fixing"),
     ).fetchall()
     assert len(rows) == 2
     expected = [
@@ -651,13 +690,54 @@ def test_review_blocking_then_fix(git_repo, make_git_config, tmp_path: Path) -> 
     )
     result = orch.run_task(_complete_task(tmp_path, "task-005"))
     assert result.final_status is Status.DONE
-    row = store.get_task("task-005")
-    assert row is not None and row.fix_iterations == 1  # one review-driven fix
-    context = json.loads(
-        (art / "logs" / "task-005" / "fixing-context.json").read_text(encoding="utf-8")
+    # Review blocked once → one review-driven fixing node ran, then review passed.
+    assert _ran_nodes(store, "task-005").count("fixing") == 1
+
+
+_MINIMAL_FLOW = """
+flow:
+  name: implementation
+  task_type: implementation
+  permission_ceiling: workspace-write
+  output_policy: code_change
+  publishing: pull_request
+  nodes:
+    - id: implementation
+      kind: agent
+      role_file: roles/implementation.md
+      session_scope: editing_lineage
+      permission_profile: workspace-write
+    - id: publish
+      kind: publish
+      policy: pull_request
+  edges:
+    - { from: implementation, to: publish }
+"""
+
+
+def test_minimal_flow_implement_only(git_repo, make_git_config, tmp_path: Path) -> None:
+    # P2.5: a degenerate flow (implementation → publish, no checks / review / fixing) is a valid
+    # graph shape and executes; the constant supervisor layer still writes the summary. A flow
+    # without a checks node simply has no mutation guard (optional via graph shape).
+    from wastech_orchestrator.core.flow.registry import FlowRegistry
+
+    flows = tmp_path / "flows"
+    (flows / "roles").mkdir(parents=True)
+    (flows / "roles" / "implementation.md").write_text("Implement {task_path}.", "utf-8")
+    (flows / "implementation.yaml").write_text(_MINIMAL_FLOW, "utf-8")
+    providers = _both()
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
     )
-    assert context["loop"] == "review"
-    assert context["review_artifacts_path"]
+    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)  # noqa: SLF001
+    _patch_impl_edit(providers, git_repo)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-min"))
+    assert result.final_status is Status.DONE
+    ran = _ran_nodes(store, "task-min")
+    assert set(ran) == {"implementation", "publish"}  # only the two declared nodes ran
+    assert "testing" not in ran and "review" not in ran  # degenerate: no checks / review nodes
+    assert (task_artifact_dir(art, "task-min") / "summary.md").exists()  # supervisor still wrote it
 
 
 def test_summary_fallback_when_provider_fails(git_repo, make_git_config, tmp_path: Path) -> None:
@@ -759,15 +839,104 @@ def test_decomposed_task_commits_each_subtask(
     assert all(s.commit_sha for s in subs)
 
 
+def test_decomposed_subtask_spec_path_reaches_implementation_prompt(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # F5 / MC3: in decomposition mode each subtask's edit nodes must be scoped to that subtask — the
+    # active immutable spec path (and "subtask N of M") is rendered into the implementation prompt,
+    # so subtask 1 sees 01-first.md and subtask 2 sees 02-second.md.
+    subtasks = {
+        "decompose": True,
+        "skills": [],
+        "subtasks": [
+            {
+                "order": 1,
+                "title": "First",
+                "slug": "first",
+                "acceptance_criteria": ["a"],
+                "depends_on": [],
+            },
+            {
+                "order": 2,
+                "title": "Second",
+                "slug": "second",
+                "acceptance_criteria": ["b"],
+                "depends_on": [1],
+            },
+        ],
+    }
+
+    class DecompProvider(FakeProvider):
+        def run(self, request: AgentRunRequest) -> AgentRunResult:
+            if request.stage is Stage.PLANNING:
+                return AgentRunResult(
+                    status=RunStatus.SUCCEEDED,
+                    provider=self.id,
+                    stage=request.stage,
+                    attempt=request.attempt,
+                    exit_code=0,
+                    started_at="t",
+                    finished_at="t",
+                    final_message="plan",
+                    structured_output={"content": "plan", "human_input": None, **subtasks},
+                )
+            if request.stage is Stage.IMPLEMENTATION:
+                (git_repo.clone / f"impl-{state['n']}.py").write_text("x\n", encoding="utf-8")
+                state["n"] += 1
+            return super().run(request)
+
+    state = {"n": 0}
+    providers = {
+        ProviderId.CLAUDE: DecompProvider("claude"),
+        ProviderId.CODEX: DecompProvider("codex"),
+    }
+    orch, _store, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"decomposition": True},
+    )
+    result = orch.run_task(_complete_task(tmp_path, "task-007"))
+    assert result.final_status is Status.DONE
+
+    impl_prompts = [
+        r.prompt for r in providers[ProviderId.CLAUDE].requests if r.stage is Stage.IMPLEMENTATION
+    ]
+    assert len(impl_prompts) == 2  # one implementation run per subtask, each subtask-scoped
+    assert "01-first.md" in impl_prompts[0] and "subtask 1 of 2" in impl_prompts[0].lower()
+    assert "02-second.md" in impl_prompts[1] and "subtask 2 of 2" in impl_prompts[1].lower()
+
+
 def test_single_active_slot_blocks(git_repo, make_git_config, tmp_path: Path) -> None:
     providers = _both()
     orch, store, _, _ = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
     )
     # Pre-seed another active task occupying the slot.
-    store.insert_task(TaskRow(task_id="other", title="o", status=Status.IMPLEMENTING))
+    store.insert_task(TaskRow(task_id="other", title="o", status=Status.RUNNING))
     with pytest.raises(SlotBusyError):
         orch.run_task(_complete_task(tmp_path, "task-008"))
+
+
+def test_unknown_task_type_fails_before_branch(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # A structurally-valid task whose ``task_type`` maps to no flow fails before any side effect:
+    # the flow is resolved before branch prep, so an unknown type → terminal failed, no branch.
+    orch, store, ledger, art = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    task = tmp_path / "task-ut.md"
+    task.write_text(
+        '---\nid: task-ut\ntitle: "X"\ntask_type: no_such_flow\n---\n\n## Description\n\nDo it.\n',
+        encoding="utf-8",
+    )
+    result = orch.run_task(str(task))
+    assert result.final_status is Status.FAILED
+    branches = git_run(["branch", "--list", "agent/*"], git_repo.clone)
+    assert branches == ""
 
 
 def test_rejected_task_no_branch(git_repo, make_git_config, git_run, tmp_path: Path) -> None:
@@ -950,7 +1119,8 @@ def test_failed_with_branch_commits_and_pushes_task_and_summary(
     pending.mkdir(parents=True)
     task_file = pending / "task-fail.md"
     task_body = (
-        '---\nid: task-fail\ntitle: "Add a thing"\nrefined: true\n---\n\n## Description\n\nDo it.\n'
+        '---\nid: task-fail\ntitle: "Add a thing"\n---\n\n'
+        "## Description\n\nDo it.\n\n## Acceptance criteria\n\n- works\n"
     )
     task_file.write_text(task_body, encoding="utf-8")
 
@@ -967,6 +1137,46 @@ def test_failed_with_branch_commits_and_pushes_task_and_summary(
     assert git_run(["ls-remote", "--heads", "origin", branch], git_repo.clone) != ""
     assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "main"
     assert ledger.records()[0]["final_status"] == "failed"
+
+
+def test_publish_failure_after_finalize_is_manual_not_stranded_done(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # A git failure during publishing AFTER finalize has moved the task file to tasks/done/ and
+    # committed the audit trail must not mislabel the work: the deliverable is committed, only the
+    # push/PR did not finish → resumable MANUAL_ACTION_REQUIRED, with the task file consistently in
+    # done/ (never stranded as a failed/ artifact, never marked FAILED). (F1 / MC2.)
+    providers = _both()
+    orch, store, ledger, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    task_file = _complete_task(tmp_path)
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.stage is Stage.IMPLEMENTATION:
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    def boom(*args: object, **kwargs: object) -> str:
+        raise GitCommandError("simulated PR creation failure")
+
+    orch._git.create_pr = boom  # type: ignore[method-assign]
+
+    result = orch.run_task(task_file)
+
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED  # not FAILED, not DONE
+    assert result.pr_url is None
+    row = store.get_task("task-001")
+    assert row is not None and row.status is Status.MANUAL_ACTION_REQUIRED
+    # The task file stays in its done/ lifecycle folder — never stranded as failed/, never left in
+    # the queue root.
+    assert (tmp_path / "done" / "task-001.md").exists()
+    assert not (tmp_path / "failed" / "task-001.md").exists()
+    assert not (tmp_path / "task-001.md").exists()
+    assert ledger.records()[0]["final_status"] == "manual_action_required"
 
 
 def test_artifacts_registered_with_checksums(git_repo, make_git_config, tmp_path: Path) -> None:
@@ -1509,7 +1719,7 @@ def _patch_impl_edit(providers: dict[ProviderId, FakeProvider], git_repo) -> Non
 def _task_with_auto_merge(tmp_path: Path, value: bool, task_id: str = "task-001") -> str:
     path = tmp_path / f"{task_id}.md"
     path.write_text(
-        f'---\nid: {task_id}\ntitle: "Add a thing"\nrefined: true\n'
+        f'---\nid: {task_id}\ntitle: "Add a thing"\n'
         f"auto_merge: {str(value).lower()}\n---\n\n"
         "## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
         encoding="utf-8",
@@ -1529,28 +1739,18 @@ def test_auto_merge_resolution_matrix(git_repo, make_git_config, tmp_path: Path)
     )
     base_git = orch._config.git
 
-    def eff(task_am: bool | None, cfg_am: bool, cfg_allow: bool) -> bool:
-        orch._config = replace(
-            orch._config,
-            git=replace(base_git, auto_merge=cfg_am, auto_merge_allow_per_task=cfg_allow),
-        )
+    def eff(task_am: bool | None, cfg_am: bool) -> bool:
+        orch._config = replace(orch._config, git=replace(base_git, auto_merge=cfg_am))
         task = NormalizedTask(id="t", title="T", description="d", auto_merge=task_am)
         return orch._auto_merge_on(task)
 
-    # Explicit per-task False always opts out, in every config combination.
+    # The per-task value wins outright (PRE.2), in every config combination.
     for cfg_am in (True, False):
-        for cfg_allow in (True, False):
-            assert eff(False, cfg_am, cfg_allow) is False
+        assert eff(False, cfg_am) is False
+        assert eff(True, cfg_am) is True
     # Absent (None) defers to the global flag.
-    assert eff(None, True, False) is True
-    assert eff(None, True, True) is True
-    assert eff(None, False, False) is False
-    assert eff(None, False, True) is False
-    # Per-task True is honored only with operator opt-in; otherwise it falls through to the global.
-    assert eff(True, False, True) is True
-    assert eff(True, True, True) is True
-    assert eff(True, False, False) is False  # ignored → global False
-    assert eff(True, True, False) is True  # ignored → global True
+    assert eff(None, True) is True
+    assert eff(None, False) is False
 
 
 def test_global_auto_merge_merges_pr(git_repo, make_git_config, tmp_path: Path) -> None:
@@ -1593,9 +1793,9 @@ def test_no_auto_merge_leaves_pr_open(git_repo, make_git_config, tmp_path: Path)
     assert ledger.records()[0]["auto_merged"] is False
 
 
-def test_per_task_true_ignored_without_operator_optin(
-    git_repo, make_git_config, tmp_path: Path
-) -> None:
+def test_per_task_true_wins_over_global_false(git_repo, make_git_config, tmp_path: Path) -> None:
+    # PRE.2: a per-task ``auto_merge: true`` wins outright over the instance default ``false``;
+    # there is no operator gate. The task author owns the decision (see docs/operations.md).
     providers = _both()
     calls: list[list[str]] = []
     orch, _, _, _ = _build(
@@ -1604,27 +1804,7 @@ def test_per_task_true_ignored_without_operator_optin(
         tmp_path,
         providers=providers,
         check_verdicts=[0],
-        config_kwargs={"auto_merge": False, "auto_merge_allow_per_task": False},
-        gh=_merge_gh(calls),
-    )
-    _patch_impl_edit(providers, git_repo)
-    result = orch.run_task(_task_with_auto_merge(tmp_path, True))
-    assert result.final_status is Status.DONE
-    assert _merge_calls(calls) == []  # per-task opt-in ignored: operator never enabled it
-
-
-def test_per_task_true_honored_with_operator_optin(
-    git_repo, make_git_config, tmp_path: Path
-) -> None:
-    providers = _both()
-    calls: list[list[str]] = []
-    orch, _, _, _ = _build(
-        git_repo,
-        make_git_config,
-        tmp_path,
-        providers=providers,
-        check_verdicts=[0],
-        config_kwargs={"auto_merge": False, "auto_merge_allow_per_task": True},
+        config_kwargs={"auto_merge": False},
         gh=_merge_gh(calls),
     )
     _patch_impl_edit(providers, git_repo)
@@ -1715,24 +1895,28 @@ def test_auto_merge_does_not_fire_when_quality_gate_fails(
     assert _merge_calls(calls) == []
 
 
-# --- stage-skip control (stages.<stage>.enabled / agents.skip_stages) ---------------------
+# --- stage-skip control (per-task stages.<stage>.enabled: false) ---------------------
 
 
 def _task_with_stages(tmp_path: Path, stages_block: str, task_id: str = "task-001") -> str:
     path = tmp_path / f"{task_id}.md"
     path.write_text(
-        f'---\nid: {task_id}\ntitle: "Add a thing"\nrefined: true\n{stages_block}---\n\n'
+        f'---\nid: {task_id}\ntitle: "Add a thing"\n{stages_block}---\n\n'
         "## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
         encoding="utf-8",
     )
     return str(path)
 
 
-def _skipped_stages(store: StateStore) -> list[str]:
-    rows = store._conn.execute(  # noqa: SLF001 - inspecting persisted audit rows in a unit test
-        "SELECT stage FROM stage_runs WHERE skipped = 1 ORDER BY stage"
-    ).fetchall()
-    return [r["stage"] for r in rows]
+def _skipped_stages(store: StateStore, task_id: str = "task-001") -> list[str]:
+    # The flow records a skipped node (deterministic when=false skip) as a node_runs row; node ids
+    # are stage-aligned in the packaged flow, so the skipped node id is the skipped stage name.
+    return sorted(r.node_id for r in store.get_node_runs(task_id) if r.skipped)
+
+
+def _ran_nodes(store: StateStore, task_id: str = "task-001") -> list[str]:
+    """Node ids that actually executed (not skipped), in order — the node_runs audit trail."""
+    return [r.node_id for r in store.get_node_runs(task_id) if not r.skipped]
 
 
 def _summary_text(art: Path, task_id: str = "task-001") -> str:
@@ -1748,10 +1932,10 @@ def test_skip_planning_writes_stub_and_runs(git_repo, make_git_config, tmp_path:
     block = "stages:\n  planning:\n    enabled: false\n"
     result = orch.run_task(_task_with_stages(tmp_path, block))
     assert result.final_status is Status.DONE
-    # The planning agent was never invoked, and a stub plan was written instead.
+    # The planning agent was never invoked; the planning node was deterministically skipped.
     assert all(r.stage is not Stage.PLANNING for r in providers[ProviderId.CLAUDE].requests)
-    plan = (task_artifact_dir(art, "task-001") / "plan.md").read_text(encoding="utf-8")
-    assert "planning stage skipped" in plan
+    # Flow semantics: a skipped node writes no artifact (no legacy stub plan); the task still runs.
+    assert not (task_artifact_dir(art, "task-001") / "plan.md").exists()
     assert "planning" in _skipped_stages(store)
 
 
@@ -1764,10 +1948,10 @@ def test_skip_testing_bypasses_checks(git_repo, make_git_config, tmp_path: Path)
         tmp_path,
         providers=providers,
         check_verdicts=[1] * 20,
-        config_kwargs={"skip_stages": ["testing"]},
     )
     _patch_impl_edit(providers, git_repo)
-    result = orch.run_task(_complete_task(tmp_path))
+    block = "stages:\n  testing:\n    enabled: false\n"
+    result = orch.run_task(_task_with_stages(tmp_path, block))
     assert result.final_status is Status.DONE
     n_checks = store._conn.execute(  # noqa: SLF001
         "SELECT COUNT(*) AS n FROM check_runs"
@@ -1803,28 +1987,18 @@ def test_skip_fixing_routes_to_manual_on_failure(git_repo, make_git_config, tmp_
         tmp_path,
         providers=providers,
         check_verdicts=[1] * 20,  # first check fails
-        config_kwargs={"skip_stages": ["fixing"]},
     )
     _patch_impl_edit(providers, git_repo)
-    result = orch.run_task(_complete_task(tmp_path))
-    # Fixing disabled → the first test failure goes straight to manual review (0 fix iterations).
-    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
-    assert store.get_counters("task-001").fix_iterations == 0
-    assert "fixing" in _skipped_stages(store)
-
-
-def test_skip_summary_writes_stub(git_repo, make_git_config, tmp_path: Path) -> None:
-    providers = _both()
-    orch, store, _, art = _build(
-        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
-    )
-    _patch_impl_edit(providers, git_repo)
-    block = "stages:\n  summary:\n    enabled: false\n"
+    block = "stages:\n  fixing:\n    enabled: false\n"
     result = orch.run_task(_task_with_stages(tmp_path, block))
-    assert result.final_status is Status.DONE
-    assert all(r.stage is not Stage.SUMMARY for r in providers[ProviderId.CLAUDE].requests)
-    assert "summary stage skipped" in _summary_text(art)
-    assert "summary" in _skipped_stages(store)
+    # Fixing disabled → the failure still ends at manual review (the preserved capability). The
+    # engine is domain-agnostic, so it does NOT special-case "no fixing → straight to manual": it
+    # runs the declared test-fix loop (the skipped fixing node is a no-op each cycle) until the cap,
+    # then exhausts → manual. So fix_iterations honestly reflects the bounded loop, not 0 — F6 made
+    # this visible (it was masked by the stale-0 counter before); see Verification Additional #7.
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
+    assert store.get_counters("task-001").fix_iterations == orch._config.agents.max_fix_cycles
+    assert "fixing" in _skipped_stages(store)
 
 
 def test_skipped_stages_listed_in_summary(git_repo, make_git_config, tmp_path: Path) -> None:
@@ -1835,10 +2009,9 @@ def test_skipped_stages_listed_in_summary(git_repo, make_git_config, tmp_path: P
         tmp_path,
         providers=providers,
         check_verdicts=[0],
-        config_kwargs={"skip_stages": ["testing"]},
     )
     _patch_impl_edit(providers, git_repo)
-    block = "stages:\n  planning:\n    enabled: false\n"
+    block = "stages:\n  planning:\n    enabled: false\n  testing:\n    enabled: false\n"
     result = orch.run_task(_task_with_stages(tmp_path, block))
     assert result.final_status is Status.DONE
     summary = _summary_text(art)
@@ -1858,7 +2031,6 @@ def test_review_skip_with_auto_merge_warns(git_repo, make_git_config, tmp_path: 
         providers=providers,
         check_verdicts=[0],
         config_kwargs={
-            "skip_stages": ["review"],
             "allow_review_skip": True,
             "auto_merge": True,
         },
@@ -1876,8 +2048,9 @@ def test_review_skip_with_auto_merge_warns(git_repo, make_git_config, tmp_path: 
     logger = logging.getLogger("wastech_orchestrator.core.orchestrator")
     handler = _Capture()
     logger.addHandler(handler)
+    block = "stages:\n  review:\n    enabled: false\n"
     try:
-        result = orch.run_task(_complete_task(tmp_path))
+        result = orch.run_task(_task_with_stages(tmp_path, block))
     finally:
         logger.removeHandler(handler)
     assert result.final_status is Status.DONE
@@ -1980,27 +2153,28 @@ def test_prompt_audit_records_steps_in_order(git_repo, make_git_config, tmp_path
     audit_dir = _audit_dir(art, "task-001")
     step_files = sorted(audit_dir.glob("*.json"))
     assert step_files, "per-step audit files were written"
-    # Filenames are zero-padded stage_run_id → lexical sort is chronological.
+    # Filenames are zero-padded node_run_id → lexical sort is chronological.
     ids = [int(p.name.split("-")[0]) for p in step_files]
     assert ids == sorted(ids)
-    # refined: true → refinement skipped; planning/implementation/review/summary are agent stages.
+    # complete task → refinement skipped; planning/implementation/review run agents. The summary is
+    # written by the supervisor layer now (not a graph node), so no summary step is audited.
     stages = [json.loads(p.read_text())["stage"] for p in step_files]
-    assert stages == ["planning", "implementation", "review", "summary"]
+    assert stages == ["planning", "implementation", "review"]
 
     # The combined timeline has one line per step, in the same chronological order.
     lines = (audit_dir / "timeline.jsonl").read_text().splitlines()
     assert len(lines) == len(step_files)
     timeline = [json.loads(line) for line in lines]
-    assert [r["stage_run_id"] for r in timeline] == sorted(r["stage_run_id"] for r in timeline)
+    assert [r["node_run_id"] for r in timeline] == sorted(r["node_run_id"] for r in timeline)
     for rec in timeline:
         assert rec["prompt"]
         assert rec["agents"] and rec["agents"][0]["status"] == "succeeded"
         assert "route_primary" in rec and "provider_used" in rec
 
-    # Who-metadata is correct: review's primary route is codex.
+    # Who-metadata is correct: every node defaults to the global primary (claude) now (PRE.1).
     review = next(r for r in timeline if r["stage"] == "review")
-    assert review["provider_used"] == "codex"
-    assert review["agents"][0]["provider"] == "codex"
+    assert review["provider_used"] == "claude"
+    assert review["agents"][0]["provider"] == "claude"
     assert review["agents"][0]["is_fallback"] is False
 
     # Both artifact kinds are registered in SQLite.
@@ -2011,73 +2185,10 @@ def test_prompt_audit_records_steps_in_order(git_repo, make_git_config, tmp_path
     assert {"prompt_audit", "prompt_audit_timeline"} <= kinds
 
 
-def test_prompt_audit_records_fallback_who(git_repo, make_git_config, tmp_path: Path) -> None:
-    """A stage that falls back records both agents in one step: the failed primary then the
-    successful fallback, in attempt order."""
-    providers = {
-        ProviderId.CLAUDE: FakeProvider("claude", infra_fail={Stage.IMPLEMENTATION}),
-        ProviderId.CODEX: FakeProvider("codex"),
-    }
-    orch, _, _, art = _build(
-        git_repo,
-        make_git_config,
-        tmp_path,
-        providers=providers,
-        check_verdicts=[0],
-        config_kwargs={"prompt_audit": True},
-    )
-    # Implementation primary (claude) infra-fails → fallback (codex) runs and must leave a change.
-    orig = providers[ProviderId.CODEX].run
-
-    def codex_with_edit(request: AgentRunRequest) -> AgentRunResult:
-        if request.stage is Stage.IMPLEMENTATION:
-            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
-        return orig(request)
-
-    providers[ProviderId.CODEX].run = codex_with_edit  # type: ignore[method-assign]
-
-    result = orch.run_task(_complete_task(tmp_path))
-    assert result.final_status is Status.DONE
-
-    impl = json.loads((_audit_dir(art, "task-001") / "000002-implementation.json").read_text())
-    assert impl["route_primary"] == "claude"
-    assert impl["provider_used"] == "codex"
-    agents = impl["agents"]
-    assert [a["provider"] for a in agents] == ["claude", "codex"]
-    assert agents[0]["status"] is None and agents[0]["error_class"] == "timeout"
-    assert agents[0]["is_fallback"] is False
-    assert agents[1]["status"] == "succeeded" and agents[1]["is_fallback"] is True
-
-
-def test_prompt_audit_redacts_secret(git_repo, make_git_config, tmp_path: Path) -> None:
-    """A token-shaped secret in the prompt is redacted in both the per-step file and timeline."""
-    tdir = tmp_path / "prompts"
-    tdir.mkdir()
-    (tdir / "implementation.md").write_text(
-        "CUSTOM-IMPL-MARKER leaked=ghp_abcdefghij0123456789ABCDEFGHIJ\n",
-        encoding="utf-8",
-    )
-    prompts_block = f"prompts:\n  templates_dir: {str(tdir)!r}\n  mode: replace\n"
-    providers = _both()
-    orch, _, _, art = _build(
-        git_repo,
-        make_git_config,
-        tmp_path,
-        providers=providers,
-        check_verdicts=[0],
-        config_kwargs={"prompt_audit": True, "prompts_block": prompts_block},
-    )
-    _patch_impl_edit(providers, git_repo)
-    result = orch.run_task(_complete_task(tmp_path, "task-sec"))
-    assert result.final_status is Status.DONE
-
-    audit_dir = _audit_dir(art, "task-sec")
-    impl_file = next(audit_dir.glob("*-implementation.json"))
-    body = impl_file.read_text()
-    timeline = (audit_dir / "timeline.jsonl").read_text()
-    assert "CUSTOM-IMPL-MARKER" in body  # the benign marker survives
-    assert "ghp_abcdefghij0123456789ABCDEFGHIJ" not in body  # the secret is redacted
-    assert "ghp_abcdefghij0123456789ABCDEFGHIJ" not in timeline
+# NOTE: the live-path "primary fails → fallback runs" prompt-audit scenario no longer exists for the
+# packaged flow: every node defaults to the global primary, whose fallback target is itself (none).
+# Fallback fires only for a node pinned to a non-primary provider. The fallback who-metadata
+# (is_fallback across primary+fallback attempts) is unit-covered in test_flow_observability.py.
 
 
 def test_prompt_audit_absent_when_disabled(git_repo, make_git_config, tmp_path: Path) -> None:
@@ -2107,7 +2218,7 @@ def test_prompt_audit_task_overrides_global_off(git_repo, make_git_config, tmp_p
     _patch_impl_edit(providers, git_repo)
     path = tmp_path / "task-001.md"
     path.write_text(
-        '---\nid: task-001\ntitle: "Add a thing"\nrefined: true\nprompt_audit: true\n---\n\n'
+        '---\nid: task-001\ntitle: "Add a thing"\nprompt_audit: true\n---\n\n'
         "## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
         encoding="utf-8",
     )

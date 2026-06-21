@@ -12,7 +12,7 @@ This module owns *structural* parsing only. The cross-field §11/§21.4 semantic
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -21,8 +21,6 @@ import yaml
 
 from wastech_orchestrator.config.schema import (
     CONFIG_SCHEMA_VERSION,
-    ROUTABLE_STAGES,
-    SKIPPABLE_STAGES,
     AgentsConfig,
     AuditBranch,
     AutoModeConfig,
@@ -37,17 +35,15 @@ from wastech_orchestrator.config.schema import (
     MergeStrategy,
     OrchestratorConfig,
     OrchestratorRuntimeConfig,
-    PromptMode,
-    PromptsConfig,
     ProviderConfig,
     RepoConfig,
-    RouteConfig,
     SecurityConfig,
     SkillsConfig,
+    SupervisorConfig,
     TelegramConfig,
     ValidationConfig,
 )
-from wastech_orchestrator.providers.base import ProviderId, Stage
+from wastech_orchestrator.providers.base import ProviderId
 
 # Defaults mirror §11 / the packaged config.example.yaml so a partial config still loads safely.
 _DEFAULT_AUDIT_MESSAGE = "chore(orchestrator): audit trail for {task_id}"
@@ -314,6 +310,7 @@ def _build_provider(raw: Any, pid: ProviderId, issues: list[str]) -> ProviderCon
             "max_turns",
             "max_budget_usd",
             "reasoning",
+            "primary",
         },
         where,
         issues,
@@ -335,6 +332,7 @@ def _build_provider(raw: Any, pid: ProviderId, issues: list[str]) -> ProviderCon
         max_turns=_opt_int(m, "max_turns", where, issues),
         max_budget_usd=_opt_float(m, "max_budget_usd", where, issues),
         reasoning=reasoning_raw,
+        primary=_bool(m, "primary", False, where, issues),
     )
 
 
@@ -349,45 +347,6 @@ def _build_providers(raw: Any, issues: list[str]) -> dict[ProviderId, ProviderCo
             continue
         providers[pid] = _build_provider(m[key], pid, issues)
     return providers
-
-
-def _build_route(raw: Any, stage: Stage, issues: list[str]) -> RouteConfig:
-    where = f"agents.routing.{stage.value}"
-    m = _mapping(raw, where, issues)
-    _check_keys(m, {"primary", "fallback"}, where, issues)
-    primary_raw = m.get("primary")
-    if primary_raw is None:
-        issues.append(f"{where}.primary: required")
-        primary = ProviderId.CLAUDE  # placeholder; an issue was recorded so loading will fail
-    else:
-        primary = _enum(primary_raw, ProviderId, f"{where}.primary", issues, ProviderId.CLAUDE)
-    fallback_raw = m.get("fallback")
-    fallback = (
-        None
-        if fallback_raw is None
-        else _enum(fallback_raw, ProviderId, f"{where}.fallback", issues, ProviderId.CODEX)
-    )
-    return RouteConfig(primary=primary, fallback=fallback)
-
-
-def _build_routing(raw: Any, issues: list[str]) -> dict[Stage, RouteConfig]:
-    m = _mapping(raw, "agents.routing", issues)
-    routing: dict[Stage, RouteConfig] = {}
-    for key in sorted(m):
-        try:
-            stage = Stage(key)
-        except ValueError:
-            issues.append(f"agents.routing: unknown route key {key!r}")
-            continue
-        routing[stage] = _build_route(m[key], stage, issues)
-    return routing
-
-
-def _legacy_codex_routing() -> dict[Stage, RouteConfig]:
-    return {
-        stage: RouteConfig(primary=ProviderId.CODEX, fallback=None)
-        for stage in sorted(ROUTABLE_STAGES, key=lambda s: s.value)
-    }
 
 
 def _build_decomposition(raw: Any, issues: list[str]) -> DecompositionConfig:
@@ -419,42 +378,11 @@ def _build_allowed(raw: Any, issues: list[str]) -> tuple[ProviderId, ...]:
     return tuple(allowed)
 
 
-def _build_skip_stages(m: Mapping[str, Any], issues: list[str]) -> tuple[Stage, ...]:
-    """Parse ``agents.skip_stages`` into a tuple of ``Stage`` (fail-closed).
-
-    Each entry must name a stage in ``SKIPPABLE_STAGES``; anything else (unknown name, or a real
-    stage that is not skippable like ``implementation``/``publishing``) is a config issue.
-    """
-    if "skip_stages" not in m:
-        return ()
-    value = m["skip_stages"]
-    if not isinstance(value, list):
-        issues.append(f"agents.skip_stages: expected a list, got {type(value).__name__}")
-        return ()
-    choices = sorted(s.value for s in SKIPPABLE_STAGES)
-    out: list[Stage] = []
-    for index, item in enumerate(value):
-        if not isinstance(item, str):
-            issues.append(
-                f"agents.skip_stages[{index}]: expected a string, got {type(item).__name__}"
-            )
-            continue
-        try:
-            stage = Stage(item)
-        except ValueError:
-            issues.append(f"agents.skip_stages[{index}]: unknown stage {item!r}")
-            continue
-        if stage not in SKIPPABLE_STAGES:
-            issues.append(
-                f"agents.skip_stages[{index}]: stage {item!r} is not skippable (allowed: {choices})"
-            )
-            continue
-        out.append(stage)
-    return tuple(out)
-
-
-def _build_agents(raw: Any, issues: list[str], warnings: list[str]) -> AgentsConfig:
+def _build_agents(raw: Any, issues: list[str]) -> AgentsConfig:
     m = _mapping(raw, "agents", issues)
+    # ``skip_stages`` (removed v10) and the stage-keyed ``routing`` block (removed v11 — a flow node
+    # declares its own ``provider``, else the global ``providers.<id>.primary``) are tolerated, not
+    # accepted: an old config still loads fail-open and ``upgrade-config`` strips the dead keys.
     _check_keys(
         m,
         {
@@ -463,39 +391,21 @@ def _build_agents(raw: Any, issues: list[str], warnings: list[str]) -> AgentsCon
             "max_fix_cycles",
             "max_total_fix_iterations",
             "decomposition",
-            "routing",
             "providers",
-            "skip_stages",
             "allow_review_skip",
         },
         "agents",
         issues,
+        tolerated={"skip_stages", "routing"},
     )
-    if "routing" in m:
-        routing = _build_routing(m["routing"], issues)
-    else:
-        # Legacy Codex-only config: no routing block. Migrate to a Codex route for every agent
-        # stage, with a warning (spec §11).
-        warnings.append(
-            "agents.routing is missing; migrating legacy Codex-only config to a Codex route "
-            "for all agent stages"
-        )
-        routing = _legacy_codex_routing()
-    skip_stages = _build_skip_stages(m, issues)
     allow_review_skip = _bool(m, "allow_review_skip", False, "agents", issues)
-    # Fail-closed: disabling the review quality gate (no agent review before commit/PR) requires the
-    # explicit opt-in, whether the skip comes from the global list or a per-task override.
-    if Stage.REVIEW in skip_stages and not allow_review_skip:
-        issues.append("agents.skip_stages: 'review' requires agents.allow_review_skip: true")
     return AgentsConfig(
         allowed=_build_allowed(m.get("allowed"), issues),
         max_stage_attempts=_int(m, "max_stage_attempts", 3, "agents", issues),
         max_fix_cycles=_int(m, "max_fix_cycles", 15, "agents", issues),
         max_total_fix_iterations=_int(m, "max_total_fix_iterations", 30, "agents", issues),
         decomposition=_build_decomposition(m.get("decomposition"), issues),
-        routing=routing,
         providers=_build_providers(m.get("providers"), issues),
-        skip_stages=skip_stages,
         allow_review_skip=allow_review_skip,
     )
 
@@ -643,6 +553,9 @@ def _build_footprint(raw: Any, issues: list[str]) -> FootprintConfig:
 def _build_git(raw: Any, issues: list[str]) -> GitConfig:
     where = "git"
     m = _mapping(raw, where, issues)
+    # ``auto_merge_allow_per_task`` (removed v11) is tolerated, not accepted: a per-task
+    # ``auto_merge`` now wins outright (PRE.2), so the gate is gone. Old configs load fail-open;
+    # ``upgrade-config`` strips the dead key.
     _check_keys(
         m,
         {
@@ -651,11 +564,11 @@ def _build_git(raw: Any, issues: list[str]) -> GitConfig:
             "footprint",
             "auto_merge",
             "auto_merge_strategy",
-            "auto_merge_allow_per_task",
             "auto_merge_wait_for_checks",
         },
         where,
         issues,
+        tolerated={"auto_merge_allow_per_task"},
     )
     return GitConfig(
         create_pull_request=_bool(m, "create_pull_request", True, where, issues),
@@ -669,7 +582,6 @@ def _build_git(raw: Any, issues: list[str]) -> GitConfig:
             issues,
             MergeStrategy.SQUASH,
         ),
-        auto_merge_allow_per_task=_bool(m, "auto_merge_allow_per_task", False, where, issues),
         auto_merge_wait_for_checks=_bool(m, "auto_merge_wait_for_checks", False, where, issues),
     )
 
@@ -686,26 +598,6 @@ def _build_telegram(raw: Any, issues: list[str]) -> TelegramConfig:
     )
 
 
-def _build_prompts(raw: Any, issues: list[str], warnings: list[str]) -> PromptsConfig:
-    where = "prompts"
-    m = _mapping(raw, where, issues)
-    # Prompt overrides are now auto-detected by file presence in ``templates_dir`` (schema v6); the
-    # ``overrides`` map and the ``strict`` flag are gone. Legacy keys are tolerated (ignored) with a
-    # warning so old configs still load fail-open — ``upgrade-config`` strips them.
-    _check_keys(m, {"templates_dir", "mode"}, where, issues, tolerated={"overrides", "strict"})
-    for legacy in ("overrides", "strict"):
-        if legacy in m:
-            warnings.append(
-                f"prompts.{legacy} is no longer used (schema v6: prompt templates are "
-                f"auto-detected by file presence in templates_dir); the key is ignored — run "
-                f"`worc upgrade-config` to remove it"
-            )
-    return PromptsConfig(
-        templates_dir=_str(m, "templates_dir", "./templates/prompts", where, issues),
-        mode=_enum(m.get("mode"), PromptMode, f"{where}.mode", issues, PromptMode.REPLACE),
-    )
-
-
 def _build_skills(raw: Any, issues: list[str]) -> SkillsConfig:
     where = "skills"
     if raw is None:
@@ -715,6 +607,26 @@ def _build_skills(raw: Any, issues: list[str]) -> SkillsConfig:
     return SkillsConfig(
         scan_root=_str(m, "scan_root", "", where, issues),
         exclude=_str_tuple(m, "exclude", ("run-checks", "test", "sync-docs"), where, issues),
+    )
+
+
+def _build_supervisor(raw: Any, issues: list[str]) -> SupervisorConfig:
+    where = "supervisor"
+    if raw is None:
+        return SupervisorConfig()
+    m = _mapping(raw, where, issues)
+    _check_keys(m, {"role_file", "model", "reasoning"}, where, issues)
+    reasoning = _opt_str(m, "reasoning", where, issues)
+    if reasoning is not None and reasoning not in _REASONING_LEVELS:
+        issues.append(
+            f"{where}.reasoning: invalid value {reasoning!r}, "
+            f"expected one of {sorted(_REASONING_LEVELS)}"
+        )
+        reasoning = None
+    return SupervisorConfig(
+        role_file=_str(m, "role_file", "roles/supervisor.md", where, issues),
+        model=_opt_str(m, "model", where, issues),
+        reasoning=reasoning,
     )
 
 
@@ -728,8 +640,8 @@ _TOP_LEVEL_KEYS = {
     "checks",
     "git",
     "telegram",
-    "prompts",
     "skills",
+    "supervisor",
     "prompt_audit",
 }
 
@@ -755,19 +667,21 @@ def _check_schema_version(raw: Mapping[str, Any], issues: list[str]) -> None:
 
 
 def _parse(raw: Mapping[str, Any], issues: list[str], warnings: list[str]) -> OrchestratorConfig:
-    _check_keys(raw, _TOP_LEVEL_KEYS, "<root>", issues)
+    # ``prompts`` (removed in config v9) is tolerated, not accepted: an old config still loads
+    # fail-open and ``upgrade-config`` strips the dead block.
+    _check_keys(raw, _TOP_LEVEL_KEYS, "<root>", issues, tolerated={"prompts"})
     _check_schema_version(raw, issues)
     return OrchestratorConfig(
         orchestrator=_build_orchestrator(raw.get("orchestrator"), issues),
         repo=_build_repo(raw.get("repo"), issues),
-        agents=_build_agents(raw.get("agents"), issues, warnings),
+        agents=_build_agents(raw.get("agents"), issues),
         security=_build_security(raw.get("security"), issues),
         validation=_build_validation(raw.get("validation"), issues),
         checks=_build_checks(raw.get("checks"), issues),
         git=_build_git(raw.get("git"), issues),
         telegram=_build_telegram(raw.get("telegram"), issues),
-        prompts=_build_prompts(raw.get("prompts"), issues, warnings),
         skills=_build_skills(raw.get("skills"), issues),
+        supervisor=_build_supervisor(raw.get("supervisor"), issues),
         prompt_audit=_bool(raw, "prompt_audit", False, "<root>", issues),
     )
 
@@ -792,18 +706,7 @@ def load_config(path: str | Path) -> ConfigLoadResult:
     """Read and parse a config file. Structural problems raise :class:`ConfigError`.
 
     Semantic §11/§21.4 rules are enforced separately by ``config.validation.validate_config``.
-
-    A relative ``prompts.templates_dir`` is anchored to the **config file's directory** (not the
-    CWD), so the file-presence activation switch is CWD-independent. Absolute paths and the empty
-    opt-out (``""``) pass through unchanged.
     """
     file = Path(path)
     text = file.read_text(encoding="utf-8")
-    result = loads_config(text, source=str(file))
-    templates_dir = result.config.prompts.templates_dir
-    if templates_dir and not Path(templates_dir).is_absolute():
-        anchored = str(file.resolve().parent / templates_dir)
-        prompts = replace(result.config.prompts, templates_dir=anchored)
-        config = replace(result.config, prompts=prompts)
-        result = ConfigLoadResult(config=config, warnings=result.warnings)
-    return result
+    return loads_config(text, source=str(file))

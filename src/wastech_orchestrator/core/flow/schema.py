@@ -13,13 +13,13 @@ from types import MappingProxyType
 from typing import Literal
 
 from wastech_orchestrator.core.flow.contracts import (
-    EvaluationKind,
     NetworkPolicy,
     OutputPolicy,
     PermissionProfile,
     PublishingPolicy,
     SessionScope,
 )
+from wastech_orchestrator.providers.base import ProviderId
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,10 +52,19 @@ class AgentNode:
     session_scope: SessionScope = SessionScope.FRESH_DISPOSABLE
     lineage_affinity: str | None = None
     permission_profile: PermissionProfile | None = None  # None → resolved from flow ceiling
+    #: which provider runs this node; None → the config's global primary (PRE.1). Validated against
+    #: ``agents.allowed`` at preflight; never relaxes the security ceiling.
+    provider: ProviderId | None = None
     model: str | None = None
     reasoning: str | None = None
     timeout_seconds: int | None = None
     output_schema: str | None = None  # JSON-encoded when present
+    #: optional well-known artifact slot the agent's output is persisted to and threaded downstream
+    #: (``enriched_spec`` / ``plan`` / ``summary``); the core writes it after the node runs (P1.4).
+    output_artifact: str | None = None
+    #: a best-effort node tolerates an infrastructure failure (no provider could run it): the engine
+    #: continues instead of failing the task (the summary stage — §5.2 minimal-summary fallback).
+    best_effort: bool = False
     hitl: HitlSettings | None = None
     extra_args: tuple[str, ...] = ()
     when: WhenPredicate | None = None
@@ -69,9 +78,10 @@ class EvaluatorNode:
     role_file: str
     session_scope: SessionScope = SessionScope.FRESH_DISPOSABLE
     permission_profile: PermissionProfile = PermissionProfile.READ_ONLY  # const per schema
-    evaluation_kind: EvaluationKind = EvaluationKind.STAGE_OUTPUT
     blocking: bool = True
     max_rework_per_stage: int = 1
+    #: which provider runs this evaluator; None → the config's global primary (PRE.1).
+    provider: ProviderId | None = None
     model: str | None = None
     reasoning: str | None = None
     when: WhenPredicate | None = None

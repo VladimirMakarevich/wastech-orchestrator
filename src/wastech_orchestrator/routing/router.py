@@ -1,18 +1,20 @@
-"""Agent Router: route resolution and infrastructure-only fallback (spec §4.2, §5, §7).
+"""Agent Router: route resolution and infrastructure-only fallback (spec §4.2, §5, §7; PRE.1).
 
-The layer between the (future) Orchestrator Core and the provider adapters. For each stage it:
+The layer between the Orchestrator Core and the provider adapters. For each node it:
 
-* resolves the ``(primary, fallback)`` pair from ``agents.routing`` plus a validated task override
-  and records the route source (§4.2, §5);
+* resolves the ``(primary, fallback)`` pair from the flow node's ``provider`` field — the node's
+  declared provider runs it, else the config's single global primary
+  (``agents.providers.<id>.primary``); the fallback is that global primary (the sole infra-fallback
+  target) unless the primary already *is* it (§4.2, §5, PRE.1);
 * runs the primary and, **only** for infrastructure ``ProviderError`` classes (plus the conditional
-  auth/permission case), falls back to the secondary provider (§7.2, §7.3);
+  auth/permission case), falls back to the global primary (§7.2, §7.3);
 * counts ``stage_attempts`` across the fallback, bounded by ``agents.max_stage_attempts`` (§8.1);
 * exposes the §7.4 partial-change diff to the fallback without ever rolling back.
 
 Invariants (.agents/rules/architecture.md): the Router depends **only** on the ``AgentProvider``
 contract — no CLI syntax, no provider internals — and it changes no state-machine state. It is
 stateless beyond the :class:`StageOutcome` it returns; persistence and transitions are the Core's
-job (P5). A quality ``AgentRunResult(status=failed)`` is never a fallback trigger; only a raised
+job. A quality ``AgentRunResult(status=failed)`` is never a fallback trigger; only a raised
 infrastructure ``ProviderError`` is.
 """
 
@@ -26,7 +28,6 @@ from enum import StrEnum
 
 from wastech_orchestrator.config.loader import ConfigError
 from wastech_orchestrator.config.schema import OrchestratorConfig
-from wastech_orchestrator.config.validation import check_task_route_override
 from wastech_orchestrator.observability.logging import bind
 from wastech_orchestrator.providers.base import (
     FALLBACK_ELIGIBLE,
@@ -73,11 +74,28 @@ def fallback_allowed(
     return False
 
 
-class RouteSource(StrEnum):
-    """Where a resolved route came from — recorded for the audit (§4.2, persisted in P5)."""
+def _resolve_global_primary(config: OrchestratorConfig) -> ProviderId:
+    """The single ``agents.providers.<id>.primary: true`` provider (PRE.1).
 
-    CONFIG = "config"
-    TASK_OVERRIDE = "task_override"
+    ``validate_config`` already guarantees exactly one; this is defensive so a router built from an
+    unvalidated config fails loud (``ConfigError``) rather than silently picking a provider.
+    """
+    primaries = [pid for pid, provider in config.agents.providers.items() if provider.primary]
+    if len(primaries) != 1:
+        raise ConfigError(
+            [
+                "agents.providers: exactly one provider must set primary: true "
+                f"(found {len(primaries)}: {sorted(p.value for p in primaries)})"
+            ]
+        )
+    return primaries[0]
+
+
+class RouteSource(StrEnum):
+    """Where a node's provider came from — recorded for the audit (§4.2, persisted in node_runs)."""
+
+    CONFIG = "config"  # defaulted to the global primary (the node declared no provider)
+    FLOW_NODE = "flow_node"  # the flow node declared an explicit provider
 
 
 @dataclass(frozen=True)
@@ -129,42 +147,25 @@ class AgentRouter:
         self._config = config
         self._providers = providers
         self._monotonic = monotonic
+        self._global_primary = _resolve_global_primary(config)
 
     def resolve_route(
         self,
         stage: Stage,
-        override: Mapping[Stage, ProviderId] | None = None,
+        provider: ProviderId | None = None,
     ) -> ResolvedRoute:
-        """Resolve ``(primary, fallback)`` for ``stage`` from config + a validated task override.
+        """Resolve ``(primary, fallback)`` for a node from its declared ``provider`` (PRE.1).
 
-        The override (front-matter ``agents``) may only repoint the **primary** to an allowed,
-        configured provider (re-validated defensively via the P1 helper). The fallback follows by
-        swap-on-collision: if the new primary equals the configured fallback they swap, so the other
-        configured provider becomes the fallback; a configured ``None`` fallback stays ``None``.
-        Raises :class:`ConfigError` on an invalid override or an unavailable provider.
+        A non-``None`` ``provider`` (the flow node's declared executor) runs the node; ``None``
+        defaults to the config's global primary. The fallback is always that global primary — the
+        single infrastructure-fallback target — unless the resolved primary already *is* the global
+        primary, in which case there is no fallback (a primary infra failure is terminal). ``stage``
+        is carried for audit/logging only; it no longer selects the provider. Raises
+        :class:`ConfigError` on an unknown or unavailable provider.
         """
-        routing = self._config.agents.routing
-        if stage not in routing:
-            raise ConfigError([f"agents.routing: no route configured for stage {stage.value!r}"])
-        base = routing[stage]
-
-        override = override or {}
-        if stage in override:
-            issues = check_task_route_override({stage: override[stage]}, self._config)
-            if issues:
-                raise ConfigError(issues)
-            primary = override[stage]
-            source = RouteSource.TASK_OVERRIDE
-        else:
-            primary = base.primary
-            source = RouteSource.CONFIG
-
-        fallback: ProviderId | None
-        if base.fallback is not None and primary == base.fallback:
-            fallback = base.primary
-        else:
-            fallback = base.fallback
-
+        primary = provider if provider is not None else self._global_primary
+        source = RouteSource.FLOW_NODE if provider is not None else RouteSource.CONFIG
+        fallback = self._global_primary if primary != self._global_primary else None
         self._assert_available(stage, primary, fallback)
         return ResolvedRoute(stage=stage, primary=primary, fallback=fallback, source=source)
 
@@ -241,6 +242,58 @@ class AgentRouter:
                         "duration_seconds": duration,
                     },
                 )
+                # Resume safety net (durable sessions, P2.2): the requested session is gone
+                # (``session_unavailable``) → retry the SAME provider once with a fresh session.
+                # This is infrastructure, not a quality failure: it never falls back to another
+                # provider and never charges a fix iteration (the fix loop is engine-owned; this
+                # stays inside one node run). Differs from a quality ``status=failed`` → fixing.
+                if (
+                    exc.error_class is ErrorClass.SESSION_UNAVAILABLE
+                    and req.session_id is not None
+                    and stage_attempts < max_attempts
+                ):
+                    fresh_no = stage_attempts + 1
+                    fresh_req = replace(req, session_id=None, attempt=fresh_no)
+                    stage_attempts += 1
+                    log.info(
+                        "session unavailable; retrying fresh (no resume)",
+                        extra={"provider": pid.value, "attempt": fresh_no},
+                    )
+                    try:
+                        result = self._providers[pid].run(fresh_req)
+                    except ProviderError as fresh_exc:
+                        last_error = NormalizedError(
+                            error_class=fresh_exc.error_class, message=str(fresh_exc)
+                        )
+                        attempts.append(
+                            ProviderAttempt(
+                                provider=pid,
+                                attempt=fresh_no,
+                                status=None,
+                                error_class=fresh_exc.error_class,
+                                result=None,
+                            )
+                        )
+                        exc = fresh_exc  # the fallback decision below uses the fresh error
+                    else:
+                        attempts.append(
+                            ProviderAttempt(
+                                provider=pid,
+                                attempt=fresh_no,
+                                status=result.status,
+                                error_class=result.error.error_class if result.error else None,
+                                result=result,
+                            )
+                        )
+                        return StageOutcome(
+                            route=route,
+                            result=result,
+                            provider_used=pid,
+                            stage_attempts=stage_attempts,
+                            attempts=tuple(attempts),
+                            terminal_error=None,
+                            partial_change=partial,
+                        )
                 has_next = index + 1 < len(sequence)
                 if not has_next or stage_attempts >= max_attempts:
                     continue  # exhausted — the loop will exit and surface last_error
@@ -327,14 +380,18 @@ class AgentRouter:
     def _assert_available(
         self, stage: Stage, primary: ProviderId, fallback: ProviderId | None
     ) -> None:
-        """Defensively re-check the allowlist/config/instances for the resolved providers (§4.2)."""
+        """Defensively re-check the allowlist/config/instances for the resolved providers (§4.2).
+
+        The node's ``provider`` is validated against ``agents.allowed`` at preflight; this is the
+        belt-and-braces check at run time (a node provider not in the allowlist, or with no
+        configured block / instance, is a fatal config error, never a silent skip)."""
         allowed = frozenset(self._config.agents.allowed)
         configured = self._config.agents.providers
         issues: list[str] = []
         for role, pid in (("primary", primary), ("fallback", fallback)):
             if pid is None:
                 continue
-            where = f"agents.routing.{stage.value}.{role}"
+            where = f"flow node provider for stage {stage.value!r} ({role})"
             if pid not in allowed:
                 issues.append(f"{where}: provider {pid.value!r} is not in agents.allowed")
             if pid not in configured:

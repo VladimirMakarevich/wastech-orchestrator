@@ -4,13 +4,14 @@ When ``security.strict_isolation`` is true, "an inability to enable the required
 preflight with an error (no silent downgrade)". This module is the deterministic, **offline** check
 that drives that gate: it asks each provider that may run whether its configured isolation can be
 enabled, **without launching any CLI**, so the gate is unit-testable and runs before a branch is
-ever created (see :meth:`Orchestrator._drive`).
+ever created (see :meth:`Orchestrator._drive_via_engine`).
 
 The provider-specific meaning of "required isolation" stays in the adapters (``providers/*.py``
 ``isolation_reasons``) — Codex's sandbox, Claude's permission mode — so this module holds no CLI
 syntax; it only dispatches by :class:`~wastech_orchestrator.providers.base.ProviderId` and frames
-the reasons. Only providers that *may* run are checked (those in ``agents.allowed`` or referenced by
-a route), so a configured-but-unused provider block never bricks an otherwise-valid run.
+the reasons. Only providers that *may* run are checked (those in ``agents.allowed`` — every flow
+node either declares an allowed ``provider`` or defaults to the global primary, also allowed), so a
+configured-but-unused provider block never bricks an otherwise-valid run.
 """
 
 from __future__ import annotations
@@ -45,17 +46,13 @@ def check_isolation(config: OrchestratorConfig) -> list[str]:
 
 
 def _providers_in_use(config: OrchestratorConfig) -> list[ProviderId]:
-    """The providers that may actually run: ``agents.allowed`` plus every routed primary/fallback.
+    """The providers that may actually run: ``agents.allowed``.
 
-    Returns a de-duplicated, order-preserving list (``dict`` keys) so an allowed-but-unrouted or a
-    merely-configured provider is handled consistently and a leftover provider block cannot brick
-    the run.
+    Every flow node either declares a ``provider`` (which must be in ``agents.allowed``) or defaults
+    to the global primary (also in ``agents.allowed``), so the allowlist is the exact set of
+    providers that can launch — a merely-configured provider block never bricks the run.
     """
     seen: dict[ProviderId, None] = {}
     for provider_id in config.agents.allowed:
         seen.setdefault(provider_id, None)
-    for route in config.agents.routing.values():
-        seen.setdefault(route.primary, None)
-        if route.fallback is not None:
-            seen.setdefault(route.fallback, None)
     return list(seen)

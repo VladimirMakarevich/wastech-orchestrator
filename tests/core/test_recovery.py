@@ -120,15 +120,15 @@ def test_no_active_task_is_none(store, make_git_config, git_repo) -> None:
 
 
 def test_one_active_task_resumes(store, make_git_config, git_repo) -> None:
-    store.insert_task(TaskRow(task_id="t1", title="t", status=Status.IMPLEMENTING))
+    store.insert_task(TaskRow(task_id="t1", title="t", status=Status.RUNNING))
     plan = _reconciler(store, make_git_config, git_repo).reconcile()
     assert plan.action is RecoveryAction.RESUME
     assert plan.task_id == "t1"
 
 
 def test_more_than_one_active_is_manual(store, make_git_config, git_repo) -> None:
-    store.insert_task(TaskRow(task_id="a", title="a", status=Status.IMPLEMENTING))
-    store.insert_task(TaskRow(task_id="b", title="b", status=Status.REVIEWING))
+    store.insert_task(TaskRow(task_id="a", title="a", status=Status.RUNNING))
+    store.insert_task(TaskRow(task_id="b", title="b", status=Status.RUNNING))
     plan = _reconciler(store, make_git_config, git_repo).reconcile()
     assert plan.action is RecoveryAction.MANUAL
     assert set(plan.manual_task_ids) == {"a", "b"}
@@ -153,7 +153,7 @@ def _decomposed(store: StateStore, *, completed: int, shas: dict[int, str]) -> N
         TaskRow(
             task_id="d",
             title="d",
-            status=Status.IMPLEMENTING,
+            status=Status.RUNNING,
             branch="agent/d-x",
             decomposition_accepted=True,
             subtask_count=2,
@@ -275,7 +275,6 @@ def _build_orchestrator(
     notifier: Notifier | None = None,
 ):
     from wastech_orchestrator.check_runner import CheckRunner
-    from wastech_orchestrator.core.loop_control import LoopController
     from wastech_orchestrator.core.orchestrator import Orchestrator
     from wastech_orchestrator.git_manager import GitManager
     from wastech_orchestrator.ledger import Ledger
@@ -318,7 +317,6 @@ def _build_orchestrator(
         checks=CheckRunner(config, run_process=fake_proc),
         store=store,
         ledger=ledger,
-        loops=LoopController(config.agents),
         gate=ValidationGate(
             config, store_has_task_id=store.task_id_exists, ledger_has_task_id=ledger.has_task_id
         ),
@@ -347,8 +345,8 @@ def test_resume_more_than_one_active_marks_manual(
         [0],
         notifier=notifier,
     )
-    store.insert_task(TaskRow(task_id="a", title="a", status=Status.IMPLEMENTING))
-    store.insert_task(TaskRow(task_id="b", title="b", status=Status.REVIEWING))
+    store.insert_task(TaskRow(task_id="a", title="a", status=Status.RUNNING))
+    store.insert_task(TaskRow(task_id="b", title="b", status=Status.RUNNING))
     result = orch.resume()
     assert result is not None and result.final_status is Status.MANUAL_ACTION_REQUIRED
     assert store.get_task("a").status is Status.MANUAL_ACTION_REQUIRED
@@ -385,21 +383,28 @@ def test_resume_interrupted_cleanup_notifies_after_ledger(
     assert notifier.calls == [("task-cleanup", "done")]
 
 
+def _impl_fingerprint() -> str:
+    from wastech_orchestrator.core.flow.registry import FlowRegistry
+
+    return FlowRegistry().resolve("implementation").flow_fingerprint
+
+
 @pytest.mark.parametrize(
-    ("status", "expected_provider", "expected_first_stage"),
+    ("current_node", "expected_provider", "expected_first_stage"),
     [
-        (Status.VALIDATED, ProviderId.CLAUDE, Stage.REFINEMENT),
-        (Status.PREPARING, ProviderId.CLAUDE, Stage.REFINEMENT),
-        (Status.REFINING, ProviderId.CLAUDE, Stage.REFINEMENT),
-        (Status.PLANNING, ProviderId.CLAUDE, Stage.PLANNING),
-        (Status.IMPLEMENTING, ProviderId.CLAUDE, Stage.IMPLEMENTATION),
-        (Status.TESTING, ProviderId.CODEX, Stage.REVIEW),
-        (Status.REVIEWING, ProviderId.CODEX, Stage.REVIEW),
-        (Status.FIXING, ProviderId.CLAUDE, Stage.FIXING),
+        # No checkpoint (interrupted before the engine) → restart from refinement.
+        (None, ProviderId.CLAUDE, Stage.REFINEMENT),
+        ("refinement", ProviderId.CLAUDE, Stage.REFINEMENT),
+        ("planning", ProviderId.CLAUDE, Stage.PLANNING),
+        ("implementation", ProviderId.CLAUDE, Stage.IMPLEMENTATION),
+        # Every node defaults to the global primary (claude) now — routing is node-based (PRE.1).
+        ("testing", ProviderId.CLAUDE, Stage.REVIEW),  # checks node → first agent stage is review
+        ("review", ProviderId.CLAUDE, Stage.REVIEW),
+        ("fixing", ProviderId.CLAUDE, Stage.FIXING),
     ],
 )
 def test_resume_continues_persisted_checkpoint(
-    status: Status,
+    current_node: str | None,
     expected_provider: ProviderId,
     expected_first_stage: Stage,
     git_repo,
@@ -414,7 +419,7 @@ def test_resume_continues_persisted_checkpoint(
     orch, store, _, art, _ = _build_orchestrator(
         git_repo, make_git_config, tmp_path, providers, [0]
     )
-    task_id = f"resume-{status.value}"
+    task_id = f"resume-{current_node or 'fresh'}"
     title = "Resume checkpoint"
     slug = slugify(title)
     branch = f"agent/{task_id}-{slug}"
@@ -423,26 +428,34 @@ def test_resume_continues_persisted_checkpoint(
         str(art),
     )
 
-    branch_prepared = status not in {Status.VALIDATED, Status.PREPARING}
+    # An interrupted engine task: RUNNING + a flow checkpoint at current_node. No checkpoint
+    # (current_node=None) models an interruption before the engine wrote one → a fresh restart.
+    branch_prepared = current_node is not None
     if branch_prepared:
         git_run(["checkout", "-b", branch], git_repo.clone)
-    if status in {Status.TESTING, Status.REVIEWING, Status.FIXING}:
+    if current_node in {"testing", "review", "fixing"}:
         (git_repo.clone / "feature.py").write_text("implemented = True\n", encoding="utf-8")
 
     store.insert_task(
         TaskRow(
             task_id=task_id,
             title=title,
-            status=status,
+            status=Status.RUNNING if current_node else Status.VALIDATED,
             branch=branch if branch_prepared else None,
             slug=slug if branch_prepared else None,
             decomposition_accepted=False,
-            test_fix_cycles=1 if status is Status.FIXING else 0,
-            fix_iterations=1 if status is Status.FIXING else 0,
         )
     )
+    if current_node is not None:
+        store.save_flow_checkpoint(
+            task_id,
+            current_node=current_node,
+            counters_json="{}",
+            flow_fingerprint=_impl_fingerprint(),
+            fix_iterations=0,
+        )
     failed_check = art / "logs" / task_id / "checks" / "001.log"
-    if status is Status.FIXING:
+    if current_node == "fixing":
         failed_check.parent.mkdir(parents=True, exist_ok=True)
         failed_check.write_text("failed assertion\n", encoding="utf-8")
         store.record_check_run(
@@ -459,14 +472,82 @@ def test_resume_continues_persisted_checkpoint(
 
     assert result is not None and result.final_status is Status.DONE
     expected = providers[expected_provider]
-    assert expected.requests[0].stage is expected_first_stage
-    all_requests = [request for provider in providers.values() for request in provider.requests]
-    if status in {Status.TESTING, Status.REVIEWING, Status.FIXING}:
+    # Ignore the constant supervisor layer's per-step observations (read-only, SUMMARY-stage, on the
+    # global primary) — they interleave with node requests but are not graph-node calls.
+    node_requests = [r for r in expected.requests if r.stage is not Stage.SUMMARY]
+    assert node_requests[0].stage is expected_first_stage
+    all_requests = [
+        request
+        for provider in providers.values()
+        for request in provider.requests
+        if request.stage is not Stage.SUMMARY
+    ]
+    if current_node in {"testing", "review", "fixing"}:
         assert all(request.stage is not Stage.IMPLEMENTATION for request in all_requests)
-    if status is Status.FIXING:
-        assert expected.requests[0].check_artifacts_path == str(failed_check)
-        row = store.get_task(task_id)
-        assert row is not None and row.fix_iterations == 1
+    if current_node == "fixing":
+        assert node_requests[0].check_artifacts_path == str(failed_check)
+
+
+def test_resume_restores_planning_selected_skills(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # F7 / MC4: planning selected a skill before the interruption (persisted to
+    # selected_skills.json); a resume past planning must restore it so the resumed implementation
+    # node still receives the skill reference path. `p.selected_skills` is in-memory only, so
+    # without the restore the dedicated skill_reference_paths channel is lost on resume.
+    import json
+
+    from wastech_orchestrator.task.model import NormalizedTask
+    from wastech_orchestrator.task.parser import slugify, write_normalized
+
+    providers = _make_providers(git_repo)
+    orch, store, _, art, _ = _build_orchestrator(
+        git_repo, make_git_config, tmp_path, providers, [0]
+    )
+    task_id = "resume-skills"
+    title = "Resume checkpoint"
+    slug = slugify(title)
+    branch = f"agent/{task_id}-{slug}"
+    write_normalized(
+        NormalizedTask(id=task_id, title=title, description="Implement the requested change."),
+        str(art),
+    )
+    git_run(["checkout", "-b", branch], git_repo.clone)
+    store.insert_task(
+        TaskRow(
+            task_id=task_id,
+            title=title,
+            status=Status.RUNNING,
+            branch=branch,
+            slug=slug,
+            decomposition_accepted=False,
+        )
+    )
+    store.save_flow_checkpoint(
+        task_id,
+        current_node="implementation",
+        counters_json="{}",
+        flow_fingerprint=_impl_fingerprint(),
+        fix_iterations=0,
+    )
+    # Planning ran before the interruption and persisted its skill selection.
+    skill_md = git_repo.clone / ".claude" / "skills" / "safe-change" / "SKILL.md"
+    skill_md.parent.mkdir(parents=True, exist_ok=True)
+    skill_md.write_text("---\nname: safe-change\ndescription: d\n---\n# Body\n", encoding="utf-8")
+    skills_json = art / "logs" / task_id / "selected_skills.json"
+    skills_json.parent.mkdir(parents=True, exist_ok=True)
+    skills_json.write_text(
+        json.dumps([{"name": "safe-change", "description": "d", "path": str(skill_md)}]),
+        encoding="utf-8",
+    )
+
+    result = orch.resume()
+    assert result is not None and result.final_status is Status.DONE
+
+    impl = next(
+        r for p in providers.values() for r in p.requests if r.stage is Stage.IMPLEMENTATION
+    )
+    assert any(path.endswith("safe-change/SKILL.md") for path in impl.skill_reference_paths)
 
 
 def test_resume_waits_on_persisted_planning_prompt_without_resending(
@@ -504,10 +585,18 @@ def test_resume_waits_on_persisted_planning_prompt_without_resending(
         TaskRow(
             task_id=task_id,
             title=title,
-            status=Status.PLANNING,
+            status=Status.RUNNING,
             branch=branch,
             slug=slug,
+            decomposition_accepted=False,
         )
+    )
+    store.save_flow_checkpoint(
+        task_id,
+        current_node="planning",
+        counters_json="{}",
+        flow_fingerprint=_impl_fingerprint(),
+        fix_iterations=0,
     )
 
     path = interaction_path(art, task_id, Stage.PLANNING)
@@ -593,15 +682,21 @@ def test_resume_decomposed_at_subtask_without_duplicate_commit(
         TaskRow(
             task_id=task_id,
             title="Add a thing",
-            status=Status.IMPLEMENTING,
+            status=Status.RUNNING,
             branch=branch,
             slug=slug,
             decomposition_accepted=True,
             subtask_count=2,
             active_subtask=2,
             subtasks_completed=1,
-            refinement_ran=False,
         )
+    )
+    store.save_flow_checkpoint(
+        task_id,
+        current_node="implementation",
+        counters_json="{}",
+        flow_fingerprint=_impl_fingerprint(),
+        fix_iterations=0,
     )
     store.insert_subtasks(
         [

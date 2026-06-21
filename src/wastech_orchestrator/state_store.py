@@ -1,6 +1,6 @@
 """SQLite State Store (spec §9).
 
-The authoritative persisted state for the pipeline: the ``tasks``, ``stage_runs``,
+The authoritative persisted state for the pipeline: the ``tasks``, ``node_runs``,
 ``provider_attempts``, ``check_runs``, ``artifacts``, ``publish_operations`` and ``subtasks``
 entities. State transitions are **transactional** (``BEGIN IMMEDIATE`` … ``COMMIT``) so a crash
 leaves a consistent prior state and a restart can reconcile (§13).
@@ -30,14 +30,39 @@ def _utc_now_iso() -> str:
 
 
 # The SQLite schema version, stamped into ``PRAGMA user_version``. Bumped only when the schema
-# changes (not on every release). ``open()`` adopts a 0 (brand-new, or pre-versioning) database as
-# the current version; both open paths refuse a database stamped newer than this. See the spec's
-# "Versioning & compatibility" section.
-# v2: added ``stage_runs.skipped`` / ``stage_runs.skip_reason`` (stage-skip control). Migrated
-# in-place by ``_migrate`` (idempotent ``ALTER TABLE ADD COLUMN``); no data is rewritten.
-# v3: added ``tasks.interrupted_status`` (the stage a task was on before going terminal), so
-# ``rerun --continue`` can re-enter the pipeline at the failed stage.
-DB_SCHEMA_VERSION = 3
+# changes (not on every release). ``open()`` adopts a ``0`` (brand-new, or pre-versioning) database
+# as the current version (``_SCHEMA`` creates it at the current shape); both open paths refuse a
+# database stamped newer than this. Because every bump below is **destructive** and ``_migrate``
+# only adds columns, a database stamped ``1..DB_SCHEMA_VERSION-1`` cannot be reshaped in place and
+# is also refused fail-closed (see :func:`_enforce_schema_version`) — greenfield means there is no
+# production data to migrate, so the local ``state.db`` is simply recreated.
+#
+# The entries below describe how the **current** ``_SCHEMA`` differs from each past version (they
+# document the cutover, they are NOT migration steps ``_migrate`` performs):
+# v4 (flow-engine P1.2): added the ``node_runs`` per-node audit table and the durable
+# :class:`~wastech_orchestrator.core.flow.run_state.FlowRunState` checkpoint columns
+# (``tasks.current_node`` / ``tasks.flow_run_counters`` / ``tasks.flow_fingerprint``). These are the
+# only **additive** columns ``_migrate`` knows how to add to a ``0``/new database.
+# v5 (flow-engine P1.4 cutover): the ``provider_attempts`` FK to ``stage_runs`` was dropped so the
+# flow-engine path can store the ``node_runs`` id there (both monotonic).
+# v6 (flow-engine P1 Slice 7): the legacy ``stage_runs`` table was dropped (the engine writes
+# ``node_runs``) and ``provider_attempts.stage_run_id`` was renamed to ``node_run_id``.
+# v7 (flow-engine P1 Slice 7): ``tasks.interrupted_status`` was dropped — the granular statuses it
+# stored are gone; ``rerun --continue`` re-enters at the ``current_node`` flow checkpoint.
+# v8 (flow-engine P2.1): added the immutable, append-only ``evaluations`` table — the per-verdict
+# audit for in-flow evaluators (``in_flow_verdict``) and the constant supervisor layer's per-step /
+# final advisory observations (``supervisor_step`` / ``supervisor_final``). A fresh database creates
+# it via ``_SCHEMA``; a brand-new (``0``) database adopts it (no additive column to migrate).
+# v9 (flow-engine P2.2): added the ``editing_lineage`` table — the durable per-execution-unit
+# editing session (provider + raw session id), the **only** place a raw session id is ever stored
+# (it is redacted everywhere else). One active editing session per ``(task_id, subtask_order)``;
+# resume for Claude/Codex reads it, the author nodes (implementation/fixing) update it. Created on a
+# fresh DB by ``_SCHEMA`` (no additive column to migrate).
+# v10 (flow-engine P3.3): added the ``node_lineage`` table — the durable own session for a
+# ``resume_own_lineage`` node (the research critic), keyed by ``(task_id, node_id, subtask_order)``
+# so a node remembers what it flagged across rework rounds. Like ``editing_lineage`` the raw session
+# id lives only here. Created on a fresh DB by ``_SCHEMA`` (no additive column to migrate).
+DB_SCHEMA_VERSION = 10
 
 
 class IncompatibleStateError(Exception):
@@ -48,30 +73,46 @@ def _migrate(conn: sqlite3.Connection) -> None:
     """Bring an existing database up to the current schema (writable open only).
 
     Idempotent: each column add is guarded by a ``PRAGMA table_info`` check, so this is a no-op on
-    a brand-new DB (``_SCHEMA`` already created the columns) and adds only what a pre-v2 DB lacks.
+    a brand-new DB (``_SCHEMA`` already created the columns) and adds only what an older DB lacks.
     """
-    cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(stage_runs)")}
-    if "skipped" not in cols:
-        conn.execute("ALTER TABLE stage_runs ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0")
-    if "skip_reason" not in cols:
-        conn.execute("ALTER TABLE stage_runs ADD COLUMN skip_reason TEXT")
     task_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(tasks)")}
-    if "interrupted_status" not in task_cols:
-        conn.execute("ALTER TABLE tasks ADD COLUMN interrupted_status TEXT")
+    # v4: the FlowRunState checkpoint columns (flow-engine execution path).
+    if "current_node" not in task_cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN current_node TEXT")
+    if "flow_run_counters" not in task_cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN flow_run_counters TEXT")
+    if "flow_fingerprint" not in task_cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN flow_fingerprint TEXT")
 
 
 def _enforce_schema_version(conn: sqlite3.Connection, *, writable: bool) -> None:
     """Verify (and, when ``writable``, migrate + stamp) ``PRAGMA user_version``.
 
-    A database newer than this orchestrator is refused (fail-loud). On the writable path an older or
-    pre-versioning (``0``) database is migrated in place by :func:`_migrate` and then stamped to
-    ``DB_SCHEMA_VERSION``. The read-only path only verifies the bound (it never mutates the file).
+    Two databases are refused fail-loud on both open paths: a **newer** one (beyond this
+    orchestrator), and an **older versioned** one (``1 <= v < DB_SCHEMA_VERSION``) — its shape
+    predates a destructive change and :func:`_migrate` is additive-only, so it cannot be reshaped in
+    place (greenfield: recreate it). Only a brand-new / pre-versioning (``0``) database is adopted:
+    on the writable path :func:`_migrate` adds any missing additive columns and the version is
+    stamped to ``DB_SCHEMA_VERSION``. The read-only path only verifies these bounds (never mutates).
     """
     current = int(conn.execute("PRAGMA user_version").fetchone()[0])
     if current > DB_SCHEMA_VERSION:
         raise IncompatibleStateError(
             f"state.db schema version {current} is newer than this orchestrator supports "
             f"({DB_SCHEMA_VERSION}); upgrade wastech-orchestrator or start a fresh workspace"
+        )
+    if 0 < current < DB_SCHEMA_VERSION:
+        # The v5-v7 schema changes were destructive (dropped/renamed tables and columns) and
+        # ``_migrate`` only *adds* columns, so an older database cannot be reshaped in place.
+        # Greenfield (no production data): refuse fail-closed rather than stamp the current version
+        # onto a still-old shape — which used to pass the version gate and then crash on the first
+        # write to a reshaped table (e.g. ``provider_attempts.node_run_id``). A brand-new / pre-
+        # versioning database (``current == 0``) is created at the current shape by ``_SCHEMA`` and
+        # is adopted normally below.
+        raise IncompatibleStateError(
+            f"state.db schema version {current} predates an incompatible (destructive) schema "
+            f"change and cannot be migrated in place; delete the local state.db or start a fresh "
+            f"workspace (greenfield — there is no production data to preserve)"
         )
     if writable:
         _migrate(conn)
@@ -110,21 +151,25 @@ CREATE TABLE IF NOT EXISTS tasks (
     cleanup_completed_at TEXT,
     cleanup_last_error TEXT,
     finished_at TEXT,
-    interrupted_status TEXT
+    current_node TEXT,
+    flow_run_counters TEXT,
+    flow_fingerprint TEXT
 );
 
-CREATE TABLE IF NOT EXISTS stage_runs (
+CREATE TABLE IF NOT EXISTS node_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id TEXT NOT NULL REFERENCES tasks(task_id),
-    stage TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    node_kind TEXT NOT NULL,
     subtask_order INTEGER,
     status TEXT,
-    route_primary TEXT NOT NULL,
+    outcome TEXT,
+    route_primary TEXT,
     route_fallback TEXT,
-    route_source TEXT NOT NULL,
+    route_source TEXT,
     provider_used TEXT,
     error_class TEXT,
-    stage_attempts INTEGER NOT NULL,
+    stage_attempts INTEGER NOT NULL DEFAULT 0,
     commit_sha_before TEXT,
     commit_sha_after TEXT,
     started_at TEXT,
@@ -135,7 +180,8 @@ CREATE TABLE IF NOT EXISTS stage_runs (
 
 CREATE TABLE IF NOT EXISTS provider_attempts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    stage_run_id INTEGER NOT NULL REFERENCES stage_runs(id),
+    -- the ``node_runs`` id this attempt belongs to (a plain monotonic id, not an FK).
+    node_run_id INTEGER NOT NULL,
     provider TEXT NOT NULL,
     attempt INTEGER NOT NULL,
     status TEXT,
@@ -193,6 +239,37 @@ CREATE TABLE IF NOT EXISTS subtasks (
     artifact_path TEXT,
     UNIQUE(task_id, "order")
 );
+
+CREATE TABLE IF NOT EXISTS evaluations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL REFERENCES tasks(task_id),
+    node_id TEXT,
+    source_node_run_id INTEGER,
+    subtask_order INTEGER,
+    kind TEXT NOT NULL,
+    verdict TEXT NOT NULL,
+    findings_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS editing_lineage (
+    task_id TEXT NOT NULL REFERENCES tasks(task_id),
+    subtask_order INTEGER NOT NULL DEFAULT -1,
+    provider TEXT NOT NULL,
+    raw_session_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (task_id, subtask_order)
+);
+
+CREATE TABLE IF NOT EXISTS node_lineage (
+    task_id TEXT NOT NULL REFERENCES tasks(task_id),
+    node_id TEXT NOT NULL,
+    subtask_order INTEGER NOT NULL DEFAULT -1,
+    provider TEXT NOT NULL,
+    raw_session_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (task_id, node_id, subtask_order)
+);
 """
 
 
@@ -227,29 +304,41 @@ class TaskRow:
     cleanup_completed_at: str | None = None
     cleanup_last_error: str | None = None
     finished_at: str | None = None
-    interrupted_status: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
 
 
 @dataclass(frozen=True)
-class StageRunRow:
+class NodeRunRow:
+    """One flow-graph node execution — the per-node audit trail row (flow-engine).
+
+    ``node_kind`` is one of ``agent``/``evaluator``/``checks``/``hitl``/``publish``; ``outcome`` is
+    the engine outcome (``accept``/``rework``/``pass``/``fail``/``done``/``route:*``). ``route_*``
+    are ``None`` for non-agent nodes. A skipped node carries ``skipped=True`` + ``skip_reason`` and
+    no provider data (see :meth:`record_node_skip`).
+
+    ``commit_sha_after`` is the node's **result reference**: the commit SHA a code/audit/subtask
+    node produced, or — for a ``publish`` node opening a PR — the PR URL (the authoritative PR URL
+    also lives in ``publish_operations``; this is the audit-trail copy). The name reads "commit sha"
+    for the common case; the publish overload is intentional and documented here.
+    """
+
     task_id: str
-    stage: str
-    route_primary: str
-    route_source: str
-    stage_attempts: int
-    route_fallback: str | None = None
+    node_id: str
+    node_kind: str
     subtask_order: int | None = None
     status: str | None = None
+    outcome: str | None = None
+    route_primary: str | None = None
+    route_fallback: str | None = None
+    route_source: str | None = None
     provider_used: str | None = None
     error_class: str | None = None
+    stage_attempts: int = 0
     commit_sha_before: str | None = None
     commit_sha_after: str | None = None
     started_at: str | None = None
     finished_at: str | None = None
-    # Stage-skip audit (stage-skip control): a skipped stage gets a row with ``skipped=True`` and a
-    # human-readable ``skip_reason`` and no provider data.
     skipped: bool = False
     skip_reason: str | None = None
     id: int | None = None
@@ -257,7 +346,7 @@ class StageRunRow:
 
 @dataclass(frozen=True)
 class ProviderAttemptRow:
-    stage_run_id: int
+    node_run_id: int
     provider: str
     attempt: int
     status: str | None = None
@@ -309,6 +398,66 @@ class SubtaskRow:
     depends_on: tuple[int, ...]
     commit_sha: str | None = None
     artifact_path: str | None = None
+
+
+@dataclass(frozen=True)
+class EvaluationRow:
+    """One immutable, append-only evaluation record (flow-engine P2.1).
+
+    Carries three kinds (``kind``): an in-flow evaluator's ``in_flow_verdict`` (``accept`` /
+    ``rework`` with its findings, namespaced by ``source_node_run_id``); and the supervisor layer's
+    advisory ``supervisor_step`` (one per completed node, namespaced by
+    ``(subtask_order, source_node_run_id)``) and ``supervisor_final`` (one per whole task). The
+    supervisor never routes, so its ``verdict`` is always ``advisory``. The in-flow per-instance
+    rework limit is derived by **counting** ``rework`` verdicts — there is no mutable counter.
+    ``node_id`` is the in-flow evaluator node, or ``None`` for the supervisor layer (not a node).
+    """
+
+    task_id: str
+    kind: str  # in_flow_verdict | supervisor_step | supervisor_final
+    verdict: str  # accept | rework (in-flow); advisory (supervisor — never routes)
+    findings_json: str = "[]"
+    node_id: str | None = None
+    source_node_run_id: int | None = None
+    subtask_order: int | None = None
+    created_at: str | None = None
+    id: int | None = None
+
+
+@dataclass(frozen=True)
+class EditingLineageRow:
+    """The durable editing session for one execution unit (flow-engine P2.2).
+
+    ``execution_unit = (task_id, subtask_order)`` (``contracts.ExecutionUnit``); there is exactly
+    one active editing session per unit. ``raw_session_id`` is the provider's real session id — it
+    **never** leaves ``state.db`` (it is redacted in every artifact/log/argv). ``provider`` binds
+    the lineage to the provider that produced it: a node resumes it only when its resolved provider
+    matches (you cannot resume a Claude session on Codex).
+    """
+
+    task_id: str
+    provider: str  # claude | codex
+    raw_session_id: str
+    subtask_order: int | None = None
+    updated_at: str | None = None
+
+
+@dataclass(frozen=True)
+class NodeLineageRow:
+    """The durable own session for a ``resume_own_lineage`` node (flow-engine P3.3).
+
+    Keyed by ``(task_id, node_id, subtask_order)`` — the research critic keeps its own session
+    across rework rounds so it remembers what it already flagged. Like :class:`EditingLineageRow`,
+    ``raw_session_id`` is the provider's real session id and **never** leaves ``state.db``;
+    ``provider`` binds it so the node resumes only when its resolved provider matches.
+    """
+
+    task_id: str
+    node_id: str
+    provider: str  # claude | codex
+    raw_session_id: str
+    subtask_order: int | None = None
+    updated_at: str | None = None
 
 
 # ``publish_operations`` uses -1 as the "no subtask" sentinel so the UNIQUE constraint works
@@ -394,8 +543,8 @@ class StateStore:
                     decomposition_enabled, decomposition_accepted, decomposition_reason,
                     subtask_count, active_subtask, subtasks_completed,
                     failure_report_path, cleanup_target_branch, cleanup_completed,
-                    cleanup_completed_at, cleanup_last_error, finished_at, interrupted_status
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    cleanup_completed_at, cleanup_last_error, finished_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(task_id) DO UPDATE SET
                     title = excluded.title,
                     status = excluded.status,
@@ -432,7 +581,6 @@ class StateStore:
                     row.cleanup_completed_at,
                     row.cleanup_last_error,
                     row.finished_at,
-                    row.interrupted_status,
                 ),
             )
 
@@ -525,10 +673,14 @@ class StateStore:
                 cleanup_completed_at=None,
                 cleanup_last_error=None,
                 finished_at=None,
-                interrupted_status=None,
+                current_node=None,
+                flow_run_counters=None,
+                flow_fingerprint=None,
             )
             c.execute("DELETE FROM subtasks WHERE task_id = ?", (task_id,))
+            c.execute("DELETE FROM node_runs WHERE task_id = ?", (task_id,))
             self.clear_publish_operations(task_id, c)
+            self.clear_editing_lineage(task_id, c)
 
     def revive_task_for_continue(
         self, task_id: str, stage_status: Status, conn: sqlite3.Connection | None = None
@@ -550,7 +702,6 @@ class StateStore:
             cleanup_completed_at=None,
             cleanup_last_error=None,
             cleanup_target_branch=None,
-            interrupted_status=None,
         )
 
     # --- loop counters --------------------------------------------------------------------
@@ -583,24 +734,27 @@ class StateStore:
             fix_iterations=counters.fix_iterations,
         )
 
-    # --- stage_runs / provider_attempts ---------------------------------------------------
+    # --- node_runs / flow checkpoint (flow-engine) ----------------------------------------
 
-    def record_stage_run(self, run: StageRunRow, conn: sqlite3.Connection | None = None) -> int:
+    def record_node_run(self, run: NodeRunRow, conn: sqlite3.Connection | None = None) -> int:
+        """Reserve a flow node-run row before executing the node; returns its id."""
         with self._writer(conn) as c:
             cur = c.execute(
                 """
-                INSERT INTO stage_runs (
-                    task_id, stage, subtask_order, status, route_primary, route_fallback,
-                    route_source, provider_used, error_class, stage_attempts,
-                    commit_sha_before, commit_sha_after, started_at, finished_at,
+                INSERT INTO node_runs (
+                    task_id, node_id, node_kind, subtask_order, status, outcome,
+                    route_primary, route_fallback, route_source, provider_used, error_class,
+                    stage_attempts, commit_sha_before, commit_sha_after, started_at, finished_at,
                     skipped, skip_reason
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     run.task_id,
-                    run.stage,
+                    run.node_id,
+                    run.node_kind,
                     run.subtask_order,
                     run.status,
+                    run.outcome,
                     run.route_primary,
                     run.route_fallback,
                     run.route_source,
@@ -617,69 +771,114 @@ class StateStore:
             )
             return int(cur.lastrowid or 0)
 
-    def record_skip(
+    def record_node_skip(
         self,
         task_id: str,
-        stage: str,
+        node_id: str,
+        node_kind: str,
         *,
         reason: str,
         subtask_order: int | None = None,
         conn: sqlite3.Connection | None = None,
     ) -> int:
-        """Record a skipped stage in the audit trail (stage-skip control).
-
-        A skipped stage runs no provider, so it carries sentinel route fields (``route_primary`` /
-        ``route_source`` are ``NOT NULL``) and ``stage_attempts=0``; ``skipped`` and ``skip_reason``
-        hold the audit detail.
-        """
-        return self.record_stage_run(
-            StageRunRow(
+        """Record a deterministically-skipped node (``when`` false) in the audit trail."""
+        now = self._clock()
+        return self.record_node_run(
+            NodeRunRow(
                 task_id=task_id,
-                stage=stage,
-                route_primary="(skipped)",
-                route_source="skip",
-                stage_attempts=0,
+                node_id=node_id,
+                node_kind=node_kind,
                 subtask_order=subtask_order,
                 status="skipped",
                 skipped=True,
                 skip_reason=reason,
-                started_at=self._clock(),
-                finished_at=self._clock(),
+                started_at=now,
+                finished_at=now,
             ),
             conn,
         )
 
-    def complete_stage_run(
+    def complete_node_run(
         self,
         run_id: int,
         *,
         status: str,
-        provider_used: str | None,
-        error_class: str | None,
-        stage_attempts: int,
+        outcome: str | None,
+        provider_used: str | None = None,
+        error_class: str | None = None,
+        stage_attempts: int = 0,
         finished_at: str,
+        commit_sha_after: str | None = None,
         conn: sqlite3.Connection | None = None,
     ) -> None:
-        """Finalize a stage run that was reserved before invoking its provider."""
+        """Finalize a node run reserved by :meth:`record_node_run`."""
         with self._writer(conn) as c:
             cur = c.execute(
                 """
-                UPDATE stage_runs
-                SET status = ?, provider_used = ?, error_class = ?,
-                    stage_attempts = ?, finished_at = ?
+                UPDATE node_runs
+                SET status = ?, outcome = ?, provider_used = ?, error_class = ?,
+                    stage_attempts = ?, finished_at = ?, commit_sha_after = ?
                 WHERE id = ?
                 """,
                 (
                     status,
+                    outcome,
                     provider_used,
                     error_class,
                     stage_attempts,
                     finished_at,
+                    commit_sha_after,
                     run_id,
                 ),
             )
             if cur.rowcount != 1:
                 raise KeyError(run_id)
+
+    def get_node_runs(self, task_id: str) -> list[NodeRunRow]:
+        """All node runs for a task in execution order (ascending id)."""
+        cur = self._conn.execute(
+            "SELECT * FROM node_runs WHERE task_id = ? ORDER BY id ASC", (task_id,)
+        )
+        return [_node_run_from_row(row) for row in cur.fetchall()]
+
+    def save_flow_checkpoint(
+        self,
+        task_id: str,
+        *,
+        current_node: str | None,
+        counters_json: str,
+        flow_fingerprint: str,
+        fix_iterations: int,
+        conn: sqlite3.Connection | None = None,
+    ) -> None:
+        """Persist the FlowRunState checkpoint columns on the ``tasks`` row (flow-engine path).
+
+        ``fix_iterations`` mirrors the engine's single global fix counter into the operator-facing
+        ``tasks.fix_iterations`` column on every checkpoint, so live ``status`` reflects the loops
+        the engine has run (the legacy column is otherwise never advanced on the engine path).
+        """
+        self.update_task(
+            task_id,
+            conn,
+            current_node=current_node,
+            flow_run_counters=counters_json,
+            flow_fingerprint=flow_fingerprint,
+            fix_iterations=fix_iterations,
+        )
+
+    def get_flow_checkpoint(self, task_id: str) -> tuple[str | None, str | None, str | None]:
+        """Return ``(current_node, flow_run_counters_json, flow_fingerprint)`` for a task.
+
+        Any element is ``None`` when the flow-engine path has not run (legacy task or fresh row).
+        """
+        cur = self._conn.execute(
+            "SELECT current_node, flow_run_counters, flow_fingerprint FROM tasks WHERE task_id = ?",
+            (task_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise KeyError(task_id)
+        return row["current_node"], row["flow_run_counters"], row["flow_fingerprint"]
 
     def record_provider_attempt(
         self, attempt: ProviderAttemptRow, conn: sqlite3.Connection | None = None
@@ -688,12 +887,12 @@ class StateStore:
             c.execute(
                 """
                 INSERT INTO provider_attempts (
-                    stage_run_id, provider, attempt, status, error_class, exit_code,
+                    node_run_id, provider, attempt, status, error_class, exit_code,
                     attempt_dir, started_at, finished_at
                 ) VALUES (?,?,?,?,?,?,?,?,?)
                 """,
                 (
-                    attempt.stage_run_id,
+                    attempt.node_run_id,
                     attempt.provider,
                     attempt.attempt,
                     attempt.status,
@@ -868,6 +1067,160 @@ class StateStore:
                 (commit_sha, status, task_id, order),
             )
 
+    # --- evaluations (immutable, append-only) ---------------------------------------------
+
+    def record_evaluation(self, row: EvaluationRow, conn: sqlite3.Connection | None = None) -> int:
+        """Append one immutable evaluation row (in-flow verdict or supervisor observation). Returns
+        its id. The table is append-only — there is no update/delete (audit + recovery)."""
+        now = self._clock()
+        with self._writer(conn) as c:
+            cur = c.execute(
+                """
+                INSERT INTO evaluations (
+                    task_id, node_id, source_node_run_id, subtask_order, kind, verdict,
+                    findings_json, created_at
+                ) VALUES (?,?,?,?,?,?,?,?)
+                """,
+                (
+                    row.task_id,
+                    row.node_id,
+                    row.source_node_run_id,
+                    row.subtask_order,
+                    row.kind,
+                    row.verdict,
+                    row.findings_json,
+                    row.created_at or now,
+                ),
+            )
+            return int(cur.lastrowid or 0)
+
+    def get_evaluations(self, task_id: str) -> list[EvaluationRow]:
+        """All evaluation rows for a task in append order (ascending id)."""
+        cur = self._conn.execute(
+            "SELECT * FROM evaluations WHERE task_id = ? ORDER BY id ASC", (task_id,)
+        )
+        return [_evaluation_from_row(r) for r in cur.fetchall()]
+
+    def count_rework_verdicts(
+        self, task_id: str, *, node_id: str | None = None, subtask_order: int | None = None
+    ) -> int:
+        """Count applied in-flow ``rework`` verdicts — the per-instance rework limit derives from
+        this count, not a mutable counter (flow-contract §2.2). Scoped to ``node_id`` /
+        ``subtask_order`` when given (``subtask_order`` matched with ``IS`` so ``NULL`` works)."""
+        sql = (
+            "SELECT COUNT(*) FROM evaluations "
+            "WHERE task_id = ? AND kind = 'in_flow_verdict' AND verdict = 'rework'"
+        )
+        params: list[object] = [task_id]
+        if node_id is not None:
+            sql += " AND node_id = ?"
+            params.append(node_id)
+        if subtask_order is not None:
+            sql += " AND subtask_order = ?"
+            params.append(subtask_order)
+        row = self._conn.execute(sql, params).fetchone()
+        return int(row[0]) if row is not None else 0
+
+    # --- editing_lineage (durable sessions) -----------------------------------------------
+
+    def get_editing_lineage(
+        self, task_id: str, subtask_order: int | None = None
+    ) -> EditingLineageRow | None:
+        """The active editing session for an execution unit, or ``None`` if none yet (P2.2)."""
+        subtask = _NO_SUBTASK if subtask_order is None else subtask_order
+        cur = self._conn.execute(
+            "SELECT provider, raw_session_id, updated_at FROM editing_lineage "
+            "WHERE task_id = ? AND subtask_order = ?",
+            (task_id, subtask),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return EditingLineageRow(
+            task_id=task_id,
+            provider=row["provider"],
+            raw_session_id=row["raw_session_id"],
+            subtask_order=subtask_order,
+            updated_at=row["updated_at"],
+        )
+
+    def upsert_editing_lineage(
+        self, row: EditingLineageRow, conn: sqlite3.Connection | None = None
+    ) -> None:
+        """Insert or replace the active editing session for an execution unit (one per unit)."""
+        now = self._clock()
+        subtask = _NO_SUBTASK if row.subtask_order is None else row.subtask_order
+        with self._writer(conn) as c:
+            c.execute(
+                """
+                INSERT INTO editing_lineage (
+                    task_id, subtask_order, provider, raw_session_id, updated_at
+                ) VALUES (?,?,?,?,?)
+                ON CONFLICT(task_id, subtask_order) DO UPDATE SET
+                    provider = excluded.provider,
+                    raw_session_id = excluded.raw_session_id,
+                    updated_at = excluded.updated_at
+                """,
+                (row.task_id, subtask, row.provider, row.raw_session_id, row.updated_at or now),
+            )
+
+    def clear_editing_lineage(self, task_id: str, conn: sqlite3.Connection | None = None) -> None:
+        """Delete a task's editing sessions so a fresh ``rerun`` starts new provider sessions."""
+        with self._writer(conn) as c:
+            c.execute("DELETE FROM editing_lineage WHERE task_id = ?", (task_id,))
+            c.execute("DELETE FROM node_lineage WHERE task_id = ?", (task_id,))
+
+    # --- node_lineage (resume_own_lineage durable sessions, P3.3) -------------------------
+
+    def get_node_lineage(
+        self, task_id: str, node_id: str, subtask_order: int | None = None
+    ) -> NodeLineageRow | None:
+        """The durable own session for a ``resume_own_lineage`` node, or ``None`` if none yet."""
+        subtask = _NO_SUBTASK if subtask_order is None else subtask_order
+        cur = self._conn.execute(
+            "SELECT provider, raw_session_id, updated_at FROM node_lineage "
+            "WHERE task_id = ? AND node_id = ? AND subtask_order = ?",
+            (task_id, node_id, subtask),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return NodeLineageRow(
+            task_id=task_id,
+            node_id=node_id,
+            provider=row["provider"],
+            raw_session_id=row["raw_session_id"],
+            subtask_order=subtask_order,
+            updated_at=row["updated_at"],
+        )
+
+    def upsert_node_lineage(
+        self, row: NodeLineageRow, conn: sqlite3.Connection | None = None
+    ) -> None:
+        """Insert or replace the durable own session for a ``resume_own_lineage`` node."""
+        now = self._clock()
+        subtask = _NO_SUBTASK if row.subtask_order is None else row.subtask_order
+        with self._writer(conn) as c:
+            c.execute(
+                """
+                INSERT INTO node_lineage (
+                    task_id, node_id, subtask_order, provider, raw_session_id, updated_at
+                ) VALUES (?,?,?,?,?,?)
+                ON CONFLICT(task_id, node_id, subtask_order) DO UPDATE SET
+                    provider = excluded.provider,
+                    raw_session_id = excluded.raw_session_id,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    row.task_id,
+                    row.node_id,
+                    subtask,
+                    row.provider,
+                    row.raw_session_id,
+                    row.updated_at or now,
+                ),
+            )
+
 
 # Statuses in which a task does NOT own the processing slot.
 _NON_ACTIVE: frozenset[Status] = frozenset(
@@ -898,6 +1251,44 @@ def _ob(value: object) -> bool | None:
     return bool(value)
 
 
+def _node_run_from_row(row: sqlite3.Row) -> NodeRunRow:
+    return NodeRunRow(
+        task_id=row["task_id"],
+        node_id=row["node_id"],
+        node_kind=row["node_kind"],
+        subtask_order=row["subtask_order"],
+        status=row["status"],
+        outcome=row["outcome"],
+        route_primary=row["route_primary"],
+        route_fallback=row["route_fallback"],
+        route_source=row["route_source"],
+        provider_used=row["provider_used"],
+        error_class=row["error_class"],
+        stage_attempts=row["stage_attempts"],
+        commit_sha_before=row["commit_sha_before"],
+        commit_sha_after=row["commit_sha_after"],
+        started_at=row["started_at"],
+        finished_at=row["finished_at"],
+        skipped=bool(row["skipped"]),
+        skip_reason=row["skip_reason"],
+        id=row["id"],
+    )
+
+
+def _evaluation_from_row(row: sqlite3.Row) -> EvaluationRow:
+    return EvaluationRow(
+        task_id=row["task_id"],
+        kind=row["kind"],
+        verdict=row["verdict"],
+        findings_json=row["findings_json"],
+        node_id=row["node_id"],
+        source_node_run_id=row["source_node_run_id"],
+        subtask_order=row["subtask_order"],
+        created_at=row["created_at"],
+        id=row["id"],
+    )
+
+
 def _task_from_row(row: sqlite3.Row) -> TaskRow:
     return TaskRow(
         task_id=row["task_id"],
@@ -926,7 +1317,6 @@ def _task_from_row(row: sqlite3.Row) -> TaskRow:
         cleanup_completed_at=row["cleanup_completed_at"],
         cleanup_last_error=row["cleanup_last_error"],
         finished_at=row["finished_at"],
-        interrupted_status=row["interrupted_status"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

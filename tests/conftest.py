@@ -107,24 +107,17 @@ def build_git_config(
     max_fix_cycles: int = 3,
     max_total_fix_iterations: int = 5,
     quarantine: str | None = None,
-    skip_stages: Sequence[str] = (),
     allow_review_skip: bool = False,
     auto_mode: bool = False,
     auto_merge: bool = False,
     auto_merge_strategy: str = "squash",
-    auto_merge_allow_per_task: bool = False,
     auto_merge_wait_for_checks: bool = False,
-    prompts_block: str | None = None,
     prompt_audit: bool = False,
 ) -> OrchestratorConfig:
-    """Build a config pointing ``repo.local_path`` at the clone, with the given footprint/checks.
-
-    ``prompts_block`` is appended verbatim (a full top-level ``prompts:`` YAML block) when given.
-    """
+    """Build a config pointing ``repo.local_path`` at the clone, with the given footprint/checks."""
     env_lines = "\n".join(f"    - {e}" for e in _TEST_ALLOWED_ENV)
     check_lines = "\n".join(f"    - {c!r}" for c in checks)
-    skip_block = "  skip_stages: [" + ", ".join(skip_stages) + "]\n" if skip_stages else ""
-    skip_block += f"  allow_review_skip: {str(allow_review_skip).lower()}\n"
+    skip_block = f"  allow_review_skip: {str(allow_review_skip).lower()}\n"
     validation_block = f"validation:\n  quarantine_folder: {quarantine!r}\n" if quarantine else ""
     text = f"""
 orchestrator:
@@ -142,16 +135,10 @@ agents:
 {skip_block}  decomposition:
     enabled: {str(decomposition).lower()}
     max_subtasks: {max_subtasks}
-  routing:
-    refinement: {{primary: claude, fallback: codex}}
-    planning: {{primary: claude, fallback: codex}}
-    implementation: {{primary: claude, fallback: codex}}
-    review: {{primary: codex, fallback: claude}}
-    fixing: {{primary: claude, fallback: codex}}
-    summary: {{primary: claude, fallback: codex}}
   providers:
     claude:
       command: "claude"
+      primary: true
     codex:
       command: "codex"
 security:
@@ -166,15 +153,12 @@ git:
   pr_base: "main"
   auto_merge: {str(auto_merge).lower()}
   auto_merge_strategy: {auto_merge_strategy}
-  auto_merge_allow_per_task: {str(auto_merge_allow_per_task).lower()}
   auto_merge_wait_for_checks: {str(auto_merge_wait_for_checks).lower()}
   footprint:
     audit_commit_message: "chore(orchestrator): audit trail for {{task_id}}"
     audit_on_branch: {audit_on_branch}
 prompt_audit: {str(prompt_audit).lower()}
 """
-    if prompts_block:
-        text += "\n" + prompts_block
     return loads_config(text).config
 
 

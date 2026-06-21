@@ -2,7 +2,7 @@
 
 This cookbook shows common ways to use **wastech-orchestrator**. It is written for operators who run the orchestrator and for developers who want a practical path from "empty workspace" to "task processed into a Pull Request".
 
-The canonical product reference remains the [Functional Map](functional/index.md). Where this guide mentions planned v1 behavior, it is labeled explicitly. The CLI surface described here (`install`, `preflight`, `run`, `watch`, and `status`) exists in the current codebase.
+The canonical product reference remains the [Functional Map](functional/index.md). The full CLI surface (`install`, `preflight`, `telegram-test`, `run`, `rerun`, `finalize`, `watch`, `stop`, `restart`, `status`, `upgrade-config`, `upgrade-docs`) exists in the current codebase; this guide focuses on the everyday subset.
 
 ## 1. Install Into A Repository
 
@@ -130,8 +130,6 @@ Create `tasks/pending/task-001.md`:
 ---
 id: task-001
 title: "Add login form validation"
-refined: false
-decompose: false
 ---
 
 ## Description
@@ -151,7 +149,7 @@ Add client-side validation to the login form. Show a validation error when the e
 - Add or update focused tests for the login form.
 ```
 
-The validation gate requires front matter, a valid `id`, a non-empty `title`, and a non-empty Description section. Acceptance criteria are not a structural reject, but in the current implementation they make the task complete enough to skip autonomous refinement when `refined: true` is not set. Constraints are still strongly recommended because they keep the implementation scope clear.
+The validation gate requires front matter, a valid `id`, a non-empty `title`, and a non-empty Description section. Acceptance criteria are not a structural reject, but they make the task complete enough to skip autonomous refinement (refinement-skip is deterministic — driven by completeness, with no task flag). Constraints are still strongly recommended because they keep the implementation scope clear.
 
 Task authoring details are in [task-authoring.md](task-authoring.md).
 
@@ -179,7 +177,7 @@ Exit codes:
 |  `1` | The task reached `failed`.                 |
 |  `2` | The task reached `manual_action_required`. |
 
-Planned v1 behavior: a successful task runs through validation, preparation, optional refinement, planning, implementation, checks, review, fixing if needed, summary, commit, push, PR creation, and terminal cleanup back to `repo.base_branch`.
+A successful task runs through validation, branch preparation, optional refinement, planning, implementation, checks (testing), review, fixing if needed, then publishing — commit, push, and PR creation — followed by terminal cleanup back to `repo.base_branch`. The plain-language summary that becomes the PR body is **not** a separate stage: the constant supervisor layer writes it at task close (see [configuration.md](configuration.md#supervisor)).
 
 ### Re-attempt a task that ended `failed` / `manual_action_required`
 
@@ -232,7 +230,7 @@ orchestrator:
     enabled: true
 ```
 
-Auto mode does not introduce concurrency. Planned v1 behavior keeps a single active task slot and requires checkout back to `repo.base_branch` before the next task can start.
+Auto mode does not introduce concurrency. There is a single active task slot, and checkout back to `repo.base_branch` must complete before the next task can start.
 
 ### Monitor a running task
 
@@ -265,39 +263,29 @@ python -m wastech_orchestrator --config ./config.yaml status task-001
 
 Without a task id, `status` shows active tasks or the most recently updated task. It reports the persisted status, current stage when applicable, configured primary provider, branch, subtask, fix counter, last update time, and elapsed time since that update. It opens `state.db` read-only.
 
-## 7. Override Providers Per Stage
+## 7. Choose Which Provider Runs a Node
 
-Global routing lives in `config.yaml` under `agents.routing`. A task may override only the provider for known agent stages, and only to a provider listed in `agents.allowed`.
+Provider routing is **node-based** — it lives on the flow, not the task. Each agent/evaluator node in the flow YAML may declare its own `provider:` (`codex` | `claude`); a node with no `provider` runs on the **global primary** (the one `config.yaml` provider marked `primary: true`, which must be in `agents.allowed`). The global primary is also the sole infrastructure-fallback target.
 
 ```yaml
----
-id: task-002
-title: "Update API pagination"
-agents:
-  planning: codex
-  implementation: claude
-  review: codex
----
+# in an operator flow (.worc/flows/<task_type>.yaml) or a packaged flow node:
+- id: review
+  kind: evaluator
+  role: review
+  role_file: roles/review.md
+  provider: codex # this node runs on codex; omit to use the global primary
 ```
 
-Allowed stage keys are:
+A **task** cannot repoint a stage's provider, set a model, or change reasoning — those are flow/operator concerns (see [configuration.md](configuration.md#agentsproviders)). `testing` and `publishing` run no agent (Check Runner / Git Manager). A node `provider` must be in `agents.allowed` (a fatal preflight error otherwise) and can never change provider commands, credentials, sandbox settings, `extra_args`, or any security policy.
 
-```text
-refinement, planning, implementation, review, fixing, summary
-```
+## 7a. Customize a Node's Prompt
 
-`testing` and `publishing` are not provider-routed stages. They are executed by the Check Runner and Git Manager.
+To add repository-specific engineering rules or a review rubric to a stage without editing Python, edit that node's **`role_file`** (see [configuration.md](configuration.md#prompt-templates-no-longer-a-config-block)). A packaged flow ships its role files beside the flow YAML; an operator flow keeps them under `.worc/flows/roles/`. The role file's content **is** the prompt template — edit it and the change takes effect on the next run.
 
-Task overrides cannot change provider commands, credentials, sandbox settings, `extra_args`, or any security policy.
-
-## 7a. Customize Stage Prompts
-
-To add repository-specific engineering rules or a review rubric to a stage without editing Python, edit the packaged template for that stage (see [configuration.md](configuration.md#prompts)). `install`/`install-templates` scaffold `.worc/templates/prompts/<stage>.md` with the packaged defaults; **just edit the file** — its presence is the activation signal, so no `overrides` entry is needed.
-
-Replace the review prompt entirely with a security rubric (the default `mode: replace`):
+For example, a review node's role file replaced with a security rubric:
 
 ```markdown
-<!-- templates/prompts/review.md -->
+<!-- roles/review.md -->
 
 Review for security first. Reject the change unless:
 
@@ -306,28 +294,8 @@ Review for security first. Reject the change unless:
 - the plan at {plan_path} is fully implemented.
 ```
 
-To instead _add_ house rules on top of the packaged default, switch to append mode:
-
-```yaml
-# config.yaml
-prompts:
-  mode: append # keep the packaged default, then add your text
-```
-
-```markdown
-<!-- templates/prompts/implementation.md -->
-
-Follow the repository conventions:
-
-- keep functions under 40 lines; extract helpers otherwise;
-- never add a runtime dependency without a note in the summary;
-- match the logging style in {repo_path}.
-```
-
 Notes:
 
-- A `templates/prompts/<stage>.md` is auto-detected by presence (agent-routed stages only). A stage with no file falls back to the packaged default — a missing file is never an error. Set `prompts.templates_dir: ""` to force the packaged defaults for every stage.
-- A relative `templates_dir` resolves from the `config.yaml` directory, so it works from any CWD.
 - Variables are metadata/paths only — e.g. `{repo_path}`, `{diff_path}`, `{plan_path}`. Large content stays in the artifact files the agent reads by path. Unknown `{...}` and literal braces pass through unchanged.
 - The exact text sent each run is saved (redacted) to `.worc/logs/<task-id>/stages/<stage>/rendered-prompt.md` so you can verify what the agent received.
 - A template is prompt text only: it cannot change the provider, sandbox/approvals, denied commands, or enable `git`/`gh` publishing.
@@ -433,7 +401,7 @@ After resolving the problem, run:
 python -m wastech_orchestrator watch
 ```
 
-Planned v1 behavior is idempotent: reruns reconcile state and do not duplicate commit, push, or PR operations.
+Recovery is idempotent: reruns reconcile state and do not duplicate commit, push, or PR operations.
 
 ## 12. Common Setups
 
@@ -443,13 +411,6 @@ Codex-only:
 agents:
   allowed:
     - codex
-  routing:
-    refinement: { primary: codex, fallback: null }
-    planning: { primary: codex, fallback: null }
-    implementation: { primary: codex, fallback: null }
-    review: { primary: codex, fallback: null }
-    fixing: { primary: codex, fallback: null }
-    summary: { primary: codex, fallback: null }
   providers:
     codex:
       command: "codex"
@@ -458,6 +419,7 @@ agents:
       sandbox: "workspace-write"
       permission_profile: "workspace-write"
       extra_args: []
+      primary: true # the global primary (exactly one; must be in agents.allowed)
 ```
 
 No automatic PR creation:

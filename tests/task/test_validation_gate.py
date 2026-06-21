@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.providers.base import Stage
 from wastech_orchestrator.task.model import StageParams
@@ -124,10 +126,33 @@ def test_missing_description(config: OrchestratorConfig) -> None:
     assert result.detail == "description"
 
 
-def test_invalid_field_type_refined(config: OrchestratorConfig) -> None:
-    text = "---\nid: task-001\ntitle: T\nrefined: maybe\n---\n\n## Description\n\nx\n"
+def test_task_type_parsed_into_normalized(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\ntask_type: deep_research\n---\n\n## Description\n\nx\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.task_type == "deep_research"
+
+
+def test_task_type_absent_defaults_to_none(config: OrchestratorConfig) -> None:
+    # No ``task_type`` → ``None`` (the registry defaults it to ``implementation`` at dispatch).
+    result = _gate(config).validate(_src(_GOOD))
+    assert result.normalized is not None
+    assert result.normalized.task_type is None
+
+
+def test_task_type_must_be_a_string(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\ntask_type: 7\n---\n\n## Description\n\nx\n"
     result = _gate(config).validate(_src(text))
     assert result.reason is ValidationReason.INVALID_FIELD_TYPE
+
+
+def test_refined_is_now_an_unknown_field(config: OrchestratorConfig) -> None:
+    # PRE.3: the clean task dropped ``refined`` (refinement-skip is completeness-driven). The key
+    # is no longer in the allowlist → fail-closed UNKNOWN_TOP_LEVEL_FIELD.
+    text = "---\nid: task-001\ntitle: T\nrefined: true\n---\n\n## Description\n\nx\n"
+    result = _gate(config).validate(_src(text))
+    assert result.reason is ValidationReason.UNKNOWN_TOP_LEVEL_FIELD
 
 
 def test_invalid_field_type_contacts(config: OrchestratorConfig) -> None:
@@ -164,16 +189,12 @@ def test_recovery_rerun_allowance_is_scoped_to_the_named_id(config: Orchestrator
     assert result.reason is ValidationReason.DUPLICATE_TASK_ID
 
 
-def test_invalid_route_override_unknown_stage(config: OrchestratorConfig) -> None:
-    text = "---\nid: task-001\ntitle: T\nagents:\n  nonsense: claude\n---\n\n## Description\n\nx\n"
+def test_agents_route_override_is_now_an_unknown_field(config: OrchestratorConfig) -> None:
+    # PRE.3: per-task provider routing is gone — a node declares its own ``provider``. The
+    # front-matter ``agents`` key is no longer in the allowlist → fail-closed.
+    text = "---\nid: task-001\ntitle: T\nagents:\n  review: codex\n---\n\n## Description\n\nx\n"
     result = _gate(config).validate(_src(text))
-    assert result.reason is ValidationReason.INVALID_ROUTE_OVERRIDE
-
-
-def test_invalid_route_override_unknown_provider(config: OrchestratorConfig) -> None:
-    text = "---\nid: task-001\ntitle: T\nagents:\n  review: gpt5\n---\n\n## Description\n\nx\n"
-    result = _gate(config).validate(_src(text))
-    assert result.reason is ValidationReason.INVALID_ROUTE_OVERRIDE
+    assert result.reason is ValidationReason.UNKNOWN_TOP_LEVEL_FIELD
 
 
 def test_injection_value_starts_with_dash(config: OrchestratorConfig) -> None:
@@ -201,8 +222,13 @@ def test_phase_b_needs_enrichment_without_acceptance(config: OrchestratorConfig)
     assert result.completeness is Completeness.NEEDS_ENRICHMENT
 
 
-def test_phase_b_complete_when_refined(config: OrchestratorConfig) -> None:
-    text = "---\nid: task-001\ntitle: T\nrefined: true\n---\n\n## Description\n\nVague.\n"
+def test_phase_b_complete_with_acceptance_criteria(config: OrchestratorConfig) -> None:
+    # PRE.3: completeness is the only input to the refinement-skip — a description + acceptance
+    # criteria classifies COMPLETE (no ``refined`` flag).
+    text = (
+        "---\nid: task-001\ntitle: T\n---\n\n"
+        "## Description\n\nDo it.\n\n## Acceptance criteria\n\n- works\n"
+    )
     result = _gate(config).validate(_src(text))
     assert result.completeness is Completeness.COMPLETE
 
@@ -288,60 +314,12 @@ def test_prompt_audit_non_boolean_is_rejected(config: OrchestratorConfig) -> Non
     assert "prompt_audit" in result.detail
 
 
-def test_model_field_passes_and_is_stored(config: OrchestratorConfig) -> None:
-    text = "---\nid: task-001\ntitle: T\nmodel: claude-opus-4-8\n---\n\n## Description\n\nDo it.\n"
+@pytest.mark.parametrize("field", ["model", "reasoning"])
+def test_model_and_reasoning_are_now_unknown_fields(config: OrchestratorConfig, field: str) -> None:
+    # PRE.3: model/reasoning live on the flow node, never the task → unknown top-level fields now.
+    text = f"---\nid: task-001\ntitle: T\n{field}: x\n---\n\n## Description\n\nDo it.\n"
     result = _gate(config).validate(_src(text))
-    assert result.passed is True
-    assert result.normalized is not None
-    assert result.normalized.model == "claude-opus-4-8"
-
-
-def test_model_null_normalizes_to_none(config: OrchestratorConfig) -> None:
-    text = "---\nid: task-001\ntitle: T\nmodel: null\n---\n\n## Description\n\nDo it.\n"
-    result = _gate(config).validate(_src(text))
-    assert result.passed is True
-    assert result.normalized is not None
-    assert result.normalized.model is None
-
-
-def test_model_non_string_is_rejected(config: OrchestratorConfig) -> None:
-    text = "---\nid: task-001\ntitle: T\nmodel: 42\n---\n\n## Description\n\nDo it.\n"
-    result = _gate(config).validate(_src(text))
-    assert result.passed is False
-    assert result.reason is ValidationReason.INVALID_FIELD_TYPE
-    assert "model" in result.detail
-
-
-def test_reasoning_valid_level_passes_and_is_stored(config: OrchestratorConfig) -> None:
-    for level in ("low", "medium", "high", "xhigh", "max"):
-        text = f"---\nid: task-001\ntitle: T\nreasoning: {level}\n---\n\n## Description\n\nDo it.\n"
-        result = _gate(config).validate(_src(text))
-        assert result.passed is True, f"level {level!r} should pass"
-        assert result.normalized is not None
-        assert result.normalized.reasoning == level
-
-
-def test_reasoning_invalid_level_is_rejected(config: OrchestratorConfig) -> None:
-    text = "---\nid: task-001\ntitle: T\nreasoning: ultra\n---\n\n## Description\n\nDo it.\n"
-    result = _gate(config).validate(_src(text))
-    assert result.passed is False
-    assert result.reason is ValidationReason.INVALID_FIELD_TYPE
-    assert "reasoning" in result.detail
-
-
-def test_reasoning_non_string_is_rejected(config: OrchestratorConfig) -> None:
-    text = "---\nid: task-001\ntitle: T\nreasoning: 3\n---\n\n## Description\n\nDo it.\n"
-    result = _gate(config).validate(_src(text))
-    assert result.passed is False
-    assert result.reason is ValidationReason.INVALID_FIELD_TYPE
-
-
-def test_reasoning_null_normalizes_to_none(config: OrchestratorConfig) -> None:
-    text = "---\nid: task-001\ntitle: T\nreasoning: null\n---\n\n## Description\n\nDo it.\n"
-    result = _gate(config).validate(_src(text))
-    assert result.passed is True
-    assert result.normalized is not None
-    assert result.normalized.reasoning is None
+    assert result.reason is ValidationReason.UNKNOWN_TOP_LEVEL_FIELD
 
 
 def _stages_task(stages_block: str) -> str:
@@ -371,22 +349,12 @@ def test_stages_empty_mapping_is_empty(config: OrchestratorConfig) -> None:
     assert result.normalized.stage_params == {}
 
 
-def test_stages_override_passes_and_is_stored(config: OrchestratorConfig) -> None:
-    block = "stages:\n  planning:\n    model: claude-opus-4-8\n    reasoning: high\n"
+def test_stages_enabled_passes_and_is_stored(config: OrchestratorConfig) -> None:
+    block = "stages:\n  planning:\n    enabled: false\n"
     result = _gate(config).validate(_src(_stages_task(block)))
     assert result.passed is True
     assert result.normalized is not None
-    assert result.normalized.stage_params == {
-        Stage.PLANNING: StageParams(model="claude-opus-4-8", reasoning="high")
-    }
-
-
-def test_stages_only_reasoning_overridden(config: OrchestratorConfig) -> None:
-    block = "stages:\n  review:\n    reasoning: high\n"
-    result = _gate(config).validate(_src(_stages_task(block)))
-    assert result.passed is True
-    assert result.normalized is not None
-    assert result.normalized.stage_params[Stage.REVIEW] == StageParams(model=None, reasoning="high")
+    assert result.normalized.stage_params == {Stage.PLANNING: StageParams(enabled=False)}
 
 
 def test_stages_stage_null_inherits(config: OrchestratorConfig) -> None:
@@ -404,22 +372,15 @@ def test_stages_empty_block_inherits(config: OrchestratorConfig) -> None:
 
 
 def test_stages_unknown_stage_rejected(config: OrchestratorConfig) -> None:
-    block = "stages:\n  nonsense:\n    model: m\n"
-    result = _gate(config).validate(_src(_stages_task(block)))
-    assert result.passed is False
-    assert result.reason is ValidationReason.INVALID_STAGE_OVERRIDE
-
-
-def test_stages_testing_rejected(config: OrchestratorConfig) -> None:
-    # ``testing`` runs no agent (it is the Check Runner) → not in ROUTABLE_STAGES.
-    block = "stages:\n  testing:\n    reasoning: high\n"
+    block = "stages:\n  nonsense:\n    enabled: false\n"
     result = _gate(config).validate(_src(_stages_task(block)))
     assert result.passed is False
     assert result.reason is ValidationReason.INVALID_STAGE_OVERRIDE
 
 
 def test_stages_publishing_rejected(config: OrchestratorConfig) -> None:
-    block = "stages:\n  publishing:\n    model: m\n"
+    # ``publishing`` is the output — never skippable, so it is not a valid ``stages`` key.
+    block = "stages:\n  publishing:\n    enabled: false\n"
     result = _gate(config).validate(_src(_stages_task(block)))
     assert result.passed is False
     assert result.reason is ValidationReason.INVALID_STAGE_OVERRIDE
@@ -445,20 +406,16 @@ def test_stages_non_mapping_top_level_rejected(config: OrchestratorConfig) -> No
     assert result.reason is ValidationReason.INVALID_STAGE_OVERRIDE
 
 
-def test_stages_invalid_reasoning_rejected(config: OrchestratorConfig) -> None:
-    block = "stages:\n  planning:\n    reasoning: ultra\n"
+@pytest.mark.parametrize("subkey", ["model", "reasoning"])
+def test_stages_model_reasoning_subkeys_now_unknown(
+    config: OrchestratorConfig, subkey: str
+) -> None:
+    # PRE.3: ``enabled`` is the only valid per-stage sub-key now — model/reasoning live on the node.
+    block = f"stages:\n  planning:\n    {subkey}: x\n"
     result = _gate(config).validate(_src(_stages_task(block)))
     assert result.passed is False
     assert result.reason is ValidationReason.INVALID_STAGE_OVERRIDE
-    assert "reasoning" in result.detail
-
-
-def test_stages_model_non_string_rejected(config: OrchestratorConfig) -> None:
-    block = "stages:\n  planning:\n    model: 42\n"
-    result = _gate(config).validate(_src(_stages_task(block)))
-    assert result.passed is False
-    assert result.reason is ValidationReason.INVALID_STAGE_OVERRIDE
-    assert "model" in result.detail
+    assert subkey in result.detail
 
 
 # --- stage-skip control (stages.<stage>.enabled) -----------------------------------------
@@ -479,38 +436,20 @@ def test_stages_testing_enabled_false_accepted(config: OrchestratorConfig) -> No
     assert result.normalized.disabled_stages() == frozenset({Stage.TESTING})
 
 
-def test_stages_planning_model_and_enabled_accepted(config: OrchestratorConfig) -> None:
-    # ``planning`` is both routable and skippable, so all three sub-keys are valid together.
-    block = "stages:\n  planning:\n    model: claude-opus-4-8\n    enabled: false\n"
-    result = _gate(config).validate(_src(_stages_task(block)))
-    assert result.passed is True
-    assert result.normalized is not None
-    assert result.normalized.stage_params[Stage.PLANNING] == StageParams(
-        model="claude-opus-4-8", enabled=False
-    )
-
-
 def test_stages_enabled_true_is_not_a_skip(config: OrchestratorConfig) -> None:
-    result = _gate(config).validate(_src(_stages_task("stages:\n  summary:\n    enabled: true\n")))
+    result = _gate(config).validate(_src(_stages_task("stages:\n  planning:\n    enabled: true\n")))
     assert result.passed is True
     assert result.normalized is not None
     assert result.normalized.disabled_stages() == frozenset()
 
 
 def test_stages_implementation_enabled_rejected(config: OrchestratorConfig) -> None:
-    # ``implementation`` is the core work — not skippable; ``enabled`` is not a valid sub-key.
+    # ``implementation`` is the core work — not skippable, so it is not a valid ``stages`` key.
     block = "stages:\n  implementation:\n    enabled: false\n"
     result = _gate(config).validate(_src(_stages_task(block)))
     assert result.passed is False
     assert result.reason is ValidationReason.INVALID_STAGE_OVERRIDE
-    assert "enabled" in result.detail
-
-
-def test_stages_testing_model_still_rejected(config: OrchestratorConfig) -> None:
-    # ``testing`` runs no agent, so model/reasoning remain invalid even though it is skippable.
-    result = _gate(config).validate(_src(_stages_task("stages:\n  testing:\n    model: m\n")))
-    assert result.passed is False
-    assert result.reason is ValidationReason.INVALID_STAGE_OVERRIDE
+    assert "implementation" in result.detail
 
 
 def test_stages_enabled_non_bool_rejected(config: OrchestratorConfig) -> None:

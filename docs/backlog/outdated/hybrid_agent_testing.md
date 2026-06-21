@@ -1,5 +1,7 @@
 # Hybrid agent testing
 
+> **Устарело — поглощено flow-движком (реализовано P0–P4, 2026-06).** Канонический преемник: [flows/p2.4-hybrid-testing.md](../flows/p2.4-hybrid-testing.md) (опциональный `test_quality` evaluator + mutation guard на узле `checks`). Не использовать как есть.
+
 Status: **accepted** — outdated. Date: 2026-06-14 Updated: 2026-06-15 Owner: Vladimir Makarevich
 
 ## Goal

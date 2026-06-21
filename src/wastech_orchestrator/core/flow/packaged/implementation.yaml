@@ -1,5 +1,22 @@
-# Packaged built-in flow: implementation.
-# Canonical version; co-design reference in docs/backlog/flows/co-design/implementation.yaml.
+# Packaged built-in flow: implementation — the executable default flow the engine drives.
+#
+# The pipeline expressed as data: refinement -> planning -> implementation -> testing(checks) ->
+# review(evaluator) -> fixing -> publish, with the two fix loops and decomposition, plus the
+# per-task stage-skip `when` predicates (config.*_enabled — the bounded per-task exception, PRE.3).
+#
+# Layered on across P2: durable sessions (P2.2 `editing_lineage`), review-as-evaluator (P2.3), and
+# the core-owned commit-candidate mutation guard on `checks` (P2.4 — active whenever a `checks` node
+# is present, not declared here). An optional non-blocking `testing_quality` evaluator (the shared
+# evaluator runner already supports its self-cap) is NOT shipped in this default flow: it is a pure
+# graph-shape choice — an operator who wants it adds the node to their own flow YAML. See the
+# reference graph in docs/backlog/flows/co-design/implementation.yaml.
+#
+# NOTE (2026-06-19 revision): supervisor is NOT a graph node. It is a constant orchestrator layer
+# ABOVE any flow (summary + per-step advisory oversight, configured in config.yaml: supervisor); the
+# supervise_impl/supervise_fix nodes and the summary-as-node were removed from the target. There is
+# NO `summary` node here: the constant supervisor layer writes the summary at whole-task close
+# (before publish) and observes every completed step. See p2-implementation.md §P2.1,
+# flow-contract §2.2/§7.
 flow:
   name: implementation
   task_type: implementation
@@ -7,18 +24,13 @@ flow:
   output_policy: code_change
   publishing: pull_request
 
-  defaults:
-    evaluator:
-      session_scope: fresh_disposable
-      permission_profile: read-only
-      max_rework_per_stage: 1
-
   nodes:
     - id: refinement
       kind: agent
       role_file: roles/refinement.md
       session_scope: fresh_disposable
       permission_profile: read-only
+      output_artifact: enriched_spec
       hitl: { allow_question: true, allow_approval: false }
       when: { fact: derived.needs_refinement }
     - id: planning
@@ -26,60 +38,33 @@ flow:
       role_file: roles/planning.md
       session_scope: fresh_disposable
       permission_profile: read-only
+      output_artifact: plan
       hitl: { allow_question: true, allow_approval: true }
+      when: { fact: config.planning_enabled }
     - id: implementation
       kind: agent
       role_file: roles/implementation.md
       session_scope: editing_lineage
       permission_profile: workspace-write
-    - id: supervise_impl
-      kind: evaluator
-      role: supervisor
-      role_file: roles/supervisor.md
-      session_scope: fresh_disposable
-      permission_profile: read-only
-      max_rework_per_stage: 1
-    - id: testing_quality
-      kind: evaluator
-      role: test_quality
-      role_file: roles/testing.md
-      session_scope: fresh_disposable
-      permission_profile: read-only
-      blocking: false
-      max_rework_per_stage: 1
-      when: { fact: config.hybrid_testing }
     - id: testing
       kind: checks
       checker: command_profile
       discovery: { mode: auto, approve_command_changes: true }
+      when: { fact: config.testing_enabled }
     - id: review
       kind: evaluator
       role: review
       role_file: roles/review.md
       session_scope: fresh_disposable
       permission_profile: read-only
+      when: { fact: config.review_enabled }
     - id: fixing
       kind: agent
       role_file: roles/fixing.md
       session_scope: editing_lineage
       lineage_affinity: implementation
       permission_profile: workspace-write
-    - id: supervise_fix
-      kind: evaluator
-      role: supervisor
-      role_file: roles/supervisor.md
-      session_scope: fresh_disposable
-      permission_profile: read-only
-      max_rework_per_stage: 1
-    - id: summary
-      kind: evaluator
-      role: supervisor
-      role_file: roles/supervisor-final.md
-      session_scope: fresh_disposable
-      permission_profile: read-only
-      evaluation_kind: final_handoff
-      blocking: false
-      when: { fact: config.summary_enabled }
+      when: { fact: config.fixing_enabled }
     - id: publish
       kind: publish
       policy: pull_request
@@ -87,19 +72,12 @@ flow:
   edges:
     - { from: refinement, to: planning }
     - { from: planning, to: implementation }
-    - { from: implementation, to: supervise_impl }
-    - { from: supervise_impl, to: testing_quality, outcome: accept }
-    - { from: supervise_impl, to: fixing, outcome: rework, budget: 1 }
-    - { from: testing_quality, to: testing, outcome: accept }
-    - { from: testing_quality, to: fixing, outcome: rework, budget: 1 }
+    - { from: implementation, to: testing }
     - { from: testing, to: review, outcome: pass }
     - { from: testing, to: fixing, outcome: fail, loop: test_fix }
-    - { from: review, to: summary, outcome: accept }
+    - { from: review, to: publish, outcome: accept } # summary + advisory oversight = supervisor layer
     - { from: review, to: fixing, outcome: rework, loop: review_fix }
-    - { from: fixing, to: supervise_fix }
-    - { from: supervise_fix, to: testing_quality, outcome: accept }
-    - { from: supervise_fix, to: fixing, outcome: rework, budget: 1 }
-    - { from: summary, to: publish }
+    - { from: fixing, to: testing }
 
   budgets:
     global_fix_iterations: 30
@@ -109,15 +87,6 @@ flow:
   decomposition:
     proposed_by: planning
     gate: { min: 2, max: 8, linear_depends_on: true }
-    sub_flow:
-      [
-        implementation,
-        supervise_impl,
-        testing_quality,
-        testing,
-        review,
-        fixing,
-        supervise_fix,
-      ]
+    sub_flow: [implementation, testing, review, fixing]
     commit_each_subtask: true
     shared_budget: global_fix_iterations

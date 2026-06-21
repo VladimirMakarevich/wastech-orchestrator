@@ -31,6 +31,7 @@ from wastech_orchestrator.config.schema import (
     OrchestratorConfig,
 )
 from wastech_orchestrator.config.validation import validate_config
+from wastech_orchestrator.core.flow.registry import FlowRegistry
 from wastech_orchestrator.core.orchestrator import (
     FinalizePlan,
     Orchestrator,
@@ -45,7 +46,7 @@ from wastech_orchestrator.install import config_writer, detect, wizard
 from wastech_orchestrator.notify import build_notifier
 from wastech_orchestrator.notify.telegram import check_telegram_preflight
 from wastech_orchestrator.observability.logging import configure_logging
-from wastech_orchestrator.providers.base import ProviderId, Stage
+from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.security.isolation import check_isolation
 from wastech_orchestrator.state_store import IncompatibleStateError, StateStore
 
@@ -62,20 +63,6 @@ _EXIT_BY_STATUS: dict[Status, int] = {
     Status.DONE: 0,
     Status.FAILED: 1,
     Status.MANUAL_ACTION_REQUIRED: 2,
-}
-
-_STATUS_STAGE: dict[Status, Stage] = {
-    Status.REFINING: Stage.REFINEMENT,
-    Status.PLANNING: Stage.PLANNING,
-    Status.IMPLEMENTING: Stage.IMPLEMENTATION,
-    Status.TESTING: Stage.TESTING,
-    Status.REVIEWING: Stage.REVIEW,
-    Status.FIXING: Stage.FIXING,
-    Status.SUMMARIZING: Stage.SUMMARY,
-    Status.READY_TO_PUBLISH: Stage.PUBLISHING,
-    Status.COMMITTING: Stage.PUBLISHING,
-    Status.PUSHING: Stage.PUBLISHING,
-    Status.CREATING_PR: Stage.PUBLISHING,
 }
 
 # The orchestrator's runtime home inside the target repo (spec §21). Everything the orchestrator
@@ -253,17 +240,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="print what would change; write nothing"
     )
 
-    install_templates_cmd = sub.add_parser(
-        "install-templates",
-        help="deliver the packaged templates/ tree into an existing install (add-missing-only)",
-    )
-    install_templates_cmd.add_argument(
-        "--force", action="store_true", help="overwrite existing template files (default: skip)"
-    )
-    install_templates_cmd.add_argument(
-        "--dry-run", action="store_true", help="print the add/skip(/overwrite) plan; write nothing"
-    )
-
     rerun_cmd = sub.add_parser(
         "rerun",
         help="re-attempt a terminal task: fresh from base, or --continue from the failed stage",
@@ -326,11 +302,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _templates_root() -> Traversable:
-    """The packaged templates directory (works from a source tree or an installed wheel)."""
-    return resources.files("wastech_orchestrator").joinpath("templates")
-
-
 def _iter_template_files(root: Path) -> Iterator[Path]:
     """Yield template file paths relative to ``root``, sorted for deterministic output."""
     for path in sorted(root.rglob("*")):
@@ -369,35 +340,6 @@ def _copy_worc_docs(dest_root: Path, *, overwrite: bool, dry: bool) -> tuple[lis
             if not dry:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_bytes((Path(wroot) / rel).read_bytes())
-    return written, skipped
-
-
-def _copy_templates_tree(
-    dest_root: Path, *, overwrite: bool, dry: bool
-) -> tuple[list[str], list[str]]:
-    """Copy the packaged ``templates/`` tree into ``dest_root/templates`` (beside ``config.yaml``).
-
-    Mirrors ``_copy_worc_docs``: existing files are skipped unless ``overwrite``; ``dry`` writes
-    nothing. ``config.example.yaml`` is excluded — it is the source for ``config.yaml`` generation
-    (``init``/``install``) and key materialization (``upgrade-config``), not a verbatim template.
-    Returns ``(written, skipped)`` as ``templates/...`` relative paths for reporting. Shared by
-    ``cmd_install`` and ``cmd_install_templates`` so the two cannot drift.
-    """
-    written: list[str] = []
-    skipped: list[str] = []
-    with resources.as_file(_templates_root()) as troot:
-        for rel in _iter_template_files(Path(troot)):
-            if rel.name == "config.example.yaml":
-                continue
-            label = str(Path("templates") / rel)
-            dest = dest_root / "templates" / rel
-            if dest.exists() and not overwrite:
-                skipped.append(label)
-                continue
-            written.append(label)
-            if not dry:
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes((Path(troot) / rel).read_bytes())
     return written, skipped
 
 
@@ -543,51 +485,6 @@ def cmd_upgrade_docs(args: argparse.Namespace) -> int:
     for rel in to_remove:
         (worc_dir / rel).unlink()
     _report("upgrade-docs: updated")
-    return 0
-
-
-def cmd_install_templates(args: argparse.Namespace) -> int:
-    """Deliver the packaged ``templates/`` tree into ``.worc/templates/``, add-missing-only.
-
-    ``install`` already copies the tree; this refreshes it when an upgraded orchestrator ships new
-    templates. The location is resolved like ``upgrade-config``/``upgrade-docs`` (``--config`` → the
-    ``.worc/config.yaml`` discovered from the Git root) and the tree lands beside ``config.yaml``.
-
-    Add-missing by default: absent files are written, existing files are **skipped** to preserve
-    operator edits. ``--force`` overwrites them (explicit); ``--dry-run`` previews. Unlike
-    ``upgrade-docs`` it never removes operator-added files (templates are operator-editable) and it
-    never touches ``config.yaml``: activating an edited template stays an operator decision.
-    Fail-closed (exit 2) when no location resolves.
-    """
-    path_str = resolve_config_path(args)
-    if path_str is None or not Path(path_str).is_file():
-        target = f" ({path_str})" if path_str is not None else ""
-        print(
-            f"install-templates: no config.yaml found{target} — pass --config PATH, or run "
-            "'install' in your repo (creates .worc/config.yaml)"
-        )
-        return 2
-    install_dir = Path(path_str).resolve().parent
-    templates_dir = install_dir / "templates"
-    written, skipped = _copy_templates_tree(install_dir, overwrite=args.force, dry=args.dry_run)
-
-    if not written:  # every packaged template already present (default run) → no-op
-        print(f"install-templates: already complete ({len(skipped)} files in {templates_dir})")
-        return 0
-
-    verb = "~ overwrite" if args.force else "+ add"
-
-    def _report(prefix: str) -> None:
-        print(f"{prefix} {templates_dir}")
-        for rel in written:
-            print(f"  {verb} {rel}")
-        for rel in skipped:
-            print(f"  skip {rel}")
-
-    if args.dry_run:
-        _report("install-templates (dry-run): would update")
-        return 0
-    _report("install-templates: updated")
     return 0
 
 
@@ -748,10 +645,10 @@ def _report_rerun_plan(plan: RerunPlan) -> None:
     print(f"rerun (dry-run): would re-attempt {plan.task_id} [{mode}]")
     print(f"  current status: {current}")
     if plan.continue_mode:
-        stage = plan.interrupted_status.value if plan.interrupted_status else "unknown"
+        node = plan.interrupted_node or "unknown"
         print(f"  branch:    reuse {plan.branch or '(none)'}")
-        print(f"  re-enter:  {stage}")
-        print("  artifacts: kept; pending HITL prompt reset so the stage re-asks")
+        print(f"  re-enter:  {node}")
+        print("  artifacts: kept; pending HITL prompt reset so the node re-asks")
         print("  state:     terminal markers cleared; counters/subtasks/publish-ops kept")
     else:
         target = plan.branch or "agent/<id>-<slug>"
@@ -959,6 +856,17 @@ def run_preflight(config: OrchestratorConfig) -> tuple[bool, list[str]]:
     ok = ok and chk_ok
     lines.extend(chk_lines)
 
+    # Every flow file — packaged built-ins and operator flows in ``.worc/flows/`` — must load and
+    # pass the full fatal validator (graph + ceiling + config-consistency) before any task runs, so
+    # a broken or unsafe operator flow is caught at install/preflight, not mid-run (P4.1).
+    flow_registry = FlowRegistry(operator_flows_dir=worc_home_for(config) / "flows", config=config)
+    for name, error in flow_registry.validate_all():
+        if error is None:
+            lines.append(f"flow {name}: OK")
+        else:
+            ok = False
+            lines.append(f"flow {name}: FAIL — {error.splitlines()[0]}")
+
     tg_ok, tg_line = check_telegram_preflight(config.telegram)
     if not tg_ok:
         ok = False
@@ -1151,6 +1059,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             if not tasks:
                 latest = store.latest_task()
                 tasks = [] if latest is None else [latest]
+        current_nodes = {t.task_id: store.get_flow_checkpoint(t.task_id)[0] for t in tasks}
     finally:
         store.close()
 
@@ -1166,12 +1075,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"task_id={task.task_id}")
         print(f"title={task.title}")
         print(f"status={task.status.value}")
-        stage = _STATUS_STAGE.get(task.status)
-        if stage is not None:
-            print(f"stage={stage.value}")
-            route = config.agents.routing.get(stage)
-            if route is not None:
-                print(f"configured_primary={route.primary.value}")
+        node = current_nodes.get(task.task_id)
+        if node:
+            print(f"node={node}")  # the flow checkpoint: where the engine will resume
         if task.branch:
             print(f"branch={task.branch}")
         if task.active_subtask is not None and task.subtask_count is not None:
@@ -1336,9 +1242,8 @@ def cmd_install(args: argparse.Namespace) -> int:
     _install_create_dirs(spec.repo_local_path)
     _install_atomic_write(config_path, text)
     print(f"install: wrote {config_path}")
-    # Editable copies of the packaged templates + the task-authoring guide live in .worc/.
-    # --reconfigure refreshes them to the packaged version; a plain re-run leaves existing files.
-    _copy_templates_tree(worc_home, overwrite=args.reconfigure, dry=False)
+    # An editable copy of the task-authoring guide lives in .worc/. --reconfigure refreshes it to
+    # the packaged version; a plain re-run leaves existing files.
     worc_written, _ = _copy_worc_docs(worc_home, overwrite=args.reconfigure, dry=False)
     if worc_written:
         print(f"install: wrote agent task-authoring docs to {worc_home / 'guide'}")
@@ -1385,8 +1290,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_upgrade_config(args)
         if args.command == "upgrade-docs":
             return cmd_upgrade_docs(args)
-        if args.command == "install-templates":
-            return cmd_install_templates(args)
         if args.command == "rerun":
             return cmd_rerun(args)
         if args.command == "finalize":

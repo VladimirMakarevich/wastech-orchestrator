@@ -136,7 +136,7 @@ model {
       // B11 Decomposition, B12 HITL, B13 Skills, B14 Dangerous-diff, B15 Prompts, B20 Artifact-layout.
     }
 
-    db = store 'State Store (state.db)' 'tasks, stage_runs, provider_attempts, check_runs, …' {
+    db = store 'State Store (state.db)' 'tasks, node_runs, provider_attempts, check_runs, …' {
       #datastore
       technology 'SQLite'
     }

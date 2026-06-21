@@ -1,0 +1,1 @@
+From the repository analysis and the dependency-scan evidence, identify concrete threats: for each, the attack, the affected location (file/line or dependency), the impact, and a severity. Distinguish exploitable issues from theoretical ones. Read only; do not edit code or write files. Return the typed structured result required by the output schema.

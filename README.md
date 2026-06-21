@@ -2,16 +2,16 @@
 
 **A lean orchestrator that turns a written task into a reviewed Pull Request** — using external coding agents (**OpenAI Codex CLI** and **Anthropic Claude Code CLI**) to do the editing, while the orchestrator owns the process and the Git lifecycle.
 
-You drop a task file into a repo; the orchestrator parses it, creates a branch, and drives a **deterministic stage pipeline** — refine → plan → implement → test → review → fix → summary → publish — routing each stage to a coding agent behind a provider abstraction (with automatic fallback to the other agent on infrastructure errors). It runs your project's checks, commits the change, pushes, and opens a PR whose body is a plain-language summary of what was done and why. The agents only edit files inside a dedicated clone; **only the orchestrator commits, pushes, and creates PRs.** Every stage is checkpointed to SQLite, so a crash resumes from the last completed step and publishing is idempotent.
+You drop a task file into a repo; the orchestrator parses it, creates a branch, and drives a **deterministic flow** — a validated graph of typed steps (refine → plan → implement → test → review → fix → publish for the default flow) — routing each node to a coding agent behind a provider abstraction (with automatic fallback to the other agent on infrastructure errors). A constant, **read-only supervisor** watches every step and writes the plain-language summary that becomes the PR body. It runs your project's checks, commits the change, pushes, and opens a PR. The agents only edit files inside a dedicated clone; **only the orchestrator commits, pushes, and creates PRs.** Every step is checkpointed to SQLite, so a crash resumes from the last completed node and publishing is idempotent.
 
-> **Status: 0.x pre-release.** The full single-task pipeline, provider routing + fallback, the security/isolation gate, the scoped Git audit commit, SQLite checkpoints + crash recovery, the watch loop with periodic Git sync, and the `install` setup flow are implemented and covered by an extensive test suite. Telegram notifications and human-in-the-loop for clarification and deletion/dependency approvals are implemented; parallel `git worktree` execution remains on the roadmap (see [docs/backlog/](docs/backlog/)). APIs and config may still change before 1.0.
+> **Status: 0.x pre-release.** The flow engine and its packaged flows (`implementation`, `deep_research`, `security_audit`), node-based provider routing + infrastructure fallback, the constant advisory supervisor layer, the security/isolation gate, the scoped Git audit commit, SQLite checkpoints + crash recovery, the watch loop with periodic Git sync, and the `install` setup flow are implemented and covered by an extensive test suite. Telegram notifications and human-in-the-loop for clarification and deletion/dependency approvals are implemented; parallel `git worktree` execution remains on the roadmap (see [docs/backlog/](docs/backlog/)). APIs and config may still change before 1.0.
 
 ---
 
 ## Why use it
 
 - **Tasks in, PRs out.** Author a task in Markdown; get a branch, the change, your checks run, and a PR with a written summary — no babysitting.
-- **Two agents, one interface.** Codex and Claude Code are interchangeable per stage. If one fails for an _infrastructure_ reason (binary missing, timeout, rate limit), the orchestrator falls back to the other; test/review failures instead loop through a bounded `fix` stage.
+- **Two agents, one interface.** Codex and Claude Code are interchangeable per flow node — a node runs on its declared `provider`, else the global primary. If a node fails for an _infrastructure_ reason (binary missing, timeout, rate limit), the orchestrator falls back to the global primary; test/review failures instead loop through a bounded `fix` stage.
 - **The orchestrator owns Git.** Agents never commit or push. Branch naming, scoped staging, commit, push, PR, and the safe return to the base branch are all the orchestrator's job.
 - **Tasks and results live in the repo.** The task file and its summary are committed to the same repository as the code (the audit trail under the repo-root `tasks/`); everything else the orchestrator generates lives under a single gitignored `<repo>/.worc/` home and never enters Git history.
 - **Discovers work pushed to Git.** `watch` runs as a loop that periodically `fetch`/`pull`s the base branch, so a teammate can hand the orchestrator a task simply by committing it to `tasks/pending/` and pushing — no manual sync needed.
@@ -27,12 +27,12 @@ You drop a task file into a repo; the orchestrator parses it, creates a branch, 
 tasks/pending/task-001.md
         │  watch loop (periodic git fetch/pull) picks it up
         ▼
-   ┌──────────────────────── deterministic pipeline ─────────────────────────┐
+   ┌──────────────────────────── deterministic flow ───────────────────────────┐
    │ git fetch/pull → checkout base → create branch agent/<id>-<slug>          │
-   │   refine → plan → implement → test → review → fix(loop)                   │
-   │   → summary  (move task → tasks/done/, write <id>.summary.md)             │
-   │   → commit (code)  +  commit (tasks/: task + summary)                     │
-   │   → push  →  gh pr create   (PR body = the summary)                       │
+   │   refine → plan → implement → test → review → fix(loop) → publish         │
+   │   (supervisor watches every step; writes <id>.summary.md at close)        │
+   │   → move task → tasks/done/  →  commit (code) + commit (task+summary)     │
+   │   → push  →  gh pr create   (PR body = the supervisor summary)            │
    │   → return to base branch  →  fetch/pull refresh                          │
    └───────────────────────────────────────────────────────────────────────────┘
         │  auto_mode? → next pending task   |   otherwise idle (keep polling)
@@ -78,7 +78,7 @@ Author a task in the repo's `tasks/pending/` directory:
 ---
 id: task-001
 title: "Add email validation to the signup form"
-# optional: refined: true | decompose: true | agents: {implementation: claude, review: codex}
+# optional: task_type: deep_research | auto_merge: true | stages: { review: { enabled: false } }
 ---
 
 ## Description
@@ -91,7 +91,7 @@ The signup form accepts any string as an email. Validate the `email` field and s
 - A unit test covers valid and invalid cases.
 ```
 
-> Only `id` and `title` are required; the gate **rejects unknown fields**. The full allow-list (`id`, `title`, `refined`, `decompose`, `agents`, `contacts`, `model`, `reasoning`) is in [docs/task-authoring.md](docs/task-authoring.md).
+> Only `id` and `title` are required; the gate **rejects unknown fields**. The full allow-list (`id`, `title`, `task_type`, `pr_title`, `auto_merge`, `prompt_audit`, `contacts`, `stages`) is in [docs/task-authoring.md](docs/task-authoring.md). Provider/model/reasoning are **flow-node concerns, not task fields** — a task names a flow, it never patches the graph.
 
 Then run it:
 
@@ -121,8 +121,9 @@ The orchestrator creates `agent/task-001-...`, runs the pipeline and your checks
 | `git.footprint` | The audit trail: `audit_commit_message` (the message for the orchestrator's task+summary commit) and `audit_on_branch` (`task` — commit onto the task branch, the default; `sibling` — onto an `…-audit` branch). |
 | `orchestrator.auto_mode.enabled` | Process the next pending task automatically after cleanup (default `false`). |
 | `orchestrator.poll_interval_seconds` | `watch` tick: fetch/pull + re-scan interval (default `300`; `0` = single pass). |
-| `agents.allowed` / `agents.routing` | Which providers are enabled and the primary/fallback per stage. |
-| `checks.commands` | Your project's test/lint commands, run as the `test` stage (argv list, no shell). |
+| `agents.allowed` / `agents.providers.<id>.primary` | Which providers are enabled, and which one is the global primary (runs any flow node with no `provider`, and is the sole infrastructure-fallback target). Per-node routing lives on the flow, not in config. |
+| `checks.commands` / `checks.discovery` | Your project's test/lint commands (argv list, no shell), or auto-discovery of them, run as the `testing` stage. |
+| `supervisor` | The constant read-only supervisor layer that watches every step and writes the PR summary (model/reasoning/role_file). |
 | `git.create_pull_request` | Open a PR after push (needs `gh`); disabling it does not disable commit/push. |
 | `telegram.*` | Optional terminal notifications and blocking HITL; credentials stay in environment variables. |
 | `security.*` | Strict isolation, the environment allowlist, denied paths/commands — invariants a task cannot weaken. |
@@ -159,9 +160,6 @@ worc upgrade-config     add config keys from a new version, keeping existing val
                           --dry-run                   preview the keys that would be added
 worc upgrade-docs       refresh the installed worc/ task-authoring docs to the packaged version
                           --dry-run                   preview added/updated/removed files
-worc install-templates  deliver the packaged templates/ tree into an existing install (add-missing)
-                          --force                     overwrite existing templates (default: skip operator edits)
-                          --dry-run                   preview the add/skip(/overwrite) plan
 worc --version          installed version
 ```
 
@@ -191,19 +189,24 @@ Project layout:
 
 ```text
 src/wastech_orchestrator/
-  cli.py                  # install / preflight / telegram-test / run / watch / status
-  core/                   # pipeline, HITL, dangerous-diff guardrails, recovery, decomposition
+  cli.py                  # install / preflight / telegram-test / run / rerun / finalize / watch / stop / restart / status / upgrade-config / upgrade-docs
+  core/                   # the orchestrator wrapper (spine), HITL, dangerous-diff guardrail, recovery, decomposition, the constant supervisor layer
+    flow/                 # the flow engine + graph traversal, node runners, validation, checkers; packaged flows + role files
   notify/                 # Notifier contract + Telegram transport
-  providers/              # AgentProvider contract + Codex / Claude adapters, redaction
-  routing/                # per-stage routing + infrastructure-error fallback
-  config/                 # schema, loader, fail-closed validator
+  providers/              # AgentProvider contract + Codex / Claude adapters, durable sessions, redaction
+  routing/                # node-based provider routing + global-primary infrastructure fallback
+  config/                 # schema, loader, fail-closed validator, upgrade-config
+  checks/                 # check discovery / resolution + the command profile
+  check_runner.py         # runs the resolved checks as bounded subprocesses
   git_manager.py          # the only commit/push/PR owner; scoped staging + the audit commit
-  state_store.py          # SQLite checkpoints
+  state_store.py          # SQLite checkpoints (schema v10)
+  ledger.py               # the append-only completed-task ledger + failure reports
   task/                   # parser + §19 validation gate
   install/                # the install wizard, config writer, detection
-  templates/              # scaffolding copied into .worc/ (config example + per-stage prompts)
+  templates/              # the packaged config.example.yaml (source for `install`/`upgrade-config`)
   worc/                   # agent task-authoring guide copied to .worc/guide/ by `install`
-docs/                     # functional map, architecture, operations, cookbook, configuration, task authoring, rules, backlog
+docs/                     # operations, cookbook, configuration, task authoring, telegram, architecture, rules, backlog
+  functional/             # code-derived block + flow reference (the source of truth on any discrepancy)
   worc/                   # authored source for the packaged worc/ guide (kept in sync by a test)
 tests/                    # unit / integration / e2e (see .agents/rules/testing.md)
 ```
@@ -233,9 +236,10 @@ The full documentation is published at **[vladimirmakarevich.github.io/wastech-o
 ## Design principles
 
 1. **The core never knows a CLI's syntax** — only the `AgentProvider` interface; provider specifics live in `providers/`.
-2. **A deterministic stage pipeline**, not free-form agent autonomy — predictability over emergence.
-3. **Providers are interchangeable** with per-stage primary/fallback; **fallback is for infrastructure errors only**, never for test/review failures (those go to the bounded `fix` loop).
-4. **Only the orchestrator does commit / push / PR.** Agents are forbidden from touching the Git lifecycle, and the code commit never contains orchestration/task files.
-5. **Checkpoints at every stage** → crash recovery and idempotent publishing.
-6. **The security policy cannot be weakened** through a task or `extra_args`; no secrets in logs, SQLite, or artifacts.
-7. **Auto mode is opt-in** — by default one task is processed, the working copy returns to `repo.base_branch`, and further pending tasks are left for the operator.
+2. **The pipeline is data, not code** — a task's `task_type` resolves to a deterministic **flow** (a validated graph of typed nodes), driven by the flow engine; predictability over emergence.
+3. **An advisory supervisor, never a decision-maker** — a constant read-only layer watches every step and writes the PR summary, but it can never rework, reopen, or route; blocking is the job of the in-flow `review`/evaluator nodes.
+4. **Providers are interchangeable per node** — a node runs on its declared `provider`, else the global primary; **fallback is for infrastructure errors only** (targeting the global primary), never for test/review failures (those go to the bounded `fix` loop).
+5. **Only the orchestrator does commit / push / PR.** Agents are forbidden from touching the Git lifecycle, and the code commit never contains orchestration/task files.
+6. **Checkpoints at every step** → crash recovery and idempotent publishing.
+7. **The security policy cannot be weakened** through a task or `extra_args`; flow-wide ceilings (`permission_ceiling`/`output_policy`/`network_policy`) are validated fail-closed before any task runs; no secrets in logs, SQLite, or artifacts.
+8. **Auto mode is opt-in** — by default one task is processed, the working copy returns to `repo.base_branch`, and further pending tasks are left for the operator.

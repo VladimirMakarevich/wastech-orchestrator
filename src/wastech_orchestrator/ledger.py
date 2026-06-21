@@ -144,13 +144,20 @@ def write_failure_report(
     last_review_findings: Sequence[Mapping[str, Any]] | None,
     final_diff: str,
     decomposed: DecomposedFailureInfo | None = None,
+    node_id: str | None = None,
 ) -> tuple[str, str]:
-    """Write ``failure_report.json`` + ``stuck.md``; return both paths (§8.1, §10)."""
+    """Write ``failure_report.json`` + ``stuck.md``; return both paths (§8.1, §10).
+
+    Flow-neutral (flow-engine P1.2): the base fields (``task_id``/``node_id``/``loop``/``counters``)
+    are always written; the implementation-specific sections (``last_check_log``,
+    ``last_review_findings``, ``final_diff``) stay empty when the flow has no such nodes.
+    """
     task_dir = task_artifact_dir(artifacts_root, task_id)
     task_dir.mkdir(parents=True, exist_ok=True)
 
     report: dict[str, Any] = {
         "task_id": task_id,
+        "node_id": node_id,
         "loop": loop,
         "limit_exhausted": limit_name,
         "counters": dict(counters),

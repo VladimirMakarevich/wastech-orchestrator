@@ -1,141 +1,100 @@
 # B22 — Git and GitHub Operations (Git Manager)
 
-## Purpose
+> Reconstructed from code (`src/wastech_orchestrator/git_manager.py`) and tests (`tests/git/test_git_manager.py`). The code is the only source of truth; this document was rebuilt from the implementation, not from prose or comments. Significant claims carry a `file:line` reference.
 
-The sole component that commits, pushes, and opens Pull Requests — agents never do this. All git/gh calls go through a safe runner as an argv list (no shell, no interpolation of user strings) with an environment allowlist. Implements the invariants "only the orchestrator does commit/push/PR" and "launch without shell interpolation".
+**Status:** documented · **Source modules:** `src/wastech_orchestrator/git_manager.py`
 
-## Responsibilities
+## Responsibility
 
-- Branch flow: `fetch` → checkout `base_branch` → `pull` → create/reuse `agent/<task-id>-<slug>` ([git_manager.py:249-264](../../../src/wastech_orchestrator/git_manager.py#L249)).
-- **Scoped staging** (§21.1): only code paths + `:(exclude)tasks/` — **never** `git add .` ([git_manager.py:447-454](../../../src/wastech_orchestrator/git_manager.py#L447)).
-- The canonical single-layout footprint (§21): the orchestrator's runtime files live under the gitignored `<repo>/.worc/` home; `install` appends the single `.worc/` line to the repo's tracked `.gitignore` (`tasks/` is intentionally NOT ignored) ([git_manager.py:50-85](../../../src/wastech_orchestrator/git_manager.py#L50)).
-- The always-on, task-scoped **audit commit** of the task file + its `<id>.summary.md` ([git_manager.py:515-563](../../../src/wastech_orchestrator/git_manager.py#L515)).
-- Idempotent commit/push/PR/merge via `publish_operations` + remote state verification ([git_manager.py:567-668](../../../src/wastech_orchestrator/git_manager.py#L567)).
-- Terminal cleanup to `base_branch` when provably safe ([git_manager.py:725-749](../../../src/wastech_orchestrator/git_manager.py#L725)).
-- `SnapshotHook` implementation for capturing partial changes ([git_manager.py:365-398](../../../src/wastech_orchestrator/git_manager.py#L365)).
+`GitManager` ([git_manager.py:171](../../../src/wastech_orchestrator/git_manager.py#L171)) is the single component that runs every `git` and `gh` invocation for the target clone — branch flow, scoped staging, commits, push, PR creation, PR merge, diffs, terminal cleanup. Every invocation is built as an **argv list** and dispatched through the [B19](B19-subprocess-runner.md) safe process runner with no shell and an allowlisted environment ([git_manager.py:196](../../../src/wastech_orchestrator/git_manager.py#L196), [git_manager.py:188](../../../src/wastech_orchestrator/git_manager.py#L188)). It is the **only** place that commits/pushes/opens PRs — providers and flows never touch git; the publish node ([B30](B30-flow-node-runners.md)) reaches it only through a narrow `GitPort` slice, and the whole git flow is driven by the orchestrator ([B06](B06-orchestrator-pipeline.md)).
 
-## Block Boundaries
+It also satisfies the `SnapshotHook` contract ([git_manager.py:172](../../../src/wastech_orchestrator/git_manager.py#L172)) used by the router ([B17](B17-agent-router-and-fallback.md)) to capture partial work across an infrastructure fallback.
 
-### Within this block's responsibility
+## Public surface
 
-- All git/gh operations, publication idempotency, the `.worc/` gitignore exclude, the task-scoped audit commit, working tree snapshots, redaction of stderr/diffs before writing.
+- `GitManager(config, *, store, artifacts_root, gh_runner=None, run_process=run_process, heartbeat_seconds=30.0)` ([git_manager.py:174](../../../src/wastech_orchestrator/git_manager.py#L174)) — constructed once in `build_orchestrator` ([orchestrator.py:1997](../../../src/wastech_orchestrator/core/orchestrator.py#L1997)) and injected into the orchestrator.
+- Branch flow: `branch_name` ([git_manager.py:246](../../../src/wastech_orchestrator/git_manager.py#L246)), `prepare_branch` ([git_manager.py:249](../../../src/wastech_orchestrator/git_manager.py#L249)), `reset_branch_to_base` ([git_manager.py:266](../../../src/wastech_orchestrator/git_manager.py#L266)), `delete_branch` ([git_manager.py:289](../../../src/wastech_orchestrator/git_manager.py#L289)), `refresh_base` ([git_manager.py:328](../../../src/wastech_orchestrator/git_manager.py#L328)), `commit_on_branch` ([git_manager.py:346](../../../src/wastech_orchestrator/git_manager.py#L346)).
+- Footprint: `ensure_runtime_excludes` ([git_manager.py:354](../../../src/wastech_orchestrator/git_manager.py#L354)) and the module function `append_runtime_excludes` ([git_manager.py:80](../../../src/wastech_orchestrator/git_manager.py#L80)) used by `install` ([B03](B03-installer-and-scaffolding.md)).
+- Staging + commit: `changed_code_paths` ([git_manager.py:402](../../../src/wastech_orchestrator/git_manager.py#L402)), `changed_code_entries` ([git_manager.py:418](../../../src/wastech_orchestrator/git_manager.py#L418)), `staged_pathspec` ([git_manager.py:447](../../../src/wastech_orchestrator/git_manager.py#L447)), `commit_code` ([git_manager.py:456](../../../src/wastech_orchestrator/git_manager.py#L456)), `commit_subtask` ([git_manager.py:467](../../../src/wastech_orchestrator/git_manager.py#L467)), `commit_audit` ([git_manager.py:515](../../../src/wastech_orchestrator/git_manager.py#L515)).
+- Publish (idempotent): `push` ([git_manager.py:567](../../../src/wastech_orchestrator/git_manager.py#L567)), `create_pr` ([git_manager.py:598](../../../src/wastech_orchestrator/git_manager.py#L598)), `merge_pr` ([git_manager.py:629](../../../src/wastech_orchestrator/git_manager.py#L629)).
+- Diffs / snapshots: `write_current_diff` ([git_manager.py:690](../../../src/wastech_orchestrator/git_manager.py#L690)), `cumulative_committed_diff` ([git_manager.py:707](../../../src/wastech_orchestrator/git_manager.py#L707)), `diff_stat` ([git_manager.py:713](../../../src/wastech_orchestrator/git_manager.py#L713)), `capture` ([git_manager.py:365](../../../src/wastech_orchestrator/git_manager.py#L365)), `partial_change_since` ([git_manager.py:374](../../../src/wastech_orchestrator/git_manager.py#L374)).
+- Terminal cleanup: `terminal_cleanup` ([git_manager.py:725](../../../src/wastech_orchestrator/git_manager.py#L725)).
+- Read probes (no mutation): `unaccounted_dirty_paths` ([git_manager.py:301](../../../src/wastech_orchestrator/git_manager.py#L301)), `remote_branch_exists` ([git_manager.py:305](../../../src/wastech_orchestrator/git_manager.py#L305)), `recorded_pr_url` ([git_manager.py:309](../../../src/wastech_orchestrator/git_manager.py#L309)), `verify_pr_state` ([git_manager.py:316](../../../src/wastech_orchestrator/git_manager.py#L316)).
+- Types: `GitResult` ([git_manager.py:106](../../../src/wastech_orchestrator/git_manager.py#L106)), `PublishResult` ([git_manager.py:121](../../../src/wastech_orchestrator/git_manager.py#L121)), `CleanupOutcome` ([git_manager.py:130](../../../src/wastech_orchestrator/git_manager.py#L130)), `ChangedPath` ([git_manager.py:139](../../../src/wastech_orchestrator/git_manager.py#L139)), `GitCommandError` ([git_manager.py:148](../../../src/wastech_orchestrator/git_manager.py#L148)), `ManualActionRequired` ([git_manager.py:152](../../../src/wastech_orchestrator/git_manager.py#L152)).
 
-### Outside this block's responsibility
+## Behavior
 
-- **When** to commit/push/create PR and status transitions — that is [B06](./B06-orchestrator-pipeline.md).
-- **Process launch security** — that is [B19](./B19-subprocess-runner.md).
-- **Redaction rules** — [B21](./B21-secret-redaction.md) (Git Manager applies them).
-- **Environment allowlist** — [B25](./B25-security-policy.md).
-- **Partial change contract shape** — that is [B17/snapshots](./B17-agent-router-and-fallback.md); Git Manager implements it.
-- **Writing `check_runs`/ledger** — that is [B07](./B07-state-machine-and-store.md)/[B08](./B08-ledger-and-failure-reports.md).
+### Command execution — argv, no shell, redacted stderr
 
-## Entry Points
+`_run` runs an argv list in the clone (`cwd=self._clone`) via the injected `run_process` ([B19](B19-subprocess-runner.md)) with the allowlisted child env and a `GIT_TIMEOUT_SECONDS = 300` bound, wrapped in a heartbeat for the long network calls ([git_manager.py:196-217](../../../src/wastech_orchestrator/git_manager.py#L196)). Stdout is read from a scratch file; **stderr is always redacted** before it leaves the runner ([git_manager.py:222](../../../src/wastech_orchestrator/git_manager.py#L222)). `_git`/`_gh` prepend the executable exactly once ([git_manager.py:227](../../../src/wastech_orchestrator/git_manager.py#L227), [git_manager.py:238](../../../src/wastech_orchestrator/git_manager.py#L238)); `_git_checked` raises `GitCommandError` (carrying only the redacted stderr) when a required call fails ([git_manager.py:230-236](../../../src/wastech_orchestrator/git_manager.py#L230)). `GitResult.ok` is true only on exit 0 with no timeout and no launch error ([git_manager.py:116-118](../../../src/wastech_orchestrator/git_manager.py#L116)). `gh` can be swapped via an injected `gh_runner` for tests ([git_manager.py:240](../../../src/wastech_orchestrator/git_manager.py#L240)).
 
-- `GitManager(...)` ([git_manager.py:174](../../../src/wastech_orchestrator/git_manager.py#L174)); constructed in `build_orchestrator`.
-- Branch/diffs/publication/cleanup: `prepare_branch`, `reset_branch_to_base`, `delete_branch`, `commit_code`/`commit_subtask`/`commit_audit`, `push`, `create_pr`, `merge_pr`, `write_current_diff`/`cumulative_committed_diff`/`diff_stat`, `terminal_cleanup`, `ensure_runtime_excludes`.
-- Read probes: `unaccounted_dirty_paths`, `remote_branch_exists`, `recorded_pr_url`, `verify_pr_state`, `refresh_base`, `commit_on_branch`.
-- `SnapshotHook`: `capture`, `partial_change_since` (calls [B17](./B17-agent-router-and-fallback.md)).
-- Module-level function `append_runtime_excludes(repo_root)` ([git_manager.py:80](../../../src/wastech_orchestrator/git_manager.py#L80)) — [B03 install](./B03-installer-and-scaffolding.md).
+### Branch flow
 
-## Input Data and State
+`branch_name` is `<branch_prefix>/<task-id>-<slug>` ([git_manager.py:246-247](../../../src/wastech_orchestrator/git_manager.py#L246)); the canonical prefix is `agent` ([test_git_manager.py:57](../../../tests/git/test_git_manager.py#L57)). `prepare_branch` does best-effort `fetch origin`, a **checked** `checkout base`, best-effort `pull --ff-only`, then **reuses** the task branch if it exists or creates it with `checkout -b` ([git_manager.py:249-264](../../../src/wastech_orchestrator/git_manager.py#L249)) — reuse-on-restart is deliberate so a resumed run never recreates the branch ([test_git_manager.py:62-68](../../../tests/git/test_git_manager.py#L62)). `prepare_branch` records the `_ActiveTask` ([git_manager.py:253](../../../src/wastech_orchestrator/git_manager.py#L253)) that scopes partial-diff paths.
 
-`OrchestratorConfig` (repo, `git.footprint`, security, auto_merge), `StateStore` (for `publish_operations`), `artifacts_root`. Internal state — the current active task `_ActiveTask` (for partial diff paths) and the environment allowlist built once in the constructor.
+`reset_branch_to_base` is the complement for `rerun`: sync base, optionally `push origin --delete` the remote branch (which auto-closes its PR) when `force_reset_remote`, then force-delete the local branch so the next `prepare_branch` rebuilds it from current base ([git_manager.py:266-287](../../../src/wastech_orchestrator/git_manager.py#L266)). `delete_branch` force-deletes a local branch if present and is idempotent ([git_manager.py:289-299](../../../src/wastech_orchestrator/git_manager.py#L289), [test_git_manager.py:548-554](../../../tests/git/test_git_manager.py#L548)). `refresh_base` is a no-op unless HEAD is already on `base_branch`, then best-effort fetch + ff-only pull — periodic discovery for `watch` that never disturbs an active task branch ([git_manager.py:328-341](../../../src/wastech_orchestrator/git_manager.py#L328), [test_git_manager.py:212-218](../../../tests/git/test_git_manager.py#L212)). `commit_on_branch` is `merge-base --is-ancestor` ([git_manager.py:346-350](../../../src/wastech_orchestrator/git_manager.py#L346)).
 
-## Main Scenario (publishing a successful task)
+### Footprint — the `.worc/` exclude
 
-1. `commit_code` — scoped staging of code paths and a single commit (or current HEAD if there is nothing to change).
-2. `commit_audit` — a separate, always-on commit that stages **only this task's** moved task file plus its `<id>.summary.md` (in `tasks/done` or `tasks/failed`) — never the whole `tasks/` tree, so a concurrently-pending task is never swept in. Working artifacts live under the gitignored `.worc/` home and are never committed. The commit lands on the task branch, or on a `…-audit` sibling branch when `git.footprint.audit_on_branch` is `sibling`.
-3. `push` — push `agent/<id>-<slug>` to `origin` (refuses to push to base).
-4. `create_pr` — `gh pr create` with body from `summary.md`.
-5. (opt.) `merge_pr` — `gh pr merge --<strategy> [--auto]`.
-6. `terminal_cleanup` — checkout `base_branch` if the working tree is safe.
+`EXCLUDED_DIRS = (".worc", "tasks")` ([git_manager.py:50](../../../src/wastech_orchestrator/git_manager.py#L50)) are the directories that must never enter a code commit. `RUNTIME_GITIGNORE_LINES` is the single `.worc/` ignore line ([git_manager.py:55-58](../../../src/wastech_orchestrator/git_manager.py#L55)); `append_runtime_excludes` idempotently adds it to the repo's tracked `.gitignore` ([git_manager.py:80-85](../../../src/wastech_orchestrator/git_manager.py#L80)), and `ensure_runtime_excludes` calls it for clones scaffolded outside `install` ([git_manager.py:354-361](../../../src/wastech_orchestrator/git_manager.py#L354), [test_git_manager.py:167-174](../../../tests/git/test_git_manager.py#L167)). `tasks/` is intentionally **not** ignored — it carries the committed audit trail.
 
-All steps are idempotent: a repeated call after a restart checks `publish_operations` and/or the remote state and does not duplicate the operation.
+### Scoped staging — never `git add .`
 
-```mermaid
-flowchart TB
-    start(["publish (when — decided by B06)"]) --> cc["commit_code: scoped staging of code paths<br/>(NEVER git add .) → single commit"]
-    cc --> ca["commit_audit (always): commit only this task's<br/>tasks/&lt;state&gt;/&lt;id&gt;.md + &lt;id&gt;.summary.md"]
-    ca --> push["push: agent/id-slug to origin<br/>(refuses to push to base_branch)"]
-    push --> pr["create_pr: gh pr create, body from summary.md"]
-    pr --> mg{"auto_merge?"}
-    mg -->|yes| merge["merge_pr: gh pr merge --strategy<br/>(never --admin/force, single attempt)"]
-    mg -->|no| clean
-    merge --> clean["terminal_cleanup: checkout base,<br/>if working tree is safe"]
-    idem["idempotency: publish_operations (B07)<br/>+ remote state check"] -.-> push
-    idem -.-> pr
-    idem -.-> merge
-```
+`changed_code_paths` parses `git status --porcelain`, taking the rename destination and dropping any path under `EXCLUDED_DIRS` via `_is_artifact_path` ([git_manager.py:402-416](../../../src/wastech_orchestrator/git_manager.py#L402), [git_manager.py:443-445](../../../src/wastech_orchestrator/git_manager.py#L443)) — this is the code-staging set ([test_git_manager.py:90-101](../../../tests/git/test_git_manager.py#L90), [test_git_manager.py:130-164](../../../tests/git/test_git_manager.py#L130)). `changed_code_entries` returns typed `ChangedPath` rows (tracked from `diff --name-status HEAD`, untracked from `ls-files --others --exclude-standard -z`) for the dangerous-diff guard ([git_manager.py:418-441](../../../src/wastech_orchestrator/git_manager.py#L418)). `staged_pathspec` appends a belt-and-braces `:(exclude)tasks/` guard to the explicit code paths ([git_manager.py:447-454](../../../src/wastech_orchestrator/git_manager.py#L447)): `.worc/` is gitignored so `add` skips it, but `tasks/` is tracked and must be kept out of the _code_ commit.
 
-## Alternative Scenarios
+`commit_code` stages the code paths and makes one commit, returning current HEAD when there is nothing to commit ([git_manager.py:456-465](../../../src/wastech_orchestrator/git_manager.py#L456)). `commit_subtask` makes the single per-subtask commit, falling back to HEAD so a marker is always set ([git_manager.py:467-473](../../../src/wastech_orchestrator/git_manager.py#L467)). Both delegate to `_commit`, which stages with `git add -- <paths> :(exclude)tasks/` (a fixed argv — **never** `git add .`/`-A`/`--all`, asserted at [test_git_manager.py:103-128](../../../tests/git/test_git_manager.py#L103)) and records the idempotency op ([git_manager.py:475-513](../../../src/wastech_orchestrator/git_manager.py#L475)).
 
-### Partial Changes (SnapshotHook)
+`commit_audit` is the orchestrator-only commit of the task lifecycle ([git_manager.py:515-563](../../../src/wastech_orchestrator/git_manager.py#L515)): it stages **only this task's** moved task file plus its `<id>.summary.md` under `tasks/done` or `tasks/failed` — an explicit per-file list `add -- <present files>`, never `add -- tasks/` wholesale, so a concurrently-pending task is never swept in ([git_manager.py:539-546](../../../src/wastech_orchestrator/git_manager.py#L539), [test_git_manager.py:221-244](../../../tests/git/test_git_manager.py#L221)). It never touches code paths; working artifacts under `.worc/` are never committed. With nothing under `tasks/` it is a no-op returning `None` ([git_manager.py:545-563](../../../src/wastech_orchestrator/git_manager.py#L545), [test_git_manager.py:247-254](../../../tests/git/test_git_manager.py#L247)). When `git.footprint.audit_on_branch` is `SIBLING` the commit lands on a `<branch>-audit` sibling and HEAD is restored to the code branch afterward ([git_manager.py:531-552](../../../src/wastech_orchestrator/git_manager.py#L531)).
 
-`capture` takes a snapshot of HEAD/porcelain/diff-checksum; `partial_change_since` writes `.worc/logs/<task>/partial/NNN.diff` and returns `PartialChange` (without rollback) when the diff has changed ([git_manager.py:374-398](../../../src/wastech_orchestrator/git_manager.py#L374)).
+### Idempotent publishing
 
-### Rerun (branch reset)
+Idempotency is keyed by the `publish_operations` table ([B07](B07-state-machine-and-store.md), `UNIQUE(task_id, kind, subtask_order)` at [state_store.py:218-228](../../../src/wastech_orchestrator/state_store.py#L218)). The kinds are `code_commit`, `subtask_commit`, `audit_commit`, `push`, `pr`, `pr_merge` ([git_manager.py:89-94](../../../src/wastech_orchestrator/git_manager.py#L89)). Every mutating operation first checks for a `completed` op and short-circuits ([git_manager.py:483-485](../../../src/wastech_orchestrator/git_manager.py#L483)); commits also write a `_fingerprint` (a SHA-256 over `task_id|kind|subtask|head|sorted(paths)`) into a `started` row before mutating, then a `completed` row carrying the result SHA ([git_manager.py:790-794](../../../src/wastech_orchestrator/git_manager.py#L790), [git_manager.py:487-513](../../../src/wastech_orchestrator/git_manager.py#L487)).
 
-`reset_branch_to_base`: checkout base, optionally delete the remote branch (closes PR), force-delete the local branch — so that a fresh `prepare_branch` recreates it from the current base ([git_manager.py:266-287](../../../src/wastech_orchestrator/git_manager.py#L266)).
+`push` refuses to push directly to `base_branch` (publishing is PR-only; the task branch is always `agent/...`, so a base-targeting push signals corrupt state) ([git_manager.py:567-578](../../../src/wastech_orchestrator/git_manager.py#L567), [test_git_manager.py:490-497](../../../tests/git/test_git_manager.py#L490)); otherwise it returns early if the op is completed or the remote branch already exists (`ls-remote --heads`), else pushes `--set-upstream` and records completion ([git_manager.py:579-596](../../../src/wastech_orchestrator/git_manager.py#L579), [test_git_manager.py:272-283](../../../tests/git/test_git_manager.py#L272)).
 
-### Already-merged PR
+`create_pr` returns `None` when `git.create_pull_request` is disabled ([git_manager.py:600](../../../src/wastech_orchestrator/git_manager.py#L600), [test_git_manager.py:346-351](../../../tests/git/test_git_manager.py#L346)), short-circuits on a completed op, else runs `gh pr create --base <pr_base> --head <branch> --title ... --body-file <path>` and records the last stdout line as the PR URL ([git_manager.py:598-627](../../../src/wastech_orchestrator/git_manager.py#L598), [test_git_manager.py:286-312](../../../tests/git/test_git_manager.py#L286)).
 
-`merge_pr` on failure with a marker "already merged/not open/was merged" treats this as an idempotent success (`"merged"`), otherwise raises `GitCommandError` ([git_manager.py:659-665](../../../src/wastech_orchestrator/git_manager.py#L659)).
+`merge_pr` (DANGER: bypasses the human review gate — reached only when `git.auto_merge` resolves true) builds a fixed argv `gh pr merge <url> --<strategy>` and **never** emits `--admin` or any force flag, so a protected branch's checks stay the real gate, with exactly one attempt and no retry ([git_manager.py:629-668](../../../src/wastech_orchestrator/git_manager.py#L629), [test_git_manager.py:382-396](../../../tests/git/test_git_manager.py#L382)). When `wait_for_checks` it appends `--auto` to arm GitHub-native auto-merge and returns `"armed"` without a synchronous SHA lookup ([git_manager.py:656-666](../../../src/wastech_orchestrator/git_manager.py#L656), [test_git_manager.py:399-409](../../../tests/git/test_git_manager.py#L399)); otherwise it returns the merge-commit SHA (best-effort `gh pr view --json mergeCommit`) or `"merged"` ([git_manager.py:666](../../../src/wastech_orchestrator/git_manager.py#L666), [git_manager.py:670-675](../../../src/wastech_orchestrator/git_manager.py#L670)). A failure whose redacted output matches `_ALREADY_MERGED_MARKERS` (`already merged`, `already been merged`, `not open`, `was merged`) is treated as an idempotent success `"merged"`; conflict / branch-protection failures deliberately do **not** match and raise `GitCommandError` ([git_manager.py:99](../../../src/wastech_orchestrator/git_manager.py#L99), [git_manager.py:659-665](../../../src/wastech_orchestrator/git_manager.py#L659), [test_git_manager.py:425-448](../../../tests/git/test_git_manager.py#L425)).
 
-## Checks and Constraints
+The publish node ([B30](B30-flow-node-runners.md)) calls `commit_code` → `commit_audit` → `push` → `create_pr` in order through the `GitPort` slice ([publish.py:116-120](../../../src/wastech_orchestrator/core/flow/nodes/publish.py#L116)); a `GitCommandError` after finalize already moved the task file becomes a _resumable_ manual stop, completed on `rerun --continue` because every op is idempotent ([publish.py:64-82](../../../src/wastech_orchestrator/core/flow/nodes/publish.py#L64)).
 
-- **argv list, no shell**; stderr is always redacted ([git_manager.py:196-242](../../../src/wastech_orchestrator/git_manager.py#L196)).
-- **Never `git add .`** — only an explicit pathspec + `:(exclude)tasks/` (the `.worc/` home is gitignored, so it needs no guard) ([git_manager.py:443-454](../../../src/wastech_orchestrator/git_manager.py#L443)).
-- The audit commit stages only this task's own files (`tasks/<state>/<id>.md` + `<id>.summary.md`), never `git add -- tasks/` wholesale ([git_manager.py:539-546](../../../src/wastech_orchestrator/git_manager.py#L539)).
-- Refuses to push directly to `base_branch` (§12.12) → `GitCommandError` ([git_manager.py:574-578](../../../src/wastech_orchestrator/git_manager.py#L574)).
-- `merge_pr` **never** uses `--admin`/force, exactly one attempt (branch protections are preserved) ([git_manager.py:653-655](../../../src/wastech_orchestrator/git_manager.py#L653)).
-- Environment — allowlist only; git/gh credentials are configured outside the orchestrator ([git_manager.py:188](../../../src/wastech_orchestrator/git_manager.py#L188)).
-- `verify_pr_state`/`recorded_pr_url`/`refresh_base`/`fetch` — best-effort (do not raise errors).
+### Diffs and snapshots
 
-## Output
+`write_current_diff` writes `logs/<task-id>/current.diff` (working tree vs HEAD), **redacted** before writing with both pattern matching and the `denied_read_paths` content seed, so the failure report (which reads it back) carries no secret ([git_manager.py:690-705](../../../src/wastech_orchestrator/git_manager.py#L690), [test_git_manager.py:500-516](../../../tests/git/test_git_manager.py#L500)). `cumulative_committed_diff` is `git diff base...HEAD` for decomposed context ([git_manager.py:707-711](../../../src/wastech_orchestrator/git_manager.py#L707)); `diff_stat` is `git diff --stat base...HEAD` — file paths + counts only, never a patch body, so nothing needs redacting ([git_manager.py:713-721](../../../src/wastech_orchestrator/git_manager.py#L713), [test_git_manager.py:177-188](../../../tests/git/test_git_manager.py#L177)).
 
-Branch creation/switching; commits (SHA); push; PR URL; merge marker; `CleanupOutcome`; diffs on disk; `PartialChange`. Idempotent markers are written to `publish_operations` ([B07](./B07-state-machine-and-store.md)).
+As `SnapshotHook`, `capture` builds a `WorkingTreeSnapshot` from HEAD + porcelain + a SHA-256 checksum over porcelain and `diff HEAD` ([git_manager.py:365-372](../../../src/wastech_orchestrator/git_manager.py#L365)). `partial_change_since` returns `None` when the checksum is unchanged, otherwise writes the diff and returns a `PartialChange` _without rolling back_ — "build on it rather than restart" ([git_manager.py:374-385](../../../src/wastech_orchestrator/git_manager.py#L374), [test_git_manager.py:257-269](../../../tests/git/test_git_manager.py#L257)). The router ([B17](B17-agent-router-and-fallback.md)) captures before a provider attempt and calls `partial_change_since` on an infrastructure fallback ([router.py:184](../../../src/wastech_orchestrator/routing/router.py#L184), [router.py:322-323](../../../src/wastech_orchestrator/routing/router.py#L322)). Partial diffs are numbered per active task at `<task-artifact-dir>/partial/NNN.diff`, falling back to `logs/_partial/partial.diff` with no active task ([git_manager.py:387-398](../../../src/wastech_orchestrator/git_manager.py#L387)); `task_artifact_dir` resolves to `<artifacts_root>/logs/<task-id>` ([artifacts.py:46-53](../../../src/wastech_orchestrator/providers/artifacts.py#L46)).
 
-## Side Effects
+### Terminal cleanup — fail-closed
 
-- Git mutations (branches, commits), network (`fetch`/`pull`/`push`/PR/merge via `gh`).
-- Files (under the gitignored `.worc/` home): `logs/<task>/current.diff`, `partial/NNN.diff`, `publish/terminal-cleanup.json`; the single `.worc/` line in the repo's tracked `.gitignore`.
-- `publish_operations` rows in the State Store (idempotency).
-- Heartbeat log during long operations.
+`terminal_cleanup` checks out `base_branch` only when provably safe ([git_manager.py:725-749](../../../src/wastech_orchestrator/git_manager.py#L725)). It first computes `_unaccounted_dirty_paths` — tracked uncommitted changes plus any untracked non-artifact (`??`) file, ignoring `EXCLUDED_DIRS` ([git_manager.py:751-767](../../../src/wastech_orchestrator/git_manager.py#L751)); if any exist it **fails closed** with `CleanupOutcome(safe=False, …)` and does not switch branches ([git_manager.py:728-736](../../../src/wastech_orchestrator/git_manager.py#L728), [test_git_manager.py:466-475](../../../tests/git/test_git_manager.py#L466)). It also fails closed if the checkout itself errors ([git_manager.py:738-744](../../../src/wastech_orchestrator/git_manager.py#L738)). Either way it writes `<task-artifact-dir>/publish/terminal-cleanup.json` recording `target_branch`/`completed`/`safe`/`error`; on success it clears `_active` ([git_manager.py:746-748](../../../src/wastech_orchestrator/git_manager.py#L746), [git_manager.py:769-788](../../../src/wastech_orchestrator/git_manager.py#L769), [test_git_manager.py:451-463](../../../tests/git/test_git_manager.py#L451)).
 
-## Errors and Edge Cases
+### Read probes for rerun / finalize
 
-- Failed required git/gh call → `GitCommandError`.
-- Blocked merge (branch protection/conflict) → `GitCommandError` (Core sets `manual_action_required`, PR remains open).
-- Dirty working tree during cleanup → `CleanupOutcome(safe=False)`; status becomes `manual_action_required` on successful publication.
+`unaccounted_dirty_paths` exposes the same dirty-tree check without mutation (the `rerun` fail-closed gate) ([git_manager.py:301-303](../../../src/wastech_orchestrator/git_manager.py#L301)). `remote_branch_exists` is the `rerun` refuse-gate ([git_manager.py:305-307](../../../src/wastech_orchestrator/git_manager.py#L305)). `recorded_pr_url` returns the URL from a prior completed `pr` op ([git_manager.py:309-314](../../../src/wastech_orchestrator/git_manager.py#L309)). `verify_pr_state` runs read-only `gh pr view <url> --json state` (never creates/pushes/merges) and is best-effort — `None` when `gh` is missing/unauthenticated/offline ([git_manager.py:316-326](../../../src/wastech_orchestrator/git_manager.py#L316), [test_git_manager.py:522-545](../../../tests/git/test_git_manager.py#L522)).
 
-## Relationships
+## Invariants & guarantees
 
-### Uses
+- **Only the orchestrator/publish node commits/pushes/PRs; providers and flows never touch git.** Node runners reach git only via the narrow `GitPort` slice ([base.py:164-185](../../../src/wastech_orchestrator/core/flow/nodes/base.py#L164)); the same `GitManager` instance is handed to wiring as both `git` and `snapshot_hook` ([wiring.py:121-122](../../../src/wastech_orchestrator/core/flow/wiring.py#L121)).
+- **No shell, no user-string interpolation.** Every call is an argv list through [B19](B19-subprocess-runner.md) with the allowlisted child env ([git_manager.py:196-217](../../../src/wastech_orchestrator/git_manager.py#L196)); the `merge` strategy comes from the validated `MergeStrategy` enum ([git_manager.py:655](../../../src/wastech_orchestrator/git_manager.py#L655)).
+- **Never `git add .`** — only an explicit pathspec + `:(exclude)tasks/`; `.worc/` and `tasks/` never enter a code commit ([git_manager.py:447-454](../../../src/wastech_orchestrator/git_manager.py#L447), [test_git_manager.py:103-128](../../../tests/git/test_git_manager.py#L103)).
+- **No secret leaves the runner.** Stderr is redacted in `_run` ([git_manager.py:222](../../../src/wastech_orchestrator/git_manager.py#L222)) and `current.diff` is redacted before writing ([git_manager.py:700](../../../src/wastech_orchestrator/git_manager.py#L700)).
+- **Refuses to push to `base_branch`** — publishing is PR-only ([git_manager.py:574-578](../../../src/wastech_orchestrator/git_manager.py#L574)).
+- **`merge_pr` never weakens branch protection** — no `--admin`, no force, exactly one attempt ([git_manager.py:653-665](../../../src/wastech_orchestrator/git_manager.py#L653)).
+- **Idempotent publish** keyed by `publish_operations` + a remote-state check, so a resumed run never double-commits/pushes ([git_manager.py:483-485](../../../src/wastech_orchestrator/git_manager.py#L483), [git_manager.py:580-584](../../../src/wastech_orchestrator/git_manager.py#L580)).
+- **Cleanup fails closed** on unaccounted dirty paths or a failed checkout ([git_manager.py:728-744](../../../src/wastech_orchestrator/git_manager.py#L728)).
 
-- [B19 — Subprocess Runner](./B19-subprocess-runner.md) — `run_process`.
-- [B21 — Redaction](./B21-secret-redaction.md) — redaction of stderr and diffs; `read_denied_secrets`.
-- [B25 — Security](./B25-security-policy.md) — `build_child_env`.
-- [B07 — State Store](./B07-state-machine-and-store.md) — `publish_operations` (idempotency).
-- [B27 — Observability](./B27-observability.md) — heartbeat and logging.
-- [B17/snapshots](./B17-agent-router-and-fallback.md) — `WorkingTreeSnapshot`/`PartialChange` types.
+## Dependencies
 
-### Used by
+- **Uses:** [B19](B19-subprocess-runner.md) (`run_process` safe runner), [B21](B21-secret-redaction.md) (`redact_text` / `read_denied_secrets` for stderr + diffs), [B25](B25-security-policy.md) (`build_child_env` allowlist), [B07](B07-state-machine-and-store.md) (`publish_operations` idempotency + `PublishOpRow`), [B27](B27-observability.md) (heartbeat + bound logging), [B17](B17-agent-router-and-fallback.md) (`WorkingTreeSnapshot` / `PartialChange` types).
+- **Used by:** [B06](B06-orchestrator-pipeline.md) (owns the entire git/publish flow; constructs `GitManager`), [B30](B30-flow-node-runners.md) (publish node calls the `GitPort` slice), [B17](B17-agent-router-and-fallback.md) (uses it as the `SnapshotHook`), [B03](B03-installer-and-scaffolding.md) (`append_runtime_excludes`).
 
-- [B06 — Pipeline](./B06-orchestrator-pipeline.md) — the entire git and publication flow.
-- [B17 — Router](./B17-agent-router-and-fallback.md) — as `SnapshotHook` (snapshot/partial diff).
-- [B03 — Installer](./B03-installer-and-scaffolding.md) — `append_runtime_excludes` (gitignore `.worc/`).
-- [B01 — CLI](./B01-cli-and-operator-commands.md) — read probes via the rerun/finalize plan in [B06](./B06-orchestrator-pipeline.md).
+## Audit candidates
 
-## Place in the Overall System
+- `git_manager.py:121-127` — `PublishResult` is a defined-but-unused dataclass; no method in the module returns it and it is not imported elsewhere. See [the audit](../../backlog/2026-06-21-audit.md).
+- `git_manager.py:152-157` — `ManualActionRequired` is defined here but is never raised anywhere in `git_manager.py`; it is raised only by the orchestrator ([orchestrator.py:1305](../../../src/wastech_orchestrator/core/orchestrator.py#L1305), [:1506](../../../src/wastech_orchestrator/core/orchestrator.py#L1506), [:1744](../../../src/wastech_orchestrator/core/orchestrator.py#L1744)). The exception type is misplaced relative to the only module that raises it. See [the audit](../../backlog/2026-06-21-audit.md).
+- `git_manager.py:1` / `git_manager.py:88` and throughout — pervasive `§NN` spec-section comments (e.g. `§21.1`, `§13`, `§12.12`) reference a spec document, not code; with the architecture now flow-engine-based (stages are node ids) these section anchors are unverifiable from the code and risk drift. See [the audit](../../backlog/2026-06-21-audit.md).
+- `git_manager.py:301-307` — `unaccounted_dirty_paths` / `remote_branch_exists` are thin public pass-throughs to private `_unaccounted_dirty_paths` / `_remote_branch_exists`; the duplication is intentional (public read-probe vs internal) but the double surface is a mild smell worth a glance. See [the audit](../../backlog/2026-06-21-audit.md).
 
-Git Manager is the system's gateway to Git/GitHub. It upholds the invariant "only the orchestrator publishes", isolates the core from git syntax, and makes publication resilient to failures (idempotency) and safe (scoped staging, refusal to push to base, no `--admin`).
+## Tests
 
-## Code Evidence
-
-- [git_manager.py:50-85](../../../src/wastech_orchestrator/git_manager.py#L50) — `EXCLUDED_DIRS` (`.worc`, `tasks`), `RUNTIME_GITIGNORE_LINES` (the single `.worc/` line), `append_runtime_excludes`.
-- [git_manager.py:196-242](../../../src/wastech_orchestrator/git_manager.py#L196) — argv launch, stderr redaction, `_git_checked`/`_gh`.
-- [git_manager.py:249-287](../../../src/wastech_orchestrator/git_manager.py#L249) — branch flow, `reset_branch_to_base`.
-- [git_manager.py:402-563](../../../src/wastech_orchestrator/git_manager.py#L402) — scoped staging, idempotent commits, task-scoped audit commit.
-- [git_manager.py:567-668](../../../src/wastech_orchestrator/git_manager.py#L567) — push/PR/merge (idempotent, no `--admin`).
-- [git_manager.py:725-788](../../../src/wastech_orchestrator/git_manager.py#L725) — terminal cleanup + artifact.
-- Test: [tests/git/test_git_manager.py](../../../tests/git/test_git_manager.py) — `agent/<id>-<slug>` branch, absence of `git add .`, the `.worc/` gitignore line, task-scoped audit commit, push/PR/merge idempotency, already-merged, refusal to push to base, redacted diff, terminal cleanup.
+- [tests/git/test_git_manager.py](../../../tests/git/test_git_manager.py) — runs against a real temporary git repo. Covers: `agent/<id>-<slug>` branch creation and restart-reuse ([:52-68](../../../tests/git/test_git_manager.py#L52)); scoped staging excludes `EXCLUDED_DIRS` and the `.worc/` home, and the absence of `git add .`/`-A`/`--all` ([:71-164](../../../tests/git/test_git_manager.py#L71)); the single `.worc/` gitignore line ([:167-174](../../../tests/git/test_git_manager.py#L167)); `diff_stat` carries no patch body ([:177-188](../../../tests/git/test_git_manager.py#L177)); `refresh_base` pulls on base and is a no-op off base ([:191-218](../../../tests/git/test_git_manager.py#L191)); the task-scoped audit commit and its no-op ([:221-254](../../../tests/git/test_git_manager.py#L221)); snapshot capture + partial change ([:257-269](../../../tests/git/test_git_manager.py#L257)); push / PR / merge idempotency, `--auto` arming, no `--admin`, blocked-merge raising while staying incomplete, already-merged idempotent success ([:272-448](../../../tests/git/test_git_manager.py#L272)); terminal cleanup safe + fail-closed ([:451-475](../../../tests/git/test_git_manager.py#L451)); redacted `current.diff` ([:500-516](../../../tests/git/test_git_manager.py#L500)); refusal to push to base ([:490-497](../../../tests/git/test_git_manager.py#L490)); `verify_pr_state` and idempotent `delete_branch` ([:522-554](../../../tests/git/test_git_manager.py#L522)).

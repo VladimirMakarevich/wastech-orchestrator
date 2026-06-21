@@ -1,129 +1,48 @@
 # End-to-End Scenarios
 
-Brief end-to-end flows that span multiple blocks. Details for each block are in its own document (see [block-registry.md](./block-registry.md)); this document covers only the order and connections.
+Brief end-to-end flows that span multiple blocks. Details for each block are in its own document (see [block-registry.md](./block-registry.md)); the per-flow node graphs are in [flows/](./flows/index.md). This document covers only the order and connections. The pipeline body is driven by the [FlowEngine](./blocks/B28-flow-engine.md) — there is no hardcoded stage loop.
 
 ## Single-task processing (`run`, happy path)
 
-1. [B01 CLI](./blocks/B01-cli-and-operator-commands.md) parses `run`, resolves and loads configuration ([B04](./blocks/B04-install-registry-and-config-discovery.md)/[B05](./blocks/B05-configuration.md)), builds the orchestrator, and calls `run_task`.
-2. [B16 Gate](./blocks/B16-task-parsing-and-validation-gate.md) parses and validates the task file (§19); on failure — quarantine + write to [B08 Ledger](./blocks/B08-ledger-and-failure-reports.md), no branch created.
-3. [B06 Pipeline](./blocks/B06-orchestrator-pipeline.md) acquires the single slot, registers the task in [B07 State Store](./blocks/B07-state-machine-and-store.md), performs the isolation preflight ([B25](./blocks/B25-security-policy.md)) and checks preflight ([B23](./blocks/B23-check-discovery.md)) — both **before** the branch.
-4. [B22 Git Manager](./blocks/B22-git-manager.md) prepares the branch `agent/<id>-<slug>`.
-5. The refinement → planning stages are executed via [B17 Router](./blocks/B17-agent-router-and-fallback.md) → [B18 Providers](./blocks/B18-agent-providers.md); the prompt is assembled by [B15](./blocks/B15-prompt-templates.md), skills by [B13](./blocks/B13-skill-selection.md), output is validated by [B12](./blocks/B12-hitl-and-typed-output.md), and the decomposition decision is made by [B11](./blocks/B11-task-decomposition.md).
-6. For each unit of work: implementation (with guardrail [B14](./blocks/B14-dangerous-diff-guardrail.md)) → testing ([B24](./blocks/B24-check-execution.md)) → review → (opt.) fixing under limits [B09](./blocks/B09-fix-loop-control.md).
-7. summary → publishing: [B22](./blocks/B22-git-manager.md) commits (+audit), pushes, creates PR.
-8. [B06](./blocks/B06-orchestrator-pipeline.md) performs terminal cleanup, writes an entry to [B08 Ledger](./blocks/B08-ledger-and-failure-reports.md), and sends a notification ([B26](./blocks/B26-notifications-telegram.md)). [B01](./blocks/B01-cli-and-operator-commands.md) maps the status to an exit code.
+1. [B01 CLI](./blocks/B01-cli-and-operator-commands.md) parses `run`, resolves and loads configuration ([B04](./blocks/B04-install-registry-and-config-discovery.md)/[B05](./blocks/B05-configuration.md)), builds the orchestrator, calls `run_task`.
+2. [B16 Gate](./blocks/B16-task-parsing-and-validation-gate.md) parses and validates the task (§19); on reject — quarantine + [B08 Ledger](./blocks/B08-ledger-and-failure-reports.md), no branch.
+3. [B06 Orchestrator](./blocks/B06-orchestrator-pipeline.md) acquires the single slot, registers the task in [B07 State Store](./blocks/B07-state-machine-and-store.md), resolves the flow for the task's `task_type` via [B29 Registry](./blocks/B29-flow-definition-and-validation.md) (validated, fail-closed), runs the isolation ([B25](./blocks/B25-security-policy.md)) and check ([B23](./blocks/B23-check-discovery.md)) preflights — both **before** the branch.
+4. [B22 Git Manager](./blocks/B22-git-manager.md) prepares the branch `agent/<id>-<slug>`; the orchestrator builds the node services/inputs + the [B31 Supervisor](./blocks/B31-supervisor.md) and hands the graph to [B28 FlowEngine](./blocks/B28-flow-engine.md).
+5. The engine traverses the default `implementation` graph ([flows/implementation.md](./flows/implementation.md)): `refinement → planning → implementation → testing → review → publish`. Each agent node runs via [B17 Router](./blocks/B17-agent-router-and-fallback.md) → [B18 Providers](./blocks/B18-agent-providers.md) ([B30 runners](./blocks/B30-flow-node-runners.md)); prompts are assembled by [B15](./blocks/B15-prompt-templates.md), skills by [B13](./blocks/B13-skill-selection.md), typed output by [B12](./blocks/B12-hitl-and-typed-output.md). After each step the supervisor observes read-only.
+6. `testing` runs the resolved checks ([B24](./blocks/B24-check-execution.md)); `review` is a read-only evaluator. `implementation`/`fixing` edits are guarded by the dangerous-diff classifier ([B14](./blocks/B14-dangerous-diff-guardrail.md)).
+7. `publish`: the orchestrator's finalize hook writes the supervisor summary + moves the task file; [B22](./blocks/B22-git-manager.md) commits (code + audit), pushes, opens the PR — idempotently.
+8. [B06](./blocks/B06-orchestrator-pipeline.md) performs terminal cleanup, writes one [B08 Ledger](./blocks/B08-ledger-and-failure-reports.md) record, sends a notification ([B26](./blocks/B26-notifications-telegram.md)). [B01](./blocks/B01-cli-and-operator-commands.md) maps the status to an exit code.
 
-The same sequence shown as a timeline (happy path):
+## Quality fix loop
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Op as Operator
-    participant CLI as B01 CLI
-    participant Gate as B16 Gate
-    participant Core as B06 Pipeline
-    participant Agent as B17/B18 Agents
-    participant Checks as B24 Checks
-    participant Git as B22 Git
-    participant Out as B08 Ledger + B26 Telegram
+A `testing` `fail` takes the `test_fix` loop edge to `fixing`; a `review` `rework` takes the `review_fix` loop edge to `fixing`; `fixing → testing` re-runs the gate. The engine charges each rework against its named loop and the single global counter, capped at `min(flow budget, agents.max_*)` ([B28](./blocks/B28-flow-engine.md)/[B09](./blocks/B09-fix-loop-control.md)). Exhausting any limit ends the run at `manual_action_required` with a failure report ([B08](./blocks/B08-ledger-and-failure-reports.md)). `fixing` resumes `implementation`'s editing session (`lineage_affinity`, durable in `editing_lineage`).
 
-    Op->>CLI: run {task-file}
-    CLI->>Gate: parse + validate (§19)
-    alt task rejected
-        Gate-->>CLI: reject → quarantine + ledger (no branch)
-    else task accepted
-        Gate-->>Core: NormalizedTask
-        Core->>Core: acquire slot, register (new→validated)
-        Core->>Core: isolation and checks preflight (before branch)
-        Core->>Git: prepare branch agent/{id}-{slug}
-        Core->>Agent: refinement, planning
-        loop for each unit of work
-            Core->>Agent: implementation
-            Core->>Checks: testing
-            Core->>Agent: review
-            opt test or review failure
-                Core->>Agent: fixing (under B09 limits)
-            end
-        end
-        Core->>Agent: summary
-        Core->>Git: commit + audit, push, PR (opt. auto-merge)
-        Core->>Out: write to ledger + notification
-        Core-->>CLI: PipelineResult (status, PR URL)
-    end
-    CLI-->>Op: exit code
-```
+## Decomposition
 
-## Fix loop (testing/review → fixing)
+If planning proposes a split that passes the deterministic gate ([B11](./blocks/B11-task-decomposition.md)), the orchestrator partitions the flow into pre / region / post ([B28](./blocks/B28-flow-engine.md) `partition_decomposition`) and runs the `sub_flow` region (`implementation → testing → review → fixing`) once per subtask, committing each ([B22](./blocks/B22-git-manager.md)) and resetting per-loop budgets between subtasks while the global counter accumulates. A subtask with a verified commit is never re-run.
 
-1. [B24](./blocks/B24-check-execution.md) reports a quality failure; [B06](./blocks/B06-orchestrator-pipeline.md) via [B09](./blocks/B09-fix-loop-control.md) decides to enter `fixing` or, when the limit is exhausted, transitions to `manual_action_required` with a failure report ([B08](./blocks/B08-ledger-and-failure-reports.md)).
-2. The fixing stage repairs the code ([B17](./blocks/B17-agent-router-and-fallback.md)/[B18](./blocks/B18-agent-providers.md)) and returns to testing (or review if testing was skipped).
-3. Passing checks/review resets the respective counters ([B09](./blocks/B09-fix-loop-control.md)).
+## HITL (planning approval, dangerous diff, changed checks)
 
-## Infrastructure provider fallback
+- **Planning approval / question** — a typed `human_input` on a HITL-capable agent node triggers one durable round-trip via [B30](./blocks/B30-flow-node-runners.md) `HumanGate` over [B26](./blocks/B26-notifications-telegram.md); the interaction artifact ([B12](./blocks/B12-hitl-and-typed-output.md)) is persisted before asking, so a restart resumes it. Fail-closed on timeout/denial.
+- **Dangerous diff** — a deletion/dependency change after a `workspace-write` edit ([B14](./blocks/B14-dangerous-diff-guardrail.md)) requires a durable approval (a matching planning pre-approval counts); on denial the node reconsiders once, then fails closed to manual.
+- **Changed check set** — a check-command set that differs from the last approved one is gated by the orchestrator ([B06](./blocks/B06-orchestrator-pipeline.md) `_ask_check_command_approval`), fail-closed.
 
-1. [B17 Router](./blocks/B17-agent-router-and-fallback.md) launches the primary via [B18](./blocks/B18-agent-providers.md).
-2. On a `ProviderError` of infrastructure class (and if the profile policy [B25](./blocks/B25-security-policy.md) permits it), the Router takes a partial diff snapshot ([B22](./blocks/B22-git-manager.md) as `SnapshotHook`) and switches to the fallback, passing the diff.
-3. A quality `failed` does **not** trigger the fallback — it goes to `fixing` ([B06](./blocks/B06-orchestrator-pipeline.md)).
+## `watch` daemon
 
-Quality vs. infrastructure decision — where a failing stage is routed:
+Between ticks ([B02](./blocks/B02-watch-daemon-and-scheduling.md)): `refresh_repo` fetch/ff-pulls the base branch (slot free), then `watch_once` resumes any in-flight task first, then processes pending tasks one at a time — back-to-back only with `auto_mode`; `manual_action_required` always blocks. `SIGTERM` is honored between ticks.
 
-```mermaid
-flowchart TD
-    start["Agent stage or check completed unsuccessfully"] --> q{"Problem type?"}
-    q -->|"infrastructure:<br/>binary_not_found, timeout,<br/>rate_limited, ..."| infra["B17: fallback to another provider,<br/>if its profile is no weaker (B25)"]
-    q -->|"quality failure:<br/>tests or review"| fix["B06: fixing stage<br/>under B09 limits"]
-    infra --> retry["retry the same stage<br/>with another provider"]
-    fix --> back["back to testing / review"]
-    fix -->|"limit exhausted"| manual["manual_action_required<br/>+ failure report (B08)"]
-```
+## Resume (`resume`)
 
-## Human-in-the-loop (refinement/planning) and dangerous-diff guardrail
+On startup [B10](./blocks/B10-recovery-and-resume.md) reconciles: >1 active → `manual_action_required`; one active → resume from the flow checkpoint (`current_node` + counters + fingerprint, hydrated from `node_runs`); a fingerprint mismatch restarts from the entry node; an incomplete terminal cleanup → finish it. `publish_operations` idempotency ([B07](./blocks/B07-state-machine-and-store.md)) means a resumed run never repeats a commit/push/PR; the flow is re-validated against the live config ([B29](./blocks/B29-flow-definition-and-validation.md)).
 
-1. The agent returns a `human_input` signal in the typed output ([B12](./blocks/B12-hitl-and-typed-output.md)).
-2. [B06](./blocks/B06-orchestrator-pipeline.md) writes a durable HITL artifact ([B12](./blocks/B12-hitl-and-typed-output.md)) and via [B26 Telegram](./blocks/B26-notifications-telegram.md) sends the request and waits for a response.
-3. For editing stages, [B14](./blocks/B14-dangerous-diff-guardrail.md) classifies the diff; a dangerous diff (deletions/dependencies) not covered by a planning approval requires confirmation; rejection allows one "safe" rework.
-4. A response failure (timeout/transport/invalid) → `manual_action_required` (fail-closed).
+## `rerun` / `rerun --continue`
 
-## Task decomposition
+[B06](./blocks/B06-orchestrator-pipeline.md): `rerun` archives prior artifacts, resets the branch to base, clears per-attempt state ([B07](./blocks/B07-state-machine-and-store.md)), and re-runs from scratch; `rerun --continue` revives the terminal task and resumes at the persisted flow checkpoint node, reusing the branch and prior work.
 
-1. planning returns a recommendation to split; [B11](./blocks/B11-task-decomposition.md) applies the deterministic acceptance rule (§5.1).
-2. On acceptance, subtask artifacts ([B11](./blocks/B11-task-decomposition.md)) and rows in [B07](./blocks/B07-state-machine-and-store.md) are written; each unit goes through implement→test→review→fix with a local commit ([B22](./blocks/B22-git-manager.md)); the global `fix_iterations` counter ([B09](./blocks/B09-fix-loop-control.md)) accumulates across all subtasks.
+## `finalize`
 
-## Check discovery and execution
+[B06](./blocks/B06-orchestrator-pipeline.md) records a task the operator handled out-of-band: terminal cleanup (fail-closed if unsafe), set the declared status (operator override), relocate the file, append a `manual` ledger record — no pipeline, no commit/push/PR.
 
-1. During preflight, [B06](./blocks/B06-orchestrator-pipeline.md) calls [B23](./blocks/B23-check-discovery.md): resolves the runnable profile (configured / deterministic / opt. agent fallback), caches by fingerprint.
-2. A changed set of commands goes through the approval gate (§1.2) via [B12](./blocks/B12-hitl-and-typed-output.md)/[B26](./blocks/B26-notifications-telegram.md).
-3. During the testing stage, [B24](./blocks/B24-check-execution.md) runs the profile; a launch failure (not a quality failure) → a single re-resolve ([B23](./blocks/B23-check-discovery.md)) or terminal failure.
+## Research and audit flows
 
-## `watch` daemon (periodic discovery)
-
-1. [B02](./blocks/B02-watch-daemon-and-scheduling.md) on each tick: `refresh_repo` (fetch/pull base via [B06](./blocks/B06-orchestrator-pipeline.md)→[B22](./blocks/B22-git-manager.md)), resumes the active task, then picks up pending tasks one at a time (auto-mode governs continuation).
-2. A PID file and `SIGTERM` handler ([B02](./blocks/B02-watch-daemon-and-scheduling.md)) provide graceful `stop`/`restart`; the single slot is enforced via `acquire_slot` ([B06](./blocks/B06-orchestrator-pipeline.md)).
-
-## Resume after restart (`resume`)
-
-1. [B06](./blocks/B06-orchestrator-pipeline.md) calls [B10](./blocks/B10-recovery-and-resume.md): reconciles state ([B07](./blocks/B07-state-machine-and-store.md) + branch commits via [B22](./blocks/B22-git-manager.md)).
-2. Decision: continue the sole in-flight task from its recorded stage, finish cleanup, mark an ambiguous task as `manual_action_required`, or do nothing (slot is free).
-3. Publishing idempotency ([B22](./blocks/B22-git-manager.md), `publish_operations`) prevents duplicate commit/push/PR creation.
-
-## Retry (`rerun` / `rerun --continue`)
-
-1. [B01](./blocks/B01-cli-and-operator-commands.md) calls `plan_rerun` ([B06](./blocks/B06-orchestrator-pipeline.md)), prints the plan or asks for confirmation.
-2. **fresh**: archive artifacts ([B20](./blocks/B20-artifact-layout.md)), reset branch to base ([B22](./blocks/B22-git-manager.md)), clear per-attempt state ([B07](./blocks/B07-state-machine-and-store.md)), then `run_task`.
-3. **continue**: revive the task at the interrupted stage (reset incomplete HITL [B12](./blocks/B12-hitl-and-typed-output.md)), then `resume`.
-
-## Manual finalization (`finalize`)
-
-1. [B01](./blocks/B01-cli-and-operator-commands.md) calls `plan_finalize` ([B06](./blocks/B06-orchestrator-pipeline.md)) (opt. merge check via read-only `gh pr view` [B22](./blocks/B22-git-manager.md)).
-2. After confirmation, [B06](./blocks/B06-orchestrator-pipeline.md): terminal cleanup, declared status **outside** the state machine ([B07](./blocks/B07-state-machine-and-store.md)), file move, `manual` entry in [B08 Ledger](./blocks/B08-ledger-and-failure-reports.md) — no pipeline, no commit/push/PR.
-
-## Installation and subsequent configuration discovery
-
-1. [B01](./blocks/B01-cli-and-operator-commands.md) → `install` → [B03 Installer](./blocks/B03-installer-and-scaffolding.md): wizard (git/provider/check detection), `config.yaml` generation + validation ([B05](./blocks/B05-configuration.md)), scaffold the gitignored `<repo>/.worc/` home + the repo-root `tasks/` lifecycle dirs, gitignore `.worc/` ([B22](./blocks/B22-git-manager.md) `append_runtime_excludes`).
-2. Auto-preflight (providers, isolation, checks, telegram).
-3. From then on, any command re-discovers `<repo>/.worc/config.yaml` via `resolve_config_path` — walking up from the cwd to the Git root, no binding to maintain ([B04](./blocks/B04-install-registry-and-config-discovery.md)).
-
-## Preflight (readiness diagnostics)
-
-1. [B01 `run_preflight`](./blocks/B01-cli-and-operator-commands.md): `provider.preflight()` for each resolved provider ([B18](./blocks/B18-agent-providers.md)), `check_isolation` ([B25](./blocks/B25-security-policy.md)), checks diagnostics ([B23](./blocks/B23-check-discovery.md)), telegram-preflight ([B26](./blocks/B26-notifications-telegram.md)).
-2. Returns readiness and secret-free strings; exit code is determined by [B01](./blocks/B01-cli-and-operator-commands.md).
+`task_type: deep_research` and `security_audit` resolve to their own packaged graphs ([flows/deep-research.md](./flows/deep-research.md), [flows/security-audit.md](./flows/security-audit.md)): the same engine, supervisor, and HITL machinery, but with a `citation` / `dependency_scan` checker ([B32](./blocks/B32-flow-checkers.md)), `network_policy`-granted research, and a documentation-PR or private-report publishing policy ([B30](./blocks/B30-flow-node-runners.md)).

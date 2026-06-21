@@ -117,7 +117,7 @@ def test_operator_flow_takes_priority_over_builtin(tmp_path: Path) -> None:
     flows_dir.mkdir()
     (flows_dir / "implementation.yaml").write_text(_MINIMAL_YAML)
     snap = FlowRegistry(operator_flows_dir=flows_dir).resolve("implementation")
-    # Operator flow has 2 nodes; packaged implementation has 11.
+    # Operator flow has 2 nodes; packaged implementation (P1 parity) has 8.
     assert len(snap.doc.nodes) == 2
 
 
@@ -126,7 +126,9 @@ def test_operator_dir_no_matching_file_falls_back_to_packaged(tmp_path: Path) ->
     flows_dir = tmp_path / "flows"
     flows_dir.mkdir()
     snap = FlowRegistry(operator_flows_dir=flows_dir).resolve("implementation")
-    assert len(snap.doc.nodes) == 11  # packaged implementation
+    # packaged implementation: refinement, planning, implementation, testing, review, fixing,
+    # publish — the summary node is gone (the constant supervisor layer writes the summary).
+    assert len(snap.doc.nodes) == 7
 
 
 def test_no_operator_dir_uses_packaged_only() -> None:
@@ -224,3 +226,53 @@ flow:
     # FlowValidationError (not FlowResolutionError) for a structurally invalid flow.
     with pytest.raises(FlowValidationError):
         FlowRegistry(operator_flows_dir=flows_dir).resolve("bad")
+
+
+# -- P4.1: operator flows on the live path ------------------------------------
+
+
+def test_operator_flow_resolves_and_executes(tmp_path: Path) -> None:
+    # A custom task_type dropped in .worc/flows/ resolves to a validated, engine-drivable snapshot
+    # (single entry, reachable terminal — proven by resolve() running the full validator). The
+    # engine driving it end-to-end is covered by test_flow_engine_driver.py.
+    flows_dir = tmp_path / "flows"
+    flows_dir.mkdir()
+    (flows_dir / "my_flow.yaml").write_text(_MINIMAL_YAML.replace("implementation", "my_flow"))
+    snap = FlowRegistry(operator_flows_dir=flows_dir).resolve("my_flow")
+    assert snap.doc.task_type == "my_flow"
+    assert {n.id for n in snap.doc.nodes} == {"work", "out"}
+
+
+def test_operator_flow_overrides_builtin(tmp_path: Path) -> None:
+    flows_dir = tmp_path / "flows"
+    flows_dir.mkdir()
+    (flows_dir / "implementation.yaml").write_text(_MINIMAL_YAML)
+    snap = FlowRegistry(operator_flows_dir=flows_dir).resolve("implementation")
+    # The 2-node operator flow wins over the 7-node packaged implementation.
+    assert len(snap.doc.nodes) == 2
+
+
+# -- P4.1: validate_all (preflight gate) --------------------------------------
+
+
+def test_validate_all_reports_each_packaged_flow() -> None:
+    results = dict(FlowRegistry().validate_all())
+    assert results == {"implementation": None, "deep_research": None, "security_audit": None}
+
+
+def test_validate_all_includes_operator_flows(tmp_path: Path) -> None:
+    flows_dir = tmp_path / "flows"
+    flows_dir.mkdir()
+    (flows_dir / "custom.yaml").write_text(_MINIMAL_YAML.replace("implementation", "custom"))
+    results = dict(FlowRegistry(operator_flows_dir=flows_dir).validate_all())
+    assert results["custom"] is None
+    assert results["implementation"] is None  # packaged still enumerated
+
+
+def test_validate_all_flags_broken_operator_flow_without_raising(tmp_path: Path) -> None:
+    flows_dir = tmp_path / "flows"
+    flows_dir.mkdir()
+    (flows_dir / "broken.yaml").write_text("flow:\n  name: broken\n")  # malformed
+    results = dict(FlowRegistry(operator_flows_dir=flows_dir).validate_all())
+    assert results["broken"] is not None  # an error string, not None
+    assert results["implementation"] is None  # other flows unaffected

@@ -1,582 +1,318 @@
 # Lean orchestrator architecture for coding agents (Codex / Claude) + Git
 
-Date: 2026-06-11 (updated) Goal: describe the architecture of a console application that runs on Windows/macOS/Linux, watches a task folder, runs a task through a deterministic stage pipeline using external coding agents (Codex CLI and/or Claude Code CLI), and publishes the result to a dedicated Git branch.
+Date: 2026-06-21 (rewritten for the flow-engine architecture). Goal: describe the architecture of a console application that runs on Windows/macOS/Linux, watches a task folder, runs each task through a **deterministic flow** (a validated graph of typed nodes) executed by external coding agents (Codex CLI and/or Claude Code CLI), and publishes the result to a dedicated Git branch.
+
+> This is the high-level **design rationale**. The code-derived reference — contracts, the state machine, routing, fallback, the security policy, and per-flow node graphs, each with `file:line` bindings — is the [Functional Map](functional/index.md), which is the source of truth on any discrepancy.
 
 ---
 
 ## 1. The idea in one paragraph
 
-The application does not replace the coding agent and Git. It acts as an **orchestrator**: it watches the task folder, parses the task, updates the repository, creates a dedicated branch, and runs the task through a deterministic stage pipeline (plan → implementation → review → tests → fixes → commit → push). After a task finishes, it safely switches the working copy back to the repository's main/base branch; only then can the next task start. Taking the next task automatically is an explicit **auto mode** setting and is off by default. The heavy lifting on the code is done by an **external coding agent** — Codex CLI or Claude Code CLI — behind an abstraction that allows globally enabling/disabling a provider and falling back to the remaining one. On top of the stages sits a thin **supervisor** that plans, routes, and, when needed, asks the human clarifying questions (via Telegram). Git access uses ordinary means (SSH key, GitHub token, `gh auth login`). The ChatGPT/Codex or Claude subscription is used for access to the agent, not as a Git authentication mechanism.
+The application does not replace the coding agent or Git. It is an **orchestrator**: it watches the task folder, validates and parses a task, prepares a dedicated branch, and runs the task through a deterministic **flow** — a YAML graph of typed nodes (refine → plan → implement → test → review → fix → publish for the default flow) driven by a **flow engine**. The heavy lifting on the code is done by an **external coding agent** (Codex CLI or Claude Code CLI) behind a single `AgentProvider` abstraction; each node runs on its declared provider or the one **global primary**, and an infrastructure failure falls back to the global primary (a quality failure never switches providers — it loops through `fixing`). Above the flow sits a constant, **read-only supervisor** that observes each completed step and writes the plain-language summary that becomes the PR body — but it never decides the route. Only the orchestrator commits, pushes, and opens the PR; the agents only edit files in a dedicated clone. After a task finishes, the working copy returns to the base branch; only then may the next task start, and taking it automatically is an explicit, off-by-default **auto mode**. Git access uses ordinary means (SSH key, credential helper, `gh auth login`); the agent subscription is used only to reach the agent, never as a Git authentication mechanism.
 
 ---
 
 ## 2. Key architectural principles
 
-1. **A deterministic Flow, not emergent behavior.** The stage pipeline is defined explicitly; agents do not freely "negotiate" among themselves. Predictability matters more than autonomy.
-2. **A thin supervisor on top of the stages**. The supervisor plans and routes, but does not replace the coding agent.
-3. **The coding agent behind an abstraction.** `Codex CLI` and `Claude Code CLI` are interchangeable implementations of a single interface with fallback.
-4. **Checkpoints at every stage**. After each stage, the state is written atomically to SQLite so it can survive a crash and continue from where it stopped.
-5. **Guardrails in two layers**. A ban on actions (sandbox/approval) + output validation (diff) before commit.
-6. **Fresh context for each task**. The supervisor and agent context are reassembled from YAML templates for each new task — no shared state between tasks.
-7. **Human-in-the-loop via Telegram**. Clarifying questions and approval of dangerous actions go to the human and block the stage until there is an answer.
+1. **The pipeline is data, not code.** Each `task_type` resolves to a flow — a validated YAML graph of typed nodes and edges — driven by the flow engine. There is no hardcoded stage loop; agents do not freely "negotiate." Predictability matters more than autonomy.
+2. **The coding agent behind an abstraction.** `Codex CLI` and `Claude Code CLI` are interchangeable implementations of one `AgentProvider` interface. The core never builds a CLI command itself — only provider adapters know CLI syntax.
+3. **A thin, advisory supervisor above the flow.** A constant per-task layer observes each completed step read-only and writes the summary at close. It is advisory by construction — it never reworks, reopens, or routes. Blocking is the job of the in-flow `review`/evaluator nodes.
+4. **Checkpoints at every step.** After each node the flow checkpoint (`current_node` + counters + fingerprint) and node-run audit are written to SQLite, so an interrupted task continues from where it stopped and publishing is idempotent.
+5. **Guardrails in layers.** Sandbox/approval profiles and an environment allowlist before execution; a dangerous-diff classifier and flow-wide ceilings (`permission_ceiling` / `output_policy` / `network_policy`) validated fail-closed before any task runs.
+6. **Fresh context per task, durable session within it.** The orchestrator builds the flow, node services, and supervisor anew for each task — no shared state between tasks. _Within_ a task the editing agent keeps a durable session (implementation → fixing, across the test/fix loop), persisted so it survives a restart.
+7. **Human-in-the-loop via Telegram.** Clarifying questions and approval of dangerous actions block one checkpoint until an answer or a fail-closed timeout.
+8. **Fallback is for infrastructure errors only.** Missing binary, auth error, rate limit, timeout, crash, invalid output → fall back to the global primary. Test failures and review findings go to `fixing`, never to another provider.
 
 ---
 
 ## 3. Overall diagram
 
-```text
-┌────────────────────┐
-│  tasks/pending/    │
-│  task-001.md       │
-└─────────┬──────────┘
-          │ new task
-          ▼
-┌─────────────────────────────────────────┐
-│            ORCHESTRATOR                   │
-│  watcher → parser → supervisor            │
-└─────────┬─────────────────────────────────┘
-          │ recreate supervisor + context per task
-          ▼
-   ┌──────────────────── Stage Flow ────────────────────┐
-   │  git pull/fetch → checkout -b agent/task-001         │
-   │  ├─ STAGE plan       (CodingAgent.run, no edits)      │
-   │  ├─ STAGE implement  (CodingAgent.run, edits)         │
-   │  ├─ STAGE review     (CodingAgent.run, no edits)      │
-   │  ├─ STAGE test       (Test Runner)                    │
-   │  ├─ STAGE fix        (retry loop, attempt limit)       │
-   │  ├─ GUARDRAILS       (action blacklist + diff-checks)  │
-   │  ├─ STAGE summary  (move task → done/, write summary)  │
-   │  ├─ code commit (scoped) + task-scoped audit commit    │
-   │  ├─ git push / gh pr create                           │
-   │  └─ return_to_base_branch → fetch/pull refresh         │
-   └───────────────────────────────────────────────────────┘
-          │ result
-          ▼
-   ┌──────────────────────────────────┐
-   │ poll every N s: fetch/pull base   │
-   │ auto mode enabled? │── yes ──> next pending task
-   └─────────┬──────────┘
-             │ no
-             ▼
-          idle (keep polling for git-pushed tasks)
+```mermaid
+flowchart TB
+    operator(["Operator"])
+    human(["Human in the loop"])
 
-                      ▲
-                      │ clarifying question / action approval
-                      │
-   ┌─────────────┐  ┌──┴──────────┐      ┌──────────────┐
-   │ State Store │  │  Telegram   │      │ tasks/done/  │
-   │  (SQLite,   │  │  (HITL +    │      │ tasks/failed/│
-   │ checkpoints)│  │ notifications)│    └──────────────┘
-   └─────────────┘  └─────────────┘
+    subgraph orc["Orchestrator — single process, one task at a time"]
+        cli["CLI / watch daemon"]
+        wrap["Orchestrator wrapper<br/>(gate · slot · branch · terminal)"]
+        engine["Flow engine<br/>(drives the node graph)"]
+        sup["Supervisor layer<br/>(read-only, advisory)"]
+        cli --> wrap --> engine
+        sup -. observes each step .-> engine
+    end
 
-   CodingAgent (abstraction) ──┬── CodexCLI   (enable/disable)
-                              └── ClaudeCLI  (enable/disable)  ← fallback
+    agents["codex / claude<br/>CLI coding agents"]
+    vcs["git / gh — CLI"]
+    tg["Telegram Bot API"]
+    db[("state.db<br/>SQLite v10")]
+    art[("Artifacts<br/>.worc/ · tasks/")]
+
+    operator -->|"run · watch · rerun · ..."| cli
+    engine -->|"agent nodes (argv, no shell)"| agents
+    engine -->|"publish: branch/commit/push/PR"| vcs
+    engine -->|"HITL question / approval"| tg
+    tg <-->|"reply / approve"| human
+    wrap <-->|"state · single slot · checkpoints"| db
+    engine <-->|"request / result / logs"| art
 ```
 
 ---
 
 ## 4. Core components
 
-### 4.1. File Watcher + Task Parser `(#9)`
+### 4.1 Orchestrator wrapper (the spine)
 
-Watches the task folder:
+A thin wrapper around the flow engine. It owns everything that is _not_ a node: the §19 validation gate, acquiring the single processing slot, registering the task in the State Store, resolving the flow for the task's `task_type`, the isolation and check **preflights** (both before any branch), branch preparation, the terminal cleanup back to the base branch, and the one ledger record at the end. It builds the node services, inputs, and the supervisor, then hands the validated graph to the engine via `drive_flow`.
 
-```text
-tasks/
-  pending/    task-001.md
-  processing/
-  done/
-  failed/
-```
+### 4.2 Flow engine + flow definition
 
-When a new `.md`/`.json` file appears, it is moved to `processing/` and parsed. The parser extracts structured fields from the task — from the YAML frontmatter and/or from the heading:
+The pipeline expressed as **data**. A flow is a YAML document — a graph of typed nodes plus edges (with named fix loops and inline budgets) and flow-wide ceilings. The engine traverses the graph, routing on each node's emitted outcome to the matching edge, charging rework against the named loop and the single global counter, and writing the durable checkpoint after each step. A `when: {fact: ...}` predicate (`derived.*` / `config.*`) deterministically skips a node — this is how a per-task `stages.<stage>.enabled: false` toggle and the deterministic refinement-skip work.
 
-```markdown
----
-id: task-001
-title: "Add login validation"
-repo: my-service # binding to the repo/project (#8)
-reasoning: high # reasoning level (#7)
-complexity: medium # affects model choice and limits
-provider: auto # auto | codex | claude
-contacts: ["@team-lead"] # who to ping on Telegram
-commands: # additional commands/hints for the agent
-  - "do not touch the billing module"
----
+Flows are resolved by `task_type`, preferring an **operator flow** at `<repo>/.worc/flows/<task_type>.yaml` over the packaged built-in. Every flow — packaged and operator — passes a **fatal three-layer validator** at `install`/`preflight` before any task runs:
 
-## Description
+- **Graph integrity** — edges resolve; outcomes are valid per node kind; every `rework`/`fail` edge is bounded by a budget or named loop; exactly one entry node; every node can reach a terminal.
+- **Security ceiling** — a node's `permission_profile` may not exceed the flow `permission_ceiling`; evaluators are forced `read-only`; `extra_args` pass the forbidden-args screen; `role_file` paths contain no traversal; unknown fields fail closed.
+- **Config consistency** — a node's pinned `provider` is in `agents.allowed`, its `reasoning` is a known level, and the ceiling is reachable by at least one configured provider. On resume the live flow is re-validated against the live config, so a config change can only ever _narrow_ what a task may do.
 
-Add validation for the login form ...
-```
+Node kinds:
 
-The parsed fields are substituted into the YAML prompt templates as `{variables}`.
-
-### 4.2. Git Manager `(#8)`
-
-The binding to a specific project/repo is set in `config.yaml` (see §5) and/or in the task's `repo` field. Before the task:
-
-```bash
-git fetch origin
-git checkout main
-git pull origin main
-git checkout -b agent/task-001-add-login-validation
-```
-
-After:
-
-```bash
-git add .
-git commit -m "feat: implement task-001: add login validation"
-git push origin agent/task-001-add-login-validation
-gh pr create --title "Task 001" --body-file logs/task-001/pr.md --base main --head agent/task-001-add-login-validation
-git checkout main
-```
-
-> Note: `git add .` above is illustrative. The orchestrator uses **scoped staging** — an explicit pathspec that excludes `.worc/` and `tasks/`, never `git add .`/`-A` — see [.agents/rules/architecture.md](../.agents/rules/architecture.md). Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home (`config.yaml`, `templates/`, `guide/`, `state.db`, `logs/`, `workspace/`, `checks/`, the `tasks/rejected` quarantine), so the operator's `git status` stays clean. The **only** things outside `.worc/` are the `tasks/` lifecycle dirs (`pending/`/`processing/`/`done/`/`failed/`) at the repo root, which are git-tracked: the **task file and its `<id>.summary.md`** (in `done/` or `failed/`) are the audit trail and are stored in git. The code change is committed by a scoped **code** commit (explicit pathspec excluding `.worc/` and `tasks/`), and the audit trail is stored via a separate **task-scoped audit commit** the orchestrator (never the agent) makes after it — staging only the current task's `tasks/<state>/<id>.md` + `<id>.summary.md`, never `git add -- tasks/` wholesale. The working artifacts under `.worc/logs/` (plan, review, diffs, stage logs, `summary.json`) and the runtime files (`.worc/state.db`, `.worc/config.yaml`) are **not** committed — they sit under the gitignored `.worc/` home (`install` appends a single `.worc/` line to the repo's tracked `.gitignore`; `tasks/` is intentionally not ignored). The final `git checkout main` is terminal cleanup. In the orchestrator this uses `repo.base_branch`, runs only when safe, and must complete before auto mode may pick another pending task. After cleanup the Git Manager runs `git fetch` + `git pull --ff-only` to refresh the base branch, and the `watch` loop repeats that refresh every `orchestrator.poll_interval_seconds` (default 300s) so tasks pushed to git after the last scan are discovered — watching is not limited to the local filesystem.
-
-Parallel tasks — via `git worktree` (v2), so as not to mix them in one clone.
-
-### 4.3. CodingAgent — provider abstraction + fallback `(#1)`
-
-```python
-class CodingAgent(Protocol):
-    name: str
-    enabled: bool                     # global enable/disable (#1)
-    def run(self, prompt: str, cwd: str, stage: str,
-            reasoning: str, allow_edits: bool) -> Result: ...
-
-class CodexCLI(CodingAgent):  ...     # wrapper over `codex exec`
-class ClaudeCLI(CodingAgent): ...     # wrapper over the `claude` CLI
-
-def run_with_fallback(prompt, **kw):
-    providers = [p for p in (CodexCLI(), ClaudeCLI()) if p.enabled]
-    if not providers:
-        raise NoProviderEnabled()
-    last_err = None
-    for p in providers:               # order = priority; auto → the whole list
-        try:
-            return p.run(prompt, **kw)
-        except ProviderError as e:
-            last_err = e               # fallback to the next enabled one
-            log.warning(f"{p.name} failed, fallback: {e}")
-    raise AllProvidersFailed(last_err)
-```
-
-- Globally disable a provider — a flag in `config.yaml` (`providers.codex.enabled: false`).
-- In a task you can pin `provider: claude` (no fallback) or `provider: auto` (with fallback).
-
-### 4.4. Supervisor `(#4, #5)`
-
-A thin layer over the stages. It is responsible for:
-
-- planning: which stages are needed for the task (for example, a simple fix does not need the full chain);
-- routing: which provider/model/reasoning at each stage;
-- escalation: when to ask the human a clarifying question (the `AskQuestion` contract) or request action approval;
-- the go/no-go decision after guardrails and tests.
-
-**Recreation for each task `(#5)`:** the supervisor and agent context are assembled anew from YAML templates for the specific parsed task. State is not shared between tasks — this eliminates "leaked" context.
-
-Protection against delegation loops: only the supervisor has the right to escalate/route; the agent's stage calls are "leaf" calls and cannot forward further.
-
-### 4.5. Stage Pipeline (Flow)
-
-The stages are fixed and deterministic:
-
-```python
-STAGES = ["plan", "implement", "review", "test", "fix", "guardrails", "commit", "push"]
-```
-
-Each stage is a separate function with input from the state and an atomic checkpoint on output (see §6). `fix` runs in a retry loop with an attempt limit.
-
-### 4.6. Guardrails — action blacklist + output validation `(#3)`
-
-Two layers:
-
-**Layer 1 — action ban (enforce, before execution):**
-
-- run the agent only in `workspace/repo`, sandbox `workspace-write`, approval `on-request`;
-- global blacklist of dangerous commands (`rm -rf`, `git push --force`, access to `~`, to secrets);
-- ban on pushing to `main` directly.
-
-**Layer 2 — output validation (before commit):**
-
-```python
-GUARDRAILS = [no_secrets_in_diff, only_allowed_paths, no_unexpected_files, no_push_to_main]
-
-def validate(diff):
-    result = diff
-    for g in GUARDRAILS:
-        ok, out = g(result)
-        if not ok:
-            return False, out          # the error goes back to the agent to fix
-        result = out
-    return True, result
-```
-
-On failure — the error is returned to the `fix` stage, retrying up to `guardrail_max_retries` (3 by default).
-
-### 4.7. Human-in-the-Loop via Telegram `(#2, #10)`
-
-A transport-neutral `Notifier` provides terminal messages and one durable question/approval round-trip. It blocks only the current checkpoint until an answer or fail-closed timeout.
-
-```python
-handle = notifier.start_ask(question=..., kind=..., interaction_id=...)
-persist(handle)                         # secret-free message/offset/deadline
-result = notifier.wait_for_answer(handle)
-rerun_stage(human_input_path=artifact)  # answer never enters CLI argv
-```
-
-- `refinement`/`planning` may emit one typed `question` or `approval`.
-- Questions use ForceReply; approvals use inline buttons. Only the configured chat and exact prompt/callback are accepted.
-- After `implementation`/`fixing`, tracked-file deletion and dependency manifest/lock changes require approval before tests. Exact approved planning scope may be reused.
-- A denial returns once to the same stage for safe reconsideration; timeout, transport failure, ambiguity, repeated request, or remaining dangerous diff → `manual_action_required`.
-- Routine commit/push/PR does not require Telegram approval.
-- Waiting/answer state is stored under `logs/<task-id>/hitl/`; no `waiting_human` state is added.
-- Telegram is also used for final result notifications (`done`/`failed` + link to the PR).
-
-### 4.8. Test Runner
-
-Commands from the config, not hardcoded:
-
-```yaml
-checks:
-  commands:
-    - "npm test"
-    - "npm run lint"
-```
-
-On failure, the test output is passed to the `fix` stage.
-
-### 4.9. State Store with checkpoints
-
-SQLite. The task status = the marker of the last successfully completed stage → resume after a crash.
-
-```sql
-CREATE TABLE tasks (
-  id           TEXT PRIMARY KEY,
-  file_path    TEXT NOT NULL,
-  repo         TEXT,
-  branch_name  TEXT,
-  stage        TEXT NOT NULL,     -- last completed stage (checkpoint)
-  status       TEXT NOT NULL,     -- running | done | failed | waiting_human
-  provider     TEXT,
-  reasoning    TEXT,
-  attempts     INTEGER DEFAULT 0,
-  created_at   TEXT NOT NULL,
-  updated_at   TEXT NOT NULL,
-  last_error   TEXT
-);
-```
-
-```python
-def run_task(task):
-    state = load_or_init(task.id)                 # resume: which stage to continue from
-    for stage in STAGES[state.stage_index:]:
-        checkpoint(task.id, stage, "running")     # before the step
-        run_stage(stage, task)
-        checkpoint(task.id, stage, "done")        # after — atomically
-```
-
-### 4.10. Reasoning / Complexity `(#7)`
-
-The `reasoning` and `complexity` fields from the task map onto:
-
-- the coding agent's model flags/budget (`reasoning_effort` low/med/high, thinking-budget for Claude);
-- model choice, number of fix iterations, and timeouts based on complexity.
-
-The `plan` stage reflects and draws up a plan before any edits begin.
-
-### 4.11. AGENTS / CLAUDE / SKILLS stubs `(#6)`
-
-Stage prompts, roles, and rules are stored in YAML templates with `{variable}` substitution from the task. The stubs for the coding agents, placed into the repository before the run, also go here:
-
-```text
-templates/
-  AGENTS.md            # instructions for Codex (placed into the repo)
-  CLAUDE.md            # instructions for Claude Code (placed into the repo)
-  skills/              # reusable skills/procedures
-  prompts/
-    plan.md            # prompt template for the plan stage with {variables}
-    implement.md
-    review.md
-    fix.md
-```
-
----
-
-## 5. Example `config.yaml`
-
-```yaml
-orchestrator:
-  auto_mode:
-    enabled: false # when true, pick the next pending task after terminal cleanup
-
-repos: # binding to projects/repos (#8)
-  my-service:
-    url: "git@github.com:OWNER/my-service.git"
-    local_path: "./workspace/my-service"
-    base_branch: "main"
-    branch_prefix: "codex"
-
-tasks:
-  pending_folder: "./tasks/pending"
-  processing_folder: "./tasks/processing"
-  done_folder: "./tasks/done"
-  failed_folder: "./tasks/failed"
-
-providers: # global enable/disable + fallback (#1)
-  default_order: ["codex", "claude"] # priority for provider: auto
-  codex:
-    enabled: true
-    working_dir: "./workspace/repo"
-    approval_mode: "on-request"
-    sandbox: "workspace-write"
-  claude:
-    enabled: true
-    sandbox: "workspace-write"
-
-reasoning: # complexity levels (#7)
-  default: "medium"
-  map: # complexity → limits
-    small: { fix_attempts: 1, timeout_s: 600 }
-    medium: { fix_attempts: 2, timeout_s: 1200 }
-    large: { fix_attempts: 3, timeout_s: 2400 }
-
-guardrails: # blacklist (#3)
-  forbidden_commands: ["rm -rf", "git push --force", "sudo"]
-  forbidden_paths: ["~", ".env", "secrets/"]
-  block_push_to_main: true
-  max_retries: 3
-
-checks:
-  commands:
-    - "npm test"
-    - "npm run lint"
-
-git:
-  create_pull_request: true
-  pr_base: "main"
-
-telegram: # HITL + notifications (#2, #10)
-  enabled: true
-  bot_token_env: "TELEGRAM_BOT_TOKEN"
-  chat_id_env: "TELEGRAM_CHAT_ID"
-  ask_timeout_s: 28800
-```
-
----
-
-## 6. Task processing flow
-
-```text
-1.  Watcher found a new task in tasks/pending/ → moved it to processing/
-2.  Parser parsed the frontmatter/heading (repo, reasoning, provider, contacts...) (#9)
-3.  Supervisor recreated for the task from YAML templates (#5)
-4.  Check the repo's availability; git fetch/pull (#8)
-5.  Create the branch codex/<task-id>
-6.  Place the AGENTS/CLAUDE/SKILLS stubs into the repo (#6)
-7.  STAGE plan      → CodingAgent.run (no edits) → logs/<id>/plan.md   [checkpoint]
-8.  STAGE implement → CodingAgent.run (edits)                          [checkpoint]
-9.  STAGE review    → CodingAgent.run (no edits)                       [checkpoint]
-10. STAGE test      → Test Runner
-11. STAGE fix       → if the tests failed: output → CodingAgent → repeat,
-                      limit = reasoning.map[complexity].fix_attempts
-12. refinement/planning emitted one typed human-input signal
-                      → persist handle, wait via Telegram, repeat stage with artifact (#2, #10)
-13. STAGE guardrails → action blacklist + diff check;
-                       failure → return to fix (up to max_retries) (#3)
-14. Deletion/dependency diff after implementation/fixing
-                      → exact-scope Telegram approval before tests (#2)
-15. STAGE summary  → produce the change summary; move the task file to tasks/done/ and write
-                     tasks/done/<id>.summary.md beside it (these enter the upcoming commit). plan,
-                     review, diffs and summary.json stay under .worc/logs/ and are NOT committed (#6) [checkpoint]
-16. STAGE commit   → scoped code commit (excludes .worc/ and tasks/) + task-scoped audit commit
-                     (only this task's tasks/<state>/<id>.md + <id>.summary.md); .worc/ is never committed [checkpoint]
-17. STAGE push     → git push; optionally gh pr create (summary.md = PR body)                   [checkpoint]
-18. Terminal handling → terminal cleanup: switch back to repo.base_branch, then git fetch +
-                     pull --ff-only to refresh the repo; notify via Telegram (#10)
-19. Discovery & auto mode → the watcher keeps the repo current with git fetch + pull --ff-only on
-                     base_branch every orchestrator.poll_interval_seconds (default 300s), so tasks
-                     pushed to git later become visible without a manual pull. If
-                     `orchestrator.auto_mode.enabled: true`, the next pending task starts ONLY after
-                     cleanup returned to base_branch and the refresh completed; otherwise stop/idle.
-20. (resume) on a crash at any step — continue from the next incomplete stage
-```
-
-Steps 15–17 are why the **task and its summary** live in the same repository as the code: the summary stage writes the summary and moves the task into `tasks/done/` **before** the commit, then the orchestrator makes a scoped **code** commit (excluding `.worc/` and `tasks/`) and a separate **task-scoped audit commit** of just that task's `tasks/<state>/<id>.md` + `<id>.summary.md`. The `tasks/` lifecycle dirs sit at the repo root and are git-tracked; everything else the orchestrator produces — plan, review, diffs, stage logs, `summary.json`, the SQLite state, templates and the agent task-authoring `guide/` — lives under the gitignored `.worc/` home and never enters git history. A **failed** task with a branch is finalized the same way (moved to `tasks/failed/`, summary written, code + audit committed and pushed) but opens **no PR**; `manual_action_required` stays put for the operator. The provider fallback `(#1)` triggers transparently inside any `CodingAgent.run`.
-
----
-
-## 7. State Machine + checkpoints
-
-```text
-new → planning → implementing → reviewing → testing
-        │                                      │
-        │                                 (fail) ├──→ fixing ──┐
-        │                                      │   (loop ≤ N)  │
-        │                                      ▼               │
-        └────────────────────────→ guardrails ◄───────────────┘
-                                        │ (fail → fixing)
-                                        ▼
-                                    committing → pushing → done
-                                        │
-                          (any step)    ▼
-                                     failed
-                          (question/approval) → waiting_human → (answer) → continue
-```
-
-Each transition = an atomic write of `stage`+`status` to SQLite. On restart, the orchestrator loads the last `stage=done` and continues from the next stage.
-
----
-
-## 8. Security and blacklist `(#3)`
-
-1. The coding agent runs only inside `workspace/repo`, sandbox `workspace-write`, approval `on-request`.
-2. Do not use a full bypass of sandbox/approvals on the main machine.
-3. Global blacklist of commands and paths (see `config.yaml: guardrails`).
-4. Do not grant access to the home folder and secrets.
-5. Ban on direct push to `main`; only via PR.
-6. Minimal GitHub token privileges; preferably Docker/VM/a separate OS user.
-7. Log all commands and the agent's output.
-8. Tracked-file deletion and dependency manifest/lock changes require correlated, fail-closed Telegram approval. Routine orchestrator publishing remains automatic.
-
----
-
-## 9. MVP version
-
-```text
-Python CLI
-  ├─ watchdog            — file watching (#9)
-  ├─ subprocess          — git / codex / claude / tests
-  ├─ sqlite3             — statuses + checkpoints
-  ├─ PyYAML              — config and templates
-  ├─ python-telegram-bot — HITL + notifications (#2, #10)
-  └─ logging             — per-task logs
-```
-
-Minimal logic:
-
-```python
-def watch():
-  poll = config.orchestrator.poll_interval_seconds   # default 300; 0 = single pass
-  while True:
-    refresh_base()                   # git fetch + pull --ff-only on base (discover git-pushed tasks)
-    task = find_new_task()
-    if not task:
-        if poll <= 0:
-            return
-        sleep(poll); continue        # idle: keep polling the repo for new tasks
-
-    parse_task(task)                 # (#9)
-    supervisor = build_supervisor(task)   # recreation per task (#5)
-    create_branch(task)
-    seed_agent_templates(task)       # AGENTS/CLAUDE/SKILLS (#6)
-
-    run_stage("plan", task)
-    run_stage("implement", task)
-    run_stage("review", task)
-    if run_tests(task).failed:
-        for _ in range(fix_attempts(task)):
-            run_stage("fix", task)
-            if not run_tests(task).failed:
-                break
-
-    if guardrails_ok(task):          # (#3)
-        run_stage("summary", task)   # move task → tasks/done/, write summary.md, BEFORE the commit
-        commit_and_push(task)        # scoped code commit (excl .worc/, tasks/) + task-scoped audit commit (#1)
-    return_to_base_branch(task)      # must succeed before the next task; then fetch/pull refresh
-    notify_telegram(task)            # (#10)
-
-    if poll <= 0 and not config.orchestrator.auto_mode.enabled:
-        return
-```
-
----
-
-## 10. Example stage prompts
-
-### Plan
-
-```text
-You are working inside a repository. Read the task file.
-Draw up a brief implementation plan:
-1. which files to change; 2. which functions/modules are affected;
-3. which tests to add/update; 4. what the risks are.
-Do not change code. If something is ambiguous — ask a clarifying question.
-```
-
-### Implementation
-
-```text
-Implement the task according to the plan. Constraints:
-- change only the necessary files; - do not commit;
-- do not add unnecessary dependencies without approval;
-- when changing behavior — add/update tests.
-```
-
-### Review
-
-```text
-Review the changes: alignment with the task, bugs, edge cases,
-style, test coverage, absence of extra/accidental files.
-```
-
-### Fixing after tests
-
-```text
-The tests failed. The output is below. Analyze the error, fix the code,
-briefly explain what was changed.
-<INSERT TEST OUTPUT>
-```
-
----
-
-## 11. How the 10 original requirements are addressed
-
-| # | Point | Where implemented |
+| Kind | What it does | Outcomes |
 | --- | --- | --- |
-| 1 | Globally enable/disable Codex/Claude + fallback | §4.3 CodingAgent + `run_with_fallback`, §5 `providers` |
-| 2 | Answers to clarifying questions + action approval | §4.7 `ask_human(question/approval)`, §6 steps 12/14 |
-| 3 | Global blacklist of forbidden items | §4.6 guardrails (2 layers), §5 `guardrails`, §8 |
-| 4 | Supervisor manages the agents | §4.4 Supervisor (planning/routing/escalation) |
-| 5 | Recreate supervisor+agents for a new task | §4.4 + §6 step 3 + §9 `build_supervisor(task)` |
-| 6 | AGENTS/CLAUDE/SKILLS stubs | §4.11 `templates/`, §6 step 6 |
-| 7 | Reasoning/complexity level | §4.10 + §5 `reasoning`, task fields |
-| 8 | Binding to a project/repo | §4.2 Git Manager + §5 `repos`, the task's `repo` field |
-| 9 | Task parsing (headings, extra info, commands) | §4.1 Task Parser, frontmatter schema |
-| 10 | Telegram integration | §4.7 + §5 `telegram` (HITL + notifications) |
+| `agent` | runs an author/editor through the router (optional embedded HITL, dangerous-diff guard, editing session) | `done` |
+| `evaluator` | a read-only verdict over a produced artifact; a blocking gate, or a non-blocking self-capping reviewer | `accept` / `rework` |
+| `checks` | a quality gate: the resolved `command_profile`, or the `citation` / `dependency_scan` checkers | `pass` / `fail` |
+| `hitl` | a bare durable human gate | approve/deny, or done |
+| `publish` | the orchestrator-owned git publish for the flow's publishing policy | `done` |
+
+### 4.3 CodingAgent — provider abstraction + node-based routing
+
+```python
+class AgentProvider(Protocol):
+    name: str
+    def preflight(self) -> PreflightResult: ...
+    def run(self, request: AgentRunRequest) -> AgentRunResult: ...
+```
+
+`CodexCLI` (wrapping `codex exec`, with `codex exec resume <id>` for durable sessions) and `ClaudeCLI` (wrapping `claude`, with `--resume <id>`) are the two adapters. Routing is **per node**: a node declares its own `provider` (`codex` | `claude`), and a node with no `provider` runs on the **global primary** — the single configured provider with `primary: true`. The global primary is also the **sole** infrastructure-fallback target: a node whose primary differs from it falls back to the global primary on an infrastructure error; a node already on the global primary has nowhere to fall back (terminal). Test failures and review findings are _not_ infrastructure errors — they go to `fixing`.
+
+### 4.4 Supervisor (constant, advisory, read-only)
+
+A per-task oversight layer that exists for every task under any flow shape — **not a graph node, not a stage**. It starts at task start, observes each completed (non-skipped) step through its own continuing read-only session (~1 LLM call/step, recording an immutable advisory row), and at whole-task close synthesizes the plain-language `summary.md` (the PR body) plus advisory caveats. If the synthesis call cannot run, a deterministic minimal-summary fallback writes `summary.md` instead, so the summary is _always_ produced. Its `permission_profile` is **forced `read-only`** in code; it can never edit or reroute. It replaced both the old summary provider and the removed blocking `supervise_*` nodes — which is why no packaged flow has a `summary` node.
+
+### 4.5 Check Runner + check discovery
+
+Quality-gate commands are **configured or discovered**, never hardcoded. The Check Runner launches each resolved command as a bounded subprocess (argv list, no shell, allowlisted env) and records redacted logs. Discovery (`auto` / `deterministic` / `configured` / `disabled`) resolves the launchable profile from project evidence (manifests, lock files, local interpreters), optionally with a read-only agent fallback. A **launch failure** (missing executable) is an infrastructure event — it stops the task before any branch and never burns a fixing iteration; a launched check that exits non-zero is a **quality failure** that goes to `fixing`.
+
+### 4.6 Git Manager
+
+The **only** component that runs commit / push / PR. Before a task it prepares the branch (`agent/<task-id>-<slug>`); on publish it makes a **scoped code commit** (an explicit pathspec that excludes `.worc/` and `tasks/` — never `git add .`/`-A`) plus a separate **task-scoped audit commit** of just that task's `tasks/<state>/<id>.md` + `<id>.summary.md`, pushes, and (when enabled) opens the PR with the summary as its body — all idempotent via `publish_operations` fingerprints. Optional **auto-merge** (off by default) merges the PR; a blocked merge ends `manual_action_required` with the PR left open, never a forced merge. Terminal cleanup returns the working copy to `repo.base_branch`, then `fetch` + `pull --ff-only`.
+
+### 4.7 State Store with checkpoints
+
+SQLite (`state.db`, schema **v10**). It holds the task status, the flow checkpoint (`current_node` + counters + fingerprint), per-node audit (`node_runs`, `provider_attempts`), checks, artifacts (each with a sha256), publish idempotency, subtasks, advisory `evaluations`, and the durable editing/own sessions (`editing_lineage` / `node_lineage` — the only place a raw session id is ever stored). Because the orchestrator is **greenfield**, the store does not migrate across destructive versions: a brand-new database is created at the current shape, and an older-versioned one is refused fail-closed (recreate it). A newer one is also refused.
+
+### 4.8 Human-in-the-Loop via Telegram
+
+A transport-neutral `Notifier` provides terminal notifications and one durable question/approval round-trip that blocks a single checkpoint.
+
+- `refinement` and `planning` may emit one typed question or approval. Questions use ForceReply; approvals use inline buttons. Only the configured chat and exact prompt/callback are accepted.
+- After an `implementation`/`fixing` edit, tracked-file deletions and dependency manifest/lock changes require approval before tests (an exact planning pre-approval can pre-clear a matching diff).
+- A **changed check-command set** is gated, fail-closed, on first use.
+- Waiting state is a durable artifact under `logs/<task-id>/hitl/`; a restart resumes the message/deadline. Timeout, transport failure, ambiguous approval, or a repeated request → `manual_action_required`. Routine commit/push/PR is never gated.
+
+### 4.9 Security policy
+
+`argv` only (no shell interpolation of user strings); the agent runs in `workspace-write` sandbox with `on-request` approvals; only allowlisted environment variables reach child processes; `denied_read_paths` and `denied_commands` are enforced; front matter is scanned for injection-shaped tokens (belt-and-braces over the file-path-only context guarantee); `strict_isolation` fails preflight if isolation cannot be enforced. No task and no `extra_args` can weaken any of this; the flow ceilings are validated fatally before any task runs.
 
 ---
 
-## 12. What to add in the second version
+## 5. Flows: the packaged graphs
 
-The second-version and candidate feature list has been consolidated into [backlog/product_backlog.md](backlog/product_backlog.md). Keep new backlog items there instead of adding another local list to this architecture note.
+| Flow | `task_type` | Output | Distinctive nodes |
+| --- | --- | --- | --- |
+| `implementation` | default | code → Pull Request | the default coding pipeline + two fix loops + optional decomposition |
+| `deep_research` | `deep_research` | a documentation PR (`docs/research/<id>/`) | `external_research` (network-gated), a `citation` checker, two non-blocking evaluators |
+| `security_audit` | `security_audit` | a **private** report under `.worc/security-reports/<id>/` | a `dependency_scan` checker; `publishing: none` (no git at all) |
+
+All three use the same engine, the same supervisor, the same HITL machinery — they differ only in nodes, ceilings (`network_policy` grants research/advisory network access), and the publishing policy. Per-flow node graphs are in [functional/flows/](functional/flows/index.md).
+
+### The default `implementation` flow
+
+```mermaid
+flowchart LR
+    refinement --> planning --> implementation --> testing
+    testing -->|pass| review
+    testing -->|fail · loop test_fix| fixing
+    review -->|accept| publish
+    review -->|rework · loop review_fix| fixing
+    fixing --> testing
+```
+
+- `refinement` runs only when the task is incomplete (`derived.needs_refinement`); `planning`/`testing`/`review`/`fixing` each have a `config.*_enabled` predicate so a per-task skip drops them.
+- Two fix loops feed `fixing` (`test_fix`, `review_fix`, each budget 15) plus a single global counter (`global_fix_iterations: 30`); each cap is clamped to `min(flow, config)` (`agents.max_fix_cycles` / `max_total_fix_iterations`). Exhaustion → `manual_action_required` + a failure report.
+- `fixing` resumes `implementation`'s durable editing session (`lineage_affinity`).
+- **Decomposition** (off by default): planning may propose a split; a deterministic gate accepts a 2..n linear DAG, and the engine runs the `sub_flow` region (`implementation → testing → review → fixing`) once per subtask — committing each, resetting per-loop budgets between subtasks while the global counter accumulates. A subtask with a verified commit is never re-run.
+- There is **no `summary` node**: the supervisor writes the summary at close, before `publish`.
 
 ---
 
-## 13. Development order
+## 6. State machine + checkpoints
 
-1. A CLI for a single task file: `python -m orchestrator run tasks/pending/task-001.md`.
-2. Task parser + branch creation + a single stage via `CodingAgent` (one provider).
-3. The full stage pipeline + tests + the `fix` retry loop.
-4. The `CodingAgent` abstraction with fallback (Codex + Claude).
-5. Guardrails (action blacklist + diff check).
-6. Telegram HITL + notifications.
-7. Folder watcher.
-8. SQLite checkpoints + resume after a crash.
-9. Push + PR.
+The lifecycle is generic; per-stage statuses are gone. Progress _within_ `running` is the flow `current_node` (in `node_runs`), and a decomposed task's subtask `k` of `n` is the `active_subtask` counter — neither is a status.
+
+```mermaid
+stateDiagram-v2
+    direction TB
+    [*] --> new
+    new --> validated: gate §19 passed
+    new --> failed: reject §19 (quarantine, no branch)
+    pending --> validated: dequeue
+    validated --> preparing
+    preparing --> running: hand the flow graph to the engine
+    running --> done: flow reached its terminal node
+    done --> [*]
+    failed --> [*]
+    manual_action_required --> [*]
+    note right of running
+      Any non-terminal status can also go to failed or
+      manual_action_required (infra failure, exhausted
+      budget, fail-closed HITL). Progress within running
+      is the current_node, not a status.
+    end note
+```
+
+Each transition is asserted against an explicit `ALLOWED_TRANSITIONS` table and persisted atomically. On restart the orchestrator reconciles: more than one active task → `manual_action_required`; one active → resume from the flow checkpoint (a fingerprint mismatch restarts from the entry node); an incomplete terminal cleanup is finished. `publish_operations` idempotency means a resumed run never repeats a commit/push/PR.
 
 ---
 
-## 14. Sources
+## 7. Configuration
+
+`config.yaml` is **infrastructure + provider defaults + non-weakenable safety caps** — the flow owns the graph, the config owns the environment. The full reference (every field, default, and validation rule) is [configuration.md](configuration.md); the packaged starting point is [`config.example.yaml`](../config.example.yaml). The shape, in brief:
+
+```yaml
+schema_version: 11
+
+orchestrator:
+  auto_mode: { enabled: false } # pick the next pending task after cleanup
+  poll_interval_seconds: 300 # watch tick: fetch/pull base, then re-scan (0 = single pass)
+
+repo: { url, local_path, base_branch: main, branch_prefix: agent }
+
+agents:
+  allowed: [claude, codex]
+  max_stage_attempts: 3
+  max_fix_cycles: 15
+  max_total_fix_iterations: 30 # >= max_fix_cycles
+  allow_review_skip: false # gate for a task's stages.review.enabled: false
+  decomposition: { enabled: false, max_subtasks: 8, ... }
+  providers: # node-based routing: a node declares `provider`, else the global primary below
+    claude:
+      {
+        command: claude,
+        model: "",
+        reasoning: null,
+        permission_profile: workspace-write,
+        primary: true,
+      }
+    codex:
+      {
+        command: codex,
+        sandbox: workspace-write,
+        permission_profile: workspace-write,
+      }
+
+security:
+  {
+    strict_isolation: true,
+    allowed_environment: [...],
+    denied_read_paths: [...],
+    denied_commands: [...],
+  }
+validation: { max_task_bytes, ..., quarantine_folder } # the §19 input-hardening gate
+checks:
+  {
+    discovery: { mode: configured|auto|deterministic|disabled, ... },
+    commands: [...],
+    timeout_seconds,
+  }
+git:
+  {
+    create_pull_request: true,
+    pr_base: main,
+    auto_merge: false,
+    footprint: { audit_commit_message, audit_on_branch },
+  }
+telegram: { enabled: false, bot_token_env, chat_id_env, ask_timeout_s }
+skills: { scan_root, exclude } # planning-selected, read-only repo skill references
+supervisor: { role_file, model, reasoning } # the constant read-only oversight layer
+prompt_audit: false # record each step's prompt + who
+```
+
+Prompt templates are **not** a config block: a node's prompt is the content of its `role_file` (shipped beside a packaged flow, or under `.worc/flows/roles/` for an operator flow). Role files render only an allowlisted set of path/metadata variables — never task bodies, diffs, env, or secrets.
+
+---
+
+## 8. The `.worc/` home and the Git footprint
+
+There is **one canonical layout**. Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home: `config.yaml`, `templates/`, the agent task-authoring `guide/`, `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `workspace/`, `checks/`, operator `flows/`, and the `tasks/rejected` quarantine. `install` appends a single `.worc/` line to the repo's tracked `.gitignore`.
+
+The **only** things outside `.worc/` are the `tasks/` lifecycle dirs (`pending`/`processing`/`done`/`failed`) at the repo root, which are git-tracked: the task file plus its `<id>.summary.md` (in `done/` or `failed/`) are the committed audit trail. The code commit excludes both `.worc/` (gitignored) and `tasks/` (it rides the separate audit commit). Parallel tasks via `git worktree` remain on the roadmap (see [backlog/](backlog/)).
+
+---
+
+## 9. Task processing flow (end to end)
+
+```text
+1.  watch finds a new task in tasks/pending/ (or a teammate pushed one to git) → it is moved to processing/
+2.  §19 validation gate parses + hardens the task; a structural reject is terminal `failed` (quarantine, no branch)
+3.  acquire the single processing slot; register the task in state.db
+4.  resolve the flow for the task's task_type (operator flow > packaged built-in), validated fail-closed
+5.  isolation + check preflights (both BEFORE any branch)
+6.  prepare branch agent/<task-id>-<slug>; build node services + the supervisor; hand the graph to the engine
+7.  the engine traverses the flow (default: refine → plan → implement → test → review → fix(loop) → publish):
+      - agent nodes run via the router → a provider adapter; the supervisor observes each completed step read-only
+      - testing runs the resolved checks; review is a read-only evaluator; edits are guarded by the dangerous-diff classifier
+      - HITL: refinement/planning may ask one durable question/approval; dangerous diffs and changed check sets are gated, fail-closed
+8.  at close the supervisor synthesizes summary.md; the orchestrator moves the task file → tasks/done/ (or failed/)
+9.  publish: scoped code commit + task-scoped audit commit, push, gh pr create (PR body = the summary) — idempotent
+10. terminal cleanup → checkout repo.base_branch → fetch + pull --ff-only; write one ledger record; notify via Telegram
+11. discovery & auto mode: the watch loop keeps refreshing base every poll_interval_seconds; with auto_mode on, the next
+      pending task starts ONLY after cleanup returned to base; otherwise idle (still polling)
+12. (resume) on a crash at any step — continue from the flow checkpoint node, or finish an incomplete terminal cleanup
+```
+
+A **failed** task with a branch is finalized the same way (moved to `tasks/failed/`, summary written, code + audit committed and pushed) but opens **no PR**; `manual_action_required` stays put for the operator.
+
+---
+
+## 10. CLI surface
+
+```text
+install      set up <repo>/.worc/ (config + guide), gitignore .worc/, run preflight
+preflight    check each allowed provider, the isolation policy, the resolved checks, and validate every flow
+telegram-test send a real correlated Telegram prompt and wait for a reply
+run          process exactly one task end to end
+rerun        re-attempt a terminal task (fresh from base, or --continue from the flow checkpoint)
+finalize     record + tidy a task you handled by hand (no pipeline / commit / PR)
+watch        process pending tasks; long-running loop with periodic git sync (Ctrl-C / `stop` to end)
+stop / restart  manage the watch daemon via <repo>/.worc/orchestrator.pid
+status       read-only snapshot from state.db (no providers / checks / git)
+upgrade-config / upgrade-docs  materialize new config keys / refresh the packaged guide
+```
+
+Every command is also available under the short alias `worc`. Exit codes: `0` done, `1` failed, `2` `manual_action_required`. Global options (`--config`, `--log-level`, `--log-format`, `--log-file`, `--heartbeat-seconds`) go before the subcommand.
+
+---
+
+## 11. Sources
 
 - OpenAI Codex CLI Reference: https://developers.openai.com/codex/cli/reference
 - OpenAI Codex Agent Approvals & Security: https://developers.openai.com/codex/agent-approvals-security
-- OpenAI Codex GitHub Action: https://developers.openai.com/codex/github-action
 - GitHub CLI `gh pr create`: https://cli.github.com/manual/gh_pr_create
+- Telegram Bot API: https://core.telegram.org/bots/api
 
 ---
 
-## 15. Short conclusion
+## 12. Short conclusion
 
-The orchestrator is a **deterministic stage pipeline** with a thin **supervisor** in the role of a manager, built with no framework dependency. Key design patterns: checkpoint-state after every stage, a delegation/clarification contract, two-layer guardrails, reasoning levels mapped from task complexity, and YAML templates with variable substitution. Three capabilities designed independently: provider fallback (#1), repo binding (#8), and the task watcher+parser (#9). The coding agent does the work on the code, Git stores the changes, CI/PR remain the control layer, the human is brought in via Telegram, and the orchestrator ties everything together into a repeatable, crash-resilient process.
+The orchestrator is a **deterministic flow engine** with a thin wrapper around it and a constant, **advisory** supervisor on top. Key design choices: the pipeline is _data_ (a validated node graph selected by `task_type`), the coding agent sits behind one provider abstraction with node-based routing and infrastructure-only fallback, every step is checkpointed to SQLite for crash-safe and idempotent publishing, security is enforced by non-weakenable flow ceilings and an environment allowlist, and the human is brought in via Telegram only at the checkpoints that warrant it. The agent does the work on the code, Git stores the changes, CI/PR remain the control layer, and the orchestrator ties it all into a repeatable, crash-resilient process.

@@ -71,13 +71,13 @@ nav:
           - B25 Security Policy: functional/blocks/B25-security-policy.md
           - B26 Notifications Telegram: functional/blocks/B26-notifications-telegram.md
           - B27 Observability: functional/blocks/B27-observability.md
-      - Coding Stage Flows:
-          - Overview: functional/flows/coding/index.md
-          - S01 Refinement: functional/flows/coding/S01-refinement.md
-          - S02 Planning: functional/flows/coding/S02-planning.md
-          - S03 Implementation: functional/flows/coding/S03-implementation.md
-          - S04 Testing: functional/flows/coding/S04-testing.md
-          - S05 Review: functional/flows/coding/S05-review.md
-          - S06 Fixing: functional/flows/coding/S06-fixing.md
-          - S07 Summary: functional/flows/coding/S07-summary.md
-          - S08 Publishing: functional/flows/coding/S08-publishing.md
+          - B28 Flow Engine: functional/blocks/B28-flow-engine.md
+          - B29 Flow Definition and Validation: functional/blocks/B29-flow-definition-and-validation.md
+          - B30 Flow Node Runners: functional/blocks/B30-flow-node-runners.md
+          - B31 Supervisor: functional/blocks/B31-supervisor.md
+          - B32 Flow Checkers: functional/blocks/B32-flow-checkers.md
+      - Flows:
+          - Overview: functional/flows/index.md
+          - Implementation: functional/flows/implementation.md
+          - Deep Research: functional/flows/deep-research.md
+          - Security Audit: functional/flows/security-audit.md

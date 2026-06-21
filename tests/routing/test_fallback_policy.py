@@ -75,7 +75,9 @@ def test_quality_failure_is_not_a_fallback_trigger(
     primary = make_fake_provider(ProviderId.CODEX, status=RunStatus.FAILED)
     fallback = make_fake_provider(ProviderId.CLAUDE)  # would succeed if (wrongly) invoked
     router = AgentRouter(config, {ProviderId.CODEX: primary, ProviderId.CLAUDE: fallback})
-    outcome = router.run_stage(make_request(stage=Stage.REVIEW), router.resolve_route(Stage.REVIEW))
+    outcome = router.run_stage(
+        make_request(stage=Stage.REVIEW), router.resolve_route(Stage.REVIEW, ProviderId.CODEX)
+    )
     assert outcome.stage_attempts == 1
     assert outcome.provider_used is ProviderId.CODEX
     assert outcome.result is not None and outcome.result.status is RunStatus.FAILED

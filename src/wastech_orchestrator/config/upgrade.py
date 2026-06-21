@@ -22,11 +22,17 @@ from wastech_orchestrator.config.schema import CONFIG_SCHEMA_VERSION
 
 # Dotted paths of keys removed by a past schema bump. ``upgrade-config`` strips them from an
 # operator's config so the regenerated file matches the current schema. Each entry is (parent-path,
-# key); an empty parent-path means a top-level key. (v6: prompt overrides are auto-detected by file
-# presence, so ``prompts.overrides`` and ``prompts.strict`` are gone.)
+# key); an empty parent-path means a top-level key. (v9: the whole ``prompts`` block is gone — a
+# flow node's prompt template is its ``role_file``. v10: ``agents.skip_stages`` is gone — global
+# stage-skip is redundant with configurable flows; per-task ``stages.enabled`` survives. v11:
+# ``agents.routing`` is gone — a flow node declares its own ``provider`` (else the global
+# ``providers.<id>.primary``); ``git.auto_merge_allow_per_task`` is gone — a per-task ``auto_merge``
+# now wins outright.)
 _REMOVED_KEYS: tuple[tuple[str, str], ...] = (
-    ("prompts", "overrides"),
-    ("prompts", "strict"),
+    ("", "prompts"),
+    ("agents", "skip_stages"),
+    ("agents", "routing"),
+    ("git", "auto_merge_allow_per_task"),
 )
 
 _UPGRADE_HEADER = (

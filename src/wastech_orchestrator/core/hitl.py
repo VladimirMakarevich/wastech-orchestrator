@@ -287,9 +287,29 @@ def guardrail_interaction_path(
     )
 
 
-def interaction_id(task_id: str, stage: Stage, subtask: int | None = None) -> str:
-    """Return a compact deterministic id that fits Telegram callback-data limits."""
-    raw = f"{task_id}:{stage.value}:{subtask if subtask is not None else '-'}"
+def node_interaction_path(
+    artifacts_root: str | Path,
+    task_id: str,
+    node_id: str,
+    *,
+    subtask: int | None = None,
+) -> Path:
+    """Durable artifact for a standalone ``hitl`` gate node, keyed by node id (no ``Stage``).
+
+    Prefixed with ``node-`` so a node id never collides with a stage-keyed interaction file.
+    """
+    suffix = f"-subtask-{subtask}" if subtask is not None else ""
+    return task_artifact_dir(artifacts_root, task_id) / "hitl" / f"node-{node_id}{suffix}.json"
+
+
+def interaction_id(task_id: str, stage: Stage | str, subtask: int | None = None) -> str:
+    """Return a compact deterministic id that fits Telegram callback-data limits.
+
+    ``stage`` is the interaction key — a routing :class:`Stage` for embedded HITL, or a node id
+    (plain ``str``) for a standalone ``hitl`` gate node.
+    """
+    key = stage.value if isinstance(stage, Stage) else stage
+    raw = f"{task_id}:{key}:{subtask if subtask is not None else '-'}"
     return "h" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
@@ -319,7 +339,7 @@ def write_waiting_interaction(
     path: Path,
     *,
     task_id: str,
-    stage: Stage,
+    stage: Stage | str,
     subtask: int | None,
     signal: HumanInputSignal,
     handle: AskHandle,
@@ -328,7 +348,7 @@ def write_waiting_interaction(
         "schema_version": 1,
         "interaction_id": handle.interaction_id,
         "task_id": task_id,
-        "stage": stage.value,
+        "stage": stage.value if isinstance(stage, Stage) else stage,
         "subtask": subtask,
         "status": "waiting" if handle.delivered else "transport_error",
         "request": {

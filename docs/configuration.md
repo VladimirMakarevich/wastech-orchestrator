@@ -1,6 +1,6 @@
 # Configuration Reference
 
-`config.yaml` controls repositories, providers, routing, security, validation, checks, git publishing, and optional notification settings. The packaged example is [`config.example.yaml`](../config.example.yaml), and the canonical contract is the config schema in the code (`config/schema.py`); see the [Functional Map](functional/index.md).
+`config.yaml` controls repositories, providers, security, validation, checks, git publishing, and optional notification settings. The packaged example is [`config.example.yaml`](../config.example.yaml), and the canonical contract is the config schema in the code (`config/schema.py`); see the [Functional Map](functional/index.md).
 
 The loader is fail-closed:
 
@@ -26,9 +26,10 @@ agents:
   providers:
     codex:
       command: "codex"
+      primary: true
 ```
 
-If `agents.routing` is omitted, the loader treats the file as a legacy Codex-only config and creates a Codex route for all agent-routed stages with a warning.
+Exactly one configured provider must set `primary: true` — the **global primary** that runs any flow node with no explicit `provider`, and the sole infrastructure-fallback target. Provider routing is per **flow node** (a node declares its own `provider`, else the global primary); there is no stage-keyed `agents.routing` block (removed in `schema_version` 11). A legacy config that still carries `agents.routing` loads fail-open — the key is tolerated and ignored, and `upgrade-config` strips it.
 
 ## `schema_version`
 
@@ -36,7 +37,7 @@ If `agents.routing` is omitted, the loader treats the file as a legacy Codex-onl
 schema_version: 1
 ```
 
-Optional top-level integer marking the `config.yaml` **format** version (current: `8`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
+Optional top-level integer marking the `config.yaml` **format** version (current: `11`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
 
 ## Config Discovery
 
@@ -115,7 +116,7 @@ Git credentials are not stored in this file. Configure SSH, a credential helper,
 
 ## `agents`
 
-Controls provider availability, retry/fix budgets, decomposition, routes, and provider-specific settings.
+Controls provider availability, retry/fix budgets, decomposition, the global primary, and provider-specific settings.
 
 ```yaml
 agents:
@@ -127,24 +128,22 @@ agents:
   max_fix_cycles: 15
   max_total_fix_iterations: 30
 
-  skip_stages: [] # stages skipped for every task
-  allow_review_skip: false # gate for skipping the review stage
+  allow_review_skip: false # gate for a task disabling the review stage
 ```
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `allowed` | list of `claude`, `codex` | `["claude", "codex"]` | Providers the router may use. |
-| `max_stage_attempts` | integer | `3` | Attempts allowed for a stage/provider route. |
+| `allowed` | list of `claude`, `codex` | `["claude", "codex"]` | Providers the router may use. Every flow node's `provider` (and the global primary) must be in this list. |
+| `max_stage_attempts` | integer | `3` | Attempts allowed for a stage (primary + the global-primary fallback). |
 | `max_fix_cycles` | integer | `15` | Fix cycles for a single local failing loop (test-driven or review-driven, counted separately). |
 | `max_total_fix_iterations` | integer | `30` | Hard global fix cap across the whole task and all subtasks. Must be `>= max_fix_cycles`. |
-| `skip_stages` | list of stage names | `[]` | Stages skipped for **every** task. Each must be skippable: `planning`, `testing`, `review`, `fixing`, `summary`. The effective skip set is this ∪ a task's `stages.<stage>.enabled: false`. See [operations.md](operations.md#skipping-pipeline-stages-agentsskip_stages). |
-| `allow_review_skip` | boolean | `false` | Required before `review` may be skipped (from `skip_stages` **or** a task) — disabling review removes the only agent quality gate before commit/PR. |
+| `allow_review_skip` | boolean | `false` | Required before a task may skip `review` (via `stages.review.enabled: false`) — disabling review removes the only agent quality gate before commit/PR. |
 
-Validation requires `max_total_fix_iterations >= max_fix_cycles`. Added in `config.yaml` `schema_version` **4**: `skip_stages` / `allow_review_skip` (older configs omit them and take the safe defaults — no skips, review-skip disallowed).
+Validation requires `max_total_fix_iterations >= max_fix_cycles`. Stage-skip is **per-task only** (`stages.<stage>.enabled: false` in a task; see [operations.md](operations.md#skipping-pipeline-stages-per-task)) — the global `agents.skip_stages` list was **removed in `schema_version` 10** (redundant with configurable flows: to drop a stage everywhere, remove its node from the flow). `allow_review_skip` was added in **4** and survives. Older configs that still carry `skip_stages` load fail-open (it is ignored); `upgrade-config` strips it.
 
 ### `agents.decomposition`
 
-Planned v1 feature, off by default. It lets planning propose a sequential subtask list for large tasks; the Core accepts it only under deterministic rules.
+Off by default. When enabled, planning may propose a sequential subtask list for large tasks; the Core accepts it only under deterministic rules and then runs each accepted subtask through the flow's `sub_flow` region (`implementation → testing → review → fixing`), committing each.
 
 ```yaml
 agents:
@@ -160,54 +159,23 @@ agents:
 | `enabled` | boolean | `false` | Enables the planning sub-phase for decomposition. |
 | `max_subtasks` | integer | `8` | Maximum accepted split size; must be at least `2`. |
 | `min_size_signal` | string | `"large"` | Advisory size threshold passed to the planning prompt. |
-| `commit_per_subtask` | boolean | `true` | Planned v1: one local commit per accepted subtask. |
+| `commit_per_subtask` | boolean | `true` | One local commit per accepted subtask on the single task branch. |
 
-A task can set `decompose: true` or `decompose: false`, but that only controls the gate for that task. It cannot change `max_subtasks`, routes, or security settings.
+Decomposition is **no longer a task flag** (`decompose` was removed in `schema_version` 11). Whether a split is permitted at all is `agents.decomposition.enabled` (above); whether one actually happens is decided by the flow's `decomposition:` block and the planning node's gate proposal, accepted only under the deterministic rules. A task cannot change `enabled`, `max_subtasks`, the provider, or security settings.
 
-### `agents.routing`
+### Provider routing (node-based)
 
-Routes agent-driven stages to a primary provider and optional fallback provider.
+There is no `agents.routing` block. Provider routing lives on the **flow node**: each agent/evaluator node may declare a `provider:` (`codex` | `claude`), and a node with no `provider` runs on the **global primary** — the one configured provider with `primary: true` (see [`agents.providers`](#agentsproviders)). The global primary is also the sole infrastructure-fallback target: when a node's primary differs from it, an infrastructure failure falls back to the global primary; when the node already runs on the global primary, an infrastructure failure is terminal (there is no other target).
 
-```yaml
-agents:
-  routing:
-    refinement:
-      primary: claude
-      fallback: codex
-    planning:
-      primary: claude
-      fallback: codex
-    implementation:
-      primary: claude
-      fallback: codex
-    review:
-      primary: codex
-      fallback: claude
-    fixing:
-      primary: claude
-      fallback: codex
-    summary:
-      primary: claude
-      fallback: codex
-```
+`testing` and `publishing` never run an agent. The Check Runner owns `testing`; the Git Manager owns `publishing`.
 
-Routable stages are:
+Rules (enforced at load/validate and at flow preflight):
 
-```text
-refinement, planning, implementation, review, fixing, summary
-```
+- exactly one configured provider must set `primary: true`, and it must be in `agents.allowed`;
+- every flow node's declared `provider` must be in `agents.allowed` (rejected at preflight otherwise);
+- a legacy `agents.routing` block is tolerated and ignored on load; `upgrade-config` strips it.
 
-`testing` and `publishing` are not routed to providers. The Check Runner owns `testing`; the Git Manager owns `publishing`.
-
-Rules:
-
-- route keys must be known routable stages;
-- `primary` is required;
-- `fallback` may be omitted or set to `null`;
-- every named provider must be in `agents.allowed`;
-- every named provider must have an `agents.providers.<provider>` entry.
-
-Fallback is planned only for infrastructure errors such as missing binaries, authentication errors, rate limits, provider unavailability, timeouts, process crashes, and invalid provider output. Test failures and review findings go to `fixing`, not fallback.
+Fallback is only for infrastructure errors such as missing binaries, authentication errors, rate limits, provider unavailability, timeouts, process crashes, and invalid provider output. Test failures and review findings go to `fixing`, not fallback.
 
 ### `agents.providers`
 
@@ -218,6 +186,7 @@ agents:
   providers:
     claude:
       command: "claude"
+      primary: true # the global primary — runs any node with no provider; sole fallback target
       model: ""
       reasoning: null # low | medium | high | xhigh (Opus 4.7+ / Fable 5) | max
       timeout_seconds: 7200
@@ -240,8 +209,9 @@ Common fields:
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `command` | string | provider id (`"claude"` or `"codex"`) | Executable name or path. |
-| `model` | string | `""` | Provider model setting; empty means provider default. |
-| `reasoning` | string or null | `null` | Reasoning effort level: `low`, `medium`, `high`, `xhigh`, or `max`. Maps to `--effort` for Claude (v2.1+) and `--reasoning-effort` for Codex. Codex supports up to `xhigh`; `max` (Claude-only) is clamped to `xhigh`. `xhigh` requires Opus 4.7+ or Fable 5 for Claude. |
+| `primary` | boolean | `false` | Marks the **global primary**. Exactly one configured provider must set it; that provider runs any flow node with no explicit `provider` and is the sole infrastructure-fallback target. It must also be in `agents.allowed`. |
+| `model` | string | `""` | Provider model setting; empty means provider default. (The default model for the provider; a flow node may override it per node.) |
+| `reasoning` | string or null | `null` | Reasoning effort level: `low`, `medium`, `high`, `xhigh`, or `max`. Maps to `--effort` for Claude (v2.1+) and `--reasoning-effort` for Codex. Codex supports up to `xhigh`; `max` (Claude-only) is clamped to `xhigh`. `xhigh` requires Opus 4.7+ or Fable 5 for Claude. (A flow node may override it per node.) |
 | `timeout_seconds` | integer | `7200` | Timeout for a stage run. |
 | `permission_profile` | string | `"workspace-write"` | Orchestrator permission profile passed into the adapter. |
 | `extra_args` | list of strings | `[]` | Additional provider CLI arguments after safety validation. |
@@ -333,8 +303,10 @@ validation:
 Current task front matter fields are:
 
 ```text
-id, title, pr_title, refined, decompose, auto_merge, prompt_audit, agents, contacts, model, reasoning, stages
+id, title, pr_title, auto_merge, prompt_audit, contacts, stages
 ```
+
+A task is deliberately "clean" (PRE.3): it carries only identity/dispatch fields plus the two sanctioned exceptions — `stages.<stage>.enabled` (per-task stage skip) and `auto_merge` (task-wins). Provider, `model`, and `reasoning` live on the **flow node**, not the task; `decompose` was removed (the flow decides splitting); refinement-skip is deterministic (completeness classification, no `refined` flag). Inside a `stages.<stage>` block only `enabled` is valid.
 
 A structurally rejected task is terminal `failed`, gets a `validation_report.json`, and never creates a branch or calls a provider.
 
@@ -383,12 +355,15 @@ Discovery never installs dependencies or mutates the environment: a candidate th
 
 ## `git`
 
-Controls PR creation and the audit-trail policy.
+Controls PR creation, the optional auto-merge bypass, and the audit-trail policy.
 
 ```yaml
 git:
   create_pull_request: true
   pr_base: "main"
+  auto_merge: false # DANGER: merge every published PR without human review
+  auto_merge_strategy: squash # merge | squash | rebase
+  auto_merge_wait_for_checks: false # true: arm GitHub-native auto-merge (--auto)
   footprint:
     audit_commit_message: "chore(orchestrator): audit trail for {task_id}"
     audit_on_branch: task
@@ -398,8 +373,13 @@ git:
 | --- | --- | --- | --- |
 | `create_pull_request` | boolean | `true` | Whether publishing creates a PR. |
 | `pr_base` | string | `"main"` | Base branch for PR creation. Usually matches `repo.base_branch`. |
+| `auto_merge` | boolean | `false` | **DANGER:** when `true`, every successfully published PR is merged to `pr_base` — this removes the human review gate. A per-task `auto_merge` wins outright over this default. |
+| `auto_merge_strategy` | `merge`, `squash`, `rebase` | `squash` | Strategy passed to `gh pr merge` when a merge fires. |
+| `auto_merge_wait_for_checks` | boolean | `false` | When `true`, arm GitHub-native auto-merge (`gh pr merge --auto`): GitHub merges only after required checks pass. When `false`, merge immediately. |
 
 `create_pull_request: false` skips only `gh pr create`. The successful publishing path still makes the orchestrator-owned commit and pushes the task branch. Use a disposable fork/test remote for a first self-hosting run; a no-push dry-run mode is not implemented.
+
+Auto-merge is **off by default** and only affects the publish step — the mid-pipeline dangerous-diff approval still fires, the orchestrator never passes `--admin` or force-pushes, and a blocked merge ends the task `manual_action_required` with the PR left open (never `failed`). Enable it only when protected branches and required CI checks already enforce your quality gate. See [operations.md](operations.md#auto-merge-to-the-base-branch-danger-bypasses-human-review) for the full behavior, the per-task override, and the audit record.
 
 ### The canonical layout
 
@@ -441,30 +421,36 @@ The config stores environment variable **names only**. Token and chat-id values 
 
 Preflight requires a non-zero numeric chat id, bot access to the chat, no configured webhook, and a working `getUpdates` polling API. Use one bot/chat with one orchestrator poller. See [telegram.md](telegram.md) for setup and `telegram-test`.
 
-## `prompts`
+## Prompt templates (no longer a config block)
 
-Optional. Lets operators extend or replace the per-stage instructions sent to the agent for the agent-routed stages (`refinement`, `planning`, `implementation`, `review`, `fixing`, `summary`) without editing Python. **A `<stage>.md` present in `templates_dir` is used automatically** — its presence is the activation signal, layered on the packaged default per `mode`. A missing file falls back to the packaged default. Added in `config.yaml` `schema_version` **3**; **`schema_version` 6** replaced the old `overrides` map and `strict` flag with file-presence auto-detection, flipped `mode` to default `replace`, and anchors a relative `templates_dir` to the `config.yaml` directory. Older configs that still carry `overrides`/`strict` load fail-open (the keys are ignored with a warning; `upgrade-config` strips them).
+There is no `prompts` config block. A flow node's prompt template is the content of its **`role_file`** — the packaged flow ships its role files alongside the flow YAML, and an operator flow keeps them under `.worc/flows/roles/*.md`. To customize a node's prompt, edit its role file. (Removed in `config.yaml` `schema_version` **9**; an older config that still carries a `prompts` block loads fail-open — the key is ignored — and `upgrade-config` strips it.)
 
-```yaml
-prompts:
-  templates_dir: "./templates/prompts" # edit templates/prompts/<stage>.md to customize that stage
-  mode: replace # replace (your file only; default) | append (packaged default + your file)
-```
+**Template variables.** A role file may reference an allowlisted set of `{name}` tokens; everything else (an unknown name, or literal braces in code/JSON) is left verbatim, so a template never breaks on stray braces. The variables are **metadata and artifact paths only** — never task bodies, diffs, check logs, environment values, or secrets (those stay in the artifact files the agent reads by path):
 
-| Field | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `templates_dir` | string | `"./templates/prompts"` | Directory scanned for `<stage>.md` files. A **relative** path resolves from the `config.yaml` directory (i.e. `<repo>/.worc/`, not the CWD or the target repo); absolute paths are honored. Set to `""` to force the packaged defaults for every stage. `install`/`install-templates` scaffold it with the packaged defaults. |
-| `mode` | enum | `replace` | `replace` = your file only (for stages that have one); `append` = packaged default first, then your file. Global for now. |
+`{task_id}` `{stage}` `{repo_path}` `{repo}` `{task_path}` `{plan_path}` `{diff_path}` `{checks_path}` `{review_path}` `{subtask_order}` `{subtask_count}` `{subtask_spec_path}` `{skills_path}`
 
-A `<stage>.md` whose name matches an agent-routed stage (e.g. `implementation.md`) is detected by presence — there is no opt-in map and no fail-closed-on-missing path. Because `install`/`install-templates` deliver each `<stage>.md` byte-identical to the packaged default, editing one is what changes behavior; an unedited copy renders the same text the default would.
+A variable with no value for the current node (e.g. `{plan_path}` before planning) renders as the empty string.
 
-**Template variables.** A template may reference an allowlisted set of `{name}` tokens; everything else (an unknown name, or literal braces in code/JSON) is left verbatim, so a template never breaks on stray braces. The variables are **metadata and artifact paths only** — never task bodies, diffs, check logs, environment values, or secrets (those stay in the artifact files the agent reads by path):
+**Safety.** Role files are prompt **text** only — delivered to the CLI on stdin, never as a command argument. A role file cannot change the provider, `extra_args`, sandbox/approval mode, denied commands, denied reads, the environment allowlist, or fallback policy; it cannot enable `git commit`/`git push`/`gh pr create`. Each rendered prompt is written, redacted, to `logs/<task-id>/stages/<stage>/[sub-NN/] rendered-prompt.md` for audit. See [operations.md](operations.md) for troubleshooting.
 
-`{task_id}` `{stage}` `{repo_path}` `{task_path}` `{plan_path}` `{diff_path}` `{checks_path}` `{review_path}` `{subtask_order}` `{subtask_count}` `{subtask_spec_path}` `{skills_path}`
+## Flows (`task_type` dispatch and operator flows)
 
-A variable with no value for the current stage (e.g. `{plan_path}` before planning) renders as the empty string.
+The pipeline a task runs is a **flow** — a declarative YAML graph of nodes (agent / checks / evaluator / hitl / publish) and edges. A task's `task_type` front-matter field selects which flow runs (a clean task carries only identity/dispatch/operational inputs — it never patches the graph). `task_type` is omitted ⇒ `implementation`; an unknown `task_type` fails before any branch.
 
-**Safety.** Templates are prompt **text** only — delivered to the CLI on stdin, never as a command argument. A template cannot change the provider, `extra_args`, sandbox/approval mode, denied commands, denied reads, the environment allowlist, or fallback policy; it cannot enable `git commit`/`git push`/`gh pr create`; and a task's front matter cannot select a template. Only files named for an agent-routed stage inside `templates_dir` are read. Each rendered prompt is written, redacted, to `logs/<task-id>/stages/<stage>/[sub-NN/] rendered-prompt.md` for audit. See [cookbook.md](cookbook.md) for a recipe and [operations.md](operations.md) for troubleshooting.
+There is no flow block in `config.yaml`. Flows live as files in two layers, operator-first:
+
+1. **Operator flows** — `<repo>/.worc/flows/<task_type>.yaml`. Drop a YAML file here to add a new `task_type` or to **override** a packaged flow of the same name. Role files live beside them under `.worc/flows/roles/*.md`.
+2. **Packaged built-ins** — shipped with the orchestrator: `implementation`, `deep_research`, `security_audit`.
+
+`config.yaml` is **infrastructure + provider defaults** that the flow's nodes fall back to (`model`/`reasoning`/`permission_profile`/`timeout`), plus the non-weakenable safety caps. The flow owns the graph; the config owns the environment. Trust is file-level: an operator flow is trusted to the same degree as `config.yaml` (same owner, same directory), and the fatal validator below guarantees it can never escalate beyond the ceiling.
+
+**Fatal validation (at `install` / `preflight`, before any task).** Every flow file — packaged and operator — is loaded and validated; any failure makes `preflight` report `NOT ready` and blocks the run. Three layers run:
+
+- **Graph integrity** — edges resolve, outcomes are in the allowed set per node kind, every `rework`/`fail` edge is bounded by a budget or named loop, exactly one entry node, every node can reach a terminal.
+- **Security ceiling** — a node's `permission_profile` may not exceed the flow `permission_ceiling`; evaluators are forced `read-only`; `extra_args` pass the forbidden-args screen; `role_file` paths contain no traversal; unknown fields anywhere fail closed.
+- **Config consistency** — a node's pinned `provider` is in `agents.allowed`, its `reasoning` is a known level (`low`/`medium`/`high`/`xhigh`/`max`), and the flow `permission_ceiling` is reachable by at least one configured provider's `permission_profile`. (On resume the live flow is re-validated against the live config, so a config change can only ever _narrow_ what a task may do.)
+
+Two things are deliberately **not** fatal here because the orchestrator degrades them gracefully: a flow `budget` above `agents.max_*` is clamped to the cap at runtime (the cap always wins), and a PR-publishing flow under `git.create_pull_request: false` runs in local-commit mode (no PR). Neither is an escalation, so neither blocks the flow.
 
 ## `skills`
 
@@ -483,6 +469,31 @@ skills:
 
 Skill bodies are repo-controlled and only ever surfaced by path. The planning agent **proposes** skill names; the Core keeps only those the scan actually found and that are not excluded, recording the selection (and any dropped names) in `plan.md`.
 
+## `supervisor`
+
+Configures the **constant supervisor layer** — a per-task oversight layer that lives _above_ any flow. It is **not a node and not a stage**: there is no `summary` node in any packaged flow because the supervisor owns the summary. The block is optional; when omitted it takes the defaults below (the packaged `config.example.yaml` does not include it).
+
+```yaml
+supervisor:
+  role_file: "roles/supervisor.md"
+  model: null # empty/null → the provider default
+  reasoning: null # low | medium | high | xhigh | max
+```
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `role_file` | string | `"roles/supervisor.md"` | Role file (resolved inside the active flow's directory) rendering the supervisor's read-only prompt; a missing/unreadable file falls back to a minimal built-in instruction. |
+| `model` | string or null | `null` | Model for the supervisor's calls; empty/null uses the provider default. |
+| `reasoning` | string or null | `null` | Reasoning level (`low`/`medium`/`high`/`xhigh`/`max`); must be a known level. |
+
+What the layer does (see the [Functional Map](functional/blocks/B31-supervisor.md)):
+
+- It exists for **every** task under any flow shape — even a single agent node with no checks/review.
+- After each completed (non-skipped) step it runs **one read-only** observation on its own continuing session (~1 call/step) and records an immutable advisory `supervisor_step` row. Observation is **best-effort**: a failure is logged and swallowed.
+- At whole-task **close** (before `publish` in the `implementation` flow) it synthesizes the plain-language `summary.md` (the PR body) plus advisory caveats and records `supervisor_final`. If the synthesis call cannot run, the orchestrator's **minimal-summary fallback** writes `summary.md` instead — the summary is _always_ produced, by one path or the other.
+
+The layer is **advisory by construction**: it never reworks, reopens, or routes — blocking is the job of the in-flow `review`/evaluator nodes. It runs on the **global primary** provider, and its `permission_profile` is **forced `read-only`** in code (it can never edit), validated under the same ceiling as flow nodes (`reasoning` in the allowlist, `role_file` path-contained).
+
 ## `prompt_audit`
 
 Optional top-level boolean (default `false`). Added in `config.yaml` `schema_version` **8**. When enabled, every agent-routed stage run records **who** received **what prompt** — a self-contained, redacted record per stage execution — under `logs/<task-id>/prompt-audit/`, in chronological order, plus a combined `timeline.jsonl`.
@@ -497,34 +508,16 @@ A per-task `prompt_audit: true|false` in the [task front matter](task-authoring.
 
 ## Common Examples
 
-Codex-only routing:
+Codex-only setup (Codex is the global primary; with no other allowed provider, every node runs on it and an infrastructure failure is terminal):
 
 ```yaml
 agents:
   allowed:
     - codex
-  routing:
-    refinement:
-      primary: codex
-      fallback: null
-    planning:
-      primary: codex
-      fallback: null
-    implementation:
-      primary: codex
-      fallback: null
-    review:
-      primary: codex
-      fallback: null
-    fixing:
-      primary: codex
-      fallback: null
-    summary:
-      primary: codex
-      fallback: null
   providers:
     codex:
       command: "codex"
+      primary: true
       model: ""
       timeout_seconds: 7200
       sandbox: "workspace-write"
@@ -555,7 +548,8 @@ Before running tasks:
 
 - `python -m wastech_orchestrator preflight` succeeds;
 - `command -v`/`where` resolves provider and `gh` executables in the same environment that launches the orchestrator;
-- every routed provider is in `agents.allowed`;
+- exactly one provider sets `primary: true`, and it is in `agents.allowed`;
+- every flow node's declared `provider` is in `agents.allowed`;
 - every allowed provider has an `agents.providers` entry;
 - `max_total_fix_iterations >= max_fix_cycles`;
 - `agents.decomposition.max_subtasks >= 2`;

@@ -1,5 +1,5 @@
-"""Config generation DoD: selected-only providers, §5 routing, safe defaults, absolute-path YAML
-round-trip (Windows/macOS), and a clean load+validate of the generated config."""
+"""Config generation DoD: selected-only providers, exactly one global primary, safe defaults,
+absolute-path YAML round-trip (Windows/macOS), and a clean load+validate of the generated config."""
 
 from __future__ import annotations
 
@@ -13,16 +13,7 @@ from wastech_orchestrator.config.schema import AuditBranch
 from wastech_orchestrator.config.validation import validate_config
 from wastech_orchestrator.install import config_writer
 from wastech_orchestrator.install.config_writer import InstallSpec, build_and_validate
-from wastech_orchestrator.providers.base import ProviderId, Stage
-
-_ROUTABLE = (
-    Stage.REFINEMENT,
-    Stage.PLANNING,
-    Stage.IMPLEMENTATION,
-    Stage.REVIEW,
-    Stage.FIXING,
-    Stage.SUMMARY,
-)
+from wastech_orchestrator.providers.base import ProviderId
 
 
 def _spec(
@@ -46,34 +37,29 @@ def _spec(
     )
 
 
-def test_codex_only_routes_to_codex_with_no_fallback(tmp_path: Path) -> None:
+def test_codex_only_marks_codex_primary(tmp_path: Path) -> None:
     cfg = loads_config(build_and_validate(_spec(tmp_path, (ProviderId.CODEX,)))).config
     assert cfg.agents.allowed == (ProviderId.CODEX,)
     assert set(cfg.agents.providers) == {ProviderId.CODEX}
-    for stage in _ROUTABLE:
-        assert cfg.agents.routing[stage].primary is ProviderId.CODEX
-        assert cfg.agents.routing[stage].fallback is None
+    assert cfg.agents.providers[ProviderId.CODEX].primary is True
 
 
-def test_claude_only_routes_to_claude_with_no_fallback(tmp_path: Path) -> None:
+def test_claude_only_marks_claude_primary(tmp_path: Path) -> None:
     cfg = loads_config(build_and_validate(_spec(tmp_path, (ProviderId.CLAUDE,)))).config
     assert cfg.agents.allowed == (ProviderId.CLAUDE,)
     assert set(cfg.agents.providers) == {ProviderId.CLAUDE}
     assert ProviderId.CODEX not in cfg.agents.providers
-    for stage in _ROUTABLE:
-        assert cfg.agents.routing[stage].primary is ProviderId.CLAUDE
-        assert cfg.agents.routing[stage].fallback is None
+    assert cfg.agents.providers[ProviderId.CLAUDE].primary is True
 
 
-def test_both_use_the_default_routing_table(tmp_path: Path) -> None:
+def test_both_mark_exactly_claude_as_primary(tmp_path: Path) -> None:
     cfg = loads_config(
         build_and_validate(_spec(tmp_path, (ProviderId.CODEX, ProviderId.CLAUDE)))
     ).config
     assert set(cfg.agents.allowed) == {ProviderId.CODEX, ProviderId.CLAUDE}
-    assert cfg.agents.routing[Stage.IMPLEMENTATION].primary is ProviderId.CLAUDE
-    assert cfg.agents.routing[Stage.IMPLEMENTATION].fallback is ProviderId.CODEX
-    assert cfg.agents.routing[Stage.REVIEW].primary is ProviderId.CODEX
-    assert cfg.agents.routing[Stage.REVIEW].fallback is ProviderId.CLAUDE
+    # Exactly one global primary; Claude is preferred when both are selected.
+    primaries = [pid for pid, p in cfg.agents.providers.items() if p.primary]
+    assert primaries == [ProviderId.CLAUDE]
 
 
 def test_generated_config_uses_worc_home_and_audit_trail(tmp_path: Path) -> None:

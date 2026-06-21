@@ -1,0 +1,1 @@
+Investigate the repository at {repo} for evidence that bears on the research question: relevant modules, APIs, configuration, tests, and docs. Record exact file paths and line numbers for every claim you intend to make — these become citations the synthesis must anchor. Read only; do not edit code or write files. Return the typed structured result required by the output schema.

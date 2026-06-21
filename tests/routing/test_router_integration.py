@@ -77,7 +77,7 @@ def test_successful_infra_fallback(
         "claude", fake_cli("success", "claude"), integration_security, tmp_path
     )
     router = AgentRouter(config, {ProviderId.CODEX: codex, ProviderId.CLAUDE: claude})
-    route = router.resolve_route(Stage.REVIEW)
+    route = router.resolve_route(Stage.REVIEW, ProviderId.CODEX)
 
     outcome = router.run_stage(
         make_request(stage=Stage.REVIEW, working_directory=str(tmp_path / "clone")), route
@@ -107,7 +107,7 @@ def test_fallback_denied_on_quality_failure(
         "claude", fake_cli("success", "claude"), integration_security, tmp_path
     )
     router = AgentRouter(config, {ProviderId.CODEX: codex, ProviderId.CLAUDE: claude})
-    route = router.resolve_route(Stage.REVIEW)
+    route = router.resolve_route(Stage.REVIEW, ProviderId.CODEX)
 
     outcome = router.run_stage(
         make_request(stage=Stage.REVIEW, working_directory=str(tmp_path / "clone")), route
@@ -140,7 +140,7 @@ def test_infra_failure_after_changes_hands_diff_to_fallback(
     primary = make_fake_provider(ProviderId.CODEX, raises=ErrorClass.TIMEOUT)
     fallback = make_fake_provider(ProviderId.CLAUDE)
     router = AgentRouter(config, {ProviderId.CODEX: primary, ProviderId.CLAUDE: fallback})
-    route = router.resolve_route(Stage.REVIEW)
+    route = router.resolve_route(Stage.REVIEW, ProviderId.CODEX)
 
     outcome = router.run_stage(
         make_request(stage=Stage.REVIEW, diff_path="cumulative.diff"), route, snapshot=hook

@@ -34,16 +34,10 @@ repo:
   branch_prefix: "agent"
 agents:
   allowed: [claude, codex]
-  routing:
-    refinement: {{primary: claude, fallback: codex}}
-    planning: {{primary: claude, fallback: codex}}
-    implementation: {{primary: claude, fallback: codex}}
-    review: {{primary: codex, fallback: claude}}
-    fixing: {{primary: claude, fallback: codex}}
-    summary: {{primary: claude, fallback: codex}}
   providers:
     claude:
       command: {claude!r}
+      primary: true
     codex:
       command: {codex!r}
 security:
@@ -65,7 +59,7 @@ git:
 def _complete_task_file(path: Path, task_id: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        f'---\nid: {task_id}\ntitle: "Add a thing"\nrefined: true\n---\n\n'
+        f'---\nid: {task_id}\ntitle: "Add a thing"\n---\n\n'
         "## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
         encoding="utf-8",
     )
@@ -82,8 +76,8 @@ def _ledger_records(clone: Path) -> list[dict]:
 # --- fresh re-attempt: failed -> rerun -> done -------------------------------------------
 
 
-def test_real_failure_persists_interrupted_status(git_repo, fake_cli, tmp_path: Path) -> None:
-    """A real terminal failure records the stage it stopped at, so ``--continue`` can re-enter."""
+def test_real_failure_persists_flow_checkpoint(git_repo, fake_cli, tmp_path: Path) -> None:
+    """A real terminal failure leaves a flow checkpoint (current_node) for ``--continue``."""
     project = tmp_path / "project"
     project.mkdir()
     config = _write_config(
@@ -100,9 +94,10 @@ def test_real_failure_persists_interrupted_status(git_repo, fake_cli, tmp_path: 
 
     store = StateStore.open_readonly(git_repo.clone / ".worc" / "state.db")
     row = store.get_task("task-700")
+    current_node, _counters, _fingerprint = store.get_flow_checkpoint("task-700")
     store.close()
     assert row is not None and row.status is Status.FAILED
-    assert row.interrupted_status is not None  # the stage it failed at
+    assert current_node is not None  # the flow checkpoint records where --continue re-enters
 
 
 def test_rerun_fresh_failed_to_done(git_repo, fake_cli, git_run, tmp_path: Path) -> None:
@@ -135,7 +130,6 @@ def test_rerun_fresh_failed_to_done(git_repo, fake_cli, git_run, tmp_path: Path)
             branch="agent/task-700-add-a-thing",
             slug="add-a-thing",
             cleanup_completed=True,
-            interrupted_status="planning",
         )
     )
     store.close()
@@ -178,12 +172,22 @@ def test_rerun_fresh_failed_to_done(git_repo, fake_cli, git_run, tmp_path: Path)
 # --- guards / refusals (no pipeline run) -------------------------------------------------
 
 
-def _seed(project: Path, clone: Path, row: TaskRow) -> Path:
+def _seed(project: Path, clone: Path, row: TaskRow, *, checkpoint_node: str | None = None) -> Path:
     config = _write_config(project, clone, claude="claude", codex="codex")
     db = clone / ".worc" / "state.db"
     db.parent.mkdir(parents=True, exist_ok=True)
     store = StateStore.open(db)
     store.insert_task(row)
+    if checkpoint_node is not None:  # an interrupted engine task: a flow checkpoint to resume from
+        from wastech_orchestrator.core.flow.registry import FlowRegistry
+
+        store.save_flow_checkpoint(
+            row.task_id,
+            current_node=checkpoint_node,
+            counters_json="{}",
+            flow_fingerprint=FlowRegistry().resolve("implementation").flow_fingerprint,
+            fix_iterations=row.fix_iterations,  # checkpoint mirrors the seeded task's fix counter
+        )
     store.close()
     return config
 
@@ -204,10 +208,10 @@ def test_rerun_refuses_non_terminal_task(
 ) -> None:
     project = tmp_path / "project"
     project.mkdir()
-    config = _seed(project, git_repo.clone, TaskRow("task-1", "T", Status.PLANNING))
+    config = _seed(project, git_repo.clone, TaskRow("task-1", "T", Status.RUNNING))
     code = cli.main(["--config", str(config), "rerun", "task-1"])
     assert code == 1
-    assert "is planning" in capsys.readouterr().out
+    assert "is running" in capsys.readouterr().out
 
 
 def test_rerun_refuses_when_daemon_running(
@@ -233,9 +237,7 @@ def test_rerun_dry_run_writes_nothing(
     config = _seed(
         project,
         git_repo.clone,
-        TaskRow(
-            "task-1", "T", Status.FAILED, source_path=str(source), interrupted_status="planning"
-        ),
+        TaskRow("task-1", "T", Status.FAILED, source_path=str(source)),
     )
     code = cli.main(["--config", str(config), "rerun", "task-1", "--dry-run"])
     assert code == 0
@@ -259,13 +261,13 @@ def test_rerun_continue_refuses_without_recoverable_stage(
     project.mkdir()
     source = project / "failed" / "task-1.md"
     _complete_task_file(source, "task-1")
-    # interrupted_status unset -> continue cannot know where to re-enter.
+    # No flow checkpoint recorded -> --continue cannot know which node to re-enter.
     config = _seed(
         project, git_repo.clone, TaskRow("task-1", "T", Status.FAILED, source_path=str(source))
     )
     code = cli.main(["--config", str(config), "rerun", "task-1", "--continue"])
     assert code == 1
-    assert "no recoverable stage" in capsys.readouterr().out
+    assert "no recoverable node" in capsys.readouterr().out
 
 
 def test_rerun_continue_revives_then_delegates_to_resume(
@@ -287,8 +289,8 @@ def test_rerun_continue_revives_then_delegates_to_resume(
             fix_iterations=2,
             finished_at="2026-01-01T00:00:00+00:00",
             cleanup_completed=True,
-            interrupted_status="reviewing",
         ),
+        checkpoint_node="review",  # the engine checkpoint --continue re-enters at
     )
 
     calls = {"resume": 0}
@@ -307,6 +309,6 @@ def test_rerun_continue_revives_then_delegates_to_resume(
     row = store.get_task("task-1")
     store.close()
     assert row is not None
-    assert row.status is Status.REVIEWING
+    assert row.status is Status.RUNNING  # revived as active; resume re-enters at the checkpoint
     assert row.finished_at is None and row.cleanup_completed is None
     assert row.branch == "agent/task-1-t" and row.fix_iterations == 2

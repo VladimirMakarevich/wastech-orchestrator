@@ -2,35 +2,39 @@
 
 A plain-English overview of what the orchestrator is and how the coding agents fit in. This page is just the mental model — for the full technical detail see the architecture and configuration docs.
 
-## It's a pipeline, not an AI "supervisor"
+## It's a deterministic pipeline, with a thin watcher on top
 
-It is tempting to picture the orchestrator as a smart AI manager that watches everything and decides what to do next. That is **not** how it works today.
+It is tempting to picture the orchestrator as a smart AI manager that decides what to do next. The important part is what the AI is _not_ allowed to do.
 
-The orchestrator is ordinary, predictable software. It has **no master prompt**, and nothing "supervises" the run by reasoning about it. It simply moves a task through a fixed list of steps, in the same order every time. Choosing which step comes next, enforcing the quality checks, and doing all the Git work (committing, pushing a branch, opening the pull request) is fixed program logic. The AI never makes those decisions.
+The orchestrator is ordinary, predictable software. It moves a task through a fixed graph of steps — called a **flow** — in the same order every time. Choosing which step comes next, enforcing the quality gates, and doing all the Git work (committing, pushing a branch, opening the pull request) is fixed program logic. The coding agent never makes those decisions.
+
+There _is_ one AI layer that watches the whole run — the **supervisor** — but it is deliberately powerless. It reads each finished step and, at the end, writes the plain-language summary that becomes the pull-request description. It cannot change the route, redo a step, or override a gate. So the run stays predictable: the supervisor only observes and explains, it never steers.
 
 ## The steps, in order
 
-Every task goes through the same line of steps:
+A normal coding task goes through the same line of steps (this is the default flow — see "Different kinds of task" below):
 
-1. **Refinement** — if the task is vague, the agent first fills in the gaps: a clear description, what is in and out of scope, and what "done" means. A task that is already clear skips this step.
+1. **Refinement** — if the task is vague, the agent first fills in the gaps: a clear description, what is in and out of scope, and what "done" means. A task that is already clear skips this step automatically.
 2. **Planning** — the agent works out _how_ it will make the change before touching any code. (A very large task can optionally be split into smaller ordered pieces here.)
 3. **Implementation** — the agent makes the actual code changes.
 4. **Testing** — the project's own test and lint commands are run to see whether they pass.
 5. **Review** — an agent reads the change like a code reviewer and flags problems.
 6. **Fixing** — only when testing or review found something. An agent fixes it, and then the change is tested (and reviewed) again. More on this loop below.
-7. **Summary** — an agent writes a short, plain-language explanation of the change. This becomes the description on the pull request.
-8. **Publishing** — the change is committed, pushed, and a pull request is opened. By default the orchestrator stops there and leaves the pull request for a person to review and merge. An operator can optionally turn on **auto-merge** (off by default), in which case the orchestrator also merges the pull request once its checks pass — it still respects the repository's branch-protection rules and never forces a merge.
+7. **Publishing** — the change is committed, pushed, and a pull request is opened. By default the orchestrator stops there and leaves the pull request for a person to review and merge. An operator can optionally turn on **auto-merge** (off by default), in which case the orchestrator also merges the pull request once its checks pass — it still respects the repository's branch-protection rules and never forces a merge.
 
 Before any of this, the orchestrator does a quick sanity check on the task file. If the task is broken or unusable, it is set aside immediately and never starts.
 
+Throughout the run the supervisor quietly reads each finished step, and once the work is done — just before publishing — it writes the short, plain-language summary of the change. That summary becomes the body of the pull request.
+
 ## Who does each step
 
-The steps fall into two kinds:
+The steps fall into three kinds:
 
-- **Thinking steps, done by a coding agent** (Codex or Claude Code): refinement, planning, implementation, review, fixing, and summary. By default Claude Code does most of them and Codex does the review, but that is configurable.
+- **Thinking steps, done by a coding agent** (Codex or Claude Code): refinement, planning, implementation, review, and fixing. By default Claude Code does most of them and Codex does the review, but that is configurable per step.
+- **Watching and explaining, done by the supervisor** (also a coding agent, but strictly read-only): it observes every finished step and writes the end-of-task summary. It never edits code and never changes the route.
 - **Plain automation, with no agent**: the sanity check at the start, **testing** (the orchestrator just runs your test/lint commands and checks whether they pass), and **publishing** (the orchestrator does the Git work itself).
 
-So the only "AI" in the loop is the coding agent during the thinking steps. Everything around it is ordinary automation.
+So the "AI" in the loop is the coding agent during the thinking steps, plus the read-only supervisor on top. Everything that decides _what happens next_ is ordinary automation.
 
 ## What happens when tests or review find problems
 
@@ -51,9 +55,19 @@ A couple of other things can pause a run for a person:
 Even though each step is a separate run, the agent does **not** start from a blank slate each time. Two things keep it informed:
 
 1. It is always handed the relevant files — the task, the plan, the current changes, the test output, and the review notes. So a fixing agent can see exactly what failed.
-2. With **Claude**, the orchestrator also keeps the **same conversation going** from one step to the next. In practice this means the agent that fixes the code is literally continuing the conversation of the agent that wrote it — it remembers everything it did and saw, including across the back-and-forth between testing and fixing. (Codex does not continue a conversation, so it relies on the files instead — either way the agent always has the context it needs.)
+2. The orchestrator also keeps the **same editing conversation going** from one step to the next. The agent that fixes the code is literally continuing the conversation of the agent that wrote it — it remembers everything it did and saw, including across the back-and-forth between testing and fixing. This works for **both** Codex and Claude Code now (each supports resuming its session), and the link is **durable**: it is saved with the task's state, so even if the orchestrator is stopped and restarted mid-task, the agent picks the conversation back up rather than starting over.
 
-One caveat: that "same conversation" link lasts only while the orchestrator keeps running. If it is stopped and started again, the agent begins a fresh conversation — but it still receives all the files, so nothing important is lost.
+(The supervisor watching on top keeps its own separate read-only view of the run; it does not touch the editing conversation.)
+
+## Different kinds of task (flows)
+
+The list of steps above is the **default** flow, used for ordinary coding tasks. The orchestrator picks which flow to run from the task's `task_type`:
+
+- **implementation** (the default) — the coding pipeline that ends in a pull request.
+- **deep_research** — researches a question and produces a documentation pull request, with a citation gate and permission to reach the network.
+- **security_audit** — an advisory audit that writes a private report instead of changing code.
+
+All flows use the same machinery — the same gates, the same fix loops, the same read-only supervisor. They differ only in the steps and the kind of output. An operator can also drop a flow file into the project to add a new task type or override a built-in one.
 
 ## How a task can end
 
@@ -67,7 +81,7 @@ After a task ends, the orchestrator tidies up (returns the working copy to the m
 
 ## In short
 
-- The orchestrator is predictable software running a fixed pipeline — there is no AI supervisor and no master prompt.
-- A coding agent only appears in the thinking steps; testing runs your own checks, and publishing does the Git work.
+- The orchestrator is predictable software running a flow — the route, the gates, and the Git work are fixed program logic, not AI choices.
+- A coding agent does the thinking steps; a strictly read-only supervisor watches every step and writes the summary, but it can never change what happens next.
 - When testing or review fails, the task loops through fixing, bounded by a safety limit that stops for a human.
-- The agent keeps its context between steps — and with Claude it continues one ongoing conversation across the whole run, so "a new step" does not mean "starting over."
+- The agent keeps its context between steps — it continues one ongoing editing conversation across the whole run (for both Codex and Claude), and that conversation survives a restart.

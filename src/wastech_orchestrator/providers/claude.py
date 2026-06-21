@@ -26,7 +26,7 @@ import re
 import tempfile
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -53,7 +53,9 @@ from wastech_orchestrator.providers.base import (
 from wastech_orchestrator.providers.errors import classify, make_signatures, message_for
 from wastech_orchestrator.providers.process import ProcessResult, run_process
 from wastech_orchestrator.providers.redaction import (
+    REDACTED,
     is_sensitive_key,
+    normalized_session_id,
     read_denied_secrets,
     redact_mapping,
     redact_text,
@@ -82,6 +84,10 @@ _PROFILE_MAP: dict[str, tuple[str, tuple[str, ...]]] = {
     "workspace-write": ("acceptEdits", ("Read", "Glob", "Grep", "Edit", "Write", "Bash")),
 }
 
+# The web tools added to ``--allowedTools`` only when the flow grants network
+# (request.network_access); omitted otherwise so a headless run cannot reach the network (P3.2).
+_NETWORK_TOOLS: tuple[str, ...] = ("WebFetch", "WebSearch")
+
 # Statuses on the terminal ``result`` event that mark the turn as NOT having satisfied the task. Any
 # other outcome is treated as a completed run — task quality is judged later by the orchestrator's
 # review/checks, not by the adapter.
@@ -90,6 +96,11 @@ _SUCCESS_SUBTYPE = "success"
 # Claude stderr signatures → normalized error classes (most specific first).
 _CLAUDE_SIGNATURES = make_signatures(
     [
+        (
+            ErrorClass.SESSION_UNAVAILABLE,
+            r"session not found|no such session|unknown session|no conversation"
+            r"|could not resume|resume failed|invalid session",
+        ),
         (
             ErrorClass.RATE_LIMITED,
             r"rate limit|\b429\b|too many requests|quota exceeded|overloaded",
@@ -268,6 +279,11 @@ def build_claude_argv(
 
     profile = request.permission_profile or config.permission_profile or _DEFAULT_PROFILE
     mode, allowed_tools = map_permission(profile)
+    if request.network_access:
+        # The flow granted network (network_policy): allow the web tools. Absent the grant they are
+        # omitted, so a headless ``acceptEdits``/``plan`` run cannot reach the network through them.
+        # This only adds network tools — it never relaxes the filesystem permission mode.
+        allowed_tools = (*allowed_tools, *_NETWORK_TOOLS)
     _reject_weaker_permission_override(combined_extra, mode)
 
     argv = [
@@ -455,7 +471,7 @@ class ClaudeCodeProvider:
             request.stage,
             request.attempt,
             self.id,
-            stage_run_id=request.stage_run_id,
+            node_run_id=request.node_run_id,
         )
         self._write_output_schema(paths, request)
 
@@ -528,6 +544,12 @@ class ClaudeCodeProvider:
             self._finalize_failure(paths, request, started_at, finished_at, proc, error)
             raise
 
+        # The raw session id lives ONLY in state.db (durable sessions, P2.2). The resume id was
+        # already redacted via ``extra_secrets``; scrub the freshly emitted id from the on-disk
+        # streams too, while keeping the raw id on the in-memory result for the lineage store.
+        if parsed.session_id:
+            self._scrub_raw_session(paths, parsed.session_id)
+
         final_message = (
             redact_text(parsed.final_message, extra_secrets=extra_secrets)
             if parsed.final_message
@@ -559,10 +581,19 @@ class ClaudeCodeProvider:
             event_log_path=paths.events_path,
             error=error_obj,
         )
-        write_result_artifact(paths, result)
+        # result.json carries the normalized (non-secret) session id; the raw id is returned
+        # in-memory for the orchestrator's editing_lineage store (state.db only).
+        write_result_artifact(paths, _redact_result_session(result))
         return result
 
     # --- internals ---
+
+    def _scrub_raw_session(self, paths: ArtifactPaths, raw_session_id: str) -> None:
+        """Replace a raw session id with :data:`REDACTED` in the on-disk stdout/events streams."""
+        for path in (paths.stdout_path, paths.events_path):
+            existing = _read_text(path)
+            if raw_session_id and raw_session_id in existing:
+                Path(path).write_text(existing.replace(raw_session_id, REDACTED), encoding="utf-8")
 
     def _write_output_schema(self, paths: ArtifactPaths, request: AgentRunRequest) -> str | None:
         if request.output_schema is None:
@@ -595,7 +626,7 @@ class ClaudeCodeProvider:
             "provider": self.id,
             "task_id": request.task_id,
             "stage": request.stage.value,
-            "stage_run_id": request.stage_run_id,
+            "node_run_id": request.node_run_id,
             "attempt": request.attempt,
             "working_directory": request.working_directory,
             "permission_profile": request.permission_profile,
@@ -634,9 +665,14 @@ class ClaudeCodeProvider:
         write_result_artifact(paths, result)
 
     def _extra_secrets(self, request: AgentRunRequest) -> tuple[str, ...]:
-        """Literal secrets to redact: secret-named parent env values + denied-read file contents."""
-        return self._secret_env_values() + read_denied_secrets(
-            request.working_directory, self._security.denied_read_paths
+        """Literal secrets to redact: secret-named parent env values + denied-read file contents +
+        the raw resume session id (durable sessions, P2.2 — it must never leave state.db, so it is
+        scrubbed from the request argv / stdout / stderr / events / result)."""
+        session = (request.session_id,) if request.session_id else ()
+        return (
+            self._secret_env_values()
+            + read_denied_secrets(request.working_directory, self._security.denied_read_paths)
+            + session
         )
 
     def _secret_env_values(self) -> tuple[str, ...]:
@@ -654,6 +690,17 @@ def _read_text(path: str) -> str:
     if not candidate.exists():
         return ""
     return candidate.read_text(encoding="utf-8", errors="replace")
+
+
+def _redact_result_session(result: AgentRunResult) -> AgentRunResult:
+    """A copy of ``result`` whose session id is the normalized (non-secret) form, for the artifact.
+
+    The raw session id is kept on the in-memory result (so the orchestrator can persist it to the
+    ``editing_lineage`` store, state.db only) and never written to ``result.json``.
+    """
+    if result.session_id is None:
+        return result
+    return replace(result, session_id=normalized_session_id(result.session_id))
 
 
 def _parse_version(text: str) -> str | None:

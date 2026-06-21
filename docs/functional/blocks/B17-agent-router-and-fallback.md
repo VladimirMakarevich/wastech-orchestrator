@@ -1,124 +1,108 @@
-# B17 — Agent Router and Fallback Policy
+# B17 — Agent Router and Fallback
 
-## Purpose
+> Reconstructed from code (`routing/router.py`, `routing/snapshots.py`, `security/profiles.py`) and tests (`tests/routing/`). The code is the only source of truth; this document was rebuilt from the implementation, not from prose or comments. Significant claims carry a `file:line` reference.
 
-The layer between the core pipeline and provider adapters. For each agent stage it selects a `(primary, fallback)` pair, runs the primary, and — **only on infrastructure errors** (plus the conditional auth/permission case) — switches to the fallback while counting attempts. Implements the invariant "fallback only for infrastructure errors; a quality failure goes to fixing, not to another provider".
+**Status:** documented · **Source modules:** `src/wastech_orchestrator/routing/router.py`, `src/wastech_orchestrator/routing/snapshots.py`, `src/wastech_orchestrator/security/profiles.py`
 
-## Responsibilities
+## Responsibility
 
-- Resolve the stage route from `agents.routing` + a validated task-override, and record the route source ([router.py:133-169](../../../src/wastech_orchestrator/routing/router.py#L133)).
-- Decide whether a raised error permits a fallback (`fallback_allowed`) ([router.py:58-73](../../../src/wastech_orchestrator/routing/router.py#L58)).
-- Run the provider sequence, counting `stage_attempts` (bounded by `max_stage_attempts`), and return a `StageOutcome` ([router.py:171-313](../../../src/wastech_orchestrator/routing/router.py#L171)).
-- Pass the partial diff of the previous attempt to the fallback provider **without reverting** files ([router.py:271-273,315-322](../../../src/wastech_orchestrator/routing/router.py#L271)).
+The `AgentRouter` is the layer between a flow node runner ([B30](B30-flow-node-runners.md)) and the provider adapters ([B18](B18-agent-providers.md)). For one node it does two things: it resolves a `(primary, fallback)` provider pair from the node's declared `provider` (else the config's single global primary), and it runs that sequence with **infrastructure-only** fallback, returning a `StageOutcome` that records every attempt. It depends solely on the `AgentProvider` contract — it knows no CLI syntax and no provider internals ([router.py:14-18](../../../src/wastech_orchestrator/routing/router.py#L14)) — and it changes **no** state-machine state: it is stateless beyond the `StageOutcome` it returns, and persistence/transitions are the caller's job.
 
-## Block Boundaries
+A returned quality failure (`AgentRunResult(status=failed)`) is never a fallback trigger; only a raised infrastructure `ProviderError` is ([router.py:345-354](../../../src/wastech_orchestrator/routing/router.py#L345)). The `Stage` threaded through `resolve_route` is carried for audit/identity only (logging, output schema, node_runs rows) — it no longer selects the provider ([router.py:160-162](../../../src/wastech_orchestrator/routing/router.py#L160)).
 
-### Within this block's responsibility
+## Public surface
 
-- Route resolution (swap-on-collision), fallback decision, sequence execution, attempt counting, partial diff handoff.
+- `fallback_allowed(error_class, *, primary_profile, fallback_profile)` ([router.py:59](../../../src/wastech_orchestrator/routing/router.py#L59)) — pure decision: True for `FALLBACK_ELIGIBLE`, conditional for auth/permission, False otherwise.
+- `RouteSource` ([router.py:92](../../../src/wastech_orchestrator/routing/router.py#L92)) — `FLOW_NODE` (node declared a provider) vs `CONFIG` (defaulted to the global primary); persisted in node_runs.
+- `ResolvedRoute(stage, primary, fallback, source)` ([router.py:99](../../../src/wastech_orchestrator/routing/router.py#L99)) — the chosen pair + its source.
+- `ProviderAttempt(provider, attempt, status, error_class, result)` ([router.py:109](../../../src/wastech_orchestrator/routing/router.py#L109)) — one provider invocation; `status=None` when the run raised.
+- `StageOutcome(route, result, provider_used, stage_attempts, terminal_error, attempts, partial_change)` ([router.py:120](../../../src/wastech_orchestrator/routing/router.py#L120)) — everything the caller needs to act on a run.
+- `AgentRouter(config, providers, *, monotonic=time.monotonic)` ([router.py:135](../../../src/wastech_orchestrator/routing/router.py#L135)) — holds the provider instances; resolves the global primary at construction.
+- `AgentRouter.resolve_route(stage, provider=None)` ([router.py:150](../../../src/wastech_orchestrator/routing/router.py#L150)) — node-based route resolution.
+- `AgentRouter.run_stage(request, route, *, snapshot=None)` ([router.py:170](../../../src/wastech_orchestrator/routing/router.py#L170)) — runs the sequence with infra-only fallback.
+- `SnapshotHook` Protocol, `WorkingTreeSnapshot`, `PartialChange` ([snapshots.py:43](../../../src/wastech_orchestrator/routing/snapshots.py#L43), [:19](../../../src/wastech_orchestrator/routing/snapshots.py#L19), [:29](../../../src/wastech_orchestrator/routing/snapshots.py#L29)) — the partial-change contract.
+- `is_same_or_stricter(candidate, reference)` ([profiles.py:23](../../../src/wastech_orchestrator/security/profiles.py#L23)) — profile strictness comparison.
 
-### Outside this block's responsibility
+## Behavior
 
-- **Building the CLI command and launching the provider** — that is [B18](./B18-agent-providers.md); the Router only calls `AgentProvider.run` ([router.py:222](../../../src/wastech_orchestrator/routing/router.py#L222)).
-- **State transitions and persistence** — that is [B06](./B06-orchestrator-pipeline.md); the Router does not modify the state machine and holds state only in the returned `StageOutcome` ([router.py:12-16](../../../src/wastech_orchestrator/routing/router.py#L12)).
-- **Working-tree snapshot/diff** — the `SnapshotHook` contract is implemented by [B22](./B22-git-manager.md) and the object is passed by [B06](./B06-orchestrator-pipeline.md) ([snapshots.py:43-56](../../../src/wastech_orchestrator/routing/snapshots.py#L43)).
-- **Error classification** — that is [B18](./B18-agent-providers.md); the Router only consumes `ErrorClass`.
-- **What to do with a quality `status=failed`** — that is [B06](./B06-orchestrator-pipeline.md).
+### Node-based route resolution
 
-## Entry Points
+`resolve_route(stage, provider=None)` picks the primary from the **node's** declared `provider`; when that is `None`, it defaults to the config's single global primary ([router.py:164](../../../src/wastech_orchestrator/routing/router.py#L164)). `source` is `FLOW_NODE` when a provider was supplied, else `CONFIG` ([router.py:165](../../../src/wastech_orchestrator/routing/router.py#L165)). The fallback is **always** the global primary — the sole infra-fallback target — **unless** the resolved primary already _is_ the global primary, in which case `fallback` is `None` and a primary infra failure is terminal (no double-fallback) ([router.py:166](../../../src/wastech_orchestrator/routing/router.py#L166)). This is verified by `test_no_provider_defaults_to_global_primary`, `test_node_provider_falls_back_to_global_primary`, and `test_node_provider_equal_to_primary_has_no_fallback` ([test_route_resolution.py:26-46](../../../tests/routing/test_route_resolution.py#L26)).
 
-- `AgentRouter.resolve_route(stage, override=None)` ([router.py:133](../../../src/wastech_orchestrator/routing/router.py#L133)) — called by [B06](./B06-orchestrator-pipeline.md) `_run_stage` ([orchestrator.py:1728](../../../src/wastech_orchestrator/core/orchestrator.py#L1728)).
-- `AgentRouter.run_stage(request, route, *, snapshot=None)` ([router.py:171](../../../src/wastech_orchestrator/routing/router.py#L171)) — called by [B06](./B06-orchestrator-pipeline.md) ([orchestrator.py:1777](../../../src/wastech_orchestrator/core/orchestrator.py#L1777), `snapshot=self._git`).
-- `fallback_allowed(error_class, *, primary_profile, fallback_profile)` ([router.py:58](../../../src/wastech_orchestrator/routing/router.py#L58)) — pure function, tested in isolation.
-- Constructed in `build_orchestrator` ([orchestrator.py:2616](../../../src/wastech_orchestrator/core/orchestrator.py#L2616)).
+The single global primary is the one provider with `agents.providers.<id>.primary: true`, computed once at construction by `_resolve_global_primary`; if zero or more than one are flagged, the router refuses to construct (raises `ConfigError`) rather than silently picking one ([router.py:77-89](../../../src/wastech_orchestrator/routing/router.py#L77), `test_router_requires_exactly_one_global_primary`). `resolve_route` then defensively re-checks the resolved primary and fallback against `agents.allowed`, `agents.providers`, and the in-memory provider instances via `_assert_available`; any miss is a fatal `ConfigError`, never a silent skip ([router.py:378-400](../../../src/wastech_orchestrator/routing/router.py#L378), `test_node_provider_not_allowlisted_is_rejected`, `test_missing_provider_instance_is_rejected`).
 
-## Input Data and State
+### Infrastructure-only fallback
 
-`AgentRunRequest` (prepared by [B06](./B06-orchestrator-pipeline.md)), `ResolvedRoute`, optional `SnapshotHook`. The Router holds a dict of provider instances and config; it has no other state (stateless beyond the returned `StageOutcome`).
+`fallback_allowed` is the §7.2/§7.3 decision table ([router.py:59-74](../../../src/wastech_orchestrator/routing/router.py#L59)):
 
-## Happy Path (`run_stage`)
+- Unconditionally True for the infrastructure classes in `FALLBACK_ELIGIBLE` — `binary_not_found`, `unsupported_version`, `authentication_failed`, `rate_limited`, `network_unavailable`, `provider_unavailable`, `timeout`, `process_crashed`, `invalid_output` ([base.py:59-71](../../../src/wastech_orchestrator/providers/base.py#L59)).
+- Conditional for `authorization_failed` / `permission_denied` (the `CONDITIONAL_FALLBACK` set, [router.py:51-56](../../../src/wastech_orchestrator/routing/router.py#L51)): allowed only when the **fallback** profile `is_same_or_stricter` than the primary's — the policy is never relaxed to enable a fallback ([router.py:72-73](../../../src/wastech_orchestrator/routing/router.py#L72)).
+- False for everything else: `configuration_error`, `task_failure`, and `session_unavailable` never fall back ([router.py:74](../../../src/wastech_orchestrator/routing/router.py#L74)). `session_unavailable` is deliberately absent from `FALLBACK_ELIGIBLE` ([base.py:49-53](../../../src/wastech_orchestrator/providers/base.py#L49)).
 
-1. Take a "before" snapshot via `snapshot.capture()` (if a hook is provided).
-2. Build the sequence `[primary]` (+ `fallback` if it is not None).
-3. For each provider, while `stage_attempts < max_stage_attempts`: assemble a per-attempt request, increment `stage_attempts`, call `provider.run(req)`.
-4. If `run` returned a result (success **or** quality `failed`) — record the attempt and **immediately** return `StageOutcome` (fallback is not invoked) ([router.py:294-303](../../../src/wastech_orchestrator/routing/router.py#L294)).
-5. If all attempts raised `ProviderError` — return `StageOutcome(result=None, terminal_error=...)`.
+A quality `status=failed` never reaches `fallback_allowed` at all — when `provider.run` _returns_ (rather than raising), the result (success or quality failure) is recorded and `run_stage` returns immediately, so the fallback is never invoked ([router.py:345-354](../../../src/wastech_orchestrator/routing/router.py#L345), `test_quality_failure_is_not_a_fallback_trigger`, `test_non_fallback_infra_error_stops_at_primary`).
 
-Attempt loop with the invariant "fallback only for infrastructure failure": any returned result (including a quality `failed`) terminates the stage immediately, the fallback is not called:
+### Attempt loop and `stage_attempts` counting
+
+`run_stage` builds the sequence `[primary]` (+ `fallback` if not `None`) ([router.py:186-188](../../../src/wastech_orchestrator/routing/router.py#L186)) and walks it while `stage_attempts < agents.max_stage_attempts` ([router.py:205-206](../../../src/wastech_orchestrator/routing/router.py#L205)). Each provider invocation increments `stage_attempts` ([router.py:210](../../../src/wastech_orchestrator/routing/router.py#L210)). On a raised `ProviderError` it records a `ProviderAttempt(status=None, error_class=...)` and keeps `last_error`; if a next provider exists, the limit isn't reached, and `fallback_allowed(...)` (evaluated with `_profile_of(primary)` vs `_profile_of(next)`) is True, it advances to the fallback; otherwise it breaks and the loop exits with `result=None` + `terminal_error=last_error` ([router.py:295-324](../../../src/wastech_orchestrator/routing/router.py#L295), [router.py:356-364](../../../src/wastech_orchestrator/routing/router.py#L356)). When both attempts raise, the **last** error wins as `terminal_error` ([test_stage_attempts.py:82-98](../../../tests/routing/test_stage_attempts.py#L82)). `max_stage_attempts=1` blocks any fallback entirely ([test_stage_attempts.py:63-79](../../../tests/routing/test_stage_attempts.py#L63)).
 
 ```mermaid
 flowchart TB
-    start(["run_stage(request, route)"]) --> cap["snapshot.capture() — 'before' snapshot (if hook is set)"]
-    cap --> seq["sequence: primary (+ fallback, if set)"]
-    seq --> run["stage_attempts += 1; provider.run(req)"]
-    run --> res{"what did the provider return?"}
-    res -->|"result: success OR quality failed"| done["StageOutcome — return immediately<br/>(fallback is NOT called)"]
-    res -->|"ProviderError (infrastructure failure)"| fb{"next provider exists, limit not reached,<br/>fallback_allowed (profile not weaker, B25)?"}
-    fb -->|yes| diff["partial_change_since(before) → diff to fallback<br/>(files are NOT reverted)"]
-    diff --> run
-    fb -->|no| term["StageOutcome(result=None, terminal_error)<br/>→ B06: terminal stage failed"]
+    start(["run_stage(request, route)"]) --> cap["snapshot.capture() → before (if hook set)"]
+    cap --> seq["sequence = [primary] (+ fallback if set)"]
+    seq --> guard{"stage_attempts < max_stage_attempts?"}
+    guard -->|no| exhaust["StageOutcome(result=None, terminal_error)"]
+    guard -->|yes| run["stage_attempts += 1; provider.run(req)"]
+    run --> res{"returned or raised?"}
+    res -->|"returned (success OR quality failed)"| done["record attempt → return StageOutcome immediately"]
+    res -->|"raised ProviderError"| sess{"session_unavailable AND req.session_id AND attempts left?"}
+    sess -->|yes| fresh["retry SAME provider, session_id=None (+1 attempt)"]
+    fresh --> freshres{"fresh run?"}
+    freshres -->|"succeeded"| done
+    freshres -->|"raised"| fb
+    sess -->|no| fb{"next provider AND limit not reached AND fallback_allowed?"}
+    fb -->|yes| diff["partial_change_since(before) → fallback gets diff_path (no rollback)"]
+    diff --> guard
+    fb -->|no| exhaust
 ```
 
-## Alternative Scenarios
+### `session_unavailable`: same-provider fresh retry (not a fallback)
 
-### Infrastructure failure → fallback
+When a resume attempt raises `ErrorClass.SESSION_UNAVAILABLE` _and_ the request carried a `session_id` _and_ an attempt budget remains, the router retries the **same** provider once with a fresh request (`session_id=None`) — it does not fall back to another provider ([router.py:248-294](../../../src/wastech_orchestrator/routing/router.py#L248)). This costs a second `stage_attempt` (`stage_attempts += 1` at [router.py:255](../../../src/wastech_orchestrator/routing/router.py#L255)), so a resume that fails then succeeds fresh reports `stage_attempts == 2` ([test_session_unavailable.py:74-82](../../../tests/routing/test_session_unavailable.py#L74)). It is explicitly infrastructure, not a quality failure: it stays inside one node run and never charges the engine's fix iterations (the fix loop is engine-owned, [B09](B09-fix-loop-control.md)/[B28](B28-flow-engine.md)). If the fresh retry also raises, the original `exc` is replaced by `fresh_exc` so the subsequent fallback decision uses the fresh error ([router.py:275](../../../src/wastech_orchestrator/routing/router.py#L275)); if it succeeds, `run_stage` returns immediately with that result ([router.py:286-294](../../../src/wastech_orchestrator/routing/router.py#L286)). The retried request's session id sequence is asserted as `["stale-session", None]` ([test_session_unavailable.py:80](../../../tests/routing/test_session_unavailable.py#L80)).
 
-`ProviderError` from primary: record the attempt (status=None); if the next provider exists, the limit is not reached, and `fallback_allowed(...)` is true — take `partial_change_since(before)` and move to the fallback (its request receives `diff_path` of the partial diff) ([router.py:244-273](../../../src/wastech_orchestrator/routing/router.py#L244)).
+### Partial-change capture between primary and fallback (no rollback)
 
-### Fallback not allowed → terminal for the stage
+The Router takes a `before` snapshot via `snapshot.capture()` (if a hook is supplied) at the top of `run_stage` ([router.py:184](../../../src/wastech_orchestrator/routing/router.py#L184)). When it decides to fall back after an infra failure, and both a hook and a `before` exist, it calls `snapshot.partial_change_since(before)` and stores the result in `partial` ([router.py:322-323](../../../src/wastech_orchestrator/routing/router.py#L322)). The next (fallback) attempt's request then gets the partial's `diff_path` substituted via `_build_request` — replacing any prior cumulative diff — while `permission_profile` is left untouched ([router.py:366-373](../../../src/wastech_orchestrator/routing/router.py#L366), `test_infra_failure_after_changes_hands_diff_to_fallback`). There is deliberately **no** rollback/restore method on the `SnapshotHook` Protocol — its absence is the no-auto-rollback guarantee; files changed by the failed primary are never reverted ([snapshots.py:43-56](../../../src/wastech_orchestrator/routing/snapshots.py#L43)). The `PartialChange.note` is carried for the caller to weave into the fallback's prompt context; the Router itself only uses `diff_path` ([snapshots.py:29-40](../../../src/wastech_orchestrator/routing/snapshots.py#L29)).
 
-If `fallback_allowed` is false (error is not infrastructure-level, or the fallback profile is weaker) — exit the loop with `result=None` and `terminal_error` ([router.py:248-262](../../../src/wastech_orchestrator/routing/router.py#L248)).
+### Profile strictness
 
-### Route override
+`is_same_or_stricter(candidate, reference)` ranks profiles by `_PROFILE_STRICTNESS` (`read-only`=0 strictest, `workspace-write`=1) and returns `rank(candidate) <= rank(reference)` ([profiles.py:17-34](../../../src/wastech_orchestrator/security/profiles.py#L17)). It is **fail-closed**: an unrecognized profile on _either_ side returns `False`, because the orchestrator may never relax policy to enable a fallback ([profiles.py:30-34](../../../src/wastech_orchestrator/security/profiles.py#L30)). This drives the conditional auth/permission rule and is exercised through `test_conditional_auth_permission_rule` (including the two `"bogus"` fail-closed cases) ([test_fallback_policy.py:43-65](../../../tests/routing/test_fallback_policy.py#L43)).
 
-A task-override retargets **primary** (after `check_task_route_override`); on collision with the configured fallback the roles are swapped; a `None` fallback stays `None` ([router.py:151-169](../../../src/wastech_orchestrator/routing/router.py#L151)).
+## Invariants & guarantees
 
-## Checks and Constraints
+- **Contract-only, CLI-blind.** The Router calls `self._providers[pid].run(req)` ([router.py:221](../../../src/wastech_orchestrator/routing/router.py#L221)) and nothing else on a provider; it never builds a command or touches provider internals ([router.py:14-15](../../../src/wastech_orchestrator/routing/router.py#L14)).
+- **No state-machine mutation.** The Router writes nothing to the DB or files and holds no state beyond the returned `StageOutcome` ([router.py:15-17](../../../src/wastech_orchestrator/routing/router.py#L15)).
+- **Fallback is infrastructure-only.** A returned quality `status=failed` is never retried on another provider; only raised infra `ProviderError`s can fall back, and auth/permission only under a same-or-stricter profile ([router.py:345-354](../../../src/wastech_orchestrator/routing/router.py#L345), [router.py:299-313](../../../src/wastech_orchestrator/routing/router.py#L299)).
+- **At most one fallback hop.** The sequence is `[primary]` + at most one `fallback`; when the primary is already the global primary there is no fallback target at all ([router.py:166](../../../src/wastech_orchestrator/routing/router.py#L166), [router.py:186-188](../../../src/wastech_orchestrator/routing/router.py#L186)).
+- **`session_unavailable` never crosses providers and never charges a fix iteration**; it is a single same-provider fresh retry that consumes one `stage_attempt` ([router.py:248-294](../../../src/wastech_orchestrator/routing/router.py#L248)).
+- **No auto-rollback.** Partial changes from a failed primary are handed forward as a diff, never reverted; the contract has no restore method ([snapshots.py:43-48](../../../src/wastech_orchestrator/routing/snapshots.py#L43)).
+- **Permission profile is never relaxed across a fallback.** `_build_request` intentionally leaves `permission_profile` untouched ([router.py:366-373](../../../src/wastech_orchestrator/routing/router.py#L366)); profile comparison is fail-closed ([profiles.py:30-34](../../../src/wastech_orchestrator/security/profiles.py#L30)).
+- **`Stage` is identity, not selection.** It is recorded on `ResolvedRoute`/logs but never used to choose a provider ([router.py:160-168](../../../src/wastech_orchestrator/routing/router.py#L160)).
 
-- `fallback_allowed`: unconditionally for `FALLBACK_ELIGIBLE` ([base.py:60-72](../../../src/wastech_orchestrator/providers/base.py#L60)); conditionally for `authorization_failed`/`permission_denied` — only if the fallback profile is not weaker (`is_same_or_stricter`); never for `task_failure`/`configuration_error` ([router.py:69-73](../../../src/wastech_orchestrator/routing/router.py#L69)).
-- The fallback's `permission_profile` is **never weakened** ([router.py:318-319](../../../src/wastech_orchestrator/routing/router.py#L318)).
-- `stage_attempts` is bounded by `agents.max_stage_attempts`; `max_stage_attempts=1` fully blocks fallback.
-- `resolve_route` defensively re-validates allowed/configured/instance presence → `ConfigError` ([router.py:327-345](../../../src/wastech_orchestrator/routing/router.py#L327)).
-- No rollback operation — partial changes are not reverted ([snapshots.py:43-48](../../../src/wastech_orchestrator/routing/snapshots.py#L43)).
+## Dependencies
 
-## Output
+- **Uses:** [B18](B18-agent-providers.md) (the `AgentProvider.run` contract, `ErrorClass`, `FALLBACK_ELIGIBLE`, `ProviderError` from `providers/base.py`), [B25](B25-security-policy.md) (`is_same_or_stricter` profile ranking), [B05](B05-configuration.md) (`agents.providers`, the single global `primary`, `max_stage_attempts`, `allowed`), [B22](B22-git-manager.md) (concrete `SnapshotHook` implementation), [B27](B27-observability.md) (structured per-route/per-attempt logs via `bind`).
+- **Used by:** [B30](B30-flow-node-runners.md) (the agent and evaluator node runners call `resolve_route(stage, node.provider)` then `run_stage(...)`), [B31](B31-supervisor.md) (the supervisor layer resolves a route and runs a stage for its per-step review), [B28](B28-flow-engine.md) (the engine model that drives those runners), [B07](B07-state-machine-and-store.md) (the `attempts`/`StageOutcome` are persisted as `provider_attempts` rows by the node observability writer).
 
-`StageOutcome`: route, final `result` (or `None` if all attempts were infrastructure failures), `provider_used`, `stage_attempts`, `terminal_error`, `attempts` tuple, `partial_change`. No further decisions are made here — they are made by [B06](./B06-orchestrator-pipeline.md).
+## Audit candidates
 
-## Side Effects
+- `docs/functional/blocks/B17-agent-router-and-fallback.md` (the prior revision) — the doc carried several stale `file:line` references (e.g. partial-diff at `router.py:270-272,314-321`, immediate-return at `router.py:294-303`, `_assert_available` at `router.py:326-348`) that no longer match the current `router.py`. Recorded in [the audit](../../backlog/2026-06-21-audit.md).
 
-- Structured log records for the route and each attempt (via [B27](./B27-observability.md)).
-- Indirectly: the provider writes artifacts on launch (that is [B18](./B18-agent-providers.md)).
-- The Router itself writes nothing to the DB or files.
+## Tests
 
-## Errors and Edge Cases
+- `tests/routing/test_route_resolution.py` — node-based resolution: default-to-global-primary, node→global-primary fallback, primary-is-global-primary (no fallback), allowlist/instance fail-closed, exactly-one-global-primary enforcement, and that the route carries only a `ProviderId` (command/args stay in config).
+- `tests/routing/test_fallback_policy.py` — the `fallback_allowed` decision table: all `FALLBACK_ELIGIBLE` classes unconditional, `configuration_error`/`task_failure` never, the conditional auth/permission rule (same/stricter/looser/fail-closed), and that a returned quality `failed` never invokes the fallback.
+- `tests/routing/test_stage_attempts.py` — `stage_attempts` counting and bounding: success-on-primary skips fallback, increment across fallback, `max_stage_attempts=1` blocks fallback, both-infra exhaustion (last error wins), non-fallback infra error stops at primary.
+- `tests/routing/test_session_unavailable.py` — `session_unavailable` triggers a same-provider fresh retry (`stage_attempts==2`, session ids `["stale", None]`), never falls back to the other provider.
+- `tests/routing/test_router_integration.py` — end-to-end over the real Codex/Claude adapters on the fake CLI: a successful infra fallback (rate-limit → fallback succeeds), fallback denied on a quality failure, and the §7.4 partial-diff handoff (the fallback request receives the partial `diff_path`, not the cumulative one; no rollback).
 
-- No route for the stage or unavailable provider → `ConfigError` (from `resolve_route`).
-- All attempts are infrastructure failures → `result=None` + `terminal_error`; [B06](./B06-orchestrator-pipeline.md) treats this as a terminal stage `failed`.
-- A quality `failed` is not treated as a Router failure — it passes through as a result.
-
-## Relationships
-
-### Uses
-
-- [B18 — Provider Adapters](./B18-agent-providers.md) — `AgentProvider.run`, `ErrorClass`, `FALLBACK_ELIGIBLE`.
-- [B25 — Security](./B25-security-policy.md) — `is_same_or_stricter` (conditional fallback).
-- [B05 — Configuration](./B05-configuration.md) — routes/providers, `check_task_route_override`.
-- [B22 — Git Manager](./B22-git-manager.md) — `SnapshotHook` implementation (snapshot/partial diff).
-- [B27 — Observability](./B27-observability.md) — structured attempt log.
-
-### Used by
-
-- [B06 — Pipeline](./B06-orchestrator-pipeline.md) — the sole caller of `resolve_route`/`run_stage`.
-
-## Place in the Overall System
-
-The Router isolates the core from providers: the core prepares a request and reacts to `StageOutcome`, while the Router encapsulates "try primary, on infrastructure failure — fallback". This upholds the separation-of-responsibility invariant (the core does not know CLI syntax) and the "fallback only for infrastructure" invariant.
-
-## Code Evidence
-
-- [routing/router.py:58-73](../../../src/wastech_orchestrator/routing/router.py#L58) — fallback decision table.
-- [routing/router.py:133-169](../../../src/wastech_orchestrator/routing/router.py#L133) — route resolution + swap-on-collision.
-- [routing/router.py:171-313](../../../src/wastech_orchestrator/routing/router.py#L171) — attempt loop, fallback, `StageOutcome`.
-- [routing/snapshots.py:43-56](../../../src/wastech_orchestrator/routing/snapshots.py#L43) — `SnapshotHook` without rollback.
-- Tests: [test_fallback_policy.py](../../../tests/routing/test_fallback_policy.py), [test_route_resolution.py](../../../tests/routing/test_route_resolution.py), [test_stage_attempts.py](../../../tests/routing/test_stage_attempts.py), [test_router_integration.py](../../../tests/routing/test_router_integration.py) — eligibility classes, override/swap, attempt limit, partial diff handoff, "quality failed does not trigger fallback".
+> Note: `is_same_or_stricter` (`security/profiles.py`) has no dedicated unit test; it is covered only indirectly through `test_fallback_policy.py::test_conditional_auth_permission_rule`.

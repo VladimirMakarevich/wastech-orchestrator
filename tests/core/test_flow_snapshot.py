@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from wastech_orchestrator.core.flow.contracts import (
-    EvaluationKind,
     OutputPolicy,
     PermissionProfile,
     PublishingPolicy,
@@ -22,7 +21,14 @@ from wastech_orchestrator.core.flow.schema import (
 )
 from wastech_orchestrator.core.flow.snapshot import FlowLoadError, FlowSnapshot, load_flow
 
-CODESIGN = Path(__file__).parent.parent.parent / "docs" / "backlog" / "flows" / "co-design"
+CODESIGN = (
+    Path(__file__).parent.parent.parent
+    / "src"
+    / "wastech_orchestrator"
+    / "core"
+    / "flow"
+    / "packaged"
+)
 
 
 @pytest.fixture(scope="module")
@@ -45,8 +51,8 @@ def test_load_implementation_yaml(impl_snap: FlowSnapshot) -> None:
     assert doc.permission_ceiling == PermissionProfile.WORKSPACE_WRITE
     assert doc.output_policy == OutputPolicy.CODE_CHANGE
     assert doc.publishing == PublishingPolicy.PULL_REQUEST
-    assert len(doc.nodes) == 11
-    assert len(doc.edges) == 15
+    assert len(doc.nodes) == 7
+    assert len(doc.edges) == 8
 
 
 def test_load_deep_research_yaml() -> None:
@@ -86,16 +92,20 @@ def test_fingerprint_differs_across_flows(
 
 def test_nodes_by_id_all_reachable(impl_snap: FlowSnapshot) -> None:
     expected_ids = {
-        "refinement", "planning", "implementation", "supervise_impl",
-        "testing_quality", "testing", "review", "fixing", "supervise_fix",
-        "summary", "publish",
+        "refinement",
+        "planning",
+        "implementation",
+        "testing",
+        "review",
+        "fixing",
+        "publish",
     }
     assert set(impl_snap.nodes_by_id.keys()) == expected_ids
 
 
 def test_nodes_by_id_kinds(impl_snap: FlowSnapshot) -> None:
     assert isinstance(impl_snap.nodes_by_id["implementation"], AgentNode)
-    assert isinstance(impl_snap.nodes_by_id["supervise_impl"], EvaluatorNode)
+    assert isinstance(impl_snap.nodes_by_id["review"], EvaluatorNode)
     assert isinstance(impl_snap.nodes_by_id["testing"], ChecksNode)
     assert isinstance(impl_snap.nodes_by_id["publish"], PublishNode)
 
@@ -104,12 +114,12 @@ def test_nodes_by_id_kinds(impl_snap: FlowSnapshot) -> None:
 
 
 def test_adjacency_multi_outcome_node(impl_snap: FlowSnapshot) -> None:
-    # supervise_impl has two outgoing edges: accept → testing_quality, rework → fixing
-    edges = impl_snap.adjacency["supervise_impl"]
+    # review has two outgoing edges: accept → publish, rework → fixing
+    edges = impl_snap.adjacency["review"]
     outcomes = {e.outcome for e in edges}
     assert outcomes == {"accept", "rework"}
     targets = {e.to for e in edges}
-    assert targets == {"testing_quality", "fixing"}
+    assert targets == {"publish", "fixing"}
 
 
 def test_adjacency_terminal_node_absent(impl_snap: FlowSnapshot) -> None:
@@ -126,15 +136,15 @@ def test_when_fact_only_defaults_equals_true(impl_snap: FlowSnapshot) -> None:
 
 
 def test_when_config_fact(impl_snap: FlowSnapshot) -> None:
-    testing_quality = impl_snap.nodes_by_id["testing_quality"]
-    assert isinstance(testing_quality, EvaluatorNode)
-    assert testing_quality.when == WhenPredicate(fact="config.hybrid_testing", equals=True)
+    planning = impl_snap.nodes_by_id["planning"]
+    assert isinstance(planning, AgentNode)
+    assert planning.when == WhenPredicate(fact="config.planning_enabled", equals=True)
 
 
 def test_no_when_is_none(impl_snap: FlowSnapshot) -> None:
-    planning = impl_snap.nodes_by_id["planning"]
-    assert isinstance(planning, AgentNode)
-    assert planning.when is None
+    implementation = impl_snap.nodes_by_id["implementation"]
+    assert isinstance(implementation, AgentNode)
+    assert implementation.when is None
 
 
 # -- defaults application -----------------------------------------------------
@@ -227,13 +237,6 @@ def test_agent_node_hitl(impl_snap: FlowSnapshot) -> None:
     assert planning.hitl is not None
     assert planning.hitl.allow_question is True
     assert planning.hitl.allow_approval is True
-
-
-def test_evaluator_final_handoff(impl_snap: FlowSnapshot) -> None:
-    summary = impl_snap.nodes_by_id["summary"]
-    assert isinstance(summary, EvaluatorNode)
-    assert summary.evaluation_kind == EvaluationKind.FINAL_HANDOFF
-    assert summary.blocking is False
 
 
 def test_checks_node_discovery(impl_snap: FlowSnapshot) -> None:
@@ -377,6 +380,20 @@ def test_namespaced_when_fact_accepted(tmp_path: Path) -> None:
     node = load_flow(_write(tmp_path, body)).nodes_by_id["a"]
     assert isinstance(node, AgentNode)
     assert node.when is not None and node.when.fact == "derived.needs_refinement"
+
+
+def test_output_artifact_slot_accepted(tmp_path: Path) -> None:
+    body = _VALID_BODY.replace(_RF, _RF + "      output_artifact: plan\n")
+    node = load_flow(_write(tmp_path, body)).nodes_by_id["a"]
+    assert isinstance(node, AgentNode)
+    assert node.output_artifact == "plan"
+
+
+def test_invalid_output_artifact_slot_rejected(tmp_path: Path) -> None:
+    # The slot vocabulary is core-fixed; an invented slot fails closed at load.
+    body = _VALID_BODY.replace(_RF, _RF + "      output_artifact: bogus\n")
+    with pytest.raises(FlowLoadError, match=r"invalid output_artifact.*bogus"):
+        load_flow(_write(tmp_path, body))
 
 
 def test_invalid_checker_rejected(tmp_path: Path) -> None:

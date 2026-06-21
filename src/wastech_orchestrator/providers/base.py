@@ -46,6 +46,11 @@ class ErrorClass(StrEnum):
     PERMISSION_DENIED = "permission_denied"
     CONFIGURATION_ERROR = "configuration_error"
     TASK_FAILURE = "task_failure"
+    # The provider could not resume the requested session (lost transcript / provider reset it). The
+    # Router retries the SAME provider once with a fresh session — it is infra (durable sessions,
+    # P2.2), never a quality failure, so it never falls back to another provider and never charges a
+    # fix iteration. Deliberately NOT in FALLBACK_ELIGIBLE.
+    SESSION_UNAVAILABLE = "session_unavailable"
 
 
 # Error classes that unconditionally allow fallback (spec §7.2).
@@ -88,7 +93,7 @@ class AgentRunRequest:
     permission_profile: str
     timeout_seconds: int
     attempt: int
-    stage_run_id: int
+    node_run_id: int
     # Paths to context artifacts (see spec §6, §10).
     task_path: str | None = None
     plan_path: str | None = None
@@ -103,6 +108,12 @@ class AgentRunRequest:
     extra_args: list[str] = field(default_factory=list)
     reasoning: str | None = None
     session_id: str | None = None
+    # Whether the agent process may reach the network (P3.2 ``network_policy`` enforcement). Default
+    # ``False`` — the flow grants network only by declaring ``network_policy``; absent, no network.
+    # The adapter maps it onto its sandbox: Codex enables the workspace-write sandbox's network
+    # access; Claude allows the WebFetch/WebSearch tools. It only toggles the network — never the
+    # filesystem sandbox/approvals (the ceiling stays in force).
+    network_access: bool = False
 
 
 @dataclass(frozen=True)

@@ -21,14 +21,14 @@ Acceptance criteria are the contract for "done." Make each one observable and ch
 - [ ] Clean up the API.
 ```
 
-If you genuinely want the orchestrator to enrich an under-specified task, omit acceptance criteria and leave `refined` unset — the refinement stage will add assumptions and criteria. But a task you have thought through should state them.
+If you genuinely want the orchestrator to enrich an under-specified task, omit acceptance criteria — the refinement stage will add assumptions and criteria. A complete task (description + acceptance criteria) skips refinement automatically; a task you have thought through should state its criteria.
 
 ## 2. Scope to one coherent change
 
 One task = one branch = one PR. Keep it to a single, reviewable change:
 
 - Prefer "add a retry budget to webhook delivery" over "improve webhook reliability."
-- If the work spans several independent changes, split it into separate tasks, or set `decompose: true` and let the orchestrator break it into sequential subtasks on one branch.
+- If the work spans several independent changes, split it into separate tasks. (Whether one large task is auto-decomposed into sequential subtasks is an operator/flow decision, not a task flag — describe the scope and let planning propose a split.)
 - A tightly scoped task plans better, reviews faster, and is far less likely to need a fixing cycle.
 - If your repo expects a conventional-commit-style PR subject that differs from a plain task `title`, set `pr_title` (e.g. `pr_title: "feat(webhooks): bounded retry budget"`); otherwise omit it and let the PR title be generated from `title`.
 
@@ -68,6 +68,6 @@ Before handing over a task:
 - [ ] `## Description` is concrete and non-empty.
 - [ ] Acceptance criteria are present and testable (unless you intend refinement to add them).
 - [ ] `## Constraints` lists do-not-touch areas and dependency/compatibility limits.
-- [ ] Front matter uses only allowed fields; provider/stage overrides are minimal and name real stages/providers.
+- [ ] Front matter uses only allowed fields; any `stages.<stage>.enabled` skip names a real skippable stage.
 - [ ] No secrets; no CLI-flag-shaped values; no attempt to change checks or security policy.
-- [ ] The change is one coherent unit (or `decompose: true` for a large one).
+- [ ] The change is one coherent unit (describe the scope; large work may be auto-decomposed by the flow).

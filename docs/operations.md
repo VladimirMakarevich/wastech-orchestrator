@@ -59,9 +59,14 @@ wastech-orchestrator --version           # confirm the new version
 
 Do it **between tasks**, not mid-run: an in-flight task holds the single processing slot and a live working branch, and its state lives in `state.db`. Wait until `status` shows no active task, then upgrade and re-run `preflight` / `watch`.
 
-The persisted state survives an upgrade — back it up first so you can roll back. That is everything under `<repo>/.worc/` (`config.yaml` and `state.db` live there), plus the git-tracked `tasks/` lifecycle dirs at the repo root. Copy at least `.worc/config.yaml` + `.worc/state.db`. The orchestrator **fail-closes on a backward-incompatible workspace**: if the `config.yaml` `schema_version` or the `state.db` schema is **newer** than the installed version understands, the command prints a clear `error:` and exits non-zero (2) instead of running against a format it cannot read. To recover, upgrade the package to a version that supports it (or, for a throwaway setup, start a fresh workspace via `install --reconfigure`). Older or absent versions are accepted as-is.
+The persisted state survives an upgrade — back it up first so you can roll back. That is everything under `<repo>/.worc/` (`config.yaml` and `state.db` live there), plus the git-tracked `tasks/` lifecycle dirs at the repo root. Copy at least `.worc/config.yaml` + `.worc/state.db`. The orchestrator **fail-closes on a backward-incompatible workspace**: if the `config.yaml` `schema_version` or the `state.db` schema is **newer** than the installed version understands, the command prints a clear `error:` and exits non-zero (2) instead of running against a format it cannot read. To recover, upgrade the package to a version that supports it (or, for a throwaway setup, start a fresh workspace via `install --reconfigure`).
 
-`state.db` migrates itself **forward** in place the first time a newer version opens it (e.g. v1→v2 adds the stage-skip audit columns) — no action needed. `config.yaml` does **not** auto-migrate: a new release may add keys (with safe defaults, so an older config still runs), but to materialize them in your file run **`upgrade-config`** after upgrading the package:
+The current schema versions are `state.db` **v10** and `config.yaml` `schema_version` **11**, and the two are handled differently because the orchestrator is **greenfield** (no production data to preserve):
+
+- **`config.yaml`** does **not** auto-migrate, and an **older or absent** `schema_version` is accepted as-is (a new release adds keys with safe defaults, so an older config still runs). To materialize the new keys in your file run **`upgrade-config`** (below).
+- **`state.db`** does **not** migrate across versions. A brand-new (or pre-versioning) database is created at the current shape; a database stamped an **older** version (`1 ≤ v < 10`) is **refused fail-closed** — several past bumps dropped/renamed tables, and the store only ever adds columns, so an old shape cannot be reshaped in place. Recovery is to delete the local `state.db` and start a fresh workspace (greenfield: there is nothing to preserve). Do this **between tasks**, never with a task in flight.
+
+To bring the rest of your deployment current after a package upgrade, run **`upgrade-config`** (and **`upgrade-docs`**):
 
 ```bash
 wastech-orchestrator upgrade-config              # uses the discovered/bound config
@@ -79,17 +84,7 @@ wastech-orchestrator upgrade-docs --dry-run      # preview added/updated/removed
 
 Unlike `config.yaml`, the `worc/` docs are generated content with **no operator edits to preserve**, so this is a straight overwrite to the packaged version: it writes missing or changed files, removes files no longer shipped, and makes no backup. It is idempotent (an already-current copy is a no-op), `--dry-run` writes nothing, and it fails closed (exit 2 with the same hint as `upgrade-config`) when no install location can be resolved.
 
-The `templates/` tree (the per-stage prompts — the only operator-customizable templates from schema v6) also ships with the package. `install` copies it into `<repo>/.worc/templates/`, but an upgrade carries newer templates than an already-installed copy. Deliver or refresh them under `.worc/templates/` with **`install-templates`**:
-
-```bash
-wastech-orchestrator install-templates           # uses the discovered/bound config location
-wastech-orchestrator install-templates --dry-run # preview the add/skip(/overwrite) plan only
-wastech-orchestrator install-templates --force   # overwrite operator-edited templates too
-```
-
-Unlike `upgrade-docs`, the templates are **operator-editable**, so this is **add-missing-only**: absent files are written and existing files are **skipped** to preserve your edits (it never removes operator-added files). Use `--force` to overwrite an edited template back to the packaged version. It resolves the install location and fails closed the same way as the `upgrade-*` commands, and it never touches `config.yaml`. From schema v6 a delivered `prompts/<stage>.md` is **auto-detected by file presence** — edit it to take effect; there is no `overrides` map to maintain (see [configuration.md](configuration.md#prompts)). A relative `prompts.templates_dir` resolves from the `config.yaml` directory (`<repo>/.worc/`), so the templates are found regardless of the current working directory.
-
-After a package upgrade, run **`upgrade-config`**, **`upgrade-docs`**, and **`install-templates`** to bring your deployment fully current. (A single umbrella `upgrade` that does all three is tracked in [follow-ups](backlog/follow_ups.md).)
+After a package upgrade, run **`upgrade-config`** and **`upgrade-docs`** to bring your deployment fully current. (A single umbrella `upgrade` that does both is tracked in [follow-ups](backlog/follow_ups.md).) There is no prompt-template delivery step: a flow node's prompt is its `role_file`, shipped with the flow (packaged flows) or kept under `.worc/flows/roles/` (operator flows) — edit the role file to customize a node's prompt.
 
 To install or pin a specific published (pre)release, append its tag to the `pipx`/`pip` source — e.g. `pipx install "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git@v0.1.1a1"`. Releases are tag-driven and pre-releases (`aN`/`bN`/`rcN` tags) are marked as such on GitHub; maintainers cut them per [RELEASING.md](RELEASING.md).
 
@@ -302,13 +297,17 @@ Configured under `git:` (all default to the safe value):
 | --- | --- | --- |
 | `auto_merge` | `false` | When true, every successfully published PR is merged to `pr_base`. |
 | `auto_merge_strategy` | `squash` | `merge` \| `squash` \| `rebase` — passed to `gh pr merge`. |
-| `auto_merge_allow_per_task` | `false` | When true, a task's front-matter `auto_merge: true` is honored. |
 | `auto_merge_wait_for_checks` | `false` | When true, arm GitHub-native auto-merge (`gh pr merge --auto`): GitHub merges only after required checks pass. When false, merge immediately. |
 
-**Per-task override.** A task file may carry `auto_merge: true` / `false` in its front-matter:
+**Per-task override (task wins).** A task file may carry `auto_merge: true` / `false` in its front-matter, and that value **wins outright** over the global `git.auto_merge`:
 
 - `auto_merge: false` **always** opts that task out, even when the global flag is on.
-- `auto_merge: true` is honored **only** when `git.auto_merge_allow_per_task: true`; otherwise it is ignored (with a logged warning) and the task follows the global policy. This is deliberate: write access to `tasks/pending/` would otherwise equal merge-to-`pr_base` rights. Resolution order: per-task `false` → per-task `true` (if allowed) → global `git.auto_merge` → `false`.
+- `auto_merge: true` **always** opts that task in, even when the global flag is off.
+- absent → the task follows the global `git.auto_merge`.
+
+Resolution order: per-task `auto_merge` (if set) → global `git.auto_merge` → `false`.
+
+> There is **no** separate `auto_merge_allow_per_task` operator gate (it was removed in `schema_version` 11). Auto-merge skips the human PR review, but the task author and the `config.yaml` owner are the **same trusted operator**, so letting a task set `auto_merge` is a publishing-policy choice, not a weakening of the agent sandbox or approvals ceiling — there is nothing to gate. (Contrast the security ceiling, which a task can never relax.)
 
 **What auto-merge does _not_ weaken:**
 
@@ -317,26 +316,15 @@ Configured under `git:` (all default to the safe value):
 
 **Audit.** Every auto-merge writes a `[AUTO-MERGE]` `WARNING` log line, records the merge in the append-only ledger (`auto_merged` + `merge_outcome` = the merge SHA, `"merged"`, or `"armed"`), and persists a `pr_merge` row in `state.db`. The terminal Telegram notification carries the PR URL.
 
-### Skipping pipeline stages (`agents.skip_stages`)
+### Skipping pipeline stages (per-task)
 
-By default the pipeline runs `refinement → planning → [implementation → testing → review → fixing] → summary → publishing`. An operator can skip stages that add no value for a given workload — globally for every task, or per-task in front-matter.
+By default the pipeline (the packaged `implementation` flow) runs `refinement → planning → implementation → testing → review → fixing(loop) → publish`. The whole-task **summary** is not a pipeline stage — the constant [supervisor layer](configuration.md#supervisor) writes it at task close (it becomes the PR body), so it cannot be skipped. A **task** can skip a stage that adds no value for it — convenient for debugging/testing and quick one-off runs without authoring a separate flow.
 
-Skippable stages: `planning`, `testing`, `review`, `fixing`, `summary`. `implementation` and `publishing` are never skippable; `refinement` uses the existing `refined: true` task flag.
+Skippable stages: `planning`, `testing`, `review`, `fixing`. `implementation` and `publishing` are never skippable; `refinement` is skipped **deterministically** when the task is already complete (completeness classification `COMPLETE`), never via a task flag.
 
-Global config under `agents:`:
+> The global `agents.skip_stages` list was **removed in config `schema_version` 10**: with fully configurable flows, "skip a stage for every task" is redundant — to drop a stage everywhere, remove its node from the flow (or author an operator flow). Per-task skip below is the surviving, bounded mechanism. The `agents.allow_review_skip` gate survives (it now permits the per-task `review` skip).
 
-| Key | Default | Effect |
-| --- | --- | --- |
-| `skip_stages` | `[]` | Stages skipped for **every** task, e.g. `[testing]` for a repo with no test suite. Each entry must be a skippable stage (else the config is rejected). |
-| `allow_review_skip` | `false` | Must be `true` before `review` may be skipped from **either** source. Disabling review removes the only agent quality gate before commit/PR. |
-
-```yaml
-agents:
-  skip_stages: [testing] # this repo has no meaningful automated tests
-  allow_review_skip: false
-```
-
-**Per-task override.** A task disables a stage with `enabled: false` in its `stages:` block (see [task-authoring.md](task-authoring.md#stages)):
+**Per-task skip.** A task disables a stage with `enabled: false` in its `stages:` block (see [task-authoring.md](task-authoring.md#stages)):
 
 ```yaml
 stages:
@@ -344,11 +332,11 @@ stages:
   testing: { enabled: false }
 ```
 
-The effective skip set is the **union** of `agents.skip_stages` and the task's `enabled: false` overrides — a stage skipped globally **cannot** be re-enabled per task.
+Disabling `review` additionally requires `agents.allow_review_skip: true` in config (it removes the only agent quality gate before commit/PR), else the task is rejected.
 
-**What each skip does:** `planning` → a stub `plan.md` and a single implementation unit (no decomposition); `testing` → straight from implementation to review, the Check Runner never runs; `review` → commit with no agent review gate; `fixing` → the first test/review failure goes to `manual_action_required` with a `stuck.md` report (no recovery loop, 0 fix iterations); `summary` → a stub summary.
+**What each skip does:** `planning` → a stub `plan.md` and a single implementation unit (no decomposition); `testing` → straight from implementation to review, the Check Runner never runs; `review` → commit with no agent review gate; `fixing` → the first test/review failure goes to `manual_action_required` with a `stuck.md` report (no recovery loop, 0 fix iterations).
 
-**Audit.** Every skip writes a `<stage> skipped` `WARNING` log line (with the reason: global config, task front-matter, or both), persists a `stage_runs` row with `skipped = 1` and `skip_reason`, and lists the skipped stages in a `## Pipeline stages skipped` section of the PR body. When `review` is skipped **and** auto-merge fires, a second `WARNING` records that the task merged with no review gate at all.
+**Audit.** Every skip writes a `<stage> skipped` `WARNING` log line (with the reason: global config, task front-matter, or both), persists a `node_runs` row with `skipped = 1` and `skip_reason`, and lists the skipped stages in a `## Pipeline stages skipped` section of the PR body. When `review` is skipped **and** auto-merge fires, a second `WARNING` records that the task merged with no review gate at all.
 
 ---
 
@@ -370,7 +358,7 @@ logs/
     failure_report.json / stuck.md# written iff the task ended manual_action_required
     review/findings.json          # review findings (severity → blocking)
     checks/<NNN>.log              # each check command's output (redacted)
-    stages/<stage>/rendered-prompt.md  # the exact stage prompt sent (redacted; see `prompts:`)
+    stages/<stage>/rendered-prompt.md  # the exact stage prompt sent (redacted; rendered from the node's role_file)
     stages/<stage>/run-<stage-run-id>/<attempt>-<provider>/
       request.json                # redacted request (argv, no secrets)
       stdout.log / stderr.log     # redacted process output
@@ -381,19 +369,18 @@ logs/
 
 - **The ledger** (`completed.jsonl`): grep here first — id, title, branch, `pr_url`, `final_status`, `fix_iterations`, terminal cleanup status, and a pointer to `failure_report.json` when stuck.
 - **Why a task is stuck**: open `stuck.md` (human-readable) / `failure_report.json` (machine). They record which fix loop and which limit was exhausted, all counter values, the last failing check output, the last blocking review findings, and the final diff — plus, for a decomposed task, the failing subtask `k` of `n` and the SHAs already committed.
-- **Audit completeness**: SQLite records every `stage_runs` and `provider_attempts` row (primary **and** any fallback), each artifact is registered with a **sha256 checksum**, and every commit/push/PR carries an idempotency fingerprint so a restart never double-publishes.
-- **Stage run vs. attempt**: `run-<stage-run-id>` is reserved in SQLite before the provider starts and changes for every repeated stage invocation, including each fixing cycle and recovery run. `<attempt>` starts at `1` inside that run and increments only for provider fallback.
+- **Audit completeness**: SQLite records every `node_runs` and `provider_attempts` row (primary **and** any fallback), each artifact is registered with a **sha256 checksum**, and every commit/push/PR carries an idempotency fingerprint so a restart never double-publishes.
+- **Node run vs. attempt**: `run-<node-run-id>` is reserved in SQLite before the provider starts and changes for every repeated node invocation, including each fixing cycle and recovery run. `<attempt>` starts at `1` inside that run and increments only for provider fallback.
 - **No secrets anywhere**: `request.json`, the stdout/stderr/events logs, diffs, SQLite rows, the ledger, and the failure report are all redacted; `denied_read_paths` (`.env`, `secrets/**`) are excluded from agent reads and their values are scrubbed from any sink.
 
-- **Custom stage prompts**: when a `templates/prompts/<stage>.md` is present, `stages/<stage>/rendered-prompt.md` is the exact (redacted) instruction the agent received for that stage — read it first to confirm your edited template took effect and rendered as intended.
+- **Rendered node prompts**: `stages/<stage>/rendered-prompt.md` is the exact (redacted) instruction the agent received for that node — read it first to confirm a `role_file` edit took effect and rendered as intended.
 
 Use the operator log for live monitoring. Provider `stdout.log` and `stderr.log` are finalized and redacted after the subprocess exits, so do not tail them while an attempt is still running.
 
-### Troubleshooting prompt templates
+### Troubleshooting node prompts
 
-- **An edited template "did nothing"** — confirm the file is named exactly `<stage>.md` for an agent-routed stage (`refinement`, `planning`, `implementation`, `review`, `fixing`, `summary`) and lives in `prompts.templates_dir` (a relative path resolves from the `config.yaml` directory). Confirm `templates_dir` is not `""` (which forces the packaged defaults), check `mode` (`replace` vs `append`), and compare `rendered-prompt.md` against your file. A whitespace-only file logs `prompt template file is empty; using packaged default` and falls back.
-- **A missing `<stage>.md` is never an error** — a stage with no template file silently uses the packaged default (there is no fail-closed path; the old `prompts.strict` flag was removed in schema v6).
-- **A `{placeholder}` printed literally** — only the allowlisted variables interpolate (see [configuration.md](configuration.md#prompts)); any other `{...}` is intentionally left verbatim so code/JSON braces survive. A path variable with no value for that stage renders empty.
+- **A `role_file` edit "did nothing"** — confirm you edited the role file the node actually uses (a packaged flow ships its role files beside the flow YAML; an operator flow keeps them under `.worc/flows/roles/`), and compare `rendered-prompt.md` against your file.
+- **A `{placeholder}` printed literally** — only the allowlisted variables interpolate (see [configuration.md](configuration.md#prompt-templates-no-longer-a-config-block)); any other `{...}` is intentionally left verbatim so code/JSON braces survive. A path variable with no value for that node renders empty.
 
 ---
 

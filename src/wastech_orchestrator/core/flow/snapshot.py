@@ -18,7 +18,6 @@ from typing import Any
 import yaml
 
 from wastech_orchestrator.core.flow.contracts import (
-    EvaluationKind,
     NetworkPolicy,
     OutputPolicy,
     PermissionProfile,
@@ -42,6 +41,7 @@ from wastech_orchestrator.core.flow.schema import (
     PublishNode,
     WhenPredicate,
 )
+from wastech_orchestrator.providers.base import ProviderId
 
 
 class FlowLoadError(Exception):
@@ -56,18 +56,57 @@ class FlowLoadError(Exception):
 # ``security-ceiling.md`` §3-§4 — the mechanism that keeps operator YAML a closed allowlist rather
 # than an open dict.
 
-_FLOW_FIELDS = frozenset({
-    "name", "task_type", "permission_ceiling", "output_policy", "publishing",
-    "network_policy", "defaults", "nodes", "edges", "budgets", "decomposition",
-})
-_AGENT_FIELDS = frozenset({
-    "id", "kind", "role_file", "session_scope", "lineage_affinity", "permission_profile",
-    "model", "reasoning", "timeout_seconds", "output_schema", "hitl", "extra_args", "when",
-})
-_EVALUATOR_FIELDS = frozenset({
-    "id", "kind", "role", "role_file", "session_scope", "permission_profile",
-    "evaluation_kind", "blocking", "max_rework_per_stage", "model", "reasoning", "when",
-})
+_FLOW_FIELDS = frozenset(
+    {
+        "name",
+        "task_type",
+        "permission_ceiling",
+        "output_policy",
+        "publishing",
+        "network_policy",
+        "defaults",
+        "nodes",
+        "edges",
+        "budgets",
+        "decomposition",
+    }
+)
+_AGENT_FIELDS = frozenset(
+    {
+        "id",
+        "kind",
+        "role_file",
+        "session_scope",
+        "lineage_affinity",
+        "permission_profile",
+        "provider",
+        "model",
+        "reasoning",
+        "timeout_seconds",
+        "output_schema",
+        "output_artifact",
+        "best_effort",
+        "hitl",
+        "extra_args",
+        "when",
+    }
+)
+_EVALUATOR_FIELDS = frozenset(
+    {
+        "id",
+        "kind",
+        "role",
+        "role_file",
+        "session_scope",
+        "permission_profile",
+        "blocking",
+        "max_rework_per_stage",
+        "provider",
+        "model",
+        "reasoning",
+        "when",
+    }
+)
 _CHECKS_FIELDS = frozenset({"id", "kind", "checker", "discovery", "when"})
 _HITL_NODE_FIELDS = frozenset({"id", "kind", "signal", "timeout_s", "when"})
 _PUBLISH_FIELDS = frozenset({"id", "kind", "policy", "when"})
@@ -75,22 +114,37 @@ _EDGE_FIELDS = frozenset({"from", "to", "outcome", "budget", "loop"})
 _WHEN_FIELDS = frozenset({"fact", "equals"})
 _HITL_SETTINGS_FIELDS = frozenset({"allow_question", "allow_approval"})
 _DISCOVERY_FIELDS = frozenset({"mode", "approve_command_changes"})
-_DECOMPOSITION_FIELDS = frozenset({
-    "proposed_by", "sub_flow", "gate", "commit_each_subtask", "shared_budget",
-})
+_DECOMPOSITION_FIELDS = frozenset(
+    {
+        "proposed_by",
+        "sub_flow",
+        "gate",
+        "commit_each_subtask",
+        "shared_budget",
+    }
+)
 _GATE_FIELDS = frozenset({"min", "max", "linear_depends_on"})
 _DEFAULTS_FIELDS = frozenset({"evaluator"})
-_EVALUATOR_DEFAULTS_FIELDS = frozenset({
-    "session_scope", "permission_profile", "max_rework_per_stage",
-})
+_EVALUATOR_DEFAULTS_FIELDS = frozenset(
+    {
+        "session_scope",
+        "permission_profile",
+        "max_rework_per_stage",
+    }
+)
 
 # Core checker set (security-ceiling §3): flow may not invent a checker kind.
 _CHECKER_KINDS = frozenset({"command_profile", "citation", "dependency_scan"})
+
+# Output-artifact slots (P1.4): the well-known names an agent node may persist its output to. The
+# slot vocabulary is core-fixed (a flow may not invent a slot — fail-closed at load).
+_OUTPUT_ARTIFACT_SLOTS = frozenset({"enriched_spec", "plan", "summary"})
 
 # ``when`` fact namespaces (co-design notes #2/#63). The exact value allowlist per namespace is
 # finalized when the P1 engine fact resolver lands; here we fail-closed on the namespace prefix so
 # a bare/typo'd fact (e.g. ``summary_enabled`` with no namespace) is rejected at load time.
 _WHEN_FACT_NAMESPACES = ("derived.", "config.")
+
 
 def _enum[EnumT: StrEnum](enum_cls: type[EnumT], value: object, ctx: str) -> EnumT:
     """Coerce ``value`` into ``enum_cls``, raising :class:`FlowLoadError` on a bad value."""
@@ -212,12 +266,20 @@ def _parse_agent_node(raw: dict[str, Any]) -> AgentNode:
     pp_raw = raw.get("permission_profile")
     permission_profile = _enum(PermissionProfile, pp_raw, ctx) if pp_raw is not None else None
 
+    provider_raw = raw.get("provider")
+    provider = _enum(ProviderId, provider_raw, ctx) if provider_raw is not None else None
+
     ss_raw = raw.get("session_scope", SessionScope.FRESH_DISPOSABLE)
 
     os_raw = raw.get("output_schema")
-    output_schema: str | None = (
-        json.dumps(os_raw, sort_keys=True) if os_raw is not None else None
-    )
+    output_schema: str | None = json.dumps(os_raw, sort_keys=True) if os_raw is not None else None
+
+    output_artifact = raw.get("output_artifact") or None
+    if output_artifact is not None and output_artifact not in _OUTPUT_ARTIFACT_SLOTS:
+        raise FlowLoadError(
+            f"invalid output_artifact {output_artifact!r} in {ctx}; "
+            f"valid slots: {sorted(_OUTPUT_ARTIFACT_SLOTS)}"
+        )
 
     return AgentNode(
         id=nid,
@@ -226,10 +288,13 @@ def _parse_agent_node(raw: dict[str, Any]) -> AgentNode:
         session_scope=_enum(SessionScope, ss_raw, ctx),
         lineage_affinity=raw.get("lineage_affinity") or None,
         permission_profile=permission_profile,
+        provider=provider,
         model=raw.get("model") or None,
         reasoning=raw.get("reasoning") or None,
         timeout_seconds=raw.get("timeout_seconds"),
         output_schema=output_schema,
+        output_artifact=output_artifact,
+        best_effort=bool(raw.get("best_effort", False)),
         hitl=_parse_hitl_settings(raw.get("hitl")),
         extra_args=tuple(str(a) for a in raw.get("extra_args", [])),
         when=_parse_when(raw.get("when")),
@@ -245,7 +310,9 @@ def _parse_evaluator_node(raw: dict[str, Any], defaults: EvaluatorDefaults) -> E
 
     ss_raw = raw.get("session_scope", defaults.session_scope)
     pp_raw = raw.get("permission_profile", defaults.permission_profile)
-    ek_raw = raw.get("evaluation_kind", EvaluationKind.STAGE_OUTPUT)
+
+    provider_raw = raw.get("provider")
+    provider = _enum(ProviderId, provider_raw, ctx) if provider_raw is not None else None
 
     return EvaluatorNode(
         id=nid,
@@ -254,9 +321,9 @@ def _parse_evaluator_node(raw: dict[str, Any], defaults: EvaluatorDefaults) -> E
         role_file=role_file,
         session_scope=_enum(SessionScope, ss_raw, ctx),
         permission_profile=_enum(PermissionProfile, pp_raw, ctx),
-        evaluation_kind=_enum(EvaluationKind, ek_raw, ctx),
         blocking=bool(raw.get("blocking", True)),
         max_rework_per_stage=int(raw.get("max_rework_per_stage", defaults.max_rework_per_stage)),
+        provider=provider,
         model=raw.get("model") or None,
         reasoning=raw.get("reasoning") or None,
         when=_parse_when(raw.get("when")),

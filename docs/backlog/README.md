@@ -10,6 +10,7 @@ The canonical reference is the [Functional Map](../functional/index.md). Backlog
 | --- | --- |
 | [product_backlog.md](product_backlog.md) | Aggregated product inventory: open backlog (program + other deferred features), a Shipped traceability list, and the open detail-file index. |
 | [follow_ups.md](follow_ups.md) | Implementation follow-ups / tech-debt discovered while building — distinct from product features. Recorded via `/sync-docs`. |
+| [2026-06-21-audit.md](2026-06-21-audit.md) | Code-verified audit (bugs, dead/decorative config, DRY, fragility, stale comments) found while reconstructing `docs/functional/` purely from the code on 2026-06-21. |
 | [workflow_execution_foundation.md](workflow_execution_foundation.md) | Shared prerequisite for built-in workflow selection, immutable resolved-profile identity, execution roles/session scopes, and reusable output/audit contracts. |
 | [supervisor_quality_gate.md](supervisor_quality_gate.md) | Mandatory read-only AI quality evaluation that emits bounded verdicts into Core-owned rework loops and optionally generates the final handoff without becoming a controller. |
 | [durable_sessions_and_fixing_affinity.md](durable_sessions_and_fixing_affinity.md) | Durable Claude/Codex editing lineage, provider-aware resume/fallback, and implementation/fixing provider-session affinity. |

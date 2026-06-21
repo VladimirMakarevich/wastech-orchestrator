@@ -149,6 +149,16 @@ def _subtasks_dir(artifacts_root: str | Path, task_id: str) -> Path:
     return task_artifact_dir(artifacts_root, task_id) / "subtasks"
 
 
+def subtask_spec_path(artifacts_root: str | Path, task_id: str, order: int, slug: str) -> Path:
+    """Path to one subtask's immutable ``NN-<slug>.md`` spec (§10).
+
+    The single source of the per-subtask spec filename, shared by :func:`write_subtask_artifacts`
+    (which writes them) and the orchestrator's decomposition fan-out (which injects the active one
+    as ``{subtask_spec_path}`` into the edit nodes).
+    """
+    return _subtasks_dir(artifacts_root, task_id) / f"{order:02d}-{slug}.md"
+
+
 def _index_entry(spec: SubtaskSpec) -> dict[str, Any]:
     return {
         "order": spec.order,
@@ -185,7 +195,7 @@ def write_subtask_artifacts(
     _write_json_atomic(sub_dir / INDEX_FILENAME, index)
 
     for spec in decision.subtasks:
-        spec_path = sub_dir / f"{spec.order:02d}-{spec.slug}.md"
+        spec_path = subtask_spec_path(artifacts_root, task_id, spec.order, spec.slug)
         if spec_path.exists():
             continue  # immutable — never overwrite (§10)
         criteria = "\n".join(f"- {c}" for c in spec.acceptance_criteria)

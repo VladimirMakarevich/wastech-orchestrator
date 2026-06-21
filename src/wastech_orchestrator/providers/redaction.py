@@ -17,12 +17,25 @@ artifact**.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
 REDACTED = "[REDACTED]"
+
+
+def normalized_session_id(raw_session_id: str) -> str:
+    """A stable, non-secret outward form of a provider session id (durable sessions, P2.2).
+
+    The raw session id lives **only** in ``state.db`` (the ``editing_lineage`` table); everywhere
+    else (artifacts, logs, the ``result.json`` audit) the session is referred to by this normalized
+    token — a short SHA-256 prefix — so runs can be correlated without exposing the resumable id.
+    """
+    digest = hashlib.sha256(raw_session_id.encode("utf-8")).hexdigest()[:12]
+    return f"session:{digest}"
+
 
 # Literal secrets shorter than this are ignored: redacting a 1-3 char value would mangle ordinary
 # text without protecting anything meaningful (real tokens are long).

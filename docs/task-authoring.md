@@ -18,16 +18,8 @@ A Markdown task starts with YAML front matter and then carries the task body:
 ---
 id: task-001
 title: "Add login form validation"
-refined: false
-decompose: false
-agents:
-  planning: claude
-  implementation: claude
-  review: codex
 contacts:
   - "@team-lead"
-model: null # optional: override provider model for this task
-reasoning: null # optional: low | medium | high | xhigh | max
 ---
 
 ## Description
@@ -62,18 +54,14 @@ Allowed fields:
 | --- | --: | --- | --- |
 | `id` | yes | string | Stable task id. Must match `^[a-z0-9][a-z0-9._-]{0,63}$`. |
 | `title` | yes | string | Short human-readable title. Used for branch slugging and reports. |
-| `refined` | no | boolean | Set `true` when the task is already complete enough to skip refinement. |
-| `decompose` | no | boolean | `true` forces the decomposition gate, `false` disables it, omitted uses config. |
-| `agents` | no | mapping | Per-stage provider override. |
-| `contacts` | no | list of strings | Plain-text mentions in Telegram notifications/HITL prompts. |
-| `model` | no | string or null | Override the provider model for every stage of this task (e.g. `claude-opus-4-8`). |
-| `reasoning` | no | string or null | Override the reasoning effort level for this task: `low`, `medium`, `high`, `xhigh`, or `max`. |
-| `stages` | no | mapping | Per-stage overrides: `model`/`reasoning` (precedence over the task-wide values) and `enabled: false` to skip a stage. See [`stages`](#stages). |
+| `task_type` | no | string | Selects the flow that runs the task. Omitted ⇒ `implementation` (the default coding pipeline). Built-ins: `implementation`, `deep_research`, `security_audit`; an operator flow in `<repo>/.worc/flows/<task_type>.yaml` may add others. An unknown `task_type` (no matching flow) fails the task before any branch is created. The task only _names_ the flow — it never edits the graph. |
 | `pr_title` | no | string \| null | PR title override; when set, used verbatim as the pull-request title instead of `title`. |
-| `auto_merge` | no | boolean | `true` requests auto-merge (honored only when the operator allows it), `false` always opts out, omitted uses config. |
+| `auto_merge` | no | boolean | `true` requests auto-merge, `false` always opts out, omitted uses the instance default. A set per-task value wins outright over `git.auto_merge`. See [`auto_merge`](#auto_merge). |
 | `prompt_audit` | no | boolean | `true` records each step's prompt + who for this task, `false` disables it, omitted uses config. Always overrides the global. See [`prompt_audit`](#prompt_audit). |
+| `contacts` | no | list of strings | Plain-text mentions in Telegram notifications/HITL prompts. |
+| `stages` | no | mapping | Per-stage skip toggle: `stages.<stage>.enabled: false` skips a skippable stage. `enabled` is the only valid sub-key. See [`stages`](#stages). |
 
-The current validation gate rejects unknown fields fail-closed. Keep task front matter limited to the fields above.
+The current validation gate rejects unknown fields fail-closed (`unknown_top_level_field`). Keep task front matter limited to the fields above. Provider, model, and reasoning are **flow-node concerns, not task fields** — each flow node declares its own `provider`/`model`/`reasoning`, and a task cannot repoint or override them (see [Provider, model, reasoning](#provider-model-reasoning-set-on-the-flow-not-the-task)).
 
 ## `id`
 
@@ -96,35 +84,15 @@ id: "-task-001"     # leading separator
 
 The orchestrator rejects invalid ids; it does not sanitize them.
 
-## `refined`
+## Refinement (automatic)
 
-Use `refined: true` only when the task already has enough detail for planning:
+Refinement-skip is deterministic — there is no task flag. The orchestrator skips refinement automatically when the task is **complete**: a non-empty `## Description` plus acceptance criteria. Provide acceptance criteria to skip refinement; omit them to let refinement enrich the task. Missing acceptance criteria never rejects the task — it makes refinement run.
 
-```yaml
-refined: true
-```
+When it runs, refinement is autonomous: it enriches the task with assumptions and acceptance criteria; it does not ask a human clarifying question.
 
-When `refined` is omitted or `false`, the Core still skips refinement if the task is classified as complete. In the current implementation, completeness requires a non-empty description plus acceptance criteria. Missing acceptance criteria does not reject the task; it makes refinement run.
+## Decomposition (operator/flow-controlled)
 
-Planned v1 refinement is autonomous. It enriches the task with assumptions and acceptance criteria; it does not ask a human clarifying question.
-
-## `decompose`
-
-Use `decompose` for large tasks:
-
-```yaml
-decompose: true
-```
-
-Values:
-
-| Value   | Meaning                                                |
-| ------- | ------------------------------------------------------ |
-| `true`  | Force the decomposition gate for this task.            |
-| `false` | Disable decomposition for this task.                   |
-| omitted | Use `agents.decomposition.enabled` from `config.yaml`. |
-
-Planned v1 decomposition is still sequential: accepted subtasks run one after another on one task branch and produce one PR for the parent task.
+Decomposition is not a task knob. Whether a large task is split is decided by the operator's `agents.decomposition.enabled`, the flow's `decomposition:` block, and the planning stage's proposal — not by a front-matter flag. Describe large scope in the `## Description` and let planning propose a split. When a split is accepted, subtasks run sequentially on one task branch and produce one PR for the parent task.
 
 ## prompt_audit
 
@@ -144,38 +112,9 @@ Values:
 
 The per-task value **always overrides** the global one (in both directions — there is no operator gate). When enabled, each agent-routed stage run is written as a self-contained, redacted JSON record under `<repo>/.worc/logs/<task-id>/prompt-audit/`, in chronological order, plus a combined `timeline.jsonl`. See [configuration.md](configuration.md#prompt_audit) for the file layout.
 
-## `agents`
+## Provider, model, reasoning (set on the flow, not the task)
 
-Use `agents` to override the provider for specific agent-routed stages:
-
-```yaml
-agents:
-  refinement: claude
-  planning: claude
-  implementation: codex
-  review: codex
-  fixing: claude
-  summary: claude
-```
-
-Allowed stage keys:
-
-```text
-refinement, planning, implementation, review, fixing, summary
-```
-
-Allowed provider values:
-
-```text
-codex, claude
-```
-
-Rules:
-
-- the provider must be listed in `agents.allowed`;
-- the provider must have an `agents.providers.<provider>` config entry;
-- `testing` and `publishing` cannot be overridden here;
-- task overrides cannot change commands, `extra_args`, credentials, sandbox, or any security policy.
+A task **cannot** choose a provider, model, or reasoning level for any stage. Provider routing is node-based: each flow node declares its own `provider:` — or, when omitted, defaults to the operator's single global primary provider (the one with `primary: true` in `config.yaml` under `agents.providers`). Model and reasoning live on the flow node as well. A task has no `agents`, `model`, or `reasoning` field, and cannot repoint a stage's provider or change commands, `extra_args`, credentials, sandbox, or any security policy.
 
 > **Tasks cannot supply or weaken checks.** The quality-gate commands are an operator/infrastructure concern resolved from `config.yaml` and the repository at install/preflight time (see [configuration.md](configuration.md#checks)). A task file has no field to add, replace, or relax a check, and cannot change the discovery policy — this keeps the quality gate independent of task content.
 
@@ -191,58 +130,27 @@ contacts:
 
 When Telegram is configured, the orchestrator renders these values as plain-text mentions in terminal notifications and HITL prompts. They do not choose the Telegram chat, grant access, alter routing, or change approval scope; the numeric chat id remains operator-controlled configuration.
 
-## `model`
+## `auto_merge`
 
-Override the provider model for every agent stage of this specific task:
-
-```yaml
-model: "claude-opus-4-8"
-```
-
-When set, this replaces whatever model is configured under `agents.providers.<provider>.model` for all stages of this task. Use `null` or omit the field to use the globally configured model.
-
-## `reasoning`
-
-Override the reasoning effort level for this specific task:
+`auto_merge` is a publishing-policy choice — whether the orchestrator merges the PR without waiting for a human review:
 
 ```yaml
-reasoning: "xhigh"
+auto_merge: true
 ```
 
-Valid values: `low`, `medium`, `high`, `xhigh`, `max`.
+Values:
 
-- For **Claude Code** (CLI v2.1+), this maps to `--effort <level>`, which implicitly enables adaptive thinking. `xhigh` requires Opus 4.7+ or Fable 5; using it on an incompatible model exits non-zero → `unsupported_version` → infrastructure fallback.
-- For **Codex**, this maps to `--reasoning-effort`; Codex supports up to `xhigh` natively, and `max` (Claude-only) is clamped to `xhigh`.
+| Value   | Meaning                                           |
+| ------- | ------------------------------------------------- |
+| `true`  | Auto-merge this task's PR (skip human review).    |
+| `false` | Always opt out, even if the instance defaults on. |
+| omitted | Use the instance default `git.auto_merge`.        |
 
-When omitted, the global `agents.providers.<provider>.reasoning` value from `config.yaml` is used. When that is also absent, no reasoning flag is passed to the CLI.
+A set per-task `auto_merge` **wins outright** over the instance default `git.auto_merge` — there is no `git.auto_merge_allow_per_task` gate. Auto-merge skips the human PR review, and the task author owns that decision (the same trusted operator who owns `config.yaml`). It is a publishing-policy choice, not a security weakening.
 
 ## `stages`
 
-Different stages have different cognitive demands: `planning` and `review` benefit from a capable, high-reasoning model, while `implementation`, `fixing`, and `summary` are usually fine on a lighter/cheaper one. Use `stages` to set `model` and/or `reasoning` per stage instead of one task-wide value:
-
-```yaml
-model: claude-sonnet-4-6 # task-wide fallback for stages not listed below
-reasoning: low
-stages:
-  planning:
-    model: claude-opus-4-8
-    reasoning: high
-  review:
-    reasoning: high # only reasoning overridden — model stays the task-wide claude-sonnet-4-6
-  fixing:
-    model: claude-sonnet-4-6
-    reasoning: medium
-```
-
-Each field resolves independently, most-specific first:
-
-```text
-stages.<stage>.<field>  →  task-wide model/reasoning  →  agents.providers.<provider>.<field>  →  unset
-```
-
-So a stage can override only `reasoning` and keep the task-wide (or provider-default) `model`, and vice versa. Both sub-fields are optional; a stage block of `{}` or `null` means "inherit", which is useful for scaffolding a block before filling it in.
-
-The `stages` block also carries the per-stage **skip** toggle, `enabled: false`:
+The `stages` block carries the per-stage **skip** toggle, `enabled: false` — the one surviving per-stage knob:
 
 ```yaml
 stages:
@@ -254,29 +162,16 @@ stages:
     enabled: false # DANGER: no agent review gate — requires agents.allow_review_skip: true
 ```
 
-Skippable stages: `planning`, `testing`, `review`, `fixing`, `summary`. `implementation` (the core work), `publishing` (the output), and `refinement` (use the `refined` flag) can never be skipped here. The effective skip set is the union of `agents.skip_stages` (global) and a task's `enabled: false` overrides — a stage skipped globally cannot be re-enabled per task.
+Skippable stages: `planning`, `testing`, `review`, `fixing`. `implementation` (the core work) and `publishing` (the output) can never be skipped here; `refinement` is skipped automatically by completeness, not by a `stages` entry. The whole-task **summary** is not skippable either — it is written by the constant supervisor layer at task close, not by a graph node (see [configuration.md](configuration.md#supervisor)). Stage-skip is **per-task only** — the global `agents.skip_stages` list was removed in config v10 (to drop a stage everywhere, remove its node from the flow). Disabling `review` additionally requires `agents.allow_review_skip: true`.
 
-What each skip does: `planning` → stub plan, single unit; `testing` → straight to review (no checks); `review` → commit with no agent gate; `fixing` → first test/review failure goes to `manual_action_required` (no recovery loop); `summary` → a stub summary. Every skip is logged at WARNING and recorded in `state.db` (`stage_runs.skipped`), and the skipped set is listed in the PR body.
-
-Allowed stage keys and their valid sub-keys:
-
-```text
-refinement      model, reasoning
-planning        model, reasoning, enabled
-implementation  model, reasoning
-testing         enabled
-review          model, reasoning, enabled
-fixing          model, reasoning, enabled
-summary         model, reasoning, enabled
-```
+What each skip does: `planning` → stub plan, single unit; `testing` → straight to review (no checks); `review` → commit with no agent gate; `fixing` → first test/review failure goes to `manual_action_required` (no recovery loop). Every skip is logged at WARNING and recorded in `state.db` (`node_runs.skipped`), and the skipped set is listed in the PR body.
 
 Rules:
 
-- `model`/`reasoning` apply only to the agent-routed stages; `testing` (the Check Runner) and `publishing` (the Git Manager) run no agent, so a `model`/`reasoning` override there is meaningless and is rejected fail-closed (`invalid_stage_override`). `publishing` is not a valid key at all;
-- `enabled` applies only to the skippable stages above; `enabled` on `implementation`/`refinement` is rejected. `enabled` must be a boolean;
+- `enabled` is the **only** valid sub-key under `stages.<stage>`. Any other sub-key (including `model`/`reasoning`, which are flow-node concerns) is rejected fail-closed (`invalid_stage_override`);
+- `enabled` applies only to the skippable stages above; `enabled` on `implementation`/`refinement`/`publishing` is rejected. `enabled` must be a boolean;
 - disabling `review` (`enabled: false`) is rejected unless `agents.allow_review_skip: true` (`review_skip_not_allowed`) — it removes the only agent quality gate before commit/PR;
-- unknown sub-keys, non-mapping stage values, and invalid `reasoning` levels are likewise rejected;
-- a `model` string is **not** validated against the stage's provider — if a stage routes to a provider that does not recognize the model name, the run fails at that provider, the same as a task-wide `model`. Keep model names consistent with the provider routing for that stage.
+- unknown sub-keys and non-mapping stage values are likewise rejected.
 
 ## Body Sections
 
@@ -319,12 +214,6 @@ Avoid:
 ---
 id: task-042
 title: "Add retry budget to webhook delivery"
-refined: false
-decompose: false
-agents:
-  planning: claude
-  implementation: claude
-  review: codex
 ---
 
 ## Description
@@ -349,9 +238,8 @@ Why this is valid:
 - `id` is normalized;
 - `title` is non-empty;
 - the body has a clear Description;
-- acceptance criteria are concrete;
-- constraints limit scope;
-- provider overrides name known stages and providers.
+- acceptance criteria are concrete (so refinement is skipped automatically);
+- constraints limit scope.
 
 ## Invalid Examples
 
@@ -381,14 +269,15 @@ Add retries to webhooks.
 
 Reason: `unknown_top_level_field` when unknown fields are rejected.
 
-Invalid route override:
+Invalid stage override:
 
 ```markdown
 ---
 id: task-044
 title: "Add retries"
-agents:
-  testing: codex
+stages:
+  implementation:
+    model: claude-opus-4-8
 ---
 
 ## Description
@@ -396,7 +285,7 @@ agents:
 Add retries to webhooks.
 ```
 
-Reason: `testing` is not an agent-routed stage.
+Reason: `invalid_stage_override`. `model` is not a valid `stages.<stage>` sub-key (model/reasoning are flow-node concerns), and `implementation` is not skippable. The only valid sub-key is `enabled`.
 
 Injection-shaped front matter:
 
@@ -421,12 +310,6 @@ JSON tasks are supported for integrations that generate structured input:
 {
   "id": "task-050",
   "title": "Add retry budget to webhook delivery",
-  "refined": false,
-  "decompose": false,
-  "agents": {
-    "planning": "claude",
-    "review": "codex"
-  },
   "contacts": ["@team-lead"],
   "description": "## Description\n\nAdd a bounded retry budget.\n\n## Acceptance criteria\n\n- [ ] Stops after 5 failed attempts.\n"
 }
@@ -444,8 +327,7 @@ Before placing a task in `tasks/pending/`:
 - include a clear `## Description`;
 - include acceptance criteria unless you intentionally want refinement to enrich the task;
 - list constraints for modules, dependencies, migrations, or compatibility;
-- keep provider overrides minimal;
-- use `model` and `reasoning` only when the task demands a specific model tier or reasoning depth;
+- use `stages.<stage>.enabled: false` only when you intentionally want to skip a skippable stage;
 - do not include credentials or secret values;
 - do not try to pass CLI flags through front matter;
 - prefer one coherent change per task.

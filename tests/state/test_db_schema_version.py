@@ -40,110 +40,6 @@ def test_legacy_zero_version_is_adopted_without_error(tmp_path: Path) -> None:
     assert _user_version(db) == DB_SCHEMA_VERSION
 
 
-def _stage_runs_columns(path: Path) -> set[str]:
-    conn = sqlite3.connect(str(path))
-    try:
-        return {str(r[1]) for r in conn.execute("PRAGMA table_info(stage_runs)")}
-    finally:
-        conn.close()
-
-
-def test_v1_database_is_migrated_to_add_skip_columns(tmp_path: Path) -> None:
-    # A pre-v2 stage_runs table lacks the skip columns; opening writable must add them in place.
-    db = tmp_path / "v1.db"
-    conn = sqlite3.connect(str(db))
-    conn.execute(
-        """
-        CREATE TABLE stage_runs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_id TEXT NOT NULL,
-            stage TEXT NOT NULL,
-            route_primary TEXT NOT NULL,
-            route_source TEXT NOT NULL,
-            stage_attempts INTEGER NOT NULL
-        )
-        """
-    )
-    conn.execute("PRAGMA user_version=1")
-    conn.commit()
-    conn.close()
-    assert "skipped" not in _stage_runs_columns(db)
-
-    StateStore.open(db).close()
-    cols = _stage_runs_columns(db)
-    assert {"skipped", "skip_reason"} <= cols
-    assert _user_version(db) == DB_SCHEMA_VERSION
-
-
-def _tasks_columns(path: Path) -> set[str]:
-    conn = sqlite3.connect(str(path))
-    try:
-        return {str(r[1]) for r in conn.execute("PRAGMA table_info(tasks)")}
-    finally:
-        conn.close()
-
-
-# The full v2 ``tasks`` schema (everything the v3 schema has except ``interrupted_status``), so the
-# migration is exercised against a realistic prior database that ``_task_from_row`` can read back.
-_V2_TASKS = """
-CREATE TABLE tasks (
-    task_id TEXT PRIMARY KEY,
-    title TEXT NOT NULL,
-    status TEXT NOT NULL,
-    source_path TEXT,
-    branch TEXT,
-    slug TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    validation_passed INTEGER,
-    validation_reason TEXT,
-    refinement_ran INTEGER,
-    refinement_skip_reason TEXT,
-    stage_attempts INTEGER NOT NULL DEFAULT 0,
-    test_fix_cycles INTEGER NOT NULL DEFAULT 0,
-    review_fix_cycles INTEGER NOT NULL DEFAULT 0,
-    fix_iterations INTEGER NOT NULL DEFAULT 0,
-    decomposition_enabled INTEGER,
-    decomposition_accepted INTEGER,
-    decomposition_reason TEXT,
-    subtask_count INTEGER,
-    active_subtask INTEGER,
-    subtasks_completed INTEGER NOT NULL DEFAULT 0,
-    failure_report_path TEXT,
-    cleanup_target_branch TEXT,
-    cleanup_completed INTEGER,
-    cleanup_completed_at TEXT,
-    cleanup_last_error TEXT,
-    finished_at TEXT
-);
-"""
-
-
-def test_v2_database_is_migrated_to_add_interrupted_status(tmp_path: Path) -> None:
-    # A pre-v3 tasks table lacks ``interrupted_status``; opening writable must add it in place and
-    # leave the existing row readable (for ``rerun --continue``).
-    db = tmp_path / "v2.db"
-    conn = sqlite3.connect(str(db))
-    conn.executescript(_V2_TASKS)
-    conn.execute(
-        "INSERT INTO tasks (task_id, title, status, created_at, updated_at) VALUES "
-        "('task-1', 'T', 'failed', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')"
-    )
-    conn.execute("PRAGMA user_version=2")
-    conn.commit()
-    conn.close()
-    assert "interrupted_status" not in _tasks_columns(db)
-
-    store = StateStore.open(db)
-    try:
-        assert "interrupted_status" in _tasks_columns(db)
-        assert _user_version(db) == DB_SCHEMA_VERSION
-        row = store.get_task("task-1")
-        assert row is not None and row.interrupted_status is None
-    finally:
-        store.close()
-
-
 def test_newer_version_is_refused_on_both_open_paths(tmp_path: Path) -> None:
     db = tmp_path / "newer.db"
     conn = sqlite3.connect(str(db))
@@ -155,3 +51,27 @@ def test_newer_version_is_refused_on_both_open_paths(tmp_path: Path) -> None:
         StateStore.open(db)
     with pytest.raises(IncompatibleStateError):
         StateStore.open_readonly(db)
+
+
+def test_pre_v7_incompatible_shape_is_refused_not_stamped(tmp_path: Path) -> None:
+    # F4 / MC5: an older versioned database carries a now-incompatible shape (here the legacy
+    # `provider_attempts.stage_run_id`, before the v6 rename to `node_run_id`). Because the v5-v7
+    # changes are destructive and `_migrate` is additive-only, open() must refuse fail-closed — it
+    # must NOT stamp the current version onto the old shape (which previously passed the gate and
+    # then crashed on the first provider-attempt write). Greenfield: the fix is refusal, not a
+    # destructive migration.
+    db = tmp_path / "v6.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TABLE provider_attempts (id INTEGER PRIMARY KEY, stage_run_id INTEGER NOT NULL)"
+    )
+    conn.execute(f"PRAGMA user_version={DB_SCHEMA_VERSION - 1}")  # a pre-v7 (legacy) database
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(IncompatibleStateError, match="predates an incompatible"):
+        StateStore.open(db)
+    with pytest.raises(IncompatibleStateError):
+        StateStore.open_readonly(db)
+    # The refusal left the file untouched (no version stamp), so it is not silently wedged.
+    assert _user_version(db) == DB_SCHEMA_VERSION - 1

@@ -1,131 +1,81 @@
 # B07 — State Machine and State Store
 
-## Purpose
+> Reconstructed from code (`src/wastech_orchestrator/core/state_machine.py`, `state_store.py`) and tests (`tests/test_state_store.py`, `tests/core/test_state_machine.py`). The code is the only source of truth; this document was rebuilt from the implementation, not from prose or comments. Significant claims carry a `file:line` reference.
 
-Defines the task status vocabulary and the allowed transitions between statuses, and persists all pipeline state in a single SQLite database (`state.db`). This is the "backbone" of state: a single processing slot, transactional transitions (crash-safe), and idempotent writes that allow an interrupted task to be resumed.
+**Status:** documented · **Source modules:** `core/state_machine.py`, `state_store.py`
 
-## Responsibilities
+## Responsibility
 
-- **State machine** (pure, no IO): enumerate statuses (§8), define allowed transitions, validate/assert transitions ([state_machine.py:15-143](../../../src/wastech_orchestrator/core/state_machine.py#L15)).
-- **State Store**: create/migrate the database and apply the schema ([state_store.py:328-340](../../../src/wastech_orchestrator/state_store.py#L328)); store 7 entities: `tasks`, `stage_runs`, `provider_attempts`, `check_runs`, `artifacts`, `publish_operations`, `subtasks` ([state_store.py:83-196](../../../src/wastech_orchestrator/state_store.py#L83)).
-- Provide `BEGIN IMMEDIATE`…`COMMIT`/`ROLLBACK` transactions ([state_store.py:359-368](../../../src/wastech_orchestrator/state_store.py#L359)).
-- Answer the question "who owns the slot" ([state_store.py:455-460](../../../src/wastech_orchestrator/state_store.py#L455)).
-- Version the database schema and reject a newer version ([state_store.py:63-81](../../../src/wastech_orchestrator/state_store.py#L63)).
+Two pieces: the **state machine** (a pure module: the canonical task statuses and the allowed transitions, with no IO) and the **state store** (the authoritative SQLite persistence — tasks, the flow-engine audit tables, idempotency, and durable sessions). Together they make the pipeline crash-safe: a transition is asserted in the pure module, then persisted in a transaction, so a crash leaves a consistent prior state a restart can reconcile.
 
-## Block Boundaries
+## State machine
 
-### Within scope
+### Statuses and transitions
 
-- Status vocabulary and transition table (policy).
-- Persistence and reading of all 7 entities; loop counters; idempotent upserts.
-- Querying active tasks (slot) and tasks with incomplete cleanup (recovery).
-- Transactions, schema migration and versioning, read-only mode.
-
-### Out of scope
-
-- **Deciding which transition to make** — that is [B06 Pipeline](./B06-orchestrator-pipeline.md): it calls `assert_transition` then `set_status` inside a transaction ([orchestrator.py:2434-2445](../../../src/wastech_orchestrator/core/orchestrator.py#L2434)). The store itself does not choose transitions; `set_status` writes any given status.
-- **Secret redaction**: the store writes exactly what it is given; the responsibility of "do not pass a secret into a field" lies with the callers ([state_store.py:8-11](../../../src/wastech_orchestrator/state_store.py#L8)).
-- **Terminal outcome ledger** — that is a separate block [B08 Ledger](./B08-ledger-and-failure-reports.md).
-- **Git operations themselves** — that is [B22](./B22-git-manager.md); the store only holds idempotency strings for publishing (`publish_operations`).
-
-## Entry Points
-
-State machine: `Status`, `ALLOWED_TRANSITIONS`, `can_transition`, `assert_transition`, `is_terminal`, `is_active`, `InvalidTransition` ([state_machine.py](../../../src/wastech_orchestrator/core/state_machine.py)).
-
-State Store ([state_store.py](../../../src/wastech_orchestrator/state_store.py)):
-
-- `StateStore.open(db_path)` / `open_readonly(db_path)` ([:328,:342](../../../src/wastech_orchestrator/state_store.py#L328)).
-- `transaction()` ([:359](../../../src/wastech_orchestrator/state_store.py#L359)).
-- Tasks: `insert_task`, `get_task`, `latest_task`, `task_id_exists`, `find_active_tasks`, `find_incomplete_cleanup`, `update_task`, `set_status`, `reset_task_for_rerun`, `revive_task_for_continue`.
-- Counters: `get_counters`, `save_counters`.
-- Records: `record_stage_run`, `record_skip`, `complete_stage_run`, `record_provider_attempt`, `record_check_run`, `latest_failed_check_log`, `register_artifact`.
-- Publish idempotency: `record_publish_op`, `get_publish_op`, `clear_publish_operations`.
-- Subtasks: `insert_subtasks`, `get_subtasks`, `set_subtask_commit`.
-
-## Input Data and State
-
-Path to `state.db`; dataclass row objects (`TaskRow`, `StageRunRow`, …). Internal state is a single SQLite connection (WAL, `foreign_keys=ON`, manual transaction management).
-
-## Main Scenario (task status transition)
-
-1. [B06](./B06-orchestrator-pipeline.md) opens a transaction via `transaction()` (`BEGIN IMMEDIATE`).
-2. Inside: `assert_transition(src, dst)` (state machine policy) → `set_status(task_id, dst)` → `save_counters(...)` → optional `update_task(...)`.
-3. On success: `COMMIT`; on exception: `ROLLBACK` — the database remains in the previous consistent state.
-
-Each status transition happens inside a single transaction: first the §8 check, then the write; on exception — full rollback:
+The lifecycle is **generic** — progress _within_ `running` (which flow node is executing) is the `current_node` in `node_runs`, not a status ([state_machine.py:7-10](../../../src/wastech_orchestrator/core/state_machine.py#L7)). `Status` ([state_machine.py:18](../../../src/wastech_orchestrator/core/state_machine.py#L18)) is `new`, `validated`, `preparing`, `running`, `done`, `failed`, `manual_action_required`, and the queue waiting-state `pending`.
 
 ```mermaid
-flowchart TB
-    start(["B06: status change needed"]) --> tx["transaction(): BEGIN IMMEDIATE"]
-    tx --> assert{"assert_transition(src, dst):<br/>is the transition allowed per §8?"}
-    assert -->|no| inv["InvalidTransition → ROLLBACK"]
-    assert -->|yes| setp["set_status → save_counters<br/>→ optional update_task"]
-    setp --> ok{"exception raised?"}
-    ok -->|no| commit["COMMIT — new state is persistent"]
-    ok -->|yes| rb["ROLLBACK — database in previous consistent state"]
+stateDiagram-v2
+    direction LR
+    [*] --> new
+    new --> validated
+    validated --> preparing
+    preparing --> running
+    running --> done
+    pending --> validated
+    pending --> preparing
+    done --> [*]
+    failed --> [*]
+    manual_action_required --> [*]
+    note right of running
+      Every non-terminal status also allows
+      → failed and → manual_action_required.
+    end note
 ```
 
-## Alternative Scenarios
+The happy-path edges live in `_BASE_TRANSITIONS` ([state_machine.py:48](../../../src/wastech_orchestrator/core/state_machine.py#L48)); `_build_transitions` ([state_machine.py:61](../../../src/wastech_orchestrator/core/state_machine.py#L61)) adds the universal `→ failed` / `→ manual_action_required` bailout to every non-terminal status and gives terminal statuses no outgoing edges. `assert_transition` ([state_machine.py:93](../../../src/wastech_orchestrator/core/state_machine.py#L93)) raises `InvalidTransition` ([state_machine.py:79](../../../src/wastech_orchestrator/core/state_machine.py#L79)) for any edge not in `ALLOWED_TRANSITIONS`. `TERMINAL` ([state_machine.py:38](../../../src/wastech_orchestrator/core/state_machine.py#L38)) is `{done, failed, manual_action_required}`; `ACTIVE` ([state_machine.py:42](../../../src/wastech_orchestrator/core/state_machine.py#L42)) is `{validated, preparing, running}` — the statuses that own the processing slot (§8.2). Two transitions deliberately bypass `assert_transition` as out-of-band operator overrides: `finalize` (`set_status`) and `rerun --continue` (`revive_task_for_continue`).
 
-### Out-of-band (operator-driven) statuses
+## State store
 
-`finalize` and `recovery` set a terminal status directly via `set_status`/`update_task` **without** `assert_transition` (intentional out-of-band change) — for example, `revive_task_for_continue` performs terminal→active for `rerun --continue` ([state_store.py:533-554](../../../src/wastech_orchestrator/state_store.py#L533)).
+### Schema version and the greenfield policy
 
-### Reset/revival on rerun
+`DB_SCHEMA_VERSION = 10` ([state_store.py:65](../../../src/wastech_orchestrator/state_store.py#L65)). `_enforce_schema_version` ([state_store.py:88](../../../src/wastech_orchestrator/state_store.py#L88)) refuses **fail-closed** any DB stamped newer than 10, **and** any older versioned DB (`1 ≤ v < 10`): the historical bumps were destructive (dropped/renamed tables) and `_migrate` ([state_store.py:72](../../../src/wastech_orchestrator/state_store.py#L72)) only _adds_ the v4 checkpoint columns, so an old shape cannot be reshaped in place. Only a brand-new / pre-versioning (`0`) database is adopted at the current shape (greenfield — there is no production data to preserve). The version history (v4 `node_runs` + checkpoint columns; v5/v6 dropped `stage_runs`; v7 dropped `interrupted_status`; v8 `evaluations`; v9 `editing_lineage`; v10 `node_lineage`) is documented in the module comment ([state_store.py:42-64](../../../src/wastech_orchestrator/state_store.py#L42)).
 
-`reset_task_for_rerun` clears all per-attempt state, resets the branch, and deletes `subtasks` + `publish_operations`, leaving the status terminal (so that a subsequent upsert in `insert_task` moves it to `new`) ([state_store.py:491-531](../../../src/wastech_orchestrator/state_store.py#L491)).
+### Tables (`_SCHEMA`, [state_store.py:124](../../../src/wastech_orchestrator/state_store.py#L124))
 
-### Read-only mode
+| Table | Purpose / notable columns |
+| --- | --- |
+| `tasks` | one row per task; status, branch/slug, validation, counters, decomposition, cleanup, `finished_at`, and the **flow checkpoint** columns `current_node` / `flow_run_counters` / `flow_fingerprint` ([state_store.py:125-157](../../../src/wastech_orchestrator/state_store.py#L125)) |
+| `node_runs` | per-node execution audit (`node_kind`, `outcome`, `route_*`, `provider_used`, `error_class`, `commit_sha_after` = result ref / PR URL, `skipped`/`skip_reason`) ([state_store.py:159](../../../src/wastech_orchestrator/state_store.py#L159)) |
+| `provider_attempts` | per-attempt audit, `node_run_id` a plain monotonic id (FK dropped at v5) ([state_store.py:181](../../../src/wastech_orchestrator/state_store.py#L181)) |
+| `check_runs` | one row per check command (`exit_code`, `timed_out`, `passed`, `log_path`) ([state_store.py:195](../../../src/wastech_orchestrator/state_store.py#L195)) |
+| `artifacts` | sha256-checksummed artifact registry, `UNIQUE(task_id, kind, path)` (idempotent upsert) ([state_store.py:208](../../../src/wastech_orchestrator/state_store.py#L208)) |
+| `publish_operations` | commit/push/PR idempotency, `UNIQUE(task_id, kind, subtask_order)` with `-1` the no-subtask sentinel ([state_store.py:218](../../../src/wastech_orchestrator/state_store.py#L218), [state_store.py:463-465](../../../src/wastech_orchestrator/state_store.py#L463)) |
+| `subtasks` | the decomposition units (`order`, `slug`, `depends_on`, `commit_sha`) ([state_store.py:230](../../../src/wastech_orchestrator/state_store.py#L230)) |
+| `evaluations` | **append-only** audit: `in_flow_verdict` (evaluators) + `supervisor_step` / `supervisor_final` (advisory); the per-instance rework limit is a `COUNT` of `rework` verdicts ([state_store.py:243](../../../src/wastech_orchestrator/state_store.py#L243)) |
+| `editing_lineage` | the durable editing session per `(task_id, subtask_order)` — the **only** place a raw provider session id is stored ([state_store.py:255](../../../src/wastech_orchestrator/state_store.py#L255)) |
+| `node_lineage` | the durable `resume_own_lineage` session per `(task_id, node_id, subtask_order)` — raw session id, never leaves `state.db` ([state_store.py:264](../../../src/wastech_orchestrator/state_store.py#L264)) |
 
-`open_readonly` opens the file with `?mode=ro`, sets `PRAGMA query_only=ON`, and checks (without migrating) the schema version; used by the `status` command ([state_store.py:342-352](../../../src/wastech_orchestrator/state_store.py#L342)).
+### Transactions and access
 
-## Checks and Constraints
+`open()` ([state_store.py:477](../../../src/wastech_orchestrator/state_store.py#L477)) connects with `isolation_level=None` (manual transactions), WAL, and foreign keys on; `open_readonly()` ([state_store.py:491](../../../src/wastech_orchestrator/state_store.py#L491)) is the operator `status` path (no creation/mutation). Writes go through `transaction()` (`BEGIN IMMEDIATE` … `COMMIT`/`ROLLBACK`, [state_store.py:508](../../../src/wastech_orchestrator/state_store.py#L508)); `_writer` ([state_store.py:519](../../../src/wastech_orchestrator/state_store.py#L519)) lets callers reuse an open transaction so a multi-step state change is atomic. Idempotency helpers: `record_publish_op` / `get_publish_op` ([state_store.py:962](../../../src/wastech_orchestrator/state_store.py#L962)), `register_artifact` (upsert, [state_store.py:945](../../../src/wastech_orchestrator/state_store.py#L945)), `insert_subtasks` (refresh-if-uncommitted, [state_store.py:1009](../../../src/wastech_orchestrator/state_store.py#L1009)). The flow checkpoint is saved by `save_flow_checkpoint` ([state_store.py:844](../../../src/wastech_orchestrator/state_store.py#L844)) and read by `get_flow_checkpoint` ([state_store.py:869](../../../src/wastech_orchestrator/state_store.py#L869)); `find_active_tasks` ([state_store.py:603](../../../src/wastech_orchestrator/state_store.py#L603)) and `find_incomplete_cleanup` ([state_store.py:610](../../../src/wastech_orchestrator/state_store.py#L610)) back slot acquisition and recovery. `reset_task_for_rerun` ([state_store.py:639](../../../src/wastech_orchestrator/state_store.py#L639)) and `revive_task_for_continue` ([state_store.py:685](../../../src/wastech_orchestrator/state_store.py#L685)) implement the two `rerun` modes.
 
-- **Allowed transitions** (§8): the "happy path" plus universal edges `-> failed` and `-> manual_action_required` for every non-terminal status; terminal statuses have no outgoing edges ([state_machine.py:70-113](../../../src/wastech_orchestrator/core/state_machine.py#L70)).
-- **Single slot**: all statuses except `{NEW, PENDING, DONE, FAILED, MANUAL_ACTION_REQUIRED}` are considered active ([state_store.py:455-460,872-875](../../../src/wastech_orchestrator/state_store.py#L455)). This is a logical slot (a database query), not a DBMS lock.
-- **Schema version** = 3; a newer version raises `IncompatibleStateError` (on both open paths); an older version is migrated in-place with idempotent `ALTER TABLE ADD COLUMN` and re-claimed ([state_store.py:40-81](../../../src/wastech_orchestrator/state_store.py#L40)).
-- **Idempotency**: `insert_task`/`register_artifact`/`record_publish_op`/`insert_subtasks` are upserts keyed on a unique key; `insert_subtasks` does not "revive" already-committed subtasks (`WHERE subtasks.commit_sha IS NULL`) ([state_store.py:818-837](../../../src/wastech_orchestrator/state_store.py#L818)).
-- **No secrets** in the schema (only ids, statuses, error classes, paths, sha256, counters, fingerprints, commit SHAs) ([state_store.py:8-11](../../../src/wastech_orchestrator/state_store.py#L8)).
+## Invariants & guarantees
 
-## Output
+- **No secrets in the DB** ([state_store.py:8-11](../../../src/wastech_orchestrator/state_store.py#L8)) — only ids, statuses, error classes, paths, checksums, counters, fingerprints, commit SHAs, and (the sole exception) raw session ids in the two lineage tables, which never leave `state.db`.
+- **Transactional transitions** — `assert_transition` (pure) then a serialized write; a crash leaves a consistent prior state ([B10](B10-recovery-and-resume.md) reconciles).
+- **Fail-closed on schema mismatch** — a newer or older-versioned DB is refused, never silently used.
+- **Idempotent side-effect records** — `publish_operations` / `artifacts` upserts mean a resumed run never duplicates.
 
-Persistent rows in `state.db`; `TaskRow`/`SubtaskRow`/… on read; `run_id` when reserving a stage; `LoopCounters` when reading counters; list of active/incomplete tasks.
+## Dependencies
 
-## Side Effects
+- **Used by:** [B06](B06-orchestrator-pipeline.md) (read/write), [B28](B28-flow-engine.md) (the `RunRecorder` checkpoint via `recorder.py`), [B30](B30-flow-node-runners.md) (node_runs / evaluations / lineage), [B22](B22-git-manager.md) (publish idempotency), [B10](B10-recovery-and-resume.md) (recovery queries), [B01](B01-cli-and-operator-commands.md) (read-only `status`).
+- **Uses:** [B09](B09-fix-loop-control.md) (`LoopCounters`).
 
-- Creation of the `state.db` file (+ WAL/SHM) and writes to it.
-- Transactional mutations (commit/rollback).
-- In read-only mode, writes are prohibited at the SQLite level (`query_only`).
+## Audit candidates
 
-## Errors and Edge Cases
+- The module docstring ([state_store.py:1-12](../../../src/wastech_orchestrator/state_store.py#L1)) enumerates the entities as "tasks, node_runs, provider_attempts, check_runs, artifacts, publish_operations and subtasks" — it omits `evaluations` / `editing_lineage` / `node_lineage` (added v8/v9/v10). Minor stale comment. See [the audit](../../backlog/2026-06-21-audit.md).
 
-- Newer schema version → `IncompatibleStateError` (caught by CLI → exit 2).
-- `complete_stage_run`/`get_counters` on a non-existent id → `KeyError`.
-- FK enabled: inserting a `stage_run` without a matching `tasks` row will violate the FK constraint (confirmed by test).
+## Tests
 
-## Relationships
-
-### Uses
-
-- [B09](./B09-fix-loop-control.md) — `LoopCounters` type (imported for counters).
-- [B07 state machine] — `Status` (used internally in the store).
-
-### Used by
-
-- [B06 — Pipeline](./B06-orchestrator-pipeline.md) — all transitions and records; `acquire_slot` via `find_active_tasks`.
-- [B22 — Git Manager](./B22-git-manager.md) — reading/writing `publish_operations` (idempotency).
-- [B10 — Recovery](./B10-recovery-and-resume.md) — `find_active_tasks`/`find_incomplete_cleanup`.
-- [B16 — Validation Gate](./B16-task-parsing-and-validation-gate.md) — `task_id_exists` (id deduplication).
-- [B01 — CLI](./B01-cli-and-operator-commands.md) — `open_readonly` for the `status` command.
-
-## Place in the Overall System
-
-All pipeline decisions materialize as status transitions and rows in `state.db`. Transactionality and idempotency here are the foundation of resumability: after a crash, [B10](./B10-recovery-and-resume.md) reads this state and decides whether to continue the task.
-
-## Code References
-
-- [core/state_machine.py:15-143](../../../src/wastech_orchestrator/core/state_machine.py#L15) — statuses, transition table, checks.
-- [state_store.py:83-196](../../../src/wastech_orchestrator/state_store.py#L83) — schema of 7 tables.
-- [state_store.py:328-352](../../../src/wastech_orchestrator/state_store.py#L328) — open/open_readonly, pragmas, version.
-- [state_store.py:455-471](../../../src/wastech_orchestrator/state_store.py#L455) — slot and incomplete cleanup.
-- Tests: [test_state_machine.py](../../../tests/core/test_state_machine.py), [test_state_store.py](../../../tests/state/test_state_store.py), [test_db_schema_version.py](../../../tests/state/test_db_schema_version.py) — transitions, slot, transactions (commit/rollback), upsert, rejection of newer version, absence of secret columns.
+- `tests/test_state_store.py`, `tests/core/test_state_machine.py` — transition legality, schema-version fail-closed, transactional writes, idempotency upserts, checkpoint round-trip, lineage tables.

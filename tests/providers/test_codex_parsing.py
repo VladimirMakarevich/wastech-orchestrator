@@ -29,6 +29,19 @@ def test_well_formed_stream_populates_all_fields() -> None:
     assert parsed.structured_output == {"summary": "done"}
 
 
+def test_codex_exec_resume_parses_thread_started() -> None:
+    # Durable sessions (P2.2): ``codex exec`` emits ``thread.started`` carrying the resumable
+    # thread id, which the adapter normalizes into ``session_id``.
+    stream = _stream(
+        {"type": "thread.started", "thread_id": "thread-abc"},
+        {"type": "message", "text": "resumed and finished"},
+        {"type": "result", "status": "success"},
+    )
+    parsed = parse_events(stream)
+    assert parsed.session_id == "thread-abc"
+    assert parsed.succeeded is True
+
+
 def test_failure_status_marks_not_succeeded() -> None:
     parsed = parse_events(_stream({"type": "result", "status": "failed"}))
     assert parsed.succeeded is False

@@ -39,34 +39,35 @@ from wastech_orchestrator.providers.base import ProviderId, Stage
 # v8 (2026-06-16, prompt-audit): adds the optional top-level `prompt_audit` flag (default false).
 # Old configs omit it and take the safe `false` default — no migration flips anything;
 # `upgrade-config` adds it from the packaged template. A per-task `prompt_audit` overrides it.
-CONFIG_SCHEMA_VERSION = 8
+# v9 (flow-engine P1 Slice 7): the `prompts` block (`templates_dir`/`mode`) is removed — a flow
+# node's prompt template is its `role_file`, not a stage-indexed packaged default. `upgrade-config`
+# strips an operator's `prompts:` block; old configs still load fail-open (the key is ignored).
+# v10 (2026-06-19, flexible-flow stage-skip): the global `agents.skip_stages` list is removed — with
+# fully configurable flows, "skip a stage for every task" is redundant (drop the node from the flow,
+# or author an operator flow). Per-task `stages.<stage>.enabled: false` survives as a bounded,
+# validated toggle (flow-contract §10), and `agents.allow_review_skip` stays (now gating only the
+# per-task review skip). `upgrade-config` strips `agents.skip_stages`; old configs still load
+# fail-open (the key is tolerated/ignored).
+# v11 (2026-06-19, flow-engine PRE.1/PRE.2): provider routing moves onto the flow node. The
+# stage-keyed `agents.routing` block is removed — a node declares its own `provider` (else the
+# global primary), and exactly one `agents.providers.<id>.primary: true` marks that global primary
+# (the sole infra-fallback target). The per-task auto-merge gate `git.auto_merge_allow_per_task` is
+# also removed: a per-task `auto_merge` now wins outright (PRE.2). `upgrade-config` strips both dead
+# keys; old configs still load fail-open (the keys are tolerated/ignored).
+CONFIG_SCHEMA_VERSION = 11
 
-# Stages routed to an agent provider. The remaining stages (``testing``, ``publishing``) are run by
-# the orchestrator itself (Check Runner / Git Manager), so they never appear in ``agents.routing``
-# (spec §5, §11).
-ROUTABLE_STAGES: frozenset[Stage] = frozenset(
-    {
-        Stage.REFINEMENT,
-        Stage.PLANNING,
-        Stage.IMPLEMENTATION,
-        Stage.REVIEW,
-        Stage.FIXING,
-        Stage.SUMMARY,
-    }
-)
-
-# Stages an operator may skip (globally via ``agents.skip_stages`` or per-task via
-# ``stages.<stage>.enabled: false``). ``refinement`` is excluded — it uses the ``refined: true``
-# task flag instead — and ``implementation``/``publishing`` are never skippable (the core work and
-# the output). Note this is *not* ``ROUTABLE_STAGES``: ``testing`` is skippable but runs no agent,
-# while ``implementation``/``refinement`` are agent-routed but not skippable (stage-skip control).
+# Stages a task may skip per-task via ``stages.<stage>.enabled: false`` (flow-contract §10 bounded
+# exception). ``refinement`` is excluded — it is skipped deterministically by completeness
+# classification (``derived.needs_refinement``), never a task flag — and
+# ``implementation``/``publishing`` are never skippable (the core work and the output). ``testing``
+# is skippable but runs no agent (it is the Check Runner). ``summary`` is no longer skippable: the
+# summary is always written by the constant supervisor layer (flow-engine P2.1), not a graph node.
 SKIPPABLE_STAGES: frozenset[Stage] = frozenset(
     {
         Stage.PLANNING,
         Stage.TESTING,
         Stage.REVIEW,
         Stage.FIXING,
-        Stage.SUMMARY,
     }
 )
 
@@ -125,12 +126,6 @@ class DecompositionConfig:
 
 
 @dataclass(frozen=True)
-class RouteConfig:
-    primary: ProviderId
-    fallback: ProviderId | None
-
-
-@dataclass(frozen=True)
 class ProviderConfig:
     command: str
     model: str
@@ -142,6 +137,9 @@ class ProviderConfig:
     max_turns: int | None = None
     max_budget_usd: float | None = None
     reasoning: str | None = None  # "low" | "medium" | "high" | "xhigh" | "max"
+    # Exactly one configured provider must set ``primary: true`` — the global primary that runs any
+    # flow node with no ``provider`` field, and the single infrastructure-fallback target (PRE.1).
+    primary: bool = False
 
 
 @dataclass(frozen=True)
@@ -151,14 +149,9 @@ class AgentsConfig:
     max_fix_cycles: int
     max_total_fix_iterations: int
     decomposition: DecompositionConfig
-    routing: dict[Stage, RouteConfig]
     providers: dict[ProviderId, ProviderConfig]
-    # Stages skipped for every task processed by this instance (subset of SKIPPABLE_STAGES). The
-    # effective skip set for a task is this ∪ the task's own ``stages.<stage>.enabled: false`` — a
-    # global skip cannot be re-enabled per task (stage-skip control).
-    skip_stages: tuple[Stage, ...] = ()
-    # Gate for the high-risk ``review`` skip (no agent quality gate before commit/PR): a task or
-    # the global config may disable review only when this is true, else it is rejected.
+    # Gate for the high-risk per-task ``review`` skip (no agent quality gate before commit/PR): a
+    # task may disable review via ``stages.review.enabled: false`` only when true, else rejected.
     allow_review_skip: bool = False
 
 
@@ -257,10 +250,6 @@ class GitConfig:
     auto_merge: bool = False
     # Strategy passed to ``gh pr merge`` when a merge fires.
     auto_merge_strategy: MergeStrategy = MergeStrategy.SQUASH
-    # A per-task ``auto_merge: true`` is honored only when this is true; a per-task ``false``
-    # always opts out. Without it, a task file could grant itself merge rights the operator
-    # never intended.
-    auto_merge_allow_per_task: bool = False
     # False: merge immediately (`gh pr merge`). True: arm GitHub-native auto-merge (`--auto`), which
     # merges only after required status checks pass.
     auto_merge_wait_for_checks: bool = False
@@ -274,27 +263,6 @@ class TelegramConfig:
     bot_token_env: str
     chat_id_env: str
     ask_timeout_s: int
-
-
-class PromptMode(StrEnum):
-    """How an operator template combines with the packaged default prompt (backlog §5)."""
-
-    APPEND = "append"  # packaged default, then the operator template
-    REPLACE = "replace"  # the operator template only, for stages that have a template file
-
-
-@dataclass(frozen=True)
-class PromptsConfig:
-    """Operator-customizable stage prompts (backlog: prompt_template_customization §5).
-
-    A ``<stage>.md`` present in ``templates_dir`` is used **automatically** (no opt-in map); the
-    packaged default is only a per-stage fallback. ``mode`` decides how a present file combines with
-    the packaged default (``replace`` = file only; ``append`` = default + file). An empty
-    ``templates_dir`` forces the packaged defaults for every stage.
-    """
-
-    templates_dir: str = "./templates/prompts"
-    mode: PromptMode = PromptMode.REPLACE
 
 
 @dataclass(frozen=True)
@@ -313,6 +281,24 @@ class SkillsConfig:
 
 
 @dataclass(frozen=True)
+class SupervisorConfig:
+    """The constant supervisor layer (flow-engine P2.1) — oversight ABOVE any flow, not a node.
+
+    It exists for every task under any flow shape: it observes each completed step read-only through
+    its own ``resume_own_lineage`` session (~1 LLM call/step) and synthesizes the summary + advisory
+    caveats at whole-task close. Trusted at the ``config.yaml`` level and validated under the same
+    ceiling as flow nodes: ``permission_profile`` is forced ``read-only`` in code, ``reasoning`` ∈
+    the allowlist (loader), and ``role_file`` is path-contained (validator). The own session is
+    in-memory in P2.1; durable ``resume_own_lineage`` is P2.2. ``model``/``reasoning`` empty → the
+    provider default; the layer runs on the global primary provider.
+    """
+
+    role_file: str = "roles/supervisor.md"
+    model: str | None = None
+    reasoning: str | None = None
+
+
+@dataclass(frozen=True)
 class OrchestratorConfig:
     orchestrator: OrchestratorRuntimeConfig
     repo: RepoConfig
@@ -322,8 +308,8 @@ class OrchestratorConfig:
     checks: ChecksConfig
     git: GitConfig
     telegram: TelegramConfig
-    prompts: PromptsConfig = PromptsConfig()
     skills: SkillsConfig = SkillsConfig()
+    supervisor: SupervisorConfig = field(default_factory=SupervisorConfig)
     # When true, every task records each step's prompt + who-metadata (provider/model/attempt/
     # fallback/status) under `logs/<task-id>/prompt-audit/`. A per-task `prompt_audit` always
     # overrides this (task wins); recording a prompt is not a privilege escalation, so there is no

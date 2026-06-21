@@ -1,118 +1,84 @@
 # B25 — Security Policy Enforcement
 
-## Purpose
+> Reconstructed from code (`security/forbidden_args.py`, `security/env.py`, `security/injection.py`, `security/isolation.py`, `security/profiles.py`) and tests (`tests/security/`). The code is the only source of truth; this document was rebuilt from the implementation, not from prose or comments. Significant claims carry a `file:line` reference.
 
-A set of small, pure primitives that together implement the system invariant "the security policy cannot be weakened through a task or `extra_args`". Each primitive covers its own aspect: environment allowlist, forbidden bypass flags, injection scanning in frontmatter, provider isolation preflight, and permission profile strictness ranking for conditional fallback.
+**Status:** documented · **Source modules:** `src/wastech_orchestrator/security/forbidden_args.py`, `src/wastech_orchestrator/security/env.py`, `src/wastech_orchestrator/security/injection.py`, `src/wastech_orchestrator/security/isolation.py`, `src/wastech_orchestrator/security/profiles.py`
 
-## Responsibilities
+## Responsibility
 
-- **Environment:** build the child process environment from allowed keys only ([env.py:18-30](../../../src/wastech_orchestrator/security/env.py#L18)).
-- **Forbidden flags:** detect flags that disable sandbox/approvals ([forbidden_args.py:38-58](../../../src/wastech_orchestrator/security/forbidden_args.py#L38)).
-- **Injections:** scan frontmatter values for argv-like tokens ([injection.py:49-80](../../../src/wastech_orchestrator/security/injection.py#L49)).
-- **Isolation:** offline-verify that every "potentially launchable" provider can enable the required isolation ([isolation.py:31-61](../../../src/wastech_orchestrator/security/isolation.py#L31)).
-- **Profile strictness:** determine that the `candidate` profile is no weaker than `reference` ([profiles.py:23-34](../../../src/wastech_orchestrator/security/profiles.py#L23)).
+A set of small, pure, provider-agnostic primitives that together enforce the system invariant **"a task or `extra_args` may never weaken the security policy"**. Each primitive owns one aspect — the environment allowlist, the forbidden bypass-flag detector, the front-matter injection scan, the offline isolation preflight, and the permission-profile strictness ranking — and each is applied at more than one call site so the guarantee holds in depth. The modules hold no provider CLI syntax and launch no process; they are decision functions consumed by other blocks (B05, B06, B16, B17, B18, B19, B22, B24, B29).
 
-## Block Boundaries
+The **network access control** is part of this same policy surface even though its mapping lives in the adapters (B18): a flow grants network only by declaring `network_policy` (B29), and the adapters translate that single boolean onto sandbox network / web tools while never touching the filesystem sandbox or approvals ceiling. It is documented here as a security control and cross-linked.
 
-### Within scope
+## Public surface
 
-- The five pure rules and lists described above (what is forbidden, what is allowed in the environment, what is stricter).
+- `find_forbidden_args(args) -> list[str]` ([forbidden_args.py:38](../../../src/wastech_orchestrator/security/forbidden_args.py#L38)) — one reason string per offending token; `[]` means safe.
+- `FORBIDDEN_SANDBOX_VALUE = "danger-full-access"` ([forbidden_args.py:21](../../../src/wastech_orchestrator/security/forbidden_args.py#L21)) — the sandbox value that must never be selected.
+- `build_child_env(allowed_keys, parent_env=None) -> dict[str, str]` ([env.py:18](../../../src/wastech_orchestrator/security/env.py#L18)) — child env from the allowlist only.
+- `scan_frontmatter(frontmatter) -> InjectionFinding | None` ([injection.py:49](../../../src/wastech_orchestrator/security/injection.py#L49)) — first argv-shaped front-matter value, or `None`.
+- `scan_value(key, value) -> InjectionFinding | None` ([injection.py:58](../../../src/wastech_orchestrator/security/injection.py#L58)) — recursive single-value scan.
+- `InjectionFinding(key, reason)` ([injection.py:37](../../../src/wastech_orchestrator/security/injection.py#L37)) — frozen finding with a `.detail` property.
+- `check_isolation(config) -> list[str]` ([isolation.py:32](../../../src/wastech_orchestrator/security/isolation.py#L32)) — one reason per provider whose required isolation cannot be enabled; `[]` means OK.
+- `is_same_or_stricter(candidate, reference) -> bool` ([profiles.py:23](../../../src/wastech_orchestrator/security/profiles.py#L23)) — `True` iff `candidate` is at least as strict; fail-closed.
 
-### Out of scope
+## Behavior
 
-- **Launching processes** with the built environment — that is [B19](./B19-subprocess-runner.md) (receives a ready `env`).
-- **Provider-specific isolation rules** (Codex sandbox, Claude permission-mode) live in the adapters ([B18 `isolation_reasons`](./B18-agent-providers.md)); `isolation.py` only dispatches by `ProviderId` and formats the reasons ([isolation.py:22-28](../../../src/wastech_orchestrator/security/isolation.py#L22)).
-- **The fallback decision** is made by [B17 Router](./B17-agent-router-and-fallback.md); `profiles.py` only compares strictness.
-- **Where to call** the checks and what to do on failure — that is up to the calling blocks (B05, B06, B16, B18, B22, B24).
+### Forbidden bypass-flag detection (the single source of truth)
 
-## Entry Points
+`find_forbidden_args` is the one place that decides whether an argv token "disables the sandbox/approvals". For each token it takes the part before `=` and rejects it when it starts with `--dangerously` or is one of the standalone flags `{--yolo, --ignore-rules}` ([forbidden_args.py:25-30](../../../src/wastech_orchestrator/security/forbidden_args.py#L25), [:47-48](../../../src/wastech_orchestrator/security/forbidden_args.py#L47)). For `--sandbox`/`-s` it reads the value either inline (`--sandbox=…`) or from the next token and rejects only `danger-full-access` ([forbidden_args.py:33](../../../src/wastech_orchestrator/security/forbidden_args.py#L33), [:50-53](../../../src/wastech_orchestrator/security/forbidden_args.py#L50)). The `--dangerously` prefix rule is deliberately broad so any **future** `--dangerously*` flag is caught without a code change ([forbidden_args.py:47](../../../src/wastech_orchestrator/security/forbidden_args.py#L47)). Reasons are returned unqualified (no config path, no provider prefix) so each caller can frame them in its own terms ([forbidden_args.py:38-43](../../../src/wastech_orchestrator/security/forbidden_args.py#L38)).
 
-- `build_child_env(allowed_keys, parent_env=None)` ([env.py:18](../../../src/wastech_orchestrator/security/env.py#L18)).
-- `find_forbidden_args(args)` ([forbidden_args.py:38](../../../src/wastech_orchestrator/security/forbidden_args.py#L38)).
-- `scan_frontmatter(frontmatter)` / `scan_value(key, value)` ([injection.py:49,58](../../../src/wastech_orchestrator/security/injection.py#L49)).
-- `check_isolation(config)` ([isolation.py:31](../../../src/wastech_orchestrator/security/isolation.py#L31)).
-- `is_same_or_stricter(candidate, reference)` ([profiles.py:23](../../../src/wastech_orchestrator/security/profiles.py#L23)).
+This detector is the defense-in-depth hinge. It is invoked at **config load** by the validator (B05) for `agents.providers.<id>.extra_args` ([validation.py:40](../../../src/wastech_orchestrator/config/validation.py#L40)) and for check argv ([validation.py:165](../../../src/wastech_orchestrator/config/validation.py#L165)), and again at **provider command-build time** (B18) on the combined config + request `extra_args` — Claude raises a `CONFIGURATION_ERROR` before building the argv ([claude.py:274-278](../../../src/wastech_orchestrator/providers/claude.py#L274)). It is also reused inside both adapters' `isolation_reasons` and inside the flow validator (B29). So even if a config check were ever bypassed, the policy cannot be weakened through a task or `extra_args`.
 
-## Inputs and State
+### Environment allowlist (no implicit secret forwarding)
 
-Allowlist of keys + parent environment; list of argv tokens; frontmatter dictionary; configuration object; two profile names. No state — everything is pure.
+`build_child_env` returns a fresh dict containing exactly the allowlisted keys that exist in the parent, in allowlist order; a key absent from the parent is skipped, never added as empty ([env.py:30](../../../src/wastech_orchestrator/security/env.py#L30)). The parent defaults to the live `os.environ` only when no `parent_env` is passed ([env.py:29](../../../src/wastech_orchestrator/security/env.py#L29)). The child therefore **never** inherits the parent's full environment, so no secret or token (`OPENAI_API_KEY`, `GITHUB_TOKEN`, …) is forwarded implicitly — credentials are configured outside the orchestrator. Every external launch builds its env this way: the orchestrator's run env ([orchestrator.py:910](../../../src/wastech_orchestrator/core/orchestrator.py#L910)), the git manager ([git_manager.py:188](../../../src/wastech_orchestrator/git_manager.py#L188)), the check runner ([check_runner.py:113](../../../src/wastech_orchestrator/check_runner.py#L113)), and the check probe ([probe.py:61](../../../src/wastech_orchestrator/checks/probe.py#L61)).
 
-## Main Scenario (by rule)
+### Front-matter injection scan (belt-and-braces over a structural guarantee)
 
-- **Environment:** returns a fresh dict containing only the `allowed_keys` that exist in the parent, in allowlist order; a missing key is skipped (never empty) ([env.py:29-30](../../../src/wastech_orchestrator/security/env.py#L29)).
-- **Forbidden flags:** for each token the part before `=` is taken; reject if it starts with `--dangerously` or is in `{--yolo, --ignore-rules}`; for `--sandbox`/`-s` — reject if the value is `danger-full-access` ([forbidden_args.py:44-54](../../../src/wastech_orchestrator/security/forbidden_args.py#L44)).
-- **Injections:** a value is rejected if, after stripping, it starts with `-`, or contains any of `; \\ | $( \n \r`, or matches a forbidden flag pattern; nested dicts/lists are processed recursively with key-paths of the form `agents.review`/`contacts[0]` ([injection.py:60-80](../../../src/wastech_orchestrator/security/injection.py#L60)).
-- **Isolation:** for each "in-use" provider (`agents.allowed` ∪ all primary/fallback routes) the adapter's `isolation_reasons` is called; reasons are collected with an id prefix; `[]` = all ok ([isolation.py:37-61](../../../src/wastech_orchestrator/security/isolation.py#L37)).
-- **Strictness:** `read-only` (rank 0) is stricter than `workspace-write` (rank 1); `candidate` is ok if its rank ≤ the rank of `reference` ([profiles.py:17-34](../../../src/wastech_orchestrator/security/profiles.py#L17)).
+The primary guarantee is **structural**, not from this scan: task content reaches providers **only as file paths** in `AgentRunRequest` (`task_path`, `plan_path`, …) and is never spliced into argv, env, the command path, or any security setting, so task body text can never become a CLI flag ([injection.py:5-8](../../../src/wastech_orchestrator/security/injection.py#L5)). `scan_frontmatter` is the belt-and-braces layer on top: it inspects **front-matter values only** (never the body — legitimate tasks embed shell snippets) for argv-shaped tokens, returning the first `InjectionFinding` ([injection.py:49-55](../../../src/wastech_orchestrator/security/injection.py#L49)). A string value is rejected when, after stripping, it begins with `-` ("value starts with '-'") ([injection.py:62-63](../../../src/wastech_orchestrator/security/injection.py#L62)), contains any token in `INJECTION_SUBSTRINGS` — `;`, a backtick, `|`, `$(`, `\n`, `\r` ("argv-shaped token") ([injection.py:34](../../../src/wastech_orchestrator/security/injection.py#L34), [:64-65](../../../src/wastech_orchestrator/security/injection.py#L64)), or matches a forbidden-flag shape via `find_forbidden_args` ("forbidden flag shape") ([injection.py:66-67](../../../src/wastech_orchestrator/security/injection.py#L66)). Mappings and lists are scanned recursively, building dotted/indexed key paths like `agents.review` or `contacts[1]` ([injection.py:69-79](../../../src/wastech_orchestrator/security/injection.py#L69)). The policy is **reject, don't sanitize**: a value is refused rather than silently fixed ([injection.py:15-16](../../../src/wastech_orchestrator/security/injection.py#L15)). The scan is run by the validation gate (B16) over the parsed front-matter ([validation_gate.py:226](../../../src/wastech_orchestrator/task/validation_gate.py#L226)).
 
-Five independent pure primitives — each covers its own aspect of the invariant and is applied at its own points (defense-in-depth):
+The "path separator where a non-path field is expected" case is intentionally **not** a distinct reject here: the task `id` is bound by the strict `^[a-z0-9][a-z0-9._-]{0,63}$` regex and route overrides are bound to the `ProviderId` enum, so the only free-text non-path fields (`title`, `contacts`) cannot designate a path ([injection.py:17-21](../../../src/wastech_orchestrator/security/injection.py#L17)).
 
-```mermaid
-flowchart LR
-    subgraph prim["5 policy primitives (pure)"]
-        env["build_child_env<br/>environment allowlist"]
-        fa["find_forbidden_args<br/>bypass flag prohibition"]
-        inj["scan_frontmatter<br/>injection scan (reject)"]
-        iso["check_isolation<br/>isolation preflight"]
-        prof["is_same_or_stricter<br/>profile strictness (fail-closed)"]
-    end
-    env --> envc["B19 / B18 / B22 / B24 — process launch"]
-    fa --> fac["B05 (load) + B18 (launch)"]
-    inj --> injc["B16 — gate §19 (frontmatter values)"]
-    iso --> isoc["B06 (before branch) + B01 (preflight)"]
-    prof --> profc["B17 — conditional fallback (profile no weaker)"]
-```
+### Isolation preflight (offline, deterministic, fail-closed, per-provider)
 
-## Checks and Constraints
+`check_isolation` drives the `strict_isolation` gate: it asks each provider that may run whether its configured isolation can be enabled **without launching any CLI**, so the gate is unit-testable and runs before a branch is ever created ([isolation.py:5-8](../../../src/wastech_orchestrator/security/isolation.py#L5)). It dispatches by `ProviderId` to the adapters' pure `isolation_reasons` ([isolation.py:26-29](../../../src/wastech_orchestrator/security/isolation.py#L26)) and prefixes every reason with the provider id so the caller can surface one combined message ([isolation.py:44](../../../src/wastech_orchestrator/security/isolation.py#L44)). Only providers in `agents.allowed` are checked — every flow node either declares an allowed `provider` or defaults to the (also-allowed) global primary, so a configured-but-unused provider block never bricks an otherwise-valid run ([isolation.py:48-58](../../../src/wastech_orchestrator/security/isolation.py#L48)). The adapter rules are themselves offline and fail-closed: Codex flags a `danger-full-access` sandbox and any forbidden `extra_args` ([codex.py:244-249](../../../src/wastech_orchestrator/providers/codex.py#L244)); Claude flags an unknown/`bypassPermissions`/full-access mode plus forbidden or permission-weakening `extra_args` ([claude.py:332-342](../../../src/wastech_orchestrator/providers/claude.py#L332)).
 
-- **Fail-closed everywhere:** unknown profile in `is_same_or_stricter` → `False` (policy must not be weakened for fallback) ([profiles.py:32-33](../../../src/wastech_orchestrator/security/profiles.py#L32)).
-- The `--dangerously*` prefix catches any future bypass flags.
-- Injection scan is "reject, not sanitize"; applied only to **frontmatter values**, not to the task body ([injection.py:7-8,15-16](../../../src/wastech_orchestrator/security/injection.py#L7)).
-- Isolation checks only "in-use" providers so that an extra provider block does not break the launch ([isolation.py:47-61](../../../src/wastech_orchestrator/security/isolation.py#L47)).
+The pipeline (B06) calls `check_isolation` only when `security.strict_isolation` is true, and a non-empty result raises `PipelineFailed("strict_isolation: …")` before any side effect — no silent downgrade ([orchestrator.py:849-856](../../../src/wastech_orchestrator/core/orchestrator.py#L849)). The CLI `preflight` command reports the same verdict read-only ([cli.py:846-852](../../../src/wastech_orchestrator/cli.py#L846)).
 
-## Output
+### Permission-profile strictness (conditional fallback only)
 
-- `build_child_env` → new environment dict.
-- `find_forbidden_args` → list of reasons (empty = safe).
-- `scan_frontmatter` → `InjectionFinding` or `None`.
-- `check_isolation` → list of reasons (empty = isolation can be enabled).
-- `is_same_or_stricter` → bool.
+`is_same_or_stricter` ranks the profiles `read-only` (rank 0, strictest) below `workspace-write` (rank 1) and returns `rank(candidate) <= rank(reference)` ([profiles.py:17-20](../../../src/wastech_orchestrator/security/profiles.py#L17), [:34](../../../src/wastech_orchestrator/security/profiles.py#L34)). An **unrecognized** profile on either side returns `False` — the orchestrator may never relax policy to enable a fallback ([profiles.py:32-33](../../../src/wastech_orchestrator/security/profiles.py#L32)). The router (B17) uses it for the conditional fallback rule: `authorization_failed` / `permission_denied` may fall back only when the fallback provider's profile is the same or stricter ([router.py:73](../../../src/wastech_orchestrator/routing/router.py#L73)). The flow validator (B29) reuses it twice — to reject a node `permission_profile` that exceeds the flow's `permission_ceiling` ([validator.py:291-292](../../../src/wastech_orchestrator/core/flow/validator.py#L291)) and to require that at least one allowed provider can operate at the ceiling ([validator.py:350-351](../../../src/wastech_orchestrator/core/flow/validator.py#L350)).
 
-## Side Effects
+### Network policy (a security control, mapped in the adapters)
 
-None. All functions are pure (isolation does not launch a CLI — it only queries adapters via their pure rules).
+Network access is **off by default** and is granted only by a flow declaring `network_policy` (B29). The runners reduce that declaration to a single boolean on the request — `network_access = (doc.network_policy is not None)` ([agent.py:385](../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L385), [evaluator.py:188](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L188)), defaulting `False` on the request itself ([base.py:116](../../../src/wastech_orchestrator/providers/base.py#L116)). The adapters (B18) map that boolean and **only** that boolean: Codex appends `-c sandbox_workspace_write.network_access=true`, leaving the sandbox's filesystem limit and the `never` approval policy in force ([codex.py:207-211](../../../src/wastech_orchestrator/providers/codex.py#L207)); Claude appends the web tools `("WebFetch", "WebSearch")` to `--allowedTools`, never relaxing the filesystem permission mode ([claude.py:89](../../../src/wastech_orchestrator/providers/claude.py#L89), [:282-286](../../../src/wastech_orchestrator/providers/claude.py#L282)). Absent the grant, both leave the network unreachable for a headless run. So network is a toggle layered on top of the isolation ceiling — it can never widen the filesystem sandbox or the approvals ceiling.
 
-## Errors and Edge Cases
+## Invariants & guarantees
 
-- Unknown profile / unknown provider in isolation — skip/`False` (fail-closed).
-- `--sandbox` without a value at the end of argv → empty string, not rejected ([forbidden_args.py:51,57-58](../../../src/wastech_orchestrator/security/forbidden_args.py#L51)).
+- **Defense in depth on forbidden flags:** `find_forbidden_args` runs at config load (B05, [validation.py:40](../../../src/wastech_orchestrator/config/validation.py#L40)) **and** at command-build time (B18, [claude.py:274](../../../src/wastech_orchestrator/providers/claude.py#L274)), so a task or `extra_args` cannot weaken policy even if one layer is bypassed.
+- **No implicit secret forwarding:** `build_child_env` returns only allowlisted keys present in the parent — never the full parent env ([env.py:30](../../../src/wastech_orchestrator/security/env.py#L30)); the input mapping is never mutated.
+- **Task text can never become a flag:** structurally, task content reaches providers only as file paths; the front-matter scan is an additional, value-only guard ([injection.py:5-8](../../../src/wastech_orchestrator/security/injection.py#L5)).
+- **Reject, don't sanitize:** suspect front-matter values are refused, not rewritten ([injection.py:15-16](../../../src/wastech_orchestrator/security/injection.py#L15)).
+- **Fail-closed:** an unknown profile in `is_same_or_stricter` → `False` ([profiles.py:32-33](../../../src/wastech_orchestrator/security/profiles.py#L32)); an unknown provider/profile in isolation is skipped/flagged, never assumed safe; `strict_isolation` failure raises before any branch is created ([orchestrator.py:856](../../../src/wastech_orchestrator/core/orchestrator.py#L856)).
+- **Offline & pure:** none of the five primitives launch a process or mutate state; `check_isolation` only queries adapter rules ([isolation.py:32-37](../../../src/wastech_orchestrator/security/isolation.py#L32)).
+- **Network toggles only network:** the `network_policy`→`network_access` boolean adds sandbox network / web tools but never the filesystem sandbox or approvals ceiling ([codex.py:209-211](../../../src/wastech_orchestrator/providers/codex.py#L209), [claude.py:285-286](../../../src/wastech_orchestrator/providers/claude.py#L285)).
 
-## Relations
+## Dependencies
 
-### Uses
+- **Uses:** B18 (the adapters' `isolation_reasons` rules, dispatched by `check_isolation`); `forbidden_args` is reused internally by `injection.scan_value`.
+- **Used by:** B05 (config validation runs `find_forbidden_args` on `extra_args` and check argv); B18 (providers run `find_forbidden_args` at build time and own the `network_access` mapping); B16 (the validation gate runs `scan_frontmatter`); B17 (the router uses `is_same_or_stricter` for conditional fallback); B29 (the flow validator uses `find_forbidden_args`, `is_same_or_stricter` for `permission_ceiling`, and `network_policy`); B06 (pipeline runs `check_isolation` at preflight) and B01 (the `preflight` command); B19/B22/B24 (`build_child_env` for every external launch).
 
-- `forbidden_args` is used inside `injection.scan_value` ([injection.py:30,66](../../../src/wastech_orchestrator/security/injection.py#L30)).
-- `isolation` imports adapter `isolation_reasons` from [B18](./B18-agent-providers.md) ([isolation.py:22-23](../../../src/wastech_orchestrator/security/isolation.py#L22)).
+## Audit candidates
 
-### Used by
+See [the audit](../../backlog/2026-06-21-audit.md).
 
-- [B19 — Subprocess Runner](./B19-subprocess-runner.md) — the caller builds the environment via `build_child_env`.
-- [B18 — Provider Adapters](./B18-agent-providers.md) — `build_child_env`, `find_forbidden_args`, `isolation_reasons`.
-- [B22](./B22-git-manager.md), [B24](./B24-check-execution.md) — `build_child_env` for git/checks.
-- [B05 — Configuration](./B05-configuration.md) — `find_forbidden_args` when validating `extra_args`.
-- [B16 — Validation Gate](./B16-task-parsing-and-validation-gate.md) — `scan_frontmatter`.
-- [B17 — Router](./B17-agent-router-and-fallback.md) — `is_same_or_stricter` for conditional fallback.
-- [B06 — Pipeline](./B06-orchestrator-pipeline.md) and [B01 — CLI](./B01-cli-and-operator-commands.md) — `check_isolation` (preflight before branch / in `preflight`).
+- `src/wastech_orchestrator/security/forbidden_args.py:50-53` — `--sandbox` at the end of argv with no value yields `_peek → ""`, which is not `danger-full-access`, so a dangling `--sandbox` is accepted. Benign in practice (the real CLIs reject a valueless `--sandbox`, and a forbidden value is still caught), but the detector silently treats an incomplete sandbox selection as safe rather than flagging it.
 
-## Role in the Overall System
+## Tests
 
-Implements the invariant "the security policy cannot be weakened" at multiple points (defense-in-depth): forbidden flags are checked both at configuration load time and in adapters at launch time; the environment is restricted on every process launch; isolation is verified before branch creation. Together with [B21](./B21-secret-redaction.md) it forms the orchestrator's security layer.
-
-## Code Confirmation
-
-- [security/env.py:18-30](../../../src/wastech_orchestrator/security/env.py#L18) — environment allowlist.
-- [security/forbidden_args.py:21-58](../../../src/wastech_orchestrator/security/forbidden_args.py#L21) — lists and `find_forbidden_args`.
-- [security/injection.py:34-80](../../../src/wastech_orchestrator/security/injection.py#L34) — frontmatter scan.
-- [security/isolation.py:25-61](../../../src/wastech_orchestrator/security/isolation.py#L25) — isolation dispatcher + `_providers_in_use`.
-- [security/profiles.py:17-34](../../../src/wastech_orchestrator/security/profiles.py#L17) — strictness ranking (fail-closed).
-- Tests: [test_env.py](../../../tests/security/test_env.py), [test_forbidden_args.py](../../../tests/security/test_forbidden_args.py), [test_injection.py](../../../tests/security/test_injection.py), [test_isolation.py](../../../tests/security/test_isolation.py), [test_no_shell_interpolation.py](../../../tests/security/test_no_shell_interpolation.py), [test_denied_reads.py](../../../tests/security/test_denied_reads.py).
+- `tests/security/test_forbidden_args.py` — every bypass shape is detected (`--dangerously*`, `--yolo`, `--ignore-rules`, `--sandbox[=] danger-full-access`, `-s`, offending flag not first) and safe args yield no reasons; the sandbox reason names the forbidden value.
+- `tests/security/test_env.py` — only allowlisted keys survive; parent secrets (`OPENAI_API_KEY`, `GITHUB_TOKEN`) are never forwarded; missing keys are skipped not blanked; empty allowlist → empty env; allowlist order preserved; defaults to `os.environ`; the parent mapping is not mutated.
+- `tests/security/test_injection.py` — clean front-matter passes; argv-shaped values (`-`, `;`, backtick, `|`, `$(`, newline) and forbidden-flag shapes are rejected with the right key/reason; nested dicts/lists get dotted/indexed keys; plain prose passes; the strict task-id regex rejects normalize-changing ids (reject-don't-sanitize).
+- `tests/security/test_isolation.py` — adapter `isolation_reasons` flag unknown/full-access profiles, bypass `extra_args`, and `danger-full-access` sandbox; `check_isolation` passes the default config, prefixes reasons with the provider id, checks only `agents.allowed` providers, and ignores a forbidden but unallowed provider.
+- `tests/security/test_no_shell_interpolation.py` — structural proof that `subprocess` is used only in the safe runner, `shell=False`, no module enables a shell, and check commands are split into argv (a shell metachar stays a literal token).
+- `tests/security/test_denied_reads.py` — `denied_read_paths` harvesting (B21) feeds redaction and builds Claude `Read(...)` deny patterns (adjacent secret-handling coverage that shares this test directory).

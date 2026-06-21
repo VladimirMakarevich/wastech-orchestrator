@@ -1,5 +1,7 @@
 # Backlog: Task workflow profiles
 
+> **Устарело — поглощено flow-движком (реализовано P0–P4, 2026-06).** Канонический преемник: [flows/p3-research-audit.md](../flows/p3-research-audit.md) (+ p3.2 политики): «3 захардкоженных профиля + runner_kind» удалены, три flow = данные. Не использовать как есть.
+
 Status: **accepted** — outdated. Date: 2026-06-13 Owner: Vladimir Makarevich
 
 This document captures the product task of supporting several explicit task workflows with different stage graphs, permissions, output contracts, quality gates, and publishing behavior. It is a backlog item, not current runtime behavior. Nothing here overrides the canonical specification, [CLAUDE.md](../../CLAUDE.md), [AGENTS.md](../../AGENTS.md), or the hard invariants in [.agents/rules/](../../.agents/rules/).

@@ -2,9 +2,7 @@
 
 Statuses: `discovered` — identified, not yet investigated; `in-progress` — under analysis; `documented` — investigated and documented; `needs-review` — behavior cannot be unambiguously reconstructed; `excluded` — reviewed, but not a standalone block.
 
-All 27 functional blocks (B01–B27) have been investigated and carry the status `documented`. Each block is described in a dedicated file under `blocks/` and is confirmed with references to executable code and tests.
-
-> In addition to blocks, there is an **execution flows** layer — documents `S01`–`S08` (one per pipeline stage) and an overview in [flows/coding/index.md](./flows/coding/index.md). These describe "what happens at a step" and reference the blocks. Other flows (`flows/deep_research/`, etc.) will be added alongside them in the future.
+All 32 functional blocks (B01–B32) carry the status `documented`, (re)built from executable code and tests in the 2026-06-21 reconstruction. Each is described in a dedicated file under `blocks/` with `file:line` evidence. The flow-graph layer is in [flows/](./flows/index.md) (the per-flow node graphs); code problems found during the reconstruction are in [docs/backlog/2026-06-21-audit.md](../backlog/2026-06-21-audit.md).
 
 ---
 
@@ -12,227 +10,286 @@ All 27 functional blocks (B01–B27) have been investigated and carry the status
 
 ### B01 — CLI and Operator Commands
 
-- **Purpose:** argument parsing, subcommand dispatch, return codes; thin command drivers for `run`, `status`, `preflight`, `telegram-test`, `rerun`, `finalize`.
-- **Entry points:** [cli.py main](../../src/wastech_orchestrator/cli.py#L1497), [build_parser](../../src/wastech_orchestrator/cli.py#L114), `cmd_run`/`cmd_status`/`cmd_preflight`/`cmd_telegram_test`/`cmd_rerun`/`cmd_finalize`.
-- **Dependencies:** B06 (orchestrator), B05/B04 (config loading and discovery), B07 (read-only `status`), B25 (isolation in preflight), B26 (telegram-test/preflight).
+- **Purpose:** argument parsing, subcommand dispatch, exit codes; thin drivers for the 12 subcommands (`install`, `run`, `watch`, `stop`, `restart`, `preflight`, `telegram-test`, `status`, `upgrade-config`, `upgrade-docs`, `rerun`, `finalize`) + `--version`.
+- **Entry points:** `cli.py` `build_parser` / `main` / `cmd_*`; `__main__.py`; console scripts in `pyproject.toml`.
+- **Dependencies:** B06 (orchestrator), B02 (watch), B03 (install), B04/B05 (config), B07 (read-only `status`), B25 (isolation preflight), B26 (telegram-test), B29 (preflight `validate_all`).
 - **Status:** `documented` · [file](./blocks/B01-cli-and-operator-commands.md)
 
 ### B02 — Watch Daemon and Task Scheduling
 
-- **Purpose:** periodic discovery of pending tasks and submission to the orchestrator one at a time; daemonization with a PID file, graceful shutdown on `SIGTERM`, protection against a second daemon instance.
-- **Entry points:** [cmd_watch](../../src/wastech_orchestrator/cli.py#L1160), `cmd_stop`, `cmd_restart`, [watch_loop](../../src/wastech_orchestrator/cli.py#L807)/[watch_once](../../src/wastech_orchestrator/cli.py#L778); [process_control.py](../../src/wastech_orchestrator/process_control.py).
-- **Dependencies:** B06 (`resume`, `acquire_slot`, `run_task`, `refresh_repo`), B05.
+- **Purpose:** periodic discovery of pending tasks and one-at-a-time submission; daemonization with a PID file, graceful `SIGTERM` shutdown between ticks, protection against a second daemon; auto-mode gating.
+- **Entry points:** `cli.py` `watch_loop`/`watch_once`/`cmd_watch`/`cmd_stop`/`cmd_restart`; `process_control.py` (`StopController`, `stop_process`, `is_running`).
+- **Dependencies:** B06 (`resume`, `acquire_slot`, `run_task`, `refresh_repo`), B05, B16 (pending files).
 - **Status:** `documented` · [file](./blocks/B02-watch-daemon-and-scheduling.md)
 
 ### B03 — Installer and Project Scaffolding
 
-- **Purpose:** `install` (wizard → generate valid `config.yaml`, scaffold `<repo>/.worc/` + repo-root `tasks/`, gitignore `.worc/`), `upgrade-config`/`upgrade-docs`/`install-templates`.
-- **Entry points:** [cmd_install](../../src/wastech_orchestrator/cli.py#L1298), [install/wizard.run_wizard](../../src/wastech_orchestrator/install/wizard.py#L68), [install/config_writer.build_and_validate](../../src/wastech_orchestrator/install/config_writer.py#L182), [install/detect.py](../../src/wastech_orchestrator/install/detect.py).
-- **Dependencies:** B05 (validation of generated config), B04 (config discovery for upgrades), B19 (git probes), B22 (`append_runtime_excludes`), B25 (denied commands in defaults).
+- **Purpose:** `install` (wizard → generate valid `config.yaml`, scaffold `<repo>/.worc/` + repo-root `tasks/`, gitignore `.worc/`, seed the check profile, auto-preflight); `upgrade-config`/`upgrade-docs`.
+- **Entry points:** `cli.py` `cmd_install`; `install/wizard.py` `run_wizard`; `install/config_writer.py` `build_and_validate`; `install/detect.py`.
+- **Dependencies:** B01, B04, B05, B23 (seed profile), B29 (preflight validates flows), B22 (`append_runtime_excludes`).
 - **Status:** `documented` · [file](./blocks/B03-installer-and-scaffolding.md)
 
-### B04 — Config Discovery
+### B04 — Install Registry and Config Discovery
 
-- **Purpose:** resolve the config path by priority (`--config` → `<repo-root>/.worc/config.yaml`, discovered by walking up to the Git root). No persistent registry.
-- **Entry points:** [cli.resolve_config_path](../../src/wastech_orchestrator/cli.py#L411).
-- **Dependencies:** B03 (`detect.git_info` in `resolve_config_path`).
+- **Purpose:** resolve the config path (explicit `--config` → `<git-root>/.worc/config.yaml` → none) and the `.worc/` home / repo-root `tasks/` split. (There is no separate "install registry" module — a project is installed iff its `.worc/config.yaml` exists.)
+- **Entry points:** `cli.py` `resolve_config_path`/`load_config_for`/`worc_home_for`/`tasks_root_for`; git-root via `install/detect.py` `git_info`.
+- **Dependencies:** B01, B03, B05, B07/B20 (the home holds state.db + artifacts).
 - **Status:** `documented` · [file](./blocks/B04-install-registry-and-config-discovery.md)
 
 ### B05 — Configuration: Schema, Loading, Validation, Upgrade
 
-- **Purpose:** typed configuration model, YAML parsing (fail-closed), semantic validation (§11/§21.4), key migration between schema versions.
-- **Entry points:** [config/loader.load_config/loads_config](../../src/wastech_orchestrator/config/loader.py), [config/validation.validate_config](../../src/wastech_orchestrator/config/validation.py), [config/upgrade.py](../../src/wastech_orchestrator/config/upgrade.py), [config/schema.py](../../src/wastech_orchestrator/config/schema.py).
-- **Dependencies:** B25 (`find_forbidden_args` in validation), B23 (`checks.model` predicates), PyYAML.
+- **Purpose:** the config shape (`CONFIG_SCHEMA_VERSION = 11`), fail-closed loading (refuse newer, reject unknown keys/enums), semantic validation (exactly one provider `primary`, forbidden-args, coherence), add-missing-only upgrade with backup.
+- **Entry points:** `config/schema.py`, `config/loader.py`, `config/validation.py`, `config/upgrade.py`.
+- **Dependencies:** B04, B01 (upgrade), B25 (forbidden-args), B29 (config-aware flow validation reads it), B18/B31/B13 (sub-configs).
 - **Status:** `documented` · [file](./blocks/B05-configuration.md)
-
----
 
 ## Orchestration Core
 
 ### B06 — Orchestrator Pipeline
 
-- **Purpose:** deterministic driver for a single task from validation through publishing and terminal cleanup; calls only the Router, Check Runner, and Git Manager; context is passed to agents as paths only.
-- **Entry points:** [Orchestrator](../../src/wastech_orchestrator/core/orchestrator.py#L294), [run_task](../../src/wastech_orchestrator/core/orchestrator.py#L350), `resume`, `rerun_task`/`continue_task`, `finalize_task`, factory [build_orchestrator](../../src/wastech_orchestrator/core/orchestrator.py#L2594).
-- **Dependencies:** almost all core and execution blocks (see index).
+- **Purpose:** the single-slot wrapper around the flow engine: gate → slot → flow resolution → isolation/check preflight → branch → drive the engine in phases → terminal handling (cleanup, ledger, auto-merge); `rerun`/`finalize`/`resume`.
+- **Entry points:** `orchestrator.py` `Orchestrator`, `run_task` ([:342](../../src/wastech_orchestrator/core/orchestrator.py#L342)), `_drive_via_engine`/`_engine_run`/`_run_phases`, `resume`, `build_orchestrator` ([:1974](../../src/wastech_orchestrator/core/orchestrator.py#L1974)).
+- **Dependencies:** B28/B30/B31 (engine, runners, supervisor), B16, B07, B08–B15, B17, B22, B23/B24, B26.
 - **Status:** `documented` · [file](./blocks/B06-orchestrator-pipeline.md)
 
 ### B07 — State Machine and State Store
 
-- **Purpose:** canonical statuses and valid transitions (§8); persistent state in SQLite, single processing slot, transactions, DB schema versioning, read-only mode.
-- **Entry points:** [core/state_machine.py](../../src/wastech_orchestrator/core/state_machine.py) (`Status`, `assert_transition`, `is_active`/`is_terminal`), [state_store.StateStore](../../src/wastech_orchestrator/state_store.py) (`open`/`open_readonly`, `transaction`, `set_status`, `find_active_tasks`, `update_task`, …).
-- **Dependencies:** `sqlite3`; used by B06 and B22.
+- **Purpose:** the pure status machine (statuses + `ALLOWED_TRANSITIONS`) and the SQLite store (schema v10: tasks + flow checkpoint, node_runs, provider_attempts, check_runs, artifacts, publish_operations, subtasks, evaluations, editing_lineage, node_lineage); transactional, fail-closed on schema mismatch.
+- **Entry points:** `core/state_machine.py` (`Status`, `assert_transition`); `state_store.py` (`StateStore`, `DB_SCHEMA_VERSION`, `_SCHEMA`).
+- **Dependencies:** used by B06, B28 (checkpoint), B30, B22, B10, B01.
 - **Status:** `documented` · [file](./blocks/B07-state-machine-and-store.md)
 
 ### B08 — Ledger and Failure Reports
 
-- **Purpose:** append-only log of terminal outcomes (`completed.jsonl`); generation of `failure_report.json`/`stuck.md` and a compact `summary.{md,json}` when no agent is present.
-- **Entry points:** [ledger.Ledger](../../src/wastech_orchestrator/ledger.py) (`append`/`records`/`has_task_id`), `write_failure_report`, `write_minimal_summary`.
-- **Dependencies:** stdlib only (`json`); read by B16/B06 (id dedup), B06 (attempt counter).
+- **Purpose:** append-only `completed.jsonl` (one record per terminal; the duplicate-id gate source); `failure_report.json`/`stuck.md`; the deterministic minimal-summary fallback.
+- **Entry points:** `ledger.py` (`Ledger`, `LedgerRecord`, `write_failure_report`, `write_minimal_summary`).
+- **Dependencies:** B06 (appends), B16 (duplicate-id), B31 (primary summary; this is the fallback), B28 (failure report via `recorder.py`).
 - **Status:** `documented` · [file](./blocks/B08-ledger-and-failure-reports.md)
 
 ### B09 — Fix Loop Control
 
-- **Purpose:** loop counters (test/review fix), rules for transitioning to `fixing`, and detection of "stuck" state based on limits.
-- **Entry points:** [core/loop_control.py](../../src/wastech_orchestrator/core/loop_control.py) (`FixLoop`, `LoopController`, `LoopCounters`).
-- **Dependencies:** `agents.*` limits from configuration; used by B06.
+- **Purpose:** the shared rework-accounting primitive (`record_rework`) + the operator-facing `LoopCounters`; the actual bounding is generic engine bookkeeping (B28), clamped to `agents.max_fix_cycles` / `max_total_fix_iterations`.
+- **Entry points:** `core/loop_control.py` (`LoopCounters`, `record_rework`).
+- **Dependencies:** B28 (enforces budgets), B07 (counters), B05 (caps), B06 (`_sync_counters_from_run_state`), B08.
 - **Status:** `documented` · [file](./blocks/B09-fix-loop-control.md)
 
 ### B10 — Recovery and Resume
 
-- **Purpose:** reconciliation of persistent state on startup and deciding what to do with an unfinished task (do nothing / mark as manual / complete cleanup / resume from a stage).
-- **Entry points:** [core/recovery.py](../../src/wastech_orchestrator/core/recovery.py) (`RecoveryReconciler.reconcile`, `RecoveryAction`, `RecoveryPlan`).
-- **Dependencies:** B07 (state), B22 (git state); used by B06 (`resume`).
+- **Purpose:** reconcile persisted state on startup (`NONE`/`RESUME`/`CLEANUP`/`MANUAL`); hydrate the flow checkpoint; fingerprint-mismatch restart; decomposition resume from the first uncommitted subtask.
+- **Entry points:** `core/recovery.py` (`RecoveryReconciler`); `core/flow/recorder.py` (`hydrate_run_state`).
+- **Dependencies:** B06 (resume entry points), B28 (checkpoint), B07, B22, B29 (re-validate against live config).
 - **Status:** `documented` · [file](./blocks/B10-recovery-and-resume.md)
 
 ### B11 — Task Decomposition
 
-- **Purpose:** decision to split a task into subtasks based on structured planning output; subtask specifications and their file artifacts; progress index.
-- **Entry points:** [core/decomposition.py](../../src/wastech_orchestrator/core/decomposition.py) (`decide_decomposition`, `SubtaskSpec`, `write_subtask_artifacts`, `update_subtask_index`).
-- **Dependencies:** B15/B12 (structured planning output), B07 (`subtasks`); used by B06.
+- **Purpose:** the deterministic acceptance rule (agent recommends, core decides), subtask spec artifacts, and the region-driven fan-out.
+- **Entry points:** `core/decomposition.py` (`decide_decomposition`, `write_subtask_artifacts`); `core/flow/postprocess.py` (`read_decomposition`).
+- **Dependencies:** B28/B29 (region driving + config), B06 (materialize + fan-out), B07 (subtasks), B10.
 - **Status:** `documented` · [file](./blocks/B11-task-decomposition.md)
 
 ### B12 — HITL and Typed Stage Output
 
-- **Purpose:** durable human-in-the-loop interactions (persist/resume) and parsing/validation of typed stage output (including a signal requesting human input).
-- **Entry points:** [core/hitl.py](../../src/wastech_orchestrator/core/hitl.py) (`write_waiting_interaction`, `load_interaction`, `parse_typed_stage_output`, `stage_output_schema`, `consume_pending_interactions`, …).
-- **Dependencies:** B26 (transport), B20/B21 (artifacts, redaction); used by B06.
+- **Purpose:** the typed stage-output schema (question/approval + planning skills/subtasks) and the durable interaction-artifact lifecycle that the human gate and check-command approval build on.
+- **Entry points:** `core/hitl.py`; `notify/interface.py` (`AskHandle`/`AskResult`).
+- **Dependencies:** B30 (HumanGate + runners), B26 (transport), B14 (guardrail approval), B06 (check-command approval), B16.
 - **Status:** `documented` · [file](./blocks/B12-hitl-and-typed-output.md)
 
 ### B13 — Skill Inventory and Selection
 
-- **Purpose:** read-only scanning of `SKILL.md` in the repository; resolving skills proposed by planning (an agent cannot select a path that the scan did not find), and deduplication against operator instructions.
-- **Entry points:** [core/skills.py](../../src/wastech_orchestrator/core/skills.py) (`SkillInventoryScanner`, `resolve_planning_skills`, `compute_skill_dedup`).
-- **Dependencies:** B25 (`denied_read_paths`); used by B06 (planning).
+- **Purpose:** bounded `.claude/skills/**/SKILL.md` inventory scan, planning-proposed selection filtered to known/non-excluded names, read-only reference paths downstream.
+- **Entry points:** `core/skills.py` (`SkillInventoryScanner`, `resolve_planning_skills`).
+- **Dependencies:** B06 (scan + apply), B30 (`skill_paths`), B15 (`{skills_path}`), B25 (denied paths), B05.
 - **Status:** `documented` · [file](./blocks/B13-skill-selection.md)
 
-### B14 — Dangerous Diff Classifier
+### B14 — Dangerous Diff Classification
 
-- **Purpose:** pure change classifier (file deletions, dependency manifest/lock edits) → requires human approval.
-- **Entry points:** [core/dangerous_diff.py](../../src/wastech_orchestrator/core/dangerous_diff.py) (`classify_dangerous_diff`, `DangerousDiff`).
-- **Dependencies:** input — `changed_code_entries()` from B22; used by B06 (guardrail) together with B12.
+- **Purpose:** the pure classifier (deletion / dependency-manifest / both) over changed paths; the guard that applies it lives in the agent node runner (B30).
+- **Entry points:** `core/dangerous_diff.py` (`classify_dangerous_diff`, `DangerousDiff`).
+- **Dependencies:** B30 (applies the guard), B12 (approval), B22 (`changed_code_entries`).
 - **Status:** `documented` · [file](./blocks/B14-dangerous-diff-guardrail.md)
 
 ### B15 — Prompt Templates and Rendering
 
-- **Purpose:** resolution of stage templates (bundled defaults + operator overrides) and rendering with an allowlisted set of variables (metadata and artifact paths only).
-- **Entry points:** [core/prompts.py](../../src/wastech_orchestrator/core/prompts.py) (`PromptTemplateStore`, `render_prompt`), [templates/prompts/](../../src/wastech_orchestrator/templates/prompts/).
-- **Dependencies:** B05 (`prompts.*`); used by B06.
+- **Purpose:** the security-critical renderer that substitutes only allowlisted `{name}` path tokens; the flow-node renderer that reads a node `role_file` with flow-dir containment.
+- **Entry points:** `core/prompts.py` (`render_prompt`, `ALLOWED_PROMPT_VARS`); `core/flow/prompt.py` (`render_role_prompt`).
+- **Dependencies:** B30 (callers), B29 (role_file traversal validated at load), B13, B05 (v9 removed the `prompts` block).
 - **Status:** `documented` · [file](./blocks/B15-prompt-templates.md)
 
----
+## The Flow Engine (execution spine)
+
+### B28 — Flow Engine and Graph Traversal
+
+- **Purpose:** the single execution model — traverse a validated node graph, route on outcome, charge fix budgets, own all transitions; region confinement for decomposition; the run-state checkpoint.
+- **Entry points:** `core/flow/engine.py` (`FlowEngine`, `NodeOutcome`, `FlowRunResult`); `core/flow/engine_driver.py` (`drive_flow`, `partition_decomposition`); `core/flow/run_state.py`.
+- **Dependencies:** B29 (snapshot), B30 (runners), B07 (recorder/checkpoint), B09 (`record_rework`), B08 (failure report).
+- **Status:** `documented` · [file](./blocks/B28-flow-engine.md)
+
+### B29 — Flow Definition, Registry and Validation
+
+- **Purpose:** the typed flow document + provider-neutral contracts; the fail-closed YAML loader; the registry (`task_type` → snapshot, operator override, `validate_all`); the three-layer fatal validator.
+- **Entry points:** `core/flow/schema.py`, `core/flow/contracts.py`, `core/flow/snapshot.py`, `core/flow/registry.py`, `core/flow/validator.py`; packaged `core/flow/packaged/*.yaml`.
+- **Dependencies:** B25 (forbidden-args, profiles), B05 (config-aware layer), B18 (`ProviderId`); used by B28, B06.
+- **Status:** `documented` · [file](./blocks/B29-flow-definition-and-validation.md)
+
+### B30 — Flow Node Runners
+
+- **Purpose:** the five node-kind runners (agent/evaluator/checks/hitl/publish) + the shared services/inputs, the human gate, prompt assembly, `output_artifact` post-processing, and output-policy containment.
+- **Entry points:** `core/flow/nodes/*.py`, `core/flow/prompt.py`, `core/flow/postprocess.py`, `core/flow/output_policy.py`, `core/flow/wiring.py`.
+- **Dependencies:** B17 (router), B24/B32 (checks/checkers), B22 (git), B26 (notifier), B12, B14, B15, B07.
+- **Status:** `documented` · [file](./blocks/B30-flow-node-runners.md)
+
+### B31 — Supervisor Oversight Layer
+
+- **Purpose:** the constant per-task advisory layer (not a node) that observes each completed step read-only and writes the whole-task summary at close.
+- **Entry points:** `core/supervisor.py` (`Supervisor`, `observe`, `finalize`).
+- **Dependencies:** B17 (router), B07 (`evaluations`), B15, B20 (`summary.{md,json}`), B05 (`SupervisorConfig`); driven by B06.
+- **Status:** `documented` · [file](./blocks/B31-supervisor.md)
+
+### B32 — Flow Checkers (citation, dependency_scan)
+
+- **Purpose:** the core-owned non-`command_profile` checkers — the deterministic citation-manifest validator (gating) and the argv dependency scanners (evidence, never gates).
+- **Entry points:** `core/flow/checkers/citation.py`, `core/flow/checkers/dependency_scan.py`.
+- **Dependencies:** B30 (`ChecksNodeRunner` dispatch + `output_policy`), B19 (`run_process`); used by the `deep_research` / `security_audit` flows.
+- **Status:** `documented` · [file](./blocks/B32-flow-checkers.md)
 
 ## Task Ingestion
 
 ### B16 — Task Model, Parsing, and Validation Gate
 
-- **Purpose:** `NormalizedTask` model; parsing of `.md`/`.json` (frontmatter + body, failing on duplicate keys); §19 gate (hard checks + completeness classification), quarantine on failure.
-- **Entry points:** [task/parser.py](../../src/wastech_orchestrator/task/parser.py) (`read_task_source`, `load_normalized`, `write_normalized`, `slugify`), [task/validation_gate.ValidationGate](../../src/wastech_orchestrator/task/validation_gate.py), [task/model.py](../../src/wastech_orchestrator/task/model.py).
-- **Dependencies:** B25 (`scan_frontmatter`), B05 (limits), B08+B07 (id dedup); used by B06.
+- **Purpose:** the task model + front-matter allowlist; Phase-A hard reject (quarantine, no branch) and Phase-B completeness (feeds the refinement-skip fact).
+- **Entry points:** `task/model.py`, `task/parser.py`, `task/validation_gate.py`.
+- **Dependencies:** B06 (gate runs first), B25 (injection scan), B08 (duplicate-id), B07 (duplicate-id + `load_normalized` on resume), B12.
 - **Status:** `documented` · [file](./blocks/B16-task-parsing-and-validation-gate.md)
-
----
 
 ## Execution and Providers
 
 ### B17 — Agent Router and Fallback Policy
 
-- **Purpose:** provider selection for a stage (config + validated task-override), launch with fallback only on infrastructure errors, attempt counting, partial diff handoff.
-- **Entry points:** [routing/router.AgentRouter](../../src/wastech_orchestrator/routing/router.py) (`resolve_route`, `run_stage`), [routing/snapshots.py](../../src/wastech_orchestrator/routing/snapshots.py) (`SnapshotHook`).
-- **Dependencies:** B18 (`run` call), B25 (`is_same_or_stricter`), B05; used by B06.
+- **Purpose:** node-based route resolution (declared provider else the single global primary), infrastructure-only fallback, `session_unavailable` same-provider retry, partial-change capture.
+- **Entry points:** `routing/router.py` (`AgentRouter`, `resolve_route`, `run_stage`, `fallback_allowed`); `routing/snapshots.py`.
+- **Dependencies:** B18 (sole caller), B25 (profile strictness), B07 (provider_attempts); called by B30, B31.
 - **Status:** `documented` · [file](./blocks/B17-agent-router-and-fallback.md)
 
 ### B18 — Provider Adapters and Contract (Codex/Claude)
 
-- **Purpose:** `AgentProvider` contract; translating `AgentRunRequest` into a CLI argv, launching, parsing output, classifying errors into `ErrorClass`; `preflight`.
-- **Entry points:** [providers/base.py](../../src/wastech_orchestrator/providers/base.py), [providers/claude.ClaudeCodeProvider](../../src/wastech_orchestrator/providers/claude.py), [providers/codex.CodexProvider](../../src/wastech_orchestrator/providers/codex.py), [providers/errors.classify](../../src/wastech_orchestrator/providers/errors.py).
-- **Dependencies:** B19 (launch), B20 (artifacts), B21 (redaction), B25 (env/forbidden/isolation); called only by B17.
+- **Purpose:** the `AgentProvider` contract + the `codex`/`claude` adapters: build argv lists, deliver the prompt on stdin, normalize errors, resume sessions — no fallback, no git, no state changes.
+- **Entry points:** `providers/base.py`, `providers/claude.py`, `providers/codex.py`, `providers/errors.py`.
+- **Dependencies:** B19 (process), B21 (redaction), B20 (artifacts), B25 (forbidden-args), B07 (editing_lineage raw session).
 - **Status:** `documented` · [file](./blocks/B18-agent-providers.md)
 
-### B19 — Safe Subprocess Runner
+### B19 — Safe Subprocess Launcher
 
-- **Purpose:** single launch primitive: argv list (no shell), environment allowlist, timeout, stdin text, streaming stdout write to file, stderr capture.
-- **Entry points:** [providers/process.run_process](../../src/wastech_orchestrator/providers/process.py).
-- **Dependencies:** B25 (`build_child_env`); used by B18, B22, B24, B03/B04 (git probes).
+- **Purpose:** the single argv-without-shell chokepoint (mandatory timeout, isolated env, stdin delivery, stdout-to-file, captured stderr).
+- **Entry points:** `providers/process.py` (`run_process`, `ProcessResult`).
+- **Dependencies:** used by B18, B22, B24, B32; B25 (env allowlist).
 - **Status:** `documented` · [file](./blocks/B19-subprocess-runner.md)
 
-### B20 — Run Artifact Layout
+### B20 — Run Artifact File Layout
 
-- **Purpose:** deterministic (never-overwrite) artifact layout on disk; writing request/result, sha256, archiving task artifacts on rerun.
-- **Entry points:** [providers/artifacts.py](../../src/wastech_orchestrator/providers/artifacts.py) (`task_artifact_dir`, `create_attempt_dir`, `archive_task_artifacts`, `sha256_file`).
-- **Dependencies:** stdlib; used by B18, B06.
+- **Purpose:** the per-attempt on-disk artifact layout under `logs/<task-id>/...`; never-overwrite; archive-for-rerun; sha256 registration.
+- **Entry points:** `providers/artifacts.py` (`task_artifact_dir`, `create_attempt_dir`, `archive_task_artifacts`).
+- **Dependencies:** B18 (writers), B21 (redaction), B07 (artifacts table), B24 (check logs).
 - **Status:** `documented` · [file](./blocks/B20-artifact-layout.md)
 
 ### B21 — Secret Redaction
 
-- **Purpose:** end-to-end scrubbing of secret-like strings (token patterns + sensitive assignments) from text/dictionaries; collection of secrets from `denied_read_paths`.
-- **Entry points:** [providers/redaction.py](../../src/wastech_orchestrator/providers/redaction.py) (`redact_text`, `redact_mapping`, `read_denied_secrets`).
-- **Dependencies:** stdlib; used by B18, B22, B27, B06, B26.
+- **Purpose:** scrub literal + pattern-based secrets before any artifact/log write; normalized (non-secret) session id.
+- **Entry points:** `providers/redaction.py` (`redact_text`, `redact_mapping`, `read_denied_secrets`, `normalized_session_id`).
+- **Dependencies:** used by B18, B20, B27, B06.
 - **Status:** `documented` · [file](./blocks/B21-secret-redaction.md)
-
----
 
 ## Git
 
 ### B22 — Git and GitHub Operations (Git Manager)
 
-- **Purpose:** all git/gh operations via argv without shell: branch `agent/<id>-<slug>`, scoped staging (never `git add .`), commit/push/PR/merge with idempotency, the task-scoped audit commit + the `.worc/` gitignore exclude, working tree snapshots, terminal cleanup.
-- **Entry points:** [git_manager.GitManager](../../src/wastech_orchestrator/git_manager.py) (`prepare_branch`, `commit_code`/`commit_subtask`/`commit_audit`, `push`, `create_pr`, `merge_pr`, `terminal_cleanup`, `capture`/`partial_change_since`, …), `append_runtime_excludes`.
-- **Dependencies:** B19, B21, B07 (publish_operations), B25 (env); used by B06, B17 (SnapshotHook), B01.
+- **Purpose:** all git/gh via the safe runner: branch flow, scoped staging, idempotent commit/push/PR/merge, diffs/snapshots, fail-closed terminal cleanup. Git is the orchestrator's sole responsibility.
+- **Entry points:** `git_manager.py` (`GitManager`).
+- **Dependencies:** B19 (runner), B07 (publish idempotency), B21 (diff redaction); used by B06, B30 (publish node).
 - **Status:** `documented` · [file](./blocks/B22-git-manager.md)
 
----
-
-## Checks (Quality Gate)
+## Checks (quality gate)
 
 ### B23 — Check Discovery and Resolution
 
-- **Purpose:** determine the set of checks to run (deterministically from repository "evidence" or by trusting `checks.commands`; optionally with an agent fallback), cache the profile by fingerprint, invalidate on change; re-resolve on launch error.
-- **Entry points:** [checks/resolver.CheckResolver](../../src/wastech_orchestrator/checks/resolver.py) (`resolve`/`reresolve`), [checks/diagnostics.py](../../src/wastech_orchestrator/checks/diagnostics.py), [checks/inspect.py](../../src/wastech_orchestrator/checks/inspect.py), [checks/detect.py](../../src/wastech_orchestrator/checks/detect.py), [checks/probe.py](../../src/wastech_orchestrator/checks/probe.py), [checks/validate.py](../../src/wastech_orchestrator/checks/validate.py), [checks/store.py](../../src/wastech_orchestrator/checks/store.py), [checks/fingerprint.py](../../src/wastech_orchestrator/checks/fingerprint.py), [checks/agent.py](../../src/wastech_orchestrator/checks/agent.py).
-- **Dependencies:** B18 (agent fallback), B19 (probes), B25; used by B06, B01, B03.
+- **Purpose:** the deterministic inspect→detect→(agent)→validate→probe→store pipeline; discovery modes; the resolved profile cache + approval signature.
+- **Entry points:** `checks/model.py`, `checks/resolver.py`, `checks/detect.py`, `checks/inspect.py`, `checks/validate.py`, `checks/profile.py`, `checks/discovery_factory.py`, `checks/agent.py`.
+- **Dependencies:** B24 (executes the profile), B30 (checks node re-resolve), B06 (preflight + approval), B19 (probing).
 - **Status:** `documented` · [file](./blocks/B23-check-discovery.md)
 
-### B24 — Check Execution (testing stage)
+### B24 — Check Execution (command-profile)
 
-- **Purpose:** run resolved checks in order (argv without shell, env allowlist, timeout), stop on first failure, logs, distinction between a launch error and a quality failure.
-- **Entry points:** [check_runner.CheckRunner.run](../../src/wastech_orchestrator/check_runner.py) → `CheckOutcome`.
-- **Dependencies:** B19, B25 (env), B21; used by B06 (`testing`).
+- **Purpose:** run the resolved checks in order, stop at first failure; launch-failure (infra) vs non-zero exit (quality) distinction.
+- **Entry points:** `check_runner.py` (`CheckRunner`, `CheckOutcome`).
+- **Dependencies:** B23 (what to run), B30 (the checks node), B32 (other checkers), B19, B25 (env).
 - **Status:** `documented` · [file](./blocks/B24-check-execution.md)
-
----
 
 ## Security
 
 ### B25 — Security Policy Enforcement
 
-- **Purpose:** primitives of the non-weakening security policy: environment variable allowlist, bypass-flag prohibition, frontmatter injection scanning, provider isolation preflight, permission-profile strictness ranking (for conditional fallback).
-- **Entry points:** [security/env.build_child_env](../../src/wastech_orchestrator/security/env.py), [security/forbidden_args.find_forbidden_args](../../src/wastech_orchestrator/security/forbidden_args.py), [security/injection.scan_frontmatter](../../src/wastech_orchestrator/security/injection.py), [security/isolation.check_isolation](../../src/wastech_orchestrator/security/isolation.py), [security/profiles.is_same_or_stricter](../../src/wastech_orchestrator/security/profiles.py).
-- **Dependencies:** stdlib; used by B18, B19, B22, B24, B17, B16, B05, B06, B01.
+- **Purpose:** forbidden-args, env allowlist, front-matter injection scan, offline isolation preflight, profile strictness; the network policy as a flow-ceiling control.
+- **Entry points:** `security/forbidden_args.py`, `security/env.py`, `security/injection.py`, `security/isolation.py`, `security/profiles.py`.
+- **Dependencies:** B05 (load-time), B18 (build-time), B17 (`is_same_or_stricter`), B29 (flow validator), B16 (injection scan), B06 (preflight).
 - **Status:** `documented` · [file](./blocks/B25-security-policy.md)
-
----
 
 ## Integrations and Cross-Cutting Services
 
 ### B26 — Notifications and HITL Transport (Telegram)
 
-- **Purpose:** `Notifier` contract; Telegram implementation: sending a correlated request, polling for a response with timeout, fire-and-forget notifications; `NullNotifier` when the transport is disabled or not configured; Telegram preflight.
-- **Entry points:** [notify/interface.py](../../src/wastech_orchestrator/notify/interface.py) (`Notifier`, `NullNotifier`, `AskResult`/`AskHandle`), [notify/telegram.py](../../src/wastech_orchestrator/notify/telegram.py) (`build_notifier`, `check_telegram_preflight`).
-- **Dependencies:** `python-telegram-bot`, B21, B05 (`telegram.*`); used by B06, B12, B01.
+- **Purpose:** the `Notifier` protocol (best-effort terminal notice; durable ask), the Telegram transport (env-named credentials, correlated polling), the `NullNotifier` fallback.
+- **Entry points:** `notify/interface.py`, `notify/telegram.py`, `notify/__init__.py`.
+- **Dependencies:** B12 (interaction shapes), B30 (`NotifierPort`), B06, B21, B05 (telegram config).
 - **Status:** `documented` · [file](./blocks/B26-notifications-telegram.md)
 
 ### B27 — Observability: Logging and Heartbeat
 
-- **Purpose:** structured logging without secrets (logfmt/json, file rotation, redaction filter, context binding) and heartbeat messages during long blocking operations.
-- **Entry points:** [observability/logging.py](../../src/wastech_orchestrator/observability/logging.py) (`configure_logging`, `bind`, `RedactionFilter`), [observability/progress.run_with_heartbeat](../../src/wastech_orchestrator/observability/progress.py).
-- **Dependencies:** B21 (redaction filter); used by B06, B18, B22, B24, B01.
+- **Purpose:** structured logging (logfmt/json, rotation, `RedactionFilter`, task-scoped `bind`), heartbeat threads for long operations, and the per-node prompt-audit JSON.
+- **Entry points:** `observability/logging.py`, `observability/progress.py`, `core/flow/observability.py`.
+- **Dependencies:** B21 (redaction), B18/B22/B24 (heartbeat), B06 (prompt-audit gate, `_observe`), B30 (`record_run_observability`), B05.
 - **Status:** `documented` · [file](./blocks/B27-observability.md)
 
 ---
 
-## Reviewed but Not Extracted as Standalone Blocks (`excluded`)
+## Module → Block Map
 
-- **`providers/errors.py`** — included in B18 (adapter error classification rules).
-- **`routing/snapshots.py`** — included in B17 (partial diff contract between Router and Git).
-- **`checks/model.py`, `checks/profile.py`, `checks/schema_validate.py`, `checks/discovery_factory.py`, `checks/fingerprint.py`** — parts of B23 (check discovery models/schemas/factory).
-- **`templates/`, `worc/` (markdown)** — package data delivered by B03; not executable code.
-- **`__init__.py` packages, `__main__.py`** — re-exports/wrappers of entry points (reflected in B01).
+Every module under `src/wastech_orchestrator/` is assigned to exactly one block:
+
+| Module(s) | Block |
+| --- | --- |
+| `cli.py` (+ `__main__.py`) | B01 (watch parts B02, install parts B03, discovery parts B04) |
+| `process_control.py` | B02 |
+| `install/wizard.py`, `install/config_writer.py`, `install/detect.py` | B03 (`detect.git_info` also B04) |
+| `config/schema.py`, `config/loader.py`, `config/validation.py`, `config/upgrade.py` | B05 |
+| `core/orchestrator.py` | B06 |
+| `core/state_machine.py`, `state_store.py` | B07 |
+| `ledger.py` | B08 |
+| `core/loop_control.py` | B09 |
+| `core/recovery.py`, `core/flow/recorder.py` | B10 |
+| `core/decomposition.py` | B11 |
+| `core/hitl.py` | B12 |
+| `core/skills.py` | B13 |
+| `core/dangerous_diff.py` | B14 |
+| `core/prompts.py`, `core/flow/prompt.py` | B15 |
+| `task/model.py`, `task/parser.py`, `task/validation_gate.py` | B16 |
+| `routing/router.py`, `routing/snapshots.py` | B17 |
+| `providers/base.py`, `providers/claude.py`, `providers/codex.py`, `providers/errors.py` | B18 |
+| `providers/process.py` | B19 |
+| `providers/artifacts.py` | B20 |
+| `providers/redaction.py` | B21 |
+| `git_manager.py` | B22 |
+| `checks/{model,resolver,detect,inspect,validate,profile,discovery_factory,agent}.py` | B23 |
+| `check_runner.py` | B24 |
+| `security/{forbidden_args,env,injection,isolation,profiles}.py` | B25 |
+| `notify/{interface,telegram,__init__}.py` | B26 |
+| `observability/{logging,progress}.py`, `core/flow/observability.py` | B27 |
+| `core/flow/{engine,engine_driver,run_state,snapshot}.py` | B28 |
+| `core/flow/{schema,contracts,registry,validator}.py`, `core/flow/packaged/*.yaml` | B29 |
+| `core/flow/nodes/*.py`, `core/flow/{postprocess,output_policy,wiring}.py` | B30 |
+| `core/supervisor.py` | B31 |
+| `core/flow/checkers/{citation,dependency_scan}.py` | B32 |
+
+### Excluded (not standalone blocks)
+
+- Package `__init__.py` files and `py.typed` markers — packaging/exports only.
+- `core/flow/__init__.py`, `core/flow/contracts.py` re-exports — vocabulary, part of B28/B29.
+- `core/flow/observability.py` — assigned to B27 (the prompt-audit observability path).

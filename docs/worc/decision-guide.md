@@ -11,15 +11,9 @@ You usually do not choose this — the operator does — but it affects where yo
 
 A live task belongs in the repo's own `tasks/pending/` directory (committed and pushed there) — that is how a teammate hands work to a watching orchestrator.
 
-## `decompose` — split a large task
+## Decomposition — split a large task
 
-| Value | Effect |
-| --- | --- |
-| `true` | Force the decomposition gate: the orchestrator breaks the task into subtasks that run sequentially on one branch and produce one PR. |
-| `false` | Disable decomposition for this task. |
-| omitted | Use the operator's `agents.decomposition.enabled` default. |
-
-Use `true` only for genuinely large work. A small, coherent change should stay a single unit.
+Decomposition is **not** a per-task knob. Whether a large task is broken into sequential subtasks (on one branch, one PR) is decided by the operator's `agents.decomposition.enabled` setting plus the flow's `decomposition:` block and the planning stage's proposal. Keep a task one coherent unit; if the work is genuinely large, say so in the Description and let planning propose a split.
 
 ## `pr_title` — override the PR title
 
@@ -34,7 +28,7 @@ Omit it to auto-generate. It changes only the PR title text; it does not touch t
 
 ## Skipping stages — `stages.<stage>.enabled: false`
 
-Skip a stage only when it adds no value for this task. Skippable: `planning`, `testing`, `review`, `fixing`, `summary`. (`implementation` and `publishing` are never skippable; for `refinement`, use the `refined` flag instead.)
+Skip a stage only when it adds no value for this task. Skippable: `planning`, `testing`, `review`, `fixing`, `summary`. (`implementation` and `publishing` are never skippable; `refinement` is skipped automatically when the task is already complete — see "Refinement" below.)
 
 ```yaml
 stages:
@@ -54,38 +48,19 @@ What each skip does:
 | `fixing` | The first test/review failure goes straight to `manual_action_required` (no recovery loop). |
 | `summary` | A stub summary instead of a written one. |
 
-**Skipping `review` is high-risk** — it removes the only agent quality gate before commit/PR. It is rejected (`review_skip_not_allowed`) unless the operator set `agents.allow_review_skip: true`. Do not skip review unless you know that flag is enabled. The effective skip set is the union of the operator's global `agents.skip_stages` and your per-task skips; a globally skipped stage cannot be re-enabled per task.
+**Skipping `review` is high-risk** — it removes the only agent quality gate before commit/PR. It is rejected (`review_skip_not_allowed`) unless the operator set `agents.allow_review_skip: true`. Do not skip review unless you know that flag is enabled. Stage-skip is per-task only (`stages.<stage>.enabled: false`); `enabled` is the **only** valid per-stage key.
 
-## Per-stage `model` / `reasoning`
+## Provider / model / reasoning — not a task knob
 
-Different stages have different needs: `planning` and `review` benefit from a stronger, higher-reasoning model; `implementation`, `fixing`, and `summary` are usually fine on a lighter one. Set a task-wide default and override per stage:
-
-```yaml
-model: claude-sonnet-4-6 # task-wide default for stages not listed below
-reasoning: low
-stages:
-  planning:
-    model: claude-opus-4-8
-    reasoning: high
-  review:
-    reasoning: high # only reasoning overridden; model stays the task-wide one
-```
-
-Each field resolves most-specific-first:
-
-```text
-stages.<stage>.<field>  →  task-wide model/reasoning  →  provider default  →  unset
-```
-
-`reasoning` must be one of `low, medium, high, xhigh, max` (`xhigh` needs a capable model; `max` is Claude-only and clamps to `xhigh` on Codex). A `model` string is **not** checked against the stage's provider — if the provider does not know the model, the run fails there. Keep model names consistent with the provider you route each stage to.
+Which provider runs a stage, and with which model and reasoning effort, is decided by the **flow** (each flow node declares its own `provider`/`model`/`reasoning`, or defaults to the operator's global primary provider) — never by the task. A task cannot repoint a stage's provider or set its model. If a stage needs a stronger model, that is an operator/flow change, not a task front-matter field.
 
 ## `auto_merge` — danger
 
-`auto_merge: true` requests that the orchestrator merge the PR automatically after publishing, **bypassing human merge**. It is honored **only** when the operator set `git.auto_merge_allow_per_task: true`; otherwise it is ignored. Leave it unset unless you have an explicit reason and know auto-merge is enabled and safe for this repository.
+`auto_merge: true` requests that the orchestrator merge the PR automatically after publishing, **bypassing human merge**. A per-task value wins outright over the instance default `git.auto_merge` — there is no separate operator gate, because the task author is the same trusted operator who owns `config.yaml`. Leave it unset unless you have an explicit reason and know auto-merge is safe for this repository; skipping the human PR review is your call.
 
-## `refined` — skip refinement
+## Refinement — skipped automatically when complete
 
-Set `refined: true` only when the task already has enough detail to plan directly. When `refined` is unset, the orchestrator still skips refinement if the task looks complete — completeness needs a non-empty description **plus** acceptance criteria. Missing acceptance criteria does not reject the task; it just makes refinement run.
+You cannot flag a task to skip refinement. The orchestrator skips it automatically when the task looks complete — completeness needs a non-empty Description **plus** acceptance criteria. Provide acceptance criteria when you want to skip refinement; omit them to let the refinement stage enrich an under-specified task (missing criteria never rejects the task).
 
 ## Where task files live
 

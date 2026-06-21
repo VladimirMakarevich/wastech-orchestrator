@@ -1,0 +1,170 @@
+"""Wiring — build :class:`NodeServices` / :class:`NodeInputs` from the orchestrator's live state.
+
+The builder seam the cutover (P1.4) uses: ``run_task``/``resume`` resolve a validated
+``FlowSnapshot``, then call these functions to turn the orchestrator's collaborators (router /
+checks / git / notifier / store) and the per-run ``_Pipeline`` into the data bundles the node
+runners read. Keeping it here (not in ``orchestrator.py``) keeps the node layer free of any
+orchestrator import and makes the mapping unit-testable with fakes.
+
+Routing is node-based now (a node's ``provider`` field, else the global primary — PRE.1), so the
+``node_id -> Stage`` map (:func:`build_stage_map`) no longer selects a provider. It supplies each
+agent / evaluator node's ``Stage`` *identity* — the request ``stage``, its output schema, HITL
+parsing, and interaction paths — which the ``Stage`` enum still backs until P4. Checks / publish
+nodes have no stage and never index it (the engine-driver test relies on this).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from wastech_orchestrator.checks.model import ResolvedCheck
+from wastech_orchestrator.core.flow.nodes.base import (
+    CheckRunnerPort,
+    GitPort,
+    NodeInputs,
+    NodeRunStorePort,
+    NodeServices,
+    NotifierPort,
+    RegisterArtifact,
+    RouterPort,
+    RunProcess,
+)
+from wastech_orchestrator.core.flow.schema import AgentNode, FlowNode
+from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
+from wastech_orchestrator.providers.base import Stage
+from wastech_orchestrator.providers.process import run_process as _default_run_process
+from wastech_orchestrator.routing.snapshots import SnapshotHook
+
+if TYPE_CHECKING:  # avoid a circular import — orchestrator imports this module at cutover.
+    from wastech_orchestrator.core.orchestrator import _Pipeline
+
+_ROUTED_KINDS = frozenset({"agent", "evaluator"})
+_STAGE_VALUES = frozenset(s.value for s in Stage)
+
+
+def build_stage_map(snapshot: FlowSnapshot) -> dict[str, Stage]:
+    """Map each agent / evaluator node id to its ``Stage`` identity.
+
+    The ``Stage`` is only a request *identity* — the output schema, HITL parsing, and interaction /
+    observability paths — never the provider (routing is node-based, PRE.1). In the implementation
+    flow the node ids are Stage-aligned (``implementation`` -> ``IMPLEMENTATION`` …) and keep that
+    identity. A node whose id is not a ``Stage`` value (research / audit flows) gets a **kind**
+    default — generic, keyed by capability, never by node name: a HITL-capable agent needs the
+    human-input schema (``REFINEMENT``), an evaluator the verdict identity (``REVIEW``), any other
+    agent the generic author identity (``IMPLEMENTATION``). Same-identity nodes share the per-stage
+    audit directory (the run-id-keyed audit files do not collide); per-node audit paths land with
+    the P4 removal of the ``Stage`` enum.
+    """
+    return {
+        node.id: _stage_identity(node)
+        for node in snapshot.nodes_by_id.values()
+        if node.kind in _ROUTED_KINDS
+    }
+
+
+def _stage_identity(node: FlowNode) -> Stage:
+    """The ``Stage`` identity for an agent / evaluator node (see :func:`build_stage_map`)."""
+    if node.id in _STAGE_VALUES:
+        return Stage(node.id)
+    if (
+        isinstance(node, AgentNode)
+        and node.hitl is not None
+        and (node.hitl.allow_question or node.hitl.allow_approval)
+    ):
+        return Stage.REFINEMENT  # a HITL node needs the human-input-capable schema
+    if node.kind == "evaluator":
+        return Stage.REVIEW
+    return Stage.IMPLEMENTATION
+
+
+def build_node_services(
+    *,
+    router: RouterPort,
+    check_runner: CheckRunnerPort,
+    store: NodeRunStorePort,
+    repo_dir: str,
+    artifacts_root: str,
+    snapshot: FlowSnapshot,
+    clock: Callable[[], str],
+    git: GitPort | None = None,
+    notifier: NotifierPort | None = None,
+    snapshot_hook: SnapshotHook | None = None,
+    default_timeout_seconds: int = 7200,
+    ask_timeout_s: int = 0,
+    prompt_audit: bool = False,
+    prompt_secrets: tuple[str, ...] = (),
+    register_artifact: RegisterArtifact | None = None,
+    finalize: Callable[[], str | None] | None = None,
+    check_reresolve: Callable[[], tuple[ResolvedCheck, ...] | None] | None = None,
+    run_process: RunProcess = _default_run_process,
+    process_env: Mapping[str, str] | None = None,
+    scan_timeout_s: int = 600,
+) -> NodeServices:
+    """Assemble the unit-shared :class:`NodeServices` (collaborators + the routing map).
+
+    ``snapshot_hook`` is the git snapshot hook handed to the router for provider observability
+    (the legacy ``run_stage(..., snapshot=git)``); the same git manager satisfies both ``git`` and
+    ``SnapshotHook``, so callers usually pass it for both. The observability / finalize / re-resolve
+    hooks are orchestrator-provided (see :class:`NodeServices`); they default off for unit tests.
+    """
+    return NodeServices(
+        router=router,
+        check_runner=check_runner,
+        store=store,
+        repo_dir=repo_dir,
+        artifacts_root=artifacts_root,
+        stage_for_node=build_stage_map(snapshot),
+        clock=clock,
+        default_timeout_seconds=default_timeout_seconds,
+        snapshot=snapshot_hook,
+        git=git,
+        notifier=notifier,
+        ask_timeout_s=ask_timeout_s,
+        prompt_audit=prompt_audit,
+        prompt_secrets=prompt_secrets,
+        register_artifact=register_artifact,
+        finalize=finalize,
+        check_reresolve=check_reresolve,
+        run_process=run_process,
+        process_env=dict(process_env or {}),
+        scan_timeout_s=scan_timeout_s,
+    )
+
+
+def build_node_inputs(
+    p: _Pipeline,
+    *,
+    flow_dir: Path,
+    resolved_checks: tuple[ResolvedCheck, ...] | None = (),
+    pr_title: str | None = None,
+    summary_body_path: str | None = None,
+    commit_message: str | None = None,
+    subtask_spec_path: str | None = None,
+) -> NodeInputs:
+    """Build the per-unit :class:`NodeInputs` from the live ``_Pipeline``.
+
+    Artifact paths are read straight off the pipeline (the values the legacy ``_prompt_variables``
+    injected). The publish-only fields (``pr_title`` / ``summary_body_path`` / ``commit_message``)
+    are not pipeline attributes — the publish wrapper computes and passes them; ``resolved_checks``
+    comes from the resolved check profile. Editing-session continuity is durable now (the
+    ``editing_lineage`` store, P2.2), not an in-memory map threaded through ``NodeInputs``.
+    """
+    return NodeInputs(
+        flow_dir=flow_dir,
+        task_path=p.task_file,
+        plan_path=p.plan_path,
+        diff_path=p.diff_path,
+        checks_path=p.check_log,
+        review_path=p.review_findings_path,
+        skill_paths=tuple(ref.path for ref in p.selected_skills),
+        subtask_count=p.decomposition.n if p.decomposition.accepted else None,
+        subtask_spec_path=subtask_spec_path,
+        resolved_checks=resolved_checks,
+        branch=p.branch or None,
+        pr_title=pr_title,
+        summary_body_path=summary_body_path,
+        commit_message=commit_message,
+        contacts=tuple(p.task.contacts),
+    )
