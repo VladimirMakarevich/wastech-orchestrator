@@ -154,7 +154,8 @@ def _check_graph(snap: FlowSnapshot) -> list[Violation]:
                 allowed_str = sorted(repr(a) for a in allowed)
                 errs.append(
                     g(
-                        f"node {node_id!r} ({node.kind}): outcome {oc!r} not in allowed {allowed_str}"
+                        f"node {node_id!r} ({node.kind}): outcome {oc!r}"
+                        f" not in allowed {allowed_str}"
                     )
                 )
 
