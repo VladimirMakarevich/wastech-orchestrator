@@ -59,9 +59,14 @@ wastech-orchestrator --version           # confirm the new version
 
 Do it **between tasks**, not mid-run: an in-flight task holds the single processing slot and a live working branch, and its state lives in `state.db`. Wait until `status` shows no active task, then upgrade and re-run `preflight` / `watch`.
 
-The persisted state survives an upgrade — back it up first so you can roll back. That is everything under `<repo>/.worc/` (`config.yaml` and `state.db` live there), plus the git-tracked `tasks/` lifecycle dirs at the repo root. Copy at least `.worc/config.yaml` + `.worc/state.db`. The orchestrator **fail-closes on a backward-incompatible workspace**: if the `config.yaml` `schema_version` or the `state.db` schema is **newer** than the installed version understands, the command prints a clear `error:` and exits non-zero (2) instead of running against a format it cannot read. To recover, upgrade the package to a version that supports it (or, for a throwaway setup, start a fresh workspace via `install --reconfigure`). Older or absent versions are accepted as-is.
+The persisted state survives an upgrade — back it up first so you can roll back. That is everything under `<repo>/.worc/` (`config.yaml` and `state.db` live there), plus the git-tracked `tasks/` lifecycle dirs at the repo root. Copy at least `.worc/config.yaml` + `.worc/state.db`. The orchestrator **fail-closes on a backward-incompatible workspace**: if the `config.yaml` `schema_version` or the `state.db` schema is **newer** than the installed version understands, the command prints a clear `error:` and exits non-zero (2) instead of running against a format it cannot read. To recover, upgrade the package to a version that supports it (or, for a throwaway setup, start a fresh workspace via `install --reconfigure`).
 
-The current schema versions are `state.db` **v7** and `config.yaml` `schema_version` **11**. `state.db` migrates itself **forward** in place the first time a newer version opens it (additive columns are added in place) — no action needed. `config.yaml` does **not** auto-migrate: a new release may add keys (with safe defaults, so an older config still runs), but to materialize them in your file run **`upgrade-config`** after upgrading the package:
+The current schema versions are `state.db` **v10** and `config.yaml` `schema_version` **11**, and the two are handled differently because the orchestrator is **greenfield** (no production data to preserve):
+
+- **`config.yaml`** does **not** auto-migrate, and an **older or absent** `schema_version` is accepted as-is (a new release adds keys with safe defaults, so an older config still runs). To materialize the new keys in your file run **`upgrade-config`** (below).
+- **`state.db`** does **not** migrate across versions. A brand-new (or pre-versioning) database is created at the current shape; a database stamped an **older** version (`1 ≤ v < 10`) is **refused fail-closed** — several past bumps dropped/renamed tables, and the store only ever adds columns, so an old shape cannot be reshaped in place. Recovery is to delete the local `state.db` and start a fresh workspace (greenfield: there is nothing to preserve). Do this **between tasks**, never with a task in flight.
+
+To bring the rest of your deployment current after a package upgrade, run **`upgrade-config`** (and **`upgrade-docs`**):
 
 ```bash
 wastech-orchestrator upgrade-config              # uses the discovered/bound config
@@ -313,9 +318,9 @@ Resolution order: per-task `auto_merge` (if set) → global `git.auto_merge` →
 
 ### Skipping pipeline stages (per-task)
 
-By default the pipeline runs `refinement → planning → [implementation → testing → review → fixing] → summary → publishing`. A **task** can skip a stage that adds no value for it — convenient for debugging/testing and quick one-off runs without authoring a separate flow.
+By default the pipeline (the packaged `implementation` flow) runs `refinement → planning → implementation → testing → review → fixing(loop) → publish`. The whole-task **summary** is not a pipeline stage — the constant [supervisor layer](configuration.md#supervisor) writes it at task close (it becomes the PR body), so it cannot be skipped. A **task** can skip a stage that adds no value for it — convenient for debugging/testing and quick one-off runs without authoring a separate flow.
 
-Skippable stages: `planning`, `testing`, `review`, `fixing`, `summary`. `implementation` and `publishing` are never skippable; `refinement` is skipped **deterministically** when the task is already complete (completeness classification `COMPLETE`), never via a task flag.
+Skippable stages: `planning`, `testing`, `review`, `fixing`. `implementation` and `publishing` are never skippable; `refinement` is skipped **deterministically** when the task is already complete (completeness classification `COMPLETE`), never via a task flag.
 
 > The global `agents.skip_stages` list was **removed in config `schema_version` 10**: with fully configurable flows, "skip a stage for every task" is redundant — to drop a stage everywhere, remove its node from the flow (or author an operator flow). Per-task skip below is the surviving, bounded mechanism. The `agents.allow_review_skip` gate survives (it now permits the per-task `review` skip).
 
@@ -329,7 +334,7 @@ stages:
 
 Disabling `review` additionally requires `agents.allow_review_skip: true` in config (it removes the only agent quality gate before commit/PR), else the task is rejected.
 
-**What each skip does:** `planning` → a stub `plan.md` and a single implementation unit (no decomposition); `testing` → straight from implementation to review, the Check Runner never runs; `review` → commit with no agent review gate; `fixing` → the first test/review failure goes to `manual_action_required` with a `stuck.md` report (no recovery loop, 0 fix iterations); `summary` → a stub summary.
+**What each skip does:** `planning` → a stub `plan.md` and a single implementation unit (no decomposition); `testing` → straight from implementation to review, the Check Runner never runs; `review` → commit with no agent review gate; `fixing` → the first test/review failure goes to `manual_action_required` with a `stuck.md` report (no recovery loop, 0 fix iterations).
 
 **Audit.** Every skip writes a `<stage> skipped` `WARNING` log line (with the reason: global config, task front-matter, or both), persists a `node_runs` row with `skipped = 1` and `skip_reason`, and lists the skipped stages in a `## Pipeline stages skipped` section of the PR body. When `review` is skipped **and** auto-merge fires, a second `WARNING` records that the task merged with no review gate at all.
 
@@ -353,7 +358,7 @@ logs/
     failure_report.json / stuck.md# written iff the task ended manual_action_required
     review/findings.json          # review findings (severity → blocking)
     checks/<NNN>.log              # each check command's output (redacted)
-    stages/<stage>/rendered-prompt.md  # the exact stage prompt sent (redacted; see `prompts:`)
+    stages/<stage>/rendered-prompt.md  # the exact stage prompt sent (redacted; rendered from the node's role_file)
     stages/<stage>/run-<stage-run-id>/<attempt>-<provider>/
       request.json                # redacted request (argv, no secrets)
       stdout.log / stderr.log     # redacted process output

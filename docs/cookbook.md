@@ -2,7 +2,7 @@
 
 This cookbook shows common ways to use **wastech-orchestrator**. It is written for operators who run the orchestrator and for developers who want a practical path from "empty workspace" to "task processed into a Pull Request".
 
-The canonical product reference remains the [Functional Map](functional/index.md). Where this guide mentions planned v1 behavior, it is labeled explicitly. The CLI surface described here (`install`, `preflight`, `run`, `watch`, and `status`) exists in the current codebase.
+The canonical product reference remains the [Functional Map](functional/index.md). The full CLI surface (`install`, `preflight`, `telegram-test`, `run`, `rerun`, `finalize`, `watch`, `stop`, `restart`, `status`, `upgrade-config`, `upgrade-docs`) exists in the current codebase; this guide focuses on the everyday subset.
 
 ## 1. Install Into A Repository
 
@@ -177,7 +177,7 @@ Exit codes:
 |  `1` | The task reached `failed`.                 |
 |  `2` | The task reached `manual_action_required`. |
 
-Planned v1 behavior: a successful task runs through validation, preparation, optional refinement, planning, implementation, checks, review, fixing if needed, summary, commit, push, PR creation, and terminal cleanup back to `repo.base_branch`.
+A successful task runs through validation, branch preparation, optional refinement, planning, implementation, checks (testing), review, fixing if needed, then publishing — commit, push, and PR creation — followed by terminal cleanup back to `repo.base_branch`. The plain-language summary that becomes the PR body is **not** a separate stage: the constant supervisor layer writes it at task close (see [configuration.md](configuration.md#supervisor)).
 
 ### Re-attempt a task that ended `failed` / `manual_action_required`
 
@@ -230,7 +230,7 @@ orchestrator:
     enabled: true
 ```
 
-Auto mode does not introduce concurrency. Planned v1 behavior keeps a single active task slot and requires checkout back to `repo.base_branch` before the next task can start.
+Auto mode does not introduce concurrency. There is a single active task slot, and checkout back to `repo.base_branch` must complete before the next task can start.
 
 ### Monitor a running task
 
@@ -401,7 +401,7 @@ After resolving the problem, run:
 python -m wastech_orchestrator watch
 ```
 
-Planned v1 behavior is idempotent: reruns reconcile state and do not duplicate commit, push, or PR operations.
+Recovery is idempotent: reruns reconcile state and do not duplicate commit, push, or PR operations.
 
 ## 12. Common Setups
 

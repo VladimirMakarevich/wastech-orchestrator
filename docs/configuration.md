@@ -143,7 +143,7 @@ Validation requires `max_total_fix_iterations >= max_fix_cycles`. Stage-skip is 
 
 ### `agents.decomposition`
 
-Planned v1 feature, off by default. It lets planning propose a sequential subtask list for large tasks; the Core accepts it only under deterministic rules.
+Off by default. When enabled, planning may propose a sequential subtask list for large tasks; the Core accepts it only under deterministic rules and then runs each accepted subtask through the flow's `sub_flow` region (`implementation → testing → review → fixing`), committing each.
 
 ```yaml
 agents:
@@ -159,7 +159,7 @@ agents:
 | `enabled` | boolean | `false` | Enables the planning sub-phase for decomposition. |
 | `max_subtasks` | integer | `8` | Maximum accepted split size; must be at least `2`. |
 | `min_size_signal` | string | `"large"` | Advisory size threshold passed to the planning prompt. |
-| `commit_per_subtask` | boolean | `true` | Planned v1: one local commit per accepted subtask. |
+| `commit_per_subtask` | boolean | `true` | One local commit per accepted subtask on the single task branch. |
 
 Decomposition is **no longer a task flag** (`decompose` was removed in `schema_version` 11). Whether a split is permitted at all is `agents.decomposition.enabled` (above); whether one actually happens is decided by the flow's `decomposition:` block and the planning node's gate proposal, accepted only under the deterministic rules. A task cannot change `enabled`, `max_subtasks`, the provider, or security settings.
 
@@ -355,12 +355,15 @@ Discovery never installs dependencies or mutates the environment: a candidate th
 
 ## `git`
 
-Controls PR creation and the audit-trail policy.
+Controls PR creation, the optional auto-merge bypass, and the audit-trail policy.
 
 ```yaml
 git:
   create_pull_request: true
   pr_base: "main"
+  auto_merge: false # DANGER: merge every published PR without human review
+  auto_merge_strategy: squash # merge | squash | rebase
+  auto_merge_wait_for_checks: false # true: arm GitHub-native auto-merge (--auto)
   footprint:
     audit_commit_message: "chore(orchestrator): audit trail for {task_id}"
     audit_on_branch: task
@@ -370,8 +373,13 @@ git:
 | --- | --- | --- | --- |
 | `create_pull_request` | boolean | `true` | Whether publishing creates a PR. |
 | `pr_base` | string | `"main"` | Base branch for PR creation. Usually matches `repo.base_branch`. |
+| `auto_merge` | boolean | `false` | **DANGER:** when `true`, every successfully published PR is merged to `pr_base` — this removes the human review gate. A per-task `auto_merge` wins outright over this default. |
+| `auto_merge_strategy` | `merge`, `squash`, `rebase` | `squash` | Strategy passed to `gh pr merge` when a merge fires. |
+| `auto_merge_wait_for_checks` | boolean | `false` | When `true`, arm GitHub-native auto-merge (`gh pr merge --auto`): GitHub merges only after required checks pass. When `false`, merge immediately. |
 
 `create_pull_request: false` skips only `gh pr create`. The successful publishing path still makes the orchestrator-owned commit and pushes the task branch. Use a disposable fork/test remote for a first self-hosting run; a no-push dry-run mode is not implemented.
+
+Auto-merge is **off by default** and only affects the publish step — the mid-pipeline dangerous-diff approval still fires, the orchestrator never passes `--admin` or force-pushes, and a blocked merge ends the task `manual_action_required` with the PR left open (never `failed`). Enable it only when protected branches and required CI checks already enforce your quality gate. See [operations.md](operations.md#auto-merge-to-the-base-branch-danger-bypasses-human-review) for the full behavior, the per-task override, and the audit record.
 
 ### The canonical layout
 
@@ -460,6 +468,31 @@ skills:
 | `exclude` | list | `["run-checks", "test", "sync-docs"]` | Gate-duplicating skills withheld from planning (the orchestrator already owns those gates). |
 
 Skill bodies are repo-controlled and only ever surfaced by path. The planning agent **proposes** skill names; the Core keeps only those the scan actually found and that are not excluded, recording the selection (and any dropped names) in `plan.md`.
+
+## `supervisor`
+
+Configures the **constant supervisor layer** — a per-task oversight layer that lives _above_ any flow. It is **not a node and not a stage**: there is no `summary` node in any packaged flow because the supervisor owns the summary. The block is optional; when omitted it takes the defaults below (the packaged `config.example.yaml` does not include it).
+
+```yaml
+supervisor:
+  role_file: "roles/supervisor.md"
+  model: null # empty/null → the provider default
+  reasoning: null # low | medium | high | xhigh | max
+```
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `role_file` | string | `"roles/supervisor.md"` | Role file (resolved inside the active flow's directory) rendering the supervisor's read-only prompt; a missing/unreadable file falls back to a minimal built-in instruction. |
+| `model` | string or null | `null` | Model for the supervisor's calls; empty/null uses the provider default. |
+| `reasoning` | string or null | `null` | Reasoning level (`low`/`medium`/`high`/`xhigh`/`max`); must be a known level. |
+
+What the layer does (see the [Functional Map](functional/blocks/B31-supervisor.md)):
+
+- It exists for **every** task under any flow shape — even a single agent node with no checks/review.
+- After each completed (non-skipped) step it runs **one read-only** observation on its own continuing session (~1 call/step) and records an immutable advisory `supervisor_step` row. Observation is **best-effort**: a failure is logged and swallowed.
+- At whole-task **close** (before `publish` in the `implementation` flow) it synthesizes the plain-language `summary.md` (the PR body) plus advisory caveats and records `supervisor_final`. If the synthesis call cannot run, the orchestrator's **minimal-summary fallback** writes `summary.md` instead — the summary is _always_ produced, by one path or the other.
+
+The layer is **advisory by construction**: it never reworks, reopens, or routes — blocking is the job of the in-flow `review`/evaluator nodes. It runs on the **global primary** provider, and its `permission_profile` is **forced `read-only`** in code (it can never edit), validated under the same ceiling as flow nodes (`reasoning` in the allowlist, `role_file` path-contained).
 
 ## `prompt_audit`
 

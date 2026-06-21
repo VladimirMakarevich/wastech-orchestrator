@@ -162,9 +162,9 @@ stages:
     enabled: false # DANGER: no agent review gate — requires agents.allow_review_skip: true
 ```
 
-Skippable stages: `planning`, `testing`, `review`, `fixing`, `summary`. `implementation` (the core work) and `publishing` (the output) can never be skipped here; `refinement` is skipped automatically by completeness, not by a `stages` entry. Stage-skip is **per-task only** — the global `agents.skip_stages` list was removed in config v10 (to drop a stage everywhere, remove its node from the flow). Disabling `review` additionally requires `agents.allow_review_skip: true`.
+Skippable stages: `planning`, `testing`, `review`, `fixing`. `implementation` (the core work) and `publishing` (the output) can never be skipped here; `refinement` is skipped automatically by completeness, not by a `stages` entry. The whole-task **summary** is not skippable either — it is written by the constant supervisor layer at task close, not by a graph node (see [configuration.md](configuration.md#supervisor)). Stage-skip is **per-task only** — the global `agents.skip_stages` list was removed in config v10 (to drop a stage everywhere, remove its node from the flow). Disabling `review` additionally requires `agents.allow_review_skip: true`.
 
-What each skip does: `planning` → stub plan, single unit; `testing` → straight to review (no checks); `review` → commit with no agent gate; `fixing` → first test/review failure goes to `manual_action_required` (no recovery loop); `summary` → a stub summary. Every skip is logged at WARNING and recorded in `state.db` (`node_runs.skipped`), and the skipped set is listed in the PR body.
+What each skip does: `planning` → stub plan, single unit; `testing` → straight to review (no checks); `review` → commit with no agent gate; `fixing` → first test/review failure goes to `manual_action_required` (no recovery loop). Every skip is logged at WARNING and recorded in `state.db` (`node_runs.skipped`), and the skipped set is listed in the PR body.
 
 Rules:
 
