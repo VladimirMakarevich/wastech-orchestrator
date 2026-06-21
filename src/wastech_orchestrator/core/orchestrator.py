@@ -48,8 +48,9 @@ from wastech_orchestrator.core.flow.postprocess import apply_output_artifact, re
 from wastech_orchestrator.core.flow.recorder import StateStoreRunRecorder, hydrate_run_state
 from wastech_orchestrator.core.flow.registry import FlowRegistry, FlowResolutionError
 from wastech_orchestrator.core.flow.run_state import FlowRunState
-from wastech_orchestrator.core.flow.schema import AgentNode, EvaluatorNode, FlowNode
+from wastech_orchestrator.core.flow.schema import AgentNode, FlowNode
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
+from wastech_orchestrator.core.flow.validator import FlowValidationError
 from wastech_orchestrator.core.flow.wiring import build_node_inputs, build_node_services
 from wastech_orchestrator.core.hitl import (
     HumanInputSignal,
@@ -135,6 +136,10 @@ _LOG = logging.getLogger(__name__)
 
 # Severities that make a review finding "blocking" → the review-driven fix loop (§5, §8.1).
 _BLOCKING_SEVERITIES = frozenset({"blocking", "critical", "high"})
+
+# The gitignored runtime home holding operator flows under ``<repo>/.worc/flows/`` (P4.1). Mirrors
+# ``cli.WORC_HOME``; duplicated here because the core must not import the CLI (would be circular).
+_WORC_HOME = ".worc"
 
 
 def _utc_now_iso() -> str:
@@ -311,9 +316,13 @@ class Orchestrator:
         self._skill_scanner = skill_scanner or self._default_skill_scanner()
         # Per-id attempt number stamped onto the next ledger record, set by ``rerun``/``continue``.
         self._rerun_attempt: dict[str, int] = {}
-        # Flow registry (P1.4 cutover): resolves a task's flow snapshot. Packaged-only in P1;
-        # operator flows (``.worc/flows/``) are wired on the live path in P4.
-        self._flow_registry = FlowRegistry()
+        # Flow registry: resolves a task's flow snapshot. Operator flows live in ``<repo>/.worc/
+        # flows/`` and override packaged built-ins (P4.1); passing the config turns on the
+        # config-aware validation layer (P4.2) on every resolve, including resume.
+        self._flow_registry = FlowRegistry(
+            operator_flows_dir=Path(config.repo.local_path) / _WORC_HOME / "flows",
+            config=config,
+        )
         # The constant supervisor layer (P2.1) — rebuilt per task in ``_engine_run`` (it carries the
         # task's own resume_own_lineage session). Single-slot, so one live instance at a time.
         self._supervisor: Supervisor | None = None
@@ -813,39 +822,19 @@ class Orchestrator:
     # --- pipeline (the FlowEngine is the driver) ------------------------------------------
 
     def _resolve_flow(self, p: _Pipeline) -> FlowSnapshot:
-        """Resolve the task's flow by its ``task_type`` (P0.4 dispatch).
+        """Resolve the task's flow by its ``task_type`` (P0.4 dispatch + P4.2 config-aware gate).
 
-        ``task_type=None`` defaults to ``implementation``; an unknown ``task_type`` has no flow file
-        and raises :class:`PipelineFailed` (caught by ``run_task`` → terminal ``failed``):
-        resolution runs before branch prep, so an unknown type fails before any side effect.
+        ``task_type=None`` defaults to ``implementation``. An unknown ``task_type`` (no flow file)
+        or a flow that fails validation — structural **or** config-aware (provider/ceiling/git/
+        budget) — raises :class:`PipelineFailed` (caught by ``run_task`` → terminal ``failed``).
+        Resolution runs before branch prep, so either failure happens before any side effect; on
+        resume it re-validates against the live config, so a flow made unsafe by a config change is
+        rejected rather than run (the recovery ceiling never widens, security-ceiling §7).
         """
         try:
             return self._flow_registry.resolve(p.task.task_type)
-        except FlowResolutionError as exc:
+        except (FlowResolutionError, FlowValidationError) as exc:
             raise PipelineFailed(str(exc)) from exc
-
-    def _check_flow_providers(self, p: _Pipeline) -> None:
-        """Fatal preflight (PRE.1a): every flow node's declared ``provider`` must be in
-        ``agents.allowed``.
-
-        Runs before any branch/provider launch so a node pinned to a disallowed provider fails loud
-        early, not mid-run. This is the config-aware half of flow validation that the load-time
-        validator cannot do (it has no config); the full move into the validator is P4.2.
-        """
-        snapshot = self._resolve_flow(p)
-        allowed = frozenset(self._config.agents.allowed)
-        bad: list[str] = []
-        for node in snapshot.doc.nodes:
-            if (
-                isinstance(node, AgentNode | EvaluatorNode)
-                and node.provider is not None
-                and node.provider not in allowed
-            ):
-                bad.append(
-                    f"node {node.id!r}: provider {node.provider.value!r} not in agents.allowed"
-                )
-        if bad:
-            raise PipelineFailed("flow provider not allowed: " + "; ".join(bad))
 
     def _drive_via_engine(self, p: _Pipeline, completeness: Completeness) -> PipelineResult:
         """Drive the task through the :class:`FlowEngine`.
@@ -856,7 +845,7 @@ class Orchestrator:
         skills) runs in the post-node hook; the publish node finalizes the task file + opens the PR.
         Infra failure → ``failed``; a node needing human action → ``manual_action_required``.
         """
-        self._check_flow_providers(p)
+        self._resolve_flow(p)  # fail closed on an unknown/invalid flow before any side-effect
         if self._config.security.strict_isolation:
             reasons = check_isolation(self._config)
             if reasons:

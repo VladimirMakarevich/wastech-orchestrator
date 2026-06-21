@@ -425,6 +425,25 @@ A variable with no value for the current node (e.g. `{plan_path}` before plannin
 
 **Safety.** Role files are prompt **text** only — delivered to the CLI on stdin, never as a command argument. A role file cannot change the provider, `extra_args`, sandbox/approval mode, denied commands, denied reads, the environment allowlist, or fallback policy; it cannot enable `git commit`/`git push`/`gh pr create`. Each rendered prompt is written, redacted, to `logs/<task-id>/stages/<stage>/[sub-NN/] rendered-prompt.md` for audit. See [operations.md](operations.md) for troubleshooting.
 
+## Flows (`task_type` dispatch and operator flows)
+
+The pipeline a task runs is a **flow** — a declarative YAML graph of nodes (agent / checks / evaluator / hitl / publish) and edges. A task's `task_type` front-matter field selects which flow runs (a clean task carries only identity/dispatch/operational inputs — it never patches the graph). `task_type` is omitted ⇒ `implementation`; an unknown `task_type` fails before any branch.
+
+There is no flow block in `config.yaml`. Flows live as files in two layers, operator-first:
+
+1. **Operator flows** — `<repo>/.worc/flows/<task_type>.yaml`. Drop a YAML file here to add a new `task_type` or to **override** a packaged flow of the same name. Role files live beside them under `.worc/flows/roles/*.md`.
+2. **Packaged built-ins** — shipped with the orchestrator: `implementation`, `deep_research`, `security_audit`.
+
+`config.yaml` is **infrastructure + provider defaults** that the flow's nodes fall back to (`model`/`reasoning`/`permission_profile`/`timeout`), plus the non-weakenable safety caps. The flow owns the graph; the config owns the environment. Trust is file-level: an operator flow is trusted to the same degree as `config.yaml` (same owner, same directory), and the fatal validator below guarantees it can never escalate beyond the ceiling.
+
+**Fatal validation (at `install` / `preflight`, before any task).** Every flow file — packaged and operator — is loaded and validated; any failure makes `preflight` report `NOT ready` and blocks the run. Three layers run:
+
+- **Graph integrity** — edges resolve, outcomes are in the allowed set per node kind, every `rework`/`fail` edge is bounded by a budget or named loop, exactly one entry node, every node can reach a terminal.
+- **Security ceiling** — a node's `permission_profile` may not exceed the flow `permission_ceiling`; evaluators are forced `read-only`; `extra_args` pass the forbidden-args screen; `role_file` paths contain no traversal; unknown fields anywhere fail closed.
+- **Config consistency** — a node's pinned `provider` is in `agents.allowed`, its `reasoning` is a known level (`low`/`medium`/`high`/`xhigh`/`max`), and the flow `permission_ceiling` is reachable by at least one configured provider's `permission_profile`. (On resume the live flow is re-validated against the live config, so a config change can only ever _narrow_ what a task may do.)
+
+Two things are deliberately **not** fatal here because the orchestrator degrades them gracefully: a flow `budget` above `agents.max_*` is clamped to the cap at runtime (the cap always wins), and a PR-publishing flow under `git.create_pull_request: false` runs in local-commit mode (no PR). Neither is an escalation, so neither blocks the flow.
+
 ## `skills`
 
 Planning-selected repo skill references (optional, §2.1). At task start the orchestrator scans the **target repo's** `.claude/skills/*/SKILL.md` (name + description only — a cheap, bounded, frontmatter-only scan). The `planning` stage may pick relevant ones; the chosen `SKILL.md` files are passed to `implementation`/`fixing` as **read-only reference paths** (the `{skills_path}` prompt variable), advisory only — never executed, never the Claude-only Skill tool (Codex has none).

@@ -1,5 +1,7 @@
 # Workflow execution foundation
 
+> **Устарело — поглощено flow-движком (реализовано P0–P4, 2026-06).** Канонический преемник: [flows/plan.md](../flows/plan.md) (контрактный слой → P0; «registry одного профиля + runner_kind» удалён, заменён flow-реестром). Не использовать как есть.
+
 Status: \*_accepted_ — outdated. Date: 2026-06-14 Owner: Vladimir Makarevich
 
 ## Goal

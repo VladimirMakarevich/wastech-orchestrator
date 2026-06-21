@@ -85,13 +85,13 @@ co-design здесь: написать `implementation.yaml`, `deep_research.yam
 
 Отложено в P4 (записано в [follow_ups.md](../follow_ups.md), 2026-06-21): пер-узловые observability-пути (удаление `Stage`-enum), Codex network на read-only-узлах, durable-сессия supervisor через `node_lineage`.
 
-## P4 — Операторская поверхность → [p4-operator.md](p4-operator.md)
+## P4 — Операторская поверхность → [p4-operator.md](p4-operator.md) ✓ **Выполнено (2026-06-21)**
 
-Цель: оператор пишет свой flow; потолок держится.
+Цель: оператор пишет свой flow; потолок держится. **Реализовано** — операторские flow из `.worc/flows/` на боевом пути, config-aware валидатор, модель угроз как тесты, recovery-перепроверка (ceiling только сужается).
 
-- **P4.1** Приём операторских flow (подключить `FlowRegistry` к боевому пути; preflight валидирует все flow).
-- **P4.2** Config-aware валидатор + модель угроз как тесты + recovery-перепроверка (закрывает отложенный из P0.5 пункт согласованности с `config.yaml`).
-- **P4.3** Docs + housekeeping (functional map, likec4, configuration, follow-ups; пять программ → `outdated/`).
+- **P4.1** ✓ Приём операторских flow (`FlowRegistry(operator_flows_dir=<repo>/.worc/flows/, config)` в оркестраторе; `validate_all` на install/preflight роняет битый operator-flow до запуска).
+- **P4.2** ✓ Config-aware валидатор (`validate_flow_against_config`: provider ∈ allowed, reasoning ∈ закрытый набор, ceiling ≤ возможностей провайдера) + модель угроз как тесты + recovery-перепроверка. **Правка объёма:** `budgets`/`publishing` НЕ фатальны (рантайм-кламп / local-commit — поддержанные деградации, не эскалации); `model`-allowlist не вводится. Подробности — [p4-operator.md](p4-operator.md) + [follow_ups.md](../follow_ups.md).
+- **P4.3** ✓ Docs + housekeeping (configuration, functional map/index + B06, follow-ups; пять программ помечены устаревшими в `outdated/`).
 
 ## P5 — Кастомные tool-узлы (ОТЛОЖЕНО, вне v1) → [p5-custom-tool-nodes.md](p5-custom-tool-nodes.md)
 

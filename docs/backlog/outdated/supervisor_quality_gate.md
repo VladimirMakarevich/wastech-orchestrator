@@ -1,5 +1,7 @@
 # Supervisor quality-gate
 
+> **Устарело — поглощено flow-движком (реализовано P0–P4, 2026-06).** Канонический преемник: [flows/p2-implementation.md](../flows/p2-implementation.md) §P2.1 (supervisor = постоянный слой-наблюдатель над flow, не узел). Не использовать как есть.
+
 Status: **accepted** — outdated. Date: 2026-06-14 Updated: 2026-06-15 Owner: Vladimir Makarevich
 
 ## Goal

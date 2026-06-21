@@ -1,5 +1,7 @@
 # Durable sessions and implementation/fixing affinity
 
+> **Устарело — поглощено flow-движком (реализовано P0–P4, 2026-06).** Канонический преемник: [flows/p2-implementation.md](../flows/p2-implementation.md) §P2.2 (durable `editing_lineage`, `session_scope`, объявляемая affinity). Не использовать как есть.
+
 Status: **accepted** — outdated. Date: 2026-06-14 Owner: Vladimir Makarevich
 
 ## Goal

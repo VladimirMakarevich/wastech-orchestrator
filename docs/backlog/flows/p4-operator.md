@@ -1,6 +1,8 @@
 # P4 — Операторская поверхность (валидатор C в бою)
 
-Статус: **backlog / инженерная спека (не запланировано к исполнению)** Дата: 2026-06-17 Владелец: Vladimir Makarevich
+Статус: **✓ Выполнено (2026-06-21)** Дата: 2026-06-17 Владелец: Vladimir Makarevich
+
+> **Реализовано (2026-06-21).** P4.1 (приём операторских flow на боевом пути + `validate_all` на install/preflight), P4.2 (`validate_flow_against_config` + модель угроз как тесты `tests/core/test_flow_threat_model.py` + recovery-перепроверка), P4.3 (docs). **Две зафиксированные правки объёма по факту реализации** (см. [follow_ups.md](../follow_ups.md) строки config-aware / budgets): (1) `budgets ≤ config-cap` НЕ делается фатальной проверкой — авторитет у рантайм-клампа `min(flow, cap)` в `engine.py` (фатальная проверка забрикала бы встроенный flow при сужении cap'а оператором — а сужение безопасно); (2) `publishing != none → git` НЕ фатально — `create_pull_request: false` = поддержанный local-commit режим. `model`-allowlist не вводится (в конфиге один `model` на провайдер, не список). Остальное реализовано как описано ниже.
 
 Детализация фазы P4 из [plan.md](plan.md). Цель: оператор пишет свой flow; **потолок держится**. Адаптирует [security-ceiling.md](security-ceiling.md). База проверки фазы: каждая угроза из [security-ceiling §1](security-ceiling.md) отбита тестом; потолок не пробивается ни данными flow, ни задачей.
 

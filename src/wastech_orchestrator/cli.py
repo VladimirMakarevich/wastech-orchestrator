@@ -31,6 +31,7 @@ from wastech_orchestrator.config.schema import (
     OrchestratorConfig,
 )
 from wastech_orchestrator.config.validation import validate_config
+from wastech_orchestrator.core.flow.registry import FlowRegistry
 from wastech_orchestrator.core.orchestrator import (
     FinalizePlan,
     Orchestrator,
@@ -854,6 +855,17 @@ def run_preflight(config: OrchestratorConfig) -> tuple[bool, list[str]]:
     chk_ok, chk_lines = check_diagnostics.check_preflight(config, worc_home_for(config))
     ok = ok and chk_ok
     lines.extend(chk_lines)
+
+    # Every flow file — packaged built-ins and operator flows in ``.worc/flows/`` — must load and
+    # pass the full fatal validator (graph + ceiling + config-consistency) before any task runs, so
+    # a broken or unsafe operator flow is caught at install/preflight, not mid-run (P4.1).
+    flow_registry = FlowRegistry(operator_flows_dir=worc_home_for(config) / "flows", config=config)
+    for name, error in flow_registry.validate_all():
+        if error is None:
+            lines.append(f"flow {name}: OK")
+        else:
+            ok = False
+            lines.append(f"flow {name}: FAIL — {error.splitlines()[0]}")
 
     tg_ok, tg_line = check_telegram_preflight(config.telegram)
     if not tg_ok:
