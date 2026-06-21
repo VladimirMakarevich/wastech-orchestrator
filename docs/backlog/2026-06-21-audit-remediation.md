@@ -2,6 +2,12 @@
 
 Remediation plan for [2026-06-21-audit.md](2026-06-21-audit.md). Every finding was **re-verified against the code** (not the audit prose) by reading the cited locations and grepping for usages across `src/`. Each entry carries a verdict, the corrected facts where the audit drifted, a concrete minimal fix, a verification step, and an effort size (S = <1h, M = a few hours, L = day+). Blocking decisions are collected in **Phase 0** — answer those before starting the phase that depends on them; everything else has a safe recommended default.
 
+## Status (updated 2026-06-22)
+
+- ✅ **Done:** **Phase 7 #A** (full `Stage`-enum flow-identity removal) + **#L1** (rendered-prompt overwrite) — Q-A resolved → option 1. Implemented, ruff + mypy + full pytest green, docs synced. 3 minor follow-ups recorded in [follow_ups.md](follow_ups.md) (node_interaction_path redundancy; `Stage`'s home in `providers/base.py`; supervisor `node_run_id=0` dir collision).
+- ✅ **All Phase 0 decisions made (2026-06-22, operator):** recorded in the decisions table at the top of Phase 0. Q-10 → **wire** the supervisor session via `node_lineage`; Q-12 → **shell-string** check seeding via the resolver; Q-19 → **wire** the skill-dedup feature; Q-4/Q-5/Q-8/Q-13/Q-17/Q-18/Q-26/Q-B → the recommended defaults. **Code not yet changed.**
+- ⬜ **Not started (now unblocked):** **Phases 1–6** (all other findings — High #1–3, Medium, Low, docs/tests, §-anchors). Each is scoped above with a concrete fix; none is begun.
+
 ## Verification outcome
 
 The audit is high quality: **24 of 32 findings + both transitional items + all 5 by-design items are CONFIRMED as written.** Eight findings needed correction or downgrade — read these before planning effort, because three of them are smaller (or nearly non-issues) than the audit implies.
@@ -34,7 +40,7 @@ One **latent bug** surfaced during verification that the audit did not separate 
 | 10 | Supervisor session not durable | Confirmed | 2 | M / S | **Q-10** |
 | 11 | HITL cleanup misses `timeout`/`invalid_response` | Confirmed | 2 | S | — |
 | 14 | PID-recycling window | Confirmed | 2 | M | — |
-| L1 | Rendered-prompt overwrite (same-identity nodes) | Confirmed (new) | 2 | S | — |
+| L1 | Rendered-prompt overwrite (same-identity nodes) | ✅ done | 2 | S | — |
 | 4 | Decorative `decomposition.gate` fields | Confirmed | 3 | S | **Q-4** |
 | 5 | Decorative commit flags | Confirmed | 3 | M | **Q-5** |
 | 15 | Dead `Stage.PUBLISHING` | Confirmed | 3 | S | — |
@@ -59,15 +65,30 @@ One **latent bug** surfaced during verification that the audit did not separate 
 | 31 | Stale docstrings | Partial | 6 | S | — |
 | 32 | Test brittleness | Partial | 6 | S | — |
 | B | `§NN` spec anchors (481 across 73 files) | Confirmed | 6 | M | **Q-B** |
-| A | `Stage` enum shim removal | Confirmed | 7 | L | **Q-A** |
+| A | `Stage` enum shim removal | ✅ done | 7 | L | Q-A→opt1 |
 
 ---
 
 ## Phase 0 — Blocking decisions (answer before the dependent phase)
 
-Each question lists options with the **recommended** one first. Most are "confirm the safe default"; the consequential ones (Q-10, Q-12, Q-19, Q-A) are flagged.
+Each question lists options with the **recommended** one first. **All decided 2026-06-22 (operator)** — recorded in the table below; the per-question detail follows for context. **Code not yet changed** — these decisions unblock Phases 1–6.
 
-### Q-4 — Decorative `decomposition.gate` fields: remove or wire? (gates Phase 3 / #4)
+| # | Status | Decision |
+| --- | --- | --- |
+| Q-A | ✅ done | option 1 — full `Stage`-enum flow-identity removal (implemented, green) |
+| Q-4 | ✅ resolved | (a) **remove** the decorative `decomposition.gate` fields |
+| Q-5 | ✅ resolved | (a) **remove** `commit_per_subtask` / `commit_each_subtask` / `min_size_signal` |
+| Q-8 | ✅ resolved | (a) `medium` is **non-blocking** — align `Finding.blocking` down (no runtime change) |
+| Q-10 | ✅ resolved | (a) **wire** the supervisor's own session via `node_lineage` |
+| Q-12 | ✅ resolved | (b) installer seeds **shell strings via the resolver** (`shlex.join`) |
+| Q-13 | ✅ resolved | (a) **tighten the docstring** (no secret registry) |
+| Q-17 | ✅ resolved | (a) **delete** the always-0 `tasks.stage_attempts` field + column |
+| Q-18 | ✅ resolved | (a) **leave** `ManualActionRequired` in place; delete only the dead `PublishResult` |
+| Q-19 | ✅ resolved | (a) **wire** `compute_skill_dedup` — the §2.2 operator-text-precedence dedup is wanted |
+| Q-26 | ✅ resolved | (a) **section-only** Phase-B completeness (drop the `"acceptance"` substring fallback) |
+| Q-B | ✅ resolved | (b) **strip bare `spec §`, convert `.md §N`** anchors to functional-map links |
+
+### Q-4 — Decorative `decomposition.gate` fields: remove or wire? (gates Phase 3 / #4) — ✅ RESOLVED → (a) remove
 
 - **(a) Remove (recommended).** Delete `gate_min`/`gate_max`/`linear_depends_on` from schema, parser, and `implementation.yaml`. The hardcoded floor-of-2 + always-linear already match `min:2, linear_depends_on:true`, so removal is a no-op at runtime. Config `agents.decomposition.max_subtasks` stays the single source of truth — which matches the deliberate invariant that a flow cannot weaken the core's gate.
 - (b) Wire it — let a flow's `gate.max`/`gate.min` override the config bound. Contradicts the "flow can't weaken the gate" invariant; no operator has asked for split per-flow bounds.
@@ -138,7 +159,7 @@ This is intended-but-unfinished code (documented §2.2, tested, renderer has a m
 - (a) Strip all. (c) Leave as-is.
 - **Recommend (b).** Map the `.md §N` anchors first, then bulk-strip the bare form, to avoid destroying useful cross-refs.
 
-### Q-A — `Stage` enum removal scope? (gates Phase 7 / item A) — _consequential, large_
+### Q-A — `Stage` enum removal scope? (gates Phase 7 / item A) — _consequential, large_ — ✅ RESOLVED → option 1 (full removal done 2026-06-22)
 
 The enum plays **two independent roles**; only the first is the shim:
 
@@ -204,10 +225,10 @@ The enum plays **two independent roles**; only the first is the shim:
 - Fix: persist process identity alongside the PID (start-time, optionally Linux `boot_id`). Switch the PID file to small JSON `{pid, start_time}`; `is_running(pid, expected_start)` returns True only on a start-time match. On darwin prefer `psutil.create_time()` if it's already a dep, else a `sys.platform` branch (`/proc/<pid>/stat` field 22 on Linux; `ps -o lstart=` on macOS). Keep every seam injectable. No legacy-format migration (greenfield).
 - Verify: inject fake `kill_fn` + start-time reader — same PID + different start-time → stale (False); matching → True.
 
-**#L1 — Rendered-prompt overwrite for same-identity nodes (latent bug from item A).** Confirmed · `observability.py:113` writes `stages/<identity>/rendered-prompt.md` with no run-id key; two nodes that both default to `Stage.IMPLEMENTATION` (`wiring.py:47-79`) overwrite each other · **S**
+**#L1 — Rendered-prompt overwrite for same-identity nodes (latent bug from item A).** ✅ DONE (2026-06-22, folded into Phase 7 #A)
 
-- Fix: run-id-key the rendered-prompt path the same way the prompt-audit step file already is (`:164`, `{run_id:06d}-…`). This removes the only real bug in the `Stage` shim and is independent of the full enum removal (Phase 7).
-- Verify: a flow with two same-identity agent nodes preserves both rendered prompts.
+- Fixed by keying observability on `node_id` instead of a collapsed stage identity: `write_rendered_prompt` now writes `stages/<node_id>/rendered-prompt.md` (`observability.py`), and the `Stage`-shim that collapsed distinct nodes to one identity (`wiring.build_stage_map`) is deleted entirely. Distinct node ids → distinct dirs, so same-capability nodes in research/audit flows no longer overwrite each other.
+- Verified by the full suite (green).
 
 ---
 
@@ -346,12 +367,13 @@ Do the docstring/anchor work in one `/sync-docs`-adjacent pass to satisfy the St
 
 ---
 
-## Phase 7 — Scheduled large refactor (separate effort)
+## Phase 7 — Large refactor — ✅ DONE (2026-06-22, Q-A option 1)
 
-**#A — Full `Stage`-enum removal (role 1 only).** Confirmed · **L** · **Q-A**
+**#A — Full `Stage`-enum removal (role 1 only).** ✅ DONE · Confirmed · **L** · Q-A resolved → **option 1 (full removal now)**
 
-- Per Q-A: the **latent bug (#L1) is fixed in Phase 2** and the "lands with P4" comments are stripped early. The remaining role-1 removal is a deliberate standalone refactor: replace the flow-engine request-identity use of `Stage` with per-node **identity strings** + an explicit per-node **capability descriptor** for the two things the enum actually gates — (a) which structured-output schema applies (none / HITL-refinement / HITL-planning / evaluator-verdict) and (b) the audit/interaction directory name. The seam already exists (`hitl.py:290-313` and the standalone `nodes/hitl.py:73` already take a bare node-id `str`). Touches ~12 `src/` files but is mechanical (everything treats `Stage` as a string-valued label already). **Keep role 2** — the legacy state-machine skip vocabulary (`SKIPPABLE_STAGES`, `effective_skip`, review-skip).
-- Verify: per-node audit dirs no longer collapse same-identity nodes; full suite green; flow contract unchanged.
+- **Done as implemented:** the flow-engine request identity is now the flow node's own `node_id: str` (threaded through `AgentRunRequest`/`AgentRunResult`/`ResolvedRoute`/router/providers/observability/HITL). The typed-output schema is selected by a derived per-node `OutputContract` (`none`/`human_input`/`planning`) in `AgentNodeRunner._contract` — the `planning` contract is the decomposition proposer (`decomposition.proposed_by`), `human_input` is any node with `hitl`; **no new YAML field** (derived from declared structure). `build_stage_map`/`_stage_identity`/`NodeServices.stage_for_node` deleted; `core/hitl.stage_output_schema`→`typed_output_schema`, `parse_typed_stage_output`→`parse_typed_output`; supervisor identity `Stage.SUMMARY`→`"supervisor"`; check-discovery `Stage.PLANNING`→`"check-discovery"`. **Role 2 kept** — `Stage` still backs the skip vocabulary (`SKIPPABLE_STAGES`, `effective_skip`, `Stage.REVIEW in p.skip`, validation gate).
+- **#L1 fixed as part of this** (not deferred): observability keys `stages/<node_id>/` and the prompt-audit step file by `node_id`, so same-capability nodes in research/audit flows no longer overwrite each other's `rendered-prompt.md`.
+- **Verified:** ruff + mypy (95 files) clean; full pytest suite green. Touched 16 `src/` files + ~20 test files. Flow contract unchanged.
 
 ---
 

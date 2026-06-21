@@ -39,7 +39,6 @@ from wastech_orchestrator.providers.base import (
     ProviderError,
     ProviderId,
     RunStatus,
-    Stage,
 )
 from wastech_orchestrator.routing.snapshots import PartialChange, SnapshotHook
 from wastech_orchestrator.security.profiles import is_same_or_stricter
@@ -100,9 +99,13 @@ class RouteSource(StrEnum):
 
 @dataclass(frozen=True)
 class ResolvedRoute:
-    """The chosen primary/fallback for a stage, with its route source (§4.2)."""
+    """The chosen primary/fallback for a node, with its route source (§4.2).
 
-    stage: Stage
+    ``node_id`` is the flow node's id, carried for audit/logging only — it never selects the
+    provider (routing is node-based via the node's ``provider`` field, PRE.1).
+    """
+
+    node_id: str
     primary: ProviderId
     fallback: ProviderId | None
     source: RouteSource
@@ -151,7 +154,7 @@ class AgentRouter:
 
     def resolve_route(
         self,
-        stage: Stage,
+        node_id: str,
         provider: ProviderId | None = None,
     ) -> ResolvedRoute:
         """Resolve ``(primary, fallback)`` for a node from its declared ``provider`` (PRE.1).
@@ -159,15 +162,15 @@ class AgentRouter:
         A non-``None`` ``provider`` (the flow node's declared executor) runs the node; ``None``
         defaults to the config's global primary. The fallback is always that global primary — the
         single infrastructure-fallback target — unless the resolved primary already *is* the global
-        primary, in which case there is no fallback (a primary infra failure is terminal). ``stage``
-        is carried for audit/logging only; it no longer selects the provider. Raises
+        primary, in which case there is no fallback (a primary infra failure is terminal).
+        ``node_id`` is carried for audit/logging only; it no longer selects the provider. Raises
         :class:`ConfigError` on an unknown or unavailable provider.
         """
         primary = provider if provider is not None else self._global_primary
         source = RouteSource.FLOW_NODE if provider is not None else RouteSource.CONFIG
         fallback = self._global_primary if primary != self._global_primary else None
-        self._assert_available(stage, primary, fallback)
-        return ResolvedRoute(stage=stage, primary=primary, fallback=fallback, source=source)
+        self._assert_available(node_id, primary, fallback)
+        return ResolvedRoute(node_id=node_id, primary=primary, fallback=fallback, source=source)
 
     def run_stage(
         self,
@@ -189,7 +192,7 @@ class AgentRouter:
         if route.fallback is not None:
             sequence.append(route.fallback)
 
-        log = bind(_LOG, task_id=request.task_id, stage=route.stage.value)
+        log = bind(_LOG, task_id=request.task_id, node_id=route.node_id)
         log.info(
             "route resolved",
             extra={
@@ -378,7 +381,7 @@ class AgentRouter:
         return self._config.agents.providers[pid].permission_profile
 
     def _assert_available(
-        self, stage: Stage, primary: ProviderId, fallback: ProviderId | None
+        self, node_id: str, primary: ProviderId, fallback: ProviderId | None
     ) -> None:
         """Defensively re-check the allowlist/config/instances for the resolved providers (§4.2).
 
@@ -391,7 +394,7 @@ class AgentRouter:
         for role, pid in (("primary", primary), ("fallback", fallback)):
             if pid is None:
                 continue
-            where = f"flow node provider for stage {stage.value!r} ({role})"
+            where = f"flow node provider for node {node_id!r} ({role})"
             if pid not in allowed:
                 issues.append(f"{where}: provider {pid.value!r} is not in agents.allowed")
             if pid not in configured:

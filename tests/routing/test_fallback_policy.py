@@ -14,7 +14,6 @@ from wastech_orchestrator.providers.base import (
     ErrorClass,
     ProviderId,
     RunStatus,
-    Stage,
 )
 from wastech_orchestrator.routing.router import (
     CONDITIONAL_FALLBACK,
@@ -76,7 +75,7 @@ def test_quality_failure_is_not_a_fallback_trigger(
     fallback = make_fake_provider(ProviderId.CLAUDE)  # would succeed if (wrongly) invoked
     router = AgentRouter(config, {ProviderId.CODEX: primary, ProviderId.CLAUDE: fallback})
     outcome = router.run_stage(
-        make_request(stage=Stage.REVIEW), router.resolve_route(Stage.REVIEW, ProviderId.CODEX)
+        make_request(node_id="review"), router.resolve_route("review", ProviderId.CODEX)
     )
     assert outcome.stage_attempts == 1
     assert outcome.provider_used is ProviderId.CODEX

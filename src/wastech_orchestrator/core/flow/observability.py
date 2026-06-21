@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
-from wastech_orchestrator.providers.base import Stage
 from wastech_orchestrator.providers.redaction import redact_text
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import ProviderAttemptRow
@@ -33,7 +32,7 @@ def record_run_observability(
     services: NodeServices,
     *,
     task_id: str,
-    stage: Stage,
+    node_id: str,
     subtask: int | None,
     run_id: int,
     prompt: str,
@@ -50,7 +49,7 @@ def record_run_observability(
     write_rendered_prompt(
         artifacts_root=services.artifacts_root,
         task_id=task_id,
-        stage=stage,
+        node_id=node_id,
         subtask=subtask,
         prompt=prompt,
         secrets=services.prompt_secrets,
@@ -60,7 +59,7 @@ def record_run_observability(
         write_prompt_audit(
             artifacts_root=services.artifacts_root,
             task_id=task_id,
-            stage=stage,
+            node_id=node_id,
             subtask=subtask,
             run_id=run_id,
             prompt=prompt,
@@ -103,18 +102,22 @@ def write_rendered_prompt(
     *,
     artifacts_root: str,
     task_id: str,
-    stage: Stage,
+    node_id: str,
     subtask: int | None,
     prompt: str,
     secrets: tuple[str, ...],
     register: RegisterArtifact,
 ) -> None:
-    """Persist the rendered (redacted) stage prompt for audit, once per node run."""
-    stage_dir = task_artifact_dir(artifacts_root, task_id) / "stages" / stage.value
+    """Persist the rendered (redacted) node prompt for audit, once per node run.
+
+    Keyed by the flow ``node_id`` so distinct nodes (even same-capability ones in a research/audit
+    flow) each get their own ``stages/<node_id>/`` directory and never overwrite each other.
+    """
+    node_dir = task_artifact_dir(artifacts_root, task_id) / "stages" / node_id
     if subtask is not None:
-        stage_dir = stage_dir / f"sub-{subtask:02d}"
-    stage_dir.mkdir(parents=True, exist_ok=True)
-    path = stage_dir / "rendered-prompt.md"
+        node_dir = node_dir / f"sub-{subtask:02d}"
+    node_dir.mkdir(parents=True, exist_ok=True)
+    path = node_dir / "rendered-prompt.md"
     path.write_text(redact_text(prompt, extra_secrets=secrets), encoding="utf-8")
     register(task_id, "rendered_prompt", str(path))
 
@@ -123,7 +126,7 @@ def write_prompt_audit(
     *,
     artifacts_root: str,
     task_id: str,
-    stage: Stage,
+    node_id: str,
     subtask: int | None,
     run_id: int,
     prompt: str,
@@ -151,7 +154,7 @@ def write_prompt_audit(
     ]
     record: dict[str, object] = {
         "node_run_id": run_id,
-        "stage": stage.value,
+        "node_id": node_id,
         "subtask": subtask,
         "route_primary": route.primary.value,
         "provider_used": outcome.provider_used.value if outcome.provider_used else None,
@@ -161,7 +164,7 @@ def write_prompt_audit(
         "prompt": redact_text(prompt, extra_secrets=secrets),
     }
     sub = f"-sub{subtask:02d}" if subtask is not None else ""
-    step_path = audit_dir / f"{run_id:06d}-{stage.value}{sub}.json"
+    step_path = audit_dir / f"{run_id:06d}-{node_id}{sub}.json"
     step_path.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     timeline_path = audit_dir / "timeline.jsonl"
     with timeline_path.open("a", encoding="utf-8") as fh:

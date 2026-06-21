@@ -17,12 +17,11 @@ from wastech_orchestrator.providers.base import (
     ErrorClass,
     NormalizedError,
     RunStatus,
-    Stage,
 )
 
 
 def test_attempt_dir_layout(tmp_path: Path) -> None:
-    paths = create_attempt_dir(tmp_path, "task-001", Stage.PLANNING, 1, "codex", node_run_id=42)
+    paths = create_attempt_dir(tmp_path, "task-001", "planning", 1, "codex", node_run_id=42)
     expected = tmp_path / "logs" / "task-001" / "stages" / "planning" / "run-000042" / "1-codex"
     assert Path(paths.attempt_dir) == expected
     assert expected.is_dir()
@@ -34,7 +33,7 @@ def test_subtask_dir_is_zero_padded(tmp_path: Path) -> None:
     paths = create_attempt_dir(
         tmp_path,
         "t",
-        Stage.IMPLEMENTATION,
+        "implementation",
         2,
         "codex",
         node_run_id=7,
@@ -48,36 +47,36 @@ def test_subtask_dir_is_zero_padded(tmp_path: Path) -> None:
 
 
 def test_never_overwrites_existing_attempt_dir(tmp_path: Path) -> None:
-    create_attempt_dir(tmp_path, "task-001", Stage.PLANNING, 1, "codex", node_run_id=1)
+    create_attempt_dir(tmp_path, "task-001", "planning", 1, "codex", node_run_id=1)
     with pytest.raises(FileExistsError):
-        create_attempt_dir(tmp_path, "task-001", Stage.PLANNING, 1, "codex", node_run_id=1)
+        create_attempt_dir(tmp_path, "task-001", "planning", 1, "codex", node_run_id=1)
 
 
 def test_distinct_attempts_get_distinct_dirs(tmp_path: Path) -> None:
-    a = create_attempt_dir(tmp_path, "task-001", Stage.PLANNING, 1, "codex", node_run_id=1)
-    b = create_attempt_dir(tmp_path, "task-001", Stage.PLANNING, 2, "codex", node_run_id=1)
+    a = create_attempt_dir(tmp_path, "task-001", "planning", 1, "codex", node_run_id=1)
+    b = create_attempt_dir(tmp_path, "task-001", "planning", 2, "codex", node_run_id=1)
     assert a.attempt_dir != b.attempt_dir
 
 
 def test_distinct_stage_runs_get_distinct_dirs_when_attempt_resets(tmp_path: Path) -> None:
-    a = create_attempt_dir(tmp_path, "task-001", Stage.FIXING, 1, "claude", node_run_id=10)
-    b = create_attempt_dir(tmp_path, "task-001", Stage.FIXING, 1, "claude", node_run_id=11)
+    a = create_attempt_dir(tmp_path, "task-001", "fixing", 1, "claude", node_run_id=10)
+    b = create_attempt_dir(tmp_path, "task-001", "fixing", 1, "claude", node_run_id=11)
     assert a.attempt_dir != b.attempt_dir
 
 
 def test_write_request_artifact_roundtrip(tmp_path: Path) -> None:
-    paths = create_attempt_dir(tmp_path, "task-001", Stage.PLANNING, 1, "codex", node_run_id=1)
+    paths = create_attempt_dir(tmp_path, "task-001", "planning", 1, "codex", node_run_id=1)
     write_request_artifact(paths, {"task_id": "task-001", "stage": "planning", "extra_args": []})
     loaded = json.loads(Path(paths.request_path).read_text(encoding="utf-8"))
     assert loaded == {"task_id": "task-001", "stage": "planning", "extra_args": []}
 
 
 def test_write_result_artifact_serializes_enums_and_error(tmp_path: Path) -> None:
-    paths = create_attempt_dir(tmp_path, "task-001", Stage.REVIEW, 1, "codex", node_run_id=1)
+    paths = create_attempt_dir(tmp_path, "task-001", "review", 1, "codex", node_run_id=1)
     result = AgentRunResult(
         status=RunStatus.FAILED,
         provider="codex",
-        stage=Stage.REVIEW,
+        node_id="review",
         attempt=1,
         exit_code=0,
         started_at="2026-06-11T00:00:00+00:00",
@@ -87,6 +86,6 @@ def test_write_result_artifact_serializes_enums_and_error(tmp_path: Path) -> Non
     write_result_artifact(paths, result)
     loaded = json.loads(Path(paths.result_path).read_text(encoding="utf-8"))
     assert loaded["status"] == "failed"
-    assert loaded["stage"] == "review"
+    assert loaded["node_id"] == "review"
     assert loaded["error"]["error_class"] == "task_failure"
     assert loaded["error"]["message"] == "did not satisfy the task"

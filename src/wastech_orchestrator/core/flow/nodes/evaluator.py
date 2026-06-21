@@ -33,9 +33,8 @@ from wastech_orchestrator.core.flow.nodes.base import (
 from wastech_orchestrator.core.flow.observability import record_run_observability
 from wastech_orchestrator.core.flow.prompt import render_role_prompt
 from wastech_orchestrator.core.flow.schema import EvaluatorNode, FlowNode
-from wastech_orchestrator.core.hitl import stage_output_schema
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
-from wastech_orchestrator.providers.base import AgentRunRequest, Stage
+from wastech_orchestrator.providers.base import AgentRunRequest
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import EvaluationRow, NodeLineageRow, NodeRunRow
 
@@ -54,8 +53,7 @@ class EvaluatorNodeRunner:
 
     def run(self, node: FlowNode, ctx: NodeContext) -> NodeResult:
         assert isinstance(node, EvaluatorNode)
-        stage = self._s.stage_for_node[node.id]
-        route = self._s.router.resolve_route(stage, node.provider)
+        route = self._s.router.resolve_route(node.id, node.provider)
         started_at = self._s.clock()
         run_id = self._s.store.record_node_run(
             NodeRunRow(
@@ -70,14 +68,14 @@ class EvaluatorNodeRunner:
                 started_at=started_at,
             )
         )
-        request = self._build_request(node, ctx, stage, route, run_id)
+        request = self._build_request(node, ctx, route, run_id)
         outcome = self._s.router.run_stage(request, route, snapshot=self._s.snapshot)
         kind = self._verdict(node, ctx, outcome)
         self._record_completion(run_id, outcome, kind)
         record_run_observability(
             self._s,
             task_id=ctx.task_id,
-            stage=stage,
+            node_id=node.id,
             subtask=ctx.subtask_order,
             run_id=run_id,
             prompt=request.prompt,
@@ -154,16 +152,15 @@ class EvaluatorNodeRunner:
         self,
         node: EvaluatorNode,
         ctx: NodeContext,
-        stage: Stage,
         route: ResolvedRoute,
         run_id: int,
     ) -> AgentRunRequest:
         prompt = render_role_prompt(
-            self._in.flow_dir, node.role_file, self._prompt_variables(ctx, stage)
+            self._in.flow_dir, node.role_file, self._prompt_variables(ctx, node)
         )
         return AgentRunRequest(
             task_id=ctx.task_id,
-            stage=stage,
+            node_id=node.id,
             working_directory=self._s.repo_dir,
             prompt=prompt,
             permission_profile=node.permission_profile.value,
@@ -175,7 +172,7 @@ class EvaluatorNodeRunner:
             diff_path=self._in.diff_path,
             check_artifacts_path=self._in.checks_path,
             review_artifacts_path=self._in.review_path,
-            output_schema=stage_output_schema(stage),
+            output_schema=None,  # evaluators parse findings directly; no provider schema enforced
             model=node.model,
             reasoning=node.reasoning,
             # Evaluators never inherit an author's editing lineage (validator-enforced read-only).
@@ -230,10 +227,10 @@ class EvaluatorNodeRunner:
             )
         )
 
-    def _prompt_variables(self, ctx: NodeContext, stage: Stage) -> dict[str, object | None]:
+    def _prompt_variables(self, ctx: NodeContext, node: EvaluatorNode) -> dict[str, object | None]:
         return {
             "task_id": ctx.task_id,
-            "stage": stage.value,
+            "stage": node.id,
             "repo_path": self._s.repo_dir,
             "repo": self._s.repo_dir,
             "task_path": self._in.task_path,

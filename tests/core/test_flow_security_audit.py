@@ -22,7 +22,7 @@ from wastech_orchestrator.core.flow.registry import FlowRegistry
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import ChecksNode, EvaluatorNode, FlowNode
 from wastech_orchestrator.core.state_machine import Status
-from wastech_orchestrator.providers.base import AgentRunResult, ProviderId, RunStatus, Stage
+from wastech_orchestrator.providers.base import AgentRunResult, ProviderId, RunStatus
 from wastech_orchestrator.providers.process import ProcessResult
 from wastech_orchestrator.routing.router import ResolvedRoute, RouteSource, StageOutcome
 
@@ -78,9 +78,9 @@ class _Router:
     def __init__(self, findings: list[dict[str, Any]]) -> None:
         self._findings = findings
 
-    def resolve_route(self, stage: Stage, override: Any = None) -> ResolvedRoute:
+    def resolve_route(self, node_id: str, override: Any = None) -> ResolvedRoute:
         return ResolvedRoute(
-            stage=stage, primary=ProviderId.CODEX, fallback=None, source=RouteSource.CONFIG
+            node_id=node_id, primary=ProviderId.CODEX, fallback=None, source=RouteSource.CONFIG
         )
 
     def run_stage(
@@ -89,7 +89,7 @@ class _Router:
         result = AgentRunResult(
             status=RunStatus.SUCCEEDED,
             provider="codex",
-            stage=request.stage,
+            node_id=request.node_id,
             attempt=1,
             exit_code=0,
             started_at="t0",
@@ -184,7 +184,6 @@ def _drive_audit(
         store=store,  # type: ignore[arg-type]
         repo_dir=str(tmp_path),
         artifacts_root=str(tmp_path / "art"),
-        stage_for_node={"finding_verification": Stage.REVIEW},
         clock=lambda: "ts",
         git=git,  # type: ignore[arg-type]
         run_process=_clean_process,

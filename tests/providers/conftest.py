@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from wastech_orchestrator.config.schema import ProviderConfig, SecurityConfig
-from wastech_orchestrator.providers.base import AgentRunRequest, Stage
+from wastech_orchestrator.providers.base import AgentRunRequest
 
 
 @pytest.fixture
@@ -85,7 +85,7 @@ def make_request(tmp_path: Any) -> Callable[..., AgentRunRequest]:
     def _make(**overrides: Any) -> AgentRunRequest:
         defaults: dict[str, Any] = {
             "task_id": "task-001",
-            "stage": Stage.PLANNING,
+            "node_id": "planning",
             "working_directory": str(tmp_path / "clone"),
             "prompt": "Implement the requested feature.",
             "permission_profile": "workspace-write",

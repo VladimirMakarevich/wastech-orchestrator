@@ -21,7 +21,7 @@ from wastech_orchestrator.check_runner import CheckOutcome
 from wastech_orchestrator.checks.model import ResolvedCheck
 from wastech_orchestrator.git_manager import ChangedPath
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult
-from wastech_orchestrator.providers.base import AgentRunRequest, ProviderId, Stage
+from wastech_orchestrator.providers.base import AgentRunRequest, ProviderId
 from wastech_orchestrator.providers.process import ProcessResult, run_process
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.routing.snapshots import SnapshotHook
@@ -67,11 +67,11 @@ class RouterPort(Protocol):
     """The slice of :class:`~wastech_orchestrator.routing.router.AgentRouter` runners use.
 
     Runners pass the flow node's declared ``provider`` to ``resolve_route``; ``None`` defaults to
-    the config's global primary (PRE.1). ``stage`` is carried for audit/logging only — it no longer
-    selects the provider.
+    the config's global primary (PRE.1). ``node_id`` is carried for audit/logging only — it no
+    longer selects the provider.
     """
 
-    def resolve_route(self, stage: Stage, provider: ProviderId | None = None) -> ResolvedRoute: ...
+    def resolve_route(self, node_id: str, provider: ProviderId | None = None) -> ResolvedRoute: ...
 
     def run_stage(
         self,
@@ -194,10 +194,6 @@ class NodeServices:
     store: NodeRunStorePort
     repo_dir: str
     artifacts_root: str
-    #: node id -> its ``Stage`` identity. Routing is node-based now (the node's ``provider``); this
-    #: map only supplies the request ``stage`` (output schema, HITL parsing, interaction paths). The
-    #: ``Stage`` enum itself is retained for these identities + skip facts until P4.
-    stage_for_node: Mapping[str, Stage]
     clock: Callable[[], str]
     default_timeout_seconds: int = 7200
     snapshot: SnapshotHook | None = None  # git snapshot hook for provider observability

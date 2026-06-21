@@ -11,7 +11,7 @@ import pytest
 from wastech_orchestrator.core.recovery import RecoveryAction, RecoveryReconciler
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult, Notifier
-from wastech_orchestrator.providers.base import AgentRunRequest, ProviderId, Stage
+from wastech_orchestrator.providers.base import AgentRunRequest, ProviderId
 from wastech_orchestrator.state_store import CheckRunRow, StateStore, SubtaskRow, TaskRow
 
 
@@ -227,16 +227,16 @@ class _FakeProvider:
         )
 
     def run(self, request):
-        from wastech_orchestrator.providers.base import AgentRunResult, RunStatus, Stage
+        from wastech_orchestrator.providers.base import AgentRunResult, RunStatus
 
         self.requests.append(request)
-        if request.stage is Stage.IMPLEMENTATION:
+        if request.node_id == "implementation":
             (self._clone / f"impl-{self._n}.py").write_text("x\n", encoding="utf-8")
             self._n += 1
         structured = None
-        if request.stage is Stage.REFINEMENT:
+        if request.node_id == "refinement":
             structured = {"content": "done", "human_input": None}
-        elif request.stage is Stage.PLANNING:
+        elif request.node_id == "planning":
             structured = {
                 "content": "done",
                 "human_input": None,
@@ -247,7 +247,7 @@ class _FakeProvider:
         return AgentRunResult(
             status=RunStatus.SUCCEEDED,
             provider=self.id,
-            stage=request.stage,
+            node_id=request.node_id,
             attempt=request.attempt,
             exit_code=0,
             started_at="t",
@@ -393,20 +393,20 @@ def _impl_fingerprint() -> str:
     ("current_node", "expected_provider", "expected_first_stage"),
     [
         # No checkpoint (interrupted before the engine) → restart from refinement.
-        (None, ProviderId.CLAUDE, Stage.REFINEMENT),
-        ("refinement", ProviderId.CLAUDE, Stage.REFINEMENT),
-        ("planning", ProviderId.CLAUDE, Stage.PLANNING),
-        ("implementation", ProviderId.CLAUDE, Stage.IMPLEMENTATION),
+        (None, ProviderId.CLAUDE, "refinement"),
+        ("refinement", ProviderId.CLAUDE, "refinement"),
+        ("planning", ProviderId.CLAUDE, "planning"),
+        ("implementation", ProviderId.CLAUDE, "implementation"),
         # Every node defaults to the global primary (claude) now — routing is node-based (PRE.1).
-        ("testing", ProviderId.CLAUDE, Stage.REVIEW),  # checks node → first agent stage is review
-        ("review", ProviderId.CLAUDE, Stage.REVIEW),
-        ("fixing", ProviderId.CLAUDE, Stage.FIXING),
+        ("testing", ProviderId.CLAUDE, "review"),  # checks node → first agent node is review
+        ("review", ProviderId.CLAUDE, "review"),
+        ("fixing", ProviderId.CLAUDE, "fixing"),
     ],
 )
 def test_resume_continues_persisted_checkpoint(
     current_node: str | None,
     expected_provider: ProviderId,
-    expected_first_stage: Stage,
+    expected_first_stage: str,
     git_repo,
     make_git_config,
     git_run,
@@ -472,18 +472,18 @@ def test_resume_continues_persisted_checkpoint(
 
     assert result is not None and result.final_status is Status.DONE
     expected = providers[expected_provider]
-    # Ignore the constant supervisor layer's per-step observations (read-only, SUMMARY-stage, on the
-    # global primary) — they interleave with node requests but are not graph-node calls.
-    node_requests = [r for r in expected.requests if r.stage is not Stage.SUMMARY]
-    assert node_requests[0].stage is expected_first_stage
+    # Ignore the constant supervisor layer's per-step observations (read-only, its own "supervisor"
+    # node id, on the global primary) — they interleave with node requests but are not graph nodes.
+    node_requests = [r for r in expected.requests if r.node_id != "supervisor"]
+    assert node_requests[0].node_id == expected_first_stage
     all_requests = [
         request
         for provider in providers.values()
         for request in provider.requests
-        if request.stage is not Stage.SUMMARY
+        if request.node_id != "supervisor"
     ]
     if current_node in {"testing", "review", "fixing"}:
-        assert all(request.stage is not Stage.IMPLEMENTATION for request in all_requests)
+        assert all(request.node_id != "implementation" for request in all_requests)
     if current_node == "fixing":
         assert node_requests[0].check_artifacts_path == str(failed_check)
 
@@ -545,7 +545,7 @@ def test_resume_restores_planning_selected_skills(
     assert result is not None and result.final_status is Status.DONE
 
     impl = next(
-        r for p in providers.values() for r in p.requests if r.stage is Stage.IMPLEMENTATION
+        r for p in providers.values() for r in p.requests if r.node_id == "implementation"
     )
     assert any(path.endswith("safe-change/SKILL.md") for path in impl.skill_reference_paths)
 
@@ -599,7 +599,7 @@ def test_resume_waits_on_persisted_planning_prompt_without_resending(
         fix_iterations=0,
     )
 
-    path = interaction_path(art, task_id, Stage.PLANNING)
+    path = interaction_path(art, task_id, "planning")
     handle = AskHandle(
         interaction_id="h-persisted",
         kind="question",
@@ -610,7 +610,7 @@ def test_resume_waits_on_persisted_planning_prompt_without_resending(
     write_waiting_interaction(
         path,
         task_id=task_id,
-        stage=Stage.PLANNING,
+        node_id="planning",
         subtask=None,
         signal=HumanInputSignal(
             kind="question",
@@ -628,7 +628,7 @@ def test_resume_waits_on_persisted_planning_prompt_without_resending(
     assert notifier.started == []
     assert notifier.waited == [handle]
     planning_requests = providers[ProviderId.CLAUDE].requests
-    assert planning_requests[0].stage is Stage.PLANNING
+    assert planning_requests[0].node_id == "planning"
     assert planning_requests[0].human_input_path == str(path)
     persisted = load_interaction(path)
     assert persisted is not None

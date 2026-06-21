@@ -62,16 +62,16 @@ class FakeProvider:
 
     def run(self, request: AgentRunRequest) -> AgentRunResult:
         self.requests.append(request)
-        if request.stage in self._infra_fail:
+        if request.node_id in self._infra_fail:
             raise ProviderError(error_class=ErrorClass.TIMEOUT, message="infra fail")
-        message, structured = self._outputs.get(request.stage, ("done", None))
-        if request.stage is Stage.REFINEMENT:
+        message, structured = self._outputs.get(request.node_id, ("done", None))
+        if request.node_id == "refinement":
             structured = (
                 structured
                 if isinstance(structured, dict) and "content" in structured
                 else {"content": message, "human_input": None}
             )
-        elif request.stage is Stage.PLANNING and (
+        elif request.node_id == "planning" and (
             not isinstance(structured, dict) or "content" not in structured
         ):
             planning = structured or {}
@@ -85,7 +85,7 @@ class FakeProvider:
         return AgentRunResult(
             status=RunStatus.SUCCEEDED,
             provider=self.id,
-            stage=request.stage,
+            node_id=request.node_id,
             attempt=request.attempt,
             exit_code=0,
             started_at="t0",
@@ -106,7 +106,7 @@ class ArtifactWritingProvider(FakeProvider):
         paths = create_attempt_dir(
             self._artifacts_root,
             request.task_id,
-            request.stage,
+            request.node_id,
             request.attempt,
             self.id,
             node_run_id=request.node_run_id,
@@ -334,7 +334,7 @@ def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: 
     orig = providers[ProviderId.CLAUDE].run
 
     def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
-        if request.stage is Stage.IMPLEMENTATION:
+        if request.node_id == "implementation":
             (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
         return orig(request)
 
@@ -438,11 +438,11 @@ def test_supervisor_summary_once_per_whole_task_not_subtask(
 
     class DecompProvider(FakeProvider):
         def run(self, request: AgentRunRequest) -> AgentRunResult:
-            if request.stage is Stage.PLANNING:
+            if request.node_id == "planning":
                 return AgentRunResult(
                     status=RunStatus.SUCCEEDED,
                     provider=self.id,
-                    stage=request.stage,
+                    node_id=request.node_id,
                     attempt=request.attempt,
                     exit_code=0,
                     started_at="t",
@@ -450,7 +450,7 @@ def test_supervisor_summary_once_per_whole_task_not_subtask(
                     final_message="plan",
                     structured_output={"content": "plan", "human_input": None, **subtasks},
                 )
-            if request.stage is Stage.IMPLEMENTATION:
+            if request.node_id == "implementation":
                 (git_repo.clone / f"impl-{state['n']}.py").write_text("x\n", encoding="utf-8")
                 state["n"] += 1
             return super().run(request)
@@ -486,7 +486,7 @@ def test_live_route_defaults_to_global_primary(git_repo, make_git_config, tmp_pa
     orig = providers[ProviderId.CLAUDE].run
 
     def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
-        if request.stage is Stage.IMPLEMENTATION:
+        if request.node_id == "implementation":
             (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
         return orig(request)
 
@@ -514,7 +514,7 @@ def test_vague_task_runs_refinement(git_repo, make_git_config, tmp_path: Path) -
     orig = providers[ProviderId.CLAUDE].run
 
     def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
-        if request.stage is Stage.IMPLEMENTATION:
+        if request.node_id == "implementation":
             (git_repo.clone / "f.py").write_text("y = 2\n", encoding="utf-8")
         return orig(request)
 
@@ -537,7 +537,7 @@ def test_failed_checks_then_fix_then_pass(git_repo, make_git_config, tmp_path: P
     orig = providers[ProviderId.CLAUDE].run
 
     def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
-        if request.stage in (Stage.IMPLEMENTATION, Stage.FIXING):
+        if request.node_id in ("implementation", "fixing"):
             (git_repo.clone / "f.py").write_text("z = 3\n", encoding="utf-8")
         return orig(request)
 
@@ -563,7 +563,7 @@ def test_fix_iterations_synced_to_operator_surfaces(
     orig = providers[ProviderId.CLAUDE].run
 
     def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
-        if request.stage in (Stage.IMPLEMENTATION, Stage.FIXING):
+        if request.node_id in ("implementation", "fixing"):
             (git_repo.clone / "f.py").write_text("z = 3\n", encoding="utf-8")
         return orig(request)
 
@@ -597,7 +597,7 @@ def test_two_fix_cycles_use_distinct_stage_run_artifacts(
     orig = providers[ProviderId.CLAUDE].run
 
     def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
-        if request.stage in (Stage.IMPLEMENTATION, Stage.FIXING):
+        if request.node_id in ("implementation", "fixing"):
             (git_repo.clone / "f.py").write_text(
                 f"node_run_id = {request.node_run_id}\n", encoding="utf-8"
             )
@@ -638,7 +638,7 @@ def test_fix_budget_exhausted_is_manual(git_repo, make_git_config, tmp_path: Pat
     orig = providers[ProviderId.CLAUDE].run
 
     def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
-        if request.stage in (Stage.IMPLEMENTATION, Stage.FIXING):
+        if request.node_id in ("implementation", "fixing"):
             (git_repo.clone / "f.py").write_text("w = 4\n", encoding="utf-8")
         return orig(request)
 
@@ -663,15 +663,15 @@ def test_review_blocking_then_fix(git_repo, make_git_config, tmp_path: Path) -> 
 
     class ReviewProvider(FakeProvider):
         def run(self, request: AgentRunRequest) -> AgentRunResult:
-            if request.stage is Stage.IMPLEMENTATION:
+            if request.node_id == "implementation":
                 (git_repo.clone / "r.py").write_text("a = 1\n", encoding="utf-8")
-            if request.stage is Stage.REVIEW:
+            if request.node_id == "review":
                 msg, structured = review_outputs[min(state["i"], 1)]
                 state["i"] += 1
                 return AgentRunResult(
                     status=RunStatus.SUCCEEDED,
                     provider=self.id,
-                    stage=request.stage,
+                    node_id=request.node_id,
                     attempt=request.attempt,
                     exit_code=0,
                     started_at="t",
@@ -741,8 +741,9 @@ def test_minimal_flow_implement_only(git_repo, make_git_config, tmp_path: Path) 
 
 
 def test_summary_fallback_when_provider_fails(git_repo, make_git_config, tmp_path: Path) -> None:
-    # Both providers fail the summary stage with an infra error → minimal summary, still DONE.
-    providers = _both(infra_fail={Stage.SUMMARY})
+    # Both providers fail the supervisor's summary synthesis with an infra error → minimal summary,
+    # still DONE. The supervisor layer runs under its own "supervisor" node id (not a stage).
+    providers = _both(infra_fail={"supervisor"})
     orch, store, _, art = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
     )
@@ -750,7 +751,7 @@ def test_summary_fallback_when_provider_fails(git_repo, make_git_config, tmp_pat
     orig = providers[ProviderId.CLAUDE].run
 
     def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
-        if request.stage is Stage.IMPLEMENTATION:
+        if request.node_id == "implementation":
             (git_repo.clone / "s.py").write_text("b = 1\n", encoding="utf-8")
         return orig(request)
 
@@ -788,11 +789,11 @@ def test_decomposed_task_commits_each_subtask(
 
     class DecompProvider(FakeProvider):
         def run(self, request: AgentRunRequest) -> AgentRunResult:
-            if request.stage is Stage.PLANNING:
+            if request.node_id == "planning":
                 return AgentRunResult(
                     status=RunStatus.SUCCEEDED,
                     provider=self.id,
-                    stage=request.stage,
+                    node_id=request.node_id,
                     attempt=request.attempt,
                     exit_code=0,
                     started_at="t",
@@ -804,7 +805,7 @@ def test_decomposed_task_commits_each_subtask(
                         **subtasks,
                     },
                 )
-            if request.stage is Stage.IMPLEMENTATION:
+            if request.node_id == "implementation":
                 # Each subtask writes a distinct file so each commit is non-empty.
                 marker = git_repo.clone / f"impl-{state['n']}.py"
                 marker.write_text("x\n", encoding="utf-8")
@@ -868,11 +869,11 @@ def test_decomposed_subtask_spec_path_reaches_implementation_prompt(
 
     class DecompProvider(FakeProvider):
         def run(self, request: AgentRunRequest) -> AgentRunResult:
-            if request.stage is Stage.PLANNING:
+            if request.node_id == "planning":
                 return AgentRunResult(
                     status=RunStatus.SUCCEEDED,
                     provider=self.id,
-                    stage=request.stage,
+                    node_id=request.node_id,
                     attempt=request.attempt,
                     exit_code=0,
                     started_at="t",
@@ -880,7 +881,7 @@ def test_decomposed_subtask_spec_path_reaches_implementation_prompt(
                     final_message="plan",
                     structured_output={"content": "plan", "human_input": None, **subtasks},
                 )
-            if request.stage is Stage.IMPLEMENTATION:
+            if request.node_id == "implementation":
                 (git_repo.clone / f"impl-{state['n']}.py").write_text("x\n", encoding="utf-8")
                 state["n"] += 1
             return super().run(request)
@@ -902,7 +903,7 @@ def test_decomposed_subtask_spec_path_reaches_implementation_prompt(
     assert result.final_status is Status.DONE
 
     impl_prompts = [
-        r.prompt for r in providers[ProviderId.CLAUDE].requests if r.stage is Stage.IMPLEMENTATION
+        r.prompt for r in providers[ProviderId.CLAUDE].requests if r.node_id == "implementation"
     ]
     assert len(impl_prompts) == 2  # one implementation run per subtask, each subtask-scoped
     assert "01-first.md" in impl_prompts[0] and "subtask 1 of 2" in impl_prompts[0].lower()
@@ -1027,7 +1028,7 @@ def test_check_launch_failure_is_infra_not_a_fix_cycle(
     orig = providers[ProviderId.CLAUDE].run
 
     def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
-        if request.stage is Stage.IMPLEMENTATION:
+        if request.node_id == "implementation":
             (git_repo.clone / "f.py").write_text("a = 1\n", encoding="utf-8")
         return orig(request)
 
@@ -1154,7 +1155,7 @@ def test_publish_failure_after_finalize_is_manual_not_stranded_done(
     orig = providers[ProviderId.CLAUDE].run
 
     def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
-        if request.stage is Stage.IMPLEMENTATION:
+        if request.node_id == "implementation":
             (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
         return orig(request)
 
@@ -1187,7 +1188,7 @@ def test_artifacts_registered_with_checksums(git_repo, make_git_config, tmp_path
     orig = providers[ProviderId.CLAUDE].run
 
     def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
-        if request.stage is Stage.IMPLEMENTATION:
+        if request.node_id == "implementation":
             (git_repo.clone / "feature.py").write_text("z = 9\n", encoding="utf-8")
         return orig(request)
 
@@ -1229,11 +1230,11 @@ def test_decomposed_failure_report_has_subtask_fields(
 
     class DecompProvider(FakeProvider):
         def run(self, request: AgentRunRequest) -> AgentRunResult:
-            if request.stage is Stage.PLANNING:
+            if request.node_id == "planning":
                 return AgentRunResult(
                     status=RunStatus.SUCCEEDED,
                     provider=self.id,
-                    stage=request.stage,
+                    node_id=request.node_id,
                     attempt=request.attempt,
                     exit_code=0,
                     started_at="t",
@@ -1245,7 +1246,7 @@ def test_decomposed_failure_report_has_subtask_fields(
                         **subtasks,
                     },
                 )
-            if request.stage in (Stage.IMPLEMENTATION, Stage.FIXING):
+            if request.node_id in ("implementation", "fixing"):
                 (git_repo.clone / "d.py").write_text("q = 1\n", encoding="utf-8")
             return super().run(request)
 
@@ -1292,7 +1293,7 @@ def _stage_result(
     return AgentRunResult(
         status=RunStatus.SUCCEEDED,
         provider=provider.id,
-        stage=request.stage,
+        node_id=request.node_id,
         attempt=request.attempt,
         exit_code=0,
         started_at="t0",
@@ -1307,7 +1308,7 @@ def test_refinement_question_is_answered_and_reinjected(
 ) -> None:
     class HitlProvider(FakeProvider):
         def run(self, request: AgentRunRequest) -> AgentRunResult:
-            if request.stage is Stage.REFINEMENT:
+            if request.node_id == "refinement":
                 self.requests.append(request)
                 if request.human_input_path is None:
                     return _stage_result(
@@ -1329,7 +1330,7 @@ def test_refinement_question_is_answered_and_reinjected(
                     request,
                     {"content": "Use behavior B.", "human_input": None},
                 )
-            if request.stage is Stage.IMPLEMENTATION:
+            if request.node_id == "implementation":
                 (git_repo.clone / "feature.py").write_text("behavior = 'B'\n", encoding="utf-8")
             return super().run(request)
 
@@ -1350,7 +1351,7 @@ def test_refinement_question_is_answered_and_reinjected(
     result = orch.run_task(_incomplete_task(tmp_path, "task-hitl-question"))
 
     assert result.final_status is Status.DONE
-    refinement_requests = [r for r in claude.requests if r.stage is Stage.REFINEMENT]
+    refinement_requests = [r for r in claude.requests if r.node_id == "refinement"]
     assert len(refinement_requests) == 2
     assert refinement_requests[1].human_input_path is not None
     interaction = json.loads(
@@ -1457,7 +1458,7 @@ def test_dangerous_diff_requires_approval(
 ) -> None:
     class DangerousProvider(FakeProvider):
         def run(self, request: AgentRunRequest) -> AgentRunResult:
-            if request.stage is Stage.IMPLEMENTATION:
+            if request.node_id == "implementation":
                 if danger == "dependency":
                     (git_repo.clone / "pyproject.toml").write_text(
                         "[project]\nname='x'\n", encoding="utf-8"
@@ -1494,7 +1495,7 @@ def test_denied_dependency_change_gets_one_safe_reconsideration(
 ) -> None:
     class ReconsideringProvider(FakeProvider):
         def run(self, request: AgentRunRequest) -> AgentRunResult:
-            if request.stage is Stage.IMPLEMENTATION:
+            if request.node_id == "implementation":
                 dependency = git_repo.clone / "pyproject.toml"
                 if request.human_input_path is None:
                     dependency.write_text("[project]\nname='x'\n", encoding="utf-8")
@@ -1520,7 +1521,7 @@ def test_denied_dependency_change_gets_one_safe_reconsideration(
     result = orch.run_task(_complete_task(tmp_path, "task-denied-dependency"))
 
     assert result.final_status is Status.DONE
-    implementation = [r for r in claude.requests if r.stage is Stage.IMPLEMENTATION]
+    implementation = [r for r in claude.requests if r.node_id == "implementation"]
     assert len(implementation) == 2
     assert implementation[1].human_input_path is not None
 
@@ -1530,7 +1531,7 @@ def test_denied_dangerous_change_that_remains_requires_manual_action(
 ) -> None:
     class PersistentDangerProvider(FakeProvider):
         def run(self, request: AgentRunRequest) -> AgentRunResult:
-            if request.stage is Stage.IMPLEMENTATION:
+            if request.node_id == "implementation":
                 (git_repo.clone / "pyproject.toml").write_text(
                     "[project]\nname='x'\n", encoding="utf-8"
                 )
@@ -1563,7 +1564,7 @@ def test_planning_approval_is_reused_for_exact_dependency_diff(
 ) -> None:
     class PlanningApprovalProvider(FakeProvider):
         def run(self, request: AgentRunRequest) -> AgentRunResult:
-            if request.stage is Stage.PLANNING:
+            if request.node_id == "planning":
                 self.requests.append(request)
                 if request.human_input_path is None:
                     return _stage_result(
@@ -1592,7 +1593,7 @@ def test_planning_approval_is_reused_for_exact_dependency_diff(
                         "subtasks": [],
                     },
                 )
-            if request.stage is Stage.IMPLEMENTATION:
+            if request.node_id == "implementation":
                 (git_repo.clone / "pyproject.toml").write_text(
                     "[project]\nname='x'\n", encoding="utf-8"
                 )
@@ -1623,7 +1624,7 @@ def test_expanded_diff_requires_separate_approval_after_planning(
 ) -> None:
     class ExpandedDiffProvider(FakeProvider):
         def run(self, request: AgentRunRequest) -> AgentRunResult:
-            if request.stage is Stage.PLANNING:
+            if request.node_id == "planning":
                 self.requests.append(request)
                 if request.human_input_path is None:
                     return _stage_result(
@@ -1652,7 +1653,7 @@ def test_expanded_diff_requires_separate_approval_after_planning(
                         "subtasks": [],
                     },
                 )
-            if request.stage is Stage.IMPLEMENTATION:
+            if request.node_id == "implementation":
                 (git_repo.clone / "pyproject.toml").write_text(
                     "[project]\nname='x'\n", encoding="utf-8"
                 )
@@ -1709,7 +1710,7 @@ def _patch_impl_edit(providers: dict[ProviderId, FakeProvider], git_repo) -> Non
     orig = providers[ProviderId.CLAUDE].run
 
     def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
-        if request.stage is Stage.IMPLEMENTATION:
+        if request.node_id == "implementation":
             (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
         return orig(request)
 
@@ -1933,7 +1934,7 @@ def test_skip_planning_writes_stub_and_runs(git_repo, make_git_config, tmp_path:
     result = orch.run_task(_task_with_stages(tmp_path, block))
     assert result.final_status is Status.DONE
     # The planning agent was never invoked; the planning node was deterministically skipped.
-    assert all(r.stage is not Stage.PLANNING for r in providers[ProviderId.CLAUDE].requests)
+    assert all(r.node_id != "planning" for r in providers[ProviderId.CLAUDE].requests)
     # Flow semantics: a skipped node writes no artifact (no legacy stub plan); the task still runs.
     assert not (task_artifact_dir(art, "task-001") / "plan.md").exists()
     assert "planning" in _skipped_stages(store)
@@ -1975,7 +1976,7 @@ def test_skip_review_commits_without_review(git_repo, make_git_config, tmp_path:
     result = orch.run_task(_task_with_stages(tmp_path, block))
     assert result.final_status is Status.DONE
     # Review is routed to codex (primary); it must never be invoked for the review stage.
-    assert all(r.stage is not Stage.REVIEW for r in providers[ProviderId.CODEX].requests)
+    assert all(r.node_id != "review" for r in providers[ProviderId.CODEX].requests)
     assert "review" in _skipped_stages(store)
 
 
@@ -2095,10 +2096,10 @@ def test_planning_selected_skills_reach_downstream_stages(
         r
         for p in providers.values()
         for r in p.requests
-        if r.stage in (Stage.IMPLEMENTATION, Stage.FIXING, Stage.REVIEW)
+        if r.node_id in ("implementation", "fixing", "review")
     ]
     assert downstream, "a downstream stage ran"
-    impl = next(r for r in downstream if r.stage is Stage.IMPLEMENTATION)
+    impl = next(r for r in downstream if r.node_id == "implementation")
     assert any(path.endswith("safe-change/SKILL.md") for path in impl.skill_reference_paths)
     assert "ghost" not in str(impl.skill_reference_paths)  # unknown name never surfaced
     assert "# Body" not in impl.prompt  # the skill body is never inlined into the prompt
@@ -2158,7 +2159,7 @@ def test_prompt_audit_records_steps_in_order(git_repo, make_git_config, tmp_path
     assert ids == sorted(ids)
     # complete task → refinement skipped; planning/implementation/review run agents. The summary is
     # written by the supervisor layer now (not a graph node), so no summary step is audited.
-    stages = [json.loads(p.read_text())["stage"] for p in step_files]
+    stages = [json.loads(p.read_text())["node_id"] for p in step_files]
     assert stages == ["planning", "implementation", "review"]
 
     # The combined timeline has one line per step, in the same chronological order.
@@ -2172,7 +2173,7 @@ def test_prompt_audit_records_steps_in_order(git_repo, make_git_config, tmp_path
         assert "route_primary" in rec and "provider_used" in rec
 
     # Who-metadata is correct: every node defaults to the global primary (claude) now (PRE.1).
-    review = next(r for r in timeline if r["stage"] == "review")
+    review = next(r for r in timeline if r["node_id"] == "review")
     assert review["provider_used"] == "claude"
     assert review["agents"][0]["provider"] == "claude"
     assert review["agents"][0]["is_fallback"] is False

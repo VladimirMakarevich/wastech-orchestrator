@@ -22,7 +22,7 @@ from wastech_orchestrator.core.loop_control import record_rework
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.core.supervisor import Supervisor
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
-from wastech_orchestrator.providers.base import AgentRunResult, ProviderId, RunStatus, Stage
+from wastech_orchestrator.providers.base import AgentRunResult, ProviderId, RunStatus
 from wastech_orchestrator.routing.router import ResolvedRoute, RouteSource, StageOutcome
 from wastech_orchestrator.state_store import (
     EditingLineageRow,
@@ -38,7 +38,7 @@ def _ok(session_id: str = "sess-super", message: str = "noted") -> AgentRunResul
     return AgentRunResult(
         status=RunStatus.SUCCEEDED,
         provider="claude",
-        stage=Stage.SUMMARY,
+        node_id="supervisor",
         attempt=1,
         exit_code=0,
         started_at="t0",
@@ -55,9 +55,9 @@ class FakeRouter:
         self.requests: list[Any] = []
         self._results = list(results) if results is not None else None
 
-    def resolve_route(self, stage: Stage, provider: Any = None) -> ResolvedRoute:
+    def resolve_route(self, node_id: str, provider: Any = None) -> ResolvedRoute:
         return ResolvedRoute(
-            stage=stage, primary=ProviderId.CLAUDE, fallback=None, source=RouteSource.CONFIG
+            node_id=node_id, primary=ProviderId.CLAUDE, fallback=None, source=RouteSource.CONFIG
         )
 
     def run_stage(

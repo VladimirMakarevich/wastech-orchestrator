@@ -87,7 +87,6 @@ def _run_checks_node(
         store=store,  # type: ignore[arg-type]
         repo_dir=str(repo_dir),
         artifacts_root=str(artifacts_root),
-        stage_for_node={},
         clock=lambda: "ts",
         run_process=run_process or _default_unused_runner,
     )

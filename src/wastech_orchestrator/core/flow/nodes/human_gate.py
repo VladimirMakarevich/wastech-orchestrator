@@ -22,7 +22,6 @@ from wastech_orchestrator.core.hitl import (
     write_waiting_interaction,
 )
 from wastech_orchestrator.notify import AskResult
-from wastech_orchestrator.providers.base import Stage
 
 
 class HumanGate:
@@ -39,16 +38,15 @@ class HumanGate:
         self,
         *,
         task_id: str,
-        stage: Stage | str,
+        node_id: str,
         subtask: int | None,
         signal: HumanInputSignal,
         path: Path,
     ) -> AskResult:
         """Start a fresh prompt, persist the ``waiting`` artifact, wait, and record the answer.
 
-        ``stage`` is the interaction key: a routing :class:`Stage` for the embedded refinement/
-        planning HITL and the dangerous-diff guard, or a node id (plain ``str``) for a standalone
-        ``hitl`` gate node.
+        ``node_id`` is the interaction key: the flow node id of the embedded refinement/planning
+        HITL, the dangerous-diff guard, or a standalone ``hitl`` gate node.
         """
         handle = self._notifier.start_ask(
             question=signal.question,
@@ -56,11 +54,11 @@ class HumanGate:
             task_id=task_id,
             kind=signal.kind,
             timeout_s=self._timeout_s,
-            interaction_id=interaction_id(task_id, stage, subtask),
+            interaction_id=interaction_id(task_id, node_id, subtask),
             contacts=self._contacts,
         )
         write_waiting_interaction(
-            path, task_id=task_id, stage=stage, subtask=subtask, signal=signal, handle=handle
+            path, task_id=task_id, node_id=node_id, subtask=subtask, signal=signal, handle=handle
         )
         result = self._notifier.wait_for_answer(handle)
         write_answer(path, result)

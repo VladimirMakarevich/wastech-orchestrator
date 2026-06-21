@@ -40,6 +40,7 @@ from wastech_orchestrator.core.flow.prompt import render_role_prompt
 from wastech_orchestrator.core.flow.schema import AgentNode, FlowNode
 from wastech_orchestrator.core.hitl import (
     HumanInputSignal,
+    OutputContract,
     StageOutputError,
     TypedStageOutput,
     guardrail_interaction_path,
@@ -47,11 +48,11 @@ from wastech_orchestrator.core.hitl import (
     load_interaction,
     mark_consumed,
     mark_interaction_status,
-    parse_typed_stage_output,
-    stage_output_schema,
+    parse_typed_output,
+    typed_output_schema,
 )
 from wastech_orchestrator.notify import AskKind, AskResult
-from wastech_orchestrator.providers.base import AgentRunRequest, Stage
+from wastech_orchestrator.providers.base import AgentRunRequest
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import EditingLineageRow, NodeRunRow
 
@@ -65,12 +66,11 @@ class AgentNodeRunner:
 
     def run(self, node: FlowNode, ctx: NodeContext) -> NodeResult:
         assert isinstance(node, AgentNode)
-        stage = self._s.stage_for_node[node.id]
-        route = self._s.router.resolve_route(stage, node.provider)
+        route = self._s.router.resolve_route(node.id, node.provider)
         try:
             if _wants_hitl(node):
-                return self._run_with_hitl(node, ctx, stage, route)
-            return self._run_simple(node, ctx, stage, route)
+                return self._run_with_hitl(node, ctx, route)
+            return self._run_simple(node, ctx, route)
         except NodeInfraError:
             if not node.best_effort:
                 raise
@@ -80,29 +80,27 @@ class AgentNodeRunner:
 
     # -- simple (non-HITL) agent run ------------------------------------------
 
-    def _run_simple(
-        self, node: AgentNode, ctx: NodeContext, stage: Stage, route: ResolvedRoute
-    ) -> NodeResult:
-        run_id, outcome = self._invoke(node, ctx, stage, route, human_input_path=None)
-        self._apply_post_edit_guard(node, ctx, stage, route)
+    def _run_simple(self, node: AgentNode, ctx: NodeContext, route: ResolvedRoute) -> NodeResult:
+        run_id, outcome = self._invoke(node, ctx, route, human_input_path=None)
+        self._apply_post_edit_guard(node, ctx, route)
         return NodeResult(node_id=node.id, outcome=_agent_outcome(outcome), node_run_id=run_id)
 
     # -- embedded HITL (refinement / planning) --------------------------------
 
     def _run_with_hitl(
-        self, node: AgentNode, ctx: NodeContext, stage: Stage, route: ResolvedRoute
+        self, node: AgentNode, ctx: NodeContext, route: ResolvedRoute
     ) -> NodeResult:
         path = interaction_path(
-            self._s.artifacts_root, ctx.task_id, stage, subtask=ctx.subtask_order
+            self._s.artifacts_root, ctx.task_id, node.id, subtask=ctx.subtask_order
         )
         persisted = load_interaction(path)
         had_interaction = persisted is not None
         human_input_path: str | None = None
         if persisted is not None:
-            human_input_path = self._resume_interaction(node, stage, path, persisted)
+            human_input_path = self._resume_interaction(node, path, persisted)
 
-        run_id, outcome = self._invoke(node, ctx, stage, route, human_input_path=human_input_path)
-        typed = self._typed(node, stage, outcome)
+        run_id, outcome = self._invoke(node, ctx, route, human_input_path=human_input_path)
+        typed = self._typed(node, ctx, outcome)
         if typed.human_input is None:
             if had_interaction:
                 mark_consumed(path)
@@ -113,20 +111,20 @@ class AgentNodeRunner:
         # First-time signal: one durable round-trip, then re-run with the answer.
         result = self._gate().request(
             task_id=ctx.task_id,
-            stage=stage,
+            node_id=node.id,
             subtask=ctx.subtask_order,
             signal=typed.human_input,
             path=path,
         )
         self._require_human(node, typed.human_input.kind, result)
-        run_id2, outcome2 = self._invoke(node, ctx, stage, route, human_input_path=str(path))
-        if self._typed(node, stage, outcome2).human_input is not None:
+        run_id2, outcome2 = self._invoke(node, ctx, route, human_input_path=str(path))
+        if self._typed(node, ctx, outcome2).human_input is not None:
             raise NodeManualRequired(f"agent node {node.id!r}: second HITL request after an answer")
         mark_consumed(path)
         return NodeResult(node_id=node.id, outcome=_agent_outcome(outcome2), node_run_id=run_id2)
 
     def _resume_interaction(
-        self, node: AgentNode, stage: Stage, path: Any, persisted: Mapping[str, Any]
+        self, node: AgentNode, path: Any, persisted: Mapping[str, Any]
     ) -> str:
         status = str(persisted.get("status", ""))
         if status == "waiting":
@@ -147,16 +145,30 @@ class AgentNodeRunner:
             self._s.notifier, timeout_s=self._s.ask_timeout_s, contacts=self._in.contacts
         )
 
-    def _typed(self, node: AgentNode, stage: Stage, outcome: StageOutcome) -> TypedStageOutput:
+    def _typed(self, node: AgentNode, ctx: NodeContext, outcome: StageOutcome) -> TypedStageOutput:
         result = outcome.result
         if result is None:  # defensive: _invoke already raised on infra-exhaustion
             raise NodeInfraError(f"agent node {node.id!r}: no result to parse")
         try:
-            return parse_typed_stage_output(stage, result.structured_output)
+            return parse_typed_output(self._contract(node, ctx), result.structured_output)
         except StageOutputError as exc:
             raise NodeInfraError(
                 f"agent node {node.id!r}: invalid structured output: {exc}"
             ) from exc
+
+    def _contract(self, node: AgentNode, ctx: NodeContext) -> OutputContract:
+        """The node's typed-output contract, derived from declared structure (never a stage name).
+
+        The decomposition proposer emits the ``planning`` contract (content + human_input +
+        decompose/subtasks/skills); any other HITL-capable node emits ``human_input`` (content +
+        human_input); a plain author node emits ``none``.
+        """
+        decomp = ctx.snapshot.doc.decomposition
+        if decomp is not None and node.id == decomp.proposed_by:
+            return "planning"
+        if _wants_hitl(node):
+            return "human_input"
+        return "none"
 
     def _require_human(self, node: AgentNode, kind: AskKind | None, result: AskResult) -> None:
         if result.failure is None and result.answered:
@@ -187,7 +199,6 @@ class AgentNodeRunner:
         self,
         node: AgentNode,
         ctx: NodeContext,
-        stage: Stage,
         route: ResolvedRoute,
         *,
         human_input_path: str | None,
@@ -206,13 +217,13 @@ class AgentNodeRunner:
                 started_at=started_at,
             )
         )
-        request = self._build_request(node, ctx, stage, route, run_id, human_input_path)
+        request = self._build_request(node, ctx, route, run_id, human_input_path)
         outcome = self._s.router.run_stage(request, route, snapshot=self._s.snapshot)
         self._record_completion(run_id, outcome)
         record_run_observability(
             self._s,
             task_id=ctx.task_id,
-            stage=stage,
+            node_id=node.id,
             subtask=ctx.subtask_order,
             run_id=run_id,
             prompt=request.prompt,
@@ -232,7 +243,7 @@ class AgentNodeRunner:
         return run_id, outcome
 
     def _apply_post_edit_guard(
-        self, node: AgentNode, ctx: NodeContext, stage: Stage, route: ResolvedRoute
+        self, node: AgentNode, ctx: NodeContext, route: ResolvedRoute
     ) -> None:
         """After a workspace-write edit, write the diff (``{diff_path}``) and gate dangerous diffs.
 
@@ -254,21 +265,21 @@ class AgentNodeRunner:
         path = guardrail_interaction_path(
             self._s.artifacts_root,
             ctx.task_id,
-            stage,
+            node.id,
             subtask=ctx.subtask_order,
             cycle=ctx.run_state.fix_iterations,
         )
         persisted = load_interaction(path)
         if persisted is not None:
             approved = self._resume_guardrail(node, path, persisted, dangerous)
-        elif self._planning_approval_matches(ctx.task_id, dangerous):
+        elif self._planning_approval_matches(ctx, dangerous):
             return  # the dangerous diff was pre-approved during planning
         else:
             result = self._gate().request(
                 task_id=ctx.task_id,
-                stage=stage,
+                node_id=node.id,
                 subtask=ctx.subtask_order,
-                signal=_dangerous_diff_signal(stage, dangerous),
+                signal=_dangerous_diff_signal(node.id, dangerous),
                 path=path,
             )
             self._require_human(node, "approval", result)
@@ -276,7 +287,7 @@ class AgentNodeRunner:
         if approved:
             mark_consumed(path)
             return
-        self._reconsider(node, ctx, stage, route, path)
+        self._reconsider(node, ctx, route, path)
 
     def _apply_output_containment_guard(self, node: AgentNode, ctx: NodeContext) -> None:
         """After a workspace-write edit, enforce the flow's ``output_policy`` write containment.
@@ -322,11 +333,11 @@ class AgentNodeRunner:
         )
 
     def _reconsider(
-        self, node: AgentNode, ctx: NodeContext, stage: Stage, route: ResolvedRoute, path: Any
+        self, node: AgentNode, ctx: NodeContext, route: ResolvedRoute, path: Any
     ) -> None:
-        """Approval denied: re-run the stage with the denial context, then re-classify."""
+        """Approval denied: re-run the node with the denial context, then re-classify."""
         mark_interaction_status(path, "reconsidering")
-        self._invoke(node, ctx, stage, route, human_input_path=str(path))
+        self._invoke(node, ctx, route, human_input_path=str(path))
         assert self._s.git is not None
         self._in.diff_path = self._s.git.write_current_diff(ctx.task_id)
         if classify_dangerous_diff(self._s.git.changed_code_entries()) is not None:
@@ -335,8 +346,13 @@ class AgentNodeRunner:
             )
         mark_interaction_status(path, "reconsidered")
 
-    def _planning_approval_matches(self, task_id: str, dangerous: DangerousDiff) -> bool:
-        path = interaction_path(self._s.artifacts_root, task_id, Stage.PLANNING)
+    def _planning_approval_matches(self, ctx: NodeContext, dangerous: DangerousDiff) -> bool:
+        """A dangerous diff is pre-approved if the planning node (the decomposition proposer) got a
+        matching human approval. No decomposition config → no planning node → no pre-approval."""
+        decomp = ctx.snapshot.doc.decomposition
+        if decomp is None:
+            return False
+        path = interaction_path(self._s.artifacts_root, ctx.task_id, decomp.proposed_by)
         persisted = load_interaction(path)
         if persisted is None or persisted.get("approved") is not True:
             return False
@@ -346,7 +362,6 @@ class AgentNodeRunner:
         self,
         node: AgentNode,
         ctx: NodeContext,
-        stage: Stage,
         route: ResolvedRoute,
         run_id: int,
         human_input_path: str | None,
@@ -354,14 +369,16 @@ class AgentNodeRunner:
         ceiling = ctx.snapshot.doc.permission_ceiling
         permission = (node.permission_profile or ceiling).value
         prompt = render_role_prompt(
-            self._in.flow_dir, node.role_file, self._prompt_variables(ctx, stage)
+            self._in.flow_dir, node.role_file, self._prompt_variables(ctx, node)
         )
         output_schema = (
-            json.loads(node.output_schema) if node.output_schema else stage_output_schema(stage)
+            json.loads(node.output_schema)
+            if node.output_schema
+            else typed_output_schema(self._contract(node, ctx))
         )
         return AgentRunRequest(
             task_id=ctx.task_id,
-            stage=stage,
+            node_id=node.id,
             working_directory=self._s.repo_dir,
             prompt=prompt,
             permission_profile=permission,
@@ -385,10 +402,10 @@ class AgentNodeRunner:
             network_access=ctx.snapshot.doc.network_policy is not None,
         )
 
-    def _prompt_variables(self, ctx: NodeContext, stage: Stage) -> dict[str, object | None]:
+    def _prompt_variables(self, ctx: NodeContext, node: AgentNode) -> dict[str, object | None]:
         variables: dict[str, object | None] = {
             "task_id": ctx.task_id,
-            "stage": stage.value,
+            "stage": node.id,
             "repo_path": self._s.repo_dir,
             "repo": self._s.repo_dir,
             "task_path": self._in.task_path,
@@ -481,14 +498,14 @@ def _wants_hitl(node: AgentNode) -> bool:
     """A node opts into the durable HITL round-trip by declaring ``hitl`` with a capability flag.
 
     Data-driven (flow-contract §2.1): the *decision* to do a human round-trip is the node's
-    declared ``hitl`` settings, never the stage name. The typed-output
-    parsing that follows is still keyed by stage (its schema is stage-specific); only the dispatch
-    is decoupled here.
+    declared ``hitl`` settings, never the stage name. The typed-output schema/parsing that follows
+    is selected by the node's derived :data:`~wastech_orchestrator.core.hitl.OutputContract`
+    (see :meth:`AgentNodeRunner._contract`), also never the stage name.
     """
     return node.hitl is not None and (node.hitl.allow_question or node.hitl.allow_approval)
 
 
-def _dangerous_diff_signal(stage: Stage, dangerous: DangerousDiff) -> HumanInputSignal:
+def _dangerous_diff_signal(node_id: str, dangerous: DangerousDiff) -> HumanInputSignal:
     detail: list[str] = []
     if dangerous.deleted_paths:
         detail.append("Deleted paths: " + ", ".join(dangerous.deleted_paths))
@@ -496,7 +513,7 @@ def _dangerous_diff_signal(stage: Stage, dangerous: DangerousDiff) -> HumanInput
         detail.append("Dependency manifests/locks: " + ", ".join(dangerous.dependency_paths))
     return HumanInputSignal(
         kind="approval",
-        question=f"Approve dangerous changes produced by the {stage.value} stage?",
+        question=f"Approve dangerous changes produced by the {node_id!r} node?",
         context="\n".join(detail),
         risk=dangerous.risk,
         paths=dangerous.paths,

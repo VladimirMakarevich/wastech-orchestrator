@@ -1,8 +1,9 @@
-"""Typed stage HITL signals and durable interaction artifacts.
+"""Typed node HITL signals and durable interaction artifacts.
 
-Only refinement and planning may ask the human. The provider proposes a typed signal, but the Core
-validates it strictly, sends it through the transport-agnostic ``Notifier`` contract, and passes the
-redacted answer back to a fresh run through ``AgentRunRequest.human_input_path``.
+Only a node that declares a ``human_input`` / ``planning`` output contract may ask the human. The
+provider proposes a typed signal, but the Core validates it strictly, sends it through the
+transport-agnostic ``Notifier`` contract, and passes the redacted answer back to a fresh run through
+``AgentRunRequest.human_input_path``.
 """
 
 from __future__ import annotations
@@ -13,14 +14,17 @@ import math
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Literal
 
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
-from wastech_orchestrator.providers.base import Stage
 from wastech_orchestrator.providers.redaction import redact_text
 
-_SIGNAL_STAGES = frozenset({Stage.REFINEMENT, Stage.PLANNING})
+#: Which built-in typed-output contract a flow node's structured result must satisfy. Derived per
+#: node (never from a stage name): ``human_input`` = a question/approval round-trip; ``planning``
+#: adds the decomposition proposal + the selected skills; ``none`` = a plain author node.
+OutputContract = Literal["none", "human_input", "planning"]
+
 _RISKS = frozenset({"clarification", "deletion", "dependency", "other"})
 _MAX_PATHS = 100
 _MAX_TEXT = 16_000
@@ -93,9 +97,14 @@ class TypedStageOutput:
     skills: tuple[str, ...] = ()  # planning-proposed skill names (validated against the inventory)
 
 
-def stage_output_schema(stage: Stage) -> dict[str, Any] | None:
-    """Return the strict provider schema for HITL-capable stages."""
-    if stage is Stage.REFINEMENT:
+def typed_output_schema(contract: OutputContract) -> dict[str, Any] | None:
+    """Return the strict provider schema for a HITL-capable node's typed output.
+
+    ``human_input`` (a refinement-style node): ``content`` plus an optional human question/approval.
+    ``planning``: the same, plus the decomposition proposal and the selected skills. ``none`` (a
+    plain author node) has no built-in typed schema (the node may still set its own schema).
+    """
+    if contract == "human_input":
         return {
             "type": "object",
             "additionalProperties": False,
@@ -105,7 +114,7 @@ def stage_output_schema(stage: Stage) -> dict[str, Any] | None:
             },
             "required": ["content", "human_input"],
         }
-    if stage is Stage.PLANNING:
+    if contract == "planning":
         return {
             "type": "object",
             "additionalProperties": False,
@@ -128,28 +137,28 @@ def stage_output_schema(stage: Stage) -> dict[str, Any] | None:
     return None
 
 
-def parse_typed_stage_output(
-    stage: Stage, structured: Mapping[str, Any] | None
+def parse_typed_output(
+    contract: OutputContract, structured: Mapping[str, Any] | None
 ) -> TypedStageOutput:
-    """Validate a refinement/planning result independently from provider schema enforcement."""
-    if stage not in _SIGNAL_STAGES:
-        raise StageOutputError(f"{stage.value} does not support typed HITL output")
+    """Validate a human_input/planning node result, independent of provider schema enforcement."""
+    if contract == "none":
+        raise StageOutputError("node does not support typed HITL output")
     if not isinstance(structured, Mapping):
-        raise StageOutputError(f"{stage.value} must return structured output")
+        raise StageOutputError("node must return structured output")
 
     expected = (
         {"content", "human_input"}
-        if stage is Stage.REFINEMENT
+        if contract == "human_input"
         else {"content", "human_input", "decompose", "subtasks", "skills"}
     )
     if set(structured) != expected:
-        raise StageOutputError(f"{stage.value} output keys must be exactly {sorted(expected)}")
+        raise StageOutputError(f"output keys must be exactly {sorted(expected)}")
     content = structured.get("content")
     if not isinstance(content, str):
-        raise StageOutputError(f"{stage.value}.content must be a string")
+        raise StageOutputError("content must be a string")
 
     skills: tuple[str, ...] = ()
-    if stage is Stage.PLANNING:
+    if contract == "planning":
         if not isinstance(structured.get("decompose"), bool):
             raise StageOutputError("planning.decompose must be a boolean")
         subtasks = structured.get("subtasks")
@@ -263,18 +272,19 @@ def _normalize_path(raw: Any) -> str:
 def interaction_path(
     artifacts_root: str | Path,
     task_id: str,
-    stage: Stage,
+    node_id: str,
     *,
     subtask: int | None = None,
 ) -> Path:
+    """Durable artifact for a node's embedded HITL round-trip, keyed by the flow node id."""
     suffix = f"-subtask-{subtask}" if subtask is not None else ""
-    return task_artifact_dir(artifacts_root, task_id) / "hitl" / f"{stage.value}{suffix}.json"
+    return task_artifact_dir(artifacts_root, task_id) / "hitl" / f"{node_id}{suffix}.json"
 
 
 def guardrail_interaction_path(
     artifacts_root: str | Path,
     task_id: str,
-    stage: Stage,
+    node_id: str,
     *,
     subtask: int | None,
     cycle: int,
@@ -283,7 +293,7 @@ def guardrail_interaction_path(
     return (
         task_artifact_dir(artifacts_root, task_id)
         / "hitl"
-        / f"guardrail-{stage.value}{subtask_suffix}-cycle-{cycle}.json"
+        / f"guardrail-{node_id}{subtask_suffix}-cycle-{cycle}.json"
     )
 
 
@@ -302,14 +312,13 @@ def node_interaction_path(
     return task_artifact_dir(artifacts_root, task_id) / "hitl" / f"node-{node_id}{suffix}.json"
 
 
-def interaction_id(task_id: str, stage: Stage | str, subtask: int | None = None) -> str:
+def interaction_id(task_id: str, node_id: str, subtask: int | None = None) -> str:
     """Return a compact deterministic id that fits Telegram callback-data limits.
 
-    ``stage`` is the interaction key — a routing :class:`Stage` for embedded HITL, or a node id
-    (plain ``str``) for a standalone ``hitl`` gate node.
+    ``node_id`` is the interaction key — the flow node id (embedded agent HITL / dangerous-diff
+    guard / check-discovery) or a standalone ``hitl`` gate node id.
     """
-    key = stage.value if isinstance(stage, Stage) else stage
-    raw = f"{task_id}:{key}:{subtask if subtask is not None else '-'}"
+    raw = f"{task_id}:{node_id}:{subtask if subtask is not None else '-'}"
     return "h" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
@@ -339,7 +348,7 @@ def write_waiting_interaction(
     path: Path,
     *,
     task_id: str,
-    stage: Stage | str,
+    node_id: str,
     subtask: int | None,
     signal: HumanInputSignal,
     handle: AskHandle,
@@ -348,7 +357,7 @@ def write_waiting_interaction(
         "schema_version": 1,
         "interaction_id": handle.interaction_id,
         "task_id": task_id,
-        "stage": stage.value if isinstance(stage, Stage) else stage,
+        "node_id": node_id,
         "subtask": subtask,
         "status": "waiting" if handle.delivered else "transport_error",
         "request": {

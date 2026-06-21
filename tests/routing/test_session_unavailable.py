@@ -18,7 +18,6 @@ from wastech_orchestrator.providers.base import (
     ProviderHealth,
     ProviderId,
     RunStatus,
-    Stage,
 )
 from wastech_orchestrator.routing.router import AgentRouter
 
@@ -47,7 +46,7 @@ class _SessionAwareProvider:
         return AgentRunResult(
             status=RunStatus.SUCCEEDED,
             provider=self.id,
-            stage=request.stage,
+            node_id=request.node_id,
             attempt=request.attempt,
             exit_code=0,
             started_at="t0",
@@ -65,10 +64,10 @@ def test_session_unavailable_retries_without_resume_no_fix_iteration(
         ProviderId.CODEX: _SessionAwareProvider(ProviderId.CODEX),
     }
     router = AgentRouter(config, providers)  # type: ignore[arg-type]
-    route = router.resolve_route(Stage.IMPLEMENTATION, None)  # the config's global primary
+    route = router.resolve_route("implementation", None)  # the config's global primary
     primary = providers[route.primary]
 
-    request = make_request(stage=Stage.IMPLEMENTATION, session_id="stale-session")
+    request = make_request(node_id="implementation", session_id="stale-session")
     outcome = router.run_stage(request, route)
 
     # The resume failed (session gone) → the SAME provider was retried fresh, which succeeded.

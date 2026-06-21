@@ -15,6 +15,14 @@ class ProviderId(StrEnum):
 
 
 class Stage(StrEnum):
+    """The canonical pipeline-stage / skip vocabulary.
+
+    This is NOT the flow-engine request identity: a provider run is identified by its flow
+    ``node_id`` (``AgentRunRequest.node_id``), not a ``Stage``. ``Stage`` survives only as the
+    orchestrator's per-task stage-skip vocabulary (``effective_skip`` / ``Stage.REVIEW in p.skip``),
+    ``config.SKIPPABLE_STAGES``, and the validation gate.
+    """
+
     REFINEMENT = "refinement"
     PLANNING = "planning"
     IMPLEMENTATION = "implementation"
@@ -87,7 +95,9 @@ class ProviderHealth:
 @dataclass(frozen=True)
 class AgentRunRequest:
     task_id: str
-    stage: Stage
+    #: the flow node's id — the per-node identity for routing audit, artifact namespacing, and the
+    #: typed-output / HITL artifact paths. Providers use it only to namespace artifacts.
+    node_id: str
     working_directory: str
     prompt: str
     permission_profile: str
@@ -126,7 +136,7 @@ class NormalizedError:
 class AgentRunResult:
     status: RunStatus
     provider: str
-    stage: Stage
+    node_id: str
     attempt: int
     exit_code: int | None
     started_at: str

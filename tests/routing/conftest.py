@@ -24,7 +24,6 @@ from wastech_orchestrator.providers.base import (
     ProviderHealth,
     ProviderId,
     RunStatus,
-    Stage,
 )
 from wastech_orchestrator.routing.snapshots import PartialChange, WorkingTreeSnapshot
 
@@ -79,7 +78,7 @@ class FakeProvider:
         return AgentRunResult(
             status=self._status,
             provider=self.id,
-            stage=request.stage,
+            node_id=request.node_id,
             attempt=request.attempt,
             exit_code=0,
             started_at=_T0,
@@ -148,7 +147,7 @@ def make_request() -> Callable[..., AgentRunRequest]:
     def _make(**overrides: Any) -> AgentRunRequest:
         defaults: dict[str, Any] = {
             "task_id": "task-001",
-            "stage": Stage.REVIEW,
+            "node_id": "review",
             "working_directory": "/tmp/clone",
             "prompt": "Do the stage.",
             "permission_profile": "workspace-write",

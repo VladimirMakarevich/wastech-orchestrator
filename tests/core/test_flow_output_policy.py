@@ -34,7 +34,7 @@ from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import AgentNode, FlowDoc, PublishNode
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
 from wastech_orchestrator.git_manager import ChangedPath
-from wastech_orchestrator.providers.base import AgentRunResult, ProviderId, RunStatus, Stage
+from wastech_orchestrator.providers.base import AgentRunResult, ProviderId, RunStatus
 from wastech_orchestrator.routing.router import ResolvedRoute, RouteSource, StageOutcome
 
 # -- fakes / helpers ----------------------------------------------------------
@@ -44,7 +44,7 @@ def _result() -> AgentRunResult:
     return AgentRunResult(
         status=RunStatus.SUCCEEDED,
         provider="codex",
-        stage=Stage.IMPLEMENTATION,
+        node_id="synthesis",
         attempt=1,
         exit_code=0,
         started_at="t0",
@@ -57,9 +57,9 @@ class _Router:
     def __init__(self) -> None:
         self.requests: list[Any] = []
 
-    def resolve_route(self, stage: Stage, override: Any = None) -> ResolvedRoute:
+    def resolve_route(self, node_id: str, override: Any = None) -> ResolvedRoute:
         return ResolvedRoute(
-            stage=stage, primary=ProviderId.CODEX, fallback=None, source=RouteSource.CONFIG
+            node_id=node_id, primary=ProviderId.CODEX, fallback=None, source=RouteSource.CONFIG
         )
 
     def run_stage(
@@ -160,7 +160,6 @@ def _services(tmp_path: Path, git: _Git, router: _Router | None = None) -> NodeS
         store=_Store(),  # type: ignore[arg-type]
         repo_dir=str(tmp_path),
         artifacts_root=str(tmp_path / "art"),
-        stage_for_node={"synthesis": Stage.IMPLEMENTATION},
         clock=lambda: "ts",
         git=git,  # type: ignore[arg-type]
     )

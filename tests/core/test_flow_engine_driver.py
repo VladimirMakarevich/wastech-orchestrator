@@ -23,7 +23,6 @@ from wastech_orchestrator.providers.base import (
     AgentRunResult,
     ProviderId,
     RunStatus,
-    Stage,
 )
 from wastech_orchestrator.routing.router import ResolvedRoute, RouteSource, StageOutcome
 from wastech_orchestrator.state_store import StateStore, TaskRow
@@ -50,9 +49,9 @@ flow:
 
 
 class _FakeRouter:
-    def resolve_route(self, stage: Stage, override: Any = None) -> ResolvedRoute:
+    def resolve_route(self, node_id: str, override: Any = None) -> ResolvedRoute:
         return ResolvedRoute(
-            stage=stage, primary=ProviderId.CODEX, fallback=None, source=RouteSource.CONFIG
+            node_id=node_id, primary=ProviderId.CODEX, fallback=None, source=RouteSource.CONFIG
         )
 
     def run_stage(
@@ -61,7 +60,7 @@ class _FakeRouter:
         result = AgentRunResult(
             status=RunStatus.SUCCEEDED,
             provider="codex",
-            stage=request.stage,
+            node_id=request.node_id,
             attempt=1,
             exit_code=0,
             started_at="t0",
@@ -137,7 +136,6 @@ def test_drive_flow_runs_tiny_flow_to_done(tmp_path: Path) -> None:
         store=store,
         repo_dir=str(tmp_path / "repo"),
         artifacts_root=str(tmp_path),
-        stage_for_node={"implementation": Stage.IMPLEMENTATION, "review": Stage.REVIEW},
         clock=lambda: "ts",
         git=_FakeGit(),
     )

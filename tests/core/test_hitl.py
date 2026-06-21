@@ -12,15 +12,14 @@ from wastech_orchestrator.core.hitl import (
     StageOutputError,
     consume_pending_interactions,
     handle_from_artifact,
-    parse_typed_stage_output,
+    parse_typed_output,
 )
 from wastech_orchestrator.git_manager import ChangedPath
-from wastech_orchestrator.providers.base import Stage
 
 
 def test_refinement_typed_output_parses_question() -> None:
-    parsed = parse_typed_stage_output(
-        Stage.REFINEMENT,
+    parsed = parse_typed_output(
+        "human_input",
         {
             "content": "",
             "human_input": {
@@ -37,8 +36,8 @@ def test_refinement_typed_output_parses_question() -> None:
 
 
 def test_human_input_paths_are_normalized_as_an_exact_set() -> None:
-    parsed = parse_typed_stage_output(
-        Stage.REFINEMENT,
+    parsed = parse_typed_output(
+        "human_input",
         {
             "content": "",
             "human_input": {
@@ -57,8 +56,8 @@ def test_human_input_paths_are_normalized_as_an_exact_set() -> None:
 
 def test_planning_output_requires_exact_keys() -> None:
     with pytest.raises(StageOutputError):
-        parse_typed_stage_output(
-            Stage.PLANNING,
+        parse_typed_output(
+            "planning",
             {
                 "content": "plan",
                 "human_input": None,
@@ -71,8 +70,8 @@ def test_planning_output_requires_exact_keys() -> None:
 
 def test_human_input_rejects_traversal_path() -> None:
     with pytest.raises(StageOutputError):
-        parse_typed_stage_output(
-            Stage.REFINEMENT,
+        parse_typed_output(
+            "human_input",
             {
                 "content": "",
                 "human_input": {
@@ -104,7 +103,7 @@ def test_planning_output_rejects_malformed_subtask() -> None:
     }
 
     with pytest.raises(StageOutputError, match="positive integer"):
-        parse_typed_stage_output(Stage.PLANNING, structured)
+        parse_typed_output("planning", structured)
 
 
 def test_persisted_handle_rejects_invalid_kind() -> None:
@@ -154,11 +153,11 @@ def test_renamed_dependency_counts_as_deletion_and_dependency() -> None:
     assert result.risk == "other"
 
 
-def _write_hitl(root: Path, task_id: str, stage: str, status: str) -> Path:
+def _write_hitl(root: Path, task_id: str, node_id: str, status: str) -> Path:
     hitl = root / "logs" / task_id / "hitl"
     hitl.mkdir(parents=True, exist_ok=True)
-    path = hitl / f"{stage}.json"
-    path.write_text(json.dumps({"status": status, "stage": stage}), encoding="utf-8")
+    path = hitl / f"{node_id}.json"
+    path.write_text(json.dumps({"status": status, "node_id": node_id}), encoding="utf-8")
     return path
 
 

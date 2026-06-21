@@ -21,7 +21,6 @@ from wastech_orchestrator.providers.base import (
     ErrorClass,
     ProviderId,
     RunStatus,
-    Stage,
 )
 from wastech_orchestrator.routing.router import (
     ProviderAttempt,
@@ -33,7 +32,7 @@ from wastech_orchestrator.routing.router import (
 
 def _route() -> ResolvedRoute:
     return ResolvedRoute(
-        stage=Stage.IMPLEMENTATION,
+        node_id="implementation",
         primary=ProviderId.CODEX,
         fallback=ProviderId.CLAUDE,
         source=RouteSource.CONFIG,
@@ -44,7 +43,7 @@ def _result(provider: str, status: RunStatus) -> AgentRunResult:
     return AgentRunResult(
         status=status,
         provider=provider,
-        stage=Stage.IMPLEMENTATION,
+        node_id="implementation",
         attempt=1,
         exit_code=0 if status is RunStatus.SUCCEEDED else 1,
         started_at="t0",
@@ -98,7 +97,7 @@ def test_write_prompt_audit_step_timeline_who_metadata_and_redaction(tmp_path: P
     write_prompt_audit(
         artifacts_root=str(tmp_path),
         task_id="task-1",
-        stage=Stage.IMPLEMENTATION,
+        node_id="implementation",
         subtask=None,
         run_id=7,
         prompt="do the thing with TOKEN_ABC123",
@@ -130,7 +129,7 @@ def test_write_rendered_prompt_redacts_and_registers(tmp_path: Path) -> None:
     write_rendered_prompt(
         artifacts_root=str(tmp_path),
         task_id="task-1",
-        stage=Stage.IMPLEMENTATION,
+        node_id="implementation",
         subtask=None,
         prompt="prompt with SECRET_XYZ inside",
         secrets=("SECRET_XYZ",),

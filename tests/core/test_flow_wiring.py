@@ -8,33 +8,15 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from wastech_orchestrator.core.flow.snapshot import load_flow
 from wastech_orchestrator.core.flow.wiring import (
     build_node_inputs,
     build_node_services,
-    build_stage_map,
 )
-from wastech_orchestrator.providers.base import Stage
-
-_PARITY = Path(__file__).parent / "flows" / "implementation_parity.yaml"
 
 
-def test_build_stage_map_only_routed_nodes() -> None:
-    # Agent + evaluator nodes get a routing Stage; checks/publish nodes are never routed and are
-    # absent — even `testing`, whose id *is* a Stage value but whose kind is `checks`.
-    snapshot = load_flow(_PARITY)
-    assert build_stage_map(snapshot) == {
-        "refinement": Stage.REFINEMENT,
-        "planning": Stage.PLANNING,
-        "implementation": Stage.IMPLEMENTATION,
-        "review": Stage.REVIEW,
-        "fixing": Stage.FIXING,
-        "summary": Stage.SUMMARY,
-    }
-
-
-def test_build_node_services_sets_collaborators_and_map() -> None:
-    snapshot = load_flow(_PARITY)
+def test_build_node_services_sets_collaborators() -> None:
+    # The wiring builds a NodeServices wrapping the orchestrator's collaborators; routing is
+    # node-based now (no stage map), so the builder only carries the collaborators + config.
     router, checks, store, git = object(), object(), object(), object()
     services = build_node_services(
         router=router,  # type: ignore[arg-type]
@@ -42,7 +24,6 @@ def test_build_node_services_sets_collaborators_and_map() -> None:
         store=store,  # type: ignore[arg-type]
         repo_dir="/repo",
         artifacts_root="/art",
-        snapshot=snapshot,
         clock=lambda: "ts",
         git=git,  # type: ignore[arg-type]
         snapshot_hook=git,  # type: ignore[arg-type]
@@ -56,7 +37,6 @@ def test_build_node_services_sets_collaborators_and_map() -> None:
     assert services.artifacts_root == "/art"
     assert services.default_timeout_seconds == 123
     assert services.ask_timeout_s == 45
-    assert services.stage_for_node["implementation"] is Stage.IMPLEMENTATION
 
 
 def _fake_pipeline(**over: object) -> SimpleNamespace:

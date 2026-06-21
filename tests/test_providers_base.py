@@ -50,7 +50,7 @@ def test_conditional_errors_excluded_from_unconditional_set() -> None:
 def test_request_is_constructible() -> None:
     req = AgentRunRequest(
         task_id="task-001",
-        stage=Stage.PLANNING,
+        node_id="planning",
         working_directory="./workspace/repo",
         prompt="...",
         permission_profile="workspace-write",

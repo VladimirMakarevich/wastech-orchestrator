@@ -87,9 +87,9 @@ All 32 functional blocks (B01–B32) carry the status `documented`, (re)built fr
 - **Dependencies:** B28/B29 (region driving + config), B06 (materialize + fan-out), B07 (subtasks), B10.
 - **Status:** `documented` · [file](./blocks/B11-task-decomposition.md)
 
-### B12 — HITL and Typed Stage Output
+### B12 — HITL and Typed Node Output
 
-- **Purpose:** the typed stage-output schema (question/approval + planning skills/subtasks) and the durable interaction-artifact lifecycle that the human gate and check-command approval build on.
+- **Purpose:** the typed node-output schema (selected per node by an `OutputContract`: question/approval + planning skills/subtasks) and the durable interaction-artifact lifecycle that the human gate and check-command approval build on.
 - **Entry points:** `core/hitl.py`; `notify/interface.py` (`AskHandle`/`AskResult`).
 - **Dependencies:** B30 (HumanGate + runners), B26 (transport), B14 (guardrail approval), B06 (check-command approval), B16.
 - **Status:** `documented` · [file](./blocks/B12-hitl-and-typed-output.md)

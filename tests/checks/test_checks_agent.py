@@ -21,7 +21,6 @@ from wastech_orchestrator.providers.base import (
     ProviderHealth,
     ProviderId,
     RunStatus,
-    Stage,
 )
 
 _DOC = {
@@ -72,7 +71,7 @@ class _FakeProvider:
         return AgentRunResult(
             status=self._status,
             provider=self.id,
-            stage=request.stage,
+            node_id=request.node_id,
             attempt=1,
             exit_code=0,
             started_at="t",
@@ -106,7 +105,7 @@ def test_request_carries_cheap_model_and_readonly_profile(tmp_path: Path) -> Non
     assert request.output_schema == DISCOVERY_OUTPUT_SCHEMA
     assert request.model == "claude-haiku-4-5-20251001"
     assert request.reasoning == "low"
-    assert request.stage is Stage.PLANNING
+    assert request.node_id == "check-discovery"
 
 
 def test_provider_error_returns_empty(tmp_path: Path) -> None:

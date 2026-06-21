@@ -4,8 +4,7 @@ This document describes how to maintain and keep current the documentation set i
 
 ## Documentation Language
 
-- **All documentation in `docs/functional/` is written in English.** This applies to `index.md`, `block-registry.md`, `system-flows.md`, all files in `blocks/` and `flows/`, and this file.
-- The English-only rule applies **only** to `docs/functional/`. The rest of the repository does **not** inherit it: source code, docstrings/comments, other documents (`.agents/rules/`, `README.md`, `docs/backlog/`, etc.), and commit messages follow their own established language — do not translate them.
+- This applies to `index.md`, `block-registry.md`, `system-flows.md`, all files in `blocks/` and `flows/`, and this file.
 - Technical identifiers within the text remain as they appear in code: file names, function names, class names, status values, enumerations, flags, and paths are not translated.
 
 ## Source of Truth

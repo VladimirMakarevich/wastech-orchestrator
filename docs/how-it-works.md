@@ -1,6 +1,6 @@
 # How wastech-orchestrator works
 
-A plain-English overview of what the orchestrator is and how the coding agents fit in. This page is just the mental model — for the full technical detail see the architecture and configuration docs.
+A plain overview of what the orchestrator is and how the coding agents fit in. This page is just the mental model — for the full technical detail see the architecture and configuration docs.
 
 ## It's a deterministic pipeline, with a thin watcher on top
 

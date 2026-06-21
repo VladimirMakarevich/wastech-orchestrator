@@ -24,7 +24,6 @@ from wastech_orchestrator.providers.base import (
     AgentRunRequest,
     ProviderError,
     RunStatus,
-    Stage,
 )
 
 # The strict structured-output schema the provider must satisfy (doc §6). Mirrored by
@@ -95,7 +94,7 @@ class AgentCheckDiscovery:
         """Run one bounded read-only discovery call; return validated candidates (else ``()``)."""
         request = AgentRunRequest(
             task_id="check-discovery",
-            stage=Stage.PLANNING,  # a label only — this runs outside the state machine
+            node_id="check-discovery",  # a label only — this runs outside the state machine
             working_directory=str(repo_root),
             prompt=_INSTRUCTIONS + _evidence_facts(evidence),
             permission_profile="read-only",

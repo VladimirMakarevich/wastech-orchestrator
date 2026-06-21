@@ -16,7 +16,6 @@ from wastech_orchestrator.providers.base import (
     ErrorClass,
     ProviderId,
     RunStatus,
-    Stage,
 )
 from wastech_orchestrator.routing.router import AgentRouter
 
@@ -34,7 +33,7 @@ def test_success_on_primary_does_not_invoke_fallback(
     fallback = make_fake_provider(ProviderId.CLAUDE)
     router = _router(config, primary, fallback)
     outcome = router.run_stage(
-        make_request(stage=Stage.REVIEW), router.resolve_route(Stage.REVIEW, ProviderId.CODEX)
+        make_request(node_id="review"), router.resolve_route("review", ProviderId.CODEX)
     )
     assert outcome.stage_attempts == 1
     assert outcome.provider_used is ProviderId.CODEX
@@ -51,7 +50,7 @@ def test_stage_attempts_increment_across_fallback(
     fallback = make_fake_provider(ProviderId.CLAUDE)
     router = _router(config, primary, fallback)
     outcome = router.run_stage(
-        make_request(stage=Stage.REVIEW), router.resolve_route(Stage.REVIEW, ProviderId.CODEX)
+        make_request(node_id="review"), router.resolve_route("review", ProviderId.CODEX)
     )
     assert outcome.stage_attempts == 2
     assert outcome.provider_used is ProviderId.CLAUDE
@@ -70,7 +69,7 @@ def test_max_stage_attempts_one_blocks_fallback(
     fallback = make_fake_provider(ProviderId.CLAUDE)
     router = _router(cfg, primary, fallback)
     outcome = router.run_stage(
-        make_request(stage=Stage.REVIEW), router.resolve_route(Stage.REVIEW, ProviderId.CODEX)
+        make_request(node_id="review"), router.resolve_route("review", ProviderId.CODEX)
     )
     assert outcome.stage_attempts == 1
     assert fallback.run_count == 0
@@ -88,7 +87,7 @@ def test_both_infra_failures_exhaust_the_stage(
     fallback = make_fake_provider(ProviderId.CLAUDE, raises=ErrorClass.RATE_LIMITED)
     router = _router(config, primary, fallback)
     outcome = router.run_stage(
-        make_request(stage=Stage.REVIEW), router.resolve_route(Stage.REVIEW, ProviderId.CODEX)
+        make_request(node_id="review"), router.resolve_route("review", ProviderId.CODEX)
     )
     assert outcome.stage_attempts == 2
     assert outcome.result is None
@@ -108,7 +107,7 @@ def test_non_fallback_infra_error_stops_at_primary(
     fallback = make_fake_provider(ProviderId.CLAUDE)
     router = _router(config, primary, fallback)
     outcome = router.run_stage(
-        make_request(stage=Stage.REVIEW), router.resolve_route(Stage.REVIEW, ProviderId.CODEX)
+        make_request(node_id="review"), router.resolve_route("review", ProviderId.CODEX)
     )
     assert outcome.stage_attempts == 1
     assert fallback.run_count == 0

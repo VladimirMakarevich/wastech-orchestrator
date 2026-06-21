@@ -78,7 +78,7 @@ class HitlNodeRunner:
         if persisted is None:
             result = gate.request(
                 task_id=ctx.task_id,
-                stage=node.id,
+                node_id=node.id,
                 subtask=ctx.subtask_order,
                 signal=_signal(node),
                 path=path,

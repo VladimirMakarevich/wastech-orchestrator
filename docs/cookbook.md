@@ -297,7 +297,7 @@ Review for security first. Reject the change unless:
 Notes:
 
 - Variables are metadata/paths only — e.g. `{repo_path}`, `{diff_path}`, `{plan_path}`. Large content stays in the artifact files the agent reads by path. Unknown `{...}` and literal braces pass through unchanged.
-- The exact text sent each run is saved (redacted) to `.worc/logs/<task-id>/stages/<stage>/rendered-prompt.md` so you can verify what the agent received.
+- The exact text sent each run is saved (redacted) to `.worc/logs/<task-id>/stages/<node-id>/rendered-prompt.md` so you can verify what the agent received.
 - A template is prompt text only: it cannot change the provider, sandbox/approvals, denied commands, or enable `git`/`gh` publishing.
 
 ## 8. Configure Checks

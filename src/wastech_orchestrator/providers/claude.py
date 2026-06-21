@@ -468,7 +468,7 @@ class ClaudeCodeProvider:
         paths = create_attempt_dir(
             self._artifacts_root,
             request.task_id,
-            request.stage,
+            request.node_id,
             request.attempt,
             self.id,
             node_run_id=request.node_run_id,
@@ -492,7 +492,7 @@ class ClaudeCodeProvider:
         log = bind(
             _LOG,
             task_id=request.task_id,
-            stage=request.stage.value,
+            node_id=request.node_id,
             provider=self.id,
             attempt=request.attempt,
         )
@@ -567,7 +567,7 @@ class ClaudeCodeProvider:
         result = AgentRunResult(
             status=status,
             provider=self.id,
-            stage=request.stage,
+            node_id=request.node_id,
             attempt=request.attempt,
             exit_code=proc.exit_code,
             started_at=started_at,
@@ -625,7 +625,7 @@ class ClaudeCodeProvider:
         return {
             "provider": self.id,
             "task_id": request.task_id,
-            "stage": request.stage.value,
+            "node_id": request.node_id,
             "node_run_id": request.node_run_id,
             "attempt": request.attempt,
             "working_directory": request.working_directory,
@@ -652,7 +652,7 @@ class ClaudeCodeProvider:
         result = AgentRunResult(
             status=RunStatus.FAILED,
             provider=self.id,
-            stage=request.stage,
+            node_id=request.node_id,
             attempt=request.attempt,
             exit_code=proc.exit_code,
             started_at=started_at,

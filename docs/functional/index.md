@@ -139,7 +139,7 @@ The full list with entry points, dependencies, and status is in [block-registry.
 - [B09 — Fix Loop Control](./blocks/B09-fix-loop-control.md)
 - [B10 — Recovery and Resume](./blocks/B10-recovery-and-resume.md)
 - [B11 — Task Decomposition](./blocks/B11-task-decomposition.md)
-- [B12 — HITL and Typed Stage Output](./blocks/B12-hitl-and-typed-output.md)
+- [B12 — HITL and Typed Node Output](./blocks/B12-hitl-and-typed-output.md)
 - [B13 — Skill Inventory and Selection](./blocks/B13-skill-selection.md)
 - [B14 — Dangerous Diff Classification](./blocks/B14-dangerous-diff-guardrail.md)
 - [B15 — Prompt Templates and Rendering](./blocks/B15-prompt-templates.md)
@@ -264,7 +264,7 @@ The `<artifacts_root>` is the gitignored `<repo>/.worc/` home (`worc_home_for(co
 
 ## Documentation Status
 
-All 32 blocks (B01–B32) have been (re)investigated from source code and tests for the 2026-06-21 reconstruction and carry status `documented` (see [block-registry.md](./block-registry.md)). B28–B32 are new (the flow engine, definition/validation, node runners, supervisor, and checkers — the subsystem the prior B01–B27 structure had no place for). Cross-cutting scenarios are in [system-flows.md](./system-flows.md); the flow-graph model is in [flows/index.md](./flows/index.md). Each module under `src/wastech_orchestrator/*` is assigned to one block; auxiliary modules are listed in the registry under `excluded`. Rules for maintaining this documentation (including the English language rule) are in [CONVENTIONS.md](./CONVENTIONS.md).
+All 32 blocks (B01–B32) have been (re)investigated from source code and tests for the 2026-06-21 reconstruction and carry status `documented` (see [block-registry.md](./block-registry.md)). B28–B32 are new (the flow engine, definition/validation, node runners, supervisor, and checkers — the subsystem the prior B01–B27 structure had no place for). Cross-cutting scenarios are in [system-flows.md](./system-flows.md); the flow-graph model is in [flows/index.md](./flows/index.md). Each module under `src/wastech_orchestrator/*` is assigned to one block; auxiliary modules are listed in the registry under `excluded`. Rules for maintaining this documentation are in [CONVENTIONS.md](./CONVENTIONS.md).
 
 ## Uncertainties
 

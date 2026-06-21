@@ -49,7 +49,6 @@ from wastech_orchestrator.providers.base import (
     AgentRunResult,
     ProviderId,
     RunStatus,
-    Stage,
 )
 from wastech_orchestrator.routing.router import ResolvedRoute, RouteSource, StageOutcome
 from wastech_orchestrator.state_store import EditingLineageRow
@@ -73,9 +72,9 @@ class FakeRouter:
         self._result = result
         self.requests: list[Any] = []
 
-    def resolve_route(self, stage: Stage, override: Any = None) -> ResolvedRoute:
+    def resolve_route(self, node_id: str, override: Any = None) -> ResolvedRoute:
         return ResolvedRoute(
-            stage=stage, primary=ProviderId.CODEX, fallback=None, source=RouteSource.CONFIG
+            node_id=node_id, primary=ProviderId.CODEX, fallback=None, source=RouteSource.CONFIG
         )
 
     def run_stage(
@@ -146,7 +145,7 @@ def _result(structured: dict[str, Any] | None = None) -> AgentRunResult:
     return AgentRunResult(
         status=RunStatus.SUCCEEDED,
         provider="codex",
-        stage=Stage.IMPLEMENTATION,
+        node_id="implementation",
         attempt=1,
         exit_code=0,
         started_at="t0",
@@ -177,7 +176,6 @@ def _snapshot(node: FlowNode) -> FlowSnapshot:
 def _services(
     router: Any,
     store: FakeStore,
-    stage_map: dict[str, Stage],
     check_runner: Any,
     git: Any = None,
     artifacts_root: str = "/art",
@@ -189,7 +187,6 @@ def _services(
         store=store,
         repo_dir="/repo",
         artifacts_root=artifacts_root,
-        stage_for_node=stage_map,
         clock=lambda: "ts",
         default_timeout_seconds=100,
         git=git,
@@ -231,7 +228,6 @@ def test_agent_node_equals_direct_router_call(tmp_path: Path) -> None:
     services = _services(
         router,
         store,
-        {"impl": Stage.IMPLEMENTATION},
         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
     )
     inputs = _inputs(tmp_path, task_path="/t/task.md", plan_path="/t/plan.md")
@@ -269,7 +265,6 @@ def test_fresh_disposable_node_does_not_inherit_or_leak_session(tmp_path: Path) 
     services = _services(
         router,
         store,
-        {"reviewish": Stage.IMPLEMENTATION},
         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
     )
     AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
@@ -299,7 +294,6 @@ def test_editing_lineage_node_continues_and_persists_session(tmp_path: Path) -> 
     services = _services(
         router,
         store,
-        {"impl": Stage.IMPLEMENTATION},
         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
     )
     AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
@@ -327,7 +321,7 @@ def test_affinity_resumes_declared_node_session(tmp_path: Path) -> None:
     )
     router_impl = FakeRouter(replace(_result(), session_id="impl-session"))
     AgentNodeRunner(
-        _services(router_impl, store, {"implementation": Stage.IMPLEMENTATION}, check),
+        _services(router_impl, store, check),
         _inputs(tmp_path),
     ).run(impl, _ctx(impl))
     assert router_impl.requests[0].session_id is None  # no lineage yet → fresh
@@ -342,7 +336,7 @@ def test_affinity_resumes_declared_node_session(tmp_path: Path) -> None:
     )
     router_fix = FakeRouter(replace(_result(), session_id="fix-session"))
     AgentNodeRunner(
-        _services(router_fix, store, {"fixing": Stage.FIXING}, check), _inputs(tmp_path)
+        _services(router_fix, store, check), _inputs(tmp_path)
     ).run(fixing, _ctx(fixing))
     assert router_fix.requests[0].session_id == "impl-session"  # resumed implementation's session
     row = store.get_editing_lineage("task-1")
@@ -361,7 +355,6 @@ def test_evaluator_fresh_disposable_does_not_touch_lineage(tmp_path: Path) -> No
     services = _services(
         router,
         store,
-        {"review": Stage.REVIEW},
         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
         artifacts_root=str(tmp_path),
     )
@@ -384,7 +377,6 @@ def test_agent_node_infra_exhaustion_raises(tmp_path: Path) -> None:
     services = _services(
         router,
         store,
-        {"impl": Stage.IMPLEMENTATION},
         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
     )
     from wastech_orchestrator.core.flow.nodes.base import NodeInfraError
@@ -405,7 +397,6 @@ def test_agent_workspace_write_writes_diff(tmp_path: Path) -> None:
     services = _services(
         router,
         store,
-        {"impl": Stage.IMPLEMENTATION},
         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
         git=git,
     )
@@ -430,7 +421,6 @@ def test_agent_dangerous_diff_goes_manual(tmp_path: Path) -> None:
     services = _services(
         FakeRouter(_result()),
         FakeStore(),
-        {"impl": Stage.IMPLEMENTATION},
         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
         git=git,
     )
@@ -454,7 +444,6 @@ def _guard_services(tmp_path: Path, git: Any, notifier: Any) -> Any:
         store=FakeStore(),
         repo_dir="/repo",
         artifacts_root=str(tmp_path),
-        stage_for_node={"impl": Stage.IMPLEMENTATION},
         clock=lambda: "ts",
         git=git,
         notifier=notifier,
@@ -514,7 +503,6 @@ def test_agent_read_only_node_skips_diff_guard(tmp_path: Path) -> None:
     services = _services(
         FakeRouter(_result()),
         FakeStore(),
-        {"summary": Stage.SUMMARY},
         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
         git=git,
     )
@@ -531,7 +519,6 @@ def _audit_services(tmp_path: Path, *, prompt_audit: bool, registered: list[Any]
         store=FakeStore(),
         repo_dir="/repo",
         artifacts_root=str(tmp_path),
-        stage_for_node={"implementation": Stage.IMPLEMENTATION},
         clock=lambda: "ts",
         prompt_audit=prompt_audit,
         register_artifact=lambda t, k, p: registered.append((t, k, p)),
@@ -620,7 +607,6 @@ def test_agent_hitl_no_signal_proceeds(tmp_path: Path) -> None:
     services = _services(
         router,
         FakeStore(),
-        {"refinement": Stage.REFINEMENT},
         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
         artifacts_root=str(tmp_path),
     )
@@ -668,7 +654,6 @@ def test_agent_hitl_question_round_trip(tmp_path: Path) -> None:
         store=FakeStore(),
         repo_dir="/repo",
         artifacts_root=str(tmp_path),
-        stage_for_node={"refinement": Stage.REFINEMENT},
         clock=lambda: "ts",
         notifier=notifier,
         ask_timeout_s=60,
@@ -704,7 +689,6 @@ def test_agent_hitl_dispatch_is_data_driven_not_stage(tmp_path: Path) -> None:
         store=FakeStore(),
         repo_dir="/repo",
         artifacts_root=str(tmp_path),
-        stage_for_node={"refinement": Stage.REFINEMENT},
         clock=lambda: "ts",
         notifier=notifier,
         ask_timeout_s=60,
@@ -735,7 +719,6 @@ def test_agent_hitl_timeout_goes_manual(tmp_path: Path) -> None:
         store=FakeStore(),
         repo_dir="/repo",
         artifacts_root=str(tmp_path),
-        stage_for_node={"refinement": Stage.REFINEMENT},
         clock=lambda: "ts",
         notifier=notifier,
         ask_timeout_s=60,
@@ -754,7 +737,6 @@ def _hitl_services(tmp_path: Path, notifier: Any, store: FakeStore | None = None
         store=store or FakeStore(),
         repo_dir="/repo",
         artifacts_root=str(tmp_path),
-        stage_for_node={},  # a hitl node is never routed (no Stage)
         clock=lambda: "ts",
         notifier=notifier,
         ask_timeout_s=60,
@@ -843,7 +825,7 @@ def test_hitl_resumes_persisted_waiting_interaction(tmp_path: Path) -> None:
     write_waiting_interaction(
         path,
         task_id="task-1",
-        stage=node.id,
+        node_id=node.id,
         subtask=None,
         signal=HumanInputSignal(
             kind="approval",
@@ -893,7 +875,6 @@ def test_evaluator_maps_blocking_findings(
     services = _services(
         router,
         store,
-        {"review": Stage.REVIEW},
         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
         artifacts_root=str(tmp_path),
     )
@@ -923,7 +904,6 @@ def test_test_quality_rework_to_fixing(tmp_path: Path) -> None:
     services = _services(
         router,
         store,
-        {"testing_quality": Stage.REVIEW},
         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
         artifacts_root=str(tmp_path),
     )
@@ -943,7 +923,6 @@ def test_test_quality_non_blocking_exhaustion_continues(tmp_path: Path) -> None:
     services = _services(
         router,
         store,
-        {"testing_quality": Stage.REVIEW},
         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
         artifacts_root=str(tmp_path),
     )
@@ -962,7 +941,6 @@ def test_test_quality_does_not_write_tests(tmp_path: Path) -> None:
     services = _services(
         router,
         store,
-        {"testing_quality": Stage.REVIEW},
         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
         artifacts_root=str(tmp_path),
     )
@@ -979,7 +957,6 @@ def test_evaluator_review_writes_findings_artifact(tmp_path: Path) -> None:
     services = _services(
         router,
         store,
-        {"review": Stage.REVIEW},
         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
         artifacts_root=str(tmp_path),
     )
@@ -1001,7 +978,6 @@ def test_review_is_ordinary_evaluator(tmp_path: Path) -> None:
     services = _services(
         FakeRouter(_result({"findings": [{"title": "bug", "severity": "high"}]})),
         store,
-        {"review": Stage.REVIEW},
         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
         artifacts_root=str(tmp_path),
     )
@@ -1035,7 +1011,6 @@ def test_checks_pass_outcome(tmp_path: Path) -> None:
     services = _services(
         FakeRouter(_result()),
         store,
-        {},
         FakeCheckRunner(CheckOutcome(passed=True, runs=(_run(True),))),
     )
     result = ChecksNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
@@ -1049,7 +1024,6 @@ def test_checks_fail_outcome(tmp_path: Path) -> None:
     services = _services(
         FakeRouter(_result()),
         store,
-        {},
         FakeCheckRunner(CheckOutcome(passed=False, runs=(_run(False),), first_failure_log="/log")),
     )
     result = ChecksNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
@@ -1062,7 +1036,6 @@ def test_checks_launch_failure_is_infra(tmp_path: Path) -> None:
     services = _services(
         FakeRouter(_result()),
         store,
-        {},
         FakeCheckRunner(
             CheckOutcome(passed=False, runs=(), launch_failed=True, first_launch_error="boom")
         ),
@@ -1094,7 +1067,6 @@ def test_checks_reresolve_retries_after_launch_failure(tmp_path: Path) -> None:
         store=store,
         repo_dir="/repo",
         artifacts_root=str(tmp_path),
-        stage_for_node={},
         clock=lambda: "ts",
         check_reresolve=lambda: (ResolvedCheck(name="pytest", argv=("pytest",)),),
     )
@@ -1111,7 +1083,6 @@ def test_checks_reresolve_none_still_launch_fails(tmp_path: Path) -> None:
         store=FakeStore(),
         repo_dir="/repo",
         artifacts_root=str(tmp_path),
-        stage_for_node={},
         clock=lambda: "ts",
         check_reresolve=lambda: None,  # no different ready profile -> still infra
     )
@@ -1152,7 +1123,6 @@ def test_mutation_guard_active_when_checks_present(tmp_path: Path) -> None:
     services = _services(
         FakeRouter(_result()),
         store,
-        {},
         FakeCheckRunner(CheckOutcome(passed=True, runs=(_run(True),))),
         snapshot=FakeSnapshot(["before", "after"]),
     )  # checksum changed → mutated
@@ -1168,7 +1138,6 @@ def test_mutation_guard_clean_check_still_passes(tmp_path: Path) -> None:
     services = _services(
         FakeRouter(_result()),
         FakeStore(),
-        {},
         FakeCheckRunner(CheckOutcome(passed=True, runs=(_run(True),))),
         snapshot=FakeSnapshot(["same"]),
     )  # capture() returns "same" both times
@@ -1254,7 +1223,6 @@ def test_publish_pull_request_runs_git_sequence(tmp_path: Path) -> None:
     services = _services(
         FakeRouter(_result()),
         store,
-        {},
         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
         git=git,
     )
@@ -1275,7 +1243,6 @@ def test_publish_pull_request_requires_branch(tmp_path: Path) -> None:
     services = _services(
         FakeRouter(_result()),
         FakeStore(),
-        {},
         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
         git=FakeGit(),
     )
@@ -1290,7 +1257,6 @@ def test_publish_pull_request_requires_body_path(tmp_path: Path) -> None:
     services = _services(
         FakeRouter(_result()),
         FakeStore(),
-        {},
         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
         git=git,
     )
@@ -1311,7 +1277,6 @@ def test_publish_finalize_provides_pr_body(tmp_path: Path) -> None:
         store=store,
         repo_dir="/repo",
         artifacts_root=str(tmp_path),
-        stage_for_node={},
         clock=lambda: "ts",
         git=git,
         finalize=lambda: "/done/task-1.summary.md",
@@ -1334,7 +1299,6 @@ def test_publish_none_policy_writes_no_git(tmp_path: Path) -> None:
     services = _services(
         FakeRouter(_result()),
         store,
-        {},
         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
         git=git,
     )
@@ -1364,7 +1328,6 @@ def test_publish_git_failure_after_finalize_raises_manual(tmp_path: Path) -> Non
         store=store,
         repo_dir="/repo",
         artifacts_root=str(tmp_path),
-        stage_for_node={},
         clock=lambda: "ts",
         git=git,
         finalize=lambda: "/done/task-1.summary.md",  # finalize already ran (file moved + summary)

@@ -893,7 +893,6 @@ class Orchestrator:
             store=self._store,
             repo_dir=self._config.repo.local_path,
             artifacts_root=str(self._artifacts_root),
-            snapshot=snapshot,
             clock=self._clock,
             git=self._git,
             notifier=self._notifier,
@@ -1341,7 +1340,7 @@ class Orchestrator:
                 result = self._notifier.wait_for_answer(handle)
                 write_answer(path, result)
                 self._register_artifact(p.task.id, "hitl", str(path))
-                self._require_human_result(p, Stage.PLANNING, "approval", result)
+                self._require_human_result(p, "check-discovery", "approval", result)
                 if result.approved is True:
                     mark_consumed(path)
                 return result.approved is True
@@ -1366,7 +1365,7 @@ class Orchestrator:
         write_waiting_interaction(
             path,
             task_id=p.task.id,
-            stage=Stage.PLANNING,
+            node_id="check-discovery",
             subtask=None,
             signal=signal,
             handle=handle,
@@ -1375,7 +1374,7 @@ class Orchestrator:
         result = self._notifier.wait_for_answer(handle)
         write_answer(path, result)
         self._register_artifact(p.task.id, "hitl", str(path))
-        self._require_human_result(p, Stage.PLANNING, "approval", result)
+        self._require_human_result(p, "check-discovery", "approval", result)
         if result.approved is True:
             mark_consumed(path)
         return result.approved is True
@@ -1716,7 +1715,7 @@ class Orchestrator:
     def _require_human_result(
         self,
         p: _Pipeline,
-        stage: Stage,
+        label: str,
         kind: AskKind,
         result: AskResult,
     ) -> None:
@@ -1729,19 +1728,19 @@ class Orchestrator:
             failure = "invalid_response"
         elif failure is None:
             failure = "invalid_response"
-        self._raise_human_failure(p, stage, failure)
+        self._raise_human_failure(p, label, failure)
 
     def _raise_human_failure(
         self,
         p: _Pipeline,
-        stage: Stage,
+        label: str,
         failure: str,
     ) -> None:
         self._log(p.task.id).warning(
             "human input failed",
-            extra={"stage": stage.value, "failure": failure},
+            extra={"label": label, "failure": failure},
         )
-        raise ManualActionRequired(f"{stage.value} human input failed: {failure}")
+        raise ManualActionRequired(f"{label} human input failed: {failure}")
 
     def _resolved_checks(self, p: _Pipeline) -> tuple[ResolvedCheck, ...] | None:
         """The resolved profile's checks; on resume, fall back to the cached profile (§13)."""

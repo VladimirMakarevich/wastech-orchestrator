@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from wastech_orchestrator.providers.base import AgentRunResult, Stage
+from wastech_orchestrator.providers.base import AgentRunResult
 
 _CHECKSUM_CHUNK = 65536
 
@@ -80,7 +80,7 @@ def archive_task_artifacts(artifacts_root: str | Path, task_id: str, attempt: in
 def create_attempt_dir(
     artifacts_root: str | Path,
     task_id: str,
-    stage: Stage,
+    node_id: str,
     attempt: int,
     provider: str,
     *,
@@ -94,7 +94,7 @@ def create_attempt_dir(
     a distinct directory even though its provider attempt counter starts again at one. A collision
     raises :class:`FileExistsError`.
     """
-    stage_dir = Path(artifacts_root) / "logs" / task_id / "stages" / stage.value
+    stage_dir = Path(artifacts_root) / "logs" / task_id / "stages" / node_id
     if subtask is not None:
         stage_dir = stage_dir / f"sub-{subtask:02d}"
     attempt_dir = stage_dir / f"run-{node_run_id:06d}" / f"{attempt}-{provider}"

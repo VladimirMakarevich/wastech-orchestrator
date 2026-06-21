@@ -9,7 +9,7 @@ command line.
 from __future__ import annotations
 
 from wastech_orchestrator.config.schema import ProviderConfig
-from wastech_orchestrator.providers.base import AgentRunRequest, Stage
+from wastech_orchestrator.providers.base import AgentRunRequest
 from wastech_orchestrator.providers.claude import build_claude_argv
 from wastech_orchestrator.providers.codex import build_codex_argv
 
@@ -22,7 +22,7 @@ _HOSTILE = (
 def _request(prompt: str) -> AgentRunRequest:
     return AgentRunRequest(
         task_id="t",
-        stage=Stage.IMPLEMENTATION,
+        node_id="implementation",
         working_directory=".",
         prompt=prompt,
         permission_profile="workspace-write",

@@ -358,8 +358,8 @@ logs/
     failure_report.json / stuck.md# written iff the task ended manual_action_required
     review/findings.json          # review findings (severity → blocking)
     checks/<NNN>.log              # each check command's output (redacted)
-    stages/<stage>/rendered-prompt.md  # the exact stage prompt sent (redacted; rendered from the node's role_file)
-    stages/<stage>/run-<stage-run-id>/<attempt>-<provider>/
+    stages/<node-id>/rendered-prompt.md  # the exact node prompt sent (redacted; rendered from the node's role_file)
+    stages/<node-id>/run-<node-run-id>/<attempt>-<provider>/
       request.json                # redacted request (argv, no secrets)
       stdout.log / stderr.log     # redacted process output
       events.jsonl                # redacted provider event stream
@@ -373,7 +373,7 @@ logs/
 - **Node run vs. attempt**: `run-<node-run-id>` is reserved in SQLite before the provider starts and changes for every repeated node invocation, including each fixing cycle and recovery run. `<attempt>` starts at `1` inside that run and increments only for provider fallback.
 - **No secrets anywhere**: `request.json`, the stdout/stderr/events logs, diffs, SQLite rows, the ledger, and the failure report are all redacted; `denied_read_paths` (`.env`, `secrets/**`) are excluded from agent reads and their values are scrubbed from any sink.
 
-- **Rendered node prompts**: `stages/<stage>/rendered-prompt.md` is the exact (redacted) instruction the agent received for that node — read it first to confirm a `role_file` edit took effect and rendered as intended.
+- **Rendered node prompts**: `stages/<node-id>/rendered-prompt.md` is the exact (redacted) instruction the agent received for that node — read it first to confirm a `role_file` edit took effect and rendered as intended.
 
 Use the operator log for live monitoring. Provider `stdout.log` and `stderr.log` are finalized and redacted after the subprocess exits, so do not tail them while an attempt is still running.
 

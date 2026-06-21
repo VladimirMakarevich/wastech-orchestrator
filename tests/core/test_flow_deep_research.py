@@ -19,7 +19,7 @@ from wastech_orchestrator.core.flow.registry import FlowRegistry
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import FlowNode
 from wastech_orchestrator.core.state_machine import Status
-from wastech_orchestrator.providers.base import AgentRunResult, ProviderId, RunStatus, Stage
+from wastech_orchestrator.providers.base import AgentRunResult, ProviderId, RunStatus
 from wastech_orchestrator.routing.router import ResolvedRoute, RouteSource, StageOutcome
 from wastech_orchestrator.state_store import EvaluationRow, NodeLineageRow
 
@@ -82,9 +82,9 @@ class _Router:
         self.requests: list[Any] = []
         self.session_counter = 0
 
-    def resolve_route(self, stage: Stage, override: Any = None) -> ResolvedRoute:
+    def resolve_route(self, node_id: str, override: Any = None) -> ResolvedRoute:
         return ResolvedRoute(
-            stage=stage, primary=ProviderId.CODEX, fallback=None, source=RouteSource.CONFIG
+            node_id=node_id, primary=ProviderId.CODEX, fallback=None, source=RouteSource.CONFIG
         )
 
     def run_stage(
@@ -100,7 +100,7 @@ class _Router:
         result = AgentRunResult(
             status=RunStatus.SUCCEEDED,
             provider="codex",
-            stage=request.stage,
+            node_id=request.node_id,
             attempt=1,
             exit_code=0,
             started_at="t0",
@@ -186,7 +186,6 @@ def _services(tmp_path: Path, store: _Store, router: _Router) -> NodeServices:
         store=store,  # type: ignore[arg-type]
         repo_dir=str(tmp_path),
         artifacts_root=str(tmp_path / "art"),
-        stage_for_node={"fact_verification": Stage.REVIEW, "critical_review": Stage.REVIEW},
         clock=lambda: "ts",
     )
 
@@ -294,7 +293,9 @@ def test_critic_resume_own_lineage_across_rounds(tmp_path: Path) -> None:
         sources=_GOOD_SOURCE,
         session_id="critic-sess",
     )
-    critic_requests = [r for r in router.requests if getattr(r, "stage", None) is Stage.REVIEW]
+    critic_requests = [
+        r for r in router.requests if getattr(r, "node_id", None) == "critical_review"
+    ]
     # The critic node persisted its own lineage, and a later critic pass resumed that session id.
     assert ("t", "critical_review", -1) in store.node_lineage
     resumed = [r.session_id for r in critic_requests if r.session_id is not None]

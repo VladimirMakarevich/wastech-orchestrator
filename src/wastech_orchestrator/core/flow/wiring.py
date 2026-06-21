@@ -6,11 +6,10 @@ checks / git / notifier / store) and the per-run ``_Pipeline`` into the data bun
 runners read. Keeping it here (not in ``orchestrator.py``) keeps the node layer free of any
 orchestrator import and makes the mapping unit-testable with fakes.
 
-Routing is node-based now (a node's ``provider`` field, else the global primary — PRE.1), so the
-``node_id -> Stage`` map (:func:`build_stage_map`) no longer selects a provider. It supplies each
-agent / evaluator node's ``Stage`` *identity* — the request ``stage``, its output schema, HITL
-parsing, and interaction paths — which the ``Stage`` enum still backs until P4. Checks / publish
-nodes have no stage and never index it (the engine-driver test relies on this).
+Routing is node-based (a node's ``provider`` field, else the global primary — PRE.1); each node
+runner uses the node's own id as its identity (the request ``node_id`` and the audit / interaction
+paths) and derives its typed-output contract from the node's declared fields. There is no
+``Stage`` map: nothing here translates a node into a pipeline stage.
 """
 
 from __future__ import annotations
@@ -31,52 +30,11 @@ from wastech_orchestrator.core.flow.nodes.base import (
     RouterPort,
     RunProcess,
 )
-from wastech_orchestrator.core.flow.schema import AgentNode, FlowNode
-from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
-from wastech_orchestrator.providers.base import Stage
 from wastech_orchestrator.providers.process import run_process as _default_run_process
 from wastech_orchestrator.routing.snapshots import SnapshotHook
 
 if TYPE_CHECKING:  # avoid a circular import — orchestrator imports this module at cutover.
     from wastech_orchestrator.core.orchestrator import _Pipeline
-
-_ROUTED_KINDS = frozenset({"agent", "evaluator"})
-_STAGE_VALUES = frozenset(s.value for s in Stage)
-
-
-def build_stage_map(snapshot: FlowSnapshot) -> dict[str, Stage]:
-    """Map each agent / evaluator node id to its ``Stage`` identity.
-
-    The ``Stage`` is only a request *identity* — the output schema, HITL parsing, and interaction /
-    observability paths — never the provider (routing is node-based, PRE.1). In the implementation
-    flow the node ids are Stage-aligned (``implementation`` -> ``IMPLEMENTATION`` …) and keep that
-    identity. A node whose id is not a ``Stage`` value (research / audit flows) gets a **kind**
-    default — generic, keyed by capability, never by node name: a HITL-capable agent needs the
-    human-input schema (``REFINEMENT``), an evaluator the verdict identity (``REVIEW``), any other
-    agent the generic author identity (``IMPLEMENTATION``). Same-identity nodes share the per-stage
-    audit directory (the run-id-keyed audit files do not collide); per-node audit paths land with
-    the P4 removal of the ``Stage`` enum.
-    """
-    return {
-        node.id: _stage_identity(node)
-        for node in snapshot.nodes_by_id.values()
-        if node.kind in _ROUTED_KINDS
-    }
-
-
-def _stage_identity(node: FlowNode) -> Stage:
-    """The ``Stage`` identity for an agent / evaluator node (see :func:`build_stage_map`)."""
-    if node.id in _STAGE_VALUES:
-        return Stage(node.id)
-    if (
-        isinstance(node, AgentNode)
-        and node.hitl is not None
-        and (node.hitl.allow_question or node.hitl.allow_approval)
-    ):
-        return Stage.REFINEMENT  # a HITL node needs the human-input-capable schema
-    if node.kind == "evaluator":
-        return Stage.REVIEW
-    return Stage.IMPLEMENTATION
 
 
 def build_node_services(
@@ -86,7 +44,6 @@ def build_node_services(
     store: NodeRunStorePort,
     repo_dir: str,
     artifacts_root: str,
-    snapshot: FlowSnapshot,
     clock: Callable[[], str],
     git: GitPort | None = None,
     notifier: NotifierPort | None = None,
@@ -115,7 +72,6 @@ def build_node_services(
         store=store,
         repo_dir=repo_dir,
         artifacts_root=artifacts_root,
-        stage_for_node=build_stage_map(snapshot),
         clock=clock,
         default_timeout_seconds=default_timeout_seconds,
         snapshot=snapshot_hook,

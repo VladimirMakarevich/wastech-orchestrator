@@ -32,14 +32,14 @@ from wastech_orchestrator.config.schema import SupervisorConfig
 from wastech_orchestrator.core.flow.nodes.base import RegisterArtifact, RouterPort
 from wastech_orchestrator.core.flow.prompt import RoleFileError, render_role_prompt
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
-from wastech_orchestrator.providers.base import AgentRunRequest, Stage
+from wastech_orchestrator.providers.base import AgentRunRequest
 from wastech_orchestrator.state_store import EvaluationRow
 
 _LOG = logging.getLogger(__name__)
 
-# The supervisor reuses the SUMMARY stage identity for its read-only request (output schema / audit
-# stage); it is not a graph node, so it records ``evaluations`` rows, never ``node_runs``.
-_SUPERVISOR_STAGE = Stage.SUMMARY
+# The supervisor's read-only requests carry a dedicated ``supervisor`` node identity (audit dir /
+# route label); it is not a graph node, so it records ``evaluations`` rows, never ``node_runs``.
+_SUPERVISOR_IDENTITY = "supervisor"
 
 
 class SupervisorStorePort(Protocol):
@@ -141,10 +141,10 @@ class Supervisor:
         file unreadable) is logged and yields ``None`` — never raised.
         """
         try:
-            route = self._router.resolve_route(_SUPERVISOR_STAGE, None)
+            route = self._router.resolve_route(_SUPERVISOR_IDENTITY, None)
             request = AgentRunRequest(
                 task_id=task_id,
-                stage=_SUPERVISOR_STAGE,
+                node_id=_SUPERVISOR_IDENTITY,
                 working_directory=self._repo_dir,
                 prompt=prompt,
                 permission_profile="read-only",  # forced — the supervisor never writes
