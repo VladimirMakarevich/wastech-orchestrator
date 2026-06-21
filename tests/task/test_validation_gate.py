@@ -126,6 +126,27 @@ def test_missing_description(config: OrchestratorConfig) -> None:
     assert result.detail == "description"
 
 
+def test_task_type_parsed_into_normalized(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\ntask_type: deep_research\n---\n\n## Description\n\nx\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.task_type == "deep_research"
+
+
+def test_task_type_absent_defaults_to_none(config: OrchestratorConfig) -> None:
+    # No ``task_type`` → ``None`` (the registry defaults it to ``implementation`` at dispatch).
+    result = _gate(config).validate(_src(_GOOD))
+    assert result.normalized is not None
+    assert result.normalized.task_type is None
+
+
+def test_task_type_must_be_a_string(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\ntask_type: 7\n---\n\n## Description\n\nx\n"
+    result = _gate(config).validate(_src(text))
+    assert result.reason is ValidationReason.INVALID_FIELD_TYPE
+
+
 def test_refined_is_now_an_unknown_field(config: OrchestratorConfig) -> None:
     # PRE.3: the clean task dropped ``refined`` (refinement-skip is completeness-driven). The key
     # is no longer in the allowlist → fail-closed UNKNOWN_TOP_LEVEL_FIELD.
@@ -294,9 +315,7 @@ def test_prompt_audit_non_boolean_is_rejected(config: OrchestratorConfig) -> Non
 
 
 @pytest.mark.parametrize("field", ["model", "reasoning"])
-def test_model_and_reasoning_are_now_unknown_fields(
-    config: OrchestratorConfig, field: str
-) -> None:
+def test_model_and_reasoning_are_now_unknown_fields(config: OrchestratorConfig, field: str) -> None:
     # PRE.3: model/reasoning live on the flow node, never the task → unknown top-level fields now.
     text = f"---\nid: task-001\ntitle: T\n{field}: x\n---\n\n## Description\n\nDo it.\n"
     result = _gate(config).validate(_src(text))

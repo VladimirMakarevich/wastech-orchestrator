@@ -84,6 +84,10 @@ _PROFILE_MAP: dict[str, tuple[str, tuple[str, ...]]] = {
     "workspace-write": ("acceptEdits", ("Read", "Glob", "Grep", "Edit", "Write", "Bash")),
 }
 
+# The web tools added to ``--allowedTools`` only when the flow grants network
+# (request.network_access); omitted otherwise so a headless run cannot reach the network (P3.2).
+_NETWORK_TOOLS: tuple[str, ...] = ("WebFetch", "WebSearch")
+
 # Statuses on the terminal ``result`` event that mark the turn as NOT having satisfied the task. Any
 # other outcome is treated as a completed run — task quality is judged later by the orchestrator's
 # review/checks, not by the adapter.
@@ -275,6 +279,11 @@ def build_claude_argv(
 
     profile = request.permission_profile or config.permission_profile or _DEFAULT_PROFILE
     mode, allowed_tools = map_permission(profile)
+    if request.network_access:
+        # The flow granted network (network_policy): allow the web tools. Absent the grant they are
+        # omitted, so a headless ``acceptEdits``/``plan`` run cannot reach the network through them.
+        # This only adds network tools — it never relaxes the filesystem permission mode.
+        allowed_tools = (*allowed_tools, *_NETWORK_TOOLS)
     _reject_weaker_permission_override(combined_extra, mode)
 
     argv = [

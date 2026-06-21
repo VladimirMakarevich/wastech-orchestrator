@@ -1,0 +1,1 @@
+Gather external evidence that bears on the research question (documentation, specifications, prior art). Use only the network access the flow grants. Record each source with a stable reference (URL or citation) and a short note on what it establishes. Read only; do not edit code or write files. Return the typed structured result required by the output schema.

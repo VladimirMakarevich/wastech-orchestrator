@@ -108,6 +108,12 @@ class AgentRunRequest:
     extra_args: list[str] = field(default_factory=list)
     reasoning: str | None = None
     session_id: str | None = None
+    # Whether the agent process may reach the network (P3.2 ``network_policy`` enforcement). Default
+    # ``False`` — the flow grants network only by declaring ``network_policy``; absent, no network.
+    # The adapter maps it onto its sandbox: Codex enables the workspace-write sandbox's network
+    # access; Claude allows the WebFetch/WebSearch tools. It only toggles the network — never the
+    # filesystem sandbox/approvals (the ceiling stays in force).
+    network_access: bool = False
 
 
 @dataclass(frozen=True)

@@ -56,6 +56,25 @@ def test_map_permission_rejects_full_access_and_unknown() -> None:
         map_permission("anything-goes")
 
 
+def test_network_access_off_by_default_no_web_tools(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    allowed = _argv(claude_config, make_request())[
+        _argv(claude_config, make_request()).index("--allowedTools") + 1
+    ]
+    assert "WebFetch" not in allowed and "WebSearch" not in allowed
+
+
+def test_network_access_allows_web_tools_when_granted(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    argv = _argv(claude_config, make_request(network_access=True))
+    allowed = argv[argv.index("--allowedTools") + 1]
+    assert "WebFetch" in allowed and "WebSearch" in allowed
+    # The filesystem permission mode is unchanged — network is the only thing added.
+    assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
+
+
 def test_denied_commands_become_disallowed_tools(
     claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:

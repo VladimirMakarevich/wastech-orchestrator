@@ -58,7 +58,11 @@ def _utc_now_iso() -> str:
 # (it is redacted everywhere else). One active editing session per ``(task_id, subtask_order)``;
 # resume for Claude/Codex reads it, the author nodes (implementation/fixing) update it. Created on a
 # fresh DB by ``_SCHEMA`` (no additive column to migrate).
-DB_SCHEMA_VERSION = 9
+# v10 (flow-engine P3.3): added the ``node_lineage`` table — the durable own session for a
+# ``resume_own_lineage`` node (the research critic), keyed by ``(task_id, node_id, subtask_order)``
+# so a node remembers what it flagged across rework rounds. Like ``editing_lineage`` the raw session
+# id lives only here. Created on a fresh DB by ``_SCHEMA`` (no additive column to migrate).
+DB_SCHEMA_VERSION = 10
 
 
 class IncompatibleStateError(Exception):
@@ -256,6 +260,16 @@ CREATE TABLE IF NOT EXISTS editing_lineage (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (task_id, subtask_order)
 );
+
+CREATE TABLE IF NOT EXISTS node_lineage (
+    task_id TEXT NOT NULL REFERENCES tasks(task_id),
+    node_id TEXT NOT NULL,
+    subtask_order INTEGER NOT NULL DEFAULT -1,
+    provider TEXT NOT NULL,
+    raw_session_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (task_id, node_id, subtask_order)
+);
 """
 
 
@@ -422,6 +436,24 @@ class EditingLineageRow:
     """
 
     task_id: str
+    provider: str  # claude | codex
+    raw_session_id: str
+    subtask_order: int | None = None
+    updated_at: str | None = None
+
+
+@dataclass(frozen=True)
+class NodeLineageRow:
+    """The durable own session for a ``resume_own_lineage`` node (flow-engine P3.3).
+
+    Keyed by ``(task_id, node_id, subtask_order)`` — the research critic keeps its own session
+    across rework rounds so it remembers what it already flagged. Like :class:`EditingLineageRow`,
+    ``raw_session_id`` is the provider's real session id and **never** leaves ``state.db``;
+    ``provider`` binds it so the node resumes only when its resolved provider matches.
+    """
+
+    task_id: str
+    node_id: str
     provider: str  # claude | codex
     raw_session_id: str
     subtask_order: int | None = None
@@ -1132,12 +1164,62 @@ class StateStore:
                 (row.task_id, subtask, row.provider, row.raw_session_id, row.updated_at or now),
             )
 
-    def clear_editing_lineage(
-        self, task_id: str, conn: sqlite3.Connection | None = None
-    ) -> None:
+    def clear_editing_lineage(self, task_id: str, conn: sqlite3.Connection | None = None) -> None:
         """Delete a task's editing sessions so a fresh ``rerun`` starts new provider sessions."""
         with self._writer(conn) as c:
             c.execute("DELETE FROM editing_lineage WHERE task_id = ?", (task_id,))
+            c.execute("DELETE FROM node_lineage WHERE task_id = ?", (task_id,))
+
+    # --- node_lineage (resume_own_lineage durable sessions, P3.3) -------------------------
+
+    def get_node_lineage(
+        self, task_id: str, node_id: str, subtask_order: int | None = None
+    ) -> NodeLineageRow | None:
+        """The durable own session for a ``resume_own_lineage`` node, or ``None`` if none yet."""
+        subtask = _NO_SUBTASK if subtask_order is None else subtask_order
+        cur = self._conn.execute(
+            "SELECT provider, raw_session_id, updated_at FROM node_lineage "
+            "WHERE task_id = ? AND node_id = ? AND subtask_order = ?",
+            (task_id, node_id, subtask),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return NodeLineageRow(
+            task_id=task_id,
+            node_id=node_id,
+            provider=row["provider"],
+            raw_session_id=row["raw_session_id"],
+            subtask_order=subtask_order,
+            updated_at=row["updated_at"],
+        )
+
+    def upsert_node_lineage(
+        self, row: NodeLineageRow, conn: sqlite3.Connection | None = None
+    ) -> None:
+        """Insert or replace the durable own session for a ``resume_own_lineage`` node."""
+        now = self._clock()
+        subtask = _NO_SUBTASK if row.subtask_order is None else row.subtask_order
+        with self._writer(conn) as c:
+            c.execute(
+                """
+                INSERT INTO node_lineage (
+                    task_id, node_id, subtask_order, provider, raw_session_id, updated_at
+                ) VALUES (?,?,?,?,?,?)
+                ON CONFLICT(task_id, node_id, subtask_order) DO UPDATE SET
+                    provider = excluded.provider,
+                    raw_session_id = excluded.raw_session_id,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    row.task_id,
+                    row.node_id,
+                    subtask,
+                    row.provider,
+                    row.raw_session_id,
+                    row.updated_at or now,
+                ),
+            )
 
 
 # Statuses in which a task does NOT own the processing slot.

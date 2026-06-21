@@ -15,7 +15,7 @@ nodes have no stage and never index it (the engine-driver test relies on this).
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -29,9 +29,12 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NotifierPort,
     RegisterArtifact,
     RouterPort,
+    RunProcess,
 )
+from wastech_orchestrator.core.flow.schema import AgentNode, FlowNode
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
 from wastech_orchestrator.providers.base import Stage
+from wastech_orchestrator.providers.process import run_process as _default_run_process
 from wastech_orchestrator.routing.snapshots import SnapshotHook
 
 if TYPE_CHECKING:  # avoid a circular import — orchestrator imports this module at cutover.
@@ -44,17 +47,36 @@ _STAGE_VALUES = frozenset(s.value for s in Stage)
 def build_stage_map(snapshot: FlowSnapshot) -> dict[str, Stage]:
     """Map each agent / evaluator node id to its ``Stage`` identity.
 
-    In the packaged flows these ids are Stage-aligned (``implementation`` -> ``IMPLEMENTATION`` …).
-    The map supplies the node's request ``stage`` (output schema, HITL parsing, interaction paths),
-    not its provider — routing is node-based (PRE.1). An agent / evaluator node whose id is not a
-    ``Stage`` value is absent from the map, so its runner raises ``KeyError`` — a loud, early
-    failure (a P4 cleanup, when the ``Stage`` enum is removed entirely).
+    The ``Stage`` is only a request *identity* — the output schema, HITL parsing, and interaction /
+    observability paths — never the provider (routing is node-based, PRE.1). In the implementation
+    flow the node ids are Stage-aligned (``implementation`` -> ``IMPLEMENTATION`` …) and keep that
+    identity. A node whose id is not a ``Stage`` value (research / audit flows) gets a **kind**
+    default — generic, keyed by capability, never by node name: a HITL-capable agent needs the
+    human-input schema (``REFINEMENT``), an evaluator the verdict identity (``REVIEW``), any other
+    agent the generic author identity (``IMPLEMENTATION``). Same-identity nodes share the per-stage
+    audit directory (the run-id-keyed audit files do not collide); per-node audit paths land with
+    the P4 removal of the ``Stage`` enum.
     """
     return {
-        node.id: Stage(node.id)
+        node.id: _stage_identity(node)
         for node in snapshot.nodes_by_id.values()
-        if node.kind in _ROUTED_KINDS and node.id in _STAGE_VALUES
+        if node.kind in _ROUTED_KINDS
     }
+
+
+def _stage_identity(node: FlowNode) -> Stage:
+    """The ``Stage`` identity for an agent / evaluator node (see :func:`build_stage_map`)."""
+    if node.id in _STAGE_VALUES:
+        return Stage(node.id)
+    if (
+        isinstance(node, AgentNode)
+        and node.hitl is not None
+        and (node.hitl.allow_question or node.hitl.allow_approval)
+    ):
+        return Stage.REFINEMENT  # a HITL node needs the human-input-capable schema
+    if node.kind == "evaluator":
+        return Stage.REVIEW
+    return Stage.IMPLEMENTATION
 
 
 def build_node_services(
@@ -76,6 +98,9 @@ def build_node_services(
     register_artifact: RegisterArtifact | None = None,
     finalize: Callable[[], str | None] | None = None,
     check_reresolve: Callable[[], tuple[ResolvedCheck, ...] | None] | None = None,
+    run_process: RunProcess = _default_run_process,
+    process_env: Mapping[str, str] | None = None,
+    scan_timeout_s: int = 600,
 ) -> NodeServices:
     """Assemble the unit-shared :class:`NodeServices` (collaborators + the routing map).
 
@@ -102,6 +127,9 @@ def build_node_services(
         register_artifact=register_artifact,
         finalize=finalize,
         check_reresolve=check_reresolve,
+        run_process=run_process,
+        process_env=dict(process_env or {}),
+        scan_timeout_s=scan_timeout_s,
     )
 
 

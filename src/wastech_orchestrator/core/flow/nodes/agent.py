@@ -35,6 +35,7 @@ from wastech_orchestrator.core.flow.nodes.base import (
 )
 from wastech_orchestrator.core.flow.nodes.human_gate import HumanGate
 from wastech_orchestrator.core.flow.observability import record_run_observability
+from wastech_orchestrator.core.flow.output_policy import resolve_output_policy, within_subdir
 from wastech_orchestrator.core.flow.prompt import render_role_prompt
 from wastech_orchestrator.core.flow.schema import AgentNode, FlowNode
 from wastech_orchestrator.core.hitl import (
@@ -105,9 +106,7 @@ class AgentNodeRunner:
         if typed.human_input is None:
             if had_interaction:
                 mark_consumed(path)
-            return NodeResult(
-                node_id=node.id, outcome=_agent_outcome(outcome), node_run_id=run_id
-            )
+            return NodeResult(node_id=node.id, outcome=_agent_outcome(outcome), node_run_id=run_id)
         if had_interaction:
             raise NodeManualRequired(f"agent node {node.id!r}: unexpected repeated HITL request")
 
@@ -248,6 +247,7 @@ class AgentNodeRunner:
         self._in.diff_path = self._s.git.write_current_diff(ctx.task_id)
         if self._s.register_artifact is not None:
             self._s.register_artifact(ctx.task_id, "diff", self._in.diff_path)
+        self._apply_output_containment_guard(node, ctx)
         dangerous = classify_dangerous_diff(self._s.git.changed_code_entries())
         if dangerous is None:
             return
@@ -277,6 +277,30 @@ class AgentNodeRunner:
             mark_consumed(path)
             return
         self._reconsider(node, ctx, stage, route, path)
+
+    def _apply_output_containment_guard(self, node: AgentNode, ctx: NodeContext) -> None:
+        """After a workspace-write edit, enforce the flow's ``output_policy`` write containment.
+
+        For a document/report flow the only writable area is the resolved report directory: a write
+        anywhere else (a tracked or untracked code change outside it) fails closed to manual review.
+        For ``private_control_workspace_report`` the report lives under the gitignored ``.worc/``
+        home, so it never appears in ``changed_code_entries`` — the guard then requires the tracked
+        tree to be byte-for-byte unchanged (any tracked/untracked code change is an escape).
+        ``code_change`` flows have no report directory and rely on the dangerous-diff guard instead.
+        """
+        policy = resolve_output_policy(ctx.snapshot.doc.output_policy, ctx.task_id)
+        if policy.report_subdir is None or self._s.git is None:
+            return
+        offenders = [
+            entry.path
+            for entry in self._s.git.changed_code_entries()
+            if not within_subdir(entry.path, policy.report_subdir)
+        ]
+        if offenders:
+            raise NodeManualRequired(
+                f"agent node {node.id!r}: output_policy {policy.policy.value!r} confines writes to "
+                f"{policy.report_subdir!r}; refusing changes outside it: {sorted(offenders)}"
+            )
 
     def _resume_guardrail(
         self, node: AgentNode, path: Any, persisted: Mapping[str, Any], dangerous: DangerousDiff
@@ -356,6 +380,9 @@ class AgentNodeRunner:
             reasoning=node.reasoning,
             extra_args=list(node.extra_args),
             session_id=self._resume_session_id(node, ctx, route),
+            # Network is a flow-ceiling dimension: every node may reach the network iff the flow
+            # declares a ``network_policy`` (advisories/research); absence = no network (P3.2).
+            network_access=ctx.snapshot.doc.network_policy is not None,
         )
 
     def _prompt_variables(self, ctx: NodeContext, stage: Stage) -> dict[str, object | None]:

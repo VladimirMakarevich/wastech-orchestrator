@@ -418,10 +418,20 @@ def test_supervisor_summary_once_per_whole_task_not_subtask(
         "decompose": True,
         "skills": [],
         "subtasks": [
-            {"order": 1, "title": "First", "slug": "first",
-             "acceptance_criteria": ["a"], "depends_on": []},
-            {"order": 2, "title": "Second", "slug": "second",
-             "acceptance_criteria": ["b"], "depends_on": [1]},
+            {
+                "order": 1,
+                "title": "First",
+                "slug": "first",
+                "acceptance_criteria": ["a"],
+                "depends_on": [],
+            },
+            {
+                "order": 2,
+                "title": "Second",
+                "slug": "second",
+                "acceptance_criteria": ["b"],
+                "depends_on": [1],
+            },
         ],
     }
     state = {"n": 0}
@@ -430,8 +440,13 @@ def test_supervisor_summary_once_per_whole_task_not_subtask(
         def run(self, request: AgentRunRequest) -> AgentRunResult:
             if request.stage is Stage.PLANNING:
                 return AgentRunResult(
-                    status=RunStatus.SUCCEEDED, provider=self.id, stage=request.stage,
-                    attempt=request.attempt, exit_code=0, started_at="t", finished_at="t",
+                    status=RunStatus.SUCCEEDED,
+                    provider=self.id,
+                    stage=request.stage,
+                    attempt=request.attempt,
+                    exit_code=0,
+                    started_at="t",
+                    finished_at="t",
                     final_message="plan",
                     structured_output={"content": "plan", "human_input": None, **subtasks},
                 )
@@ -445,8 +460,12 @@ def test_supervisor_summary_once_per_whole_task_not_subtask(
         ProviderId.CODEX: DecompProvider("codex"),
     }
     orch, store, _, _ = _build(
-        git_repo, make_git_config, tmp_path, providers=providers,
-        check_verdicts=[0], config_kwargs={"decomposition": True},
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"decomposition": True},
     )
     result = orch.run_task(_complete_task(tmp_path, "task-sup-dec"))
     assert result.final_status is Status.DONE
@@ -456,9 +475,7 @@ def test_supervisor_summary_once_per_whole_task_not_subtask(
     assert len(finals) == 1  # exactly one, despite two subtasks
 
 
-def test_live_route_defaults_to_global_primary(
-    git_repo, make_git_config, tmp_path: Path
-) -> None:
+def test_live_route_defaults_to_global_primary(git_repo, make_git_config, tmp_path: Path) -> None:
     # Routing is node-based now (PRE.1): the packaged implementation flow declares no per-node
     # `provider`, so every node resolves to the config's global primary (claude) on the live engine
     # path, tagged RouteSource.CONFIG. A task can no longer repoint a stage's provider.
@@ -482,8 +499,6 @@ def test_live_route_defaults_to_global_primary(
     impl = runs["implementation"]
     assert impl.route_primary == "claude"  # the global primary
     assert impl.route_source == "config"
-
-
 
 
 def test_vague_task_runs_refinement(git_repo, make_git_config, tmp_path: Path) -> None:
@@ -834,10 +849,20 @@ def test_decomposed_subtask_spec_path_reaches_implementation_prompt(
         "decompose": True,
         "skills": [],
         "subtasks": [
-            {"order": 1, "title": "First", "slug": "first",
-             "acceptance_criteria": ["a"], "depends_on": []},
-            {"order": 2, "title": "Second", "slug": "second",
-             "acceptance_criteria": ["b"], "depends_on": [1]},
+            {
+                "order": 1,
+                "title": "First",
+                "slug": "first",
+                "acceptance_criteria": ["a"],
+                "depends_on": [],
+            },
+            {
+                "order": 2,
+                "title": "Second",
+                "slug": "second",
+                "acceptance_criteria": ["b"],
+                "depends_on": [1],
+            },
         ],
     }
 
@@ -866,16 +891,18 @@ def test_decomposed_subtask_spec_path_reaches_implementation_prompt(
         ProviderId.CODEX: DecompProvider("codex"),
     }
     orch, _store, _, _ = _build(
-        git_repo, make_git_config, tmp_path, providers=providers,
-        check_verdicts=[0], config_kwargs={"decomposition": True},
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"decomposition": True},
     )
     result = orch.run_task(_complete_task(tmp_path, "task-007"))
     assert result.final_status is Status.DONE
 
     impl_prompts = [
-        r.prompt
-        for r in providers[ProviderId.CLAUDE].requests
-        if r.stage is Stage.IMPLEMENTATION
+        r.prompt for r in providers[ProviderId.CLAUDE].requests if r.stage is Stage.IMPLEMENTATION
     ]
     assert len(impl_prompts) == 2  # one implementation run per subtask, each subtask-scoped
     assert "01-first.md" in impl_prompts[0] and "subtask 1 of 2" in impl_prompts[0].lower()
@@ -891,6 +918,25 @@ def test_single_active_slot_blocks(git_repo, make_git_config, tmp_path: Path) ->
     store.insert_task(TaskRow(task_id="other", title="o", status=Status.RUNNING))
     with pytest.raises(SlotBusyError):
         orch.run_task(_complete_task(tmp_path, "task-008"))
+
+
+def test_unknown_task_type_fails_before_branch(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # A structurally-valid task whose ``task_type`` maps to no flow fails before any side effect:
+    # the flow is resolved before branch prep, so an unknown type → terminal failed, no branch.
+    orch, store, ledger, art = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    task = tmp_path / "task-ut.md"
+    task.write_text(
+        '---\nid: task-ut\ntitle: "X"\ntask_type: no_such_flow\n---\n\n## Description\n\nDo it.\n',
+        encoding="utf-8",
+    )
+    result = orch.run_task(str(task))
+    assert result.final_status is Status.FAILED
+    branches = git_run(["branch", "--list", "agent/*"], git_repo.clone)
+    assert branches == ""
 
 
 def test_rejected_task_no_branch(git_repo, make_git_config, git_run, tmp_path: Path) -> None:
@@ -1747,9 +1793,7 @@ def test_no_auto_merge_leaves_pr_open(git_repo, make_git_config, tmp_path: Path)
     assert ledger.records()[0]["auto_merged"] is False
 
 
-def test_per_task_true_wins_over_global_false(
-    git_repo, make_git_config, tmp_path: Path
-) -> None:
+def test_per_task_true_wins_over_global_false(git_repo, make_git_config, tmp_path: Path) -> None:
     # PRE.2: a per-task ``auto_merge: true`` wins outright over the instance default ``false``;
     # there is no operator gate. The task author owns the decision (see docs/operations.md).
     providers = _both()

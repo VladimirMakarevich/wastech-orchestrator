@@ -23,10 +23,13 @@ TASK_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 # (per-task stage skip) and ``auto_merge`` (task-wins). Provider/model/reasoning/decomposition are
 # the flow's job (a node declares ``provider``/``model``/``reasoning``; ``decomposition:`` and the
 # planning gate decide splitting); refinement-skip is deterministic (completeness classification).
+# ``task_type`` is the dispatch key — it selects the flow (``implementation`` / ``deep_research`` /
+# ``security_audit`` / an operator flow), never anything about *how* a node runs (P0.4).
 ALLOWED_TASK_KEYS: frozenset[str] = frozenset(
     {
         "id",
         "title",
+        "task_type",
         "pr_title",
         "auto_merge",
         "prompt_audit",
@@ -67,6 +70,9 @@ class NormalizedTask:
     id: str
     title: str
     description: str
+    # Dispatch key → flow (P0.4): ``None`` defers to the registry default (``implementation``). The
+    # task never selects the flow from prose and never patches the graph — it only names the flow.
+    task_type: str | None = None
     pr_title: str | None = None
     # Tri-state opt-in to auto-merge (DANGER: bypasses human review). The task value wins outright
     # (PRE.2): True requests it, False always opts out, None defers to config.git.auto_merge.

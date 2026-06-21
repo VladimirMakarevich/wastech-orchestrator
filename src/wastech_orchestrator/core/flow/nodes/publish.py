@@ -6,12 +6,15 @@ returns an unconditional ``done`` outcome on success. A git failure *after* fina
 moved the task file into ``tasks/done/`` raises ``NodeManualRequired`` (a resumable manual stop)
 rather than a terminal failure — see :meth:`PublishNodeRunner.run` for why.
 
-In P1 only ``pull_request`` / ``documentation_pull_request`` are wired (the implementation parity
-path): commit code, commit the audit trail, push the branch, open the PR — each idempotent via
-``publish_operations``. ``none`` / ``local_artifact`` / ``private_control_workspace_report`` write
-no git (the deliverable is the in-workspace artifact); their publishing specifics land in P3. Task
-finalize (moving the task file before the audit commit) and auto-merge stay orchestrator-level and
-are applied by the P1.4 wrapper around the engine.
+``pull_request`` / ``documentation_pull_request`` take the PR path: commit code, commit the audit
+trail, push the branch, open the PR — each idempotent via ``publish_operations``. The documentation
+PR needs no special staging: the after-stage output guard (P3.2) already confined the writes to the
+report directory, so the existing scoped staging commits only those docs.
+``private_control_workspace_report`` (P3.2) stores the report under the gitignored ``.worc/``
+control workspace and touches git not at all — it fails closed if that report would be git-trackable
+(so it can never enter staging/a commit/a PR), leaving the target repo byte-for-byte. ``none`` /
+``local_artifact`` write no git either (the deliverable is the in-workspace artifact). Task finalize
+(moving the task file before the audit commit) and auto-merge stay orchestrator-level.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NodeManualRequired,
     NodeServices,
 )
+from wastech_orchestrator.core.flow.output_policy import resolve_output_policy, within_subdir
 from wastech_orchestrator.core.flow.schema import FlowNode, PublishNode
 from wastech_orchestrator.git_manager import GitCommandError
 from wastech_orchestrator.state_store import NodeRunRow
@@ -88,9 +92,10 @@ class PublishNodeRunner:
         return NodeResult(node_id=node.id, outcome=NodeOutcome("done"), node_run_id=run_id)
 
     def _publish(self, node: PublishNode, ctx: NodeContext) -> str | None:
+        if node.policy is PublishingPolicy.PRIVATE_CONTROL_WORKSPACE_REPORT:
+            return self._store_private_report(ctx)
         if node.policy not in _PR_POLICIES:
-            # none / local_artifact / private report: the deliverable is the in-workspace artifact;
-            # no git publishing in P1 (P3 wires private storage / local artifact handling).
+            # none / local_artifact: the deliverable is the in-workspace artifact; git is untouched.
             return None
         git = self._s.git
         if git is None or self._in.branch is None:
@@ -117,3 +122,35 @@ class PublishNodeRunner:
             title=self._in.pr_title or ctx.task_id,
             body_path=body_path,
         )
+
+    def _store_private_report(self, ctx: NodeContext) -> str | None:
+        """Finalize a ``private_control_workspace_report`` deliverable without touching git (P3.2).
+
+        The report is already written under the gitignored ``.worc/`` control workspace by the
+        writing node (the after-stage guard confined it there). This node touches git **not at all**
+        — the target repo stays byte-for-byte. It fails closed if any file under the report dir is
+        git-trackable: a report that could enter staging / a commit / a PR is a leak, so we refuse
+        rather than risk publishing it. The report files are registered as audit artifacts.
+        """
+        resolved = resolve_output_policy(ctx.snapshot.doc.output_policy, ctx.task_id)
+        if resolved.report_subdir is None:  # defensive: a non-report output_policy on this node
+            return None
+        if self._s.git is not None:
+            leaking = [
+                entry.path
+                for entry in self._s.git.changed_code_entries()
+                if within_subdir(entry.path, resolved.report_subdir)
+            ]
+            if leaking:
+                raise NodeManualRequired(
+                    f"private report under {resolved.report_subdir!r} is git-trackable "
+                    f"(not ignored): {sorted(leaking)} would enter staging/commit/PR — refusing to "
+                    "publish (ensure the .worc/ control workspace is gitignored)"
+                )
+        report_dir = resolved.report_dir(self._s.repo_dir)
+        if report_dir is not None and self._s.register_artifact is not None:
+            for filename in resolved.required_files:
+                path = report_dir / filename
+                if path.exists():
+                    self._s.register_artifact(ctx.task_id, "report", str(path))
+        return None

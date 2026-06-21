@@ -13,7 +13,7 @@ The collaborator fields are typed as narrow :class:`Protocol`\\ s so the real
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
@@ -22,12 +22,14 @@ from wastech_orchestrator.checks.model import ResolvedCheck
 from wastech_orchestrator.git_manager import ChangedPath
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult
 from wastech_orchestrator.providers.base import AgentRunRequest, ProviderId, Stage
+from wastech_orchestrator.providers.process import ProcessResult, run_process
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.routing.snapshots import SnapshotHook
 from wastech_orchestrator.state_store import (
     CheckRunRow,
     EditingLineageRow,
     EvaluationRow,
+    NodeLineageRow,
     NodeRunRow,
     ProviderAttemptRow,
 )
@@ -35,6 +37,10 @@ from wastech_orchestrator.state_store import (
 #: Register a written artifact in the audit trail: ``(task_id, kind, path)``. The orchestrator's
 #: ``_register_artifact`` (sha256 + upsert, skips a missing file) satisfies it.
 RegisterArtifact = Callable[[str, str, str], None]
+
+#: The safe argv process runner (``providers.process.run_process``) the ``dependency_scan`` checker
+#: launches its scanners through (argv-without-shell, mandatory timeout, allowlisted env).
+RunProcess = Callable[..., ProcessResult]
 
 
 class NodeInfraError(Exception):
@@ -65,9 +71,7 @@ class RouterPort(Protocol):
     selects the provider.
     """
 
-    def resolve_route(
-        self, stage: Stage, provider: ProviderId | None = None
-    ) -> ResolvedRoute: ...
+    def resolve_route(self, stage: Stage, provider: ProviderId | None = None) -> ResolvedRoute: ...
 
     def run_stage(
         self,
@@ -131,6 +135,12 @@ class NodeRunStorePort(Protocol):
 
     def upsert_editing_lineage(self, row: EditingLineageRow) -> None: ...
 
+    def get_node_lineage(
+        self, task_id: str, node_id: str, subtask_order: int | None = ...
+    ) -> NodeLineageRow | None: ...
+
+    def upsert_node_lineage(self, row: NodeLineageRow) -> None: ...
+
 
 class NotifierPort(Protocol):
     """The slice of :class:`~wastech_orchestrator.notify.interface.Notifier` the durable HITL gate
@@ -168,9 +178,7 @@ class GitPort(Protocol):
 
     def push(self, task_id: str, branch: str) -> bool: ...
 
-    def create_pr(
-        self, task_id: str, branch: str, *, title: str, body_path: str
-    ) -> str | None: ...
+    def create_pr(self, task_id: str, branch: str, *, title: str, body_path: str) -> str | None: ...
 
     def write_current_diff(self, task_id: str) -> str: ...
 
@@ -214,6 +222,12 @@ class NodeServices:
     #: ``None`` when no different ready profile exists. Bounded to once per task by the hook itself
     #: (it returns ``None`` after the first re-resolve). Ports the legacy re-resolve-on-launch-fail.
     check_reresolve: Callable[[], tuple[ResolvedCheck, ...] | None] | None = None
+    #: the ``dependency_scan`` checker's process runner + its allowlisted child env + per-scanner
+    #: timeout. ``process_env`` is the same allowlisted env the Check Runner uses
+    #: (``build_child_env(config.security.allowed_environment)``); empty in unit harnesses.
+    run_process: RunProcess = run_process
+    process_env: Mapping[str, str] = field(default_factory=dict)
+    scan_timeout_s: int = 600
 
 
 @dataclass

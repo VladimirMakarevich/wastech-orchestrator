@@ -204,6 +204,11 @@ def build_codex_argv(
         "--output-last-message",
         last_message_path,
     ]
+    if request.network_access:
+        # The flow granted network (network_policy). Codex blocks network in the sandbox by default;
+        # enable it for the workspace-write sandbox. This toggles ONLY network — the sandbox's
+        # filesystem limit and the ``never`` approval policy stay in force (the ceiling holds).
+        argv += ["-c", "sandbox_workspace_write.network_access=true"]
     if output_schema_path is not None:
         argv += ["--output-schema", output_schema_path]
     model = request.model or config.model

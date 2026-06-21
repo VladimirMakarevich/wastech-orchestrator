@@ -74,14 +74,16 @@ co-design здесь: написать `implementation.yaml`, `deep_research.yam
 - **P2.4** Hybrid `test_quality` (опциональный, неблокирующий) + mutation guard на `checks` (действует при наличии узла `checks`).
 - **P2.5** Целевой packaged `implementation.yaml` + тесты из спек трёх программ.
 
-## P3 — Flows research + audit → [p3-research-audit.md](p3-research-audit.md)
+## P3 — Flows research + audit → [p3-research-audit.md](p3-research-audit.md) ✓ **Выполнено (2026-06-21)**
 
-Цель: два не-implementation flow данными; co-design тест абстракции — финальный гейт.
+Цель: два не-implementation flow данными; co-design тест абстракции — финальный гейт. **Все четыре пункта реализованы; co-design тест зелёный** (`tests/core/test_flow_security_audit.py::test_codesign_all_three_flows_generic`). Плюс закрыт остаток P0.4: `task_type` на чистой задаче → диспетч flow в оркестраторе (unknown → `failed` до ветки).
 
-- **P3.1** Ядровые чекеры `citation` / `dependency_scan` (без LLM).
-- **P3.2** Политики output/publishing/network + path-containment + after-stage guard.
-- **P3.3** `deep_research.yaml` (verifier+critic, `resume_own_lineage`, неблокирующий, Open questions на исчерпании).
-- **P3.4** `security_audit.yaml` (private report, `publishing: none`, repo byte-for-byte); **co-design тест зелёный**.
+- **P3.1** ✓ Ядровые чекеры `citation` / `dependency_scan` (без LLM) — `core/flow/checkers/`, диспетч по `ChecksNode.checker`.
+- **P3.2** ✓ Политики output/publishing/network — `core/flow/output_policy.py` + after-stage write-containment guard (`AgentNodeRunner`) + private-report publish (fail-closed) + `network_policy` end-to-end (request → Codex/Claude sandbox; отсутствие = нет сети).
+- **P3.3** ✓ `deep_research.yaml` исполняется (roles/research/\*, `resume_own_lineage` critic через `node_lineage` `state.db` v10, `config.external_research` из network-grant).
+- **P3.4** ✓ `security_audit.yaml` исполняется (roles/audit/\*, private report, `publishing: none`, repo byte-for-byte); **co-design тест зелёный — абстракция доказана тремя flow**.
+
+Отложено в P4 (записано в [follow_ups.md](../follow_ups.md), 2026-06-21): пер-узловые observability-пути (удаление `Stage`-enum), Codex network на read-only-узлах, durable-сессия supervisor через `node_lineage`.
 
 ## P4 — Операторская поверхность → [p4-operator.md](p4-operator.md)
 

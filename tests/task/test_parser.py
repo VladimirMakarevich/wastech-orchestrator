@@ -127,6 +127,15 @@ def test_write_normalized(tmp_path: Path) -> None:
     assert path.endswith("task.normalized.json")
 
 
+@pytest.mark.parametrize("value", ["deep_research", "security_audit", None])
+def test_task_type_round_trips(tmp_path: Path, value: str | None) -> None:
+    # Restart-safety: a resumed task must dispatch to the same flow it was created with — a lost
+    # task_type would silently fall back to the implementation flow on recovery.
+    task = NormalizedTask(id="task-001", title="T", description="Do it", task_type=value)
+    write_normalized(task, tmp_path)
+    assert load_normalized(tmp_path, "task-001").task_type == value
+
+
 @pytest.mark.parametrize("value", [True, False, None])
 def test_auto_merge_round_trips(tmp_path: Path, value: bool | None) -> None:
     # Restart-safety: the resumed task must carry the exact tri-state it was parsed with, or a

@@ -61,12 +61,13 @@ def test_default_collections_are_independent() -> None:
 
 
 def test_schema_constants() -> None:
-    # A clean task carries only identity/dispatch + the two sanctioned exceptions (PRE.3):
-    # ``stages.<stage>.enabled`` (skip) and ``auto_merge`` (task-wins). No provider/model/reasoning/
-    # decompose/refined.
+    # A clean task carries only identity/dispatch (``task_type`` selects the flow) + the two
+    # sanctioned exceptions (PRE.3): ``stages.<stage>.enabled`` (skip) and ``auto_merge``
+    # (task-wins). No provider/model/reasoning/decompose/refined.
     assert {
         "id",
         "title",
+        "task_type",
         "pr_title",
         "auto_merge",
         "prompt_audit",

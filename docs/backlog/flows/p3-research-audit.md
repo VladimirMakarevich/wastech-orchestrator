@@ -1,6 +1,8 @@
 # P3 — Flows research + audit + их виды узлов
 
-Статус: **backlog / инженерная спека (не запланировано к исполнению)** Дата: 2026-06-17 Владелец: Vladimir Makarevich
+Статус: **реализовано (2026-06-21)** Дата: 2026-06-17 Владелец: Vladimir Makarevich
+
+> **Выполнено 2026-06-21.** Все четыре пункта (P3.1 чекеры, P3.2 политики, P3.3 deep_research, P3.4 security_audit) реализованы и исполняются движком; co-design тест абстракции зелёный (`tests/core/test_flow_security_audit.py`). Диспетч `task_type → flow` (остаток P0.4) тоже закрыт. Детали и отложенные пункты — [follow_ups.md](../follow_ups.md) (строка 2026-06-21) и [plan.md](plan.md) §P3.
 
 Детализация фазы P3 из [plan.md](plan.md). Цель: два не-implementation flow данными; **доказательство обобщаемости** движка. Адаптирует [task workflow profiles](../outdated/task_workflow_profiles.md). База проверки фазы: **co-design тест трёх flow** — финальный гейт абстракции ([index.md](index.md) §11): три flow выражаются данными без доменного знания в движке.
 

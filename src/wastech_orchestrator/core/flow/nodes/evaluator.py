@@ -23,6 +23,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from wastech_orchestrator.core.flow.contracts import SessionScope
 from wastech_orchestrator.core.flow.engine import Finding, NodeContext, NodeOutcome, NodeResult
 from wastech_orchestrator.core.flow.nodes.base import (
     NodeInfraError,
@@ -36,7 +37,7 @@ from wastech_orchestrator.core.hitl import stage_output_schema
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.providers.base import AgentRunRequest, Stage
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
-from wastech_orchestrator.state_store import EvaluationRow, NodeRunRow
+from wastech_orchestrator.state_store import EvaluationRow, NodeLineageRow, NodeRunRow
 
 _BLOCKING_SEVERITIES = frozenset({"blocking", "critical", "high"})
 #: severity tokens the verdict treats as blocking (medium/high), normalized to the ``Finding`` set.
@@ -92,6 +93,7 @@ class EvaluatorNodeRunner:
                 else "no_provider_available"
             )
             raise NodeInfraError(f"evaluator node {node.id!r}: no provider could run it ({err})")
+        self._persist_own_lineage(node, ctx, outcome)
         raw_findings = self._extract_findings(outcome.result.structured_output)
         findings = tuple(_to_finding(f) for f in raw_findings)
         # Persist the findings artifact and expose it to downstream fixing as {review_path}.
@@ -176,10 +178,56 @@ class EvaluatorNodeRunner:
             output_schema=stage_output_schema(stage),
             model=node.model,
             reasoning=node.reasoning,
-            # Evaluators are read-only and never editing_lineage (validator-enforced): a fresh
-            # session each pass, never inheriting an author's editing lineage (durable sessions,
-            # P2.2). A multi-round ``resume_own_lineage`` evaluator (research critic) is P3.
-            session_id=None,
+            # Evaluators never inherit an author's editing lineage (validator-enforced read-only).
+            # A ``fresh_disposable`` evaluator starts clean each pass; a ``resume_own_lineage`` one
+            # (the research critic) resumes its OWN durable session so it remembers what it flagged
+            # across rework rounds (P3.3).
+            session_id=self._resume_own_session(node, ctx, route),
+            # Network grant follows the flow ceiling (a research verifier may need it); absence = no
+            # network (P3.2). It only toggles network — evaluators stay read-only on the filesystem.
+            network_access=ctx.snapshot.doc.network_policy is not None,
+        )
+
+    def _resume_own_session(
+        self, node: EvaluatorNode, ctx: NodeContext, route: ResolvedRoute
+    ) -> str | None:
+        """The durable own session to resume for a ``resume_own_lineage`` evaluator (P3.3).
+
+        A ``fresh_disposable`` evaluator always starts clean (``None``). A ``resume_own_lineage``
+        one (the research critic) resumes the session it stored on its previous pass — but only when
+        the stored session was produced by the same provider it now resolves to (you cannot resume a
+        Claude session on Codex). On the first round there is no lineage yet, so it starts fresh.
+        """
+        if node.session_scope is not SessionScope.RESUME_OWN_LINEAGE:
+            return None
+        row = self._s.store.get_node_lineage(ctx.task_id, node.id, ctx.subtask_order)
+        if row is None or row.provider != route.primary.value:
+            return None
+        return row.raw_session_id
+
+    def _persist_own_lineage(
+        self, node: EvaluatorNode, ctx: NodeContext, outcome: StageOutcome
+    ) -> None:
+        """Persist a ``resume_own_lineage`` evaluator's session after a successful pass (P3.3).
+
+        A ``fresh_disposable`` evaluator never writes a lineage. The raw session id is stored ONLY
+        in ``state.db`` (redacted everywhere else), keyed by ``(task_id, node_id, subtask_order)``
+        so the node's next round resumes exactly its own session.
+        """
+        if node.session_scope is not SessionScope.RESUME_OWN_LINEAGE:
+            return
+        result = outcome.result
+        if result is None or not result.session_id or outcome.provider_used is None:
+            return
+        self._s.store.upsert_node_lineage(
+            NodeLineageRow(
+                task_id=ctx.task_id,
+                node_id=node.id,
+                provider=outcome.provider_used.value,
+                raw_session_id=result.session_id,
+                subtask_order=ctx.subtask_order,
+                updated_at=self._s.clock(),
+            )
         )
 
     def _prompt_variables(self, ctx: NodeContext, stage: Stage) -> dict[str, object | None]:

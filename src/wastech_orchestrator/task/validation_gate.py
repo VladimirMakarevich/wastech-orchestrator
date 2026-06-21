@@ -229,10 +229,13 @@ class ValidationGate:
 
         raw_pr_title = frontmatter.get("pr_title")
         pr_title = (str(raw_pr_title).strip() or None) if isinstance(raw_pr_title, str) else None
+        raw_task_type = frontmatter.get("task_type")
+        task_type = (str(raw_task_type).strip() or None) if isinstance(raw_task_type, str) else None
         task = NormalizedTask(
             id=id_value,
             title=str(title_value),
             description=body.strip(),
+            task_type=task_type,
             pr_title=pr_title,
             auto_merge=_as_tristate(frontmatter.get("auto_merge")),
             prompt_audit=_as_tristate(frontmatter.get("prompt_audit")),
@@ -253,6 +256,9 @@ class ValidationGate:
             return _Reject(ValidationReason.INVALID_FIELD_TYPE, "title must be a string")
         if "pr_title" in fm and fm["pr_title"] is not None and not isinstance(fm["pr_title"], str):
             return _Reject(ValidationReason.INVALID_FIELD_TYPE, "pr_title must be a string")
+        task_type = fm.get("task_type")
+        if "task_type" in fm and task_type is not None and not isinstance(task_type, str):
+            return _Reject(ValidationReason.INVALID_FIELD_TYPE, "task_type must be a string")
         if (
             "auto_merge" in fm
             and fm["auto_merge"] is not None

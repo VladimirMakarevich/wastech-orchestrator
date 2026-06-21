@@ -46,7 +46,7 @@ from wastech_orchestrator.core.flow.nodes.base import (
 )
 from wastech_orchestrator.core.flow.postprocess import apply_output_artifact, read_decomposition
 from wastech_orchestrator.core.flow.recorder import StateStoreRunRecorder, hydrate_run_state
-from wastech_orchestrator.core.flow.registry import FlowRegistry
+from wastech_orchestrator.core.flow.registry import FlowRegistry, FlowResolutionError
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import AgentNode, EvaluatorNode, FlowNode
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
@@ -109,6 +109,7 @@ from wastech_orchestrator.providers.base import (
 )
 from wastech_orchestrator.providers.redaction import read_denied_secrets, redact_text
 from wastech_orchestrator.routing.router import AgentRouter
+from wastech_orchestrator.security.env import build_child_env
 from wastech_orchestrator.security.isolation import check_isolation
 from wastech_orchestrator.state_store import (
     ArtifactRow,
@@ -148,6 +149,7 @@ _ARTIFACT_KINDS: dict[str, str] = {
     "fixing-context.json": "fixing_context",
     "rendered-prompt.md": "rendered_prompt",
 }
+
 
 @dataclass(frozen=True)
 class RerunPlan:
@@ -743,7 +745,7 @@ class Orchestrator:
         A task with no flow checkpoint (interrupted before the engine started, or a flow whose
         fingerprint no longer matches) restarts from the top. Side-effect idempotency (commit/push/
         PR) lives in ``publish_operations``, so a resumed run never duplicates them."""
-        snapshot = self._flow_registry.resolve(None)
+        snapshot = self._resolve_flow(p)
         run_state = hydrate_run_state(self._store, p.task.id)
         if run_state is None or run_state.flow_fingerprint != snapshot.flow_fingerprint:
             # No usable checkpoint (interrupted before the engine wrote one, or the flow changed) →
@@ -810,7 +812,19 @@ class Orchestrator:
 
     # --- pipeline (the FlowEngine is the driver) ------------------------------------------
 
-    def _check_flow_providers(self) -> None:
+    def _resolve_flow(self, p: _Pipeline) -> FlowSnapshot:
+        """Resolve the task's flow by its ``task_type`` (P0.4 dispatch).
+
+        ``task_type=None`` defaults to ``implementation``; an unknown ``task_type`` has no flow file
+        and raises :class:`PipelineFailed` (caught by ``run_task`` → terminal ``failed``):
+        resolution runs before branch prep, so an unknown type fails before any side effect.
+        """
+        try:
+            return self._flow_registry.resolve(p.task.task_type)
+        except FlowResolutionError as exc:
+            raise PipelineFailed(str(exc)) from exc
+
+    def _check_flow_providers(self, p: _Pipeline) -> None:
         """Fatal preflight (PRE.1a): every flow node's declared ``provider`` must be in
         ``agents.allowed``.
 
@@ -818,7 +832,7 @@ class Orchestrator:
         early, not mid-run. This is the config-aware half of flow validation that the load-time
         validator cannot do (it has no config); the full move into the validator is P4.2.
         """
-        snapshot = self._flow_registry.resolve(None)
+        snapshot = self._resolve_flow(p)
         allowed = frozenset(self._config.agents.allowed)
         bad: list[str] = []
         for node in snapshot.doc.nodes:
@@ -842,7 +856,7 @@ class Orchestrator:
         skills) runs in the post-node hook; the publish node finalizes the task file + opens the PR.
         Infra failure → ``failed``; a node needing human action → ``manual_action_required``.
         """
-        self._check_flow_providers()
+        self._check_flow_providers(p)
         if self._config.security.strict_isolation:
             reasons = check_isolation(self._config)
             if reasons:
@@ -867,7 +881,7 @@ class Orchestrator:
     ) -> PipelineResult:
         """Build the node services/inputs and drive the flow (fresh or resumed). The preamble
         (preflight, branch) + terminal handling live in the callers; this is the engine core."""
-        snapshot = self._flow_registry.resolve(None)  # P1: every task → the implementation flow
+        snapshot = self._resolve_flow(p)  # task_type → flow (P0.4 dispatch)
         assert snapshot.source_path is not None
         if run_state is None:
             run_state = FlowRunState(flow_fingerprint=snapshot.flow_fingerprint)
@@ -901,6 +915,11 @@ class Orchestrator:
             register_artifact=self._register_artifact,
             finalize=lambda: self._engine_finalize(p),
             check_reresolve=lambda: self._engine_check_reresolve(p),
+            # The dependency_scan checker launches its argv scanners through the same safe runner
+            # and allowlisted env the Check Runner uses (a test's fake runner drives both).
+            run_process=self._checks.run_process,
+            process_env=build_child_env(self._config.security.allowed_environment),
+            scan_timeout_s=self._config.checks.timeout_seconds,
         )
         recorder = StateStoreRunRecorder(
             self._store, p.task.id, artifacts_root=self._artifacts_root
@@ -953,7 +972,7 @@ class Orchestrator:
         ``current_node``, and a decomposed run re-enters the active uncommitted subtask at the
         region entry (committed subtasks are skipped, never re-committed)."""
         post_node = self._engine_post_node(p, inputs, snapshot)
-        facts = self._engine_facts(p, completeness)
+        facts = self._engine_facts(p, completeness, snapshot)
         if resume and run_state.current_node is None:
             resume = False  # no checkpoint position to resume from → start fresh
 
@@ -1038,8 +1057,9 @@ class Orchestrator:
         """Commit one completed subtask + persist its SHA (legacy ``_on_review_passed`` parity)."""
         message = f"feat({p.task.id}): subtask {unit.order:02d} {unit.title}"
         sha = self._git.commit_subtask(p.task.id, unit.order, unit.slug, message)
-        update_subtask_index(self._artifacts_root, p.task.id, unit.order, status="committed",
-                             commit_sha=sha)
+        update_subtask_index(
+            self._artifacts_root, p.task.id, unit.order, status="committed", commit_sha=sha
+        )
         self._store.set_subtask_commit(p.task.id, unit.order, sha, "committed")
         self._store.update_task(p.task.id, subtasks_completed=unit.order)
 
@@ -1082,16 +1102,22 @@ class Orchestrator:
         return None
 
     def _engine_facts(
-        self, p: _Pipeline, completeness: Completeness
+        self, p: _Pipeline, completeness: Completeness, snapshot: FlowSnapshot
     ) -> Callable[[str], bool]:
-        """Resolve a flow ``when`` fact (``derived.*`` / ``config.*_enabled``) to a boolean."""
+        """Resolve a flow ``when`` fact (``derived.*`` / ``config.*``) to a boolean."""
         # Refinement-skip is deterministic — driven purely by completeness classification, never a
         # task flag (PRE.3): a ``complete`` task skips refinement, anything else runs it (§5).
         needs_refinement = completeness is not Completeness.COMPLETE
+        # External research (deep_research) is available iff the flow grants network — there is no
+        # separate config knob (config.yaml stays infra-only): an optional node's availability is a
+        # capability of the flow, not an orchestrator flag.
+        external_research = snapshot.doc.network_policy is not None
 
         def facts(fact: str) -> bool:
             if fact == "derived.needs_refinement":
                 return needs_refinement
+            if fact == "config.external_research":
+                return external_research
             if fact.startswith("config.") and fact.endswith("_enabled"):
                 name = fact[len("config.") : -len("_enabled")]
                 try:
@@ -1183,9 +1209,7 @@ class Orchestrator:
         """Resolve planning-proposed skills, surface them downstream, append the plan section."""
         structured = outcome.structured_output
         skills_raw = structured.get("skills") if isinstance(structured, Mapping) else None
-        proposed = (
-            tuple(str(s) for s in skills_raw) if isinstance(skills_raw, list | tuple) else ()
-        )
+        proposed = tuple(str(s) for s in skills_raw) if isinstance(skills_raw, list | tuple) else ()
         selection = resolve_planning_skills(proposed, p.skill_inventory)
         p.selected_skills = selection.refs
         inputs.skill_paths = tuple(ref.path for ref in selection.refs)

@@ -1,25 +1,40 @@
-"""Checks node runner (P1.3/P1.4) — thin adapter to the CheckRunner.
+"""Checks node runner (P1.3/P1.4/P3.1) — dispatch on the node's ``checker``.
 
-Runs the resolved checks, records each ``check_runs`` row, and maps the aggregate result to the
-engine outcome: ``passed`` -> ``pass``, otherwise -> ``fail``. A check *launch* failure is an
-infrastructure event (a missing executable, not a quality failure): the runner re-resolves the
-check command set once via ``services.check_reresolve`` (the gated ``_reresolve_on_launch_failure``
-port) and retries; if it still cannot launch it raises :class:`CheckLaunchError`, which never
-becomes a ``fail`` outcome. Check exit codes are authoritative (``CheckOutcome.passed``).
+A ``checks`` node names a ``checker``; this runner dispatches on it, and every checker maps to the
+same engine outcome — ``pass`` / ``fail`` — so the engine needs no per-checker special case:
 
-**Mutation guard (P2.4).** The runner snapshots the working tree before and after the checks; if a
-*passing* check mutated commit-candidate files (e.g. an auto-formatter rewrote sources), it fails
-closed to manual review — a green-but-dirtying check must not pass silently. This is a core-owned
-property of the ``checks`` node and cannot be declared away or disabled by the flow (security rack,
-``security-ceiling.md`` §3). A flow without a ``checks`` node simply has no guard — that is a choice
-of graph shape, not a weakening of a gate. The guard is a no-op when no snapshot hook is wired (a
-unit harness without git).
+* ``command_profile`` (P1.3) — runs the resolved quality-gate commands through the CheckRunner
+  (exit codes authoritative). Used by the implementation flow's ``testing`` node.
+* ``citation`` (P3.1) — the deterministic, no-LLM citation-manifest validator: a hallucinated
+  citation fails the check, gating the synthesis loop. Used by ``deep_research``.
+* ``dependency_scan`` (P3.1) — the core-owned argv advisory scanners as evidence: it always emits
+  ``pass`` (the scan ran); whether findings gate is the flow's decision (its edges). Used by
+  ``security_audit``.
+
+The flow never supplies commands / scanners (security-ceiling §3): the command profile is resolved
+by the orchestrator and the scanner set is core-owned in
+:mod:`~wastech_orchestrator.core.flow.checkers`.
+
+**Mutation guard (P2.4).** The ``command_profile`` path snapshots the working tree before and after
+the checks; if a *passing* check mutated commit-candidate files (e.g. an auto-formatter rewrote
+sources), it fails closed to manual review — a green-but-dirtying check must not pass silently. This
+is a core-owned property of the ``checks`` node and cannot be declared away or disabled by the flow.
+The ``citation`` / ``dependency_scan`` checkers are read-only, so the guard does not apply to them.
+The guard is a no-op when no snapshot hook is wired (a unit harness without git).
 """
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from wastech_orchestrator.check_runner import CheckOutcome
 from wastech_orchestrator.checks.model import ResolvedCheck
+from wastech_orchestrator.core.flow.checkers.citation import CitationReport, validate_citations
+from wastech_orchestrator.core.flow.checkers.dependency_scan import (
+    DependencyScanReport,
+    run_dependency_scan,
+)
 from wastech_orchestrator.core.flow.engine import NodeContext, NodeOutcome, NodeResult
 from wastech_orchestrator.core.flow.nodes.base import (
     NodeInfraError,
@@ -27,7 +42,9 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NodeManualRequired,
     NodeServices,
 )
+from wastech_orchestrator.core.flow.output_policy import resolve_output_policy
 from wastech_orchestrator.core.flow.schema import ChecksNode, FlowNode
+from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.routing.snapshots import WorkingTreeSnapshot
 from wastech_orchestrator.state_store import CheckRunRow, NodeRunRow
 
@@ -37,7 +54,7 @@ class CheckLaunchError(NodeInfraError):
 
 
 class ChecksNodeRunner:
-    """Run a ``checks`` node through the CheckRunner (constructed per unit)."""
+    """Run a ``checks`` node — ``command_profile`` / ``citation`` / ``dependency_scan``."""
 
     def __init__(self, services: NodeServices, inputs: NodeInputs) -> None:
         self._s = services
@@ -55,6 +72,15 @@ class ChecksNodeRunner:
                 started_at=self._s.clock(),
             )
         )
+        if node.checker == "citation":
+            return self._run_citation(node, ctx, run_id)
+        if node.checker == "dependency_scan":
+            return self._run_dependency_scan(node, ctx, run_id)
+        return self._run_command_profile(node, ctx, run_id)
+
+    # -- command_profile (P1.3/P2.4) ------------------------------------------
+
+    def _run_command_profile(self, node: ChecksNode, ctx: NodeContext, run_id: int) -> NodeResult:
         before = self._capture()  # working-tree state before the checks can mutate anything
         outcome = self._run_checks(ctx, self._in.resolved_checks)
         if outcome.launch_failed and self._s.check_reresolve is not None:
@@ -81,14 +107,103 @@ class ChecksNodeRunner:
                 "(commit-candidate files changed across the check run) — a green-but-dirtying "
                 "check must not pass silently"
             )
-        result_kind = "pass" if outcome.passed else "fail"
+        return self._complete(run_id, node, passed=outcome.passed)
+
+    # -- citation (P3.1) ------------------------------------------------------
+
+    def _run_citation(self, node: ChecksNode, ctx: NodeContext, run_id: int) -> NodeResult:
+        """Validate the research ``sources.json`` manifest; a hallucinated citation → ``fail``."""
+        checks_dir = self._checks_dir(ctx.task_id)
+        resolved = resolve_output_policy(ctx.snapshot.doc.output_policy, ctx.task_id)
+        report_dir = resolved.report_dir(self._s.repo_dir)
+        # A missing manifest (no report dir, or sources.json absent) → uncheckable, never a crash.
+        manifest = (report_dir or checks_dir) / "sources.json"
+        report = validate_citations(self._s.repo_dir, manifest)
+        artifact = checks_dir / "citation.json"
+        artifact.write_text(_citation_json(report), encoding="utf-8")
+        self._record_check_run(
+            ctx,
+            command="citation",
+            exit_code=0 if report.passed else 1,
+            timed_out=False,
+            passed=report.passed,
+            log_path=str(artifact),
+        )
+        self._register(ctx.task_id, "citation", str(artifact))
+        return self._complete(run_id, node, passed=report.passed)
+
+    # -- dependency_scan (P3.1) ----------------------------------------------
+
+    def _run_dependency_scan(self, node: ChecksNode, ctx: NodeContext, run_id: int) -> NodeResult:
+        """Run the core-owned advisory scanners as evidence; always ``pass`` (the scan ran)."""
+        checks_dir = self._checks_dir(ctx.task_id)
+        report = run_dependency_scan(
+            repo_dir=self._s.repo_dir,
+            logs_dir=checks_dir / "dependency_scan",
+            env=self._s.process_env,
+            timeout_seconds=self._s.scan_timeout_s,
+            run_process=self._s.run_process,
+        )
+        artifact = checks_dir / "dependency_scan.json"
+        artifact.write_text(_dependency_scan_json(report), encoding="utf-8")
+        for scan in report.runs:
+            self._record_check_run(
+                ctx,
+                command=scan.command,
+                exit_code=scan.exit_code,
+                timed_out=scan.timed_out,
+                # "passed" here means the scanner produced evidence (launched, did not time out);
+                # the node outcome is unconditionally ``pass`` (gating is the flow's edges' call).
+                passed=scan.launched and not scan.timed_out,
+                log_path=scan.report_path,
+            )
+        self._register(ctx.task_id, "dependency_scan", str(artifact))
+        return self._complete(run_id, node, passed=report.passed)
+
+    # -- shared helpers -------------------------------------------------------
+
+    def _complete(self, run_id: int, node: ChecksNode, *, passed: bool) -> NodeResult:
+        result_kind = "pass" if passed else "fail"
         self._s.store.complete_node_run(
             run_id,
-            status="passed" if outcome.passed else "failed",
+            status="passed" if passed else "failed",
             outcome=result_kind,
             finished_at=self._s.clock(),
         )
         return NodeResult(node_id=node.id, outcome=NodeOutcome(result_kind), node_run_id=run_id)
+
+    def _checks_dir(self, task_id: str) -> Path:
+        checks_dir = Path(task_artifact_dir(self._s.artifacts_root, task_id)) / "checks"
+        checks_dir.mkdir(parents=True, exist_ok=True)
+        return checks_dir
+
+    def _record_check_run(
+        self,
+        ctx: NodeContext,
+        *,
+        command: str,
+        exit_code: int | None,
+        timed_out: bool,
+        passed: bool,
+        log_path: str,
+    ) -> None:
+        self._s.store.record_check_run(
+            CheckRunRow(
+                task_id=ctx.task_id,
+                subtask_order=ctx.subtask_order,
+                command=command,
+                exit_code=exit_code,
+                timed_out=timed_out,
+                passed=passed,
+                log_path=log_path,
+                started_at=self._s.clock(),
+                finished_at=self._s.clock(),
+            )
+        )
+
+    def _register(self, task_id: str, kind: str, path: str) -> None:
+        if self._s.register_artifact is not None:
+            self._s.register_artifact(task_id, kind, path)
 
     def _capture(self) -> WorkingTreeSnapshot | None:
         """Snapshot the working tree before the checks run, or ``None`` when no hook is wired."""
@@ -117,17 +232,54 @@ class ChecksNodeRunner:
             checks=checks,
         )
         for run in outcome.runs:
-            self._s.store.record_check_run(
-                CheckRunRow(
-                    task_id=ctx.task_id,
-                    subtask_order=ctx.subtask_order,
-                    command=run.command,
-                    exit_code=run.exit_code,
-                    timed_out=run.timed_out,
-                    passed=run.passed,
-                    log_path=run.log_path,
-                    started_at=self._s.clock(),
-                    finished_at=self._s.clock(),
-                )
+            self._record_check_run(
+                ctx,
+                command=run.command,
+                exit_code=run.exit_code,
+                timed_out=run.timed_out,
+                passed=run.passed,
+                log_path=run.log_path,
             )
         return outcome
+
+
+def _citation_json(report: CitationReport) -> str:
+    return (
+        json.dumps(
+            {
+                "manifest_status": report.manifest_status,
+                "passed": report.passed,
+                "entries": [
+                    {"source_id": e.source_id, "status": e.status.value, "reason": e.reason}
+                    for e in report.entries
+                ],
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n"
+    )
+
+
+def _dependency_scan_json(report: DependencyScanReport) -> str:
+    return (
+        json.dumps(
+            {
+                "passed": report.passed,
+                "scanners": [
+                    {
+                        "name": r.name,
+                        "command": r.command,
+                        "launched": r.launched,
+                        "exit_code": r.exit_code,
+                        "timed_out": r.timed_out,
+                        "report_path": r.report_path,
+                    }
+                    for r in report.runs
+                ],
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n"
+    )
