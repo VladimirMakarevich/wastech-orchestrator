@@ -1,115 +1,108 @@
 # B26 — Notifications and HITL Transport (Telegram)
 
-## Purpose
+> Reconstructed from code (`notify/interface.py`, `notify/telegram.py`, `notify/__init__.py`) and tests (`tests/notify/`). The code is the only source of truth; this document was rebuilt from the implementation, not from prose or comments. Significant claims carry a `file:line` reference.
 
-Human-in-the-loop transport and terminal notifications via Telegram. The core is typed against the narrow `Notifier` contract, so the transport is an implementation detail: if Telegram is disabled or unconfigured, a silent `NullNotifier` is returned. Sends a correlated request, waits for a response with a timeout, and sends fire-and-forget notifications for terminal outcomes.
+**Status:** documented · **Source modules:** `src/wastech_orchestrator/notify/interface.py`, `src/wastech_orchestrator/notify/telegram.py`, `src/wastech_orchestrator/notify/__init__.py`
 
-## Responsibilities
+## Responsibility
 
-- Define the `Notifier` contract and its types (`AskHandle`, `AskResult`) plus the null implementation ([interface.py:54-161](../../../src/wastech_orchestrator/notify/interface.py#L54)).
-- Resolve the transport from configuration and env (`build_notifier`) ([telegram.py:300-345](../../../src/wastech_orchestrator/notify/telegram.py#L300)).
-- Send a request (approval buttons / ForceReply question) and poll for a response until the deadline ([telegram.py:168-264,596-718](../../../src/wastech_orchestrator/notify/telegram.py#L168)).
-- Send terminal notifications best-effort and perform a Telegram preflight check ([telegram.py:128-144,348-392](../../../src/wastech_orchestrator/notify/telegram.py#L128)).
-- Redact the token/chat_id from all outgoing content and from logs ([telegram.py:283-297](../../../src/wastech_orchestrator/notify/telegram.py#L283)).
+Define the narrow `Notifier` contract the core depends on, and provide its Telegram transport. The core is typed against `Notifier` ([interface.py:54](../../../src/wastech_orchestrator/notify/interface.py#L54)) — never against `python-telegram-bot` — so the transport stays an implementation detail that tests replace with a fake. The contract is one fire-and-forget terminal notification plus a durable two-phase HITL primitive (send a correlated prompt → wait for the reply against a persisted deadline) for clarifying questions and yes/no approvals on a dangerous action.
 
-## Block Boundaries
+The transport is resolved by `build_notifier` from config + the process environment; with Telegram disabled or its env-named secrets missing it returns a silent `NullNotifier` so the pipeline behaves exactly as before. All transport failures are returned as typed `AskResult` values, never raised — the core applies fail-closed task semantics. Secrets (bot token, chat id) are read from env only and are never written to artifacts, SQLite, or a log without redaction.
 
-### Within this block's responsibility
+## Public surface
 
-- `Notifier` contract; Telegram send/polling; correlation by `interaction_id` + `message_id`; timeout; null path; preflight; credential redaction.
+Exported from the package ([`__init__.py:21-30`](../../../src/wastech_orchestrator/notify/__init__.py#L21)): `Notifier`, `NullNotifier`, `TelegramNotifier`, `build_notifier`, and the types `AskHandle`, `AskResult`, `AskKind`, `AskFailure`.
 
-### Outside this block's responsibility
+- `Notifier` ([interface.py:54](../../../src/wastech_orchestrator/notify/interface.py#L54)) — `runtime_checkable` Protocol; the only contract a transport must satisfy.
+  - `send_notification(*, task_id, final_status, pr_url, reason, contacts=())` ([interface.py:58](../../../src/wastech_orchestrator/notify/interface.py#L58)) — best-effort terminal notification; never raises, never blocks.
+  - `start_ask(*, question, context, task_id, kind, timeout_s, interaction_id, contacts=())` → `AskHandle` ([interface.py:69](../../../src/wastech_orchestrator/notify/interface.py#L69)) — send one correlated prompt and return a durable handle without waiting.
+  - `wait_for_answer(handle)` → `AskResult` ([interface.py:82](../../../src/wastech_orchestrator/notify/interface.py#L82)) — wait for the correlated answer until the handle's persisted deadline.
+  - `ask_human(...)` → `AskResult` ([interface.py:85](../../../src/wastech_orchestrator/notify/interface.py#L85)) — blocking facade over `start_ask` + `wait_for_answer`; `interaction_id` defaults to `"adhoc"`.
+- `AskKind = Literal["question", "approval"]` ([interface.py:14](../../../src/wastech_orchestrator/notify/interface.py#L14)); `AskFailure = Literal["timeout", "transport_error", "invalid_response"]` ([interface.py:15](../../../src/wastech_orchestrator/notify/interface.py#L15)).
+- `AskHandle` ([interface.py:18](../../../src/wastech_orchestrator/notify/interface.py#L18)) — frozen, secret-free: `interaction_id`, `kind`, `expires_at` (Unix wall-clock), `message_id`, `update_offset`, `delivered=True`.
+- `AskResult` ([interface.py:35](../../../src/wastech_orchestrator/notify/interface.py#L35)) — frozen: `answered`, `text`, `approved`, `timed_out`, `failure`, `interaction_id`, `message_id`.
+- `NullNotifier` ([interface.py:99](../../../src/wastech_orchestrator/notify/interface.py#L99)) — silent terminal notifier; blocking requests fail closed as `transport_error`.
+- `TelegramNotifier` ([telegram.py:105](../../../src/wastech_orchestrator/notify/telegram.py#L105)) — real Telegram-backed notifier; construct via `build_notifier`.
+- `build_notifier(cfg, env=None, *, client_factory=None)` → `Notifier` ([telegram.py:300](../../../src/wastech_orchestrator/notify/telegram.py#L300)).
+- `check_telegram_preflight(cfg, env=None, *, client_factory=None)` → `(ok, report_line)` ([telegram.py:348](../../../src/wastech_orchestrator/notify/telegram.py#L348)).
 
-- **Durable HITL artifacts** (persist/resume of interactions) — that is [B12](./B12-hitl-and-typed-output.md).
-- **Round-trip orchestration** (when to ask) — that is [B06](./B06-orchestrator-pipeline.md).
-- **Secret storage** — the token/chat_id are read from env only and never written anywhere.
-- **Redaction patterns** — [B21 `redact_text`](./B21-secret-redaction.md).
+## Behavior
 
-## Entry Points
+### Factory resolution (`build_notifier`)
 
-- `build_notifier(cfg, env=None, *, client_factory=None)` → `Notifier` ([telegram.py:300](../../../src/wastech_orchestrator/notify/telegram.py#L300)) — in `build_orchestrator` ([orchestrator.py:2638](../../../src/wastech_orchestrator/core/orchestrator.py#L2638)) and [B01](./B01-cli-and-operator-commands.md) (`telegram-test`/`watch`).
-- `check_telegram_preflight(cfg, env=None, ...)` → `(ok, line)` ([telegram.py:348](../../../src/wastech_orchestrator/notify/telegram.py#L348)) — [B01 preflight/telegram-test](./B01-cli-and-operator-commands.md).
-- `Notifier.send_notification` / `start_ask` / `wait_for_answer` / `ask_human` ([interface.py:58-96](../../../src/wastech_orchestrator/notify/interface.py#L58)) — [B06](./B06-orchestrator-pipeline.md)/[B12](./B12-hitl-and-typed-output.md); `ask_human` — [B01 telegram-test](./B01-cli-and-operator-commands.md).
-- `NullNotifier` ([interface.py:99](../../../src/wastech_orchestrator/notify/interface.py#L99)).
+`build_notifier` returns a silent `NullNotifier` when `cfg.enabled` is `False` ([telegram.py:318](../../../src/wastech_orchestrator/notify/telegram.py#L318)), or when the env var _named by_ `cfg.bot_token_env` or `cfg.chat_id_env` is missing or blank after `.strip()` ([telegram.py:325-337](../../../src/wastech_orchestrator/notify/telegram.py#L325)). The config holds env-var **names**, not secret values; the values are read from `env` (default `os.environ`) at build time ([telegram.py:317](../../../src/wastech_orchestrator/notify/telegram.py#L317)). Each path logs a single `debug` line recording the reason (`disabled` / `missing_env`) without secret values. Otherwise it builds a `TelegramNotifier` whose client comes from `client_factory` (else `_default_client_factory`, which constructs the real `_HttpTelegramClient` — the `python-telegram-bot` import stays lazy) and forwards `cfg.ask_timeout_s` ([telegram.py:339-345](../../../src/wastech_orchestrator/notify/telegram.py#L339), [telegram.py:437-439](../../../src/wastech_orchestrator/notify/telegram.py#L437)). The factory's return type is the abstract `Notifier`, so callers cannot couple to the concrete class.
 
-## Input Data and State
+### Two-phase ask (`start_ask` / `wait_for_answer`)
 
-`TelegramConfig` (`enabled`, `bot_token_env`, `chat_id_env`, `ask_timeout_s`); token/chat_id values from env (by names from the configuration); `AskHandle` (including `expires_at` as a wall-clock deadline that survives restarts). Does not store state between calls (short-lived event loop per operation).
+`ask_human` is a thin facade: `start_ask` then `wait_for_answer` ([telegram.py:157-166](../../../src/wastech_orchestrator/notify/telegram.py#L157)). The split exists so the core can persist a durable HITL artifact (B12) between the two and resume waiting after a restart.
 
-## Main Scenario (`ask_human` = start_ask + wait_for_answer)
+`start_ask` clamps the effective timeout to `min(max(0, timeout_s), self._ask_timeout_s)` ([telegram.py:179](../../../src/wastech_orchestrator/notify/telegram.py#L179)) — the per-call request can only ever _lower_ the config ceiling — formats and redacts the prompt, and calls `client.send_prompt`. On a transport exception it returns `AskHandle(delivered=False, expires_at=<now>)` ([telegram.py:195-202](../../../src/wastech_orchestrator/notify/telegram.py#L195)); on success it returns a handle carrying `message_id` + `update_offset` and `expires_at = wall_clock() + effective_timeout` ([telegram.py:203-209](../../../src/wastech_orchestrator/notify/telegram.py#L203)). The deadline is a wall-clock timestamp specifically so a restarted process can continue waiting against the original deadline.
 
-1. `start_ask`: formats and redacts the prompt, sends it (approval → inline buttons `hitl:<id>:yes|no`; question → ForceReply), returns `AskHandle` with deadline `now + timeout` (bounded by `ask_timeout_s`).
-2. `wait_for_answer`: calculates the remaining time until the wall-clock deadline; `poll_reply` polls `getUpdates` until the deadline, matching the response to `message_id`/`callback_data` in the target chat.
-3. Returns `AskResult`: success (text/approved), `timeout`, `transport_error`, or `invalid_response` (free text instead of an approval button).
+`wait_for_answer` short-circuits to `transport_error` if the handle was never delivered or has no `message_id` ([telegram.py:212-218](../../../src/wastech_orchestrator/notify/telegram.py#L212)). Otherwise it converts the remaining wall-clock budget into a **monotonic** deadline (`monotonic() + max(0, expires_at - wall_clock())`) and hands it to `client.poll_reply` ([telegram.py:219-229](../../../src/wastech_orchestrator/notify/telegram.py#L219)). This wall→monotonic conversion is why the persisted handle survives a restart yet the poll itself is immune to wall-clock jumps. It then maps the result:
 
-Round-trip `ask_human`; any transport failure is a typed value (not an exception); the core treats it fail-closed:
+- poll exception → `AskResult(failure="transport_error")` ([telegram.py:230-241](../../../src/wastech_orchestrator/notify/telegram.py#L230)).
+- `reply is None` → `AskResult(timed_out=True, failure="timeout")` ([telegram.py:242-249](../../../src/wastech_orchestrator/notify/telegram.py#L242)).
+- `kind="approval"` but `reply.approved is None` (free-form text where a button was expected) → `answered=True, failure="invalid_response"`, carrying the redacted text ([telegram.py:250-257](../../../src/wastech_orchestrator/notify/telegram.py#L250)).
+- otherwise → `answered=True` with redacted `text` and `approved` ([telegram.py:258-264](../../../src/wastech_orchestrator/notify/telegram.py#L258)).
 
-```mermaid
-flowchart TB
-    start(["ask_human = start_ask + wait_for_answer"]) --> nf{"transport enabled and configured?"}
-    nf -->|no| null["NullNotifier → transport_error"]
-    nf -->|yes| sa["start_ask: redact prompt;<br/>approval → inline buttons, question → ForceReply;<br/>AskHandle with deadline now + timeout"]
-    sa --> del{"delivered?"}
-    del -->|no| te["AskHandle(delivered=False) → transport_error"]
-    del -->|yes| wa["wait_for_answer: poll_reply (getUpdates) until deadline,<br/>matching by message_id / callback_data in target chat"]
-    wa --> res["AskResult: success (text/approved) |<br/>timeout | transport_error | invalid_response"]
-    res -.->|any failure| fc["B06: fail-closed → ManualActionRequired"]
-```
+### Durable correlation (no credentials)
 
-## Alternative Scenarios
+Correlation rides entirely on `message_id` + `update_offset`, captured in the `AskHandle` ([interface.py:18-32](../../../src/wastech_orchestrator/notify/interface.py#L18)) — these are Telegram metadata, never credentials, so the handle is safe to persist. The transport itself is stateless across calls: `_HttpTelegramClient` holds only the bot token and opens a fresh short-lived `asyncio` event loop + `Bot` async context manager per operation ([telegram.py:442-463](../../../src/wastech_orchestrator/notify/telegram.py#L442)).
 
-### Transport disabled / not configured
+### Reply matching and polling
 
-`build_notifier` → `NullNotifier` (if `enabled=False` or empty token/chat*id); its `ask*\*`methods deterministically return`transport_error` ([interface.py:131-138](../../../src/wastech_orchestrator/notify/interface.py#L131)).
+The matcher lives in `_HttpTelegramClient.poll_reply` ([telegram.py:596](../../../src/wastech_orchestrator/notify/telegram.py#L596)). It loops calling `getUpdates(offset, allowed_updates=("message","callback_query"))` ([telegram.py:39](../../../src/wastech_orchestrator/notify/telegram.py#L39), [telegram.py:625-633](../../../src/wastech_orchestrator/notify/telegram.py#L625)), bounding each long-poll by the monotonic deadline and returning `None` when the deadline passes or the wrapping `asyncio.wait_for` times out ([telegram.py:619-635](../../../src/wastech_orchestrator/notify/telegram.py#L619)). Every consumed update advances `offset = update_id + 1` so a near-miss is not re-fetched forever ([telegram.py:650](../../../src/wastech_orchestrator/notify/telegram.py#L650)).
 
-### Undelivered request
+- **Question** (`ForceReply`): a match requires a `message` in the target chat that is a reply to `prompt_message_id` with non-blank text; the reply text (stripped) is returned ([telegram.py:651-662](../../../src/wastech_orchestrator/notify/telegram.py#L651)). `test_http_client_ignores_foreign_and_unrelated_question_replies` confirms foreign-chat and stale-prompt replies are skipped and only the correlated one matches ([test_http_client.py:98](../../../tests/notify/test_http_client.py#L98)).
+- **Approval** (inline keyboard): `start_ask`/`send_prompt` attach buttons whose `callback_data` is `hitl:<interaction_id>:yes|no` ([telegram.py:541-555](../../../src/wastech_orchestrator/notify/telegram.py#L541)). A press in the target chat on `prompt_message_id` whose data is the expected yes/no is acknowledged and mapped to `approved` ([telegram.py:663-682](../../../src/wastech_orchestrator/notify/telegram.py#L663)).
 
-`start_ask` caught an exception → `AskHandle(delivered=False)`; `wait_for_answer` immediately returns `transport_error` ([telegram.py:195-218](../../../src/wastech_orchestrator/notify/telegram.py#L195)).
+Callback feedback is deliberate so the operator never sees "nothing happened" ([telegram.py:42-45](../../../src/wastech_orchestrator/notify/telegram.py#L42)): a matched press gets `_ACK_APPROVED`/`_ACK_DENIED`; a near-miss in our chat (inaccessible message, unexpected data, or wrong message id) is acknowledged with `_ACK_STALE` as an alert and logged with the reason ([telegram.py:683-709](../../../src/wastech_orchestrator/notify/telegram.py#L683)); a callback from a **foreign** chat is never acknowledged, only logged ([telegram.py:710-715](../../../src/wastech_orchestrator/notify/telegram.py#L710)). `_ack` swallows its own errors so button feedback can never break the poll loop or mask a matched reply ([telegram.py:585-594](../../../src/wastech_orchestrator/notify/telegram.py#L585)). Before sending an approval/question prompt, `send_prompt` drains pending updates (up to 10 batches, else `RuntimeError`) to set the starting offset ([telegram.py:539](../../../src/wastech_orchestrator/notify/telegram.py#L539), [telegram.py:571-583](../../../src/wastech_orchestrator/notify/telegram.py#L571)).
 
-### Polling conflict (409)
+### Terminal notifications
 
-A second consumer of `getUpdates` on the same bot token → `RuntimeError` (mapped to `transport_error`), and on preflight — an explicit FAIL ([telegram.py:636-644,504-520](../../../src/wastech_orchestrator/notify/telegram.py#L636)).
+`send_notification` formats `[task_id] status=… [pr=…] [reason=…] [contacts=…]` ([telegram.py:395-410](../../../src/wastech_orchestrator/notify/telegram.py#L395)) and sends via `_safe_send`, which catches every exception, logs a redacted warning, and returns `False` — it never propagates ([telegram.py:266-272](../../../src/wastech_orchestrator/notify/telegram.py#L266)). `test_send_failure_is_swallowed` pins the best-effort contract ([test_send.py:74](../../../tests/notify/test_send.py#L74)).
 
-## Checks and Constraints
+### Preflight (`check_telegram_preflight`)
 
-- `build_notifier`/preflight FAIL when env values are absent or empty; preflight FAIL on non-numeric chat_id, a configured webhook (polling is required), or an API error ([telegram.py:361-392](../../../src/wastech_orchestrator/notify/telegram.py#L361)).
-- Terminal notifications are best-effort: exceptions are caught and logged (redacted), not re-raised ([telegram.py:266-272](../../../src/wastech_orchestrator/notify/telegram.py#L266)).
-- A callback from a foreign chat is never acknowledged (§12.15) ([telegram.py:710-715](../../../src/wastech_orchestrator/notify/telegram.py#L710)).
-- Outgoing content is redacted and truncated to 4096 characters ([telegram.py:296-297,430-434](../../../src/wastech_orchestrator/notify/telegram.py#L296)); transport logs (httpx/telegram) are suppressed so that URLs containing the token do not leak ([telegram.py:721-745](../../../src/wastech_orchestrator/notify/telegram.py#L721)).
+Returns `(ok, report_line)` for the preflight report ([telegram.py:348](../../../src/wastech_orchestrator/notify/telegram.py#L348)): `enabled: false` → `(True, "telegram: SKIP (disabled)")` (never fails preflight); missing env var(s) → `FAIL` naming them; a chat id not matching `-?[1-9][0-9]*` → `FAIL — chat id must be a numeric Telegram chat id` ([telegram.py:371](../../../src/wastech_orchestrator/notify/telegram.py#L371)); a configured outgoing webhook → `FAIL` (HITL requires polling) ([telegram.py:380-384](../../../src/wastech_orchestrator/notify/telegram.py#L380)). On success it reports `OK (bot=@…, chat=…, polling ready)` after `get_me`/`get_chat`/`get_webhook_url`/`check_polling` ([telegram.py:377-386](../../../src/wastech_orchestrator/notify/telegram.py#L377)). Any API exception is caught and the message is redacted before being surfaced as `FAIL — API error (…)` ([telegram.py:387-392](../../../src/wastech_orchestrator/notify/telegram.py#L387)).
 
-## Output
+### Real client and the fake-vs-live boundary
 
-`AskResult` (for HITL), a preflight `ProviderHealth`-like string, a sent notification. A transport failure is a typed value, not an exception.
+The live path (`_HttpTelegramClient`) wraps `python-telegram-bot` 21+ (async), giving each synchronous entry point its own event loop and `Bot` async context manager ([telegram.py:442-448](../../../src/wastech_orchestrator/notify/telegram.py#L442)). `check_polling`/`poll_reply` translate Telegram's HTTP 409 `Conflict` (a second `getUpdates` consumer on the same bot token) into a clear `RuntimeError` — "only one poller may run per bot token" — which `wait_for_answer` then maps to `transport_error` and the preflight surfaces as `FAIL` ([telegram.py:514-520](../../../src/wastech_orchestrator/notify/telegram.py#L514), [telegram.py:636-644](../../../src/wastech_orchestrator/notify/telegram.py#L636)). The `Notifier` contract is verified against the `FakeTelegramClient` ([conftest.py:35](../../../tests/notify/conftest.py#L35)); the adapter lifecycle is exercised against a fake `telegram.Bot` ([test_http_client.py:43](../../../tests/notify/test_http_client.py#L43)) — neither touches the live API.
 
-## Side Effects
+### Secret hygiene
 
-- Network calls to the Telegram Bot API (send/getUpdates/answerCallback).
-- Logging (redacted). Reading env variables. Does not write files (HITL artifacts — [B12](./B12-hitl-and-typed-output.md)).
+`_outgoing` redacts then truncates every outbound string to 4096 chars (`_TELEGRAM_TEXT_LIMIT`) with a marker suffix ([telegram.py:37-38](../../../src/wastech_orchestrator/notify/telegram.py#L37), [telegram.py:296-297](../../../src/wastech_orchestrator/notify/telegram.py#L296), [telegram.py:430-434](../../../src/wastech_orchestrator/notify/telegram.py#L430)). `_redact` first removes the bot token and chat id verbatim (because `redact_text` ignores literals shorter than four chars — B21's `_MIN_LITERAL_LEN = 4`), then applies the shared structural redactor with those literals ([telegram.py:283-294](../../../src/wastech_orchestrator/notify/telegram.py#L283)). `_warn` redacts both the message and every structured field ([telegram.py:274-281](../../../src/wastech_orchestrator/notify/telegram.py#L274)). Around every real HTTP call, `_suppress_transport_request_logs` raises the `httpx`/`httpcore`/`telegram` loggers above `CRITICAL` so a third-party logger cannot emit a token-bearing request URL, restoring levels afterwards under a lock ([telegram.py:721-745](../../../src/wastech_orchestrator/notify/telegram.py#L721)).
 
-## Errors and Edge Cases
+## Invariants & guarantees
 
-- All transport errors are returned as `failure` (`timeout`/`transport_error`/`invalid_response`), and the core applies fail-closed semantics ([B06](./B06-orchestrator-pipeline.md): `ManualActionRequired`).
-- Update backlog too large to drain → `RuntimeError` ([telegram.py:583](../../../src/wastech_orchestrator/notify/telegram.py#L583)).
+- **Core is decoupled from the transport.** The core holds a `Notifier`; the concrete class is never imported by the core ([orchestrator.py:297-311](../../../src/wastech_orchestrator/core/orchestrator.py#L297)).
+- **Best-effort terminal notification.** `send_notification` never raises and never blocks ([telegram.py:266-272](../../../src/wastech_orchestrator/notify/telegram.py#L266), [interface.py:67](../../../src/wastech_orchestrator/notify/interface.py#L67)).
+- **All HITL failures are typed values, not exceptions** — `timeout` / `transport_error` / `invalid_response` ([telegram.py:230-264](../../../src/wastech_orchestrator/notify/telegram.py#L230)); the core fails closed on them.
+- **Fail-closed default.** `NullNotifier.wait_for_answer` returns `transport_error` ([interface.py:131-138](../../../src/wastech_orchestrator/notify/interface.py#L131)); `test_null_notifier_ask_human_is_deterministic_timeout` confirms it ([test_factory.py:63](../../../tests/notify/test_factory.py#L63)).
+- **Config carries env-var names, not secrets.** Values are resolved from the environment at `build_notifier`/preflight time and never persisted ([telegram.py:325-326](../../../src/wastech_orchestrator/notify/telegram.py#L325), [telegram.py:365-366](../../../src/wastech_orchestrator/notify/telegram.py#L365)).
+- **The durable handle is secret-free** — only `interaction_id`, `kind`, `expires_at`, `message_id`, `update_offset` ([interface.py:18-32](../../../src/wastech_orchestrator/notify/interface.py#L18)).
+- **A per-call timeout can only lower the config ceiling** ([telegram.py:179](../../../src/wastech_orchestrator/notify/telegram.py#L179)); `test_timeout_is_capped_by_config` ([test_ask_human.py:99](../../../tests/notify/test_ask_human.py#L99)).
+- **No secret reaches a log or the wire unredacted** ([telegram.py:283-297](../../../src/wastech_orchestrator/notify/telegram.py#L283), [telegram.py:721-745](../../../src/wastech_orchestrator/notify/telegram.py#L721)); enforced by `test_send_failure_log_redacts_token_and_chat_id`, `test_outgoing_message_is_redacted_and_bounded`, `test_http_client_near_miss_log_carries_no_secrets`.
+- **One poller per bot token** — 409 `Conflict` is surfaced, not silently swallowed ([telegram.py:514-520](../../../src/wastech_orchestrator/notify/telegram.py#L514), [telegram.py:636-644](../../../src/wastech_orchestrator/notify/telegram.py#L636)).
+- **A foreign chat's callback is never acknowledged** ([telegram.py:710-715](../../../src/wastech_orchestrator/notify/telegram.py#L710)); `test_http_client_does_not_acknowledge_foreign_chat_callback` ([test_http_client.py:245](../../../tests/notify/test_http_client.py#L245)).
 
-## Relations
+## Dependencies
 
-### Uses
+- **Uses:** B21 (secret redaction — `redact_text`, `REDACTED`; [telegram.py:31](../../../src/wastech_orchestrator/notify/telegram.py#L31)), B05 (`TelegramConfig`: `enabled`, `bot_token_env`, `chat_id_env`, `ask_timeout_s` — [schema.py:258](../../../src/wastech_orchestrator/config/schema.py#L258)), `python-telegram-bot` (lazy import in the real client only).
+- **Used by:** B12 (the durable HITL artifacts persist/resume the `AskHandle`/`AskResult` shapes defined here), B30 (the HumanGate runner depends on the `NotifierPort` Protocol — a `start_ask`/`wait_for_answer` subset of this contract; [human_gate.py:16](../../../src/wastech_orchestrator/core/flow/nodes/human_gate.py#L16), [base.py:145](../../../src/wastech_orchestrator/core/flow/nodes/base.py#L145)), B06 (the orchestrator builds the notifier via `build_notifier(config.telegram)`, drives the terminal notification and the check-command/plan/dangerous-diff approvals, and is the layer that fails closed; [orchestrator.py:2017](../../../src/wastech_orchestrator/core/orchestrator.py#L2017), [orchestrator.py:1899](../../../src/wastech_orchestrator/core/orchestrator.py#L1899)), B01 (the CLI calls `check_telegram_preflight` in preflight and `build_notifier` + `ask_human` for `telegram-test`; [cli.py:870](../../../src/wastech_orchestrator/cli.py#L870), [cli.py:909](../../../src/wastech_orchestrator/cli.py#L909)).
 
-- `python-telegram-bot` (lazy import), [B21 — Redaction](./B21-secret-redaction.md), [B05 — Configuration](./B05-configuration.md) (`TelegramConfig`).
+## Audit candidates
 
-### Used by
+- `src/wastech_orchestrator/notify/telegram.py:90` — stale/contradictory comment — the `_TelegramClient.get_me` docstring says "returns bot @username (first_name as fallback)", which the real client honors ([telegram.py:473](../../../src/wastech_orchestrator/notify/telegram.py#L473)), but `check_telegram_preflight` already prefixes the result with `@` ([telegram.py:386](../../../src/wastech_orchestrator/notify/telegram.py#L386)); if `get_me` returned a `@`-prefixed value the report would read `@@…`. The comment leaves the contract (with/without `@`) ambiguous. See [the audit](../../backlog/2026-06-21-audit.md).
+- `src/wastech_orchestrator/notify/telegram.py:60` — dead/over-broad Protocol — `_TelegramClient` declares `send_message`, `send_prompt`, `poll_reply`, `get_me`, `get_chat`, `get_webhook_url`, `check_polling`, but `TelegramNotifier` only ever calls the first three; the preflight-only methods are typed on the notifier's client even though the notifier never invokes them, conflating two distinct surfaces. See [the audit](../../backlog/2026-06-21-audit.md).
 
-- [B06 — Pipeline](./B06-orchestrator-pipeline.md) — terminal notifications and HITL round-trip.
-- [B12 — HITL](./B12-hitl-and-typed-output.md) — `AskHandle`/`AskResult`/`AskKind` types.
-- [B01 — CLI](./B01-cli-and-operator-commands.md) — `build_notifier`/`check_telegram_preflight`/`ask_human` (preflight, telegram-test).
+## Tests
 
-## Role in the Overall System
-
-Makes human pauses real: plan approval, dangerous diff approval, and changed check-set approval all flow through this transport. Together with [B12](./B12-hitl-and-typed-output.md) (durability), it provides HITL that survives restarts without leaking secrets into logs or the network.
-
-## Code Evidence
-
-- [notify/interface.py:18-161](../../../src/wastech_orchestrator/notify/interface.py#L18) — contract, `AskHandle`/`AskResult`, `NullNotifier`.
-- [notify/telegram.py:105-345](../../../src/wastech_orchestrator/notify/telegram.py#L105) — `TelegramNotifier`, `build_notifier`, redaction.
-- [notify/telegram.py:442-745](../../../src/wastech_orchestrator/notify/telegram.py#L442) — HTTP client: send_prompt/poll_reply, ack, 409, log suppression.
-- Tests: [tests/notify/](../../../tests/notify/) (test_factory, test_ask_human, test_send, test_telegram_preflight, test_http_client) — null path, yes/no mapping, timeout, redaction, best-effort send, preflight.
+- `tests/notify/conftest.py` — `FakeTelegramClient` (records sends/prompts, scripts `poll_reply`, simulates `send_error`/`poll_error`) and the `telegram_config`/`fake_client` fixtures; the contract is verified against this fake, not the live API ([conftest.py:35](../../../tests/notify/conftest.py#L35)).
+- `tests/notify/test_factory.py` — `build_notifier` resolution: disabled / missing token / blank token / missing chat id → `NullNotifier`; all present → `TelegramNotifier`; the null path's `ask_human` is a deterministic `transport_error`.
+- `tests/notify/test_ask_human.py` — question returns text; reply redacts known credentials; approval yes/no map to `True`/`False`; free-form reply on an approval → `invalid_response`; empty queue → deterministic `timeout`; timeout capped by config; `send_error`/`poll_error` → `transport_error`.
+- `tests/notify/test_send.py` — terminal message shape (task id/status/pr/reason/contacts, PR field omitted when absent); failure swallowed; failure log and outgoing message redact token + chat id; outgoing message bounded to 4096 chars.
+- `tests/notify/test_telegram_preflight.py` — `SKIP` when disabled; `FAIL` on missing env var(s), non-numeric / zero chat id, configured webhook, or a (token-redacted) API error; `OK (@bot, polling ready)` on success.
+- `tests/notify/test_http_client.py` — real adapter against a fake `telegram.Bot`: async lifecycle without leaking the request URL; question correlation ignores foreign/stale replies; matching + near-miss callbacks both acknowledged (near-miss as a stale alert); a callback with no message is acknowledged but not actionable; a foreign-chat callback is never acknowledged; near-miss log carries no secrets; 409 `Conflict` surfaces a clear `RuntimeError`.

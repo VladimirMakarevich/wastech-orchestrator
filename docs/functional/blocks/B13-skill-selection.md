@@ -1,91 +1,72 @@
 # B13 — Skill Inventory and Selection
 
-## Purpose
+> Reconstructed from code (`core/skills.py`) and tests (`tests/core/test_skills.py`). The code is the only source of truth; this document was rebuilt from the implementation, not from prose or comments. Significant claims carry a `file:line` reference.
 
-Scans `SKILL.md` files in the target repository (`<repo>/.claude/skills/*`), allows the `planning` stage to select relevant ones, and deterministically filters the selection (the agent proposes — the core decides). Selected skills are passed downstream as **read-only path references** (never executed, not via the Claude-only Skill tool — so that both providers behave identically).
+**Status:** documented · **Source modules:** `src/wastech_orchestrator/core/skills.py`
 
-## Responsibilities
+## Responsibility
 
-- Read the skill inventory (frontmatter `name`/`description`), with size limits and in read-only mode ([skills.py:86-138](../../../src/wastech_orchestrator/core/skills.py#L86)).
-- From the names proposed by planning, keep only those that were actually found and are not on the gate-duplicating denylist ([skills.py:155-186](../../../src/wastech_orchestrator/core/skills.py#L155)).
-- Mark skill sections whose headings match operator instructions (dedup §2.2) ([skills.py:200-229](../../../src/wastech_orchestrator/core/skills.py#L200)).
+Discover the procedural-knowledge **skills** a target repo ships under `<repo>/.claude/skills/*/SKILL.md`, let the `planning` agent pick the relevant ones by name, and deterministically decide which of those names the Core actually accepts — "the agent proposes, the Core decides". This module is pure logic over the filesystem: a bounded, read-only, frontmatter-only **inventory scan** ([skills.py:102](../../../src/wastech_orchestrator/core/skills.py#L102)), a name filter against that scan ([skills.py:155](../../../src/wastech_orchestrator/core/skills.py#L155)), and a heading-overlap dedup helper ([skills.py:200](../../../src/wastech_orchestrator/core/skills.py#L200)). It never builds CLI argv, reads env, weakens the sandbox, or executes anything; accepted skills are only ever surfaced downstream **by path** as advisory read-only references ([skills.py:1-19](../../../src/wastech_orchestrator/core/skills.py#L1)).
 
-## Block Boundaries
+The wiring (scan at task start, apply in the planning post-node hook, persist for resume) lives in the orchestrator and is owned by [B06](B06-orchestrator-pipeline.md); this block is the data + decision functions B06 calls.
 
-### Within the block's responsibility
+## Public surface
 
-- Read-only inventory, deterministic selection, heading-level deduplication.
+- `SkillRef` ([skills.py:41](../../../src/wastech_orchestrator/core/skills.py#L41)) — frozen `(name, description, path)` for one repo skill; `path` is `str(<dir>/SKILL.md)`.
+- `SkillInventory` ([skills.py:50](../../../src/wastech_orchestrator/core/skills.py#L50)) — scanned `skills` tuple plus the `excluded` frozenset of denylisted names; `.relevant()` filters out the excluded ([skills.py:57](../../../src/wastech_orchestrator/core/skills.py#L57)), `.by_name()` looks up only among relevant skills ([skills.py:61](../../../src/wastech_orchestrator/core/skills.py#L61)).
+- `SkillSelection` ([skills.py:68](../../../src/wastech_orchestrator/core/skills.py#L68)) — the Core's accepted `refs` plus the `dropped_unknown` / `dropped_excluded` names.
+- `SkillDedupEntry` ([skills.py:77](../../../src/wastech_orchestrator/core/skills.py#L77)) — a selected skill plus headings that overlap the operator's planning text.
+- `SkillInventoryScanner` ([skills.py:86](../../../src/wastech_orchestrator/core/skills.py#L86)) — `.collect()` builds the inventory; `.read_body(ref)` reads one selected skill's body (bounded, denied-aware).
+- `resolve_planning_skills(proposed, inventory)` ([skills.py:155](../../../src/wastech_orchestrator/core/skills.py#L155)) — the deterministic accept filter.
+- `compute_skill_dedup(user_text, bodies)` ([skills.py:200](../../../src/wastech_orchestrator/core/skills.py#L200)) — heading-overlap flagger (operator text wins).
+- `markdown_headings(text)` ([skills.py:195](../../../src/wastech_orchestrator/core/skills.py#L195)) — ordered `# …`–`###### …` titles; helper for dedup.
+- `DEFAULT_EXCLUDED_SKILLS` ([skills.py:35](../../../src/wastech_orchestrator/core/skills.py#L35)) — `("run-checks", "test", "sync-docs")`, the default gate-duplicating denylist.
 
-### Outside the block's responsibility
+## Behavior
 
-- **Passing skills to stages** — that is [B06](./B06-orchestrator-pipeline.md): it places paths in `request.skill_reference_paths` and renders a section in `plan.md`.
-- **Executing skills** — never (path references only) ([skills.py:6-8](../../../src/wastech_orchestrator/core/skills.py#L6)).
-- **Validating names proposed by planning** — that is [B12 `_validate_skills`](./B12-hitl-and-typed-output.md); here names are resolved in the inventory.
-- **The alloy-list of denied paths** — the rule is defined by [B25](./B25-security-policy.md) (used during reading).
+### Inventory scan (`collect`)
 
-## Entry Points
+`collect` returns an empty inventory (carrying the configured `excluded` set) when the root is not a directory or `iterdir` raises `OSError` ([skills.py:103](../../../src/wastech_orchestrator/core/skills.py#L103), [skills.py:108](../../../src/wastech_orchestrator/core/skills.py#L108)). Otherwise it visits each immediate **sub-directory** in sorted order and scans `<dir>/SKILL.md` ([skills.py:107-111](../../../src/wastech_orchestrator/core/skills.py#L107)). The scan reads only YAML **front matter** matched by `^---\n(...)\n---\n` ([skills.py:37](../../../src/wastech_orchestrator/core/skills.py#L37), [skills.py:124](../../../src/wastech_orchestrator/core/skills.py#L124)): a file with no front matter, non-dict YAML, a YAML error, or a missing/blank `name` is skipped defensively and yields no ref ([skills.py:126-137](../../../src/wastech_orchestrator/core/skills.py#L126)). `description` is optional — a non-string or absent value becomes `""` ([skills.py:137](../../../src/wastech_orchestrator/core/skills.py#L137)). The accepted `name`/`description` are stripped; `path` is the `SKILL.md` path as a string ([skills.py:138](../../../src/wastech_orchestrator/core/skills.py#L138)). Tests cover the happy path, frontmatterless/no-name skips, and a missing root ([test_skills.py:29](../../../tests/core/test_skills.py#L29), [test_skills.py:40](../../../tests/core/test_skills.py#L40), [test_skills.py:52](../../../tests/core/test_skills.py#L52)).
 
-- `SkillInventoryScanner(...).collect()` / `read_body(ref)` ([skills.py:86-118](../../../src/wastech_orchestrator/core/skills.py#L86)) — the scanner is constructed in `Orchestrator._default_skill_scanner` ([orchestrator.py:338](../../../src/wastech_orchestrator/core/orchestrator.py#L338)); `collect` is called in `run_task`/resume.
-- `resolve_planning_skills(proposed, inventory)` → `SkillSelection` ([skills.py:155](../../../src/wastech_orchestrator/core/skills.py#L155)) — [B06 `_resolve_and_render_skills`](./B06-orchestrator-pipeline.md).
-- `compute_skill_dedup(user_text, bodies)` ([skills.py:200](../../../src/wastech_orchestrator/core/skills.py#L200)).
-- Types: `SkillRef`, `SkillInventory`, `SkillSelection`, `SkillDedupEntry`; `DEFAULT_EXCLUDED_SKILLS`.
+The single read primitive `_read_text` is **bounded and denied-aware** ([skills.py:140](../../../src/wastech_orchestrator/core/skills.py#L140)): it computes the path relative to the scan root, returns `None` if the relative path or the absolute path matches any `denied_read_paths` glob ([skills.py:145](../../../src/wastech_orchestrator/core/skills.py#L145)), refuses non-files and files larger than `_MAX_FILE_BYTES` (262_144) ([skills.py:31](../../../src/wastech_orchestrator/core/skills.py#L31), [skills.py:148](../../../src/wastech_orchestrator/core/skills.py#L148)), and swallows `OSError` to `None` ([skills.py:151](../../../src/wastech_orchestrator/core/skills.py#L151)). A denied skill therefore never enters the inventory ([test_skills.py:57](../../../tests/core/test_skills.py#L57)). The 262 KB cap mirrors the repository inspector's bounded read so a pathological `SKILL.md` cannot wedge or balloon the scan ([skills.py:30](../../../src/wastech_orchestrator/core/skills.py#L30)).
 
-## Input Data and State
+### Excluded (gate-duplicating) names
 
-Skill root (default `<repo.local_path>/.claude/skills`), `denied_read_paths`, name denylist; names proposed by planning; operator planning override text. Holds no state.
+`excluded_names` defaults to `DEFAULT_EXCLUDED_SKILLS` and is stored as a frozenset on the scanner ([skills.py:94](../../../src/wastech_orchestrator/core/skills.py#L94), [skills.py:99](../../../src/wastech_orchestrator/core/skills.py#L99)). Excluded skills **are still scanned into** `SkillInventory.skills` — exclusion only withholds them from what planning may select: `relevant()` drops them ([skills.py:59](../../../src/wastech_orchestrator/core/skills.py#L59)) and `by_name()` returns `None` for them ([test_skills.py:74](../../../tests/core/test_skills.py#L74)). The default list (`run-checks`/`test`/`sync-docs`) is exactly the set of skills the orchestrator already owns as deterministic gates/guardrails, kept out to avoid two sources of truth and scope creep ([skills.py:33-35](../../../src/wastech_orchestrator/core/skills.py#L33)). The denylist is operator-configurable via `skills.exclude` (B05).
 
-## Main Scenario
+### Deterministic acceptance (`resolve_planning_skills`)
 
-1. `collect`: for each `<root>/<dir>/SKILL.md`, the frontmatter is read; a valid `name` → `SkillRef`; denylist names are marked as excluded (present in inventory but not offered to planning).
-2. `resolve_planning_skills`: from the proposed names, only **relevant** skills that were found are kept; not-found names → `dropped_unknown`; found only as excluded → `dropped_excluded`; the result is deduplicated and sorted.
-3. (optional) `compute_skill_dedup`: if operator planning override text is present, sections of selected skills with matching normalized headings are marked (operator text takes priority).
+The planning agent emits skill **names** in the `skills` field of its structured output (validated as a bounded list of bounded non-empty strings by B12 `_validate_skills`); matching against the real inventory is explicitly **not** B12's job ([B12](B12-hitl-and-typed-output.md)). `resolve_planning_skills` performs that match: it walks `proposed` in order, skips blanks and already-seen names ([skills.py:169-173](../../../src/wastech_orchestrator/core/skills.py#L169)), and for each name asks `inventory.by_name` ([skills.py:174](../../../src/wastech_orchestrator/core/skills.py#L174)) — a hit becomes an accepted ref; a miss that nonetheless names a _scanned-but-excluded_ skill goes to `dropped_excluded` ([skills.py:177](../../../src/wastech_orchestrator/core/skills.py#L177)); anything else goes to `dropped_unknown` ([skills.py:180](../../../src/wastech_orchestrator/core/skills.py#L180)). Accepted refs are sorted by name; the dropped lists are sorted too ([skills.py:181-186](../../../src/wastech_orchestrator/core/skills.py#L181)). Because acceptance flows only through `by_name`, **the agent can never introduce a path the Core did not independently discover** ([test_skills.py:86](../../../tests/core/test_skills.py#L86), [test_skills.py:94](../../../tests/core/test_skills.py#L94)).
 
-"The agent proposes — the core decides": selection is only possible from what the inventory scan found:
+### How acceptance reaches downstream nodes (read-only, provider-neutral)
 
-```mermaid
-flowchart TB
-    collect["collect: scan SKILL.md<br/>(frontmatter name/description, read-only, size limit)"] --> inv["inventory: relevant + excluded (denylist)"]
-    proposed["planning proposed names"] --> resolve["resolve_planning_skills"]
-    inv --> resolve
-    resolve -->|"not in scan"| du["dropped_unknown"]
-    resolve -->|"excluded only:<br/>run-checks / test / sync-docs"| de["dropped_excluded"]
-    resolve -->|"found and relevant"| keep["refs → read-only paths in plan.md (B06)"]
-    keep --> dedup["compute_skill_dedup: mark sections<br/>that match operator instructions"]
-```
+The accepted `refs` are surfaced to later edit nodes purely as **paths**. B06's planning post-node hook sets `inputs.skill_paths = tuple(ref.path for ref in selection.refs)` and persists them ([orchestrator.py:1204](../../../src/wastech_orchestrator/core/orchestrator.py#L1204)); the wiring layer copies them onto `NodeInputs.skill_paths` (`skill_paths` field at [base.py:243](../../../src/wastech_orchestrator/core/flow/nodes/base.py#L243); resume restore at [wiring.py:161](../../../src/wastech_orchestrator/core/flow/wiring.py#L161), B30). The agent node runner turns them into the prompt variable `skills_path` (newline-joined, or `None` when empty) ([agent.py:399](../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L399)) and into `AgentRunRequest.skill_reference_paths` ([agent.py:377](../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L377), [base.py:105](../../../src/wastech_orchestrator/providers/base.py#L105)). `skills_path` is on the prompt-renderer allowlist (B15) ([prompts.py:35](../../../src/wastech_orchestrator/core/prompts.py#L35)); both providers list the paths verbatim as "read-only reference; advisory, do not execute" ([codex.py:140](../../../src/wastech_orchestrator/providers/codex.py#L140), [claude.py:164](../../../src/wastech_orchestrator/providers/claude.py#L164)), and the implementation/fixing role files repeat that they are advisory and must never be executed ([implementation.md:5](../../../src/wastech_orchestrator/core/flow/packaged/roles/implementation.md#L5)). Nothing routes through the Claude-only Skill tool, so both providers behave identically.
 
-## Checks and Constraints
+### Heading-overlap dedup (`compute_skill_dedup`)
 
-- Reading is size-limited (262 KB/file) and skips `denied_read_paths` ([skills.py:140-152](../../../src/wastech_orchestrator/core/skills.py#L140)).
-- The agent cannot introduce a path that the scan did not find (selection is from the inventory only) ([skills.py:156-162](../../../src/wastech_orchestrator/core/skills.py#L156)).
-- Default denylist: `run-checks`, `test`, `sync-docs` (gate-duplicating) ([skills.py:35](../../../src/wastech_orchestrator/core/skills.py#L35)).
+The intent (§2.2): when an operator appends free-form planning guidance, flag skill sections covering the same topic so `plan.md` can record that the operator's explicit text wins there. With no operator text — the common case — it is a no-op ([skills.py:211](../../../src/wastech_orchestrator/core/skills.py#L211), [test_skills.py:119](../../../tests/core/test_skills.py#L119)). Otherwise it normalizes the operator's headings (lowercased, punctuation stripped, whitespace collapsed) into a set ([skills.py:189](../../../src/wastech_orchestrator/core/skills.py#L189), [skills.py:213](../../../src/wastech_orchestrator/core/skills.py#L213)) and, per skill body, emits an entry listing each body heading whose normalized form is in that set (de-duplicated, source casing preserved) ([skills.py:218-228](../../../src/wastech_orchestrator/core/skills.py#L218)). The match is case/punctuation/level-insensitive ([test_skills.py:131](../../../tests/core/test_skills.py#L131)). **This function is fully tested but is not invoked anywhere in `src/`** — see Audit candidates.
 
-## Output
+## Invariants & guarantees
 
-`SkillInventory`; `SkillSelection(refs, dropped_unknown, dropped_excluded)`; tuple of `SkillDedupEntry`. [B06](./B06-orchestrator-pipeline.md) converts this into read-only paths and a deterministic `plan.md` section.
+- Read-only and bounded: only `_read_text` touches disk; it caps file size at 262 KB and honours `denied_read_paths` for every read, including `read_body` ([skills.py:140-152](../../../src/wastech_orchestrator/core/skills.py#L140)).
+- No execution, no argv, no env, no secrets: skills are surfaced only as advisory read-only paths; skill bodies are treated as untrusted repo-controlled content ([skills.py:1-19](../../../src/wastech_orchestrator/core/skills.py#L1)).
+- Provenance-closed: an accepted skill always resolves through `by_name`, so planning cannot smuggle in an undiscovered path ([skills.py:174](../../../src/wastech_orchestrator/core/skills.py#L174)).
+- Deterministic and order-stable: accepted refs and both dropped lists are sorted; proposals are de-duplicated ([skills.py:181-186](../../../src/wastech_orchestrator/core/skills.py#L181)).
+- All dataclasses are frozen ([skills.py:41](../../../src/wastech_orchestrator/core/skills.py#L41), [skills.py:50](../../../src/wastech_orchestrator/core/skills.py#L50), [skills.py:68](../../../src/wastech_orchestrator/core/skills.py#L68), [skills.py:77](../../../src/wastech_orchestrator/core/skills.py#L77)).
 
-## Side Effects
+## Dependencies
 
-- Reading `SKILL.md` files (read-only, size-limited). Selection/dedup logic is pure.
+- **Uses:** B25 (security policy — the `denied_read_paths` globs applied on every read), B05 (configuration — `skills.scan_root` / `skills.exclude` feed the scanner's constructor).
+- **Used by:** B06 (orchestrator pipeline — scans the inventory at task start and applies the selection in the planning post-node hook, persisting to `selected_skills.json`), B12 (HITL/typed output — validates the proposed `skills` names that this block then resolves), B30 (flow node runners — read `NodeInputs.skill_paths` and render `skills_path` / `skill_reference_paths`), B15 (prompt templates — allowlists the `skills_path` variable).
 
-## Errors and Edge Cases
+## Audit candidates
 
-- No skills directory / no frontmatter / malformed YAML → skill is skipped; inventory is empty without error.
+See [the audit](../../backlog/2026-06-21-audit.md).
 
-## Relationships
+- `core/skills.py:200` (+`read_body` at `:116`, `markdown_headings` at `:195`, `SkillDedupEntry` at `:77`) — dead/unwired feature: the entire §2.2 dedup path has no production caller. `_engine_apply_skills` calls `_render_skill_section(selection, ())` with an empty `bodies`/`dedup` tuple ([orchestrator.py:1206](../../../src/wastech_orchestrator/core/orchestrator.py#L1206), [orchestrator.py:1431](../../../src/wastech_orchestrator/core/orchestrator.py#L1431)), and `compute_skill_dedup` / `read_body` are referenced only by tests — so operator-vs-skill heading dedup never actually runs.
+- `core/flow/packaged/roles/planning.md:1` + `core/hitl.py:120` — design/UX gap matching the reported audit angle: the planning agent is never shown the skill inventory. The planning role prompt does not mention skills at all, and the `skills` output-schema property carries no `description` ([hitl.py:120-124](../../../src/wastech_orchestrator/core/hitl.py#L120)). At planning time `inputs.skill_paths` is empty, so `skills_path` renders empty ([agent.py:399](../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L399)) — it is filled only _after_ planning by `_engine_apply_skills`. No `skills_inventory`-style variable exists on the allowlist ([prompts.py:21-37](../../../src/wastech_orchestrator/core/prompts.py#L21)). The agent must therefore _guess_ skill names; wrong guesses are silently routed to `dropped_unknown` ([skills.py:180](../../../src/wastech_orchestrator/core/skills.py#L180)) and the matching mechanism is effectively unreachable in practice.
+- `tests/core/test_skills.py:37` — non-portable assertion: `assert names["safe-change"].path.endswith("safe-change/SKILL.md")` hard-codes a `/` separator, while `path` is `str(<dir>/SKILL.md)` ([skills.py:138](../../../src/wastech_orchestrator/core/skills.py#L138)) which uses the OS separator — the test would fail on Windows (`\`).
 
-### Uses
+## Tests
 
-- [B25 — Security](./B25-security-policy.md) — `denied_read_paths` (when reading files).
-
-### Used by
-
-- [B06 — Pipeline](./B06-orchestrator-pipeline.md) — scans the inventory at startup; resolves the selection and computes dedup during `planning`; passes paths to downstream stages.
-
-## Place in the Overall System
-
-Gives agents repository-specific procedural reference material, but strictly as read-only content and only from what the core itself discovered. Follows the same principle as decomposition ([B11](./B11-task-decomposition.md)): the agent proposes — the core decides.
-
-## Code Confirmation
-
-- [core/skills.py:86-229](../../../src/wastech_orchestrator/core/skills.py#L86) — scanner, `resolve_planning_skills`, `compute_skill_dedup`.
-- Test: [tests/core/test_skills.py](../../../tests/core/test_skills.py) — inventory, dropping unknown/excluded, heading dedup, denied-aware reading.
+- `tests/core/test_skills.py` — inventory scan (frontmatter-only, malformed/frontmatterless skips, missing root) ([test_skills.py:29](../../../tests/core/test_skills.py#L29)); denied-path-aware reads ([test_skills.py:57](../../../tests/core/test_skills.py#L57)); default-denylist exclusion via `relevant()`/`by_name()` ([test_skills.py:67](../../../tests/core/test_skills.py#L67)); `resolve_planning_skills` keeping known names while dropping unknown/excluded, plus de-dup-and-sort and empty-proposal cases ([test_skills.py:86](../../../tests/core/test_skills.py#L86)); `compute_skill_dedup` overlap flagging, the no-user-text no-op, the no-overlap case, and normalized matching ([test_skills.py:108](../../../tests/core/test_skills.py#L108)).

@@ -1,0 +1,87 @@
+# B30 — Flow Node Runners
+
+> Reconstructed from code (`src/wastech_orchestrator/core/flow/nodes/*.py`, `prompt.py`, `postprocess.py`, `output_policy.py`, `wiring.py`) and tests (`tests/core/flow/`). The code is the only source of truth; this document was rebuilt from the implementation, not from prose or comments. Significant claims carry a `file:line` reference.
+
+**Status:** documented · **Source modules:** `core/flow/nodes/{base,agent,evaluator,checks,hitl,human_gate,publish}.py`, `core/flow/prompt.py`, `core/flow/postprocess.py`, `core/flow/output_policy.py`, `core/flow/wiring.py`
+
+## Responsibility
+
+A `NodeRunner` ([B28](B28-flow-engine.md)) executes one node and returns a `NodeOutcome`; it never picks the next node and never changes task status. Each of the five node kinds has a runner here. The runners are the seam where the generic engine meets the orchestrator's collaborators (router, check runner, git, notifier, store), injected once per execution unit through `NodeServices`/`NodeInputs`. This block also covers the per-node prompt assembly, the `output_artifact` post-processing, the output-policy containment, and the wiring that builds the runner registry.
+
+## Public surface
+
+- **Contracts** (`nodes/base.py`): `NodeServices` ([base.py:188](../../../src/wastech_orchestrator/core/flow/nodes/base.py#L188)) and `NodeInputs` ([base.py:233](../../../src/wastech_orchestrator/core/flow/nodes/base.py#L233)); `NodeInfraError` ([base.py:46](../../../src/wastech_orchestrator/core/flow/nodes/base.py#L46)) → terminal `failed`; `NodeManualRequired` ([base.py:56](../../../src/wastech_orchestrator/core/flow/nodes/base.py#L56)) → terminal `manual_action_required`; the narrow `RouterPort`/`CheckRunnerPort`/`NodeRunStorePort`/`NotifierPort`/`GitPort` protocols ([base.py:66-186](../../../src/wastech_orchestrator/core/flow/nodes/base.py#L66)).
+- `AgentNodeRunner` ([agent.py:59](../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L59)), `EvaluatorNodeRunner` ([evaluator.py:48](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L48)), `ChecksNodeRunner` ([checks.py:56](../../../src/wastech_orchestrator/core/flow/nodes/checks.py#L56)), `HitlNodeRunner` ([hitl.py:39](../../../src/wastech_orchestrator/core/flow/nodes/hitl.py#L39)), `PublishNodeRunner` ([publish.py:43](../../../src/wastech_orchestrator/core/flow/nodes/publish.py#L43)).
+- `HumanGate` ([human_gate.py:28](../../../src/wastech_orchestrator/core/flow/nodes/human_gate.py#L28)) — the shared durable round-trip.
+- `render_role_prompt` ([prompt.py:41](../../../src/wastech_orchestrator/core/flow/prompt.py#L41)), `read_role_file` ([prompt.py:26](../../../src/wastech_orchestrator/core/flow/prompt.py#L26)).
+- `apply_output_artifact` ([postprocess.py:50](../../../src/wastech_orchestrator/core/flow/postprocess.py#L50)), `read_decomposition` ([postprocess.py:82](../../../src/wastech_orchestrator/core/flow/postprocess.py#L82)), `OUTPUT_SLOTS` ([postprocess.py:43](../../../src/wastech_orchestrator/core/flow/postprocess.py#L43)).
+- `resolve_output_policy` ([output_policy.py:53](../../../src/wastech_orchestrator/core/flow/output_policy.py#L53)), `within_subdir`/`is_within` ([output_policy.py:78](../../../src/wastech_orchestrator/core/flow/output_policy.py#L78)).
+- `build_node_services`/`build_node_inputs`/`build_stage_map` ([wiring.py:47-170](../../../src/wastech_orchestrator/core/flow/wiring.py#L47)).
+
+## Behavior
+
+### Agent node
+
+`AgentNodeRunner.run` ([agent.py:66](../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L66)) resolves the route from the node's `provider` (else the global primary), builds an `AgentRunRequest`, runs it through the router ([B17](B17-agent-router-and-fallback.md)), records a `node_runs` row, and returns an unconditional `done` outcome carrying the agent output (so the post-node hook can persist an `output_artifact` slot / read the decomposition contract). Infra-exhaustion (no provider completed the stage) raises `NodeInfraError`; a quality-failed result flows on for a downstream evaluator/checks node to judge ([agent.py:224-230](../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L224)). A `best_effort` node tolerates infra-exhaustion and continues with no output ([agent.py:74-79](../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L74)) — the §5.2 minimal-summary fallback.
+
+Two core-owned behaviors wrap the run, both **data-driven, never keyed by stage name**:
+
+- **Embedded HITL** ([agent.py:92](../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L92)) — a node opts in by declaring `hitl` with `allow_question`/`allow_approval` (`_wants_hitl`, [agent.py:480](../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L480)). If the typed output carries a human question/approval, the runner does at most one durable round-trip via `HumanGate` and re-runs the stage with the answer, resuming a persisted interaction after a restart. A second signal after an answer fails closed to `NodeManualRequired` ([agent.py:124](../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L124)).
+- **Dangerous-diff + output-containment guard** ([agent.py:234](../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L234)) — after a `workspace-write` edit the runner writes `{diff_path}` and: (1) for a document/report `output_policy`, fails closed if any change escaped the report directory (`_apply_output_containment_guard`, [agent.py:281](../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L281)); (2) classifies the diff ([B14](B14-dangerous-diff-guardrail.md)) and, if a deletion/dependency change is found, requires a durable human approval — a matching planning pre-approval counts ([agent.py:338](../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L338)) — reconsidering once on denial before failing closed ([agent.py:324](../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L324)).
+
+The request grants network iff the flow declares a `network_policy` ([agent.py:383-385](../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L383)). Editing-session continuity is realized here: an `editing_lineage` node resumes the unit's stored session only when the same provider produced it (`_resume_session_id`, [agent.py:427](../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L427)) and persists it after success (`_persist_session`, [agent.py:446](../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L446)) — the raw session id lives only in `state.db` ([B07](B07-state-machine-and-store.md), `editing_lineage`). `lineage_affinity` makes `fixing` continue the session `implementation` established.
+
+### Evaluator node
+
+`EvaluatorNodeRunner.run` ([evaluator.py:55](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L55)) runs the evaluator's `role_file` prompt read-only and maps its structured verdict to an outcome (`_verdict`, [evaluator.py:134](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L134)): a blocking finding → `rework`, otherwise `accept`. It writes the findings artifact (`review/findings.json`, exposed downstream as `{review_path}`, [evaluator.py:120](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L120)) and an immutable `in_flow_verdict` row in `evaluations`. Two evaluator shapes share one mechanism:
+
+- **Blocking** (`blocking: true`, e.g. `review`) — reworks every time it finds a blocking issue; the engine's named-loop budget bounds the cycles (exhaustion → manual).
+- **Non-blocking self-capping** (e.g. `test_quality`) — reworks until its own `max_rework_per_stage` is spent, **counted from the immutable `in_flow_verdict` rows** (`count_rework_verdicts`, [evaluator.py:148](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L148)), then accepts — never manual. There is no mutable counter, so the core stays domain-free.
+
+A `resume_own_lineage` evaluator (the research critic) resumes its own durable session across rework rounds, persisted in `node_lineage` keyed by `(task_id, node_id, subtask_order)` (`_resume_own_session`/`_persist_own_lineage`, [evaluator.py:191-231](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L191)).
+
+### Checks node
+
+`ChecksNodeRunner.run` ([checks.py:63](../../../src/wastech_orchestrator/core/flow/nodes/checks.py#L63)) dispatches on `node.checker`; every checker maps to the same `pass`/`fail` outcome so the engine needs no per-checker case:
+
+- **`command_profile`** ([checks.py:83](../../../src/wastech_orchestrator/core/flow/nodes/checks.py#L83)) — runs the resolved quality-gate commands through the Check Runner ([B24](B24-check-execution.md)). On a launch failure it re-resolves the command set once (gated) and retries; a still-failing launch raises `CheckLaunchError` (an infra failure, [checks.py:52](../../../src/wastech_orchestrator/core/flow/nodes/checks.py#L52)). **Mutation guard (P2.4):** it snapshots the working tree before/after; a _passing_ check that mutated commit-candidate files fails closed to manual review ([checks.py:99-109](../../../src/wastech_orchestrator/core/flow/nodes/checks.py#L99)) — a green-but-dirtying check must not pass silently. This is core-owned and cannot be disabled by the flow.
+- **`citation`** / **`dependency_scan`** — delegate to the read-only checkers ([B32](B32-flow-checkers.md)); the mutation guard does not apply.
+
+### HITL node and the human gate
+
+`HitlNodeRunner` ([hitl.py:39](../../../src/wastech_orchestrator/core/flow/nodes/hitl.py#L39)) is a bare human gate with no agent stage, keyed by the node id (not a `Stage`). `signal: approval` branches `route:approve` / `route:deny`; `signal: question` proceeds `done` once a non-empty answer arrives ([hitl.py:121-125](../../../src/wastech_orchestrator/core/flow/nodes/hitl.py#L121)). `HumanGate` ([human_gate.py:28](../../../src/wastech_orchestrator/core/flow/nodes/human_gate.py#L28)) is the shared primitive behind the embedded refinement/planning HITL, the dangerous-diff approval, and this node: it sends one correlated prompt, persists a durable `waiting` artifact, waits against the persisted deadline, and records the answer; a restarted process resumes the `waiting` interaction (`resume`, [human_gate.py:69](../../../src/wastech_orchestrator/core/flow/nodes/human_gate.py#L69)). Fail-closed: a missing notifier, timeout, transport error, or invalid response raises `NodeManualRequired`.
+
+### Publish node
+
+`PublishNodeRunner` ([publish.py:43](../../../src/wastech_orchestrator/core/flow/nodes/publish.py#L43)) maps the flow's `PublishingPolicy` to idempotent git operations ([B22](B22-git-manager.md)) — publishing is the orchestrator's sole responsibility; providers and flows never touch git. `pull_request` / `documentation_pull_request` call finalize (move the task file + write the committed summary, the PR body), then commit code, commit the audit trail, push, and open the PR — each idempotent via `publish_operations` ([publish.py:94-124](../../../src/wastech_orchestrator/core/flow/nodes/publish.py#L94)). `private_control_workspace_report` stores the report under the gitignored `.worc/` workspace and touches git not at all, failing closed if the report would be git-trackable ([publish.py:126](../../../src/wastech_orchestrator/core/flow/nodes/publish.py#L126)). A git failure **after** finalize already moved the task file raises `NodeManualRequired` (a resumable manual stop via `rerun --continue`) rather than a terminal failure, so a done-committed task is neither mislabeled nor stranded ([publish.py:64-82](../../../src/wastech_orchestrator/core/flow/nodes/publish.py#L64)).
+
+### Prompt assembly, output artifacts, output policy
+
+- `render_role_prompt` ([prompt.py:41](../../../src/wastech_orchestrator/core/flow/prompt.py#L41)) reads the node's `role_file` from inside the flow directory (defense-in-depth on top of the load-time traversal check) and substitutes only allowlisted **path** variables via the fixed core renderer ([B15](B15-prompt-templates.md)) — never task bodies, diffs, logs, env, or secrets.
+- `apply_output_artifact` ([postprocess.py:50](../../../src/wastech_orchestrator/core/flow/postprocess.py#L50)) writes an agent node's declared `output_artifact` slot (`enriched_spec` → `task.enriched.md`, `plan` → `plan.md`, `summary` → `summary.md`) and threads the path into the downstream `NodeInputs` (so the next node gets `{plan_path}` etc.). `read_decomposition` ([postprocess.py:82](../../../src/wastech_orchestrator/core/flow/postprocess.py#L82)) reads the proposed_by node's decompose/subtasks contract and applies the deterministic gate ([B11](B11-task-decomposition.md)).
+- `resolve_output_policy` ([output_policy.py:53](../../../src/wastech_orchestrator/core/flow/output_policy.py#L53)) maps a scalar `OutputPolicy` to a `ResolvedOutputPolicy` (the per-task report directory, required files, privacy): `repository_document` → `docs/research/<task-id>/`, `private_control_workspace_report` → `.worc/security-reports/<task-id>/` (never committed), `code_change` → no report directory.
+
+### Wiring
+
+`build_node_services`/`build_node_inputs` ([wiring.py:82-170](../../../src/wastech_orchestrator/core/flow/wiring.py#L82)) turn the orchestrator's live `_Pipeline` and collaborators into the data bundles the runners read; keeping this out of `orchestrator.py` keeps the node layer free of an orchestrator import. `build_stage_map` ([wiring.py:47](../../../src/wastech_orchestrator/core/flow/wiring.py#L47)) maps each agent/evaluator node id to a `Stage` **identity** (request `stage`, output schema, HITL parsing, interaction/observability paths) — not the provider (routing is node-based). Nodes whose id is not a `Stage` value (research/audit flows) get a capability-keyed default via `_stage_identity` ([wiring.py:67](../../../src/wastech_orchestrator/core/flow/wiring.py#L67)).
+
+## Invariants & guarantees
+
+- **Runners never transition** — they return a `NodeOutcome`; the engine ([B28](B28-flow-engine.md)) moves execution and the orchestrator moves the [B07](B07-state-machine-and-store.md) status.
+- **Git is orchestrator-only** — only the publish node calls the `GitPort`, and only the orchestrator wires it ([base.py:204-206](../../../src/wastech_orchestrator/core/flow/nodes/base.py#L204)).
+- **Raw sessions only in `state.db`** — `editing_lineage` / `node_lineage` are the sole stores of raw provider session ids; redacted everywhere else ([B21](B21-secret-redaction.md)).
+- **Containment fails closed** — output-policy and dangerous-diff guards raise `NodeManualRequired` rather than publishing a risky change.
+
+## Dependencies
+
+- **Uses:** [B17](B17-agent-router-and-fallback.md) (router), [B24](B24-check-execution.md)/[B32](B32-flow-checkers.md) (checks/checkers), [B22](B22-git-manager.md) (git), [B26](B26-notifications-telegram.md) (notifier), [B12](B12-hitl-and-typed-output.md) (typed output + interaction artifacts), [B14](B14-dangerous-diff-guardrail.md), [B15](B15-prompt-templates.md), [B07](B07-state-machine-and-store.md) (`node_runs`, `evaluations`, lineage tables).
+- **Used by:** [B28](B28-flow-engine.md) (runner registry), [B06](B06-orchestrator-pipeline.md) (wiring).
+
+## Audit candidates
+
+- The verdict routing (`_is_blocking`, [evaluator.py:273](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L273)) treats only `high`/`critical`/`blocking` as blocking — a `medium` finding does **not** drive `rework` — while `Finding.blocking` ([engine.py:73](../../../src/wastech_orchestrator/core/flow/engine.py#L73)) reports `medium` as blocking. The carried `Finding` and the routing decision disagree on `medium`. Also `_BLOCKING_SEVERITIES` and `_HIGH_SEVERITIES` are identical frozensets ([evaluator.py:42-44](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L42)).
+- `build_stage_map` shoehorns arbitrary flow node ids into the 8-value `Stage` enum with a heuristic capability default ([wiring.py:67-79](../../../src/wastech_orchestrator/core/flow/wiring.py#L67)); same-identity nodes share one audit directory. The code marks per-node audit paths and the `Stage` enum removal as "land with P4" ([wiring.py:56-58](../../../src/wastech_orchestrator/core/flow/wiring.py#L56)), which has not happened. See [the audit](../../backlog/2026-06-21-audit.md).
+
+## Tests
+
+- `tests/core/flow/` — per-runner behavior (agent HITL round-trips, dangerous-diff/containment guard, evaluator verdict mapping + self-cap, checks mutation guard, publish idempotency + resumable manual stop, standalone hitl gate).

@@ -1,103 +1,73 @@
 # B09 — Fix Loop Control
 
-## Purpose
+> Reconstructed from code (`core/loop_control.py`, `core/flow/run_state.py`) and tests (`tests/core/test_supervisor.py`, `tests/state/test_state_store.py`). The code is the only source of truth; this document was rebuilt from the implementation, not from prose or comments. Significant claims carry a `file:line` reference.
 
-Deterministically guarantees task completion: the persisted per-task counter struct (`LoopCounters`) plus the **generic** budget enforcement the FlowEngine ([B06](./B06-orchestrator-pipeline.md)) runs over `FlowRunState.loop_counters`. Replaces a supervisor agent with simple persistent counters and hard limits, to prevent an infinite ping-pong of `review ↔ fixing` or `testing ↔ fixing`. The engine carries no domain knowledge — it does not know `test_fix`/`review_fix` by name; the named loops live in the flow YAML edges.
+**Status:** documented · **Source modules:** `src/wastech_orchestrator/core/loop_control.py`, `src/wastech_orchestrator/core/flow/run_state.py`
 
-## Responsibilities
+## Responsibility
 
-- Define the mutable per-task counter struct (`stage_attempts`, `test_fix_cycles`, `review_fix_cycles`, `fix_iterations`) persisted on the `tasks` row ([loop_control.py:23-30](../../../src/wastech_orchestrator/core/loop_control.py#L23)).
-- (Engine) On every `rework`/`fail` edge, charge it against a single global counter plus its named loop / inline budget, and decide whether the run is stuck and which limit was exhausted ([engine.py:342-361](../../../src/wastech_orchestrator/core/flow/engine.py#L342)).
-- (Engine) Reset a loop / inline-budget counter when a forward edge leaves the node ([engine.py:363-375](../../../src/wastech_orchestrator/core/flow/engine.py#L363)); preserve the global counter across subtasks ([run_state.py:69-79](../../../src/wastech_orchestrator/core/flow/run_state.py#L69)).
+Since the flow engine, this block is no longer a bespoke loop controller — it is the **shared rework-accounting primitive** plus the **operator-facing loop counters**. Two things live here: (1) `record_rework`, the single accounting path that increments the one global fix counter on every in-flow rework/fail edge ([loop_control.py:37](../../../src/wastech_orchestrator/core/loop_control.py#L37)); and (2) `LoopCounters`, the mutable per-task counter struct persisted on the `tasks` row that backs the ledger, the CLI `status` line, and the failure report ([loop_control.py:27](../../../src/wastech_orchestrator/core/loop_control.py#L27)). The `FlowRunState` checkpoint that physically holds the counters during a traversal also lives here ([run_state.py:30](../../../src/wastech_orchestrator/core/flow/run_state.py#L30)).
 
-## Block Boundaries
+The actual bounding — comparing a counter against a cap and ending the run when a budget is exhausted — is **not** in this block. That is generic engine bookkeeping owned by B28 ([engine.py:355](../../../src/wastech_orchestrator/core/flow/engine.py#L355)). This module carries no flow domain knowledge: it does not know the names `test_fix` / `review_fix` (those are YAML edges) and it does not decide termination.
 
-### Within the block's responsibility
+## Public surface
 
-- The counter struct (§8.1) and the engine's "stuck / not stuck" decision with the name of the exhausted limit.
+- `LoopCounters` ([loop_control.py:27](../../../src/wastech_orchestrator/core/loop_control.py#L27)) — dataclass: `stage_attempts`, `test_fix_cycles`, `review_fix_cycles`, `fix_iterations` (all default `0`); the per-task counters persisted on the `tasks` row.
+- `record_rework(run_state) -> int` ([loop_control.py:37](../../../src/wastech_orchestrator/core/loop_control.py#L37)) — the single global accounting path; bumps `FlowRunState.loop_counters["global_fix_iterations"]` and returns the new value.
+- `FlowRunState` ([run_state.py:30](../../../src/wastech_orchestrator/core/flow/run_state.py#L30)) — the mutable per-traversal checkpoint holding `loop_counters` (`dict[str, int]`), with `bump` / `counter` / `reset` / `reset_for_next_subtask` and the `fix_iterations` convenience property.
+- `FlowRunState.GLOBAL_FIX_KEY` ([run_state.py:37](../../../src/wastech_orchestrator/core/flow/run_state.py#L37)) — the reserved counter key `"global_fix_iterations"`.
 
-### Outside the block's responsibility
+## Behavior
 
-- **Persistence** of the counters — that is [B07](./B07-state-machine-and-store.md) (the engine checkpoint via the [recorder](../../../src/wastech_orchestrator/core/flow/recorder.py)).
-- **Ownership of `stage_attempts`** — it is counted by [B17 Router](./B17-agent-router-and-fallback.md); on the `tasks` row it is only mirrored as the latest value.
-- **The named loops themselves** (`test_fix`/`review_fix`) — they live in the flow YAML edges, not in the engine ([implementation.yaml:74-83](../../../src/wastech_orchestrator/core/flow/packaged/implementation.yaml#L74)).
+### The accounting primitive
 
-## Entry Points
+`record_rework` is a one-liner over the checkpoint: `return run_state.bump(run_state.GLOBAL_FIX_KEY)` ([loop_control.py:50](../../../src/wastech_orchestrator/core/loop_control.py#L50)). Its purpose is to be the **one** place a rework is counted globally. Every in-flow rework/fail edge — the test-driven loop and the review-driven loop alike — charges its global cost here and only here, so a rework can never be double-incremented. `test_record_rework_single_increment` anchors this: two calls return `1` then `2`, and afterwards only the `GLOBAL_FIX_KEY` key exists in `loop_counters` ([test_supervisor.py:242](../../../tests/core/test_supervisor.py#L242)). The immutable per-verdict record lives in the `evaluations` table written by the evaluator node (B30); recording a verdict never touches this counter.
 
-- `LoopCounters` — the persisted counter dataclass ([loop_control.py:23](../../../src/wastech_orchestrator/core/loop_control.py#L23)).
-- Engine budget bookkeeping: `_charge_rework` / `_reset_loops_at` / `_loop_cap` / `_global_cap` ([engine.py:342-382](../../../src/wastech_orchestrator/core/flow/engine.py#L342)).
-- `FlowRunState.loop_counters` and the reserved `GLOBAL_FIX_KEY` ("global_fix_iterations") ([run_state.py:37,44](../../../src/wastech_orchestrator/core/flow/run_state.py#L37)).
+### The counter struct and its keys
 
-## Input Data and State
+`LoopCounters` is pure data — no methods, no enforcement. Its four fields back distinct surfaces:
 
-`AgentsConfig` limits (`max_fix_cycles`, `max_total_fix_iterations`) and the flow's `budgets`; the engine's runtime `FlowRunState.loop_counters` (a single `dict[str, int]` keyed by named loop, synthetic edge key, or `GLOBAL_FIX_KEY`). `loop_control.py` itself is pure data.
+- `fix_iterations` — the single global per-task counter; mirrors `FlowRunState.fix_iterations`, which reads `GLOBAL_FIX_KEY` ([run_state.py:47](../../../src/wastech_orchestrator/core/flow/run_state.py#L47)).
+- `test_fix_cycles` / `review_fix_cycles` — the length of the _current consecutive_ named-loop cycle, mirrored from the runtime counters keyed `"test_fix"` / `"review_fix"`.
+- `stage_attempts` — attempts of a single stage run including provider fallback; owned and counted by the Router (`StageOutcome.stage_attempts`), not by this block. See the audit note below.
 
-## Main Scenario (engine charges a `rework`/`fail` edge)
+`FlowRunState.loop_counters` is a single `dict[str, int]` carrying three key flavours without per-flow special cases ([run_state.py:13](../../../src/wastech_orchestrator/core/flow/run_state.py#L13)): a named loop's name, a synthetic inline-budget edge key, and the reserved `GLOBAL_FIX_KEY`. `reset_for_next_subtask` drops every per-loop / per-edge counter but **preserves** the global one, so the global fix budget accumulates across a decomposed task while each subtask gets fresh per-loop budgets ([run_state.py:69](../../../src/wastech_orchestrator/core/flow/run_state.py#L69)).
 
-1. Bump the global counter (`GLOBAL_FIX_KEY`).
-2. If the edge carries `loop: <name>`, bump that named loop and compare with `>=` against the per-loop cap; if it carries an inline `budget: N`, compare the synthetic edge key with `allow N` before bumping.
-3. If the per-loop / inline cap is reached → `stuck`, `limit_name="max_fix_cycles"` (or `budget:<from>-><to>`) — checked first.
-4. Otherwise, if the global counter reaches the global cap → `stuck`, `limit_name="max_total_fix_iterations"`.
-5. Otherwise not stuck — the engine takes the rework/fail edge.
+### How the engine bounds it (B28 — framing only, not this block)
 
-The per-loop / inline cap is `min(flow_budget, max_fix_cycles)` and is checked before the global cap `min(flow_budget, max_total_fix_iterations)`; on exhaustion the engine ends the run at `MANUAL_ACTION_REQUIRED` and writes a failure report ([engine.py:239-256](../../../src/wastech_orchestrator/core/flow/engine.py#L239)):
+The engine charges and caps each rework/fail edge in `_charge_rework` ([engine.py:355](../../../src/wastech_orchestrator/core/flow/engine.py#L355)): it calls `record_rework` for the global increment, then compares against the relevant cap. The effective ceilings are `min(flow_budget, config_cap)`:
 
-```mermaid
-flowchart TB
-    start(["edge.outcome ∈ {rework, fail}"]) --> g["bump GLOBAL_FIX_KEY"]
-    g --> hasloop{"edge has loop / budget?"}
-    hasloop -->|"loop: <name>"| bumploop["bump named loop"]
-    hasloop -->|"budget: N"| chkb{"edge counter ≥ N?"}
-    bumploop --> c1{"cycles ≥ min(flow_budget, max_fix_cycles)?"}
-    chkb -->|yes| stuck1["stuck, limit = budget"]
-    chkb -->|no| c2
-    c1 -->|yes| stuck1b["stuck, limit = max_fix_cycles"]
-    c1 -->|no| c2{"global ≥ min(flow_budget, max_total_fix_iterations)?"}
-    hasloop -->|neither| c2
-    c2 -->|yes| stuck2["stuck, limit = max_total_fix_iterations"]
-    c2 -->|no| go["not stuck → engine takes the edge"]
-    stuck1 --> manual["engine: MANUAL_ACTION_REQUIRED + failure report (B08)"]
-    stuck1b --> manual
-    stuck2 --> manual
-```
+- a **named-loop** edge (`loop: <name>`) is capped at `min(flow_budget, agents.max_fix_cycles)`, reported as `max_fix_cycles` ([engine.py:395](../../../src/wastech_orchestrator/core/flow/engine.py#L395));
+- an inline **`budget: N`** edge (no named loop) uses `allow N` semantics keyed by `edge_key` ([engine.py:372](../../../src/wastech_orchestrator/core/flow/engine.py#L372));
+- the **global** counter is capped at `min(flow_budget, agents.max_total_fix_iterations)`, reported as `max_total_fix_iterations` ([engine.py:398](../../../src/wastech_orchestrator/core/flow/engine.py#L398)).
 
-## Checks and Constraints
+The per-loop / inline cap is checked **before** the global cap when both could trip on the same entry. On exhaustion the engine returns `MANUAL_ACTION_REQUIRED` and writes a failure report ([engine.py:252](../../../src/wastech_orchestrator/core/flow/engine.py#L252)); a forward (non-rework) edge instead resets the loop/inline counter anchored at that node ([engine.py:381](../../../src/wastech_orchestrator/core/flow/engine.py#L381)). The packaged implementation flow declares the two named loops and their budgets — `test_fix: 15`, `review_fix: 15`, `global_fix_iterations: 30` — purely in YAML ([implementation.yaml:77](../../../src/wastech_orchestrator/core/flow/packaged/implementation.yaml#L77)).
 
-- Two independent limits: per-loop (`max_fix_cycles`) and global hard stop (`max_total_fix_iterations`); each is the config ceiling clamping the flow budget (`min(flow_budget, config_cap)`, [engine.py:377-382](../../../src/wastech_orchestrator/core/flow/engine.py#L377)). The configuration validator requires `max_total_fix_iterations ≥ max_fix_cycles` ([B05](./B05-configuration.md)).
-- When both limits trip on the same entry, the per-loop / inline limit is reported before the global one ([engine.py:359-361](../../../src/wastech_orchestrator/core/flow/engine.py#L359)).
-- `_reset_loops_at` resets a loop / inline-budget counter when a forward edge leaves the node ([engine.py:363-375](../../../src/wastech_orchestrator/core/flow/engine.py#L363)).
-- `FlowRunState.reset_for_next_subtask` drops every loop / inline counter **except** the global counter, so decomposition cannot bypass the hard stop ([run_state.py:69-79](../../../src/wastech_orchestrator/core/flow/run_state.py#L69)).
+### Mirroring the engine's counters back into `LoopCounters`
 
-## Output
+The engine counts in `FlowRunState.loop_counters`; the `tasks` counter columns back the operator surfaces. The orchestrator (B06) reconciles them in `_sync_counters_from_run_state`, called before every terminal transition ([orchestrator.py:929](../../../src/wastech_orchestrator/core/orchestrator.py#L929)). It `replace`s `p.counters` with `fix_iterations` from the global counter and `test_fix_cycles` / `review_fix_cycles` from the named-loop counters ([orchestrator.py:938](../../../src/wastech_orchestrator/core/orchestrator.py#L938)) — so the surfaces do not read `0` after the engine ran fix loops. Independently, `save_flow_checkpoint` mirrors the global counter into the `tasks.fix_iterations` column on **every** checkpoint, so a live `status` reflects loops mid-run, not only at the terminal step ([state_store.py:854](../../../src/wastech_orchestrator/state_store.py#L854)).
 
-A `_Stuck(loop, limit_name)` (or `None`) from `_charge_rework`; mutated `FlowRunState.loop_counters`.
+Persistence round-trips through the state store: `save_counters` writes the four columns, `get_counters` reads them back into a `LoopCounters` ([state_store.py:709](../../../src/wastech_orchestrator/state_store.py#L709)). Resume rehydrates `p.counters` via `get_counters` ([orchestrator.py:733](../../../src/wastech_orchestrator/core/orchestrator.py#L733)). The counter then surfaces in the ledger entry's `fix_iterations` field ([ledger.py:75](../../../src/wastech_orchestrator/ledger.py#L75)), the CLI `status` line ([cli.py:1085](../../../src/wastech_orchestrator/cli.py#L1085)), and the failure report's `counters` block ([recorder.py:62](../../../src/wastech_orchestrator/core/flow/recorder.py#L62)).
 
-## Side Effects
+## Invariants & guarantees
 
-- The engine mutates `FlowRunState.loop_counters`, persisted via the recorder checkpoint ([recorder.py:39-45](../../../src/wastech_orchestrator/core/flow/recorder.py#L39)). `loop_control.py` itself is pure data (a dataclass).
+- A rework is counted globally **exactly once** — `record_rework` is the sole writer of `GLOBAL_FIX_KEY`, so no edge double-counts ([loop_control.py:50](../../../src/wastech_orchestrator/core/loop_control.py#L50), anchored by [test_supervisor.py:242](../../../tests/core/test_supervisor.py#L242)).
+- `loop_control.py` holds **no** enforcement or domain knowledge — it never names a loop and never compares against a cap; bounding is the engine's ([engine.py:355](../../../src/wastech_orchestrator/core/flow/engine.py#L355)).
+- The global fix counter survives decomposition subtask resets; per-loop / inline counters do not ([run_state.py:69](../../../src/wastech_orchestrator/core/flow/run_state.py#L69)).
+- Config guarantees termination is reachable: `agents.max_total_fix_iterations >= agents.max_fix_cycles` is validated, else rejected ([validation.py:87](../../../src/wastech_orchestrator/config/validation.py#L87)); defaults are `max_fix_cycles=15`, `max_total_fix_iterations=30`, `max_stage_attempts=3` ([loader.py:404](../../../src/wastech_orchestrator/config/loader.py#L404)).
+- The reserved key name cannot collide with a named loop (operator-chosen) or a synthetic edge key (contains `"->"`) ([run_state.py:34](../../../src/wastech_orchestrator/core/flow/run_state.py#L34)).
 
-## Errors and Edge Cases
+## Dependencies
 
-- When both limits are triggered on the same entry, the per-loop / inline limit is reported first.
+- **Uses:** B07 (`get_counters` / `save_counters` / `save_flow_checkpoint` persist the counters on the `tasks` row), B05 (`agents.max_fix_cycles` / `max_total_fix_iterations` supply the config caps).
+- **Used by:** B28 (`_charge_rework` calls `record_rework` and caps the counters), B06 (`_sync_counters_from_run_state` mirrors the engine counters back into `LoopCounters`), B08 (the ledger entry and failure report read the counters), B01 (the CLI `status` line prints `fix_iterations`), B17 (the Router produces `stage_attempts`, persisted into this struct's field).
 
-## Relationships
+## Audit candidates
 
-### Uses
+- `src/wastech_orchestrator/core/loop_control.py:31` — `LoopCounters.stage_attempts` is vestigial on the `tasks` row in the flow-engine era — see [the audit](../../backlog/2026-06-21-audit.md). The Router's per-run `stage_attempts` is persisted only into `node_runs` via `complete_node_run` ([agent.py:423](../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L423), [evaluator.py:260](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L260)); `_sync_counters_from_run_state` never sets it ([orchestrator.py:938](../../../src/wastech_orchestrator/core/orchestrator.py#L938)), so the `tasks.stage_attempts` column read by `get_counters` and surfaced to operators is permanently `0`.
 
-- [B05 — Configuration](./B05-configuration.md) — limits from `AgentsConfig`.
+## Tests
 
-### Used by
-
-- [B06 — Pipeline / FlowEngine](./B06-orchestrator-pipeline.md) — budget enforcement over `FlowRunState.loop_counters`.
-- [B07 — State Store](./B07-state-machine-and-store.md) — imports `LoopCounters` for counter persistence.
-
-## Role in the Overall System
-
-This is the "circuit breaker" for the fix loop, now realized as the engine's bounded-termination guarantee over generic counters: every `rework`/`fail` edge is charged, and when a limit is exhausted the run ends at `MANUAL_ACTION_REQUIRED` with a failure report ([B08](./B08-ledger-and-failure-reports.md)).
-
-## Code Confirmation
-
-- [core/loop_control.py:23-30](../../../src/wastech_orchestrator/core/loop_control.py#L23) — the `LoopCounters` dataclass.
-- [core/flow/engine.py:340-383](../../../src/wastech_orchestrator/core/flow/engine.py#L340) — engine budget bookkeeping (`_charge_rework`/`_reset_loops_at`/`_loop_cap`/`_global_cap`).
-- [core/flow/run_state.py](../../../src/wastech_orchestrator/core/flow/run_state.py) — `loop_counters`, `GLOBAL_FIX_KEY`, `reset_for_next_subtask`.
-- Test: [tests/core/test_flow_engine.py](../../../tests/core/test_flow_engine.py) — fix-loop budget scenarios (both caps, resets, global accumulation across subtasks).
+- [tests/core/test_supervisor.py:242](../../../tests/core/test_supervisor.py#L242) (`test_record_rework_single_increment`) — the single-increment invariant: `record_rework` advances only the global counter and never double-counts. (The former dedicated `tests/core/test_loop_control.py` was removed with the `LoopController` in commit `79dfa37`; this is its surviving anchor.)
+- [tests/state/test_state_store.py:123](../../../tests/state/test_state_store.py#L123) — round-trips a fully-populated `LoopCounters` through `save_counters` / `get_counters`.
+- [tests/core/test_flow_engine.py:327](../../../tests/core/test_flow_engine.py#L327) — exercises the engine caps that consume these counters: named-loop cap, the global cap as a hard stop, and inline `budget` edges (B28 coverage, listed here for the counter contract).

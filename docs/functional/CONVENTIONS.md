@@ -4,7 +4,7 @@ This document describes how to maintain and keep current the documentation set i
 
 ## Documentation Language
 
-- **All documentation in `docs/functional/` is written in English.** This applies to `index.md`, `block-registry.md`, `system-flows.md`, all files in `blocks/`, and this file.
+- **All documentation in `docs/functional/` is written in English.** This applies to `index.md`, `block-registry.md`, `system-flows.md`, all files in `blocks/` and `flows/`, and this file.
 - The English-only rule applies **only** to `docs/functional/`. The rest of the repository does **not** inherit it: source code, docstrings/comments, other documents (`.agents/rules/`, `README.md`, `docs/backlog/`, etc.), and commit messages follow their own established language — do not translate them.
 - Technical identifiers within the text remain as they appear in code: file names, function names, class names, status values, enumerations, flags, and paths are not translated.
 
@@ -14,6 +14,7 @@ This document describes how to maintain and keep current the documentation set i
 - The following are **not** used as sources (even as supplementary references): README and existing documentation, architectural descriptions and diagrams, comments/docstrings, task/issue/PR titles, statements about how the system "should" work.
 - Purpose must not be inferred from a file/directory/class/function/variable name. Confirm through actual calls, dependencies, inputs, conditions, state changes, side effects, and return values.
 - A test is evidence of behavior only based on its setup, invocation, and the actual assertion — not based on its name.
+- The 2026-06-21 reconstruction rebuilt every block, flow, and top-level document from the code alone (the prior prose was not trusted); code problems found during that pass are recorded in [docs/backlog/2026-06-21-audit.md](../backlog/2026-06-21-audit.md), not in the functional docs.
 
 ## When to Update Documentation
 
@@ -21,6 +22,7 @@ Update `docs/functional/` **in the same change** as the code whenever the follow
 
 - an entry point, route, CLI subcommand, background task, or event handler;
 - a contract between blocks (signatures, enumerations, schemas, statuses, error codes);
+- the flow graph — a node, edge, outcome, loop/budget, ceiling (`permission_ceiling` / `output_policy` / `publishing` / `network_policy`), or a packaged flow YAML;
 - an external integration, storage, data schema, or artifact format;
 - a check, constraint, branch, side effect, or error handler inside a block;
 - a new independent responsibility appears (new block) or an existing one disappears.
@@ -32,11 +34,12 @@ Purely cosmetic code changes that do not alter boundaries/behavior/contracts do 
 1. Identify the affected block (via `block-registry.md`). If the responsibility is new — create a new block (see below) rather than expanding someone else's.
 2. Re-read the actual code and tests for the affected area; do not rely on the previous documentation text.
 3. Update the block file `blocks/<id>-<short-name>.md` using the template, verifying each statement against the code.
-4. Update mutual references in related blocks (the "Uses" / "Used by" sections).
+4. Update mutual references in related blocks (the "Dependencies: Uses / Used by" section).
 5. If entry points, storage, integrations, or relationships have changed — update `index.md`.
-6. If a cross-cutting scenario has changed — update `system-flows.md` (without duplicating block details).
-7. Update `block-registry.md`: purpose, entry points, dependencies, status.
-8. Run the quality checks (see checklist) and verify that all links resolve.
+6. If a flow graph changed — update the affected `flows/<flow>.md` (and `flows/index.md` if the model changed), without duplicating block details.
+7. If a cross-cutting scenario changed — update `system-flows.md`.
+8. Update `block-registry.md`: purpose, entry points, dependencies, status.
+9. Run the quality checks (see checklist) and verify that all links resolve.
 
 ## What Counts as a Separate Block
 
@@ -48,19 +51,19 @@ Extract behavior into a separate block if it combines several of the following t
 
 ## Block File Template
 
-Each file `blocks/<id>-<short-name>.md` contains the following sections: Purpose; Responsibilities; Block Boundaries (In scope / Out of scope); Entry Points; Inputs and State; Main Scenario; Alternative Scenarios (if any); Checks and Constraints; Result; Side Effects; Errors and Edge Cases; Relationships (Uses / Used by); Place in the Overall System; Code Evidence; Uncertainties (if any).
+Each file `blocks/<id>-<short-name>.md` opens with a reconstructed-from-code blockquote and a `**Status:** … · **Source modules:** …` line, then these sections: **Responsibility**; **Public surface** (key symbols with `file:line`); **Behavior** (subsections, with a mermaid diagram where it clarifies); **Invariants & guarantees**; **Dependencies** (Uses / Used by); **Audit candidates** (code issues found, pointing at the dated audit; omit if none); **Tests**.
 
 - One file — one logical block.
-- Block identifiers (`B01`…`B27`) and short file names are fixed; a new block receives the next available `Bxx` and does not reuse a freed one.
+- Block identifiers (`B01`…`B32`) and short file names are fixed; a new block receives the next available `Bxx` and does not reuse a freed one.
 
-## Execution Flow Documents (S-prefix)
+## Flow Documents (`flows/`)
 
-In addition to `B**` blocks (what exists in the system), there is a layer of **execution flows** in `flows/<category>/`: one document `S01`…`S0n` per flow step plus an overview `flows/<category>/index.md`. The first flow is `flows/coding/` (the coding pipeline: refinement → … → publishing); in the future, `flows/deep_research/`, `flows/documentation/`, `flows/security/`, and others will appear alongside it. This uses the same template and the same rules, but from a different perspective — **what happens at a step**: who executes it, whether it is optional, transitions, ping-pong.
+The pipeline is data, not a fixed stage sequence: each `task_type` resolves to a flow — a YAML graph of typed nodes driven by the flow engine ([B28](blocks/B28-flow-engine.md)). The `flows/` directory documents this from the graph's perspective:
 
-- S-documents describe the flow and **reference** the `B**` blocks that implement the mechanics — without duplicating their content.
-- The `S` prefix is reserved for flow steps (does not reuse `B`); numbering follows the order of steps within their category.
-- Same requirements: English, only code-confirmed content, `file:line` references, diagrams where appropriate.
-- The related C4 layer is the dynamic view `implementationFlow` in `docs/likec4/` (see its README).
+- `flows/index.md` — the flow model (node kinds, edges/outcomes, loops/budgets, decomposition regions, the supervisor layer above all flows).
+- one document per packaged flow — `flows/implementation.md`, `flows/deep-research.md`, `flows/security-audit.md` — each describing that flow's node-by-node graph.
+
+Flow docs **reference** the `B**` blocks that implement the mechanics without duplicating them. (The former per-step `S01`–`S08` stage documents are retired: the system no longer has a fixed eight-stage pipeline.) Same requirements: English, code-confirmed content only, `file:line` references, diagrams where appropriate. The related C4 layer is the dynamic view in `docs/likec4/` (see its README; note it is maintained separately and may lag).
 
 ## Registry Statuses
 
@@ -70,16 +73,16 @@ In addition to `B**` blocks (what exists in the system), there is a layer of **e
 ## Links and Evidence
 
 - Use relative Markdown links; make them mutual and accompany them with a brief explanation of the relationship.
-- Back each significant statement with a reference to the code/test location in `file:line` format (e.g., `[orchestrator.py:350](../../src/wastech_orchestrator/core/orchestrator.py#L350)`).
-- Paths are relative to the file's location: from `blocks/<...>.md` to code — `../../../src/...`; from `index.md`/`system-flows.md`/`block-registry.md` — `../../src/...`.
+- Back each significant statement with a reference to the code/test location in `file:line` format (e.g., `[orchestrator.py:342](../../src/wastech_orchestrator/core/orchestrator.py#L342)`).
+- Paths are relative to the file's location: from `blocks/<...>.md` and `flows/<...>.md` to code — `../../../src/...`; from `index.md`/`system-flows.md`/`block-registry.md` — `../../src/...`.
 - Do not reference a non-existent block file without first registering it in the registry.
 
 ## Style
 
 - Write concisely and precisely; do not paraphrase code line by line. Include technical details only when they affect boundaries, execution order, result, constraint, error, state change, or relationship.
 - Distinguish between a block's own work, initiation, delegation, use of another block's result, and another block's side effect.
-- Do not present unreachable code as working behavior; mark it as unreachable/unconfirmed.
-- Speculative wording is prohibited: "probably", "most likely", "apparently", and similar. Place unestablished facts in the "Uncertainties" section, specifying what is unknown and which areas were checked.
+- Do not present unreachable code as working behavior; mark it as unreachable/unconfirmed (and consider an Audit-candidates entry).
+- Speculative wording is prohibited: "probably", "most likely", "apparently", and similar. State unestablished facts as such, specifying what is unknown and which areas were checked.
 - Markdown: prose **without hard wrapping** — one paragraph = one line (wrap only softly in the editor; do not insert manual line breaks in prose). Surround headings and lists with blank lines; do not use bold text instead of a heading; increment heading levels one at a time.
 - Markdown formatting is standardized by **Prettier** (`proseWrap: never`, see `.prettierrc.json` in the root): `npx prettier@3 --write "**/*.md"`. It removes hard wrapping, aligns tables and blank lines around headings; it does not touch code blocks, mermaid, or links. Exceptions are in `.prettierignore`.
 
@@ -87,8 +90,7 @@ In addition to `B**` blocks (what exists in the system), there is a layer of **e
 
 - Format diagrams as a code block with the `mermaid` language tag — it renders on GitHub and in VS Code and remains as text visible in diffs.
 - The same source-of-truth rule applies to diagrams as to text: only what is confirmed by code. Do not add edges, states, or relationships "for completeness" if they are not in the code.
-- Add a diagram where it clarifies order, state, or relationships (state machine, call sequence, dependency map) rather than trivially duplicating a list.
-- Below a non-trivial diagram, indicate the source from which it was derived (`file:line`).
+- Add a diagram where it clarifies order, state, or relationships (state machine, call sequence, dependency map, flow graph) rather than trivially duplicating a list.
 - Keep the diagram up to date in the same change as the code (just like the text).
 - Labels should use plain English; technical identifiers, statuses, and names remain as they appear in code.
 
@@ -103,21 +105,21 @@ In addition to `B**` blocks (what exists in the system), there is a layer of **e
 - Boundaries and what the block does not do are defined; the main and alternative scenarios are confirmed.
 - Checks, constraints, errors, and side effects are described; dependencies and mutual references are correct.
 - No code paraphrasing, speculation, or filler; every significant statement is verifiable.
-- Registry, index, and (if necessary) cross-cutting flows are consistent; all statuses are final.
-- All relative links (to blocks and to code/tests) resolve.
+- Registry, index, flows, and (if necessary) cross-cutting scenarios are consistent; all statuses are final.
+- All relative links (to blocks, flows, and to code/tests) resolve.
 
-Quick check for links to block files and to code/tests (run from `docs/functional/`):
+Quick check for links to block/flow files and to code/tests (run from `docs/functional/`):
 
 ```bash
-# broken links to block files from index/registry/flows
+# broken links to local .md files from index/registry/system-flows
 for f in index.md system-flows.md block-registry.md; do
-  grep -oE '\]\(\./[^)]+\.md[^)]*\)' "$f" | sed -E 's/^\]\(//; s/\)$//; s/#.*$//' \
+  grep -oE '\]\([^)]+\.md[^)]*\)' "$f" | sed -E 's/^\]\(//; s/\)$//; s/#.*$//' \
     | sort -u | while read -r t; do [ -f "$t" ] || echo "$f -> $t"; done
 done
 
 # broken links to code/tests from block files (../../../<path>)
-for f in blocks/*.md; do
+for f in blocks/*.md flows/*.md; do
   grep -oE '\]\(\.\./\.\./\.\./[^)]+\)' "$f" | sed -E 's/^\]\(//; s/\)$//; s/#.*$//' \
-    | sort -u | while read -r t; do [ -e "blocks/$t" ] || echo "$f -> $t"; done
+    | sort -u | while read -r t; do d=$(dirname "$f"); [ -e "$d/$t" ] || echo "$f -> $t"; done
 done
 ```

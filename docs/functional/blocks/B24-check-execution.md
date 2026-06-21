@@ -1,120 +1,91 @@
-# B24 — Check Execution (testing stage)
+# B24 — Check Execution
 
-## Purpose
+> Reconstructed from code (`src/wastech_orchestrator/check_runner.py`) and tests (`tests/check/test_check_runner.py`, `tests/security/test_no_shell_interpolation.py`). The code is the only source of truth; this document was rebuilt from the implementation, not from prose or comments. Significant claims carry a `file:line` reference.
 
-Runs the allowed check commands (quality gate) for a task or subtask and reports pass/fail. This is the executor of the `testing` stage: it runs commands in order, stops on the first failure, writes logs, and distinguishes "quality failure" (the test ran and found problems) from "launch failure" (binary or module not found).
+**Status:** documented · **Source modules:** `src/wastech_orchestrator/check_runner.py`
 
-## Responsibilities
+## Responsibility
 
-- Determine the check set: the provided `checks` profile or normalized `checks.commands` ([check_runner.py:102-105](../../../src/wastech_orchestrator/check_runner.py#L102)).
-- Run each check as an **argv list without shell** via the safe runner, with an environment allowlist and a `checks.timeout_seconds` timeout ([check_runner.py:126-140](../../../src/wastech_orchestrator/check_runner.py#L126)).
-- Write each check's stdout to a non-overwritable `checks/<run-id>.log`, append redacted stderr and a status footer ([check_runner.py:178-198](../../../src/wastech_orchestrator/check_runner.py#L178)).
-- Stop on the first failure and return a `CheckOutcome` flagged as a launch failure where applicable ([check_runner.py:167-176](../../../src/wastech_orchestrator/check_runner.py#L167)).
+`CheckRunner` is the **command-profile execution engine**: given a resolved list of quality-gate checks (each an argv list), it launches each one **in order through the safe runner** ([B19](B19-subprocess-runner.md)), stops at the **first failure**, writes a per-run log, and returns an aggregate `CheckOutcome` ([check_runner.py:91](../../../src/wastech_orchestrator/check_runner.py#L91)). It never transitions state, never touches git, and does not decide what to run — the resolved profile is supplied by the caller (the [checks](B30-flow-node-runners.md) node) and resolved by [B23](B23-check-discovery.md).
 
-## Block Boundaries
+Its load-bearing distinction is **launch failure vs. quality failure**. A check whose executable could not be launched (`launch_error != None`) short-circuits with `launch_failed=True` ([check_runner.py:148](../../../src/wastech_orchestrator/check_runner.py#L148), [check_runner.py:174](../../../src/wastech_orchestrator/check_runner.py#L174)) so the node treats it as **infrastructure** (re-resolve once, then fail) — never spending a fix iteration on a problem no code change can fix. A non-zero **exit** after a successful launch is a **quality** failure that routes to fixing.
 
-### Within block responsibility
+## Public surface
 
-- Sequential execution of checks, result aggregation, logging, and launch/quality distinction.
+- `CheckRunner.run(*, clone_dir, artifacts_root, task_id, subtask=None, checks=None) -> CheckOutcome` ([check_runner.py:91](../../../src/wastech_orchestrator/check_runner.py#L91)) — run the resolved checks in order; stop at the first failure.
+- `CheckRunner.run_process` (property) ([check_runner.py:85](../../../src/wastech_orchestrator/check_runner.py#L85)) — exposes the injected safe runner. **Note:** no caller reads it today (see Audit candidates).
+- `CheckOutcome` ([check_runner.py:56](../../../src/wastech_orchestrator/check_runner.py#L56)) — `passed`, `runs: tuple[CheckRunResult, ...]`, `first_failure_log`, `launch_failed`, `first_launch_error`.
+- `CheckRunResult` ([check_runner.py:41](../../../src/wastech_orchestrator/check_runner.py#L41)) — one check's `command`, `name`, `exit_code`, `timed_out`, `passed`, `log_path`, `launch_failed`, `launch_error`.
+- `split_command(command) -> Sequence[str]` ([check_runner.py:207](../../../src/wastech_orchestrator/check_runner.py#L207)) — module-level `shlex.split` helper (no shell).
 
-### Outside block responsibility
+## Behavior
 
-- **Selecting which checks to run** (profile resolution) — that is [B23](./B23-check-discovery.md); the runner receives `checks` or normalizes `config.checks.commands`.
-- **State transitions, writing `check_runs`, the fixing cycle, re-resolution on launch failure** — that is [B06](./B06-orchestrator-pipeline.md) ([check_runner.py:7-9](../../../src/wastech_orchestrator/check_runner.py#L7)).
-- **Launch security** — that is [B19 `run_process`](./B19-subprocess-runner.md).
-- **Environment allowlist** — [B25](./B25-security-policy.md); **stderr redaction** — [B21](./B21-secret-redaction.md).
+### Resolving what to run
 
-## Entry Points
+`run` normalizes its `checks` argument into a concrete list ([check_runner.py:108](../../../src/wastech_orchestrator/check_runner.py#L108)):
 
-- `CheckRunner.run(*, clone_dir, artifacts_root, task_id, subtask=None, checks=None)` ([check_runner.py:85](../../../src/wastech_orchestrator/check_runner.py#L85)) — [B06](./B06-orchestrator-pipeline.md) `_run_checks` ([orchestrator.py:2204-2211](../../../src/wastech_orchestrator/core/orchestrator.py#L2204)).
-- Constructed in `build_orchestrator` ([orchestrator.py:2624](../../../src/wastech_orchestrator/core/orchestrator.py#L2624)).
-- `split_command(command)` ([check_runner.py:201](../../../src/wastech_orchestrator/check_runner.py#L201)) — public helper for `shlex.split`.
+- `checks=None` → fall back to the configured `checks.commands`, run through `normalize_commands` (legacy path) ([check_runner.py:111](../../../src/wastech_orchestrator/check_runner.py#L111)). `normalize_commands` skips blank legacy strings ([model.py:118](../../../src/wastech_orchestrator/checks/model.py#L118), confirmed by `test_blank_command_is_skipped`).
+- an explicit, possibly **empty** tuple → run exactly those checks. An empty tuple is a **vacuous pass**: the loop runs zero times and returns `CheckOutcome(passed=True, runs=())` ([check_runner.py:182](../../../src/wastech_orchestrator/check_runner.py#L182), confirmed by `test_no_commands_passes`).
 
-## Input Data and State
+The runner consumes the canonical `ResolvedCheck` shape (`name` + argv tuple) — string→argv translation lives in [B23](B23-check-discovery.md)'s `checks.model`, never here.
 
-`clone_dir` (working copy), `artifacts_root`, `task_id`, optional `subtask`, optional `checks` (`ResolvedCheck` argv from profile). Config provides `checks.timeout_seconds` and `security.allowed_environment`. No state is stored.
+### The run loop
 
-## Main Scenario
+Before the loop: the per-check timeout is read from `checks.timeout_seconds` ([check_runner.py:112](../../../src/wastech_orchestrator/check_runner.py#L112), confirmed by `test_timeout_value_passed_through`), the child env is built from the **allowlist** only ([check_runner.py:113](../../../src/wastech_orchestrator/check_runner.py#L113)), and `<artifacts_root>/logs/<task-id>/checks/` is created ([check_runner.py:114](../../../src/wastech_orchestrator/check_runner.py#L114)).
 
-1. Check set = `checks` (if provided) or `normalize_commands(config.checks.commands)`.
-2. Build environment `build_child_env(allowed_environment)`; create `logs/<task-id>/checks/`.
-3. For each check in order: argv = `check.argv`; log path = next non-overwritable slot; run `run_process(argv, cwd=clone_dir, env, timeout, stdout_path=log)` under a heartbeat.
-4. Append redacted stderr and a status footer; `passed = exit_code==0 and not timed_out and not launch_failed`.
-5. If a check fails — immediately return `CheckOutcome(passed=False, first_failure_log, launch_failed, first_launch_error)` (first failure stops execution).
-6. All passed → `CheckOutcome(passed=True, runs=…)`.
+For each check ([check_runner.py:119](../../../src/wastech_orchestrator/check_runner.py#L119)):
 
-Profile runs in order; first failure stops; launch failure is distinguished from quality failure:
+1. `argv = list(check.argv)` — passed verbatim to the safe runner, no shell, no `shlex` at this point ([check_runner.py:120](../../../src/wastech_orchestrator/check_runner.py#L120), confirmed by `test_argv_split_no_shell` and `test_explicit_resolved_checks_override_config`).
+2. A fresh, non-overwriting log path is chosen ([check_runner.py:121](../../../src/wastech_orchestrator/check_runner.py#L121)).
+3. The launch runs under a heartbeat ([check_runner.py:132](../../../src/wastech_orchestrator/check_runner.py#L132)): `run_process(argv, cwd=clone_dir, env=<allowlisted>, timeout_seconds=<configured>, stdout_path=<log>)`. Only stdout is streamed to the log; stderr is captured.
+4. `_append_stderr` appends the **redacted** stderr and a status footer to the log ([check_runner.py:147](../../../src/wastech_orchestrator/check_runner.py#L147)).
+5. The pass formula: `passed = result.exit_code == 0 and not result.timed_out and not launch_failed`, where `launch_failed = result.launch_error is not None` ([check_runner.py:148](../../../src/wastech_orchestrator/check_runner.py#L148)).
+6. A `CheckRunResult` is appended ([check_runner.py:161](../../../src/wastech_orchestrator/check_runner.py#L161)). If it did not pass, `run` returns immediately with `first_failure_log` set and `launch_failed` / `first_launch_error` mirrored from this check ([check_runner.py:173](../../../src/wastech_orchestrator/check_runner.py#L173)). The remaining checks never run (confirmed by `test_stops_at_first_failure`).
+
+If every check passes, the loop falls through to `CheckOutcome(passed=True, runs=...)` ([check_runner.py:182](../../../src/wastech_orchestrator/check_runner.py#L182), confirmed by `test_all_commands_pass`).
 
 ```mermaid
 flowchart TB
-    start(["run(clone_dir, task_id, checks)"]) --> set["check set = checks or<br/>normalize_commands(config.checks.commands)"]
-    set --> empty{"set empty?"}
-    empty -->|yes| passall["CheckOutcome(passed=True) — no runs"]
-    empty -->|no| run["run_process(argv, cwd, env via allowlist, timeout) (B19);<br/>stdout → non-overwritable log + redacted stderr"]
-    run --> ok{"exit=0, not timeout, not launch failure?"}
-    ok -->|yes| next{"more checks?"}
-    next -->|yes| run
-    next -->|no| passall2["CheckOutcome(passed=True)"]
-    ok -->|"launch failure"| lf["CheckOutcome(launch_failed=True)<br/>→ B06: re-resolution (B23), NOT fixing"]
-    ok -->|"quality failure / timeout"| qf["CheckOutcome(passed=False, first_failure_log)<br/>→ B06: fixing"]
+    start(["run(... checks)"]) --> norm["checks is None?<br/>yes → normalize(config.checks.commands)<br/>no → list(checks)"]
+    norm --> loop{"next check?"}
+    loop -->|none left| passall["CheckOutcome(passed=True)"]
+    loop -->|check| exec["run_process(argv, cwd, allowlisted env, timeout) — B19<br/>stdout → fresh log; redact+footer stderr"]
+    exec --> pf{"exit==0 &amp; not timed_out<br/>&amp; not launch_failed?"}
+    pf -->|yes| loop
+    pf -->|"launch_error set"| lf["CheckOutcome(passed=False, launch_failed=True,<br/>first_launch_error) → infra: re-resolve once, else fail"]
+    pf -->|"non-zero exit / timeout"| qf["CheckOutcome(passed=False, first_failure_log)<br/>→ quality: route to fixing"]
 ```
 
-## Alternative Scenarios
+### Logs
 
-### No checks
+`_next_log_path` returns `<NNN>.log` (3-digit, 1-based) — or `sub-<NN>-<NNN>.log` for a subtask — sized from the count of already-present matching logs so a fix-loop re-run **never clobbers** an earlier log ([check_runner.py:184](../../../src/wastech_orchestrator/check_runner.py#L184), confirmed by `test_logs_not_overwritten_across_runs` and `test_subtask_logs_are_prefixed`). `_append_stderr` writes a `----- stderr -----` section only when redacted stderr is non-empty and a `----- status -----` footer carrying `launch_error: …` and/or `timed_out: true` when set ([check_runner.py:190](../../../src/wastech_orchestrator/check_runner.py#L190), confirmed by `test_stderr_redacted_in_log`).
 
-Empty set → `CheckOutcome(passed=True)` with no runs ([check_runner.py:176](../../../src/wastech_orchestrator/check_runner.py#L176); confirmed by test `test_no_commands_passes`).
+### Structured logging
 
-### Launch failure
+Each check emits a `check started` and a `check completed` log bound to `task_id` and `stage="testing"`, the latter carrying `passed`, `launch_failed`, `exit_code`, `timed_out`, and a rounded `duration_seconds` ([check_runner.py:118](../../../src/wastech_orchestrator/check_runner.py#L118), [check_runner.py:150](../../../src/wastech_orchestrator/check_runner.py#L150), confirmed by `test_check_logs_start_completion_and_duration`). The heartbeat emits `check heartbeat` while a check runs long ([check_runner.py:142](../../../src/wastech_orchestrator/check_runner.py#L142)).
 
-`result.launch_error is not None` → `launch_failed=True`, `passed=False`, `launch_failed`/`first_launch_error` are set in `CheckOutcome`; [B06](./B06-orchestrator-pipeline.md) treats this as an infrastructure event (re-resolution/preflight), not a reason for fixing ([check_runner.py:142-143,167-174](../../../src/wastech_orchestrator/check_runner.py#L142)).
+## Invariants & guarantees
 
-## Checks and Constraints
+- **Argv, never a shell.** Checks reach `run_process` as a list with `shell=False`; the runner applies no `shlex.split` of its own (that happens once, upstream, in `normalize_commands`) ([check_runner.py:120](../../../src/wastech_orchestrator/check_runner.py#L120)).
+- **Allowlisted env only.** The child gets exactly `build_child_env(security.allowed_environment)`, never the parent's full environment ([check_runner.py:113](../../../src/wastech_orchestrator/check_runner.py#L113), [B25](B25-security-policy.md)).
+- **Launch failure ≠ quality failure.** A timeout is a quality failure (`launch_failed is False`) because the process did launch (confirmed by `test_timeout_is_failure`); only `launch_error != None` sets `launch_failed=True` (confirmed by `test_launch_error_is_distinct_from_quality_failure`).
+- **First failure short-circuits.** No check after the first failure is launched ([check_runner.py:173](../../../src/wastech_orchestrator/check_runner.py#L173)).
+- **No state, no git, no overwrite.** The runner only spawns processes and appends to fresh log files; recording `check_runs` and routing are the node's job ([check_runner.py:184](../../../src/wastech_orchestrator/check_runner.py#L184)).
+- **Redaction before disk.** stderr is run through `redact_text` before any byte is written ([check_runner.py:197](../../../src/wastech_orchestrator/check_runner.py#L197), [B21](B21-secret-redaction.md)).
 
-- Only argv list, no shell (launched via [B19](./B19-subprocess-runner.md)); `shlex.split` is applied at most during normalization of config strings, not in shell.
-- Mandatory per-check timeout (`checks.timeout_seconds`).
-- Environment — allowlist only; parent environment is not inherited.
-- Log files are not overwritten (numbering `NNN.log`, with `sub-NN-` prefix for subtasks) ([check_runner.py:178-182](../../../src/wastech_orchestrator/check_runner.py#L178)).
-- First failure short-circuits (subsequent checks are not run).
+## Dependencies
 
-## Output
+- **Uses:** [B19](B19-subprocess-runner.md) (`run_process` — the safe argv launcher), [B23](B23-check-discovery.md) (`ResolvedCheck` / `normalize_commands` — the check model), [B25](B25-security-policy.md) (`build_child_env` — env allowlist), [B21](B21-secret-redaction.md) (`redact_text` — stderr), [B20](B20-artifact-layout.md) (`task_artifact_dir` — the `checks/` location), [B27](B27-observability.md) (`bind` logging + `run_with_heartbeat`).
+- **Used by:** [B30](B30-flow-node-runners.md) — the `checks` node's `command_profile` mode calls `CheckRunner.run` ([nodes/checks.py:227](../../../src/wastech_orchestrator/core/flow/nodes/checks.py#L227)), records one `check_runs` row per command ([nodes/checks.py:234](../../../src/wastech_orchestrator/core/flow/nodes/checks.py#L234), [B07](B07-state-machine-and-store.md)), and maps `launch_failed` to a re-resolve-once-then-`CheckLaunchError` path ([nodes/checks.py:86](../../../src/wastech_orchestrator/core/flow/nodes/checks.py#L86)). Constructed once in `build_orchestrator` ([orchestrator.py:2004](../../../src/wastech_orchestrator/core/orchestrator.py#L2004)). The `citation` / `dependency_scan` checkers ([B32](B32-flow-checkers.md)) are separate node methods, not this runner.
 
-`CheckOutcome(passed, runs, first_failure_log, launch_failed, first_launch_error)` and a `CheckRunResult` for each check that ran. On disk — a log for each run.
+## Audit candidates
 
-## Side Effects
+See [the audit](../../backlog/2026-06-21-audit.md).
 
-- Creation of the `checks/` directory and writing log files (stdout + redacted stderr + footer).
-- Spawning one child process per check (via [B19](./B19-subprocess-runner.md)).
-- Heartbeat log during a long-running check (via [B27](./B27-observability.md)).
+- `check_runner.py:1-16` — the module docstring is **stale on its own central fact**: it says checks "run from the canonical `checks.model.ResolvedCheck` argv lists supplied by the resolver; absent those, the configured `checks.commands` are normalized" yet leads with "Runs the configured `checks.commands` (config, not hardcoded) through … `shlex.split`". The `shlex.split` framing describes only the legacy `checks=None` fallback, not the primary resolved-profile path.
+- `check_runner.py:207-209` — `split_command` is **vestigial to this module**: the runner never calls it (it relies on `normalize_commands` upstream); its only consumer is a security test ([tests/security/test_no_shell_interpolation.py:56](../../../tests/security/test_no_shell_interpolation.py#L56)). It duplicates the `shlex.split(..., posix=True)` already inside `normalize_check_command` ([model.py:110](../../../src/wastech_orchestrator/checks/model.py#L110)).
 
-## Errors and Edge Cases
+## Tests
 
-- Launch failure is a **result value** (`launch_failed`), not an exception.
-- Timeout — `timed_out=True` → `passed=False`.
-- stderr is always redacted before being written to the log.
-
-## Connections
-
-### Uses
-
-- [B19 — Subprocess Runner](./B19-subprocess-runner.md) — `run_process`.
-- [B25 — Security](./B25-security-policy.md) — `build_child_env`.
-- [B21 — Redaction](./B21-secret-redaction.md) — `redact_text` for stderr.
-- [B20 — Artifacts](./B20-artifact-layout.md) — `task_artifact_dir`.
-- [B23 — Check Discovery](./B23-check-discovery.md) — `ResolvedCheck`/`normalize_commands` (check model).
-- [B27 — Observability](./B27-observability.md) — heartbeat and logging.
-
-### Used by
-
-- [B06 — Pipeline](./B06-orchestrator-pipeline.md) — `testing` stage (`_run_checks`).
-
-## Position in the Overall System
-
-This is the "quality gate" for tests/linters. Its result determines the branching in [B06](./B06-orchestrator-pipeline.md): `passed` → review; quality failure → fixing; launch failure → check re-resolution ([B23](./B23-check-discovery.md)) or terminal failure. The invariant "test errors go to fixing, not to another provider" relies on this distinction.
-
-## Code Confirmation
-
-- [check_runner.py:85-176](../../../src/wastech_orchestrator/check_runner.py#L85) — run loop, first failure, launch distinction.
-- [check_runner.py:142-143](../../../src/wastech_orchestrator/check_runner.py#L142) — `passed` and `launch_failed` formula.
-- [check_runner.py:178-198](../../../src/wastech_orchestrator/check_runner.py#L178) — non-overwritable logs, redacted stderr.
-- Test: [tests/check/test_check_runner.py](../../../tests/check/test_check_runner.py) — empty set → pass, first failure stops, launch failure is flagged, argv without shell.
+- `tests/check/test_check_runner.py` — empty/blank command set → vacuous pass; all-pass aggregation and per-check logs; argv split without shell; explicit `ResolvedCheck` overriding config; first-failure short-circuit; timeout is a quality (not launch) failure; launch error is distinct and flagged on both `CheckOutcome` and the `CheckRunResult`; timeout value passthrough; logs never overwritten across re-runs; subtask log prefixing; stderr redaction in the log; structured `check started` / `check completed` + duration logging.
+- `tests/security/test_no_shell_interpolation.py` — `split_command` performs `shlex` splitting and does not expand shell substitutions, anchoring the no-shell guarantee.

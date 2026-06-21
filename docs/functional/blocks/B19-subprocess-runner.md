@@ -1,111 +1,78 @@
-# B19 — Safe Subprocess Runner
+# B19 — Safe Subprocess Launcher
 
-## Purpose
+> Reconstructed from code (`providers/process.py`) and tests (`tests/providers/test_process.py`, `tests/security/test_no_shell_interpolation.py`, `tests/providers/test_prompt_argv_isolation.py`). The code is the only source of truth; this document was rebuilt from the implementation, not from prose or comments. Significant claims carry a `file:line` reference.
 
-The single entry point for launching any external CLI. Enforces the system's process-launch security invariants: argument-list invocation (no shell), a mandatory timeout, an explicitly specified environment, prompt delivery via stdin, and streaming stdout to a file. The primitive itself has no knowledge of Codex/Claude/git syntax or error classes — it simply launches a process and returns a raw result for the caller to normalize.
+**Status:** documented · **Source modules:** `src/wastech_orchestrator/providers/process.py`
 
-## Responsibilities
+## Responsibility
 
-- Launch `argv` as a list via `subprocess.run(..., shell=False)` ([process.py:81-93](../../../src/wastech_orchestrator/providers/process.py#L81)).
-- Pass the child process **exactly** the provided environment dictionary (`env=dict(env)`), without merging with the parent ([process.py:84](../../../src/wastech_orchestrator/providers/process.py#L84)).
-- Apply a mandatory timeout; on expiry, kill the process and set `timed_out` ([process.py:90,96-98](../../../src/wastech_orchestrator/providers/process.py#L96)).
-- Feed `stdin_text` to the process's stdin (via `input=`), or send `DEVNULL` if no text is provided ([process.py:75-77](../../../src/wastech_orchestrator/providers/process.py#L75)).
-- Stream stdout to `stdout_path` (file opened `wb`), capture stderr in memory ([process.py:80,86](../../../src/wastech_orchestrator/providers/process.py#L80)).
-- Return `ProcessResult` (exit_code/timed_out/launch_error/duration/stdout_path/stderr_text) ([process.py:32-41,105-112](../../../src/wastech_orchestrator/providers/process.py#L32)).
+The single chokepoint through which every external command in the system is launched. `run_process` ([process.py:44](../../../src/wastech_orchestrator/providers/process.py#L44)) takes an argv **list**, runs it with `shell=False` ([process.py:91](../../../src/wastech_orchestrator/providers/process.py#L91)), hands the child exactly the env mapping it was given ([process.py:84](../../../src/wastech_orchestrator/providers/process.py#L84)), enforces a mandatory timeout ([process.py:90](../../../src/wastech_orchestrator/providers/process.py#L90)), streams stdout to a file and captures stderr in memory ([process.py:80-86](../../../src/wastech_orchestrator/providers/process.py#L80)), and returns a raw `ProcessResult` ([process.py:105-112](../../../src/wastech_orchestrator/providers/process.py#L105)).
 
-## Block Boundaries
+It is deliberately provider-agnostic: it knows nothing about Codex/Claude syntax, git, check commands, or `ErrorClass`. It launches a process safely and reports a raw outcome; classification, redaction, and argv construction belong to the callers. Both a timeout and an un-launchable binary are returned as **values**, never raised — the only `subprocess` import in the whole package lives here ([process.py:24](../../../src/wastech_orchestrator/providers/process.py#L24)).
 
-### Within scope
+## Public surface
 
-- Safe process launch and duration measurement (via an injectable `monotonic`).
-- Capturing stdout to a file and stderr to a string (unredacted).
+- `run_process(argv, *, cwd, env, timeout_seconds, stdout_path, stdin_text=None, monotonic=time.monotonic) -> ProcessResult` ([process.py:44-53](../../../src/wastech_orchestrator/providers/process.py#L44)) — launch an argv list safely; return a raw result.
+- `ProcessResult` ([process.py:32-41](../../../src/wastech_orchestrator/providers/process.py#L32)) — frozen dataclass with `exit_code: int | None`, `timed_out: bool`, `launch_error: str | None`, `duration_seconds: float`, `stdout_path: str`, `stderr_text: str`.
+- `_coerce_stderr(raw) -> str` ([process.py:115-120](../../../src/wastech_orchestrator/providers/process.py#L115)) — module-private; normalizes the `str | bytes | None` stderr salvaged from a `TimeoutExpired` into text.
 
-### Out of scope
+## Behavior
 
-- **Building the environment** — performed by [B25 `build_child_env`](./B25-security-policy.md); the caller passes a ready-made `env` here. This module does not import `security.env`.
-- **Secret redaction** — stderr is returned as-is; the caller redacts it before writing to an artifact ([B21](./B21-secret-redaction.md)); this is explicitly noted in the result type ([process.py:41](../../../src/wastech_orchestrator/providers/process.py#L41)).
-- **Error classification** into `ErrorClass` — that is [B18](./B18-agent-providers.md) (`errors.classify`).
-- **Building `argv`** — that is the adapters/managers that call `run_process`.
+### Safe launch
 
-## Entry Points
+`run_process` opens `stdout_path` in binary write mode (`wb`) and calls `subprocess.run(list(argv), …)` inside that context ([process.py:80-93](../../../src/wastech_orchestrator/providers/process.py#L80)). `list(argv)` is passed positionally with `shell=False` ([process.py:82](../../../src/wastech_orchestrator/providers/process.py#L82), [process.py:91](../../../src/wastech_orchestrator/providers/process.py#L91)) — there is no command string and therefore no shell to interpolate user input into. `cwd` is normalized via `os.fspath` ([process.py:83](../../../src/wastech_orchestrator/providers/process.py#L83)). Output is decoded as UTF-8 with `errors="replace"` ([process.py:88-89](../../../src/wastech_orchestrator/providers/process.py#L88)), so undecodable bytes can never raise.
 
-- `run_process(argv, *, cwd, env, timeout_seconds, stdout_path, stdin_text=None, monotonic=...)` ([process.py:44](../../../src/wastech_orchestrator/providers/process.py#L44)). Called from provider adapters ([B18](./B18-agent-providers.md)), Git Manager ([B22](./B22-git-manager.md)), Check Runner ([B24](./B24-check-execution.md)), and git detection during setup ([B03/B04](./B03-installer-and-scaffolding.md)).
+### Environment isolation
 
-## Input Data and State
+The child receives `env=dict(env)` — a copy of exactly the mapping passed in, never merged with the parent's `os.environ` ([process.py:84](../../../src/wastech_orchestrator/providers/process.py#L84)). The runner itself applies no allowlist; it only guarantees "the child sees what, and only what, you handed me." Building the allowlisted env is the caller's job (the env allowlist, [B25](B25-security-policy.md)). `test_child_env_is_exactly_what_is_passed` ([test_process.py:106-121](../../../tests/providers/test_process.py#L106)) sets a secret in the parent and asserts the child reports it absent.
 
-`argv` (list), `cwd`, `env` (full environment for the child), `timeout_seconds` (mandatory), `stdout_path`, optional `stdin_text`. No state is stored — the function is pure with respect to the process (except for creating the stdout file).
+### stdin / stdout / stderr
 
-## Main Scenario
+stdin is mutually exclusive between the two modes ([process.py:73-77](../../../src/wastech_orchestrator/providers/process.py#L73)): with `stdin_text` the prompt is fed via `input=` (keeping argv free of task content); with `stdin_text=None` the child's stdin is `subprocess.DEVNULL`, so a prompt-less child sees immediate EOF and can never hang on inherited parent stdin. stdout is streamed straight to the open file via the `stdout=stdout_file` handle ([process.py:85](../../../src/wastech_orchestrator/providers/process.py#L85)) rather than buffered in memory. stderr is captured with `stderr=subprocess.PIPE` ([process.py:86](../../../src/wastech_orchestrator/providers/process.py#L86)) into `stderr_text` — it is small and secret-prone, and the field is documented as **not yet redacted** ([process.py:41](../../../src/wastech_orchestrator/providers/process.py#L41)); the caller redacts before it touches an artifact ([B21](B21-secret-redaction.md)).
 
-1. Open `stdout_path` for writing (binary mode).
-2. Run `subprocess.run(list(argv), cwd=…, env=dict(env), stdout=file, stderr=PIPE, text=utf-8/replace, timeout=…, shell=False)` with `input=stdin_text` or `stdin=DEVNULL`.
-3. On completion, record `exit_code` and `stderr_text`.
-4. Return `ProcessResult` with the measured duration.
-
-Safe-launch contract; timeout and launch failure are **values** in the result, not exceptions:
+### Outcomes (values, not exceptions)
 
 ```mermaid
 flowchart TB
-    start(["run_process(argv, cwd, env, timeout, stdout_path, stdin_text)"]) --> open["open stdout_path (wb)"]
-    open --> run["subprocess.run(list(argv), shell=False,<br/>env=dict(env) — no parent inheritance,<br/>input=stdin_text or stdin=DEVNULL,<br/>stdout=file, stderr=PIPE, mandatory timeout)"]
-    run --> r{"outcome?"}
-    r -->|"exited"| ok["ProcessResult(exit_code, stderr_text — unredacted, duration)"]
-    r -->|"TimeoutExpired"| to["ProcessResult(timed_out=True, exit_code=None)"]
-    r -->|"FileNotFoundError / OSError / ..."| le["ProcessResult(launch_error=argv[0]) — no exception raised"]
+  s(["run_process(argv, cwd, env, timeout, stdout_path, stdin_text)"]) --> open["open stdout_path (wb)"]
+  open --> run["subprocess.run(list(argv), shell=False,<br/>env=dict(env), input=stdin_text or stdin=DEVNULL,<br/>stdout=file, stderr=PIPE, timeout=timeout_seconds)"]
+  run --> r{"outcome?"}
+  r -->|"exited"| ok["exit_code=returncode, stderr_text, timed_out=False, launch_error=None"]
+  r -->|"TimeoutExpired"| to["timed_out=True, exit_code=None, stderr_text=partial"]
+  r -->|"FileNotFoundError / PermissionError /<br/>NotADirectoryError / OSError"| le["launch_error=&quot;could not launch argv[0]…&quot;, exit_code=None"]
 ```
 
-## Alternative Scenarios
+- **Clean exit** — `exit_code` is set to `completed.returncode` and `stderr_text` to `completed.stderr or ""` ([process.py:94-95](../../../src/wastech_orchestrator/providers/process.py#L94)). A non-zero exit is a value, not an error; `test_nonzero_exit_is_reported` ([test_process.py:54-64](../../../tests/providers/test_process.py#L54)).
+- **Timeout** — `subprocess.TimeoutExpired` is caught ([process.py:96-98](../../../src/wastech_orchestrator/providers/process.py#L96)); `subprocess.run` kills the child on expiry, `timed_out=True`, `exit_code` stays `None`, and any partial stderr from the exception is salvaged via `_coerce_stderr`. `test_timeout_maps_to_timed_out` ([test_process.py:78-87](../../../tests/providers/test_process.py#L78)).
+- **Un-launchable binary** — `FileNotFoundError | PermissionError | NotADirectoryError | OSError` is caught and recorded in `launch_error` rather than raised ([process.py:99-102](../../../src/wastech_orchestrator/providers/process.py#L99)). The message names `argv[0]` (which comes from config and is not a secret) or `"<empty argv>"` for an empty list, plus `exc.strerror` or the exception type name. `test_missing_binary_sets_launch_error` ([test_process.py:90-103](../../../tests/providers/test_process.py#L90)) also asserts the (empty) stdout file still exists for the audit trail, since it is opened before the launch attempt.
 
-### Timeout expiry
+### Duration measurement
 
-`subprocess.TimeoutExpired` → `timed_out=True`, `exit_code=None`, partial stderr from the exception ([process.py:96-98](../../../src/wastech_orchestrator/providers/process.py#L96)).
+`duration_seconds` is `monotonic() - start` and is always computed, even on a launch error ([process.py:67](../../../src/wastech_orchestrator/providers/process.py#L67), [process.py:104](../../../src/wastech_orchestrator/providers/process.py#L104)). The clock is an injectable seam (`monotonic: Callable[[], float] = time.monotonic`, [process.py:52](../../../src/wastech_orchestrator/providers/process.py#L52)); `test_duration_uses_injected_monotonic` ([test_process.py:124-134](../../../tests/providers/test_process.py#L124)) feeds two ticks and asserts the exact delta.
 
-### Binary cannot be launched
+## Invariants & guarantees
 
-`FileNotFoundError/PermissionError/NotADirectoryError/OSError` → the error is **not re-raised**; it is recorded in `launch_error` (with the name `argv[0]`, no secret); for an empty `argv` the label `"<empty argv>"` is used ([process.py:99-102](../../../src/wastech_orchestrator/providers/process.py#L99)).
+- **argv list, never a shell string.** Positional `list(argv)` with `shell=False` ([process.py:82](../../../src/wastech_orchestrator/providers/process.py#L82), [process.py:91](../../../src/wastech_orchestrator/providers/process.py#L91)); user strings are never spliced into a command.
+- **`subprocess` is imported in exactly one module.** Enforced structurally by `test_subprocess_is_only_used_in_the_safe_runner` ([test_no_shell_interpolation.py:27-35](../../../tests/security/test_no_shell_interpolation.py#L27)), which fails if any other package module contains the substring `subprocess`; `test_no_module_enables_a_shell` ([test_no_shell_interpolation.py:43-51](../../../tests/security/test_no_shell_interpolation.py#L43)) forbids the literal `shell=True` anywhere but this file.
+- **The child gets only the passed env.** `env=dict(env)`, no parent inheritance ([process.py:84](../../../src/wastech_orchestrator/providers/process.py#L84)).
+- **Timeout is mandatory.** `timeout_seconds: int` is a required keyword argument with no default ([process.py:49](../../../src/wastech_orchestrator/providers/process.py#L49)).
+- **Parent stdin is never inherited.** Either `input=stdin_text` or `stdin=DEVNULL` ([process.py:75-77](../../../src/wastech_orchestrator/providers/process.py#L75)).
+- **Timeout and launch failure are values, not exceptions** ([process.py:96-102](../../../src/wastech_orchestrator/providers/process.py#L96)); the caller classifies them. Only the `open(stdout_path)` itself can still propagate (it is outside the try that wraps the launch — [process.py:79-80](../../../src/wastech_orchestrator/providers/process.py#L79)).
+- **stderr is returned unredacted.** Documented on the field; redaction is the caller's responsibility ([process.py:41](../../../src/wastech_orchestrator/providers/process.py#L41)).
 
-## Constraints and Invariants
+## Dependencies
 
-- `shell=False` always; `argv` must be a list (no shell interpolation of user strings).
-- Environment is exactly `dict(env)`; the parent environment is not inherited.
-- Timeout is mandatory (type `int`, provided by the caller).
-- stdin: either `input` or `DEVNULL` — the parent's stdin is never inherited.
+- **Uses:** standard library only (`subprocess`, `os`, `time`); no internal blocks. Notably it does **not** import the env allowlist ([B25](B25-security-policy.md)) — callers pass a ready-made env.
+- **Used by:** [B18](B18-agent-providers.md) (Codex/Claude adapters, [codex.py:339](../../../src/wastech_orchestrator/providers/codex.py#L339), [claude.py:427](../../../src/wastech_orchestrator/providers/claude.py#L427)), [B22](B22-git-manager.md) (git/gh, [git_manager.py:206](../../../src/wastech_orchestrator/git_manager.py#L206)), [B24](B24-check-execution.md) (check commands, [check_runner.py:134](../../../src/wastech_orchestrator/check_runner.py#L134)), [B23](B23-check-discovery.md) (launchability probes, [probe.py:63](../../../src/wastech_orchestrator/checks/probe.py#L63)), [B32](B32-flow-checkers.md) (the `dependency_scan` checker, [dependency_scan.py:73](../../../src/wastech_orchestrator/core/flow/checkers/dependency_scan.py#L73)), and install-time git detection, [B04](B04-install-registry-and-config-discovery.md) ([detect.py:50](../../../src/wastech_orchestrator/install/detect.py#L50)). Every caller injects `run_process` as a default-valued parameter for test substitution.
 
-## Output
+## Audit candidates
 
-`ProcessResult` — the raw result of the launch: return code (or `None`), flags `timed_out`, `launch_error`, duration, path to the stdout file, stderr text (unredacted).
+- [process.py:99](../../../src/wastech_orchestrator/providers/process.py#L99) — `FileNotFoundError`/`PermissionError`/`NotADirectoryError` are all subclasses of `OSError`, which is also caught in the same `except` tuple; the three named classes are redundant and the broad `OSError` makes `launch_error` swallow _any_ OS-level failure (including ones unrelated to "binary not launchable"). Tracked in [the audit](../../backlog/2026-06-21-audit.md).
+- [process.py:79-80](../../../src/wastech_orchestrator/providers/process.py#L79) — `open(stdout_path, "wb")` sits outside the `try`, so an unwritable `stdout_path` raises rather than becoming a `launch_error`. The asymmetry (launch failures are values, output-file failures are exceptions) is undocumented in the result type. Tracked in [the audit](../../backlog/2026-06-21-audit.md).
+- [test_no_shell_interpolation.py:38-40](../../../tests/security/test_no_shell_interpolation.py#L38) — `test_safe_runner_launches_without_a_shell` asserts the literal substring `"shell=False"` is present in the source rather than asserting launch behavior; a refactor to `shell=bool(False)` or a constant would silently defeat the guard. Tracked in [the audit](../../backlog/2026-06-21-audit.md).
 
-## Side Effects
+## Tests
 
-- The file `stdout_path` is created or overwritten.
-- One child process is spawned (with the given cwd/env/timeout).
-
-## Errors and Edge Cases
-
-- Timeout and launch failure are **values** in the result, not exceptions (see alternative scenarios). The caller decides how to classify them.
-- Duration is always measured, even on a launch error.
-
-## Relationships
-
-### Uses
-
-- Standard library (`subprocess`, `os`, `time`). Does not use any external blocks.
-
-### Used by
-
-- [B18 — Agent Providers](./B18-agent-providers.md) — launching `codex`/`claude`.
-- [B22 — Git Manager](./B22-git-manager.md) — launching `git`/`gh`.
-- [B24 — Check Execution](./B24-check-execution.md) — launching check commands.
-- [B23 — Check Discovery](./B23-check-discovery.md) — launchability probes.
-- [B03 — Installer](./B03-installer-and-scaffolding.md) — `git_info` (read-only git probes).
-
-## Role in the Overall System
-
-This is the execution bottleneck: the invariant "launch CLI without shell interpolation of user strings" (see [CLAUDE.md], security rules) is enforced here. Every external process in the system passes through `run_process`, so secret redaction and the environment allowlist are applied consistently across all subsystems.
-
-## Code Confirmation
-
-- [providers/process.py:44-112](../../../src/wastech_orchestrator/providers/process.py#L44) — `run_process`: argv list, `shell=False`, `env=dict(env)`, timeout, stdin, stdout-to-file.
-- [providers/process.py:32-41](../../../src/wastech_orchestrator/providers/process.py#L32) — `ProcessResult` (stderr marked as "unredacted").
-- [tests/providers/test_process.py](../../../tests/providers/test_process.py) — confirms: stdout to file, stdin not in argv, environment is exactly what was passed (parent secrets do not leak), timeout → `timed_out`, missing binary → `launch_error` without exception.
-- [tests/security/test_no_shell_interpolation.py](../../../tests/security/test_no_shell_interpolation.py) — confirms that `subprocess` is used only through this module.
+- `tests/providers/test_process.py` ([test_process.py](../../../tests/providers/test_process.py)) — a portable Python one-liner ([test_process.py:17-18](../../../tests/providers/test_process.py#L17)) stands in for any CLI on both POSIX and Windows: stdout streamed to file, prompt delivered on stdin and absent from argv, non-zero exit reported, stderr captured (not streamed), timeout → `timed_out`/`exit_code=None`, missing binary → `launch_error` with the stdout file still present, child env is exactly what was passed (parent secret absent), and injected-`monotonic` duration.
+- `tests/security/test_no_shell_interpolation.py` ([test_no_shell_interpolation.py](../../../tests/security/test_no_shell_interpolation.py)) — structural proof that `subprocess` is imported only by this module, that `shell=True` appears nowhere else, and that check commands are tokenized into argv rather than shell-interpreted.
+- `tests/providers/test_prompt_argv_isolation.py` ([test_prompt_argv_isolation.py](../../../tests/providers/test_prompt_argv_isolation.py)) — complements the runner from the adapter side: a hostile prompt produces byte-identical argv, proving no template can inject a flag or command into the launch.
