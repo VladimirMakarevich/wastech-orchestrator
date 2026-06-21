@@ -448,8 +448,11 @@ def test_resume_continues_persisted_checkpoint(
     )
     if current_node is not None:
         store.save_flow_checkpoint(
-            task_id, current_node=current_node, counters_json="{}",
-            flow_fingerprint=_impl_fingerprint(), fix_iterations=0,
+            task_id,
+            current_node=current_node,
+            counters_json="{}",
+            flow_fingerprint=_impl_fingerprint(),
+            fix_iterations=0,
         )
     failed_check = art / "logs" / task_id / "checks" / "001.log"
     if current_node == "fixing":
@@ -521,8 +524,11 @@ def test_resume_restores_planning_selected_skills(
         )
     )
     store.save_flow_checkpoint(
-        task_id, current_node="implementation", counters_json="{}",
-        flow_fingerprint=_impl_fingerprint(), fix_iterations=0,
+        task_id,
+        current_node="implementation",
+        counters_json="{}",
+        flow_fingerprint=_impl_fingerprint(),
+        fix_iterations=0,
     )
     # Planning ran before the interruption and persisted its skill selection.
     skill_md = git_repo.clone / ".claude" / "skills" / "safe-change" / "SKILL.md"
@@ -586,8 +592,11 @@ def test_resume_waits_on_persisted_planning_prompt_without_resending(
         )
     )
     store.save_flow_checkpoint(
-        task_id, current_node="planning", counters_json="{}",
-        flow_fingerprint=_impl_fingerprint(), fix_iterations=0,
+        task_id,
+        current_node="planning",
+        counters_json="{}",
+        flow_fingerprint=_impl_fingerprint(),
+        fix_iterations=0,
     )
 
     path = interaction_path(art, task_id, Stage.PLANNING)
@@ -683,8 +692,11 @@ def test_resume_decomposed_at_subtask_without_duplicate_commit(
         )
     )
     store.save_flow_checkpoint(
-        task_id, current_node="implementation", counters_json="{}",
-        flow_fingerprint=_impl_fingerprint(), fix_iterations=0,
+        task_id,
+        current_node="implementation",
+        counters_json="{}",
+        flow_fingerprint=_impl_fingerprint(),
+        fix_iterations=0,
     )
     store.insert_subtasks(
         [

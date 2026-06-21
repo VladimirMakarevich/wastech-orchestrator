@@ -61,8 +61,9 @@ def _agent(node_id: str, *, when: WhenPredicate | None = None) -> AgentNode:
 
 
 def _evaluator(node_id: str, *, when: WhenPredicate | None = None) -> EvaluatorNode:
-    return EvaluatorNode(id=node_id, kind="evaluator", role="review", role_file="roles/r.md",
-                         when=when)
+    return EvaluatorNode(
+        id=node_id, kind="evaluator", role="review", role_file="roles/r.md", when=when
+    )
 
 
 def _checks(node_id: str) -> ChecksNode:

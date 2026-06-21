@@ -113,9 +113,7 @@ class HitlNodeRunner:
             )
         if node.signal == "approval" and not isinstance(result.approved, bool):
             raise NodeManualRequired(f"hitl node {node.id!r}: approval returned no decision")
-        if node.signal == "question" and not (
-            isinstance(result.text, str) and result.text.strip()
-        ):
+        if node.signal == "question" and not (isinstance(result.text, str) and result.text.strip()):
             raise NodeManualRequired(f"hitl node {node.id!r}: question returned no answer")
 
     @staticmethod

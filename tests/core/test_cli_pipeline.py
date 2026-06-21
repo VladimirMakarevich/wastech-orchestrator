@@ -318,8 +318,11 @@ def test_cmd_status_reports_active_task(
     )
     # The flow checkpoint surfaces where the engine will resume (replaces the granular-stage view).
     store.save_flow_checkpoint(
-        "task-active", current_node="implementation", counters_json="{}",
-        flow_fingerprint="fp", fix_iterations=2,  # checkpoint mirrors the task's fix counter
+        "task-active",
+        current_node="implementation",
+        counters_json="{}",
+        flow_fingerprint="fp",
+        fix_iterations=2,  # checkpoint mirrors the task's fix counter
     )
     store.close()
 

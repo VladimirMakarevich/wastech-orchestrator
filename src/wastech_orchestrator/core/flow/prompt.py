@@ -38,8 +38,6 @@ def read_role_file(flow_dir: Path, role_file: str) -> str:
         raise RoleFileError(f"cannot read role_file {target}: {exc}") from exc
 
 
-def render_role_prompt(
-    flow_dir: Path, role_file: str, variables: dict[str, object | None]
-) -> str:
+def render_role_prompt(flow_dir: Path, role_file: str, variables: dict[str, object | None]) -> str:
     """Build a node's prompt: read its ``role_file`` and substitute allowlisted path variables."""
     return render_prompt(read_role_file(flow_dir, role_file), variables)

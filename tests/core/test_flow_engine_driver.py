@@ -141,8 +141,13 @@ def test_drive_flow_runs_tiny_flow_to_done(tmp_path: Path) -> None:
         clock=lambda: "ts",
         git=_FakeGit(),
     )
-    inputs = NodeInputs(flow_dir=flow_dir, task_path="/t/task.md", branch="agent/task-1-x",
-                        pr_title="PR", summary_body_path="/s.md")
+    inputs = NodeInputs(
+        flow_dir=flow_dir,
+        task_path="/t/task.md",
+        branch="agent/task-1-x",
+        pr_title="PR",
+        summary_body_path="/s.md",
+    )
 
     result = drive_flow(
         snapshot=snapshot,

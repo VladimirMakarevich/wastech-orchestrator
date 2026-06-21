@@ -39,9 +39,7 @@ TERMINAL: frozenset[Status] = frozenset({Status.DONE, Status.FAILED, Status.MANU
 
 # Statuses in which a task is actively occupying the processing slot (§8.2). ``pending`` and the
 # terminal statuses are excluded; ``new`` precedes slot acquisition (the gate runs first).
-ACTIVE: frozenset[Status] = frozenset(
-    {Status.VALIDATED, Status.PREPARING, Status.RUNNING}
-)
+ACTIVE: frozenset[Status] = frozenset({Status.VALIDATED, Status.PREPARING, Status.RUNNING})
 
 # The "happy path" edges from §8. Every non-terminal status additionally allows ``-> failed`` and
 # ``-> manual_action_required`` (added below), so those are not repeated here.

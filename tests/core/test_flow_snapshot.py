@@ -85,8 +85,14 @@ def test_fingerprint_differs_across_flows(
 
 def test_nodes_by_id_all_reachable(impl_snap: FlowSnapshot) -> None:
     expected_ids = {
-        "refinement", "planning", "implementation",
-        "testing_quality", "testing", "review", "fixing", "publish",
+        "refinement",
+        "planning",
+        "implementation",
+        "testing_quality",
+        "testing",
+        "review",
+        "fixing",
+        "publish",
     }
     assert set(impl_snap.nodes_by_id.keys()) == expected_ids
 

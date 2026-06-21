@@ -56,19 +56,57 @@ class FlowLoadError(Exception):
 # ``security-ceiling.md`` §3-§4 — the mechanism that keeps operator YAML a closed allowlist rather
 # than an open dict.
 
-_FLOW_FIELDS = frozenset({
-    "name", "task_type", "permission_ceiling", "output_policy", "publishing",
-    "network_policy", "defaults", "nodes", "edges", "budgets", "decomposition",
-})
-_AGENT_FIELDS = frozenset({
-    "id", "kind", "role_file", "session_scope", "lineage_affinity", "permission_profile",
-    "provider", "model", "reasoning", "timeout_seconds", "output_schema", "output_artifact",
-    "best_effort", "hitl", "extra_args", "when",
-})
-_EVALUATOR_FIELDS = frozenset({
-    "id", "kind", "role", "role_file", "session_scope", "permission_profile",
-    "blocking", "max_rework_per_stage", "provider", "model", "reasoning", "when",
-})
+_FLOW_FIELDS = frozenset(
+    {
+        "name",
+        "task_type",
+        "permission_ceiling",
+        "output_policy",
+        "publishing",
+        "network_policy",
+        "defaults",
+        "nodes",
+        "edges",
+        "budgets",
+        "decomposition",
+    }
+)
+_AGENT_FIELDS = frozenset(
+    {
+        "id",
+        "kind",
+        "role_file",
+        "session_scope",
+        "lineage_affinity",
+        "permission_profile",
+        "provider",
+        "model",
+        "reasoning",
+        "timeout_seconds",
+        "output_schema",
+        "output_artifact",
+        "best_effort",
+        "hitl",
+        "extra_args",
+        "when",
+    }
+)
+_EVALUATOR_FIELDS = frozenset(
+    {
+        "id",
+        "kind",
+        "role",
+        "role_file",
+        "session_scope",
+        "permission_profile",
+        "blocking",
+        "max_rework_per_stage",
+        "provider",
+        "model",
+        "reasoning",
+        "when",
+    }
+)
 _CHECKS_FIELDS = frozenset({"id", "kind", "checker", "discovery", "when"})
 _HITL_NODE_FIELDS = frozenset({"id", "kind", "signal", "timeout_s", "when"})
 _PUBLISH_FIELDS = frozenset({"id", "kind", "policy", "when"})
@@ -76,14 +114,24 @@ _EDGE_FIELDS = frozenset({"from", "to", "outcome", "budget", "loop"})
 _WHEN_FIELDS = frozenset({"fact", "equals"})
 _HITL_SETTINGS_FIELDS = frozenset({"allow_question", "allow_approval"})
 _DISCOVERY_FIELDS = frozenset({"mode", "approve_command_changes"})
-_DECOMPOSITION_FIELDS = frozenset({
-    "proposed_by", "sub_flow", "gate", "commit_each_subtask", "shared_budget",
-})
+_DECOMPOSITION_FIELDS = frozenset(
+    {
+        "proposed_by",
+        "sub_flow",
+        "gate",
+        "commit_each_subtask",
+        "shared_budget",
+    }
+)
 _GATE_FIELDS = frozenset({"min", "max", "linear_depends_on"})
 _DEFAULTS_FIELDS = frozenset({"evaluator"})
-_EVALUATOR_DEFAULTS_FIELDS = frozenset({
-    "session_scope", "permission_profile", "max_rework_per_stage",
-})
+_EVALUATOR_DEFAULTS_FIELDS = frozenset(
+    {
+        "session_scope",
+        "permission_profile",
+        "max_rework_per_stage",
+    }
+)
 
 # Core checker set (security-ceiling §3): flow may not invent a checker kind.
 _CHECKER_KINDS = frozenset({"command_profile", "citation", "dependency_scan"})
@@ -96,6 +144,7 @@ _OUTPUT_ARTIFACT_SLOTS = frozenset({"enriched_spec", "plan", "summary"})
 # finalized when the P1 engine fact resolver lands; here we fail-closed on the namespace prefix so
 # a bare/typo'd fact (e.g. ``summary_enabled`` with no namespace) is rejected at load time.
 _WHEN_FACT_NAMESPACES = ("derived.", "config.")
+
 
 def _enum[EnumT: StrEnum](enum_cls: type[EnumT], value: object, ctx: str) -> EnumT:
     """Coerce ``value`` into ``enum_cls``, raising :class:`FlowLoadError` on a bad value."""
@@ -223,9 +272,7 @@ def _parse_agent_node(raw: dict[str, Any]) -> AgentNode:
     ss_raw = raw.get("session_scope", SessionScope.FRESH_DISPOSABLE)
 
     os_raw = raw.get("output_schema")
-    output_schema: str | None = (
-        json.dumps(os_raw, sort_keys=True) if os_raw is not None else None
-    )
+    output_schema: str | None = json.dumps(os_raw, sort_keys=True) if os_raw is not None else None
 
     output_artifact = raw.get("output_artifact") or None
     if output_artifact is not None and output_artifact not in _OUTPUT_ARTIFACT_SLOTS:

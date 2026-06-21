@@ -152,17 +152,21 @@ def _check_graph(snap: FlowSnapshot) -> list[Violation]:
                 continue
             if oc not in allowed:
                 allowed_str = sorted(repr(a) for a in allowed)
-                errs.append(g(
-                    f"node {node_id!r} ({node.kind}): outcome {oc!r} not in allowed {allowed_str}"
-                ))
+                errs.append(
+                    g(
+                        f"node {node_id!r} ({node.kind}): outcome {oc!r} not in allowed {allowed_str}"
+                    )
+                )
 
     # 3. Bounded loops: every rework/fail edge must carry budget or loop.
     for edge in doc.edges:
         if edge.outcome in ("rework", "fail") and edge.budget is None and edge.loop is None:
-            errs.append(g(
-                f"edge {edge.from_node!r}->{edge.to!r} (outcome={edge.outcome!r}): "
-                "unbounded; must declare budget or loop"
-            ))
+            errs.append(
+                g(
+                    f"edge {edge.from_node!r}->{edge.to!r} (outcome={edge.outcome!r}): "
+                    "unbounded; must declare budget or loop"
+                )
+            )
 
     # 4. Named loops must be declared in budgets.
     for edge in doc.edges:
@@ -225,27 +229,31 @@ def _check_graph(snap: FlowSnapshot) -> list[Violation]:
             continue
         target = snap.nodes_by_id.get(node.lineage_affinity)
         if target is None:
-            errs.append(g(
-                f"node {node.id!r}: lineage_affinity {node.lineage_affinity!r} not found"
-            ))
+            errs.append(
+                g(f"node {node.id!r}: lineage_affinity {node.lineage_affinity!r} not found")
+            )
         elif (
             not isinstance(target, AgentNode)
             or target.session_scope != SessionScope.EDITING_LINEAGE
         ):
-            errs.append(g(
-                f"node {node.id!r}: lineage_affinity {node.lineage_affinity!r} must be "
-                "an agent with session_scope=editing_lineage"
-            ))
+            errs.append(
+                g(
+                    f"node {node.id!r}: lineage_affinity {node.lineage_affinity!r} must be "
+                    "an agent with session_scope=editing_lineage"
+                )
+            )
         elif (
             node.provider is not None
             and target.provider is not None
             and node.provider != target.provider
         ):
-            errs.append(g(
-                f"node {node.id!r}: provider {node.provider.value!r} conflicts with "
-                f"lineage_affinity {node.lineage_affinity!r} provider "
-                f"{target.provider.value!r} (cannot resume a session across providers)"
-            ))
+            errs.append(
+                g(
+                    f"node {node.id!r}: provider {node.provider.value!r} conflicts with "
+                    f"lineage_affinity {node.lineage_affinity!r} provider "
+                    f"{target.provider.value!r} (cannot resume a session across providers)"
+                )
+            )
 
     # 8. Decomposition references must resolve.
     dec = doc.decomposition
@@ -276,26 +284,32 @@ def _check_ceiling(snap: FlowSnapshot) -> list[Violation]:
         if isinstance(node, EvaluatorNode):
             # Evaluator is always read-only and must never inherit the author's editing context.
             if node.permission_profile != PermissionProfile.READ_ONLY:
-                errs.append(c(
-                    f"evaluator {node.id!r}: permission_profile must be read-only, "
-                    f"got {node.permission_profile.value!r}"
-                ))
+                errs.append(
+                    c(
+                        f"evaluator {node.id!r}: permission_profile must be read-only, "
+                        f"got {node.permission_profile.value!r}"
+                    )
+                )
             if node.session_scope == SessionScope.EDITING_LINEAGE:
-                errs.append(c(
-                    f"evaluator {node.id!r}: session_scope editing_lineage is forbidden "
-                    "(evaluator must not inherit the author workspace context)"
-                ))
+                errs.append(
+                    c(
+                        f"evaluator {node.id!r}: session_scope editing_lineage is forbidden "
+                        "(evaluator must not inherit the author workspace context)"
+                    )
+                )
             _check_path(node.id, node.role_file, errs)
 
         if isinstance(node, AgentNode):
             if node.permission_profile is not None and not is_same_or_stricter(
                 node.permission_profile.value, ceiling.value
             ):
-                errs.append(c(
-                    f"agent {node.id!r}: permission_profile "
-                    f"{node.permission_profile.value!r} exceeds "
-                    f"permission_ceiling {ceiling.value!r}"
-                ))
+                errs.append(
+                    c(
+                        f"agent {node.id!r}: permission_profile "
+                        f"{node.permission_profile.value!r} exceeds "
+                        f"permission_ceiling {ceiling.value!r}"
+                    )
+                )
             if node.extra_args:
                 for reason in find_forbidden_args(list(node.extra_args)):
                     errs.append(c(f"agent {node.id!r}: extra_args {reason}"))
@@ -307,9 +321,9 @@ def _check_ceiling(snap: FlowSnapshot) -> list[Violation]:
 def _check_path(node_id: str, path: str, errs: list[Violation]) -> None:
     parts = path.replace("\\", "/").split("/")
     if ".." in parts or path.startswith("/"):
-        errs.append(Violation(
-            "ceiling", f"node {node_id!r}: role_file {path!r} contains path traversal"
-        ))
+        errs.append(
+            Violation("ceiling", f"node {node_id!r}: role_file {path!r} contains path traversal")
+        )
 
 
 # -- config consistency (P4.2) ------------------------------------------------
@@ -331,15 +345,19 @@ def _check_config_consistency(snap: FlowSnapshot, config: OrchestratorConfig) ->
         if not isinstance(node, AgentNode | EvaluatorNode):
             continue
         if node.provider is not None and node.provider not in allowed:
-            errs.append(cfg(
-                f"node {node.id!r}: provider {node.provider.value!r} not in agents.allowed "
-                f"{sorted(p.value for p in allowed)}"
-            ))
+            errs.append(
+                cfg(
+                    f"node {node.id!r}: provider {node.provider.value!r} not in agents.allowed "
+                    f"{sorted(p.value for p in allowed)}"
+                )
+            )
         if node.reasoning is not None and node.reasoning not in _VALID_REASONING:
-            errs.append(cfg(
-                f"node {node.id!r}: reasoning {node.reasoning!r} not in "
-                f"{sorted(_VALID_REASONING)}"
-            ))
+            errs.append(
+                cfg(
+                    f"node {node.id!r}: reasoning {node.reasoning!r} not in "
+                    f"{sorted(_VALID_REASONING)}"
+                )
+            )
 
     # 2. permission_ceiling ≤ a configured provider's capability: at least one allowed provider must
     #    be able to operate at the ceiling, else no node clamped to the ceiling could ever run.
@@ -350,9 +368,11 @@ def _check_config_consistency(snap: FlowSnapshot, config: OrchestratorConfig) ->
     if provider_profiles and not any(
         is_same_or_stricter(ceiling.value, profile) for profile in provider_profiles
     ):
-        errs.append(cfg(
-            f"permission_ceiling {ceiling.value!r} exceeds the capability of every configured "
-            f"allowed provider {provider_profiles} (no provider can run a node at this ceiling)"
-        ))
+        errs.append(
+            cfg(
+                f"permission_ceiling {ceiling.value!r} exceeds the capability of every configured "
+                f"allowed provider {provider_profiles} (no provider can run a node at this ceiling)"
+            )
+        )
 
     return errs

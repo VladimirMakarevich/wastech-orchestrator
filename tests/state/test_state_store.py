@@ -361,9 +361,7 @@ def test_no_secret_columns_in_schema(store: StateStore) -> None:
 def test_foreign_keys_enforced(store: StateStore) -> None:
     # A node_run for a non-existent task violates the FK (foreign_keys=ON).
     with pytest.raises(sqlite3.IntegrityError):
-        store.record_node_run(
-            NodeRunRow(task_id="missing", node_id="planning", node_kind="agent")
-        )
+        store.record_node_run(NodeRunRow(task_id="missing", node_id="planning", node_kind="agent"))
 
 
 # --- rerun / continue reset primitives ---------------------------------------------------

@@ -96,10 +96,20 @@ def test_no_slot_is_noop(tmp_path: Path) -> None:
 
 def _subtasks() -> list[dict[str, object]]:
     return [
-        {"order": 1, "title": "First", "slug": "first", "acceptance_criteria": ["x"],
-         "depends_on": []},
-        {"order": 2, "title": "Second", "slug": "second", "acceptance_criteria": ["y"],
-         "depends_on": [1]},
+        {
+            "order": 1,
+            "title": "First",
+            "slug": "first",
+            "acceptance_criteria": ["x"],
+            "depends_on": [],
+        },
+        {
+            "order": 2,
+            "title": "Second",
+            "slug": "second",
+            "acceptance_criteria": ["y"],
+            "depends_on": [1],
+        },
     ]
 
 

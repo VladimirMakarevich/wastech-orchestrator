@@ -34,8 +34,7 @@ def test_rewrite_links_points_private_paths_to_github() -> None:
     )
 
     assert (
-        rewritten
-        == "[cli.py](https://github.com/VladimirMakarevich/wastech-orchestrator/blob/"
+        rewritten == "[cli.py](https://github.com/VladimirMakarevich/wastech-orchestrator/blob/"
         "v1.2.3/src/wastech_orchestrator/cli.py#L114)"
     )
 

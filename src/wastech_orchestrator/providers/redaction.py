@@ -36,6 +36,7 @@ def normalized_session_id(raw_session_id: str) -> str:
     digest = hashlib.sha256(raw_session_id.encode("utf-8")).hexdigest()[:12]
     return f"session:{digest}"
 
+
 # Literal secrets shorter than this are ignored: redacting a 1-3 char value would mangle ordinary
 # text without protecting anything meaningful (real tokens are long).
 _MIN_LITERAL_LEN = 4

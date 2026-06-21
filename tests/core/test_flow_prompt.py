@@ -19,9 +19,9 @@ def test_render_substitutes_allowlisted_path_vars(tmp_path: Path) -> None:
 
 
 def test_unknown_braces_pass_through(tmp_path: Path) -> None:
-    (tmp_path / "r.md").write_text("schema {\"a\": 1} and {not_allowed}\n", "utf-8")
+    (tmp_path / "r.md").write_text('schema {"a": 1} and {not_allowed}\n', "utf-8")
     out = render_role_prompt(tmp_path, "r.md", {})
-    assert out == "schema {\"a\": 1} and {not_allowed}\n"
+    assert out == 'schema {"a": 1} and {not_allowed}\n'
 
 
 def test_role_file_traversal_is_rejected(tmp_path: Path) -> None:

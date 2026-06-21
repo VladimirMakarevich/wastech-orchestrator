@@ -228,9 +228,12 @@ def test_agent_node_equals_direct_router_call(tmp_path: Path) -> None:
         model="gpt-x",
     )
     router, store = FakeRouter(_result()), FakeStore()
-    services = _services(router, store, {"impl": Stage.IMPLEMENTATION}, FakeCheckRunner(
-        CheckOutcome(passed=True, runs=())
-    ))
+    services = _services(
+        router,
+        store,
+        {"impl": Stage.IMPLEMENTATION},
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+    )
     inputs = _inputs(tmp_path, task_path="/t/task.md", plan_path="/t/plan.md")
     result = AgentNodeRunner(services, inputs).run(node, _ctx(node))
 
@@ -252,15 +255,23 @@ def test_fresh_disposable_node_does_not_inherit_or_leak_session(tmp_path: Path) 
     from dataclasses import replace
 
     (tmp_path / "r.md").write_text("go", "utf-8")
-    node = AgentNode(id="reviewish", kind="agent", role_file="r.md",
-                     session_scope=SessionScope.FRESH_DISPOSABLE,
-                     permission_profile=PermissionProfile.READ_ONLY)
+    node = AgentNode(
+        id="reviewish",
+        kind="agent",
+        role_file="r.md",
+        session_scope=SessionScope.FRESH_DISPOSABLE,
+        permission_profile=PermissionProfile.READ_ONLY,
+    )
     router, store = FakeRouter(replace(_result(), session_id="fresh-sess")), FakeStore()
     store.upsert_editing_lineage(  # left by a prior editing node on the same provider
         EditingLineageRow(task_id="task-1", provider="codex", raw_session_id="editing-sess")
     )
-    services = _services(router, store, {"reviewish": Stage.IMPLEMENTATION},
-                         FakeCheckRunner(CheckOutcome(passed=True, runs=())))
+    services = _services(
+        router,
+        store,
+        {"reviewish": Stage.IMPLEMENTATION},
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+    )
     AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert router.requests[0].session_id is None  # did not resume the editing lineage
     # did not overwrite the editing lineage with its own session
@@ -274,15 +285,23 @@ def test_editing_lineage_node_continues_and_persists_session(tmp_path: Path) -> 
     from dataclasses import replace
 
     (tmp_path / "r.md").write_text("go", "utf-8")
-    node = AgentNode(id="impl", kind="agent", role_file="r.md",
-                     session_scope=SessionScope.EDITING_LINEAGE,
-                     permission_profile=PermissionProfile.WORKSPACE_WRITE)
+    node = AgentNode(
+        id="impl",
+        kind="agent",
+        role_file="r.md",
+        session_scope=SessionScope.EDITING_LINEAGE,
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+    )
     router, store = FakeRouter(replace(_result(), session_id="impl-sess-2")), FakeStore()
     store.upsert_editing_lineage(
         EditingLineageRow(task_id="task-1", provider="codex", raw_session_id="impl-sess-1")
     )
-    services = _services(router, store, {"impl": Stage.IMPLEMENTATION},
-                         FakeCheckRunner(CheckOutcome(passed=True, runs=())))
+    services = _services(
+        router,
+        store,
+        {"impl": Stage.IMPLEMENTATION},
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+    )
     AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert router.requests[0].session_id == "impl-sess-1"  # resumed the editing session
     row = store.get_editing_lineage("task-1")
@@ -299,9 +318,13 @@ def test_affinity_resumes_declared_node_session(tmp_path: Path) -> None:
     store = FakeStore()
     check = FakeCheckRunner(CheckOutcome(passed=True, runs=()))
 
-    impl = AgentNode(id="implementation", kind="agent", role_file="impl.md",
-                     session_scope=SessionScope.EDITING_LINEAGE,
-                     permission_profile=PermissionProfile.WORKSPACE_WRITE)
+    impl = AgentNode(
+        id="implementation",
+        kind="agent",
+        role_file="impl.md",
+        session_scope=SessionScope.EDITING_LINEAGE,
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+    )
     router_impl = FakeRouter(replace(_result(), session_id="impl-session"))
     AgentNodeRunner(
         _services(router_impl, store, {"implementation": Stage.IMPLEMENTATION}, check),
@@ -309,10 +332,14 @@ def test_affinity_resumes_declared_node_session(tmp_path: Path) -> None:
     ).run(impl, _ctx(impl))
     assert router_impl.requests[0].session_id is None  # no lineage yet → fresh
 
-    fixing = AgentNode(id="fixing", kind="agent", role_file="fix.md",
-                       session_scope=SessionScope.EDITING_LINEAGE,
-                       lineage_affinity="implementation",
-                       permission_profile=PermissionProfile.WORKSPACE_WRITE)
+    fixing = AgentNode(
+        id="fixing",
+        kind="agent",
+        role_file="fix.md",
+        session_scope=SessionScope.EDITING_LINEAGE,
+        lineage_affinity="implementation",
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+    )
     router_fix = FakeRouter(replace(_result(), session_id="fix-session"))
     AgentNodeRunner(
         _services(router_fix, store, {"fixing": Stage.FIXING}, check), _inputs(tmp_path)
@@ -331,9 +358,13 @@ def test_evaluator_fresh_disposable_does_not_touch_lineage(tmp_path: Path) -> No
         EditingLineageRow(task_id="task-1", provider="codex", raw_session_id="author-session")
     )
     router = FakeRouter(_result({"findings": []}))
-    services = _services(router, store, {"review": Stage.REVIEW},
-                         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
-                         artifacts_root=str(tmp_path))
+    services = _services(
+        router,
+        store,
+        {"review": Stage.REVIEW},
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
     node = _evaluator("review")
     EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert router.requests[0].session_id is None  # evaluator never resumes the author lineage
@@ -343,11 +374,19 @@ def test_evaluator_fresh_disposable_does_not_touch_lineage(tmp_path: Path) -> No
 
 def test_agent_node_infra_exhaustion_raises(tmp_path: Path) -> None:
     (tmp_path / "r.md").write_text("go", "utf-8")
-    node = AgentNode(id="impl", kind="agent", role_file="r.md",
-                     permission_profile=PermissionProfile.WORKSPACE_WRITE)
+    node = AgentNode(
+        id="impl",
+        kind="agent",
+        role_file="r.md",
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+    )
     router, store = FakeRouter(None), FakeStore()  # result None => infra-exhausted
-    services = _services(router, store, {"impl": Stage.IMPLEMENTATION},
-                         FakeCheckRunner(CheckOutcome(passed=True, runs=())))
+    services = _services(
+        router,
+        store,
+        {"impl": Stage.IMPLEMENTATION},
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+    )
     from wastech_orchestrator.core.flow.nodes.base import NodeInfraError
 
     with pytest.raises(NodeInfraError):
@@ -356,11 +395,20 @@ def test_agent_node_infra_exhaustion_raises(tmp_path: Path) -> None:
 
 def test_agent_workspace_write_writes_diff(tmp_path: Path) -> None:
     (tmp_path / "r.md").write_text("go", "utf-8")
-    node = AgentNode(id="impl", kind="agent", role_file="r.md",
-                     permission_profile=PermissionProfile.WORKSPACE_WRITE)
+    node = AgentNode(
+        id="impl",
+        kind="agent",
+        role_file="r.md",
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+    )
     router, store, git = FakeRouter(_result()), FakeStore(), FakeGit()
-    services = _services(router, store, {"impl": Stage.IMPLEMENTATION},
-                         FakeCheckRunner(CheckOutcome(passed=True, runs=())), git=git)
+    services = _services(
+        router,
+        store,
+        {"impl": Stage.IMPLEMENTATION},
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=git,
+    )
     inputs = _inputs(tmp_path)
     AgentNodeRunner(services, inputs).run(node, _ctx(node))
     assert inputs.diff_path == "/art/current.diff"
@@ -372,18 +420,31 @@ def test_agent_dangerous_diff_goes_manual(tmp_path: Path) -> None:
     from wastech_orchestrator.git_manager import ChangedPath
 
     (tmp_path / "r.md").write_text("go", "utf-8")
-    node = AgentNode(id="impl", kind="agent", role_file="r.md",
-                     permission_profile=PermissionProfile.WORKSPACE_WRITE)
+    node = AgentNode(
+        id="impl",
+        kind="agent",
+        role_file="r.md",
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+    )
     git = FakeGit(changed=(ChangedPath(status="D", path="src/core.py"),))
-    services = _services(FakeRouter(_result()), FakeStore(), {"impl": Stage.IMPLEMENTATION},
-                         FakeCheckRunner(CheckOutcome(passed=True, runs=())), git=git)
+    services = _services(
+        FakeRouter(_result()),
+        FakeStore(),
+        {"impl": Stage.IMPLEMENTATION},
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=git,
+    )
     with pytest.raises(NodeManualRequired):
         AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
 
 
 def _ws_node() -> AgentNode:
-    return AgentNode(id="impl", kind="agent", role_file="r.md",
-                     permission_profile=PermissionProfile.WORKSPACE_WRITE)
+    return AgentNode(
+        id="impl",
+        kind="agent",
+        role_file="r.md",
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+    )
 
 
 def _guard_services(tmp_path: Path, git: Any, notifier: Any) -> Any:
@@ -446,11 +507,17 @@ def test_agent_dangerous_diff_denied_still_dangerous_goes_manual(tmp_path: Path)
 def test_agent_read_only_node_skips_diff_guard(tmp_path: Path) -> None:
     # summary is a read-only agent node (non-HITL stage) -> simple path, no diff guard.
     (tmp_path / "r.md").write_text("go", "utf-8")
-    node = AgentNode(id="summary", kind="agent", role_file="r.md",
-                     permission_profile=PermissionProfile.READ_ONLY)
+    node = AgentNode(
+        id="summary", kind="agent", role_file="r.md", permission_profile=PermissionProfile.READ_ONLY
+    )
     git = FakeGit()
-    services = _services(FakeRouter(_result()), FakeStore(), {"summary": Stage.SUMMARY},
-                         FakeCheckRunner(CheckOutcome(passed=True, runs=())), git=git)
+    services = _services(
+        FakeRouter(_result()),
+        FakeStore(),
+        {"summary": Stage.SUMMARY},
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=git,
+    )
     inputs = _inputs(tmp_path)
     AgentNodeRunner(services, inputs).run(node, _ctx(node))
     assert inputs.diff_path is None
@@ -473,12 +540,16 @@ def _audit_services(tmp_path: Path, *, prompt_audit: bool, registered: list[Any]
 
 def test_agent_node_writes_prompt_audit_when_enabled(tmp_path: Path) -> None:
     (tmp_path / "r.md").write_text("go", "utf-8")
-    node = AgentNode(id="implementation", kind="agent", role_file="r.md",
-                     permission_profile=PermissionProfile.READ_ONLY)
+    node = AgentNode(
+        id="implementation",
+        kind="agent",
+        role_file="r.md",
+        permission_profile=PermissionProfile.READ_ONLY,
+    )
     registered: list[Any] = []
-    AgentNodeRunner(_audit_services(tmp_path, prompt_audit=True, registered=registered), _inputs(
-        tmp_path
-    )).run(node, _ctx(node))
+    AgentNodeRunner(
+        _audit_services(tmp_path, prompt_audit=True, registered=registered), _inputs(tmp_path)
+    ).run(node, _ctx(node))
     kinds = {k for _, k, _ in registered}
     assert {"rendered_prompt", "prompt_audit", "prompt_audit_timeline"} <= kinds
 
@@ -486,12 +557,16 @@ def test_agent_node_writes_prompt_audit_when_enabled(tmp_path: Path) -> None:
 def test_agent_node_no_prompt_audit_when_disabled(tmp_path: Path) -> None:
     # prompt_audit off: rendered-prompt still written (audit-independent), but no prompt-audit JSON.
     (tmp_path / "r.md").write_text("go", "utf-8")
-    node = AgentNode(id="implementation", kind="agent", role_file="r.md",
-                     permission_profile=PermissionProfile.READ_ONLY)
+    node = AgentNode(
+        id="implementation",
+        kind="agent",
+        role_file="r.md",
+        permission_profile=PermissionProfile.READ_ONLY,
+    )
     registered: list[Any] = []
-    AgentNodeRunner(_audit_services(tmp_path, prompt_audit=False, registered=registered), _inputs(
-        tmp_path
-    )).run(node, _ctx(node))
+    AgentNodeRunner(
+        _audit_services(tmp_path, prompt_audit=False, registered=registered), _inputs(tmp_path)
+    ).run(node, _ctx(node))
     kinds = {k for _, k, _ in registered}
     assert "rendered_prompt" in kinds
     assert "prompt_audit" not in kinds
@@ -507,8 +582,17 @@ class FakeNotifier:
         self._result = result
         self.asks: list[str] = []
 
-    def start_ask(self, *, question: str, context: str, task_id: str, kind: str,
-                  timeout_s: int, interaction_id: str, contacts: tuple[str, ...] = ()) -> Any:
+    def start_ask(
+        self,
+        *,
+        question: str,
+        context: str,
+        task_id: str,
+        kind: str,
+        timeout_s: int,
+        interaction_id: str,
+        contacts: tuple[str, ...] = (),
+    ) -> Any:
         from wastech_orchestrator.notify import AskHandle
 
         self.asks.append(question)
@@ -520,18 +604,26 @@ class FakeNotifier:
 
 def _refinement_node() -> AgentNode:
     # Refinement opts into HITL by declaring `hitl` (data-driven dispatch, not the stage name).
-    return AgentNode(id="refinement", kind="agent", role_file="r.md",
-                     permission_profile=PermissionProfile.READ_ONLY,
-                     hitl=HitlSettings(allow_question=True))
+    return AgentNode(
+        id="refinement",
+        kind="agent",
+        role_file="r.md",
+        permission_profile=PermissionProfile.READ_ONLY,
+        hitl=HitlSettings(allow_question=True),
+    )
 
 
 def test_agent_hitl_no_signal_proceeds(tmp_path: Path) -> None:
     (tmp_path / "r.md").write_text("refine", "utf-8")
     node = _refinement_node()
     router = FakeRouter(_result({"content": "done", "human_input": None}))
-    services = _services(router, FakeStore(), {"refinement": Stage.REFINEMENT},
-                         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
-                         artifacts_root=str(tmp_path))
+    services = _services(
+        router,
+        FakeStore(),
+        {"refinement": Stage.REFINEMENT},
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
     result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "done"
 
@@ -552,8 +644,13 @@ def test_agent_hitl_question_round_trip(tmp_path: Path) -> None:
         def run_stage(self, request: Any, route: Any, *, snapshot: Any = None) -> Any:
             self._n += 1
             signal = (
-                {"kind": "question", "question": "Which API?", "context": "",
-                 "risk": "clarification", "paths": []}
+                {
+                    "kind": "question",
+                    "question": "Which API?",
+                    "context": "",
+                    "risk": "clarification",
+                    "paths": [],
+                }
                 if self._n == 1
                 else None
             )
@@ -586,10 +683,19 @@ def test_agent_hitl_dispatch_is_data_driven_not_stage(tmp_path: Path) -> None:
     # A node on the REFINEMENT stage but WITHOUT a declared `hitl` must NOT do a round-trip even if
     # the agent emits a signal — dispatch is by node.hitl, not the stage name (flow-contract §2.1).
     (tmp_path / "r.md").write_text("refine", "utf-8")
-    node = AgentNode(id="refinement", kind="agent", role_file="r.md",
-                     permission_profile=PermissionProfile.READ_ONLY)  # no hitl declared
-    signal = {"kind": "question", "question": "ignored?", "context": "",
-              "risk": "clarification", "paths": []}
+    node = AgentNode(
+        id="refinement",
+        kind="agent",
+        role_file="r.md",
+        permission_profile=PermissionProfile.READ_ONLY,
+    )  # no hitl declared
+    signal = {
+        "kind": "question",
+        "question": "ignored?",
+        "context": "",
+        "risk": "clarification",
+        "paths": [],
+    }
     router = FakeRouter(_result({"content": "ok", "human_input": signal}))
     notifier = FakeNotifier(None)
     services = NodeServices(
@@ -614,8 +720,13 @@ def test_agent_hitl_timeout_goes_manual(tmp_path: Path) -> None:
 
     (tmp_path / "r.md").write_text("refine", "utf-8")
     node = _refinement_node()
-    signal = {"kind": "question", "question": "?", "context": "", "risk": "clarification",
-              "paths": []}
+    signal = {
+        "kind": "question",
+        "question": "?",
+        "context": "",
+        "risk": "clarification",
+        "paths": [],
+    }
     router = FakeRouter(_result({"content": "ok", "human_input": signal}))
     notifier = FakeNotifier(AskResult(answered=False, timed_out=True, failure="timeout"))
     services = NodeServices(
@@ -735,8 +846,11 @@ def test_hitl_resumes_persisted_waiting_interaction(tmp_path: Path) -> None:
         stage=node.id,
         subtask=None,
         signal=HumanInputSignal(
-            kind="approval", question="Approval required to continue the flow.",
-            context="hitl gate 'gate'", risk="other", paths=(),
+            kind="approval",
+            question="Approval required to continue the flow.",
+            context="hitl gate 'gate'",
+            risk="other",
+            paths=(),
         ),
         handle=AskHandle(interaction_id="hxyz", kind="approval", expires_at=1.0, message_id=1),
     )
@@ -770,22 +884,31 @@ def _evaluator(node_id: str, *, blocking: bool = True) -> EvaluatorNode:
         ({"findings": []}, "accept"),
     ],
 )
-def test_evaluator_maps_blocking_findings(tmp_path: Path, structured: dict[str, Any],
-                                          expected: str) -> None:
+def test_evaluator_maps_blocking_findings(
+    tmp_path: Path, structured: dict[str, Any], expected: str
+) -> None:
     (tmp_path / "r.md").write_text("review {diff_path}", "utf-8")
     node = _evaluator("review")
     router, store = FakeRouter(_result(structured)), FakeStore()
-    services = _services(router, store, {"review": Stage.REVIEW},
-                         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
-                         artifacts_root=str(tmp_path))
+    services = _services(
+        router,
+        store,
+        {"review": Stage.REVIEW},
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
     result = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == expected
 
 
 def _test_quality(max_rework_per_stage: int = 1) -> EvaluatorNode:
     return EvaluatorNode(
-        id="testing_quality", kind="evaluator", role="test_quality", role_file="r.md",
-        permission_profile=PermissionProfile.READ_ONLY, blocking=False,
+        id="testing_quality",
+        kind="evaluator",
+        role="test_quality",
+        role_file="r.md",
+        permission_profile=PermissionProfile.READ_ONLY,
+        blocking=False,
         max_rework_per_stage=max_rework_per_stage,
     )
 
@@ -797,9 +920,13 @@ def test_test_quality_rework_to_fixing(tmp_path: Path) -> None:
     (tmp_path / "r.md").write_text("review", "utf-8")
     node = _test_quality()
     router, store = FakeRouter(_result({"findings": [{"severity": "high"}]})), FakeStore()
-    services = _services(router, store, {"testing_quality": Stage.REVIEW},
-                         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
-                         artifacts_root=str(tmp_path))
+    services = _services(
+        router,
+        store,
+        {"testing_quality": Stage.REVIEW},
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
     result = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "rework"
 
@@ -813,9 +940,13 @@ def test_test_quality_non_blocking_exhaustion_continues(tmp_path: Path) -> None:
     node = _test_quality(max_rework_per_stage=1)
     store = FakeStore()
     router = FakeRouter(_result({"findings": [{"severity": "critical"}]}))
-    services = _services(router, store, {"testing_quality": Stage.REVIEW},
-                         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
-                         artifacts_root=str(tmp_path))
+    services = _services(
+        router,
+        store,
+        {"testing_quality": Stage.REVIEW},
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
     first = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert first.outcome.kind == "rework"  # budget remaining → rework
     second = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
@@ -828,9 +959,13 @@ def test_test_quality_does_not_write_tests(tmp_path: Path) -> None:
     (tmp_path / "r.md").write_text("review", "utf-8")
     node = _test_quality()
     router, store = FakeRouter(_result({"findings": []})), FakeStore()
-    services = _services(router, store, {"testing_quality": Stage.REVIEW},
-                         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
-                         artifacts_root=str(tmp_path))
+    services = _services(
+        router,
+        store,
+        {"testing_quality": Stage.REVIEW},
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
     EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert router.requests[0].permission_profile == "read-only"
 
@@ -841,9 +976,13 @@ def test_evaluator_review_writes_findings_artifact(tmp_path: Path) -> None:
     router = FakeRouter(_result({"findings": [{"title": "x", "severity": "low"}]}))
     store = FakeStore()
     inputs = _inputs(tmp_path)
-    services = _services(router, store, {"review": Stage.REVIEW},
-                         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
-                         artifacts_root=str(tmp_path))
+    services = _services(
+        router,
+        store,
+        {"review": Stage.REVIEW},
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
     EvaluatorNodeRunner(services, inputs).run(node, _ctx(node))
     findings_file = Path(inputs.review_path)  # type: ignore[arg-type]
     assert findings_file.name == "findings.json"
@@ -861,8 +1000,10 @@ def test_review_is_ordinary_evaluator(tmp_path: Path) -> None:
     store = FakeStore()
     services = _services(
         FakeRouter(_result({"findings": [{"title": "bug", "severity": "high"}]})),
-        store, {"review": Stage.REVIEW},
-        FakeCheckRunner(CheckOutcome(passed=True, runs=())), artifacts_root=str(tmp_path),
+        store,
+        {"review": Stage.REVIEW},
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
     )
     result = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "rework"  # blocking review → rework (→ fixing)
@@ -879,15 +1020,24 @@ def _checks_node() -> ChecksNode:
 
 
 def _run(passed: bool) -> CheckRunResult:
-    return CheckRunResult(command="pytest", exit_code=0 if passed else 1,
-                          timed_out=False, passed=passed, log_path="/l")
+    return CheckRunResult(
+        command="pytest",
+        exit_code=0 if passed else 1,
+        timed_out=False,
+        passed=passed,
+        log_path="/l",
+    )
 
 
 def test_checks_pass_outcome(tmp_path: Path) -> None:
     node = _checks_node()
     store = FakeStore()
-    services = _services(FakeRouter(_result()), store, {},
-                         FakeCheckRunner(CheckOutcome(passed=True, runs=(_run(True),))))
+    services = _services(
+        FakeRouter(_result()),
+        store,
+        {},
+        FakeCheckRunner(CheckOutcome(passed=True, runs=(_run(True),))),
+    )
     result = ChecksNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "pass"
     assert len(store.check_runs) == 1
@@ -896,9 +1046,12 @@ def test_checks_pass_outcome(tmp_path: Path) -> None:
 def test_checks_fail_outcome(tmp_path: Path) -> None:
     node = _checks_node()
     store = FakeStore()
-    services = _services(FakeRouter(_result()), store, {},
-                         FakeCheckRunner(CheckOutcome(passed=False, runs=(_run(False),),
-                                                      first_failure_log="/log")))
+    services = _services(
+        FakeRouter(_result()),
+        store,
+        {},
+        FakeCheckRunner(CheckOutcome(passed=False, runs=(_run(False),), first_failure_log="/log")),
+    )
     result = ChecksNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "fail"
 
@@ -906,10 +1059,14 @@ def test_checks_fail_outcome(tmp_path: Path) -> None:
 def test_checks_launch_failure_is_infra(tmp_path: Path) -> None:
     node = _checks_node()
     store = FakeStore()
-    services = _services(FakeRouter(_result()), store, {},
-                         FakeCheckRunner(CheckOutcome(passed=False, runs=(),
-                                                      launch_failed=True,
-                                                      first_launch_error="boom")))
+    services = _services(
+        FakeRouter(_result()),
+        store,
+        {},
+        FakeCheckRunner(
+            CheckOutcome(passed=False, runs=(), launch_failed=True, first_launch_error="boom")
+        ),
+    )
     with pytest.raises(CheckLaunchError):
         ChecksNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
 
@@ -992,9 +1149,13 @@ def test_mutation_guard_active_when_checks_present(tmp_path: Path) -> None:
 
     node = _checks_node()
     store = FakeStore()
-    services = _services(FakeRouter(_result()), store, {},
-                         FakeCheckRunner(CheckOutcome(passed=True, runs=(_run(True),))),
-                         snapshot=FakeSnapshot(["before", "after"]))  # checksum changed → mutated
+    services = _services(
+        FakeRouter(_result()),
+        store,
+        {},
+        FakeCheckRunner(CheckOutcome(passed=True, runs=(_run(True),))),
+        snapshot=FakeSnapshot(["before", "after"]),
+    )  # checksum changed → mutated
     with pytest.raises(NodeManualRequired):
         ChecksNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert store.completed[-1]["status"] == "dirtied_working_tree"
@@ -1004,9 +1165,13 @@ def test_mutation_guard_clean_check_still_passes(tmp_path: Path) -> None:
     # The guard does not false-positive: a passing check that left the tree untouched (same
     # checksum before/after) yields the ordinary "pass" outcome even with a snapshot hook wired.
     node = _checks_node()
-    services = _services(FakeRouter(_result()), FakeStore(), {},
-                         FakeCheckRunner(CheckOutcome(passed=True, runs=(_run(True),))),
-                         snapshot=FakeSnapshot(["same"]))  # capture() returns "same" both times
+    services = _services(
+        FakeRouter(_result()),
+        FakeStore(),
+        {},
+        FakeCheckRunner(CheckOutcome(passed=True, runs=(_run(True),))),
+        snapshot=FakeSnapshot(["same"]),
+    )  # capture() returns "same" both times
     result = ChecksNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "pass"
 
@@ -1017,12 +1182,19 @@ def test_flow_without_checks_has_no_mutation_guard(tmp_path: Path) -> None:
     # and contains no checks node for the guard to attach to.
     from wastech_orchestrator.core.flow.validator import validate_flow
 
-    impl = AgentNode(id="implementation", kind="agent", role_file="r.md",
-                     permission_profile=PermissionProfile.WORKSPACE_WRITE)
+    impl = AgentNode(
+        id="implementation",
+        kind="agent",
+        role_file="r.md",
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+    )
     publish = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
     doc = FlowDoc(
-        name="t", task_type="t", permission_ceiling=PermissionProfile.WORKSPACE_WRITE,
-        output_policy=OutputPolicy.CODE_CHANGE, publishing=PublishingPolicy.PULL_REQUEST,
+        name="t",
+        task_type="t",
+        permission_ceiling=PermissionProfile.WORKSPACE_WRITE,
+        output_policy=OutputPolicy.CODE_CHANGE,
+        publishing=PublishingPolicy.PULL_REQUEST,
         nodes=(impl, publish),
         edges=(Edge(from_node="implementation", to="publish"),),
         budgets=MappingProxyType({}),
@@ -1030,8 +1202,9 @@ def test_flow_without_checks_has_no_mutation_guard(tmp_path: Path) -> None:
     snap = FlowSnapshot(
         doc=doc,
         nodes_by_id=MappingProxyType({"implementation": impl, "publish": publish}),
-        adjacency=MappingProxyType({"implementation": (Edge(from_node="implementation",
-                                                            to="publish"),)}),
+        adjacency=MappingProxyType(
+            {"implementation": (Edge(from_node="implementation", to="publish"),)}
+        ),
         flow_fingerprint="fp",
     )
     validate_flow(snap)  # a checks-less flow is valid …
@@ -1078,10 +1251,16 @@ class FakeGit:
 def test_publish_pull_request_runs_git_sequence(tmp_path: Path) -> None:
     node = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
     git, store = FakeGit(), FakeStore()
-    services = _services(FakeRouter(_result()), store, {},
-                         FakeCheckRunner(CheckOutcome(passed=True, runs=())), git=git)
-    inputs = _inputs(tmp_path, branch="agent/task-1-x", pr_title="My PR",
-                     summary_body_path="/s/summary.md")
+    services = _services(
+        FakeRouter(_result()),
+        store,
+        {},
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=git,
+    )
+    inputs = _inputs(
+        tmp_path, branch="agent/task-1-x", pr_title="My PR", summary_body_path="/s/summary.md"
+    )
     result = PublishNodeRunner(services, inputs).run(node, _ctx(node))
     assert result.outcome.kind == "done"
     assert [c[0] for c in git.calls] == ["commit_code", "commit_audit", "push", "create_pr"]
@@ -1093,8 +1272,13 @@ def test_publish_pull_request_runs_git_sequence(tmp_path: Path) -> None:
 
 def test_publish_pull_request_requires_branch(tmp_path: Path) -> None:
     node = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
-    services = _services(FakeRouter(_result()), FakeStore(), {},
-                         FakeCheckRunner(CheckOutcome(passed=True, runs=())), git=FakeGit())
+    services = _services(
+        FakeRouter(_result()),
+        FakeStore(),
+        {},
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=FakeGit(),
+    )
     with pytest.raises(PublishConfigError):
         PublishNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
 
@@ -1103,8 +1287,13 @@ def test_publish_pull_request_requires_body_path(tmp_path: Path) -> None:
     # branch present but no summary body path: refuse rather than open a PR with an empty body.
     node = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
     git = FakeGit()
-    services = _services(FakeRouter(_result()), FakeStore(), {},
-                         FakeCheckRunner(CheckOutcome(passed=True, runs=())), git=git)
+    services = _services(
+        FakeRouter(_result()),
+        FakeStore(),
+        {},
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=git,
+    )
     inputs = _inputs(tmp_path, branch="agent/task-1-x")  # summary_body_path is None
     with pytest.raises(PublishConfigError):
         PublishNodeRunner(services, inputs).run(node, _ctx(node))
@@ -1131,15 +1320,24 @@ def test_publish_finalize_provides_pr_body(tmp_path: Path) -> None:
     result = PublishNodeRunner(services, inputs).run(node, _ctx(node))
     assert result.outcome.kind == "done"
     assert git.calls[-1] == (
-        "create_pr", "task-1", "agent/task-1-x", "PR", "/done/task-1.summary.md"
+        "create_pr",
+        "task-1",
+        "agent/task-1-x",
+        "PR",
+        "/done/task-1.summary.md",
     )
 
 
 def test_publish_none_policy_writes_no_git(tmp_path: Path) -> None:
     node = PublishNode(id="store", kind="publish", policy=PublishingPolicy.NONE)
     git, store = FakeGit(), FakeStore()
-    services = _services(FakeRouter(_result()), store, {},
-                         FakeCheckRunner(CheckOutcome(passed=True, runs=())), git=git)
+    services = _services(
+        FakeRouter(_result()),
+        store,
+        {},
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=git,
+    )
     result = PublishNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "done"
     assert git.calls == []

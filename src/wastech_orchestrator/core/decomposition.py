@@ -149,9 +149,7 @@ def _subtasks_dir(artifacts_root: str | Path, task_id: str) -> Path:
     return task_artifact_dir(artifacts_root, task_id) / "subtasks"
 
 
-def subtask_spec_path(
-    artifacts_root: str | Path, task_id: str, order: int, slug: str
-) -> Path:
+def subtask_spec_path(artifacts_root: str | Path, task_id: str, order: int, slug: str) -> Path:
     """Path to one subtask's immutable ``NN-<slug>.md`` spec (§10).
 
     The single source of the per-subtask spec filename, shared by :func:`write_subtask_artifacts`
