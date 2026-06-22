@@ -20,61 +20,52 @@ selects an isolation-weakening mode.
 from __future__ import annotations
 
 import json
-import logging
-import os
-import re
-import tempfile
-import time
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from wastech_orchestrator.config.schema import ProviderConfig, SecurityConfig
-from wastech_orchestrator.observability.logging import bind
-from wastech_orchestrator.observability.progress import run_with_heartbeat
-from wastech_orchestrator.providers.artifacts import (
-    ArtifactPaths,
-    create_attempt_dir,
-    write_request_artifact,
-    write_result_artifact,
+from wastech_orchestrator.config.schema import ProviderConfig
+from wastech_orchestrator.providers._adapter_base import (
+    BaseCliProvider,
+    ParsedEvents,
+    build_context_footer,
+    build_effective_prompt,
 )
+from wastech_orchestrator.providers.artifacts import ArtifactPaths
 from wastech_orchestrator.providers.base import (
     AgentRunRequest,
-    AgentRunResult,
     ErrorClass,
-    NormalizedError,
     ProviderError,
-    ProviderHealth,
     ProviderId,
-    RunStatus,
 )
-from wastech_orchestrator.providers.errors import classify, make_signatures, message_for
-from wastech_orchestrator.providers.process import ProcessResult, run_process
-from wastech_orchestrator.providers.redaction import (
-    REDACTED,
-    is_sensitive_key,
-    normalized_session_id,
-    read_denied_secrets,
-    redact_mapping,
-    redact_text,
+from wastech_orchestrator.providers.errors import (
+    StderrSignature,
+    make_signatures,
+    message_for,
 )
-from wastech_orchestrator.security.env import build_child_env
 from wastech_orchestrator.security.forbidden_args import (
     FORBIDDEN_SANDBOX_VALUE,
     find_forbidden_args,
 )
 
+__all__ = [
+    "ClaudeCodeProvider",
+    "ParsedEvents",
+    "build_claude_argv",
+    "build_context_footer",
+    "build_effective_prompt",
+    "isolation_reasons",
+    "map_permission",
+    "parse_stream_json",
+]
+
 _DEFAULT_PROFILE = "workspace-write"
-_PREFLIGHT_TIMEOUT_SECONDS = 10
 
 # Claude Code permission modes, ordered strict → permissive. The adapter never selects a mode weaker
 # than the one a profile maps to, and never selects ``bypassPermissions`` (full bypass) at all.
 _MODE_ORDER: tuple[str, ...] = ("plan", "default", "acceptEdits", "bypassPermissions")
 _PERMISSION_MODE_FLAG = "--permission-mode"
 _BYPASS_MODE = "bypassPermissions"
-_LOG = logging.getLogger(__name__)
 
 # Profile → (permission mode, baseline allowed tools). ``read-only`` proposes but executes nothing;
 # ``workspace-write`` may edit files and run safe workspace commands without prompting — the Claude
@@ -128,55 +119,6 @@ _CLAUDE_SIGNATURES = make_signatures(
         ),
     ]
 )
-
-# The injected process-runner seam (defaults to the real one).
-RunProcess = Callable[..., ProcessResult]
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
-
-
-@dataclass(frozen=True)
-class ParsedEvents:
-    """The fields extracted from a Claude ``stream-json`` event stream."""
-
-    final_message: str | None
-    structured_output: dict[str, Any] | None
-    usage: dict[str, Any] | None
-    session_id: str | None
-    succeeded: bool
-
-
-def build_context_footer(request: AgentRunRequest) -> str:
-    """Render the non-``None`` context file paths as a deterministic footer (paths only, §19.5)."""
-    fields = (
-        ("task", request.task_path),
-        ("plan", request.plan_path),
-        ("diff", request.diff_path),
-        ("checks", request.check_artifacts_path),
-        ("review", request.review_artifacts_path),
-        ("human_input", request.human_input_path),
-    )
-    present = [(label, path) for label, path in fields if path]
-    skill_lines = [
-        f"- skill (read-only reference; advisory, do not execute): {path}"
-        for path in request.skill_reference_paths
-    ]
-    if not present and not skill_lines:
-        return ""
-    lines = ["Context files (read them as needed; do not assume their contents):"]
-    lines += [f"- {label}: {path}" for label, path in present]
-    lines += skill_lines
-    return "\n".join(lines)
-
-
-def build_effective_prompt(request: AgentRunRequest) -> str:
-    """Combine the Core-assembled prompt with the context-files footer."""
-    footer = build_context_footer(request)
-    if not footer:
-        return request.prompt
-    return f"{request.prompt}\n\n{footer}"
 
 
 def _deny_tools_for(denied_commands: Sequence[str]) -> list[str]:
@@ -395,205 +337,42 @@ def parse_stream_json(stdout_text: str) -> ParsedEvents:
     )
 
 
-class ClaudeCodeProvider:
-    """Claude Code CLI adapter implementing the ``AgentProvider`` protocol."""
+class ClaudeCodeProvider(BaseCliProvider):
+    """Claude Code CLI adapter implementing the ``AgentProvider`` protocol.
+
+    Carries only the Claude-specific syntax (argv, stderr signatures, ``stream-json`` parsing,
+    inline output schema); the run/preflight/redaction spine lives in :class:`BaseCliProvider`.
+    """
 
     id: str = ProviderId.CLAUDE.value
 
-    def __init__(
-        self,
-        config: ProviderConfig,
-        *,
-        security: SecurityConfig,
-        artifacts_root: str | Path,
-        clock: Callable[[], datetime] = _utc_now,
-        monotonic: Callable[[], float] = time.monotonic,
-        run_process: RunProcess = run_process,
-        heartbeat_seconds: float = 30.0,
-    ) -> None:
-        self._config = config
-        self._security = security
-        self._artifacts_root = Path(artifacts_root)
-        self._clock = clock
-        self._monotonic = monotonic
-        self._run_process = run_process
-        self._heartbeat_seconds = heartbeat_seconds
+    def _executable_label(self) -> str:
+        return "claude"
 
-    def preflight(self) -> ProviderHealth:
-        """Detect the executable and parse its version (auth is best-effort/offline in P2)."""
-        env = build_child_env(self._security.allowed_environment)
-        with tempfile.TemporaryDirectory() as scratch:
-            stdout_path = os.path.join(scratch, "version.out")
-            proc = self._run_process(
-                [self._config.command, "--version"],
-                cwd=scratch,
-                env=env,
-                timeout_seconds=_PREFLIGHT_TIMEOUT_SECONDS,
-                stdout_path=stdout_path,
-                monotonic=self._monotonic,
-            )
-            stdout_text = _read_text(stdout_path)
+    def _signatures(self) -> Sequence[StderrSignature]:
+        return _CLAUDE_SIGNATURES
 
-        if proc.launch_error is not None:
-            return ProviderHealth(
-                provider_id=self.id,
-                executable_found=False,
-                version=None,
-                authenticated=False,
-                supports_required_features=False,
-                message="claude executable not found",
-            )
-        if proc.timed_out or proc.exit_code != 0:
-            return ProviderHealth(
-                provider_id=self.id,
-                executable_found=True,
-                version=None,
-                authenticated=False,
-                supports_required_features=False,
-                message="claude was found but 'claude --version' did not succeed",
-            )
-        version = _parse_version(stdout_text)
-        return ProviderHealth(
-            provider_id=self.id,
-            executable_found=True,
-            version=version,
-            authenticated=True,
-            supports_required_features=version is not None,
-            message=f"claude {version or 'unknown version'} available",
-        )
-
-    def run(self, request: AgentRunRequest) -> AgentRunResult:
-        """Execute a single Claude stage run. Infrastructure failures raise ``ProviderError``."""
-        started_at = self._clock().isoformat()
-        paths = create_attempt_dir(
-            self._artifacts_root,
-            request.task_id,
-            request.node_id,
-            request.attempt,
-            self.id,
-            node_run_id=request.node_run_id,
-        )
+    def _build_argv(self, request: AgentRunRequest, paths: ArtifactPaths) -> tuple[list[str], None]:
         self._write_output_schema(paths, request)
-
-        try:
-            argv = build_claude_argv(
-                self._config,
-                request,
-                denied_commands=self._security.denied_commands,
-                denied_read_paths=self._security.denied_read_paths,
-            )
-        except ProviderError:
-            self._write_request(paths, request, argv=None)
-            raise
-
-        self._write_request(paths, request, argv=argv)
-
-        env = build_child_env(self._security.allowed_environment)
-        log = bind(
-            _LOG,
-            task_id=request.task_id,
-            node_id=request.node_id,
-            provider=self.id,
-            attempt=request.attempt,
+        argv = build_claude_argv(
+            self._config,
+            request,
+            denied_commands=self._security.denied_commands,
+            denied_read_paths=self._security.denied_read_paths,
         )
-        proc = run_with_heartbeat(
-            lambda: self._run_process(
-                argv,
-                cwd=request.working_directory,
-                env=env,
-                timeout_seconds=request.timeout_seconds,
-                stdout_path=paths.stdout_path,
-                stdin_text=build_effective_prompt(request),
-                monotonic=self._monotonic,
-            ),
-            logger=log,
-            message="provider heartbeat",
-            interval_seconds=self._heartbeat_seconds,
-            fields={"timeout_seconds": request.timeout_seconds},
-        )
-        finished_at = self._clock().isoformat()
+        return argv, None
 
-        # Redact every captured sink before it is written (§12.6): a leaked secret must never land
-        # in stdout.log or events.jsonl. Parsing uses the in-memory raw stream for correctness.
-        extra_secrets = self._extra_secrets(request)
-        raw_stdout = _read_text(paths.stdout_path)
-        redacted_stdout = redact_text(raw_stdout, extra_secrets=extra_secrets)
-        Path(paths.stdout_path).write_text(redacted_stdout, encoding="utf-8")
-        Path(paths.stderr_path).write_text(
-            redact_text(proc.stderr_text, extra_secrets=extra_secrets), encoding="utf-8"
-        )
-        Path(paths.events_path).write_text(redacted_stdout, encoding="utf-8")
+    def _parse(
+        self,
+        raw_stdout: str,
+        paths: ArtifactPaths,
+        parse_context: None,
+        extra_secrets: tuple[str, ...],
+    ) -> ParsedEvents:
+        return parse_stream_json(raw_stdout)
 
-        # Infrastructure failure (launch / timeout / abnormal exit) → normalized error → raise.
-        if proc.launch_error is not None or proc.timed_out or proc.exit_code != 0:
-            error = classify(
-                exit_code=proc.exit_code,
-                stderr_text=proc.stderr_text,
-                timed_out=proc.timed_out,
-                launch_error=proc.launch_error,
-                signatures=_CLAUDE_SIGNATURES,
-            )
-            self._finalize_failure(paths, request, started_at, finished_at, proc, error)
-            raise ProviderError(error.error_class, error.message)
-
-        # Clean exit: parse the structured event stream.
-        try:
-            parsed = parse_stream_json(raw_stdout)
-        except ProviderError as exc:
-            error = NormalizedError(exc.error_class, str(exc))
-            self._finalize_failure(paths, request, started_at, finished_at, proc, error)
-            raise
-
-        # The raw session id lives ONLY in state.db (durable sessions, P2.2). The resume id was
-        # already redacted via ``extra_secrets``; scrub the freshly emitted id from the on-disk
-        # streams too, while keeping the raw id on the in-memory result for the lineage store.
-        if parsed.session_id:
-            self._scrub_raw_session(paths, parsed.session_id)
-
-        final_message = (
-            redact_text(parsed.final_message, extra_secrets=extra_secrets)
-            if parsed.final_message
-            else None
-        )
-        usage = redact_mapping(parsed.usage, extra_secrets=extra_secrets) if parsed.usage else None
-        if parsed.succeeded:
-            status, error_obj = RunStatus.SUCCEEDED, None
-        else:
-            status = RunStatus.FAILED
-            error_obj = NormalizedError(
-                ErrorClass.TASK_FAILURE, message_for(ErrorClass.TASK_FAILURE)
-            )
-
-        result = AgentRunResult(
-            status=status,
-            provider=self.id,
-            node_id=request.node_id,
-            attempt=request.attempt,
-            exit_code=proc.exit_code,
-            started_at=started_at,
-            finished_at=finished_at,
-            final_message=final_message,
-            structured_output=parsed.structured_output,
-            usage=usage,
-            session_id=parsed.session_id,
-            stdout_path=paths.stdout_path,
-            stderr_path=paths.stderr_path,
-            event_log_path=paths.events_path,
-            error=error_obj,
-        )
-        # result.json carries the normalized (non-secret) session id; the raw id is returned
-        # in-memory for the orchestrator's editing_lineage store (state.db only).
-        write_result_artifact(paths, _redact_result_session(result))
-        return result
-
-    # --- internals ---
-
-    def _scrub_raw_session(self, paths: ArtifactPaths, raw_session_id: str) -> None:
-        """Replace a raw session id with :data:`REDACTED` in the on-disk stdout/events streams."""
-        for path in (paths.stdout_path, paths.events_path):
-            existing = _read_text(path)
-            if raw_session_id and raw_session_id in existing:
-                Path(path).write_text(existing.replace(raw_session_id, REDACTED), encoding="utf-8")
+    def _representation_extras(self, request: AgentRunRequest) -> dict[str, Any]:
+        return {"reasoning": request.reasoning or self._config.reasoning or None}
 
     def _write_output_schema(self, paths: ArtifactPaths, request: AgentRunRequest) -> str | None:
         if request.output_schema is None:
@@ -603,106 +382,3 @@ class ClaudeCodeProvider:
             json.dumps(request.output_schema, ensure_ascii=False), encoding="utf-8"
         )
         return schema_path
-
-    def _write_request(
-        self, paths: ArtifactPaths, request: AgentRunRequest, *, argv: list[str] | None
-    ) -> None:
-        representation = self._request_representation(request, argv)
-        redacted = redact_mapping(representation, extra_secrets=self._extra_secrets(request))
-        write_request_artifact(paths, redacted)
-
-    def _request_representation(
-        self, request: AgentRunRequest, argv: list[str] | None
-    ) -> dict[str, Any]:
-        context_paths = {
-            "task_path": request.task_path,
-            "plan_path": request.plan_path,
-            "diff_path": request.diff_path,
-            "check_artifacts_path": request.check_artifacts_path,
-            "review_artifacts_path": request.review_artifacts_path,
-            "human_input_path": request.human_input_path,
-        }
-        return {
-            "provider": self.id,
-            "task_id": request.task_id,
-            "node_id": request.node_id,
-            "node_run_id": request.node_run_id,
-            "attempt": request.attempt,
-            "working_directory": request.working_directory,
-            "permission_profile": request.permission_profile,
-            "timeout_seconds": request.timeout_seconds,
-            "model": request.model or self._config.model or None,
-            "prompt": request.prompt,
-            "context_paths": {k: v for k, v in context_paths.items() if v},
-            "extra_args": list(request.extra_args),
-            "config_extra_args": list(self._config.extra_args),
-            "reasoning": request.reasoning or self._config.reasoning or None,
-            "argv": argv,
-        }
-
-    def _finalize_failure(
-        self,
-        paths: ArtifactPaths,
-        request: AgentRunRequest,
-        started_at: str,
-        finished_at: str,
-        proc: ProcessResult,
-        error: NormalizedError,
-    ) -> None:
-        result = AgentRunResult(
-            status=RunStatus.FAILED,
-            provider=self.id,
-            node_id=request.node_id,
-            attempt=request.attempt,
-            exit_code=proc.exit_code,
-            started_at=started_at,
-            finished_at=finished_at,
-            stdout_path=paths.stdout_path,
-            stderr_path=paths.stderr_path,
-            event_log_path=paths.events_path,
-            error=error,
-        )
-        write_result_artifact(paths, result)
-
-    def _extra_secrets(self, request: AgentRunRequest) -> tuple[str, ...]:
-        """Literal secrets to redact: secret-named parent env values + denied-read file contents +
-        the raw resume session id (durable sessions, P2.2 — it must never leave state.db, so it is
-        scrubbed from the request argv / stdout / stderr / events / result)."""
-        session = (request.session_id,) if request.session_id else ()
-        return (
-            self._secret_env_values()
-            + read_denied_secrets(request.working_directory, self._security.denied_read_paths)
-            + session
-        )
-
-    def _secret_env_values(self) -> tuple[str, ...]:
-        """Values of non-allowlisted, secret-named parent env vars, for defensive redaction."""
-        allowed = set(self._security.allowed_environment)
-        return tuple(
-            value
-            for key, value in os.environ.items()
-            if key not in allowed and len(value) >= 8 and is_sensitive_key(key)
-        )
-
-
-def _read_text(path: str) -> str:
-    candidate = Path(path)
-    if not candidate.exists():
-        return ""
-    return candidate.read_text(encoding="utf-8", errors="replace")
-
-
-def _redact_result_session(result: AgentRunResult) -> AgentRunResult:
-    """A copy of ``result`` whose session id is the normalized (non-secret) form, for the artifact.
-
-    The raw session id is kept on the in-memory result (so the orchestrator can persist it to the
-    ``editing_lineage`` store, state.db only) and never written to ``result.json``.
-    """
-    if result.session_id is None:
-        return result
-    return replace(result, session_id=normalized_session_id(result.session_id))
-
-
-def _parse_version(text: str) -> str | None:
-    match = re.search(r"(\d+\.\d+(?:\.\d+)?)", text)
-    return match.group(1) if match else None

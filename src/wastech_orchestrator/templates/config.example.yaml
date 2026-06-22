@@ -79,7 +79,7 @@ validation:                         # input hardening gate (§19); rejects broke
   max_control_ratio: 0.01
   required_fields: ["id", "title"]
   reject_unknown_fields: true
-  quarantine_folder: "./tasks/rejected"
+  quarantine_folder: "./.worc/tasks/rejected"
 
 checks:
   discovery:

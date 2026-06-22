@@ -6,8 +6,8 @@ deterministic rule — the agent never gets to weaken ``max_subtasks``, routes, 
 
 A split is accepted **only** when all hold:
 
-* the gate is on for this task (config ``agents.decomposition.enabled`` or the per-task
-  ``decompose`` tri-state — resolved by the caller and passed as ``gate_on``);
+* the gate is on for this task (config ``agents.decomposition.enabled`` — resolved by the caller and
+  passed as ``gate_on``);
 * the agent recommends a split with ``2 <= n <= max_subtasks``;
 * every subtask declares ``order``, ``title``, ``slug``, ``acceptance_criteria`` and ``depends_on``;
 * ``order`` values are exactly ``1..n`` and each ``depends_on`` references **only earlier orders**

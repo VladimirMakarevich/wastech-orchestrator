@@ -1,9 +1,10 @@
 """SQLite State Store (spec §9).
 
 The authoritative persisted state for the pipeline: the ``tasks``, ``node_runs``,
-``provider_attempts``, ``check_runs``, ``artifacts``, ``publish_operations`` and ``subtasks``
-entities. State transitions are **transactional** (``BEGIN IMMEDIATE`` … ``COMMIT``) so a crash
-leaves a consistent prior state and a restart can reconcile (§13).
+``provider_attempts``, ``check_runs``, ``artifacts``, ``publish_operations``, ``subtasks``,
+``evaluations``, ``editing_lineage`` and ``node_lineage`` entities. State transitions are
+**transactional** (``BEGIN IMMEDIATE`` … ``COMMIT``) so a crash leaves a consistent prior state and
+a restart can reconcile (§13).
 
 **No secrets, tokens, or full process environment are ever written here** (§9, §12.6) — only ids,
 statuses, error classes, file paths, sha256 checksums, counters, idempotency fingerprints and

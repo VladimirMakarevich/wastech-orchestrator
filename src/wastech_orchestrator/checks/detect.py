@@ -11,7 +11,10 @@ This module is provider-agnostic and read-only: it proposes argv lists; it never
 
 from __future__ import annotations
 
-from wastech_orchestrator.checks.inspect import RepositoryEvidence
+import shlex
+from pathlib import Path
+
+from wastech_orchestrator.checks.inspect import RepositoryEvidence, RepositoryInspector
 from wastech_orchestrator.checks.model import CheckCandidate, CheckSource, Confidence
 
 # Logical check names. ``checks`` is a combined project-owned wrapper (e.g. ``make check``) that
@@ -196,3 +199,44 @@ def _ruff_note(ev: RepositoryEvidence) -> str:
 
 def _mypy_note(ev: RepositoryEvidence) -> str:
     return "; scope from [tool.mypy]" if (ev.mypy_files or ev.mypy_has_scope) else ""
+
+
+# Logical-check confidence ranking, mirroring the runtime resolver's ``_priority``.
+_CONFIDENCE_RANK: dict[Confidence, int] = {
+    Confidence.LOW: 1,
+    Confidence.MEDIUM: 2,
+    Confidence.HIGH: 3,
+}
+
+
+def propose_default_commands(repo_root: Path | str) -> list[str]:
+    """Propose default ``checks.commands`` (shell strings) for the installer to seed config.
+
+    Delegates ecosystem detection to :class:`CheckCandidateDetector` — the **same** deterministic,
+    lockfile-aware detector the runtime ``checks.resolver.CheckResolver`` uses — then renders the
+    highest-confidence candidate per logical check to a shell string via :func:`shlex.join`
+    (``checks.commands`` is operator-friendly, so the seed is a string, not argv; the round-trip
+    back to argv is lossless for these simple commands). One ecosystem-detection source of truth,
+    so the installer can never seed a command the resolver disagrees with.
+
+    Offline: detection inspects manifests/lockfiles/venvs but launches nothing — the installer only
+    seeds the config; the resolver re-validates launchability at preflight/runtime.
+    """
+    evidence = RepositoryInspector(repo_root).collect()
+    candidates = CheckCandidateDetector().detect(evidence)
+    chosen = _best_candidate_per_name(candidates)
+    # A project-owned wrapper (``make check``/``tox``/…) supersedes the per-language checks when it
+    # is present (§17), mirroring the resolver's selection.
+    selected = [chosen[_CHECKS]] if _CHECKS in chosen else [chosen[name] for name in sorted(chosen)]
+    return [shlex.join(candidate.argv) for candidate in selected]
+
+
+def _best_candidate_per_name(candidates: list[CheckCandidate]) -> dict[str, CheckCandidate]:
+    """Keep the highest-confidence candidate per logical name (ties broken by detection order)."""
+    best: dict[str, tuple[int, int, CheckCandidate]] = {}
+    for index, candidate in enumerate(candidates):
+        rank = _CONFIDENCE_RANK[candidate.confidence]
+        current = best.get(candidate.name)
+        if current is None or rank > current[0]:
+            best[candidate.name] = (rank, index, candidate)
+    return {name: item[2] for name, item in best.items()}

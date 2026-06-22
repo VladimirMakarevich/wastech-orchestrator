@@ -102,8 +102,13 @@ class _BoundLogger(logging.LoggerAdapter[logging.Logger]):
 class RedactionFilter(logging.Filter):
     """Scrub each record's message, args, and structured fields through :func:`redact_text` (§12.6).
 
-    A safety net: even if a call site accidentally interpolates a secret, it is redacted before the
-    record reaches any handler/sink.
+    A *structural* safety net: it is called without ``extra_secrets``, so it catches what
+    :func:`redact_text` recognizes by shape — token-shaped credentials (GitHub/OpenAI/Slack/AWS
+    keys, Bearer tokens, JWTs) and sensitive ``NAME=VALUE`` assignments. It does **not** know any
+    task's specific secret literals (denied-file values, raw session ids); those are redacted at
+    their source (the providers / the artifact writer), and the logging contract keeps call sites to
+    ids/enums/counters in the first place. This filter is the last-line backstop for a token-shaped
+    value that slips into a log message, not a guarantee against logging an arbitrary literal.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:

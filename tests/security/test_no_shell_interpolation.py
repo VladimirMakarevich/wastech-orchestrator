@@ -12,9 +12,13 @@ tests/providers/test_codex_command.py and test_claude_command.py.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 import wastech_orchestrator
 from wastech_orchestrator.checks.model import normalize_check_command
+from wastech_orchestrator.providers import process as process_mod
 
 _SRC = Path(wastech_orchestrator.__file__).resolve().parent
 _PROCESS_RUNNER = _SRC / "providers" / "process.py"
@@ -35,9 +39,33 @@ def test_subprocess_is_only_used_in_the_safe_runner() -> None:
     assert offenders == [], f"subprocess used outside the safe runner: {offenders}"
 
 
-def test_safe_runner_launches_without_a_shell() -> None:
-    source = _PROCESS_RUNNER.read_text(encoding="utf-8")
-    assert "shell=False" in source
+def test_safe_runner_passes_shell_false_to_subprocess(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Behavioral proof (not a source-substring grep): intercept the real subprocess.run and assert
+    # the runner actually hands it shell=False with an argv list. A refactor that moved the literal
+    # to a constant would no longer be able to silently defeat this guard.
+    captured: dict[str, Any] = {}
+
+    class _Completed:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(argv: object, **kwargs: object) -> _Completed:
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        return _Completed()
+
+    monkeypatch.setattr(process_mod.subprocess, "run", fake_run)
+    process_mod.run_process(
+        ["echo", "hi"],
+        cwd=tmp_path,
+        env={},
+        timeout_seconds=5,
+        stdout_path=tmp_path / "stdout.log",
+    )
+    assert captured["kwargs"]["shell"] is False
+    assert captured["argv"] == ["echo", "hi"]
 
 
 def test_no_module_enables_a_shell() -> None:

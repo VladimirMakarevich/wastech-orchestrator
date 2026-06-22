@@ -23,6 +23,9 @@ from wastech_orchestrator.security.forbidden_args import (
         ("-s", "danger-full-access"),
         ("-s=danger-full-access",),
         ("--model", "gpt-x", "--yolo"),  # offending flag not first
+        ("--sandbox",),  # dangling: no value (last token)
+        ("-s",),  # dangling short form
+        ("--sandbox=",),  # trailing '=' with empty value
     ],
 )
 def test_forbidden_args_are_detected(args: tuple[str, ...]) -> None:

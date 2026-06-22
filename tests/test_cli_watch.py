@@ -9,10 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from wastech_orchestrator import cli, process_control
+from wastech_orchestrator import cli, preflight, process_control
 from wastech_orchestrator.config.loader import loads_config
 from wastech_orchestrator.config.schema import OrchestratorConfig
-from wastech_orchestrator.install import detect
 from wastech_orchestrator.install.config_writer import InstallSpec, build_and_validate
 from wastech_orchestrator.providers.base import ProviderId
 
@@ -229,6 +228,6 @@ def test_watch_skips_gh_check_when_pr_disabled(
     monkeypatch.setattr(cli, "build_orchestrator", lambda *a, **k: object())
     monkeypatch.setattr(cli, "watch_loop", lambda *a, **k: [])
     calls: list[int] = []
-    monkeypatch.setattr(detect, "require_gh", lambda: calls.append(1))
+    monkeypatch.setattr(preflight, "require_gh", lambda: calls.append(1))
     assert cli.main(["watch", "--poll-seconds", "0"]) == 0
     assert calls == []

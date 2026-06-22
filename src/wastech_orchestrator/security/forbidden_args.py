@@ -48,8 +48,14 @@ def find_forbidden_args(args: Sequence[str]) -> list[str]:
             reasons.append(f"flag {token!r} {_BYPASS_REASON}")
             continue
         if flag in _SANDBOX_FLAGS:
+            has_value = "=" in token or index + 1 < len(args)
             value = token.split("=", 1)[1] if "=" in token else _peek(args, index + 1)
-            if value == FORBIDDEN_SANDBOX_VALUE:
+            if not has_value or value == "":
+                # A sandbox flag with no value (last token, or a trailing ``=``) is malformed: the
+                # CLI would consume the next real flag as its value or error out. Reject it rather
+                # than treat it as safe — defense in depth, it can never weaken isolation.
+                reasons.append(f"{flag} requires a sandbox value (none given)")
+            elif value == FORBIDDEN_SANDBOX_VALUE:
                 reasons.append(f"--sandbox may not be set to {FORBIDDEN_SANDBOX_VALUE!r}")
     return reasons
 

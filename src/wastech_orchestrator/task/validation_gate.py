@@ -347,9 +347,11 @@ class ValidationGate:
         to the deterministic refinement-skip (``derived.needs_refinement``); there is no task flag.
         """
         has_description = bool(task.description.strip())
-        has_acceptance = extract_section(task.description, "Acceptance criteria") is not None or (
-            "acceptance" in task.description.lower()
-        )
+        # Require the structured ``## Acceptance criteria`` section. The old ``"acceptance" in
+        # description`` substring fallback let prose like "no acceptance criteria yet" classify as
+        # COMPLETE and skip refinement; dropping it routes such tasks through refinement, the safe
+        # direction (refinement never rejects, §19.1).
+        has_acceptance = extract_section(task.description, "Acceptance criteria") is not None
         if has_description and has_acceptance:
             return Completeness.COMPLETE
         return Completeness.NEEDS_ENRICHMENT

@@ -43,7 +43,8 @@ _MIN_LITERAL_LEN = 4
 
 # Threshold for a token harvested from a denied_read_paths file. Higher than _MIN_LITERAL_LEN so
 # scanning a ``.env`` does not turn common short values (``true``, ``1234``) into redaction literals
-# that would mangle unrelated output. Mirrors the >= 8 heuristic the adapters use for env secrets.
+# that would mangle unrelated output. The adapter base imports this constant for the same heuristic
+# when harvesting secret-named env values, so the threshold has a single source of truth.
 _MIN_DENIED_SECRET_LEN = 8
 
 # A run of non-separator characters on a line — used to harvest individual secret tokens (e.g. the

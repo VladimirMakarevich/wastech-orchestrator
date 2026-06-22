@@ -9,7 +9,8 @@ Remediation plan for [2026-06-21-audit.md](2026-06-21-audit.md). Every finding w
 - ✅ **Done: Phase 2 (Medium correctness bugs; 2026-06-22).** #6 — research/audit flows renamed `global_revision_iterations` → the enforced `global_fix_iterations` key (cap now `min(12/8, max_total_fix_iterations)`). #8 (Q-8a) — `Finding.blocking` aligned down to `high` only; the duplicate `_HIGH_SEVERITIES` collapsed into `_BLOCKING_SEVERITIES`; the dead `_BLOCKING_SEVERITIES` in `orchestrator.py` removed. #9 — validator now rejects a disconnected decomposition region (no region entry / no forward exit), and `partition_decomposition` uses `next(..., None)` → `EngineInternalError` as belt-and-suspenders. #10 (Q-10a) — supervisor's own session is now durable via `node_lineage` under the `__supervisor__` sentinel (provider-gated, `state.db`-only). #11 — HITL `reset`/`consume` now act on the full un-answered set (`_RESETTABLE_STATUSES`, derived from `AskFailure`: waiting + transport_error + timeout + invalid_response). #14 — PID file is now JSON `{pid, start_time}`; `is_running`/`running_daemon_pid`/`stop_process` match the recorded start-time (Linux `/proc`; non-Linux degrades to a bare PID probe to honor the no-shell-out invariant). #L1 was already done in Phase 7. New/updated tests across all six; ruff + mypy + full pytest green; B02/B05/B12/B29/B30/B31 + deep-research/security-audit/index docs synced.
 - ✅ **Done: Phase 3 (dead config & dead code removal; 2026-06-22).** #4 (Q-4a) — flow `decomposition.gate` (`gate_min`/`gate_max`/`linear_depends_on`) deleted from schema/parser + packaged & parity YAMLs. #5 (Q-5a) — flow `commit_each_subtask` + config `min_size_signal`/`commit_per_subtask` deleted; loader tolerate-and-strips the config keys, `upgrade-config` strips them (config **schema_version 11 → 12**; `_strip_removed_keys` now walks dotted parents). #15 — `Stage.PUBLISHING` removed. #16 — `LedgerRecord.summary_gist` removed. #17 (Q-17a) — `LoopCounters.stage_attempts` + the `tasks.stage_attempts` column removed (state.db **DB_SCHEMA_VERSION 10 → 11**; `node_runs.stage_attempts` untouched). #18 (Q-18a) — dead `PublishResult` deleted; `ManualActionRequired` left in place. #19 (Q-19a) — `compute_skill_dedup` **wired** in `_engine_apply_skills` (plan.md text + selected skill bodies via `read_body`). #20 — dead `--keep-branch` flag removed. #22 — `split_command` + unused `shlex` import removed; the security test repointed to `normalize_check_command`. **#23 deferred** (benign `.worc` literal dup — follow-up logged). New/updated tests; ruff + mypy + full pytest green; B01/B05/B07/B08/B09/B11/B13/B18/B22/B24 + index/implementation docs synced.
 - ✅ **All Phase 0 decisions made (2026-06-22, operator):** recorded in the decisions table at the top of Phase 0. Q-10 → **wire** the supervisor session via `node_lineage`; Q-12 → **shell-string** check seeding via the resolver; Q-19 → **wire** the skill-dedup feature; Q-4/Q-5/Q-8/Q-13/Q-17/Q-18/Q-26/Q-B → the recommended defaults.
-- ⬜ **Not started (now unblocked):** **Phases 4–6** (DRY/structural, robustness, docs/tests + §-anchors). #23 (\_WORC_HOME) deferred to [follow_ups.md](follow_ups.md). Each is scoped above with a concrete fix; none is begun.
+- ✅ **Done: Phases 4–6 (DRY/structural, robustness, docs/tests; 2026-06-22)** — in one iteration. **Phase 4:** #7 — extracted `providers/_adapter_base.py` (`BaseCliProvider` + the byte-identical tail/footer helpers); `claude.py`/`codex.py` are now thin subclasses carrying only argv/signatures/parse/schema, with four CLI-aware hooks (`_build_argv`/`_parse`/`_signatures`/`_executable_label`) — the base names no CLI flag. #12 — installer seeds checks through the **B23 detector** (`checks.detect.propose_default_commands` → lockfile-aware argv → `shlex.join`); `install/detect.detect_checks`/`_node_checks` deleted. #21 — `require_gh`/`GhNotAvailableError` moved to a new `preflight.py` (runtime gate out of the read-only detection module); `has_gh` stays. #27 — `_MIN_DENIED_SECRET_LEN` is the single source for the env-secret threshold (the base imports it). **Phase 5:** #13 — `RedactionFilter` docstring tightened to its real structural coverage (+ a boundary test); #24 — safe-runner splits stdout-open failure (names the path) from launch failure, one `OSError` clause; #25 — git-status matched by exact code (`status[:1]`); #26 — Phase-B completeness requires the `## Acceptance criteria` section (substring fallback dropped); #28 — a dangling `--sandbox`/`-s` (missing/empty value) is now rejected; #29 — atomic-write temp name derived from the target (`.<stem>-…<suffix>`). **Phase 6:** #30 — `quarantine_folder` examples → `./.worc/tasks/rejected`; #31 — stale docstrings fixed (`state_store` entity list, `decomposition` decompose tri-state, `task/model` P1/P5 phasing, `cli` init→install, `telegram.get_me` bare-username, `check_runner` leads with the resolver path); #32 — the shell-interpolation guard now asserts **behavior** (intercepts `subprocess.run`, asserts `shell=False` + argv list). New/updated tests across all items; ruff + ruff format + mypy (97 files) + full pytest green.
+- ⚠️ **Deferred: Phase 6 #B (`§NN` spec anchors)** — **not bundled.** Executing the Q-Bb sweep surfaced a correction to the audit: ~238 of the 526 src/ `§` tokens are in string **constants**, and at least four sit in **runtime/operator-facing literals** (`git_manager.py:568`, `recovery.py:62` `manual_reason`, `orchestrator.py:352`, `git_manager.py:375`), not docstrings. A blanket regex both mangles code (global whitespace tidying) and alters persisted ledger/`manual_reason` text. #B needs a dedicated **AST-aware** pass (comment/docstring spans only) with the literal cases handled deliberately — logged in [follow_ups.md](follow_ups.md). #23 (`_WORC_HOME`) remains deferred there too.
 
 ## Verification outcome
 
@@ -67,7 +68,7 @@ One **latent bug** surfaced during verification that the audit did not separate 
 | 30 | `quarantine_folder` example drift | Confirmed | 6 | S | — |
 | 31 | Stale docstrings | Partial | 6 | S | — |
 | 32 | Test brittleness | Partial | 6 | S | — |
-| B | `§NN` spec anchors (481 across 73 files) | Confirmed | 6 | M | **Q-B** |
+| B | `§NN` spec anchors (481 across 73 files) | Confirmed | 6 | M | ⚠️ deferred (§ in runtime literals — needs AST-aware pass; [follow_ups](follow_ups.md)) |
 | A | `Stage` enum shim removal | ✅ done | 7 | L | Q-A→opt1 |
 
 ---
@@ -288,7 +289,7 @@ Mostly deletions; net code reduction. Group #4 and #5 together (same `Decomposit
 
 ---
 
-## Phase 4 — DRY / structural
+## Phase 4 — DRY / structural — ✅ DONE (2026-06-22)
 
 **#7 — Provider adapter duplication.** Partial (smaller than stated) · `providers/claude.py` / `codex.py` · **M**
 
@@ -313,7 +314,7 @@ Mostly deletions; net code reduction. Group #4 and #5 together (same `Decomposit
 
 ---
 
-## Phase 5 — Robustness / fragility hardening
+## Phase 5 — Robustness / fragility hardening — ✅ DONE (2026-06-22)
 
 **#13 — `RedactionFilter` defense-in-depth gap.** Partial (mitigated) · `observability/logging.py:111,118,125` pass no `extra_secrets`; docstring `:103-105` overstates · **S** · **Q-13**
 
@@ -346,7 +347,7 @@ Mostly deletions; net code reduction. Group #4 and #5 together (same `Decomposit
 
 ---
 
-## Phase 6 — Docs & test hardening
+## Phase 6 — Docs & test hardening — ✅ DONE (2026-06-22; #B deferred)
 
 Do the docstring/anchor work in one `/sync-docs`-adjacent pass to satisfy the Stop docs-sync gate. `src/` is prettier-excluded, so `.py` docstring edits don't need prettier; this doc and any `docs/` markdown do.
 

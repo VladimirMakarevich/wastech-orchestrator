@@ -101,6 +101,28 @@ def test_missing_binary_sets_launch_error(tmp_path: Path) -> None:
     assert result.timed_out is False
     # The empty stdout artifact still exists for the audit trail.
     assert (tmp_path / "stdout.log").exists()
+    # A genuine launch failure names the binary, not the stdout path.
+    assert "could not launch" in result.launch_error
+
+
+def test_unwritable_stdout_path_degrades_and_blames_the_path(tmp_path: Path) -> None:
+    # stdout_path points *inside* a regular file, so open() fails with NotADirectoryError. The
+    # runner must degrade to launch_error (not raise) and the message must name the path, not
+    # argv[0] (which launched fine — the binary is not the culprit).
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x", encoding="utf-8")
+    bad_stdout = blocker / "stdout.log"
+    result = run_process(
+        ["echo", "hi"],
+        cwd=tmp_path,
+        env={},
+        timeout_seconds=30,
+        stdout_path=bad_stdout,
+    )
+    assert result.launch_error is not None
+    assert result.exit_code is None
+    assert "could not open stdout path" in result.launch_error
+    assert "could not launch" not in result.launch_error
 
 
 def test_child_env_is_exactly_what_is_passed(

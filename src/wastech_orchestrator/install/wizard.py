@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from wastech_orchestrator.checks.detect import propose_default_commands
 from wastech_orchestrator.install import detect
 from wastech_orchestrator.install.config_writer import InstallSpec
 from wastech_orchestrator.providers.base import ProviderId
@@ -163,7 +164,7 @@ def _resolve_checks(
 ) -> tuple[str, ...]:
     if checks is not None:
         return tuple(checks)
-    detected = detect.detect_checks(repo_root)
+    detected = propose_default_commands(repo_root)
     if non_interactive:
         return tuple(detected)
     if detected and prompter.confirm(f"Use detected checks {detected}?", default=True):

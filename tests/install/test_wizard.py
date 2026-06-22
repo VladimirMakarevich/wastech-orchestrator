@@ -61,7 +61,7 @@ def _patch_detect(
     }
     monkeypatch.setattr(detect, "detect_providers", lambda: detected)
     monkeypatch.setattr(detect, "has_gh", lambda: gh)
-    monkeypatch.setattr(detect, "detect_checks", lambda _root: list(checks))
+    monkeypatch.setattr(wizard, "propose_default_commands", lambda _root: list(checks))
 
 
 def _run(monkeypatch: pytest.MonkeyPatch, root: Path, **kwargs: object) -> wizard.WizardOutcome:

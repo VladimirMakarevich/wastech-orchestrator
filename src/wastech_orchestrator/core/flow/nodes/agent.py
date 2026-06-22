@@ -87,9 +87,7 @@ class AgentNodeRunner:
 
     # -- embedded HITL (refinement / planning) --------------------------------
 
-    def _run_with_hitl(
-        self, node: AgentNode, ctx: NodeContext, route: ResolvedRoute
-    ) -> NodeResult:
+    def _run_with_hitl(self, node: AgentNode, ctx: NodeContext, route: ResolvedRoute) -> NodeResult:
         path = interaction_path(
             self._s.artifacts_root, ctx.task_id, node.id, subtask=ctx.subtask_order
         )
@@ -123,9 +121,7 @@ class AgentNodeRunner:
         mark_consumed(path)
         return NodeResult(node_id=node.id, outcome=_agent_outcome(outcome2), node_run_id=run_id2)
 
-    def _resume_interaction(
-        self, node: AgentNode, path: Any, persisted: Mapping[str, Any]
-    ) -> str:
+    def _resume_interaction(self, node: AgentNode, path: Any, persisted: Mapping[str, Any]) -> str:
         status = str(persisted.get("status", ""))
         if status == "waiting":
             result = self._gate().resume(path, dict(persisted))

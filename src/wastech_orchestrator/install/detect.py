@@ -13,7 +13,6 @@ operator's own environment.
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import tempfile
@@ -108,56 +107,9 @@ def detect_providers() -> dict[ProviderId, str | None]:
     return {pid: find_executable(pid.value) for pid in ProviderId}
 
 
-class GhNotAvailableError(OSError):
-    """The GitHub CLI (``gh``) is required for PR creation but is not on ``PATH`` (§6.7)."""
-
-
 def has_gh() -> bool:
-    """Whether the GitHub CLI (``gh``) is on ``PATH`` (gates the PR-creation default)."""
-    return find_executable("gh") is not None
+    """Whether the GitHub CLI (``gh``) is on ``PATH`` (gates the PR-creation default).
 
-
-def require_gh() -> None:
-    """Raise :class:`GhNotAvailableError` unless ``gh`` is on ``PATH`` (hard pre-flight gate).
-
-    The raising counterpart to :func:`has_gh`, used at ``watch``/``run`` startup when PR creation is
-    enabled so a missing GitHub CLI fails fast with an actionable message rather than surfacing as a
-    ``GitCommandError`` deep inside the publish stage.
+    The raising runtime gate built on this lives in :mod:`wastech_orchestrator.preflight`.
     """
-    if not has_gh():
-        raise GhNotAvailableError(
-            "'gh' (GitHub CLI) is not installed or not on PATH. Install it from "
-            "https://cli.github.com/ and run 'gh auth login', or disable PR creation "
-            "(git.create_pull_request: false)."
-        )
-
-
-def detect_checks(repo_root: Path | str) -> list[str]:
-    """Propose default ``checks.commands`` from the repo's ecosystem markers (first match wins)."""
-    root = Path(repo_root)
-    if (root / "pyproject.toml").is_file():
-        return ["pytest"]
-    if (root / "package.json").is_file():
-        return _node_checks(root / "package.json")
-    if (root / "Cargo.toml").is_file():
-        return ["cargo test"]
-    if (root / "go.mod").is_file():
-        return ["go test ./..."]
-    return []
-
-
-def _node_checks(package_json: Path) -> list[str]:
-    """Read ``package.json`` ``scripts`` and propose ``npm`` commands for the ones that exist."""
-    try:
-        data = json.loads(package_json.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-    scripts = data.get("scripts") if isinstance(data, dict) else None
-    if not isinstance(scripts, dict):
-        return []
-    commands: list[str] = []
-    if "test" in scripts:
-        commands.append("npm test")
-    if "lint" in scripts:
-        commands.append("npm run lint")
-    return commands
+    return find_executable("gh") is not None

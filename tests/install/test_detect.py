@@ -9,6 +9,8 @@ from typing import Any
 
 import pytest
 
+from wastech_orchestrator import preflight
+from wastech_orchestrator.checks.detect import propose_default_commands
 from wastech_orchestrator.install import detect
 from wastech_orchestrator.providers.base import ProviderId
 
@@ -73,13 +75,13 @@ def test_has_gh_false_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_require_gh_is_noop_when_present(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/gh" if name == "gh" else None)
-    detect.require_gh()  # must not raise
+    preflight.require_gh()  # must not raise
 
 
 def test_require_gh_raises_with_actionable_message(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("shutil.which", lambda name: None)
-    with pytest.raises(detect.GhNotAvailableError) as exc:
-        detect.require_gh()
+    with pytest.raises(preflight.GhNotAvailableError) as exc:
+        preflight.require_gh()
     message = str(exc.value)
     assert "gh" in message
     assert "cli.github.com" in message
@@ -93,24 +95,42 @@ def test_require_gh_raises_with_actionable_message(monkeypatch: pytest.MonkeyPat
         ("go.mod", "module x\n", ["go test ./..."]),
     ],
 )
-def test_detect_checks_by_marker(
+def test_propose_defaults_by_marker(
     tmp_path: Path, marker: str, content: str, expected: list[str]
 ) -> None:
     (tmp_path / marker).write_text(content, encoding="utf-8")
-    assert detect.detect_checks(tmp_path) == expected
+    assert propose_default_commands(tmp_path) == expected
 
 
-def test_detect_checks_node_uses_scripts(tmp_path: Path) -> None:
+def test_propose_defaults_node_uses_scripts(tmp_path: Path) -> None:
     (tmp_path / "package.json").write_text(
         '{"scripts": {"test": "jest", "lint": "eslint ."}}', encoding="utf-8"
     )
-    assert detect.detect_checks(tmp_path) == ["npm test", "npm run lint"]
+    # Names are emitted in sorted logical order (lint before tests); npm is the default runner.
+    assert propose_default_commands(tmp_path) == ["npm run lint", "npm test"]
 
 
-def test_detect_checks_node_without_scripts(tmp_path: Path) -> None:
+def test_propose_defaults_node_is_lockfile_aware(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text(
+        '{"scripts": {"test": "vitest", "lint": "eslint ."}}', encoding="utf-8"
+    )
+    (tmp_path / "pnpm-lock.yaml").write_text("lockfileVersion: 9\n", encoding="utf-8")
+    # The lockfile makes the detector prefer pnpm over the first-match npm of the old installer.
+    assert propose_default_commands(tmp_path) == ["pnpm run lint", "pnpm test"]
+
+
+def test_propose_defaults_python_is_lockfile_aware(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "x"\n[dependency-groups]\ndev = ["pytest"]\n', encoding="utf-8"
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    assert propose_default_commands(tmp_path) == ["uv run pytest"]
+
+
+def test_propose_defaults_node_without_scripts(tmp_path: Path) -> None:
     (tmp_path / "package.json").write_text('{"name": "x"}', encoding="utf-8")
-    assert detect.detect_checks(tmp_path) == []
+    assert propose_default_commands(tmp_path) == []
 
 
-def test_detect_checks_empty_when_no_markers(tmp_path: Path) -> None:
-    assert detect.detect_checks(tmp_path) == []
+def test_propose_defaults_empty_when_no_markers(tmp_path: Path) -> None:
+    assert propose_default_commands(tmp_path) == []

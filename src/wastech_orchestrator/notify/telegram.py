@@ -87,7 +87,7 @@ class _TelegramClient(Protocol):
         deadline_monotonic: float,
     ) -> _ClientReply | None: ...
 
-    def get_me(self) -> str: ...  # returns bot @username (first_name as fallback)
+    def get_me(self) -> str: ...  # bare username (first_name fallback); the caller prepends '@'
 
     def get_chat(self, *, chat_id: str) -> str: ...
 

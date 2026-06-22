@@ -84,10 +84,12 @@ def classify_dangerous_diff(entries: tuple[ChangedPath, ...]) -> DangerousDiff |
     deleted: set[str] = set()
     dependencies: set[str] = set()
     for entry in entries:
-        status = entry.status.upper()
-        if status.startswith("D"):
+        # The first character is the git name-status code; rename/copy carry a numeric similarity
+        # score suffix (e.g. ``R100``), so match the code exactly rather than by prefix.
+        code = entry.status.upper()[:1]
+        if code == "D":
             deleted.add(entry.path)
-        elif status.startswith("R") and entry.previous_path is not None:
+        elif code == "R" and entry.previous_path is not None:
             deleted.add(entry.previous_path)
         for candidate in (entry.path, entry.previous_path):
             if candidate is not None and _is_dependency_path(candidate):

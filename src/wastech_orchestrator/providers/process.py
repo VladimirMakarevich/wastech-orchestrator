@@ -77,29 +77,38 @@ def run_process(
     )
 
     try:
-        with open(stdout_path, "wb") as stdout_file:
-            completed = subprocess.run(
-                list(argv),
-                cwd=os.fspath(cwd),
-                env=dict(env),
-                stdout=stdout_file,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout_seconds,
-                shell=False,
-                **stdin_kwargs,
-            )
-        exit_code = completed.returncode
-        stderr_text = completed.stderr or ""
-    except subprocess.TimeoutExpired as exc:
-        timed_out = True
-        stderr_text = _coerce_stderr(exc.stderr)
-    except (FileNotFoundError, PermissionError, NotADirectoryError, OSError) as exc:
-        # The binary could not be launched. argv[0] comes from config (no secret); safe to name.
-        command = argv[0] if argv else "<empty argv>"
-        launch_error = f"could not launch {command!r}: {exc.strerror or type(exc).__name__}"
+        stdout_file = open(stdout_path, "wb")  # noqa: SIM115 — closed in the inner `with`
+    except OSError as exc:
+        # The stdout sink itself could not be opened (unwritable dir, bad path). Degrade rather than
+        # raise, and name the *path* — not argv[0], which launched fine and is not the culprit.
+        launch_error = f"could not open stdout path {os.fspath(stdout_path)!r}: {_reason(exc)}"
+    else:
+        try:
+            with stdout_file:
+                completed = subprocess.run(
+                    list(argv),
+                    cwd=os.fspath(cwd),
+                    env=dict(env),
+                    stdout=stdout_file,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=timeout_seconds,
+                    shell=False,
+                    **stdin_kwargs,
+                )
+            exit_code = completed.returncode
+            stderr_text = completed.stderr or ""
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            stderr_text = _coerce_stderr(exc.stderr)
+        except OSError as exc:
+            # The binary could not be launched (missing / not executable / bad cwd). argv[0] comes
+            # from config (no secret); safe to name. FileNotFoundError/PermissionError/
+            # NotADirectoryError are all OSError, so one clause covers them.
+            command = argv[0] if argv else "<empty argv>"
+            launch_error = f"could not launch {command!r}: {_reason(exc)}"
 
     duration_seconds = monotonic() - start
     return ProcessResult(
@@ -110,6 +119,11 @@ def run_process(
         stdout_path=os.fspath(stdout_path),
         stderr_text=stderr_text,
     )
+
+
+def _reason(exc: OSError) -> str:
+    """A short, secret-free reason from an OS error (its ``strerror``, else the exception type)."""
+    return exc.strerror or type(exc).__name__
 
 
 def _coerce_stderr(raw: str | bytes | None) -> str:

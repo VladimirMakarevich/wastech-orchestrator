@@ -1,9 +1,9 @@
 """CLI entry point.
 
-``init`` scaffolds a project layout and templates; ``run`` processes one task end to end through
-the Orchestrator Core; ``watch`` resumes any in-flight task and then processes pending tasks (one at
-a time, continuing only when ``orchestrator.auto_mode.enabled``); ``status`` reads persisted
-progress without starting work. See the spec §15.
+``install`` scaffolds a project layout under ``.worc/`` and writes config; ``run`` processes one
+task end to end through the Orchestrator Core; ``watch`` resumes any in-flight task and then
+processes pending tasks (one at a time, continuing only when ``orchestrator.auto_mode.enabled``);
+``status`` reads persisted progress without starting work. See the spec §15.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from importlib import resources
 from importlib.resources.abc import Traversable
 from pathlib import Path
 
-from wastech_orchestrator import __version__, process_control
+from wastech_orchestrator import __version__, preflight, process_control
 from wastech_orchestrator.checks import diagnostics as check_diagnostics
 from wastech_orchestrator.config import upgrade as config_upgrade
 from wastech_orchestrator.config.loader import ConfigError, load_config, loads_config
@@ -614,7 +614,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if config is None:
         return 2
     if config.git.create_pull_request:
-        detect.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish (§6.7)
+        preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish (§6.7)
     orchestrator = build_orchestrator(
         config,
         artifacts_root=worc_home_for(config),
@@ -705,7 +705,7 @@ def cmd_rerun(args: argparse.Namespace) -> int:
         return 0
 
     if config.git.create_pull_request:
-        detect.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish (§6.7)
+        preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish (§6.7)
 
     mode = "continue" if args.continue_ else "fresh"
     if not args.yes and not _confirm(
@@ -946,7 +946,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
     if config is None:
         return 2
     if config.git.create_pull_request:
-        detect.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish (§6.7)
+        preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish (§6.7)
     poll = (
         args.poll_seconds
         if args.poll_seconds is not None
@@ -1100,9 +1100,13 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def _install_atomic_write(path: Path, text: str) -> None:
-    """Write ``text`` to ``path`` atomically (temp file in the same dir + ``os.replace``)."""
+    """Write ``text`` to ``path`` atomically (temp file in the same dir + ``os.replace``).
+
+    The temp name is derived from the target (``.<stem>-…<suffix>``) so a ``.md`` guide does not get
+    a ``.config-*.yaml``-named sibling (this helper serves config and ``upgrade-docs`` alike).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".config-", suffix=".yaml")
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}-", suffix=path.suffix)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
@@ -1291,7 +1295,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_rerun(args)
         if args.command == "finalize":
             return cmd_finalize(args)
-    except (ConfigError, IncompatibleStateError, detect.GhNotAvailableError) as exc:
+    except (ConfigError, IncompatibleStateError, preflight.GhNotAvailableError) as exc:
         print(f"error: {exc}")
         return 2
     raise SystemExit(f"Unknown command '{args.command}'.")

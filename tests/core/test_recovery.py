@@ -574,9 +574,7 @@ def test_resume_restores_planning_selected_skills(
     result = orch.resume()
     assert result is not None and result.final_status is Status.DONE
 
-    impl = next(
-        r for p in providers.values() for r in p.requests if r.node_id == "implementation"
-    )
+    impl = next(r for p in providers.values() for r in p.requests if r.node_id == "implementation")
     assert any(path.endswith("safe-change/SKILL.md") for path in impl.skill_reference_paths)
 
 

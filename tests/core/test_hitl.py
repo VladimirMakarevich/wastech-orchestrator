@@ -128,6 +128,13 @@ def test_ordinary_diff_needs_no_approval() -> None:
     assert result is None
 
 
+def test_multi_letter_modify_status_is_not_a_deletion() -> None:
+    # Matching the status code exactly (first letter) means a porcelain-style "MM" is read as a
+    # modify, not mistaken for a deletion the way a naive ``startswith("D")`` could go wrong.
+    result = classify_dangerous_diff((ChangedPath(status="MM", path="src/app.py"),))
+    assert result is None
+
+
 def test_dependency_and_deletion_diff_is_combined_risk() -> None:
     result = classify_dangerous_diff(
         (

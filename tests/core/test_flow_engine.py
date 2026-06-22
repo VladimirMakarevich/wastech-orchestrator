@@ -49,9 +49,7 @@ def _agents(*, max_fix_cycles: int = 99, max_total: int = 99) -> AgentsConfig:
         max_stage_attempts=3,
         max_fix_cycles=max_fix_cycles,
         max_total_fix_iterations=max_total,
-        decomposition=DecompositionConfig(
-            enabled=False, max_subtasks=8
-        ),
+        decomposition=DecompositionConfig(enabled=False, max_subtasks=8),
         providers={},
     )
 

@@ -41,6 +41,21 @@ def test_redaction_filter_scrubs_message() -> None:
     assert "ghp_" not in record.getMessage()
 
 
+def test_redaction_filter_scrubs_sensitive_assignment() -> None:
+    record = _record("config PASSWORD=hunter2-longvalue applied")
+    obslog.RedactionFilter().filter(record)
+    assert "hunter2-longvalue" not in record.getMessage()
+
+
+def test_redaction_filter_is_structural_not_a_literal_registry() -> None:
+    # The filter runs without extra_secrets: it scrubs by *shape*, so a bare literal that is neither
+    # token-shaped nor a sensitive assignment passes through. Such values are redacted at their
+    # source (providers / artifact writer); the logging contract keeps call sites to ids/enums.
+    record = _record("opaque value correct-horse-battery-staple")
+    obslog.RedactionFilter().filter(record)
+    assert "correct-horse-battery-staple" in record.getMessage()
+
+
 def test_redaction_filter_scrubs_fields_but_keeps_safe_ones() -> None:
     record = _record("msg")
     record.logfmt_fields = {"token": _GH_TOKEN, "stage": "review"}  # type: ignore[attr-defined]

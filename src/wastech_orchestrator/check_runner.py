@@ -1,9 +1,10 @@
 """Check Runner (spec §4.8 / the ``testing`` stage).
 
-Runs the configured ``checks.commands`` (config, not hardcoded) through the P2 safe process runner
-— an **argv list** (split by ``checks.model.normalize_check_command``), never a shell string — with
-an allowlisted environment and the per-command ``checks.timeout_seconds``. Each run is written to
-``checks/<run-id>.log`` (§10).
+Runs the resolved checks — the canonical ``checks.model.ResolvedCheck`` argv lists supplied by the
+resolver (automatic check discovery §3, §11), falling back to the configured ``checks.commands``
+normalized by ``checks.model.normalize_check_command`` — through the P2 safe process runner as an
+**argv list**, never a shell string, with an allowlisted environment and the per-command
+``checks.timeout_seconds``. Each run is written to ``checks/<run-id>.log`` (§10).
 
 A check failure is a **quality** error: the caller routes it to ``fixing`` with **no provider
 fallback** (§4.8). The Check Runner itself never transitions state nor touches git; it returns a
@@ -12,8 +13,7 @@ fallback** (§4.8). The Check Runner itself never transitions state nor touches 
 A **launch** failure (a missing executable/module) is *not* a quality error: it is reported via
 ``CheckOutcome.launch_failed`` so the orchestrator treats it as an infrastructure/preflight event,
 never spending a fix iteration on a problem no code change can fix (automatic check discovery §3,
-§11). Checks run from the canonical ``checks.model.ResolvedCheck`` argv lists supplied by the
-resolver; absent those, the configured ``checks.commands`` are normalized.
+§11).
 """
 
 from __future__ import annotations

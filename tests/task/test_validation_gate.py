@@ -222,6 +222,20 @@ def test_phase_b_needs_enrichment_without_acceptance(config: OrchestratorConfig)
     assert result.completeness is Completeness.NEEDS_ENRICHMENT
 
 
+def test_phase_b_acceptance_prose_without_section_needs_enrichment(
+    config: OrchestratorConfig,
+) -> None:
+    # The substring "acceptance" in the body no longer counts as completeness — only the structured
+    # ## Acceptance criteria section does. "no acceptance criteria yet" must route to refinement.
+    text = (
+        "---\nid: task-001\ntitle: T\n---\n\n"
+        "## Description\n\nThere are no acceptance criteria yet.\n"
+    )
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.completeness is Completeness.NEEDS_ENRICHMENT
+
+
 def test_phase_b_complete_with_acceptance_criteria(config: OrchestratorConfig) -> None:
     # PRE.3: completeness is the only input to the refinement-skip — a description + acceptance
     # criteria classifies COMPLETE (no ``refined`` flag).

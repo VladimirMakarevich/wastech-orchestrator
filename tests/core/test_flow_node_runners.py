@@ -335,9 +335,9 @@ def test_affinity_resumes_declared_node_session(tmp_path: Path) -> None:
         permission_profile=PermissionProfile.WORKSPACE_WRITE,
     )
     router_fix = FakeRouter(replace(_result(), session_id="fix-session"))
-    AgentNodeRunner(
-        _services(router_fix, store, check), _inputs(tmp_path)
-    ).run(fixing, _ctx(fixing))
+    AgentNodeRunner(_services(router_fix, store, check), _inputs(tmp_path)).run(
+        fixing, _ctx(fixing)
+    )
     assert router_fix.requests[0].session_id == "impl-session"  # resumed implementation's session
     row = store.get_editing_lineage("task-1")
     assert row is not None and row.raw_session_id == "fix-session"  # fixing updated the lineage
@@ -889,8 +889,9 @@ def test_evaluator_medium_finding_is_non_blocking_and_carried(tmp_path: Path) ->
     # with severity "medium" and Finding.blocking False — the carried flag and routing now agree.
     (tmp_path / "r.md").write_text("review {diff_path}", "utf-8")
     node = _evaluator("review")
-    router, store = FakeRouter(_result({"findings": [{"title": "x", "severity": "medium"}]})), (
-        FakeStore()
+    router, store = (
+        FakeRouter(_result({"findings": [{"title": "x", "severity": "medium"}]})),
+        (FakeStore()),
     )
     services = _services(
         router,
