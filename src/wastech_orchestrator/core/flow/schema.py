@@ -52,6 +52,10 @@ class AgentNode:
     session_scope: SessionScope = SessionScope.FRESH_DISPOSABLE
     lineage_affinity: str | None = None
     permission_profile: PermissionProfile | None = None  # None → resolved from flow ceiling
+    #: per-node override of the flow-wide network grant: ``True``/``False`` grant/deny network for
+    #: this node alone; ``None`` (default) inherits the flow's ``network_policy`` default. Toggles
+    #: only the network dimension — never the filesystem permission ceiling.
+    network_access: bool | None = None
     #: which provider runs this node; None → the config's global primary (PRE.1). Validated against
     #: ``agents.allowed`` at preflight; never relaxes the security ceiling.
     provider: ProviderId | None = None
@@ -78,6 +82,9 @@ class EvaluatorNode:
     role_file: str
     session_scope: SessionScope = SessionScope.FRESH_DISPOSABLE
     permission_profile: PermissionProfile = PermissionProfile.READ_ONLY  # const per schema
+    #: per-node override of the flow-wide network grant (see :class:`AgentNode`); ``None`` inherits
+    #: the flow's ``network_policy`` default. Toggles only the network dimension.
+    network_access: bool | None = None
     blocking: bool = True
     max_rework_per_stage: int = 1
     #: which provider runs this evaluator; None → the config's global primary (PRE.1).

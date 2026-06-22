@@ -25,7 +25,11 @@ from collections.abc import Mapping
 from typing import Any
 
 from wastech_orchestrator.core.dangerous_diff import DangerousDiff, classify_dangerous_diff
-from wastech_orchestrator.core.flow.contracts import PermissionProfile, SessionScope
+from wastech_orchestrator.core.flow.contracts import (
+    PermissionProfile,
+    SessionScope,
+    resolve_network_access,
+)
 from wastech_orchestrator.core.flow.engine import NodeContext, NodeOutcome, NodeResult
 from wastech_orchestrator.core.flow.nodes.base import (
     NodeInfraError,
@@ -393,9 +397,14 @@ class AgentNodeRunner:
             reasoning=node.reasoning,
             extra_args=list(node.extra_args),
             session_id=self._resume_session_id(node, ctx, route),
-            # Network is a flow-ceiling dimension: every node may reach the network iff the flow
-            # declares a ``network_policy`` (advisories/research); absence = no network (P3.2).
-            network_access=ctx.snapshot.doc.network_policy is not None,
+            # Network is a per-node override on top of the flow-wide default: the node's
+            # ``network_access`` wins (a node-level grant works even in a flow with no
+            # ``network_policy``; a node-level ``False`` opts out), and absent it the node inherits
+            # the flow's ``network_policy`` default (P3.2). It only toggles network — never the
+            # filesystem permission ceiling.
+            network_access=resolve_network_access(
+                node.network_access, ctx.snapshot.doc.network_policy
+            ),
         )
 
     def _prompt_variables(self, ctx: NodeContext, node: AgentNode) -> dict[str, object | None]:

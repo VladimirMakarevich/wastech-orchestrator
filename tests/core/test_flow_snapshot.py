@@ -411,6 +411,55 @@ def test_invalid_output_artifact_slot_rejected(tmp_path: Path) -> None:
         load_flow(_write(tmp_path, body))
 
 
+def test_agent_network_access_tristate(tmp_path: Path) -> None:
+    # Tri-state parse: true → True, false → False, omitted → None (inherit the flow default).
+    def _na(value: str) -> str:
+        return _VALID_BODY.replace(_RF, _RF + f"      network_access: {value}\n")
+
+    for body, expected in (
+        (_na("true"), True),
+        (_na("false"), False),
+        (_VALID_BODY, None),  # omitted ⇒ inherit the flow default
+    ):
+        node = load_flow(_write(tmp_path, body)).nodes_by_id["a"]
+        assert isinstance(node, AgentNode)
+        assert node.network_access is expected
+
+
+def test_evaluator_network_access_tristate(tmp_path: Path) -> None:
+    def _ev_flow(na_line: str) -> str:
+        return (
+            "flow:\n"
+            "  name: t\n"
+            "  task_type: t\n"
+            "  permission_ceiling: workspace-write\n"
+            "  output_policy: code_change\n"
+            "  publishing: pull_request\n"
+            "  nodes:\n"
+            "    - id: work\n"
+            "      kind: agent\n"
+            "      role_file: roles/work.md\n"
+            "    - id: check\n"
+            "      kind: evaluator\n"
+            "      role: review\n"
+            "      role_file: roles/review.md\n"
+            f"{na_line}"
+            "  edges:\n"
+            "    - { from: work, to: check }\n"
+        )
+
+    for na_line, expected in (
+        ("      network_access: true\n", True),
+        ("      network_access: false\n", False),
+        ("", None),  # omitted ⇒ inherit the flow default
+    ):
+        p = tmp_path / "ev.yaml"
+        p.write_text(_ev_flow(na_line))
+        ev = load_flow(p).nodes_by_id["check"]
+        assert isinstance(ev, EvaluatorNode)
+        assert ev.network_access is expected
+
+
 def test_invalid_checker_rejected(tmp_path: Path) -> None:
     body = _VALID_BODY.replace(
         "  edges: []\n",

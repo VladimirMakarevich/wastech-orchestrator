@@ -5,12 +5,14 @@ from __future__ import annotations
 from wastech_orchestrator.core.flow.contracts import (
     EvaluatorRole,
     ExecutionUnit,
+    NetworkPolicy,
     OutputPolicy,
     PermissionProfile,
     PublishingPolicy,
     RunKind,
     SessionScope,
     fingerprint,
+    resolve_network_access,
 )
 
 
@@ -62,3 +64,24 @@ def test_fingerprint_changes_with_payload() -> None:
     base = fingerprint({"name": "implementation"})
     assert base != fingerprint({"name": "deep_research"})
     assert base != fingerprint({"name": "implementation", "extra": 1})
+
+
+# -- per-node network_access resolution ---------------------------------------
+
+
+def test_resolve_network_access_node_grant_overrides_policyless_flow() -> None:
+    # The operator's case: a node-level grant gives network even in a flow with no network_policy.
+    assert resolve_network_access(True, None) is True
+
+
+def test_resolve_network_access_node_optout_beats_granting_flow() -> None:
+    # A node-level False is a real opt-out: offline even when the flow would otherwise grant it.
+    assert resolve_network_access(False, NetworkPolicy.RESEARCH) is False
+
+
+def test_resolve_network_access_inherits_granting_flow() -> None:
+    assert resolve_network_access(None, NetworkPolicy.RESEARCH) is True
+
+
+def test_resolve_network_access_inherits_policyless_flow() -> None:
+    assert resolve_network_access(None, None) is False

@@ -1,6 +1,6 @@
 # `gh auth status` warning at startup
 
-Status: **accepted** Date: 2026-06-22 Owner: Vladimir Makarevich
+Status: **done** (2026-06-22 — see the Done entry in [archive/follow_ups_history.md](archive/follow_ups_history.md)) Date: 2026-06-22 Owner: Vladimir Makarevich
 
 Detail file for the [follow_ups.md](follow_ups.md) item "`gh auth status` warning at startup".
 

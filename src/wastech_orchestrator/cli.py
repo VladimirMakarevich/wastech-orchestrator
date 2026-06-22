@@ -615,6 +615,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 2
     if config.git.create_pull_request:
         preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish
+        preflight.warn_if_gh_logged_out()  # non-blocking advisory if gh is present but logged out
     orchestrator = build_orchestrator(
         config,
         artifacts_root=worc_home_for(config),
@@ -706,6 +707,7 @@ def cmd_rerun(args: argparse.Namespace) -> int:
 
     if config.git.create_pull_request:
         preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish
+        preflight.warn_if_gh_logged_out()  # non-blocking advisory if gh is present but logged out
 
     mode = "continue" if args.continue_ else "fresh"
     if not args.yes and not _confirm(
@@ -947,6 +949,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
         return 2
     if config.git.create_pull_request:
         preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish
+        preflight.warn_if_gh_logged_out()  # non-blocking advisory if gh is present but logged out
     poll = (
         args.poll_seconds
         if args.poll_seconds is not None

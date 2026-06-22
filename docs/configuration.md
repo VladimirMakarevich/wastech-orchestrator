@@ -473,6 +473,17 @@ There is no flow block in `config.yaml`. Flows live as files in two layers, oper
 
 Two things are deliberately **not** fatal here because the orchestrator degrades them gracefully: a flow `budget` above `agents.max_*` is clamped to the cap at runtime (the cap always wins), and a PR-publishing flow under `git.create_pull_request: false` runs in local-commit mode (no PR). Neither is an escalation, so neither blocks the flow.
 
+**Network access (flow-wide default + per-node override).** Network is **off by default**. A flow grants it flow-wide by declaring `network_policy` (`advisories`/`research`); absent that key, every node is offline (only the packaged `deep_research` / `security_audit` flows declare it). On top of that flow-wide default, an `agent` or `evaluator` node may carry an optional tri-state `network_access` field: omitting it (the default) inherits the flow default; `network_access: true` grants the node network **even in a flow that declares no `network_policy`** (so you can let only the `implementation` node fetch packages while `refinement`/`planning`/`review` stay offline); `network_access: false` is an explicit opt-out that forces the node offline even when the flow's `network_policy` would otherwise grant it. The operator owns this grant — they author and run the flow file, and it is preflight-validated like every other field. Like `network_policy`, the resolved grant toggles **only** the network dimension — it never relaxes the filesystem permission profile / sandbox, so a `read-only` node granted network stays read-only on disk. **Codex read-only asymmetry:** Codex only enables sandbox network for the `workspace-write` sandbox, so `network_access: true` on a `read-only` node takes effect under Claude (the `WebFetch`/`WebSearch` tools are added) but is silently ineffective when Codex runs that node.
+
+```yaml
+nodes:
+  - id: implementation
+    kind: agent
+    role_file: roles/implementation.md
+    permission_profile: workspace-write
+    network_access: true # only this node may reach the network; siblings stay offline
+```
+
 ## `skills`
 
 Planning-selected repo skill references (optional, §2.1). At task start the orchestrator scans the **target repo's** `.claude/skills/*/SKILL.md` (name + description only — a cheap, bounded, frontmatter-only scan). The `planning` stage may pick relevant ones; the chosen `SKILL.md` files are passed to `implementation`/`fixing` as **read-only reference paths** (the `{skills_path}` prompt variable), advisory only — never executed, never the Claude-only Skill tool (Codex has none).

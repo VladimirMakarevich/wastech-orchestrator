@@ -87,6 +87,85 @@ def test_require_gh_raises_with_actionable_message(monkeypatch: pytest.MonkeyPat
     assert "cli.github.com" in message
 
 
+# -- gh auth advisory (non-blocking) ------------------------------------------
+
+
+def _fake_process_result(**overrides: Any) -> Any:
+    from wastech_orchestrator.providers.process import ProcessResult
+
+    base: dict[str, Any] = {
+        "exit_code": 0,
+        "timed_out": False,
+        "launch_error": None,
+        "duration_seconds": 0.0,
+        "stdout_path": "/dev/null",
+        "stderr_text": "",
+    }
+    base.update(overrides)
+    return ProcessResult(**base)
+
+
+@pytest.mark.parametrize(
+    ("result_kwargs", "expected"),
+    [
+        ({"exit_code": 0}, True),  # authenticated
+        ({"exit_code": 1}, False),  # logged out
+        ({"launch_error": "could not launch 'gh'"}, None),  # unknown (launch failure)
+        ({"timed_out": True, "exit_code": None}, None),  # unknown (timeout)
+    ],
+)
+def test_gh_auth_ok_maps_exit_to_tristate(
+    monkeypatch: pytest.MonkeyPatch, result_kwargs: dict[str, Any], expected: bool | None
+) -> None:
+    monkeypatch.setattr(
+        detect, "run_process", lambda *a, **k: _fake_process_result(**result_kwargs)
+    )
+    assert detect.gh_auth_ok() is expected
+
+
+def test_warn_if_gh_logged_out_emits_once_when_logged_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(preflight, "has_gh", lambda: True)
+    monkeypatch.setattr(preflight, "gh_auth_ok", lambda: False)
+    emitted: list[str] = []
+    preflight.warn_if_gh_logged_out(emitted.append)
+    assert len(emitted) == 1
+    # Generic text, no raw `gh auth status` output (no account login / token scopes leaked).
+    assert "gh auth login" in emitted[0]
+
+
+@pytest.mark.parametrize("auth", [True, None])
+def test_warn_if_gh_logged_out_silent_when_authenticated_or_unknown(
+    monkeypatch: pytest.MonkeyPatch, auth: bool | None
+) -> None:
+    # True (authenticated) and None (probe unknown — transient / env-token auth) both stay silent.
+    monkeypatch.setattr(preflight, "has_gh", lambda: True)
+    monkeypatch.setattr(preflight, "gh_auth_ok", lambda: auth)
+    emitted: list[str] = []
+    preflight.warn_if_gh_logged_out(emitted.append)
+    assert emitted == []
+
+
+def test_warn_if_gh_logged_out_silent_when_gh_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    # gh missing is require_gh's job; the advisory must not probe auth or warn.
+    monkeypatch.setattr(preflight, "has_gh", lambda: False)
+    monkeypatch.setattr(
+        preflight, "gh_auth_ok", lambda: pytest.fail("gh_auth_ok must not run when gh is absent")
+    )
+    emitted: list[str] = []
+    preflight.warn_if_gh_logged_out(emitted.append)
+    assert emitted == []
+
+
+def test_warn_if_gh_logged_out_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Even if the probe somehow raised, the advisory must never propagate / block the run. Here we
+    # assert the happy path returns None and does not raise with the default (logger) emit.
+    monkeypatch.setattr(preflight, "has_gh", lambda: True)
+    monkeypatch.setattr(preflight, "gh_auth_ok", lambda: False)
+    assert preflight.warn_if_gh_logged_out() is None  # default emit = logger; no exception
+
+
 @pytest.mark.parametrize(
     ("marker", "content", "expected"),
     [

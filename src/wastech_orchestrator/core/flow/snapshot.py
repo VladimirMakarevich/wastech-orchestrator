@@ -79,6 +79,7 @@ _AGENT_FIELDS = frozenset(
         "session_scope",
         "lineage_affinity",
         "permission_profile",
+        "network_access",
         "provider",
         "model",
         "reasoning",
@@ -99,6 +100,7 @@ _EVALUATOR_FIELDS = frozenset(
         "role_file",
         "session_scope",
         "permission_profile",
+        "network_access",
         "blocking",
         "max_rework_per_stage",
         "provider",
@@ -159,6 +161,16 @@ def _reject_unknown(raw: dict[str, Any], allowed: frozenset[str], ctx: str) -> N
     extra = sorted(set(raw) - allowed)
     if extra:
         raise FlowLoadError(f"unknown field(s) {extra} in {ctx} (fail-closed)")
+
+
+def _parse_network_access(raw: dict[str, Any]) -> bool | None:
+    """Tri-state per-node ``network_access``: ``None`` (omitted ⇒ inherit) vs explicit ``bool``.
+
+    ``None`` must be preserved as "inherit the flow default" — ``bool(None)`` is ``False``, which
+    would silently turn inherit into an explicit deny.
+    """
+    na = raw.get("network_access")
+    return None if na is None else bool(na)
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,6 +297,7 @@ def _parse_agent_node(raw: dict[str, Any]) -> AgentNode:
         session_scope=_enum(SessionScope, ss_raw, ctx),
         lineage_affinity=raw.get("lineage_affinity") or None,
         permission_profile=permission_profile,
+        network_access=_parse_network_access(raw),
         provider=provider,
         model=raw.get("model") or None,
         reasoning=raw.get("reasoning") or None,
@@ -318,6 +331,7 @@ def _parse_evaluator_node(raw: dict[str, Any], defaults: EvaluatorDefaults) -> E
         role_file=role_file,
         session_scope=_enum(SessionScope, ss_raw, ctx),
         permission_profile=_enum(PermissionProfile, pp_raw, ctx),
+        network_access=_parse_network_access(raw),
         blocking=bool(raw.get("blocking", True)),
         max_rework_per_stage=int(raw.get("max_rework_per_stage", defaults.max_rework_per_stage)),
         provider=provider,

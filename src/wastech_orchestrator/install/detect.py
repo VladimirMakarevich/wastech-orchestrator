@@ -113,3 +113,28 @@ def has_gh() -> bool:
     The raising runtime gate built on this lives in :mod:`wastech_orchestrator.preflight`.
     """
     return find_executable("gh") is not None
+
+
+def gh_auth_ok() -> bool | None:
+    """Whether ``gh`` is authenticated, via a read-only ``gh auth status`` probe.
+
+    Returns ``True`` on exit 0 (authenticated), ``False`` on a non-zero exit (logged out), and
+    ``None`` on a launch failure / timeout (unknown — a missing ``gh`` binary is
+    :func:`has_gh`/``require_gh``'s concern, not this one). Mirrors :func:`_run_git`: the probe runs
+    through the safe runner with the operator's own environment, so an env
+    ``GH_TOKEN``/``GITHUB_TOKEN`` is honored (``gh auth status`` already accounts for env tokens,
+    which is why it is the right probe). Its stdout (streamed to a throwaway temp file) and stderr
+    are discarded, never surfaced — ``gh auth status`` prints the account login and token scopes,
+    which must stay out of logs/artifacts per the no-secrets invariant.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        result = run_process(
+            ["gh", "auth", "status"],
+            cwd=tmp,
+            env=dict(os.environ),
+            timeout_seconds=_GIT_TIMEOUT_SECONDS,
+            stdout_path=Path(tmp) / "stdout",
+        )
+    if result.launch_error is not None or result.timed_out or result.exit_code is None:
+        return None
+    return result.exit_code == 0

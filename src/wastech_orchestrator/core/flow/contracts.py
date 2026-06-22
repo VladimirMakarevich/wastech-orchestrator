@@ -94,6 +94,21 @@ class NetworkPolicy(StrEnum):
     RESEARCH = "research"  # broader external research fetches (deep_research)
 
 
+def resolve_network_access(node_value: bool | None, policy: NetworkPolicy | None) -> bool:
+    """Per-node override of the flow-wide network grant; ``None`` inherits the flow default.
+
+    ``network_policy`` is the flow-wide default (its presence grants network to every node that
+    does not override it); a node's ``network_access`` overrides that default for that node alone.
+    An explicit ``True``/``False`` wins (a node-level ``True`` grants network even in a flow with no
+    ``network_policy``; a node-level ``False`` is an opt-out that forces the node offline even when
+    the flow would otherwise grant it). Resolves only the network dimension — never the filesystem
+    sandbox / permission ceiling.
+    """
+    if node_value is not None:
+        return node_value
+    return policy is not None
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionUnit:
     """The foundation-owned identity of the thing being executed: ``(task_id, subtask_order)``.

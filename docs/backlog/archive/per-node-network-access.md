@@ -1,6 +1,6 @@
 # Per-node `network_access` — operator-owned, opt-in, default off
 
-Status: **accepted** Date: 2026-06-22 Owner: Vladimir Makarevich
+Status: **done** (2026-06-22, no config-version bump — see the Done entry in [archive/follow_ups_history.md](archive/follow_ups_history.md)) Date: 2026-06-22 Owner: Vladimir Makarevich
 
 Detail file for the [follow_ups.md](follow_ups.md) item "Flow-engine: per-node `network_access` override". Adds an optional `network_access: true|false` field to a flow's agent and evaluator nodes so the operator can grant (or withhold) network for a single node — e.g. only the implementation or testing node — instead of the whole flow. Default is unchanged behavior: a node with no `network_access` inherits the flow-level grant, and a flow that grants nothing leaves every node offline.
 

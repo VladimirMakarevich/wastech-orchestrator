@@ -245,6 +245,40 @@ def test_agent_node_equals_direct_router_call(tmp_path: Path) -> None:
     assert store.completed[-1]["outcome"] == "done"
 
 
+def test_agent_node_network_access_grant_in_policyless_flow(tmp_path: Path) -> None:
+    # Per-node override: a node-level grant reaches the request even in a flow with no
+    # network_policy; a sibling without the field inherits the (policy-less) default and stays off.
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    granted = AgentNode(id="impl", kind="agent", role_file="r.md", network_access=True)
+    sibling = AgentNode(id="impl", kind="agent", role_file="r.md")
+    for node, expected in ((granted, True), (sibling, False)):
+        router, store = FakeRouter(_result()), FakeStore()
+        services = _services(router, store, FakeCheckRunner(CheckOutcome(passed=True, runs=())))
+        AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+        assert router.requests[0].network_access is expected
+
+
+def test_agent_node_network_access_optout_in_granting_flow(tmp_path: Path) -> None:
+    # A node-level False is an opt-out: offline even when the flow's network_policy would grant it.
+    from dataclasses import replace
+
+    from wastech_orchestrator.core.flow.contracts import NetworkPolicy
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(id="impl", kind="agent", role_file="r.md", network_access=False)
+    ctx = _ctx(node)
+    ctx = replace(
+        ctx,
+        snapshot=replace(
+            ctx.snapshot, doc=replace(ctx.snapshot.doc, network_policy=NetworkPolicy.RESEARCH)
+        ),
+    )
+    router, store = FakeRouter(_result()), FakeStore()
+    services = _services(router, store, FakeCheckRunner(CheckOutcome(passed=True, runs=())))
+    AgentNodeRunner(services, _inputs(tmp_path)).run(node, ctx)
+    assert router.requests[0].network_access is False
+
+
 def test_fresh_disposable_node_does_not_inherit_or_leak_session(tmp_path: Path) -> None:
     # F3 / MC6 (durable, P2.2): a fresh_disposable node must NOT resume the unit's editing lineage
     # and must NOT write a lineage back — otherwise it would leak into a later editing_lineage node.
@@ -363,6 +397,23 @@ def test_evaluator_fresh_disposable_does_not_touch_lineage(tmp_path: Path) -> No
     assert router.requests[0].session_id is None  # evaluator never resumes the author lineage
     row = store.get_editing_lineage("task-1")
     assert row is not None and row.raw_session_id == "author-session"  # left untouched
+
+
+def test_evaluator_node_network_access_grant_in_policyless_flow(tmp_path: Path) -> None:
+    # Evaluator parity: a node-level grant reaches the request even in a policy-less flow.
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    from dataclasses import replace
+
+    node = replace(_evaluator("review"), network_access=True)
+    router = FakeRouter(_result({"findings": []}))
+    services = _services(
+        router,
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert router.requests[0].network_access is True
 
 
 def test_agent_node_infra_exhaustion_raises(tmp_path: Path) -> None:

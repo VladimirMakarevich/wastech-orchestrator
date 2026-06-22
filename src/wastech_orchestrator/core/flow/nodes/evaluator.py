@@ -24,7 +24,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from wastech_orchestrator.core.flow.contracts import SessionScope
+from wastech_orchestrator.core.flow.contracts import SessionScope, resolve_network_access
 from wastech_orchestrator.core.flow.engine import Finding, NodeContext, NodeOutcome, NodeResult
 from wastech_orchestrator.core.flow.nodes.base import (
     NodeInfraError,
@@ -182,9 +182,13 @@ class EvaluatorNodeRunner:
             # (the research critic) resumes its OWN durable session so it remembers what it flagged
             # across rework rounds (P3.3).
             session_id=self._resume_own_session(node, ctx, route),
-            # Network grant follows the flow ceiling (a research verifier may need it); absence = no
-            # network (P3.2). It only toggles network — evaluators stay read-only on the filesystem.
-            network_access=ctx.snapshot.doc.network_policy is not None,
+            # Network is a per-node override on top of the flow-wide default (a research verifier
+            # may need it): the node's ``network_access`` wins, else it inherits the flow's
+            # ``network_policy`` default (P3.2). It only toggles network — evaluators stay read-only
+            # on the filesystem.
+            network_access=resolve_network_access(
+                node.network_access, ctx.snapshot.doc.network_policy
+            ),
         )
 
     def _resume_own_session(
