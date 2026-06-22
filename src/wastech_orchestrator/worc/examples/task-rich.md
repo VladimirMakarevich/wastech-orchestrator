@@ -1,8 +1,8 @@
 ---
-# A "clean" task: identity/dispatch only, plus the two sanctioned exceptions — `stages.<>.enabled`
-# (per-task skip) and `auto_merge` (task-wins). Provider, model, and reasoning live on the FLOW NODE
-# (config.yaml providers + the flow YAML), never the task. Refinement-skip is automatic (a complete
-# task — description + acceptance criteria — skips it); decomposition is decided by the flow.
+# A "clean" task: identity/dispatch only, plus the two sanctioned exceptions — `nodes.<id>.enabled`
+# (per-task node disable) and `auto_merge` (task-wins). Provider, model, and reasoning live on the
+# FLOW NODE (config.yaml providers + the flow YAML), never the task. Refinement-skip is automatic (a
+# complete task — description + acceptance criteria — skips it); decomposition is decided by the flow.
 id: task-webhook-retry-budget
 title: "Add a bounded retry budget to webhook delivery"
 pr_title: "feat(webhooks): bounded retry budget for delivery" # overrides the auto-generated PR title (omit to auto-generate from title)
@@ -10,13 +10,13 @@ auto_merge: false # true = auto-merge (DANGER: skips human review; the task auth
 contacts: # handles surfaced for human-in-the-loop prompts and approvals
   - "@team-lead"
   - "@webhooks-oncall"
-stages: # the ONLY per-stage knob is `enabled` (the skip toggle). Skippable: planning, testing, review, fixing.
+nodes: # keys are flow node ids; the ONLY per-node knob is `enabled` (the disable toggle).
   testing:
     enabled: true # explicit default (it runs). false would skip the check gate (rarely wanted).
   fixing:
-    enabled: false # (illustrative) skip the fixing stage — a failed check then goes to manual.
-    # skipping `review` also needs agents.allow_review_skip; implementation/refinement are never
-    # skippable; publishing is not per-task; the summary is always written by the supervisor layer.
+    enabled: false # (illustrative) disable the fixing node — the fix loop runs to its cap, then manual.
+    # Any node in the task's resolved flow may be disabled; which ones are safe to disable is the
+    # operator's flow-authoring call. An id absent from the flow ends the task `failed` (controlled).
 ---
 
 ## Description

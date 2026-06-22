@@ -14,24 +14,6 @@ class ProviderId(StrEnum):
     CLAUDE = "claude"
 
 
-class Stage(StrEnum):
-    """The canonical pipeline-stage / skip vocabulary.
-
-    This is NOT the flow-engine request identity: a provider run is identified by its flow
-    ``node_id`` (``AgentRunRequest.node_id``), not a ``Stage``. ``Stage`` survives only as the
-    orchestrator's per-task stage-skip vocabulary (``effective_skip`` / ``Stage.REVIEW in p.skip``),
-    ``config.SKIPPABLE_STAGES``, and the validation gate.
-    """
-
-    REFINEMENT = "refinement"
-    PLANNING = "planning"
-    IMPLEMENTATION = "implementation"
-    TESTING = "testing"
-    REVIEW = "review"
-    FIXING = "fixing"
-    SUMMARY = "summary"
-
-
 class RunStatus(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"

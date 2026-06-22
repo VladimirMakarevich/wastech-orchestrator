@@ -9,20 +9,7 @@ from wastech_orchestrator.providers.base import (
     ErrorClass,
     ProviderError,
     ProviderId,
-    Stage,
 )
-
-
-def test_stage_values_are_canonical() -> None:
-    assert {s.value for s in Stage} == {
-        "refinement",
-        "planning",
-        "implementation",
-        "testing",
-        "review",
-        "fixing",
-        "summary",
-    }
 
 
 def test_provider_ids_are_canonical() -> None:

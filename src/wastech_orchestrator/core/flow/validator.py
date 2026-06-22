@@ -46,7 +46,7 @@ from wastech_orchestrator.core.flow.contracts import (
     PermissionProfile,
     SessionScope,
 )
-from wastech_orchestrator.core.flow.engine import _REWORK_OUTCOMES
+from wastech_orchestrator.core.flow.engine import _REWORK_OUTCOMES, skip_outcome
 from wastech_orchestrator.core.flow.schema import AgentNode, EvaluatorNode
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
 from wastech_orchestrator.security.forbidden_args import find_forbidden_args
@@ -102,6 +102,61 @@ def validate_flow_against_config(snapshot: FlowSnapshot, config: OrchestratorCon
     :raises FlowValidationError: if any config-consistency violation is found.
     """
     violations = _check_config_consistency(snapshot, config)
+    if violations:
+        raise FlowValidationError(violations)
+
+
+def validate_disabled_nodes(snapshot: FlowSnapshot, disabled: frozenset[str]) -> None:
+    """Validate a task's per-task disabled-node set against its resolved flow (fail-closed).
+
+    The gate validates the ``nodes:`` block shape only — it cannot see the flow. This is the second
+    tier: it needs the resolved snapshot. The orchestrator calls it in ``_resolve_flow`` after the
+    snapshot resolves and before any side effect, so a bad set ends the task at terminal ``failed``
+    (via the existing ``FlowValidationError`` → ``PipelineFailed`` funnel) rather than mid-run.
+
+    Two checks, both reported as ``graph`` violations:
+
+    * **Existence** — every disabled id must be a node in the flow (else the disable would be a
+      silent no-op, the exact defect the node-id rebasing removes).
+    * **Routing soundness** — a disabled non-terminal node yields its skip-outcome
+      (:func:`~.engine.skip_outcome`) and the engine takes the matching forward edge; if that
+      outcome resolves to no declared edge the engine would raise ``EngineInternalError`` mid-run.
+      Checking it here turns that potential crash into a controlled ``failed``. (A disabled terminal
+      node — no outgoing edges — simply ends the flow ``DONE``, so it needs no edge.)
+    """
+    if not disabled:
+        return
+    violations: list[Violation] = []
+    known = sorted(snapshot.nodes_by_id)
+    for node_id in sorted(disabled):
+        node = snapshot.nodes_by_id.get(node_id)
+        if node is None:
+            violations.append(
+                Violation(
+                    category="graph",
+                    message=f"task disables unknown node {node_id!r} (flow nodes: {known})",
+                )
+            )
+            continue
+        edges = snapshot.adjacency.get(node_id, ())
+        if not edges:
+            continue  # terminal node: skipping it ends the flow DONE, no forward edge needed
+        kind = skip_outcome(node).kind
+        matched = any(e.outcome == kind for e in edges)
+        if not matched and kind == "done":
+            matched = sum(1 for e in edges if e.outcome is None) == 1
+        if not matched:
+            declared = sorted(repr(e.outcome) for e in edges)
+            violations.append(
+                Violation(
+                    category="graph",
+                    message=(
+                        f"task disables node {node_id!r} but its skip-outcome {kind!r} matches no "
+                        f"forward edge (declared: {declared}); the node cannot be safely skipped "
+                        "in this flow"
+                    ),
+                )
+            )
     if violations:
         raise FlowValidationError(violations)
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from wastech_orchestrator.providers.base import ProviderId, Stage
+from wastech_orchestrator.providers.base import ProviderId
 
 # The config.yaml format version. Bumped only when the *format* changes (not on every release). The
 # loader refuses a config whose ``schema_version`` is newer than this (fail-loud); an absent or
@@ -58,22 +58,12 @@ from wastech_orchestrator.providers.base import ProviderId, Stage
 # `agents.decomposition.commit_per_subtask` keys are removed — neither was ever read (subtask commit
 # is unconditional; no prompt consumes the size signal). `upgrade-config` strips both; old configs
 # still load fail-open (the keys are tolerated/ignored).
-CONFIG_SCHEMA_VERSION = 12
-
-# Stages a task may skip per-task via ``stages.<stage>.enabled: false`` (flow-contract bounded
-# exception). ``refinement`` is excluded — it is skipped deterministically by completeness
-# classification (``derived.needs_refinement``), never a task flag — and
-# ``implementation``/``publishing`` are never skippable (the core work and the output). ``testing``
-# is skippable but runs no agent (it is the Check Runner). ``summary`` is no longer skippable: the
-# summary is always written by the constant supervisor layer (flow-engine P2.1), not a graph node.
-SKIPPABLE_STAGES: frozenset[Stage] = frozenset(
-    {
-        Stage.PLANNING,
-        Stage.TESTING,
-        Stage.REVIEW,
-        Stage.FIXING,
-    }
-)
+# v13 (2026-06-22, Stage-enum removal): the `Stage` enum is deleted and per-task skip is re-founded
+# on flow node ids (`nodes.<node-id>.enabled: false`). `agents.allow_review_skip` is removed — there
+# is no `review`-special-case; which nodes are safe to disable is the operator's flow-authoring
+# responsibility. `upgrade-config` strips `agents.allow_review_skip`; old configs still load
+# fail-open (the key is tolerated/ignored).
+CONFIG_SCHEMA_VERSION = 13
 
 
 class AuditBranch(StrEnum):
@@ -152,9 +142,6 @@ class AgentsConfig:
     max_total_fix_iterations: int
     decomposition: DecompositionConfig
     providers: dict[ProviderId, ProviderConfig]
-    # Gate for the high-risk per-task ``review`` skip (no agent quality gate before commit/PR): a
-    # task may disable review via ``stages.review.enabled: false`` only when true, else rejected.
-    allow_review_skip: bool = False
 
 
 @dataclass(frozen=True)

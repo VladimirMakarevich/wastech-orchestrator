@@ -26,29 +26,28 @@ pr_title: "feat(webhooks): bounded retry budget for delivery"
 
 Omit it to auto-generate. It changes only the PR title text; it does not touch the branch name (still `agent/<task-id>-<slug>`), the commit messages, or any routing.
 
-## Skipping stages — `stages.<stage>.enabled: false`
+## Disabling nodes — `nodes.<node-id>.enabled: false`
 
-Skip a stage only when it adds no value for this task. Skippable: `planning`, `testing`, `review`, `fixing`, `summary`. (`implementation` and `publishing` are never skippable; `refinement` is skipped automatically when the task is already complete — see "Refinement" below.)
+Disable a node only when it adds no value for this task. Keys are flow **node ids**; any node in the task's resolved flow may be disabled. The ids below are the default `implementation` flow's; a custom flow exposes its own (e.g. `code_review`). `refinement` is skipped automatically when the task is already complete (see "Refinement" below).
 
 ```yaml
-stages:
+nodes:
   planning:
     enabled: false # write a stub plan and run as a single unit (no decomposition)
   testing:
     enabled: false # bypass the Check Runner — only for a repo with no meaningful test suite
 ```
 
-What each skip does:
+What disabling the default-flow nodes does:
 
-| Skip | Effect |
+| Node | Effect |
 | --- | --- |
 | `planning` | Stub plan; runs as a single unit. |
 | `testing` | Straight to review, no checks run. |
 | `review` | Commit with **no agent review gate**. |
-| `fixing` | The first test/review failure goes straight to `manual_action_required` (no recovery loop). |
-| `summary` | A stub summary instead of a written one. |
+| `fixing` | A test/review failure spins the fix loop as a no-op to its cap, then `manual_action_required`. |
 
-**Skipping `review` is high-risk** — it removes the only agent quality gate before commit/PR. It is rejected (`review_skip_not_allowed`) unless the operator set `agents.allow_review_skip: true`. Do not skip review unless you know that flag is enabled. Stage-skip is per-task only (`stages.<stage>.enabled: false`); `enabled` is the **only** valid per-stage key.
+**Disabling `review` is high-risk** — it removes the only agent quality gate before commit/PR. There is no config gate for it (no `agents.allow_review_skip`): which nodes are safe to disable is the operator's flow-authoring responsibility. Node-disable is per-task only (`nodes.<node-id>.enabled: false`); `enabled` is the **only** valid per-node key. Naming an id absent from the task's flow ends the task `failed` (a controlled error at flow resolution).
 
 ## Provider / model / reasoning — not a task knob
 

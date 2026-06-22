@@ -29,7 +29,6 @@ from wastech_orchestrator.providers.base import (
     ProviderHealth,
     ProviderId,
     RunStatus,
-    Stage,
 )
 from wastech_orchestrator.state_store import StateStore, TaskRow
 from wastech_orchestrator.task.validation_gate import ValidationGate
@@ -42,8 +41,8 @@ class FakeProvider:
         self,
         provider_id: str,
         *,
-        outputs: dict[Stage, tuple[str, dict | None]] | None = None,
-        infra_fail: set[Stage] | None = None,
+        outputs: dict[str, tuple[str, dict | None]] | None = None,
+        infra_fail: set[str] | None = None,
     ) -> None:
         self.id = provider_id
         self._outputs = outputs or {}
@@ -314,7 +313,7 @@ def _both(**kwargs) -> dict[ProviderId, FakeProvider]:
 
 def _impl_writes_file(provider_id: str) -> FakeProvider:
     # Implementation must actually change the working tree so there is something to commit.
-    return FakeProvider(provider_id, outputs={Stage.IMPLEMENTATION: ("implemented", None)})
+    return FakeProvider(provider_id, outputs={"implementation": ("implemented", None)})
 
 
 def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: Path) -> None:
@@ -346,7 +345,7 @@ def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: 
 
     row = store.get_task("task-001")
     assert row is not None and row.status is Status.DONE
-    assert "refinement" in _skipped_stages(store)  # complete task → refinement node skipped
+    assert "refinement" in _skipped_nodes(store)  # complete task → refinement node skipped
     # The task file was moved into its lifecycle folder (tasks/done).
     assert (tmp_path / "done" / "task-001.md").exists()
     assert not (tmp_path / "task-001.md").exists()
@@ -940,6 +939,22 @@ def test_unknown_task_type_fails_before_branch(
     assert branches == ""
 
 
+def test_disable_unknown_node_fails_before_branch(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # A task disabling a node id absent from its resolved flow fails before any side effect: the
+    # disabled-node set is validated at flow resolution (before branch prep), so an unknown id →
+    # terminal failed with no branch. (Shape passes the gate; existence is the resolution tier.)
+    orch, store, ledger, art = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    block = "nodes:\n  no_such_node:\n    enabled: false\n"
+    result = orch.run_task(_task_with_nodes(tmp_path, block))
+    assert result.final_status is Status.FAILED
+    branches = git_run(["branch", "--list", "agent/*"], git_repo.clone)
+    assert branches == ""
+
+
 def test_rejected_task_no_branch(git_repo, make_git_config, git_run, tmp_path: Path) -> None:
     quarantine = tmp_path / "rejected"
     notifier = RecordingNotifier()
@@ -1108,7 +1123,7 @@ def test_failed_with_branch_commits_and_pushes_task_and_summary(
     # Both providers fail (infra) at implementation, AFTER the branch exists → FAILED. The failed
     # attempt is finalized like a success: the task moves to tasks/failed/, its summary.md is
     # committed, and the branch is pushed — but no PR is opened for a failure.
-    providers = _both(infra_fail={Stage.IMPLEMENTATION})
+    providers = _both(infra_fail={"implementation"})
     orch, store, ledger, _ = _build(
         git_repo,
         make_git_config,
@@ -1374,7 +1389,7 @@ def test_refinement_timeout_is_manual_action_required(
             "paths": [],
         },
     }
-    providers = _both(outputs={Stage.REFINEMENT: ("", signal)})
+    providers = _both(outputs={"refinement": ("", signal)})
     notifier = RecordingNotifier(
         ask_results=[AskResult(answered=False, timed_out=True, failure="timeout")]
     )
@@ -1405,7 +1420,7 @@ def test_ambiguous_stage_approval_is_manual_action_required(
             "paths": [],
         },
     }
-    providers = _both(outputs={Stage.REFINEMENT: ("", signal)})
+    providers = _both(outputs={"refinement": ("", signal)})
     notifier = RecordingNotifier(
         ask_results=[AskResult(answered=True, text="maybe", approved=None)]
     )
@@ -1436,7 +1451,7 @@ def test_repeated_stage_question_is_manual_action_required(
             "paths": [],
         },
     }
-    providers = _both(outputs={Stage.REFINEMENT: ("", signal)})
+    providers = _both(outputs={"refinement": ("", signal)})
     notifier = RecordingNotifier(ask_results=[AskResult(answered=True, text="Use B")])
     orch, _, _, _ = _build(
         git_repo,
@@ -1896,20 +1911,20 @@ def test_auto_merge_does_not_fire_when_quality_gate_fails(
     assert _merge_calls(calls) == []
 
 
-# --- stage-skip control (per-task stages.<stage>.enabled: false) ---------------------
+# --- node-disable control (per-task nodes.<node-id>.enabled: false) ---------------------
 
 
-def _task_with_stages(tmp_path: Path, stages_block: str, task_id: str = "task-001") -> str:
+def _task_with_nodes(tmp_path: Path, nodes_block: str, task_id: str = "task-001") -> str:
     path = tmp_path / f"{task_id}.md"
     path.write_text(
-        f'---\nid: {task_id}\ntitle: "Add a thing"\n{stages_block}---\n\n'
+        f'---\nid: {task_id}\ntitle: "Add a thing"\n{nodes_block}---\n\n'
         "## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
         encoding="utf-8",
     )
     return str(path)
 
 
-def _skipped_stages(store: StateStore, task_id: str = "task-001") -> list[str]:
+def _skipped_nodes(store: StateStore, task_id: str = "task-001") -> list[str]:
     # The flow records a skipped node (deterministic when=false skip) as a node_runs row; node ids
     # are stage-aligned in the packaged flow, so the skipped node id is the skipped stage name.
     return sorted(r.node_id for r in store.get_node_runs(task_id) if r.skipped)
@@ -1930,14 +1945,14 @@ def test_skip_planning_writes_stub_and_runs(git_repo, make_git_config, tmp_path:
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
     )
     _patch_impl_edit(providers, git_repo)
-    block = "stages:\n  planning:\n    enabled: false\n"
-    result = orch.run_task(_task_with_stages(tmp_path, block))
+    block = "nodes:\n  planning:\n    enabled: false\n"
+    result = orch.run_task(_task_with_nodes(tmp_path, block))
     assert result.final_status is Status.DONE
     # The planning agent was never invoked; the planning node was deterministically skipped.
     assert all(r.node_id != "planning" for r in providers[ProviderId.CLAUDE].requests)
     # Flow semantics: a skipped node writes no artifact (no legacy stub plan); the task still runs.
     assert not (task_artifact_dir(art, "task-001") / "plan.md").exists()
-    assert "planning" in _skipped_stages(store)
+    assert "planning" in _skipped_nodes(store)
 
 
 def test_skip_testing_bypasses_checks(git_repo, make_git_config, tmp_path: Path) -> None:
@@ -1951,14 +1966,14 @@ def test_skip_testing_bypasses_checks(git_repo, make_git_config, tmp_path: Path)
         check_verdicts=[1] * 20,
     )
     _patch_impl_edit(providers, git_repo)
-    block = "stages:\n  testing:\n    enabled: false\n"
-    result = orch.run_task(_task_with_stages(tmp_path, block))
+    block = "nodes:\n  testing:\n    enabled: false\n"
+    result = orch.run_task(_task_with_nodes(tmp_path, block))
     assert result.final_status is Status.DONE
     n_checks = store._conn.execute(  # noqa: SLF001
         "SELECT COUNT(*) AS n FROM check_runs"
     ).fetchone()["n"]
     assert n_checks == 0  # the check runner never ran
-    assert "testing" in _skipped_stages(store)
+    assert "testing" in _skipped_nodes(store)
 
 
 def test_skip_review_commits_without_review(git_repo, make_git_config, tmp_path: Path) -> None:
@@ -1969,15 +1984,14 @@ def test_skip_review_commits_without_review(git_repo, make_git_config, tmp_path:
         tmp_path,
         providers=providers,
         check_verdicts=[0],
-        config_kwargs={"allow_review_skip": True},
     )
     _patch_impl_edit(providers, git_repo)
-    block = "stages:\n  review:\n    enabled: false\n"
-    result = orch.run_task(_task_with_stages(tmp_path, block))
+    block = "nodes:\n  review:\n    enabled: false\n"
+    result = orch.run_task(_task_with_nodes(tmp_path, block))
     assert result.final_status is Status.DONE
-    # Review is routed to codex (primary); it must never be invoked for the review stage.
+    # Review is routed to codex (primary); it must never be invoked for the review node.
     assert all(r.node_id != "review" for r in providers[ProviderId.CODEX].requests)
-    assert "review" in _skipped_stages(store)
+    assert "review" in _skipped_nodes(store)
 
 
 def test_skip_fixing_routes_to_manual_on_failure(git_repo, make_git_config, tmp_path: Path) -> None:
@@ -1990,8 +2004,8 @@ def test_skip_fixing_routes_to_manual_on_failure(git_repo, make_git_config, tmp_
         check_verdicts=[1] * 20,  # first check fails
     )
     _patch_impl_edit(providers, git_repo)
-    block = "stages:\n  fixing:\n    enabled: false\n"
-    result = orch.run_task(_task_with_stages(tmp_path, block))
+    block = "nodes:\n  fixing:\n    enabled: false\n"
+    result = orch.run_task(_task_with_nodes(tmp_path, block))
     # Fixing disabled → the failure still ends at manual review (the preserved capability). The
     # engine is domain-agnostic, so it does NOT special-case "no fixing → straight to manual": it
     # runs the declared test-fix loop (the skipped fixing node is a no-op each cycle) until the cap,
@@ -1999,10 +2013,10 @@ def test_skip_fixing_routes_to_manual_on_failure(git_repo, make_git_config, tmp_
     # this visible (it was masked by the stale-0 counter before); see Verification Additional #7.
     assert result.final_status is Status.MANUAL_ACTION_REQUIRED
     assert store.get_counters("task-001").fix_iterations == orch._config.agents.max_fix_cycles
-    assert "fixing" in _skipped_stages(store)
+    assert "fixing" in _skipped_nodes(store)
 
 
-def test_skipped_stages_listed_in_summary(git_repo, make_git_config, tmp_path: Path) -> None:
+def test_skipped_nodes_listed_in_summary(git_repo, make_git_config, tmp_path: Path) -> None:
     providers = _both()
     orch, _, _, art = _build(
         git_repo,
@@ -2012,52 +2026,37 @@ def test_skipped_stages_listed_in_summary(git_repo, make_git_config, tmp_path: P
         check_verdicts=[0],
     )
     _patch_impl_edit(providers, git_repo)
-    block = "stages:\n  planning:\n    enabled: false\n  testing:\n    enabled: false\n"
-    result = orch.run_task(_task_with_stages(tmp_path, block))
+    block = "nodes:\n  planning:\n    enabled: false\n  testing:\n    enabled: false\n"
+    result = orch.run_task(_task_with_nodes(tmp_path, block))
     assert result.final_status is Status.DONE
     summary = _summary_text(art)
-    assert "## Pipeline stages skipped" in summary
+    assert "## Pipeline nodes skipped" in summary
     assert "`planning`" in summary and "`testing`" in summary
 
 
-def test_review_skip_with_auto_merge_warns(git_repo, make_git_config, tmp_path: Path) -> None:
-    import logging
-
+def test_review_disabled_with_auto_merge_still_merges(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # Disabling ``review`` + ``auto_merge`` merges without any review gate. There is no longer a
+    # ``review``-special-case warning (the operator owns which nodes are safe to disable); the
+    # generic auto-merge behaviour is unchanged.
     providers = _both()
     calls: list[list[str]] = []
-    orch, _, _, _ = _build(
+    orch, store, _, _ = _build(
         git_repo,
         make_git_config,
         tmp_path,
         providers=providers,
         check_verdicts=[0],
-        config_kwargs={
-            "allow_review_skip": True,
-            "auto_merge": True,
-        },
+        config_kwargs={"auto_merge": True},
         gh=_merge_gh(calls),
     )
     _patch_impl_edit(providers, git_repo)
-    # Attach a handler directly to the orchestrator logger so capture is independent of the
-    # global logging configuration (other tests reconfigure handlers / propagation).
-    messages: list[str] = []
-
-    class _Capture(logging.Handler):
-        def emit(self, record: logging.LogRecord) -> None:
-            messages.append(record.getMessage())
-
-    logger = logging.getLogger("wastech_orchestrator.core.orchestrator")
-    handler = _Capture()
-    logger.addHandler(handler)
-    block = "stages:\n  review:\n    enabled: false\n"
-    try:
-        result = orch.run_task(_task_with_stages(tmp_path, block))
-    finally:
-        logger.removeHandler(handler)
+    block = "nodes:\n  review:\n    enabled: false\n"
+    result = orch.run_task(_task_with_nodes(tmp_path, block))
     assert result.final_status is Status.DONE
+    assert "review" in _skipped_nodes(store)
     assert len(_merge_calls(calls)) == 1  # it really did merge without a review gate
-    # The double-warning must fire before the merge so the operator sees the bypassed gate.
-    assert any("review skipped AND auto_merge enabled" in m for m in messages)
 
 
 def test_planning_selected_skills_reach_downstream_stages(
@@ -2075,7 +2074,7 @@ def test_planning_selected_skills_reach_downstream_stages(
     git_run(["commit", "-m", "add safe-change skill"], git_repo.clone)
     providers = {
         ProviderId.CLAUDE: FakeProvider(
-            "claude", outputs={Stage.PLANNING: ("plan", {"skills": ["safe-change", "ghost"]})}
+            "claude", outputs={"planning": ("plan", {"skills": ["safe-change", "ghost"]})}
         ),
         ProviderId.CODEX: FakeProvider("codex"),
     }

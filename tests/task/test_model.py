@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from wastech_orchestrator.providers.base import Stage
 from wastech_orchestrator.task.model import (
     ALLOWED_TASK_KEYS,
     REQUIRED_TASK_FIELDS,
+    NodeOverride,
     NormalizedTask,
-    StageParams,
     is_valid_task_id,
 )
 
@@ -56,13 +55,13 @@ def test_default_collections_are_independent() -> None:
     a = NormalizedTask(id="a", title="A", description="d")
     b = NormalizedTask(id="b", title="B", description="d")
     a.contacts.append("ops")
-    a.stage_params[Stage.PLANNING] = StageParams(enabled=False)
-    assert b.contacts == [] and b.stage_params == {}
+    a.node_overrides["planning"] = NodeOverride(enabled=False)
+    assert b.contacts == [] and b.node_overrides == {}
 
 
 def test_schema_constants() -> None:
     # A clean task carries only identity/dispatch (``task_type`` selects the flow) + the two
-    # sanctioned exceptions (PRE.3): ``stages.<stage>.enabled`` (skip) and ``auto_merge``
+    # sanctioned exceptions (PRE.3): ``nodes.<node-id>.enabled`` (disable) and ``auto_merge``
     # (task-wins). No provider/model/reasoning/decompose/refined.
     assert {
         "id",
@@ -72,21 +71,21 @@ def test_schema_constants() -> None:
         "auto_merge",
         "prompt_audit",
         "contacts",
-        "stages",
+        "nodes",
     } == ALLOWED_TASK_KEYS
     assert {"id", "title"} == REQUIRED_TASK_FIELDS
     assert REQUIRED_TASK_FIELDS <= ALLOWED_TASK_KEYS
 
 
-def test_disabled_stages_reflects_enabled_false_only() -> None:
+def test_disabled_nodes_reflects_enabled_false_only() -> None:
     task = NormalizedTask(
         id="t",
         title="x",
         description="d",
-        stage_params={
-            Stage.REVIEW: StageParams(enabled=False),
-            Stage.TESTING: StageParams(enabled=True),
-            Stage.PLANNING: StageParams(),  # unset → default (runs)
+        node_overrides={
+            "review": NodeOverride(enabled=False),
+            "testing": NodeOverride(enabled=True),
+            "planning": NodeOverride(),  # unset → default (runs)
         },
     )
-    assert task.disabled_stages() == frozenset({Stage.REVIEW})
+    assert task.disabled_nodes() == frozenset({"review"})

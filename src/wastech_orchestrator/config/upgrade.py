@@ -28,11 +28,14 @@ from wastech_orchestrator.config.schema import CONFIG_SCHEMA_VERSION
 # ``agents.routing`` is gone — a flow node declares its own ``provider`` (else the global
 # ``providers.<id>.primary``); ``git.auto_merge_allow_per_task`` is gone — a per-task ``auto_merge``
 # now wins outright. v12: ``agents.decomposition.min_size_signal``/``commit_per_subtask`` are gone —
-# both were decorative (never read).) The parent-path may be dotted (walked segment by segment).
+# both were decorative (never read). v13: ``agents.allow_review_skip`` is gone — per-task skip is by
+# flow node id and the operator owns which nodes are safe to disable.) The parent-path may be dotted
+# (walked segment by segment).
 _REMOVED_KEYS: tuple[tuple[str, str], ...] = (
     ("", "prompts"),
     ("agents", "skip_stages"),
     ("agents", "routing"),
+    ("agents", "allow_review_skip"),
     ("git", "auto_merge_allow_per_task"),
     ("agents.decomposition", "min_size_signal"),
     ("agents.decomposition", "commit_per_subtask"),

@@ -20,15 +20,15 @@ def test_adds_missing_top_level_key() -> None:
 
 
 def test_adds_missing_subkey_under_existing_block() -> None:
-    # The real shape: a new key (allow_review_skip) added under an already-present agents block.
-    template = {"agents": {"max_fix_cycles": 15, "allow_review_skip": False}}
+    # The real shape: a new key added under an already-present agents block.
+    template = {"agents": {"max_fix_cycles": 15, "max_total_fix_iterations": 30}}
     operator = {"agents": {"max_fix_cycles": 15}}
     merged, added, _ = upgrade_config_mapping(template, operator)
     assert merged["agents"] == {
         "max_fix_cycles": 15,
-        "allow_review_skip": False,
+        "max_total_fix_iterations": 30,
     }
-    assert added == ["agents.allow_review_skip"]
+    assert added == ["agents.max_total_fix_iterations"]
 
 
 def test_never_overwrites_existing_leaf() -> None:
@@ -103,16 +103,30 @@ def test_strips_legacy_prompts_block() -> None:
 
 def test_strips_legacy_skip_stages() -> None:
     # config v10 removed the global `agents.skip_stages` list; upgrade-config drops it (per-task
-    # `stages.enabled` is the surviving, task-level skip — not in config).
-    template = {"schema_version": CONFIG_SCHEMA_VERSION, "agents": {"allow_review_skip": False}}
+    # `nodes.enabled` is the surviving, task-level disable — not in config).
+    template = {"schema_version": CONFIG_SCHEMA_VERSION, "agents": {"max_fix_cycles": 15}}
     operator = {
         "schema_version": 9,
-        "agents": {"skip_stages": ["testing", "review"], "allow_review_skip": True},
+        "agents": {"skip_stages": ["testing", "review"], "max_fix_cycles": 99},
     }
     merged, _added, removed = upgrade_config_mapping(template, operator)
     assert "skip_stages" not in merged["agents"]
     assert removed == ["agents.skip_stages"]
-    assert merged["agents"]["allow_review_skip"] is True  # operator value preserved
+    assert merged["agents"]["max_fix_cycles"] == 99  # operator value preserved
+
+
+def test_strips_legacy_allow_review_skip() -> None:
+    # config v13 removed `agents.allow_review_skip` (per-task skip is by flow node id, operator owns
+    # which nodes are safe to disable); upgrade-config drops it from an operator config.
+    template = {"schema_version": CONFIG_SCHEMA_VERSION, "agents": {"max_fix_cycles": 15}}
+    operator = {
+        "schema_version": 12,
+        "agents": {"allow_review_skip": True, "max_fix_cycles": 99},
+    }
+    merged, _added, removed = upgrade_config_mapping(template, operator)
+    assert "allow_review_skip" not in merged["agents"]
+    assert removed == ["agents.allow_review_skip"]
+    assert merged["agents"]["max_fix_cycles"] == 99  # operator value preserved
 
 
 def test_render_round_trips_through_parse() -> None:

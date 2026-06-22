@@ -21,7 +21,7 @@ You are working on **wastech-orchestrator** — an orchestrator that launches co
 ## Canonical names (do not invent your own)
 
 - Providers: `codex`, `claude`.
-- Stages: `refinement`, `planning`, `implementation`, `testing`, `review`, `fixing`, `summary`, `publishing`.
+- Default-flow node ids: `refinement`, `planning`, `implementation`, `testing`, `review`, `fixing`, `publish` (the packaged `implementation` flow; the whole-task `summary` is the supervisor layer, not a node). These are flow node ids, not a `Stage` type — there is no `Stage` enum.
 - Branch prefix: `agent/<task-id>-<slug>`.
 - State machine statuses: see the [system flows](docs/functional/system-flows.md) and `src/wastech_orchestrator/core/state_machine.py`.
 

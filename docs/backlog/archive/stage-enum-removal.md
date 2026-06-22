@@ -1,6 +1,8 @@
 # Remove the `Stage` enum — re-found per-task skip on flow node ids
 
-Status: **accepted** Date: 2026-06-22 Owner: Vladimir Makarevich
+Status: **implemented** (2026-06-22) Date: 2026-06-22 Owner: Vladimir Makarevich
+
+> Implemented 2026-06-22. The optional routing-soundness hardening (Risks / out of scope) **was included** in v1 (`validate_disabled_nodes` checks each disabled node's skip-outcome resolves to a forward edge). See the archived [follow-ups history](archive/follow_ups_history.md) row. Remaining functional-map `file:line` re-sync is folded into the pending full re-sync pass in [follow_ups.md](follow_ups.md).
 
 Detailed design for the [follow_ups.md](follow_ups.md) item "Flow-engine: delete the `Stage` enum (per-task skip → flow node ids)". This supersedes sub-point (b) of the older "Stage-enum-removal minor follow-ups" row (relocating the enum) — the enum is deleted outright, not moved.
 

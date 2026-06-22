@@ -7,8 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from wastech_orchestrator.providers.base import Stage
-from wastech_orchestrator.task.model import NormalizedTask, StageParams
+from wastech_orchestrator.task.model import NodeOverride, NormalizedTask
 from wastech_orchestrator.task.parser import (
     extract_section,
     load_normalized,
@@ -117,13 +116,13 @@ def test_write_normalized(tmp_path: Path) -> None:
         title="T",
         description="Do it",
         contacts=["@lead"],
-        stage_params={Stage.REVIEW: StageParams(enabled=False)},
+        node_overrides={"review": NodeOverride(enabled=False)},
     )
     path = write_normalized(task, tmp_path)
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     assert data["id"] == "task-001"
     assert data["contacts"] == ["@lead"]
-    assert data["stages"] == {"review": {"enabled": False}}
+    assert data["nodes"] == {"review": {"enabled": False}}
     assert path.endswith("task.normalized.json")
 
 
@@ -162,33 +161,33 @@ def test_pr_title_round_trips(tmp_path: Path, value: str | None) -> None:
     assert load_normalized(tmp_path, "task-001").pr_title == value
 
 
-def test_stage_params_round_trip(tmp_path: Path) -> None:
-    # Restart-safety: the per-stage skip toggle must survive a resume, or a crash could lose a skip
-    # and re-run a stage the operator disabled.
+def test_node_overrides_round_trip(tmp_path: Path) -> None:
+    # Restart-safety: the per-node disable toggle must survive a resume, or a crash could lose a
+    # disable and re-run a node the operator turned off.
     task = NormalizedTask(
         id="task-001",
         title="T",
         description="Do it",
-        stage_params={
-            Stage.PLANNING: StageParams(enabled=False),
-            Stage.TESTING: StageParams(enabled=False),
-            Stage.REVIEW: StageParams(),
+        node_overrides={
+            "planning": NodeOverride(enabled=False),
+            "testing": NodeOverride(enabled=False),
+            "review": NodeOverride(),
         },
     )
     write_normalized(task, tmp_path)
     loaded = load_normalized(tmp_path, "task-001")
-    assert loaded.stage_params == task.stage_params
-    assert loaded.disabled_stages() == frozenset({Stage.PLANNING, Stage.TESTING})
+    assert loaded.node_overrides == task.node_overrides
+    assert loaded.disabled_nodes() == frozenset({"planning", "testing"})
 
 
-def test_stage_params_absent_in_legacy_normalized_loads_empty(tmp_path: Path) -> None:
+def test_node_overrides_absent_in_normalized_loads_empty(tmp_path: Path) -> None:
     task_dir = tmp_path / "logs" / "task-001"
     task_dir.mkdir(parents=True)
     (task_dir / "task.normalized.json").write_text(
         json.dumps({"id": "task-001", "title": "T", "description": "d"}), encoding="utf-8"
     )
     loaded = load_normalized(tmp_path, "task-001")
-    assert loaded.stage_params == {}
+    assert loaded.node_overrides == {}
 
 
 def test_auto_merge_absent_in_legacy_normalized_loads_as_none(tmp_path: Path) -> None:

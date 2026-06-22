@@ -1,8 +1,10 @@
 # Packaged built-in flow: implementation — the executable default flow the engine drives.
 #
 # The pipeline expressed as data: refinement -> planning -> implementation -> testing(checks) ->
-# review(evaluator) -> fixing -> publish, with the two fix loops and decomposition, plus the
-# per-task stage-skip `when` predicates (config.*_enabled — the bounded per-task exception, PRE.3).
+# review(evaluator) -> fixing -> publish, with the two fix loops and decomposition. Refinement is
+# skipped deterministically (`when: derived.needs_refinement`); any other node can be disabled per
+# task via `nodes.<id>.enabled: false` (driven by node id, not a `when` fact — the bounded per-task
+# exception, PRE.3).
 #
 # Layered on across P2: durable sessions (P2.2 `editing_lineage`), review-as-evaluator (P2.3), and
 # the core-owned commit-candidate mutation guard on `checks` (P2.4 — active whenever a `checks` node
@@ -40,7 +42,6 @@ flow:
       permission_profile: read-only
       output_artifact: plan
       hitl: { allow_question: true, allow_approval: true }
-      when: { fact: config.planning_enabled }
     - id: implementation
       kind: agent
       role_file: roles/implementation.md
@@ -50,21 +51,18 @@ flow:
       kind: checks
       checker: command_profile
       discovery: { mode: auto, approve_command_changes: true }
-      when: { fact: config.testing_enabled }
     - id: review
       kind: evaluator
       role: review
       role_file: roles/review.md
       session_scope: fresh_disposable
       permission_profile: read-only
-      when: { fact: config.review_enabled }
     - id: fixing
       kind: agent
       role_file: roles/fixing.md
       session_scope: editing_lineage
       lineage_affinity: implementation
       permission_profile: workspace-write
-      when: { fact: config.fixing_enabled }
     - id: publish
       kind: publish
       policy: pull_request

@@ -133,11 +133,13 @@ def drive_flow(
     subtask_order: int | None = None,
     post_node: PostNodeHook | None = None,
     region: frozenset[str] | None = None,
+    disabled_nodes: frozenset[str] = frozenset(),
 ) -> FlowRunResult:
     """Run one unit through the flow engine with the core-owned node runners.
 
     ``region`` confines the run to a decomposition sub_flow (it ends at the forward edge leaving the
-    region); ``subtask_order`` scopes the node_runs to that subtask.
+    region); ``subtask_order`` scopes the node_runs to that subtask. ``disabled_nodes`` are the flow
+    node ids the task disabled (``nodes.<id>.enabled: false``) — each is skipped by the engine.
     """
     engine = FlowEngine(
         snapshot,
@@ -150,5 +152,6 @@ def drive_flow(
         subtask_order=subtask_order,
         post_node=post_node,
         region=region,
+        disabled_nodes=disabled_nodes,
     )
     return engine.run()

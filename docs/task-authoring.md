@@ -59,7 +59,7 @@ Allowed fields:
 | `auto_merge` | no | boolean | `true` requests auto-merge, `false` always opts out, omitted uses the instance default. A set per-task value wins outright over `git.auto_merge`. See [`auto_merge`](#auto_merge). |
 | `prompt_audit` | no | boolean | `true` records each step's prompt + who for this task, `false` disables it, omitted uses config. Always overrides the global. See [`prompt_audit`](#prompt_audit). |
 | `contacts` | no | list of strings | Plain-text mentions in Telegram notifications/HITL prompts. |
-| `stages` | no | mapping | Per-stage skip toggle: `stages.<stage>.enabled: false` skips a skippable stage. `enabled` is the only valid sub-key. See [`stages`](#stages). |
+| `nodes` | no | mapping | Per-node disable toggle, keyed by flow node id: `nodes.<node-id>.enabled: false` disables a node. `enabled` is the only valid sub-key. See [`nodes`](#nodes). |
 
 The current validation gate rejects unknown fields fail-closed (`unknown_top_level_field`). Keep task front matter limited to the fields above. Provider, model, and reasoning are **flow-node concerns, not task fields** — each flow node declares its own `provider`/`model`/`reasoning`, and a task cannot repoint or override them (see [Provider, model, reasoning](#provider-model-reasoning-set-on-the-flow-not-the-task)).
 
@@ -148,30 +148,29 @@ Values:
 
 A set per-task `auto_merge` **wins outright** over the instance default `git.auto_merge` — there is no `git.auto_merge_allow_per_task` gate. Auto-merge skips the human PR review, and the task author owns that decision (the same trusted operator who owns `config.yaml`). It is a publishing-policy choice, not a security weakening.
 
-## `stages`
+## `nodes`
 
-The `stages` block carries the per-stage **skip** toggle, `enabled: false` — the one surviving per-stage knob:
+The `nodes` block carries the per-node **disable** toggle, `enabled: false` — the one surviving per-node knob. Keys are flow **node ids** (the ids in the task's resolved flow); `enabled: false` disables a node so the engine skips it and takes its forward edge:
 
 ```yaml
-stages:
+nodes:
   planning:
     enabled: false # write a stub plan and run as a single unit (no decomposition)
   testing:
     enabled: false # bypass the Check Runner (e.g. a repo with no test suite)
-  review:
-    enabled: false # DANGER: no agent review gate — requires agents.allow_review_skip: true
 ```
 
-Skippable stages: `planning`, `testing`, `review`, `fixing`. `implementation` (the core work) and `publishing` (the output) can never be skipped here; `refinement` is skipped automatically by completeness, not by a `stages` entry. The whole-task **summary** is not skippable either — it is written by the constant supervisor layer at task close, not by a graph node (see [configuration.md](configuration.md#supervisor)). Stage-skip is **per-task only** — the global `agents.skip_stages` list was removed in config v10 (to drop a stage everywhere, remove its node from the flow). Disabling `review` additionally requires `agents.allow_review_skip: true`.
+Any node present in the task's resolved flow may be disabled — there is no fixed allowlist. **Which nodes are safe to disable is the operator's responsibility** (they author the flow and run the tasks). The node ids above (`planning`, `testing`, `review`, `fixing`, …) are those of the default `implementation` flow; a custom flow exposes its own node ids (e.g. `code_review`). `refinement` is skipped automatically by completeness, not by a `nodes` entry. The whole-task **summary** is not a graph node — it is written by the constant supervisor layer at task close (see [configuration.md](configuration.md#supervisor)). Node-disable is **per-task only** — there is no global config knob (to drop a node everywhere, remove it from the flow).
 
-What each skip does: `planning` → stub plan, single unit; `testing` → straight to review (no checks); `review` → commit with no agent gate; `fixing` → first test/review failure goes to `manual_action_required` (no recovery loop). Every skip is logged at WARNING and recorded in `state.db` (`node_runs.skipped`), and the skipped set is listed in the PR body.
+What disabling the default-flow nodes does: `planning` → stub plan, single unit; `testing` → straight to review (no checks); `review` → commit with no agent quality gate; `fixing` → the test/review fix loop runs as a no-op to its cap, then `manual_action_required`. Every disable is recorded in `state.db` (`node_runs.skipped`) and listed in the PR body / summary.
+
+**Failure mode (controlled).** If `nodes` names an id that is **not** in the task's resolved flow, the task ends `failed` (moved to `tasks/failed/`) with a clear message — checked at flow resolution, before any branch/PR side effect. The same controlled failure catches a disabled node whose skip cannot route to a forward edge in that flow.
 
 Rules:
 
-- `enabled` is the **only** valid sub-key under `stages.<stage>`. Any other sub-key (including `model`/`reasoning`, which are flow-node concerns) is rejected fail-closed (`invalid_stage_override`);
-- `enabled` applies only to the skippable stages above; `enabled` on `implementation`/`refinement`/`publishing` is rejected. `enabled` must be a boolean;
-- disabling `review` (`enabled: false`) is rejected unless `agents.allow_review_skip: true` (`review_skip_not_allowed`) — it removes the only agent quality gate before commit/PR;
-- unknown sub-keys and non-mapping stage values are likewise rejected.
+- `enabled` is the **only** valid sub-key under `nodes.<node-id>`. Any other sub-key (including `model`/`reasoning`, which are flow-node concerns) is rejected fail-closed (`invalid_node_override`);
+- `enabled` must be a boolean; the `nodes` block must be a mapping and each value a mapping (or null);
+- the gate validates **shape only** — it cannot see the flow, so node-id existence is checked later, at flow resolution (the failure mode above), not at the gate.
 
 ## Body Sections
 
@@ -269,13 +268,13 @@ Add retries to webhooks.
 
 Reason: `unknown_top_level_field` when unknown fields are rejected.
 
-Invalid stage override:
+Invalid node override:
 
 ```markdown
 ---
 id: task-044
 title: "Add retries"
-stages:
+nodes:
   implementation:
     model: claude-opus-4-8
 ---
@@ -285,7 +284,7 @@ stages:
 Add retries to webhooks.
 ```
 
-Reason: `invalid_stage_override`. `model` is not a valid `stages.<stage>` sub-key (model/reasoning are flow-node concerns), and `implementation` is not skippable. The only valid sub-key is `enabled`.
+Reason: `invalid_node_override`. `model` is not a valid `nodes.<node-id>` sub-key (model/reasoning are flow-node concerns) — `enabled` is the only valid sub-key. (The gate checks shape only; whether a node id exists in the task's flow is checked later, at flow resolution.)
 
 Injection-shaped front matter:
 
@@ -327,7 +326,7 @@ Before placing a task in `tasks/pending/`:
 - include a clear `## Description`;
 - include acceptance criteria unless you intentionally want refinement to enrich the task;
 - list constraints for modules, dependencies, migrations, or compatibility;
-- use `stages.<stage>.enabled: false` only when you intentionally want to skip a skippable stage;
+- use `nodes.<node-id>.enabled: false` only when you intentionally want to disable a node in the task's flow;
 - do not include credentials or secret values;
 - do not try to pass CLI flags through front matter;
 - prefer one coherent change per task.

@@ -8,8 +8,7 @@ from pathlib import Path
 import pytest
 
 from wastech_orchestrator.config.schema import OrchestratorConfig
-from wastech_orchestrator.providers.base import Stage
-from wastech_orchestrator.task.model import StageParams
+from wastech_orchestrator.task.model import NodeOverride
 from wastech_orchestrator.task.parser import ParsedSource
 from wastech_orchestrator.task.validation_gate import (
     Completeness,
@@ -336,164 +335,129 @@ def test_model_and_reasoning_are_now_unknown_fields(config: OrchestratorConfig, 
     assert result.reason is ValidationReason.UNKNOWN_TOP_LEVEL_FIELD
 
 
-def _stages_task(stages_block: str) -> str:
-    """Build a minimal valid task whose front matter carries the given ``stages:`` block."""
-    return f"---\nid: task-001\ntitle: T\n{stages_block}---\n\n## Description\n\nDo it.\n"
+def _nodes_task(nodes_block: str) -> str:
+    """Build a minimal valid task whose front matter carries the given ``nodes:`` block."""
+    return f"---\nid: task-001\ntitle: T\n{nodes_block}---\n\n## Description\n\nDo it.\n"
 
 
-def test_stages_absent_is_empty(config: OrchestratorConfig) -> None:
+def test_nodes_absent_is_empty(config: OrchestratorConfig) -> None:
     text = "---\nid: task-001\ntitle: T\n---\n\n## Description\n\nDo it.\n"
     result = _gate(config).validate(_src(text))
     assert result.passed is True
     assert result.normalized is not None
-    assert result.normalized.stage_params == {}
+    assert result.normalized.node_overrides == {}
 
 
-def test_stages_null_is_empty(config: OrchestratorConfig) -> None:
-    result = _gate(config).validate(_src(_stages_task("stages: null\n")))
+def test_nodes_null_is_empty(config: OrchestratorConfig) -> None:
+    result = _gate(config).validate(_src(_nodes_task("nodes: null\n")))
     assert result.passed is True
     assert result.normalized is not None
-    assert result.normalized.stage_params == {}
+    assert result.normalized.node_overrides == {}
 
 
-def test_stages_empty_mapping_is_empty(config: OrchestratorConfig) -> None:
-    result = _gate(config).validate(_src(_stages_task("stages: {}\n")))
+def test_nodes_empty_mapping_is_empty(config: OrchestratorConfig) -> None:
+    result = _gate(config).validate(_src(_nodes_task("nodes: {}\n")))
     assert result.passed is True
     assert result.normalized is not None
-    assert result.normalized.stage_params == {}
+    assert result.normalized.node_overrides == {}
 
 
-def test_stages_enabled_passes_and_is_stored(config: OrchestratorConfig) -> None:
-    block = "stages:\n  planning:\n    enabled: false\n"
-    result = _gate(config).validate(_src(_stages_task(block)))
+def test_nodes_enabled_passes_and_is_stored(config: OrchestratorConfig) -> None:
+    block = "nodes:\n  planning:\n    enabled: false\n"
+    result = _gate(config).validate(_src(_nodes_task(block)))
     assert result.passed is True
     assert result.normalized is not None
-    assert result.normalized.stage_params == {Stage.PLANNING: StageParams(enabled=False)}
+    assert result.normalized.node_overrides == {"planning": NodeOverride(enabled=False)}
 
 
-def test_stages_stage_null_inherits(config: OrchestratorConfig) -> None:
-    result = _gate(config).validate(_src(_stages_task("stages:\n  planning: null\n")))
+def test_nodes_node_null_inherits(config: OrchestratorConfig) -> None:
+    result = _gate(config).validate(_src(_nodes_task("nodes:\n  planning: null\n")))
     assert result.passed is True
     assert result.normalized is not None
-    assert result.normalized.stage_params == {Stage.PLANNING: StageParams()}
+    assert result.normalized.node_overrides == {"planning": NodeOverride()}
 
 
-def test_stages_empty_block_inherits(config: OrchestratorConfig) -> None:
-    result = _gate(config).validate(_src(_stages_task("stages:\n  planning: {}\n")))
+def test_nodes_empty_block_inherits(config: OrchestratorConfig) -> None:
+    result = _gate(config).validate(_src(_nodes_task("nodes:\n  planning: {}\n")))
     assert result.passed is True
     assert result.normalized is not None
-    assert result.normalized.stage_params == {Stage.PLANNING: StageParams()}
+    assert result.normalized.node_overrides == {"planning": NodeOverride()}
 
 
-def test_stages_unknown_stage_rejected(config: OrchestratorConfig) -> None:
-    block = "stages:\n  nonsense:\n    enabled: false\n"
-    result = _gate(config).validate(_src(_stages_task(block)))
+def test_nodes_arbitrary_node_id_accepted(config: OrchestratorConfig) -> None:
+    # The gate checks shape only — it cannot see the task's flow, so any node id is accepted here.
+    # A non-legacy id (impossible to disable under the old ``Stage`` vocabulary) passes the gate;
+    # whether the node exists in the resolved flow is checked later, at flow resolution.
+    block = "nodes:\n  code_review:\n    enabled: false\n"
+    result = _gate(config).validate(_src(_nodes_task(block)))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.disabled_nodes() == frozenset({"code_review"})
+
+
+def test_nodes_unknown_subkey_rejected(config: OrchestratorConfig) -> None:
+    block = "nodes:\n  planning:\n    temperature: 1\n"
+    result = _gate(config).validate(_src(_nodes_task(block)))
     assert result.passed is False
-    assert result.reason is ValidationReason.INVALID_STAGE_OVERRIDE
-
-
-def test_stages_publishing_rejected(config: OrchestratorConfig) -> None:
-    # ``publishing`` is the output — never skippable, so it is not a valid ``stages`` key.
-    block = "stages:\n  publishing:\n    enabled: false\n"
-    result = _gate(config).validate(_src(_stages_task(block)))
-    assert result.passed is False
-    assert result.reason is ValidationReason.INVALID_STAGE_OVERRIDE
-
-
-def test_stages_unknown_subkey_rejected(config: OrchestratorConfig) -> None:
-    block = "stages:\n  planning:\n    temperature: 1\n"
-    result = _gate(config).validate(_src(_stages_task(block)))
-    assert result.passed is False
-    assert result.reason is ValidationReason.INVALID_STAGE_OVERRIDE
+    assert result.reason is ValidationReason.INVALID_NODE_OVERRIDE
     assert "temperature" in result.detail
 
 
-def test_stages_non_mapping_value_rejected(config: OrchestratorConfig) -> None:
-    result = _gate(config).validate(_src(_stages_task("stages:\n  planning: opus\n")))
+def test_nodes_non_mapping_value_rejected(config: OrchestratorConfig) -> None:
+    result = _gate(config).validate(_src(_nodes_task("nodes:\n  planning: opus\n")))
     assert result.passed is False
-    assert result.reason is ValidationReason.INVALID_STAGE_OVERRIDE
+    assert result.reason is ValidationReason.INVALID_NODE_OVERRIDE
 
 
-def test_stages_non_mapping_top_level_rejected(config: OrchestratorConfig) -> None:
-    result = _gate(config).validate(_src(_stages_task("stages: opus\n")))
+def test_nodes_non_mapping_top_level_rejected(config: OrchestratorConfig) -> None:
+    result = _gate(config).validate(_src(_nodes_task("nodes: opus\n")))
     assert result.passed is False
-    assert result.reason is ValidationReason.INVALID_STAGE_OVERRIDE
+    assert result.reason is ValidationReason.INVALID_NODE_OVERRIDE
 
 
 @pytest.mark.parametrize("subkey", ["model", "reasoning"])
-def test_stages_model_reasoning_subkeys_now_unknown(
-    config: OrchestratorConfig, subkey: str
-) -> None:
-    # PRE.3: ``enabled`` is the only valid per-stage sub-key now — model/reasoning live on the node.
-    block = f"stages:\n  planning:\n    {subkey}: x\n"
-    result = _gate(config).validate(_src(_stages_task(block)))
+def test_nodes_model_reasoning_subkeys_unknown(config: OrchestratorConfig, subkey: str) -> None:
+    # ``enabled`` is the only valid per-node sub-key — model/reasoning live on the flow node.
+    block = f"nodes:\n  planning:\n    {subkey}: x\n"
+    result = _gate(config).validate(_src(_nodes_task(block)))
     assert result.passed is False
-    assert result.reason is ValidationReason.INVALID_STAGE_OVERRIDE
+    assert result.reason is ValidationReason.INVALID_NODE_OVERRIDE
     assert subkey in result.detail
 
 
-# --- stage-skip control (stages.<stage>.enabled) -----------------------------------------
+# --- node-disable control (nodes.<node-id>.enabled) --------------------------------------
 
 
-def _allow_review_skip(config: OrchestratorConfig) -> OrchestratorConfig:
-    from dataclasses import replace
-
-    return replace(config, agents=replace(config.agents, allow_review_skip=True))
-
-
-def test_stages_testing_enabled_false_accepted(config: OrchestratorConfig) -> None:
-    # ``testing`` is skippable (no agent) — ``enabled`` is its only valid sub-key.
-    result = _gate(config).validate(_src(_stages_task("stages:\n  testing:\n    enabled: false\n")))
+def test_nodes_enabled_false_accepted_and_disabled(config: OrchestratorConfig) -> None:
+    result = _gate(config).validate(_src(_nodes_task("nodes:\n  testing:\n    enabled: false\n")))
     assert result.passed is True
     assert result.normalized is not None
-    assert result.normalized.stage_params[Stage.TESTING] == StageParams(enabled=False)
-    assert result.normalized.disabled_stages() == frozenset({Stage.TESTING})
+    assert result.normalized.node_overrides["testing"] == NodeOverride(enabled=False)
+    assert result.normalized.disabled_nodes() == frozenset({"testing"})
 
 
-def test_stages_enabled_true_is_not_a_skip(config: OrchestratorConfig) -> None:
-    result = _gate(config).validate(_src(_stages_task("stages:\n  planning:\n    enabled: true\n")))
+def test_nodes_enabled_true_is_not_a_disable(config: OrchestratorConfig) -> None:
+    result = _gate(config).validate(_src(_nodes_task("nodes:\n  planning:\n    enabled: true\n")))
     assert result.passed is True
     assert result.normalized is not None
-    assert result.normalized.disabled_stages() == frozenset()
+    assert result.normalized.disabled_nodes() == frozenset()
 
 
-def test_stages_implementation_enabled_rejected(config: OrchestratorConfig) -> None:
-    # ``implementation`` is the core work — not skippable, so it is not a valid ``stages`` key.
-    block = "stages:\n  implementation:\n    enabled: false\n"
-    result = _gate(config).validate(_src(_stages_task(block)))
+def test_nodes_enabled_non_bool_rejected(config: OrchestratorConfig) -> None:
+    block = "nodes:\n  testing:\n    enabled: nope\n"
+    result = _gate(config).validate(_src(_nodes_task(block)))
     assert result.passed is False
-    assert result.reason is ValidationReason.INVALID_STAGE_OVERRIDE
-    assert "implementation" in result.detail
-
-
-def test_stages_enabled_non_bool_rejected(config: OrchestratorConfig) -> None:
-    block = "stages:\n  testing:\n    enabled: nope\n"
-    result = _gate(config).validate(_src(_stages_task(block)))
-    assert result.passed is False
-    assert result.reason is ValidationReason.INVALID_STAGE_OVERRIDE
+    assert result.reason is ValidationReason.INVALID_NODE_OVERRIDE
     assert "enabled" in result.detail
 
 
-def test_stages_review_skip_rejected_without_opt_in(config: OrchestratorConfig) -> None:
-    # The default config has allow_review_skip: false → disabling review is rejected (fail-closed).
-    result = _gate(config).validate(_src(_stages_task("stages:\n  review:\n    enabled: false\n")))
-    assert result.passed is False
-    assert result.reason is ValidationReason.REVIEW_SKIP_NOT_ALLOWED
-
-
-def test_stages_review_skip_allowed_with_opt_in(config: OrchestratorConfig) -> None:
-    result = _gate(_allow_review_skip(config)).validate(
-        _src(_stages_task("stages:\n  review:\n    enabled: false\n"))
-    )
+def test_nodes_review_disable_needs_no_config_opt_in(config: OrchestratorConfig) -> None:
+    # There is no ``review``-special-case: disabling ``review`` is accepted shape-wise like any
+    # other node (no ``allow_review_skip`` gate). Skip safety is the operator's flow-authoring job.
+    result = _gate(config).validate(_src(_nodes_task("nodes:\n  review:\n    enabled: false\n")))
     assert result.passed is True
     assert result.normalized is not None
-    assert result.normalized.disabled_stages() == frozenset({Stage.REVIEW})
-
-
-def test_stages_review_enabled_true_never_gated(config: OrchestratorConfig) -> None:
-    # Only ``enabled: false`` on review needs the opt-in; an explicit enable is always fine.
-    result = _gate(config).validate(_src(_stages_task("stages:\n  review:\n    enabled: true\n")))
-    assert result.passed is True
+    assert result.normalized.disabled_nodes() == frozenset({"review"})
 
 
 # ---------------------------------------------------------------------------

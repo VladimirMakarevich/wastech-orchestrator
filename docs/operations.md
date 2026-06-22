@@ -316,27 +316,27 @@ Resolution order: per-task `auto_merge` (if set) → global `git.auto_merge` →
 
 **Audit.** Every auto-merge writes a `[AUTO-MERGE]` `WARNING` log line, records the merge in the append-only ledger (`auto_merged` + `merge_outcome` = the merge SHA, `"merged"`, or `"armed"`), and persists a `pr_merge` row in `state.db`. The terminal Telegram notification carries the PR URL.
 
-### Skipping pipeline stages (per-task)
+### Disabling flow nodes (per-task)
 
-By default the pipeline (the packaged `implementation` flow) runs `refinement → planning → implementation → testing → review → fixing(loop) → publish`. The whole-task **summary** is not a pipeline stage — the constant [supervisor layer](configuration.md#supervisor) writes it at task close (it becomes the PR body), so it cannot be skipped. A **task** can skip a stage that adds no value for it — convenient for debugging/testing and quick one-off runs without authoring a separate flow.
+By default the pipeline (the packaged `implementation` flow) runs `refinement → planning → implementation → testing → review → fixing(loop) → publish`. The whole-task **summary** is not a graph node — the constant [supervisor layer](configuration.md#supervisor) writes it at task close (it becomes the PR body), so it cannot be disabled. A **task** can disable a node that adds no value for it — convenient for debugging/testing and quick one-off runs without authoring a separate flow.
 
-Skippable stages: `planning`, `testing`, `review`, `fixing`. `implementation` and `publishing` are never skippable; `refinement` is skipped **deterministically** when the task is already complete (completeness classification `COMPLETE`), never via a task flag.
+Any node present in the task's resolved flow may be disabled, keyed by its **node id**. The ids `planning`, `testing`, `review`, `fixing` are the default `implementation` flow's; a custom flow exposes its own (e.g. `code_review`). `refinement` is skipped **deterministically** when the task is already complete (completeness classification `COMPLETE`), never via a task flag. **Which nodes are safe to disable is the operator's responsibility** — they author the flow and run the tasks; there is no fixed skippable allowlist and no `review`-special-case.
 
-> The global `agents.skip_stages` list was **removed in config `schema_version` 10**: with fully configurable flows, "skip a stage for every task" is redundant — to drop a stage everywhere, remove its node from the flow (or author an operator flow). Per-task skip below is the surviving, bounded mechanism. The `agents.allow_review_skip` gate survives (it now permits the per-task `review` skip).
+> The global `agents.skip_stages` list was **removed in config `schema_version` 10**, and the `agents.allow_review_skip` gate in **`schema_version` 13** (per-task disable is by flow node id; the operator owns which nodes are safe to disable). With fully configurable flows, "skip a node for every task" is redundant — to drop a node everywhere, remove it from the flow (or author an operator flow). Per-task disable below is the surviving, bounded mechanism.
 
-**Per-task skip.** A task disables a stage with `enabled: false` in its `stages:` block (see [task-authoring.md](task-authoring.md#stages)):
+**Per-task disable.** A task disables a node with `enabled: false` in its `nodes:` block (see [task-authoring.md](task-authoring.md#nodes)):
 
 ```yaml
-stages:
+nodes:
   planning: { enabled: false }
   testing: { enabled: false }
 ```
 
-Disabling `review` additionally requires `agents.allow_review_skip: true` in config (it removes the only agent quality gate before commit/PR), else the task is rejected.
+The validation gate checks shape only; node-id **existence** against the task's resolved flow is checked at flow resolution, before any branch/PR side effect. Naming an id absent from the flow (or a node whose skip cannot route to a forward edge) ends the task `failed` with a controlled message.
 
-**What each skip does:** `planning` → a stub `plan.md` and a single implementation unit (no decomposition); `testing` → straight from implementation to review, the Check Runner never runs; `review` → commit with no agent review gate; `fixing` → the first test/review failure goes to `manual_action_required` with a `stuck.md` report (no recovery loop, 0 fix iterations).
+**What disabling the default-flow nodes does:** `planning` → a stub `plan.md` and a single implementation unit (no decomposition); `testing` → straight from implementation to review, the Check Runner never runs; `review` → commit with no agent review gate; `fixing` → the test/review fix loop runs as a no-op to its cap, then `manual_action_required` with a `stuck.md` report.
 
-**Audit.** Every skip writes a `<stage> skipped` `WARNING` log line (with the reason: global config, task front-matter, or both), persists a `node_runs` row with `skipped = 1` and `skip_reason`, and lists the skipped stages in a `## Pipeline stages skipped` section of the PR body. When `review` is skipped **and** auto-merge fires, a second `WARNING` records that the task merged with no review gate at all.
+**Audit.** Every disable persists a `node_runs` row with `skipped = 1` and `skip_reason`, and lists the disabled nodes in a `## Pipeline nodes skipped` section of the PR body.
 
 ---
 

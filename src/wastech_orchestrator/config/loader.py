@@ -393,9 +393,11 @@ def _build_allowed(raw: Any, issues: list[str]) -> tuple[ProviderId, ...]:
 
 def _build_agents(raw: Any, issues: list[str]) -> AgentsConfig:
     m = _mapping(raw, "agents", issues)
-    # ``skip_stages`` (removed v10) and the stage-keyed ``routing`` block (removed v11 — a flow node
-    # declares its own ``provider``, else the global ``providers.<id>.primary``) are tolerated, not
-    # accepted: an old config still loads fail-open and ``upgrade-config`` strips the dead keys.
+    # ``skip_stages`` (removed v10), the stage-keyed ``routing`` block (removed v11 — a flow node
+    # declares its own ``provider``, else the global ``providers.<id>.primary``), and
+    # ``allow_review_skip`` (removed v13 — no ``review``-special-case; per-task disable is by node
+    # id and the operator owns which nodes are safe to disable) are tolerated, not accepted: an old
+    # config still loads fail-open and ``upgrade-config`` strips the dead keys.
     _check_keys(
         m,
         {
@@ -405,13 +407,11 @@ def _build_agents(raw: Any, issues: list[str]) -> AgentsConfig:
             "max_total_fix_iterations",
             "decomposition",
             "providers",
-            "allow_review_skip",
         },
         "agents",
         issues,
-        tolerated={"skip_stages", "routing"},
+        tolerated={"skip_stages", "routing", "allow_review_skip"},
     )
-    allow_review_skip = _bool(m, "allow_review_skip", False, "agents", issues)
     return AgentsConfig(
         allowed=_build_allowed(m.get("allowed"), issues),
         max_stage_attempts=_int(m, "max_stage_attempts", 3, "agents", issues),
@@ -419,7 +419,6 @@ def _build_agents(raw: Any, issues: list[str]) -> AgentsConfig:
         max_total_fix_iterations=_int(m, "max_total_fix_iterations", 30, "agents", issues),
         decomposition=_build_decomposition(m.get("decomposition"), issues),
         providers=_build_providers(m.get("providers"), issues),
-        allow_review_skip=allow_review_skip,
     )
 
 

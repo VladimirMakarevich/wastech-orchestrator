@@ -24,17 +24,13 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from wastech_orchestrator.config.schema import (
-    SKIPPABLE_STAGES,
-    OrchestratorConfig,
-)
+from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
-from wastech_orchestrator.providers.base import Stage
 from wastech_orchestrator.security.injection import scan_frontmatter
 from wastech_orchestrator.task.model import (
     ALLOWED_TASK_KEYS,
+    NodeOverride,
     NormalizedTask,
-    StageParams,
     is_valid_task_id,
 )
 from wastech_orchestrator.task.parser import (
@@ -63,8 +59,7 @@ class ValidationReason(StrEnum):
     INVALID_FIELD_TYPE = "invalid_field_type"
     INVALID_TASK_ID = "invalid_task_id"
     DUPLICATE_TASK_ID = "duplicate_task_id"
-    INVALID_STAGE_OVERRIDE = "invalid_stage_override"
-    REVIEW_SKIP_NOT_ALLOWED = "review_skip_not_allowed"
+    INVALID_NODE_OVERRIDE = "invalid_node_override"
     INJECTION_SUSPECTED = "injection_suspected"
 
 
@@ -90,11 +85,6 @@ class ValidationResult:
 class _Reject:
     reason: ValidationReason
     detail: str
-
-
-# Map a front-matter stage key to the canonical Stage (only skippable stages are valid under the
-# task ``stages`` block). ``implementation`` is the spec's key (not ``implementing``, a status).
-_STAGE_BY_KEY = {stage.value: stage for stage in Stage}
 
 
 class ValidationGate:
@@ -216,10 +206,11 @@ class ValidationGate:
         ):
             return _rej(ValidationReason.DUPLICATE_TASK_ID, id_value)
 
-        # invalid_stage_override — map the per-stage skip toggle (skippable stages only).
-        stage_params, stage_reject = self._build_stage_params(frontmatter.get("stages"))
-        if stage_reject is not None:
-            return stage_reject, None
+        # invalid_node_override — map the per-node disable toggle (shape only; node existence
+        # against the resolved flow is checked later, at flow resolution).
+        node_overrides, node_reject = self._build_node_overrides(frontmatter.get("nodes"))
+        if node_reject is not None:
+            return node_reject, None
 
         # injection_suspected — argv-shaped tokens in front-matter values. The scanner is
         # belt-and-braces over the file-path-only structural guarantee (see security/injection.py).
@@ -240,7 +231,7 @@ class ValidationGate:
             auto_merge=_as_tristate(frontmatter.get("auto_merge")),
             prompt_audit=_as_tristate(frontmatter.get("prompt_audit")),
             contacts=[str(c) for c in frontmatter.get("contacts", [])],
-            stage_params=stage_params,
+            node_overrides=node_overrides,
         )
         return None, task
 
@@ -281,61 +272,47 @@ class ValidationGate:
                 )
         return None
 
-    def _build_stage_params(self, raw: Any) -> tuple[dict[Stage, StageParams], _Reject | None]:
-        """Map the ``stages`` front-matter block to ``{Stage: StageParams}`` (fail-closed).
+    def _build_node_overrides(self, raw: Any) -> tuple[dict[str, NodeOverride], _Reject | None]:
+        """Map the ``nodes`` front-matter block to ``{node-id: NodeOverride}`` (shape only).
 
-        Each key must be a skippable stage (``SKIPPABLE_STAGES``); the only valid sub-key is
-        ``enabled`` — the stage-skip toggle (flow-contract, the one sanctioned per-stage knob).
-        ``enabled: false`` skips the stage; ``null``/``{}`` means default (it runs).
-        ``implementation``/``refinement`` cannot be disabled here (refinement-skip is deterministic
-        — completeness classification), and ``publishing`` is never a valid key.
+        Keys are flow node ids; the only valid sub-key is ``enabled`` — the node-disable toggle
+        (flow-contract, the one sanctioned per-node knob). ``enabled: false`` disables the node;
+        ``null``/``{}`` means default (it runs). The gate checks shape only — it cannot see the
+        task's flow, so it does not validate node ids against any vocabulary. Whether each named
+        node exists in the resolved flow (and is safe to disable) is checked at flow resolution.
 
-        Unknown/non-skippable stages, unknown sub-keys, and non-mapping values all reject with
-        ``INVALID_STAGE_OVERRIDE``. Disabling ``review`` additionally requires
-        ``agents.allow_review_skip`` (else ``REVIEW_SKIP_NOT_ALLOWED``).
+        Non-mapping block, non-mapping values, unknown sub-keys, and a non-bool ``enabled`` all
+        reject with ``INVALID_NODE_OVERRIDE``.
         """
         if raw is None:
             return {}, None
         if not isinstance(raw, Mapping):
-            return {}, _Reject(ValidationReason.INVALID_STAGE_OVERRIDE, "stages must be a mapping")
-        stage_params: dict[Stage, StageParams] = {}
+            return {}, _Reject(ValidationReason.INVALID_NODE_OVERRIDE, "nodes must be a mapping")
+        node_overrides: dict[str, NodeOverride] = {}
         for key, value in raw.items():
-            stage = _STAGE_BY_KEY.get(str(key))
-            if stage is None or stage not in SKIPPABLE_STAGES:
-                return {}, _Reject(
-                    ValidationReason.INVALID_STAGE_OVERRIDE, f"unknown stage {key!r}"
-                )
+            node_id = str(key)
             if value is None:
-                stage_params[stage] = StageParams()
+                node_overrides[node_id] = NodeOverride()
                 continue
             if not isinstance(value, Mapping):
                 return {}, _Reject(
-                    ValidationReason.INVALID_STAGE_OVERRIDE,
-                    f"stages.{stage.value} must be a mapping",
+                    ValidationReason.INVALID_NODE_OVERRIDE,
+                    f"nodes.{node_id} must be a mapping",
                 )
             unknown = {str(k) for k in value} - {"enabled"}
             if unknown:
                 return {}, _Reject(
-                    ValidationReason.INVALID_STAGE_OVERRIDE,
-                    f"stages.{stage.value}: unknown keys {sorted(unknown)}",
+                    ValidationReason.INVALID_NODE_OVERRIDE,
+                    f"nodes.{node_id}: unknown keys {sorted(unknown)}",
                 )
             enabled = value.get("enabled")
             if enabled is not None and not isinstance(enabled, bool):
                 return {}, _Reject(
-                    ValidationReason.INVALID_STAGE_OVERRIDE,
-                    f"stages.{stage.value} enabled must be a boolean",
+                    ValidationReason.INVALID_NODE_OVERRIDE,
+                    f"nodes.{node_id} enabled must be a boolean",
                 )
-            if (
-                stage is Stage.REVIEW
-                and enabled is False
-                and not self._config.agents.allow_review_skip
-            ):
-                return {}, _Reject(
-                    ValidationReason.REVIEW_SKIP_NOT_ALLOWED,
-                    "stages.review.enabled: false requires agents.allow_review_skip: true",
-                )
-            stage_params[stage] = StageParams(enabled=enabled)
-        return stage_params, None
+            node_overrides[node_id] = NodeOverride(enabled=enabled)
+        return node_overrides, None
 
     # --- Phase B --------------------------------------------------------------------------
 

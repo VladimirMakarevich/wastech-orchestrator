@@ -68,6 +68,6 @@ Before handing over a task:
 - [ ] `## Description` is concrete and non-empty.
 - [ ] Acceptance criteria are present and testable (unless you intend refinement to add them).
 - [ ] `## Constraints` lists do-not-touch areas and dependency/compatibility limits.
-- [ ] Front matter uses only allowed fields; any `stages.<stage>.enabled` skip names a real skippable stage.
+- [ ] Front matter uses only allowed fields; any `nodes.<node-id>.enabled` disable names a node in the task's flow.
 - [ ] No secrets; no CLI-flag-shaped values; no attempt to change checks or security policy.
 - [ ] The change is one coherent unit (describe the scope; large work may be auto-decomposed by the flow).

@@ -14,6 +14,7 @@ from wastech_orchestrator.core.flow.snapshot import load_flow
 from wastech_orchestrator.core.flow.validator import (
     FlowValidationError,
     Violation,
+    validate_disabled_nodes,
     validate_flow,
 )
 
@@ -697,3 +698,100 @@ flow:
 """
     result = validate_flow(_snap(yaml, tmp_path))
     assert result is None
+
+
+# -- per-task disabled-node validation (Stage-enum removal) -------------------
+#
+# ``validate_disabled_nodes`` is the second validation tier (the gate cannot see the flow): node
+# existence + skip-outcome routing soundness against the resolved snapshot.
+
+_CUSTOM_REVIEW_FLOW = """\
+flow:
+  name: t
+  task_type: t
+  permission_ceiling: workspace-write
+  output_policy: code_change
+  publishing: pull_request
+  budgets: { review_loop: 3 }
+  nodes:
+    - id: entry
+      kind: agent
+      role_file: roles/entry.md
+    - id: build
+      kind: agent
+      role_file: roles/build.md
+    - id: code_review
+      kind: evaluator
+      role: review
+      role_file: roles/review.md
+    - id: out
+      kind: publish
+      policy: pull_request
+  edges:
+    - { from: entry, to: build }
+    - { from: build, to: code_review }
+    - { from: code_review, to: out, outcome: accept }
+    - { from: code_review, to: build, outcome: rework, loop: review_loop }
+"""
+
+# A router agent whose only edge is an explicit ``route:`` outcome: valid to load (``route:*`` is
+# always allowed), but its skip-outcome ``done`` matches no edge — disabling it would strand.
+_STRANDED_ROUTER_FLOW = """\
+flow:
+  name: t
+  task_type: t
+  permission_ceiling: workspace-write
+  output_policy: code_change
+  publishing: pull_request
+  nodes:
+    - id: router
+      kind: agent
+      role_file: roles/router.md
+    - id: out
+      kind: publish
+      policy: pull_request
+  edges:
+    - { from: router, to: out, outcome: route:go }
+"""
+
+
+def _impl_snap():  # type: ignore[no-untyped-def]
+    return load_flow(CODESIGN / "implementation.yaml")
+
+
+def test_disabled_nodes_empty_is_ok() -> None:
+    validate_disabled_nodes(_impl_snap(), frozenset())  # no raise
+
+
+def test_disabled_real_node_ok() -> None:
+    # ``review`` is a real node with a normal forward edge — disabling it validates clean.
+    validate_disabled_nodes(_impl_snap(), frozenset({"review"}))
+
+
+def test_disabled_custom_node_id_ok(tmp_path: Path) -> None:
+    # A non-legacy node id (impossible to disable under the old ``Stage`` vocabulary) can be
+    # disabled when it exists in the flow and its skip-outcome routes to a forward edge.
+    snap = _snap(_CUSTOM_REVIEW_FLOW, tmp_path)
+    validate_disabled_nodes(snap, frozenset({"code_review"}))
+
+
+def test_disabled_terminal_node_ok(tmp_path: Path) -> None:
+    # A terminal node (no outgoing edges) needs no forward edge — skipping it ends the flow DONE.
+    snap = _snap(_STRANDED_ROUTER_FLOW, tmp_path)
+    validate_disabled_nodes(snap, frozenset({"out"}))
+
+
+def test_disabled_unknown_node_raises(tmp_path: Path) -> None:
+    snap = _snap(_CUSTOM_REVIEW_FLOW, tmp_path)
+    with pytest.raises(FlowValidationError) as exc:
+        validate_disabled_nodes(snap, frozenset({"ghost"}))
+    vs = exc.value.violations
+    assert _has(vs, "graph", "ghost")
+    assert _has(vs, "graph", "code_review")  # the message lists the flow's real node ids
+
+
+def test_disabled_stranded_skip_outcome_raises(tmp_path: Path) -> None:
+    snap = _snap(_STRANDED_ROUTER_FLOW, tmp_path)
+    with pytest.raises(FlowValidationError) as exc:
+        validate_disabled_nodes(snap, frozenset({"router"}))
+    assert _has(exc.value.violations, "graph", "skip-outcome")

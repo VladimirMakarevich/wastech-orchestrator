@@ -2,15 +2,15 @@
 id: task-001
 title: "Example task: add login form validation"
 contacts: ["@team-lead"] # plain-text Telegram mentions for prompts/terminal notifications
-stages: # optional per-stage skip toggle (the only per-stage knob).
-  # enabled: false: SKIP the stage (per-task). Skippable: planning, testing,
-  #   review, fixing, summary. (implementation/publishing can never be skipped;
-  #   refinement is skipped automatically when the task is complete.) Skipping
-  #   `review` requires agents.allow_review_skip: true.
+nodes: # optional per-node disable toggle, keyed by flow node id (the only per-node knob).
+  # enabled: false: disable the node (per-task). Any node in the task's resolved flow
+  #   may be disabled (ids shown are the default `implementation` flow's). refinement is
+  #   skipped automatically when the task is complete; the summary is always written.
+  #   An id absent from the flow ends the task `failed` (a controlled error).
   testing:
     enabled: true # set false when the repo has no meaningful test suite
   # review:
-  #   enabled: false        # DANGER: no agent review gate; requires agents.allow_review_skip: true
+  #   enabled: false        # DANGER: no agent review gate before commit/PR
 ---
 
 ## Description

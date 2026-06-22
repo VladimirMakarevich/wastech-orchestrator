@@ -135,10 +135,21 @@ def test_when_fact_only_defaults_equals_true(impl_snap: FlowSnapshot) -> None:
     assert refinement.when == WhenPredicate(fact="derived.needs_refinement", equals=True)
 
 
-def test_when_config_fact(impl_snap: FlowSnapshot) -> None:
+def test_when_config_fact() -> None:
+    # A real ``config.`` when-fact still parses (the deep_research external-research gate). The
+    # ``config.*_enabled`` per-stage facts were removed — per-task node disable is by node id now,
+    # not a fact (see ``test_planning_has_no_when_fact``).
+    research = load_flow(CODESIGN / "deep_research.yaml")
+    external = research.nodes_by_id["external_research"]
+    assert external.when == WhenPredicate(fact="config.external_research", equals=True)
+
+
+def test_planning_has_no_when_fact(impl_snap: FlowSnapshot) -> None:
+    # Per-task disable moved off the ``config.planning_enabled`` fact onto the node id, so the
+    # packaged ``planning`` node no longer carries a ``when`` predicate.
     planning = impl_snap.nodes_by_id["planning"]
     assert isinstance(planning, AgentNode)
-    assert planning.when == WhenPredicate(fact="config.planning_enabled", equals=True)
+    assert planning.when is None
 
 
 def test_no_when_is_none(impl_snap: FlowSnapshot) -> None:

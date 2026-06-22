@@ -66,7 +66,7 @@ A thin wrapper around the flow engine. It owns everything that is _not_ a node: 
 
 ### 4.2 Flow engine + flow definition
 
-The pipeline expressed as **data**. A flow is a YAML document — a graph of typed nodes plus edges (with named fix loops and inline budgets) and flow-wide ceilings. The engine traverses the graph, routing on each node's emitted outcome to the matching edge, charging rework against the named loop and the single global counter, and writing the durable checkpoint after each step. A `when: {fact: ...}` predicate (`derived.*` / `config.*`) deterministically skips a node — this is how a per-task `stages.<stage>.enabled: false` toggle and the deterministic refinement-skip work.
+The pipeline expressed as **data**. A flow is a YAML document — a graph of typed nodes plus edges (with named fix loops and inline budgets) and flow-wide ceilings. The engine traverses the graph, routing on each node's emitted outcome to the matching edge, charging rework against the named loop and the single global counter, and writing the durable checkpoint after each step. A `when: {fact: ...}` predicate (`derived.*` / `config.*`) deterministically skips a node (this is how the refinement-skip works); a per-task `nodes.<node-id>.enabled: false` disables a node directly by node id (handed to the engine as the disabled-node set), independent of any `when` fact.
 
 Flows are resolved by `task_type`, preferring an **operator flow** at `<repo>/.worc/flows/<task_type>.yaml` over the packaged built-in. Every flow — packaged and operator — passes a **fatal three-layer validator** at `install`/`preflight` before any task runs:
 
@@ -148,7 +148,7 @@ flowchart LR
     fixing --> testing
 ```
 
-- `refinement` runs only when the task is incomplete (`derived.needs_refinement`); `planning`/`testing`/`review`/`fixing` each have a `config.*_enabled` predicate so a per-task skip drops them.
+- `refinement` runs only when the task is incomplete (`derived.needs_refinement`); any other node can be dropped per task via `nodes.<node-id>.enabled: false` (disabled by node id, not a `when` fact).
 - Two fix loops feed `fixing` (`test_fix`, `review_fix`, each budget 15) plus a single global counter (`global_fix_iterations: 30`); each cap is clamped to `min(flow, config)` (`agents.max_fix_cycles` / `max_total_fix_iterations`). Exhaustion → `manual_action_required` + a failure report.
 - `fixing` resumes `implementation`'s durable editing session (`lineage_affinity`).
 - **Decomposition** (off by default): planning may propose a split; a deterministic gate accepts a 2..n linear DAG, and the engine runs the `sub_flow` region (`implementation → testing → review → fixing`) once per subtask — committing each, resetting per-loop budgets between subtasks while the global counter accumulates. A subtask with a verified commit is never re-run.
@@ -203,7 +203,6 @@ agents:
   max_stage_attempts: 3
   max_fix_cycles: 15
   max_total_fix_iterations: 30 # >= max_fix_cycles
-  allow_review_skip: false # gate for a task's stages.review.enabled: false
   decomposition: { enabled: false, max_subtasks: 8, ... }
   providers: # node-based routing: a node declares `provider`, else the global primary below
     claude:

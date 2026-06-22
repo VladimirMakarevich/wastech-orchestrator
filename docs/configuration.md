@@ -127,8 +127,6 @@ agents:
   max_stage_attempts: 3
   max_fix_cycles: 15
   max_total_fix_iterations: 30
-
-  allow_review_skip: false # gate for a task disabling the review stage
 ```
 
 | Field | Type | Default | Meaning |
@@ -137,9 +135,8 @@ agents:
 | `max_stage_attempts` | integer | `3` | Attempts allowed for a stage (primary + the global-primary fallback). |
 | `max_fix_cycles` | integer | `15` | Fix cycles for a single local failing loop (test-driven or review-driven, counted separately). |
 | `max_total_fix_iterations` | integer | `30` | Hard global fix cap across the whole task and all subtasks. Must be `>= max_fix_cycles`. |
-| `allow_review_skip` | boolean | `false` | Required before a task may skip `review` (via `stages.review.enabled: false`) — disabling review removes the only agent quality gate before commit/PR. |
 
-Validation requires `max_total_fix_iterations >= max_fix_cycles`. Stage-skip is **per-task only** (`stages.<stage>.enabled: false` in a task; see [operations.md](operations.md#skipping-pipeline-stages-per-task)) — the global `agents.skip_stages` list was **removed in `schema_version` 10** (redundant with configurable flows: to drop a stage everywhere, remove its node from the flow). `allow_review_skip` was added in **4** and survives. Older configs that still carry `skip_stages` load fail-open (it is ignored); `upgrade-config` strips it.
+Validation requires `max_total_fix_iterations >= max_fix_cycles`. Node-disable is **per-task only** (`nodes.<node-id>.enabled: false` in a task; see [operations.md](operations.md#disabling-flow-nodes-per-task)) — there is no config knob for it. The global `agents.skip_stages` list was **removed in `schema_version` 10**, and the `agents.allow_review_skip` gate in **`schema_version` 13** (per-task disable is by flow node id; the operator owns which nodes are safe to disable — no `review`-special-case). Older configs that still carry either key load fail-open (it is ignored); `upgrade-config` strips it.
 
 ### `agents.decomposition`
 
@@ -325,7 +322,7 @@ Current task front matter fields are:
 id, title, pr_title, auto_merge, prompt_audit, contacts, stages
 ```
 
-A task is deliberately "clean" (PRE.3): it carries only identity/dispatch fields plus the two sanctioned exceptions — `stages.<stage>.enabled` (per-task stage skip) and `auto_merge` (task-wins). Provider, `model`, and `reasoning` live on the **flow node**, not the task; `decompose` was removed (the flow decides splitting); refinement-skip is deterministic (completeness classification, no `refined` flag). Inside a `stages.<stage>` block only `enabled` is valid.
+A task is deliberately "clean" (PRE.3): it carries only identity/dispatch fields plus the two sanctioned exceptions — `nodes.<node-id>.enabled` (per-task node disable) and `auto_merge` (task-wins). Provider, `model`, and `reasoning` live on the **flow node**, not the task; `decompose` was removed (the flow decides splitting); refinement-skip is deterministic (completeness classification, no `refined` flag). Inside a `nodes.<node-id>` block only `enabled` is valid.
 
 A structurally rejected task is terminal `failed`, gets a `validation_report.json`, and never creates a branch or calls a provider.
 

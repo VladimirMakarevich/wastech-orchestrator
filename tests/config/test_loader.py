@@ -45,25 +45,22 @@ def _agents(body: str) -> str:
     )
 
 
-def test_allow_review_skip_default_false() -> None:
-    result = loads_config(_LEGACY)
-    assert result.config.agents.allow_review_skip is False
-
-
-def test_allow_review_skip_parsed() -> None:
-    # ``allow_review_skip`` survives global-skip removal: it now gates the per-task
-    # ``stages.review.enabled: false`` override (validated by the task gate).
-    result = loads_config(_agents("  allow_review_skip: true\n"))
-    assert result.config.agents.allow_review_skip is True
-
-
 def test_legacy_skip_stages_tolerated_not_error() -> None:
     # ``agents.skip_stages`` was removed in config v10 (global stage-skip dropped for flexible
     # flows — drop the node from the flow instead). An old config still carrying it loads fail-open
     # (the key is ignored, not rejected); ``upgrade-config`` strips it.
     result = loads_config(_agents("  skip_stages: [testing, review]\n"))
     assert not hasattr(result.config.agents, "skip_stages")
-    assert result.config.agents.allow_review_skip is False  # loaded cleanly, dead key ignored
+    assert result.config.agents.allowed  # loaded cleanly, dead key ignored
+
+
+def test_legacy_allow_review_skip_tolerated_not_error() -> None:
+    # ``agents.allow_review_skip`` was removed in config v13 (per-task skip is by flow node id, and
+    # the operator owns which nodes are safe to disable — no ``review``-special-case). An old config
+    # still carrying it loads fail-open (key ignored, not rejected); ``upgrade-config`` strips it.
+    result = loads_config(_agents("  allow_review_skip: true\n"))
+    assert not hasattr(result.config.agents, "allow_review_skip")
+    assert result.config.agents.allowed  # loaded cleanly, dead key ignored
 
 
 def test_auto_mode_defaults_to_false() -> None:

@@ -22,8 +22,7 @@ from typing import Any
 import yaml
 
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
-from wastech_orchestrator.providers.base import Stage
-from wastech_orchestrator.task.model import NormalizedTask, StageParams
+from wastech_orchestrator.task.model import NodeOverride, NormalizedTask
 
 # For a ``.json`` task the body lives in this reserved key (a ``.md`` task carries it as the body
 # after the front matter). It is therefore not a front-matter field for either format.
@@ -212,17 +211,17 @@ def write_normalized(task: NormalizedTask, artifacts_root: str | Path) -> str:
         "auto_merge": task.auto_merge,
         "prompt_audit": task.prompt_audit,
         "contacts": list(task.contacts),
-        "stages": {stage.value: _stage_params_json(sp) for stage, sp in task.stage_params.items()},
+        "nodes": {node_id: _node_override_json(ov) for node_id, ov in task.node_overrides.items()},
     }
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return str(path)
 
 
-def _stage_params_json(sp: StageParams) -> dict[str, Any]:
-    """Serialize a :class:`StageParams`, omitting unset (``None``) fields."""
+def _node_override_json(ov: NodeOverride) -> dict[str, Any]:
+    """Serialize a :class:`NodeOverride`, omitting unset (``None``) fields."""
     out: dict[str, Any] = {}
-    if sp.enabled is not None:
-        out["enabled"] = sp.enabled
+    if ov.enabled is not None:
+        out["enabled"] = ov.enabled
     return out
 
 
@@ -230,9 +229,9 @@ def load_normalized(artifacts_root: str | Path, task_id: str) -> NormalizedTask:
     """Read back a ``task.normalized.json`` written by :func:`write_normalized` (recovery)."""
     path = task_artifact_dir(artifacts_root, task_id) / NORMALIZED_FILENAME
     data = json.loads(path.read_text(encoding="utf-8"))
-    stage_params = {
-        Stage(stage): StageParams(enabled=sp.get("enabled"))
-        for stage, sp in (data.get("stages") or {}).items()
+    node_overrides = {
+        str(node_id): NodeOverride(enabled=ov.get("enabled"))
+        for node_id, ov in (data.get("nodes") or {}).items()
     }
     return NormalizedTask(
         id=data["id"],
@@ -243,5 +242,5 @@ def load_normalized(artifacts_root: str | Path, task_id: str) -> NormalizedTask:
         auto_merge=data.get("auto_merge"),
         prompt_audit=data.get("prompt_audit"),
         contacts=list(data.get("contacts", [])),
-        stage_params=stage_params,
+        node_overrides=node_overrides,
     )

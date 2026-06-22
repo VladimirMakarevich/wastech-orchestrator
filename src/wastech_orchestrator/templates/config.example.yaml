@@ -3,7 +3,7 @@
 # This is the packaged copy used by `wastech-orchestrator init`; keep it in sync with the
 # repo-root config.example.yaml
 
-schema_version: 12                  # config format version; the orchestrator refuses newer configs
+schema_version: 13                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -25,8 +25,6 @@ agents:
   max_stage_attempts: 3
   max_fix_cycles: 15
   max_total_fix_iterations: 30      # hard global cap across all fix loops (and all subtasks); >= max_fix_cycles
-
-  allow_review_skip: false          # required before a task's `stages.review.enabled: false` may disable the `review` quality gate
 
   decomposition:                    # optional task decomposition (§5.1); OFF by default
     enabled: false

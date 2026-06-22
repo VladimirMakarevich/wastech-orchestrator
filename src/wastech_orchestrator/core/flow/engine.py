@@ -93,6 +93,19 @@ class NodeOutcome:
     final_message: str | None = None
 
 
+def skip_outcome(node: FlowNode) -> NodeOutcome:
+    """The pass-through outcome a skipped node yields, so the engine takes its forward edge.
+
+    The single source of truth for the skip-outcome-per-node-kind rule, shared by the engine's
+    skip path and the flow validator's per-task disabled-node routing-soundness check.
+    """
+    if isinstance(node, EvaluatorNode):
+        return NodeOutcome("accept")
+    if isinstance(node, ChecksNode):
+        return NodeOutcome("pass")
+    return NodeOutcome("done")
+
+
 @dataclass(frozen=True, slots=True)
 class NodeResult:
     """A node's execution result: its outcome plus the ``node_runs`` row id it recorded (P1.2)."""
@@ -208,6 +221,7 @@ class FlowEngine:
         subtask_order: int | None = None,
         post_node: PostNodeHook | None = None,
         region: frozenset[str] | None = None,
+        disabled_nodes: frozenset[str] = frozenset(),
     ) -> None:
         self._snapshot = snapshot
         self._run_state = run_state
@@ -218,6 +232,11 @@ class FlowEngine:
         self._task_id = task_id
         self._subtask_order = subtask_order
         self._post_node = post_node
+        # Flow node ids the task disabled (``nodes.<id>.enabled: false``); each is skipped exactly
+        # like a ``when``-false node — its pass-through outcome takes the forward edge. Re-derived
+        # from front-matter every run/resume (not persisted). Existence + routing soundness were
+        # already checked at flow resolution, so the engine can skip these unconditionally.
+        self._disabled_nodes = disabled_nodes
         # When set, the run is confined to this node-id set (a decomposition sub_flow region): it
         # ends when a *forward* edge leaves the region (the driver then runs the next subtask or the
         # post-region phase). Rework/fail edges always point back into the region, so they never
@@ -304,13 +323,14 @@ class FlowEngine:
         return result.outcome
 
     def _should_skip(self, node: FlowNode) -> bool:
+        if node.id in self._disabled_nodes:
+            return True
         when = node.when
-        if when is None:
-            return False
-        return self._facts(when.fact) != when.equals
+        return when is not None and self._facts(when.fact) != when.equals
 
-    @staticmethod
-    def _skip_reason(node: FlowNode) -> str:
+    def _skip_reason(self, node: FlowNode) -> str:
+        if node.id in self._disabled_nodes:
+            return f"disabled by task: nodes.{node.id}.enabled=false"
         when = node.when
         fact = when.fact if when is not None else "?"
         return f"deterministic skip: when {fact} != {when.equals if when else True}"
@@ -318,11 +338,7 @@ class FlowEngine:
     @staticmethod
     def _skip_outcome(node: FlowNode) -> NodeOutcome:
         """A skipped node yields its pass-through outcome so the engine takes the forward edge."""
-        if isinstance(node, EvaluatorNode):
-            return NodeOutcome("accept")
-        if isinstance(node, ChecksNode):
-            return NodeOutcome("pass")
-        return NodeOutcome("done")
+        return skip_outcome(node)
 
     # -- edge resolution -------------------------------------------------------
 

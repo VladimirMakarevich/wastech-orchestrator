@@ -50,7 +50,10 @@ from wastech_orchestrator.core.flow.registry import FlowRegistry, FlowResolution
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import AgentNode, FlowNode
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
-from wastech_orchestrator.core.flow.validator import FlowValidationError
+from wastech_orchestrator.core.flow.validator import (
+    FlowValidationError,
+    validate_disabled_nodes,
+)
 from wastech_orchestrator.core.flow.wiring import build_node_inputs, build_node_services
 from wastech_orchestrator.core.hitl import (
     HumanInputSignal,
@@ -107,7 +110,6 @@ from wastech_orchestrator.providers.artifacts import (
 from wastech_orchestrator.providers.base import (
     AgentProvider,
     ProviderId,
-    Stage,
 )
 from wastech_orchestrator.providers.redaction import read_denied_secrets, redact_text
 from wastech_orchestrator.routing.router import AgentRouter
@@ -213,15 +215,15 @@ def _artifact_kind(name: str) -> str:
     return _ARTIFACT_KINDS.get(name, name)
 
 
-def effective_skip(task: NormalizedTask) -> frozenset[Stage]:
-    """The stages skipped for ``task`` — its own ``stages.<stage>.enabled: false`` overrides
-    (per-task stage-skip control; flow-contract bounded exception).
+def effective_skip(task: NormalizedTask) -> frozenset[str]:
+    """The flow node ids disabled for ``task`` — its own ``nodes.<node-id>.enabled: false``
+    overrides (per-task node-disable control; flow-contract bounded exception).
 
-    Validation has already guaranteed every member is in ``SKIPPABLE_STAGES`` and that any
-    ``review`` skip is permitted (``agents.allow_review_skip``), so the orchestrator can trust this
-    set unconditionally.
+    The gate validated the ``nodes:`` block shape; node existence and routing soundness against the
+    task's resolved flow are checked at flow resolution (``validate_disabled_nodes``), so by the
+    time the engine consumes this set it is known to name real, safely-skippable nodes.
     """
-    return task.disabled_stages()
+    return task.disabled_nodes()
 
 
 @dataclass(frozen=True)
@@ -271,9 +273,9 @@ class _Pipeline:
     # past planning restores it (see `_persist_selected_skills` / `_restore_engine_inputs`).
     skill_inventory: SkillInventory = field(default_factory=SkillInventory)
     selected_skills: tuple[SkillRef, ...] = ()
-    # Effective stage-skip set (global config ∪ per-task). Re-derived on every run/resume from
-    # config + frontmatter, so a restart recovers it without persistence (stage-skip control).
-    skip: frozenset[Stage] = frozenset()
+    # Per-task disabled flow node ids (``nodes.<id>.enabled: false``). Re-derived every run/resume
+    # from front-matter, so a restart recovers it without persistence (node-disable control).
+    skip: frozenset[str] = frozenset()
 
 
 class Orchestrator:
@@ -848,13 +850,17 @@ class Orchestrator:
 
         ``task_type=None`` defaults to ``implementation``. An unknown ``task_type`` (no flow file)
         or a flow that fails validation — structural **or** config-aware (provider/ceiling/git/
-        budget) — raises :class:`PipelineFailed` (caught by ``run_task`` → terminal ``failed``).
+        budget) — raises :class:`PipelineFailed` (caught by ``run_task`` → terminal ``failed``). The
+        task's per-task disabled-node set is validated against the resolved snapshot here too (it
+        names a real, safely-skippable node), so a bad ``nodes:`` override fails the same way.
         Resolution runs before branch prep, so either failure happens before any side effect; on
         resume it re-validates against the live config, so a flow made unsafe by a config change is
         rejected rather than run (the recovery ceiling never widens, security-ceiling).
         """
         try:
-            return self._flow_registry.resolve(p.task.task_type)
+            snapshot = self._flow_registry.resolve(p.task.task_type)
+            validate_disabled_nodes(snapshot, p.task.disabled_nodes())
+            return snapshot
         except (FlowResolutionError, FlowValidationError) as exc:
             raise PipelineFailed(str(exc)) from exc
 
@@ -982,7 +988,7 @@ class Orchestrator:
         ``current_node``, and a decomposed run re-enters the active uncommitted subtask at the
         region entry (committed subtasks are skipped, never re-committed)."""
         post_node = self._engine_post_node(p, inputs, snapshot)
-        facts = self._engine_facts(p, completeness, snapshot)
+        facts = self._engine_facts(completeness, snapshot)
         if resume and run_state.current_node is None:
             resume = False  # no checkpoint position to resume from → start fresh
 
@@ -1003,6 +1009,7 @@ class Orchestrator:
                 post_node=post_node,
                 subtask_order=subtask,
                 region=region,
+                disabled_nodes=p.skip,
             )
 
         if snapshot.doc.decomposition is None:
@@ -1101,7 +1108,7 @@ class Orchestrator:
         summary is *always* written, one way or the other (``config.summary_enabled`` is gone)."""
         if self._supervisor is not None:
             self._supervisor.finalize(task_id=p.task.id, task_title=p.task.title)
-        self._append_skip_section(p)  # note skipped stages on the supervisor summary (idempotent)
+        self._append_skip_section(p)  # note skipped nodes on the supervisor summary (idempotent)
         summary_md = self._finalize_task_artifacts(p, Status.DONE)
         return str(summary_md) if summary_md is not None else None
 
@@ -1112,9 +1119,14 @@ class Orchestrator:
         return None
 
     def _engine_facts(
-        self, p: _Pipeline, completeness: Completeness, snapshot: FlowSnapshot
+        self, completeness: Completeness, snapshot: FlowSnapshot
     ) -> Callable[[str], bool]:
-        """Resolve a flow ``when`` fact (``derived.*`` / ``config.*``) to a boolean."""
+        """Resolve a flow ``when`` fact (``derived.*`` / ``config.*``) to a boolean.
+
+        Per-task node-disable no longer flows through a ``config.*_enabled`` fact — it is handed to
+        the engine directly as ``disabled_nodes`` (keyed by node id), so the only facts left are the
+        deterministic refinement-skip and the flow-capability ``config.external_research``.
+        """
         # Refinement-skip is deterministic — driven purely by completeness classification, never a
         # task flag (PRE.3): a ``complete`` task skips refinement, anything else runs it.
         needs_refinement = completeness is not Completeness.COMPLETE
@@ -1128,12 +1140,6 @@ class Orchestrator:
                 return needs_refinement
             if fact == "config.external_research":
                 return external_research
-            if fact.startswith("config.") and fact.endswith("_enabled"):
-                name = fact[len("config.") : -len("_enabled")]
-                try:
-                    return Stage(name) not in p.skip
-                except ValueError:
-                    return True  # unknown stage-enabled fact → do not skip
             return False  # unknown fact → default off
 
         return facts
@@ -1254,12 +1260,6 @@ class Orchestrator:
         """Map a terminal :class:`FlowRunResult` to a :class:`PipelineResult` (+ auto-merge)."""
         if result.status is Status.DONE:
             pr_url = self._git.recorded_pr_url(p.task.id)
-            if pr_url and Stage.REVIEW in p.skip and self._auto_merge_on(p.task):
-                self._log(p.task.id).warning(
-                    "[AUTO-MERGE] review skipped AND auto_merge enabled — task will merge without "
-                    "any review gate",
-                    extra={"pr_url": pr_url},
-                )
             if pr_url and self._auto_merge_on(p.task):
                 return self._auto_merge(p, pr_url)
             return self._go_terminal(p, Status.DONE, pr_url=pr_url, already_moved=True)
@@ -1485,14 +1485,14 @@ class Orchestrator:
         return "\n" + redact_text("\n".join(lines) + "\n")
 
     def _skip_section_md(self, p: _Pipeline) -> str:
-        """A ``## Pipeline stages skipped`` markdown block, or ``""`` when nothing was skipped."""
+        """A ``## Pipeline nodes skipped`` markdown block, or ``""`` when nothing was skipped."""
         if not p.skip:
             return ""
-        lines = "\n".join(f"- `{s.value}`" for s in sorted(p.skip, key=lambda s: s.value))
-        return f"\n## Pipeline stages skipped\n\n{lines}\n"
+        lines = "\n".join(f"- `{node_id}`" for node_id in sorted(p.skip))
+        return f"\n## Pipeline nodes skipped\n\n{lines}\n"
 
     def _append_skip_section(self, p: _Pipeline) -> None:
-        """Append the skipped-stages section to ``summary.md`` (idempotent within a run)."""
+        """Append the skipped-nodes section to ``summary.md`` (idempotent within a run)."""
         section = self._skip_section_md(p)
         if not section:
             return
@@ -1500,7 +1500,7 @@ class Orchestrator:
         if not md_path.exists():
             return
         existing = md_path.read_text(encoding="utf-8")
-        if "## Pipeline stages skipped" in existing:
+        if "## Pipeline nodes skipped" in existing:
             return
         md_path.write_text(existing.rstrip("\n") + "\n" + section, encoding="utf-8")
 
