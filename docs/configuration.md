@@ -150,18 +150,14 @@ agents:
   decomposition:
     enabled: false
     max_subtasks: 8
-    min_size_signal: "large"
-    commit_per_subtask: true
 ```
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | boolean | `false` | Enables the planning sub-phase for decomposition. |
 | `max_subtasks` | integer | `8` | Maximum accepted split size; must be at least `2`. |
-| `min_size_signal` | string | `"large"` | Advisory size threshold passed to the planning prompt. |
-| `commit_per_subtask` | boolean | `true` | One local commit per accepted subtask on the single task branch. |
 
-Decomposition is **no longer a task flag** (`decompose` was removed in `schema_version` 11). Whether a split is permitted at all is `agents.decomposition.enabled` (above); whether one actually happens is decided by the flow's `decomposition:` block and the planning node's gate proposal, accepted only under the deterministic rules. A task cannot change `enabled`, `max_subtasks`, the provider, or security settings.
+Decomposition is **no longer a task flag** (`decompose` was removed in `schema_version` 11). Whether a split is permitted at all is `agents.decomposition.enabled` (above); whether one actually happens is decided by the flow's `decomposition:` block and the planning node's gate proposal, accepted only under the deterministic rules. A task cannot change `enabled`, `max_subtasks`, the provider, or security settings. The decorative `min_size_signal` and `commit_per_subtask` keys were **removed in `schema_version` 12** (neither was ever read — the size hint lives in the planning role prompt and every accepted subtask is always committed). Older configs that still carry them load fail-open (the keys are ignored); `upgrade-config` strips them.
 
 ### Provider routing (node-based)
 
@@ -224,25 +220,48 @@ Provider-specific fields:
 | `claude` | `max_turns` | integer or null | `null` if omitted | Claude Code turn limit. |
 | `claude` | `max_budget_usd` | number or null | `null` if omitted | Claude Code budget limit when supported. |
 
-Unsafe `extra_args` are rejected by config validation and again by provider command builders. Known forbidden examples include:
+#### `extra_args`
+
+`extra_args` appends extra arguments to the provider's CLI invocation, verbatim. It is empty (`[]`) by default, so nothing extra is passed.
+
+**Sources (both operator-authored).** The provider-level list here (`agents.providers.<id>.extra_args`) applies to every run of that provider. A flow node may also declare its own `extra_args` (a packaged flow, or a flow under `.worc/flows/`), applied only to that node — see the Flows section below. The two are concatenated (the provider list first, then the node's) and both go through the same validation. A task **cannot** set `extra_args`: task content never builds a command line.
+
+**How it is applied.** Arguments are passed as an argument list, never through a shell — each entry is one literal token, and shell metacharacters (`;`, `|`, `$(...)`) are not interpreted. A flag that takes a value is two entries (`["--add-dir", "../lib"]`) or one with `=` (`["--add-dir=../lib"]`). The list is appended **after** the orchestrator's own flags, so where a CLI resolves duplicates last-wins it can override an earlier value — but it can never override the safety rules below.
+
+**What you can pass.** Anything your installed CLI accepts that does not weaken isolation or approvals — for example an extra working directory, an output/format option, or a config override. Confirm exact flag names against `claude --help` / `codex exec --help`; the orchestrator forwards them unchanged and does **not** check that a flag exists (an unknown flag simply makes the CLI fail, surfaced as a provider error). Illustrative — verify against your CLI version:
 
 ```yaml
-extra_args:
-  - "--dangerously-bypass-approvals-and-sandbox"
+agents:
+  providers:
+    claude:
+      extra_args: ["--add-dir", "../shared-lib"] # add another working directory
+    codex:
+      extra_args: ["-c", "tools.web_search=true"] # a Codex -c config override
+```
+
+**What is rejected.** Arguments that disable the sandbox or approvals are refused:
+
+| Rejected argument | Provider | Reason |
+| --- | --- | --- |
+| any `--dangerously*` flag (`--dangerously-bypass-approvals-and-sandbox`, `--dangerously-skip-permissions`, `--dangerously-bypass-hook-trust`, …) | both | disables approvals / sandbox / hook-trust |
+| `--yolo`, `--ignore-rules` | Codex | disables approvals |
+| `--sandbox danger-full-access` (or `-s danger-full-access`) | Codex | full filesystem access — no isolation |
+| `--sandbox` / `-s` with no value | Codex | malformed: would swallow the next token |
+| `--permission-mode bypassPermissions`, or any `--permission-mode` more permissive than the resolved `permission_profile` | Claude | escalates above the permission profile |
+
+**Where the error appears.** The flag-based bans (everything except the Claude `--permission-mode` rule) are caught at **config load** — the whole config is rejected with an error before any task runs — and re-checked by the provider command builder at launch. The Claude `--permission-mode` escalation is enforced by the Claude adapter **at launch** and by the `strict_isolation` preflight (a config carrying it loads, but the run fails before a branch is created).
+
+```yaml
+# Codex — rejected at config load
+extra_args: ["--sandbox", "danger-full-access"]
 ```
 
 ```yaml
-extra_args:
-  - "--sandbox"
-  - "danger-full-access"
+# Claude — rejected at launch / by the strict_isolation preflight
+extra_args: ["--permission-mode", "bypassPermissions"]
 ```
 
-```yaml
-extra_args:
-  - "--dangerously-skip-permissions"
-```
-
-Do not pass secrets through `extra_args`.
+Do not pass secrets through `extra_args`: values become argv tokens and are recorded (redacted) in the request artifact.
 
 ## `security`
 

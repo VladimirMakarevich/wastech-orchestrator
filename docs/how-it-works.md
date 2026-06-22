@@ -50,6 +50,26 @@ A couple of other things can pause a run for a person:
 - If a change does something **risky** — like deleting tracked files or changing dependencies — the orchestrator asks a human to approve it before continuing.
 - If something genuinely cannot be launched (for example a test command whose program is missing), that is treated as a setup problem, not something the agent can fix by editing code.
 
+## Splitting a big task into smaller pieces (decomposition)
+
+Some tasks are too large to do well in one pass. The orchestrator can optionally break such a task into a short, ordered list of **subtasks** and carry them out one after another. This is **off by default** — an operator turns it on in the configuration.
+
+The decision is shared on purpose, and not left to the AI alone:
+
+- During **planning**, the agent may _propose_ a split — a numbered list of subtasks, each with its own "done" criteria.
+- The orchestrator then _decides_ whether to accept that proposal, by fixed rules the agent cannot bend. It accepts a split only when it has between two and a configured maximum number of subtasks (eight by default) and forms a simple ordered chain — each subtask may build on earlier ones, never on a later one. Anything outside those rules is rejected and the task just runs as a single unit.
+
+So the agent can suggest, but it can never force a split, exceed the limit, or reorder the chain. If it proposes nothing — or proposes something malformed — nothing breaks; the task simply runs whole.
+
+When a split is accepted, each subtask goes through the normal implementation → testing → review → fixing steps and is **committed on its own**, all on the same branch. The whole parent task still ends in **one pull request**, not one per subtask.
+
+Two practical benefits come from those per-subtask commits:
+
+- **Cleaner history** — the branch reads as a sequence of self-contained steps instead of one giant change.
+- **Safe resume** — if a run is interrupted partway, restarting continues from the first _unfinished_ subtask; the ones already committed are never redone. And if the run gets stuck, the report names exactly which subtask (k of n) failed and which were already committed.
+
+**What it is not.** Subtasks always run in a straight line, one at a time — there is no parallel work and no branching between them. And only flows that include the per-subtask region support splitting at all: the default coding flow does; the research and audit flows do not.
+
 ## The agent keeps its context — it does not start over
 
 Even though each step is a separate run, the agent does **not** start from a blank slate each time. Two things keep it informed:
@@ -84,4 +104,5 @@ After a task ends, the orchestrator tidies up (returns the working copy to the m
 - The orchestrator is predictable software running a flow — the route, the gates, and the Git work are fixed program logic, not AI choices.
 - A coding agent does the thinking steps; a strictly read-only supervisor watches every step and writes the summary, but it can never change what happens next.
 - When testing or review fails, the task loops through fixing, bounded by a safety limit that stops for a human.
+- A big task can optionally be split into a linear chain of subtasks (off by default); the agent proposes the split, the orchestrator decides by fixed rules, and each subtask is committed on its own — still one pull request.
 - The agent keeps its context between steps — it continues one ongoing editing conversation across the whole run (for both Codex and Claude), and that conversation survives a restart.
