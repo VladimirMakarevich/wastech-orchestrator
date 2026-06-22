@@ -1,4 +1,4 @@
-"""Routing layer (spec §4.2, §5, §7.2–§7.4, §8.1).
+"""Routing layer (–).
 
 The Agent Router resolves the primary/fallback provider per stage and performs infrastructure-only
 fallback between them. It depends solely on the ``AgentProvider`` contract (no CLI syntax) and

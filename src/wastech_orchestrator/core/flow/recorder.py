@@ -8,7 +8,7 @@ transition, and writes the flow-neutral failure report when a budget is exhauste
 
 :func:`hydrate_run_state` rebuilds the checkpoint on resume **from the persisted snapshot
 fingerprint** — recovery trusts the stored flow and never re-resolves it from the live config
-(``index.md`` §6, ``flow-contract.md`` §9). Side-effect idempotency lives in ``publish_operations``
+(``index.md``, ``flow-contract.md``). Side-effect idempotency lives in ``publish_operations``
 (unchanged), so a resumed run never duplicates a commit/push/PR.
 """
 

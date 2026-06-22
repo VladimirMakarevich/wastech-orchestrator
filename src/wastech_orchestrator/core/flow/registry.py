@@ -22,7 +22,7 @@ Resolution rules:
   needs git, and ``budgets`` ≤ the config safety caps.
 
 See ``docs/backlog/flows/plan.md`` (P0.4), ``p4-operator.md`` (P4.1/P4.2) and
-``flow-contract.md`` §10.
+``flow-contract.md``.
 """
 
 from __future__ import annotations
@@ -99,7 +99,7 @@ class FlowRegistry:
         success or a one-line message on failure. Operator files shadow a packaged file of the same
         name (only the operator one is reported, mirroring :meth:`resolve`). Does not raise — the
         caller decides how to surface failures (``install``/``preflight`` treat any as fatal,
-        ``happy-path.md`` §1).
+        ``happy-path.md``).
         """
         results: list[tuple[str, str | None]] = []
         for name in self._all_flow_names():

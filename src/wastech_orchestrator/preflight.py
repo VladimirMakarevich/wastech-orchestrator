@@ -1,4 +1,4 @@
-"""Runtime startup gates for the CLI (spec §6.7).
+"""Runtime startup gates for the CLI.
 
 These are *runtime* preflight checks run at ``run``/``watch``/``rerun`` startup — distinct from the
 read-only environment *detection* in :mod:`wastech_orchestrator.install.detect`. A gate fails fast
@@ -11,7 +11,7 @@ from wastech_orchestrator.install.detect import has_gh
 
 
 class GhNotAvailableError(OSError):
-    """The GitHub CLI (``gh``) is required for PR creation but is not on ``PATH`` (§6.7)."""
+    """The GitHub CLI (``gh``) is required for PR creation but is not on ``PATH``."""
 
 
 def require_gh() -> None:

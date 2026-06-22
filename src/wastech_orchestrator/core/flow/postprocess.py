@@ -1,6 +1,6 @@
 """Data-driven per-node post-processing (P1.4) — mechanics the engine post-node hook runs.
 
-Two mechanisms, both triggered by **declared data**, never a stage name (flow-contract §2.1):
+Two mechanisms, both triggered by **declared data**, never a stage name (flow-contract):
 
 * :func:`apply_output_artifact` — when an agent node declares ``output_artifact: <slot>``, write
   the agent's output to that slot file, register it, and thread the path into the downstream

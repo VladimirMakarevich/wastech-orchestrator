@@ -1,4 +1,4 @@
-"""Human-in-the-loop notifications and `ask_human` primitive (spec §4.7).
+"""Human-in-the-loop notifications and `ask_human` primitive.
 
 The Core depends only on the narrow :class:`Notifier` protocol; the Telegram transport is selected
 by :func:`build_notifier` from :class:`TelegramConfig` + the process environment. When the feature

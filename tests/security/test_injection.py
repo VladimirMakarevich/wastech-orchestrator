@@ -1,4 +1,4 @@
-"""Front-matter injection scanner — security/injection.py (spec §19.5, §6.2).
+"""Front-matter injection scanner — security/injection.py.
 
 Adversarial coverage of the argv-shaped-token scanner plus the reject-don't-sanitize guarantee for
 the task id. The file-path-only *structural* guarantee is proven in
@@ -58,7 +58,7 @@ def test_body_like_content_in_a_value_is_only_caught_by_tokens() -> None:
     ["Task-1", "task 1", "../etc", ".hidden", "task/sub", "task;rm", "tȯask"],
 )
 def test_task_id_is_reject_not_sanitize(task_id: str) -> None:
-    # A value that would change under normalization is rejected outright (§19.3: reject, don't fix).
+    # A value that would change under normalization is rejected outright (: reject, don't fix).
     assert is_valid_task_id(task_id) is False
 
 

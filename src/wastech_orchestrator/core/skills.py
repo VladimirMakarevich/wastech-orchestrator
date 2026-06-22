@@ -1,4 +1,4 @@
-"""Repo skill inventory + planning-selected references (post-test-run §2.1/§2.2).
+"""Repo skill inventory + planning-selected references (post-test-run).
 
 Skills are provider-neutral ``SKILL.md`` files in the **target repo** (``<repo>/.claude/skills/*``):
 ``name``/``description`` frontmatter plus a markdown body of procedural guidance. This module does a
@@ -12,7 +12,7 @@ Two deterministic, auditable steps live here:
 * :func:`resolve_planning_skills` — the "agent proposes, Core decides" filter (cf. decomposition):
   keep only names the scan actually found and that are not on the gate-duplicating denylist.
 * :func:`compute_skill_dedup` — flag skill sections whose heading matches the operator's appended
-  planning guidance, so plan.md can record that the operator's text wins for that topic (§2.2).
+  planning guidance, so plan.md can record that the operator's text wins for that topic.
 
 Nothing here builds CLI argv, reads env, or weakens the sandbox; skill bodies are repo-controlled
 (untrusted) and are only ever surfaced by path.
@@ -31,7 +31,7 @@ import yaml
 _MAX_FILE_BYTES = 262_144
 
 # Gate-duplicating skills the orchestrator already owns as deterministic gates/guardrails — excluded
-# from what is surfaced to planning by default (two-sources-of-truth + scope-creep risk, §2.1).
+# from what is surfaced to planning by default (two-sources-of-truth + scope-creep risk).
 DEFAULT_EXCLUDED_SKILLS: tuple[str, ...] = ("run-checks", "test", "sync-docs")
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
@@ -67,7 +67,7 @@ class SkillInventory:
 
 @dataclass(frozen=True)
 class SkillSelection:
-    """The Core's deterministic acceptance of the planning agent's proposed skill names (§2.1)."""
+    """The Core's deterministic acceptance of the planning agent's proposed skill names."""
 
     refs: tuple[SkillRef, ...] = ()
     dropped_unknown: tuple[str, ...] = ()
@@ -76,7 +76,7 @@ class SkillSelection:
 
 @dataclass(frozen=True)
 class SkillDedupEntry:
-    """A selected skill with section headings that overlap the operator's planning text (§2.2)."""
+    """A selected skill with section headings that overlap the operator's planning text."""
 
     skill: str
     path: str
@@ -114,7 +114,7 @@ class SkillInventoryScanner:
         return SkillInventory(skills=tuple(refs), excluded=self._excluded)
 
     def read_body(self, ref: SkillRef) -> str | None:
-        """Read a selected skill's body (used only by the §2.2 dedup; bounded, denied-aware)."""
+        """Read a selected skill's body (used only by the dedup; bounded, denied-aware)."""
         return self._read_text(Path(ref.path))
 
     def _scan_one(self, skill_md: Path) -> SkillRef | None:
@@ -153,7 +153,7 @@ class SkillInventoryScanner:
 
 
 def resolve_planning_skills(proposed: Sequence[str], inventory: SkillInventory) -> SkillSelection:
-    """Keep only proposed names the scan found and that are not gate-duplicating (§2.1).
+    """Keep only proposed names the scan found and that are not gate-duplicating.
 
     Deterministic, like decomposition's accept rule: the agent proposes names; the Core decides. A
     name that does not resolve to a relevant skill is dropped (``dropped_unknown``); a name that
@@ -187,7 +187,7 @@ def resolve_planning_skills(proposed: Sequence[str], inventory: SkillInventory) 
 
 
 def _normalize_heading(heading: str) -> str:
-    """Lowercase, drop punctuation/extra whitespace — for deterministic heading match (§2.2)."""
+    """Lowercase, drop punctuation/extra whitespace — for deterministic heading match."""
     cleaned = re.sub(r"[^a-z0-9 ]+", "", heading.lower())
     return re.sub(r"\s+", " ", cleaned).strip()
 
@@ -200,7 +200,7 @@ def markdown_headings(text: str) -> list[str]:
 def compute_skill_dedup(
     user_text: str | None, bodies: Sequence[tuple[SkillRef, str]]
 ) -> tuple[SkillDedupEntry, ...]:
-    """Flag selected-skill sections whose heading matches the operator's planning text (§2.2).
+    """Flag selected-skill sections whose heading matches the operator's planning text.
 
     Heading-level and fully deterministic (v1): a skill section is "overlapping" when its normalized
     heading equals a heading in the operator's appended planning guidance. The skill is still

@@ -1,4 +1,4 @@
-"""ClaudeCodeProvider — the Claude Code CLI adapter (spec §4.4).
+"""ClaudeCodeProvider — the Claude Code CLI adapter.
 
 Implements the :class:`~wastech_orchestrator.providers.base.AgentProvider` contract for
 ``id = "claude"`` using ``claude -p`` (headless/print mode). This is the **only** module that knows
@@ -122,7 +122,7 @@ _CLAUDE_SIGNATURES = make_signatures(
 
 
 def _deny_tools_for(denied_commands: Sequence[str]) -> list[str]:
-    """Translate the denied-commands blacklist into Claude ``Bash(<cmd>:*)`` tool patterns (§12).
+    """Translate the denied-commands blacklist into Claude ``Bash(<cmd>:*)`` tool patterns.
 
     The agent process must never be able to commit/push/open PRs; denying the corresponding ``Bash``
     tool patterns is the tool-level enforcement of that invariant.
@@ -137,7 +137,7 @@ def _deny_tools_for(denied_commands: Sequence[str]) -> list[str]:
 
 
 def _deny_read_tools_for(denied_read_paths: Sequence[str]) -> list[str]:
-    """Translate ``denied_read_paths`` into Claude ``Read(<glob>)`` disallowed-tool patterns (§12).
+    """Translate ``denied_read_paths`` into Claude ``Read(<glob>)`` disallowed-tool patterns.
 
     The agent must never read secret files (``.env``, ``secrets/**``); denying the ``Read`` tool on
     those paths is the tool-level enforcement, paired with the redaction net for what leaks.
@@ -210,7 +210,7 @@ def build_claude_argv(
     or the requested profile is the forbidden full-access mode — defence in depth over the P1 config
     validator. The prompt is delivered on stdin, never on the command line; context reaches Claude
     only as file paths. ``denied_commands`` and ``denied_read_paths`` (the ``security.*`` lists) are
-    enforced as ``--disallowedTools`` so the agent can never publish or read secret files (§12).
+    enforced as ``--disallowedTools`` so the agent can never publish or read secret files.
     """
     combined_extra = tuple(config.extra_args) + tuple(request.extra_args)
     reasons = find_forbidden_args(combined_extra)
@@ -267,7 +267,7 @@ def isolation_reasons(config: ProviderConfig) -> list[str]:
     """Reasons the configured Claude isolation cannot be enabled — an empty list means OK.
 
     Pure and offline (no CLI launched), so it can drive the ``strict_isolation`` preflight
-    (:mod:`wastech_orchestrator.security.isolation`, §12.8). Mirrors what :func:`build_claude_argv`
+    (:mod:`wastech_orchestrator.security.isolation`). Mirrors what :func:`build_claude_argv`
     would enforce: the permission profile must resolve to a concrete non-``bypassPermissions`` mode,
     and ``extra_args`` must not weaken the sandbox/approvals or that mode.
     """

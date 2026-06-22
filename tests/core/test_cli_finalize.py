@@ -1,4 +1,4 @@
-"""Tests for the ``finalize`` CLI command — record + tidy a human-handled task (§finalize)."""
+"""Tests for the ``finalize`` CLI command — record + tidy a human-handled task."""
 
 from __future__ import annotations
 

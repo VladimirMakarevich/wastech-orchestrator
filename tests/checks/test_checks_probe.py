@@ -1,4 +1,4 @@
-"""Launchability probing (automatic check discovery §7)."""
+"""Launchability probing (automatic check discovery)."""
 
 from __future__ import annotations
 

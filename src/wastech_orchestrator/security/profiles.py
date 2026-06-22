@@ -1,4 +1,4 @@
-"""Permission-profile strictness ordering (spec §7.2, .agents/rules/security.md).
+"""Permission-profile strictness ordering (.agents/rules/security.md).
 
 A small, provider-agnostic ordering over the permission profiles a stage can run under. The Agent
 Router (P4) uses it for the **conditional** fallback rule: ``authorization_failed`` /
@@ -6,7 +6,7 @@ Router (P4) uses it for the **conditional** fallback rule: ``authorization_faile
 **same or a stricter** profile — never a looser one. Relaxing the policy to make a fallback possible
 is prohibited, so an unknown profile is treated as *not* provably same-or-stricter (fail-closed).
 
-Profiles mirror ``ProviderConfig.permission_profile`` (§11): ``read-only`` is the strictest,
+Profiles mirror ``ProviderConfig.permission_profile``: ``read-only`` is the strictest,
 ``workspace-write`` allows writes within the workspace.
 """
 
@@ -24,7 +24,7 @@ def is_same_or_stricter(candidate: str, reference: str) -> bool:
     """Return True iff ``candidate`` is at least as strict as ``reference``.
 
     Fail-closed: an unrecognized profile on either side returns False, because the orchestrator may
-    never *relax* the policy to enable a fallback (spec §7.2). With both profiles known, this is
+    never *relax* the policy to enable a fallback. With both profiles known, this is
     ``rank(candidate) <= rank(reference)`` (a lower rank is stricter).
     """
     candidate_rank = _PROFILE_STRICTNESS.get(candidate)

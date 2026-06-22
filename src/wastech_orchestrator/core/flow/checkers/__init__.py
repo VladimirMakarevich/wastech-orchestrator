@@ -10,5 +10,5 @@ Two deterministic, non-LLM checkers that make the ``checks`` node usable for res
 
 Which checker a ``checks`` node runs is the node's ``checker`` field; the node runner
 (``core/flow/nodes/checks.py``) dispatches on it. The flow never supplies commands/scanners
-(security-ceiling §3) — the scanner set is core-owned here.
+(security-ceiling) — the scanner set is core-owned here.
 """

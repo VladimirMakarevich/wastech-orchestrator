@@ -1,4 +1,4 @@
-"""Forbidden CLI flag detector (spec §11, §12.7, .agents/rules/security.md).
+"""Forbidden CLI flag detector (.agents/rules/security.md).
 
 The single source of truth for "an option that bypasses the sandbox/approvals". It is called from
 two places so the security invariant is enforced in depth:

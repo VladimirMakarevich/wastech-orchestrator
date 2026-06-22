@@ -1,4 +1,4 @@
-"""Resolved-profile command signature + backward-compatible load (post-test-run §1.2)."""
+"""Resolved-profile command signature + backward-compatible load (post-test-run)."""
 
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ def test_approval_fields_round_trip() -> None:
 
 
 def test_v1_profile_loads_with_approved_false() -> None:
-    # A profile written before §1.2 lacks the approval fields; it must load with approved=False so
+    # A profile written before lacks the approval fields; it must load with approved=False so
     # the next *change* to the command set triggers an approval (never crashes on the missing keys).
     legacy = _profile().to_json()
     for key in ("commands_signature", "approved", "approved_at", "approved_interaction_id"):

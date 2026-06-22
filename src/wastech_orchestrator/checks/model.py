@@ -20,7 +20,7 @@ from typing import Any
 
 # Characters that only mean something to a shell. We never launch through a shell, so any of these
 # in an argv token is a configuration/discovery mistake (it would be passed literally and fail) —
-# reject it as defense in depth against shell-injection-shaped commands (§7, §12).
+# reject it as defense in depth against shell-injection-shaped commands.
 _SHELL_METACHARS: frozenset[str] = frozenset(";|&$`><(){}*?\n\r")
 
 
@@ -137,7 +137,7 @@ def argv_matches_denied(argv: Sequence[str], denied: Iterable[str]) -> str | Non
     """Return the denied-command prefix this argv matches, or ``None``.
 
     Mirrors the provider adapters' rule (whitespace-normalized prefix match) so a check can never be
-    a forbidden command such as ``git commit`` / ``git push`` (§12).
+    a forbidden command such as ``git commit`` / ``git push``.
     """
     joined = " ".join(argv)
     for entry in denied:

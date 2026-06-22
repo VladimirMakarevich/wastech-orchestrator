@@ -1,4 +1,4 @@
-"""Front-matter injection scanner (spec §19.5, §6.2, .agents/rules/security.md).
+"""Front-matter injection scanner (.agents/rules/security.md).
 
 The structural guarantee comes first: task content reaches providers **only as file paths** in
 :class:`~wastech_orchestrator.providers.base.AgentRunRequest` (``task_path``, ``plan_path``, …). No
@@ -18,7 +18,7 @@ rejected rather than silently fixed. The task ``id`` is bound by the strict
 and route overrides are bound to the :class:`~wastech_orchestrator.providers.base.ProviderId` enum,
 so the only free-text non-path front-matter fields (``title``, ``contacts``) cannot designate a
 path. A bare path separator is therefore not a distinct reject here — the "path separator where a
-non-path field is expected" case (§19.5) is already covered by those structural bindings.
+non-path field is expected" case is already covered by those structural bindings.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from typing import Any
 
 from wastech_orchestrator.security.forbidden_args import find_forbidden_args
 
-# Front-matter values must not look like a CLI argument (§19.5). A value beginning with ``-`` is
+# Front-matter values must not look like a CLI argument. A value beginning with ``-`` is
 # handled separately so the reason is specific.
 INJECTION_SUBSTRINGS: tuple[str, ...] = (";", "`", "|", "$(", "\n", "\r")
 

@@ -1,4 +1,4 @@
-"""Tests for the artifact writer (spec §10)."""
+"""Tests for the artifact writer."""
 
 from __future__ import annotations
 

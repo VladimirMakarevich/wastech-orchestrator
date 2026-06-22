@@ -1,4 +1,4 @@
-"""Regression: operator prompt customization can never reach provider argv (backlog §6).
+"""Regression: operator prompt customization can never reach provider argv (backlog).
 
 The rendered prompt only ever travels on the request and is delivered on stdin. These tests prove
 the argv a provider builds is identical no matter what the prompt text is — so no template can

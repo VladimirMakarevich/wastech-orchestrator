@@ -1,4 +1,4 @@
-"""The read-only `preflight` CLI command (spec §6.7).
+"""The read-only `preflight` CLI command.
 
 Drives ``cmd_preflight`` with in-memory providers so the test is deterministic and free of real
 subprocess/CLI concerns (each adapter's real ``preflight()`` is covered by the provider tests). The

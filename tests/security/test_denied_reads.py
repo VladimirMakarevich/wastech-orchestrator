@@ -1,4 +1,4 @@
-"""denied_read_paths enforcement (spec §12.4, §6.1).
+"""denied_read_paths enforcement.
 
 Covers the redaction content-scan (:func:`read_denied_secrets`) and the Claude ``Read(...)`` deny
 pattern builder. The end-to-end "secret never lands in an artifact" assertion lives in the core

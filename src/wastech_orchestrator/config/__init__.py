@@ -1,4 +1,4 @@
-"""Configuration layer: schema (§11), fail-closed loader, and validator.
+"""Configuration layer: schema, fail-closed loader, and validator.
 
 The loader/validator are the config-time half of the "security can't be weakened" invariant
 (.agents/rules/security.md). Loading is an explicit call — no import-time side effects.

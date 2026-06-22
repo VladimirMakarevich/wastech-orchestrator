@@ -67,7 +67,7 @@ def test_non_interactive_codex_only(git_repo: Any, monkeypatch: pytest.MonkeyPat
     assert config_path is not None and config_path.is_file()
     assert config_path == git_repo.clone / ".worc" / "config.yaml"
     # The task lifecycle dirs live at the repo root (tracked audit trail); everything else —
-    # runtime dirs and the rejected-task quarantine — lives under the gitignored .worc/ (§21).
+    # runtime dirs and the rejected-task quarantine — lives under the gitignored .worc/.
     assert (git_repo.clone / "tasks" / "pending").is_dir()
     assert (git_repo.clone / ".worc" / "logs").is_dir()
     assert (git_repo.clone / ".worc" / "tasks" / "rejected").is_dir()

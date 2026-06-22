@@ -1,7 +1,7 @@
-"""Task data model (spec §5, §19.3).
+"""Task data model.
 
 Defines the normalized task shapes and the front-matter schema constants the Task Parser populates.
-The actual parsing, the §19 validation gate, and duplicate-id detection live in the parser/gate
+The actual parsing, the validation gate, and duplicate-id detection live in the parser/gate
 (they need the State Store + ledger); this module fixes only the shapes and the shared id-regex as
 the one source of truth they all share.
 """
@@ -13,12 +13,12 @@ from dataclasses import dataclass, field
 
 from wastech_orchestrator.providers.base import Stage
 
-# A task id is strict and normalized (spec §19.3): a lowercase alphanumeric first char, then up to
+# A task id is strict and normalized: a lowercase alphanumeric first char, then up to
 # 63 of [a-z0-9._-]; no whitespace, no leading dot/separator, 1..64 chars. Invalid ids are rejected,
 # never sanitized (.agents/rules/security.md). Shared source of truth for the model and the parser.
 TASK_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 
-# Front-matter schema (spec §5, §19.3). A task is "clean" (flow-contract §10, PRE.3): it carries
+# Front-matter schema. A task is "clean" (flow-contract, PRE.3): it carries
 # only identity/dispatch fields plus the two sanctioned exceptions — ``stages.<stage>.enabled``
 # (per-task stage skip) and ``auto_merge`` (task-wins). Provider/model/reasoning/decomposition are
 # the flow's job (a node declares ``provider``/``model``/``reasoning``; ``decomposition:`` and the
@@ -41,7 +41,7 @@ REQUIRED_TASK_FIELDS: frozenset[str] = frozenset({"id", "title"})
 
 
 def is_valid_task_id(task_id: str) -> bool:
-    """Return True iff ``task_id`` matches the normalized id format (spec §19.3)."""
+    """Return True iff ``task_id`` matches the normalized id format."""
     return TASK_ID_PATTERN.fullmatch(task_id) is not None
 
 
@@ -60,9 +60,9 @@ class StageParams:
 
 @dataclass(frozen=True)
 class NormalizedTask:
-    """A parsed, normalized task manifest: §5 front matter plus the body Description.
+    """A parsed, normalized task manifest: front matter plus the body Description.
 
-    A "clean" task (flow-contract §10, PRE.3): identity/dispatch only, plus the two sanctioned
+    A "clean" task (flow-contract, PRE.3): identity/dispatch only, plus the two sanctioned
     exceptions (``stages.<stage>.enabled`` skip and ``auto_merge`` task-wins). The flow node owns
     provider/model/reasoning; the flow owns decomposition and the deterministic refinement-skip.
     """

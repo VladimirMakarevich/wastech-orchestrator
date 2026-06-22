@@ -1,4 +1,4 @@
-"""Check resolution — the deterministic pipeline that produces a launchable profile (§4, §5, §11).
+"""Check resolution — the deterministic pipeline that produces a launchable profile.
 
 Orchestrates RepositoryInspector -> CheckCandidateDetector -> (optional AgentCheckDiscovery) ->
 CheckCandidateValidator -> CheckProbeRunner -> ResolvedCheckProfileStore, honoring
@@ -11,7 +11,7 @@ Mode semantics:
   backward-compatible path — the runtime launch/quality split still protects the fix budget).
 * ``deterministic``/``auto``: discover the launchable profile, preferring configured commands when
   they probe launchable; ``auto`` additionally runs the agent fallback when confidence is low. An
-  empty result is ``ready=False`` (stop before any branch — §11).
+  empty result is ``ready=False`` (stop before any branch —).
 * ``disabled``: an explicit zero-check profile with a prominent warning note.
 """
 
@@ -54,13 +54,13 @@ from wastech_orchestrator.providers.process import ProcessResult, run_process
 
 RunProcess = Callable[..., ProcessResult]
 
-# The combined project-owned wrapper check; when launchable it supersedes per-language checks (§17).
+# The combined project-owned wrapper check; when launchable it supersedes per-language checks.
 _WRAPPER_NAME = "checks"
 
 
 class ReResolveReason(StrEnum):
     """Why a mid-task re-resolve was triggered — only ever *infrastructure proof*, never a quality
-    failure (§1.2). Recorded in the profile notes for audit."""
+    failure. Recorded in the profile notes for audit."""
 
     LAUNCH_FAILED = "launch_failed"
     FINGERPRINT_CHANGED = "fingerprint_changed"
@@ -124,7 +124,7 @@ class CheckResolver:
         return profile
 
     def reresolve(self, *, allow_agent: bool, reason: ReResolveReason) -> ResolvedCheckProfile:
-        """Force a fresh resolve (ignoring the cache) because of *infrastructure proof* (§1.2).
+        """Force a fresh resolve (ignoring the cache) because of *infrastructure proof*.
 
         Used only when there is real evidence the command is wrong — a launch failure, a changed
         config/CI fingerprint, or low-confidence detection — never because a check *reported*
@@ -304,7 +304,7 @@ def _select(
 ) -> tuple[list[CheckCandidate], list[ProfileCandidateRecord]]:
     """Pick the top-priority launchable candidate per logical name; a launchable wrapper wins.
 
-    Pinning (§1.2): when a logical name has a CONFIGURED candidate, only a configured candidate may
+    Pinning: when a logical name has a CONFIGURED candidate, only a configured candidate may
     fill that slot — a deliberate operator pin is never silently replaced by a detected fallback. If
     the configured pin does not probe launchable, the name is left unchosen (reported not-ready in
     the records) rather than masked by detection.
@@ -326,7 +326,7 @@ def _select(
         if launchable:
             chosen[name] = launchable[0]
 
-    # A launchable project-owned wrapper supersedes the per-language checks (§17).
+    # A launchable project-owned wrapper supersedes the per-language checks.
     if _WRAPPER_NAME in chosen:
         selected = [chosen[_WRAPPER_NAME]]
     else:

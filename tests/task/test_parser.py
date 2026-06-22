@@ -1,4 +1,4 @@
-"""Unit tests for the task parser (§5, §19.3, §10)."""
+"""Unit tests for the task parser."""
 
 from __future__ import annotations
 

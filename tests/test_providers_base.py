@@ -30,7 +30,7 @@ def test_provider_ids_are_canonical() -> None:
 
 
 def test_quality_errors_are_not_fallback_eligible() -> None:
-    # Quality/configuration errors must not trigger a provider switch (spec §7.3).
+    # Quality/configuration errors must not trigger a provider switch.
     for ec in (ErrorClass.TASK_FAILURE, ErrorClass.CONFIGURATION_ERROR):
         assert ec not in FALLBACK_ELIGIBLE
 

@@ -1,10 +1,10 @@
-"""Partial-change snapshot contract (spec §7.4).
+"""Partial-change snapshot contract.
 
 Defines *only the data and the protocol* the Router and Core exchange around a stage run — the
 actual git/snapshot execution is the Git Manager + Core (P5). Capturing this contract now lets P5
 wire real git behind it without reshaping the Router.
 
-The rule it encodes (§7.4): when the primary provider fails with an **infrastructure** error *after*
+The rule it encodes: when the primary provider fails with an **infrastructure** error *after*
 files were changed, the orchestrator does **not** roll back automatically; instead it snapshots the
 post-attempt state and hands the fallback the current diff plus a "partial attempt" note. There is
 deliberately no rollback operation on this protocol — its absence is the no-auto-rollback guarantee.
@@ -18,7 +18,7 @@ from typing import Protocol, runtime_checkable
 
 @dataclass(frozen=True)
 class WorkingTreeSnapshot:
-    """A point-in-time view of the target working tree (the §7.4 "before"/"after" capture)."""
+    """A point-in-time view of the target working tree (the "before"/"after" capture)."""
 
     commit_sha: str
     porcelain_status: str  # output of `git status --porcelain`
@@ -31,7 +31,7 @@ class PartialChange:
     """Produced after an infra failure that changed files; consumed by the fallback attempt.
 
     The Router sets the fallback request's ``diff_path`` to :attr:`diff_path`; ``note`` is the
-    "partial attempt" message P5 weaves into the fallback's prompt context (§6, §7.4).
+    "partial attempt" message P5 weaves into the fallback's prompt context.
     """
 
     before: WorkingTreeSnapshot

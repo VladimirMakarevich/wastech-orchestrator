@@ -1,4 +1,4 @@
-"""Route resolution: node-based provider selection + global-primary fallback (§4.2, §5, PRE.1)."""
+"""Route resolution: node-based provider selection + global-primary fallback (PRE.1)."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def test_node_provider_equal_to_primary_has_no_fallback(router: AgentRouter) -> 
 def test_node_provider_not_allowlisted_is_rejected(
     config: OrchestratorConfig, make_fake_provider: Callable[..., object]
 ) -> None:
-    # Shrink the allowlist to claude-only; a node pinned to codex must fail closed (§4.2, PRE.1a).
+    # Shrink the allowlist to claude-only; a node pinned to codex must fail closed (PRE.1a).
     cfg = replace(config, agents=replace(config.agents, allowed=(ProviderId.CLAUDE,)))
     providers = {pid: make_fake_provider(pid) for pid in (ProviderId.CODEX, ProviderId.CLAUDE)}
     router = AgentRouter(cfg, providers)

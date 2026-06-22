@@ -1,4 +1,4 @@
-"""Unit tests for the Codex JSONL event parser (spec §4.4)."""
+"""Unit tests for the Codex JSONL event parser."""
 
 from __future__ import annotations
 

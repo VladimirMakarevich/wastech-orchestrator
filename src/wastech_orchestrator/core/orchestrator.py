@@ -1,10 +1,10 @@
-"""The deterministic Orchestrator Core pipeline (spec §5, §6, §8).
+"""The deterministic Orchestrator Core pipeline.
 
 Drives one task end to end: validation gate → slot → branch → refinement (deterministic skip) →
 planning (+ decomposition) → per-unit [implementation → testing → review → fixing] → summary →
 publishing → terminal cleanup → ledger. The Core **never** builds a CLI command — it calls only the
 Agent Router for agent stages, the Check Runner for ``testing``, and the Git Manager for everything
-that touches git. Context is handed to agents **only as artifact file paths** on the request (§6).
+that touches git. Context is handed to agents **only as artifact file paths** on the request.
 """
 
 from __future__ import annotations
@@ -144,7 +144,7 @@ def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-# Map a task-level artifact filename to its registry ``kind`` (§10). Unknown names fall back to the
+# Map a task-level artifact filename to its registry ``kind``. Unknown names fall back to the
 # filename so registration is always meaningful even if a new artifact is added.
 _ARTIFACT_KINDS: dict[str, str] = {
     "task.enriched.md": "enriched",
@@ -156,7 +156,7 @@ _ARTIFACT_KINDS: dict[str, str] = {
 
 @dataclass(frozen=True)
 class RerunPlan:
-    """The reconciled facts + refusals for a ``rerun``/``rerun --continue`` (read-only; §rerun)."""
+    """The reconciled facts + refusals for a ``rerun``/``rerun --continue`` (read-only)."""
 
     task_id: str
     continue_mode: bool
@@ -175,7 +175,7 @@ class RerunPlan:
 
 @dataclass(frozen=True)
 class FinalizePlan:
-    """The reconciled facts + warnings/refusals for a ``finalize`` (read-only; §finalize)."""
+    """The reconciled facts + warnings/refusals for a ``finalize`` (read-only)."""
 
     task_id: str
     declared: Status
@@ -215,7 +215,7 @@ def _artifact_kind(name: str) -> str:
 
 def effective_skip(task: NormalizedTask) -> frozenset[Stage]:
     """The stages skipped for ``task`` — its own ``stages.<stage>.enabled: false`` overrides
-    (per-task stage-skip control; flow-contract §10 bounded exception).
+    (per-task stage-skip control; flow-contract bounded exception).
 
     Validation has already guaranteed every member is in ``SKIPPABLE_STAGES`` and that any
     ``review`` skip is permitted (``agents.allow_review_skip``), so the orchestrator can trust this
@@ -235,7 +235,7 @@ class PipelineResult:
 
 
 class SlotBusyError(Exception):
-    """Raised when the single processing slot is already held by another active task (§8.2)."""
+    """Raised when the single processing slot is already held by another active task."""
 
 
 class PipelineFailed(Exception):
@@ -264,9 +264,9 @@ class _Pipeline:
     branch: str = ""
     slug: str = ""
     check_profile: ResolvedCheckProfile | None = None  # resolved at preflight (before any branch)
-    reresolved_once: bool = False  # mid-task check re-resolve is bounded to once per task (§1.2)
+    reresolved_once: bool = False  # mid-task check re-resolve is bounded to once per task
     # Repo skill inventory scanned at task start; planning's chosen subset is surfaced to downstream
-    # stages as read-only reference paths (§2.1). Re-derived per run; `selected_skills` is set when
+    # stages as read-only reference paths. Re-derived per run; `selected_skills` is set when
     # the planning agent runs this process and is persisted to `selected_skills.json`, so a resume
     # past planning restores it (see `_persist_selected_skills` / `_restore_engine_inputs`).
     skill_inventory: SkillInventory = field(default_factory=SkillInventory)
@@ -277,7 +277,7 @@ class _Pipeline:
 
 
 class Orchestrator:
-    """The single-slot deterministic Core (§8.2). One instance drives one task at a time."""
+    """The single-slot deterministic Core. One instance drives one task at a time."""
 
     def __init__(
         self,
@@ -308,9 +308,9 @@ class Orchestrator:
         self._monotonic = monotonic
         self._notifier: Notifier = notifier if notifier is not None else NullNotifier()
         # The check resolver runs a deterministic preflight before any branch (automatic check
-        # discovery §11). ``None`` skips it — the Check Runner then uses ``checks.commands``.
+        # discovery). ``None`` skips it — the Check Runner then uses ``checks.commands``.
         self._resolver = resolver
-        # Repo skill inventory scanner (§2.1). Defaults to the target repo clone's `.claude/skills`.
+        # Repo skill inventory scanner. Defaults to the target repo clone's `.claude/skills`.
         self._skill_scanner = skill_scanner or self._default_skill_scanner()
         # Per-id attempt number stamped onto the next ledger record, set by ``rerun``/``continue``.
         self._rerun_attempt: dict[str, int] = {}
@@ -349,7 +349,7 @@ class Orchestrator:
         completeness = result.completeness or Completeness.NEEDS_ENRICHMENT
 
         if not self.acquire_slot(task.id):
-            raise SlotBusyError(f"another task is active; {task.id} must wait (§8.2)")
+            raise SlotBusyError(f"another task is active; {task.id} must wait")
 
         self._register_task(task, task_file, result)
         pipeline = _Pipeline(
@@ -373,7 +373,7 @@ class Orchestrator:
             return self._fail(pipeline, str(exc))
 
     def acquire_slot(self, task_id: str) -> bool:
-        """True iff no *other* task currently owns the processing slot (§8.2)."""
+        """True iff no *other* task currently owns the processing slot."""
         return not any(t.task_id != task_id for t in self._store.find_active_tasks())
 
     # --- rerun (operator-driven re-attempt of a terminal task) ----------------------------
@@ -455,7 +455,7 @@ class Orchestrator:
     def rerun_task(
         self, task_id: str, *, source_path: str, force_reset_remote: bool = False
     ) -> PipelineResult:
-        """Fresh attempt of a terminal task from the *current* ``base_branch`` (§rerun).
+        """Fresh attempt of a terminal task from the *current* ``base_branch``.
 
         Archives the prior attempt's artifacts, resets the branch to base, clears the per-attempt
         state, then drives the full pipeline via ``run_task`` (the gate admits the id once). The
@@ -475,7 +475,7 @@ class Orchestrator:
         return self.run_task(source_path)
 
     def continue_task(self, task_id: str) -> PipelineResult:
-        """Fix-and-continue: revive a terminal task at the stage it failed and resume it (§rerun).
+        """Fix-and-continue: revive a terminal task at the stage it failed and resume it.
 
         Reuses the existing branch and all prior work; only the terminal markers are cleared and
         any un-answered HITL prompt is reset so the re-entered stage asks fresh. The whole pipeline
@@ -630,7 +630,7 @@ class Orchestrator:
         return PipelineResult(task_id=task_id, final_status=declared, pr_url=pr_url)
 
     def refresh_repo(self) -> None:
-        """Best-effort fetch/pull of ``base_branch`` so git-pushed tasks become visible (§8.3).
+        """Best-effort fetch/pull of ``base_branch`` so git-pushed tasks become visible.
 
         Called by the ``watch`` loop between ticks. Delegates to the Git Manager, which no-ops
         unless the working copy is on ``base_branch`` (the slot is free after terminal cleanup), so
@@ -639,7 +639,7 @@ class Orchestrator:
         self._git.refresh_base()
 
     def resume(self) -> PipelineResult | None:
-        """Reconcile persisted state on startup and resume the single unfinished task (§13).
+        """Reconcile persisted state on startup and resume the single unfinished task.
 
         Returns the terminal result of the resumed task, or ``None`` when the slot is free (no
         active task and no interrupted cleanup) so a caller may pick a pending task.
@@ -655,7 +655,7 @@ class Orchestrator:
         return self._resume_task(plan)
 
     def _resume_manual(self, plan: RecoveryPlan) -> PipelineResult:
-        """Mark every ambiguously-active task ``manual_action_required`` and record it (§13)."""
+        """Mark every ambiguously-active task ``manual_action_required`` and record it."""
         for task_id in plan.manual_task_ids:
             self._store.set_status(task_id, Status.MANUAL_ACTION_REQUIRED)
             self._store.update_task(
@@ -683,7 +683,7 @@ class Orchestrator:
         return PipelineResult(task_id=first, final_status=Status.MANUAL_ACTION_REQUIRED)
 
     def _resume_cleanup(self, task_id: str | None) -> PipelineResult | None:
-        """Finish an interrupted terminal cleanup: checkout base once, then ledger (§8.3)."""
+        """Finish an interrupted terminal cleanup: checkout base once, then ledger."""
         if task_id is None:
             return None
         row = self._store.get_task(task_id)
@@ -718,7 +718,7 @@ class Orchestrator:
         return PipelineResult(task_id=task_id, final_status=row.status)
 
     def _resume_task(self, plan: RecoveryPlan) -> PipelineResult:
-        """Rebuild the context for the one active task and continue it idempotently (§13)."""
+        """Rebuild the context for the one active task and continue it idempotently."""
         assert plan.task_id is not None
         row = self._store.get_task(plan.task_id)
         assert row is not None
@@ -726,7 +726,7 @@ class Orchestrator:
             task = load_normalized(self._artifacts_root, plan.task_id)
         except (json.JSONDecodeError, OSError, KeyError, ValueError) as exc:
             # A corrupt/truncated/missing normalized manifest can't be resumed — fail closed to
-            # manual rather than crashing out of resume() (§13). The persisted TaskRow still carries
+            # manual rather than crashing out of resume(). The persisted TaskRow still carries
             # enough (id/title/branch/slug/status) to run terminal cleanup + ledger.
             return self._go_terminal(
                 self._degraded_pipeline(row),
@@ -756,7 +756,7 @@ class Orchestrator:
 
     def _degraded_pipeline(self, row: TaskRow) -> _Pipeline:
         """A minimal pipeline context for a task whose normalized manifest can't be read, so the
-        terminal handler (cleanup + ledger + notify) still runs without the manifest (§13). Counters
+        terminal handler (cleanup + ledger + notify) still runs without the manifest. Counters
         and decomposition come from the controlled SQLite row, not the corrupt on-disk artifact."""
         return _Pipeline(
             task=NormalizedTask(id=row.task_id, title=row.title, description=""),
@@ -769,7 +769,7 @@ class Orchestrator:
         )
 
     def _resume_via_engine(self, p: _Pipeline) -> PipelineResult:
-        """Resume the engine from the persisted checkpoint (node-based recovery, §13).
+        """Resume the engine from the persisted checkpoint (node-based recovery).
 
         Hydrates the :class:`FlowRunState` from ``node_runs`` + the ``tasks`` checkpoint and
         continues from ``current_node`` (the decomposed re-entry is handled in :meth:`_run_phases`).
@@ -851,7 +851,7 @@ class Orchestrator:
         budget) — raises :class:`PipelineFailed` (caught by ``run_task`` → terminal ``failed``).
         Resolution runs before branch prep, so either failure happens before any side effect; on
         resume it re-validates against the live config, so a flow made unsafe by a config change is
-        rejected rather than run (the recovery ceiling never widens, security-ceiling §7).
+        rejected rather than run (the recovery ceiling never widens, security-ceiling).
         """
         try:
             return self._flow_registry.resolve(p.task.task_type)
@@ -1036,7 +1036,7 @@ class Orchestrator:
         inputs: NodeInputs,
     ) -> FlowRunResult:
         """Run the sub_flow region once per subtask (commit each, reset per-subtask counters), then
-        the post-region phase. A subtask with a verified commit is never re-run (recovery, §13).
+        the post-region phase. A subtask with a verified commit is never re-run (recovery).
 
         Before each subtask's region runs, the active immutable spec is injected as
         ``inputs.subtask_spec_path`` so the edit nodes' ``{subtask_spec_path}`` (plus
@@ -1116,7 +1116,7 @@ class Orchestrator:
     ) -> Callable[[str], bool]:
         """Resolve a flow ``when`` fact (``derived.*`` / ``config.*``) to a boolean."""
         # Refinement-skip is deterministic — driven purely by completeness classification, never a
-        # task flag (PRE.3): a ``complete`` task skips refinement, anything else runs it (§5).
+        # task flag (PRE.3): a ``complete`` task skips refinement, anything else runs it.
         needs_refinement = completeness is not Completeness.COMPLETE
         # External research (deep_research) is available iff the flow grants network — there is no
         # separate config knob (config.yaml stays infra-only): an optional node's availability is a
@@ -1225,7 +1225,7 @@ class Orchestrator:
         inputs.skill_paths = tuple(ref.path for ref in selection.refs)
         self._persist_selected_skills(p, selection.refs)
         existing = Path(plan_path).read_text(encoding="utf-8")
-        # §2.2 dedup: flag selected-skill sections whose heading already appears in the plan so the
+        # dedup: flag selected-skill sections whose heading already appears in the plan so the
         # plan's own instructions take precedence (the skill stays referenced by path — nothing is
         # dropped). Skill bodies are read denied-aware/bounded through the inventory scanner.
         bodies = [
@@ -1238,7 +1238,7 @@ class Orchestrator:
             Path(plan_path).write_text(existing + section, encoding="utf-8")
 
     def _persist_selected_skills(self, p: _Pipeline, refs: tuple[SkillRef, ...]) -> None:
-        """Persist the planning-selected skills so a resume past planning can restore them (§2.1).
+        """Persist the planning-selected skills so a resume past planning can restore them.
 
         ``p.selected_skills`` is in-memory only (set when planning runs this process), so without
         this a resumed implementation/fixing node would lose ``{skills_path}`` /
@@ -1270,14 +1270,14 @@ class Orchestrator:
         return self._fail(p, result.limit_name or "flow run failed")
 
     def _check_preflight(self, p: _Pipeline) -> None:
-        """Resolve the launchable check profile at task start, before any branch (§11, §1.2).
+        """Resolve the launchable check profile at task start, before any branch.
 
         Skipped when no resolver is wired (legacy behavior: the Check Runner uses
         ``checks.commands``). A non-ready profile raises :class:`PipelineFailed` — the task fails
         before a branch is created and without consuming any fix iteration. With
         ``checks.discovery.run_at_task_start`` (default on), ``auto`` mode may run the opt-in agent
         fallback here (the resolver still gates it on mode + agent_fallback + a configured model). A
-        *changed* set of check commands goes through the sensitive-change approval gate (§1.2).
+        *changed* set of check commands goes through the sensitive-change approval gate.
         """
         if self._resolver is None:
             return
@@ -1304,7 +1304,7 @@ class Orchestrator:
     def _gate_check_commands(
         self, p: _Pipeline, profile: ResolvedCheckProfile, prev_approved_sig: str
     ) -> ResolvedCheckProfile:
-        """Approve the *set* of check commands when it changed (§1.2). Returns an approved profile.
+        """Approve the *set* of check commands when it changed. Returns an approved profile.
 
         First-ever resolution for a repo is auto-approved and recorded (approval is for a *change*,
         not for the first ever set); an unchanged set is reused; a changed set requires human
@@ -1323,7 +1323,7 @@ class Orchestrator:
             return self._stamp_check_approval(
                 profile, "bootstrap"
             )  # first-ever → record, no prompt
-        # The command set CHANGED from a previously approved set — a sensitive change (§1.2).
+        # The command set CHANGED from a previously approved set — a sensitive change.
         if not self._config.checks.discovery.approve_command_changes:
             self._log(p.task.id).warning(
                 "check command set changed; approval gate disabled by config",
@@ -1339,7 +1339,7 @@ class Orchestrator:
     def _stamp_check_approval(
         self, profile: ResolvedCheckProfile, interaction: str
     ) -> ResolvedCheckProfile:
-        """Record the approval on the profile and persist it (the audit trail, §1.2)."""
+        """Record the approval on the profile and persist it (the audit trail)."""
         approved = replace(
             profile,
             approved=True,
@@ -1351,7 +1351,7 @@ class Orchestrator:
         return approved
 
     def _ask_check_command_approval(self, p: _Pipeline, profile: ResolvedCheckProfile) -> bool:
-        """Ask the human to approve a changed check-command set; fail-closed (§1.2).
+        """Ask the human to approve a changed check-command set; fail-closed.
 
         Reuses the durable HITL interaction machinery under a discovery-specific artifact. On a
         restart it resumes a still-waiting interaction for the *same* command set; a denial,
@@ -1410,7 +1410,7 @@ class Orchestrator:
         return result.approved is True
 
     def _reresolve_on_launch_failure(self, p: _Pipeline) -> bool:
-        """Re-resolve the check commands once after a *launch* failure (§1.2).
+        """Re-resolve the check commands once after a *launch* failure.
 
         Returns ``True`` when a new, different, ready profile is now active (so checks can be
         re-run), else ``False`` (the caller then fails the task). Bounded to once per task. Only an
@@ -1460,7 +1460,7 @@ class Orchestrator:
     def _render_skill_section(
         self, selection: SkillSelection, dedup: tuple[SkillDedupEntry, ...]
     ) -> str:
-        """Render the deterministic, auditable plan.md skills block (§2.1/§2.2)."""
+        """Render the deterministic, auditable plan.md skills block."""
         if not (selection.refs or selection.dropped_unknown or selection.dropped_excluded):
             return ""
         lines = ["", "## Skills (planning-selected, read-only references)", ""]
@@ -1542,7 +1542,7 @@ class Orchestrator:
         return str(task_artifact_dir(self._artifacts_root, p.task.id) / "summary.md")
 
     def _summary_md_body(self, p: _Pipeline) -> str:
-        """The human-readable summary text; falls back to a deterministic minimal summary (§5.2)."""
+        """The human-readable summary text; falls back to a deterministic minimal summary."""
         md_path = task_artifact_dir(self._artifacts_root, p.task.id) / "summary.md"
         if not md_path.exists():
             write_minimal_summary(
@@ -1556,7 +1556,7 @@ class Orchestrator:
         return md_path.read_text(encoding="utf-8") if md_path.exists() else (p.task.title + "\n")
 
     def _task_ref(self, p: _Pipeline) -> str | None:
-        """A short sibling-relative pointer to the task file for the committed summary (§5.2).
+        """A short sibling-relative pointer to the task file for the committed summary.
 
         The committed ``<id>.summary.md`` lives next to the moved ``<id>.md`` task file, so the
         basename is the correct, move-independent reference. ``None`` for a synthetic ``run`` path.
@@ -1566,7 +1566,7 @@ class Orchestrator:
     def _finalize_task_artifacts(self, p: _Pipeline, final: Status) -> Path | None:
         """Move the task into its lifecycle folder; write the committed `<id>.summary.md` alongside.
 
-        Runs **before** the commit so both land in the task (audit) commit (§6, §21.3). Returns the
+        Runs **before** the commit so both land in the task (audit) commit. Returns the
         path to the committed `summary.md`, or ``None`` when there is no on-disk task file (e.g. a
         synthetic ``run`` path). ``summary.json`` and the rest of ``logs/`` are never committed.
         """
@@ -1587,7 +1587,7 @@ class Orchestrator:
     def _fail(self, p: _Pipeline, error: str) -> PipelineResult:
         """Terminal ``failed``. When a task branch exists, finalize like a success — move the task
         to ``tasks/failed/``, write its ``summary.md``, commit (code + task) and push — so the
-        failed attempt and its summary are stored in git (§6). No PR is opened for a failure. When
+        failed attempt and its summary are stored in git. No PR is opened for a failure. When
         no branch was created yet (e.g. an isolation-preflight failure), nothing is published.
 
         The git operations are best-effort: a failed task must still reach a terminal state even if
@@ -1618,9 +1618,9 @@ class Orchestrator:
         already_moved: bool = False,
         merge_outcome: str | None = None,
     ) -> PipelineResult:
-        """Run terminal cleanup, set the final status, append exactly one ledger record (§8.3).
+        """Run terminal cleanup, set the final status, append exactly one ledger record.
 
-        ``already_moved`` is set when the task file was moved + committed during finalize (§6); the
+        ``already_moved`` is set when the task file was moved + committed during finalize; the
         move is then complete on the task branch, so this must not re-move it on ``base_branch``
         after the cleanup checkout.
         """
@@ -1629,7 +1629,7 @@ class Orchestrator:
             p, "terminal cleanup", lambda: self._git.terminal_cleanup(p.task.id)
         )
         if not cleanup.safe and status is Status.DONE:
-            # Publishing finished but the working copy could not be safely restored → manual (§8.3).
+            # Publishing finished but the working copy could not be safely restored → manual.
             final = Status.MANUAL_ACTION_REQUIRED
         # Record the terminal-cleanup outcome and the reason this task stopped (when applicable).
         last_error = cleanup.error or manual_reason
@@ -1667,18 +1667,18 @@ class Orchestrator:
         return PipelineResult(task_id=p.task.id, final_status=final, pr_url=pr_url)
 
     def _move_task_file(self, p: _Pipeline, final: Status) -> Path | None:
-        """Move the task file to its lifecycle folder; see _relocate_task_file (§20.2)."""
+        """Move the task file to its lifecycle folder; see _relocate_task_file."""
         return self._relocate_task_file(p.task_file, p.task.id, final)
 
     def _relocate_task_file(
         self, task_file: str | None, task_id: str, final: Status
     ) -> Path | None:
-        """Move a task file into its lifecycle folder (``tasks/done`` / ``tasks/failed``, §20.2).
+        """Move a task file into its lifecycle folder (``tasks/done`` / ``tasks/failed``).
 
         Pipeline-free (used by both the pipeline's `_move_task_file` and the operator `finalize`).
         ``done`` and ``failed`` move; ``manual_action_required`` stays put for the operator to
-        resolve (§8.3) — so a finalize `--as abandoned` leaves the file where it is. A §19 gate
-        reject is quarantined separately (§19.4). Idempotent: returns the destination whether it
+        resolve — so a finalize `--as abandoned` leaves the file where it is. A gate
+        reject is quarantined separately. Idempotent: returns the destination whether it
         moved now or was already in place; returns ``None`` when there is nothing to do.
         """
         folder_name = {Status.DONE: "done", Status.FAILED: "failed"}.get(final)
@@ -1705,7 +1705,7 @@ class Orchestrator:
         return dest
 
     def _reject(self, task_file: str, result: ValidationResult) -> PipelineResult:
-        """Handle a §19 Phase-A reject: failed, quarantine, report, ledger — no branch (§19.4)."""
+        """Handle a Phase-A reject: failed, quarantine, report, ledger — no branch."""
         task_id = Path(task_file).stem
         reason = result.reason.value if result.reason else "unknown"
         self._log(task_id).info("validation rejected", extra={"reason": reason})
@@ -1773,7 +1773,7 @@ class Orchestrator:
         raise ManualActionRequired(f"{label} human input failed: {failure}")
 
     def _resolved_checks(self, p: _Pipeline) -> tuple[ResolvedCheck, ...] | None:
-        """The resolved profile's checks; on resume, fall back to the cached profile (§13)."""
+        """The resolved profile's checks; on resume, fall back to the cached profile."""
         if p.check_profile is not None:
             return p.check_profile.checks
         if self._resolver is None:
@@ -1787,21 +1787,21 @@ class Orchestrator:
     # --- artifact + logging helpers -------------------------------------------------------
 
     def _prompt_secrets(self) -> tuple[str, ...]:
-        """Denied-read file secrets to scrub from the rendered prompt before storage (§6)."""
+        """Denied-read file secrets to scrub from the rendered prompt before storage."""
         return read_denied_secrets(
             self._config.repo.local_path, self._config.security.denied_read_paths
         )
 
     def _log(self, task_id: str) -> logging.LoggerAdapter[logging.Logger]:
-        """A task-scoped structured logger (§6.6): every record carries ``task_id``."""
+        """A task-scoped structured logger: every record carries ``task_id``."""
         return bind(_LOG, task_id=task_id)
 
     def _register_artifact(self, task_id: str, kind: str, path: str | None) -> None:
-        """Register a durable §10 artifact in SQLite with a sha256 checksum (best-effort, §10).
+        """Register a durable artifact in SQLite with a sha256 checksum (best-effort).
 
         Idempotent (the store upserts on ``(task_id, kind, path)``); a missing file is skipped and
         registration never raises into the terminal path. Requires the ``tasks`` row to exist (FK),
-        so a §19-rejected task — which has no row — is not registered here.
+        so a-rejected task — which has no row — is not registered here.
         """
         if not path or not Path(path).exists():
             return
@@ -1923,7 +1923,7 @@ class Orchestrator:
         reason: str | None,
         contacts: tuple[str, ...] = (),
     ) -> None:
-        """Best-effort terminal notification (§4.7). Never raises and never alters the outcome."""
+        """Best-effort terminal notification. Never raises and never alters the outcome."""
         try:
             self._notifier.send_notification(
                 task_id=task_id,
@@ -2014,7 +2014,7 @@ def build_orchestrator(
     ledger (``<artifacts_root>/logs/completed.jsonl``), Git Manager, Check Runner, loop controller,
     and validation gate. The Core depends only on these interfaces — never on a provider directly.
 
-    ``is_recovery_rerun`` is threaded into the §19 gate so the ``rerun`` command can admit exactly
+    ``is_recovery_rerun`` is threaded into the gate so the ``rerun`` command can admit exactly
     the re-run id past the duplicate-id check (scoped to one id; every other gate check still runs).
     """
     root = Path(artifacts_root)
@@ -2032,7 +2032,7 @@ def build_orchestrator(
     )
     checks = CheckRunner(config, heartbeat_seconds=heartbeat_seconds)
     # Agent-assisted discovery is opt-in: build_discovery returns None unless agent_fallback + a
-    # cheap model are configured, so default runs stay deterministic (§1.2).
+    # cheap model are configured, so default runs stay deterministic.
     discovery = build_discovery(config, providers, str(root))
     resolver = CheckResolver(
         config, repo_root=config.repo.local_path, artifacts_root=str(root), discovery=discovery

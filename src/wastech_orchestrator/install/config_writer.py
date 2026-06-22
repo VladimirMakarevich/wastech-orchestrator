@@ -1,4 +1,4 @@
-"""Generate a ``config.yaml`` from the installer's resolved settings (spec §11).
+"""Generate a ``config.yaml`` from the installer's resolved settings.
 
 Builds a plain dict mirroring the packaged ``config.example.yaml`` — only the selected providers,
 absolute native paths, exactly one global ``primary`` provider, and **immutable safe security
@@ -41,7 +41,7 @@ class InstallSpec:
     create_pull_request: bool
     auto_mode: bool
     # ``configured`` when the operator supplied/confirmed explicit checks; ``auto`` when none were
-    # found, so discovery resolves them at preflight/runtime (automatic check discovery §9).
+    # found, so discovery resolves them at preflight/runtime (automatic check discovery).
     discovery_mode: str = "configured"
 
 
@@ -133,7 +133,7 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "auto_merge_wait_for_checks": False,
             "footprint": {
                 # The task file + its <id>.summary.md are audit-committed in the repo under tasks/;
-                # all other runtime artifacts live under the gitignored .worc/ home (§21).
+                # all other runtime artifacts live under the gitignored .worc/ home.
                 "audit_commit_message": "chore(orchestrator): audit trail for {task_id}",
                 "audit_on_branch": "task",
             },
@@ -154,7 +154,7 @@ def render(mapping: dict[str, Any]) -> str:
 
 
 def build_and_validate(spec: InstallSpec) -> str:
-    """Render the config, then fail-closed verify it loads and passes §11/§21.4 before returning.
+    """Render the config, then fail-closed verify it loads and passes before returning.
 
     Raises :class:`~wastech_orchestrator.config.loader.ConfigError` if the generated config is
     structurally invalid or violates a semantic rule — a defensive guard against a generator bug;

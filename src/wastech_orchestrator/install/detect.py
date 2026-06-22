@@ -7,7 +7,7 @@ on ``PATH``; and a sensible default ``checks`` list inferred from the repo's eco
 Everything here is **read-only** and operator-side. Git is launched through the shared safe process
 runner (:func:`~wastech_orchestrator.providers.process.run_process`) — an **argv list, never a shell
 string**, with a mandatory timeout — so the no-shell-interpolation invariant holds at every call
-site (spec §12.5). Unlike sandboxed *agent* runs, these trusted, network-free probes run with the
+site. Unlike sandboxed *agent* runs, these trusted, network-free probes run with the
 operator's own environment.
 """
 
@@ -28,7 +28,7 @@ _GIT_TIMEOUT_SECONDS = 30
 
 @dataclass(frozen=True)
 class GitInfo:
-    """What ``install`` needs to know about the bound repository (spec §11 repo/footprint)."""
+    """What ``install`` needs to know about the bound repository (repo/footprint)."""
 
     root: Path
     origin_url: str | None

@@ -1,4 +1,4 @@
-"""Validator: every §11/§21.4 reject path, including the global-primary rule (PRE.1)."""
+"""Validator: every reject path, including the global-primary rule (PRE.1)."""
 
 from __future__ import annotations
 

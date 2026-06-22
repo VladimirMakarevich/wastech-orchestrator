@@ -2,7 +2,7 @@
 
 Two scenarios run the **real** Codex/Claude adapters over the deterministic fake CLI (building on
 the P2/P3 harness) to prove end-to-end wiring: a successful infra-fallback, and fallback denied on a
-quality failure. The third — an infra failure after files changed — asserts the §7.4 contract on the
+quality failure. The third — an infra failure after files changed — asserts the contract on the
 request the router hands the fallback, so it uses recording in-memory providers (the diff-passing is
 a router/Core data-exchange concern, best observed on the ``AgentRunRequest`` itself).
 """
@@ -128,7 +128,7 @@ def test_infra_failure_after_changes_hands_diff_to_fallback(
     make_request: Callable[..., AgentRunRequest],
     tmp_path: Path,
 ) -> None:
-    # §7.4: an infra failure that changed files is not rolled back; the fallback gets the current
+    #: an infra failure that changed files is not rolled back; the fallback gets the current
     # diff. The snapshot hook reports a partial change; assert the fallback request gets it.
     diff_path = str(tmp_path / "partial.diff")
     snap = WorkingTreeSnapshot(

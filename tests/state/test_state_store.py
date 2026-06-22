@@ -1,4 +1,4 @@
-"""Unit tests for the §9 SQLite State Store."""
+"""Unit tests for the SQLite State Store."""
 
 from __future__ import annotations
 
@@ -232,7 +232,7 @@ def test_latest_failed_check_log_is_scoped_to_subtask(store: StateStore) -> None
 
 
 def test_artifact_registration_is_idempotent(store: StateStore) -> None:
-    # Re-registering the same (task_id, kind, path) updates the checksum, never duplicates (§13).
+    # Re-registering the same (task_id, kind, path) updates the checksum, never duplicates.
     store.insert_task(_new_task())
     path = "logs/task-001/plan.md"
     store.register_artifact(ArtifactRow(task_id="task-001", kind="plan", path=path, checksum="aaa"))
@@ -343,7 +343,7 @@ def test_subtask_planning_insert_is_idempotent_without_reopening_committed_work(
 
 
 def test_no_secret_columns_in_schema(store: StateStore) -> None:
-    # §9/§12.6: no secret/token/env columns anywhere in the schema.
+    #: no secret/token/env columns anywhere in the schema.
     cur = store._conn.execute(  # noqa: SLF001
         "SELECT name FROM sqlite_master WHERE type='table'"
     )

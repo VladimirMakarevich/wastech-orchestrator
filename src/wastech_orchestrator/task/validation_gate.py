@@ -1,17 +1,17 @@
-"""Validation gate (spec §19).
+"""Validation gate.
 
 Runs on ``new -> validated``, **before** the processing slot is acquired and before any
 branch/provider. Two phases:
 
-* **Phase A — structural, hard reject** (§19.2): deterministic, no agent. Each failure maps to a
+* **Phase A — structural, hard reject**: deterministic, no agent. Each failure maps to a
   machine-readable :class:`ValidationReason`; the **first** failure short-circuits. A Phase-A
   failure is terminal ``failed``: the task file moves ``processing/ -> tasks/rejected/`` and the
   only artifact written is ``validation_report.json`` — **no branch is ever created**.
-* **Phase B — semantic completeness** (§19.1): never rejects. Classifies ``complete`` vs.
-  ``needs_enrichment`` to feed the deterministic refinement-skip decision (§5). Missing acceptance
+* **Phase B — semantic completeness**: never rejects. Classifies ``complete`` vs.
+  ``needs_enrichment`` to feed the deterministic refinement-skip decision. Missing acceptance
   criteria/constraints is **not** a reject.
 
-Task content reaches providers only as file paths (§19.5), so a task field can never become a CLI
+Task content reaches providers only as file paths, so a task field can never become a CLI
 flag — the front-matter injection scan here is belt-and-braces on top of that structural guarantee.
 """
 
@@ -45,12 +45,12 @@ from wastech_orchestrator.task.parser import (
 
 VALIDATION_REPORT_FILENAME = "validation_report.json"
 
-# Characters allowed alongside printable text (everything else counts as a control char, §19.2).
+# Characters allowed alongside printable text (everything else counts as a control char).
 _ALLOWED_CONTROL = {"\t", "\n", "\r"}
 
 
 class ValidationReason(StrEnum):
-    """The Phase-A structural reject reasons (§19.2). Canonical machine-readable strings."""
+    """The Phase-A structural reject reasons. Canonical machine-readable strings."""
 
     FILE_TOO_LARGE = "file_too_large"
     NOT_UTF8 = "not_utf8"
@@ -69,7 +69,7 @@ class ValidationReason(StrEnum):
 
 
 class Completeness(StrEnum):
-    """Phase-B classification feeding the refinement-skip decision (§5, §19.1)."""
+    """Phase-B classification feeding the refinement-skip decision."""
 
     COMPLETE = "complete"
     NEEDS_ENRICHMENT = "needs_enrichment"
@@ -98,7 +98,7 @@ _STAGE_BY_KEY = {stage.value: stage for stage in Stage}
 
 
 class ValidationGate:
-    """Applies the §19 gate. Dependencies are injected so the gate stays pure and testable."""
+    """Applies the gate. Dependencies are injected so the gate stays pure and testable."""
 
     def __init__(
         self,
@@ -182,16 +182,16 @@ class ValidationGate:
     def _validate_fields(
         self, frontmatter: Mapping[str, Any], body: str
     ) -> tuple[_Reject | None, NormalizedTask | None]:
-        # unknown_top_level_field — fail-closed (§19.3).
+        # unknown_top_level_field — fail-closed.
         for key in frontmatter:
             if key not in ALLOWED_TASK_KEYS:
                 return _rej(ValidationReason.UNKNOWN_TOP_LEVEL_FIELD, f"key {key!r}")
 
-        # The Description *section* must be non-empty (§19.3); the full body becomes the agent
+        # The Description *section* must be non-empty; the full body becomes the agent
         # context (and feeds the Phase-B acceptance-criteria scan).
         description_section = self._extract_description(body)
 
-        # missing_required_field — id/title present, body Description non-empty (§19.3).
+        # missing_required_field — id/title present, body Description non-empty.
         if "id" not in frontmatter:
             return _rej(ValidationReason.MISSING_REQUIRED_FIELD, "id")
         title_value = frontmatter.get("title")
@@ -200,17 +200,17 @@ class ValidationGate:
         if not description_section.strip():
             return _rej(ValidationReason.MISSING_REQUIRED_FIELD, "description")
 
-        # invalid_field_type (§19.2).
+        # invalid_field_type.
         type_reject = self._check_field_types(frontmatter)
         if type_reject is not None:
             return type_reject, None
 
-        # invalid_task_id (§19.3).
+        # invalid_task_id.
         id_value = frontmatter["id"]
         if not isinstance(id_value, str) or not is_valid_task_id(id_value):
             return _rej(ValidationReason.INVALID_TASK_ID, repr(id_value))
 
-        # duplicate_task_id — vs. the tasks table + the ledger, exempting a recovery re-run (§13).
+        # duplicate_task_id — vs. the tasks table + the ledger, exempting a recovery re-run.
         if not self._is_recovery_rerun(id_value) and (
             self._store_has_task_id(id_value) or self._ledger_has_task_id(id_value)
         ):
@@ -221,7 +221,7 @@ class ValidationGate:
         if stage_reject is not None:
             return stage_reject, None
 
-        # injection_suspected — argv-shaped tokens in front-matter values (§19.5). The scanner is
+        # injection_suspected — argv-shaped tokens in front-matter values. The scanner is
         # belt-and-braces over the file-path-only structural guarantee (see security/injection.py).
         finding = scan_frontmatter(frontmatter)
         if finding is not None:
@@ -285,7 +285,7 @@ class ValidationGate:
         """Map the ``stages`` front-matter block to ``{Stage: StageParams}`` (fail-closed).
 
         Each key must be a skippable stage (``SKIPPABLE_STAGES``); the only valid sub-key is
-        ``enabled`` — the stage-skip toggle (flow-contract §10, the one sanctioned per-stage knob).
+        ``enabled`` — the stage-skip toggle (flow-contract, the one sanctioned per-stage knob).
         ``enabled: false`` skips the stage; ``null``/``{}`` means default (it runs).
         ``implementation``/``refinement`` cannot be disabled here (refinement-skip is deterministic
         — completeness classification), and ``publishing`` is never a valid key.
@@ -340,17 +340,17 @@ class ValidationGate:
     # --- Phase B --------------------------------------------------------------------------
 
     def phase_b(self, task: NormalizedTask) -> Completeness:
-        """Classify ``complete`` vs ``needs_enrichment`` (never rejects, §19.1).
+        """Classify ``complete`` vs ``needs_enrichment`` (never rejects).
 
         Complete when the task carries both a description and acceptance criteria; anything less is
-        ``needs_enrichment`` — ``refinement`` will run (§5). This classification is the *only* input
+        ``needs_enrichment`` — ``refinement`` will run. This classification is the *only* input
         to the deterministic refinement-skip (``derived.needs_refinement``); there is no task flag.
         """
         has_description = bool(task.description.strip())
         # Require the structured ``## Acceptance criteria`` section. The old ``"acceptance" in
         # description`` substring fallback let prose like "no acceptance criteria yet" classify as
         # COMPLETE and skip refinement; dropping it routes such tasks through refinement, the safe
-        # direction (refinement never rejects, §19.1).
+        # direction (refinement never rejects).
         has_acceptance = extract_section(task.description, "Acceptance criteria") is not None
         if has_description and has_acceptance:
             return Completeness.COMPLETE
@@ -370,7 +370,7 @@ def _as_tristate(value: Any) -> bool | None:
 def write_validation_report(
     result: ValidationResult, task_id: str, artifacts_root: str | Path
 ) -> str:
-    """Write ``validation_report.json`` under ``logs/<task-id>/``; return its path (§10, §19.4)."""
+    """Write ``validation_report.json`` under ``logs/<task-id>/``; return its path."""
     task_dir = task_artifact_dir(artifacts_root, task_id)
     task_dir.mkdir(parents=True, exist_ok=True)
     path = task_dir / VALIDATION_REPORT_FILENAME

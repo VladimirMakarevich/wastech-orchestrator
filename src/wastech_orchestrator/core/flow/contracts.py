@@ -36,7 +36,7 @@ class EvaluatorRole(StrEnum):
     These are the in-flow evaluator roles that ship; operator-authored flows may use other role
     strings (they get the default evaluator behavior). Supervision is **not** an evaluator role:
     summary + per-step advisory oversight is a constant orchestrator layer above the flow, not a
-    graph node (2026-06-19 revision; see ``docs/backlog/flows/flow-contract.md`` §2.2).
+    graph node (2026-06-19 revision; see ``docs/backlog/flows/flow-contract.md``).
     """
 
     REVIEW = "review"

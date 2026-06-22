@@ -63,7 +63,7 @@ class AgentNode:
     #: (``enriched_spec`` / ``plan`` / ``summary``); the core writes it after the node runs (P1.4).
     output_artifact: str | None = None
     #: a best-effort node tolerates an infrastructure failure (no provider could run it): the engine
-    #: continues instead of failing the task (the summary stage — §5.2 minimal-summary fallback).
+    #: continues instead of failing the task (the summary stage — minimal-summary fallback).
     best_effort: bool = False
     hitl: HitlSettings | None = None
     extra_args: tuple[str, ...] = ()

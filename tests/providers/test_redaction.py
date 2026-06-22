@@ -1,4 +1,4 @@
-"""Tests for secret redaction (spec §12.6). All tokens below are fake, never real secrets."""
+"""Tests for secret redaction. All tokens below are fake, never real secrets."""
 
 from __future__ import annotations
 

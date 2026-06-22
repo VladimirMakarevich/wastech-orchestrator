@@ -3,7 +3,7 @@
 Sets up the orchestrator inside an existing Git repository: it generates a validated ``config.yaml``
 from detected/confirmed settings and scaffolds the gitignored ``<repo>/.worc/`` runtime home that
 holds it. Because the config always lives at ``<repo>/.worc/config.yaml``, the other commands
-discover it by walking up to the Git root — no registry or ``--config`` needed. See §20 of the
+discover it by walking up to the Git root — no registry or ``--config`` needed. See of the
 canonical spec.
 
 This package owns *installation-time* concerns only (detection, config generation, and the wizard).

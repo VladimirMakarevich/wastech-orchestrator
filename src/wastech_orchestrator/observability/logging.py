@@ -1,4 +1,4 @@
-"""Structured, secret-free operator logging (spec §6.6, coding-style.md).
+"""Structured, secret-free operator logging (coding-style.md).
 
 A thin layer over the stdlib :mod:`logging` that gives the pipeline a clear operator-facing trace —
 keyed by ``task_id`` / ``stage`` / ``attempt`` / ``provider`` — without ever emitting a secret. The
@@ -6,14 +6,14 @@ machine-readable audit lives elsewhere (SQLite, ``events.jsonl``, ``completed.js
 are for a human watching a run, so the default rendering is **logfmt** (``key=value``), which is
 greppable in a terminal.
 
-Two guarantees back "never logs secrets" (§12.6): the call sites log only ids / enums / counters
+Two guarantees back "never logs secrets": the call sites log only ids / enums / counters
 (never argv, prompts, env, or file content), and a :class:`RedactionFilter` scrubs every record
 through :func:`~wastech_orchestrator.providers.redaction.redact_text` as a defence-in-depth net.
 
 Usage::
 
-    _LOG = logging.getLogger(__name__)            # module level, no handler/config
-    log = bind(_LOG, task_id=task_id)             # bind stable context
+    _LOG = logging.getLogger(__name__) # module level, no handler/config
+    log = bind(_LOG, task_id=task_id) # bind stable context
     log.info("route resolved", extra={"stage": "planning", "source": "config"})
 
 ``configure_logging`` is called once from the CLI; library modules only ever ``getLogger`` and bind,
@@ -100,7 +100,7 @@ class _BoundLogger(logging.LoggerAdapter[logging.Logger]):
 
 
 class RedactionFilter(logging.Filter):
-    """Scrub each record's message, args, and structured fields through :func:`redact_text` (§12.6).
+    """Scrub each record's message, args, and structured fields through :func:`redact_text`.
 
     A *structural* safety net: it is called without ``extra_secrets``, so it catches what
     :func:`redact_text` recognizes by shape — token-shaped credentials (GitHub/OpenAI/Slack/AWS

@@ -1,4 +1,4 @@
-"""Artifact writer (spec §10).
+"""Artifact writer.
 
 Writes the per-attempt artifacts under
 ``<artifacts_root>/logs/<task-id>/stages/<stage>/run-<stage-run-id>/<attempt>-<provider>/`` (with a
@@ -6,7 +6,7 @@ Writes the per-attempt artifacts under
 rule live here; the *content* (already redacted) is supplied by the caller — this module imports
 neither :mod:`~wastech_orchestrator.providers.redaction` nor any provider syntax.
 
-Artifacts (§10): ``request.json`` (redacted), ``stdout.log``, ``stderr.log``, ``events.jsonl``,
+Artifacts: ``request.json`` (redacted), ``stdout.log``, ``stderr.log``, ``events.jsonl``,
 ``result.json``. ``before.diff`` / ``after.diff`` are stamped by the pipeline in P5.
 """
 
@@ -44,7 +44,7 @@ class ArtifactPaths:
 
 
 def task_artifact_dir(artifacts_root: str | Path, task_id: str) -> Path:
-    """Return ``<artifacts_root>/logs/<task-id>/`` — the root of one task's artifacts (§10).
+    """Return ``<artifacts_root>/logs/<task-id>/`` — the root of one task's artifacts.
 
     The single source of truth for the per-task artifact location. Callers that write task-level
     artifacts (``plan.md``, ``summary.md``, ``subtasks/``, ``checks/``, ``validation_report.json``,
@@ -89,7 +89,7 @@ def create_attempt_dir(
 ) -> ArtifactPaths:
     """Create the attempt directory and return its :class:`ArtifactPaths`.
 
-    The directory must not already exist — logs are never overwritten (§10). ``node_run_id`` is
+    The directory must not already exist — logs are never overwritten. ``node_run_id`` is
     reserved in SQLite before the provider starts, so a repeated fixing cycle or recovery run gets
     a distinct directory even though its provider attempt counter starts again at one. A collision
     raises :class:`FileExistsError`.
@@ -110,12 +110,12 @@ def create_attempt_dir(
 
 
 def write_request_artifact(paths: ArtifactPaths, redacted_request: Mapping[str, Any]) -> str:
-    """Write the **already-redacted** request representation to ``request.json`` (§10)."""
+    """Write the **already-redacted** request representation to ``request.json``."""
     return _write_json(paths.request_path, dict(redacted_request))
 
 
 def write_result_artifact(paths: ArtifactPaths, result: AgentRunResult) -> str:
-    """Write the machine-readable :class:`AgentRunResult` to ``result.json`` (§10)."""
+    """Write the machine-readable :class:`AgentRunResult` to ``result.json``."""
     return _write_json(paths.result_path, dataclasses.asdict(result))
 
 
@@ -126,7 +126,7 @@ def _write_json(path: str, data: Any) -> str:
 
 
 def sha256_file(path: str | Path) -> str:
-    """Return the hex SHA-256 of a file's bytes (artifact checksum for the SQLite registry, §10)."""
+    """Return the hex SHA-256 of a file's bytes (artifact checksum for the SQLite registry)."""
     digest = hashlib.sha256()
     with Path(path).open("rb") as handle:
         for chunk in iter(lambda: handle.read(_CHECKSUM_CHUNK), b""):

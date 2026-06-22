@@ -3,7 +3,7 @@
 Mirrors the packaged-template tests (``test_cli_init.test_templates_are_discoverable``) and the
 repo-root-vs-packaged sync test (``tests/config/test_roundtrip``): the authored docs live in
 ``docs/worc/`` and a byte-identical copy ships as package data under ``wastech_orchestrator/worc/``.
-The shipped example tasks must pass the §19 validation gate.
+The shipped example tasks must pass the validation gate.
 """
 
 from __future__ import annotations

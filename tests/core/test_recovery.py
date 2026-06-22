@@ -1,4 +1,4 @@
-"""Tests for restart recovery (§13): reconciliation decisions and resume behavior."""
+"""Tests for restart recovery: reconciliation decisions and resume behavior."""
 
 from __future__ import annotations
 
@@ -362,7 +362,7 @@ def test_resume_corrupt_normalized_artifact_marks_manual(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
     # A corrupt/truncated task.normalized.json must fail closed to manual on resume, not crash out
-    # of resume() with an uncaught JSONDecodeError (§13 fail-closed).
+    # of resume() with an uncaught JSONDecodeError (fail-closed).
     from wastech_orchestrator.providers.artifacts import task_artifact_dir
 
     notifier = RecordingNotifier()
@@ -745,7 +745,7 @@ def test_resume_decomposed_at_subtask_without_duplicate_commit(
 
     result = orch.resume()
     assert result is not None and result.final_status is Status.DONE
-    # Subtask 1's recorded commit is unchanged (never re-committed, §13).
+    # Subtask 1's recorded commit is unchanged (never re-committed).
     subs = {s.order: s for s in store.get_subtasks(task_id)}
     assert subs[1].commit_sha == sha1
     assert subs[2].commit_sha and subs[2].commit_sha != sha1

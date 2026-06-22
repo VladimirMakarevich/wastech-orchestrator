@@ -1,4 +1,4 @@
-"""Tests for the environment allowlist (spec §12.3)."""
+"""Tests for the environment allowlist."""
 
 from __future__ import annotations
 

@@ -38,7 +38,7 @@ class RunStatus(StrEnum):
 
 
 class ErrorClass(StrEnum):
-    """Normalized provider error classes (spec §7.1)."""
+    """Normalized provider error classes."""
 
     BINARY_NOT_FOUND = "binary_not_found"
     UNSUPPORTED_VERSION = "unsupported_version"
@@ -60,7 +60,7 @@ class ErrorClass(StrEnum):
     SESSION_UNAVAILABLE = "session_unavailable"
 
 
-# Error classes that unconditionally allow fallback (spec §7.2).
+# Error classes that unconditionally allow fallback.
 # authorization_failed / permission_denied are a conditional fallback, decided by the Router,
 # not here, so they are not part of this set.
 FALLBACK_ELIGIBLE: frozenset[ErrorClass] = frozenset(
@@ -78,7 +78,7 @@ FALLBACK_ELIGIBLE: frozenset[ErrorClass] = frozenset(
 )
 
 
-# --- Contract data structures (spec §4.3) ---
+# --- Contract data structures ---
 
 
 @dataclass(frozen=True)
@@ -103,14 +103,14 @@ class AgentRunRequest:
     timeout_seconds: int
     attempt: int
     node_run_id: int
-    # Paths to context artifacts (see spec §6, §10).
+    # Paths to context artifacts.
     task_path: str | None = None
     plan_path: str | None = None
     diff_path: str | None = None
     check_artifacts_path: str | None = None
     review_artifacts_path: str | None = None
     human_input_path: str | None = None
-    # Planning-selected SKILL.md paths — read-only advisory references, never executed (§2.1).
+    # Planning-selected SKILL.md paths — read-only advisory references, never executed.
     skill_reference_paths: tuple[str, ...] = ()
     output_schema: dict[str, Any] | None = None
     model: str | None = None

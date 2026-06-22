@@ -1,4 +1,4 @@
-"""Unit tests for the Codex command/prompt builders (spec §4.4, §12.5)."""
+"""Unit tests for the Codex command/prompt builders."""
 
 from __future__ import annotations
 

@@ -1,6 +1,6 @@
 """Threat model as tests (flow-engine P4.2).
 
-One test per row of the operator-flow threat model (``docs/backlog/flows/security-ceiling.md`` §1):
+One test per row of the operator-flow threat model (``docs/backlog/flows/security-ceiling.md``):
 each proves the attack vector is closed **independently of the flow YAML / task content**. Rows
 already proven structurally in P0.3/P0.5 assert against :func:`validate_flow` / :func:`load_flow`;
 the config-aware rows (P4.2) assert against :func:`validate_flow_against_config`. Keeping the whole
@@ -326,7 +326,7 @@ def test_packaged_security_audit_resolves_config_aware(tmp_path: Path) -> None:
 
 
 # =============================================================================
-# Recovery: the ceiling can only narrow (security-ceiling §7)
+# Recovery: the ceiling can only narrow (security-ceiling)
 # =============================================================================
 
 

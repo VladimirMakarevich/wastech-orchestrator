@@ -1,4 +1,4 @@
-"""strict_isolation preflight — security/isolation.py + adapter isolation_reasons (§12.8, §6.1).
+"""strict_isolation preflight — security/isolation.py + adapter isolation_reasons.
 
 Proves the deterministic, offline check: a provider that may run must be able to enable its required
 isolation; ``extra_args`` or a profile/sandbox that would weaken it is flagged. None of these launch

@@ -3,7 +3,7 @@
 ``install`` scaffolds a project layout under ``.worc/`` and writes config; ``run`` processes one
 task end to end through the Orchestrator Core; ``watch`` resumes any in-flight task and then
 processes pending tasks (one at a time, continuing only when ``orchestrator.auto_mode.enabled``);
-``status`` reads persisted progress without starting work. See the spec §15.
+``status`` reads persisted progress without starting work.
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.security.isolation import check_isolation
 from wastech_orchestrator.state_store import IncompatibleStateError, StateStore
 
-# --log-level names → stdlib logging levels for the structured operator trace (§6.6).
+# --log-level names → stdlib logging levels for the structured operator trace.
 _LOG_LEVELS: dict[str, int] = {
     "debug": logging.DEBUG,
     "info": logging.INFO,
@@ -65,13 +65,13 @@ _EXIT_BY_STATUS: dict[Status, int] = {
     Status.MANUAL_ACTION_REQUIRED: 2,
 }
 
-# The orchestrator's runtime home inside the target repo (spec §21). Everything the orchestrator
+# The orchestrator's runtime home inside the target repo. Everything the orchestrator
 # generates or installs lives under `<repo>/.worc/` — gitignored as a whole — except the audit
 # trail: the task lifecycle dirs below sit at the repo root and are audit-committed.
 WORC_HOME = ".worc"
 
 # Task lifecycle dirs created at the repo root by `install` (tracked; the audit commit captures the
-# task file + its `<id>.summary.md` in done/failed). `tasks/rejected` is the §19 quarantine and
+# task file + its `<id>.summary.md` in done/failed). `tasks/rejected` is the quarantine and
 # lives under `.worc/` instead, so rejected tasks are never swept into the audit commit.
 REPO_TASK_DIRS: tuple[str, ...] = (
     "tasks/pending",
@@ -341,7 +341,7 @@ def _copy_worc_docs(dest_root: Path, *, overwrite: bool, dry: bool) -> tuple[lis
 
 
 def _load_config(path: str) -> OrchestratorConfig:
-    """Load and semantically validate the config (fail-closed, §11/§21.4)."""
+    """Load and semantically validate the config (fail-closed)."""
     config = load_config(path).config
     validate_config(config)
     return config
@@ -398,7 +398,7 @@ def cmd_upgrade_config(args: argparse.Namespace) -> int:
         return 0
 
     rendered = config_upgrade.render(merged)
-    # Defensive: the regenerated config must load and pass §11/§21.4 before we touch the file.
+    # Defensive: the regenerated config must load and pass before we touch the file.
     validate_config(loads_config(rendered, source="<upgraded config>").config)
 
     def _report(prefix: str) -> None:
@@ -498,7 +498,7 @@ def load_config_for(args: argparse.Namespace) -> OrchestratorConfig | None:
 
 
 def worc_home_for(config: OrchestratorConfig) -> Path:
-    """The orchestrator's gitignored runtime home: ``<repo>/.worc/`` (§21).
+    """The orchestrator's gitignored runtime home: ``<repo>/.worc/``.
 
     Everything the orchestrator generates — ``state.db``, ``logs/``, ``orchestrator.pid``,
     ``workspace/``, ``checks/``, the resolved check profile, validation reports — lives here, plus
@@ -508,7 +508,7 @@ def worc_home_for(config: OrchestratorConfig) -> Path:
 
 
 def tasks_root_for(config: OrchestratorConfig) -> Path:
-    """The repo root that holds the tracked ``tasks/`` lifecycle dirs (the audit trail, §21).
+    """The repo root that holds the tracked ``tasks/`` lifecycle dirs (the audit trail).
 
     Unlike :func:`worc_home_for`, ``tasks/`` stays at the repo root so the task file and its
     committed ``<id>.summary.md`` can be audit-committed into the repo's history.
@@ -517,7 +517,7 @@ def tasks_root_for(config: OrchestratorConfig) -> Path:
 
 
 def pending_dir(config: OrchestratorConfig) -> Path:
-    """The folder ``watch`` scans for new tasks: ``<repo>/tasks/pending`` (§21)."""
+    """The folder ``watch`` scans for new tasks: ``<repo>/tasks/pending``."""
     return tasks_root_for(config) / "tasks" / "pending"
 
 
@@ -539,7 +539,7 @@ def select_pending(folder: Path) -> list[Path]:
 def watch_once(
     orchestrator: Orchestrator, config: OrchestratorConfig, folder: Path
 ) -> list[PipelineResult]:
-    """Resume any in-flight task, then process pending tasks per the auto-mode rule (§8.2, §8.3).
+    """Resume any in-flight task, then process pending tasks per the auto-mode rule.
 
     Resumes the single active task first. Then picks pending tasks **only** when the slot is free;
     with auto mode off it processes exactly one, with auto mode on it continues to the next after a
@@ -559,7 +559,7 @@ def watch_once(
         result = orchestrator.run_task(str(task_file))
         results.append(result)
         if result.final_status is Status.MANUAL_ACTION_REQUIRED:
-            break  # a manual task blocks automatic continuation (§8.3)
+            break  # a manual task blocks automatic continuation
         if not auto:
             break  # auto mode off: process exactly one task
     return results
@@ -575,7 +575,7 @@ def watch_loop(
     sleep_fn: Callable[[float], None] = time.sleep,
     stop_event: threading.Event | None = None,
 ) -> list[PipelineResult]:
-    """Run ``watch_once`` on a loop, refreshing the repo each tick (periodic discovery, §8.3).
+    """Run ``watch_once`` on a loop, refreshing the repo each tick (periodic discovery).
 
     Each tick: ``refresh_repo`` (fetch + ff-only pull of ``base_branch`` when the slot is free, so a
     task pushed to git later becomes visible), then ``watch_once``, then sleep ``poll_interval``.
@@ -608,13 +608,13 @@ def watch_loop(
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    """Process exactly one task file through the Core pipeline (§5)."""
+    """Process exactly one task file through the Core pipeline."""
     _configure_runtime_logging(args)
     config = load_config_for(args)
     if config is None:
         return 2
     if config.git.create_pull_request:
-        preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish (§6.7)
+        preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish
     orchestrator = build_orchestrator(
         config,
         artifacts_root=worc_home_for(config),
@@ -705,7 +705,7 @@ def cmd_rerun(args: argparse.Namespace) -> int:
         return 0
 
     if config.git.create_pull_request:
-        preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish (§6.7)
+        preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish
 
     mode = "continue" if args.continue_ else "fresh"
     if not args.yes and not _confirm(
@@ -816,7 +816,7 @@ def cmd_finalize(args: argparse.Namespace) -> int:
 
 
 def run_preflight(config: OrchestratorConfig) -> tuple[bool, list[str]]:
-    """Compute the read-only preflight verdict + report lines (spec §6.7); no task is processed.
+    """Compute the read-only preflight verdict + report lines; no task is processed.
 
     Runs every allowed provider's ``preflight()`` (``<cli> --version``) and the deterministic
     ``check_isolation`` policy check. Returns ``(ready, lines)`` where ``ready`` is true iff every
@@ -874,7 +874,7 @@ def run_preflight(config: OrchestratorConfig) -> tuple[bool, list[str]]:
 
 
 def cmd_preflight(args: argparse.Namespace) -> int:
-    """Report each CLI's health and the strict_isolation verdict (read-only diagnostics, §6.7)."""
+    """Report each CLI's health and the strict_isolation verdict (read-only diagnostics)."""
     _configure_runtime_logging(args)
     config = load_config_for(args)
     if config is None:
@@ -946,7 +946,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
     if config is None:
         return 2
     if config.git.create_pull_request:
-        preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish (§6.7)
+        preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish
     poll = (
         args.poll_seconds
         if args.poll_seconds is not None
@@ -1128,7 +1128,7 @@ def _install_create_dirs(repo_local_path: Path) -> None:
     """Create the tracked task dirs at the repo root and the gitignored ``.worc/`` runtime dirs.
 
     Idempotent. The repo task dirs are created empty, so they do not appear in ``git status`` until
-    a task writes into them; everything under ``.worc/`` is gitignored as a whole (§21).
+    a task writes into them; everything under ``.worc/`` is gitignored as a whole.
     """
     worc_home = repo_local_path / WORC_HOME
     for rel in REPO_TASK_DIRS:
@@ -1187,7 +1187,7 @@ def _install_resolve_checks(config: OrchestratorConfig) -> None:
 
 
 def _install_run_preflight(config_path: Path, *, skip: bool) -> int:
-    """Auto-run preflight after writing config; on failure keep config but exit non-zero (§6.7)."""
+    """Auto-run preflight after writing config; on failure keep config but exit non-zero."""
     if skip:
         return 0
     ok, lines = run_preflight(_load_config(str(config_path)))
@@ -1203,12 +1203,12 @@ def _install_run_preflight(config_path: Path, *, skip: bool) -> int:
 
 
 def cmd_install(args: argparse.Namespace) -> int:
-    """Set up the orchestrator in the current repo under ``.worc/`` and generate config (§21).
+    """Set up the orchestrator in the current repo under ``.worc/`` and generate config.
 
     Runs the wizard to resolve settings, then idempotently writes a validated ``config.yaml`` into
     ``<repo>/.worc/``, scaffolds the runtime + task dirs, copies the editable templates and the
     task-authoring guide, and gitignores ``.worc/``. Re-running is a no-op unless ``--reconfigure``
-    (which backs up and regenerates). After a successful write it auto-runs preflight (§6.7).
+    (which backs up and regenerates). After a successful write it auto-runs preflight.
     """
     _configure_runtime_logging(args)
     try:
@@ -1248,7 +1248,7 @@ def cmd_install(args: argparse.Namespace) -> int:
     worc_written, _ = _copy_worc_docs(worc_home, overwrite=args.reconfigure, dry=False)
     if worc_written:
         print(f"install: wrote agent task-authoring docs to {worc_home / 'guide'}")
-    # Gitignore the whole .worc/ runtime home so the operator's `git status` stays clean (§21.2).
+    # Gitignore the whole .worc/ runtime home so the operator's `git status` stays clean.
     if append_runtime_excludes(spec.repo_local_path):
         print(f"install: ignored {WORC_HOME}/ via .gitignore")
     if outcome.missing_providers:

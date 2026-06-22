@@ -1,4 +1,4 @@
-"""Unit tests for the Check Runner (§4.8 / testing stage)."""
+"""Unit tests for the Check Runner (testing stage)."""
 
 from __future__ import annotations
 

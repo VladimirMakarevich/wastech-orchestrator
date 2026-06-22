@@ -6,7 +6,7 @@
 
 > **ОБНОВЛЕНИЕ 2026-06-18 — golden-harness / паритет байт-в-байт с `_drive` ОТМЕНЁН.** Greenfield, прода нет, релиза не было ⇒ доказывать побайтовое совпадение со старым драйвером — оверинжиниринг (migration-машинерия для миграции, которой нет). **Цель не «совпасть с `_drive`», а «не потерять ни одной возможности, переписав их под Flow».** P1.4 = **прямой cutover** (движок становится драйвером в `run_task`), а гарантия «ничего не потеряли» — **адаптация существующего интеграционного тест-сьюта на движок** (каждая возможность из чек-листа = ≥1 зелёный сценарий). Legacy `_drive` удаляется в том же шаге (P1.4 + P1.5 сливаются — двух драйверов держать незачем). Где ниже сказано «golden-harness / двойной прогон / байт-в-байт» — читать в этом ключе; детали в [p1-step-b-wiring-draft.md](p1-step-b-wiring-draft.md). (Употребления «repo byte-for-byte» в audit-flow и «единый учёт / без двойного счёта `fix_iterations`» — это **другое** и в силе.)
 
-План реализации унификации из [index.md](index.md), контракта из [flow-contract.md](flow-contract.md) и потолка из [security-ceiling.md](security-ceiling.md). Адаптирует пять backlog-программ ([foundation](../outdated/workflow_execution_foundation.md), [supervisor](../outdated/supervisor_quality_gate.md), [durable sessions](../outdated/durable_sessions_and_fixing_affinity.md), [hybrid testing](../outdated/hybrid_agent_testing.md), [profiles](../outdated/task_workflow_profiles.md)) к новой модели.
+План реализации унификации из [index.md](index.md), контракта из [flow-contract.md](flow-contract.md) и потолка из [security-ceiling.md](security-ceiling.md). Адаптирует пять backlog-программ ([foundation](../archive/outdated/workflow_execution_foundation.md), [supervisor](../archive/outdated/supervisor_quality_gate.md), [durable sessions](../archive/outdated/durable_sessions_and_fixing_affinity.md), [hybrid testing](../archive/outdated/hybrid_agent_testing.md), [profiles](../archive/outdated/task_workflow_profiles.md)) к новой модели.
 
 ## Объём v1 (зафиксирован)
 
@@ -37,7 +37,7 @@ v1 поставляет **всё**: движок + целевой `implementatio
 
 ## P0 — Контракты и валидатор (без исполнения, без смены поведения)
 
-Цель: словарь, схема flow и фатальный валидатор существуют и тестируются на flow-файлах; ничего не исполняется. Адаптирует контрактный слой [foundation](../outdated/workflow_execution_foundation.md) + [security-ceiling.md](security-ceiling.md).
+Цель: словарь, схема flow и фатальный валидатор существуют и тестируются на flow-файлах; ничего не исполняется. Адаптирует контрактный слой [foundation](../archive/outdated/workflow_execution_foundation.md) + [security-ceiling.md](security-ceiling.md).
 
 - **P0.1 — Провайдер-нейтральный словарь** (адаптирует foundation §3–§7). `run_kind ∈ {stage, evaluator}` + `role`; `session_scope`; `QualityAction` → lifecycle; `output_policy`/`publishing`; `execution_unit = (task_id, subtask_order)`; два фингерпринта. Touchpoints: новый `core/flow/contracts.py`. Тесты: `QualityAction`→статусы; `evaluator`-run не становится `Stage`. Exit: словарь доступен, без потребителей.
 - **P0.2 — Схема flow + снапшот** (адаптирует [flow-contract.md](flow-contract.md) §1, §7, §9). YAML-схема (nodes/edges/budgets/policies/decomposition) + JSON-Schema + резолв в неизменяемый снапшот графа + `flow_fingerprint`. Touchpoints: `core/flow/schema.py`, `core/flow/snapshot.py`. Тесты: парс/резолв эталонного `implementation.yaml`; фингерпринт стабилен. Exit: flow-файл грузится в снапшот.
@@ -91,7 +91,7 @@ co-design здесь: написать `implementation.yaml`, `deep_research.yam
 
 - **P4.1** ✓ Приём операторских flow (`FlowRegistry(operator_flows_dir=<repo>/.worc/flows/, config)` в оркестраторе; `validate_all` на install/preflight роняет битый operator-flow до запуска).
 - **P4.2** ✓ Config-aware валидатор (`validate_flow_against_config`: provider ∈ allowed, reasoning ∈ закрытый набор, ceiling ≤ возможностей провайдера) + модель угроз как тесты + recovery-перепроверка. **Правка объёма:** `budgets`/`publishing` НЕ фатальны (рантайм-кламп / local-commit — поддержанные деградации, не эскалации); `model`-allowlist не вводится. Подробности — [p4-operator.md](p4-operator.md) + [follow_ups.md](../follow_ups.md).
-- **P4.3** ✓ Docs + housekeeping (configuration, functional map/index + B06, follow-ups; пять программ помечены устаревшими в `outdated/`).
+- **P4.3** ✓ Docs + housekeeping (configuration, functional map/index + B06, follow-ups; пять программ помечены устаревшими в `archive/outdated/`).
 
 ## P5 — Кастомные tool-узлы (ОТЛОЖЕНО, вне v1) → [p5-custom-tool-nodes.md](p5-custom-tool-nodes.md)
 
@@ -103,18 +103,18 @@ co-design здесь: написать `implementation.yaml`, `deep_research.yam
 
 | Backlog-программа | Куда уходит | Что меняется vs оригинал |
 | --- | --- | --- |
-| [foundation](../outdated/workflow_execution_foundation.md) | P0 (словарь, снапшот, диспетчеризация) | Контракты сохранены дословно; «registry одного профиля + `runner_kind` + не трогать state machine» **удалено** (заменено движком из данных) |
-| [supervisor](../outdated/supervisor_quality_gate.md) | P2.1 | Становится **постоянным слоем-наблюдателем над flow** (оркестратор, config.yaml: model/effort/role_file): живёт весь цикл задачи, проверяет каждый шаг (своя `resume_own_lineage`, advisory), summary+advise при закрытии всей задачи; привилегированный `core/supervisor.py` и блокирующие per-stage supervisor-узлы **удалены**; `record_rework` сохранён для in-flow петель; блокирующие пер-стейдж гейты = опциональные `review`/`test_quality`-узлы |
-| [durable sessions](../outdated/durable_sessions_and_fixing_affinity.md) | P2.2 | Почти целиком ядровая возможность; узлы цепляются через `session_scope`; affinity объявляется во flow |
-| [hybrid testing](../outdated/hybrid_agent_testing.md) | P2.4 | `evaluator`-узел перед `checks`; mutation guard — свойство узла `checks`; машинерия почти не меняется |
-| [profiles](../outdated/task_workflow_profiles.md) | P3 (+ P3.2 политики) | «3 захардкоженных профиля + `runner_kind`» **удалено**; три flow = данные; семантика → новые чекеры `checks` + политики + ядровые потолки |
+| [foundation](../archive/outdated/workflow_execution_foundation.md) | P0 (словарь, снапшот, диспетчеризация) | Контракты сохранены дословно; «registry одного профиля + `runner_kind` + не трогать state machine» **удалено** (заменено движком из данных) |
+| [supervisor](../archive/outdated/supervisor_quality_gate.md) | P2.1 | Становится **постоянным слоем-наблюдателем над flow** (оркестратор, config.yaml: model/effort/role_file): живёт весь цикл задачи, проверяет каждый шаг (своя `resume_own_lineage`, advisory), summary+advise при закрытии всей задачи; привилегированный `core/supervisor.py` и блокирующие per-stage supervisor-узлы **удалены**; `record_rework` сохранён для in-flow петель; блокирующие пер-стейдж гейты = опциональные `review`/`test_quality`-узлы |
+| [durable sessions](../archive/outdated/durable_sessions_and_fixing_affinity.md) | P2.2 | Почти целиком ядровая возможность; узлы цепляются через `session_scope`; affinity объявляется во flow |
+| [hybrid testing](../archive/outdated/hybrid_agent_testing.md) | P2.4 | `evaluator`-узел перед `checks`; mutation guard — свойство узла `checks`; машинерия почти не меняется |
+| [profiles](../archive/outdated/task_workflow_profiles.md) | P3 (+ P3.2 политики) | «3 захардкоженных профиля + `runner_kind`» **удалено**; три flow = данные; семантика → новые чекеры `checks` + политики + ядровые потолки |
 
 ## Что удаляется и когда
 
 - P1.5: `_drive`, реентри-диспетчер по статусам, `Stage`-как-конвейер.
 - P2.1: отдельный summary-провайдер (никогда не вводится — заменён константным supervisor-слоем); привилегированный supervisor-компонент; блокирующие per-stage supervisor-узлы (`supervise_impl`/`supervise_fix`) в графе не вводятся.
 - P0.4/P4.1: фрейминг profile-registry/`runner_kind` (никогда не строится — заменён flow-реестром).
-- P4.3: пять backlog-доков → `docs/backlog/outdated/`.
+- P4.3: пять backlog-доков → `docs/backlog/archive/outdated/`.
 
 ## Риски
 

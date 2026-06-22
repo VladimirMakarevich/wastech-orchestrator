@@ -1,4 +1,4 @@
-"""Launchability probing (backlog: automatic check discovery, §7).
+"""Launchability probing (backlog: automatic check discovery).
 
 Decides whether a candidate *can be launched* without running the full suite. The probe is
 lightweight and tool-specific where it helps: it confirms an executable/path is present and, for a

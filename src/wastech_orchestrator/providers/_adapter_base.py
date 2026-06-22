@@ -1,4 +1,4 @@
-"""Shared CLI-adapter infrastructure for the Codex/Claude providers (spec §4.4).
+"""Shared CLI-adapter infrastructure for the Codex/Claude providers.
 
 The two provider adapters (:mod:`wastech_orchestrator.providers.claude` /
 :mod:`wastech_orchestrator.providers.codex`) have a byte-identical infrastructure spine — the
@@ -80,7 +80,7 @@ class ParsedEvents:
 
 
 def build_context_footer(request: AgentRunRequest) -> str:
-    """Render the non-``None`` context file paths as a deterministic footer (paths only, §19.5)."""
+    """Render the non-``None`` context file paths as a deterministic footer (paths only)."""
     fields = (
         ("task", request.task_path),
         ("plan", request.plan_path),
@@ -280,7 +280,7 @@ class BaseCliProvider:
         )
         finished_at = self._clock().isoformat()
 
-        # Redact every captured sink before it is written (§12.6): a leaked secret must never land
+        # Redact every captured sink before it is written: a leaked secret must never land
         # in stdout.log or events.jsonl. Parsing uses the in-memory raw stream for correctness.
         extra_secrets = self._extra_secrets(request)
         raw_stdout = read_text(paths.stdout_path)

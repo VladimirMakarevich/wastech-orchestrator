@@ -1,4 +1,4 @@
-"""Tests for the shared forbidden-flag detector (spec §11, §12.7)."""
+"""Tests for the shared forbidden-flag detector."""
 
 from __future__ import annotations
 

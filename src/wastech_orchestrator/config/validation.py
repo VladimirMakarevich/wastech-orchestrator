@@ -1,6 +1,6 @@
-"""Configuration validator (spec §11, §21.4) — the fail-closed gate.
+"""Configuration validator — the fail-closed gate.
 
-Enforces every §11 / §21.4 semantic rule so an unsafe or contradictory config never reaches the
+Enforces every semantic rule so an unsafe or contradictory config never reaches the
 pipeline. This is the config-time half of the "security cannot be weakened" invariant
 (.agents/rules/security.md): ``extra_args`` that would disable the sandbox/approvals are
 rejected here. The adversarial test matrix lives in P6.
@@ -30,7 +30,7 @@ _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _check_extra_args(pid: ProviderId, args: tuple[str, ...], issues: list[str]) -> None:
-    """Reject any extra_args flag that disables the sandbox/permissions (spec §11).
+    """Reject any extra_args flag that disables the sandbox/permissions.
 
     Delegates the detection to the shared
     :func:`~wastech_orchestrator.security.forbidden_args.find_forbidden_args` (also used at run time
@@ -64,7 +64,7 @@ def _check_global_primary(
 
 
 def validate_config(config: OrchestratorConfig) -> list[str]:
-    """Validate a parsed config against §11/§21.4. Raises :class:`ConfigError` on any violation.
+    """Validate a parsed config . Raises :class:`ConfigError` on any violation.
 
     Returns a list of non-fatal warnings (empty in v1 — every validator finding is a hard error).
     """
@@ -76,14 +76,14 @@ def validate_config(config: OrchestratorConfig) -> list[str]:
     # Provider routing: exactly one global primary, in agents.allowed (PRE.1 — node-based routing).
     _check_global_primary(config, allowed, issues)
 
-    # Watch poll interval (§8.3): negative is meaningless; 0 means single-pass (no loop).
+    # Watch poll interval: negative is meaningless; 0 means single-pass (no loop).
     if config.orchestrator.poll_interval_seconds < 0:
         issues.append(
             "orchestrator.poll_interval_seconds must be >= 0 "
             f"(got {config.orchestrator.poll_interval_seconds})"
         )
 
-    # Loop-control hard cap (§8.1): the global cap must be >= a single fix loop.
+    # Loop-control hard cap: the global cap must be >= a single fix loop.
     if agents.max_total_fix_iterations < agents.max_fix_cycles:
         issues.append(
             "agents.max_total_fix_iterations must be >= agents.max_fix_cycles "
@@ -153,7 +153,7 @@ def _validate_checks(config: OrchestratorConfig, issues: list[str], warnings: li
     for index, raw in enumerate(checks.commands):
         where = f"checks.commands[{index}]"
         if isinstance(raw, str) and not raw.strip():
-            continue  # a blank legacy string is a tolerated no-op (§4.8)
+            continue  # a blank legacy string is a tolerated no-op
         try:
             check = normalize_check_command(raw)
         except CheckCommandError as exc:

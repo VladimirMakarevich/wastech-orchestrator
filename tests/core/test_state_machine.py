@@ -1,4 +1,4 @@
-"""Unit tests for the §8 state machine (generic lifecycle)."""
+"""Unit tests for the state machine (generic lifecycle)."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from wastech_orchestrator.core.state_machine import (
 
 
 def test_status_set_is_the_generic_lifecycle() -> None:
-    # The generic lifecycle: new -> validated -> preparing -> running -> terminal, plus the §8.2
+    # The generic lifecycle: new -> validated -> preparing -> running -> terminal, plus the
     # ``pending`` queue waiting-state. Progress within ``running`` is the flow ``current_node``.
     assert {s.value for s in Status} == {
         "new",
@@ -56,7 +56,7 @@ def test_allowed_happy_path_transitions(src: Status, dst: Status) -> None:
 
 
 def test_new_can_fail_at_validation_gate() -> None:
-    # A §19 reject is terminal ``failed`` straight from ``new`` (no branch).
+    # A reject is terminal ``failed`` straight from ``new`` (no branch).
     assert can_transition(Status.NEW, Status.FAILED)
 
 

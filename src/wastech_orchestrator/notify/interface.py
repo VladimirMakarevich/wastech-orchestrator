@@ -1,4 +1,4 @@
-"""Notifier protocol + null implementation (spec §4.7).
+"""Notifier protocol + null implementation.
 
 The Core is typed against this protocol rather than ``python-telegram-bot``, so the transport stays
 an implementation detail and tests can inject a fake. The protocol is intentionally narrow: one

@@ -1,7 +1,7 @@
 """Fixtures for Agent Router tests (Phase 4).
 
 Provides an in-memory recording ``FakeProvider`` (to drive route/fallback/attempt logic
-deterministically), a ``FakeSnapshotHook`` (the §7.4 contract), an ``AgentRunRequest`` factory, the
+deterministically), a ``FakeSnapshotHook`` (the contract), an ``AgentRunRequest`` factory, the
 real default config (loaded from the packaged example), and the integration security allowlist. The
 root ``fake_cli`` fixture (tests/conftest.py) is reused for the real-provider integration tests.
 """
@@ -89,7 +89,7 @@ class FakeProvider:
 
 
 class FakeSnapshotHook:
-    """A deterministic :class:`SnapshotHook` (§7.4). Records calls; has no rollback by design."""
+    """A deterministic :class:`SnapshotHook`. Records calls; has no rollback by design."""
 
     def __init__(self, partial: PartialChange | None = None) -> None:
         self._partial = partial
@@ -112,7 +112,7 @@ class FakeSnapshotHook:
 
 @pytest.fixture
 def config(packaged_config_text: str) -> OrchestratorConfig:
-    """The packaged default config — canonical §5 routing, both providers, max_stage_attempts=3.
+    """The packaged default config — canonical routing, both providers, max_stage_attempts=3.
 
     ``packaged_config_text`` comes from the root tests/conftest.py.
     """

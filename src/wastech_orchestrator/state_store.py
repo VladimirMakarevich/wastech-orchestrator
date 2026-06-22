@@ -1,12 +1,12 @@
-"""SQLite State Store (spec §9).
+"""SQLite State Store.
 
 The authoritative persisted state for the pipeline: the ``tasks``, ``node_runs``,
 ``provider_attempts``, ``check_runs``, ``artifacts``, ``publish_operations``, ``subtasks``,
 ``evaluations``, ``editing_lineage`` and ``node_lineage`` entities. State transitions are
 **transactional** (``BEGIN IMMEDIATE`` … ``COMMIT``) so a crash leaves a consistent prior state and
-a restart can reconcile (§13).
+a restart can reconcile.
 
-**No secrets, tokens, or full process environment are ever written here** (§9, §12.6) — only ids,
+**No secrets, tokens, or full process environment are ever written here** — only ids,
 statuses, error classes, file paths, sha256 checksums, counters, idempotency fingerprints and
 commit SHAs. Callers are responsible for never passing a secret into a field; this module persists
 exactly what it is given, so the redaction boundary lives in the providers and the artifact writer.
@@ -278,7 +278,7 @@ CREATE TABLE IF NOT EXISTS node_lineage (
 """
 
 
-# --- Row dataclasses (mirroring the §9 entities) ---------------------------------------------
+# --- Row dataclasses (mirroring the entities) ---------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -470,7 +470,7 @@ _NO_SUBTASK = -1
 
 
 class StateStore:
-    """A thin transactional wrapper over a single SQLite database file (§9)."""
+    """A thin transactional wrapper over a single SQLite database file."""
 
     def __init__(
         self, conn: sqlite3.Connection, *, clock: Callable[[], str] = _utc_now_iso
@@ -599,19 +599,19 @@ class StateStore:
         return _task_from_row(row) if row is not None else None
 
     def task_id_exists(self, task_id: str) -> bool:
-        """True iff ``task_id`` already has a row (used for the §19 ``duplicate_task_id`` check)."""
+        """True iff ``task_id`` already has a row (used for the ``duplicate_task_id`` check)."""
         cur = self._conn.execute("SELECT 1 FROM tasks WHERE task_id = ?", (task_id,))
         return cur.fetchone() is not None
 
     def find_active_tasks(self) -> list[TaskRow]:
-        """All tasks owning the processing slot, i.e. in an active (non-terminal) status (§8.2)."""
+        """All tasks owning the processing slot, i.e. in an active (non-terminal) status."""
         active = tuple(s.value for s in Status if s not in _NON_ACTIVE)
         placeholders = ",".join("?" * len(active))
         cur = self._conn.execute(f"SELECT * FROM tasks WHERE status IN ({placeholders})", active)
         return [_task_from_row(r) for r in cur.fetchall()]
 
     def find_incomplete_cleanup(self) -> list[TaskRow]:
-        """Terminal tasks that have a branch but whose terminal cleanup never completed (§13)."""
+        """Terminal tasks that have a branch but whose terminal cleanup never completed."""
         terminal = (Status.DONE.value, Status.FAILED.value, Status.MANUAL_ACTION_REQUIRED.value)
         placeholders = ",".join("?" * len(terminal))
         cur = self._conn.execute(
@@ -945,9 +945,9 @@ class StateStore:
     def register_artifact(
         self, artifact: ArtifactRow, conn: sqlite3.Connection | None = None
     ) -> None:
-        """Register an artifact with its checksum (§10). Idempotent: re-registering the same
+        """Register an artifact with its checksum. Idempotent: re-registering the same
         ``(task_id, kind, path)`` updates the checksum rather than inserting a duplicate, so a
-        resumed run that re-writes ``plan.md`` etc. does not accumulate rows (§13)."""
+        resumed run that re-writes ``plan.md`` etc. does not accumulate rows."""
         now = self._clock()
         with self._writer(conn) as c:
             c.execute(
@@ -1105,7 +1105,7 @@ class StateStore:
         self, task_id: str, *, node_id: str | None = None, subtask_order: int | None = None
     ) -> int:
         """Count applied in-flow ``rework`` verdicts — the per-instance rework limit derives from
-        this count, not a mutable counter (flow-contract §2.2). Scoped to ``node_id`` /
+        this count, not a mutable counter (flow-contract). Scoped to ``node_id`` /
         ``subtask_order`` when given (``subtask_order`` matched with ``IS`` so ``NULL`` works)."""
         sql = (
             "SELECT COUNT(*) FROM evaluations "

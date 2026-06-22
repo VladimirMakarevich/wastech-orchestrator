@@ -53,7 +53,7 @@ class FlowLoadError(Exception):
 # Every mapping in the flow document is checked against an explicit allowlist: an unknown key is a
 # fatal load error, never silently ignored. This is the structural ``additionalProperties: false``
 # gate from the co-design ``flow.schema.json`` and the field-allowlist requirement in
-# ``security-ceiling.md`` §3-§4 — the mechanism that keeps operator YAML a closed allowlist rather
+# ``security-ceiling.md``- — the mechanism that keeps operator YAML a closed allowlist rather
 # than an open dict.
 
 _FLOW_FIELDS = frozenset(
@@ -130,7 +130,7 @@ _EVALUATOR_DEFAULTS_FIELDS = frozenset(
     }
 )
 
-# Core checker set (security-ceiling §3): flow may not invent a checker kind.
+# Core checker set (security-ceiling): flow may not invent a checker kind.
 _CHECKER_KINDS = frozenset({"command_profile", "citation", "dependency_scan"})
 
 # Output-artifact slots (P1.4): the well-known names an agent node may persist its output to. The

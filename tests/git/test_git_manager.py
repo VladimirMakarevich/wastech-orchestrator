@@ -1,4 +1,4 @@
-"""Tests for the Git Manager (§21) against a real temporary git repo."""
+"""Tests for the Git Manager against a real temporary git repo."""
 
 from __future__ import annotations
 
@@ -131,7 +131,7 @@ def test_changed_code_paths_excludes_worc_home(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:
     # Everything the orchestrator generates lives under the in-repo .worc/ home (state.db,
-    # config.yaml, …); nothing under it may ever be staged into a code commit (§21.1).
+    # config.yaml, …); nothing under it may ever be staged into a code commit.
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
     gm.prepare_branch("task-001", "x")
     (git_repo.clone / ".worc").mkdir(exist_ok=True)
@@ -146,7 +146,7 @@ def test_changed_code_paths_excludes_worc_home(
 def test_resolved_profile_not_in_code_commit(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
 ) -> None:
-    # The generated checks profile (a runtime cache, §10) lives under .worc/checks/ and must never
+    # The generated checks profile (a runtime cache) lives under .worc/checks/ and must never
     # ride a code commit.
     _task(store)
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
@@ -177,7 +177,7 @@ def test_ensure_runtime_excludes_writes_worc_line(
 def test_diff_stat_returns_stat_only(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:
-    # diff_stat() feeds the compact minimal summary (§5.2): files + counts, never the patch body.
+    # diff_stat() feeds the compact minimal summary: files + counts, never the patch body.
     _task(store)
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
     gm.prepare_branch("task-001", "x")
@@ -192,7 +192,7 @@ def test_refresh_base_pulls_pushed_commits(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
 ) -> None:
     # A second clone pushes a new task file to origin/main; refresh_base brings it into the
-    # orchestrator clone without a manual pull (periodic discovery, §8.3).
+    # orchestrator clone without a manual pull (periodic discovery).
     other = tmp_path / "other"
     git_run(["clone", str(git_repo.remote), str(other)], tmp_path)
     git_run(["config", "user.email", "o@example.com"], other)
@@ -237,7 +237,7 @@ def test_audit_commit_commits_tasks_and_summary(
     assert sha is not None
     msg = git_run(["log", "-1", "--format=%s", "HEAD"], git_repo.clone)
     assert "audit trail for task-001" in msg
-    # The task lifecycle + summary are committed; .worc/ is deliberately NOT (kept out of git, §21).
+    # The task lifecycle + summary are committed; .worc/ is deliberately NOT (kept out of git).
     tracked = git_run(["ls-files"], git_repo.clone)
     assert "tasks/done/task-001.md" in tracked
     assert "tasks/done/task-001.summary.md" in tracked
@@ -278,7 +278,7 @@ def test_push_idempotent(
     (git_repo.clone / "src.py").write_text("x\n", encoding="utf-8")
     gm.commit_code("task-001", "feat")
     assert gm.push("task-001", branch) is True
-    assert gm.push("task-001", branch) is True  # idempotent (§13)
+    assert gm.push("task-001", branch) is True  # idempotent
     op = store.get_publish_op("task-001", "push")
     assert op is not None and op.status == "completed"
 
@@ -351,7 +351,7 @@ def test_create_pr_disabled_returns_none(
     assert gm.create_pr("task-001", branch, title="t", body_path="x") is None
 
 
-# --- merge_pr (auto-merge bypass, §13 idempotency) ---
+# --- merge_pr (auto-merge bypass, idempotency) ---
 
 _PR_URL = "https://github.com/o/r/pull/1"
 
@@ -490,7 +490,7 @@ def test_write_current_diff(
 def test_push_to_base_branch_is_refused(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:
-    # §12.12: publishing is PR-only; a push aimed at base_branch is refused, never executed.
+    #: publishing is PR-only; a push aimed at base_branch is refused, never executed.
     _task(store)
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
     with pytest.raises(GitCommandError):
@@ -500,7 +500,7 @@ def test_push_to_base_branch_is_refused(
 def test_current_diff_is_redacted(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:
-    # §12.6: current.diff (the failure report reads it back) must carry no secrets — token-shaped
+    #: current.diff (the failure report reads it back) must carry no secrets — token-shaped
     # ones via pattern, denied_read_paths values via the content-scan seed.
     _task(store)
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)

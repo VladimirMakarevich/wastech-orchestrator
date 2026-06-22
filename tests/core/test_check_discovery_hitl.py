@@ -1,4 +1,4 @@
-"""The sensitive-change approval gate for a changed set of check commands (post-test-run §1.2)."""
+"""The sensitive-change approval gate for a changed set of check commands (post-test-run)."""
 
 from __future__ import annotations
 

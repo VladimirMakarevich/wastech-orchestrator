@@ -1,4 +1,4 @@
-"""Loader: fail-closed structural parsing and legacy-key tolerance (spec §11)."""
+"""Loader: fail-closed structural parsing and legacy-key tolerance."""
 
 from __future__ import annotations
 
@@ -96,7 +96,7 @@ def test_poll_interval_defaults_to_300() -> None:
 
 def test_footprint_defaults_to_task_audit_branch() -> None:
     # The footprint now carries only the audit-trail policy: the task + summary are committed in the
-    # repo on the task's own branch, while everything else lives under the gitignored .worc/ (§21).
+    # repo on the task's own branch, while everything else lives under the gitignored .worc/.
     result = loads_config(_LEGACY)
     assert result.config.git.footprint.audit_on_branch is AuditBranch.TASK
     assert "{task_id}" in result.config.git.footprint.audit_commit_message
@@ -233,7 +233,7 @@ def test_reasoning_null_parses_to_none() -> None:
     assert result.config.agents.providers[ProviderId.CLAUDE].reasoning is None
 
 
-# --- auto-merge bypass (§ git.auto_merge*) ---
+# --- auto-merge bypass (git.auto_merge*) ---
 
 
 def test_auto_merge_keys_default_to_safe_values() -> None:
@@ -270,7 +270,7 @@ def test_auto_merge_strategy_invalid_value_is_rejected() -> None:
     assert any("auto_merge_strategy" in issue for issue in exc.value.issues)
 
 
-# --- prompt audit (§ top-level prompt_audit) ---
+# --- prompt audit (top-level prompt_audit) ---
 
 
 def test_prompt_audit_defaults_to_false() -> None:

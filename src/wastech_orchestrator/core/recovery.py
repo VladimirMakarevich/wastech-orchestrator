@@ -1,11 +1,11 @@
-"""Restart recovery + idempotency reconciliation (spec §13).
+"""Restart recovery + idempotency reconciliation.
 
 On startup the orchestrator reconciles SQLite ↔ working branch ↔ artifacts to find the single
 unfinished operation and resume it idempotently. This module computes the **decision** (a
 :class:`RecoveryPlan`); the orchestrator carries it out (re-running only the unfinished work, with
 commit/push/PR idempotency enforced by the Git Manager's fingerprints).
 
-Rules (§13, §8.2):
+Rules:
 
 * exactly one task may be active; **more than one → ``manual_action_required``** (ambiguous);
 * a decomposed subtask is "done" only when its ``commit_sha`` is set **and** that commit is on the
@@ -37,7 +37,7 @@ class RecoveryAction(StrEnum):
 
 @dataclass(frozen=True)
 class RecoveryPlan:
-    """The reconciliation decision (§13)."""
+    """The reconciliation decision."""
 
     action: RecoveryAction
     task_id: str | None = None
@@ -47,7 +47,7 @@ class RecoveryPlan:
 
 
 class RecoveryReconciler:
-    """Computes the :class:`RecoveryPlan` from the persisted state on startup (§13)."""
+    """Computes the :class:`RecoveryPlan` from the persisted state on startup."""
 
     def __init__(self, config: OrchestratorConfig, store: StateStore, git: GitManager) -> None:
         self._config = config
@@ -59,7 +59,7 @@ class RecoveryReconciler:
         if len(active) > 1:
             return RecoveryPlan(
                 action=RecoveryAction.MANUAL,
-                manual_reason="more than one task is active (§8.2)",
+                manual_reason="more than one task is active",
                 manual_task_ids=tuple(t.task_id for t in active),
             )
         if len(active) == 1:
@@ -74,7 +74,7 @@ class RecoveryReconciler:
         return RecoveryPlan(action=RecoveryAction.NONE)
 
     def reconcile_decomposed(self, task: TaskRow) -> RecoveryPlan:
-        """Verify each recorded subtask commit against the branch; find the resume point (§5.1)."""
+        """Verify each recorded subtask commit against the branch; find the resume point."""
         branch = task.branch or ""
         subtasks = self._store.get_subtasks(task.task_id)
         committed = 0
@@ -100,7 +100,7 @@ class RecoveryReconciler:
                 ),
                 manual_task_ids=(task.task_id,),
             )
-        # The first subtask without a verified commit is the one to re-run (§5.1, §7.4).
+        # The first subtask without a verified commit is the one to re-run.
         resume_subtask = committed + 1
         return RecoveryPlan(
             action=RecoveryAction.RESUME, task_id=task.task_id, resume_subtask=resume_subtask

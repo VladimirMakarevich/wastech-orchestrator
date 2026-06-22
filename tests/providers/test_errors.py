@@ -1,4 +1,4 @@
-"""Tests for error normalization (spec §7.1)."""
+"""Tests for error normalization."""
 
 from __future__ import annotations
 

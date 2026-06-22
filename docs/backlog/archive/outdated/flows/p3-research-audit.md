@@ -4,7 +4,7 @@
 
 > **Выполнено 2026-06-21.** Все четыре пункта (P3.1 чекеры, P3.2 политики, P3.3 deep_research, P3.4 security_audit) реализованы и исполняются движком; co-design тест абстракции зелёный (`tests/core/test_flow_security_audit.py`). Диспетч `task_type → flow` (остаток P0.4) тоже закрыт. Детали и отложенные пункты — [follow_ups.md](../follow_ups.md) (строка 2026-06-21) и [plan.md](plan.md) §P3.
 
-Детализация фазы P3 из [plan.md](plan.md). Цель: два не-implementation flow данными; **доказательство обобщаемости** движка. Адаптирует [task workflow profiles](../outdated/task_workflow_profiles.md). База проверки фазы: **co-design тест трёх flow** — финальный гейт абстракции ([index.md](index.md) §11): три flow выражаются данными без доменного знания в движке.
+Детализация фазы P3 из [plan.md](plan.md). Цель: два не-implementation flow данными; **доказательство обобщаемости** движка. Адаптирует [task workflow profiles](../archive/outdated/task_workflow_profiles.md). База проверки фазы: **co-design тест трёх flow** — финальный гейт абстракции ([index.md](index.md) §11): три flow выражаются данными без доменного знания в движке.
 
 Вход: полный evaluator-примитив (P2, включая `resume_own_lineage`), packaged [deep_research.yaml](../../../src/wastech_orchestrator/core/flow/packaged/deep_research.yaml) и [security_audit.yaml](../../../src/wastech_orchestrator/core/flow/packaged/security_audit.yaml) (уже грузятся/валидируются в P0; в P3 — исполняются).
 

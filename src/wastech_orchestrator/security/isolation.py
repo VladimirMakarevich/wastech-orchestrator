@@ -1,4 +1,4 @@
-"""``strict_isolation`` preflight check (spec §12.8, §6.1).
+"""``strict_isolation`` preflight check.
 
 When ``security.strict_isolation`` is true, "an inability to enable the required isolation fails
 preflight with an error (no silent downgrade)". This module is the deterministic, **offline** check

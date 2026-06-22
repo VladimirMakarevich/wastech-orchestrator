@@ -1,4 +1,4 @@
-"""The deterministic Orchestrator Core (spec §5–§13).
+"""The deterministic Orchestrator Core (spec–).
 
 This package holds the components that drive a task end to end: the state machine, loop control,
 decomposition decision, recovery reconciliation, and the orchestrator pipeline itself. The Core

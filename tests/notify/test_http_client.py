@@ -172,7 +172,7 @@ def _ack_recording_bot() -> type[_FakeBot]:
 def test_http_client_acknowledges_matching_and_near_miss_callbacks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Every press in our chat is acknowledged (§4.1): the near-miss "wrong" (right chat + message,
+    # Every press in our chat is acknowledged: the near-miss "wrong" (right chat + message,
     # but stale data) gets a stale alert; the matching "right" returns the answer.
     base = _ack_recording_bot()
     base.acks = []
@@ -291,7 +291,7 @@ def test_http_client_near_miss_log_carries_no_secrets(
         ) -> tuple[_Update, ...]:
             if offset is not None and offset > 1:
                 return ()
-            prompt = _Message(_Chat(424242), "x", message_id=99)  # chat id is a secret (§12.15)
+            prompt = _Message(_Chat(424242), "x", message_id=99)  # chat id is a secret
             return (
                 _Update(
                     1, callback_query=_Callback(id="c", message=prompt, data="hitl:hitl-1:yes")

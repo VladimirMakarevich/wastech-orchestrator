@@ -1,4 +1,4 @@
-"""Repo skill inventory scan, planning-selection acceptance, and dedup (post-test-run §2.1/§2.2)."""
+"""Repo skill inventory scan, planning-selection acceptance, and dedup (post-test-run)."""
 
 from __future__ import annotations
 

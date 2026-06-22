@@ -9,7 +9,7 @@ evaluator (e.g. ``test_quality``) self-caps: it reworks until its own per-instan
 (``max_rework_per_stage``) is spent, then takes the ``accept`` edge (-> continue), **never** manual
 (P2.4). Each pass writes an immutable ``evaluations`` row (``in_flow_verdict``) namespaced by the
 source ``node_run`` id — the per-instance rework limit is derived by COUNTing those verdicts, not a
-mutable counter (flow-contract §2.2), so the core stays domain-free (the cap is the node's declared
+mutable counter (flow-contract), so the core stays domain-free (the cap is the node's declared
 budget, not knowledge of the role). One mechanism serves every in-flow role (review / test_quality /
 critic / verifier / operator-defined); only the prompt, blocking flag, and budget differ.
 
@@ -143,7 +143,7 @@ class EvaluatorNodeRunner:
             return "rework"
         # A non-blocking evaluator (e.g. test_quality) self-caps: rework until its own per-instance
         # budget (max_rework_per_stage) is spent — counted from the immutable in_flow_verdict rows
-        # (flow-contract §2.2), not a mutable counter — then accept (→ continue), never manual. The
+        # (flow-contract), not a mutable counter — then accept (→ continue), never manual. The
         # core stays domain-free: the cap is the node's declared budget, not knowledge of the role.
         prior_rework = self._s.store.count_rework_verdicts(
             ctx.task_id, node_id=node.id, subtask_order=ctx.subtask_order

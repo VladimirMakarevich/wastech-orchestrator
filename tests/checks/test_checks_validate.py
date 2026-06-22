@@ -1,4 +1,4 @@
-"""Candidate validation rules (automatic check discovery §7, §12)."""
+"""Candidate validation rules (automatic check discovery)."""
 
 from __future__ import annotations
 

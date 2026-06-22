@@ -83,7 +83,7 @@ Deny-list в бою; модель угроз как тесты; recovery-пер�
 
 ## P4.3 — Docs + housekeeping
 
-Обновить configuration / how-it-works / функциональную карту / likec4 / follow-ups; перенести поглощённые пять backlog-доков в `docs/backlog/outdated/` со ссылкой на `flows/*`.
+Обновить configuration / how-it-works / функциональную карту / likec4 / follow-ups; перенести поглощённые пять backlog-доков в `docs/backlog/archive/outdated/` со ссылкой на `flows/*`.
 
 ### Touchpoints
 
@@ -92,7 +92,7 @@ Deny-list в бою; модель угроз как тесты; recovery-пер�
 - `docs/configuration.md` — шринкнутая схема конфига (граница config↔flow, [index.md](index.md) §14.3); `.worc/flows/` раскладка.
 - how-it-works / [happy-path.md](happy-path.md) — синхронизировать с реализованным.
 - [`docs/backlog/follow_ups.md`](../follow_ups.md) — снять закрытые P0.5-пункты; зафиксировать оставшиеся deferred (network per-host allowlist, signature/hash-реестр flow — [security-ceiling.md](security-ceiling.md) §8).
-- Перенести пять программ ([foundation](../outdated/workflow_execution_foundation.md) и др.) — **уже** в `docs/backlog/outdated/`; добавить заголовочную ссылку на `flows/*` как канонический преемник.
+- Перенести пять программ ([foundation](../archive/outdated/workflow_execution_foundation.md) и др.) — **уже** в `docs/backlog/archive/outdated/`; добавить заголовочную ссылку на `flows/*` как канонический преемник.
 
 ### Exit
 

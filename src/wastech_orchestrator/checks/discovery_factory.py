@@ -1,4 +1,4 @@
-"""Build the agent discovery component from config + providers (automatic check discovery §6).
+"""Build the agent discovery component from config + providers (automatic check discovery).
 
 Selects which provider runs discovery (the explicit ``checks.discovery.provider`` or the first
 available allowed provider) and constructs the :class:`AgentCheckDiscovery`. Returns ``None`` when

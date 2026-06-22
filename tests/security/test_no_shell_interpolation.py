@@ -1,4 +1,4 @@
-"""No-shell-interpolation across all call sites (spec §12.5, §6.1).
+"""No-shell-interpolation across all call sites.
 
 Every external process is launched as an argv list, never through a shell, and no user string is
 ever spliced into a command. We prove this structurally: the *only* module that touches

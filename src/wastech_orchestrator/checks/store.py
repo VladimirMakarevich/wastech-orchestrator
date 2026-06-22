@@ -1,4 +1,4 @@
-"""Resolved-profile persistence (backlog: automatic check discovery, §10).
+"""Resolved-profile persistence (backlog: automatic check discovery).
 
 Stores the resolved profile at ``<artifacts_root>/checks/resolved-profile.json`` (the control
 workspace). Writes are atomic (temp + replace) so an interrupted write never leaves a half-profile.

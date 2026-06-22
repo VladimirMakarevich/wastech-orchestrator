@@ -1,4 +1,4 @@
-"""Tests for the ``rerun`` CLI command — fresh re-attempt and ``--continue`` (§rerun)."""
+"""Tests for the ``rerun`` CLI command — fresh re-attempt and ``--continue``."""
 
 from __future__ import annotations
 

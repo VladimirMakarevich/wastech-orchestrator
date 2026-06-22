@@ -11,7 +11,7 @@ same engine outcome — ``pass`` / ``fail`` — so the engine needs no per-check
   ``pass`` (the scan ran); whether findings gate is the flow's decision (its edges). Used by
   ``security_audit``.
 
-The flow never supplies commands / scanners (security-ceiling §3): the command profile is resolved
+The flow never supplies commands / scanners (security-ceiling): the command profile is resolved
 by the orchestrator and the scanner set is core-owned in
 :mod:`~wastech_orchestrator.core.flow.checkers`.
 

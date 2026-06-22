@@ -1,9 +1,9 @@
-"""Repository inspection — bounded, non-secret evidence collection (automatic check discovery §5).
+"""Repository inspection — bounded, non-secret evidence collection (automatic check discovery).
 
 Reads only well-known, non-secret project files (manifests, lock files, wrappers, CI workflow
 names, instruction docs) and the presence of local interpreters/tool scripts. Each file read is
 size-bounded and any path matching the security ``denied_read_paths`` is skipped. Nothing here
-launches a process or resolves environment-variable *values* — CI files contribute names only (§12).
+launches a process or resolves environment-variable *values* — CI files contribute names only.
 """
 
 from __future__ import annotations
@@ -76,7 +76,7 @@ class RepositoryEvidence:
     venvs: tuple[VenvInfo, ...] = ()
     ci_workflows: tuple[str, ...] = ()
     instruction_docs: tuple[str, ...] = ()
-    # Configured tool scope (§1.1): an explicit `.` argument overrides these, so detection must
+    # Configured tool scope: an explicit `.` argument overrides these, so detection must
     # honor them instead of hardcoding `mypy .` / `ruff check .`. ``mypy_files`` are the safe,
     # repo-relative paths from ``[tool.mypy] files``; the ``*_has_scope`` flags mean any scope key
     # (files/exclude for mypy; src/include/exclude for ruff) is configured.
@@ -226,7 +226,7 @@ class RepositoryInspector:
 
 
 def _tool_scopes(data: dict[str, object] | None) -> tuple[tuple[str, ...], bool, bool]:
-    """``(mypy_files, mypy_has_scope, ruff_has_scope)`` from ``[tool.mypy]``/``[tool.ruff]`` (§1.1).
+    """``(mypy_files, mypy_has_scope, ruff_has_scope)`` from ``[tool.mypy]``/``[tool.ruff]``.
 
     Best effort and safe by default: an unparseable/absent ``pyproject.toml`` yields no scope, so
     detection keeps the historical ``mypy .`` / ``ruff check .``. ``[tool.mypy] exclude`` is a regex

@@ -1,4 +1,4 @@
-"""Git Manager (spec §21, .agents/rules/git-workflow.md).
+"""Git Manager (.agents/rules/git-workflow.md).
 
 The **only** component that commits, pushes, or opens pull requests — agents never do. Every git
 and ``gh`` invocation goes through the P2 safe process runner as an **argv list** (no shell string,
@@ -7,13 +7,13 @@ no user-string interpolation), with an allowlisted environment.
 Responsibilities:
 
 * branch flow: ``fetch`` → checkout ``base_branch`` → ``pull`` → create ``agent/<task-id>-<slug>``;
-* **scoped staging** (§21.1): stage only the agent's code paths via an explicit pathspec plus a
+* **scoped staging**: stage only the agent's code paths via an explicit pathspec plus a
   belt-and-braces ``:(exclude)tasks/`` guard — **never** ``git add .``;
-* the canonical footprint (§21): the orchestrator's runtime files live under the gitignored
+* the canonical footprint: the orchestrator's runtime files live under the gitignored
   ``<repo>/.worc/`` home, and a separate orchestrator-made audit commit captures the task file plus
   its ``<id>.summary.md`` at the repo root under ``tasks/``;
-* idempotent commit/push/PR via an operation fingerprint + remote-state check (§13);
-* terminal cleanup back to ``repo.base_branch`` when provably safe (§8.3);
+* idempotent commit/push/PR via an operation fingerprint + remote-state check;
+* terminal cleanup back to ``repo.base_branch`` when provably safe;
 * the :class:`~wastech_orchestrator.routing.snapshots.SnapshotHook` for partial-change capture.
 """
 
@@ -44,12 +44,12 @@ from wastech_orchestrator.state_store import PublishOpRow, StateStore
 # Git/gh operations are bounded but slower than a trivial command (network fetch/push allowed).
 GIT_TIMEOUT_SECONDS = 300
 
-# The directories that must never enter a code commit (§21.1). `.worc/` is the gitignored runtime
+# The directories that must never enter a code commit. `.worc/` is the gitignored runtime
 # home (state.db, logs/, workspace/, checks/, config.yaml, orchestrator.pid, …); `tasks/` is tracked
-# but rides the separate audit commit, so it is kept out of the code commit too (§21.3).
+# but rides the separate audit commit, so it is kept out of the code commit too.
 EXCLUDED_DIRS = (".worc", "tasks")
 
-# The single ignore line `install` appends to a target repo's tracked `.gitignore` (§21.2): the
+# The single ignore line `install` appends to a target repo's tracked `.gitignore`: the
 # whole `.worc/` runtime home, so an operator's `git status` stays clean. `tasks/` is intentionally
 # NOT ignored — it carries the committed audit trail.
 RUNTIME_GITIGNORE_LINES: tuple[str, ...] = (
@@ -78,14 +78,14 @@ def _append_missing_lines(target: Path, lines: Sequence[str]) -> list[str]:
 
 
 def append_runtime_excludes(repo_root: str | Path) -> list[str]:
-    """Idempotently add the ``.worc/`` ignore line to the repo's tracked ``.gitignore`` (§21.2).
+    """Idempotently add the ``.worc/`` ignore line to the repo's tracked ``.gitignore``.
 
     Returns the lines actually appended — empty when everything was already present.
     """
     return _append_missing_lines(Path(repo_root) / ".gitignore", RUNTIME_GITIGNORE_LINES)
 
 
-# publish_operations.kind values (idempotency keys, §13).
+# publish_operations.kind values (idempotency keys).
 KIND_CODE_COMMIT = "code_commit"
 KIND_SUBTASK_COMMIT = "subtask_commit"
 KIND_AUDIT_COMMIT = "audit_commit"
@@ -120,7 +120,7 @@ class GitResult:
 
 @dataclass(frozen=True)
 class CleanupOutcome:
-    """The terminal-cleanup decision (§8.3)."""
+    """The terminal-cleanup decision."""
 
     safe: bool
     target_branch: str
@@ -141,7 +141,7 @@ class GitCommandError(Exception):
 
 
 class ManualActionRequired(Exception):
-    """A condition the Core must surface as ``manual_action_required`` (e.g. §21.4 preflight)."""
+    """A condition the Core must surface as ``manual_action_required`` (e.g. preflight)."""
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
@@ -319,7 +319,7 @@ class GitManager:
     def refresh_base(self) -> None:
         """Best-effort fetch + ff-only pull of ``base_branch`` so git-pushed tasks become visible.
 
-        Periodic discovery for the ``watch`` loop (§8.3). A no-op unless HEAD is already on
+        Periodic discovery for the ``watch`` loop. A no-op unless HEAD is already on
         ``base_branch`` (i.e. the slot is free after terminal cleanup), so it never disturbs an
         active task branch. Both git calls are best-effort: a repo without a remote or a
         non-fast-forwardable base simply leaves the working copy untouched.
@@ -335,7 +335,7 @@ class GitManager:
         return self._git("rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").ok
 
     def commit_on_branch(self, sha: str, branch: str) -> bool:
-        """True iff ``sha`` is an ancestor of ``branch`` (recovery subtask verification, §13)."""
+        """True iff ``sha`` is an ancestor of ``branch`` (recovery subtask verification)."""
         if not sha:
             return False
         return self._git("merge-base", "--is-ancestor", sha, branch).ok
@@ -343,7 +343,7 @@ class GitManager:
     # --- footprint ------------------------------------------------------------------------
 
     def ensure_runtime_excludes(self) -> None:
-        """Ensure the repo's tracked ``.gitignore`` ignores the ``.worc/`` runtime home (§21.2).
+        """Ensure the repo's tracked ``.gitignore`` ignores the ``.worc/`` runtime home.
 
         ``install`` normally writes this, but a clone scaffolded another way may lack it.
         Idempotent; keeps ``.worc/`` (state.db, logs/, workspace/, checks/, config.yaml, …) out of
@@ -351,7 +351,7 @@ class GitManager:
         """
         append_runtime_excludes(self._clone)
 
-    # --- SnapshotHook (§7.4) --------------------------------------------------------------
+    # --- SnapshotHook --------------------------------------------------------------
 
     def capture(self) -> WorkingTreeSnapshot:
         commit_sha = self._git("rev-parse", "HEAD").stdout.strip()
@@ -372,7 +372,7 @@ class GitManager:
             before=before,
             after=after,
             diff_path=diff_path,
-            note="partial attempt from a prior provider; build on it rather than restart (§7.4)",
+            note="partial attempt from a prior provider; build on it rather than restart",
         )
 
     def _write_partial_diff(self, diff_text: str) -> str:
@@ -388,7 +388,7 @@ class GitManager:
         path.write_text(diff_text, encoding="utf-8")
         return str(path)
 
-    # --- staging + commit (§21.1) ---------------------------------------------------------
+    # --- staging + commit ---------------------------------------------------------
 
     def changed_code_paths(self) -> list[str]:
         """The changed paths that are *not* orchestration artifacts (the code staging set)."""
@@ -436,7 +436,7 @@ class GitManager:
         return any(normalized == d or normalized.startswith(f"{d}/") for d in EXCLUDED_DIRS)
 
     def staged_pathspec(self, paths: Sequence[str]) -> list[str]:
-        """Build the scoped ``git add`` pathspec: code paths plus a belt-and-braces guard (§21.1).
+        """Build the scoped ``git add`` pathspec: code paths plus a belt-and-braces guard.
 
         ``.worc/`` is gitignored, so ``git add`` skips it without a guard; ``tasks/`` is tracked (it
         rides the separate audit commit), so it is guarded with ``:(exclude)`` to ensure it never
@@ -456,7 +456,7 @@ class GitManager:
         return self._commit(task_id, KIND_CODE_COMMIT, None, message, paths)
 
     def commit_subtask(self, task_id: str, order: int, slug: str, message: str) -> str:
-        """Make the single local commit for a completed subtask on the task branch (§5.1)."""
+        """Make the single local commit for a completed subtask on the task branch."""
         paths = self.changed_code_paths()
         sha = self._commit(task_id, KIND_SUBTASK_COMMIT, order, message, paths)
         if sha is None:  # nothing changed — fall back to HEAD so the marker is always set
@@ -473,7 +473,7 @@ class GitManager:
     ) -> str | None:
         existing = self._store.get_publish_op(task_id, kind, subtask)
         if existing is not None and existing.status == _STATUS_COMPLETED:
-            return existing.result_ref  # already committed (restart) — never double-commit (§13)
+            return existing.result_ref  # already committed (restart) — never double-commit
 
         head_before = self._git("rev-parse", "HEAD").stdout.strip()
         fingerprint = self._fingerprint(task_id, kind, subtask, head_before, paths)
@@ -504,7 +504,7 @@ class GitManager:
         return sha
 
     def commit_audit(self, task_id: str) -> str | None:
-        """Make the orchestrator-only commit of the task lifecycle (§21.3).
+        """Make the orchestrator-only commit of the task lifecycle.
 
         Stages **only this task's** moved task file plus its `<id>.summary.md` (in ``tasks/done`` or
         ``tasks/failed``) — never the whole ``tasks/`` tree, so a concurrently-pending task is never
@@ -553,19 +553,19 @@ class GitManager:
         )
         return sha
 
-    # --- publish (idempotent, §13) --------------------------------------------------------
+    # --- publish (idempotent) --------------------------------------------------------
 
     def push(self, task_id: str, branch: str) -> bool:
         """Push the task branch to ``origin``. Idempotent via the publish op + remote check.
 
-        Refuses to push directly to ``base_branch`` (§12.12): publishing is PR-only, and the task
+        Refuses to push directly to ``base_branch``: publishing is PR-only, and the task
         branch is always ``agent/<task-id>-<slug>``, so a push targeting the base branch signals a
         corrupted branch state rather than a normal publish.
         """
         base = self._config.repo.base_branch
         if branch == base:
             raise GitCommandError(
-                f"refusing to push directly to base branch {base!r}; publishing is PR-only (§12.12)"
+                f"refusing to push directly to base branch {base!r}; publishing is PR-only"
             )
         existing = self._store.get_publish_op(task_id, KIND_PUSH, None)
         if existing is not None and existing.status == _STATUS_COMPLETED:
@@ -620,7 +620,7 @@ class GitManager:
     def merge_pr(
         self, task_id: str, pr_url: str, *, strategy: MergeStrategy, wait_for_checks: bool
     ) -> str | None:
-        """Merge an open PR via ``gh pr merge``. Idempotent via the publish op (§13).
+        """Merge an open PR via ``gh pr merge``. Idempotent via the publish op.
 
         Returns a merge-outcome marker: the merge commit SHA (immediate mode), ``"merged"`` when the
         SHA is unreadable, or ``"armed"`` when GitHub-native auto-merge was armed (``--auto``);
@@ -679,9 +679,9 @@ class GitManager:
     # --- diffs ----------------------------------------------------------------------------
 
     def write_current_diff(self, task_id: str) -> str:
-        """Write ``logs/<task-id>/current.diff`` (working tree vs HEAD) and return its path (§6).
+        """Write ``logs/<task-id>/current.diff`` (working tree vs HEAD) and return its path.
 
-        The diff is redacted before writing (§12.6): the failure report reads it back, so this is
+        The diff is redacted before writing: the failure report reads it back, so this is
         the single place that keeps a leaked secret out of both ``current.diff`` and the report.
         """
         diff = self._git("diff", "HEAD").stdout
@@ -692,11 +692,11 @@ class GitManager:
         return str(path)
 
     def _diff_secrets(self) -> tuple[str, ...]:
-        """Denied-file secret values present in the clone, to redact from written diffs (§12.6)."""
+        """Denied-file secret values present in the clone, to redact from written diffs."""
         return read_denied_secrets(self._clone, self._config.security.denied_read_paths)
 
     def cumulative_committed_diff(self) -> str:
-        """The diff of all task-branch commits vs ``base_branch`` (decomposed context, §6)."""
+        """The diff of all task-branch commits vs ``base_branch`` (decomposed context)."""
         base = self._config.repo.base_branch
         result = self._git("diff", f"{base}...HEAD")
         return result.stdout
@@ -704,14 +704,14 @@ class GitManager:
     def diff_stat(self) -> str:
         """``git diff --stat base...HEAD`` — changed files + line counts only, no patch body.
 
-        Used by the deterministic minimal summary (§5.2) so the committed ``summary.md`` stays
+        Used by the deterministic minimal summary so the committed ``summary.md`` stays
         compact. ``--stat`` carries only file paths and counts (never patch content), so unlike
         :meth:`cumulative_committed_diff` there is nothing secret to redact.
         """
         base = self._config.repo.base_branch
         return self._git("diff", "--stat", f"{base}...HEAD").stdout
 
-    # --- terminal cleanup (§8.3) ----------------------------------------------------------
+    # --- terminal cleanup ----------------------------------------------------------
 
     def terminal_cleanup(self, task_id: str) -> CleanupOutcome:
         """Safely checkout ``base_branch`` after a terminal outcome, or report why it is unsafe."""

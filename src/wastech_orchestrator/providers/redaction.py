@@ -1,4 +1,4 @@
-"""Secret redaction (spec §12.6, .agents/rules/security.md).
+"""Secret redaction (.agents/rules/security.md).
 
 Pure functions that scrub known-secret shapes from text and from the request representation
 **before** anything is written to an artifact, log, or SQLite. There are two inputs:
@@ -11,7 +11,7 @@ Pure functions that scrub known-secret shapes from text and from the request rep
 The functions never mutate their inputs. :func:`read_denied_secrets` harvests the values of the
 ``security.denied_read_paths`` files (``.env``, ``secrets/**``) present in the agent's workspace so
 that, even if the agent leaks their content to stdout/stderr, those values are redacted before any
-artifact/log is written (§12.4/§12.6). The guarantee these support: **no secret ever lands in an
+artifact/log is written. The guarantee these support: **no secret ever lands in an
 artifact**.
 """
 
@@ -151,7 +151,7 @@ def read_denied_secrets(
     *,
     max_bytes: int = 65536,
 ) -> tuple[str, ...]:
-    """Harvest secret values from the ``denied_read_paths`` files under ``workspace`` (§12.4).
+    """Harvest secret values from the ``denied_read_paths`` files under ``workspace``.
 
     Each pattern is globbed relative to the workspace (``.env`` matches a file, ``secrets/**`` a
     whole subtree); matched files are read up to ``max_bytes`` and their non-trivial value tokens

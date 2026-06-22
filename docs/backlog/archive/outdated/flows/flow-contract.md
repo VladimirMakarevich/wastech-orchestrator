@@ -32,7 +32,7 @@ flow:
   decomposition: { ... } # необязательная конструкция фан-аута
 ```
 
-`output_policy` — скаляр, резолвящийся в foundation-овский `ResolvedOutputPolicy` (`target_repository_writes` + `control_workspace_writes` + `allowed_path_policy`). `publishing` — единый профиль-уровневый скаляр (`pull_request` / `documentation_pull_request` / `local_artifact` / `private_control_workspace_report` / `none`). Оба перечислены в [foundation](../outdated/workflow_execution_foundation.md) §4; flow выбирает значение, ядро его обеспечивает.
+`output_policy` — скаляр, резолвящийся в foundation-овский `ResolvedOutputPolicy` (`target_repository_writes` + `control_workspace_writes` + `allowed_path_policy`). `publishing` — единый профиль-уровневый скаляр (`pull_request` / `documentation_pull_request` / `local_artifact` / `private_control_workspace_report` / `none`). Оба перечислены в [foundation](../archive/outdated/workflow_execution_foundation.md) §4; flow выбирает значение, ядро его обеспечивает.
 
 ## 2. Палитра видов узлов
 
@@ -288,7 +288,7 @@ flow:
 
 ## 8. Примеры: `deep_research.yaml` и `security_audit.yaml`
 
-Те же два flow из [outdated/task_workflow_profiles.md](../outdated/task_workflow_profiles.md) §7–§8 — целиком данными на той же палитре, что и implementation (§7). Это доказательство, что палитра не заточена под один flow.
+Те же два flow из [archive/outdated/task_workflow_profiles.md](../archive/outdated/task_workflow_profiles.md) §7–§8 — целиком данными на той же палитре, что и implementation (§7). Это доказательство, что палитра не заточена под один flow.
 
 Заметка про права записи: research/audit держат `permission_ceiling: workspace-write`, потому что пишущие узлы (`synthesis`/`report`) создают файлы, **но** `output_policy` + path-containment + after-stage guard ограничивают, КУДА (research-dir / private-report-dir); исходники repo остаются read-only (`target_repository_writes: approved_document_only`/`none`). Sandbox разрешает запись, политика ограничивает путь — два слоя.
 

@@ -1,4 +1,4 @@
-"""Task decomposition: deterministic acceptance + artifacts (spec §5.1).
+"""Task decomposition: deterministic acceptance + artifacts.
 
 Decomposition is a flag-gated sub-phase of ``planning``, **off by default**. The planning agent may
 *recommend* a split in its structured output, but the Core decides whether to accept it by a
@@ -14,7 +14,7 @@ A split is accepted **only** when all hold:
   (linear; no forward or cyclic dependency).
 
 Otherwise the task runs as a single unit. The accept/reject decision, ``n``, and the reason are
-returned for the caller to persist (§9) and audit.
+returned for the caller to persist and audit.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from typing import Any
 
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
 
-# Reason codes for the accept/reject decision (persisted/audited, §5.1).
+# Reason codes for the accept/reject decision (persisted/audited).
 REASON_GATE_OFF = "gate_off"
 REASON_NOT_RECOMMENDED = "not_recommended"
 REASON_N_OUT_OF_RANGE = "n_out_of_range"
@@ -35,7 +35,7 @@ REASON_MALFORMED_SUBTASK = "malformed_subtask"
 REASON_NON_LINEAR_DEPENDENCIES = "non_linear_dependencies"
 REASON_ACCEPTED = "accepted"
 
-# Subtask lifecycle status persisted in ``subtasks/index.json`` and the State Store (§9, §10).
+# Subtask lifecycle status persisted in ``subtasks/index.json`` and the State Store.
 SUBTASK_PENDING = "pending"
 SUBTASK_IN_PROGRESS = "in_progress"
 SUBTASK_COMMITTED = "committed"
@@ -45,7 +45,7 @@ INDEX_FILENAME = "index.json"
 
 @dataclass(frozen=True)
 class SubtaskSpec:
-    """One subtask of an accepted decomposition (§5.1)."""
+    """One subtask of an accepted decomposition."""
 
     order: int
     title: str
@@ -109,7 +109,7 @@ def decide_decomposition(
     gate_on: bool,
     max_subtasks: int,
 ) -> DecompositionDecision:
-    """Apply the §5.1 deterministic acceptance rule to the planning agent's structured output."""
+    """Apply the deterministic acceptance rule to the planning agent's structured output."""
     if not gate_on:
         return _single_unit(REASON_GATE_OFF)
     if not isinstance(structured_output, Mapping):
@@ -150,7 +150,7 @@ def _subtasks_dir(artifacts_root: str | Path, task_id: str) -> Path:
 
 
 def subtask_spec_path(artifacts_root: str | Path, task_id: str, order: int, slug: str) -> Path:
-    """Path to one subtask's immutable ``NN-<slug>.md`` spec (§10).
+    """Path to one subtask's immutable ``NN-<slug>.md`` spec.
 
     The single source of the per-subtask spec filename, shared by :func:`write_subtask_artifacts`
     (which writes them) and the orchestrator's decomposition fan-out (which injects the active one
@@ -180,7 +180,7 @@ def _write_json_atomic(path: Path, data: Any) -> None:
 def write_subtask_artifacts(
     decision: DecompositionDecision, artifacts_root: str | Path, task_id: str
 ) -> None:
-    """Write ``subtasks/index.json`` and one immutable ``NN-<slug>.md`` spec per subtask (§10).
+    """Write ``subtasks/index.json`` and one immutable ``NN-<slug>.md`` spec per subtask.
 
     All under ``logs/<task-id>/`` — never in the target repository. The per-subtask ``.md`` files
     are written once and never overwritten; ``index.json`` is updated transactionally as each
@@ -197,7 +197,7 @@ def write_subtask_artifacts(
     for spec in decision.subtasks:
         spec_path = subtask_spec_path(artifacts_root, task_id, spec.order, spec.slug)
         if spec_path.exists():
-            continue  # immutable — never overwrite (§10)
+            continue  # immutable — never overwrite
         criteria = "\n".join(f"- {c}" for c in spec.acceptance_criteria)
         depends = ", ".join(str(d) for d in spec.depends_on) if spec.depends_on else "none"
         spec_path.write_text(
@@ -217,7 +217,7 @@ def update_subtask_index(
     status: str,
     commit_sha: str | None = None,
 ) -> None:
-    """Update one subtask's ``status``/``commit_sha`` in ``index.json`` atomically (§10).
+    """Update one subtask's ``status``/``commit_sha`` in ``index.json`` atomically.
 
     Mirrors the State Store update so the on-disk index and SQLite agree as each subtask commits.
     """

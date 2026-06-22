@@ -1,4 +1,4 @@
-"""Unit tests for the ledger, failure report, and minimal summary (§10, §8.1, §5.2)."""
+"""Unit tests for the ledger, failure report, and minimal summary."""
 
 from __future__ import annotations
 
@@ -170,7 +170,7 @@ def test_write_minimal_summary(tmp_path: Path) -> None:
 
 
 def test_minimal_summary_is_compact_and_inlines_no_patch(tmp_path: Path) -> None:
-    """The fallback must stay small: no full diff body, no pasted task description (§5.2)."""
+    """The fallback must stay small: no full diff body, no pasted task description."""
     md_path, _ = write_minimal_summary(
         tmp_path,
         "task-002",

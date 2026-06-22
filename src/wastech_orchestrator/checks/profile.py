@@ -1,9 +1,9 @@
-"""The resolved check profile artifact (backlog: automatic check discovery, §10).
+"""The resolved check profile artifact (backlog: automatic check discovery).
 
 A machine-readable record of the checks the orchestrator will run, plus the evidence, probe results,
 and the discovery-input fingerprint that lets the profile be cached and invalidated. It is
 structurally secret-free: it carries argv lists, evidence strings, and paths only — never
-environment values or file contents (§12).
+environment values or file contents.
 """
 
 from __future__ import annotations
@@ -20,13 +20,13 @@ from wastech_orchestrator.checks.model import (
 )
 
 # The profile's own format version, independent of the config CONFIG_SCHEMA_VERSION.
-# v2 (2026-06-14, §1.2): adds commands_signature + the approval fields. A v1 profile lacks them and
+# v2 (2026-06-14): adds commands_signature + the approval fields. A v1 profile lacks them and
 # loads with approved=False, which simply triggers an approval on the next *change* to the set.
 PROFILE_SCHEMA_VERSION = 2
 
 
 def commands_signature(checks: Sequence[ResolvedCheck]) -> str:
-    """A stable, secret-free hash identifying the *set* of check commands (name + argv) (§1.2).
+    """A stable, secret-free hash identifying the *set* of check commands (name + argv).
 
     Order-independent (sorted) so re-ordering the same checks is not a "change". This is the value a
     changed-command-set approval gate compares against — argv only, never env or file contents.
@@ -99,7 +99,7 @@ class ResolvedCheckProfile:
     created_at: str
     last_validated_at: str
     notes: tuple[str, ...] = ()
-    # The §1.2 sensitive-change approval gate: a stable hash of the selected command set, whether
+    # The sensitive-change approval gate: a stable hash of the selected command set, whether
     # the operator approved *this* set, and a secret-free link to the approving HITL interaction.
     commands_signature: str = ""
     approved: bool = False

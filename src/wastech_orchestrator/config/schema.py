@@ -1,9 +1,9 @@
-"""Configuration schema (spec §11).
+"""Configuration schema.
 
-Frozen dataclasses mirroring the config.yaml structure, one per §11 block, keyed by the canonical
+Frozen dataclasses mirroring the config.yaml structure, one per block, keyed by the canonical
 enums from ``providers.base``. This module holds *shapes only* — no parsing, no validation, and no
 CLI syntax. The loader (``config.loader``) maps YAML into these types; the validator
-(``config.validation``) enforces the §11/§21.4 semantic rules.
+(``config.validation``) enforces the semantic rules.
 """
 
 from __future__ import annotations
@@ -24,8 +24,8 @@ from wastech_orchestrator.providers.base import ProviderId, Stage
 # v4: added the optional ``agents.skip_stages`` / ``agents.allow_review_skip`` keys (stage-skip
 # control). Old configs omit them and take the safe defaults (no skips, review-skip disallowed) — no
 # migration flips anything.
-# v5 (2026-06-14, post-test-run): adds the optional `skills:` block (§2.1) and the
-# `checks.discovery.{run_at_task_start,approve_command_changes}` keys (§1.2). All are
+# v5 (2026-06-14, post-test-run): adds the optional `skills:` block and the
+# `checks.discovery.{run_at_task_start,approve_command_changes}` keys. All are
 # backward-compatible (absent => safe defaults); `upgrade-config` adds them to an older config.
 # v6 (2026-06-14, prompt-templates-simplification): prompt overrides are now auto-detected by file
 # presence in `prompts.templates_dir` — the `prompts.overrides` map and `prompts.strict` flag are
@@ -45,7 +45,7 @@ from wastech_orchestrator.providers.base import ProviderId, Stage
 # v10 (2026-06-19, flexible-flow stage-skip): the global `agents.skip_stages` list is removed — with
 # fully configurable flows, "skip a stage for every task" is redundant (drop the node from the flow,
 # or author an operator flow). Per-task `stages.<stage>.enabled: false` survives as a bounded,
-# validated toggle (flow-contract §10), and `agents.allow_review_skip` stays (now gating only the
+# validated toggle (flow-contract), and `agents.allow_review_skip` stays (now gating only the
 # per-task review skip). `upgrade-config` strips `agents.skip_stages`; old configs still load
 # fail-open (the key is tolerated/ignored).
 # v11 (2026-06-19, flow-engine PRE.1/PRE.2): provider routing moves onto the flow node. The
@@ -60,7 +60,7 @@ from wastech_orchestrator.providers.base import ProviderId, Stage
 # still load fail-open (the keys are tolerated/ignored).
 CONFIG_SCHEMA_VERSION = 12
 
-# Stages a task may skip per-task via ``stages.<stage>.enabled: false`` (flow-contract §10 bounded
+# Stages a task may skip per-task via ``stages.<stage>.enabled: false`` (flow-contract bounded
 # exception). ``refinement`` is excluded — it is skipped deterministically by completeness
 # classification (``derived.needs_refinement``), never a task flag — and
 # ``implementation``/``publishing`` are never skippable (the core work and the output). ``testing``
@@ -77,14 +77,14 @@ SKIPPABLE_STAGES: frozenset[Stage] = frozenset(
 
 
 class AuditBranch(StrEnum):
-    """Which branch the audit trail is committed onto (spec §21)."""
+    """Which branch the audit trail is committed onto."""
 
     TASK = "task"
     SIBLING = "sibling"
 
 
 class CheckDiscoveryMode(StrEnum):
-    """How the check profile is resolved (backlog: automatic check discovery, §9)."""
+    """How the check profile is resolved (backlog: automatic check discovery)."""
 
     AUTO = "auto"  # deterministic detection, then agent fallback when confidence is low
     DETERMINISTIC = "deterministic"  # inspect known project evidence only; never an agent
@@ -93,7 +93,7 @@ class CheckDiscoveryMode(StrEnum):
 
 
 class CheckRefreshPolicy(StrEnum):
-    """When a cached resolved profile is recomputed (backlog: automatic check discovery, §10)."""
+    """When a cached resolved profile is recomputed (backlog: automatic check discovery)."""
 
     ON_CHANGE = "on_change"  # rediscover when the discovery-input fingerprint changes
     ALWAYS = "always"
@@ -109,7 +109,7 @@ class AutoModeConfig:
 class OrchestratorRuntimeConfig:
     auto_mode: AutoModeConfig
     # Seconds between `watch` ticks; each tick fetch/pulls base_branch to discover tasks pushed to
-    # git, then processes pending. 0 = single-pass (no loop, no periodic sync). See spec §8.3.
+    # git, then processes pending. 0 = single-pass (no loop, no periodic sync).
     poll_interval_seconds: int
 
 
@@ -191,7 +191,7 @@ class CheckCommandSpec:
 
 @dataclass(frozen=True)
 class CheckDiscoveryConfig:
-    """Check discovery policy (backlog: automatic check discovery, §9).
+    """Check discovery policy (backlog: automatic check discovery).
 
     The defaults are backward compatible: ``configured`` uses ``checks.commands`` as-is. ``install``
     opts new repositories into ``auto``. ``model``/``reasoning``/``provider``/``timeout_seconds``
@@ -205,11 +205,11 @@ class CheckDiscoveryConfig:
     reasoning: str | None = "low"  # low | medium | high | xhigh | max
     timeout_seconds: int = 120
     # Run discovery inside the state machine at task start (not only at install), so `auto` mode can
-    # resolve/agent-assist when the task begins (§1.2). Deterministic install-time discovery stays a
+    # resolve/agent-assist when the task begins. Deterministic install-time discovery stays a
     # cache-warming option. Default on; the agent fallback still only fires in `auto` + opted-in.
     run_at_task_start: bool = True
     # Treat a *changed* set of check commands as a sensitive change: write it to the resolved
-    # profile and require human approval on first use (§1.2). Disabling it under auto/deterministic
+    # profile and require human approval on first use. Disabling it under auto/deterministic
     # is the operator's call but is logged loudly (it decides what "passing" means).
     approve_command_changes: bool = True
 
@@ -218,7 +218,7 @@ class CheckDiscoveryConfig:
 class ChecksConfig:
     # A backward-compatible union: legacy shell-style strings and/or structured CheckCommandSpec.
     commands: tuple[str | CheckCommandSpec, ...]
-    # Per-command timeout for the Check Runner (spec §4.8). The process runner requires a timeout;
+    # Per-command timeout for the Check Runner. The process runner requires a timeout;
     # each ``commands`` entry is launched as an argv list (no shell) and bounded by this value.
     timeout_seconds: int = 7200
     discovery: CheckDiscoveryConfig = field(default_factory=CheckDiscoveryConfig)
@@ -227,7 +227,7 @@ class ChecksConfig:
 @dataclass(frozen=True)
 class FootprintConfig:
     """The audit-trail policy. The orchestrator's runtime files always live under the gitignored
-    ``<repo>/.worc/`` home; only the task file and its ``<id>.summary.md`` are committed (§21)."""
+    ``<repo>/.worc/`` home; only the task file and its ``<id>.summary.md`` are committed."""
 
     audit_commit_message: str
     audit_on_branch: AuditBranch
@@ -269,7 +269,7 @@ class TelegramConfig:
 
 @dataclass(frozen=True)
 class SkillsConfig:
-    """Planning-selected repo skill references (post-test-run §2.1).
+    """Planning-selected repo skill references (post-test-run).
 
     The orchestrator scans ``<scan_root>`` (default ``<repo.local_path>/.claude/skills``) for
     ``*/SKILL.md`` name+description, lets ``planning`` pick the relevant ones, and passes the chosen

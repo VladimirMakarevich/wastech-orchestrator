@@ -1,21 +1,21 @@
-"""The safe prompt renderer (spec §6).
+"""The safe prompt renderer.
 
 A flow node's prompt template is the content of its ``role_file`` (see
 :mod:`wastech_orchestrator.core.flow.prompt`); this module only turns a template into the final
 ``AgentRunRequest.prompt`` by substituting an **allowlisted** set of metadata/artifact *path*
 variables (never task bodies, diffs, check logs, env, or secrets — those stay in the artifact files
-the provider references by path, §6).
+the provider references by path).
 
 Invariant this module preserves: it produces only stdin prompt *text*. It never touches provider
 argv, CLI syntax, the sandbox/approvals, denied commands/reads, the env allowlist, or fallback
-policy. A template cannot weaken any of those (backlog §6).
+policy. A template cannot weaken any of those (backlog).
 """
 
 from __future__ import annotations
 
 import re
 
-# The only names a template may interpolate (backlog §5). Everything is metadata or an artifact
+# The only names a template may interpolate (backlog). Everything is metadata or an artifact
 # *path*; large content is never injected. An unknown ``{name}`` is left verbatim, so a template
 # carrying code/JSON braces renders unchanged.
 ALLOWED_PROMPT_VARS: frozenset[str] = frozenset(
@@ -23,7 +23,7 @@ ALLOWED_PROMPT_VARS: frozenset[str] = frozenset(
         "task_id",
         "stage",
         "repo_path",
-        "repo",  # flow-engine alias for ``repo_path`` (flow-contract §6); single shared allowlist
+        "repo",  # flow-engine alias for ``repo_path`` (flow-contract); single shared allowlist
         "task_path",
         "plan_path",
         "diff_path",

@@ -1,4 +1,4 @@
-"""Shared provider-integration matrix against a fake CLI (spec §4.4 tests, Phase 3).
+"""Shared provider-integration matrix against a fake CLI (tests, Phase 3).
 
 The same scenario matrix runs against **both** ``codex`` and ``claude`` via the dialect-aware
 ``fake_cli`` stub, proving the two adapters are behaviourally interchangeable behind the

@@ -1,11 +1,11 @@
-"""Configuration loader (spec §11).
+"""Configuration loader.
 
 Reads a config.yaml into the typed schema, fail-closed: a non-mapping root, an unknown top-level
 or per-block key, an unknown route stage, or a bad enum value is an error — never silently dropped.
 Every problem is collected and reported together via a typed :class:`ConfigError` (not bare
 strings). Loading is an explicit call with no import-time side effects.
 
-This module owns *structural* parsing only. The cross-field §11/§21.4 semantic rules live in
+This module owns *structural* parsing only. The cross-field semantic rules live in
 ``config.validation``.
 """
 
@@ -45,7 +45,7 @@ from wastech_orchestrator.config.schema import (
 )
 from wastech_orchestrator.providers.base import ProviderId
 
-# Defaults mirror §11 / the packaged config.example.yaml so a partial config still loads safely.
+# Defaults mirror / the packaged config.example.yaml so a partial config still loads safely.
 _DEFAULT_AUDIT_MESSAGE = "chore(orchestrator): audit trail for {task_id}"
 
 _REASONING_LEVELS: frozenset[str] = frozenset({"low", "medium", "high", "xhigh", "max"})
@@ -68,9 +68,9 @@ _DEFAULT_DENIED_COMMANDS: tuple[str, ...] = (
 
 
 class ConfigError(Exception):
-    """A config file is structurally invalid or violates a §11/§21.4 rule.
+    """A config file is structurally invalid or violates a rule.
 
-    Carries *every* problem found (``issues``), not just the first — fail-closed reporting (§11).
+    Carries *every* problem found (``issues``), not just the first — fail-closed reporting.
     """
 
     def __init__(self, issues: list[str]) -> None:
@@ -718,7 +718,7 @@ def loads_config(text: str, *, source: str = "<string>") -> ConfigLoadResult:
 def load_config(path: str | Path) -> ConfigLoadResult:
     """Read and parse a config file. Structural problems raise :class:`ConfigError`.
 
-    Semantic §11/§21.4 rules are enforced separately by ``config.validation.validate_config``.
+    Semantic rules are enforced separately by ``config.validation.validate_config``.
     """
     file = Path(path)
     text = file.read_text(encoding="utf-8")

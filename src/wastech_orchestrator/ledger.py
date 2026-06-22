@@ -1,13 +1,13 @@
-"""Completed-tasks ledger + failure report + minimal summary (spec §10).
+"""Completed-tasks ledger + failure report + minimal summary.
 
 The ledger is an **append-only** file (``logs/completed.jsonl``) outside SQLite: one JSON record per
 terminal transition (``done`` / ``failed`` / ``manual_action_required``), never rewritten. SQLite
 remains the authoritative state; the ledger is a convenience index of what has been done, and the
-duplicate-id source for the §19 gate.
+duplicate-id source for the gate.
 
 This module also writes the two stuck artifacts — ``failure_report.json`` (machine) and ``stuck.md``
 (human) — and the deterministic minimal summary the Core falls back to when no provider can produce
-the ``summary`` stage (§5.2).
+the ``summary`` stage.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ SUMMARY_JSON_FILENAME = "summary.json"
 
 @dataclass(frozen=True)
 class LedgerRecord:
-    """One terminal-transition record (§10). Fields beyond the core set apply when relevant."""
+    """One terminal-transition record. Fields beyond the core set apply when relevant."""
 
     id: str
     title: str
@@ -37,7 +37,7 @@ class LedgerRecord:
     finished_at: str
     branch: str | None = None
     pr_url: str | None = None
-    # Auto-merge audit (§ auto-merge bypass): ``auto_merged`` is true iff the orchestrator merged
+    # Auto-merge audit (auto-merge bypass): ``auto_merged`` is true iff the orchestrator merged
     # the PR without review; ``merge_outcome`` is the merge SHA, "merged", or "armed" (native
     # --auto). Part of the append-only, tamper-evident audit trail.
     auto_merged: bool = False
@@ -100,7 +100,7 @@ class Ledger:
         return self._path
 
     def append(self, record: LedgerRecord) -> None:
-        """Append exactly one record. Created on first use; never rewritten (§10)."""
+        """Append exactly one record. Created on first use; never rewritten."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(record.to_json(), ensure_ascii=False)
         with self._path.open("a", encoding="utf-8") as fh:
@@ -117,13 +117,13 @@ class Ledger:
         return out
 
     def has_task_id(self, task_id: str) -> bool:
-        """True iff ``task_id`` appears in the ledger (the §19 duplicate-id ledger half)."""
+        """True iff ``task_id`` appears in the ledger (the duplicate-id ledger half)."""
         return any(rec.get("id") == task_id for rec in self.records())
 
 
 @dataclass(frozen=True)
 class DecomposedFailureInfo:
-    """Extra failure-report fields for a decomposed task (§10)."""
+    """Extra failure-report fields for a decomposed task."""
 
     subtask_count: int
     subtasks_completed: int
@@ -144,7 +144,7 @@ def write_failure_report(
     decomposed: DecomposedFailureInfo | None = None,
     node_id: str | None = None,
 ) -> tuple[str, str]:
-    """Write ``failure_report.json`` + ``stuck.md``; return both paths (§8.1, §10).
+    """Write ``failure_report.json`` + ``stuck.md``; return both paths.
 
     Flow-neutral (flow-engine P1.2): the base fields (``task_id``/``node_id``/``loop``/``counters``)
     are always written; the implementation-specific sections (``last_check_log``,
@@ -209,7 +209,7 @@ def write_minimal_summary(
     diff_stat: str,
     task_ref: str | None = None,
 ) -> tuple[str, str]:
-    """Write a *compact* deterministic ``summary.md`` + ``summary.json`` (§5.2).
+    """Write a *compact* deterministic ``summary.md`` + ``summary.json``.
 
     The Core's fallback when no provider can produce the ``summary`` stage — a reviewed, passing
     change is never blocked by the prose step. Deliberately small: it links to the task file and

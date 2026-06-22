@@ -1,4 +1,4 @@
-"""Structured, secret-free operator logging — observability/logging.py (spec §6.6)."""
+"""Structured, secret-free operator logging — observability/logging.py."""
 
 from __future__ import annotations
 

@@ -54,7 +54,7 @@ def resolve_output_policy(policy: OutputPolicy, task_id: str) -> ResolvedOutputP
     """Resolve a scalar ``output_policy`` for a task into its foundation form.
 
     The per-task subdirectory keeps concurrent/serial tasks from colliding and makes the report
-    self-identifying. ``task_id`` is the §19.3-normalized id (``[a-z0-9][a-z0-9._-]*``), so it is a
+    self-identifying. ``task_id`` is the normalized id (``[a-z0-9][a-z0-9._-]*``), so it is a
     safe single path segment — never an absolute path or a traversal.
     """
     if policy is OutputPolicy.REPOSITORY_DOCUMENT:

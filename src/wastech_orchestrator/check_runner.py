@@ -1,19 +1,18 @@
-"""Check Runner (spec §4.8 / the ``testing`` stage).
+"""Check Runner (the ``testing`` stage).
 
 Runs the resolved checks — the canonical ``checks.model.ResolvedCheck`` argv lists supplied by the
-resolver (automatic check discovery §3, §11), falling back to the configured ``checks.commands``
+resolver (automatic check discovery), falling back to the configured ``checks.commands``
 normalized by ``checks.model.normalize_check_command`` — through the P2 safe process runner as an
 **argv list**, never a shell string, with an allowlisted environment and the per-command
-``checks.timeout_seconds``. Each run is written to ``checks/<run-id>.log`` (§10).
+``checks.timeout_seconds``. Each run is written to ``checks/<run-id>.log``.
 
 A check failure is a **quality** error: the caller routes it to ``fixing`` with **no provider
-fallback** (§4.8). The Check Runner itself never transitions state nor touches git; it returns a
+fallback**. The Check Runner itself never transitions state nor touches git; it returns a
 :class:`CheckOutcome` and the orchestrator records the ``check_runs`` rows and drives the loop.
 
 A **launch** failure (a missing executable/module) is *not* a quality error: it is reported via
 ``CheckOutcome.launch_failed`` so the orchestrator treats it as an infrastructure/preflight event,
-never spending a fix iteration on a problem no code change can fix (automatic check discovery §3,
-§11).
+never spending a fix iteration on a problem no code change can fix (automatic check discovery).
 """
 
 from __future__ import annotations
@@ -61,7 +60,7 @@ class CheckOutcome:
     runs: tuple[CheckRunResult, ...]
     first_failure_log: str | None = None
     # Set when the first failure was a *launch* failure: the orchestrator treats it as an infra
-    # event (terminal/preflight), never routing it to ``fixing`` (automatic check discovery §11).
+    # event (terminal/preflight), never routing it to ``fixing`` (automatic check discovery).
     launch_failed: bool = False
     first_launch_error: str | None = None
 
@@ -97,7 +96,7 @@ class CheckRunner:
         subtask: int | None = None,
         checks: Sequence[ResolvedCheck] | None = None,
     ) -> CheckOutcome:
-        """Run each resolved check in order, stopping at the first failure (§4.8).
+        """Run each resolved check in order, stopping at the first failure.
 
         ``checks`` is the resolved profile's argv list; when ``None`` the configured
         ``checks.commands`` are normalized (backward compatible). Returns ``passed=True`` with no
@@ -182,7 +181,7 @@ class CheckRunner:
         return CheckOutcome(passed=True, runs=tuple(runs))
 
     def _next_log_path(self, checks_dir: Path, subtask: int | None) -> Path:
-        """A fresh, non-overwriting ``<run-id>.log`` path (logs are never overwritten, §10)."""
+        """A fresh, non-overwriting ``<run-id>.log`` path (logs are never overwritten)."""
         prefix = "" if subtask is None else f"sub-{subtask:02d}-"
         existing = sorted(checks_dir.glob(f"{prefix}*.log"))
         return checks_dir / f"{prefix}{len(existing) + 1:03d}.log"

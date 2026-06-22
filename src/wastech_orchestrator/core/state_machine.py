@@ -1,4 +1,4 @@
-"""Task state machine (spec §8).
+"""Task state machine.
 
 The canonical task statuses and the allowed transitions between them. This module is pure: no IO,
 no git, no SQLite. The orchestrator asserts a transition here and then persists the new status
@@ -16,9 +16,9 @@ from enum import StrEnum
 
 
 class Status(StrEnum):
-    """The task statuses from spec §8 (canonical names; do not invent new ones).
+    """The task statuses from spec (canonical names; do not invent new ones).
 
-    ``pending`` is the §8.2 queue waiting-state — a task that has been accepted but does not yet own
+    ``pending`` is the queue waiting-state — a task that has been accepted but does not yet own
     the single processing slot. ``running`` is the single in-flight status: the FlowEngine drives
     the graph and progress is the ``current_node`` in ``node_runs``, not a granular status.
     """
@@ -30,21 +30,21 @@ class Status(StrEnum):
     DONE = "done"
     FAILED = "failed"
     MANUAL_ACTION_REQUIRED = "manual_action_required"
-    # The §8.2 queue waiting-state: accepted, awaiting the single processing slot.
+    # The queue waiting-state: accepted, awaiting the single processing slot.
     PENDING = "pending"
 
 
-# Terminal statuses: no outgoing transitions, the slot is released after terminal cleanup (§8.3).
+# Terminal statuses: no outgoing transitions, the slot is released after terminal cleanup.
 TERMINAL: frozenset[Status] = frozenset({Status.DONE, Status.FAILED, Status.MANUAL_ACTION_REQUIRED})
 
-# Statuses in which a task is actively occupying the processing slot (§8.2). ``pending`` and the
+# Statuses in which a task is actively occupying the processing slot. ``pending`` and the
 # terminal statuses are excluded; ``new`` precedes slot acquisition (the gate runs first).
 ACTIVE: frozenset[Status] = frozenset({Status.VALIDATED, Status.PREPARING, Status.RUNNING})
 
-# The "happy path" edges from §8. Every non-terminal status additionally allows ``-> failed`` and
+# The "happy path" edges . Every non-terminal status additionally allows ``-> failed`` and
 # ``-> manual_action_required`` (added below), so those are not repeated here.
 _BASE_TRANSITIONS: dict[Status, frozenset[Status]] = {
-    # new -> validated normally; new -> failed when the §19 gate rejects (quarantined, no branch).
+    # new -> validated normally; new -> failed when the gate rejects (quarantined, no branch).
     Status.NEW: frozenset({Status.VALIDATED}),
     Status.VALIDATED: frozenset({Status.PREPARING}),
     # preparing -> running when the orchestrator hands the validated flow graph to the engine
@@ -75,7 +75,7 @@ ALLOWED_TRANSITIONS: dict[Status, frozenset[Status]] = _build_transitions()
 
 
 class InvalidTransition(Exception):
-    """Raised when a status transition is not permitted by §8."""
+    """Raised when a status transition is not permitted ."""
 
     def __init__(self, src: Status, dst: Status) -> None:
         super().__init__(f"illegal transition: {src.value} -> {dst.value}")
@@ -84,12 +84,12 @@ class InvalidTransition(Exception):
 
 
 def can_transition(src: Status, dst: Status) -> bool:
-    """Return True iff ``src -> dst`` is an allowed §8 transition."""
+    """Return True iff ``src -> dst`` is an allowed transition."""
     return dst in ALLOWED_TRANSITIONS.get(src, frozenset())
 
 
 def assert_transition(src: Status, dst: Status) -> None:
-    """Raise :class:`InvalidTransition` unless ``src -> dst`` is allowed by §8."""
+    """Raise :class:`InvalidTransition` unless ``src -> dst`` is allowed ."""
     if not can_transition(src, dst):
         raise InvalidTransition(src, dst)
 
@@ -100,5 +100,5 @@ def is_terminal(status: Status) -> bool:
 
 
 def is_active(status: Status) -> bool:
-    """Return True iff ``status`` means the task currently owns the processing slot (§8.2)."""
+    """Return True iff ``status`` means the task currently owns the processing slot."""
     return status in ACTIVE

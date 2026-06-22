@@ -1,4 +1,4 @@
-"""Integration tests for the Orchestrator Core pipeline (§5, §8).
+"""Integration tests for the Orchestrator Core pipeline.
 
 These drive the real Router + Git Manager (temp repo) + Check Runner, with fake in-memory providers
 and a fake check process, exercising the full state machine, loops, decomposition, summary fallback,
@@ -347,7 +347,7 @@ def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: 
     row = store.get_task("task-001")
     assert row is not None and row.status is Status.DONE
     assert "refinement" in _skipped_stages(store)  # complete task → refinement node skipped
-    # The task file was moved into its lifecycle folder (tasks/done, §20.2).
+    # The task file was moved into its lifecycle folder (tasks/done).
     assert (tmp_path / "done" / "task-001.md").exists()
     assert not (tmp_path / "task-001.md").exists()
     # A done task has no resume position: the flow checkpoint is cleared (no stale node= in status),
@@ -758,7 +758,7 @@ def test_summary_fallback_when_provider_fails(git_repo, make_git_config, tmp_pat
     providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
 
     result = orch.run_task(task_file)
-    assert result.final_status is Status.DONE  # summary failure never blocks (§5.2)
+    assert result.final_status is Status.DONE  # summary failure never blocks
     summary = (art / "logs" / "task-006" / "summary.md").read_text(encoding="utf-8")
     assert "## What" in summary
 
@@ -998,7 +998,7 @@ def test_notifier_exception_does_not_change_terminal_outcome(
     assert not (Path.cwd() / "tasks" / "rejected" / "task-notify-fail.md").exists()
 
 
-# --- Phase 6: security & observability (spec §6.1/§6.5) -------------------------------------------
+# --- Phase 6: security & observability -------------------------------------------
 
 
 def test_check_launch_failure_is_infra_not_a_fix_cycle(
@@ -1044,7 +1044,7 @@ def test_check_launch_failure_is_infra_not_a_fix_cycle(
 def test_check_preflight_not_ready_stops_before_branch(
     git_repo, make_git_config, git_run, tmp_path: Path
 ) -> None:
-    # A resolver that cannot produce a launchable profile stops the task before any branch (§11).
+    # A resolver that cannot produce a launchable profile stops the task before any branch.
     from wastech_orchestrator.checks.model import CheckSource
     from wastech_orchestrator.checks.profile import ResolvedCheckProfile
 
@@ -1085,7 +1085,7 @@ def test_check_preflight_not_ready_stops_before_branch(
 def test_strict_isolation_preflight_fails_without_branch(
     monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, git_run, tmp_path: Path
 ) -> None:
-    # When strict_isolation cannot be guaranteed, the task fails BEFORE a branch is created (§12.8).
+    # When strict_isolation cannot be guaranteed, the task fails BEFORE a branch is created.
     orch, store, ledger, _ = _build(
         git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
     )
@@ -1107,7 +1107,7 @@ def test_failed_with_branch_commits_and_pushes_task_and_summary(
 ) -> None:
     # Both providers fail (infra) at implementation, AFTER the branch exists → FAILED. The failed
     # attempt is finalized like a success: the task moves to tasks/failed/, its summary.md is
-    # committed, and the branch is pushed — but no PR is opened for a failure (§6).
+    # committed, and the branch is pushed — but no PR is opened for a failure.
     providers = _both(infra_fail={Stage.IMPLEMENTATION})
     orch, store, ledger, _ = _build(
         git_repo,
@@ -1206,7 +1206,7 @@ def test_artifacts_registered_with_checksums(git_repo, make_git_config, tmp_path
 def test_decomposed_failure_report_has_subtask_fields(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # A decomposed task that gets stuck in subtask 1 records its decomposition context (§10).
+    # A decomposed task that gets stuck in subtask 1 records its decomposition context.
     subtasks = {
         "decompose": True,
         "skills": [],
@@ -1287,7 +1287,7 @@ def _stage_result(
     request: AgentRunRequest,
     structured: dict[str, object],
 ) -> AgentRunResult:
-    # Planning output requires the `skills` key (§2.1); default it so test fixtures stay terse.
+    # Planning output requires the `skills` key; default it so test fixtures stay terse.
     if "decompose" in structured and "skills" not in structured:
         structured = {**structured, "skills": []}
     return AgentRunResult(
@@ -1683,7 +1683,7 @@ def test_expanded_diff_requires_separate_approval_after_planning(
     assert len(notifier.ask_calls) == 2
 
 
-# --- auto-merge bypass (§ git.auto_merge*) ------------------------------------------------
+# --- auto-merge bypass (git.auto_merge*) ------------------------------------------------
 
 
 def _merge_gh(
@@ -2086,7 +2086,7 @@ def test_planning_selected_skills_reach_downstream_stages(
     result = orch.run_task(_complete_task(tmp_path, "task-skills"))
     assert result.final_status is Status.DONE
 
-    # plan.md records the selection and the dropped unknown name (auditable, §2.1).
+    # plan.md records the selection and the dropped unknown name (auditable).
     plan = (art / "logs" / "task-skills" / "plan.md").read_text(encoding="utf-8")
     assert "Skills (planning-selected" in plan
     assert "safe-change" in plan and "ghost" in plan
@@ -2105,7 +2105,7 @@ def test_planning_selected_skills_reach_downstream_stages(
     assert "# Body" not in impl.prompt  # the skill body is never inlined into the prompt
 
 
-# --- prompt audit (§ who+prompt per step) -----------------------------------------------------
+# --- prompt audit (who+prompt per step) -----------------------------------------------------
 
 
 def test_prompt_audit_resolution_matrix(git_repo, make_git_config, tmp_path: Path) -> None:

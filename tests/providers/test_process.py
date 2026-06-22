@@ -1,4 +1,4 @@
-"""Tests for the safe process runner (spec §12.5, coding-style.md).
+"""Tests for the safe process runner (coding-style.md).
 
 A portable Python one-liner stands in for any external CLI, so these tests run identically on
 Windows and POSIX with no real Codex/Claude binary.

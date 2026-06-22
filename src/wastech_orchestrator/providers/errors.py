@@ -1,4 +1,4 @@
-"""Error normalization (spec §7.1).
+"""Error normalization.
 
 Maps a raw process failure — launch error, timeout, exit code, and provider stderr signatures —
 onto a normalized :class:`~wastech_orchestrator.providers.base.ErrorClass` with a **secret-free**

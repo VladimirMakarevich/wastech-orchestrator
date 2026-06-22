@@ -1,4 +1,4 @@
-"""Operator-facing check diagnostics (automatic check discovery §11)."""
+"""Operator-facing check diagnostics (automatic check discovery)."""
 
 from __future__ import annotations
 

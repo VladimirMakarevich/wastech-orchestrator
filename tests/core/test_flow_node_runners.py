@@ -666,7 +666,7 @@ def test_agent_hitl_question_round_trip(tmp_path: Path) -> None:
 
 def test_agent_hitl_dispatch_is_data_driven_not_stage(tmp_path: Path) -> None:
     # A node on the REFINEMENT stage but WITHOUT a declared `hitl` must NOT do a round-trip even if
-    # the agent emits a signal — dispatch is by node.hitl, not the stage name (flow-contract §2.1).
+    # the agent emits a signal — dispatch is by node.hitl, not the stage name (flow-contract).
     (tmp_path / "r.md").write_text("refine", "utf-8")
     node = AgentNode(
         id="refinement",

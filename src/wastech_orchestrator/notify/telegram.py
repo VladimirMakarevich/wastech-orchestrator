@@ -1,4 +1,4 @@
-"""Telegram transport for :class:`Notifier` (spec §4.7).
+"""Telegram transport for :class:`Notifier`.
 
 The Core does not import this module directly — it talks to a :class:`Notifier`. The factory
 :func:`build_notifier` resolves the bot token and chat id **only** from the env vars *named* by
@@ -38,7 +38,7 @@ _TELEGRAM_TEXT_LIMIT = 4096
 _TRUNCATION_SUFFIX = "\n\n[message truncated by wastech-orchestrator]"
 _ALLOWED_UPDATES = ("message", "callback_query")
 
-# Feedback shown on the button itself when a callback is pressed (§4.1). Every press in our chat is
+# Feedback shown on the button itself when a callback is pressed. Every press in our chat is
 # acknowledged so the operator never sees "nothing happened"; a stale/duplicate press gets an alert.
 _ACK_APPROVED = "Approved — continuing."
 _ACK_DENIED = "Denied — will reconsider."
@@ -273,7 +273,7 @@ class TelegramNotifier:
 
     def _warn(self, message: str, **fields: Any) -> None:
         # Redact the bot token and chat id from anything we attach to a record — secrets must never
-        # reach the log sink (§12.6). The global RedactionFilter is a second line of defence.
+        # reach the log sink. The global RedactionFilter is a second line of defence.
         extras = {k: self._redact(str(v)) for k, v in fields.items()}
         _LOG.warning(
             self._redact(message),
@@ -303,7 +303,7 @@ def build_notifier(
     *,
     client_factory: Callable[[_Secrets, TelegramConfig], _TelegramClient] | None = None,
 ) -> Notifier:
-    """Resolve the transport from config + env (spec §4.7).
+    """Resolve the transport from config + env.
 
     Returns a silent :class:`NullNotifier` when:
     * ``cfg.enabled`` is ``False``; or
@@ -351,7 +351,7 @@ def check_telegram_preflight(
     *,
     client_factory: Callable[[_Secrets, TelegramConfig], _TelegramClient] | None = None,
 ) -> tuple[bool, str]:
-    """Return ``(ok, report_line)`` for inclusion in the preflight report (spec §6.7).
+    """Return ``(ok, report_line)`` for inclusion in the preflight report.
 
     * ``enabled: false`` → ``(True, "telegram: SKIP (disabled)")`` — never fails preflight.
     * Missing env vars → ``(False, "telegram: FAIL — env var(s) not set: …")``.
@@ -513,7 +513,7 @@ class _HttpTelegramClient:
                     await bot.get_updates(limit=1, timeout=0, allowed_updates=_ALLOWED_UPDATES)
                 except Conflict as exc:
                     # Another getUpdates consumer already holds this bot token (HTTP 409). Diagnose
-                    # it clearly at preflight so HITL is not silently broken at run time (§4.1).
+                    # it clearly at preflight so HITL is not silently broken at run time.
                     raise RuntimeError(
                         "another process is already polling this bot token "
                         "(Telegram 409 Conflict); only one poller may run per bot token"
@@ -645,7 +645,7 @@ class _HttpTelegramClient:
                     for update in updates:
                         # Always advance past a consumed update: re-fetching a near-miss forever
                         # would spin the loop to the deadline. We never advance *silently* — a
-                        # callback in our chat is acknowledged and logged first (§4.1), so a stale
+                        # callback in our chat is acknowledged and logged first, so a stale
                         # or duplicate press stays visible to the operator, not dropped.
                         offset = update.update_id + 1
                         if kind == "question":
@@ -708,7 +708,7 @@ class _HttpTelegramClient:
                             )
                             await self._ack(bot, query.id, _ACK_STALE, alert=True)
                         else:
-                            # Foreign chat: never acknowledge another chat's callback (§12.15).
+                            # Foreign chat: never acknowledge another chat's callback.
                             _LOG.warning(
                                 "telegram callback from a foreign chat ignored",
                                 extra={"logfmt_fields": {"interaction_id": interaction_id}},

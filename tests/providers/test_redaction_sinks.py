@@ -1,4 +1,4 @@
-"""Adapter output sinks are redacted before they are written (spec §12.6, §6.4).
+"""Adapter output sinks are redacted before they are written.
 
 Proves the gap-fix: ``stdout.log`` and ``events.jsonl`` (not just ``stderr.log``) are redacted, and
 a secret seeded into a ``denied_read_paths`` file in the workspace is scrubbed from every sink. Also
@@ -52,7 +52,7 @@ def _assert_no_secrets(*paths: str) -> None:
 
 
 def _attempt_sinks(result: object) -> tuple[str, ...]:
-    """Every written attempt artifact, including request.json (a named §6.4 sink)."""
+    """Every written attempt artifact, including request.json (a named sink)."""
     stdout_path = result.stdout_path  # type: ignore[attr-defined]
     request_json = str(Path(stdout_path).parent / "request.json")
     return (

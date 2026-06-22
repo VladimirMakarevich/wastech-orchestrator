@@ -1,4 +1,4 @@
-"""CodexProvider — the Codex CLI adapter (spec §4.4).
+"""CodexProvider — the Codex CLI adapter.
 
 Implements the :class:`~wastech_orchestrator.providers.base.AgentProvider` contract for
 ``id = "codex"`` using ``codex exec`` (OpenAI Codex CLI). This is the **only** module that knows
@@ -179,7 +179,7 @@ def isolation_reasons(config: ProviderConfig) -> list[str]:
     """Reasons the configured Codex isolation cannot be enabled — an empty list means OK.
 
     Pure and offline (no CLI launched), so it can drive the ``strict_isolation`` preflight
-    (:mod:`wastech_orchestrator.security.isolation`, §12.8). Mirrors what :func:`build_codex_argv`
+    (:mod:`wastech_orchestrator.security.isolation`). Mirrors what :func:`build_codex_argv`
     enforces: a non-``danger-full-access`` sandbox must be selectable and ``extra_args`` must not
     weaken the sandbox/approvals. Codex has no per-tool deny mechanism — the sandbox *is* the
     isolation, so "isolation enabled" means a real sandbox mode is in force.

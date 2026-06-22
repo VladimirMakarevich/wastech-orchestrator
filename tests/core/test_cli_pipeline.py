@@ -1,4 +1,4 @@
-"""Tests for the ``run`` / ``watch`` CLI wiring (§5.12) and the §14 end-to-end happy path."""
+"""Tests for the ``run`` / ``watch`` CLI wiring and the end-to-end happy path."""
 
 from __future__ import annotations
 
@@ -106,7 +106,7 @@ def test_watch_resume_manual_blocks(make_git_config, git_repo, tmp_path: Path) -
     assert orch.run_calls == []  # resume's manual outcome blocks picking pending
 
 
-# --- watch_loop unit tests (periodic discovery, §8.3) ------------------------------------
+# --- watch_loop unit tests (periodic discovery) ------------------------------------
 
 
 def test_watch_loop_refreshes_each_tick_and_sleeps_between(
@@ -259,7 +259,7 @@ def test_in_repo_commit_stores_task_and_summary_not_logs(
     git_repo, fake_cli, git_run, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """In-repo audit footprint: the task (moved to done/) + its summary.md are committed; logs/ is
-    not. Code change and task lifecycle are separate commits on the branch (§6, §21)."""
+    not. Code change and task lifecycle are separate commits on the branch."""
     project = tmp_path / "project"
     project.mkdir()
     claude_cmd = fake_cli("success_edit", "claude")
@@ -359,7 +359,7 @@ def test_cmd_watch_auto_mode_two_tasks(
 ) -> None:
     project = tmp_path / "project"
     project.mkdir()
-    # watch scans tasks/pending at the repo root (the tracked audit trail), not the cwd (§21).
+    # watch scans tasks/pending at the repo root (the tracked audit trail), not the cwd.
     (git_repo.clone / "tasks" / "pending").mkdir(parents=True)
     claude_cmd = fake_cli("success_edit", "claude")
     codex_cmd = fake_cli("success_edit", "codex")
@@ -377,7 +377,7 @@ def test_cmd_watch_auto_mode_two_tasks(
     ids = {json.loads(line)["id"] for line in ledger_lines}
     assert ids == {"task-201", "task-202"}  # both ran sequentially under auto mode
     # Each task left pending and was audit-committed (task + summary) on its own agent branch; the
-    # working tree is back on base, so the committed files live in git history, not on disk (§20.2).
+    # working tree is back on base, so the committed files live in git history, not on disk.
     for tid in ("task-201", "task-202"):
         assert not (git_repo.clone / "tasks" / "pending" / f"{tid}.md").exists()
         branch = f"agent/{tid}-add-a-thing"

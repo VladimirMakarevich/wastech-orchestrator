@@ -1,4 +1,4 @@
-"""End-to-end deterministic resolution (automatic check discovery §5, §11)."""
+"""End-to-end deterministic resolution (automatic check discovery)."""
 
 from __future__ import annotations
 
@@ -165,7 +165,7 @@ def test_configured_pin_not_replaced_by_detection_when_unlaunchable(
 ) -> None:
     # auto mode: a configured `{name: types, argv: [mypy, src]}` pins the `types` slot. The bare
     # `mypy` is not on PATH, so the pin does not probe launchable — and detection's launchable
-    # `.venv/bin/mypy` must NOT silently fill it (§1.2). `tests` still resolves from detection.
+    # `.venv/bin/mypy` must NOT silently fill it. `tests` still resolves from detection.
     root = make_repo(
         {"pyproject.toml": "[project]\ndependencies=['pytest','mypy']\n"},
         venv=".venv",

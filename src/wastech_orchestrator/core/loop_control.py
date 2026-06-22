@@ -1,4 +1,4 @@
-"""Persisted per-task loop counters (spec §8.1).
+"""Persisted per-task loop counters.
 
 The counters are stored on the ``tasks`` row and surface fix-loop progress; the ``FlowEngine`` owns
 the termination rules now (it charges each ``rework``/``fail`` edge against a generic global counter
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class LoopCounters:
-    """The mutable per-task loop counters persisted on the ``tasks`` row (§9)."""
+    """The mutable per-task loop counters persisted on the ``tasks`` row."""
 
     test_fix_cycles: int = 0
     review_fix_cycles: int = 0

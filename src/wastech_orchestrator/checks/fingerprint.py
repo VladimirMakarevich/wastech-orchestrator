@@ -1,4 +1,4 @@
-"""Discovery-input fingerprint (backlog: automatic check discovery, §10).
+"""Discovery-input fingerprint (backlog: automatic check discovery).
 
 A stable hash over the files and local executables that drive detection. When it changes the
 resolver rediscovers; when it matches, a cached profile is reused. Missing inputs contribute a
@@ -13,7 +13,7 @@ from pathlib import Path
 # Hash at most this many bytes per file (lock files can be large; bound the work).
 _MAX_HASH_BYTES = 1_048_576
 
-# Files whose contents drive detection (§10).
+# Files whose contents drive detection.
 _FINGERPRINT_FILES: tuple[str, ...] = (
     "pyproject.toml",
     "uv.lock",
@@ -37,7 +37,7 @@ _FINGERPRINT_FILES: tuple[str, ...] = (
     "CLAUDE.md",
 )
 
-# Local executables whose mere presence/identity changes which checks are launchable (§10).
+# Local executables whose mere presence/identity changes which checks are launchable.
 _FINGERPRINT_EXECUTABLES: tuple[str, ...] = (
     ".venv/bin/python",
     ".venv/bin/pytest",

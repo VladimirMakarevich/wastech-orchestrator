@@ -1,4 +1,4 @@
-"""Unit tests for the safe prompt renderer (:func:`render_prompt` + the allowlist, spec §6)."""
+"""Unit tests for the safe prompt renderer (:func:`render_prompt` + the allowlist, spec)."""
 
 from __future__ import annotations
 

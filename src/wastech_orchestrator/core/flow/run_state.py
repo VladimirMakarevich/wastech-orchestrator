@@ -2,7 +2,7 @@
 
 :class:`FlowRunState` is the mutable checkpoint the engine threads through a single graph
 traversal: where execution currently is (``current_node``), what has run (``completed_nodes``), and
-the loop/budget counters (``loop_counters``). Per the resume model (``index.md`` §6) the durable
+the loop/budget counters (``loop_counters``). Per the resume model (``index.md``) the durable
 checkpoint is ``{completed_nodes, current_node, loop_counters, publish_operations}``;
 ``publish_operations`` is read from the state store (idempotency lives there) and is **not**
 duplicated here.
@@ -10,7 +10,7 @@ duplicated here.
 In P1.1 the state is in-memory only. P1.2 adds the persistence seam (hydrate from ``node_runs`` +
 ``tasks`` + ``publish_operations``, schema v4) without changing this shape.
 
-``loop_counters`` is a single ``dict[str, int]`` keyed by (P1.1/P1.2 decision §):
+``loop_counters`` is a single ``dict[str, int]`` keyed by (P1.1/P1.2 decision):
 
 * a named loop's name (``loop: test_fix``) — the consecutive-cycle counter for that loop;
 * the synthetic edge key ``"<from>-><to>:<outcome>"`` — for an inline ``budget: N`` rework edge;

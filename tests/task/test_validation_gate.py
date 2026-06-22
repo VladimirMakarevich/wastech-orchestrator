@@ -1,4 +1,4 @@
-"""Unit tests for the §19 validation gate."""
+"""Unit tests for the validation gate."""
 
 from __future__ import annotations
 

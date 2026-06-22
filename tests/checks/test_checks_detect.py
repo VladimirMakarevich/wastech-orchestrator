@@ -1,4 +1,4 @@
-"""Evidence parsing + deterministic candidate detection per ecosystem (check discovery §5)."""
+"""Evidence parsing + deterministic candidate detection per ecosystem (check discovery)."""
 
 from __future__ import annotations
 
@@ -104,7 +104,7 @@ def test_plain_pyproject_pytest_is_low_confidence_candidate(make_repo: Callable[
     assert ("pytest",) in _candidates(root)["tests"]
 
 
-# --- configured tool scope (§1.1): an explicit `.` overrides [tool.mypy]/[tool.ruff] scope --------
+# --- configured tool scope: an explicit `.` overrides [tool.mypy]/[tool.ruff] scope --------
 
 _MYPY_FILES = "[tool.mypy]\nfiles = ['src']\n"
 _MYPY_EXCLUDE = "[tool.mypy]\nexclude = ['^tests/']\n"
@@ -155,7 +155,7 @@ def test_uv_run_honors_mypy_scope(make_repo: Callable[..., Path]) -> None:
 
 def test_unsafe_mypy_files_entry_is_rejected(make_repo: Callable[..., Path]) -> None:
     # An absolute / traversal path in [tool.mypy] files must never reach argv; it drops to a bare
-    # `mypy` (scope still configured) rather than being passed through (reject-don't-sanitize, §9).
+    # `mypy` (scope still configured) rather than being passed through (reject-don't-sanitize).
     pyproject = "[project]\ndependencies=['mypy']\n[tool.mypy]\nfiles = ['/etc', '../evil']\n"
     root = make_repo({"pyproject.toml": pyproject})
     evidence = RepositoryInspector(root).collect()

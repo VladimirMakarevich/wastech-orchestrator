@@ -1,15 +1,15 @@
-"""Agent Router: route resolution and infrastructure-only fallback (spec §4.2, §5, §7; PRE.1).
+"""Agent Router: route resolution and infrastructure-only fallback (PRE.1).
 
 The layer between the Orchestrator Core and the provider adapters. For each node it:
 
 * resolves the ``(primary, fallback)`` pair from the flow node's ``provider`` field — the node's
   declared provider runs it, else the config's single global primary
   (``agents.providers.<id>.primary``); the fallback is that global primary (the sole infra-fallback
-  target) unless the primary already *is* it (§4.2, §5, PRE.1);
+  target) unless the primary already *is* it (PRE.1);
 * runs the primary and, **only** for infrastructure ``ProviderError`` classes (plus the conditional
-  auth/permission case), falls back to the global primary (§7.2, §7.3);
-* counts ``stage_attempts`` across the fallback, bounded by ``agents.max_stage_attempts`` (§8.1);
-* exposes the §7.4 partial-change diff to the fallback without ever rolling back.
+  auth/permission case), falls back to the global primary;
+* counts ``stage_attempts`` across the fallback, bounded by ``agents.max_stage_attempts``;
+* exposes the partial-change diff to the fallback without ever rolling back.
 
 Invariants (.agents/rules/architecture.md): the Router depends **only** on the ``AgentProvider``
 contract — no CLI syntax, no provider internals — and it changes no state-machine state. It is
@@ -46,7 +46,7 @@ from wastech_orchestrator.security.profiles import is_same_or_stricter
 _LOG = logging.getLogger(__name__)
 
 # authorization_failed / permission_denied fall back only when the fallback provider runs in the
-# same or a stricter permission profile (§7.2) — decided here, not in providers.base.
+# same or a stricter permission profile — decided here, not in providers.base.
 CONDITIONAL_FALLBACK: frozenset[ErrorClass] = frozenset(
     {
         ErrorClass.AUTHORIZATION_FAILED,
@@ -58,7 +58,7 @@ CONDITIONAL_FALLBACK: frozenset[ErrorClass] = frozenset(
 def fallback_allowed(
     error_class: ErrorClass, *, primary_profile: str, fallback_profile: str
 ) -> bool:
-    """Decide whether a raised ``ProviderError`` permits fallback (spec §7.2/§7.3).
+    """Decide whether a raised ``ProviderError`` permits fallback.
 
     Unconditional for the infrastructure classes in
     :data:`~wastech_orchestrator.providers.base.FALLBACK_ELIGIBLE`; conditional for
@@ -91,7 +91,7 @@ def _resolve_global_primary(config: OrchestratorConfig) -> ProviderId:
 
 
 class RouteSource(StrEnum):
-    """Where a node's provider came from — recorded for the audit (§4.2, persisted in node_runs)."""
+    """Where a node's provider came from — recorded for the audit (persisted in node_runs)."""
 
     CONFIG = "config"  # defaulted to the global primary (the node declared no provider)
     FLOW_NODE = "flow_node"  # the flow node declared an explicit provider
@@ -99,7 +99,7 @@ class RouteSource(StrEnum):
 
 @dataclass(frozen=True)
 class ResolvedRoute:
-    """The chosen primary/fallback for a node, with its route source (§4.2).
+    """The chosen primary/fallback for a node, with its route source.
 
     ``node_id`` is the flow node's id, carried for audit/logging only — it never selects the
     provider (routing is node-based via the node's ``provider`` field, PRE.1).
@@ -113,7 +113,7 @@ class ResolvedRoute:
 
 @dataclass(frozen=True)
 class ProviderAttempt:
-    """One provider invocation within a stage (a §9 provider_attempts audit row)."""
+    """One provider invocation within a stage (a provider_attempts audit row)."""
 
     provider: ProviderId
     attempt: int
@@ -182,8 +182,8 @@ class AgentRouter:
         """Run ``route.primary`` and, for infra failures only, fall back to ``route.fallback``.
 
         Counts ``stage_attempts`` across the fallback, bounded by ``agents.max_stage_attempts``. On
-        an infra failure that changed files, the fallback receives the current diff (§7.4) — files
-        are never rolled back. A quality ``status=failed`` is returned as-is, never retried (§7.3).
+        an infra failure that changed files, the fallback receives the current diff — files
+        are never rolled back. A quality ``status=failed`` is returned as-is, never retried.
         """
         max_attempts = self._config.agents.max_stage_attempts
         before = snapshot.capture() if snapshot is not None else None
@@ -347,7 +347,7 @@ class AgentRouter:
                     "duration_seconds": round(self._monotonic() - attempt_started, 3),
                 },
             )
-            # A returned result — success or a quality failure — is never a fallback trigger (§7.3).
+            # A returned result — success or a quality failure — is never a fallback trigger.
             return StageOutcome(
                 route=route,
                 result=result,
@@ -372,7 +372,7 @@ class AgentRouter:
         self, request: AgentRunRequest, attempt: int, partial: PartialChange | None
     ) -> AgentRunRequest:
         """Per-attempt request. The fallback gets the partial diff; the permission profile is never
-        relaxed (``permission_profile`` is intentionally left untouched), per §7.2/§7.4."""
+        relaxed (``permission_profile`` is intentionally left untouched), ."""
         if partial is not None:
             return replace(request, attempt=attempt, diff_path=partial.diff_path)
         return replace(request, attempt=attempt)
@@ -383,7 +383,7 @@ class AgentRouter:
     def _assert_available(
         self, node_id: str, primary: ProviderId, fallback: ProviderId | None
     ) -> None:
-        """Defensively re-check the allowlist/config/instances for the resolved providers (§4.2).
+        """Defensively re-check the allowlist/config/instances for the resolved providers.
 
         The node's ``provider`` is validated against ``agents.allowed`` at preflight; this is the
         belt-and-braces check at run time (a node provider not in the allowlist, or with no

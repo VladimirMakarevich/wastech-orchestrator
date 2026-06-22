@@ -1,4 +1,4 @@
-"""``build_notifier`` resolves the transport only from env-named secrets (spec §4.7)."""
+"""``build_notifier`` resolves the transport only from env-named secrets."""
 
 from __future__ import annotations
 

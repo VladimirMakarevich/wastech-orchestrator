@@ -1,4 +1,4 @@
-"""Agent-assisted discovery + provider selection (automatic check discovery §6)."""
+"""Agent-assisted discovery + provider selection (automatic check discovery)."""
 
 from __future__ import annotations
 

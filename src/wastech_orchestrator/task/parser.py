@@ -1,8 +1,8 @@
-"""Task parser (spec §5, §19.3, §10).
+"""Task parser.
 
 Reads a task file (``.md`` with leading ``---`` front matter + body, or ``.json`` object) into the
-structural pieces the §19 validation gate needs, and writes the normalized manifest
-(``task.normalized.json``, §10). This module is deliberately *structural only*: it splits front
+structural pieces the validation gate needs, and writes the normalized manifest
+(``task.normalized.json``). This module is deliberately *structural only*: it splits front
 matter from body and folds a slug — it does **not** decide validity (that is the gate's job, which
 maps each failure to a machine-readable reason).
 
@@ -158,7 +158,7 @@ def _split_json(text: str) -> FrontmatterParse:
             detail=f"JSON error: {exc}",
         )
     if not isinstance(loaded, dict):
-        # Valid JSON but not an object => no front matter (§19.2 ``frontmatter_missing``).
+        # Valid JSON but not an object => no front matter (``frontmatter_missing``).
         return FrontmatterParse(present=False, malformed=False, frontmatter={}, body="")
     # The reserved body key is split out so the front-matter key set is uniform across formats.
     body_value = loaded.get(JSON_BODY_KEY, "")
@@ -189,7 +189,7 @@ _SLUG_STRIP_RE = re.compile(r"[^a-z0-9]+")
 
 
 def slugify(value: str) -> str:
-    """Fold a title into a branch-safe slug: lowercase, non-alphanumerics → single ``-`` (§19.5).
+    """Fold a title into a branch-safe slug: lowercase, non-alphanumerics → single ``-``.
 
     Deterministic and documented (the only normalization the gate tolerates for the slug). Returns
     ``"task"`` for an otherwise empty result so a branch name is always well-formed.
@@ -199,7 +199,7 @@ def slugify(value: str) -> str:
 
 
 def write_normalized(task: NormalizedTask, artifacts_root: str | Path) -> str:
-    """Write ``task.normalized.json`` under ``logs/<task-id>/`` and return its path (§10)."""
+    """Write ``task.normalized.json`` under ``logs/<task-id>/`` and return its path."""
     task_dir = task_artifact_dir(artifacts_root, task.id)
     task_dir.mkdir(parents=True, exist_ok=True)
     path = task_dir / NORMALIZED_FILENAME
@@ -227,7 +227,7 @@ def _stage_params_json(sp: StageParams) -> dict[str, Any]:
 
 
 def load_normalized(artifacts_root: str | Path, task_id: str) -> NormalizedTask:
-    """Read back a ``task.normalized.json`` written by :func:`write_normalized` (recovery, §13)."""
+    """Read back a ``task.normalized.json`` written by :func:`write_normalized` (recovery)."""
     path = task_artifact_dir(artifacts_root, task_id) / NORMALIZED_FILENAME
     data = json.loads(path.read_text(encoding="utf-8"))
     stage_params = {

@@ -1,4 +1,4 @@
-"""Resolved-profile persistence round-trip (automatic check discovery §10)."""
+"""Resolved-profile persistence round-trip (automatic check discovery)."""
 
 from __future__ import annotations
 

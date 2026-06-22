@@ -1,4 +1,4 @@
-"""Strict validation of agent discovery output (automatic check discovery §6, §12)."""
+"""Strict validation of agent discovery output (automatic check discovery)."""
 
 from __future__ import annotations
 

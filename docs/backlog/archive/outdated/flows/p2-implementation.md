@@ -2,7 +2,7 @@
 
 Статус: **backlog / инженерная спека (запланировано к исполнению)** Дата: 2026-06-17 (ревизия 2026-06-19) Владелец: Vladimir Makarevich
 
-Детализация фазы P2 из [plan.md](plan.md). Цель: на **доказанном** движке (P1) нарастить целевой implementation, адаптировав три поглощённые программы — [supervisor](../outdated/supervisor_quality_gate.md), [durable sessions](../outdated/durable_sessions_and_fixing_affinity.md), [hybrid testing](../outdated/hybrid_agent_testing.md). База проверки фазы: **тесты из спек трёх программ** покрывают новые узлы (адаптированный на движок интеграционный сьют из P1 анкерит неизменное ядро — golden-harness отменён, см. [plan.md](plan.md)).
+Детализация фазы P2 из [plan.md](plan.md). Цель: на **доказанном** движке (P1) нарастить целевой implementation, адаптировав три поглощённые программы — [supervisor](../archive/outdated/supervisor_quality_gate.md), [durable sessions](../archive/outdated/durable_sessions_and_fixing_affinity.md), [hybrid testing](../archive/outdated/hybrid_agent_testing.md). База проверки фазы: **тесты из спек трёх программ** покрывают новые узлы (адаптированный на движок интеграционный сьют из P1 анкерит неизменное ядро — golden-harness отменён, см. [plan.md](plan.md)).
 
 > **Ревизия архитектуры supervisor (2026-06-19).** Зафиксировано: flow — **полностью конфигурируемый граф любых узлов**; оператор вправе описать ЛЮБОЙ flow и любое число агентов в YAML — вплоть до одного implement-агента без проверок, ревью и чеков. **Единственная константа — supervisor, который живёт отдельным слоем НАД flow** (на уровне оркестратора, не узлом графа): стартует при старте задачи, **живёт весь цикл и проверяет каждый завершённый шаг** (read-only, своя `resume_own_lineage`-сессия, advisory — не блокирует), а при закрытии всей задачи пишет `summary` + advises. Отдельных блокирующих per-stage supervisor-узлов (`supervise_impl`/`supervise_fix`) в графе **больше нет** — кому нужны блокирующие пер-стейдж гейты, добавляет опциональные `review`/`test_quality` (или operator-defined) evaluator-узлы в YAML. Детали — P2.1; целевой граф — P2.5; зеркальные правки контракта — [flow-contract.md](flow-contract.md) §2.2/§4/§7, [security-ceiling.md](security-ceiling.md) §3.
 
@@ -77,7 +77,7 @@ class EvaluationRow:
 
 ### Тесты
 
-Адаптированные на новую модель (из [supervisor §minimum tests](../outdated/supervisor_quality_gate.md#minimum-tests)):
+Адаптированные на новую модель (из [supervisor §minimum tests](../archive/outdated/supervisor_quality_gate.md#minimum-tests)):
 
 - `test_supervisor_runs_above_any_flow` — supervisor работает + пишет summary даже для degenerate-flow (один implement-агент, без checks/review).
 - `test_supervisor_observes_each_completed_step` — после каждого завершённого узла идёт read-only supervisor-наблюдение в его `resume_own_lineage`-сессии.
@@ -134,7 +134,7 @@ class EditingLineageRow:
 
 ### Тесты
 
-Из [durable §minimum tests](../outdated/durable_sessions_and_fixing_affinity.md#minimum-tests):
+Из [durable §minimum tests](../archive/outdated/durable_sessions_and_fixing_affinity.md#minimum-tests):
 
 - `test_claude_resume_uses_lineage_session` — `--resume` берёт session_id из lineage-стора.
 - `test_codex_exec_resume_parses_thread_started` — Codex `exec resume <id>`, парс `thread.started`.

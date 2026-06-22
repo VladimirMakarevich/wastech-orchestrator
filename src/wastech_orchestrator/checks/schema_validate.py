@@ -1,4 +1,4 @@
-"""Strict structural validation of agent discovery output (automatic check discovery §6, §12).
+"""Strict structural validation of agent discovery output (automatic check discovery).
 
 The Core does not trust an agent's structured output: it is fail-closed validated here against the
 discovery schema (types, required keys, no unknown keys, bounds, confidence enum) and given a cheap
@@ -88,5 +88,5 @@ def _parse_item(item: Any) -> Proposal | None:
 
 
 def _is_absolute(token: str) -> bool:
-    """An absolute path is rejected — a portable relative path or bare command is required (§7)."""
+    """An absolute path is rejected — a portable relative path or bare command is required."""
     return PurePosixPath(token).is_absolute() or PureWindowsPath(token).is_absolute()

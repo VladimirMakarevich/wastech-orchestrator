@@ -1,4 +1,4 @@
-"""Candidate validation (backlog: automatic check discovery, §7, §12).
+"""Candidate validation (backlog: automatic check discovery).
 
 Enforces the security rules on every check candidate — deterministic or agent-supplied — before it
 is probed or run: an argv with no shell metacharacters, no sandbox-weakening flag, and not a denied

@@ -33,7 +33,7 @@ deliberately **not** fatal here because the orchestrator already degrades them g
 
 Call :func:`validate_flow` immediately after :func:`~.snapshot.load_flow` — before branch creation
 and before any provider launch. Together the three layers form the fatal gate described in
-``docs/backlog/flows/security-ceiling.md §4``.
+``docs/backlog/flows/security-ceiling.md``.
 """
 
 from __future__ import annotations
@@ -95,7 +95,7 @@ def validate_flow_against_config(snapshot: FlowSnapshot, config: OrchestratorCon
     :func:`validate_flow`. It rejects a flow that is structurally valid but cannot be safely or
     usefully run under *this* config: a node pinned to a disallowed provider or an unknown reasoning
     level, or a ``permission_ceiling`` no configured provider can reach. Security can only ever
-    *narrow* here — see ``docs/backlog/flows/security-ceiling.md §4``. (Flow ``budgets`` and
+    *narrow* here — see ``docs/backlog/flows/security-ceiling.md``. (Flow ``budgets`` and
     ``publishing`` are handled by graceful runtime degradation, not here — see the module
     docstring.)
 
@@ -206,7 +206,7 @@ def _check_graph(snap: FlowSnapshot) -> list[Violation]:
         errs.append(g("no terminal node (every node has at least one outgoing edge)"))
     else:
         # Reverse reachability from terminals: any node that cannot reach a terminal is a dead end
-        # (security-ceiling §4 "есть путь к терминалу"). Bounded loops guarantee runtime
+        # (security-ceiling "есть путь к терминалу"). Bounded loops guarantee runtime
         # termination, but a structurally trapped node still indicates a malformed graph.
         reverse: dict[str, list[str]] = {}
         for edge in doc.edges:

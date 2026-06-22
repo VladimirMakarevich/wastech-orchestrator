@@ -1,4 +1,4 @@
-"""Fallback decision table (§7.2/§7.3): which errors fall back, the conditional rule,
+"""Fallback decision table: which errors fall back, the conditional rule,
 and that a quality failure never triggers fallback (phase doc 4.3)."""
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ def test_quality_failure_is_not_a_fallback_trigger(
     make_request: Callable[..., AgentRunRequest],
 ) -> None:
     # A returned status=failed (not a raised error) is surfaced as-is for the Core to route to
-    # fixing — never retried on the fallback (§7.3, phase doc 4.3).
+    # fixing — never retried on the fallback (phase doc 4.3).
     primary = make_fake_provider(ProviderId.CODEX, status=RunStatus.FAILED)
     fallback = make_fake_provider(ProviderId.CLAUDE)  # would succeed if (wrongly) invoked
     router = AgentRouter(config, {ProviderId.CODEX: primary, ProviderId.CLAUDE: fallback})

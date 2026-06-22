@@ -66,7 +66,7 @@ def test_generated_config_uses_worc_home_and_audit_trail(tmp_path: Path) -> None
     spec = _spec(tmp_path, (ProviderId.CODEX,))
     cfg = loads_config(build_and_validate(spec)).config
     # The task + summary are audit-committed in the repo; the quarantine lives under .worc/ so
-    # rejected tasks are never swept into that commit (§21).
+    # rejected tasks are never swept into that commit.
     assert cfg.git.footprint.audit_on_branch is AuditBranch.TASK
     expected_quarantine = tmp_path / "my-repo" / ".worc" / "tasks" / "rejected"
     assert cfg.validation.quarantine_folder == str(expected_quarantine)

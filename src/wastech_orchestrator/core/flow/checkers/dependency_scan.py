@@ -7,7 +7,7 @@ structures each scanner's run as evidence. The scan **never gates**: it always r
 no "this checker doesn't gate" special case (co-design note #3). Whether the findings gate the flow
 is the flow's decision, expressed by its edges (``dependency_scan → threat_analysis (pass)``).
 
-The flow cannot specify scanners (security-ceiling §3) — the set is core-owned here. A scanner that
+The flow cannot specify scanners (security-ceiling) — the set is core-owned here. A scanner that
 is not installed *launch-fails* and contributes no findings: a missing tool is not a quality failure
 for an evidence scan (unlike a gating ``command_profile`` check, where a launch failure is infra).
 """

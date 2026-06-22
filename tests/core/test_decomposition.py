@@ -1,4 +1,4 @@
-"""Unit tests for §5.1 decomposition acceptance and artifacts."""
+"""Unit tests for decomposition acceptance and artifacts."""
 
 from __future__ import annotations
 

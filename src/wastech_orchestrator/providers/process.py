@@ -1,4 +1,4 @@
-"""Safe process runner (spec §12.5, .agents/rules/coding-style.md).
+"""Safe process runner (.agents/rules/coding-style.md).
 
 The single chokepoint for launching any external CLI. Every provider subprocess goes through
 ``run_process``. The runner is deliberately provider-agnostic: it knows nothing about Codex/Claude

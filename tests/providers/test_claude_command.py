@@ -1,4 +1,4 @@
-"""Unit tests for the Claude Code command/prompt builders (spec §4.4, §12)."""
+"""Unit tests for the Claude Code command/prompt builders."""
 
 from __future__ import annotations
 

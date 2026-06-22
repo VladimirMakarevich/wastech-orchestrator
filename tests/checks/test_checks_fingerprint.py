@@ -1,4 +1,4 @@
-"""Discovery-input fingerprint stability and invalidation (automatic check discovery §10)."""
+"""Discovery-input fingerprint stability and invalidation (automatic check discovery)."""
 
 from __future__ import annotations
 

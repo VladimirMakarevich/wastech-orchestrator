@@ -1,4 +1,4 @@
-"""Agent-assisted read-only check discovery (automatic check discovery §6).
+"""Agent-assisted read-only check discovery (automatic check discovery).
 
 When deterministic detection cannot produce a launchable test command, a single bounded, read-only
 provider run may *propose* structured candidates. It is advisory only: it cannot mark a check
@@ -26,7 +26,7 @@ from wastech_orchestrator.providers.base import (
     RunStatus,
 )
 
-# The strict structured-output schema the provider must satisfy (doc §6). Mirrored by
+# The strict structured-output schema the provider must satisfy (doc). Mirrored by
 # ``schema_validate.validate_discovery_output`` (we validate in the consumer, not the adapter).
 DISCOVERY_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",

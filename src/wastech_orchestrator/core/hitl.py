@@ -242,7 +242,7 @@ def _validate_subtasks(raw_subtasks: list[Any]) -> None:
 
 
 def _validate_skills(raw_skills: Any) -> tuple[str, ...]:
-    """Validate planning's proposed skill names: a bounded list of non-empty bounded strings (§2.1).
+    """Validate planning's proposed skill names: a bounded list of non-empty bounded strings.
 
     Returns the proposed names verbatim (de-duplication and matching against the actual inventory is
     the Core's deterministic job in :func:`core.skills.resolve_planning_skills`).
@@ -323,7 +323,7 @@ def interaction_id(task_id: str, node_id: str, subtask: int | None = None) -> st
 
 
 def discovery_interaction_path(artifacts_root: str | Path, task_id: str) -> Path:
-    """The durable artifact for a check-command-set approval (§1.2), under the task's ``hitl/``."""
+    """The durable artifact for a check-command-set approval, under the task's ``hitl/``."""
     return task_artifact_dir(artifacts_root, task_id) / "hitl" / "check-discovery.json"
 
 
@@ -412,7 +412,7 @@ _RESETTABLE_STATUSES: frozenset[str] = frozenset({"waiting", *get_args(AskFailur
 
 
 def reset_pending_interactions(artifacts_root: str | Path, task_id: str) -> list[str]:
-    """Remove un-answered (``waiting`` / any ``AskFailure``) HITL artifacts for a continue (§rerun).
+    """Remove un-answered (``waiting`` / any ``AskFailure``) HITL artifacts for a continue.
 
     The infra failure being continued from is often a dropped notifier (the prompt never delivered,
     timed out, or returned an invalid response). Deleting only those artifacts makes the re-entered

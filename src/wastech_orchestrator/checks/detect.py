@@ -1,4 +1,4 @@
-"""Deterministic check-candidate detection (backlog: automatic check discovery, §5).
+"""Deterministic check-candidate detection (backlog: automatic check discovery).
 
 Turns :class:`~wastech_orchestrator.checks.inspect.RepositoryEvidence` into ordered
 :class:`~wastech_orchestrator.checks.model.CheckCandidate` proposals for recognized ecosystems —
@@ -174,7 +174,7 @@ def _low(name: str, argv: tuple[str, ...], evidence: list[str]) -> CheckCandidat
 
 
 def _ruff_argv(ruff_cmd: tuple[str, ...], ev: RepositoryEvidence) -> tuple[str, ...]:
-    """``<ruff> check`` with a trailing ``.`` only when the project pins no ruff scope (§1.1).
+    """``<ruff> check`` with a trailing ``.`` only when the project pins no ruff scope.
 
     A configured ``[tool.ruff]`` scope (``src``/``include``/``exclude``) is *overridden* by an
     explicit ``.``, so we drop it and let ruff read its own config — the post-test-run scope bug.
@@ -184,7 +184,7 @@ def _ruff_argv(ruff_cmd: tuple[str, ...], ev: RepositoryEvidence) -> tuple[str, 
 
 
 def _mypy_argv(mypy_cmd: tuple[str, ...], ev: RepositoryEvidence) -> tuple[str, ...]:
-    """``<mypy>`` targets honoring the project's scope (§1.1): the configured ``[tool.mypy] files``
+    """``<mypy>`` targets honoring the project's scope: the configured ``[tool.mypy] files``
     when set, else a bare ``mypy`` when any scope (files/exclude) is configured, else ``mypy .``."""
     if ev.mypy_files:
         return (*mypy_cmd, *ev.mypy_files)
@@ -226,7 +226,7 @@ def propose_default_commands(repo_root: Path | str) -> list[str]:
     candidates = CheckCandidateDetector().detect(evidence)
     chosen = _best_candidate_per_name(candidates)
     # A project-owned wrapper (``make check``/``tox``/…) supersedes the per-language checks when it
-    # is present (§17), mirroring the resolver's selection.
+    # is present, mirroring the resolver's selection.
     selected = [chosen[_CHECKS]] if _CHECKS in chosen else [chosen[name] for name in sorted(chosen)]
     return [shlex.join(candidate.argv) for candidate in selected]
 

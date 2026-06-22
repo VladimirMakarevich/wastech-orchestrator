@@ -1,4 +1,4 @@
-"""Operator-facing check diagnostics (automatic check discovery §11, ops).
+"""Operator-facing check diagnostics (automatic check discovery, ops).
 
 Provider-agnostic reporting helpers shared by the CLI: ``check_preflight`` resolves
 (deterministically, no provider run) and reports whether the repository's checks are launchable;

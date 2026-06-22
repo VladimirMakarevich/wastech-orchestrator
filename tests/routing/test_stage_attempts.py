@@ -1,4 +1,4 @@
-"""`stage_attempts` counting and bounding across fallback (§8.1, phase doc 4.4).
+"""`stage_attempts` counting and bounding across fallback (phase doc 4.4).
 
 Drives the router with in-memory fakes so each attempt's outcome is deterministic. The node pins
 ``provider=codex`` while claude is the global primary, so the route is (codex, claude): the CODEX
@@ -102,7 +102,7 @@ def test_non_fallback_infra_error_stops_at_primary(
     make_fake_provider: Callable[..., object],
     make_request: Callable[..., AgentRunRequest],
 ) -> None:
-    # configuration_error is not fallback-eligible → no retry; surfaced for `failed` (§7.3).
+    # configuration_error is not fallback-eligible → no retry; surfaced for `failed`.
     primary = make_fake_provider(ProviderId.CODEX, raises=ErrorClass.CONFIGURATION_ERROR)
     fallback = make_fake_provider(ProviderId.CLAUDE)
     router = _router(config, primary, fallback)

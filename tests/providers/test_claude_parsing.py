@@ -1,4 +1,4 @@
-"""Unit tests for the Claude ``stream-json`` event parser (spec §4.4)."""
+"""Unit tests for the Claude ``stream-json`` event parser."""
 
 from __future__ import annotations
 
