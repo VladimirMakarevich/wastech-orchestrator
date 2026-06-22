@@ -129,6 +129,29 @@ def test_strips_legacy_allow_review_skip() -> None:
     assert merged["agents"]["max_fix_cycles"] == 99  # operator value preserved
 
 
+def test_strips_legacy_max_budget_usd() -> None:
+    # config v14 removed `agents.providers.<p>.max_budget_usd` (declared/parsed but read nowhere);
+    # upgrade-config drops it from both provider blocks, preserving every other operator value.
+    template = {"schema_version": CONFIG_SCHEMA_VERSION, "agents": {"providers": {"claude": {}}}}
+    operator = {
+        "schema_version": 13,
+        "agents": {
+            "providers": {
+                "claude": {"command": "claude", "max_budget_usd": 12.5, "max_turns": 99},
+                "codex": {"command": "codex", "max_budget_usd": None},
+            }
+        },
+    }
+    merged, _added, removed = upgrade_config_mapping(template, operator)
+    assert "max_budget_usd" not in merged["agents"]["providers"]["claude"]
+    assert "max_budget_usd" not in merged["agents"]["providers"]["codex"]
+    assert set(removed) >= {
+        "agents.providers.claude.max_budget_usd",
+        "agents.providers.codex.max_budget_usd",
+    }
+    assert merged["agents"]["providers"]["claude"]["max_turns"] == 99  # operator value preserved
+
+
 def test_render_round_trips_through_parse() -> None:
     mapping = {"schema_version": CONFIG_SCHEMA_VERSION, "agents": {"max_fix_cycles": 15}}
     text = render(mapping)

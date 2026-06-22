@@ -247,16 +247,6 @@ def _opt_int(m: Mapping[str, Any], key: str, where: str, issues: list[str]) -> i
     return value
 
 
-def _opt_float(m: Mapping[str, Any], key: str, where: str, issues: list[str]) -> float | None:
-    if key not in m or m[key] is None:
-        return None
-    value = m[key]
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        issues.append(f"{where}.{key}: expected a number, got {type(value).__name__}")
-        return None
-    return float(value)
-
-
 def _enum[E: StrEnum](
     value: Any, enum_cls: type[E], where: str, issues: list[str], default: E
 ) -> E:
@@ -317,12 +307,13 @@ def _build_provider(raw: Any, pid: ProviderId, issues: list[str]) -> ProviderCon
             "extra_args",
             "sandbox",
             "max_turns",
-            "max_budget_usd",
             "reasoning",
             "primary",
         },
         where,
         issues,
+        # ``max_budget_usd`` (removed v14) is tolerated, not accepted — a stale config still loads.
+        tolerated={"max_budget_usd"},
     )
     reasoning_raw = _opt_str(m, "reasoning", where, issues)
     if reasoning_raw is not None and reasoning_raw not in _REASONING_LEVELS:
@@ -339,7 +330,6 @@ def _build_provider(raw: Any, pid: ProviderId, issues: list[str]) -> ProviderCon
         extra_args=_str_tuple(m, "extra_args", (), where, issues),
         sandbox=_opt_str(m, "sandbox", where, issues),
         max_turns=_opt_int(m, "max_turns", where, issues),
-        max_budget_usd=_opt_float(m, "max_budget_usd", where, issues),
         reasoning=reasoning_raw,
         primary=_bool(m, "primary", False, where, issues),
     )

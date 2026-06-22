@@ -29,8 +29,9 @@ from wastech_orchestrator.config.schema import CONFIG_SCHEMA_VERSION
 # ``providers.<id>.primary``); ``git.auto_merge_allow_per_task`` is gone — a per-task ``auto_merge``
 # now wins outright. v12: ``agents.decomposition.min_size_signal``/``commit_per_subtask`` are gone —
 # both were decorative (never read). v13: ``agents.allow_review_skip`` is gone — per-task skip is by
-# flow node id and the operator owns which nodes are safe to disable.) The parent-path may be dotted
-# (walked segment by segment).
+# flow node id and the operator owns which nodes are safe to disable. v14:
+# ``agents.providers.<p>.max_budget_usd`` is gone — declared/parsed but read nowhere.) The
+# parent-path may be dotted (walked segment by segment).
 _REMOVED_KEYS: tuple[tuple[str, str], ...] = (
     ("", "prompts"),
     ("agents", "skip_stages"),
@@ -39,6 +40,8 @@ _REMOVED_KEYS: tuple[tuple[str, str], ...] = (
     ("git", "auto_merge_allow_per_task"),
     ("agents.decomposition", "min_size_signal"),
     ("agents.decomposition", "commit_per_subtask"),
+    ("agents.providers.claude", "max_budget_usd"),
+    ("agents.providers.codex", "max_budget_usd"),
 )
 
 _UPGRADE_HEADER = (

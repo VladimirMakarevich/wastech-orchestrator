@@ -63,7 +63,12 @@ from wastech_orchestrator.providers.base import ProviderId
 # is no `review`-special-case; which nodes are safe to disable is the operator's flow-authoring
 # responsibility. `upgrade-config` strips `agents.allow_review_skip`; old configs still load
 # fail-open (the key is tolerated/ignored).
-CONFIG_SCHEMA_VERSION = 13
+# v14 (2026-06-22, provider-config-cleanup): the unused `agents.providers.<p>.max_budget_usd` key
+# is removed — declared/parsed but read nowhere (only `max_turns` reaches an argv). `upgrade-config`
+# strips it from both provider blocks; old configs still load fail-open (the key is tolerated). (The
+# same bump also ships explicit default `model`/`reasoning` and makes each provider's full-access
+# mode operator-selectable under `security.strict_isolation: false` — neither is a format change.)
+CONFIG_SCHEMA_VERSION = 14
 
 
 class AuditBranch(StrEnum):
@@ -124,10 +129,9 @@ class ProviderConfig:
     timeout_seconds: int
     permission_profile: str
     extra_args: tuple[str, ...] = ()
-    # Provider-specific (optional): Codex sandbox; Claude max_turns / max_budget_usd.
+    # Provider-specific (optional): Codex sandbox; Claude max_turns.
     sandbox: str | None = None
     max_turns: int | None = None
-    max_budget_usd: float | None = None
     reasoning: str | None = None  # "low" | "medium" | "high" | "xhigh" | "max"
     # Exactly one configured provider must set ``primary: true`` — the global primary that runs any
     # flow node with no ``provider`` field, and the single infrastructure-fallback target (PRE.1).

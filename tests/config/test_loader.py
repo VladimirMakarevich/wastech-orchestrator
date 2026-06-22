@@ -9,6 +9,7 @@ from wastech_orchestrator.config.schema import (
     AuditBranch,
     MergeStrategy,
 )
+from wastech_orchestrator.providers.base import ProviderId
 
 _LEGACY = """
 repo:
@@ -61,6 +62,21 @@ def test_legacy_allow_review_skip_tolerated_not_error() -> None:
     result = loads_config(_agents("  allow_review_skip: true\n"))
     assert not hasattr(result.config.agents, "allow_review_skip")
     assert result.config.agents.allowed  # loaded cleanly, dead key ignored
+
+
+def test_legacy_max_budget_usd_tolerated_not_error() -> None:
+    # ``agents.providers.<p>.max_budget_usd`` was removed in config v14 (declared/parsed but read
+    # nowhere). An old config still carrying it loads fail-open (the key is ignored, not rejected);
+    # ``upgrade-config`` strips it.
+    text = (
+        'repo:\n  url: "git@example.com:o/r.git"\n'
+        "agents:\n  allowed: [codex]\n  providers:\n"
+        '    codex:\n      command: "codex"\n      max_budget_usd: 12.5\n'
+    )
+    result = loads_config(text)
+    codex_cfg = result.config.agents.providers[ProviderId.CODEX]
+    assert not hasattr(codex_cfg, "max_budget_usd")
+    assert codex_cfg.command == "codex"  # loaded cleanly, dead key ignored
 
 
 def test_auto_mode_defaults_to_false() -> None:

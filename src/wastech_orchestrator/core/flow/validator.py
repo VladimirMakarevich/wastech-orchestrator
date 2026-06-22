@@ -15,7 +15,10 @@ one pass:
 
 :func:`validate_flow_against_config` is the **config-aware** third layer (P4.2): it needs the
 ``OrchestratorConfig`` (node providers ∈ ``agents.allowed``; node reasoning ∈ the closed level set;
-``permission_ceiling`` ≤ a configured provider's capability). It is kept separate so
+``permission_ceiling`` ≤ a configured provider's capability; and — under
+``security.strict_isolation`` — no node selects a provider full-access mode in ``extra_args`` via
+:func:`~wastech_orchestrator.security.forbidden_args.find_full_access_args`, the flow-side half of
+the global isolation gate). It is kept separate so
 :func:`validate_flow` stays unit-testable without a config, and so the layers (graph / ceiling /
 config) never mix in one signature. The :class:`~.registry.FlowRegistry` calls it after
 :func:`validate_flow`; both raise :class:`FlowValidationError`.
@@ -49,7 +52,10 @@ from wastech_orchestrator.core.flow.contracts import (
 from wastech_orchestrator.core.flow.engine import _REWORK_OUTCOMES, skip_outcome
 from wastech_orchestrator.core.flow.schema import AgentNode, EvaluatorNode
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
-from wastech_orchestrator.security.forbidden_args import find_forbidden_args
+from wastech_orchestrator.security.forbidden_args import (
+    find_forbidden_args,
+    find_full_access_args,
+)
 from wastech_orchestrator.security.profiles import is_same_or_stricter
 
 # Reasoning levels the provider adapters understand (``ProviderConfig.reasoning``); a node may not
@@ -94,10 +100,12 @@ def validate_flow_against_config(snapshot: FlowSnapshot, config: OrchestratorCon
     The config-aware third layer, run by the :class:`~.registry.FlowRegistry` after
     :func:`validate_flow`. It rejects a flow that is structurally valid but cannot be safely or
     usefully run under *this* config: a node pinned to a disallowed provider or an unknown reasoning
-    level, or a ``permission_ceiling`` no configured provider can reach. Security can only ever
-    *narrow* here — see ``docs/backlog/flows/security-ceiling.md``. (Flow ``budgets`` and
-    ``publishing`` are handled by graceful runtime degradation, not here — see the module
-    docstring.)
+    level, a ``permission_ceiling`` no configured provider can reach, or — under
+    ``security.strict_isolation`` — a node whose ``extra_args`` select a provider full-access mode
+    (the flow-side half of the isolation gate; the operator opts in via ``strict_isolation:
+    false``). Security can only ever *narrow* here — see ``docs/backlog/flows/security-ceiling.md``.
+    (Flow ``budgets`` and ``publishing`` are handled by graceful runtime degradation, not here — see
+    the module docstring.)
 
     :raises FlowValidationError: if any config-consistency violation is found.
     """
@@ -456,5 +464,24 @@ def _check_config_consistency(snap: FlowSnapshot, config: OrchestratorConfig) ->
                 f"allowed provider {provider_profiles} (no provider can run a node at this ceiling)"
             )
         )
+
+    # 3. strict_isolation gate (provider-config-cleanup Risk #2): under security.strict_isolation a
+    #    flow node must not select a provider full-access mode in extra_args (Codex
+    #    ``--sandbox danger-full-access`` / Claude ``--permission-mode bypassPermissions``). This
+    #    mirrors the provider-config isolation preflight so the gate is global — the operator opts
+    #    in by setting strict_isolation: false (and owns the risk). The absolutely-forbidden
+    #    ``--dangerously*`` / ``--yolo`` / ``--ignore-rules`` flags are already rejected (config-
+    #    free) by _check_ceiling regardless of strict_isolation.
+    if config.security.strict_isolation:
+        for node in doc.nodes:
+            if not isinstance(node, AgentNode):
+                continue
+            for reason in find_full_access_args(node.extra_args):
+                errs.append(
+                    cfg(
+                        f"node {node.id!r}: extra_args {reason} — not permitted under "
+                        "security.strict_isolation (set strict_isolation: false to opt in)"
+                    )
+                )
 
     return errs

@@ -144,24 +144,28 @@ def test_forbidden_extra_args_in_request_are_rejected(
     assert exc.value.error_class is ErrorClass.CONFIGURATION_ERROR
 
 
-def test_weaker_permission_mode_override_is_rejected(
+def test_bypass_permission_mode_override_builds_argv(
     claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # workspace-write maps to acceptEdits; bypassPermissions would relax isolation.
-    bad = replace(claude_config, extra_args=("--permission-mode", "bypassPermissions"))
-    with pytest.raises(ProviderError) as exc:
-        _argv(bad, make_request(permission_profile="workspace-write"))
-    assert exc.value.error_class is ErrorClass.CONFIGURATION_ERROR
+    # Full access is operator-selectable (no absolute ban): build_claude_argv no longer raises on a
+    # --permission-mode escalation. The override is appended AFTER the orchestrator's own
+    # --permission-mode so the CLI's last-wins resolution applies. The strict_isolation preflight
+    # gate (not the adapter) blocks it by default — see tests/security/test_isolation.py.
+    cfg = replace(claude_config, extra_args=("--permission-mode", "bypassPermissions"))
+    argv = _argv(cfg, make_request(permission_profile="workspace-write"))
+    # The orchestrator's own mode (acceptEdits) comes first; the operator override comes last.
+    assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
+    assert argv[-2:] == ["--permission-mode", "bypassPermissions"]
 
 
-def test_weaker_permission_mode_override_inline_form_is_rejected(
+def test_permission_mode_override_inline_form_builds_argv(
     claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # read-only maps to plan; acceptEdits is more permissive than plan.
-    bad = replace(claude_config, extra_args=("--permission-mode=acceptEdits",))
-    with pytest.raises(ProviderError) as exc:
-        _argv(bad, make_request(permission_profile="read-only"))
-    assert exc.value.error_class is ErrorClass.CONFIGURATION_ERROR
+    # The inline (flag=value) form also passes through now (gated by strict_isolation, not banned).
+    cfg = replace(claude_config, extra_args=("--permission-mode=bypassPermissions",))
+    argv = _argv(cfg, make_request(permission_profile="read-only"))
+    assert argv[argv.index("--permission-mode") + 1] == "plan"  # orchestrator's own, first
+    assert argv[-1] == "--permission-mode=bypassPermissions"
 
 
 def test_safe_extra_args_are_appended(

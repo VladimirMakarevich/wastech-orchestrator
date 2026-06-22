@@ -45,6 +45,7 @@ from wastech_orchestrator.providers.redaction import redact_text
 from wastech_orchestrator.security.forbidden_args import (
     FORBIDDEN_SANDBOX_VALUE,
     find_forbidden_args,
+    find_full_access_args,
 )
 
 __all__ = [
@@ -110,9 +111,11 @@ def build_codex_argv(
     """Build the ``codex exec`` argv (a list, never a shell string).
 
     Raises :class:`ProviderError` (``CONFIGURATION_ERROR``) if ``extra_args`` would weaken the
-    sandbox/approvals or the resolved sandbox is the forbidden full-access mode — defence in depth
-    over the P1 config validator. The prompt is delivered on stdin (the trailing ``-``), never on
-    the command line.
+    sandbox/approvals (the absolutely-forbidden ``--dangerously*`` / ``--yolo`` / ``--ignore-rules``
+    flags) — defence in depth over the P1 config validator. The full-access sandbox
+    (``danger-full-access``) is **not** rejected here: it is operator-selectable and gated by
+    ``strict_isolation`` at preflight (security rule #3), so it passes through to the CLI. The
+    prompt is delivered on stdin (the trailing ``-``), never on the command line.
     """
     combined_extra = tuple(config.extra_args) + tuple(request.extra_args)
     reasons = find_forbidden_args(combined_extra)
@@ -122,8 +125,6 @@ def build_codex_argv(
         )
 
     sandbox = config.sandbox or config.permission_profile or _DEFAULT_SANDBOX
-    if sandbox == FORBIDDEN_SANDBOX_VALUE:
-        raise ProviderError(ErrorClass.CONFIGURATION_ERROR, f"sandbox {sandbox!r} is forbidden")
 
     # Approval policy is a global Codex flag. Both Codex CLI 0.57 and current releases reject it
     # when it is placed after the ``exec`` subcommand.
@@ -179,15 +180,17 @@ def isolation_reasons(config: ProviderConfig) -> list[str]:
     """Reasons the configured Codex isolation cannot be enabled — an empty list means OK.
 
     Pure and offline (no CLI launched), so it can drive the ``strict_isolation`` preflight
-    (:mod:`wastech_orchestrator.security.isolation`). Mirrors what :func:`build_codex_argv`
-    enforces: a non-``danger-full-access`` sandbox must be selectable and ``extra_args`` must not
-    weaken the sandbox/approvals. Codex has no per-tool deny mechanism — the sandbox *is* the
-    isolation, so "isolation enabled" means a real sandbox mode is in force.
+    (:mod:`wastech_orchestrator.security.isolation`). Codex has no per-tool deny mechanism — the
+    sandbox *is* the isolation, so "isolation enabled" means a real sandbox mode is in force. The
+    full-access sandbox (``danger-full-access``) is reported as "no isolation" whether it is set via
+    the ``sandbox`` field or selected in ``extra_args`` (the gate, not an absolute ban), and
+    ``extra_args`` must not weaken the sandbox/approvals.
     """
     sandbox = config.sandbox or config.permission_profile or _DEFAULT_SANDBOX
     reasons: list[str] = []
     if sandbox == FORBIDDEN_SANDBOX_VALUE:
         reasons.append(f"sandbox {sandbox!r} grants full filesystem access (no isolation)")
+    reasons.extend(f"extra_args {r}" for r in find_full_access_args(config.extra_args))
     reasons.extend(f"extra_args {r}" for r in find_forbidden_args(config.extra_args))
     return reasons
 

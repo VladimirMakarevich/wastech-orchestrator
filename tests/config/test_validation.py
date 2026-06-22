@@ -72,7 +72,8 @@ def test_max_subtasks_below_two_is_rejected(base_config: OrchestratorConfig) -> 
     "flag",
     [
         "--dangerously-bypass-approvals-and-sandbox",
-        "--sandbox=danger-full-access",
+        "--yolo",
+        "--ignore-rules",
     ],
 )
 def test_sandbox_bypass_extra_arg_is_rejected(base_config: OrchestratorConfig, flag: str) -> None:
@@ -84,14 +85,22 @@ def test_sandbox_bypass_extra_arg_is_rejected(base_config: OrchestratorConfig, f
     assert any("extra_args" in issue for issue in exc.value.issues)
 
 
-def test_sandbox_bypass_split_value_is_rejected(base_config: OrchestratorConfig) -> None:
-    codex = replace(
-        base_config.agents.providers[ProviderId.CODEX],
-        extra_args=("--sandbox", "danger-full-access"),
-    )
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        ("--sandbox=danger-full-access",),
+        ("--sandbox", "danger-full-access"),
+    ],
+)
+def test_full_access_sandbox_extra_arg_is_not_a_config_error(
+    base_config: OrchestratorConfig, extra_args: tuple[str, ...]
+) -> None:
+    # provider-config-cleanup #1: a full-access sandbox is no longer an absolute config-validation
+    # error — it is operator-selectable and gated by the strict_isolation preflight (the absolute
+    # ban is reserved for --dangerously*/--yolo/--ignore-rules). See test_isolation.py for the gate.
+    codex = replace(base_config.agents.providers[ProviderId.CODEX], extra_args=extra_args)
     providers = {**base_config.agents.providers, ProviderId.CODEX: codex}
-    with pytest.raises(ConfigError):
-        validate_config(_with_agents(base_config, providers=providers))
+    assert validate_config(_with_agents(base_config, providers=providers)) == []
 
 
 def test_claude_skip_permissions_extra_arg_is_rejected(base_config: OrchestratorConfig) -> None:

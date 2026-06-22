@@ -180,17 +180,16 @@ agents:
     claude:
       command: "claude"
       primary: true # the global primary — runs any node with no provider; sole fallback target
-      model: ""
-      reasoning: null # low | medium | high | xhigh (Opus 4.7+ / Fable 5) | max
+      model: "claude-sonnet-4-6" # explicit default; "" = use the CLI/account default
+      reasoning: high # low | medium | high | xhigh | max
       timeout_seconds: 7200
       max_turns: 50
-      max_budget_usd: null
       permission_profile: "workspace-write"
       extra_args: []
     codex:
       command: "codex"
-      model: ""
-      reasoning: null # low | medium | high | xhigh | max→xhigh
+      model: "gpt-5.4" # confirm against your Codex CLI; "" = use its default
+      reasoning: high # low | medium | high | xhigh | max→xhigh
       timeout_seconds: 7200
       sandbox: "workspace-write"
       permission_profile: "workspace-write"
@@ -203,8 +202,8 @@ Common fields:
 | --- | --- | --- | --- |
 | `command` | string | provider id (`"claude"` or `"codex"`) | Executable name or path. |
 | `primary` | boolean | `false` | Marks the **global primary**. Exactly one configured provider must set it; that provider runs any flow node with no explicit `provider` and is the sole infrastructure-fallback target. It must also be in `agents.allowed`. |
-| `model` | string | `""` | Provider model setting; empty means provider default. (The default model for the provider; a flow node may override it per node.) |
-| `reasoning` | string or null | `null` | Reasoning effort level: `low`, `medium`, `high`, `xhigh`, or `max`. Maps to `--effort` for Claude (v2.1+) and `--reasoning-effort` for Codex. Codex supports up to `xhigh`; `max` (Claude-only) is clamped to `xhigh`. `xhigh` requires Opus 4.7+ or Fable 5 for Claude. (A flow node may override it per node.) |
+| `model` | string | `claude-sonnet-4-6` (claude), `gpt-5.4` (codex) | Provider model setting. The packaged template ships an explicit default per provider; set `""` to fall back to the CLI/account default. Confirm the Codex id against your installed Codex CLI. (A flow node may override it per node.) |
+| `reasoning` | string or null | `high` (both, in the packaged template) | Reasoning effort level: `low`, `medium`, `high`, `xhigh`, or `max`. Maps to `--effort` for Claude (v2.1+) and `--reasoning-effort` for Codex. Codex supports up to `xhigh`; `max` (Claude-only) is clamped to `xhigh`. `xhigh` requires Opus 4.7+ or Fable 5 for Claude. Set `null` to omit the flag and use the CLI default. (A flow node may override it per node.) |
 | `timeout_seconds` | integer | `7200` | Timeout for a stage run. |
 | `permission_profile` | string | `"workspace-write"` | Orchestrator permission profile passed into the adapter. |
 | `extra_args` | list of strings | `[]` | Additional provider CLI arguments after safety validation. |
@@ -213,9 +212,8 @@ Provider-specific fields:
 
 | Provider | Field | Type | Default | Meaning |
 | --- | --- | --- | --- | --- |
-| `codex` | `sandbox` | string or null | `null` if omitted | Codex sandbox mode. The example sets `workspace-write`. |
+| `codex` | `sandbox` | string or null | `null` if omitted | Codex sandbox mode (`workspace-write`, `read-only`, or `danger-full-access`). The example sets `workspace-write`. `danger-full-access` is operator-selectable but rejected at preflight unless `strict_isolation: false` (see `extra_args` / `security` below). |
 | `claude` | `max_turns` | integer or null | `null` if omitted | Claude Code turn limit. |
-| `claude` | `max_budget_usd` | number or null | `null` if omitted | Claude Code budget limit when supported. |
 
 #### `extra_args`
 
@@ -236,25 +234,32 @@ agents:
       extra_args: ["-c", "tools.web_search=true"] # a Codex -c config override
 ```
 
-**What is rejected.** Arguments that disable the sandbox or approvals are refused:
+**What is always forbidden.** Flags that disable approvals / sandbox / hook-trust wholesale are refused unconditionally — they cannot be enabled through a config or a flow node, regardless of `strict_isolation`:
 
-| Rejected argument | Provider | Reason |
+| Forbidden argument | Provider | Reason |
 | --- | --- | --- |
 | any `--dangerously*` flag (`--dangerously-bypass-approvals-and-sandbox`, `--dangerously-skip-permissions`, `--dangerously-bypass-hook-trust`, …) | both | disables approvals / sandbox / hook-trust |
 | `--yolo`, `--ignore-rules` | Codex | disables approvals |
-| `--sandbox danger-full-access` (or `-s danger-full-access`) | Codex | full filesystem access — no isolation |
 | `--sandbox` / `-s` with no value | Codex | malformed: would swallow the next token |
-| `--permission-mode bypassPermissions`, or any `--permission-mode` more permissive than the resolved `permission_profile` | Claude | escalates above the permission profile |
 
-**Where the error appears.** The flag-based bans (everything except the Claude `--permission-mode` rule) are caught at **config load** — the whole config is rejected with an error before any task runs — and re-checked by the provider command builder at launch. The Claude `--permission-mode` escalation is enforced by the Claude adapter **at launch** and by the `strict_isolation` preflight (a config carrying it loads, but the run fails before a branch is created).
+These are caught at **config load** — the whole config is rejected before any task runs — re-checked by the provider command builder at launch, and re-checked on a flow node's `extra_args` at flow load. Note `--dangerously-skip-permissions` stays forbidden even though it is functionally the flag form of `bypassPermissions`: keeping the whole `--dangerously*` namespace bright is the parity rule.
+
+**Full access — operator-selectable, gated by `strict_isolation`.** Selecting a provider's full-access mode is _not_ hard-forbidden: the orchestrator does not impose its own refusal, and the operator owns the risk. It is instead gated by [`security.strict_isolation`](#security): with the default `strict_isolation: true` it is rejected at the isolation **preflight** (the run fails before a branch is created); set `strict_isolation: false` to opt in.
+
+| Gated argument | Provider | Effect |
+| --- | --- | --- |
+| `--sandbox danger-full-access` (or `-s danger-full-access`), or the `sandbox: danger-full-access` field | Codex | full filesystem access — no isolation |
+| `--permission-mode bypassPermissions` | Claude | disables permission prompts — no isolation |
+
+The gate covers full access selected in provider `extra_args`, the Codex `sandbox` field, **and** a flow node's `extra_args` (checked against `strict_isolation` at flow load). (A `--permission-mode` escalation above the resolved profile that is _not_ `bypassPermissions` — e.g. `acceptEdits` over a `plan` profile — is likewise reported by the `strict_isolation` preflight for the provider config.)
 
 ```yaml
-# Codex — rejected at config load
+# Codex full access — loads, but rejected at the strict_isolation preflight (default true)
 extra_args: ["--sandbox", "danger-full-access"]
 ```
 
 ```yaml
-# Claude — rejected at launch / by the strict_isolation preflight
+# Claude full access — loads, but rejected at the strict_isolation preflight (default true)
 extra_args: ["--permission-mode", "bypassPermissions"]
 ```
 
@@ -284,7 +289,7 @@ security:
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `strict_isolation` | boolean | `true` | Preflight fails if the required isolation cannot be enforced. |
+| `strict_isolation` | boolean | `true` | Preflight fails if the required isolation cannot be enforced. This is also the **sole gate** for operator-selected full access: a Codex `danger-full-access` sandbox or a Claude `--permission-mode bypassPermissions` — in provider config _or_ a flow node's `extra_args` — is rejected at preflight while this is `true` (the default). Set it `false` to opt in (you own the risk). |
 | `allowed_environment` | list of strings | `PATH`, `HOME`, `USERPROFILE`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR` | Only these environment variables reach child processes. |
 | `denied_read_paths` | list of strings | `.env`, `secrets/**` | Paths agents must not read and artifacts must not expose. |
 | `denied_commands` | list of strings | `git commit`, `git push`, `gh pr create` | Commands agents are forbidden to run. |
@@ -464,7 +469,7 @@ There is no flow block in `config.yaml`. Flows live as files in two layers, oper
 
 - **Graph integrity** — edges resolve, outcomes are in the allowed set per node kind, every `rework`/`fail` edge is bounded by a budget or named loop, exactly one entry node, every node can reach a terminal.
 - **Security ceiling** — a node's `permission_profile` may not exceed the flow `permission_ceiling`; evaluators are forced `read-only`; `extra_args` pass the forbidden-args screen; `role_file` paths contain no traversal; unknown fields anywhere fail closed.
-- **Config consistency** — a node's pinned `provider` is in `agents.allowed`, its `reasoning` is a known level (`low`/`medium`/`high`/`xhigh`/`max`), and the flow `permission_ceiling` is reachable by at least one configured provider's `permission_profile`. (On resume the live flow is re-validated against the live config, so a config change can only ever _narrow_ what a task may do.)
+- **Config consistency** — a node's pinned `provider` is in `agents.allowed`, its `reasoning` is a known level (`low`/`medium`/`high`/`xhigh`/`max`), the flow `permission_ceiling` is reachable by at least one configured provider's `permission_profile`, and — under `security.strict_isolation` — no node's `extra_args` selects a provider full-access mode (Codex `--sandbox danger-full-access` / Claude `--permission-mode bypassPermissions`; the flow-side half of the isolation gate). (On resume the live flow is re-validated against the live config, so a config change can only ever _narrow_ what a task may do.)
 
 Two things are deliberately **not** fatal here because the orchestrator degrades them gracefully: a flow `budget` above `agents.max_*` is clamped to the cap at runtime (the cap always wins), and a PR-publishing flow under `git.create_pull_request: false` runs in local-commit mode (no PR). Neither is an escalation, so neither blocks the flow.
 

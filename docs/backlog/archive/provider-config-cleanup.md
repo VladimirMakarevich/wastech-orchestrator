@@ -1,6 +1,6 @@
 # Provider config: operator-owned full access (Codex sandbox + Claude permissions), drop `max_budget_usd`, explicit model/reasoning defaults
 
-Status: **accepted** Date: 2026-06-22 Owner: Vladimir Makarevich
+Status: **done** (2026-06-22, config v14 — see the Done entry in [archive/follow_ups_history.md](archive/follow_ups_history.md)) Date: 2026-06-22 Owner: Vladimir Makarevich
 
 Detail file for the [follow_ups.md](follow_ups.md) item "Provider config cleanup (operator-owned full access, drop `max_budget_usd`, explicit model/reasoning defaults)". Three independent provider-config changes, bundled because they all touch the same surface (`config.example.yaml`, the schema/loader, `install/config_writer.py`, the provider adapters) and ship together as one config-version bump.
 

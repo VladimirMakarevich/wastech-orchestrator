@@ -1,7 +1,7 @@
 # Example configuration for wastech-orchestrator.
 # Copy to config.yaml and fill it in for your project. config.yaml is NOT committed to git.
 
-schema_version: 12                  # config format version; the orchestrator refuses newer configs
+schema_version: 14                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -33,23 +33,25 @@ agents:
   # Provider routing is node-based: a flow node declares its own `provider` (else the global
   # primary below). Exactly one configured provider must set `primary: true` — it runs every node
   # with no `provider` field and is the sole infrastructure-fallback target. It must be in `allowed`.
+  # `model`/`reasoning` below are explicit defaults; blank either ("" / null) to use the CLI default.
+  # Full access — Codex `sandbox: danger-full-access` or Claude `--permission-mode bypassPermissions`
+  # in `extra_args` — is operator-selectable but rejected at preflight unless `strict_isolation: false`.
   providers:
     claude:
       command: "claude"
-      model: ""
-      reasoning: null          # low | medium | high | xhigh (Opus 4.7+ / Fable 5) | max
+      model: "claude-sonnet-4-6"   # "" = use the Claude CLI/account default
+      reasoning: high          # low | medium | high | xhigh | max
       timeout_seconds: 7200
       max_turns: 50
-      max_budget_usd: null
       permission_profile: "workspace-write"
       extra_args: []
       primary: true            # the global primary (exactly one provider; must be in `allowed`)
     codex:
       command: "codex"
-      model: ""
-      reasoning: null          # low | medium | high | xhigh | max->xhigh
+      model: "gpt-5.4"         # confirm against your Codex CLI; "" = use its default
+      reasoning: high          # low | medium | high | xhigh | max->xhigh
       timeout_seconds: 7200
-      sandbox: "workspace-write"
+      sandbox: "workspace-write"   # workspace-write | read-only | danger-full-access (needs strict_isolation: false)
       permission_profile: "workspace-write"
       extra_args: []
 

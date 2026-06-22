@@ -105,13 +105,15 @@ def test_forbidden_extra_args_in_request_are_rejected(
     assert exc.value.error_class is ErrorClass.CONFIGURATION_ERROR
 
 
-def test_danger_full_access_sandbox_is_rejected(
+def test_danger_full_access_sandbox_builds_argv(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    bad = replace(codex_config, sandbox="danger-full-access")
-    with pytest.raises(ProviderError) as exc:
-        _argv(bad, make_request())
-    assert exc.value.error_class is ErrorClass.CONFIGURATION_ERROR
+    # Full access is operator-selectable (no absolute ban): the adapter no longer raises — it passes
+    # ``--sandbox danger-full-access`` through to the CLI. The strict_isolation preflight gate (not
+    # the adapter) is what blocks it by default — see tests/security/test_isolation.py.
+    full = replace(codex_config, sandbox="danger-full-access")
+    argv = _argv(full, make_request())
+    assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
 
 
 def test_safe_extra_args_are_appended(

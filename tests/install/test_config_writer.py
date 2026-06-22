@@ -93,6 +93,20 @@ def test_safe_security_defaults_are_written(tmp_path: Path) -> None:
     assert cfg.agents.providers[ProviderId.CODEX].extra_args == ()
 
 
+def test_explicit_model_and_reasoning_defaults_are_written(tmp_path: Path) -> None:
+    text = build_and_validate(_spec(tmp_path, (ProviderId.CODEX, ProviderId.CLAUDE)))
+    cfg = loads_config(text).config
+    claude = cfg.agents.providers[ProviderId.CLAUDE]
+    codex = cfg.agents.providers[ProviderId.CODEX]
+    # provider-config-cleanup #3: fresh installs ship explicit model/reasoning, not "" / null.
+    assert (claude.model, claude.reasoning) == ("claude-sonnet-4-6", "high")
+    assert (codex.model, codex.reasoning) == ("gpt-5.4", "high")
+    # provider-config-cleanup #2: the unused max_budget_usd field is gone from the generated config.
+    assert "max_budget_usd" not in text
+    assert not hasattr(claude, "max_budget_usd")
+    assert not hasattr(codex, "max_budget_usd")
+
+
 def test_create_pr_and_auto_mode_are_reflected(tmp_path: Path) -> None:
     cfg = loads_config(
         build_and_validate(_spec(tmp_path, (ProviderId.CODEX,), create_pr=False, auto_mode=True))

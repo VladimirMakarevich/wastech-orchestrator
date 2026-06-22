@@ -169,12 +169,14 @@ def map_permission(profile: str) -> tuple[str, tuple[str, ...]]:
 
 
 def _reject_weaker_permission_override(extra_args: Sequence[str], required_mode: str) -> None:
-    """Reject an ``extra_args`` ``--permission-mode`` that is weaker than the required mode.
+    """Report an ``extra_args`` ``--permission-mode`` that is weaker than the required mode.
 
-    Defence-in-depth over the P1 config validator: a task or config must never relax the profile the
-    adapter was handed. ``--dangerously-skip-permissions`` is already rejected by
-    :func:`find_forbidden_args`; this also blocks the ``--permission-mode bypassPermissions`` vector
-    and any mode more permissive than ``required_mode``.
+    Used **only** by :func:`isolation_reasons` to drive the ``strict_isolation`` preflight — it is
+    no longer a runtime hard-raise in :func:`build_claude_argv` (a permission-mode escalation, incl.
+    ``bypassPermissions``, is operator-selectable and gated by ``strict_isolation``, not absolutely
+    forbidden). ``--dangerously-skip-permissions`` stays absolutely forbidden via
+    :func:`find_forbidden_args`; this flags the ``--permission-mode bypassPermissions`` vector and
+    any mode more permissive than ``required_mode``.
     """
     required_rank = _MODE_ORDER.index(required_mode)
     for index, token in enumerate(extra_args):
@@ -206,11 +208,15 @@ def build_claude_argv(
 ) -> list[str]:
     """Build the ``claude -p`` argv (a list, never a shell string).
 
-    Raises :class:`ProviderError` (``CONFIGURATION_ERROR``) if ``extra_args`` would weaken isolation
-    or the requested profile is the forbidden full-access mode — defence in depth over the P1 config
-    validator. The prompt is delivered on stdin, never on the command line; context reaches Claude
-    only as file paths. ``denied_commands`` and ``denied_read_paths`` (the ``security.*`` lists) are
-    enforced as ``--disallowedTools`` so the agent can never publish or read secret files.
+    Raises :class:`ProviderError` (``CONFIGURATION_ERROR``) if ``extra_args`` carry an
+    absolutely-forbidden flag (``--dangerously*`` / ``--yolo`` / ``--ignore-rules``) or the
+    requested profile is the forbidden full-access mode — defence in depth over the P1 config
+    validator. A ``--permission-mode`` override in ``extra_args`` (incl. ``bypassPermissions``) is
+    **not** rejected here: it is operator-selectable, gated by ``strict_isolation`` at preflight,
+    and appended after the orchestrator's own ``--permission-mode`` so the CLI's last-wins
+    resolution applies. The prompt is delivered on stdin, never on the command line; context reaches
+    Claude only as file paths. ``denied_commands`` and ``denied_read_paths`` (the ``security.*``
+    lists) are enforced as ``--disallowedTools`` so the agent can never publish or read secrets.
     """
     combined_extra = tuple(config.extra_args) + tuple(request.extra_args)
     reasons = find_forbidden_args(combined_extra)
@@ -226,7 +232,6 @@ def build_claude_argv(
         # omitted, so a headless ``acceptEdits``/``plan`` run cannot reach the network through them.
         # This only adds network tools — it never relaxes the filesystem permission mode.
         allowed_tools = (*allowed_tools, *_NETWORK_TOOLS)
-    _reject_weaker_permission_override(combined_extra, mode)
 
     argv = [
         config.command,

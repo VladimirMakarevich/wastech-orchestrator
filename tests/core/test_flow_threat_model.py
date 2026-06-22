@@ -86,6 +86,7 @@ def _config(
     allowed: str = "[claude, codex]",
     claude_profile: str = "workspace-write",
     codex_profile: str = "workspace-write",
+    strict_isolation: bool = True,
 ) -> OrchestratorConfig:
     text = f"""
 repo:
@@ -108,6 +109,7 @@ agents:
       command: "codex"
       permission_profile: {codex_profile}
 security:
+  strict_isolation: {str(strict_isolation).lower()}
   allowed_environment:
     - PATH
 checks:
@@ -277,6 +279,39 @@ def test_threat_ceiling_above_provider_capability_fatal(tmp_path: Path) -> None:
     config = _config(tmp_path, claude_profile="read-only", codex_profile="read-only")
     vs = _config_violations(_flow(ceiling="workspace-write"), config, tmp_path)
     assert _has(vs, "config", "permission_ceiling")
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "extra_args: ['--sandbox', 'danger-full-access']",  # Codex full-access sandbox
+        "extra_args: ['--permission-mode', 'bypassPermissions']",  # Claude permission bypass
+    ],
+)
+def test_threat_node_full_access_blocked_under_strict_isolation(extra: str, tmp_path: Path) -> None:
+    # provider-config-cleanup Risk #2 (option b): a flow node selecting a provider full-access mode
+    # in extra_args is no longer an absolute ban (find_forbidden_args lets it through, so it is
+    # structurally valid), but under security.strict_isolation the config-aware layer rejects it —
+    # the flow-side half of the global isolation gate.
+    config = _config(tmp_path, strict_isolation=True)
+    vs = _config_violations(_flow(extra=extra), config, tmp_path)
+    assert _has(vs, "config", "strict_isolation")
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "extra_args: ['--sandbox', 'danger-full-access']",
+        "extra_args: ['--permission-mode', 'bypassPermissions']",
+    ],
+)
+def test_node_full_access_allowed_when_strict_isolation_off(extra: str, tmp_path: Path) -> None:
+    # The operator opts in by setting strict_isolation: false; the gate then lets the node through
+    # (the operator owns the risk). validate_flow_against_config must not raise.
+    config = _config(tmp_path, strict_isolation=False)
+    snap = _snap(_flow(extra=extra), tmp_path)
+    validate_flow(snap)  # structurally valid (no absolute ban on the structured selector)
+    validate_flow_against_config(snap, config)  # no raise → operator-selected full access allowed
 
 
 def test_threat_direct_base_commit_blocked(tmp_path: Path) -> None:

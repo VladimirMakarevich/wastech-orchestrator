@@ -51,14 +51,29 @@ def _ordered_providers(providers: tuple[ProviderId, ...]) -> tuple[ProviderId, .
     return tuple(pid for pid in ProviderId if pid in selected)
 
 
+# Shipped default ``(model, reasoning)`` per provider (provider-config-cleanup #3). These replace
+# the old empty ``""`` / ``null`` placeholders; ``""`` / blank stays a valid "use the CLI/account
+# default" sentinel, so an operator may still clear either field. Keep the Codex id in step with the
+# installed Codex CLI's accepted ``--model`` values.
+_PROVIDER_DEFAULTS: dict[ProviderId, tuple[str, str]] = {
+    ProviderId.CLAUDE: ("claude-sonnet-4-6", "high"),
+    ProviderId.CODEX: ("gpt-5.4", "high"),
+}
+
+
 def _provider_block(pid: ProviderId, *, primary: bool) -> dict[str, Any]:
     """One ``agents.providers.<id>`` block, mirroring the packaged template's safe defaults."""
-    block: dict[str, Any] = {"command": pid.value, "model": "", "timeout_seconds": 7200}
+    model, reasoning = _PROVIDER_DEFAULTS[pid]
+    block: dict[str, Any] = {
+        "command": pid.value,
+        "model": model,
+        "reasoning": reasoning,
+        "timeout_seconds": 7200,
+    }
     if pid is ProviderId.CODEX:
         block["sandbox"] = "workspace-write"
     if pid is ProviderId.CLAUDE:
         block["max_turns"] = 50
-        block["max_budget_usd"] = None
     block["permission_profile"] = "workspace-write"
     block["extra_args"] = []
     if primary:
