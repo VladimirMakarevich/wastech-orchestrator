@@ -160,6 +160,73 @@ def test_invalid_field_type_contacts(config: OrchestratorConfig) -> None:
     assert result.reason is ValidationReason.INVALID_FIELD_TYPE
 
 
+def test_depends_on_non_list_rejected(config: OrchestratorConfig) -> None:
+    text = '---\nid: task-001\ntitle: T\ndepends_on: "task-002"\n---\n\n## Description\n\nx\n'
+    result = _gate(config).validate(_src(text))
+    assert result.reason is ValidationReason.INVALID_DEPENDS_ON
+
+
+def test_depends_on_non_string_element_rejected(config: OrchestratorConfig) -> None:
+    text = '---\nid: task-001\ntitle: T\ndepends_on: ["task-002", 7]\n---\n\n## Description\n\nx\n'
+    result = _gate(config).validate(_src(text))
+    assert result.reason is ValidationReason.INVALID_DEPENDS_ON
+
+
+def test_depends_on_empty_string_element_rejected(config: OrchestratorConfig) -> None:
+    text = '---\nid: task-001\ntitle: T\ndepends_on: ["task-002", ""]\n---\n\n## Description\n\nx\n'
+    result = _gate(config).validate(_src(text))
+    assert result.reason is ValidationReason.INVALID_DEPENDS_ON
+
+
+def test_depends_on_self_reference_rejected(config: OrchestratorConfig) -> None:
+    text = '---\nid: task-001\ntitle: T\ndepends_on: ["task-001"]\n---\n\n## Description\n\nx\n'
+    result = _gate(config).validate(_src(text))
+    assert result.reason is ValidationReason.INVALID_DEPENDS_ON
+
+
+def test_depends_on_list_of_strings_passes(config: OrchestratorConfig) -> None:
+    text = (
+        '---\nid: task-001\ntitle: T\ndepends_on: [" task-002 ", "task-003"]\n---\n\n'
+        "## Description\n\nx\n"
+    )
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    # Stripped on construction; preserves order.
+    assert result.normalized.depends_on == ("task-002", "task-003")
+
+
+def test_depends_on_absent_defaults_empty(config: OrchestratorConfig) -> None:
+    result = _gate(config).validate(_src(_GOOD))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.depends_on == ()
+
+
+def test_subtasks_non_list_rejected(config: OrchestratorConfig) -> None:
+    text = '---\nid: task-001\ntitle: T\nsubtasks: "sub/01.md"\n---\n\n## Description\n\nx\n'
+    result = _gate(config).validate(_src(text))
+    assert result.reason is ValidationReason.INVALID_SUBTASKS
+
+
+def test_subtasks_empty_string_element_rejected(config: OrchestratorConfig) -> None:
+    text = '---\nid: task-001\ntitle: T\nsubtasks: ["sub/01.md", ""]\n---\n\n## Description\n\nx\n'
+    result = _gate(config).validate(_src(text))
+    assert result.reason is ValidationReason.INVALID_SUBTASKS
+
+
+def test_subtasks_list_of_strings_passes_gate_shape(config: OrchestratorConfig) -> None:
+    # The gate only checks the list shape; file/path/count/linear validation is the orchestrator's.
+    text = (
+        '---\nid: task-001\ntitle: T\nsubtasks: ["sub/01-a.md", "sub/02-b.md"]\n---\n\n'
+        "## Description\n\nx\n"
+    )
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.subtasks == ("sub/01-a.md", "sub/02-b.md")
+
+
 def test_invalid_task_id(config: OrchestratorConfig) -> None:
     text = "---\nid: 'Bad Id!'\ntitle: T\n---\n\n## Description\n\nx\n"
     result = _gate(config).validate(_src(text))

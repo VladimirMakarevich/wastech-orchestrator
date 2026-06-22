@@ -11,6 +11,7 @@ from wastech_orchestrator.task.model import NodeOverride, NormalizedTask
 from wastech_orchestrator.task.parser import (
     extract_section,
     load_normalized,
+    read_subtask_spec,
     read_task_source,
     slugify,
     split_frontmatter,
@@ -188,6 +189,65 @@ def test_node_overrides_absent_in_normalized_loads_empty(tmp_path: Path) -> None
     )
     loaded = load_normalized(tmp_path, "task-001")
     assert loaded.node_overrides == {}
+
+
+@pytest.mark.parametrize("value", [("task-002", "task-003"), ()])
+def test_depends_on_round_trips(tmp_path: Path, value: tuple[str, ...]) -> None:
+    # Restart-safety: a resumed task must preserve its exact depends_on tuple across recovery.
+    task = NormalizedTask(id="task-001", title="T", description="Do it", depends_on=value)
+    write_normalized(task, tmp_path)
+    assert load_normalized(tmp_path, "task-001").depends_on == value
+
+
+def test_depends_on_absent_in_legacy_normalized_loads_empty(tmp_path: Path) -> None:
+    task_dir = tmp_path / "logs" / "task-001"
+    task_dir.mkdir(parents=True)
+    (task_dir / "task.normalized.json").write_text(
+        json.dumps({"id": "task-001", "title": "T", "description": "d"}), encoding="utf-8"
+    )
+    assert load_normalized(tmp_path, "task-001").depends_on == ()
+
+
+@pytest.mark.parametrize("value", [("sub/01-a.md", "sub/02-b.md"), ()])
+def test_subtasks_round_trips(tmp_path: Path, value: tuple[str, ...]) -> None:
+    # Restart-safety: a resumed operator-decomposed task must preserve its subtasks references.
+    task = NormalizedTask(id="task-001", title="T", description="Do it", subtasks=value)
+    write_normalized(task, tmp_path)
+    assert load_normalized(tmp_path, "task-001").subtasks == value
+
+
+def test_read_subtask_spec_parses_title_slug_deps_and_body() -> None:
+    text = (
+        '---\ntitle: "Add the cart model"\nslug: cart\ndepends_on: ["payment"]\n---\n\n'
+        "## Acceptance criteria\n\n- [ ] models exist\n- works\n"
+    )
+    spec = read_subtask_spec(text)
+    assert spec is not None
+    assert spec.title == "Add the cart model"
+    assert spec.slug == "cart"
+    assert spec.depends_on == ("payment",)
+    assert spec.acceptance_criteria == ("models exist", "works")
+    assert "## Acceptance criteria" in spec.body  # body kept verbatim (incl. leading blank line)
+
+
+def test_read_subtask_spec_defaults_slug_from_title() -> None:
+    spec = read_subtask_spec('---\ntitle: "Payment Step"\n---\n\nDo the payment step.\n')
+    assert spec is not None
+    assert spec.slug == "payment-step"
+    assert spec.depends_on == ()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "no front matter\n",  # missing front matter
+        "---\ndepends_on: []\n---\n\nbody\n",  # missing title
+        '---\ntitle: "T"\n---\n\n',  # empty body
+        '---\ntitle: "T"\ndepends_on: "nope"\n---\n\nbody\n',  # depends_on not a list
+    ],
+)
+def test_read_subtask_spec_malformed_returns_none(text: str) -> None:
+    assert read_subtask_spec(text) is None
 
 
 def test_auto_merge_absent_in_legacy_normalized_loads_as_none(tmp_path: Path) -> None:

@@ -15,9 +15,15 @@ from pathlib import Path
 import pytest
 
 from wastech_orchestrator.check_runner import CheckRunner
-from wastech_orchestrator.core.orchestrator import Orchestrator, SlotBusyError
+from wastech_orchestrator.core.orchestrator import Eligibility, Orchestrator, SlotBusyError
 from wastech_orchestrator.core.state_machine import Status
-from wastech_orchestrator.git_manager import GitCommandError, GitManager, GitResult
+from wastech_orchestrator.git_manager import (
+    KIND_PR,
+    KIND_PR_MERGE,
+    GitCommandError,
+    GitManager,
+    GitResult,
+)
 from wastech_orchestrator.ledger import Ledger
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult, Notifier
 from wastech_orchestrator.providers.artifacts import create_attempt_dir, task_artifact_dir
@@ -30,7 +36,7 @@ from wastech_orchestrator.providers.base import (
     ProviderId,
     RunStatus,
 )
-from wastech_orchestrator.state_store import StateStore, TaskRow
+from wastech_orchestrator.state_store import PublishOpRow, StateStore, TaskRow
 from wastech_orchestrator.task.validation_gate import ValidationGate
 
 
@@ -907,6 +913,194 @@ def test_decomposed_subtask_spec_path_reaches_implementation_prompt(
     assert len(impl_prompts) == 2  # one implementation run per subtask, each subtask-scoped
     assert "01-first.md" in impl_prompts[0] and "subtask 1 of 2" in impl_prompts[0].lower()
     assert "02-second.md" in impl_prompts[1] and "subtask 2 of 2" in impl_prompts[1].lower()
+
+
+# --- operator-authored decomposition (``subtasks:`` manifest) ------------------------------
+
+
+def _operator_root(tmp_path: Path, root_id: str, refs: list[str], *, front_extra: str = "") -> str:
+    refs_yaml = "[" + ", ".join(f'"{r}"' for r in refs) + "]"
+    path = tmp_path / f"{root_id}.md"
+    path.write_text(
+        f'---\nid: {root_id}\ntitle: "Epic"\nsubtasks: {refs_yaml}\n{front_extra}---\n\n'
+        "## Description\n\nShared context for the whole change.\n",
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def _write_subtask(
+    tmp_path: Path,
+    rel: str,
+    *,
+    title: str,
+    depends_on: tuple[str, ...] = (),
+    body: str | None = None,
+) -> None:
+    dep_yaml = "[" + ", ".join(f'"{d}"' for d in depends_on) + "]"
+    spec = tmp_path / rel
+    spec.parent.mkdir(parents=True, exist_ok=True)
+    text = body if body is not None else "## Acceptance criteria\n\n- it works\n"
+    spec.write_text(
+        f'---\ntitle: "{title}"\ndepends_on: {dep_yaml}\n---\n\n{text}', encoding="utf-8"
+    )
+
+
+class _OpImplProvider(FakeProvider):
+    """Writes a distinct file per ``implementation`` run so each subtask commit is non-empty."""
+
+    def __init__(self, provider_id: str, *, clone: Path, state: dict[str, int]) -> None:
+        super().__init__(provider_id)
+        self._clone = clone
+        self._state = state
+
+    def run(self, request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            (self._clone / f"impl-{self._state['n']}.py").write_text("x\n", encoding="utf-8")
+            self._state["n"] += 1
+        return super().run(request)
+
+
+def test_operator_decomposition_runs_each_subtask_one_pr(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # Independent of ``agents.decomposition.enabled`` (the agent-proposal gate): the operator
+    # manifest is authoritative. Three subtasks → one branch, one commit each, in order.
+    _write_subtask(tmp_path, "subtasks/01-first.md", title="First")
+    _write_subtask(tmp_path, "subtasks/02-second.md", title="Second", depends_on=("first",))
+    _write_subtask(tmp_path, "subtasks/03-third.md", title="Third", depends_on=("second",))
+    root = _operator_root(
+        tmp_path,
+        "epic-001",
+        ["subtasks/01-first.md", "subtasks/02-second.md", "subtasks/03-third.md"],
+    )
+    state = {"n": 0}
+    providers = {
+        ProviderId.CLAUDE: _OpImplProvider("claude", clone=git_repo.clone, state=state),
+        ProviderId.CODEX: _OpImplProvider("codex", clone=git_repo.clone, state=state),
+    }
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    result = orch.run_task(root)
+    assert result.final_status is Status.DONE
+    row = store.get_task("epic-001")
+    assert row is not None
+    assert row.decomposition_accepted is True
+    assert row.decomposition_reason == "operator_authored"
+    assert row.subtask_count == 3
+    subs = store.get_subtasks("epic-001")
+    assert [s.slug for s in subs] == ["first", "second", "third"]
+    assert [s.depends_on for s in subs] == [(), (1,), (2,)]
+    assert all(s.commit_sha for s in subs)
+    # The immutable spec carries the operator's verbatim body.
+    spec = art / "logs" / "epic-001" / "subtasks" / "01-first.md"
+    assert "## Acceptance criteria" in spec.read_text(encoding="utf-8")
+    count = git_run(["rev-list", "--count", "main..agent/epic-001-epic"], git_repo.clone)
+    assert int(count) >= 3
+
+
+def test_operator_decomposition_when_planning_disabled(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # Disabling planning skips the proposed_by node (its post-hook never fires); the operator
+    # decision is materialized at preflight regardless, so the split still runs.
+    _write_subtask(tmp_path, "subtasks/01-a.md", title="A")
+    _write_subtask(tmp_path, "subtasks/02-b.md", title="B", depends_on=("a",))
+    root = _operator_root(
+        tmp_path,
+        "epic-002",
+        ["subtasks/01-a.md", "subtasks/02-b.md"],
+        front_extra="nodes:\n  planning:\n    enabled: false\n",
+    )
+    state = {"n": 0}
+    providers = {
+        ProviderId.CLAUDE: _OpImplProvider("claude", clone=git_repo.clone, state=state),
+        ProviderId.CODEX: _OpImplProvider("codex", clone=git_repo.clone, state=state),
+    }
+    orch, store, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    result = orch.run_task(root)
+    assert result.final_status is Status.DONE
+    row = store.get_task("epic-002")
+    assert row is not None and row.decomposition_accepted is True and row.subtask_count == 2
+
+
+@pytest.mark.parametrize(
+    ("setup", "reason"),
+    [
+        ("count", "subtask_count_out_of_range"),
+        ("forward", "subtask_depends_forward"),
+        ("unknown_dep", "subtask_depends_forward"),
+        ("traversal", "invalid_subtask_path"),
+        ("beside_root", "invalid_subtask_path"),
+        ("missing", "subtask_file_missing"),
+        ("malformed", "subtask_malformed"),
+    ],
+)
+def test_operator_decomposition_bad_manifest_rejected_before_branch(
+    git_repo, make_git_config, git_run, tmp_path: Path, setup: str, reason: str
+) -> None:
+    if setup == "count":
+        _write_subtask(tmp_path, "subtasks/01-a.md", title="A")
+        refs = ["subtasks/01-a.md"]  # < 2 units
+    elif setup == "forward":
+        _write_subtask(tmp_path, "subtasks/01-a.md", title="A", depends_on=("b",))
+        _write_subtask(tmp_path, "subtasks/02-b.md", title="B")
+        refs = ["subtasks/01-a.md", "subtasks/02-b.md"]
+    elif setup == "unknown_dep":
+        _write_subtask(tmp_path, "subtasks/01-a.md", title="A")
+        _write_subtask(tmp_path, "subtasks/02-b.md", title="B", depends_on=("ghost",))
+        refs = ["subtasks/01-a.md", "subtasks/02-b.md"]
+    elif setup == "traversal":
+        _write_subtask(tmp_path, "subtasks/01-a.md", title="A")
+        _write_subtask(tmp_path, "subtasks/02-b.md", title="B")
+        refs = ["subtasks/01-a.md", "../02-b.md"]
+    elif setup == "beside_root":
+        _write_subtask(tmp_path, "subtasks/01-a.md", title="A")
+        _write_subtask(tmp_path, "beside.md", title="B")
+        refs = ["subtasks/01-a.md", "beside.md"]
+    elif setup == "missing":
+        _write_subtask(tmp_path, "subtasks/01-a.md", title="A")
+        refs = ["subtasks/01-a.md", "subtasks/02-nope.md"]
+    else:  # malformed
+        _write_subtask(tmp_path, "subtasks/01-a.md", title="A")
+        (tmp_path / "subtasks" / "02-bad.md").write_text("no front matter\n", encoding="utf-8")
+        refs = ["subtasks/01-a.md", "subtasks/02-bad.md"]
+
+    root = _operator_root(tmp_path, "epic-bad", refs)
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    result = orch.run_task(root)
+    assert result.final_status is Status.FAILED
+    assert result.validation_reason == reason
+    # Quarantined with a report, and no branch was created.
+    report = art / "logs" / "epic-bad" / "validation_report.json"
+    assert json.loads(report.read_text(encoding="utf-8"))["reason"] == reason
+    branches = git_run(["branch", "--list", "agent/epic-bad-epic"], git_repo.clone)
+    assert branches.strip() == ""
+
+
+def test_operator_decomposition_flow_without_block_rejected(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # A flow that declares no ``decomposition:`` block cannot host an operator split.
+    _write_subtask(tmp_path, "subtasks/01-a.md", title="A")
+    _write_subtask(tmp_path, "subtasks/02-b.md", title="B")
+    root = _operator_root(
+        tmp_path,
+        "epic-flow",
+        ["subtasks/01-a.md", "subtasks/02-b.md"],
+        front_extra="task_type: deep_research\n",
+    )
+    orch, _, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    result = orch.run_task(root)
+    assert result.final_status is Status.FAILED
+    assert result.validation_reason == "flow_cannot_decompose"
 
 
 def test_single_active_slot_blocks(git_repo, make_git_config, tmp_path: Path) -> None:
@@ -2229,3 +2423,205 @@ def test_prompt_audit_task_overrides_global_off(git_repo, make_git_config, tmp_p
     assert audit_dir.exists()
     assert (audit_dir / "timeline.jsonl").exists()
     assert sorted(audit_dir.glob("*.json"))
+
+
+# --- task dependencies (``depends_on`` merge-gated scheduling) -----------------------------
+
+_DEP_PR = "https://example/pr/dep"
+
+
+def _merge_state_gh(state: str, sha: str | None = None) -> Callable[[Sequence[str]], GitResult]:
+    """A gh fake that answers the readiness probe with a fixed PR state (and SHA when merged)."""
+
+    def gh(argv: Sequence[str]) -> GitResult:
+        if list(argv[:2]) == ["pr", "view"]:
+            payload = {"state": state, "mergeCommit": {"oid": sha} if sha else None}
+            return GitResult(
+                exit_code=0,
+                stdout=json.dumps(payload),
+                stderr="",
+                timed_out=False,
+                launch_error=None,
+            )
+        return GitResult(
+            exit_code=0,
+            stdout="https://example/pr/1\n",
+            stderr="",
+            timed_out=False,
+            launch_error=None,
+        )
+
+    return gh
+
+
+def _seed_task(store: StateStore, task_id: str, status: Status) -> None:
+    store.insert_task(TaskRow(task_id=task_id, title=task_id, status=status))
+
+
+def _seed_pr(
+    store: StateStore, task_id: str, *, pr_url: str = _DEP_PR, merge: str | None = None
+) -> None:
+    store.record_publish_op(
+        PublishOpRow(
+            task_id=task_id, kind=KIND_PR, fingerprint=pr_url, status="completed", result_ref=pr_url
+        )
+    )
+    if merge is not None:
+        store.record_publish_op(
+            PublishOpRow(
+                task_id=task_id,
+                kind=KIND_PR_MERGE,
+                fingerprint=pr_url,
+                status="completed",
+                result_ref=merge,
+            )
+        )
+
+
+def test_dependency_eligibility_dep_merged_is_eligible_and_backfills_sha(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    orch, store, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        gh=_merge_state_gh("MERGED", sha="realsha"),
+    )
+    _seed_task(store, "dep", Status.DONE)
+    _seed_pr(store, "dep", merge="armed")  # auto-merge armed, real SHA not yet captured
+    verdict = orch.dependency_eligibility("task-001", ("dep",), pending={})
+    assert verdict.state is Eligibility.ELIGIBLE
+    # The readiness probe backfilled the armed merge op with the real SHA (SQLite only).
+    op = store.get_publish_op("dep", KIND_PR_MERGE)
+    assert op is not None and op.result_ref == "realsha"
+
+
+def test_dependency_eligibility_dep_open_pr_waits(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    orch, store, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        gh=_merge_state_gh("OPEN"),
+    )
+    _seed_task(store, "dep", Status.DONE)
+    _seed_pr(store, "dep", merge="armed")
+    assert (
+        orch.dependency_eligibility("task-001", ("dep",), pending={}).state is Eligibility.WAITING
+    )
+
+
+def test_dependency_eligibility_dep_failed_waits_forever(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    orch, store, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    _seed_task(store, "dep", Status.FAILED)
+    assert (
+        orch.dependency_eligibility("task-001", ("dep",), pending={}).state is Eligibility.WAITING
+    )
+
+
+def test_dependency_eligibility_local_commit_done_is_eligible(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    orch, store, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    _seed_task(store, "dep", Status.DONE)  # no PR recorded → local-commit mode
+    assert (
+        orch.dependency_eligibility("task-001", ("dep",), pending={}).state is Eligibility.ELIGIBLE
+    )
+
+
+def test_dependency_eligibility_all_deps_must_be_merged(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    orch, store, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        gh=_merge_state_gh("MERGED", sha="s"),
+    )
+    _seed_task(store, "a", Status.DONE)
+    _seed_pr(store, "a", pr_url="https://example/pr/a", merge="armed")
+    _seed_task(store, "b", Status.RUNNING)  # still in flight
+    assert (
+        orch.dependency_eligibility("task-001", ("a", "b"), pending={}).state is Eligibility.WAITING
+    )
+    store.update_task("b", status=Status.DONE)  # b finishes, no PR → local-commit eligible
+    assert (
+        orch.dependency_eligibility("task-001", ("a", "b"), pending={}).state
+        is Eligibility.ELIGIBLE
+    )
+
+
+def test_dependency_eligibility_pending_dep_waits(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    orch, _, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    pending = {"task-001": ("dep",), "dep": ()}
+    assert (
+        orch.dependency_eligibility("task-001", ("dep",), pending=pending).state
+        is Eligibility.WAITING
+    )
+
+
+def test_dependency_eligibility_unknown_ref_is_broken(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    orch, _, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    verdict = orch.dependency_eligibility("task-001", ("ghost",), pending={"task-001": ("ghost",)})
+    assert verdict.state is Eligibility.BROKEN
+    assert "ghost" in verdict.detail
+
+
+def test_dependency_eligibility_cycle_is_broken(git_repo, make_git_config, tmp_path: Path) -> None:
+    orch, _, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    pending = {"task-001": ("task-002",), "task-002": ("task-001",)}
+    assert (
+        orch.dependency_eligibility("task-001", ("task-002",), pending=pending).state
+        is Eligibility.BROKEN
+    )
+    assert (
+        orch.dependency_eligibility("task-002", ("task-001",), pending=pending).state
+        is Eligibility.BROKEN
+    )
+
+
+def test_dependency_eligibility_empty_is_eligible(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    orch, _, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    assert orch.dependency_eligibility("task-001", (), pending={}).state is Eligibility.ELIGIBLE
+
+
+def test_reject_dependency_quarantines_and_records_failed(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    orch, store, ledger, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    path = _complete_task(tmp_path, "task-001")
+    result = orch.reject_dependency(path, "depends on unknown task 'ghost'")
+    assert result.final_status is Status.FAILED
+    assert not Path(path).exists()  # quarantined out of the source folder
+    record = ledger.records()[-1]
+    assert record["id"] == "task-001"
+    assert record["validation_reason"] == "invalid_depends_on"

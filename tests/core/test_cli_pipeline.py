@@ -10,7 +10,11 @@ from pathlib import Path
 import pytest
 
 from wastech_orchestrator import cli
-from wastech_orchestrator.core.orchestrator import PipelineResult
+from wastech_orchestrator.core.orchestrator import (
+    DependencyVerdict,
+    Eligibility,
+    PipelineResult,
+)
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.observability import logging as obslog
 from wastech_orchestrator.state_store import StateStore, TaskRow
@@ -104,6 +108,67 @@ def test_watch_resume_manual_blocks(make_git_config, git_repo, tmp_path: Path) -
     results = cli.watch_once(orch, config, folder)  # type: ignore[arg-type]
     assert results == [manual]
     assert orch.run_calls == []  # resume's manual outcome blocks picking pending
+
+
+# --- watch_once dependency gating (``depends_on`` merge-gated scheduling) -----------
+
+
+class _DepOrch(_FakeOrch):
+    """Watch fake whose dependency verdicts are keyed by task id (default: eligible)."""
+
+    def __init__(self, *, verdicts=None, runs=None) -> None:
+        super().__init__(runs=runs)
+        self.verdicts = verdicts or {}
+        self.eligibility_calls: list[tuple[str, tuple[str, ...]]] = []
+        self.rejected: list[str] = []
+
+    def dependency_eligibility(self, task_id, depends_on, *, pending):
+        self.eligibility_calls.append((task_id, tuple(depends_on)))
+        return self.verdicts.get(task_id, DependencyVerdict(Eligibility.ELIGIBLE))
+
+    def reject_dependency(self, task_file, detail):
+        self.rejected.append(task_file)
+        return PipelineResult(task_id=Path(task_file).stem, final_status=Status.FAILED)
+
+
+def _dep_folder(tmp_path: Path, *specs: tuple[str, tuple[str, ...]]) -> Path:
+    folder = tmp_path / "pending"
+    folder.mkdir()
+    for task_id, deps in specs:
+        deps_yaml = "[" + ", ".join(f'"{d}"' for d in deps) + "]"
+        front = f'---\nid: {task_id}\ntitle: "T"\ndepends_on: {deps_yaml}\n---\n'
+        (folder / f"{task_id}.md").write_text(f"{front}\n## Description\n\nx\n", encoding="utf-8")
+    return folder
+
+
+def test_watch_skips_waiting_runs_later_independent(
+    make_git_config, git_repo, tmp_path: Path
+) -> None:
+    # auto-mode off: an earlier-in-filename ineligible dependent is skipped so the slot still runs
+    # the later independent task (the slot never idles on an unmerged dependency).
+    config = make_git_config(git_repo.clone, auto_mode=False)
+    orch = _DepOrch(
+        verdicts={"task-1": DependencyVerdict(Eligibility.WAITING, "dep 'x' unmerged")},
+        runs=[_done("task-2")],
+    )
+    folder = _dep_folder(tmp_path, ("task-1", ("x",)), ("task-2", ()))
+    results = cli.watch_once(orch, config, folder)  # type: ignore[arg-type]
+    assert [Path(p).stem for p in orch.run_calls] == ["task-2"]  # task-1 skipped
+    assert orch.eligibility_calls == [("task-1", ("x",))]  # task-2 has no deps → no probe
+    assert [r.task_id for r in results] == ["task-2"]
+
+
+def test_watch_rejects_broken_dependent(make_git_config, git_repo, tmp_path: Path) -> None:
+    config = make_git_config(git_repo.clone, auto_mode=False)
+    orch = _DepOrch(
+        verdicts={"task-1": DependencyVerdict(Eligibility.BROKEN, "depends on unknown task 'x'")},
+        runs=[_done("task-2")],
+    )
+    folder = _dep_folder(tmp_path, ("task-1", ("x",)), ("task-2", ()))
+    results = cli.watch_once(orch, config, folder)  # type: ignore[arg-type]
+    assert [Path(p).stem for p in orch.rejected] == ["task-1"]  # terminally rejected
+    assert [Path(p).stem for p in orch.run_calls] == ["task-2"]  # the reject did not eat the slot
+    assert [r.final_status for r in results] == [Status.FAILED, Status.DONE]
 
 
 # --- watch_loop unit tests (periodic discovery) ------------------------------------
@@ -352,6 +417,27 @@ def test_cmd_run_rejected_task(git_repo, tmp_path: Path) -> None:
     assert json.loads(report.read_text(encoding="utf-8"))["reason"] == "frontmatter_missing"
     # Quarantined, and no branch was created.
     assert (project / "rejected" / "task-bad.md").exists()
+
+
+def test_cmd_run_refuses_unmerged_dependency(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    dependent = project / "task-b.md"
+    dependent.write_text(
+        '---\nid: task-b\ntitle: "B"\ndepends_on: ["task-a"]\n---\n\n'
+        "## Description\n\nDo it.\n\n## Acceptance criteria\n\n- works\n",
+        encoding="utf-8",
+    )
+
+    code = cli.main(["--config", str(config), "run", str(dependent)])
+    assert code == 2  # refused: depends on an unknown/unmerged task
+    assert "task-a" in capsys.readouterr().err
+    # No side effect: the task file is left in place (not quarantined) and no ledger record exists.
+    assert dependent.exists()
+    assert not (git_repo.clone / ".worc" / "logs" / "completed.jsonl").exists()
 
 
 def test_cmd_watch_auto_mode_two_tasks(

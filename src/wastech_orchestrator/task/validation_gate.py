@@ -60,7 +60,18 @@ class ValidationReason(StrEnum):
     INVALID_TASK_ID = "invalid_task_id"
     DUPLICATE_TASK_ID = "duplicate_task_id"
     INVALID_NODE_OVERRIDE = "invalid_node_override"
+    INVALID_DEPENDS_ON = "invalid_depends_on"
     INJECTION_SUSPECTED = "injection_suspected"
+    # Operator-authored decomposition (``subtasks:``). ``INVALID_SUBTASKS`` is the gate's cheap
+    # list-of-strings shape check; the rest are surfaced by the orchestrator's pre-branch operator
+    # manifest pass (it needs filesystem + the resolved flow, which the IO-free gate cannot touch).
+    INVALID_SUBTASKS = "invalid_subtasks"
+    INVALID_SUBTASK_PATH = "invalid_subtask_path"
+    SUBTASK_FILE_MISSING = "subtask_file_missing"
+    SUBTASK_MALFORMED = "subtask_malformed"
+    SUBTASK_COUNT_OUT_OF_RANGE = "subtask_count_out_of_range"
+    SUBTASK_DEPENDS_FORWARD = "subtask_depends_forward"
+    FLOW_CANNOT_DECOMPOSE = "flow_cannot_decompose"
 
 
 class Completeness(StrEnum):
@@ -200,6 +211,12 @@ class ValidationGate:
         if not isinstance(id_value, str) or not is_valid_task_id(id_value):
             return _rej(ValidationReason.INVALID_TASK_ID, repr(id_value))
 
+        # invalid_depends_on — self-reference (cheap, single-task; cross-task cycles are resolved by
+        # the scheduler against the pending graph, which the per-task gate cannot see).
+        depends_on = tuple(str(d).strip() for d in frontmatter.get("depends_on", []))
+        if id_value in depends_on:
+            return _rej(ValidationReason.INVALID_DEPENDS_ON, f"{id_value!r} depends on itself")
+
         # duplicate_task_id — vs. the tasks table + the ledger, exempting a recovery re-run.
         if not self._is_recovery_rerun(id_value) and (
             self._store_has_task_id(id_value) or self._ledger_has_task_id(id_value)
@@ -231,6 +248,8 @@ class ValidationGate:
             auto_merge=_as_tristate(frontmatter.get("auto_merge")),
             prompt_audit=_as_tristate(frontmatter.get("prompt_audit")),
             contacts=[str(c) for c in frontmatter.get("contacts", [])],
+            depends_on=depends_on,
+            subtasks=tuple(str(s).strip() for s in frontmatter.get("subtasks", [])),
             node_overrides=node_overrides,
         )
         return None, task
@@ -269,6 +288,24 @@ class ValidationGate:
             if not all(isinstance(c, str) for c in contacts):
                 return _Reject(
                     ValidationReason.INVALID_FIELD_TYPE, "contacts must be a list of strings"
+                )
+        if "depends_on" in fm:
+            depends_on = fm["depends_on"]
+            if not isinstance(depends_on, Sequence) or isinstance(depends_on, str | bytes):
+                return _Reject(ValidationReason.INVALID_DEPENDS_ON, "depends_on must be a list")
+            if not all(isinstance(d, str) and d.strip() for d in depends_on):
+                return _Reject(
+                    ValidationReason.INVALID_DEPENDS_ON,
+                    "depends_on must be a list of non-empty strings",
+                )
+        if "subtasks" in fm:
+            subtasks = fm["subtasks"]
+            if not isinstance(subtasks, Sequence) or isinstance(subtasks, str | bytes):
+                return _Reject(ValidationReason.INVALID_SUBTASKS, "subtasks must be a list")
+            if not all(isinstance(s, str) and s.strip() for s in subtasks):
+                return _Reject(
+                    ValidationReason.INVALID_SUBTASKS,
+                    "subtasks must be a list of non-empty path strings",
                 )
         return None
 

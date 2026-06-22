@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from wastech_orchestrator.git_manager import (
     GitManager,
     GitResult,
 )
-from wastech_orchestrator.state_store import StateStore, TaskRow
+from wastech_orchestrator.state_store import PublishOpRow, StateStore, TaskRow
 
 GitRunner = Callable[[Sequence[str], Path], str]
 ConfigFactory = Callable[..., object]
@@ -543,6 +544,85 @@ def test_verify_pr_state_none_when_gh_unavailable(
 
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
     assert gm.verify_pr_state("https://example/pull/1") is None
+
+
+def _view_state_gh(payload: dict[str, object], *, ok: bool = True) -> Callable[..., GitResult]:
+    def gh(args: Sequence[str]) -> GitResult:
+        assert list(args[:2]) == ["pr", "view"]
+        assert "state,mergeCommit" in args  # the single readiness probe, not two calls
+        return GitResult(
+            exit_code=0 if ok else 1,
+            stdout=json.dumps(payload) if ok else "",
+            stderr="" if ok else "not found",
+            timed_out=False,
+            launch_error=None,
+        )
+
+    return gh
+
+
+def test_pr_merge_state_merged_returns_state_and_sha(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    gh = _view_state_gh({"state": "MERGED", "mergeCommit": {"oid": "abc123"}})
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+    assert gm.pr_merge_state(_PR_URL) == ("MERGED", "abc123")
+
+
+def test_pr_merge_state_open_has_no_sha(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    gh = _view_state_gh({"state": "OPEN", "mergeCommit": None})
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+    assert gm.pr_merge_state(_PR_URL) == ("OPEN", None)
+
+
+def test_pr_merge_state_probe_failure_is_none(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    gm = _manager(
+        git_repo, store, tmp_path / "art", make_git_config, gh_runner=_view_state_gh({}, ok=False)
+    )
+    assert gm.pr_merge_state(_PR_URL) == (None, None)
+
+
+def _seed_armed_merge(store: StateStore, task_id: str = "task-001") -> None:
+    store.record_publish_op(
+        PublishOpRow(
+            task_id=task_id,
+            kind=KIND_PR_MERGE,
+            fingerprint=_PR_URL,
+            status="completed",
+            result_ref="armed",
+        )
+    )
+
+
+def test_backfill_merge_sha_replaces_armed(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    _task(store)
+    _seed_armed_merge(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.backfill_merge_sha("task-001", "realsha")
+    op = store.get_publish_op("task-001", KIND_PR_MERGE)
+    assert op is not None and op.status == "completed" and op.result_ref == "realsha"
+
+
+def test_backfill_merge_sha_idempotent_and_skips_unknown(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    # No recorded merge op → no-op (no op is created).
+    gm.backfill_merge_sha("task-001", "realsha")
+    assert store.get_publish_op("task-001", KIND_PR_MERGE) is None
+    # Already the real SHA → stays put.
+    _seed_armed_merge(store)
+    gm.backfill_merge_sha("task-001", "realsha")
+    gm.backfill_merge_sha("task-001", "realsha")
+    op = store.get_publish_op("task-001", KIND_PR_MERGE)
+    assert op is not None and op.result_ref == "realsha"
 
 
 def test_delete_branch_is_idempotent(

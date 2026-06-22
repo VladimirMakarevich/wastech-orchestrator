@@ -71,6 +71,8 @@ def test_schema_constants() -> None:
         "auto_merge",
         "prompt_audit",
         "contacts",
+        "depends_on",
+        "subtasks",
         "nodes",
     } == ALLOWED_TASK_KEYS
     assert {"id", "title"} == REQUIRED_TASK_FIELDS

@@ -24,7 +24,7 @@ Where to find the design detail:
 | [task-dependencies.md](task-dependencies.md) | Detail file for the `follow_ups.md` task that adds a task-level `depends_on` field with non-blocking merge-gated scheduling (and folds in the real merge-SHA backfill). |
 | [provider-config-cleanup.md](provider-config-cleanup.md) | Detail file for the `follow_ups.md` task that makes each provider's full-access mode operator-selectable under `strict_isolation: false` (Codex `danger-full-access` sandbox; Claude `bypassPermissions` / profile-escalating `--permission-mode`), deletes the unused `max_budget_usd` field, and ships explicit default model/reasoning for both providers (one config-version bump). |
 | [per-node-network-access.md](per-node-network-access.md) | Detail file for the `follow_ups.md` task that adds an opt-in, operator-owned `network_access: true\|false` field to agent/evaluator flow nodes — a per-node override of the flow-wide `network_policy` default (default off; backward compatible). |
-| [operator-authored-decomposition.md](operator-authored-decomposition.md) | Detail file for the operator-authored-decomposition feature: one root task with a `subtasks:` list of references runs like a planning-proposed split (sequential, one branch, one PR), reusing the whole decomposition pipeline — only the source of the `DecompositionDecision` changes. |
+| [operator-authored-decomposition.md](operator-authored-decomposition.md) | Detail file for the operator-authored-decomposition feature (**shipped 2026-06-22**): one root task with a `subtasks:` list of references runs like a planning-proposed split (sequential, one branch, one PR), reusing the whole decomposition pipeline — only the source of the `DecompositionDecision` changes. |
 | [runtime_provider_capacity_gate.md](runtime_provider_capacity_gate.md) | Detailed backlog task for checking Codex and Claude capacity before autonomous `watch` admits a pending task. |
 | [archive/token_optimization.md](token_optimization.md) | Detailed backlog task for measuring and reducing token usage. |
 | [archive/outdated/](archive/outdated/) | Historical design documents for shipped items and the pre-implementation flow-engine engineering specs. DO NOT USE as a source of truth — the [Functional Map](../functional/index.md) is. |
@@ -37,7 +37,6 @@ These are deferred by the v1 spec or described in architecture notes; not schedu
 
 | Item | Summary | Source / constraint |
 | --- | --- | --- |
-| [Operator-authored decomposition](operator-authored-decomposition.md) | One root task carries the shared context plus a `subtasks:` list of references to per-subtask files; it runs like a planning-proposed split (sequential, one task branch, one PR). The operator authors the split instead of the planning agent. | Reuses the entire decomposition pipeline — only the source of the `DecompositionDecision` changes. Does not patch the graph (content, not shape); requires a flow with a `decomposition:` block. Linear/sequential only. |
 | [Runtime provider capacity gate](runtime_provider_capacity_gate.md) | Before autonomous `watch` claims a pending task, query the capacity of the Codex/Claude accounts its resolved routes need and defer the task when configured headroom is unavailable. | Runtime admission control, not install preflight. Deferred tasks stay pending, consume no attempts, retried after provider reset. |
 | [Token optimization](token_optimization.md) | Measure and reduce token consumption across stages. | Analysis + candidate levers; not part of v1 scope. |
 | Config-level per-node `node_defaults` | The complement to the shipped per-task `nodes:` overrides: per-node `{model,reasoning}` defaults under each provider in `config.yaml`. | Tracked in [follow_ups.md](follow_ups.md). Touches schema (+version bump), loader, validation. |
@@ -65,7 +64,6 @@ These are deferred by the v1 spec or described in architecture notes; not schedu
 
 | Item | Detail |
 | --- | --- |
-| Operator-authored decomposition | [operator-authored-decomposition.md](operator-authored-decomposition.md) |
 | Runtime provider capacity gate | [runtime_provider_capacity_gate.md](runtime_provider_capacity_gate.md) |
 | Token optimization | [archive/token_optimization.md](token_optimization.md) |
 

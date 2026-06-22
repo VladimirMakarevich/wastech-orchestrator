@@ -13,9 +13,10 @@ import json
 import logging
 import re
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -26,8 +27,10 @@ from wastech_orchestrator.checks.profile import ResolvedCheckProfile
 from wastech_orchestrator.checks.resolver import CheckResolver, ReResolveReason
 from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.core.decomposition import (
+    REASON_N_OUT_OF_RANGE,
     DecompositionDecision,
     SubtaskSpec,
+    decide_operator_decomposition,
     subtask_spec_path,
     update_subtask_index,
     write_subtask_artifacts,
@@ -44,6 +47,7 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NodeManualRequired,
     NodeServices,
 )
+from wastech_orchestrator.core.flow.output_policy import is_within
 from wastech_orchestrator.core.flow.postprocess import apply_output_artifact, read_decomposition
 from wastech_orchestrator.core.flow.recorder import StateStoreRunRecorder, hydrate_run_state
 from wastech_orchestrator.core.flow.registry import FlowRegistry, FlowResolutionError
@@ -123,7 +127,9 @@ from wastech_orchestrator.state_store import (
 )
 from wastech_orchestrator.task.model import NormalizedTask
 from wastech_orchestrator.task.parser import (
+    SubtaskSpecFile,
     load_normalized,
+    read_subtask_spec,
     read_task_source,
     slugify,
     write_normalized,
@@ -131,6 +137,7 @@ from wastech_orchestrator.task.parser import (
 from wastech_orchestrator.task.validation_gate import (
     Completeness,
     ValidationGate,
+    ValidationReason,
     ValidationResult,
     write_validation_report,
 )
@@ -276,6 +283,33 @@ class _Pipeline:
     # Per-task disabled flow node ids (``nodes.<id>.enabled: false``). Re-derived every run/resume
     # from front-matter, so a restart recovers it without persistence (node-disable control).
     skip: frozenset[str] = frozenset()
+    # Operator-authored decomposition built + validated pre-slot from the task's ``subtasks:``
+    # manifest (fresh run only). When set, it is materialized at preflight (before branch) and the
+    # planning ``proposed_by`` post-hook does not re-read the agent's proposal. ``None`` on resume —
+    # the decision is rebuilt from the persisted ``subtasks`` rows (source-agnostic).
+    operator_decomposition: DecompositionDecision | None = None
+
+
+class Eligibility(StrEnum):
+    """A pending task's dependency-readiness verdict (``depends_on`` merge-gated scheduling).
+
+    ``ELIGIBLE`` runs now; ``WAITING`` is a non-blocking skip (the scheduler tries other eligible
+    tasks and re-evaluates next tick — including the "wait forever" case of a terminal-but-unmerged
+    dependency, which is never auto-failed); ``BROKEN`` is a fail-closed terminal reject (a cycle,
+    an unknown reference, or a self-reference — a malformed task, not a waiting one).
+    """
+
+    ELIGIBLE = "eligible"
+    WAITING = "waiting"
+    BROKEN = "broken"
+
+
+@dataclass(frozen=True)
+class DependencyVerdict:
+    """An :class:`Eligibility` plus a human-readable reason (advisory log / reject detail)."""
+
+    state: Eligibility
+    detail: str = ""
 
 
 class Orchestrator:
@@ -350,6 +384,13 @@ class Orchestrator:
         task = result.normalized
         completeness = result.completeness or Completeness.NEEDS_ENRICHMENT
 
+        # Operator-authored decomposition (``subtasks:``): the IO-bearing manifest validation the
+        # IO-free gate cannot do — runs pre-slot so a bad manifest is quarantined to
+        # ``tasks/rejected/`` with a report and never reaches a branch.
+        operator_reject, operator_decision = self._validate_operator_subtasks(task, task_file)
+        if operator_reject is not None:
+            return self._reject(task_file, operator_reject)
+
         if not self.acquire_slot(task.id):
             raise SlotBusyError(f"another task is active; {task.id} must wait")
 
@@ -362,6 +403,7 @@ class Orchestrator:
             decomposition=DecompositionDecision(accepted=False, reason="pending", n=1),
             skip=effective_skip(task),
             skill_inventory=self._skill_scanner.collect(),
+            operator_decomposition=operator_decision,
         )
         try:
             # The FlowEngine is the sole driver: the refinement→…→publish pipeline is the validated
@@ -377,6 +419,222 @@ class Orchestrator:
     def acquire_slot(self, task_id: str) -> bool:
         """True iff no *other* task currently owns the processing slot."""
         return not any(t.task_id != task_id for t in self._store.find_active_tasks())
+
+    # --- operator-authored decomposition (``subtasks:`` manifest) -------------------------
+
+    def _validate_operator_subtasks(
+        self, task: NormalizedTask, task_file: str
+    ) -> tuple[ValidationResult | None, DecompositionDecision | None]:
+        """Validate a root task's ``subtasks:`` manifest and build its decomposition decision.
+
+        Runs after the (IO-free) gate but **before** slot acquisition, so a bad manifest is rejected
+        before any branch. The operator supplies the *content* of the split; this resolves the
+        referenced files and runs the same units gate as the agent split (``max_subtasks``, linear
+        deps), so the operator cannot weaken it. Returns ``(None, None)`` for a task with no
+        ``subtasks``, ``(reject, None)`` on any failure, or ``(None, decision)`` on success.
+        """
+        if not task.subtasks:
+            return None, None
+        try:
+            snapshot = self._flow_registry.resolve(task.task_type)
+        except (FlowResolutionError, FlowValidationError) as exc:
+            return self._operator_reject(ValidationReason.FLOW_CANNOT_DECOMPOSE, str(exc))
+        if snapshot.doc.decomposition is None:
+            flow_name = task.task_type or "implementation"
+            return self._operator_reject(
+                ValidationReason.FLOW_CANNOT_DECOMPOSE,
+                f"flow '{flow_name}' has no decomposition block to host a split",
+            )
+
+        root_dir = Path(task_file).resolve().parent
+        slug_to_order: dict[str, int] = {}
+        files: list[tuple[int, SubtaskSpecFile]] = []
+        for order, ref in enumerate(task.subtasks, start=1):
+            reject = self._resolve_subtask_path(ref, root_dir)
+            if isinstance(reject, ValidationResult):
+                return reject, None
+            text = reject.read_text(encoding="utf-8")
+            spec_file = read_subtask_spec(text)
+            if spec_file is None:
+                return self._operator_reject(
+                    ValidationReason.SUBTASK_MALFORMED,
+                    f"subtask file {ref!r} is malformed (need front-matter title + a body)",
+                )
+            if spec_file.slug in slug_to_order:
+                return self._operator_reject(
+                    ValidationReason.SUBTASK_MALFORMED, f"duplicate subtask slug {spec_file.slug!r}"
+                )
+            slug_to_order[spec_file.slug] = order
+            files.append((order, spec_file))
+
+        specs: list[SubtaskSpec] = []
+        for order, spec_file in files:
+            dep_orders: list[int] = []
+            for dep_slug in spec_file.depends_on:
+                dep_order = slug_to_order.get(dep_slug)
+                if dep_order is None or dep_order >= order:
+                    return self._operator_reject(
+                        ValidationReason.SUBTASK_DEPENDS_FORWARD,
+                        f"subtask {spec_file.slug!r} depends on {dep_slug!r}, "
+                        "which is not an earlier subtask",
+                    )
+                dep_orders.append(dep_order)
+            specs.append(
+                SubtaskSpec(
+                    order=order,
+                    title=spec_file.title,
+                    slug=spec_file.slug,
+                    acceptance_criteria=spec_file.acceptance_criteria,
+                    depends_on=tuple(dep_orders),
+                    spec_body=spec_file.body,
+                )
+            )
+
+        decision = decide_operator_decomposition(
+            specs, max_subtasks=self._config.agents.decomposition.max_subtasks
+        )
+        if not decision.accepted:
+            reason = (
+                ValidationReason.SUBTASK_COUNT_OUT_OF_RANGE
+                if decision.reason == REASON_N_OUT_OF_RANGE
+                else ValidationReason.SUBTASK_DEPENDS_FORWARD
+            )
+            return self._operator_reject(reason, f"subtasks rejected: {decision.reason}")
+        return None, decision
+
+    def _resolve_subtask_path(self, ref: str, root_dir: Path) -> Path | ValidationResult:
+        """Resolve one ``subtasks`` reference safely, or return a reject (fail-closed path rules).
+
+        The path must be repo-relative (no absolute / ``..``), resolve under the root task file's
+        directory, live in a **subfolder** (never beside the root, where ``select_pending`` would
+        pick it up as a standalone task), and point at an existing file.
+        """
+        ref_path = Path(ref)
+        if ref_path.is_absolute() or ".." in ref_path.parts:
+            return self._operator_reject(
+                ValidationReason.INVALID_SUBTASK_PATH,
+                f"subtask path {ref!r} must be repo-relative with no '..'",
+            )[0]
+        resolved = (root_dir / ref_path).resolve()
+        if not is_within(root_dir, resolved):
+            return self._operator_reject(
+                ValidationReason.INVALID_SUBTASK_PATH,
+                f"subtask path {ref!r} escapes the task directory",
+            )[0]
+        if resolved.parent == root_dir:
+            return self._operator_reject(
+                ValidationReason.INVALID_SUBTASK_PATH,
+                f"subtask {ref!r} must live in a subfolder, not beside the root task",
+            )[0]
+        if not resolved.is_file():
+            return self._operator_reject(
+                ValidationReason.SUBTASK_FILE_MISSING, f"subtask file {ref!r} not found"
+            )[0]
+        return resolved
+
+    @staticmethod
+    def _operator_reject(reason: ValidationReason, detail: str) -> tuple[ValidationResult, None]:
+        return ValidationResult(passed=False, reason=reason, detail=detail), None
+
+    # --- task dependencies (``depends_on`` merge-gated scheduling) -------------------------
+
+    def dependency_eligibility(
+        self,
+        task_id: str,
+        depends_on: Sequence[str],
+        *,
+        pending: Mapping[str, Sequence[str]],
+    ) -> DependencyVerdict:
+        """Classify a pending dependent: eligible to run / waiting (skip) / broken (reject).
+
+        Non-blocking merge-gated scheduling: a task is **eligible** iff every id in ``depends_on``
+        is **merged**. ``pending`` maps every currently-pending id to its ``depends_on`` (the
+        scheduler's lightweight front-matter scan), so an unknown reference is distinguishable from
+        a known-but-pending one and cross-task cycles are resolvable here (the per-task gate sees
+        one task in isolation and cannot see the graph). Resolves each dependency against the store
+        + ledger, probes PR merge state via the Git Manager, and backfills the real merge SHA when
+        it first observes an armed PR merged. Read-only except for that SHA backfill.
+        """
+        if not depends_on:
+            return DependencyVerdict(Eligibility.ELIGIBLE)
+        if self._in_cycle(task_id, pending):
+            return DependencyVerdict(Eligibility.BROKEN, f"dependency cycle involving '{task_id}'")
+        verdict = DependencyVerdict(Eligibility.ELIGIBLE)
+        for dep in depends_on:
+            state, detail = self._resolve_dependency(dep, pending)
+            if state is Eligibility.BROKEN:
+                return DependencyVerdict(Eligibility.BROKEN, detail)
+            if state is Eligibility.WAITING and verdict.state is Eligibility.ELIGIBLE:
+                verdict = DependencyVerdict(Eligibility.WAITING, detail)
+        return verdict
+
+    def _resolve_dependency(
+        self, dep: str, pending: Mapping[str, Sequence[str]]
+    ) -> tuple[Eligibility, str]:
+        """Resolve one dependency id to (ELIGIBLE | WAITING | BROKEN, detail)."""
+        row = self._store.get_task(dep)
+        if row is not None:
+            if row.status is Status.DONE:
+                return self._dependency_merged(dep)
+            if row.status in (Status.FAILED, Status.MANUAL_ACTION_REQUIRED):
+                return Eligibility.WAITING, f"dependency '{dep}' is {row.status.value} (unmerged)"
+            return Eligibility.WAITING, f"dependency '{dep}' is in flight ({row.status.value})"
+        if dep in pending:
+            return Eligibility.WAITING, f"dependency '{dep}' is pending (not yet run)"
+        if self._ledger.has_task_id(dep):
+            done = any(
+                rec.get("id") == dep and rec.get("final_status") == Status.DONE.value
+                for rec in self._ledger.records()
+            )
+            if done:
+                return self._dependency_merged(dep)
+            return Eligibility.WAITING, f"dependency '{dep}' terminated unmerged"
+        return Eligibility.BROKEN, f"depends on unknown task '{dep}'"
+
+    def _dependency_merged(self, dep: str) -> tuple[Eligibility, str]:
+        """A terminal-``DONE`` dependency: satisfied iff its PR is merged (or local-commit mode)."""
+        pr_url = self._git.recorded_pr_url(dep)
+        if pr_url is None:
+            return Eligibility.ELIGIBLE, ""  # local-commit mode: DONE means commits on base
+        state, sha = self._git.pr_merge_state(pr_url)
+        if state == "MERGED":
+            if sha is not None:
+                self._git.backfill_merge_sha(dep, sha)
+            return Eligibility.ELIGIBLE, ""
+        if state is None:
+            return Eligibility.WAITING, f"dependency '{dep}' merge state unconfirmable"
+        return Eligibility.WAITING, f"dependency '{dep}' PR is {state} (unmerged)"
+
+    @staticmethod
+    def _in_cycle(start: str, pending: Mapping[str, Sequence[str]]) -> bool:
+        """True iff ``start`` lies on a cycle within the pending dependency graph.
+
+        Edges are restricted to deps that are themselves pending (a terminal record is resolved, so
+        it cannot close a cycle). ``start`` is on a cycle iff it is reachable from itself.
+        """
+        stack = [d for d in pending.get(start, ()) if d in pending]
+        seen: set[str] = set()
+        while stack:
+            node = stack.pop()
+            if node == start:
+                return True
+            if node in seen:
+                continue
+            seen.add(node)
+            stack.extend(d for d in pending.get(node, ()) if d in pending)
+        return False
+
+    def reject_dependency(self, task_file: str, detail: str) -> PipelineResult:
+        """Fail-closed terminal reject of a dependency-broken task (cycle / unknown / self-ref).
+
+        Reuses the Phase-A reject machinery: quarantine to ``tasks/rejected/``, a ``failed`` ledger
+        record with the ``invalid_depends_on`` reason, and ``validation_report.json`` — **no branch
+        is ever created**.
+        """
+        result = ValidationResult(
+            passed=False, reason=ValidationReason.INVALID_DEPENDS_ON, detail=detail
+        )
+        return self._reject(task_file, result)
 
     # --- rerun (operator-driven re-attempt of a terminal task) ----------------------------
 
@@ -874,6 +1132,11 @@ class Orchestrator:
         Infra failure → ``failed``; a node needing human action → ``manual_action_required``.
         """
         self._resolve_flow(p)  # fail closed on an unknown/invalid flow before any side-effect
+        if p.operator_decomposition is not None:
+            # Operator-authored split: materialize the manifest-built decision now, before any
+            # branch, so it is in place whether or not the planning ``proposed_by`` node runs (a
+            # disabled planning node never fires the post-hook). Validated already at preflight.
+            self._persist_decomposition(p, p.operator_decomposition, gate_on=True)
         if self._config.security.strict_isolation:
             reasons = check_isolation(self._config)
             if reasons:
@@ -1175,18 +1438,31 @@ class Orchestrator:
             )
             if node.output_artifact == "plan" and path is not None:
                 self._engine_apply_skills(p, outcome, inputs, path)
-            if decomp is not None and node.id == decomp.proposed_by:
-                self._engine_materialize_decomposition(p, outcome)
+            # Operator-authored splits are materialized at preflight (the decision comes from the
+            # ``subtasks:`` manifest, not this node), so this post-hook is a no-op for them.
+            if (
+                decomp is not None
+                and node.id == decomp.proposed_by
+                and p.operator_decomposition is None
+            ):
+                gate_on = self._decomposition_gate_on()
+                decision = read_decomposition(
+                    outcome,
+                    gate_on=gate_on,
+                    max_subtasks=self._config.agents.decomposition.max_subtasks,
+                )
+                self._persist_decomposition(p, decision, gate_on=gate_on)
 
         return post_node
 
-    def _engine_materialize_decomposition(self, p: _Pipeline, outcome: NodeOutcome) -> None:
-        """Decide decomposition from the proposed_by node's contract, persist it + write the subtask
-        specs/rows (legacy ``_planning`` block, triggered by data not the stage name)."""
-        gate_on = self._decomposition_gate_on()
-        decision = read_decomposition(
-            outcome, gate_on=gate_on, max_subtasks=self._config.agents.decomposition.max_subtasks
-        )
+    def _persist_decomposition(
+        self, p: _Pipeline, decision: DecompositionDecision, *, gate_on: bool
+    ) -> None:
+        """Persist a decomposition decision + write the subtask specs/rows. Source-agnostic.
+
+        Shared by the agent path (``proposed_by`` post-hook) and the operator path (preflight). For
+        an accepted operator split the spec files carry the operator's verbatim subtask bodies.
+        """
         p.decomposition = decision
         self._store.update_task(
             p.task.id,

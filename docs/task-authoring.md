@@ -59,6 +59,8 @@ Allowed fields:
 | `auto_merge` | no | boolean | `true` requests auto-merge, `false` always opts out, omitted uses the instance default. A set per-task value wins outright over `git.auto_merge`. See [`auto_merge`](#auto_merge). |
 | `prompt_audit` | no | boolean | `true` records each step's prompt + who for this task, `false` disables it, omitted uses config. Always overrides the global. See [`prompt_audit`](#prompt_audit). |
 | `contacts` | no | list of strings | Plain-text mentions in Telegram notifications/HITL prompts. |
+| `depends_on` | no | list of strings | Other task ids that must be **merged** before this task may start (non-blocking, merge-gated scheduling). See [`depends_on`](#depends_on). |
+| `subtasks` | no | list of strings | Operator-authored decomposition: ordered references to per-subtask spec files. Presence ⇒ the task runs as a split (one branch, one PR). See [`subtasks`](#subtasks-operator-authored-decomposition). |
 | `nodes` | no | mapping | Per-node disable toggle, keyed by flow node id: `nodes.<node-id>.enabled: false` disables a node. `enabled` is the only valid sub-key. See [`nodes`](#nodes). |
 
 The current validation gate rejects unknown fields fail-closed (`unknown_top_level_field`). Keep task front matter limited to the fields above. Provider, model, and reasoning are **flow-node concerns, not task fields** — each flow node declares its own `provider`/`model`/`reasoning`, and a task cannot repoint or override them (see [Provider, model, reasoning](#provider-model-reasoning-set-on-the-flow-not-the-task)).
@@ -92,7 +94,10 @@ When it runs, refinement is autonomous: it enriches the task with assumptions an
 
 ## Decomposition (operator/flow-controlled)
 
-Decomposition is not a task knob. Whether a large task is split is decided by the operator's `agents.decomposition.enabled`, the flow's `decomposition:` block, and the planning stage's proposal — not by a front-matter flag. Describe large scope in the `## Description` and let planning propose a split. When a split is accepted, subtasks run sequentially on one task branch and produce one PR for the parent task.
+Decomposition has two sources, both running the same execution machinery (subtasks run sequentially on one task branch → one PR):
+
+1. **Agent-proposed** (this section): not a task knob. Whether a large task is split is decided by the operator's `agents.decomposition.enabled`, the flow's `decomposition:` block, and the planning stage's proposal — not by a front-matter flag. Describe large scope in the `## Description` and let planning propose a split.
+2. **Operator-authored** (the [`subtasks`](#subtasks-operator-authored-decomposition) field): when you already know the ordered units, list references to per-subtask spec files in the root task's `subtasks:`. The Core validates them with the same gate as the agent split.
 
 ## prompt_audit
 
@@ -129,6 +134,72 @@ contacts:
 ```
 
 When Telegram is configured, the orchestrator renders these values as plain-text mentions in terminal notifications and HITL prompts. They do not choose the Telegram chat, grant access, alter routing, or change approval scope; the numeric chat id remains operator-controlled configuration.
+
+## `depends_on`
+
+`depends_on` lists other task ids that must be **merged** before this task may start:
+
+```yaml
+depends_on: [task-a, task-b] # this task may start only after task-a AND task-b have merged
+```
+
+This is for tasks that build on each other: each task branches from a freshly pulled `base_branch`, so a task that needs another's work must wait until that work is on `base_branch`. (Distinct from a decomposed task's per-subtask `depends_on`, which orders subtasks _within_ one task.)
+
+Scheduling is **non-blocking and merge-gated**. Under `watch`, a pending task is **eligible** only when _every_ id in `depends_on` is merged; while a dependency is unmerged the scheduler **skips** the dependent and runs other eligible tasks instead — the single slot never idles on CI. The dependent is re-evaluated on each later tick, and once its dependencies merge it branches from a `base_branch` that now includes them.
+
+"Merged" means, per dependency:
+
+- it has a PR that is **MERGED** (probed read-only via `gh pr view`); or
+- it ran in local-commit mode (no PR) and reached terminal `DONE` — its commits are already on `base_branch`.
+
+An open/armed PR (e.g. GitHub-native auto-merge waiting on checks) counts as **not yet merged** — the dependent waits.
+
+Rules and edge cases:
+
+- **Deps must already exist.** A dependency id must resolve to a known task — pending in the queue, or a terminal record — when the dependent is evaluated. Add the dependency before (or alongside) the dependent. A `depends_on` id that matches no known task is treated as a typo and the dependent is **rejected** (fail-closed, `invalid_depends_on`, moved to `tasks/rejected/`).
+- **Cycles and self-reference are rejected** the same way (`A → B → A`, or a task depending on itself).
+- **An unsatisfiable dependency waits forever.** If a dependency failed, went `manual_action_required`, or had its PR closed unmerged, the dependent stays pending and is skipped every pass — _indefinitely_, until you remove or fix the dependency. The orchestrator never auto-fails a dependent (an advisory log line records the wait).
+- **Explicit `run` is refused, not skipped.** `worc run <file>` of a task whose dependencies are not merged exits non-zero with a controlled message rather than building on a stale base. Use `watch` for dependency-gated scheduling.
+- Shape: a list of non-empty strings (validated at the gate).
+
+## `subtasks` (operator-authored decomposition)
+
+When you already know how to carve a large change into ordered units, write **one root task** that carries the shared context and references the per-subtask spec files in `subtasks:`. The orchestrator runs them exactly like an accepted agent decomposition — sequentially, on one branch, into **one PR** — but the split is yours, not the planning agent's. (Distinct from `depends_on`, which links _separate_ tasks each producing their own PR.)
+
+Root task:
+
+```yaml
+---
+id: epic-checkout
+title: "Rework checkout into a multi-step flow"
+subtasks: # ordered references; presence ⇒ operator-authored decomposition
+  - subtasks/01-cart-model.md
+  - subtasks/02-payment-step.md
+  - subtasks/03-confirmation.md
+---
+## Description
+
+Shared context for the whole change — the once-per-task framing every subtask inherits.
+```
+
+Each referenced file is a **reduced spec, not a task** (no `id`, so it can never run standalone):
+
+```yaml
+---
+title: "Add the cart line-item model"
+depends_on: [] # optional; slugs of earlier subtasks (default: none)
+---
+
+## Acceptance criteria
+
+- [ ] Concrete, testable unit-level criteria.
+```
+
+- `slug` defaults to `slugify(title)` (override with an explicit `slug:`); it names the immutable `NN-<slug>.md` spec. The file body is materialized **verbatim** and injected into the edit nodes — write the per-subtask instructions however you like.
+- `depends_on` lists **slugs of earlier subtasks**; a forward, self, or unknown reference is rejected. The Core applies the same linear/`max_subtasks` gate as the agent split, so you cannot weaken it.
+- **Where they live:** put subtask files in a **subfolder** (e.g. `tasks/pending/subtasks/…`). The scheduler scans only the top level of `tasks/pending/`, so subtask files there never run as standalone tasks; a path that lands beside the root is rejected.
+- **Path rules (fail-closed):** each reference must be repo-relative with no `..`/absolute/traversal and resolve under the task directory.
+- **Rejected fail-closed before any branch** (quarantined to `tasks/rejected/` with a `validation_report.json`): a malformed/missing subtask file, a bad path, fewer than 2 or more than `max_subtasks` units, a forward dependency, or a `task_type` whose flow declares no `decomposition:` block (`flow_cannot_decompose`).
 
 ## `auto_merge`
 

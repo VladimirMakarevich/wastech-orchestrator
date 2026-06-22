@@ -201,6 +201,14 @@ It sets the declared terminal status, runs terminal cleanup (back to `base_branc
 
 By default `watch` is a **long-running loop** (`orchestrator.poll_interval_seconds: 300`, overridable with `--poll-seconds N`): each tick it runs `git fetch` + `pull --ff-only` on `base_branch` then re-scans, so a task committed and pushed to git after `watch` started is picked up without a manual pull (discovery is not limited to the local filesystem). Stop it with Ctrl-C. Set `poll_interval_seconds: 0` (or `--poll-seconds 0`) for a single pass — e.g. when an external scheduler re-invokes `watch`.
 
+### Task dependencies (`depends_on`)
+
+A task can declare other tasks it needs **merged** first via front-matter `depends_on: [<task-id>, …]` (see [task-authoring.md](task-authoring.md#depends_on)). Scheduling is **non-blocking and merge-gated**: under `watch`, a pending task is **eligible** only when every dependency has merged; while a dependency is unmerged the scheduler **skips** the dependent and runs other eligible pending tasks instead, so the single slot never idles on CI. The dependent is re-evaluated each tick (after the `fetch`/`pull`), and once its dependencies merge it branches from a `base_branch` that includes them. "Merged" is probed read-only (`gh pr view → state == MERGED`); a task that committed locally with no PR counts once it is terminal `DONE`. An open or armed PR (e.g. GitHub-native auto-merge still waiting on checks) is **not yet merged**.
+
+**Wait-forever policy + operator intervention.** If a dependency is terminal-but-unmerged — it failed, went `manual_action_required`, or its PR was closed unmerged — the dependent is skipped **every pass, indefinitely**; the orchestrator never auto-fails it (an advisory log line `task <id> waiting: …` records each skip). To unblock, the operator either fixes/re-runs the dependency until it merges, or removes the `depends_on` entry (or the dependent task). A **broken** declaration — a cycle, a self-reference, or a `depends_on` id that matches no known task — is different: it is rejected fail-closed (terminal `failed`, `invalid_depends_on`, quarantined to `tasks/rejected/`), exactly like a malformed task. An explicit `worc run <file>` of a dependent whose dependencies are not merged is **refused** (non-zero exit) rather than skipped, so it never builds on a stale base.
+
+**Merge-SHA backfill.** When the readiness probe observes a dependency's armed PR (`merge_outcome: "armed"`, from GitHub-native auto-merge) now `MERGED`, it backfills the real `mergeCommit.oid` into that task's recorded merge outcome in `state.db`. The append-only ledger (`completed.jsonl`) keeps its point-in-time `"armed"` record — at terminal time the merge genuinely was only armed. An armed PR that **no** task depends on is never probed, so its recorded outcome stays `"armed"`.
+
 ### Managing the daemon (`stop` / `restart`)
 
 When `watch` runs as a background service (systemd, launchd, `nohup &`) you do not need to track its PID. A looping `watch` writes `<repo>/.worc/orchestrator.pid` on start and removes it on exit; two commands act on it from any shell in the same repo:
@@ -314,7 +322,7 @@ Resolution order: per-task `auto_merge` (if set) → global `git.auto_merge` →
 - The mid-pipeline **dangerous-diff approval** (code deletions / dependency changes) still fires — auto-merge affects only the publish step, never the agent sandbox or earlier gates.
 - It never passes `--admin`, never force-pushes, and tries exactly once. If the merge is **blocked** (branch protection, pending checks, conflict) the task ends `manual_action_required` with the PR **left open** for a human — never `failed`, never a forced merge. Re-running the task retries the merge idempotently (it never double-merges an already-merged PR).
 
-**Audit.** Every auto-merge writes a `[AUTO-MERGE]` `WARNING` log line, records the merge in the append-only ledger (`auto_merged` + `merge_outcome` = the merge SHA, `"merged"`, or `"armed"`), and persists a `pr_merge` row in `state.db`. The terminal Telegram notification carries the PR URL.
+**Audit.** Every auto-merge writes a `[AUTO-MERGE]` `WARNING` log line, records the merge in the append-only ledger (`auto_merged` + `merge_outcome` = the merge SHA, `"merged"`, or `"armed"`), and persists a `pr_merge` row in `state.db`. The terminal Telegram notification carries the PR URL. When `auto_merge_wait_for_checks` arms a PR (`merge_outcome: "armed"`), the real merge SHA is captured later only if another task `depends_on` it — the readiness probe backfills the `state.db` `pr_merge` row once it observes the PR merged (see [Task dependencies](#task-dependencies-depends_on)); the ledger row keeps its `"armed"` snapshot.
 
 ### Disabling flow nodes (per-task)
 

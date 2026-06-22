@@ -34,6 +34,8 @@ REASON_N_OUT_OF_RANGE = "n_out_of_range"
 REASON_MALFORMED_SUBTASK = "malformed_subtask"
 REASON_NON_LINEAR_DEPENDENCIES = "non_linear_dependencies"
 REASON_ACCEPTED = "accepted"
+# An operator-authored split (``subtasks:`` manifest) accepted by the same units gate.
+REASON_OPERATOR_AUTHORED = "operator_authored"
 
 # Subtask lifecycle status persisted in ``subtasks/index.json`` and the State Store.
 SUBTASK_PENDING = "pending"
@@ -52,6 +54,10 @@ class SubtaskSpec:
     slug: str
     acceptance_criteria: tuple[str, ...]
     depends_on: tuple[int, ...]
+    # Operator-authored splits carry the subtask file's verbatim body, materialized as-is into the
+    # immutable ``NN-<slug>.md`` spec. ``None`` (the agent path) generates the spec from
+    # ``acceptance_criteria`` instead. Not persisted — the spec file is written once (first run).
+    spec_body: str | None = None
 
 
 @dataclass(frozen=True)
@@ -121,10 +127,6 @@ def decide_decomposition(
     if not isinstance(raw_subtasks, Sequence) or isinstance(raw_subtasks, str | bytes):
         return _single_unit(REASON_NOT_RECOMMENDED)
 
-    n = len(raw_subtasks)
-    if n < 2 or n > max_subtasks:
-        return _single_unit(REASON_N_OUT_OF_RANGE)
-
     specs: list[SubtaskSpec] = []
     for raw in raw_subtasks:
         spec = _parse_subtask(raw)
@@ -132,17 +134,46 @@ def decide_decomposition(
             return _single_unit(REASON_MALFORMED_SUBTASK)
         specs.append(spec)
 
-    specs.sort(key=lambda s: s.order)
-    # Orders must be exactly 1..n, and dependencies may reference only strictly-earlier orders
-    # (linear; no forward or cyclic dependency).
-    for index, spec in enumerate(specs, start=1):
+    return _decide_from_specs(specs, max_subtasks=max_subtasks)
+
+
+def _decide_from_specs(specs: Sequence[SubtaskSpec], *, max_subtasks: int) -> DecompositionDecision:
+    """The deterministic units gate, shared by the agent and operator paths.
+
+    A split is accepted only when ``2 <= n <= max_subtasks``, orders are exactly ``1..n`` after
+    sorting, and every ``depends_on`` references a strictly-earlier order (linear; no forward or
+    cyclic dependency). Otherwise returns a single-unit decision carrying the failure reason.
+    """
+    n = len(specs)
+    if n < 2 or n > max_subtasks:
+        return _single_unit(REASON_N_OUT_OF_RANGE)
+    ordered = sorted(specs, key=lambda s: s.order)
+    for index, spec in enumerate(ordered, start=1):
         if spec.order != index:
             return _single_unit(REASON_NON_LINEAR_DEPENDENCIES)
         for dep in spec.depends_on:
             if dep < 1 or dep >= spec.order:
                 return _single_unit(REASON_NON_LINEAR_DEPENDENCIES)
+    return DecompositionDecision(
+        accepted=True, reason=REASON_ACCEPTED, n=n, subtasks=tuple(ordered)
+    )
 
-    return DecompositionDecision(accepted=True, reason=REASON_ACCEPTED, n=n, subtasks=tuple(specs))
+
+def decide_operator_decomposition(
+    specs: Sequence[SubtaskSpec], *, max_subtasks: int
+) -> DecompositionDecision:
+    """Apply the same deterministic units gate to an operator-authored split.
+
+    The operator supplies the *content* of the split (the same shape the agent proposes); the Core
+    validates it identically, so the operator can never weaken ``max_subtasks`` or smuggle a
+    non-linear dependency. A success reason is ``operator_authored`` (vs the agent's ``accepted``).
+    """
+    decision = _decide_from_specs(specs, max_subtasks=max_subtasks)
+    if decision.accepted:
+        return DecompositionDecision(
+            accepted=True, reason=REASON_OPERATOR_AUTHORED, n=decision.n, subtasks=decision.subtasks
+        )
+    return decision
 
 
 def _subtasks_dir(artifacts_root: str | Path, task_id: str) -> Path:
@@ -198,6 +229,10 @@ def write_subtask_artifacts(
         spec_path = subtask_spec_path(artifacts_root, task_id, spec.order, spec.slug)
         if spec_path.exists():
             continue  # immutable — never overwrite
+        if spec.spec_body is not None:
+            # Operator-authored: materialize the subtask file's body verbatim.
+            spec_path.write_text(spec.spec_body, encoding="utf-8")
+            continue
         criteria = "\n".join(f"- {c}" for c in spec.acceptance_criteria)
         depends = ", ".join(str(d) for d in spec.depends_on) if spec.depends_on else "none"
         spec_path.write_text(

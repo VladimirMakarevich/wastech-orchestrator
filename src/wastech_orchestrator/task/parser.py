@@ -211,6 +211,8 @@ def write_normalized(task: NormalizedTask, artifacts_root: str | Path) -> str:
         "auto_merge": task.auto_merge,
         "prompt_audit": task.prompt_audit,
         "contacts": list(task.contacts),
+        "depends_on": list(task.depends_on),
+        "subtasks": list(task.subtasks),
         "nodes": {node_id: _node_override_json(ov) for node_id, ov in task.node_overrides.items()},
     }
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -242,5 +244,74 @@ def load_normalized(artifacts_root: str | Path, task_id: str) -> NormalizedTask:
         auto_merge=data.get("auto_merge"),
         prompt_audit=data.get("prompt_audit"),
         contacts=list(data.get("contacts", [])),
+        depends_on=tuple(data.get("depends_on", [])),
+        subtasks=tuple(data.get("subtasks", [])),
         node_overrides=node_overrides,
     )
+
+
+@dataclass(frozen=True)
+class SubtaskSpecFile:
+    """An operator-authored subtask spec file (front matter + verbatim body).
+
+    A reduced manifest, deliberately *not* a standalone task (no ``id``). ``depends_on`` lists the
+    **slugs** of earlier subtasks; ``body`` is the verbatim text after the front matter, written
+    into the immutable ``NN-<slug>.md`` spec the edit nodes read as ``{subtask_spec_path}``.
+    """
+
+    title: str
+    slug: str
+    depends_on: tuple[str, ...]
+    acceptance_criteria: tuple[str, ...]
+    body: str
+
+
+def read_subtask_spec(text: str) -> SubtaskSpecFile | None:
+    """Parse an operator subtask spec file; ``None`` when malformed.
+
+    Malformed = no/invalid front matter, a missing/blank ``title``, a non-string ``slug``, a
+    ``depends_on`` that is not a list of non-empty strings, or an empty body. ``slug`` defaults to
+    ``slugify(title)``. Structural only — the orchestrator maps slugs→orders and runs the shared
+    linear/range gate.
+    """
+    parse = split_frontmatter(text, ".md")
+    if not parse.present or parse.malformed:
+        return None
+    fm = parse.frontmatter
+    raw_title = fm.get("title")
+    if not isinstance(raw_title, str) or not raw_title.strip():
+        return None
+    raw_slug = fm.get("slug")
+    if raw_slug is not None and not isinstance(raw_slug, str):
+        return None
+    if isinstance(raw_slug, str) and raw_slug.strip():
+        slug = slugify(raw_slug)
+    else:
+        slug = slugify(raw_title)
+    raw_deps = fm.get("depends_on", [])
+    if not isinstance(raw_deps, list | tuple) or not all(
+        isinstance(d, str) and d.strip() for d in raw_deps
+    ):
+        return None
+    if not parse.body.strip():
+        return None
+    ac_section = extract_section(parse.body, "Acceptance criteria")
+    return SubtaskSpecFile(
+        title=raw_title.strip(),
+        slug=slug,
+        depends_on=tuple(d.strip() for d in raw_deps),
+        acceptance_criteria=_parse_criteria(ac_section) if ac_section else (),
+        body=parse.body,
+    )
+
+
+def _parse_criteria(section: str) -> tuple[str, ...]:
+    """Pull bullet items out of an ``## Acceptance criteria`` section (best-effort, audit only)."""
+    items: list[str] = []
+    for line in section.splitlines():
+        stripped = line.strip()
+        for marker in ("- [ ] ", "- [x] ", "- ", "* "):
+            if stripped.startswith(marker):
+                items.append(stripped[len(marker) :].strip())
+                break
+    return tuple(item for item in items if item)

@@ -33,6 +33,7 @@ from wastech_orchestrator.config.schema import (
 from wastech_orchestrator.config.validation import validate_config
 from wastech_orchestrator.core.flow.registry import FlowRegistry
 from wastech_orchestrator.core.orchestrator import (
+    Eligibility,
     FinalizePlan,
     Orchestrator,
     PipelineResult,
@@ -49,6 +50,9 @@ from wastech_orchestrator.observability.logging import configure_logging
 from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.security.isolation import check_isolation
 from wastech_orchestrator.state_store import IncompatibleStateError, StateStore
+from wastech_orchestrator.task.parser import read_task_source, split_frontmatter
+
+_LOG = logging.getLogger(__name__)
 
 # --log-level names → stdlib logging levels for the structured operator trace.
 _LOG_LEVELS: dict[str, int] = {
@@ -536,6 +540,30 @@ def select_pending(folder: Path) -> list[Path]:
     return sorted(p for p in folder.iterdir() if p.suffix.lower() in (".md", ".json"))
 
 
+def _scan_depends_on(task_file: Path) -> tuple[str | None, tuple[str, ...]]:
+    """Lightweight front-matter read of a pending file's ``id`` and ``depends_on`` (no validation).
+
+    Used by the scheduler for the cheap skip/eligibility decision; full validation still happens in
+    ``run_task``. A read/decode/parse problem (or a malformed ``depends_on``) yields ``(None, ())``,
+    so the file falls through to the gate, which rejects it properly.
+    """
+    try:
+        source = read_task_source(task_file)
+        parse = split_frontmatter(source.raw_bytes.decode("utf-8"), source.suffix)
+    except (OSError, UnicodeDecodeError):
+        return None, ()
+    if not parse.present or parse.malformed:
+        return None, ()
+    raw_id = parse.frontmatter.get("id")
+    task_id = raw_id if isinstance(raw_id, str) else None
+    raw_deps = parse.frontmatter.get("depends_on", [])
+    if not isinstance(raw_deps, (list, tuple)) or not all(
+        isinstance(d, str) and d.strip() for d in raw_deps
+    ):
+        return task_id, ()
+    return task_id, tuple(d.strip() for d in raw_deps)
+
+
 def watch_once(
     orchestrator: Orchestrator, config: OrchestratorConfig, folder: Path
 ) -> list[PipelineResult]:
@@ -544,6 +572,11 @@ def watch_once(
     Resumes the single active task first. Then picks pending tasks **only** when the slot is free;
     with auto mode off it processes exactly one, with auto mode on it continues to the next after a
     successful terminal cleanup. A ``manual_action_required`` outcome blocks further continuation.
+
+    A task with unmerged ``depends_on`` dependencies is **skipped** (non-blocking) so an independent
+    task can run instead — the slot never idles on CI; a dependency-broken task (cycle / unknown /
+    self-ref) is terminally rejected. The skip does **not** consume the auto-mode-off "one task"
+    budget, so the slot still runs one real eligible task per tick.
     """
     results: list[PipelineResult] = []
     resumed = orchestrator.resume()
@@ -553,9 +586,19 @@ def watch_once(
             return results
 
     auto = config.orchestrator.auto_mode.enabled
-    for task_file in select_pending(folder):
+    scanned = [(p, *_scan_depends_on(p)) for p in select_pending(folder)]
+    pending_map = {task_id: deps for _p, task_id, deps in scanned if task_id is not None}
+    for task_file, task_id, depends_on in scanned:
         if not orchestrator.acquire_slot(""):
             break  # the slot is not free (an active task remains)
+        if task_id is not None and depends_on:
+            verdict = orchestrator.dependency_eligibility(task_id, depends_on, pending=pending_map)
+            if verdict.state is Eligibility.WAITING:
+                _LOG.info("task %s waiting: %s", task_id, verdict.detail)
+                continue  # non-blocking skip — try the next eligible task
+            if verdict.state is Eligibility.BROKEN:
+                results.append(orchestrator.reject_dependency(str(task_file), verdict.detail))
+                continue  # fail-closed terminal reject; the slot stays free
         result = orchestrator.run_task(str(task_file))
         results.append(result)
         if result.final_status is Status.MANUAL_ACTION_REQUIRED:
@@ -621,6 +664,15 @@ def cmd_run(args: argparse.Namespace) -> int:
         artifacts_root=worc_home_for(config),
         heartbeat_seconds=args.heartbeat_seconds,
     )
+    # Refuse an explicit run of a dependent whose dependencies are not merged — never build it on a
+    # stale base. Unlike ``watch`` (which skips/retries), an explicit ``run`` of an ineligible task
+    # is a controlled refusal with a non-zero exit; a malformed file falls through to the gate.
+    task_id, depends_on = _scan_depends_on(Path(args.task_file))
+    if task_id is not None and depends_on:
+        verdict = orchestrator.dependency_eligibility(task_id, depends_on, pending={})
+        if verdict.state is not Eligibility.ELIGIBLE:
+            print(f"error: refusing to run {task_id}: {verdict.detail}", file=sys.stderr)
+            return 2
     result = orchestrator.run_task(args.task_file)
     suffix = f" → {result.pr_url}" if result.pr_url else ""
     print(f"{result.task_id}: {result.final_status.value}{suffix}")

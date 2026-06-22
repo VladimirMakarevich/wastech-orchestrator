@@ -1,6 +1,6 @@
 # Task dependencies (`depends_on`) — non-blocking merge-gated scheduling
 
-Status: **accepted** Date: 2026-06-22 Owner: Vladimir Makarevich
+Status: **done** (implemented 2026-06-22) Date: 2026-06-22 Owner: Vladimir Makarevich
 
 Detail file for the [follow_ups.md](follow_ups.md) item "Task dependencies (`depends_on`)". This **subsumes** the older "Capture real merge SHA in `--auto` auto-merge mode" follow-up: the real merge SHA is backfilled as a byproduct of the dependency readiness probe (see [§ Real merge-SHA backfill](#real-merge-sha-backfill)).
 

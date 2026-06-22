@@ -316,6 +316,43 @@ class GitManager:
             return None
         return result.stdout.strip() or None
 
+    def pr_merge_state(self, pr_url: str) -> tuple[str | None, str | None]:
+        """Read-only ``(state, merge_commit_sha)`` for a PR: the dependency-readiness probe.
+
+        Runs a single `gh pr view <url> --json state,mergeCommit` — strictly **read-only** (no
+        ``--admin``, never creates/pushes/merges), so it does not weaken the security policy. The
+        SHA is present only once the PR is ``MERGED`` (``None`` otherwise). Best-effort: returns
+        ``(None, None)`` when ``gh`` is missing / unauthenticated / offline or the PR is gone, so
+        the caller can treat an unconfirmable merge as "not yet" and skip.
+        """
+        result = self._gh(["pr", "view", pr_url, "--json", "state,mergeCommit"])
+        if not result.ok:
+            return None, None
+        try:
+            data = json.loads(result.stdout or "{}")
+        except ValueError:
+            return None, None
+        state = data.get("state") or None
+        merge_commit = data.get("mergeCommit") or {}
+        sha = (merge_commit.get("oid") if isinstance(merge_commit, dict) else None) or None
+        return state, sha
+
+    def backfill_merge_sha(self, task_id: str, sha: str) -> None:
+        """Replace an armed ``pr_merge`` outcome with the real merge SHA, once observed merged.
+
+        Closes the "armed PR never records its real SHA" gap for any task that has a dependent: the
+        readiness probe (:meth:`pr_merge_state`) observed ``MERGED`` and hands the merge oid here.
+        Updates **only** the SQLite ``pr_merge`` publish op (the authoritative merge-outcome store);
+        the append-only ledger keeps its point-in-time ``"armed"`` record untouched. Idempotent: a
+        no-op when there is no recorded merge op or its ``result_ref`` is already ``sha``.
+        """
+        if not sha:
+            return
+        existing = self._store.get_publish_op(task_id, KIND_PR_MERGE, None)
+        if existing is None or existing.status != _STATUS_COMPLETED or existing.result_ref == sha:
+            return
+        self._record_completed(task_id, KIND_PR_MERGE, existing.fingerprint, sha)
+
     def refresh_base(self) -> None:
         """Best-effort fetch + ff-only pull of ``base_branch`` so git-pushed tasks become visible.
 

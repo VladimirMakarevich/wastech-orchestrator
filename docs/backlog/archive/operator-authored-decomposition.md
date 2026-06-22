@@ -1,6 +1,8 @@
 # Operator-authored decomposition (`subtasks:` references) — one root task, operator-supplied split, one PR
 
-Status: **candidate** Date: 2026-06-22 Owner: Vladimir Makarevich
+Status: **done** (implemented 2026-06-22) Date: 2026-06-22 Owner: Vladimir Makarevich
+
+> **As-built corrections to this design (the doc predated two refactors):** (1) the per-task disable knob is `nodes.<id>.enabled`, not `stages.<>.enabled`/`SKIPPABLE_STAGES`/`_build_stage_params` (the `Stage` enum was removed). (2) There is no "stub-plan step" — the engine's post-node hook fires only for _executed_ nodes, so a disabled `planning` node never reaches the agent-path materialization seam. The operator decision is therefore validated + materialized at the orchestrator's **pre-branch preflight** (a second pass in `run_task` after the IO-free gate, reusing `_reject` → `tasks/rejected/` + report), which works whether `planning` runs or is disabled. (3) The new `ValidationReason` members (`invalid_subtasks`, `invalid_subtask_path`, `subtask_file_missing`, `subtask_malformed`, `subtask_count_out_of_range`, `subtask_depends_forward`, `flow_cannot_decompose`) live in the gate enum but the IO-bearing ones are applied by that preflight pass, not inside the pure `ValidationGate`. Canonical behavior now lives in [task-authoring.md](../task-authoring.md#subtasks-operator-authored-decomposition) and the code.
 
 Detail file for the operator-authored-decomposition backlog item. The operator writes one **root** task that carries the shared context plus an ordered list of references to per-subtask files, and the orchestrator runs them exactly like a planning-proposed decomposition: sequentially, on one task branch, into **one PR**. This is the inverse-source twin of the existing decomposition — the split is authored by the operator instead of proposed by the planning agent.
 

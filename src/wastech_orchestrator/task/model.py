@@ -32,6 +32,8 @@ ALLOWED_TASK_KEYS: frozenset[str] = frozenset(
         "auto_merge",
         "prompt_audit",
         "contacts",
+        "depends_on",
+        "subtasks",
         "nodes",
     }
 )
@@ -79,6 +81,18 @@ class NormalizedTask:
     # the global config.prompt_audit. The task value always wins (no operator gate).
     prompt_audit: bool | None = None
     contacts: list[str] = field(default_factory=list)
+    # Other task ids this task needs **merged** before it may start (non-blocking merge-gated
+    # scheduling): the scheduler skips a dependent while a dependency is unmerged and runs other
+    # eligible tasks instead. Empty by default. Distinct from a decomposition's per-subtask
+    # ``depends_on`` (subtask orders within one task). Eligibility is computed live from PR/merge
+    # state — there is no persisted schema for it.
+    depends_on: tuple[str, ...] = ()
+    # Operator-authored decomposition: ordered repository-relative references to per-subtask spec
+    # files. Presence ⇒ the orchestrator builds the decomposition from this manifest (reason
+    # ``operator_authored``) instead of from the planning agent's proposal, and runs the units
+    # exactly like an accepted agent split (one branch, one PR). The gate validates only the list
+    # shape; path/file/count/linear validation runs at the pre-branch preflight in ``run_task``.
+    subtasks: tuple[str, ...] = ()
     # Per-node disable toggle, keyed by flow node id. The gate validates shape only; node existence
     # against the resolved flow is checked at flow resolution (fail-closed → terminal ``failed``).
     node_overrides: dict[str, NodeOverride] = field(default_factory=dict)
