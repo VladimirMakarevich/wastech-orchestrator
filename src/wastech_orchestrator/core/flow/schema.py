@@ -131,10 +131,6 @@ class Edge:
 class DecompositionConfig:
     proposed_by: str
     sub_flow: tuple[str, ...]
-    gate_min: int | None = None
-    gate_max: int | None = None
-    linear_depends_on: bool = False
-    commit_each_subtask: bool = False
     shared_budget: str | None = None
 
 

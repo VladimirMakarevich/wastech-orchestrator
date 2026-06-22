@@ -40,9 +40,7 @@ Each cap is clamped to `min(flow, config)` by the engine ([B28](../blocks/B28-fl
 
 ## Decomposition
 
-A `decomposition` block ([implementation.yaml:87-92](../../../src/wastech_orchestrator/core/flow/packaged/implementation.yaml#L87)) lets planning propose a split: `proposed_by: planning`, `sub_flow: [implementation, testing, review, fixing]`, `commit_each_subtask: true`, `shared_budget: global_fix_iterations`. The orchestrator decides the split deterministically ([B11](../blocks/B11-task-decomposition.md)) and runs the region once per subtask (committing each), with per-loop budgets reset between subtasks and the global counter accumulating. See [B06](../blocks/B06-orchestrator-pipeline.md) `_run_phases`/`_fan_out_subtasks`.
-
-> Audit note: the `decomposition.gate` block (`min`/`max`/`linear_depends_on`) is set here but is **not consumed** at runtime — the accept gate uses `agents.decomposition.max_subtasks` and always enforces a 2..n linear DAG; likewise `commit_each_subtask` is never read (commit is unconditional). See [the audit](../../backlog/2026-06-21-audit.md).
+A `decomposition` block ([implementation.yaml:87-90](../../../src/wastech_orchestrator/core/flow/packaged/implementation.yaml#L87)) lets planning propose a split: `proposed_by: planning`, `sub_flow: [implementation, testing, review, fixing]`, `shared_budget: global_fix_iterations`. The orchestrator decides the split deterministically ([B11](../blocks/B11-task-decomposition.md)) and runs the region once per subtask (committing each — subtask commit is unconditional), with per-loop budgets reset between subtasks and the global counter accumulating. See [B06](../blocks/B06-orchestrator-pipeline.md) `_run_phases`/`_fan_out_subtasks`. The accept gate uses `agents.decomposition.max_subtasks` and always enforces a 2..n linear DAG (the decorative `decomposition.gate` + `commit_each_subtask` fields were removed — audit #4/#5).
 
 ## HITL
 

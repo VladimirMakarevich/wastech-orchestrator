@@ -57,6 +57,15 @@ _DEFAULT_ALLOWED_ENV: tuple[str, ...] = (
     "CLAUDE_CONFIG_DIR",
 )
 
+# ``denied_commands`` REPLACES (does not extend) this default, so the shipped config.example.yaml
+# must list every entry it wants — guarded by test_example_denied_commands_match_loader_default.
+_DEFAULT_DENIED_COMMANDS: tuple[str, ...] = (
+    "git commit",
+    "git push",
+    "gh pr create",
+    "gh pr merge",
+)
+
 
 class ConfigError(Exception):
     """A config file is structurally invalid or violates a §11/§21.4 rule.
@@ -352,14 +361,18 @@ def _build_providers(raw: Any, issues: list[str]) -> dict[ProviderId, ProviderCo
 def _build_decomposition(raw: Any, issues: list[str]) -> DecompositionConfig:
     where = "agents.decomposition"
     m = _mapping(raw, where, issues)
+    # ``min_size_signal`` / ``commit_per_subtask`` (removed v12) are tolerated, not accepted: an old
+    # config still loads fail-open and ``upgrade-config`` strips the dead keys.
     _check_keys(
-        m, {"enabled", "max_subtasks", "min_size_signal", "commit_per_subtask"}, where, issues
+        m,
+        {"enabled", "max_subtasks"},
+        where,
+        issues,
+        tolerated={"min_size_signal", "commit_per_subtask"},
     )
     return DecompositionConfig(
         enabled=_bool(m, "enabled", False, where, issues),
         max_subtasks=_int(m, "max_subtasks", 8, where, issues),
-        min_size_signal=_str(m, "min_size_signal", "large", where, issues),
-        commit_per_subtask=_bool(m, "commit_per_subtask", True, where, issues),
     )
 
 
@@ -428,7 +441,7 @@ def _build_security(raw: Any, issues: list[str]) -> SecurityConfig:
         denied_commands=_str_tuple(
             m,
             "denied_commands",
-            ("git commit", "git push", "gh pr create", "gh pr merge"),
+            _DEFAULT_DENIED_COMMANDS,
             where,
             issues,
         ),

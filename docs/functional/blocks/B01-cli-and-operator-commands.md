@@ -42,7 +42,7 @@ It also fixes two repo-layout constants used pervasively downstream: the gitigno
 - **upgrade-config** ([cli.py:227](../../../src/wastech_orchestrator/cli.py#L227)) — add config keys introduced by this version, preserving existing values; `--dry-run`.
 - **upgrade-docs** ([cli.py:235](../../../src/wastech_orchestrator/cli.py#L235)) — overwrite the installed `.worc/guide/` authoring docs with the packaged version; `--dry-run`.
 - **rerun** ([cli.py:243](../../../src/wastech_orchestrator/cli.py#L243)) — re-attempt a terminal task; `task_id`, `--continue` (reuse branch, re-enter the failed node), `--force-reset-remote`, `--dry-run`, `-y/--yes`.
-- **finalize** ([cli.py:268](../../../src/wastech_orchestrator/cli.py#L268)) — record + tidy a task handled by hand; `task_id`, required `--as {done,failed,abandoned}`, `--pr-url`, `--note`, `--delete-branch`, `--keep-branch`, `--no-verify-pr`, `--dry-run`, `-y/--yes`.
+- **finalize** ([cli.py:268](../../../src/wastech_orchestrator/cli.py#L268)) — record + tidy a task handled by hand; `task_id`, required `--as {done,failed,abandoned}`, `--pr-url`, `--note`, `--delete-branch` (keep is the default), `--no-verify-pr`, `--dry-run`, `-y/--yes`.
 
 ### Global flags
 
@@ -108,7 +108,6 @@ Each driver begins with `_configure_runtime_logging(args)` ([cli.py:527](../../.
 
 ## Audit candidates
 
-- `src/wastech_orchestrator/cli.py:287` — `--keep-branch` on `finalize` is dead/cosmetic — see [the audit](../../backlog/2026-06-21-audit.md).
 - `src/wastech_orchestrator/cli.py:1108` — `_install_atomic_write` hardcodes a `.config-*.yaml` temp name even when `upgrade-docs` writes `.md` files through it — see [the audit](../../backlog/2026-06-21-audit.md).
 - `src/wastech_orchestrator/cli.py:3` — module docstring describes an `init` command that no longer exists (renamed to `install`) — see [the audit](../../backlog/2026-06-21-audit.md).
 

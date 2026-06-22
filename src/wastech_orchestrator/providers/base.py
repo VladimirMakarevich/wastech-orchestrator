@@ -30,7 +30,6 @@ class Stage(StrEnum):
     REVIEW = "review"
     FIXING = "fixing"
     SUMMARY = "summary"
-    PUBLISHING = "publishing"
 
 
 class RunStatus(StrEnum):

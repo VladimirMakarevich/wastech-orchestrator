@@ -35,6 +35,6 @@ flowchart LR
 
 All three feedback edges point back to `synthesis` with **inline** budgets (not named loops): `citation_check → synthesis` (`fail`, budget 1), `fact_verification → synthesis` (`rework`, budget 2), `critical_review → synthesis` (`rework`, budget 3). The two evaluators are **non-blocking**: each reworks up to its own `max_rework_per_stage` (counted from the immutable `in_flow_verdict` rows) then takes `accept` — never `manual` ([B30](../blocks/B30-flow-node-runners.md)).
 
-> Audit note: the flow declares `budgets.global_revision_iterations: 12` ([deep_research.yaml:79-80](../../../src/wastech_orchestrator/core/flow/packaged/deep_research.yaml#L79)), but the engine's global cap only reads the key `global_fix_iterations` (`run_state.GLOBAL_FIX_KEY`), so this declared budget is **never enforced** — the global cap falls back to `agents.max_total_fix_iterations`. See [the audit](../../backlog/2026-06-21-audit.md).
+The flow declares `budgets.global_fix_iterations: 12` ([deep_research.yaml:79-80](../../../src/wastech_orchestrator/core/flow/packaged/deep_research.yaml#L79)) — the reserved key the engine's global cap reads (`run_state.GLOBAL_FIX_KEY`). The effective ceiling is `min(12, agents.max_total_fix_iterations)`, so cumulative rework across all feedback edges stops at 12 (tighter than the config default).
 
 The supervisor layer still writes the task summary; the deliverable PR body is the committed summary. See [flows/index.md](index.md) and [B31](../blocks/B31-supervisor.md).

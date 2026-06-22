@@ -29,7 +29,7 @@ The engine's `PostNodeHook` ([B28](B28-flow-engine.md)) calls `observe` after ea
 
 ### The supervisor's own session
 
-`_run` ([supervisor.py:136](../../../src/wastech_orchestrator/core/supervisor.py#L136)) runs one read-only turn through the router, continuing the supervisor's own `resume_own_lineage` session by updating `_own_session_id` from each result. The request `permission_profile` is **forced `read-only`** — the supervisor never writes ([supervisor.py:150](../../../src/wastech_orchestrator/core/supervisor.py#L150)). The role prompt is rendered from `config.supervisor.role_file` inside the flow dir, falling back to a minimal instruction if the role file is missing/unreadable ([supervisor.py:210-220](../../../src/wastech_orchestrator/core/supervisor.py#L210)). The request reuses the `Stage.SUMMARY` identity for its output-schema/audit stage ([supervisor.py:42](../../../src/wastech_orchestrator/core/supervisor.py#L42)) but records `evaluations` rows (`node_id=None`), never `node_runs`.
+`_run` ([supervisor.py:136](../../../src/wastech_orchestrator/core/supervisor.py#L136)) runs one read-only turn through the router, continuing the supervisor's own `resume_own_lineage` session. The session is **durable**: `_resume_session` resumes the in-memory `_own_session_id`, or — on a fresh process after a restart — the persisted `node_lineage` row (gated by provider match, exactly like the `resume_own_lineage` evaluator in [B30](B30-flow-node-runners.md)); `_persist_session` writes the new session id back to `node_lineage` after each turn. The lineage is keyed by a reserved sentinel node id `__supervisor__` ([supervisor.py:42-46](../../../src/wastech_orchestrator/core/supervisor.py#L42)) — distinct from the routing identity `supervisor`, so it can never collide with a real flow node id — and the raw session id lives **only** in `state.db`. The request `permission_profile` is **forced `read-only`** — the supervisor never writes ([supervisor.py:150](../../../src/wastech_orchestrator/core/supervisor.py#L150)). The role prompt is rendered from `config.supervisor.role_file` inside the flow dir, falling back to a minimal instruction if the role file is missing/unreadable. The request carries the `supervisor` node identity but records `evaluations` rows (`node_id=None`), never `node_runs`.
 
 ### Configuration and ceiling
 
@@ -41,15 +41,12 @@ Configured in `config.yaml` under `supervisor: {model, reasoning, role_file}` ([
 - **Never fatal** — observation/synthesis failures are logged and swallowed; they can never fail or reroute the task ([supervisor.py:90-95](../../../src/wastech_orchestrator/core/supervisor.py#L90)).
 - **Append-only audit** — `supervisor_step` / `supervisor_final` rows are immutable ([B07](B07-state-machine-and-store.md), `evaluations`).
 - **Read-only** — the permission profile is forced `read-only`; the supervisor cannot edit code.
+- **Durable own session** — `_own_session_id` is persisted to / hydrated from `node_lineage` under the `__supervisor__` sentinel, so a resumed task continues the supervisor's accumulated cross-step context (gated by provider match; raw session id stays in `state.db`).
 
 ## Dependencies
 
 - **Uses:** [B17](B17-agent-router-and-fallback.md) (router, via `RouterPort`), [B07](B07-state-machine-and-store.md) (`evaluations`), [B15](B15-prompt-templates.md) (`render_role_prompt`), [B20](B20-artifact-layout.md) (`task_artifact_dir`, `summary.{md,json}`), [B05](B05-configuration.md) (`SupervisorConfig`).
 - **Used by:** [B06](B06-orchestrator-pipeline.md) — the orchestrator constructs one `Supervisor` per task, wires `observe` into the engine's post-node hook, and calls `finalize` at whole-task close.
-
-## Audit candidates
-
-- The module docstring says the own session is "durable across restart in P2.2" ([supervisor.py:17](../../../src/wastech_orchestrator/core/supervisor.py#L17)), but `_own_session_id` is an in-memory instance attribute ([supervisor.py:76](../../../src/wastech_orchestrator/core/supervisor.py#L76)) that is never persisted to or hydrated from `node_lineage` (unlike the `resume_own_lineage` evaluator in [B30](B30-flow-node-runners.md), which does use it). A resumed task constructs a fresh `Supervisor` and loses the accumulated cross-step context — a doc/implementation mismatch and a functional gap. See [the audit](../../backlog/2026-06-21-audit.md).
 
 ## Tests
 

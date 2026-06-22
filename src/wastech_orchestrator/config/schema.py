@@ -54,7 +54,11 @@ from wastech_orchestrator.providers.base import ProviderId, Stage
 # (the sole infra-fallback target). The per-task auto-merge gate `git.auto_merge_allow_per_task` is
 # also removed: a per-task `auto_merge` now wins outright (PRE.2). `upgrade-config` strips both dead
 # keys; old configs still load fail-open (the keys are tolerated/ignored).
-CONFIG_SCHEMA_VERSION = 11
+# v12 (2026-06-22, audit remediation #5): the decorative `agents.decomposition.min_size_signal` and
+# `agents.decomposition.commit_per_subtask` keys are removed — neither was ever read (subtask commit
+# is unconditional; no prompt consumes the size signal). `upgrade-config` strips both; old configs
+# still load fail-open (the keys are tolerated/ignored).
+CONFIG_SCHEMA_VERSION = 12
 
 # Stages a task may skip per-task via ``stages.<stage>.enabled: false`` (flow-contract §10 bounded
 # exception). ``refinement`` is excluded — it is skipped deterministically by completeness
@@ -121,8 +125,6 @@ class RepoConfig:
 class DecompositionConfig:
     enabled: bool
     max_subtasks: int
-    min_size_signal: str
-    commit_per_subtask: bool
 
 
 @dataclass(frozen=True)

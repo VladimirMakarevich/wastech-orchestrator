@@ -22,7 +22,6 @@ def test_stage_values_are_canonical() -> None:
         "review",
         "fixing",
         "summary",
-        "publishing",
     }
 
 

@@ -1,8 +1,9 @@
 """Check Runner (spec §4.8 / the ``testing`` stage).
 
 Runs the configured ``checks.commands`` (config, not hardcoded) through the P2 safe process runner
-— an **argv list** (``shlex.split``), never a shell string — with an allowlisted environment and the
-per-command ``checks.timeout_seconds``. Each run is written to ``checks/<run-id>.log`` (§10).
+— an **argv list** (split by ``checks.model.normalize_check_command``), never a shell string — with
+an allowlisted environment and the per-command ``checks.timeout_seconds``. Each run is written to
+``checks/<run-id>.log`` (§10).
 
 A check failure is a **quality** error: the caller routes it to ``fixing`` with **no provider
 fallback** (§4.8). The Check Runner itself never transitions state nor touches git; it returns a
@@ -18,7 +19,6 @@ resolver; absent those, the configured ``checks.commands`` are normalized.
 from __future__ import annotations
 
 import logging
-import shlex
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -202,8 +202,3 @@ class CheckRunner:
             if footer:
                 fh.write("\n----- status -----\n")
                 fh.write("\n".join(footer) + "\n")
-
-
-def split_command(command: str) -> Sequence[str]:
-    """Public helper: split a configured check command into an argv list (no shell)."""
-    return shlex.split(command, posix=True)

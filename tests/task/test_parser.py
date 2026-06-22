@@ -153,6 +153,15 @@ def test_prompt_audit_round_trips(tmp_path: Path, value: bool | None) -> None:
     assert load_normalized(tmp_path, "task-001").prompt_audit is value
 
 
+@pytest.mark.parametrize("value", ["Custom PR", None])
+def test_pr_title_round_trips(tmp_path: Path, value: str | None) -> None:
+    # Restart-safety: a custom pr_title must survive a crash-resume, or a task resumed before
+    # publish would silently fall back to the task title for the PR.
+    task = NormalizedTask(id="task-001", title="T", description="Do it", pr_title=value)
+    write_normalized(task, tmp_path)
+    assert load_normalized(tmp_path, "task-001").pr_title == value
+
+
 def test_stage_params_round_trip(tmp_path: Path) -> None:
     # Restart-safety: the per-stage skip toggle must survive a resume, or a crash could lose a skip
     # and re-run a stage the operator disabled.

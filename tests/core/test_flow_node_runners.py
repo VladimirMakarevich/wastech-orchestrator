@@ -862,6 +862,8 @@ def _evaluator(node_id: str, *, blocking: bool = True) -> EvaluatorNode:
     ("structured", "expected"),
     [
         ({"findings": [{"title": "x", "severity": "high"}]}, "rework"),
+        # #8: medium is advisory (non-blocking) — routing and the carried Finding agree on this now.
+        ({"findings": [{"title": "x", "severity": "medium"}]}, "accept"),
         ({"findings": [{"title": "x", "severity": "low"}]}, "accept"),
         ({"findings": []}, "accept"),
     ],
@@ -880,6 +882,28 @@ def test_evaluator_maps_blocking_findings(
     )
     result = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == expected
+
+
+def test_evaluator_medium_finding_is_non_blocking_and_carried(tmp_path: Path) -> None:
+    # #8: a medium finding accepts (non-blocking routing) yet is still carried for the audit trail
+    # with severity "medium" and Finding.blocking False — the carried flag and routing now agree.
+    (tmp_path / "r.md").write_text("review {diff_path}", "utf-8")
+    node = _evaluator("review")
+    router, store = FakeRouter(_result({"findings": [{"title": "x", "severity": "medium"}]})), (
+        FakeStore()
+    )
+    services = _services(
+        router,
+        store,
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    result = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "accept"
+    assert len(result.outcome.findings) == 1
+    finding = result.outcome.findings[0]
+    assert finding.severity == "medium"
+    assert finding.blocking is False
 
 
 def _test_quality(max_rework_per_stage: int = 1) -> EvaluatorNode:

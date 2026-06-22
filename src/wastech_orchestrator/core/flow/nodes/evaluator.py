@@ -1,9 +1,10 @@
 """Evaluator node runner (P1.3/P2.1) — the shared in-flow evaluator primitive.
 
 Runs the evaluator's ``role_file`` prompt (read-only) through the router and maps its structured
-verdict to an engine outcome: a blocking finding (severity ``medium``/``high``) -> ``rework``, a
-clean verdict -> ``accept``. A **blocking** evaluator gates every time it finds a blocking issue;
-the engine's named-loop budget bounds the rework cycles (exhaustion -> manual). A **non-blocking**
+verdict to an engine outcome: a blocking finding (severity ``high``/``critical``/``blocking``) ->
+``rework``, a clean (or medium-only, advisory) verdict -> ``accept``. A **blocking** evaluator gates
+every time it finds a blocking issue; the engine's named-loop budget bounds the rework cycles
+(exhaustion -> manual). A **non-blocking**
 evaluator (e.g. ``test_quality``) self-caps: it reworks until its own per-instance budget
 (``max_rework_per_stage``) is spent, then takes the ``accept`` edge (-> continue), **never** manual
 (P2.4). Each pass writes an immutable ``evaluations`` row (``in_flow_verdict``) namespaced by the
@@ -38,9 +39,10 @@ from wastech_orchestrator.providers.base import AgentRunRequest
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import EvaluationRow, NodeLineageRow, NodeRunRow
 
+#: Raw severity tokens that make a finding blocking (drive ``rework``) and normalize to ``high`` on
+#: the typed ``Finding``. ``medium``/``moderate`` are advisory only (non-blocking) — this matches
+#: both the routing in ``_is_blocking`` and the typed ``Finding.blocking`` flag (one definition).
 _BLOCKING_SEVERITIES = frozenset({"blocking", "critical", "high"})
-#: severity tokens the verdict treats as blocking (medium/high), normalized to the ``Finding`` set.
-_HIGH_SEVERITIES = frozenset({"blocking", "critical", "high"})
 _MEDIUM_SEVERITIES = frozenset({"medium", "moderate"})
 
 
@@ -277,7 +279,7 @@ class EvaluatorNodeRunner:
 def _to_finding(raw: Mapping[str, Any]) -> Finding:
     """Map a raw structured finding to the typed :class:`Finding` (severity / reason / paths)."""
     sev_token = str(raw.get("severity", "")).lower()
-    if raw.get("blocking") is True or sev_token in _HIGH_SEVERITIES:
+    if raw.get("blocking") is True or sev_token in _BLOCKING_SEVERITIES:
         severity: str = "high"
     elif sev_token in _MEDIUM_SEVERITIES:
         severity = "medium"

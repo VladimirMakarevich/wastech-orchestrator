@@ -285,9 +285,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="delete the now-unneeded local agent branch (default: keep it)",
     )
     finalize_cmd.add_argument(
-        "--keep-branch", action="store_true", help="keep the agent branch (the default; no-op)"
-    )
-    finalize_cmd.add_argument(
         "--no-verify-pr",
         action="store_true",
         help="(--as done) skip the read-only `gh pr view` merge check",
@@ -674,8 +671,8 @@ def cmd_rerun(args: argparse.Namespace) -> int:
     root = worc_home_for(config)
 
     # Rerun drives the pipeline in the shared clone; refuse while a live watch daemon owns it.
-    pid = process_control.read_pid(process_control.pid_file_path(root))
-    if pid is not None and process_control.is_running(pid):
+    pid = process_control.running_daemon_pid(process_control.pid_file_path(root))
+    if pid is not None:
         print(
             f"rerun: the watch daemon is running (pid {pid}); stop it first with "
             "'wastech-orchestrator stop'"
@@ -769,8 +766,8 @@ def cmd_finalize(args: argparse.Namespace) -> int:
 
     # Finalize runs terminal cleanup (`git checkout base`) in the shared clone; refuse while a live
     # watch daemon owns it. An orphaned-active task (dead PID) is exactly what finalize reconciles.
-    pid = process_control.read_pid(process_control.pid_file_path(root))
-    if pid is not None and process_control.is_running(pid):
+    pid = process_control.running_daemon_pid(process_control.pid_file_path(root))
+    if pid is not None:
         print(
             f"finalize: the watch daemon is running (pid {pid}); stop it first with "
             "'wastech-orchestrator stop'"
@@ -961,8 +958,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
     # Only the looping mode is a daemon; refuse a second watcher for the same artifact root. A stale
     # PID file (process gone) is overwritten on start.
     if poll > 0:
-        existing = process_control.read_pid(pid_path)
-        if existing is not None and process_control.is_running(existing):
+        existing = process_control.running_daemon_pid(pid_path)
+        if existing is not None:
             print(
                 f"watch: already running (pid {existing}); stop it first with "
                 f"'wastech-orchestrator stop', or use 'restart' ({pid_path})"

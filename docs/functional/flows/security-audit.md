@@ -30,6 +30,6 @@ flowchart LR
 
 One feedback edge: `finding_verification → threat_analysis` (`rework`, inline budget 2); `finding_verification` is non-blocking and self-caps at `max_rework_per_stage: 2` then accepts. The `dependency_scan` checker never gates (it always emits `pass`); whether its findings matter is expressed by the flow's edges, which here proceed unconditionally to `threat_analysis`.
 
-> Audit note: as with `deep_research`, the flow declares `budgets.global_revision_iterations: 8` ([security_audit.yaml:60-61](../../../src/wastech_orchestrator/core/flow/packaged/security_audit.yaml#L60)) but the engine only reads `global_fix_iterations`, so this budget is **never enforced**. See [the audit](../../backlog/2026-06-21-audit.md).
+As with `deep_research`, the flow declares `budgets.global_fix_iterations: 8` ([security_audit.yaml:60-61](../../../src/wastech_orchestrator/core/flow/packaged/security_audit.yaml#L60)) — the reserved key the engine's global cap reads — so cumulative rework stops at `min(8, agents.max_total_fix_iterations)`.
 
 The supervisor layer writes the task summary; the audit deliverable is the private report under `.worc/`. See [flows/index.md](index.md), [B31](../blocks/B31-supervisor.md).

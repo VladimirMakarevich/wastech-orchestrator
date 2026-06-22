@@ -77,4 +77,4 @@ flow:
     - { from: critical_review, to: synthesis, outcome: rework, budget: 3 }
 
   budgets:
-    global_revision_iterations: 12
+    global_fix_iterations: 12

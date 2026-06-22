@@ -27,12 +27,15 @@ from wastech_orchestrator.config.schema import CONFIG_SCHEMA_VERSION
 # stage-skip is redundant with configurable flows; per-task ``stages.enabled`` survives. v11:
 # ``agents.routing`` is gone — a flow node declares its own ``provider`` (else the global
 # ``providers.<id>.primary``); ``git.auto_merge_allow_per_task`` is gone — a per-task ``auto_merge``
-# now wins outright.)
+# now wins outright. v12: ``agents.decomposition.min_size_signal``/``commit_per_subtask`` are gone —
+# both were decorative (never read).) The parent-path may be dotted (walked segment by segment).
 _REMOVED_KEYS: tuple[tuple[str, str], ...] = (
     ("", "prompts"),
     ("agents", "skip_stages"),
     ("agents", "routing"),
     ("git", "auto_merge_allow_per_task"),
+    ("agents.decomposition", "min_size_signal"),
+    ("agents.decomposition", "commit_per_subtask"),
 )
 
 _UPGRADE_HEADER = (
@@ -86,7 +89,10 @@ def _strip_removed_keys(merged: dict[str, Any]) -> list[str]:
     for parent, key in _REMOVED_KEYS:
         container: Any = merged
         if parent:
-            container = merged.get(parent)
+            for part in parent.split("."):  # walk a (possibly dotted) parent path
+                container = container.get(part) if isinstance(container, dict) else None
+                if container is None:
+                    break
             if not isinstance(container, dict):
                 continue
         if key in container:

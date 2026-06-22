@@ -34,7 +34,6 @@ This module is pure I/O over paths and dataclasses: it imports only `task_artifa
 - Git outcome: `branch`, `pr_url`.
 - Auto-merge audit: `auto_merged` (true iff the orchestrator merged without review), `merge_outcome` (merge SHA, `"merged"`, or `"armed"`) ([ledger.py:40](../../../src/wastech_orchestrator/ledger.py#L40)).
 - Fix/cleanup: `fix_iterations`, `terminal_cleanup` (`"completed"`/`"blocked"`), `failure_report` (path to the stuck report).
-- `summary_gist` ([ledger.py:48](../../../src/wastech_orchestrator/ledger.py#L48)) — declared and serialized but never assigned by any caller (see Audit candidates).
 - Validation: `validation_reason` (the §16 gate rejection reason).
 - Decomposition: `decomposed`, `subtask_count`, `subtasks_completed`.
 - Re-run linkage: `attempt` (1 for the original, increments per re-run), `rerun_of` (the re-attempted id, set only when `attempt > 1`) ([ledger.py:53](../../../src/wastech_orchestrator/ledger.py#L53)).
@@ -69,7 +68,6 @@ This is the single writer for the engine's failure report: the flow recorder's `
 
 ## Audit candidates
 
-- `src/wastech_orchestrator/ledger.py:48` — see [the audit](../../backlog/2026-06-21-audit.md): `summary_gist` field is declared on `LedgerRecord` and serialized by `to_json` ([ledger.py:79](../../../src/wastech_orchestrator/ledger.py#L79)) but is never assigned by any caller and never read anywhere in `src/` or `tests/` — dead/vestigial field.
 - `src/wastech_orchestrator/ledger.py:9` — see [the audit](../../backlog/2026-06-21-audit.md): the module docstring and `write_minimal_summary`'s docstring frame the fallback as triggered when "no provider can produce the `summary` stage (§5.2)" ([ledger.py:206](../../../src/wastech_orchestrator/ledger.py#L206)), but the whole-task summary is now authored by the supervisor layer (B31), not a provider `summary` stage — stale framing.
 
 ## Tests

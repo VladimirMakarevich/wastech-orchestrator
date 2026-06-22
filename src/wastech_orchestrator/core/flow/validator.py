@@ -46,6 +46,7 @@ from wastech_orchestrator.core.flow.contracts import (
     PermissionProfile,
     SessionScope,
 )
+from wastech_orchestrator.core.flow.engine import _REWORK_OUTCOMES
 from wastech_orchestrator.core.flow.schema import AgentNode, EvaluatorNode
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
 from wastech_orchestrator.security.forbidden_args import find_forbidden_args
@@ -256,16 +257,41 @@ def _check_graph(snap: FlowSnapshot) -> list[Violation]:
                 )
             )
 
-    # 8. Decomposition references must resolve.
+    # 8. Decomposition references must resolve, and the region must be connected.
     dec = doc.decomposition
     if dec is not None:
-        if dec.proposed_by not in snap.nodes_by_id:
+        proposed_ok = dec.proposed_by in snap.nodes_by_id
+        if not proposed_ok:
             errs.append(g(f"decomposition.proposed_by {dec.proposed_by!r} not found"))
+        sub_flow_ok = True
         for nid in dec.sub_flow:
             if nid not in snap.nodes_by_id:
                 errs.append(g(f"decomposition.sub_flow {nid!r} not found"))
+                sub_flow_ok = False
         if dec.shared_budget is not None and dec.shared_budget not in doc.budgets:
             errs.append(g(f"decomposition.shared_budget {dec.shared_budget!r} not in budgets"))
+        # Region connectivity: the partitioner (engine_driver.partition_decomposition) resolves the
+        # region entry/exit with next(...); a structurally-valid but disconnected region would crash
+        # it with StopIteration at run time, so reject it at load instead (only check once the
+        # references resolve — otherwise the region set would reference missing nodes).
+        if proposed_ok and sub_flow_ok:
+            region = set(dec.sub_flow)
+            if not any(e.to in region for e in snap.adjacency.get(dec.proposed_by, ())):
+                errs.append(
+                    g(
+                        f"decomposition: no edge from proposed_by {dec.proposed_by!r} enters the "
+                        "sub_flow region"
+                    )
+                )
+            has_exit = any(
+                e.to not in region and e.outcome not in _REWORK_OUTCOMES
+                for nid in region
+                for e in snap.adjacency.get(nid, ())
+            )
+            if not has_exit:
+                errs.append(
+                    g("decomposition: sub_flow region has no forward exit edge to a post node")
+                )
 
     return errs
 

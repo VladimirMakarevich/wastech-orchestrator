@@ -93,8 +93,6 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "decomposition": {
                 "enabled": False,
                 "max_subtasks": 8,
-                "min_size_signal": "large",
-                "commit_per_subtask": True,
             },
             "providers": {
                 pid.value: _provider_block(pid, primary=(pid is primary_pid)) for pid in providers

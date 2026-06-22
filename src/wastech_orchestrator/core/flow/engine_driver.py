@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from wastech_orchestrator.config.schema import AgentsConfig
 from wastech_orchestrator.core.flow.engine import (
     _REWORK_OUTCOMES,
+    EngineInternalError,
     FactResolver,
     FlowEngine,
     FlowRunResult,
@@ -61,17 +62,34 @@ def partition_decomposition(snapshot: FlowSnapshot) -> DecompositionRegions:
     if decomp is None:
         raise ValueError("flow has no decomposition block to partition")
     region = frozenset(decomp.sub_flow)
+    # Region entry/exit are validator-guaranteed to exist (validate_flow rejects a disconnected
+    # decomposition region); the ``next(..., None)`` + raise here is belt-and-suspenders so a bug
+    # surfaces as a typed EngineInternalError, never a bare StopIteration.
     region_entry = next(
-        e.to for e in snapshot.adjacency.get(decomp.proposed_by, ()) if e.to in region
+        (e.to for e in snapshot.adjacency.get(decomp.proposed_by, ()) if e.to in region),
+        None,
     )
+    if region_entry is None:
+        raise EngineInternalError(
+            f"decomposition region has no entry edge from {decomp.proposed_by!r} "
+            "(validator should have rejected this flow)"
+        )
     # The region exit is a forward (non-rework) edge from a region node to a non-region node;
     # rework/fail edges always point back into the region, so they are never the exit.
     post_entry = next(
-        e.to
-        for node_id in region
-        for e in snapshot.adjacency.get(node_id, ())
-        if e.to not in region and e.outcome not in _REWORK_OUTCOMES
+        (
+            e.to
+            for node_id in region
+            for e in snapshot.adjacency.get(node_id, ())
+            if e.to not in region and e.outcome not in _REWORK_OUTCOMES
+        ),
+        None,
     )
+    if post_entry is None:
+        raise EngineInternalError(
+            "decomposition region has no forward exit edge "
+            "(validator should have rejected this flow)"
+        )
     post = _reachable(snapshot, post_entry)
     pre = frozenset(snapshot.nodes_by_id) - region - post
     return DecompositionRegions(

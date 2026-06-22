@@ -76,6 +76,7 @@ from wastech_orchestrator.core.skills import (
     SkillInventoryScanner,
     SkillRef,
     SkillSelection,
+    compute_skill_dedup,
     resolve_planning_skills,
 )
 from wastech_orchestrator.core.state_machine import Status, assert_transition
@@ -133,9 +134,6 @@ from wastech_orchestrator.task.validation_gate import (
 )
 
 _LOG = logging.getLogger(__name__)
-
-# Severities that make a review finding "blocking" → the review-driven fix loop (§5, §8.1).
-_BLOCKING_SEVERITIES = frozenset({"blocking", "critical", "high"})
 
 # The gitignored runtime home holding operator flows under ``<repo>/.worc/flows/`` (P4.1). Mirrors
 # ``cli.WORC_HOME``; duplicated here because the core must not import the CLI (would be circular).
@@ -724,7 +722,17 @@ class Orchestrator:
         assert plan.task_id is not None
         row = self._store.get_task(plan.task_id)
         assert row is not None
-        task = load_normalized(self._artifacts_root, plan.task_id)
+        try:
+            task = load_normalized(self._artifacts_root, plan.task_id)
+        except (json.JSONDecodeError, OSError, KeyError, ValueError) as exc:
+            # A corrupt/truncated/missing normalized manifest can't be resumed — fail closed to
+            # manual rather than crashing out of resume() (§13). The persisted TaskRow still carries
+            # enough (id/title/branch/slug/status) to run terminal cleanup + ledger.
+            return self._go_terminal(
+                self._degraded_pipeline(row),
+                Status.MANUAL_ACTION_REQUIRED,
+                manual_reason=f"corrupt normalized task artifact: {exc}",
+            )
         decomposition = self._rebuild_decomposition(plan.task_id, row)
         p = _Pipeline(
             task=task,
@@ -745,6 +753,20 @@ class Orchestrator:
             return self._go_terminal(p, Status.MANUAL_ACTION_REQUIRED, manual_reason=exc.reason)
         except (PipelineFailed, GitCommandError) as exc:
             return self._go_terminal(p, Status.FAILED, manual_reason=str(exc))
+
+    def _degraded_pipeline(self, row: TaskRow) -> _Pipeline:
+        """A minimal pipeline context for a task whose normalized manifest can't be read, so the
+        terminal handler (cleanup + ledger + notify) still runs without the manifest (§13). Counters
+        and decomposition come from the controlled SQLite row, not the corrupt on-disk artifact."""
+        return _Pipeline(
+            task=NormalizedTask(id=row.task_id, title=row.title, description=""),
+            task_file=row.source_path or "",
+            status=row.status,
+            counters=self._store.get_counters(row.task_id),
+            decomposition=self._rebuild_decomposition(row.task_id, row),
+            branch=row.branch or "",
+            slug=row.slug or "",
+        )
 
     def _resume_via_engine(self, p: _Pipeline) -> PipelineResult:
         """Resume the engine from the persisted checkpoint (node-based recovery, §13).
@@ -1202,9 +1224,17 @@ class Orchestrator:
         p.selected_skills = selection.refs
         inputs.skill_paths = tuple(ref.path for ref in selection.refs)
         self._persist_selected_skills(p, selection.refs)
-        section = self._render_skill_section(selection, ())
+        existing = Path(plan_path).read_text(encoding="utf-8")
+        # §2.2 dedup: flag selected-skill sections whose heading already appears in the plan so the
+        # plan's own instructions take precedence (the skill stays referenced by path — nothing is
+        # dropped). Skill bodies are read denied-aware/bounded through the inventory scanner.
+        bodies = [
+            (ref, body)
+            for ref in selection.refs
+            if (body := self._skill_scanner.read_body(ref)) is not None
+        ]
+        section = self._render_skill_section(selection, compute_skill_dedup(existing, bodies))
         if section:
-            existing = Path(plan_path).read_text(encoding="utf-8")
             Path(plan_path).write_text(existing + section, encoding="utf-8")
 
     def _persist_selected_skills(self, p: _Pipeline, refs: tuple[SkillRef, ...]) -> None:

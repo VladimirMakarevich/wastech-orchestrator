@@ -33,7 +33,7 @@ The request grants network iff the flow declares a `network_policy` ([agent.py:4
 
 ### Evaluator node
 
-`EvaluatorNodeRunner.run` ([evaluator.py:54](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L54)) runs the evaluator's `role_file` prompt read-only and maps its structured verdict to an outcome (`_verdict`, [evaluator.py:132](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L132)): a blocking finding → `rework`, otherwise `accept`. It writes the findings artifact (`review/findings.json`, exposed downstream as `{review_path}`, [evaluator.py:118](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L118)) and an immutable `in_flow_verdict` row in `evaluations`. Two evaluator shapes share one mechanism:
+`EvaluatorNodeRunner.run` ([evaluator.py:54](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L54)) runs the evaluator's `role_file` prompt read-only and maps its structured verdict to an outcome (`_verdict`, [evaluator.py:132](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L132)): a blocking finding → `rework`, otherwise `accept`. Blocking means severity `high` (raw `high`/`critical`/`blocking`); `medium`/`low` are advisory only — the routing (`_is_blocking`) and the carried `Finding.blocking` flag agree on this (one definition, `_BLOCKING_SEVERITIES`). It writes the findings artifact (`review/findings.json`, exposed downstream as `{review_path}`, [evaluator.py:118](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L118)) and an immutable `in_flow_verdict` row in `evaluations`. Two evaluator shapes share one mechanism:
 
 - **Blocking** (`blocking: true`, e.g. `review`) — reworks every time it finds a blocking issue; the engine's named-loop budget bounds the cycles (exhaustion → manual).
 - **Non-blocking self-capping** (e.g. `test_quality`) — reworks until its own `max_rework_per_stage` is spent, **counted from the immutable `in_flow_verdict` rows** (`count_rework_verdicts`, [evaluator.py:146](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L146)), then accepts — never manual. There is no mutable counter, so the core stays domain-free.
@@ -78,8 +78,6 @@ A `resume_own_lineage` evaluator (the research critic) resumes its own durable s
 - **Used by:** [B28](B28-flow-engine.md) (runner registry), [B06](B06-orchestrator-pipeline.md) (wiring).
 
 ## Audit candidates
-
-- The verdict routing (`_is_blocking`, [evaluator.py:271](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L271)) treats only `high`/`critical`/`blocking` as blocking — a `medium` finding does **not** drive `rework` — while `Finding.blocking` ([engine.py:73](../../../src/wastech_orchestrator/core/flow/engine.py#L73)) reports `medium` as blocking. The carried `Finding` and the routing decision disagree on `medium`. Also `_BLOCKING_SEVERITIES` and `_HIGH_SEVERITIES` are identical frozensets ([evaluator.py:41-43](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L41)). See [the audit](../../backlog/2026-06-21-audit.md).
 
 (The former `build_stage_map` transitional debt — shoehorning arbitrary node ids into the 8-value `Stage` enum, with same-identity nodes sharing one audit directory — is **resolved**: the node→`Stage` map is gone, each node uses `node.id` directly as its identity, and per-node audit directories now exist (see Wiring, above, and [B27](B27-observability.md)).)
 

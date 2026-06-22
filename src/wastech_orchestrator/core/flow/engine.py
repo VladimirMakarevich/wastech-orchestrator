@@ -60,8 +60,8 @@ class EngineInternalError(Exception):
 class Finding:
     """A single evaluator finding (the shared evaluator primitive, P2.1).
 
-    ``severity`` drives blocking: a ``medium``/``high`` finding blocks (an evaluator verdict of
-    ``rework`` requires at least one), a ``low`` finding is advisory only. ``paths`` are the
+    ``severity`` drives blocking: a ``high`` finding blocks (an evaluator verdict of ``rework``
+    requires at least one); ``medium``/``low`` findings are advisory only. ``paths`` are the
     files/locations the finding concerns. Carried on :class:`NodeOutcome` for the audit trail (the
     immutable ``evaluations`` row) — the engine never inspects it to route.
     """
@@ -72,8 +72,8 @@ class Finding:
 
     @property
     def blocking(self) -> bool:
-        """A finding blocks (drives ``rework``) iff its severity is ``medium`` or ``high``."""
-        return self.severity in ("medium", "high")
+        """A finding blocks (drives ``rework``) iff ``high``; ``medium``/``low`` are advisory."""
+        return self.severity == "high"
 
 
 @dataclass(frozen=True, slots=True)

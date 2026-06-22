@@ -257,6 +257,14 @@ def test_budgets_accessible(impl_snap: FlowSnapshot) -> None:
     assert impl_snap.doc.budgets["review_fix"] == 15
 
 
+def test_research_audit_global_budget_uses_reserved_key(audit_snap: FlowSnapshot) -> None:
+    # #6: the research/audit global ceiling must use the reserved key the engine's _global_cap
+    # reads (FlowRunState.GLOBAL_FIX_KEY), not the inert "global_revision_iterations" key.
+    assert audit_snap.doc.budgets["global_fix_iterations"] == 8
+    research = load_flow(CODESIGN / "deep_research.yaml")
+    assert research.doc.budgets["global_fix_iterations"] == 12
+
+
 def test_budgets_readonly(impl_snap: FlowSnapshot) -> None:
     with pytest.raises(TypeError):
         impl_snap.doc.budgets["new_budget"] = 1  # type: ignore[index]
@@ -268,10 +276,6 @@ def test_decomposition_parsed(impl_snap: FlowSnapshot) -> None:
     assert dec.proposed_by == "planning"
     assert "implementation" in dec.sub_flow
     assert "fixing" in dec.sub_flow
-    assert dec.gate_min == 2
-    assert dec.gate_max == 8
-    assert dec.linear_depends_on is True
-    assert dec.commit_each_subtask is True
     assert dec.shared_budget == "global_fix_iterations"
 
 

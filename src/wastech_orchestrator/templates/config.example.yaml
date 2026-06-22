@@ -3,7 +3,7 @@
 # This is the packaged copy used by `wastech-orchestrator init`; keep it in sync with the
 # repo-root config.example.yaml
 
-schema_version: 11                  # config format version; the orchestrator refuses newer configs
+schema_version: 12                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -31,8 +31,6 @@ agents:
   decomposition:                    # optional task decomposition (§5.1); OFF by default
     enabled: false
     max_subtasks: 8                 # a split with n > this (or n < 2) is rejected; runs as a single task
-    min_size_signal: "large"        # advisory threshold passed to the planning prompt
-    commit_per_subtask: true        # one local commit per subtask on the single task branch
 
   # Provider routing is node-based: a flow node declares its own `provider` (else the global
   # primary below). Exactly one configured provider must set `primary: true` — it runs every node
@@ -68,10 +66,11 @@ security:
   denied_read_paths:
     - ".env"
     - "secrets/**"
-  denied_commands:
+  denied_commands:                    # REPLACES (does not extend) the default list — keep every entry you need
     - "git commit"
     - "git push"
     - "gh pr create"
+    - "gh pr merge"
 
 validation:                         # input hardening gate (§19); rejects broken tasks before any branch
   max_task_bytes: 262144

@@ -45,7 +45,6 @@ class LedgerRecord:
     fix_iterations: int = 0
     terminal_cleanup: str | None = None
     failure_report: str | None = None
-    summary_gist: str | None = None
     validation_reason: str | None = None
     decomposed: bool = False
     subtask_count: int | None = None
@@ -76,7 +75,6 @@ class LedgerRecord:
             "terminal_cleanup": self.terminal_cleanup,
             "finished_at": self.finished_at,
             "failure_report": self.failure_report,
-            "summary_gist": self.summary_gist,
             "validation_reason": self.validation_reason,
             "decomposed": self.decomposed,
             "subtask_count": self.subtask_count,

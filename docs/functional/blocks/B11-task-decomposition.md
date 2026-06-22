@@ -86,10 +86,9 @@ On resume the fan-out reads already-committed orders from the store (`{s.order f
 
 See [the audit](../../backlog/2026-06-21-audit.md).
 
-- `src/wastech_orchestrator/core/flow/schema.py:134` — the flow `decomposition.gate` fields (`gate_min`, `gate_max`, `linear_depends_on`) are parsed ([snapshot.py:378](../../../src/wastech_orchestrator/core/flow/snapshot.py#L378)) but never consumed — bounds come from `config.agents.decomposition.max_subtasks` and the hardcoded floor of `2`, and linearity is always enforced regardless of `linear_depends_on`. The packaged flow sets `gate: { min: 2, max: 8, linear_depends_on: true }` ([implementation.yaml:89](../../../src/wastech_orchestrator/core/flow/packaged/implementation.yaml#L89)), implying the YAML controls the bounds when it does not.
-- `src/wastech_orchestrator/core/flow/schema.py:137` — `commit_each_subtask` (flow block) and `commit_per_subtask` (config, [config/schema.py:125](../../../src/wastech_orchestrator/config/schema.py#L125)) are parsed but never read at runtime; `_fan_out_subtasks` unconditionally commits each subtask ([orchestrator.py:1038](../../../src/wastech_orchestrator/core/orchestrator.py#L1038)) — two vestigial knobs that look like they gate per-subtask commits but do not.
 - `src/wastech_orchestrator/core/decomposition.py:9` — the module docstring says the gate can be on via "the per-task `decompose` tri-state", but no such field exists on `NormalizedTask` (only `auto_merge`/`prompt_audit` are task-wins, [task/model.py:34](../../../src/wastech_orchestrator/task/model.py#L34)) and `_decomposition_gate_on` returns only the config default ([orchestrator.py:1805](../../../src/wastech_orchestrator/core/orchestrator.py#L1805)); stale docstring.
-- `src/wastech_orchestrator/config/schema.py:124` — `min_size_signal` is documented as an advisory threshold passed to the planning prompt ([config.example.yaml:34](../../../src/wastech_orchestrator/templates/config.example.yaml#L34)) but is never referenced outside config load/scaffolding; effectively dead config.
+
+(The decorative flow `decomposition.gate` fields + `commit_each_subtask`, and the config `min_size_signal`/`commit_per_subtask` knobs, were **removed** — audit #4/#5.)
 
 ## Tests
 

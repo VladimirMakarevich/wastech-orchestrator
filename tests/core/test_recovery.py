@@ -358,6 +358,36 @@ def test_resume_more_than_one_active_marks_manual(
     }
 
 
+def test_resume_corrupt_normalized_artifact_marks_manual(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # A corrupt/truncated task.normalized.json must fail closed to manual on resume, not crash out
+    # of resume() with an uncaught JSONDecodeError (§13 fail-closed).
+    from wastech_orchestrator.providers.artifacts import task_artifact_dir
+
+    notifier = RecordingNotifier()
+    orch, store, ledger, art, _ = _build_orchestrator(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        _make_providers(git_repo),
+        [0],
+        notifier=notifier,
+    )
+    task_id = "corrupt"
+    store.insert_task(TaskRow(task_id=task_id, title="Corrupt manifest", status=Status.RUNNING))
+    task_dir = task_artifact_dir(str(art), task_id)
+    task_dir.mkdir(parents=True, exist_ok=True)
+    (task_dir / "task.normalized.json").write_text('{"id": "corrupt", "ti', encoding="utf-8")
+
+    result = orch.resume()
+
+    assert result is not None and result.final_status is Status.MANUAL_ACTION_REQUIRED
+    assert store.get_task(task_id).status is Status.MANUAL_ACTION_REQUIRED
+    assert ledger.records()[0]["id"] == task_id
+    assert notifier.calls == [(task_id, "manual_action_required")]
+
+
 def test_resume_interrupted_cleanup_notifies_after_ledger(
     git_repo, make_git_config, git_run, tmp_path: Path
 ) -> None:

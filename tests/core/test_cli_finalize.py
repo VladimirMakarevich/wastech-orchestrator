@@ -241,8 +241,7 @@ def test_finalize_refuses_while_daemon_running(
     project = tmp_path / "p"
     project.mkdir()
     config = _seed(project, git_repo.clone)
-    monkeypatch.setattr(cli.process_control, "read_pid", lambda _p: 4321)
-    monkeypatch.setattr(cli.process_control, "is_running", lambda _pid: True)
+    monkeypatch.setattr(cli.process_control, "running_daemon_pid", lambda _p: 4321)
 
     code = cli.main(["--config", str(config), "finalize", "task-1", "--as", "failed"])
     assert code == 1

@@ -16,7 +16,6 @@ Its load-bearing distinction is **launch failure vs. quality failure**. A check 
 - `CheckRunner.run_process` (property) ([check_runner.py:85](../../../src/wastech_orchestrator/check_runner.py#L85)) — exposes the injected safe runner. **Note:** no caller reads it today (see Audit candidates).
 - `CheckOutcome` ([check_runner.py:56](../../../src/wastech_orchestrator/check_runner.py#L56)) — `passed`, `runs: tuple[CheckRunResult, ...]`, `first_failure_log`, `launch_failed`, `first_launch_error`.
 - `CheckRunResult` ([check_runner.py:41](../../../src/wastech_orchestrator/check_runner.py#L41)) — one check's `command`, `name`, `exit_code`, `timed_out`, `passed`, `log_path`, `launch_failed`, `launch_error`.
-- `split_command(command) -> Sequence[str]` ([check_runner.py:207](../../../src/wastech_orchestrator/check_runner.py#L207)) — module-level `shlex.split` helper (no shell).
 
 ## Behavior
 
@@ -82,10 +81,9 @@ Each check emits a `check started` and a `check completed` log bound to `task_id
 
 See [the audit](../../backlog/2026-06-21-audit.md).
 
-- `check_runner.py:1-16` — the module docstring is **stale on its own central fact**: it says checks "run from the canonical `checks.model.ResolvedCheck` argv lists supplied by the resolver; absent those, the configured `checks.commands` are normalized" yet leads with "Runs the configured `checks.commands` (config, not hardcoded) through … `shlex.split`". The `shlex.split` framing describes only the legacy `checks=None` fallback, not the primary resolved-profile path.
-- `check_runner.py:207-209` — `split_command` is **vestigial to this module**: the runner never calls it (it relies on `normalize_commands` upstream); its only consumer is a security test ([tests/security/test_no_shell_interpolation.py:56](../../../tests/security/test_no_shell_interpolation.py#L56)). It duplicates the `shlex.split(..., posix=True)` already inside `normalize_check_command` ([model.py:110](../../../src/wastech_orchestrator/checks/model.py#L110)).
+- `check_runner.py:1-16` — the module docstring still **leads with** "Runs the configured `checks.commands`" though the primary path runs the canonical `checks.model.ResolvedCheck` argv lists from the resolver; the `checks.commands` normalization is only the legacy `checks=None` fallback. A lead-with-the-resolver reorder is the optional cleanup (Phase 6 #31).
 
 ## Tests
 
 - `tests/check/test_check_runner.py` — empty/blank command set → vacuous pass; all-pass aggregation and per-check logs; argv split without shell; explicit `ResolvedCheck` overriding config; first-failure short-circuit; timeout is a quality (not launch) failure; launch error is distinct and flagged on both `CheckOutcome` and the `CheckRunResult`; timeout value passthrough; logs never overwritten across re-runs; subtask log prefixing; stderr redaction in the log; structured `check started` / `check completed` + duration logging.
-- `tests/security/test_no_shell_interpolation.py` — `split_command` performs `shlex` splitting and does not expand shell substitutions, anchoring the no-shell guarantee.
+- `tests/security/test_no_shell_interpolation.py` — `normalize_check_command` splits a command into argv tokens and does not expand shell substitutions, anchoring the no-shell guarantee on the real resolver path.

@@ -12,7 +12,7 @@ The actual bounding — comparing a counter against a cap and ending the run whe
 
 ## Public surface
 
-- `LoopCounters` ([loop_control.py:27](../../../src/wastech_orchestrator/core/loop_control.py#L27)) — dataclass: `stage_attempts`, `test_fix_cycles`, `review_fix_cycles`, `fix_iterations` (all default `0`); the per-task counters persisted on the `tasks` row.
+- `LoopCounters` ([loop_control.py:27](../../../src/wastech_orchestrator/core/loop_control.py#L27)) — dataclass: `test_fix_cycles`, `review_fix_cycles`, `fix_iterations` (all default `0`); the per-task counters persisted on the `tasks` row. (`stage_attempts` was removed — audit #17: it is a per-node quantity, owned by the Router and persisted on `node_runs`, never a task-level integer.)
 - `record_rework(run_state) -> int` ([loop_control.py:37](../../../src/wastech_orchestrator/core/loop_control.py#L37)) — the single global accounting path; bumps `FlowRunState.loop_counters["global_fix_iterations"]` and returns the new value.
 - `FlowRunState` ([run_state.py:30](../../../src/wastech_orchestrator/core/flow/run_state.py#L30)) — the mutable per-traversal checkpoint holding `loop_counters` (`dict[str, int]`), with `bump` / `counter` / `reset` / `reset_for_next_subtask` and the `fix_iterations` convenience property.
 - `FlowRunState.GLOBAL_FIX_KEY` ([run_state.py:37](../../../src/wastech_orchestrator/core/flow/run_state.py#L37)) — the reserved counter key `"global_fix_iterations"`.
@@ -25,11 +25,12 @@ The actual bounding — comparing a counter against a cap and ending the run whe
 
 ### The counter struct and its keys
 
-`LoopCounters` is pure data — no methods, no enforcement. Its four fields back distinct surfaces:
+`LoopCounters` is pure data — no methods, no enforcement. Its three fields back distinct surfaces:
 
 - `fix_iterations` — the single global per-task counter; mirrors `FlowRunState.fix_iterations`, which reads `GLOBAL_FIX_KEY` ([run_state.py:47](../../../src/wastech_orchestrator/core/flow/run_state.py#L47)).
 - `test_fix_cycles` / `review_fix_cycles` — the length of the _current consecutive_ named-loop cycle, mirrored from the runtime counters keyed `"test_fix"` / `"review_fix"`.
-- `stage_attempts` — attempts of a single stage run including provider fallback; owned and counted by the Router (`StageOutcome.stage_attempts`), not by this block. See the audit note below.
+
+(`stage_attempts` — attempts of a single stage run including provider fallback — is owned and counted by the Router (`StageOutcome.stage_attempts`) and persisted on `node_runs`, never on the `tasks` row; it is not a `LoopCounters` field.)
 
 `FlowRunState.loop_counters` is a single `dict[str, int]` carrying three key flavours without per-flow special cases ([run_state.py:13](../../../src/wastech_orchestrator/core/flow/run_state.py#L13)): a named loop's name, a synthetic inline-budget edge key, and the reserved `GLOBAL_FIX_KEY`. `reset_for_next_subtask` drops every per-loop / per-edge counter but **preserves** the global one, so the global fix budget accumulates across a decomposed task while each subtask gets fresh per-loop budgets ([run_state.py:69](../../../src/wastech_orchestrator/core/flow/run_state.py#L69)).
 
@@ -60,11 +61,7 @@ Persistence round-trips through the state store: `save_counters` writes the four
 ## Dependencies
 
 - **Uses:** B07 (`get_counters` / `save_counters` / `save_flow_checkpoint` persist the counters on the `tasks` row), B05 (`agents.max_fix_cycles` / `max_total_fix_iterations` supply the config caps).
-- **Used by:** B28 (`_charge_rework` calls `record_rework` and caps the counters), B06 (`_sync_counters_from_run_state` mirrors the engine counters back into `LoopCounters`), B08 (the ledger entry and failure report read the counters), B01 (the CLI `status` line prints `fix_iterations`), B17 (the Router produces `stage_attempts`, persisted into this struct's field).
-
-## Audit candidates
-
-- `src/wastech_orchestrator/core/loop_control.py:31` — `LoopCounters.stage_attempts` is vestigial on the `tasks` row in the flow-engine era — see [the audit](../../backlog/2026-06-21-audit.md). The Router's per-run `stage_attempts` is persisted only into `node_runs` via `complete_node_run` ([agent.py:423](../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L423), [evaluator.py:260](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L260)); `_sync_counters_from_run_state` never sets it ([orchestrator.py:938](../../../src/wastech_orchestrator/core/orchestrator.py#L938)), so the `tasks.stage_attempts` column read by `get_counters` and surfaced to operators is permanently `0`.
+- **Used by:** B28 (`_charge_rework` calls `record_rework` and caps the counters), B06 (`_sync_counters_from_run_state` mirrors the engine counters back into `LoopCounters`), B08 (the ledger entry and failure report read the counters), B01 (the CLI `status` line prints `fix_iterations`), B17 (the Router produces `stage_attempts`, persisted on `node_runs`).
 
 ## Tests
 

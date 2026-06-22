@@ -87,6 +87,7 @@ def test_safe_security_defaults_are_written(tmp_path: Path) -> None:
     assert cfg.security.strict_isolation is True
     assert "git push" in cfg.security.denied_commands
     assert "gh pr create" in cfg.security.denied_commands
+    assert "gh pr merge" in cfg.security.denied_commands
     assert cfg.agents.providers[ProviderId.CODEX].permission_profile == "workspace-write"
     assert cfg.agents.providers[ProviderId.CODEX].sandbox == "workspace-write"
     assert cfg.agents.providers[ProviderId.CODEX].extra_args == ()

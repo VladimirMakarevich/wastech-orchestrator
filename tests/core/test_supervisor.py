@@ -130,6 +130,27 @@ def test_supervisor_observes_each_completed_step(tmp_path: Path) -> None:
     assert all(e.verdict == "advisory" and e.node_id is None for e in evals)
 
 
+def test_supervisor_session_is_durable_across_restart(tmp_path: Path) -> None:
+    # #10: the supervisor's own resume_own_lineage session is persisted to node_lineage so a
+    # resumed task continues its accumulated cross-step context instead of starting blind.
+    from wastech_orchestrator.core.supervisor import _SUPERVISOR_LINEAGE_NODE_ID
+
+    store = _store(tmp_path)
+    # First process: one observation persists the supervisor's own session under the sentinel id.
+    sup1 = _supervisor(tmp_path, FakeRouter(), store)
+    sup1.observe(task_id=_TASK, node_id="implementation", node_run_id=1, outcome_kind="done")
+    row = store.get_node_lineage(_TASK, _SUPERVISOR_LINEAGE_NODE_ID, None)
+    assert row is not None
+    assert row.raw_session_id == "sess-super" and row.provider == "claude"
+
+    # A restart rebuilds a fresh Supervisor with no in-memory session; its first turn must resume
+    # the persisted session (provider matches) rather than start fresh.
+    router2 = FakeRouter()
+    sup2 = _supervisor(tmp_path, router2, store)
+    sup2.observe(task_id=_TASK, node_id="review", node_run_id=2, outcome_kind="accept")
+    assert router2.requests[0].session_id == "sess-super"
+
+
 def test_supervisor_advisory_never_reworks(tmp_path: Path) -> None:
     router, store = FakeRouter(), _store(tmp_path)
     sup = _supervisor(tmp_path, router, store)

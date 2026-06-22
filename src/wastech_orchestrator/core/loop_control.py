@@ -5,9 +5,10 @@ the termination rules now (it charges each ``rework``/``fail`` edge against a ge
 plus its named loop / inline budget — the ``min(flow_budget, config_cap)`` ceiling), so this module
 is just the data shape:
 
-* ``stage_attempts`` — attempts of a single stage run, including provider fallback within that
-  stage; bounded by ``agents.max_stage_attempts``. Owned and enforced by the Router
-  (``StageOutcome.stage_attempts``); persisted here.
+(``stage_attempts`` is **not** here: it is an inherently per-node quantity owned by the Router
+(``StageOutcome.stage_attempts``) and persisted on ``node_runs``, never collapsed to a task-level
+integer — audit remediation #17.)
+
 * ``test_fix_cycles`` / ``review_fix_cycles`` — the length of the *current consecutive* fix loop,
   counted separately for the test-driven and review-driven loops; each bounded by
   ``agents.max_fix_cycles``.
@@ -28,7 +29,6 @@ if TYPE_CHECKING:
 class LoopCounters:
     """The mutable per-task loop counters persisted on the ``tasks`` row (§9)."""
 
-    stage_attempts: int = 0
     test_fix_cycles: int = 0
     review_fix_cycles: int = 0
     fix_iterations: int = 0

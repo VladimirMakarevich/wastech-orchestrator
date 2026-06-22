@@ -421,6 +421,41 @@ flow:
     assert _has(vs, "graph", "ghost_planner")
 
 
+def test_decomposition_region_without_entry_edge_rejected(tmp_path: Path) -> None:
+    # #9: references resolve, but no edge from proposed_by lands directly in the region. The
+    # partitioner would crash with StopIteration resolving region_entry; the validator rejects it.
+    yaml = """\
+flow:
+  name: t
+  task_type: t
+  permission_ceiling: workspace-write
+  output_policy: code_change
+  publishing: pull_request
+  nodes:
+    - id: planner
+      kind: agent
+      role_file: roles/planner.md
+    - id: gate
+      kind: agent
+      role_file: roles/gate.md
+    - id: impl
+      kind: agent
+      role_file: roles/impl.md
+    - id: out
+      kind: publish
+      policy: pull_request
+  edges:
+    - { from: planner, to: gate }
+    - { from: gate, to: impl }
+    - { from: impl, to: out }
+  decomposition:
+    proposed_by: planner
+    sub_flow: [impl]
+"""
+    vs = _violations(yaml, tmp_path)
+    assert _has(vs, "graph", "enters the sub_flow region")
+
+
 # -- ceiling: evaluator invariants --------------------------------------------
 
 

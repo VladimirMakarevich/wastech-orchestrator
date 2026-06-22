@@ -119,15 +119,6 @@ class GitResult:
 
 
 @dataclass(frozen=True)
-class PublishResult:
-    """The outcome of the publish sequence for a task."""
-
-    commit_sha: str | None
-    pushed: bool
-    pr_url: str | None
-
-
-@dataclass(frozen=True)
 class CleanupOutcome:
     """The terminal-cleanup decision (§8.3)."""
 

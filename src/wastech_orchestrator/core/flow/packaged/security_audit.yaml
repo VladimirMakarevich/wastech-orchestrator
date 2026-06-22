@@ -58,4 +58,4 @@ flow:
     - { from: report, to: private_storage }
 
   budgets:
-    global_revision_iterations: 8
+    global_fix_iterations: 8

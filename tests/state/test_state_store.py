@@ -120,10 +120,9 @@ def test_counters_round_trip(store: StateStore) -> None:
     store.insert_task(_new_task())
     store.save_counters(
         "task-001",
-        LoopCounters(stage_attempts=1, test_fix_cycles=2, review_fix_cycles=1, fix_iterations=3),
+        LoopCounters(test_fix_cycles=2, review_fix_cycles=1, fix_iterations=3),
     )
     counters = store.get_counters("task-001")
-    assert counters.stage_attempts == 1
     assert counters.test_fix_cycles == 2
     assert counters.review_fix_cycles == 1
     assert counters.fix_iterations == 3
@@ -376,7 +375,6 @@ def _seed_terminal_task(store: StateStore, *, status: Status = Status.FAILED) ->
             status=status,
             branch="agent/task-001-a-task",
             slug="a-task",
-            stage_attempts=3,
             test_fix_cycles=2,
             review_fix_cycles=1,
             fix_iterations=4,
@@ -411,7 +409,7 @@ def test_reset_task_for_rerun_clears_per_attempt_state(store: StateStore) -> Non
     assert row is not None
     assert row.status is Status.FAILED  # left terminal — run_task's upsert flips it
     assert row.branch is None and row.slug is None
-    assert row.stage_attempts == 0 and row.fix_iterations == 0
+    assert row.fix_iterations == 0
     assert row.test_fix_cycles == 0 and row.review_fix_cycles == 0
     assert row.decomposition_accepted is None and row.subtask_count is None
     assert row.subtasks_completed == 0

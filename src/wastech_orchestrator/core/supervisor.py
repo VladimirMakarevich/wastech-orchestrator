@@ -14,7 +14,10 @@ never consumes it to route. Blocking is the job of in-flow ``review`` / ``test_q
 Configured in ``config.yaml`` (``supervisor: {model, reasoning, role_file}``) under the same ceiling
 as flow nodes: ``permission_profile`` is forced ``read-only`` here, ``reasoning`` ∈ the allowlist
 (loader), ``role_file`` is path-contained (validator + the renderer's flow-dir containment). The own
-session is in-memory in P2.1; durable ``resume_own_lineage`` (survives restart) lands in P2.2.
+``resume_own_lineage`` session is durable: it is persisted to / hydrated from ``node_lineage`` under
+a reserved sentinel node id (``state.db`` only), so a resumed task continues the supervisor's
+accumulated cross-step context instead of starting blind — gated by provider match, exactly like the
+``resume_own_lineage`` evaluator.
 
 It replaces the old summary provider and the removed blocking ``supervise_impl`` / ``supervise_fix``
 nodes (2026-06-19 revision; see ``docs/backlog/flows/flow-contract.md`` §2.2,
@@ -32,8 +35,9 @@ from wastech_orchestrator.config.schema import SupervisorConfig
 from wastech_orchestrator.core.flow.nodes.base import RegisterArtifact, RouterPort
 from wastech_orchestrator.core.flow.prompt import RoleFileError, render_role_prompt
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
-from wastech_orchestrator.providers.base import AgentRunRequest
-from wastech_orchestrator.state_store import EvaluationRow
+from wastech_orchestrator.providers.base import AgentRunRequest, ProviderId
+from wastech_orchestrator.routing.router import ResolvedRoute
+from wastech_orchestrator.state_store import EvaluationRow, NodeLineageRow
 
 _LOG = logging.getLogger(__name__)
 
@@ -41,11 +45,23 @@ _LOG = logging.getLogger(__name__)
 # route label); it is not a graph node, so it records ``evaluations`` rows, never ``node_runs``.
 _SUPERVISOR_IDENTITY = "supervisor"
 
+# The reserved ``node_lineage`` key under which the supervisor's own durable session lives. It is a
+# double-underscore sentinel, distinct from the routing identity above, so it can never collide with
+# a real flow node id (an operator could legally name an evaluator node ``supervisor``).
+_SUPERVISOR_LINEAGE_NODE_ID = "__supervisor__"
+
 
 class SupervisorStorePort(Protocol):
-    """The slice of the state store the supervisor needs: append an immutable evaluation row."""
+    """The slice of the state store the supervisor needs: the immutable evaluation row plus the
+    durable own-session lineage (read on first use, written after each turn)."""
 
     def record_evaluation(self, row: EvaluationRow) -> int: ...
+
+    def get_node_lineage(
+        self, task_id: str, node_id: str, subtask_order: int | None = None
+    ) -> NodeLineageRow | None: ...
+
+    def upsert_node_lineage(self, row: NodeLineageRow) -> None: ...
 
 
 class Supervisor:
@@ -71,8 +87,9 @@ class Supervisor:
         self._flow_dir = flow_dir
         self._register_artifact = register_artifact
         self._default_timeout_seconds = default_timeout_seconds
-        # The supervisor's own session (resume_own_lineage). In-memory in P2.1 — independent of the
-        # editing-lineage authors; durable across restart in P2.2.
+        # The supervisor's own session (resume_own_lineage). Held in-memory within a process run and
+        # persisted to / hydrated from ``node_lineage`` so it survives a restart (independent of the
+        # editing-lineage authors). ``None`` until the first turn runs or the persisted row is read.
         self._own_session_id: str | None = None
 
     # -- per-step observation --------------------------------------------------
@@ -136,9 +153,10 @@ class Supervisor:
     def _run(self, task_id: str, prompt: str) -> str | None:
         """Run one read-only supervisor LLM turn on its own session; return the final message.
 
-        Continues the supervisor's own ``resume_own_lineage`` session (updates the in-memory session
-        id from the result). Best-effort by contract: any failure (no provider, infra error, role
-        file unreadable) is logged and yields ``None`` — never raised.
+        Continues the supervisor's own ``resume_own_lineage`` session: it resumes the in-memory id,
+        or — on a fresh process after a restart — the persisted ``node_lineage`` session, and writes
+        the new session id back after the turn. Best-effort by contract: any failure (no provider,
+        infra error, role file unreadable) is logged and yields ``None`` — never raised.
         """
         try:
             route = self._router.resolve_route(_SUPERVISOR_IDENTITY, None)
@@ -153,7 +171,7 @@ class Supervisor:
                 node_run_id=0,  # not a graph node; audit lives in the ``evaluations`` table
                 model=self._settings.model,
                 reasoning=self._settings.reasoning,
-                session_id=self._own_session_id,
+                session_id=self._resume_session(task_id, route),
             )
             outcome = self._router.run_stage(request, route)
         except Exception as exc:  # noqa: BLE001 — advisory layer must never break the task
@@ -166,8 +184,41 @@ class Supervisor:
         if result is None:
             return None
         if result.session_id:
-            self._own_session_id = result.session_id  # resume_own_lineage continuity
+            self._own_session_id = result.session_id  # resume_own_lineage continuity (in-memory)
+            self._persist_session(task_id, result.session_id, outcome.provider_used)
         return result.final_message
+
+    def _resume_session(self, task_id: str, route: ResolvedRoute) -> str | None:
+        """The own session to resume: the in-memory id if a turn already ran this process, else the
+        persisted lineage — but only when produced by the provider now resolved (you cannot resume a
+        Claude session on Codex). On the first round there is no lineage yet, so it starts fresh.
+        """
+        if self._own_session_id is not None:
+            return self._own_session_id
+        row = self._store.get_node_lineage(task_id, _SUPERVISOR_LINEAGE_NODE_ID, None)
+        if row is None or row.provider != route.primary.value:
+            return None
+        self._own_session_id = row.raw_session_id
+        return self._own_session_id
+
+    def _persist_session(
+        self, task_id: str, session_id: str, provider_used: ProviderId | None
+    ) -> None:
+        """Persist the supervisor's own session after a successful turn (``state.db`` only — the raw
+        id is redacted everywhere else), keyed by the reserved sentinel so a resumed task resumes
+        it.
+        """
+        if provider_used is None:
+            return
+        self._store.upsert_node_lineage(
+            NodeLineageRow(
+                task_id=task_id,
+                node_id=_SUPERVISOR_LINEAGE_NODE_ID,
+                provider=provider_used.value,
+                raw_session_id=session_id,
+                subtask_order=None,
+            )
+        )
 
     def _record(
         self,

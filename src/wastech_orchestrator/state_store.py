@@ -62,7 +62,12 @@ def _utc_now_iso() -> str:
 # ``resume_own_lineage`` node (the research critic), keyed by ``(task_id, node_id, subtask_order)``
 # so a node remembers what it flagged across rework rounds. Like ``editing_lineage`` the raw session
 # id lives only here. Created on a fresh DB by ``_SCHEMA`` (no additive column to migrate).
-DB_SCHEMA_VERSION = 10
+# v11 (2026-06-22, audit remediation #17): the always-0 ``tasks.stage_attempts`` column was dropped
+# — ``stage_attempts`` is an inherently per-node quantity that lives on ``node_runs`` (the
+# task-level integer was never populated). A destructive change (dropped column), so an older
+# versioned DB is refused fail-closed and recreated (greenfield). ``node_runs.stage_attempts`` is
+# untouched.
+DB_SCHEMA_VERSION = 11
 
 
 class IncompatibleStateError(Exception):
@@ -135,7 +140,6 @@ CREATE TABLE IF NOT EXISTS tasks (
     validation_reason TEXT,
     refinement_ran INTEGER,
     refinement_skip_reason TEXT,
-    stage_attempts INTEGER NOT NULL DEFAULT 0,
     test_fix_cycles INTEGER NOT NULL DEFAULT 0,
     review_fix_cycles INTEGER NOT NULL DEFAULT 0,
     fix_iterations INTEGER NOT NULL DEFAULT 0,
@@ -288,7 +292,6 @@ class TaskRow:
     validation_reason: str | None = None
     refinement_ran: bool | None = None
     refinement_skip_reason: str | None = None
-    stage_attempts: int = 0
     test_fix_cycles: int = 0
     review_fix_cycles: int = 0
     fix_iterations: int = 0
@@ -539,12 +542,12 @@ class StateStore:
                     task_id, title, status, source_path, branch, slug,
                     created_at, updated_at, validation_passed, validation_reason,
                     refinement_ran, refinement_skip_reason,
-                    stage_attempts, test_fix_cycles, review_fix_cycles, fix_iterations,
+                    test_fix_cycles, review_fix_cycles, fix_iterations,
                     decomposition_enabled, decomposition_accepted, decomposition_reason,
                     subtask_count, active_subtask, subtasks_completed,
                     failure_report_path, cleanup_target_branch, cleanup_completed,
                     cleanup_completed_at, cleanup_last_error, finished_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(task_id) DO UPDATE SET
                     title = excluded.title,
                     status = excluded.status,
@@ -565,7 +568,6 @@ class StateStore:
                     row.validation_reason,
                     _b(row.refinement_ran),
                     row.refinement_skip_reason,
-                    row.stage_attempts,
                     row.test_fix_cycles,
                     row.review_fix_cycles,
                     row.fix_iterations,
@@ -657,7 +659,6 @@ class StateStore:
                 validation_reason=None,
                 refinement_ran=None,
                 refinement_skip_reason=None,
-                stage_attempts=0,
                 test_fix_cycles=0,
                 review_fix_cycles=0,
                 fix_iterations=0,
@@ -708,7 +709,7 @@ class StateStore:
 
     def get_counters(self, task_id: str) -> LoopCounters:
         cur = self._conn.execute(
-            "SELECT stage_attempts, test_fix_cycles, review_fix_cycles, fix_iterations "
+            "SELECT test_fix_cycles, review_fix_cycles, fix_iterations "
             "FROM tasks WHERE task_id = ?",
             (task_id,),
         )
@@ -716,7 +717,6 @@ class StateStore:
         if row is None:
             raise KeyError(task_id)
         return LoopCounters(
-            stage_attempts=row["stage_attempts"],
             test_fix_cycles=row["test_fix_cycles"],
             review_fix_cycles=row["review_fix_cycles"],
             fix_iterations=row["fix_iterations"],
@@ -728,7 +728,6 @@ class StateStore:
         self.update_task(
             task_id,
             conn,
-            stage_attempts=counters.stage_attempts,
             test_fix_cycles=counters.test_fix_cycles,
             review_fix_cycles=counters.review_fix_cycles,
             fix_iterations=counters.fix_iterations,
@@ -1301,7 +1300,6 @@ def _task_from_row(row: sqlite3.Row) -> TaskRow:
         validation_reason=row["validation_reason"],
         refinement_ran=_ob(row["refinement_ran"]),
         refinement_skip_reason=row["refinement_skip_reason"],
-        stage_attempts=row["stage_attempts"],
         test_fix_cycles=row["test_fix_cycles"],
         review_fix_cycles=row["review_fix_cycles"],
         fix_iterations=row["fix_iterations"],

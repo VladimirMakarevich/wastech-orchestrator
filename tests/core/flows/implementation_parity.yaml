@@ -79,7 +79,5 @@ flow:
 
   decomposition:
     proposed_by: planning
-    gate: { min: 2, max: 8, linear_depends_on: true }
     sub_flow: [implementation, testing, review, fixing]
-    commit_each_subtask: true
     shared_budget: global_fix_iterations

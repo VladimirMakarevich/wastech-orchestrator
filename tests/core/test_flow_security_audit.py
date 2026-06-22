@@ -168,7 +168,7 @@ def _agents() -> AgentsConfig:
         max_fix_cycles=99,
         max_total_fix_iterations=99,
         decomposition=DecompositionConfig(
-            enabled=False, max_subtasks=8, min_size_signal="large", commit_per_subtask=True
+            enabled=False, max_subtasks=8
         ),
         providers={},
     )

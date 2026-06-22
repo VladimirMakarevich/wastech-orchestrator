@@ -118,12 +118,9 @@ _DECOMPOSITION_FIELDS = frozenset(
     {
         "proposed_by",
         "sub_flow",
-        "gate",
-        "commit_each_subtask",
         "shared_budget",
     }
 )
-_GATE_FIELDS = frozenset({"min", "max", "linear_depends_on"})
 _DEFAULTS_FIELDS = frozenset({"evaluator"})
 _EVALUATOR_DEFAULTS_FIELDS = frozenset(
     {
@@ -417,15 +414,9 @@ def _parse_decomposition(raw: Any) -> DecompositionConfig | None:
     _reject_unknown(raw, _DECOMPOSITION_FIELDS, "decomposition")
     proposed_by = str(_require(raw, "proposed_by", "decomposition"))
     sub_flow_raw = _require(raw, "sub_flow", "decomposition")
-    gate: dict[str, Any] = raw.get("gate") or {}
-    _reject_unknown(gate, _GATE_FIELDS, "decomposition.gate")
     return DecompositionConfig(
         proposed_by=proposed_by,
         sub_flow=tuple(str(s) for s in sub_flow_raw),
-        gate_min=gate.get("min"),
-        gate_max=gate.get("max"),
-        linear_depends_on=bool(gate.get("linear_depends_on", False)),
-        commit_each_subtask=bool(raw.get("commit_each_subtask", False)),
         shared_budget=raw.get("shared_budget") or None,
     )
 

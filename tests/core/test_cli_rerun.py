@@ -220,8 +220,7 @@ def test_rerun_refuses_when_daemon_running(
     project = tmp_path / "project"
     project.mkdir()
     config = _seed(project, git_repo.clone, TaskRow("task-1", "T", Status.FAILED))
-    monkeypatch.setattr(cli.process_control, "read_pid", lambda _p: 4321)
-    monkeypatch.setattr(cli.process_control, "is_running", lambda _pid: True)
+    monkeypatch.setattr(cli.process_control, "running_daemon_pid", lambda _p: 4321)
     code = cli.main(["--config", str(config), "rerun", "task-1"])
     assert code == 1
     assert "watch daemon is running" in capsys.readouterr().out

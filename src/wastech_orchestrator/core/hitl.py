@@ -14,9 +14,9 @@ import math
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
-from wastech_orchestrator.notify import AskHandle, AskKind, AskResult
+from wastech_orchestrator.notify import AskFailure, AskHandle, AskKind, AskResult
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.providers.redaction import redact_text
 
@@ -404,14 +404,21 @@ def mark_interaction_status(path: Path, status: str) -> None:
     _atomic_json(path, payload)
 
 
-def reset_pending_interactions(artifacts_root: str | Path, task_id: str) -> list[str]:
-    """Remove un-answered (``waiting``/``transport_error``) HITL artifacts for a continue (§rerun).
+# Statuses an interaction can carry while still un-answered: the delivered-but-unanswered "waiting"
+# plus every AskFailure (timeout / transport_error / invalid_response, persisted by write_answer).
+# Cleanup (reset / consume) acts on exactly these — derived from AskFailure so a new failure mode is
+# covered automatically and never silently skipped.
+_RESETTABLE_STATUSES: frozenset[str] = frozenset({"waiting", *get_args(AskFailure)})
 
-    The infra failure being continued from is often a dropped notifier (the prompt never delivered
-    or never answered). Deleting only those artifacts makes the re-entered stage ask fresh instead
-    of blocking on, or replaying, a stale prompt; ``answered``/``consumed`` artifacts from earlier
-    completed stages are left intact (the resume engine skips those stages). Returns the paths that
-    were reset, for logging.
+
+def reset_pending_interactions(artifacts_root: str | Path, task_id: str) -> list[str]:
+    """Remove un-answered (``waiting`` / any ``AskFailure``) HITL artifacts for a continue (§rerun).
+
+    The infra failure being continued from is often a dropped notifier (the prompt never delivered,
+    timed out, or returned an invalid response). Deleting only those artifacts makes the re-entered
+    stage ask fresh instead of blocking on, or replaying, a stale prompt; ``answered``/``consumed``
+    artifacts from earlier completed stages are left intact (the resume engine skips those stages).
+    Returns the paths that were reset, for logging.
     """
     hitl_dir = task_artifact_dir(artifacts_root, task_id) / "hitl"
     if not hitl_dir.is_dir():
@@ -419,14 +426,14 @@ def reset_pending_interactions(artifacts_root: str | Path, task_id: str) -> list
     reset: list[str] = []
     for path in sorted(hitl_dir.glob("*.json")):
         payload = load_interaction(path)
-        if payload is not None and payload.get("status") in ("waiting", "transport_error"):
+        if payload is not None and payload.get("status") in _RESETTABLE_STATUSES:
             path.unlink()
             reset.append(str(path))
     return reset
 
 
 def consume_pending_interactions(artifacts_root: str | Path, task_id: str) -> list[str]:
-    """Close un-answered (``waiting``/``transport_error``) HITL artifacts for a `finalize`.
+    """Close un-answered (``waiting`` or any ``AskFailure``) HITL artifacts for a `finalize`.
 
     Marks them ``consumed`` (not deletes — the audit artifact is preserved) so a later resume can't
     act on a stale prompt for a task the operator already finalized. ``answered``/``consumed``
@@ -438,7 +445,7 @@ def consume_pending_interactions(artifacts_root: str | Path, task_id: str) -> li
     closed: list[str] = []
     for path in sorted(hitl_dir.glob("*.json")):
         payload = load_interaction(path)
-        if payload is not None and payload.get("status") in ("waiting", "transport_error"):
+        if payload is not None and payload.get("status") in _RESETTABLE_STATUSES:
             mark_interaction_status(path, "consumed")
             closed.append(str(path))
     return closed

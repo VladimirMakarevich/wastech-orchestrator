@@ -14,7 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import wastech_orchestrator
-from wastech_orchestrator.check_runner import split_command
+from wastech_orchestrator.checks.model import normalize_check_command
 
 _SRC = Path(wastech_orchestrator.__file__).resolve().parent
 _PROCESS_RUNNER = _SRC / "providers" / "process.py"
@@ -52,6 +52,7 @@ def test_no_module_enables_a_shell() -> None:
 
 
 def test_check_commands_are_split_into_argv_not_shell_interpreted() -> None:
-    # A shell metacharacter stays a literal argv token — it is never expanded by a shell.
-    assert split_command("npm test") == ["npm", "test"]
-    assert split_command("echo $(whoami)") == ["echo", "$(whoami)"]
+    # A shell metacharacter stays a literal argv token — it is never expanded by a shell. This pins
+    # the real resolver path (normalize_check_command), the only command-splitting seam.
+    assert normalize_check_command("npm test").argv == ("npm", "test")
+    assert normalize_check_command("echo $(whoami)").argv == ("echo", "$(whoami)")

@@ -13,6 +13,7 @@ from wastech_orchestrator.core.hitl import (
     consume_pending_interactions,
     handle_from_artifact,
     parse_typed_output,
+    reset_pending_interactions,
 )
 from wastech_orchestrator.git_manager import ChangedPath
 
@@ -162,16 +163,36 @@ def _write_hitl(root: Path, task_id: str, node_id: str, status: str) -> Path:
 
 
 def test_consume_pending_interactions_closes_only_unanswered(tmp_path: Path) -> None:
+    # #11: every un-answered status — waiting AND all three AskFailures — must be closed, not just
+    # waiting/transport_error (else timeout/invalid_response leak past finalize and block a resume).
     waiting = _write_hitl(tmp_path, "task-1", "refinement", "waiting")
     errored = _write_hitl(tmp_path, "task-1", "planning", "transport_error")
-    answered = _write_hitl(tmp_path, "task-1", "review", "answered")
+    timed_out = _write_hitl(tmp_path, "task-1", "review", "timeout")
+    invalid = _write_hitl(tmp_path, "task-1", "fixing", "invalid_response")
+    answered = _write_hitl(tmp_path, "task-1", "summary", "answered")
 
     closed = consume_pending_interactions(tmp_path, "task-1")
 
-    assert set(closed) == {str(waiting), str(errored)}
-    assert json.loads(waiting.read_text())["status"] == "consumed"
-    assert json.loads(errored.read_text())["status"] == "consumed"
+    assert set(closed) == {str(waiting), str(errored), str(timed_out), str(invalid)}
+    for path in (waiting, errored, timed_out, invalid):
+        assert json.loads(path.read_text())["status"] == "consumed"
     assert json.loads(answered.read_text())["status"] == "answered"  # untouched
+
+
+def test_reset_pending_interactions_unlinks_all_unanswered(tmp_path: Path) -> None:
+    # #11: a continue must delete every un-answered artifact (incl. timeout/invalid_response) so the
+    # re-entered node asks fresh; answered/consumed artifacts stay.
+    paths = {
+        status: _write_hitl(tmp_path, "task-1", status, status)
+        for status in ("waiting", "transport_error", "timeout", "invalid_response")
+    }
+    answered = _write_hitl(tmp_path, "task-1", "answered_node", "answered")
+
+    reset = reset_pending_interactions(tmp_path, "task-1")
+
+    assert set(reset) == {str(p) for p in paths.values()}
+    assert all(not p.exists() for p in paths.values())
+    assert answered.exists()  # untouched
 
 
 def test_consume_pending_interactions_no_hitl_dir(tmp_path: Path) -> None:
