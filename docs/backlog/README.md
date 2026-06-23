@@ -48,7 +48,7 @@ These are deferred by the v1 spec or described in architecture notes; not schedu
 | PR template support | Generate PR bodies from a configurable template in addition to `summary.md`. | Should integrate with the existing summary stage and Git Manager. |
 | GitHub Issues integration | Link tasks to issues, update status, optionally close on PR creation/merge. | Requires GitHub auth through the existing external credential model. |
 | Web UI for tasks and logs | Browser UI for pending/running/done tasks, artifacts, logs, stuck states. | Read-only first; mutations need auth/audit. |
-| Auto-retry on network errors | Retry transient network/provider failures before fallback or terminal failure. | Must be bounded and audited; never retry quality failures. |
+| [Auto-retry on network errors](transient-provider-failure-recovery.md) | Retry transient network/provider failures before fallback or terminal failure. | Must be bounded and audited; never retry quality failures. Investigation + options in the detail file (**proposed**). |
 | Per-task budget limit | Task-level budget/time/token limits. | Must not let a task raise global security or cost ceilings. |
 | Auto-close stale tasks | Detect and close/archive/escalate stale pending/running/manual tasks. | Needs explicit policy and audit trail. |
 | Dry-run without push | Run planning/check/review/publish prep without pushing or opening a PR. | Must clearly mark that no publish operation occurred. |
@@ -66,6 +66,7 @@ These are deferred by the v1 spec or described in architecture notes; not schedu
 | Item | Detail |
 | --- | --- |
 | Runtime provider capacity gate | [runtime_provider_capacity_gate.md](runtime_provider_capacity_gate.md) |
+| Auto-retry on network errors (transient provider-failure recovery) | [transient-provider-failure-recovery.md](transient-provider-failure-recovery.md) |
 | Token optimization | [archive/token_optimization.md](token_optimization.md) |
 
 ## Rules

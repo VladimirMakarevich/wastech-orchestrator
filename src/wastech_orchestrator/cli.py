@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import shutil
 import sys
 import tempfile
 import threading
@@ -361,6 +362,58 @@ def _copy_worc_docs(dest_root: Path, *, overwrite: bool, dry: bool) -> tuple[lis
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_bytes((Path(wroot) / rel).read_bytes())
     return written, skipped
+
+
+def _flows_root() -> Traversable:
+    """The packaged built-in flows (``implementation``/``deep_research``/``security_audit``) and
+    their per-node role-prompt templates under ``roles/`` (works from a source tree or a wheel).
+
+    ``install`` copies this whole tree into ``.worc/flows/`` so the operator gets editable, *active*
+    copies: the registry prefers ``<repo>/.worc/flows/<task_type>.yaml`` over the packaged built-in,
+    and a node's ``role_file`` resolves beside it under ``.worc/flows/roles/``. Unlike the generated
+    ``guide/``, these are operator-editable, so a plain re-run never clobbers them (see
+    ``_copy_packaged_flows`` / ``_backup_flows_dir``).
+    """
+    return resources.files("wastech_orchestrator.core.flow").joinpath("packaged")
+
+
+def _copy_packaged_flows(
+    dest_root: Path, *, overwrite: bool, dry: bool
+) -> tuple[list[str], list[str]]:
+    """Copy the packaged built-in flows + their ``roles/`` prompts into ``dest_root/flows``.
+
+    Existing files are skipped unless ``overwrite`` (so a plain re-run preserves operator edits);
+    ``dry`` writes nothing. Returns ``(written, skipped)`` as ``flows/...`` relative paths.
+    """
+    written: list[str] = []
+    skipped: list[str] = []
+    with resources.as_file(_flows_root()) as froot:
+        for rel in _iter_template_files(Path(froot)):
+            label = str(Path("flows") / rel)
+            dest = dest_root / "flows" / rel
+            if dest.exists() and not overwrite:
+                skipped.append(label)
+                continue
+            written.append(label)
+            if not dry:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes((Path(froot) / rel).read_bytes())
+    return written, skipped
+
+
+def _backup_flows_dir(worc_home: Path) -> Path | None:
+    """Snapshot an existing ``.worc/flows/`` to a timestamped sibling before ``--reconfigure``
+    refreshes it, so operator edits (and any custom flows) stay recoverable. Returns the backup
+    path, or ``None`` when there is nothing to back up. The backup lives under the gitignored
+    ``.worc/`` home, so it never shows up in ``git status``.
+    """
+    flows = worc_home / "flows"
+    if not flows.is_dir() or not any(flows.iterdir()):
+        return None
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    backup = flows.with_name(f"flows.bak-{stamp}")
+    shutil.copytree(flows, backup)
+    return backup
 
 
 def _load_config(path: str) -> OrchestratorConfig:
@@ -1297,6 +1350,7 @@ def _install_print_plan(
     for rel in WORC_RUNTIME_DIRS:
         print(f"  would create {worc_home / rel}")
     print(f"  would create {worc_home / 'guide'}/ (agent task-authoring docs)")
+    print(f"  would create {worc_home / 'flows'}/ (built-in flows + node prompt templates)")
     print(f"  would create {worc_home / ENV_EXAMPLE_FILENAME} (secrets template)")
     print(f"  would ignore {WORC_HOME}/ via .gitignore")
     if missing:
@@ -1323,9 +1377,10 @@ def cmd_install(args: argparse.Namespace) -> int:
     """Set up the orchestrator in the current repo under ``.worc/`` and generate config.
 
     Runs the wizard to resolve settings, then idempotently writes a validated ``config.yaml`` into
-    ``<repo>/.worc/``, scaffolds the runtime + task dirs, copies the editable templates and the
-    task-authoring guide, and gitignores ``.worc/``. Re-running is a no-op unless ``--reconfigure``
-    (which backs up and regenerates). After a successful write it auto-runs preflight.
+    ``<repo>/.worc/``, scaffolds the runtime + task dirs, copies the task-authoring guide and
+    editable copies of the built-in flows + their per-node prompt templates into ``.worc/flows/``,
+    and gitignores ``.worc/``. Re-running is a no-op unless ``--reconfigure`` (which backs up and
+    regenerates). After a successful write it auto-runs preflight.
     """
     _configure_runtime_logging(args)
     try:
@@ -1364,6 +1419,16 @@ def cmd_install(args: argparse.Namespace) -> int:
     worc_written, _ = _copy_worc_docs(worc_home, overwrite=args.reconfigure, dry=False)
     if worc_written:
         print(f"install: wrote agent task-authoring docs to {worc_home / 'guide'}")
+    # Editable, active copies of the built-in flows + their per-node prompt templates land in
+    # .worc/flows/ (these override the packaged built-ins). A plain re-run only fills in missing
+    # files; --reconfigure snapshots the existing dir first, then refreshes to the packaged version.
+    if args.reconfigure:
+        flows_backup = _backup_flows_dir(worc_home)
+        if flows_backup is not None:
+            print(f"install: backed up existing flows to {flows_backup}")
+    flows_written, _ = _copy_packaged_flows(worc_home, overwrite=args.reconfigure, dry=False)
+    if flows_written:
+        print(f"install: wrote built-in flows + node prompts to {worc_home / 'flows'}")
     if _install_write_env_example(worc_home):
         print(f"install: wrote {worc_home / ENV_EXAMPLE_FILENAME} (copy to .worc/.env, fill in)")
     # Gitignore the whole .worc/ runtime home so the operator's `git status` stays clean.

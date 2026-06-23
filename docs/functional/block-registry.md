@@ -24,9 +24,9 @@ All 32 functional blocks (B01–B32) carry the status `documented`, (re)built fr
 
 ### B03 — Installer and Project Scaffolding
 
-- **Purpose:** `install` (wizard → generate valid `config.yaml` with an empty `command_sets`, scaffold `<repo>/.worc/` + repo-root `tasks/`, gitignore `.worc/`, auto-preflight); `upgrade-config`/`upgrade-docs`.
+- **Purpose:** `install` (wizard → generate valid `config.yaml` with an empty `command_sets`, scaffold `<repo>/.worc/` + repo-root `tasks/`, seed editable copies of the built-in flows + node prompts into `.worc/flows/`, gitignore `.worc/`, auto-preflight); `upgrade-config`/`upgrade-docs`.
 - **Entry points:** `cli.py` `cmd_install`; `install/wizard.py` `run_wizard`; `install/config_writer.py` `build_and_validate`; `install/detect.py`.
-- **Dependencies:** B01, B04, B05, B29 (preflight validates flows), B22 (`append_runtime_excludes`).
+- **Dependencies:** B01, B04, B05, B29 (preflight validates flows; source of the seeded `.worc/flows/` copies), B22 (`append_runtime_excludes`).
 - **Status:** `documented` · [file](./blocks/B03-installer-and-scaffolding.md)
 
 ### B04 — Install Registry and Config Discovery

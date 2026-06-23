@@ -63,8 +63,9 @@ Bind an existing repository and let the orchestrator process a task end to end.
 pipx install "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git"
 
 # 2. Set up your repo: generates a validated config.yaml under <repo>/.worc/.
-#    The task & its summary are committed to this repo; config, state.db, logs/, and the
-#    task-authoring guide all live under the gitignored .worc/ home, leaving tracked files clean.
+#    The task & its summary are committed to this repo; config, state.db, logs/, the
+#    task-authoring guide, and editable copies of the built-in flows + node prompts all live
+#    under the gitignored .worc/ home, leaving tracked files clean.
 cd /path/to/my-repo
 worc install .          # interactive wizard (detects origin, branch, agents, checks)
 
@@ -137,7 +138,7 @@ Secrets (e.g. the Telegram token/chat id) are read from the environment. Keep th
 ## Commands
 
 ```text
-worc install [repo]     set up the orchestrator under <repo>/.worc/: generate config + guide, gitignore .worc/
+worc install [repo]     set up the orchestrator under <repo>/.worc/: generate config + guide + flows, gitignore .worc/
                           --non-interactive --provider codex|claude|both|auto --no-create-pr --reconfigure
 worc preflight          check both CLIs' health + the isolation policy (read-only)
 worc telegram-test      send a real correlated Telegram prompt and wait for reply
@@ -193,7 +194,7 @@ Project layout:
 src/wastech_orchestrator/
   cli.py                  # install / preflight / telegram-test / run / rerun / finalize / watch / stop / restart / status / upgrade-config / upgrade-docs
   core/                   # the orchestrator wrapper (spine), HITL, dangerous-diff guardrail, recovery, decomposition, the constant supervisor layer
-    flow/                 # the flow engine + graph traversal, node runners, validation, checkers; packaged flows + role files
+    flow/                 # the flow engine + graph traversal, node runners, validation, checkers; packaged flows + role files (copied to .worc/flows/ by `install`)
   notify/                 # Notifier contract + Telegram transport
   providers/              # AgentProvider contract + Codex / Claude adapters, durable sessions, redaction
   routing/                # node-based provider routing + global-primary infrastructure fallback

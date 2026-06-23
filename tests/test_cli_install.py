@@ -3,7 +3,8 @@
 Drives ``main(["install", ...])`` against a real git clone (``git_repo`` fixture), with provider/gh
 discovery faked via ``shutil.which``. Covers interactive and non-interactive runs, routing modes,
 idempotency/reconfigure/backup, dry-run, the ``.worc/`` layout, ``.gitignore`` handling, the
-task-authoring guide copy, and the post-write preflight wiring.
+task-authoring guide copy, the built-in flow + node-prompt delivery, and the post-write preflight
+wiring.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import pytest
 from wastech_orchestrator import cli
 from wastech_orchestrator.config.loader import load_config
 from wastech_orchestrator.config.schema import AuditBranch
+from wastech_orchestrator.core.flow.registry import _PACKAGED_DIR, FlowRegistry
 from wastech_orchestrator.observability import logging as obslog
 from wastech_orchestrator.providers.base import ProviderId
 
@@ -218,8 +220,8 @@ def test_install_writes_config_and_guide_into_worc(
     _present(monkeypatch, "codex")
     assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
     worc = git_repo.clone / ".worc"
-    # The generated config and the agent task-authoring guide land under .worc/. (Prompt templates
-    # are not delivered — a flow node's prompt is its role_file, shipped with the flow.)
+    # The generated config and the agent task-authoring guide land under .worc/. (The built-in flows
+    # and their per-node prompt templates also land there — see the dedicated test below.)
     assert (worc / "guide" / "README.md").is_file()
     assert (worc / "config.yaml").is_file()
 
@@ -232,6 +234,48 @@ def test_reconfigure_refreshes_guide_docs(git_repo: Any, monkeypatch: pytest.Mon
     redo = _ni(git_repo.clone, "--provider", "codex", "--reconfigure", "--skip-preflight")
     assert cli.main(redo) == 0
     assert readme.read_text(encoding="utf-8") != "# stale\n"  # refreshed from the package
+
+
+def test_install_delivers_builtin_flows_and_node_prompts(
+    git_repo: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _present(monkeypatch, "codex")
+    assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
+    flows = git_repo.clone / ".worc" / "flows"
+    # All three built-in flows + their per-node role-prompt templates are delivered, editable.
+    for name in ("implementation", "deep_research", "security_audit"):
+        assert (flows / f"{name}.yaml").is_file()
+    for rel in ("roles/refinement.md", "roles/research/synthesis.md", "roles/audit/scope.md"):
+        assert (flows / rel).is_file()
+    # Delivered byte-for-byte from the packaged source (not regenerated or rewritten).
+    assert (flows / "implementation.yaml").read_bytes() == (
+        _PACKAGED_DIR / "implementation.yaml"
+    ).read_bytes()
+    # And the copies are *active*: pointed at .worc/flows/, the registry resolves every built-in
+    # (operator flows shadow the packaged ones), proving the delivered files validate and run.
+    registry = FlowRegistry(operator_flows_dir=flows)
+    for name in ("implementation", "deep_research", "security_audit"):
+        assert registry.resolve(name).doc.task_type == name
+
+
+def test_reconfigure_backs_up_and_refreshes_flows(
+    git_repo: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _present(monkeypatch, "codex")
+    assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
+    worc = git_repo.clone / ".worc"
+    role = worc / "flows" / "roles" / "implementation.md"
+    role.write_text("# stale operator prompt\n", encoding="utf-8")
+    redo = _ni(git_repo.clone, "--provider", "codex", "--reconfigure", "--skip-preflight")
+    assert cli.main(redo) == 0
+    # Refreshed back to the packaged version...
+    assert role.read_text(encoding="utf-8") != "# stale operator prompt\n"
+    # ...but the operator's edit stays recoverable from the timestamped backup dir under .worc/.
+    backups = list(worc.glob("flows.bak-*"))
+    assert len(backups) == 1
+    assert (backups[0] / "roles" / "implementation.md").read_text(
+        encoding="utf-8"
+    ) == "# stale operator prompt\n"
 
 
 def test_install_gitignore_append_is_idempotent(

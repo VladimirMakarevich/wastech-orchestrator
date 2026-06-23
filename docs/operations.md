@@ -84,7 +84,7 @@ wastech-orchestrator upgrade-docs --dry-run      # preview added/updated/removed
 
 Unlike `config.yaml`, the `worc/` docs are generated content with **no operator edits to preserve**, so this is a straight overwrite to the packaged version: it writes missing or changed files, removes files no longer shipped, and makes no backup. It is idempotent (an already-current copy is a no-op), `--dry-run` writes nothing, and it fails closed (exit 2 with the same hint as `upgrade-config`) when no install location can be resolved.
 
-After a package upgrade, run **`upgrade-config`** and **`upgrade-docs`** to bring your deployment fully current. (A single umbrella `upgrade` that does both is tracked in [follow-ups](backlog/follow_ups.md).) There is no prompt-template delivery step: a flow node's prompt is its `role_file`, shipped with the flow (packaged flows) or kept under `.worc/flows/roles/` (operator flows) — edit the role file to customize a node's prompt.
+After a package upgrade, run **`upgrade-config`** and **`upgrade-docs`** to bring your deployment fully current. (A single umbrella `upgrade` that does both is tracked in [follow-ups](backlog/follow_ups.md).) `install` delivers the built-in flows (`implementation`/`deep_research`/`security_audit`) and their per-node prompt templates as **editable copies** under `.worc/flows/` (each `<task_type>.yaml` plus `roles/*.md`); a flow node's prompt is its `role_file`, so you customize a node by editing the delivered role file. Because these copies **override** the packaged built-ins (the registry prefers `.worc/flows/`), a package upgrade does **not** refresh them automatically — re-run **`install --reconfigure`** to refresh them to the packaged version (it snapshots your existing `.worc/flows/` to a `flows.bak-<UTC>` sibling first, so edits stay recoverable). A dedicated flow/prompt re-sync step (the analogue of `upgrade-docs`) is tracked in [follow-ups](backlog/follow_ups.md).
 
 To install or pin a specific published (pre)release, append its tag to the `pipx`/`pip` source — e.g. `pipx install "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git@v0.1.1a1"`. Releases are tag-driven and pre-releases (`aN`/`bN`/`rcN` tags) are marked as such on GitHub; maintainers cut them by pushing a `v*` tag, which runs the [release workflow](../.github/workflows/release.yml).
 
@@ -382,7 +382,7 @@ Use the operator log for live monitoring. Provider `stdout.log` and `stderr.log`
 
 ### Troubleshooting node prompts
 
-- **A `role_file` edit "did nothing"** — confirm you edited the role file the node actually uses (a packaged flow ships its role files beside the flow YAML; an operator flow keeps them under `.worc/flows/roles/`), and compare `rendered-prompt.md` against your file.
+- **A `role_file` edit "did nothing"** — confirm you edited the role file the node actually uses. `install` delivers the built-in flows + their role files under `.worc/flows/` (`roles/*.md`), and those copies **override** the packaged built-ins, so edit the copy there (a custom operator flow likewise keeps its role files under `.worc/flows/roles/`). Compare `rendered-prompt.md` against your file.
 - **A `{placeholder}` printed literally** — only the allowlisted variables interpolate (see [configuration.md](configuration.md#prompt-templates-no-longer-a-config-block)); any other `{...}` is intentionally left verbatim so code/JSON braces survive. A path variable with no value for that node renders empty.
 
 ---

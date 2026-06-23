@@ -86,7 +86,7 @@ Detailed step-by-step scenarios are in [system-flows.md](./system-flows.md); the
 3. **Resume (`resume`).** On startup, reconcile persisted state and continue the single unfinished task from its flow checkpoint, or complete interrupted cleanup.
 4. **`rerun` / `rerun --continue`.** Retry a terminal task — "from scratch from base" or "continue from the flow checkpoint node where it stopped".
 5. **`finalize`.** The operator records the outcome of a task completed manually (without the pipeline and without commit/push/PR).
-6. **`install` / `preflight`.** Set up the orchestrator in a repository under `<repo>/.worc/`, generate and validate configuration, diagnose provider and isolation readiness, and fatally validate every flow file (packaged + operator flows in `.worc/flows/`) before any task runs.
+6. **`install` / `preflight`.** Set up the orchestrator in a repository under `<repo>/.worc/`, generate and validate configuration, seed editable copies of the built-in flows + their per-node prompts into `.worc/flows/`, diagnose provider and isolation readiness, and fatally validate every flow file (packaged + operator flows in `.worc/flows/`) before any task runs.
 
 ## Pipeline as a State Machine
 

@@ -492,7 +492,7 @@ Preflight requires a non-zero numeric chat id, bot access to the chat, no config
 
 ## Prompt templates (no longer a config block)
 
-There is no `prompts` config block. A flow node's prompt template is the content of its **`role_file`** — the packaged flow ships its role files alongside the flow YAML, and an operator flow keeps them under `.worc/flows/roles/*.md`. To customize a node's prompt, edit its role file. (Removed in `config.yaml` `schema_version` **9**; an older config that still carries a `prompts` block loads fail-open — the key is ignored — and `upgrade-config` strips it.)
+There is no `prompts` config block. A flow node's prompt template is the content of its **`role_file`**. `install` delivers the built-in flows + their role files as editable copies under `.worc/flows/` (`roles/*.md`), and those copies **override** the packaged built-ins, so to customize a node's prompt you edit the delivered role file (a custom operator flow likewise keeps its role files under `.worc/flows/roles/`). (Removed in `config.yaml` `schema_version` **9**; an older config that still carries a `prompts` block loads fail-open — the key is ignored — and `upgrade-config` strips it.)
 
 **Template variables.** A role file may reference an allowlisted set of `{name}` tokens; everything else (an unknown name, or literal braces in code/JSON) is left verbatim, so a template never breaks on stray braces. The variables are **metadata and artifact paths only** — never task bodies, diffs, check logs, environment values, or secrets (those stay in the artifact files the agent reads by path):
 
@@ -508,8 +508,8 @@ The pipeline a task runs is a **flow** — a declarative YAML graph of nodes (ag
 
 There is no flow block in `config.yaml`. Flows live as files in two layers, operator-first:
 
-1. **Operator flows** — `<repo>/.worc/flows/<task_type>.yaml`. Drop a YAML file here to add a new `task_type` or to **override** a packaged flow of the same name. Role files live beside them under `.worc/flows/roles/*.md`.
-2. **Packaged built-ins** — shipped with the orchestrator: `implementation`, `deep_research`, `security_audit`.
+1. **Operator flows** — `<repo>/.worc/flows/<task_type>.yaml`. Drop a YAML file here to add a new `task_type` or to **override** a packaged flow of the same name. Role files live beside them under `.worc/flows/roles/*.md`. **`install` seeds this directory** with editable copies of all three built-ins below (each `<task_type>.yaml` plus the shared `roles/`), so out of the box every built-in is already an operator flow you can edit. Because the seeded copies override the packaged layer, a package upgrade does not refresh them — `install --reconfigure` refreshes them to the packaged version (snapshotting the existing dir to `flows.bak-<UTC>` first).
+2. **Packaged built-ins** — shipped with the orchestrator and the source for the seeded copies above: `implementation`, `deep_research`, `security_audit`.
 
 `config.yaml` is **infrastructure + provider defaults** that the flow's nodes fall back to (`model`/`reasoning`/`permission_profile`/`timeout`), plus the non-weakenable safety caps. The flow owns the graph; the config owns the environment. Trust is file-level: an operator flow is trusted to the same degree as `config.yaml` (same owner, same directory), and the fatal validator below guarantees it can never escalate beyond the ceiling.
 

@@ -68,7 +68,7 @@ A thin wrapper around the flow engine. It owns everything that is _not_ a node: 
 
 The pipeline expressed as **data**. A flow is a YAML document — a graph of typed nodes plus edges (with named fix loops and inline budgets) and flow-wide ceilings. The engine traverses the graph, routing on each node's emitted outcome to the matching edge, charging rework against the named loop and the single global counter, and writing the durable checkpoint after each step. A `when: {fact: ...}` predicate (`derived.*` / `config.*`) deterministically skips a node (this is how the refinement-skip works); a per-task `nodes.<node-id>.enabled: false` disables a node directly by node id (handed to the engine as the disabled-node set), independent of any `when` fact.
 
-Flows are resolved by `task_type`, preferring an **operator flow** at `<repo>/.worc/flows/<task_type>.yaml` over the packaged built-in. Every flow — packaged and operator — passes a **fatal three-layer validator** at `install`/`preflight` before any task runs:
+Flows are resolved by `task_type`, preferring an **operator flow** at `<repo>/.worc/flows/<task_type>.yaml` over the packaged built-in. `install` seeds `.worc/flows/` with editable copies of the built-ins (`implementation`/`deep_research`/`security_audit`) and their shared `roles/` prompts, so out of the box every built-in is already an editable operator flow (the copies override the packaged layer; `install --reconfigure` refreshes them, snapshotting the old dir first). Every flow — packaged and operator — passes a **fatal three-layer validator** at `install`/`preflight` before any task runs:
 
 - **Graph integrity** — edges resolve; outcomes are valid per node kind; every `rework`/`fail` edge is bounded by a budget or named loop; exactly one entry node; every node can reach a terminal.
 - **Security ceiling** — a node's `permission_profile` may not exceed the flow `permission_ceiling`; evaluators are forced `read-only`; `extra_args` pass the forbidden-args screen; `role_file` paths contain no traversal; unknown fields fail closed.
@@ -253,7 +253,7 @@ supervisor: { role_file, model, reasoning } # the constant read-only oversight l
 prompt_audit: false # record each step's prompt + who
 ```
 
-Prompt templates are **not** a config block: a node's prompt is the content of its `role_file` (shipped beside a packaged flow, or under `.worc/flows/roles/` for an operator flow). Role files render only an allowlisted set of path/metadata variables — never task bodies, diffs, env, or secrets.
+Prompt templates are **not** a config block: a node's prompt is the content of its `role_file`. `install` delivers editable copies under `.worc/flows/roles/` (overriding the packaged built-ins), so a node's prompt is customized by editing the delivered role file. Role files render only an allowlisted set of path/metadata variables — never task bodies, diffs, env, or secrets.
 
 ---
 

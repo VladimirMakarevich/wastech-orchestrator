@@ -280,7 +280,7 @@ A **task** cannot repoint a stage's provider, set a model, or change reasoning �
 
 ## 7a. Customize a Node's Prompt
 
-To add repository-specific engineering rules or a review rubric to a stage without editing Python, edit that node's **`role_file`** (see [configuration.md](configuration.md#prompt-templates-no-longer-a-config-block)). A packaged flow ships its role files beside the flow YAML; an operator flow keeps them under `.worc/flows/roles/`. The role file's content **is** the prompt template — edit it and the change takes effect on the next run.
+To add repository-specific engineering rules or a review rubric to a stage without editing Python, edit that node's **`role_file`** (see [configuration.md](configuration.md#prompt-templates-no-longer-a-config-block)). `install` delivers the built-in flows + their role files under `.worc/flows/` (`roles/*.md`), and those copies override the packaged built-ins, so edit the delivered role file (a custom operator flow likewise keeps its role files under `.worc/flows/roles/`). The role file's content **is** the prompt template — edit it and the change takes effect on the next run.
 
 For example, a review node's role file replaced with a security rubric:
 
