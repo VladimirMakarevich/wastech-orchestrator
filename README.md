@@ -122,7 +122,7 @@ The orchestrator creates `agent/task-001-...`, runs the pipeline and your checks
 | `orchestrator.auto_mode.enabled` | Process the next pending task automatically after cleanup (default `false`). |
 | `orchestrator.poll_interval_seconds` | `watch` tick: fetch/pull + re-scan interval (default `300`; `0` = single pass). |
 | `agents.allowed` / `agents.providers.<id>.primary` | Which providers are enabled, and which one is the global primary (runs any flow node with no `provider`, and is the sole infrastructure-fallback target). Per-node routing lives on the flow, not in config. |
-| `checks.commands` / `checks.discovery` | Your project's test/lint commands (argv list, no shell), or auto-discovery of them, run as the `testing` stage. |
+| `checks.command_sets` | Operator-authored, diff-selected test/lint commands (argv list, no shell) run as the `testing` stage. Empty (`{}`) = no gate. |
 | `supervisor` | The constant read-only supervisor layer that watches every step and writes the PR summary (model/reasoning/role_file). |
 | `git.create_pull_request` | Open a PR after push (needs `gh`); disabling it does not disable commit/push. |
 | `telegram.*` | Optional terminal notifications and blocking HITL; credentials stay in environment variables. |
@@ -198,10 +198,10 @@ src/wastech_orchestrator/
   providers/              # AgentProvider contract + Codex / Claude adapters, durable sessions, redaction
   routing/                # node-based provider routing + global-primary infrastructure fallback
   config/                 # schema, loader, fail-closed validator, upgrade-config
-  checks/                 # check discovery / resolution + the command profile
-  check_runner.py         # runs the resolved checks as bounded subprocesses
+  checks/                 # command-set model, resolution, and diff-based selection
+  check_runner.py         # runs the selected command sets as bounded subprocesses
   git_manager.py          # the only commit/push/PR owner; scoped staging + the audit commit
-  state_store.py          # SQLite checkpoints (schema v10)
+  state_store.py          # SQLite checkpoints (schema v12)
   ledger.py               # the append-only completed-task ledger + failure reports
   task/                   # parser + §19 validation gate
   install/                # the install wizard, config writer, detection

@@ -50,11 +50,28 @@ def test_preserves_operator_only_keys() -> None:
 
 
 def test_list_values_kept_verbatim() -> None:
-    template = {"checks": {"commands": []}}
-    operator = {"checks": {"commands": ["pytest", "ruff check ."]}}
+    template = {"security": {"denied_commands": []}}
+    operator = {"security": {"denied_commands": ["git commit", "git push"]}}
     merged, added, _ = upgrade_config_mapping(template, operator)
-    assert merged["checks"]["commands"] == ["pytest", "ruff check ."]
+    assert merged["security"]["denied_commands"] == ["git commit", "git push"]
     assert added == []  # the list is a present leaf, not merged element-wise
+
+
+def test_removed_checks_keys_are_stripped() -> None:
+    # v15: the whole `checks.discovery` block and the flat `checks.commands` list are removed —
+    # `upgrade-config` strips both (the operator authors `checks.command_sets` by hand).
+    template = {"checks": {"command_sets": {}, "timeout_seconds": 7200}}
+    operator = {
+        "checks": {
+            "discovery": {"mode": "auto"},
+            "commands": ["pytest", "ruff check ."],
+            "timeout_seconds": 60,
+        }
+    }
+    merged, _, _ = upgrade_config_mapping(template, operator)
+    assert "discovery" not in merged["checks"]
+    assert "commands" not in merged["checks"]
+    assert merged["checks"]["timeout_seconds"] == 60  # operator's value preserved
 
 
 def test_schema_version_forced_to_current() -> None:

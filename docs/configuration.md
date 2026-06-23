@@ -37,7 +37,7 @@ Exactly one configured provider must set `primary: true` — the **global primar
 schema_version: 1
 ```
 
-Optional top-level integer marking the `config.yaml` **format** version (current: `11`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
+Optional top-level integer marking the `config.yaml` **format** version (current: `15`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
 
 ## Config Discovery
 
@@ -335,46 +335,92 @@ A structurally rejected task is terminal `failed`, gets a `validation_report.jso
 
 ## `checks`
 
-Configures the Check Runner and **automatic check discovery** (resolve the repository's quality-gate commands without hand-writing technology-specific paths). The Check Runner runs each resolved command as a bounded external process (argv list, no shell, allowlisted env) and records redacted logs under the task artifact directory. A **launch failure** (a missing executable/module) is treated as an infrastructure event — it stops the task before any branch and never consumes a fixing iteration — distinct from a quality failure (a launched check that exits non-zero), which enters `fixing`.
+Configures the Check Runner — the `testing`-node quality gate — as **operator-authored, diff-selected command sets**. The Check Runner runs each selected command as a bounded external process (argv list, no shell, allowlisted env) and records redacted logs under the task artifact directory. There is no auto-detection: the operator writes the commands. A **launch failure** of a _required_ toolchain (a non-`skip_if_unavailable` set whose binary cannot start) leaves the gate incomplete — the task goes to **manual** (the agent cannot install host toolchains, so a fix loop cannot help), distinct from a quality failure (a launched check that exits non-zero), which enters `fixing`.
 
 ```yaml
 checks:
-  discovery:
-    mode: auto # auto | deterministic | configured | disabled
-    refresh: on_change # on_change | always | never
-  commands: # legacy strings and/or structured {name, argv}
-    - "ruff check ."
-    - name: tests
-      argv: [".venv/bin/python", "-m", "pytest"]
-  timeout_seconds: 7200
+  timeout_seconds: 7200 # global per-command default
+  command_sets:
+    repo:
+      paths: [] # no paths ⇒ always runs (on a non-empty diff)
+      commands:
+        - { name: lint, argv: ["ruff", "check", "."] }
+        - { name: types, argv: ["mypy", "src"] }
+        - { name: tests, argv: [".venv/bin/python", "-m", "pytest"] }
 ```
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `commands` | list | `[]` | Checks the runner executes. Each item is a legacy shell-style **string** (split with `shlex`, no shell) **or** a structured `{name, argv: [...]}` mapping. |
-| `timeout_seconds` | integer | `7200` | Per-command timeout. |
-| `discovery.mode` | enum | `configured` | How the profile is resolved (see below). |
-| `discovery.agent_fallback` | bool | `true` | Allow a read-only agent discovery pass when deterministic confidence is low (only runs when `model` is set). |
-| `discovery.refresh` | enum | `on_change` | When a cached profile is recomputed: `on_change` (discovery-input fingerprint changed), `always`, or `never`. |
-| `discovery.provider` | enum/null | `null` | Which provider runs agent discovery; `null` = first available allowed provider. |
-| `discovery.model` | string | `""` | A **cheap** model id for agent discovery (e.g. a Haiku). Empty disables the agent fallback. |
-| `discovery.reasoning` | enum/null | `low` | Reasoning level for the discovery call. |
-| `discovery.timeout_seconds` | integer | `120` | Bound on the discovery call. |
-| `discovery.run_at_task_start` | bool | `true` | Resolve checks inside the state machine at task start (not only at install), so `auto` mode can resolve/agent-assist in-band (§1.2). |
-| `discovery.approve_command_changes` | bool | `true` | Treat a _changed_ set of check commands as a sensitive change requiring human approval on first use (fail-closed). Disabling it under `auto`/`deterministic` is allowed but logged loudly. |
+| `timeout_seconds` | integer | `7200` | Global per-command default timeout. A set's own `timeout_seconds` overrides it for that set's commands. |
+| `command_sets` | mapping | `{}` | Named sets of checks. **Empty (`{}`) means no gate** — every task passes the checks node vacuously. `command_sets` is operator-authored; it is never auto-generated. |
 
-### Discovery modes
+Each entry in `command_sets` is `name → set`, where a set is:
 
-- **`configured`** (the default, fully backward compatible): the Check Runner uses `commands` as-is. With empty `commands` the task simply runs no checks.
-- **`deterministic`**: inspect known project evidence (manifests, lock files, `make`/`just`/`tox`/`nox` wrappers, local `.venv` interpreters) and probe launchability, preferring any configured commands when they probe launchable. Stops before any branch if no check is launchable.
-- **`auto`**: `deterministic`, plus a read-only agent fallback when confidence is low (opt-in: set `discovery.model`). `install` writes `auto` when it could not detect explicit checks. With `run_at_task_start` (default), `auto` resolution runs at task start, not only at install.
-- **`disabled`**: an explicit no-check mode with a prominent warning and an audit record.
+| Set field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `paths` | list of globs | `[]` | Which diff paths select this set. **No `paths` ⇒ the set always runs** (whenever the diff is non-empty). Globs support subtree (`backend/**`) and extension-anywhere (`**/*.md`). |
+| `timeout_seconds` | integer or null | `null` (inherit) | Per-command timeout for this set; overrides the global `checks.timeout_seconds`. |
+| `skip_if_unavailable` | boolean | `false` | When `true`, if the set's toolchain binary is absent on the host the set is **skipped** (recorded loudly, never counted as passed) instead of failing the gate. Default `false` = fail-closed. |
+| `commands` | list | (required) | The checks in the set. Each is `{name, argv: [...], cwd?}`. |
 
-Under **`configured`** a non-empty `commands` list is authoritative (it is the whole gate). Under **`auto`** a configured command **pins only the check it names** (e.g. `{name: types, argv: [mypy, src]}`) and lets detection fill the rest — a pin is never silently replaced by a detected fallback. Detection respects the project's configured tool scope (`[tool.mypy] files`/`exclude`, `[tool.ruff]`), so it emits `mypy src` / `ruff check` rather than overriding the scope with `.` (§1.1).
+Each command is:
 
-Resolved profiles are cached at `<workspace>/checks/resolved-profile.json` (a generated runtime file, git-ignored, never committed) and invalidated by the `refresh` policy. **Re-resolution at run time happens only on infrastructure proof** — a check launch failure (bounded to once per task), a changed discovery fingerprint, or low-confidence detection — never because a check _reported_ failures. A change to the _set_ of resolved commands is recorded in the profile and **approved by a human on first use** (`approve_command_changes`); the first-ever set is auto-approved. See [operations.md](operations.md#check-discovery-diagnostics) for `preflight`/`status` diagnostics.
+| Command field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `name` | string | (required) | Label used in logs and the `check_runs` record. |
+| `argv` | list of strings | (required) | The command as an **argv list** (no shell — shell metacharacters are not interpreted). |
+| `cwd` | string or null | `null` (clone root) | Repo-relative working directory for the command. Validated against `..`/absolute traversal; it must stay inside the clone. |
 
-Discovery never installs dependencies or mutates the environment: a candidate that is really a dependency-install/setup command (e.g. `uv sync`, `npm ci`) is rejected as a check, not executed.
+### Diff-based selection
+
+The runner runs the **union** of sets whose `paths` glob match the task diff (the working-tree changes), then aggregates:
+
+- A set with **no `paths`** always runs (on a non-empty diff).
+- An **empty diff** (nothing changed) selects nothing → the checks node **passes vacuously**.
+- **Fail-safe:** if any changed path is claimed by **no** set, the runner runs **all** sets (rather than skip a check for an unmatched file).
+
+### Run-all, then aggregate
+
+All selected checks **run** (no fail-fast) so the human sees every failure at once, then the verdict is computed:
+
+- A **required toolchain absent** (a non-`skip_if_unavailable` set whose binary cannot launch) **or** every selected check skipped ⇒ the gate is **incomplete** → the task goes to **manual** even if some checks passed (the agent cannot install host toolchains, so a fix loop cannot help).
+- Otherwise any **quality failure** (a launched check that exited non-zero) → `fixing`.
+- Otherwise the gate **passes**.
+
+### `skip_if_unavailable` and auto-merge
+
+A set opted into `skip_if_unavailable: true` whose toolchain binary is missing is recorded as **"skipped (toolchain absent)"** in `check_runs` and surfaced to the human — never counted as passed. A partial skip can still pass the checks node, **but any skip blocks `git.auto_merge`**: an incomplete gate is never auto-merged, and the PR is left open for a human.
+
+### Single-root and monorepo examples
+
+A single-root repo with one set and no `paths` (it always runs) is the common case — see the example above.
+
+A polyglot monorepo selects per-subtree, plus a Markdown-only linter that runs only when `.md` files change:
+
+```yaml
+checks:
+  command_sets:
+    backend:
+      paths: ["backend/**"]
+      commands:
+        - { name: lint, argv: ["ruff", "check", "."], cwd: "backend" }
+        - { name: tests, argv: ["pytest"], cwd: "backend" }
+    mobile:
+      paths: ["mobile/**"]
+      commands:
+        - { name: test, argv: ["npm", "test"], cwd: "mobile" }
+    docs:
+      paths: ["**/*.md"] # extension-anywhere: runs only when Markdown changes
+      commands:
+        - { name: prose, argv: ["npx", "prettier@3", "--check", "**/*.md"] }
+    ios:
+      paths: ["ios/**"]
+      skip_if_unavailable: true # xcodebuild may be absent off-macOS; skip rather than block
+      commands:
+        - { name: build, argv: ["xcodebuild", "build"], cwd: "ios" }
+```
+
+A stale `discovery` or flat `commands` key from an older config is **tolerated (ignored) on load**; `upgrade-config` strips it (config `schema_version` **15**). See [operations.md](operations.md#command-set-diagnostics) for the `preflight`/`status` command-set summary.
 
 ## `git`
 
@@ -406,7 +452,7 @@ Auto-merge is **off by default** and only affects the publish step — the mid-p
 
 ### The canonical layout
 
-There is one canonical layout — there are no footprint modes to choose. Everything the orchestrator generates or installs lives under a single gitignored `<repo>/.worc/` home: `config.yaml`, `guide/`, `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `workspace/`, `checks/`, and the `tasks/rejected` quarantine. `install` appends a single `.worc/` line to the repo's tracked `.gitignore`.
+There is one canonical layout — there are no footprint modes to choose. Everything the orchestrator generates or installs lives under a single gitignored `<repo>/.worc/` home: `config.yaml`, `guide/`, `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `workspace/`, and the `tasks/rejected` quarantine. `install` appends a single `.worc/` line to the repo's tracked `.gitignore`.
 
 The only things **not** under `.worc/` are the `tasks/` lifecycle dirs (`pending`/`processing`/`done`/`failed`), which sit at the repo root and are git-tracked. The committed audit trail is the moved task file plus its `<id>.summary.md` in `tasks/done` or `tasks/failed`; the orchestrator's audit commit stages **only that task's own files** (never `git add -- tasks/` wholesale), so a concurrently-pending task is never swept in.
 

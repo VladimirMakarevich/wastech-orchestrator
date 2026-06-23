@@ -39,12 +39,6 @@ class HitlSettings:
 
 
 @dataclass(frozen=True, slots=True)
-class ChecksDiscovery:
-    mode: Literal["auto", "configured", "deterministic", "disabled"] = "auto"
-    approve_command_changes: bool = False
-
-
-@dataclass(frozen=True, slots=True)
 class AgentNode:
     id: str
     kind: Literal["agent"]
@@ -99,7 +93,6 @@ class ChecksNode:
     id: str
     kind: Literal["checks"]
     checker: Literal["command_profile", "citation", "dependency_scan"]
-    discovery: ChecksDiscovery | None = None
     when: WhenPredicate | None = None
 
 

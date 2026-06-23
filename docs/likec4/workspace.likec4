@@ -54,7 +54,7 @@ specification {
 model {
 
   operator = actor 'Operator' 'Runs CLI commands and responds to HITL requests'
-  human    = actor 'Human in the loop' 'Approves plans, dangerous diffs, changed check sets'
+  human    = actor 'Human in the loop' 'Approves plans and dangerous diffs'
 
   // --- External systems (child processes / network) ---
   codex = externalSystem 'Codex CLI' 'Coding agent (child process)' {
@@ -106,10 +106,10 @@ model {
       subprocess = component 'B19 Subprocess Runner' 'run_process: argv without shell, timeout, env allowlist' {
         link ../functional/blocks/B19-subprocess-runner.md 'Block B19'
       }
-      resolver = component 'B23 Check Discovery' 'Which check profile to run (cache by fingerprint)' {
+      resolver = component 'B23 Check Resolution' 'Normalize command_sets; diff-select which sets run (no discovery)' {
         link ../functional/blocks/B23-check-discovery.md 'Block B23'
       }
-      checks = component 'B24 Checks' 'Run profile in order; launch failure ≠ quality failure' {
+      checks = component 'B24 Checks' 'Run all selected command sets; launch-fail / quality-fail / skip' {
         link ../functional/blocks/B24-check-execution.md 'Block B24'
       }
       gitmgr = component 'B22 Git Manager' 'The only component that does commit/push/PR (idempotent)' {
@@ -159,7 +159,7 @@ model {
   gate -> security 'scan_frontmatter (injections)'
   pipeline -> state 'Status transitions (transactional)'
   state -> db 'Read / write'
-  pipeline -> resolver 'Check profile preflight'
+  pipeline -> resolver 'Normalize command_sets (preflight)'
   pipeline -> router 'Agent stages'
   router -> providers 'AgentProvider.run'
   providers -> subprocess 'run_process'
@@ -214,7 +214,7 @@ views {
     cli -> pipeline 'run_task'
     pipeline -> gate '§19 validation'
     pipeline -> state 'acquire slot, NEW→VALIDATED'
-    pipeline -> resolver 'check profile preflight'
+    pipeline -> resolver 'normalize command_sets (preflight)'
     pipeline -> gitmgr 'branch preparation'
     pipeline -> router 'implementation / planning'
     router -> providers 'AgentProvider.run'

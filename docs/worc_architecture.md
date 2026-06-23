@@ -44,7 +44,7 @@ flowchart TB
     agents["codex / claude<br/>CLI coding agents"]
     vcs["git / gh — CLI"]
     tg["Telegram Bot API"]
-    db[("state.db<br/>SQLite v11")]
+    db[("state.db<br/>SQLite v12")]
     art[("Artifacts<br/>.worc/ · tasks/")]
 
     operator -->|"run · watch · rerun · ..."| cli
@@ -80,7 +80,7 @@ Node kinds:
 | --- | --- | --- |
 | `agent` | runs an author/editor through the router (optional embedded HITL, dangerous-diff guard, editing session) | `done` |
 | `evaluator` | a read-only verdict over a produced artifact; a blocking gate, or a non-blocking self-capping reviewer | `accept` / `rework` |
-| `checks` | a quality gate: the resolved `command_profile`, or the `citation` / `dependency_scan` checkers | `pass` / `fail` |
+| `checks` | a quality gate: the operator's diff-selected `checks.command_sets`, or the `citation` / `dependency_scan` checkers | `pass` / `fail` |
 | `hitl` | a bare durable human gate | approve/deny, or done |
 | `publish` | the orchestrator-owned git publish for the flow's publishing policy | `done` |
 
@@ -99,9 +99,9 @@ class AgentProvider(Protocol):
 
 A per-task oversight layer that exists for every task under any flow shape — **not a graph node, not a stage**. It starts at task start, observes each completed (non-skipped) step through its own continuing read-only session (~1 LLM call/step, recording an immutable advisory row), and at whole-task close synthesizes the plain-language `summary.md` (the PR body) plus advisory caveats. If the synthesis call cannot run, a deterministic minimal-summary fallback writes `summary.md` instead, so the summary is _always_ produced. Its `permission_profile` is **forced `read-only`** in code; it can never edit or reroute. It replaced both the old summary provider and the removed blocking `supervise_*` nodes — which is why no packaged flow has a `summary` node.
 
-### 4.5 Check Runner + check discovery
+### 4.5 Check Runner + command sets
 
-Quality-gate commands are **configured or discovered**, never hardcoded. The Check Runner launches each resolved command as a bounded subprocess (argv list, no shell, allowlisted env) and records redacted logs. Discovery (`auto` / `deterministic` / `configured` / `disabled`) resolves the launchable profile from project evidence (manifests, lock files, local interpreters), optionally with a read-only agent fallback. A **launch failure** (missing executable) is an infrastructure event — it stops the task before any branch and never burns a fixing iteration; a launched check that exits non-zero is a **quality failure** that goes to `fixing`.
+Quality-gate commands are **operator-authored**, never auto-detected or hardcoded: they live in `config.yaml` under `checks.command_sets` (an empty mapping means no gate). A deterministic, diff-based selector picks the **union** of sets whose `paths` globs match the task's changed files (a set with no `paths` always runs; an empty diff runs nothing; a changed path claimed by no set is the fail-safe that runs **all** sets), and the Check Runner launches each selected command as a bounded subprocess (argv list, no shell, allowlisted env, repo-relative `cwd`) and records redacted logs. All selected checks run, then the verdict aggregates: a **required toolchain absent** (a non-`skip_if_unavailable` set whose binary cannot launch) or every check skipped leaves the gate **incomplete** → `manual_action_required` (the agent cannot install host toolchains); otherwise a launched check that exits non-zero is a **quality failure** that goes to `fixing`, else the gate passes. A `skip_if_unavailable` set whose toolchain is absent is recorded loudly as skipped (never passed) and blocks `git.auto_merge`.
 
 ### 4.6 Git Manager
 
@@ -109,7 +109,7 @@ The **only** component that runs commit / push / PR. Before a task it prepares t
 
 ### 4.7 State Store with checkpoints
 
-SQLite (`state.db`, schema **v11**). It holds the task status, the flow checkpoint (`current_node` + counters + fingerprint), per-node audit (`node_runs`, `provider_attempts`), checks, artifacts (each with a sha256), publish idempotency, subtasks, advisory `evaluations`, and the durable editing/own sessions (`editing_lineage` / `node_lineage` — the only place a raw session id is ever stored). Because the orchestrator is **greenfield**, the store does not migrate across destructive versions: a brand-new database is created at the current shape, and an older-versioned one is refused fail-closed (recreate it). A newer one is also refused.
+SQLite (`state.db`, schema **v12**). It holds the task status, the flow checkpoint (`current_node` + counters + fingerprint), per-node audit (`node_runs`, `provider_attempts`), checks, artifacts (each with a sha256), publish idempotency, subtasks, advisory `evaluations`, and the durable editing/own sessions (`editing_lineage` / `node_lineage` — the only place a raw session id is ever stored). Because the orchestrator is **greenfield**, the store does not migrate across destructive versions: a brand-new database is created at the current shape, and an older-versioned one is refused fail-closed (recreate it). A newer one is also refused.
 
 ### 4.8 Human-in-the-Loop via Telegram
 
@@ -190,7 +190,7 @@ Each transition is asserted against an explicit `ALLOWED_TRANSITIONS` table and 
 `config.yaml` is **infrastructure + provider defaults + non-weakenable safety caps** — the flow owns the graph, the config owns the environment. The full reference (every field, default, and validation rule) is [configuration.md](configuration.md); the packaged starting point is [`config.example.yaml`](../config.example.yaml). The shape, in brief:
 
 ```yaml
-schema_version: 14
+schema_version: 15
 
 orchestrator:
   auto_mode: { enabled: false } # pick the next pending task after cleanup
@@ -228,12 +228,18 @@ security:
     denied_commands: [...],
   }
 validation: { max_task_bytes, ..., quarantine_folder } # the §19 input-hardening gate
-checks:
-  {
-    discovery: { mode: configured|auto|deterministic|disabled, ... },
-    commands: [...],
+checks: {
     timeout_seconds,
-  }
+    command_sets:
+      {
+        <name>:
+          {
+            paths: [globs],
+            skip_if_unavailable?,
+            commands: [{ name, argv, cwd? }],
+          },
+      },
+  } # operator-authored, diff-selected; {} = no gate
 git:
   {
     create_pull_request: true,
@@ -253,7 +259,7 @@ Prompt templates are **not** a config block: a node's prompt is the content of i
 
 ## 8. The `.worc/` home and the Git footprint
 
-There is **one canonical layout**. Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home: `config.yaml`, the agent task-authoring `guide/`, `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `workspace/`, `checks/`, operator `flows/`, and the `tasks/rejected` quarantine. `install` appends a single `.worc/` line to the repo's tracked `.gitignore`.
+There is **one canonical layout**. Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home: `config.yaml`, the agent task-authoring `guide/`, `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `workspace/`, operator `flows/`, and the `tasks/rejected` quarantine. `install` appends a single `.worc/` line to the repo's tracked `.gitignore`.
 
 The **only** things outside `.worc/` are the `tasks/` lifecycle dirs (`pending`/`processing`/`done`/`failed`) at the repo root, which are git-tracked: the task file plus its `<id>.summary.md` (in `done/` or `failed/`) are the committed audit trail. The code commit excludes both `.worc/` (gitignored) and `tasks/` (it rides the separate audit commit). Parallel tasks via `git worktree` remain on the roadmap (see [backlog/](backlog/)).
 
@@ -270,7 +276,7 @@ The **only** things outside `.worc/` are the `tasks/` lifecycle dirs (`pending`/
 6.  prepare branch agent/<task-id>-<slug>; build node services + the supervisor; hand the graph to the engine
 7.  the engine traverses the flow (default: refine → plan → implement → test → review → fix(loop) → publish):
       - agent nodes run via the router → a provider adapter; the supervisor observes each completed step read-only
-      - testing runs the resolved checks; review is a read-only evaluator; edits are guarded by the dangerous-diff classifier
+      - testing runs the diff-selected command sets; review is a read-only evaluator; edits are guarded by the dangerous-diff classifier
       - HITL: refinement/planning may ask one durable question/approval; dangerous diffs and changed check sets are gated, fail-closed
 8.  at close the supervisor synthesizes summary.md; the orchestrator moves the task file → tasks/done/ (or failed/)
 9.  publish: scoped code commit + task-scoped audit commit, push, gh pr create (PR body = the summary) — idempotent
@@ -288,7 +294,7 @@ A **failed** task with a branch is finalized the same way (moved to `tasks/faile
 
 ```text
 install      set up <repo>/.worc/ (config + guide), gitignore .worc/, run preflight
-preflight    check each allowed provider, the isolation policy, the resolved checks, and validate every flow
+preflight    check each allowed provider, the isolation policy, summarize the configured command sets, and validate every flow
 telegram-test send a real correlated Telegram prompt and wait for a reply
 run          process exactly one task end to end
 rerun        re-attempt a terminal task (fresh from base, or --continue from the flow checkpoint)

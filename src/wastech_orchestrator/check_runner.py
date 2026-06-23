@@ -1,30 +1,35 @@
 """Check Runner (the ``testing`` stage).
 
-Runs the resolved checks — the canonical ``checks.model.ResolvedCheck`` argv lists supplied by the
-resolver (automatic check discovery), falling back to the configured ``checks.commands``
-normalized by ``checks.model.normalize_check_command`` — through the P2 safe process runner as an
-**argv list**, never a shell string, with an allowlisted environment and the per-command
-``checks.timeout_seconds``. Each run is written to ``checks/<run-id>.log``.
+Runs the operator's selected ``checks.command_sets`` — normalized to ``checks.model.ResolvedCheck``
+argv lists, never shell strings — through the P2 safe process runner, each in its set's ``cwd`` with
+an allowlisted environment and the set's (or global) timeout. Each run is written to
+``checks/<run-id>.log``.
 
-A check failure is a **quality** error: the caller routes it to ``fixing`` with **no provider
-fallback**. The Check Runner itself never transitions state nor touches git; it returns a
-:class:`CheckOutcome` and the orchestrator records the ``check_runs`` rows and drives the loop.
-
-A **launch** failure (a missing executable/module) is *not* a quality error: it is reported via
-``CheckOutcome.launch_failed`` so the orchestrator treats it as an infrastructure/preflight event,
-never spending a fix iteration on a problem no code change can fix (automatic check discovery).
+Every selected check runs (no fail-fast): the runner aggregates the results so the human sees the
+full picture and ``fixing`` can address all quality failures in one cycle. A check failure is a
+**quality** error → the caller routes it to ``fixing`` with no provider fallback. A **launch**
+failure (a missing executable on a *required* set) is an infrastructure event, not a quality error,
+reported via ``CheckOutcome.any_launch_failed`` so the caller hands an incomplete gate to a human
+rather than spending a fix iteration on a problem no code change can fix. A set marked
+``skip_if_unavailable`` whose toolchain binary is absent is **skipped** — loudly, never "passed" —
+reported via ``CheckOutcome.any_skipped``. The Check Runner never transitions state nor touches git.
 """
 
 from __future__ import annotations
 
 import logging
+import shutil
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 
-from wastech_orchestrator.checks.model import ResolvedCheck, normalize_commands
+from wastech_orchestrator.checks.model import (
+    ResolvedCheck,
+    ResolvedCheckSet,
+    normalize_command_sets,
+)
 from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.observability.logging import bind
 from wastech_orchestrator.observability.progress import run_with_heartbeat
@@ -34,12 +39,13 @@ from wastech_orchestrator.providers.redaction import redact_text
 from wastech_orchestrator.security.env import build_child_env
 
 RunProcess = Callable[..., ProcessResult]
+Which = Callable[[str], str | None]
 _LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class CheckRunResult:
-    """The outcome of one configured check command."""
+    """The outcome of one check command."""
 
     command: str
     exit_code: int | None
@@ -50,34 +56,40 @@ class CheckRunResult:
     # A launch failure (binary/module not found) is an infrastructure event, not a quality failure.
     launch_failed: bool = False
     launch_error: str | None = None
+    # Set when the command's toolchain binary was absent and its set is ``skip_if_unavailable``: the
+    # check did not run (never ``passed``); the gate is incomplete for it.
+    skipped: bool = False
 
 
 @dataclass(frozen=True)
 class CheckOutcome:
-    """The aggregate result of a Check Runner invocation."""
+    """The aggregate result of a Check Runner invocation (every selected check is run)."""
 
     passed: bool
     runs: tuple[CheckRunResult, ...]
-    first_failure_log: str | None = None
-    # Set when the first failure was a *launch* failure: the orchestrator treats it as an infra
-    # event (terminal/preflight), never routing it to ``fixing`` (automatic check discovery).
-    launch_failed: bool = False
-    first_launch_error: str | None = None
+    # Aggregates over ``runs`` (see :meth:`CheckRunner._aggregate`):
+    any_quality_failed: bool = False  # ≥1 executed check failed on its exit code → ``fixing``
+    any_launch_failed: bool = False  # ≥1 required check could not be launched → incomplete gate
+    any_skipped: bool = False  # ≥1 check skipped (opted-in set, toolchain absent)
+    nothing_ran: bool = False  # got ≥1 check but every one was skipped → incomplete gate
+    first_failure_log: str | None = None  # first quality-failure log, for the fixing loop
 
 
 class CheckRunner:
-    """Runs ``checks.commands`` for a task (or subtask) and reports pass/fail."""
+    """Runs the selected ``checks.command_sets`` for a task/subtask and aggregates pass/fail."""
 
     def __init__(
         self,
         config: OrchestratorConfig,
         *,
         run_process: RunProcess = run_process,
+        which: Which = shutil.which,
         heartbeat_seconds: float = 30.0,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._config = config
         self._run_process = run_process
+        self._which = which
         self._heartbeat_seconds = heartbeat_seconds
         self._monotonic = monotonic
 
@@ -94,91 +106,132 @@ class CheckRunner:
         artifacts_root: str | Path,
         task_id: str,
         subtask: int | None = None,
-        checks: Sequence[ResolvedCheck] | None = None,
+        selected: Sequence[ResolvedCheckSet] | None = None,
     ) -> CheckOutcome:
-        """Run each resolved check in order, stopping at the first failure.
+        """Run every check in the ``selected`` sets and aggregate the results.
 
-        ``checks`` is the resolved profile's argv list; when ``None`` the configured
-        ``checks.commands`` are normalized (backward compatible). Returns ``passed=True`` with no
-        runs when no checks are configured. A *launch* failure short-circuits with
-        ``launch_failed=True`` so the caller can treat it as infrastructure rather than a quality
-        failure.
+        ``selected`` is the diff-selected command sets; when ``None`` all of the configured
+        ``checks.command_sets`` are normalized and run. Returns a vacuous ``passed=True`` with no
+        runs when there are no checks. A check whose set is ``skip_if_unavailable`` and whose binary
+        is absent is recorded as ``skipped``; a missing binary on a *required* set surfaces as a
+        launch failure via the process runner.
         """
-        if checks is not None:
-            resolved = list(checks)
+        if selected is not None:
+            sets = list(selected)
         else:
-            resolved = normalize_commands(self._config.checks.commands)
-        timeout = self._config.checks.timeout_seconds
+            sets = list(normalize_command_sets(self._config.checks.command_sets))
+        global_timeout = self._config.checks.timeout_seconds
         env = build_child_env(self._config.security.allowed_environment)
         checks_dir = task_artifact_dir(artifacts_root, task_id) / "checks"
         checks_dir.mkdir(parents=True, exist_ok=True)
 
         runs: list[CheckRunResult] = []
         log = bind(_LOG, task_id=task_id, stage="testing")
-        for index, check in enumerate(resolved, start=1):
-            argv = list(check.argv)
-            log_path = self._next_log_path(checks_dir, subtask)
-            fields: dict[str, object] = {
-                "check_index": index,
-                "check": check.name,
-                "command": argv[0],
-                "timeout_seconds": timeout,
-            }
-            if subtask is not None:
-                fields["subtask"] = subtask
-            started = self._monotonic()
-            log.info("check started", extra=fields)
-            result = run_with_heartbeat(
-                partial(
-                    self._run_process,
-                    argv,
-                    cwd=clone_dir,
-                    env=env,
-                    timeout_seconds=timeout,
-                    stdout_path=str(log_path),
-                ),
-                logger=log,
-                message="check heartbeat",
-                interval_seconds=self._heartbeat_seconds,
-                fields=fields,
-                monotonic=self._monotonic,
-            )
-            self._append_stderr(log_path, result.stderr_text, result)
-            launch_failed = result.launch_error is not None
-            passed = result.exit_code == 0 and not result.timed_out and not launch_failed
-            log.info(
-                "check completed",
-                extra={
-                    **fields,
-                    "passed": passed,
-                    "launch_failed": launch_failed,
-                    "exit_code": result.exit_code,
-                    "timed_out": result.timed_out,
-                    "duration_seconds": round(self._monotonic() - started, 3),
-                },
-            )
-            runs.append(
-                CheckRunResult(
-                    command=" ".join(argv),
-                    name=check.name,
-                    exit_code=result.exit_code,
-                    timed_out=result.timed_out,
-                    passed=passed,
-                    log_path=str(log_path),
-                    launch_failed=launch_failed,
-                    launch_error=result.launch_error,
+        index = 0
+        for cset in sets:
+            timeout = cset.timeout_seconds or global_timeout
+            for check in cset.checks:
+                index += 1
+                argv = list(check.argv)
+                log_path = self._next_log_path(checks_dir, subtask)
+                fields: dict[str, object] = {
+                    "check_index": index,
+                    "check": check.name,
+                    "command": argv[0],
+                    "command_set": cset.name,
+                    "timeout_seconds": timeout,
+                }
+                if subtask is not None:
+                    fields["subtask"] = subtask
+                if cset.skip_if_unavailable and self._which(argv[0]) is None:
+                    # Opted-in set, toolchain binary absent on host → skip (loud), never "passed".
+                    log.warning("check skipped: toolchain absent", extra=fields)
+                    runs.append(self._skipped_result(argv, check, log_path))
+                    continue
+                cwd = Path(clone_dir) / check.cwd if check.cwd else Path(clone_dir)
+                started = self._monotonic()
+                log.info("check started", extra=fields)
+                result = run_with_heartbeat(
+                    partial(
+                        self._run_process,
+                        argv,
+                        cwd=cwd,
+                        env=env,
+                        timeout_seconds=timeout,
+                        stdout_path=str(log_path),
+                    ),
+                    logger=log,
+                    message="check heartbeat",
+                    interval_seconds=self._heartbeat_seconds,
+                    fields=fields,
+                    monotonic=self._monotonic,
                 )
-            )
-            if not passed:
-                return CheckOutcome(
-                    passed=False,
-                    runs=tuple(runs),
-                    first_failure_log=str(log_path),
-                    launch_failed=launch_failed,
-                    first_launch_error=result.launch_error,
+                self._append_stderr(log_path, result.stderr_text, result)
+                launch_failed = result.launch_error is not None
+                passed = result.exit_code == 0 and not result.timed_out and not launch_failed
+                log.info(
+                    "check completed",
+                    extra={
+                        **fields,
+                        "passed": passed,
+                        "launch_failed": launch_failed,
+                        "exit_code": result.exit_code,
+                        "timed_out": result.timed_out,
+                        "duration_seconds": round(self._monotonic() - started, 3),
+                    },
+                )
+                runs.append(
+                    CheckRunResult(
+                        command=" ".join(argv),
+                        name=check.name,
+                        exit_code=result.exit_code,
+                        timed_out=result.timed_out,
+                        passed=passed,
+                        log_path=str(log_path),
+                        launch_failed=launch_failed,
+                        launch_error=result.launch_error,
+                    )
                 )
 
-        return CheckOutcome(passed=True, runs=tuple(runs))
+        return self._aggregate(tuple(runs))
+
+    def _aggregate(self, runs: tuple[CheckRunResult, ...]) -> CheckOutcome:
+        """Fold per-check results into the node-level outcome (run-all precedence is the node's)."""
+        executed = [r for r in runs if not r.skipped]
+        any_skipped = any(r.skipped for r in runs)
+        any_launch_failed = any(r.launch_failed for r in runs)
+        any_quality_failed = any(not r.passed and not r.launch_failed for r in executed)
+        nothing_ran = bool(runs) and not executed  # got checks, but every one was skipped
+        first_failure_log = next(
+            (r.log_path for r in executed if not r.passed and not r.launch_failed), None
+        )
+        passed = not (any_quality_failed or any_launch_failed or nothing_ran)
+        return CheckOutcome(
+            passed=passed,
+            runs=runs,
+            any_quality_failed=any_quality_failed,
+            any_launch_failed=any_launch_failed,
+            any_skipped=any_skipped,
+            nothing_ran=nothing_ran,
+            first_failure_log=first_failure_log,
+        )
+
+    def _skipped_result(
+        self, argv: list[str], check: ResolvedCheck, log_path: Path
+    ) -> CheckRunResult:
+        """Record a skipped check with a loud, distinct log line (never overwritten)."""
+        log_path.write_text(
+            f"skipped (toolchain absent): {argv[0]!r} not found on host\n", encoding="utf-8"
+        )
+        return CheckRunResult(
+            command=" ".join(argv),
+            name=check.name,
+            exit_code=None,
+            timed_out=False,
+            passed=False,
+            log_path=str(log_path),
+            skipped=True,
+        )
 
     def _next_log_path(self, checks_dir: Path, subtask: int | None) -> Path:
         """A fresh, non-overwriting ``<run-id>.log`` path (logs are never overwritten)."""

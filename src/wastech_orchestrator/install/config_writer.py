@@ -37,12 +37,8 @@ class InstallSpec:
     repo_local_path: Path
     base_branch: str
     providers: tuple[ProviderId, ...]
-    checks: tuple[str, ...]
     create_pull_request: bool
     auto_mode: bool
-    # ``configured`` when the operator supplied/confirmed explicit checks; ``auto`` when none were
-    # found, so discovery resolves them at preflight/runtime (automatic check discovery).
-    discovery_mode: str = "configured"
 
 
 def _ordered_providers(providers: tuple[ProviderId, ...]) -> tuple[ProviderId, ...]:
@@ -135,8 +131,8 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "quarantine_folder": quarantine,
         },
         "checks": {
-            "discovery": {"mode": spec.discovery_mode, "refresh": "on_change"},
-            "commands": list(spec.checks),
+            # No gate is seeded: the operator authors ``command_sets`` (see config.example.yaml).
+            "command_sets": {},
             "timeout_seconds": 7200,
         },
         "git": {

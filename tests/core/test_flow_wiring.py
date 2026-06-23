@@ -60,7 +60,7 @@ def test_build_node_inputs_maps_pipeline_paths(tmp_path: Path) -> None:
     inputs = build_node_inputs(
         p,  # type: ignore[arg-type]
         flow_dir=tmp_path,
-        resolved_checks=(),
+        check_sets=(),
         pr_title="My PR",
         summary_body_path="/s/summary.md",
         commit_message="feat: x",

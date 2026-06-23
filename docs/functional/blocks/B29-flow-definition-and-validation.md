@@ -26,7 +26,7 @@ A flow has five node kinds, each a frozen dataclass discriminated by `kind` ([sc
 | --- | --- | --- |
 | `agent` | `role_file`, `session_scope`, `lineage_affinity`, `permission_profile`, `provider`, `output_artifact`, `best_effort`, `hitl`, `when` | runs an author/editor through the router |
 | `evaluator` | `role`, `role_file`, `blocking`, `max_rework_per_stage`, `permission_profile` (const read-only) | read-only verdict → `accept`/`rework` |
-| `checks` | `checker` (`command_profile` / `citation` / `dependency_scan`), `discovery` | quality gate → `pass`/`fail` |
+| `checks` | `checker` (`command_profile` / `citation` / `dependency_scan`), `when` | quality gate → `pass`/`fail` |
 | `hitl` | `signal` (`question` / `approval`), `timeout_s` | bare durable human gate |
 | `publish` | `policy` (a `PublishingPolicy`) | git publish (orchestrator-owned) |
 
@@ -40,7 +40,7 @@ An `Edge` ([schema.py:119](../../../src/wastech_orchestrator/core/flow/schema.py
 
 `load_flow` ([snapshot.py:134](../../../src/wastech_orchestrator/core/flow/snapshot.py#L134)) reads the YAML, requires a top-level `flow:` key, computes the `flow_fingerprint` over the raw `flow` dict, and parses into a `FlowDoc`. Every mapping is checked against an explicit field allowlist — an unknown key is a **fatal** `FlowLoadError`, never silently ignored ([snapshot.py:51-98](../../../src/wastech_orchestrator/core/flow/snapshot.py#L51), `_reject_unknown` at [snapshot.py:111](../../../src/wastech_orchestrator/core/flow/snapshot.py#L111)). This is the structural `additionalProperties: false` gate that keeps operator YAML a closed allowlist. Additional load-time closed sets:
 
-- `checker` ∈ `{command_profile, citation, dependency_scan}` ([snapshot.py:89](../../../src/wastech_orchestrator/core/flow/snapshot.py#L89)) — a flow may not invent a checker.
+- `checker` ∈ `{command_profile, citation, dependency_scan}` ([snapshot.py:134](../../../src/wastech_orchestrator/core/flow/snapshot.py#L134)) — a flow may not invent a checker. A `checks` node is exactly `{id, kind, checker, when}` (`_CHECKS_FIELDS`, [snapshot.py:111](../../../src/wastech_orchestrator/core/flow/snapshot.py#L111)), so a stale `discovery:` key (removed with the checks-monorepo change) is now a fatal `FlowLoadError` — the flow never supplies check commands or discovery settings.
 - `output_artifact` ∈ `{enriched_spec, plan, summary}` ([snapshot.py:93](../../../src/wastech_orchestrator/core/flow/snapshot.py#L93)) — the slot vocabulary is core-fixed.
 - `when.fact` must be namespaced `derived.*` / `config.*` ([snapshot.py:98](../../../src/wastech_orchestrator/core/flow/snapshot.py#L98)) — a bare/typo'd fact is rejected at load.
 

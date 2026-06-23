@@ -18,7 +18,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from wastech_orchestrator.checks.model import ResolvedCheck
+from wastech_orchestrator.checks.model import ResolvedCheckSet
 from wastech_orchestrator.core.flow.nodes.base import (
     CheckRunnerPort,
     GitPort,
@@ -54,7 +54,6 @@ def build_node_services(
     prompt_secrets: tuple[str, ...] = (),
     register_artifact: RegisterArtifact | None = None,
     finalize: Callable[[], str | None] | None = None,
-    check_reresolve: Callable[[], tuple[ResolvedCheck, ...] | None] | None = None,
     run_process: RunProcess = _default_run_process,
     process_env: Mapping[str, str] | None = None,
     scan_timeout_s: int = 600,
@@ -82,7 +81,6 @@ def build_node_services(
         prompt_secrets=prompt_secrets,
         register_artifact=register_artifact,
         finalize=finalize,
-        check_reresolve=check_reresolve,
         run_process=run_process,
         process_env=dict(process_env or {}),
         scan_timeout_s=scan_timeout_s,
@@ -93,7 +91,7 @@ def build_node_inputs(
     p: _Pipeline,
     *,
     flow_dir: Path,
-    resolved_checks: tuple[ResolvedCheck, ...] | None = (),
+    check_sets: tuple[ResolvedCheckSet, ...] = (),
     pr_title: str | None = None,
     summary_body_path: str | None = None,
     commit_message: str | None = None,
@@ -103,9 +101,9 @@ def build_node_inputs(
 
     Artifact paths are read straight off the pipeline (the values the legacy ``_prompt_variables``
     injected). The publish-only fields (``pr_title`` / ``summary_body_path`` / ``commit_message``)
-    are not pipeline attributes — the publish wrapper computes and passes them; ``resolved_checks``
-    comes from the resolved check profile. Editing-session continuity is durable now (the
-    ``editing_lineage`` store, P2.2), not an in-memory map threaded through ``NodeInputs``.
+    are not pipeline attributes — the publish wrapper computes and passes them; ``check_sets`` are
+    the normalized ``checks.command_sets`` (diff-selected at run time by the checks node). Editing-
+    session continuity is durable now (the ``editing_lineage`` store, P2.2), not an in-memory map.
     """
     return NodeInputs(
         flow_dir=flow_dir,
@@ -117,7 +115,7 @@ def build_node_inputs(
         skill_paths=tuple(ref.path for ref in p.selected_skills),
         subtask_count=p.decomposition.n if p.decomposition.accepted else None,
         subtask_spec_path=subtask_spec_path,
-        resolved_checks=resolved_checks,
+        check_sets=check_sets,
         branch=p.branch or None,
         pr_title=pr_title,
         summary_body_path=summary_body_path,

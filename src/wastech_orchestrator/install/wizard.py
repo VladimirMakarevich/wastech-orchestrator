@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from wastech_orchestrator.checks.detect import propose_default_commands
 from wastech_orchestrator.install import detect
 from wastech_orchestrator.install.config_writer import InstallSpec
 from wastech_orchestrator.providers.base import ProviderId
@@ -70,7 +69,6 @@ def run_wizard(
     *,
     repo_path: Path,
     provider: str,
-    checks: list[str] | None,
     create_pr: bool | None,
     auto_mode: bool | None,
     non_interactive: bool,
@@ -98,21 +96,19 @@ def run_wizard(
     _confirm_cleanliness(info.is_clean, non_interactive, prompter)
 
     providers, missing = _resolve_providers(provider, prompter)
-    resolved_checks = _resolve_checks(checks, info.root, non_interactive, prompter)
     resolved_create_pr = _resolve_create_pr(create_pr, non_interactive, prompter)
     resolved_auto = _resolve_auto_mode(auto_mode, non_interactive, prompter)
 
+    # Checks are not seeded at install: the gate is named ``checks.command_sets`` (with paths/cwd),
+    # which a flat list can't express. ``init`` writes an empty mapping; the operator authors it
+    # from the commented examples in config.example.yaml.
     spec = InstallSpec(
         repo_url=info.origin_url,
         repo_local_path=info.root,
         base_branch=base_branch,
         providers=providers,
-        checks=resolved_checks,
         create_pull_request=resolved_create_pr,
         auto_mode=resolved_auto,
-        # With explicit/confirmed checks, trust them (``configured``); otherwise let discovery
-        # resolve a launchable profile at preflight/runtime (``auto``) — automatic check discovery.
-        discovery_mode="configured" if resolved_checks else "auto",
     )
     prompter.info(_summary(spec, missing))
     if not non_interactive and not prompter.confirm("Write this configuration?", default=True):
@@ -159,19 +155,6 @@ def _resolve_providers(
     return selected, missing
 
 
-def _resolve_checks(
-    checks: list[str] | None, repo_root: Path, non_interactive: bool, prompter: Prompter
-) -> tuple[str, ...]:
-    if checks is not None:
-        return tuple(checks)
-    detected = propose_default_commands(repo_root)
-    if non_interactive:
-        return tuple(detected)
-    if detected and prompter.confirm(f"Use detected checks {detected}?", default=True):
-        return tuple(detected)
-    return tuple(prompter.ask_list("Enter check commands one per line (blank line to finish):"))
-
-
 def _resolve_create_pr(create_pr: bool | None, non_interactive: bool, prompter: Prompter) -> bool:
     if create_pr is not None:
         return create_pr
@@ -191,7 +174,6 @@ def _resolve_auto_mode(auto_mode: bool | None, non_interactive: bool, prompter: 
 
 def _summary(spec: InstallSpec, missing: tuple[ProviderId, ...]) -> str:
     providers = ", ".join(pid.value for pid in spec.providers)
-    checks = ", ".join(spec.checks) or "(none)"
     lines = [
         "",
         "configuration to write:",
@@ -199,7 +181,7 @@ def _summary(spec: InstallSpec, missing: tuple[ProviderId, ...]) -> str:
         f"  .worc home:  {spec.repo_local_path / '.worc'}",
         f"  base branch: {spec.base_branch}",
         f"  providers:   {providers}",
-        f"  checks:      {checks}",
+        "  checks:      command_sets (author in config.yaml)",
         f"  create PR:   {spec.create_pull_request}",
         f"  auto mode:   {spec.auto_mode}",
     ]

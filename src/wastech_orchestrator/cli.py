@@ -23,7 +23,6 @@ from importlib.resources.abc import Traversable
 from pathlib import Path
 
 from wastech_orchestrator import __version__, preflight, process_control
-from wastech_orchestrator.checks import diagnostics as check_diagnostics
 from wastech_orchestrator.config import upgrade as config_upgrade
 from wastech_orchestrator.config.loader import ConfigError, load_config, loads_config
 from wastech_orchestrator.config.schema import (
@@ -163,13 +162,6 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("auto", "codex", "claude", "both"),
         default="auto",
         help="which providers to route to (default: auto-detect what is on PATH)",
-    )
-    install_cmd.add_argument(
-        "--check",
-        action="append",
-        default=None,
-        metavar="COMMAND",
-        help="a check command (repeatable); overrides ecosystem auto-detection",
     )
     install_cmd.add_argument(
         "--create-pr",
@@ -970,9 +962,7 @@ def run_preflight(config: OrchestratorConfig) -> tuple[bool, list[str]]:
         enforced = "enforced" if config.security.strict_isolation else "strict_isolation=false"
         lines.append(f"isolation: OK ({enforced})")
 
-    chk_ok, chk_lines = check_diagnostics.check_preflight(config, worc_home_for(config))
-    ok = ok and chk_ok
-    lines.extend(chk_lines)
+    lines.extend(_summarize_command_sets(config))
 
     # Every flow file — packaged built-ins and operator flows in ``.worc/flows/`` — must load and
     # pass the full fatal validator (graph + ceiling + config-consistency) before any task runs, so
@@ -1157,6 +1147,28 @@ def cmd_restart(args: argparse.Namespace) -> int:
     return cmd_watch(args)
 
 
+def _summarize_command_sets(config: OrchestratorConfig) -> list[str]:
+    """Read-only summary of the configured ``checks.command_sets`` (no resolution/probing/running).
+
+    Shared by ``preflight`` and ``status``; an empty mapping is reported as "no quality gate".
+    """
+    sets = config.checks.command_sets
+    if not sets:
+        return ["checks: no command_sets configured (no quality gate)"]
+    lines = [f"checks: {len(sets)} command set(s):"]
+    for name, cset in sets.items():
+        paths = ", ".join(cset.paths) if cset.paths else "always"
+        cmds = "; ".join(" ".join(c.argv) for c in cset.commands)
+        flags = []
+        if cset.timeout_seconds is not None:
+            flags.append(f"timeout={cset.timeout_seconds}s")
+        if cset.skip_if_unavailable:
+            flags.append("skip_if_unavailable")
+        suffix = f" [{', '.join(flags)}]" if flags else ""
+        lines.append(f"  {name} (paths: {paths}){suffix}: {cmds}")
+    return lines
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     """Show persisted progress without starting providers, checks, or git operations."""
     _configure_runtime_logging(args)
@@ -1210,14 +1222,10 @@ def cmd_status(args: argparse.Namespace) -> int:
         if task.cleanup_last_error:
             print(f"last_error={task.cleanup_last_error}")
 
-    # The resolved check profile, read-only (status never resolves, probes, or runs anything).
-    profile = check_diagnostics.load_profile(worc_home_for(config))
+    # The configured check command sets, read-only (status never resolves, probes, or runs).
     print()
-    if profile is None:
-        print("checks_profile: none (run preflight or install to resolve)")
-    else:
-        for line in check_diagnostics.summarize_profile(profile):
-            print(line)
+    for line in _summarize_command_sets(config):
+        print(line)
     return 0
 
 
@@ -1281,8 +1289,7 @@ def _install_print_plan(
     print(f"  base:       {spec.base_branch}")
     print(f"  config:     {config_path}")
     print(f"  providers:  {', '.join(p.value for p in spec.providers)}")
-    print(f"  checks:     {', '.join(spec.checks) or '(none)'}")
-    print(f"  discovery:  {spec.discovery_mode}")
+    print("  checks:     command_sets (author in config.yaml)")
     print(f"  create_pr:  {spec.create_pull_request}")
     print(f"  auto_mode:  {spec.auto_mode}")
     for rel in REPO_TASK_DIRS:
@@ -1294,30 +1301,6 @@ def _install_print_plan(
     print(f"  would ignore {WORC_HOME}/ via .gitignore")
     if missing:
         print(f"  note: provider(s) not on PATH: {', '.join(p.value for p in missing)}")
-
-
-def _install_resolve_checks(config: OrchestratorConfig) -> None:
-    """Seed the resolved profile at install, running the read-only agent fallback when configured.
-
-    Deterministic resolution is also performed by the auto-preflight, but only the agent fallback
-    needs an explicit provider run here. No-op unless ``checks.discovery`` enables agent fallback
-    and names a cheap model (opt-in); the deterministic preflight then seeds the profile on its own.
-    """
-    from wastech_orchestrator.checks.discovery_factory import build_discovery
-    from wastech_orchestrator.checks.resolver import CheckResolver
-
-    artifacts_root = str(worc_home_for(config))
-    providers = build_providers(config, artifacts_root=artifacts_root)
-    discovery = build_discovery(config, providers, artifacts_root)
-    if discovery is None:
-        return
-    resolver = CheckResolver(
-        config,
-        repo_root=config.repo.local_path,
-        artifacts_root=artifacts_root,
-        discovery=discovery,
-    )
-    resolver.resolve(allow_agent=True)
 
 
 def _install_run_preflight(config_path: Path, *, skip: bool) -> int:
@@ -1349,7 +1332,6 @@ def cmd_install(args: argparse.Namespace) -> int:
         outcome = wizard.run_wizard(
             repo_path=Path(args.repo_path),
             provider=args.provider,
-            checks=args.check,
             create_pr=args.create_pr,
             auto_mode=args.auto_mode,
             non_interactive=args.non_interactive,
@@ -1390,7 +1372,6 @@ def cmd_install(args: argparse.Namespace) -> int:
     if outcome.missing_providers:
         names = ", ".join(p.value for p in outcome.missing_providers)
         print(f"install: note — selected provider(s) not on PATH yet: {names}")
-    _install_resolve_checks(_load_config(str(config_path)))
     return _install_run_preflight(config_path, skip=args.skip_preflight)
 
 

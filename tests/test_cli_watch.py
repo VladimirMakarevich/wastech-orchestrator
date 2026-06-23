@@ -23,7 +23,6 @@ def test_pending_dir_is_under_the_bound_repo(tmp_path: Path) -> None:
         repo_local_path=repo,
         base_branch="main",
         providers=(ProviderId.CODEX,),
-        checks=(),
         create_pull_request=False,
         auto_mode=False,
     )

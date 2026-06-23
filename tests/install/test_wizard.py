@@ -48,7 +48,6 @@ def _patch_detect(
     clean: bool = True,
     providers: tuple[str, ...] = ("codex", "claude"),
     gh: bool = True,
-    checks: tuple[str, ...] = (),
 ) -> None:
     info = GitInfo(
         root=root, origin_url=origin, current_branch="main", default_branch="main", is_clean=clean
@@ -61,14 +60,12 @@ def _patch_detect(
     }
     monkeypatch.setattr(detect, "detect_providers", lambda: detected)
     monkeypatch.setattr(detect, "has_gh", lambda: gh)
-    monkeypatch.setattr(wizard, "propose_default_commands", lambda _root: list(checks))
 
 
 def _run(monkeypatch: pytest.MonkeyPatch, root: Path, **kwargs: object) -> wizard.WizardOutcome:
     defaults: dict[str, object] = {
         "repo_path": root,
         "provider": "auto",
-        "checks": None,
         "create_pr": None,
         "auto_mode": None,
         "non_interactive": True,
@@ -152,7 +149,6 @@ def test_dirty_repo_declined_aborts_in_interactive(
             monkeypatch,
             root,
             non_interactive=False,
-            checks=["x"],
             create_pr=False,
             auto_mode=False,
             prompter=prompter,
@@ -168,61 +164,19 @@ def test_aborted_final_confirm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
             monkeypatch,
             root,
             non_interactive=False,
-            checks=["x"],
             create_pr=False,
             auto_mode=False,
             prompter=prompter,
         )
 
 
-def test_explicit_checks_override_detection(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_install_does_not_seed_checks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # v15: the wizard no longer detects/seeds checks; the operator authors `command_sets` by hand.
     root = tmp_path / "repo"
-    _patch_detect(monkeypatch, root=root, checks=("pytest",))
-    outcome = _run(monkeypatch, root, checks=["cargo test", "cargo clippy"])
-    assert outcome.spec.checks == ("cargo test", "cargo clippy")
-
-
-def test_detected_checks_used_in_non_interactive(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "repo"
-    _patch_detect(monkeypatch, root=root, checks=("pytest",))
-    assert _run(monkeypatch, root).spec.checks == ("pytest",)
-
-
-def test_discovery_mode_configured_when_checks_resolved(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "repo"
-    _patch_detect(monkeypatch, root=root, checks=("pytest",))
-    assert _run(monkeypatch, root).spec.discovery_mode == "configured"
-
-
-def test_discovery_mode_auto_when_no_checks_found(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "repo"
-    _patch_detect(monkeypatch, root=root, checks=())  # nothing detected
-    assert _run(monkeypatch, root).spec.discovery_mode == "auto"
-
-
-def test_interactive_checks_entered_one_by_one(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "repo"
-    _patch_detect(monkeypatch, root=root, providers=("codex",), checks=())  # nothing detected
-    prompter = _ScriptedPrompter(lists=[["pytest", "ruff check ."]], confirms=[True])
-    outcome = _run(
-        monkeypatch,
-        root,
-        non_interactive=False,
-        create_pr=False,
-        auto_mode=False,
-        prompter=prompter,
-    )
-    assert outcome.spec.checks == ("pytest", "ruff check .")
+    _patch_detect(monkeypatch, root=root)
+    spec = _run(monkeypatch, root).spec
+    assert not hasattr(spec, "checks")
+    assert not hasattr(spec, "discovery_mode")
 
 
 def test_create_pr_defaults_to_gh_presence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

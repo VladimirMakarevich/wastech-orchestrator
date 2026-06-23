@@ -29,7 +29,8 @@ import json
 from pathlib import Path
 
 from wastech_orchestrator.check_runner import CheckOutcome
-from wastech_orchestrator.checks.model import ResolvedCheck
+from wastech_orchestrator.checks.model import ResolvedCheckSet
+from wastech_orchestrator.checks.selection import select_check_sets
 from wastech_orchestrator.core.flow.checkers.citation import CitationReport, validate_citations
 from wastech_orchestrator.core.flow.checkers.dependency_scan import (
     DependencyScanReport,
@@ -37,7 +38,6 @@ from wastech_orchestrator.core.flow.checkers.dependency_scan import (
 )
 from wastech_orchestrator.core.flow.engine import NodeContext, NodeOutcome, NodeResult
 from wastech_orchestrator.core.flow.nodes.base import (
-    NodeInfraError,
     NodeInputs,
     NodeManualRequired,
     NodeServices,
@@ -47,10 +47,6 @@ from wastech_orchestrator.core.flow.schema import ChecksNode, FlowNode
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.routing.snapshots import WorkingTreeSnapshot
 from wastech_orchestrator.state_store import CheckRunRow, NodeRunRow
-
-
-class CheckLaunchError(NodeInfraError):
-    """A configured check could not be *launched* (infra, never a quality ``fail``)."""
 
 
 class ChecksNodeRunner:
@@ -82,23 +78,31 @@ class ChecksNodeRunner:
 
     def _run_command_profile(self, node: ChecksNode, ctx: NodeContext, run_id: int) -> NodeResult:
         before = self._capture()  # working-tree state before the checks can mutate anything
-        outcome = self._run_checks(ctx, self._in.resolved_checks)
-        if outcome.launch_failed and self._s.check_reresolve is not None:
-            # Infra launch failure: re-resolve the command set once (gated) and retry the node.
-            new_checks = self._s.check_reresolve()
-            if new_checks is not None:
-                self._in.resolved_checks = new_checks
-                outcome = self._run_checks(ctx, new_checks)
-        if outcome.launch_failed:
+        # Diff-select which command sets to run (Р3). ``None`` = git not wired (unit harness) → run
+        # all; ``[]`` = empty diff (nothing changed) → run nothing (vacuous pass).
+        changed = self._s.git.changed_code_paths() if self._s.git is not None else None
+        selected = select_check_sets(self._in.check_sets, changed)
+        if not selected:
+            # Empty diff (nothing changed) or no command_sets configured → nothing to check → pass.
+            return self._complete(run_id, node, passed=True)
+        outcome = self._run_checks(ctx, selected)
+        if outcome.any_launch_failed or outcome.nothing_ran:
+            # Incomplete gate: a required toolchain was absent, or every selected check was
+            # skipped — changed code went unchecked. Fail closed to manual (a fix loop cannot
+            # install host toolchains). This precedence wins over a co-occurring quality failure.
             self._s.store.complete_node_run(
-                run_id, status="launch_failed", outcome=None, finished_at=self._s.clock()
+                run_id, status="incomplete", outcome=None, finished_at=self._s.clock()
             )
-            raise CheckLaunchError(
-                outcome.first_launch_error or "a configured check could not be launched"
+            raise NodeManualRequired(
+                f"checks node {node.id!r}: the quality gate could not fully run (a required "
+                "toolchain is absent on the host, or every selected check was skipped) — changed "
+                "code must not be handed on unchecked"
             )
-        if outcome.passed and self._mutated_working_tree(before):
+        if outcome.any_quality_failed:
+            return self._complete(run_id, node, passed=False)
+        if self._mutated_working_tree(before):
             # Green-but-dirtying guard: a passing check that rewrote commit-candidate files must not
-            # pass silently. Fail closed to manual review (mirrors the launch-failure record shape).
+            # pass silently. Fail closed to manual review.
             self._s.store.complete_node_run(
                 run_id, status="dirtied_working_tree", outcome=None, finished_at=self._s.clock()
             )
@@ -107,7 +111,7 @@ class ChecksNodeRunner:
                 "(commit-candidate files changed across the check run) — a green-but-dirtying "
                 "check must not pass silently"
             )
-        return self._complete(run_id, node, passed=outcome.passed)
+        return self._complete(run_id, node, passed=True)
 
     # -- citation (P3.1) ------------------------------------------------------
 
@@ -186,6 +190,7 @@ class ChecksNodeRunner:
         timed_out: bool,
         passed: bool,
         log_path: str,
+        skipped: bool = False,
     ) -> None:
         self._s.store.record_check_run(
             CheckRunRow(
@@ -196,6 +201,7 @@ class ChecksNodeRunner:
                 timed_out=timed_out,
                 passed=passed,
                 log_path=log_path,
+                skipped=skipped,
                 started_at=self._s.clock(),
                 finished_at=self._s.clock(),
             )
@@ -220,16 +226,14 @@ class ChecksNodeRunner:
             return False
         return self._s.snapshot.capture().diff_checksum != before.diff_checksum
 
-    def _run_checks(
-        self, ctx: NodeContext, checks: tuple[ResolvedCheck, ...] | None
-    ) -> CheckOutcome:
-        """Run the check profile and record one ``check_runs`` row per command."""
+    def _run_checks(self, ctx: NodeContext, selected: tuple[ResolvedCheckSet, ...]) -> CheckOutcome:
+        """Run the selected command sets and record one ``check_runs`` row per command."""
         outcome = self._s.check_runner.run(
             clone_dir=self._s.repo_dir,
             artifacts_root=self._s.artifacts_root,
             task_id=ctx.task_id,
             subtask=ctx.subtask_order,
-            checks=checks,
+            selected=selected,
         )
         for run in outcome.runs:
             self._record_check_run(
@@ -239,6 +243,7 @@ class ChecksNodeRunner:
                 timed_out=run.timed_out,
                 passed=run.passed,
                 log_path=run.log_path,
+                skipped=run.skipped,
             )
         return outcome
 

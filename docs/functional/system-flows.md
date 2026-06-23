@@ -9,7 +9,7 @@ Brief end-to-end flows that span multiple blocks. Details for each block are in 
 3. [B06 Orchestrator](./blocks/B06-orchestrator-pipeline.md) acquires the single slot, registers the task in [B07 State Store](./blocks/B07-state-machine-and-store.md), resolves the flow for the task's `task_type` via [B29 Registry](./blocks/B29-flow-definition-and-validation.md) (validated, fail-closed), runs the isolation ([B25](./blocks/B25-security-policy.md)) and check ([B23](./blocks/B23-check-discovery.md)) preflights — both **before** the branch.
 4. [B22 Git Manager](./blocks/B22-git-manager.md) prepares the branch `agent/<id>-<slug>`; the orchestrator builds the node services/inputs + the [B31 Supervisor](./blocks/B31-supervisor.md) and hands the graph to [B28 FlowEngine](./blocks/B28-flow-engine.md).
 5. The engine traverses the default `implementation` graph ([flows/implementation.md](./flows/implementation.md)): `refinement → planning → implementation → testing → review → publish`. Each agent node runs via [B17 Router](./blocks/B17-agent-router-and-fallback.md) → [B18 Providers](./blocks/B18-agent-providers.md) ([B30 runners](./blocks/B30-flow-node-runners.md)); prompts are assembled by [B15](./blocks/B15-prompt-templates.md), skills by [B13](./blocks/B13-skill-selection.md), typed output by [B12](./blocks/B12-hitl-and-typed-output.md). After each step the supervisor observes read-only.
-6. `testing` runs the resolved checks ([B24](./blocks/B24-check-execution.md)); `review` is a read-only evaluator. `implementation`/`fixing` edits are guarded by the dangerous-diff classifier ([B14](./blocks/B14-dangerous-diff-guardrail.md)).
+6. `testing` selects the operator's command sets matching the diff ([B23](./blocks/B23-check-discovery.md) `select_check_sets`) and runs them all through the Check Runner ([B24](./blocks/B24-check-execution.md)) — a quality failure routes to `fixing`, while an incomplete gate (a required toolchain absent, or every selected check skipped) goes to manual; `review` is a read-only evaluator. `implementation`/`fixing` edits are guarded by the dangerous-diff classifier ([B14](./blocks/B14-dangerous-diff-guardrail.md)).
 7. `publish`: the orchestrator's finalize hook writes the supervisor summary + moves the task file; [B22](./blocks/B22-git-manager.md) commits (code + audit), pushes, opens the PR — idempotently.
 8. [B06](./blocks/B06-orchestrator-pipeline.md) performs terminal cleanup, writes one [B08 Ledger](./blocks/B08-ledger-and-failure-reports.md) record, sends a notification ([B26](./blocks/B26-notifications-telegram.md)). [B01](./blocks/B01-cli-and-operator-commands.md) maps the status to an exit code.
 
@@ -21,11 +21,10 @@ A `testing` `fail` takes the `test_fix` loop edge to `fixing`; a `review` `rewor
 
 If planning proposes a split that passes the deterministic gate ([B11](./blocks/B11-task-decomposition.md)), the orchestrator partitions the flow into pre / region / post ([B28](./blocks/B28-flow-engine.md) `partition_decomposition`) and runs the `sub_flow` region (`implementation → testing → review → fixing`) once per subtask, committing each ([B22](./blocks/B22-git-manager.md)) and resetting per-loop budgets between subtasks while the global counter accumulates. A subtask with a verified commit is never re-run.
 
-## HITL (planning approval, dangerous diff, changed checks)
+## HITL (planning approval, dangerous diff)
 
 - **Planning approval / question** — a typed `human_input` on a HITL-capable agent node triggers one durable round-trip via [B30](./blocks/B30-flow-node-runners.md) `HumanGate` over [B26](./blocks/B26-notifications-telegram.md); the interaction artifact ([B12](./blocks/B12-hitl-and-typed-output.md)) is persisted before asking, so a restart resumes it. Fail-closed on timeout/denial.
 - **Dangerous diff** — a deletion/dependency change after a `workspace-write` edit ([B14](./blocks/B14-dangerous-diff-guardrail.md)) requires a durable approval (a matching planning pre-approval counts); on denial the node reconsiders once, then fails closed to manual.
-- **Changed check set** — a check-command set that differs from the last approved one is gated by the orchestrator ([B06](./blocks/B06-orchestrator-pipeline.md) `_ask_check_command_approval`), fail-closed.
 
 ## `watch` daemon
 

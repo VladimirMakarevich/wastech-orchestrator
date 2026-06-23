@@ -25,10 +25,8 @@ from wastech_orchestrator.config.schema import (
     AuditBranch,
     AutoModeConfig,
     CheckCommandSpec,
-    CheckDiscoveryConfig,
-    CheckDiscoveryMode,
-    CheckRefreshPolicy,
     ChecksConfig,
+    CommandSet,
     DecompositionConfig,
     FootprintConfig,
     GitConfig,
@@ -171,41 +169,10 @@ def _str_tuple(
     return tuple(out)
 
 
-def _check_command_list(
-    m: Mapping[str, Any], key: str, where: str, issues: list[str]
-) -> tuple[str | CheckCommandSpec, ...]:
-    """Read ``checks.commands`` as a backward-compatible union of strings and ``{name, argv}`` maps.
-
-    Structural only — no ``shlex`` splitting here (the canonical normalization lives in
-    ``checks.model``). A legacy string is kept verbatim; a mapping must carry a non-empty ``argv``
-    list of strings and may carry an optional ``name``.
-    """
-    if key not in m:
-        return ()
-    value = m[key]
-    if not isinstance(value, list):
-        issues.append(f"{where}.{key}: expected a list, got {type(value).__name__}")
-        return ()
-    out: list[str | CheckCommandSpec] = []
-    for index, item in enumerate(value):
-        item_where = f"{where}.{key}[{index}]"
-        if isinstance(item, str):
-            out.append(item)
-            continue
-        if isinstance(item, Mapping):
-            spec = _command_spec({str(k): v for k, v in item.items()}, item_where, issues)
-            if spec is not None:
-                out.append(spec)
-            continue
-        issues.append(
-            f"{item_where}: expected a string or a {{name, argv}} mapping, "
-            f"got {type(item).__name__}"
-        )
-    return tuple(out)
-
-
 def _command_spec(m: Mapping[str, Any], where: str, issues: list[str]) -> CheckCommandSpec | None:
-    _check_keys(m, {"name", "argv"}, where, issues)
+    """Parse one ``{name, argv, cwd?}`` command mapping (structural only; the ``cwd`` traversal
+    check lives in ``config.validation``, the ``shlex``/argv normalization in ``checks.model``)."""
+    _check_keys(m, {"name", "argv", "cwd"}, where, issues)
     raw_argv = m.get("argv")
     if not isinstance(raw_argv, list) or not raw_argv:
         issues.append(f"{where}.argv: expected a non-empty list of strings")
@@ -224,7 +191,47 @@ def _command_spec(m: Mapping[str, Any], where: str, issues: list[str]) -> CheckC
     if name is not None and not isinstance(name, str):
         issues.append(f"{where}.name: expected a string, got {type(name).__name__}")
         name = None
-    return CheckCommandSpec(argv=tuple(argv), name=name)
+    cwd = _opt_str(m, "cwd", where, issues)
+    return CheckCommandSpec(argv=tuple(argv), name=name, cwd=cwd)
+
+
+def _command_set(m: Mapping[str, Any], where: str, issues: list[str]) -> CommandSet:
+    """Parse one ``checks.command_sets.<name>`` mapping into a :class:`CommandSet` (shapes only)."""
+    _check_keys(m, {"paths", "timeout_seconds", "skip_if_unavailable", "commands"}, where, issues)
+    raw_cmds = m.get("commands")
+    commands: list[CheckCommandSpec] = []
+    if not isinstance(raw_cmds, list):
+        issues.append(f"{where}.commands: expected a list of {{name, argv, cwd?}} mappings")
+    else:
+        for index, item in enumerate(raw_cmds):
+            item_where = f"{where}.commands[{index}]"
+            if isinstance(item, Mapping):
+                spec = _command_spec({str(k): v for k, v in item.items()}, item_where, issues)
+                if spec is not None:
+                    commands.append(spec)
+            else:
+                issues.append(
+                    f"{item_where}: expected a {{name, argv, cwd?}} mapping, "
+                    f"got {type(item).__name__}"
+                )
+    return CommandSet(
+        commands=tuple(commands),
+        paths=_str_tuple(m, "paths", (), where, issues),
+        timeout_seconds=_opt_int(m, "timeout_seconds", where, issues),
+        skip_if_unavailable=_bool(m, "skip_if_unavailable", False, where, issues),
+    )
+
+
+def _build_command_sets(raw: Any, issues: list[str]) -> dict[str, CommandSet]:
+    """Parse ``checks.command_sets`` (name → set); the mapping key is the set name."""
+    if raw is None:
+        return {}
+    m = _mapping(raw, "checks.command_sets", issues)
+    sets: dict[str, CommandSet] = {}
+    for name in m:
+        where = f"checks.command_sets.{name}"
+        sets[name] = _command_set(_mapping(m[name], where, issues), where, issues)
+    return sets
 
 
 def _opt_str(m: Mapping[str, Any], key: str, where: str, issues: list[str]) -> str | None:
@@ -465,74 +472,22 @@ def _build_validation(raw: Any, issues: list[str]) -> ValidationConfig:
     )
 
 
-def _build_discovery(raw: Any, issues: list[str]) -> CheckDiscoveryConfig:
-    where = "checks.discovery"
-    m = _mapping(raw, where, issues)
-    _check_keys(
-        m,
-        {
-            "mode",
-            "agent_fallback",
-            "refresh",
-            "provider",
-            "model",
-            "reasoning",
-            "timeout_seconds",
-            "run_at_task_start",
-            "approve_command_changes",
-        },
-        where,
-        issues,
-    )
-    if "reasoning" not in m:
-        reasoning: str | None = "low"
-    else:
-        reasoning = _opt_str(m, "reasoning", where, issues)
-        if reasoning is not None and reasoning not in _REASONING_LEVELS:
-            issues.append(
-                f"{where}.reasoning: invalid value {reasoning!r}, "
-                f"expected one of {sorted(_REASONING_LEVELS)}"
-            )
-            reasoning = None
-    provider_raw = m.get("provider")
-    provider = (
-        None
-        if provider_raw is None
-        else _enum(provider_raw, ProviderId, f"{where}.provider", issues, ProviderId.CLAUDE)
-    )
-    return CheckDiscoveryConfig(
-        mode=_enum(
-            m.get("mode"),
-            CheckDiscoveryMode,
-            f"{where}.mode",
-            issues,
-            CheckDiscoveryMode.CONFIGURED,
-        ),
-        agent_fallback=_bool(m, "agent_fallback", True, where, issues),
-        refresh=_enum(
-            m.get("refresh"),
-            CheckRefreshPolicy,
-            f"{where}.refresh",
-            issues,
-            CheckRefreshPolicy.ON_CHANGE,
-        ),
-        provider=provider,
-        model=_str(m, "model", "", where, issues),
-        reasoning=reasoning,
-        timeout_seconds=_int(m, "timeout_seconds", 120, where, issues),
-        run_at_task_start=_bool(m, "run_at_task_start", True, where, issues),
-        approve_command_changes=_bool(m, "approve_command_changes", True, where, issues),
-    )
-
-
 def _build_checks(raw: Any, issues: list[str]) -> ChecksConfig:
     where = "checks"
     m = _mapping(raw, where, issues)
-    _check_keys(m, {"commands", "timeout_seconds", "discovery"}, where, issues)
+    # ``discovery`` (whole block) and ``commands`` (flat list) were removed in config v15 —
+    # tolerated (ignored), not accepted: a stale config still loads fail-open and ``upgrade-config``
+    # strips the dead keys. The gate is now exactly the operator's ``command_sets`` (empty = none).
+    _check_keys(
+        m,
+        {"command_sets", "timeout_seconds"},
+        where,
+        issues,
+        tolerated={"discovery", "commands"},
+    )
     return ChecksConfig(
-        commands=_check_command_list(m, "commands", where, issues),
+        command_sets=_build_command_sets(m.get("command_sets"), issues),
         timeout_seconds=_int(m, "timeout_seconds", 7200, where, issues),
-        discovery=_build_discovery(m.get("discovery"), issues),
     )
 
 

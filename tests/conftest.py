@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -115,7 +116,12 @@ def build_git_config(
 ) -> OrchestratorConfig:
     """Build a config pointing ``repo.local_path`` at the clone, with the given footprint/checks."""
     env_lines = "\n".join(f"    - {e}" for e in _TEST_ALLOWED_ENV)
-    check_lines = "\n".join(f"    - {c!r}" for c in checks)
+    # ``checks`` (shell-string commands) map to one always-on ``default`` command set (v15).
+    if checks:
+        cmd_lines = "\n".join(f"        - {{ argv: {shlex.split(c)!r} }}" for c in checks)
+        checks_block = "  command_sets:\n    default:\n      commands:\n" + cmd_lines + "\n"
+    else:
+        checks_block = "  command_sets: {}\n"
     validation_block = f"validation:\n  quarantine_folder: {quarantine!r}\n" if quarantine else ""
     text = f"""
 orchestrator:
@@ -143,9 +149,7 @@ security:
   allowed_environment:
 {env_lines}
 {validation_block}checks:
-  commands:
-{check_lines if checks else "    []"}
-  timeout_seconds: 30
+{checks_block}  timeout_seconds: 30
 git:
   create_pull_request: {str(create_pr).lower()}
   pr_base: "main"
