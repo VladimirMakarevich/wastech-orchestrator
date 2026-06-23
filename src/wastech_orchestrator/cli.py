@@ -42,6 +42,7 @@ from wastech_orchestrator.core.orchestrator import (
     build_providers,
 )
 from wastech_orchestrator.core.state_machine import Status
+from wastech_orchestrator.env_file import load_env_file
 from wastech_orchestrator.git_manager import append_runtime_excludes
 from wastech_orchestrator.install import config_writer, detect, wizard
 from wastech_orchestrator.notify import build_notifier
@@ -87,6 +88,26 @@ REPO_TASK_DIRS: tuple[str, ...] = (
 # Runtime dirs created under `<repo>/.worc/` by `install` (all gitignored).
 WORC_RUNTIME_DIRS: tuple[str, ...] = ("logs", "workspace", "checks", "tasks/rejected")
 
+# `install` drops this commented template (never real values) so the operator knows which secrets
+# the orchestrator reads from the environment. Copy it to `.worc/.env` and fill it in; the whole
+# `.worc/` home is gitignored, so the real `.env` is never committed. Real exported env vars win.
+ENV_EXAMPLE_FILENAME = ".env.example"
+_ENV_EXAMPLE_TEMPLATE = """\
+# wastech-orchestrator secrets — copy this file to `.env` (i.e. `.worc/.env`) and fill in values.
+# The orchestrator auto-loads `<repo>/.worc/.env` at startup; an already-exported env var always
+# wins over the file. This whole `.worc/` directory is gitignored, so `.worc/.env` is never
+# committed. Never put secret VALUES in config.yaml or task files — keep them here (or export them).
+
+# Telegram notifications / HITL (only used when telegram.enabled: true). The names must match
+# telegram.bot_token_env / telegram.chat_id_env in config.yaml.
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+
+# Add any other variables the orchestrator process needs. A variable reaches a child process
+# (codex / claude / git / gh / checks) only if its name is also in security.allowed_environment.
+# GH_TOKEN=
+"""
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -98,6 +119,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--config",
         default=None,
         help="path to config.yaml (default: <repo-root>/.worc/config.yaml, discovered from cwd)",
+    )
+    parser.add_argument(
+        "--env-file",
+        default=None,
+        help="load environment variables from this file (default: the .env beside config.yaml, "
+        "i.e. <repo-root>/.worc/.env); existing env vars are never overridden",
     )
     parser.add_argument(
         "--log-level",
@@ -368,6 +395,46 @@ def resolve_config_path(args: argparse.Namespace) -> str | None:
         if candidate.is_file():
             return str(candidate)
     return None
+
+
+def resolve_env_file_path(args: argparse.Namespace) -> tuple[Path | None, bool]:
+    """Find the ``.env`` to load, returning ``(path, required)``:
+
+    1. an explicit ``--env-file PATH`` — ``required=True`` (a missing file is an error);
+    2. otherwise the ``.env`` beside the resolved ``config.yaml`` (``<repo-root>/.worc/.env``),
+       falling back to ``<repo-root>/.worc/.env`` discovered from the Git root — ``required=False``
+       (auto-discovery is best-effort: a missing file is a silent no-op);
+    3. otherwise ``(None, False)``.
+    """
+    explicit = getattr(args, "env_file", None)
+    if explicit is not None:
+        return Path(explicit), True
+    config_path = resolve_config_path(args)
+    if config_path is not None:
+        return Path(config_path).parent / ".env", False
+    info = detect.git_info(Path.cwd())
+    if info is not None:
+        return info.root / WORC_HOME / ".env", False
+    return None, False
+
+
+def _load_env_file_for(args: argparse.Namespace) -> None:
+    """Auto-load the orchestrator's ``.env`` before any command runs (real env vars always win).
+
+    Emits a single secret-free notice (count + path) to stderr when it loads anything. A missing
+    *explicit* ``--env-file`` is a fail-closed :class:`ConfigError` (exit 2); a missing
+    auto-discovered ``.env`` is a silent no-op.
+    """
+    path, required = resolve_env_file_path(args)
+    if path is None:
+        return
+    if not path.is_file():
+        if required:
+            raise ConfigError([f"--env-file not found: {path}"])
+        return
+    count = load_env_file(path)
+    if count:
+        print(f"env: loaded {count} variable(s) from {path}", file=sys.stderr)
 
 
 def cmd_upgrade_config(args: argparse.Namespace) -> int:
@@ -1192,6 +1259,17 @@ def _install_create_dirs(repo_local_path: Path) -> None:
         (worc_home / rel).mkdir(parents=True, exist_ok=True)
 
 
+def _install_write_env_example(worc_home: Path) -> bool:
+    """Write ``.worc/.env.example`` (a commented, value-free template). Never clobbers an existing
+    one — the operator's real ``.env`` (and any edits to the example) are preserved. Returns whether
+    a file was written."""
+    target = worc_home / ENV_EXAMPLE_FILENAME
+    if target.exists():
+        return False
+    target.write_text(_ENV_EXAMPLE_TEMPLATE, encoding="utf-8")
+    return True
+
+
 def _install_print_plan(
     spec: config_writer.InstallSpec, config_path: Path, missing: tuple[ProviderId, ...]
 ) -> None:
@@ -1212,6 +1290,7 @@ def _install_print_plan(
     for rel in WORC_RUNTIME_DIRS:
         print(f"  would create {worc_home / rel}")
     print(f"  would create {worc_home / 'guide'}/ (agent task-authoring docs)")
+    print(f"  would create {worc_home / ENV_EXAMPLE_FILENAME} (secrets template)")
     print(f"  would ignore {WORC_HOME}/ via .gitignore")
     if missing:
         print(f"  note: provider(s) not on PATH: {', '.join(p.value for p in missing)}")
@@ -1303,6 +1382,8 @@ def cmd_install(args: argparse.Namespace) -> int:
     worc_written, _ = _copy_worc_docs(worc_home, overwrite=args.reconfigure, dry=False)
     if worc_written:
         print(f"install: wrote agent task-authoring docs to {worc_home / 'guide'}")
+    if _install_write_env_example(worc_home):
+        print(f"install: wrote {worc_home / ENV_EXAMPLE_FILENAME} (copy to .worc/.env, fill in)")
     # Gitignore the whole .worc/ runtime home so the operator's `git status` stays clean.
     if append_runtime_excludes(spec.repo_local_path):
         print(f"install: ignored {WORC_HOME}/ via .gitignore")
@@ -1324,8 +1405,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--timeout must be >= 0")
 
     # A config/DB written by a newer orchestrator is refused with a clean message + exit 2 here,
-    # rather than surfacing as a traceback (fail loud, not ugly). See the versioning gates.
+    # rather than surfacing as a traceback (fail loud, not ugly). See the versioning gates. The
+    # .env is loaded first (inside the try) so a bad --env-file also exits 2 cleanly.
     try:
+        _load_env_file_for(args)
         if args.command == "install":
             return cmd_install(args)
         if args.command == "run":

@@ -198,3 +198,39 @@ checks:
     names = {c.name for c in profile.checks}
     assert "tests" in names  # detection filled the test slot
     assert "types" not in names  # the configured pin was unlaunchable and was NOT replaced
+
+
+def test_cache_invalidated_when_commands_change(
+    make_repo: Callable[..., Path],
+    make_checks_config: Callable[..., OrchestratorConfig],
+    tmp_path: Path,
+) -> None:
+    root = make_repo()
+    config1 = make_checks_config(local_path=str(root), mode="configured", commands=["ruff check ."])
+    art = tmp_path / "art"
+    first = _resolver(config1, root, art, which=lambda name: f"/usr/bin/{name}").resolve()
+    assert [c.argv for c in first.checks] == [("ruff", "check", ".")]
+
+    # Same repo, but commands changed — combined fingerprint differs, cache must be invalidated.
+    config2 = make_checks_config(local_path=str(root), mode="configured", commands=["pytest"])
+    second = _resolver(config2, root, art, which=lambda name: f"/usr/bin/{name}").resolve()
+    assert [c.argv for c in second.checks] == [("pytest",)]
+
+
+def test_cache_invalidated_when_mode_changes(
+    make_repo: Callable[..., Path],
+    make_checks_config: Callable[..., OrchestratorConfig],
+    tmp_path: Path,
+) -> None:
+    root = make_repo({"go.mod": "module x\n"})
+    art = tmp_path / "art"
+
+    # First resolve: configured mode with an explicit command.
+    config1 = make_checks_config(local_path=str(root), mode="configured", commands=["mycheck"])
+    first = _resolver(config1, root, art, which=lambda name: f"/usr/bin/{name}").resolve()
+    assert first.checks[0].argv == ("mycheck",)
+
+    # Switch to deterministic — mode change must bust the cache and re-detect from go.mod.
+    config2 = make_checks_config(local_path=str(root), mode="deterministic")
+    second = _resolver(config2, root, art, which=lambda name: f"/usr/bin/{name}").resolve()
+    assert any(c.argv == ("go", "test", "./...") for c in second.checks)

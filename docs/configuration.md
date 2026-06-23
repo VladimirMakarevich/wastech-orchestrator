@@ -80,6 +80,8 @@ Logging and heartbeat settings are global CLI options, not `config.yaml` fields:
 
 The `watch` subcommand also accepts `--poll-seconds N` (placed after `watch`), which overrides `orchestrator.poll_interval_seconds` for that run.
 
+The global `--env-file PATH` loads environment variables from a file before any command runs. With no flag, the orchestrator auto-loads the `.env` beside the resolved `config.yaml` (`<repo-root>/.worc/.env`) when present. Loading never overrides an already-exported variable (the real environment wins), only populates the orchestrator's own process (a value reaches a child only if its name is in `security.allowed_environment`), and logs a secret-free `count`/`path` notice. A missing explicit `--env-file` fails closed (exit 2); a missing auto-discovered `.worc/.env` is a silent no-op. See [operations.md §2](operations.md#2-authorization-configured-outside-the-orchestrator).
+
 Place global options before the subcommand:
 
 ```bash
@@ -404,7 +406,7 @@ Auto-merge is **off by default** and only affects the publish step — the mid-p
 
 ### The canonical layout
 
-There is one canonical layout — there are no footprint modes to choose. Everything the orchestrator generates or installs lives under a single gitignored `<repo>/.worc/` home: `config.yaml`, `templates/`, `guide/`, `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `workspace/`, `checks/`, and the `tasks/rejected` quarantine. `install` appends a single `.worc/` line to the repo's tracked `.gitignore`.
+There is one canonical layout — there are no footprint modes to choose. Everything the orchestrator generates or installs lives under a single gitignored `<repo>/.worc/` home: `config.yaml`, `guide/`, `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `workspace/`, `checks/`, and the `tasks/rejected` quarantine. `install` appends a single `.worc/` line to the repo's tracked `.gitignore`.
 
 The only things **not** under `.worc/` are the `tasks/` lifecycle dirs (`pending`/`processing`/`done`/`failed`), which sit at the repo root and are git-tracked. The committed audit trail is the moved task file plus its `<id>.summary.md` in `tasks/done` or `tasks/failed`; the orchestrator's audit commit stages **only that task's own files** (never `git add -- tasks/` wholesale), so a concurrently-pending task is never swept in.
 

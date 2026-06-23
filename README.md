@@ -130,6 +130,8 @@ The orchestrator creates `agent/task-001-...`, runs the pipeline and your checks
 
 Config discovery order: explicit `--config` → `<repo-root>/.worc/config.yaml` (found by walking up from the cwd to the Git root) → a hint to run `install .`.
 
+Secrets (e.g. the Telegram token/chat id) are read from the environment. Keep them in `<repo>/.worc/.env` (auto-loaded at startup, gitignored; `install` drops a `.worc/.env.example` to copy) or `export` them — an exported variable always wins over the file. Override the path with `--env-file PATH`. See [docs/operations.md §2](docs/operations.md).
+
 ---
 
 ## Commands
@@ -165,7 +167,7 @@ worc --version          installed version
 
 Every command is also available under the short alias **`worc`** (e.g. `worc watch`, `worc stop`); `wastech-orchestrator` stays the canonical name.
 
-Global options (before the subcommand): `--config PATH`, `--log-level`, `--log-format logfmt|json`, `--log-file PATH`, `--heartbeat-seconds N`. Exit codes: `0` done, `1` failed, `2` `manual_action_required`.
+Global options (before the subcommand): `--config PATH`, `--env-file PATH`, `--log-level`, `--log-format logfmt|json`, `--log-file PATH`, `--heartbeat-seconds N`. Exit codes: `0` done, `1` failed, `2` `manual_action_required`.
 
 ---
 

@@ -63,12 +63,22 @@ If no updates appear, send another message to the bot and confirm that no webhoo
 
 ## 4. Configure environment and YAML
 
-Export both values in the environment that starts the orchestrator:
+The orchestrator reads the **values** from its process environment; YAML holds only the variable **names**. Provide the values either way — an exported variable always wins over the file:
 
-```bash
-export TELEGRAM_BOT_TOKEN='...'
-export TELEGRAM_CHAT_ID='-1001234567890'
-```
+- **`.worc/.env`** (recommended) — put the values in `<repo>/.worc/.env`, which the orchestrator auto-loads at startup. The whole `.worc/` home is gitignored, so the file is never committed; `worc install` drops a `.worc/.env.example` to copy:
+
+  ```bash
+  # <repo>/.worc/.env
+  TELEGRAM_BOT_TOKEN=...
+  TELEGRAM_CHAT_ID=-1001234567890
+  ```
+
+- **`export`** — export them in the shell/service that starts the orchestrator. Use this when you launch from outside the repo, or to override the file for a single run:
+
+  ```bash
+  export TELEGRAM_BOT_TOKEN='...'
+  export TELEGRAM_CHAT_ID='-1001234567890'
+  ```
 
 Configure only the environment-variable names:
 
@@ -80,7 +90,7 @@ telegram:
   ask_timeout_s: 28800
 ```
 
-`ask_timeout_s` must be greater than zero. Environment-variable names must match normal shell env name syntax. A service manager such as systemd, launchd, Docker, or Kubernetes must inject the same variables into the orchestrator process.
+`ask_timeout_s` must be greater than zero. Environment-variable names must match normal shell env name syntax. A service manager such as systemd, launchd, Docker, or Kubernetes can inject the same variables into the orchestrator process, or point it at a file with `--env-file PATH`.
 
 ## 5. Remove a webhook
 

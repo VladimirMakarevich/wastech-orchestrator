@@ -44,7 +44,7 @@ flowchart TB
     agents["codex / claude<br/>CLI coding agents"]
     vcs["git / gh — CLI"]
     tg["Telegram Bot API"]
-    db[("state.db<br/>SQLite v10")]
+    db[("state.db<br/>SQLite v11")]
     art[("Artifacts<br/>.worc/ · tasks/")]
 
     operator -->|"run · watch · rerun · ..."| cli
@@ -109,7 +109,7 @@ The **only** component that runs commit / push / PR. Before a task it prepares t
 
 ### 4.7 State Store with checkpoints
 
-SQLite (`state.db`, schema **v10**). It holds the task status, the flow checkpoint (`current_node` + counters + fingerprint), per-node audit (`node_runs`, `provider_attempts`), checks, artifacts (each with a sha256), publish idempotency, subtasks, advisory `evaluations`, and the durable editing/own sessions (`editing_lineage` / `node_lineage` — the only place a raw session id is ever stored). Because the orchestrator is **greenfield**, the store does not migrate across destructive versions: a brand-new database is created at the current shape, and an older-versioned one is refused fail-closed (recreate it). A newer one is also refused.
+SQLite (`state.db`, schema **v11**). It holds the task status, the flow checkpoint (`current_node` + counters + fingerprint), per-node audit (`node_runs`, `provider_attempts`), checks, artifacts (each with a sha256), publish idempotency, subtasks, advisory `evaluations`, and the durable editing/own sessions (`editing_lineage` / `node_lineage` — the only place a raw session id is ever stored). Because the orchestrator is **greenfield**, the store does not migrate across destructive versions: a brand-new database is created at the current shape, and an older-versioned one is refused fail-closed (recreate it). A newer one is also refused.
 
 ### 4.8 Human-in-the-Loop via Telegram
 
@@ -190,7 +190,7 @@ Each transition is asserted against an explicit `ALLOWED_TRANSITIONS` table and 
 `config.yaml` is **infrastructure + provider defaults + non-weakenable safety caps** — the flow owns the graph, the config owns the environment. The full reference (every field, default, and validation rule) is [configuration.md](configuration.md); the packaged starting point is [`config.example.yaml`](../config.example.yaml). The shape, in brief:
 
 ```yaml
-schema_version: 11
+schema_version: 14
 
 orchestrator:
   auto_mode: { enabled: false } # pick the next pending task after cleanup
@@ -253,7 +253,7 @@ Prompt templates are **not** a config block: a node's prompt is the content of i
 
 ## 8. The `.worc/` home and the Git footprint
 
-There is **one canonical layout**. Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home: `config.yaml`, `templates/`, the agent task-authoring `guide/`, `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `workspace/`, `checks/`, operator `flows/`, and the `tasks/rejected` quarantine. `install` appends a single `.worc/` line to the repo's tracked `.gitignore`.
+There is **one canonical layout**. Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home: `config.yaml`, the agent task-authoring `guide/`, `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `workspace/`, `checks/`, operator `flows/`, and the `tasks/rejected` quarantine. `install` appends a single `.worc/` line to the repo's tracked `.gitignore`.
 
 The **only** things outside `.worc/` are the `tasks/` lifecycle dirs (`pending`/`processing`/`done`/`failed`) at the repo root, which are git-tracked: the task file plus its `<id>.summary.md` (in `done/` or `failed/`) are the committed audit trail. The code commit excludes both `.worc/` (gitignored) and `tasks/` (it rides the separate audit commit). Parallel tasks via `git worktree` remain on the roadmap (see [backlog/](backlog/)).
 

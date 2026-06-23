@@ -22,7 +22,7 @@ python -m venv .venv
 pip install -e ".[dev]"             # or: pip install wastech-orchestrator
 ```
 
-`install` is the single setup command. It sets up `<repo>/.worc/` in the current repository — a single gitignored home for everything the orchestrator generates: `config.yaml`, editable `templates/`, a `guide/` (the agent task-authoring docs), `state.db`, `logs/`, `workspace/`, and `checks/`. There is no sibling workspace and no separate clone requirement — the orchestrator branches/commits/pushes in the repo you run it in.
+`install` is the single setup command. It sets up `<repo>/.worc/` in the current repository — a single gitignored home for everything the orchestrator generates: `config.yaml`, a `guide/` (the agent task-authoring docs), `state.db`, `logs/`, `workspace/`, and `checks/`. There is no sibling workspace and no separate clone requirement — the orchestrator branches/commits/pushes in the repo you run it in.
 
 ### Bind the repository (`install`)
 
@@ -34,7 +34,7 @@ cd C:\projects\my-repo
 wastech-orchestrator install .          # interactive wizard
 ```
 
-The wizard detects the Git root, `origin`, base branch, and cleanliness; finds `codex`/`claude`/`gh`; proposes checks from the repo's ecosystem (`pyproject.toml` / `package.json` / `Cargo.toml` / `go.mod`); writes a validated `config.yaml` and the editable `templates/` tree into `<repo>/.worc/`; and copies the packaged `worc/` guide to `.worc/guide/`. It appends a single line `.worc/` to the repo's tracked `.gitignore` so the whole runtime home is ignored (`tasks/` is intentionally left tracked). (`install --reconfigure` refreshes the `.worc/guide/` docs to the packaged version.) It never installs or authorizes the CLIs; it reports what is missing and auto-runs `preflight` at the end (a failed preflight keeps the config but exits non-zero with instructions).
+The wizard detects the Git root, `origin`, base branch, and cleanliness; finds `codex`/`claude`/`gh`; proposes checks from the repo's ecosystem (`pyproject.toml` / `package.json` / `Cargo.toml` / `go.mod`); writes a validated `config.yaml` into `<repo>/.worc/`; and copies the packaged `worc/` guide to `.worc/guide/`. It appends a single line `.worc/` to the repo's tracked `.gitignore` so the whole runtime home is ignored (`tasks/` is intentionally left tracked). (`install --reconfigure` refreshes the `.worc/guide/` docs to the packaged version.) It never installs or authorizes the CLIs; it reports what is missing and auto-runs `preflight` at the end (a failed preflight keeps the config but exits non-zero with instructions).
 
 Subsequent commands need no `--config` — they walk up from the current directory to the Git root and use `<root>/.worc/config.yaml`, run from anywhere inside the repo:
 
@@ -61,10 +61,10 @@ Do it **between tasks**, not mid-run: an in-flight task holds the single process
 
 The persisted state survives an upgrade — back it up first so you can roll back. That is everything under `<repo>/.worc/` (`config.yaml` and `state.db` live there), plus the git-tracked `tasks/` lifecycle dirs at the repo root. Copy at least `.worc/config.yaml` + `.worc/state.db`. The orchestrator **fail-closes on a backward-incompatible workspace**: if the `config.yaml` `schema_version` or the `state.db` schema is **newer** than the installed version understands, the command prints a clear `error:` and exits non-zero (2) instead of running against a format it cannot read. To recover, upgrade the package to a version that supports it (or, for a throwaway setup, start a fresh workspace via `install --reconfigure`).
 
-The current schema versions are `state.db` **v10** and `config.yaml` `schema_version` **11**, and the two are handled differently because the orchestrator is **greenfield** (no production data to preserve):
+The current schema versions are `state.db` **v11** and `config.yaml` `schema_version` **14**, and the two are handled differently because the orchestrator is **greenfield** (no production data to preserve):
 
 - **`config.yaml`** does **not** auto-migrate, and an **older or absent** `schema_version` is accepted as-is (a new release adds keys with safe defaults, so an older config still runs). To materialize the new keys in your file run **`upgrade-config`** (below).
-- **`state.db`** does **not** migrate across versions. A brand-new (or pre-versioning) database is created at the current shape; a database stamped an **older** version (`1 ≤ v < 10`) is **refused fail-closed** — several past bumps dropped/renamed tables, and the store only ever adds columns, so an old shape cannot be reshaped in place. Recovery is to delete the local `state.db` and start a fresh workspace (greenfield: there is nothing to preserve). Do this **between tasks**, never with a task in flight.
+- **`state.db`** does **not** migrate across versions. A brand-new (or pre-versioning) database is created at the current shape; a database stamped an **older** version (`1 ≤ v < 11`) is **refused fail-closed** — several past bumps dropped/renamed tables, and the store only ever adds columns, so an old shape cannot be reshaped in place. Recovery is to delete the local `state.db` and start a fresh workspace (greenfield: there is nothing to preserve). Do this **between tasks**, never with a task in flight.
 
 To bring the rest of your deployment current after a package upgrade, run **`upgrade-config`** (and **`upgrade-docs`**):
 
@@ -86,7 +86,7 @@ Unlike `config.yaml`, the `worc/` docs are generated content with **no operator 
 
 After a package upgrade, run **`upgrade-config`** and **`upgrade-docs`** to bring your deployment fully current. (A single umbrella `upgrade` that does both is tracked in [follow-ups](backlog/follow_ups.md).) There is no prompt-template delivery step: a flow node's prompt is its `role_file`, shipped with the flow (packaged flows) or kept under `.worc/flows/roles/` (operator flows) — edit the role file to customize a node's prompt.
 
-To install or pin a specific published (pre)release, append its tag to the `pipx`/`pip` source — e.g. `pipx install "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git@v0.1.1a1"`. Releases are tag-driven and pre-releases (`aN`/`bN`/`rcN` tags) are marked as such on GitHub; maintainers cut them per [RELEASING.md](RELEASING.md).
+To install or pin a specific published (pre)release, append its tag to the `pipx`/`pip` source — e.g. `pipx install "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git@v0.1.1a1"`. Releases are tag-driven and pre-releases (`aN`/`bN`/`rcN` tags) are marked as such on GitHub; maintainers cut them by pushing a `v*` tag, which runs the [release workflow](../.github/workflows/release.yml).
 
 ---
 
@@ -99,6 +99,8 @@ The orchestrator passes child processes **only** the allowlisted environment var
 - **Claude Code** — sign in with the Claude CLI (e.g. `claude login` or an API key in its own config); its config dir `CLAUDE_CONFIG_DIR` is on the default allowlist.
 
 Install only the providers you intend to route to. When Claude Code is unavailable, remove it from `agents.allowed` and route every agent-driven stage to Codex. GitHub CLI is required only when `git.create_pull_request: true`; disabling PR creation does not disable commit or push. When PR creation is enabled, `run`, `watch`, and `rerun` **pre-flight `gh` at startup** and exit `2` with an actionable message if it is not on `PATH`, rather than failing later inside the publish stage. On top of that hard gate there is a **non-blocking auth advisory**: if `gh` is present but not logged in, startup logs a `WARNING` ("gh present but not logged in — run `gh auth login`") and continues — it never blocks the run (a valid `GH_TOKEN`/`GITHUB_TOKEN` in the environment, or a transient probe failure, is honored, and the real `gh pr create` failure still degrades to `manual_action_required` safely). The advisory emits a fixed message only — never the raw `gh auth status` output, which would carry the account login and token scopes.
+
+**Where the values live.** The orchestrator reads secrets from its **own** process environment. Provide them either by `export`ing them in the shell/service that launches `worc`, or by putting them in `<repo>/.worc/.env`, which the orchestrator auto-loads at startup (an exported variable always wins over the file). `.worc/` is gitignored so the file is never committed; `install` writes a `.worc/.env.example` template to copy. Point at a file elsewhere with the global `--env-file PATH` (a missing explicit `--env-file` fails closed with exit 2; a missing auto-discovered `.worc/.env` is a silent no-op). Loading `.env` only populates the orchestrator's own environment — it does **not** widen what child processes receive.
 
 If a credential must reach a child process, add **only its variable name** to `security.allowed_environment`. Never place a secret value in `config.yaml`, a task file, or `extra_args`.
 
@@ -124,6 +126,8 @@ preflight: ready
 
 - Exit `0` when every allowed provider is healthy, the required isolation can be enabled, **and** the repository's checks resolve to a launchable profile; non-zero otherwise.
 - A `FAIL` line names the problem without leaking secrets (e.g. `codex executable not found`).
+- `isolation: OK (enforced)` — every provider in `agents.allowed` passed the offline isolation check (Codex sandbox, Claude permission mode) **and** `security.strict_isolation: true` (the default) is active, meaning a failed check would abort the run rather than silently downgrade isolation.
+- `isolation: OK (strict_isolation=false)` — the check still passed, but the operator has set `security.strict_isolation: false`, opting in to full-access provider modes (e.g. `danger-full-access` or `bypassPermissions`). The operator owns the risk; the gate will not abort a run if isolation cannot be enforced.
 - `isolation: FAIL` lists the offending provider/setting. With `security.strict_isolation: true` (the default) a run would **fail preflight** before any branch is created rather than silently downgrading isolation — fix the config (don't weaken the sandbox/permission profile) and re-run.
 
 ### Check discovery diagnostics
@@ -282,7 +286,7 @@ python -m wastech_orchestrator --config ./config.yaml status task-001
 
 ## 5. Git footprint and the audit commit
 
-There is one canonical layout. Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home — `config.yaml`, `templates/`, `guide/`, `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `workspace/`, `checks/`, and the `tasks/rejected` quarantine. The **only** things not under `.worc/` are the `tasks/` lifecycle dirs (`pending`/`processing`/`done`/`failed`), which live at the **repo root** and are **git-tracked**: the task file and its `<id>.summary.md` (in `done/` or `failed/`) are the audit trail. `install` appends a single line `.worc/` to the repo's tracked `.gitignore`; `tasks/` is intentionally not ignored.
+There is one canonical layout. Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home — `config.yaml`, `guide/`, `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `workspace/`, `checks/`, and the `tasks/rejected` quarantine. The **only** things not under `.worc/` are the `tasks/` lifecycle dirs (`pending`/`processing`/`done`/`failed`), which live at the **repo root** and are **git-tracked**: the task file and its `<id>.summary.md` (in `done/` or `failed/`) are the audit trail. `install` appends a single line `.worc/` to the repo's tracked `.gitignore`; `tasks/` is intentionally not ignored.
 
 Two fields under `git.footprint` shape the audit commit:
 

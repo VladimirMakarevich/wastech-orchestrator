@@ -245,3 +245,29 @@ def test_install_gitignore_append_is_idempotent(
     argv = _ni(git_repo.clone, "--provider", "codex", "--skip-preflight", "--reconfigure")
     assert cli.main(argv) == 0
     assert gitignore_path.read_text(encoding="utf-8") == first
+
+
+def test_install_writes_env_example_template(
+    git_repo: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _present(monkeypatch, "codex")
+    assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
+    example = git_repo.clone / ".worc" / ".env.example"
+    assert example.is_file()
+    body = example.read_text(encoding="utf-8")
+    # Documents the expected names with NO real values, and there is no real .worc/.env yet.
+    assert "TELEGRAM_BOT_TOKEN=" in body
+    assert "TELEGRAM_CHAT_ID=" in body
+    assert not (git_repo.clone / ".worc" / ".env").exists()
+
+
+def test_install_does_not_clobber_existing_env_example(
+    git_repo: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _present(monkeypatch, "codex")
+    assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
+    example = git_repo.clone / ".worc" / ".env.example"
+    example.write_text("EDITED_BY_OPERATOR=1\n", encoding="utf-8")
+    # A plain re-run (and --reconfigure) must preserve the operator's edited template.
+    assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
+    assert example.read_text(encoding="utf-8") == "EDITED_BY_OPERATOR=1\n"

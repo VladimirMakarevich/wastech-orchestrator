@@ -11,7 +11,7 @@ The source of truth is the code (`src/wastech_orchestrator/security/`); see the 
 ## Environment and secrets
 
 4. Processes receive **only allowlisted** env variables (see `security.allowed_environment` in the config).
-5. Secret files (`.env`, `secrets/**`, …) are excluded from reading by the agent and from logging.
+5. Secret files (`.env`, `secrets/**`, …) **inside the agent's workspace** are excluded from reading by the agent and from logging. Distinct concern: the orchestrator may load its **own** `<repo>/.worc/.env` (or an explicit `--env-file`) into the **parent** process environment at startup (`env_file.load_env_file`, `override=False` so a real exported var wins) — that file is gitignored and lives outside the agent workspace. Loading it never widens what children receive (rule #4 still gates every child by `allowed_environment`) and its values are still scrubbed from artifacts by the redaction net.
 6. Secrets, tokens, and the full process environment are **not stored** in SQLite, logs, or artifacts. The request artifact stores a **redacted** representation. The deterministic minimal summary (§5.2 fallback) links to the already-redacted `logs/<id>/current.diff` and shows only a `git diff --stat` (file paths + counts, no patch body) — it never inlines a raw diff into the committed `summary.md`.
 7. Git credentials and agent credentials are configured outside the orchestrator.
 

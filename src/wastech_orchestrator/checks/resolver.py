@@ -26,7 +26,11 @@ from enum import StrEnum
 from pathlib import Path
 
 from wastech_orchestrator.checks.detect import CheckCandidateDetector
-from wastech_orchestrator.checks.fingerprint import compute_fingerprint
+from wastech_orchestrator.checks.fingerprint import (
+    _combine,
+    compute_config_signature,
+    compute_fingerprint,
+)
 from wastech_orchestrator.checks.inspect import RepositoryEvidence, RepositoryInspector
 from wastech_orchestrator.checks.model import (
     CheckCandidate,
@@ -109,7 +113,10 @@ class CheckResolver:
     def resolve(self, *, allow_agent: bool = False, refresh: bool = False) -> ResolvedCheckProfile:
         """Return a resolved profile, reusing the cached one when the fingerprint is unchanged."""
         discovery_cfg = self._config.checks.discovery
-        fingerprint = compute_fingerprint(self._repo_root)
+        fingerprint = _combine(
+            compute_fingerprint(self._repo_root),
+            compute_config_signature(self._config.checks),
+        )
 
         if not refresh and discovery_cfg.refresh is not CheckRefreshPolicy.ALWAYS:
             cached = self._store.load()
@@ -131,7 +138,10 @@ class CheckResolver:
         failures (that would let the gate quietly rewrite its own command until it passes). The
         reason is stamped into the profile notes for audit.
         """
-        fingerprint = compute_fingerprint(self._repo_root)
+        fingerprint = _combine(
+            compute_fingerprint(self._repo_root),
+            compute_config_signature(self._config.checks),
+        )
         profile = self._resolve_fresh(self._config.checks.discovery.mode, allow_agent, fingerprint)
         profile = replace(profile, notes=(*profile.notes, f"re-resolved: {reason.value}"))
         self._store.save(profile)
