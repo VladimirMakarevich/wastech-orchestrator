@@ -22,12 +22,12 @@ Key properties visible in the code:
 
 - **The pipeline is data, not a fixed stage loop.** Each `task_type` resolves to a flow — a validated YAML graph of typed nodes — driven by the FlowEngine ([B28](./blocks/B28-flow-engine.md)); the orchestrator ([B06](./blocks/B06-orchestrator-pipeline.md)) is a thin wrapper that owns the gate, slot, preamble, wiring, and terminal handling.
 - **Single processing slot.** Only one task can be active at a time; the slot is checked by a database query (`acquire_slot` / `find_active_tasks`, [orchestrator.py:377](../../src/wastech_orchestrator/core/orchestrator.py#L377)).
-- **Resumability.** All state is persisted in SQLite (`state.db`, schema v10) and in file artifacts, with a per-task flow checkpoint, so an interrupted task can be continued (`resume`, [orchestrator.py:643](../../src/wastech_orchestrator/core/orchestrator.py#L643)).
+- **Resumability.** All state is persisted in SQLite (`state.db`, schema v12) and in file artifacts, with a per-task flow checkpoint, so an interrupted task can be continued (`resume`, [orchestrator.py:643](../../src/wastech_orchestrator/core/orchestrator.py#L643)).
 - **Separation of concerns (invariant).** The core never builds a CLI command itself: it only calls the Router (agent nodes), the Check Runner (checks nodes), and the Git Manager (publish). Context is passed to agents **only as paths to artifact files** in `AgentRunRequest`.
 - **Fallback only for infrastructure errors.** Quality failures (checks/review) loop back to a fixing node, not to another provider (Router, [router.py](../../src/wastech_orchestrator/routing/router.py)).
 - **Non-weakening security policy.** Forbidden flags, environment-variable allowlist, isolation, injection scanning, and the flow ceilings (`permission_ceiling` / `output_policy` / `network_policy`) ([security/](../../src/wastech_orchestrator/security/), [core/flow/validator.py](../../src/wastech_orchestrator/core/flow/validator.py)).
 - **Constant supervisor layer.** A per-task oversight layer above any flow observes each completed step read-only and writes the whole-task summary at close ([core/supervisor.py](../../src/wastech_orchestrator/core/supervisor.py)) — the summary is not a node or a stage.
-- **Human in the loop (HITL).** Durable interactions via Telegram for approving plans, "dangerous" diffs, and changed check sets ([core/hitl.py](../../src/wastech_orchestrator/core/hitl.py), [notify/telegram.py](../../src/wastech_orchestrator/notify/telegram.py)).
+- **Human in the loop (HITL).** Durable interactions via Telegram for approving plans and "dangerous" diffs ([core/hitl.py](../../src/wastech_orchestrator/core/hitl.py), [notify/telegram.py](../../src/wastech_orchestrator/notify/telegram.py)).
 
 ## System Context
 
@@ -47,7 +47,7 @@ flowchart TB
     agents["codex / claude<br/>CLI coding agents"]
     vcs["git / gh — CLI"]
     tg["Telegram Bot API"]
-    db[("state.db<br/>SQLite v10")]
+    db[("state.db<br/>SQLite v12")]
     fsart[("Artifacts on disk<br/>.worc/ · tasks/")]
 
     operator -->|"subcommands: run, watch, ..."| cli
@@ -86,7 +86,7 @@ Detailed step-by-step scenarios are in [system-flows.md](./system-flows.md); the
 3. **Resume (`resume`).** On startup, reconcile persisted state and continue the single unfinished task from its flow checkpoint, or complete interrupted cleanup.
 4. **`rerun` / `rerun --continue`.** Retry a terminal task — "from scratch from base" or "continue from the flow checkpoint node where it stopped".
 5. **`finalize`.** The operator records the outcome of a task completed manually (without the pipeline and without commit/push/PR).
-6. **`install` / `preflight`.** Set up the orchestrator in a repository under `<repo>/.worc/`, generate and validate configuration, diagnose provider and isolation readiness, and fatally validate every flow file (packaged + operator flows in `.worc/flows/`) before any task runs.
+6. **`install` / `preflight`.** Set up the orchestrator in a repository under `<repo>/.worc/`, generate and validate configuration, seed editable copies of the built-in flows + their per-node prompts into `.worc/flows/`, diagnose provider and isolation readiness, and fatally validate every flow file (packaged + operator flows in `.worc/flows/`) before any task runs.
 
 ## Pipeline as a State Machine
 
@@ -170,8 +170,8 @@ The full list with entry points, dependencies, and status is in [block-registry.
 
 ### Checks (quality gate)
 
-- [B23 — Check Discovery and Resolution](./blocks/B23-check-discovery.md)
-- [B24 — Check Execution (command-profile)](./blocks/B24-check-execution.md)
+- [B23 — Check Resolution and Selection](./blocks/B23-check-discovery.md)
+- [B24 — Check Execution (command-set)](./blocks/B24-check-execution.md)
 
 ### Security
 
@@ -245,12 +245,11 @@ Key: [B28 FlowEngine](./blocks/B28-flow-engine.md) is the execution spine driven
 
 The `<artifacts_root>` is the gitignored `<repo>/.worc/` home (`worc_home_for(config)`); the task lifecycle dirs are the exception — they sit at the repo root and carry the committed audit trail.
 
-- **`state.db`** — `<artifacts_root>/state.db`; SQLite **schema v10** (tasks, node_runs, provider_attempts, check_runs, artifacts, publish_operations, subtasks, evaluations, editing_lineage, node_lineage); owner [B07](./blocks/B07-state-machine-and-store.md).
+- **`state.db`** — `<artifacts_root>/state.db`; SQLite **schema v12** (tasks, node_runs, provider_attempts, check_runs, artifacts, publish_operations, subtasks, evaluations, editing_lineage, node_lineage); owner [B07](./blocks/B07-state-machine-and-store.md).
 - **`completed.jsonl`** — `<artifacts_root>/logs/completed.jsonl`; JSONL (append-only); owner [B08](./blocks/B08-ledger-and-failure-reports.md).
-- **`resolved-profile.json`** — `<artifacts_root>/checks/`; JSON (check profile cache); owner [B23](./blocks/B23-check-discovery.md).
 - **Run artifacts** — `<artifacts_root>/logs/<task-id>/...`; per-node attempt dirs (request/result/stdout/stderr/events) + checks logs; owner [B20](./blocks/B20-artifact-layout.md).
 - **HITL interactions** — `<artifacts_root>/logs/<task-id>/...`; JSON; owner [B12](./blocks/B12-hitl-and-typed-output.md).
-- **`config.yaml`** — `<artifacts_root>/config.yaml`; **schema v12**; discovered by walking up to the Git root; owner [B04](./blocks/B04-install-registry-and-config-discovery.md)/[B05](./blocks/B05-configuration.md).
+- **`config.yaml`** — `<artifacts_root>/config.yaml`; **schema v15**; discovered by walking up to the Git root; owner [B04](./blocks/B04-install-registry-and-config-discovery.md)/[B05](./blocks/B05-configuration.md).
 - **Operator flows** — `<artifacts_root>/flows/<task_type>.yaml`; override packaged built-ins; owner [B29](./blocks/B29-flow-definition-and-validation.md).
 - **Task lifecycle folders** — `tasks/{pending,processing,done,failed}` at the repo root (git-tracked; the task file + `<id>.summary.md` are audit-committed) and `tasks/rejected` under `.worc/` (quarantine); owners [B06](./blocks/B06-orchestrator-pipeline.md), [B16](./blocks/B16-task-parsing-and-validation-gate.md).
 
@@ -260,7 +259,7 @@ The `<artifacts_root>` is the gitignored `<repo>/.worc/` home (`worc_home_for(co
 - **CLI coding agents `codex` / `claude`** — subprocesses from [B18](./blocks/B18-agent-providers.md).
 - **Telegram Bot API** — [B26](./blocks/B26-notifications-telegram.md).
 - **SQLite** (stdlib `sqlite3`) — [B07](./blocks/B07-state-machine-and-store.md).
-- **File system** — the `<repo>/.worc/` home (artifacts, check profile cache, config, operator flows) and the repo-root `tasks/` lifecycle folders.
+- **File system** — the `<repo>/.worc/` home (artifacts, check logs, config, operator flows) and the repo-root `tasks/` lifecycle folders.
 
 ## Documentation Status
 

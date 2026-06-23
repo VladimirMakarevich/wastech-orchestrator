@@ -21,10 +21,8 @@ from pathlib import Path
 from typing import Any
 
 from wastech_orchestrator.check_runner import CheckRunner
-from wastech_orchestrator.checks.discovery_factory import build_discovery
-from wastech_orchestrator.checks.model import ResolvedCheck
-from wastech_orchestrator.checks.profile import ResolvedCheckProfile
-from wastech_orchestrator.checks.resolver import CheckResolver, ReResolveReason
+from wastech_orchestrator.checks.model import ResolvedCheckSet
+from wastech_orchestrator.checks.resolver import CheckResolver
 from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.core.decomposition import (
     REASON_N_OUT_OF_RANGE,
@@ -60,16 +58,8 @@ from wastech_orchestrator.core.flow.validator import (
 )
 from wastech_orchestrator.core.flow.wiring import build_node_inputs, build_node_services
 from wastech_orchestrator.core.hitl import (
-    HumanInputSignal,
     consume_pending_interactions,
-    discovery_interaction_id,
-    discovery_interaction_path,
-    handle_from_artifact,
-    load_interaction,
-    mark_consumed,
     reset_pending_interactions,
-    write_answer,
-    write_waiting_interaction,
 )
 from wastech_orchestrator.core.loop_control import LoopCounters
 from wastech_orchestrator.core.recovery import (
@@ -272,8 +262,7 @@ class _Pipeline:
     last_review_findings: list[dict[str, Any]] = field(default_factory=list)
     branch: str = ""
     slug: str = ""
-    check_profile: ResolvedCheckProfile | None = None  # resolved at preflight (before any branch)
-    reresolved_once: bool = False  # mid-task check re-resolve is bounded to once per task
+    check_sets: tuple[ResolvedCheckSet, ...] = ()  # normalized command_sets, resolved at preflight
     # Repo skill inventory scanned at task start; planning's chosen subset is surfaced to downstream
     # stages as read-only reference paths. Re-derived per run; `selected_skills` is set when
     # the planning agent runs this process and is persisted to `selected_skills.json`, so a resume
@@ -343,8 +332,8 @@ class Orchestrator:
         self._clock = clock
         self._monotonic = monotonic
         self._notifier: Notifier = notifier if notifier is not None else NullNotifier()
-        # The check resolver runs a deterministic preflight before any branch (automatic check
-        # discovery). ``None`` skips it — the Check Runner then uses ``checks.commands``.
+        # The check resolver normalizes ``checks.command_sets`` at preflight (before any branch).
+        # ``None`` skips it — the Check Runner then normalizes the config itself.
         self._resolver = resolver
         # Repo skill inventory scanner. Defaults to the target repo clone's `.claude/skills`.
         self._skill_scanner = skill_scanner or self._default_skill_scanner()
@@ -1171,7 +1160,7 @@ class Orchestrator:
         inputs = build_node_inputs(
             p,
             flow_dir=snapshot.source_path.parent,
-            resolved_checks=self._resolved_checks(p),  # None → CheckRunner uses checks.commands
+            check_sets=self._check_sets(p),  # normalized command_sets; () = no gate
             pr_title=p.task.pr_title or p.task.title,
             commit_message=f"feat({p.task.id}): {p.task.title}",
             summary_body_path=self._fallback_summary_path(p),
@@ -1193,7 +1182,6 @@ class Orchestrator:
             prompt_secrets=self._prompt_secrets(),
             register_artifact=self._register_artifact,
             finalize=lambda: self._engine_finalize(p),
-            check_reresolve=lambda: self._engine_check_reresolve(p),
             # The dependency_scan checker launches its argv scanners through the same safe runner
             # and allowlisted env the Check Runner uses (a test's fake runner drives both).
             run_process=self._checks.run_process,
@@ -1375,12 +1363,6 @@ class Orchestrator:
         summary_md = self._finalize_task_artifacts(p, Status.DONE)
         return str(summary_md) if summary_md is not None else None
 
-    def _engine_check_reresolve(self, p: _Pipeline) -> tuple[ResolvedCheck, ...] | None:
-        """The checks node's re-resolve hook: re-resolve once on a launch failure (gated)."""
-        if self._reresolve_on_launch_failure(p) and p.check_profile is not None:
-            return p.check_profile.checks
-        return None
-
     def _engine_facts(
         self, completeness: Completeness, snapshot: FlowSnapshot
     ) -> Callable[[str], bool]:
@@ -1537,6 +1519,14 @@ class Orchestrator:
         if result.status is Status.DONE:
             pr_url = self._git.recorded_pr_url(p.task.id)
             if pr_url and self._auto_merge_on(p.task):
+                # A skipped check (toolchain absent) means the quality gate did not fully run — an
+                # incomplete gate is never auto-merged; hand the open PR to a human.
+                if self._store.task_had_skipped_checks(p.task.id):
+                    self._log(p.task.id).warning(
+                        "[AUTO-MERGE] skipped: a check was skipped (toolchain absent) — the gate "
+                        "is incomplete; leaving the PR open for human review"
+                    )
+                    return self._go_terminal(p, Status.DONE, pr_url=pr_url, already_moved=True)
                 return self._auto_merge(p, pr_url)
             return self._go_terminal(p, Status.DONE, pr_url=pr_url, already_moved=True)
         if result.status is Status.MANUAL_ACTION_REQUIRED:
@@ -1546,179 +1536,15 @@ class Orchestrator:
         return self._fail(p, result.limit_name or "flow run failed")
 
     def _check_preflight(self, p: _Pipeline) -> None:
-        """Resolve the launchable check profile at task start, before any branch.
+        """Normalize ``checks.command_sets`` onto the pipeline at task start (before any branch).
 
-        Skipped when no resolver is wired (legacy behavior: the Check Runner uses
-        ``checks.commands``). A non-ready profile raises :class:`PipelineFailed` — the task fails
-        before a branch is created and without consuming any fix iteration. With
-        ``checks.discovery.run_at_task_start`` (default on), ``auto`` mode may run the opt-in agent
-        fallback here (the resolver still gates it on mode + agent_fallback + a configured model). A
-        *changed* set of check commands goes through the sensitive-change approval gate.
+        Trivial now (no discovery): an empty ``command_sets`` mapping resolves to ``()`` — no gate.
+        Selection of which sets to run happens later, in the checks node, once the diff is known.
+        Skipped when no resolver is wired (the Check Runner then normalizes the config itself).
         """
         if self._resolver is None:
             return
-        prev = self._resolver.store.load()
-        prev_approved_sig = prev.commands_signature if (prev and prev.approved) else ""
-        allow_agent = self._config.checks.discovery.run_at_task_start
-        profile = self._resolver.resolve(allow_agent=allow_agent)
-        profile = self._gate_check_commands(p, profile, prev_approved_sig)
-        p.check_profile = profile
-        if profile.ready:
-            self._log(p.task.id).info(
-                "check preflight ready",
-                extra={"source": profile.source.value, "checks": len(profile.checks)},
-            )
-            return
-        self._log(p.task.id).warning(
-            "check preflight failed", extra={"source": profile.source.value}
-        )
-        raise PipelineFailed(
-            "check preflight: no launchable check profile could be resolved "
-            "(set checks.commands, or use checks.discovery.mode to detect them)"
-        )
-
-    def _gate_check_commands(
-        self, p: _Pipeline, profile: ResolvedCheckProfile, prev_approved_sig: str
-    ) -> ResolvedCheckProfile:
-        """Approve the *set* of check commands when it changed. Returns an approved profile.
-
-        First-ever resolution for a repo is auto-approved and recorded (approval is for a *change*,
-        not for the first ever set); an unchanged set is reused; a changed set requires human
-        approval (fail-closed on deny/timeout/no-notifier) unless the operator disabled the gate.
-        """
-        if not profile.ready or not profile.checks:
-            return (
-                profile  # nothing to run → no command set to approve (readiness handled by caller)
-            )
-        sig = profile.commands_signature
-        if profile.approved and sig == prev_approved_sig:
-            return profile  # already approved this exact set (cache reuse)
-        if sig == prev_approved_sig and prev_approved_sig:
-            return self._stamp_check_approval(profile, "reuse")  # same set as last approved
-        if not prev_approved_sig:
-            return self._stamp_check_approval(
-                profile, "bootstrap"
-            )  # first-ever → record, no prompt
-        # The command set CHANGED from a previously approved set — a sensitive change.
-        if not self._config.checks.discovery.approve_command_changes:
-            self._log(p.task.id).warning(
-                "check command set changed; approval gate disabled by config",
-                extra={"signature": sig},
-            )
-            return self._stamp_check_approval(profile, "approval-disabled")
-        if not self._ask_check_command_approval(p, profile):
-            raise ManualActionRequired(
-                "the set of check commands changed and the change was not approved"
-            )
-        return self._stamp_check_approval(profile, discovery_interaction_id(p.task.id, sig))
-
-    def _stamp_check_approval(
-        self, profile: ResolvedCheckProfile, interaction: str
-    ) -> ResolvedCheckProfile:
-        """Record the approval on the profile and persist it (the audit trail)."""
-        approved = replace(
-            profile,
-            approved=True,
-            approved_at=self._clock(),
-            approved_interaction_id=interaction,
-        )
-        if self._resolver is not None:
-            self._resolver.store.save(approved)
-        return approved
-
-    def _ask_check_command_approval(self, p: _Pipeline, profile: ResolvedCheckProfile) -> bool:
-        """Ask the human to approve a changed check-command set; fail-closed.
-
-        Reuses the durable HITL interaction machinery under a discovery-specific artifact. On a
-        restart it resumes a still-waiting interaction for the *same* command set; a denial,
-        timeout, transport error, or absent notifier raises :class:`ManualActionRequired`.
-        """
-        path = discovery_interaction_path(self._artifacts_root, p.task.id)
-        sig = profile.commands_signature
-        wanted = discovery_interaction_id(p.task.id, sig)
-        persisted = load_interaction(path)
-        if persisted is not None and persisted.get("interaction_id") == wanted:
-            status = str(persisted.get("status", ""))
-            if status in {"answered", "consumed"}:
-                return persisted.get("approved") is True
-            if status == "waiting":
-                handle = handle_from_artifact(persisted)
-                result = self._notifier.wait_for_answer(handle)
-                write_answer(path, result)
-                self._register_artifact(p.task.id, "hitl", str(path))
-                self._require_human_result(p, "check-discovery", "approval", result)
-                if result.approved is True:
-                    mark_consumed(path)
-                return result.approved is True
-
-        commands = "\n".join(f"{c.name}: {' '.join(c.argv)}" for c in profile.checks)
-        signal = HumanInputSignal(
-            kind="approval",
-            question="The set of quality-gate check commands changed. Approve running them?",
-            context=f"Resolved check commands:\n{commands}",
-            risk="other",
-            paths=tuple(c.name for c in profile.checks),
-        )
-        handle = self._notifier.start_ask(
-            question=signal.question,
-            context=signal.context,
-            task_id=p.task.id,
-            kind="approval",
-            timeout_s=self._config.telegram.ask_timeout_s,
-            interaction_id=wanted,
-            contacts=tuple(p.task.contacts),
-        )
-        write_waiting_interaction(
-            path,
-            task_id=p.task.id,
-            node_id="check-discovery",
-            subtask=None,
-            signal=signal,
-            handle=handle,
-        )
-        self._register_artifact(p.task.id, "hitl", str(path))
-        result = self._notifier.wait_for_answer(handle)
-        write_answer(path, result)
-        self._register_artifact(p.task.id, "hitl", str(path))
-        self._require_human_result(p, "check-discovery", "approval", result)
-        if result.approved is True:
-            mark_consumed(path)
-        return result.approved is True
-
-    def _reresolve_on_launch_failure(self, p: _Pipeline) -> bool:
-        """Re-resolve the check commands once after a *launch* failure.
-
-        Returns ``True`` when a new, different, ready profile is now active (so checks can be
-        re-run), else ``False`` (the caller then fails the task). Bounded to once per task. Only an
-        infrastructure launch failure reaches here — never a quality failure. A changed command set
-        is routed through the same sensitive-change approval gate (fail-closed on denial). In
-        ``configured`` mode the re-resolve yields the same commands, so this is a no-op (the
-        operator's commands are their responsibility).
-        """
-        if self._resolver is None or p.reresolved_once:
-            return False
-        p.reresolved_once = True
-        prev_sig = p.check_profile.commands_signature if p.check_profile else ""
-        prev_approved_sig = (
-            p.check_profile.commands_signature
-            if (p.check_profile and p.check_profile.approved)
-            else ""
-        )
-        allow_agent = self._config.checks.discovery.run_at_task_start
-        new_profile = self._resolver.reresolve(
-            allow_agent=allow_agent, reason=ReResolveReason.LAUNCH_FAILED
-        )
-        if not new_profile.ready or not new_profile.checks:
-            return False
-        if new_profile.commands_signature == prev_sig:
-            return False  # same set re-resolved → re-running would launch-fail identically
-        gated = self._gate_check_commands(p, new_profile, prev_approved_sig)
-        p.check_profile = gated
-        self._log(p.task.id).info(
-            "checks re-resolved after launch failure",
-            extra={"source": gated.source.value, "checks": len(gated.checks)},
-        )
-        return True
+        p.check_sets = self._resolver.resolve()
 
     def _prepare_branch(self, p: _Pipeline) -> None:
         """Complete the persisted ``preparing`` checkpoint and attach the task branch."""
@@ -2048,17 +1874,17 @@ class Orchestrator:
         )
         raise ManualActionRequired(f"{label} human input failed: {failure}")
 
-    def _resolved_checks(self, p: _Pipeline) -> tuple[ResolvedCheck, ...] | None:
-        """The resolved profile's checks; on resume, fall back to the cached profile."""
-        if p.check_profile is not None:
-            return p.check_profile.checks
+    def _check_sets(self, p: _Pipeline) -> tuple[ResolvedCheckSet, ...]:
+        """The normalized command sets; recompute from config if not resolved yet (e.g. on resume).
+
+        Idempotent and cheap (no I/O) — ``()`` when no resolver is wired or no sets are configured.
+        """
+        if p.check_sets:
+            return p.check_sets
         if self._resolver is None:
-            return None  # legacy path: the Check Runner normalizes checks.commands
-        cached = self._resolver.store.load()
-        if cached is not None:
-            p.check_profile = cached
-            return cached.checks
-        return None
+            return ()
+        p.check_sets = self._resolver.resolve()
+        return p.check_sets
 
     # --- artifact + logging helpers -------------------------------------------------------
 
@@ -2307,12 +2133,8 @@ def build_orchestrator(
         heartbeat_seconds=heartbeat_seconds,
     )
     checks = CheckRunner(config, heartbeat_seconds=heartbeat_seconds)
-    # Agent-assisted discovery is opt-in: build_discovery returns None unless agent_fallback + a
-    # cheap model are configured, so default runs stay deterministic.
-    discovery = build_discovery(config, providers, str(root))
-    resolver = CheckResolver(
-        config, repo_root=config.repo.local_path, artifacts_root=str(root), discovery=discovery
-    )
+    # The resolver just normalizes the operator's ``checks.command_sets`` (no discovery).
+    resolver = CheckResolver(config)
     gate = ValidationGate(
         config,
         store_has_task_id=store.task_id_exists,

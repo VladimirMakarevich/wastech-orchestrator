@@ -102,6 +102,9 @@ class _FakeGit:
     def changed_code_entries(self) -> tuple[Any, ...]:
         return ()
 
+    def changed_code_paths(self) -> list[str]:
+        return ["src/x.py"]  # a non-empty diff so the checks node runs its command sets
+
 
 def _agents() -> AgentsConfig:
     return AgentsConfig(

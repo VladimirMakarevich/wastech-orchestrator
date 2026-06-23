@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from wastech_orchestrator.check_runner import CheckOutcome, CheckRunResult
+from wastech_orchestrator.checks.model import ResolvedCheck, ResolvedCheckSet
 from wastech_orchestrator.core.flow.contracts import (
     OutputPolicy,
     PermissionProfile,
@@ -23,7 +24,6 @@ from wastech_orchestrator.core.flow.contracts import (
 from wastech_orchestrator.core.flow.engine import NodeContext
 from wastech_orchestrator.core.flow.nodes import (
     AgentNodeRunner,
-    CheckLaunchError,
     ChecksNodeRunner,
     EvaluatorNodeRunner,
     HitlNodeRunner,
@@ -1081,6 +1081,29 @@ def _run(passed: bool) -> CheckRunResult:
     )
 
 
+def _skipped_run() -> CheckRunResult:
+    return CheckRunResult(
+        command="xcodebuild test",
+        exit_code=None,
+        timed_out=False,
+        passed=False,
+        log_path="/l",
+        skipped=True,
+    )
+
+
+def _one_set() -> tuple[ResolvedCheckSet, ...]:
+    """A single always-on command set, so selection is non-empty and the runner is invoked.
+
+    With ``git=None`` (the default in ``_services``) the diff is indeterminate → all sets run.
+    """
+    return (ResolvedCheckSet(name="a", paths=(), checks=(ResolvedCheck("x", ("x",)),)),)
+
+
+def _checks_inputs(flow_dir: Path) -> NodeInputs:
+    return _inputs(flow_dir, check_sets=_one_set())
+
+
 def test_checks_pass_outcome(tmp_path: Path) -> None:
     node = _checks_node()
     store = FakeStore()
@@ -1089,7 +1112,7 @@ def test_checks_pass_outcome(tmp_path: Path) -> None:
         store,
         FakeCheckRunner(CheckOutcome(passed=True, runs=(_run(True),))),
     )
-    result = ChecksNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    result = ChecksNodeRunner(services, _checks_inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "pass"
     assert len(store.check_runs) == 1
 
@@ -1100,70 +1123,71 @@ def test_checks_fail_outcome(tmp_path: Path) -> None:
     services = _services(
         FakeRouter(_result()),
         store,
-        FakeCheckRunner(CheckOutcome(passed=False, runs=(_run(False),), first_failure_log="/log")),
+        FakeCheckRunner(
+            CheckOutcome(
+                passed=False, runs=(_run(False),), any_quality_failed=True, first_failure_log="/log"
+            )
+        ),
     )
-    result = ChecksNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    result = ChecksNodeRunner(services, _checks_inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "fail"
 
 
-def test_checks_launch_failure_is_infra(tmp_path: Path) -> None:
+def test_checks_launch_failure_is_manual(tmp_path: Path) -> None:
+    # A required toolchain that could not launch → incomplete gate → manual (no more re-resolve).
+    from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
+
+    node = _checks_node()
+    store = FakeStore()
+    services = _services(
+        FakeRouter(_result()),
+        store,
+        FakeCheckRunner(CheckOutcome(passed=False, runs=(), any_launch_failed=True)),
+    )
+    with pytest.raises(NodeManualRequired):
+        ChecksNodeRunner(services, _checks_inputs(tmp_path)).run(node, _ctx(node))
+    assert store.completed[-1]["status"] == "incomplete"
+
+
+def test_checks_all_skipped_is_manual(tmp_path: Path) -> None:
+    # Every selected check skipped (toolchain absent) → nothing ran → incomplete gate → manual.
+    from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
+
     node = _checks_node()
     store = FakeStore()
     services = _services(
         FakeRouter(_result()),
         store,
         FakeCheckRunner(
-            CheckOutcome(passed=False, runs=(), launch_failed=True, first_launch_error="boom")
+            CheckOutcome(passed=False, runs=(_skipped_run(),), any_skipped=True, nothing_ran=True)
         ),
     )
-    with pytest.raises(CheckLaunchError):
-        ChecksNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    with pytest.raises(NodeManualRequired):
+        ChecksNodeRunner(services, _checks_inputs(tmp_path)).run(node, _ctx(node))
+    assert store.completed[-1]["status"] == "incomplete"
 
 
-class _SeqCheckRunner:
-    """Returns programmed CheckOutcomes in order (one per run call)."""
-
-    def __init__(self, outcomes: list[CheckOutcome]) -> None:
-        self._outcomes = outcomes
-
-    def run(self, **kwargs: Any) -> CheckOutcome:
-        return self._outcomes.pop(0)
-
-
-def test_checks_reresolve_retries_after_launch_failure(tmp_path: Path) -> None:
-    from wastech_orchestrator.checks.model import ResolvedCheck
-
+def test_checks_partial_skip_still_passes(tmp_path: Path) -> None:
+    # One set ran+passed, another skipped: the node passes, and the skip is recorded.
     node = _checks_node()
     store = FakeStore()
-    launch_fail = CheckOutcome(passed=False, runs=(), launch_failed=True, first_launch_error="boom")
-    passed = CheckOutcome(passed=True, runs=(_run(True),))
-    services = NodeServices(
-        router=FakeRouter(_result()),
-        check_runner=_SeqCheckRunner([launch_fail, passed]),
-        store=store,
-        repo_dir="/repo",
-        artifacts_root=str(tmp_path),
-        clock=lambda: "ts",
-        check_reresolve=lambda: (ResolvedCheck(name="pytest", argv=("pytest",)),),
-    )
-    result = ChecksNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
-    assert result.outcome.kind == "pass"  # re-resolved + retried, then passed
+    outcome = CheckOutcome(passed=True, runs=(_run(True), _skipped_run()), any_skipped=True)
+    services = _services(FakeRouter(_result()), store, FakeCheckRunner(outcome))
+    result = ChecksNodeRunner(services, _checks_inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "pass"
+    assert len(store.check_runs) == 2  # both the run and the skip are recorded
 
 
-def test_checks_reresolve_none_still_launch_fails(tmp_path: Path) -> None:
+def test_checks_empty_diff_passes_without_running(tmp_path: Path) -> None:
+    # Correction: a task that changed no code selects no set → vacuous pass, runner never called.
     node = _checks_node()
-    launch_fail = CheckOutcome(passed=False, runs=(), launch_failed=True, first_launch_error="boom")
-    services = NodeServices(
-        router=FakeRouter(_result()),
-        check_runner=_SeqCheckRunner([launch_fail]),
-        store=FakeStore(),
-        repo_dir="/repo",
-        artifacts_root=str(tmp_path),
-        clock=lambda: "ts",
-        check_reresolve=lambda: None,  # no different ready profile -> still infra
-    )
-    with pytest.raises(CheckLaunchError):
-        ChecksNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    store = FakeStore()
+    check_runner = FakeCheckRunner(CheckOutcome(passed=False, runs=(), any_quality_failed=True))
+    # FakeGit.changed_code_paths() returns [] → empty diff → no set selected.
+    services = _services(FakeRouter(_result()), store, check_runner, git=FakeGit())
+    result = ChecksNodeRunner(services, _checks_inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "pass"
+    assert store.check_runs == []  # nothing ran
 
 
 # -- checks mutation guard (P2.4) --------------------------------------------
@@ -1203,7 +1227,7 @@ def test_mutation_guard_active_when_checks_present(tmp_path: Path) -> None:
         snapshot=FakeSnapshot(["before", "after"]),
     )  # checksum changed → mutated
     with pytest.raises(NodeManualRequired):
-        ChecksNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+        ChecksNodeRunner(services, _checks_inputs(tmp_path)).run(node, _ctx(node))
     assert store.completed[-1]["status"] == "dirtied_working_tree"
 
 
@@ -1217,7 +1241,7 @@ def test_mutation_guard_clean_check_still_passes(tmp_path: Path) -> None:
         FakeCheckRunner(CheckOutcome(passed=True, runs=(_run(True),))),
         snapshot=FakeSnapshot(["same"]),
     )  # capture() returns "same" both times
-    result = ChecksNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    result = ChecksNodeRunner(services, _checks_inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "pass"
 
 
@@ -1291,6 +1315,9 @@ class FakeGit:
         if self._changed_seq:
             return self._changed_seq.pop(0) if len(self._changed_seq) > 1 else self._changed_seq[0]
         return self._changed
+
+    def changed_code_paths(self) -> list[str]:
+        return []  # no code changed → the checks node selects nothing (vacuous pass)
 
 
 def test_publish_pull_request_runs_git_sequence(tmp_path: Path) -> None:

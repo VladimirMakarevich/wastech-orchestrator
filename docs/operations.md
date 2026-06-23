@@ -22,7 +22,7 @@ python -m venv .venv
 pip install -e ".[dev]"             # or: pip install wastech-orchestrator
 ```
 
-`install` is the single setup command. It sets up `<repo>/.worc/` in the current repository — a single gitignored home for everything the orchestrator generates: `config.yaml`, a `guide/` (the agent task-authoring docs), `state.db`, `logs/`, `workspace/`, and `checks/`. There is no sibling workspace and no separate clone requirement — the orchestrator branches/commits/pushes in the repo you run it in.
+`install` is the single setup command. It sets up `<repo>/.worc/` in the current repository — a single gitignored home for everything the orchestrator generates: `config.yaml`, a `guide/` (the agent task-authoring docs), `state.db`, `logs/`, and `workspace/`. There is no sibling workspace and no separate clone requirement — the orchestrator branches/commits/pushes in the repo you run it in.
 
 ### Bind the repository (`install`)
 
@@ -61,10 +61,10 @@ Do it **between tasks**, not mid-run: an in-flight task holds the single process
 
 The persisted state survives an upgrade — back it up first so you can roll back. That is everything under `<repo>/.worc/` (`config.yaml` and `state.db` live there), plus the git-tracked `tasks/` lifecycle dirs at the repo root. Copy at least `.worc/config.yaml` + `.worc/state.db`. The orchestrator **fail-closes on a backward-incompatible workspace**: if the `config.yaml` `schema_version` or the `state.db` schema is **newer** than the installed version understands, the command prints a clear `error:` and exits non-zero (2) instead of running against a format it cannot read. To recover, upgrade the package to a version that supports it (or, for a throwaway setup, start a fresh workspace via `install --reconfigure`).
 
-The current schema versions are `state.db` **v11** and `config.yaml` `schema_version` **14**, and the two are handled differently because the orchestrator is **greenfield** (no production data to preserve):
+The current schema versions are `state.db` **v12** and `config.yaml` `schema_version` **15**, and the two are handled differently because the orchestrator is **greenfield** (no production data to preserve):
 
 - **`config.yaml`** does **not** auto-migrate, and an **older or absent** `schema_version` is accepted as-is (a new release adds keys with safe defaults, so an older config still runs). To materialize the new keys in your file run **`upgrade-config`** (below).
-- **`state.db`** does **not** migrate across versions. A brand-new (or pre-versioning) database is created at the current shape; a database stamped an **older** version (`1 ≤ v < 11`) is **refused fail-closed** — several past bumps dropped/renamed tables, and the store only ever adds columns, so an old shape cannot be reshaped in place. Recovery is to delete the local `state.db` and start a fresh workspace (greenfield: there is nothing to preserve). Do this **between tasks**, never with a task in flight.
+- **`state.db`** does **not** migrate across versions. A brand-new (or pre-versioning) database is created at the current shape; a database stamped an **older** version (`1 ≤ v < 12`) is **refused fail-closed** — several past bumps dropped/renamed tables, and the store only ever adds columns, so an old shape cannot be reshaped in place. Recovery is to delete the local `state.db` and start a fresh workspace (greenfield: there is nothing to preserve). Do this **between tasks**, never with a task in flight.
 
 To bring the rest of your deployment current after a package upgrade, run **`upgrade-config`** (and **`upgrade-docs`**):
 
@@ -84,7 +84,7 @@ wastech-orchestrator upgrade-docs --dry-run      # preview added/updated/removed
 
 Unlike `config.yaml`, the `worc/` docs are generated content with **no operator edits to preserve**, so this is a straight overwrite to the packaged version: it writes missing or changed files, removes files no longer shipped, and makes no backup. It is idempotent (an already-current copy is a no-op), `--dry-run` writes nothing, and it fails closed (exit 2 with the same hint as `upgrade-config`) when no install location can be resolved.
 
-After a package upgrade, run **`upgrade-config`** and **`upgrade-docs`** to bring your deployment fully current. (A single umbrella `upgrade` that does both is tracked in [follow-ups](backlog/follow_ups.md).) There is no prompt-template delivery step: a flow node's prompt is its `role_file`, shipped with the flow (packaged flows) or kept under `.worc/flows/roles/` (operator flows) — edit the role file to customize a node's prompt.
+After a package upgrade, run **`upgrade-config`** and **`upgrade-docs`** to bring your deployment fully current. (A single umbrella `upgrade` that does both is tracked in [follow-ups](backlog/follow_ups.md).) `install` delivers the built-in flows (`implementation`/`deep_research`/`security_audit`) and their per-node prompt templates as **editable copies** under `.worc/flows/` (each `<task_type>.yaml` plus `roles/*.md`); a flow node's prompt is its `role_file`, so you customize a node by editing the delivered role file. Because these copies **override** the packaged built-ins (the registry prefers `.worc/flows/`), a package upgrade does **not** refresh them automatically — re-run **`install --reconfigure`** to refresh them to the packaged version (it snapshots your existing `.worc/flows/` to a `flows.bak-<UTC>` sibling first, so edits stay recoverable). A dedicated flow/prompt re-sync step (the analogue of `upgrade-docs`) is tracked in [follow-ups](backlog/follow_ups.md).
 
 To install or pin a specific published (pre)release, append its tag to the `pipx`/`pip` source — e.g. `pipx install "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git@v0.1.1a1"`. Releases are tag-driven and pre-releases (`aN`/`bN`/`rcN` tags) are marked as such on GitHub; maintainers cut them by pushing a `v*` tag, which runs the [release workflow](../.github/workflows/release.yml).
 
@@ -118,38 +118,30 @@ python -m wastech_orchestrator preflight
 claude: OK — claude 1.2.3 available (version=1.2.3, authenticated=True)
 codex: OK — codex 0.9.0 available (version=0.9.0, authenticated=True)
 isolation: OK (enforced)
-checks: OK (2 resolved, source=detected)
-  - tests: LAUNCHABLE  argv=['.venv/bin/python', '-m', 'pytest']
-  - lint: LAUNCHABLE  argv=['.venv/bin/ruff', 'check', '.']
+checks: 2 command sets configured
+  - repo: 3 commands (always runs)
+  - ios: 1 command (paths: ios/**, skip_if_unavailable)
 preflight: ready
 ```
 
-- Exit `0` when every allowed provider is healthy, the required isolation can be enabled, **and** the repository's checks resolve to a launchable profile; non-zero otherwise.
+- Exit `0` when every allowed provider is healthy and the required isolation can be enabled; non-zero otherwise. The command-set summary is informational — an empty `command_sets` (`checks: no command sets configured (no gate)`) is valid and does not fail preflight.
 - A `FAIL` line names the problem without leaking secrets (e.g. `codex executable not found`).
 - `isolation: OK (enforced)` — every provider in `agents.allowed` passed the offline isolation check (Codex sandbox, Claude permission mode) **and** `security.strict_isolation: true` (the default) is active, meaning a failed check would abort the run rather than silently downgrade isolation.
 - `isolation: OK (strict_isolation=false)` — the check still passed, but the operator has set `security.strict_isolation: false`, opting in to full-access provider modes (e.g. `danger-full-access` or `bypassPermissions`). The operator owns the risk; the gate will not abort a run if isolation cannot be enforced.
 - `isolation: FAIL` lists the offending provider/setting. With `security.strict_isolation: true` (the default) a run would **fail preflight** before any branch is created rather than silently downgrading isolation — fix the config (don't weaken the sandbox/permission profile) and re-run.
 
-### Check discovery diagnostics
+### Command-set diagnostics
 
-When `checks.discovery.mode` is `auto`/`deterministic`, `preflight` resolves and probes the repository's quality-gate commands (deterministically — it never spends a provider run) and reports the verdict. `checks: FAIL` means no required check is launchable; the lines below it show which candidates were `not_launchable` or rejected by the security rules:
+`preflight` and `status` print a static summary of the configured `checks.command_sets` — the operator-authored gate. There is no resolution, probing, caching, or readiness verdict: the commands are exactly what the operator wrote (see [configuration.md](configuration.md#checks)), and the orchestrator does not auto-detect them. Each line shows a set's command count, its selecting `paths` (or "always runs" when it has none), and a `skip_if_unavailable` marker:
 
 ```text
-checks: FAIL (0 resolved, source=detected)
-  not_launchable: tests (pytest)
-  rejected: lint (git push origin) — matches denied command 'git push'
+checks: 2 command sets configured
+  - repo: 3 commands (always runs)
+  - ios: 1 command (paths: ios/**, skip_if_unavailable)
 ```
 
-- The resolved profile is cached at `<repo>/.worc/checks/resolved-profile.json` with a fingerprint of the discovery inputs (manifests, lock files, CI workflows, local interpreters). It is recomputed per `checks.discovery.refresh` (`on_change` by default) — editing a manifest or lock file refreshes it. Force a refresh by setting `refresh: always`, or re-run `install --reconfigure`.
-- `status` prints a read-only summary of the cached profile (it never resolves, probes, or runs anything):
-
-  ```text
-  checks_profile: source=detected, resolved=2, ready=True, fingerprint=ab12cd34ef56
-    tests: .venv/bin/python -m pytest
-    lint: .venv/bin/ruff check .
-  ```
-
-- The agent-assisted fallback (a read-only, advisory provider call that proposes candidates) runs only at `install`, and only when `checks.discovery.agent_fallback` is on **and** a cheap `checks.discovery.model` is configured. Its proposals pass the same validation and probing as deterministic candidates; it can never mark a check passing or execute anything.
+- `status` prints the same read-only summary (it never runs anything). An empty `command_sets` shows `checks: no command sets configured (no gate)` — a valid configuration in which every task passes the checks node.
+- At task time the runner runs the **union** of the sets whose `paths` match the task diff (a set with no `paths` always runs; an empty diff runs nothing; a changed path claimed by no set is the fail-safe that runs **all** sets). All selected checks run and the verdict is aggregated: a **required toolchain absent** (a non-`skip_if_unavailable` set whose binary cannot launch) or every check skipped leaves the gate **incomplete** → the task goes to **manual** (the agent cannot install host toolchains); otherwise a quality failure → `fixing`, else pass. A skipped `skip_if_unavailable` set is recorded loudly in `check_runs` and **blocks `git.auto_merge`** even when the node passes.
 
 ### Verify the executable seen by the runtime
 
@@ -286,7 +278,7 @@ python -m wastech_orchestrator --config ./config.yaml status task-001
 
 ## 5. Git footprint and the audit commit
 
-There is one canonical layout. Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home — `config.yaml`, `guide/`, `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `workspace/`, `checks/`, and the `tasks/rejected` quarantine. The **only** things not under `.worc/` are the `tasks/` lifecycle dirs (`pending`/`processing`/`done`/`failed`), which live at the **repo root** and are **git-tracked**: the task file and its `<id>.summary.md` (in `done/` or `failed/`) are the audit trail. `install` appends a single line `.worc/` to the repo's tracked `.gitignore`; `tasks/` is intentionally not ignored.
+There is one canonical layout. Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home — `config.yaml`, `guide/`, `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `workspace/`, and the `tasks/rejected` quarantine. The **only** things not under `.worc/` are the `tasks/` lifecycle dirs (`pending`/`processing`/`done`/`failed`), which live at the **repo root** and are **git-tracked**: the task file and its `<id>.summary.md` (in `done/` or `failed/`) are the audit trail. `install` appends a single line `.worc/` to the repo's tracked `.gitignore`; `tasks/` is intentionally not ignored.
 
 Two fields under `git.footprint` shape the audit commit:
 
@@ -296,8 +288,6 @@ Two fields under `git.footprint` shape the audit commit:
 | `audit_on_branch` | `task` | `task` commits the audit onto the task branch; `sibling` commits it onto a `<branch>-audit` branch. |
 
 The orchestrator (never an agent) makes the audit commit, staging **only the current task's own files** — `tasks/<state>/<id>.md` plus `<id>.summary.md` — never `git add -- tasks/` wholesale. The _code_ commit is likewise **scoped** via an explicit pathspec that excludes `.worc/` (gitignored) and `tasks/` (rides the audit commit) — there is never a `git add .`.
-
-> **One-time cleanup if a prior run leaked `.worc/checks/resolved-profile.json`.** Before the `.worc/` layout the generated resolved check profile could ride a code commit. It now lives under `.worc/checks/` and is gitignored, and the orchestrator stops tracking it for _future_ runs, but it deliberately does not refuse to start on an already-tracked copy. If `git status` or a prior commit shows it tracked, untrack it once: `git rm --cached .worc/checks/resolved-profile.json`, then commit. The file keeps working as a local cache.
 
 ### Auto-merge to the base branch (DANGER: bypasses human review)
 
@@ -324,6 +314,7 @@ Resolution order: per-task `auto_merge` (if set) → global `git.auto_merge` →
 **What auto-merge does _not_ weaken:**
 
 - The mid-pipeline **dangerous-diff approval** (code deletions / dependency changes) still fires — auto-merge affects only the publish step, never the agent sandbox or earlier gates.
+- An **incomplete checks gate is never auto-merged.** If any selected check was **skipped** (a `skip_if_unavailable` set whose toolchain binary was absent — see [configuration.md](configuration.md#checks)), the PR is left open for a human even when the checks node passed; only a fully-run, all-pass gate is eligible for auto-merge.
 - It never passes `--admin`, never force-pushes, and tries exactly once. If the merge is **blocked** (branch protection, pending checks, conflict) the task ends `manual_action_required` with the PR **left open** for a human — never `failed`, never a forced merge. Re-running the task retries the merge idempotently (it never double-merges an already-merged PR).
 
 **Audit.** Every auto-merge writes a `[AUTO-MERGE]` `WARNING` log line, records the merge in the append-only ledger (`auto_merged` + `merge_outcome` = the merge SHA, `"merged"`, or `"armed"`), and persists a `pr_merge` row in `state.db`. The terminal Telegram notification carries the PR URL. When `auto_merge_wait_for_checks` arms a PR (`merge_outcome: "armed"`), the real merge SHA is captured later only if another task `depends_on` it — the readiness probe backfills the `state.db` `pr_merge` row once it observes the PR merged (see [Task dependencies](#task-dependencies-depends_on)); the ledger row keeps its `"armed"` snapshot.
@@ -391,7 +382,7 @@ Use the operator log for live monitoring. Provider `stdout.log` and `stderr.log`
 
 ### Troubleshooting node prompts
 
-- **A `role_file` edit "did nothing"** — confirm you edited the role file the node actually uses (a packaged flow ships its role files beside the flow YAML; an operator flow keeps them under `.worc/flows/roles/`), and compare `rendered-prompt.md` against your file.
+- **A `role_file` edit "did nothing"** — confirm you edited the role file the node actually uses. `install` delivers the built-in flows + their role files under `.worc/flows/` (`roles/*.md`), and those copies **override** the packaged built-ins, so edit the copy there (a custom operator flow likewise keeps its role files under `.worc/flows/roles/`). Compare `rendered-prompt.md` against your file.
 - **A `{placeholder}` printed literally** — only the allowlisted variables interpolate (see [configuration.md](configuration.md#prompt-templates-no-longer-a-config-block)); any other `{...}` is intentionally left verbatim so code/JSON braces survive. A path variable with no value for that node renders empty.
 
 ---

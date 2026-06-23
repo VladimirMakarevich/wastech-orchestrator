@@ -280,7 +280,7 @@ A **task** cannot repoint a stage's provider, set a model, or change reasoning �
 
 ## 7a. Customize a Node's Prompt
 
-To add repository-specific engineering rules or a review rubric to a stage without editing Python, edit that node's **`role_file`** (see [configuration.md](configuration.md#prompt-templates-no-longer-a-config-block)). A packaged flow ships its role files beside the flow YAML; an operator flow keeps them under `.worc/flows/roles/`. The role file's content **is** the prompt template — edit it and the change takes effect on the next run.
+To add repository-specific engineering rules or a review rubric to a stage without editing Python, edit that node's **`role_file`** (see [configuration.md](configuration.md#prompt-templates-no-longer-a-config-block)). `install` delivers the built-in flows + their role files under `.worc/flows/` (`roles/*.md`), and those copies override the packaged built-ins, so edit the delivered role file (a custom operator flow likewise keeps its role files under `.worc/flows/roles/`). The role file's content **is** the prompt template — edit it and the change takes effect on the next run.
 
 For example, a review node's role file replaced with a security rubric:
 
@@ -302,36 +302,43 @@ Notes:
 
 ## 8. Configure Checks
 
-Checks are configured or discovered — never hardcoded. The Check Runner runs each resolved command with a timeout and records output as artifacts; a launched check that exits non-zero is a quality failure that goes to `fixing` (no provider fallback), while a check that **cannot be launched** stops the task before any branch and never burns a fixing iteration.
+Checks are **operator-authored command sets** — never auto-detected. The Check Runner runs each selected command (argv list, no shell) with a timeout and records output as artifacts; a launched check that exits non-zero is a quality failure that goes to `fixing` (no provider fallback), while a **required toolchain that cannot launch** leaves the gate incomplete and sends the task to `manual_action_required` (the agent cannot install host toolchains). `install` writes `command_sets: {}` (no gate); you author the gate.
 
-**Zero-config onboarding.** `install` detects the repository's ecosystem and writes `checks.discovery.mode: auto` when it can't pin explicit commands. On the next `preflight`/run the orchestrator discovers the launchable profile — for a Python repo with a local virtualenv it resolves `.venv/bin/python -m pytest` (and ruff/mypy) even when `pytest` is not on `PATH`:
-
-```bash
-python -m wastech_orchestrator install        # detects ecosystem, writes mode: auto
-python -m wastech_orchestrator preflight       # reports the resolved, launchable checks
-```
+**Single-root repo.** One set with no `paths` always runs (on any non-empty diff):
 
 ```yaml
 checks:
-  discovery:
-    mode: auto
-  commands: [] # discovery resolves a launchable profile; preflight shows it
-  timeout_seconds: 7200
+  timeout_seconds: 7200 # global per-command default
+  command_sets:
+    repo:
+      paths: [] # no paths ⇒ always runs
+      commands:
+        - { name: lint, argv: ["ruff", "check", "."] }
+        - { name: types, argv: ["mypy", "src"] }
+        - { name: tests, argv: [".venv/bin/python", "-m", "pytest"] }
 ```
 
-**Explicit override.** A non-empty `commands` list is authoritative in any mode. Use legacy strings, structured `{name, argv}`, or both:
+**Polyglot monorepo.** Sets are selected by the **union** of those whose `paths` match the task diff; a `cwd` runs the command in a subtree, and `skip_if_unavailable` skips (rather than fails) a set whose toolchain is absent off-host:
 
 ```yaml
 checks:
-  discovery:
-    mode: configured
-  commands:
-    - "ruff check ."
-    - name: tests
-      argv: [".venv/bin/python", "-m", "pytest"]
+  command_sets:
+    backend:
+      paths: ["backend/**"]
+      commands:
+        - { name: tests, argv: ["pytest"], cwd: "backend" }
+    docs:
+      paths: ["**/*.md"] # extension-anywhere: only when Markdown changes
+      commands:
+        - { name: prose, argv: ["npx", "prettier@3", "--check", "**/*.md"] }
+    ios:
+      paths: ["ios/**"]
+      skip_if_unavailable: true # xcodebuild absent off-macOS ⇒ skip, don't block
+      commands:
+        - { name: build, argv: ["xcodebuild", "build"], cwd: "ios" }
 ```
 
-See [configuration.md](configuration.md#checks) for every field and [operations.md](operations.md#check-discovery-diagnostics) for the `preflight`/`status` diagnostics.
+An **empty diff** runs nothing (the checks node passes vacuously); a changed path claimed by **no** set is the fail-safe that runs **all** sets. A skipped `skip_if_unavailable` set is recorded loudly and **blocks `git.auto_merge`** even when the node passes. See [configuration.md](configuration.md#checks) for every field and [operations.md](operations.md#command-set-diagnostics) for the `preflight`/`status` command-set summary.
 
 ## 9. Configure The Audit Commit
 
@@ -432,15 +439,17 @@ git:
 
 This disables PR creation only. A successful run still commits and pushes the task branch.
 
-Long-running checks:
+Long-running checks (a per-set `timeout_seconds` overrides the global default):
 
 ```yaml
 checks:
-  commands:
-    - "npm test"
-    - "npm run lint"
-    - "npm run typecheck"
-  timeout_seconds: 3600
+  command_sets:
+    repo:
+      timeout_seconds: 3600
+      commands:
+        - { name: tests, argv: ["npm", "test"] }
+        - { name: lint, argv: ["npm", "run", "lint"] }
+        - { name: types, argv: ["npm", "run", "typecheck"] }
 ```
 
 Smaller fix budget for conservative runs:

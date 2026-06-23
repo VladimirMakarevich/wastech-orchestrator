@@ -30,8 +30,11 @@ from wastech_orchestrator.config.schema import CONFIG_SCHEMA_VERSION
 # now wins outright. v12: ``agents.decomposition.min_size_signal``/``commit_per_subtask`` are gone —
 # both were decorative (never read). v13: ``agents.allow_review_skip`` is gone — per-task skip is by
 # flow node id and the operator owns which nodes are safe to disable. v14:
-# ``agents.providers.<p>.max_budget_usd`` is gone — declared/parsed but read nowhere.) The
-# parent-path may be dotted (walked segment by segment).
+# ``agents.providers.<p>.max_budget_usd`` is gone — declared/parsed but read nowhere. v15: the whole
+# ``checks.discovery`` block and the flat ``checks.commands`` list are gone — replaced by named
+# ``checks.command_sets``, which ``upgrade-config`` cannot synthesize (host inspection is removed);
+# the operator authors it (see config.example.yaml).) The parent-path may be dotted (walked
+# segment by segment).
 _REMOVED_KEYS: tuple[tuple[str, str], ...] = (
     ("", "prompts"),
     ("agents", "skip_stages"),
@@ -42,6 +45,8 @@ _REMOVED_KEYS: tuple[tuple[str, str], ...] = (
     ("agents.decomposition", "commit_per_subtask"),
     ("agents.providers.claude", "max_budget_usd"),
     ("agents.providers.codex", "max_budget_usd"),
+    ("checks", "discovery"),
+    ("checks", "commands"),
 )
 
 _UPGRADE_HEADER = (

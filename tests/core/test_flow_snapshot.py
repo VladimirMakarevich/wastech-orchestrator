@@ -250,13 +250,10 @@ def test_agent_node_hitl(impl_snap: FlowSnapshot) -> None:
     assert planning.hitl.allow_approval is True
 
 
-def test_checks_node_discovery(impl_snap: FlowSnapshot) -> None:
+def test_checks_node_has_checker(impl_snap: FlowSnapshot) -> None:
     testing = impl_snap.nodes_by_id["testing"]
     assert isinstance(testing, ChecksNode)
     assert testing.checker == "command_profile"
-    assert testing.discovery is not None
-    assert testing.discovery.mode == "auto"
-    assert testing.discovery.approve_command_changes is True
 
 
 # -- budgets and decomposition ------------------------------------------------

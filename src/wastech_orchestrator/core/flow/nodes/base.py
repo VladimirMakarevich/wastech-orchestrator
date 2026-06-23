@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Protocol
 
 from wastech_orchestrator.check_runner import CheckOutcome
-from wastech_orchestrator.checks.model import ResolvedCheck
+from wastech_orchestrator.checks.model import ResolvedCheckSet
 from wastech_orchestrator.git_manager import ChangedPath
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult
 from wastech_orchestrator.providers.base import AgentRunRequest, ProviderId
@@ -92,7 +92,7 @@ class CheckRunnerPort(Protocol):
         artifacts_root: str | Path,
         task_id: str,
         subtask: int | None = None,
-        checks: Sequence[ResolvedCheck] | None = None,
+        selected: Sequence[ResolvedCheckSet] | None = None,
     ) -> CheckOutcome: ...
 
 
@@ -184,6 +184,8 @@ class GitPort(Protocol):
 
     def changed_code_entries(self) -> tuple[ChangedPath, ...]: ...
 
+    def changed_code_paths(self) -> list[str]: ...
+
 
 @dataclass(frozen=True)
 class NodeServices:
@@ -213,11 +215,6 @@ class NodeServices:
     #: lifecycle folder + write the committed ``<id>.summary.md`` (so both enter the audit commit),
     #: returning that summary path (used as the PR body). ``None`` → no finalize (e.g. a unit test).
     finalize: Callable[[], str | None] | None = None
-    #: orchestrator hook the checks node calls on a check *launch* failure: re-resolve the check
-    #: command set once (gated by the change-approval), returning the new checks to retry, or
-    #: ``None`` when no different ready profile exists. Bounded to once per task by the hook itself
-    #: (it returns ``None`` after the first re-resolve). Ports the legacy re-resolve-on-launch-fail.
-    check_reresolve: Callable[[], tuple[ResolvedCheck, ...] | None] | None = None
     #: the ``dependency_scan`` checker's process runner + its allowlisted child env + per-scanner
     #: timeout. ``process_env`` is the same allowlisted env the Check Runner uses
     #: (``build_child_env(config.security.allowed_environment)``); empty in unit harnesses.
@@ -239,9 +236,9 @@ class NodeInputs:
     skill_paths: tuple[str, ...] = ()
     subtask_count: int | None = None
     subtask_spec_path: str | None = None
-    #: resolved check profile, or ``None`` to fall back to ``checks.commands`` (legacy semantics:
-    #: ``None`` ≠ ``()`` — an empty tuple means *run zero checks*, which vacuously passes).
-    resolved_checks: tuple[ResolvedCheck, ...] | None = ()
+    #: the normalized ``checks.command_sets`` (diff-selected at run time by the checks node). An
+    #: empty tuple means *no gate* — the checks node passes vacuously.
+    check_sets: tuple[ResolvedCheckSet, ...] = ()
     #: publish inputs (set for the unit that reaches a publish node).
     branch: str | None = None
     pr_title: str | None = None

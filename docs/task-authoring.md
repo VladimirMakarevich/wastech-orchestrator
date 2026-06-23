@@ -121,7 +121,7 @@ The per-task value **always overrides** the global one (in both directions — t
 
 A task **cannot** choose a provider, model, or reasoning level for any stage. Provider routing is node-based: each flow node declares its own `provider:` — or, when omitted, defaults to the operator's single global primary provider (the one with `primary: true` in `config.yaml` under `agents.providers`). Model and reasoning live on the flow node as well. A task has no `agents`, `model`, or `reasoning` field, and cannot repoint a stage's provider or change commands, `extra_args`, credentials, sandbox, or any security policy.
 
-> **Tasks cannot supply or weaken checks.** The quality-gate commands are an operator/infrastructure concern resolved from `config.yaml` and the repository at install/preflight time (see [configuration.md](configuration.md#checks)). A task file has no field to add, replace, or relax a check, and cannot change the discovery policy — this keeps the quality gate independent of task content.
+> **Tasks cannot supply or weaken checks.** The quality-gate commands are an operator/infrastructure concern, authored only in `config.yaml` under `checks.command_sets` (see [configuration.md](configuration.md#checks)). A task file has no field to add, replace, relax, or re-select a check — which sets run is a deterministic function of the task diff, not task content — keeping the quality gate independent of the task.
 
 ## `contacts`
 

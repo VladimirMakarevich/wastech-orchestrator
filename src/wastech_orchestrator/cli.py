@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import shutil
 import sys
 import tempfile
 import threading
@@ -23,7 +24,6 @@ from importlib.resources.abc import Traversable
 from pathlib import Path
 
 from wastech_orchestrator import __version__, preflight, process_control
-from wastech_orchestrator.checks import diagnostics as check_diagnostics
 from wastech_orchestrator.config import upgrade as config_upgrade
 from wastech_orchestrator.config.loader import ConfigError, load_config, loads_config
 from wastech_orchestrator.config.schema import (
@@ -163,13 +163,6 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("auto", "codex", "claude", "both"),
         default="auto",
         help="which providers to route to (default: auto-detect what is on PATH)",
-    )
-    install_cmd.add_argument(
-        "--check",
-        action="append",
-        default=None,
-        metavar="COMMAND",
-        help="a check command (repeatable); overrides ecosystem auto-detection",
     )
     install_cmd.add_argument(
         "--create-pr",
@@ -369,6 +362,58 @@ def _copy_worc_docs(dest_root: Path, *, overwrite: bool, dry: bool) -> tuple[lis
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_bytes((Path(wroot) / rel).read_bytes())
     return written, skipped
+
+
+def _flows_root() -> Traversable:
+    """The packaged built-in flows (``implementation``/``deep_research``/``security_audit``) and
+    their per-node role-prompt templates under ``roles/`` (works from a source tree or a wheel).
+
+    ``install`` copies this whole tree into ``.worc/flows/`` so the operator gets editable, *active*
+    copies: the registry prefers ``<repo>/.worc/flows/<task_type>.yaml`` over the packaged built-in,
+    and a node's ``role_file`` resolves beside it under ``.worc/flows/roles/``. Unlike the generated
+    ``guide/``, these are operator-editable, so a plain re-run never clobbers them (see
+    ``_copy_packaged_flows`` / ``_backup_flows_dir``).
+    """
+    return resources.files("wastech_orchestrator.core.flow").joinpath("packaged")
+
+
+def _copy_packaged_flows(
+    dest_root: Path, *, overwrite: bool, dry: bool
+) -> tuple[list[str], list[str]]:
+    """Copy the packaged built-in flows + their ``roles/`` prompts into ``dest_root/flows``.
+
+    Existing files are skipped unless ``overwrite`` (so a plain re-run preserves operator edits);
+    ``dry`` writes nothing. Returns ``(written, skipped)`` as ``flows/...`` relative paths.
+    """
+    written: list[str] = []
+    skipped: list[str] = []
+    with resources.as_file(_flows_root()) as froot:
+        for rel in _iter_template_files(Path(froot)):
+            label = str(Path("flows") / rel)
+            dest = dest_root / "flows" / rel
+            if dest.exists() and not overwrite:
+                skipped.append(label)
+                continue
+            written.append(label)
+            if not dry:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes((Path(froot) / rel).read_bytes())
+    return written, skipped
+
+
+def _backup_flows_dir(worc_home: Path) -> Path | None:
+    """Snapshot an existing ``.worc/flows/`` to a timestamped sibling before ``--reconfigure``
+    refreshes it, so operator edits (and any custom flows) stay recoverable. Returns the backup
+    path, or ``None`` when there is nothing to back up. The backup lives under the gitignored
+    ``.worc/`` home, so it never shows up in ``git status``.
+    """
+    flows = worc_home / "flows"
+    if not flows.is_dir() or not any(flows.iterdir()):
+        return None
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    backup = flows.with_name(f"flows.bak-{stamp}")
+    shutil.copytree(flows, backup)
+    return backup
 
 
 def _load_config(path: str) -> OrchestratorConfig:
@@ -970,9 +1015,7 @@ def run_preflight(config: OrchestratorConfig) -> tuple[bool, list[str]]:
         enforced = "enforced" if config.security.strict_isolation else "strict_isolation=false"
         lines.append(f"isolation: OK ({enforced})")
 
-    chk_ok, chk_lines = check_diagnostics.check_preflight(config, worc_home_for(config))
-    ok = ok and chk_ok
-    lines.extend(chk_lines)
+    lines.extend(_summarize_command_sets(config))
 
     # Every flow file — packaged built-ins and operator flows in ``.worc/flows/`` — must load and
     # pass the full fatal validator (graph + ceiling + config-consistency) before any task runs, so
@@ -1157,6 +1200,28 @@ def cmd_restart(args: argparse.Namespace) -> int:
     return cmd_watch(args)
 
 
+def _summarize_command_sets(config: OrchestratorConfig) -> list[str]:
+    """Read-only summary of the configured ``checks.command_sets`` (no resolution/probing/running).
+
+    Shared by ``preflight`` and ``status``; an empty mapping is reported as "no quality gate".
+    """
+    sets = config.checks.command_sets
+    if not sets:
+        return ["checks: no command_sets configured (no quality gate)"]
+    lines = [f"checks: {len(sets)} command set(s):"]
+    for name, cset in sets.items():
+        paths = ", ".join(cset.paths) if cset.paths else "always"
+        cmds = "; ".join(" ".join(c.argv) for c in cset.commands)
+        flags = []
+        if cset.timeout_seconds is not None:
+            flags.append(f"timeout={cset.timeout_seconds}s")
+        if cset.skip_if_unavailable:
+            flags.append("skip_if_unavailable")
+        suffix = f" [{', '.join(flags)}]" if flags else ""
+        lines.append(f"  {name} (paths: {paths}){suffix}: {cmds}")
+    return lines
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     """Show persisted progress without starting providers, checks, or git operations."""
     _configure_runtime_logging(args)
@@ -1210,14 +1275,10 @@ def cmd_status(args: argparse.Namespace) -> int:
         if task.cleanup_last_error:
             print(f"last_error={task.cleanup_last_error}")
 
-    # The resolved check profile, read-only (status never resolves, probes, or runs anything).
-    profile = check_diagnostics.load_profile(worc_home_for(config))
+    # The configured check command sets, read-only (status never resolves, probes, or runs).
     print()
-    if profile is None:
-        print("checks_profile: none (run preflight or install to resolve)")
-    else:
-        for line in check_diagnostics.summarize_profile(profile):
-            print(line)
+    for line in _summarize_command_sets(config):
+        print(line)
     return 0
 
 
@@ -1281,8 +1342,7 @@ def _install_print_plan(
     print(f"  base:       {spec.base_branch}")
     print(f"  config:     {config_path}")
     print(f"  providers:  {', '.join(p.value for p in spec.providers)}")
-    print(f"  checks:     {', '.join(spec.checks) or '(none)'}")
-    print(f"  discovery:  {spec.discovery_mode}")
+    print("  checks:     command_sets (author in config.yaml)")
     print(f"  create_pr:  {spec.create_pull_request}")
     print(f"  auto_mode:  {spec.auto_mode}")
     for rel in REPO_TASK_DIRS:
@@ -1290,34 +1350,11 @@ def _install_print_plan(
     for rel in WORC_RUNTIME_DIRS:
         print(f"  would create {worc_home / rel}")
     print(f"  would create {worc_home / 'guide'}/ (agent task-authoring docs)")
+    print(f"  would create {worc_home / 'flows'}/ (built-in flows + node prompt templates)")
     print(f"  would create {worc_home / ENV_EXAMPLE_FILENAME} (secrets template)")
     print(f"  would ignore {WORC_HOME}/ via .gitignore")
     if missing:
         print(f"  note: provider(s) not on PATH: {', '.join(p.value for p in missing)}")
-
-
-def _install_resolve_checks(config: OrchestratorConfig) -> None:
-    """Seed the resolved profile at install, running the read-only agent fallback when configured.
-
-    Deterministic resolution is also performed by the auto-preflight, but only the agent fallback
-    needs an explicit provider run here. No-op unless ``checks.discovery`` enables agent fallback
-    and names a cheap model (opt-in); the deterministic preflight then seeds the profile on its own.
-    """
-    from wastech_orchestrator.checks.discovery_factory import build_discovery
-    from wastech_orchestrator.checks.resolver import CheckResolver
-
-    artifacts_root = str(worc_home_for(config))
-    providers = build_providers(config, artifacts_root=artifacts_root)
-    discovery = build_discovery(config, providers, artifacts_root)
-    if discovery is None:
-        return
-    resolver = CheckResolver(
-        config,
-        repo_root=config.repo.local_path,
-        artifacts_root=artifacts_root,
-        discovery=discovery,
-    )
-    resolver.resolve(allow_agent=True)
 
 
 def _install_run_preflight(config_path: Path, *, skip: bool) -> int:
@@ -1340,16 +1377,16 @@ def cmd_install(args: argparse.Namespace) -> int:
     """Set up the orchestrator in the current repo under ``.worc/`` and generate config.
 
     Runs the wizard to resolve settings, then idempotently writes a validated ``config.yaml`` into
-    ``<repo>/.worc/``, scaffolds the runtime + task dirs, copies the editable templates and the
-    task-authoring guide, and gitignores ``.worc/``. Re-running is a no-op unless ``--reconfigure``
-    (which backs up and regenerates). After a successful write it auto-runs preflight.
+    ``<repo>/.worc/``, scaffolds the runtime + task dirs, copies the task-authoring guide and
+    editable copies of the built-in flows + their per-node prompt templates into ``.worc/flows/``,
+    and gitignores ``.worc/``. Re-running is a no-op unless ``--reconfigure`` (which backs up and
+    regenerates). After a successful write it auto-runs preflight.
     """
     _configure_runtime_logging(args)
     try:
         outcome = wizard.run_wizard(
             repo_path=Path(args.repo_path),
             provider=args.provider,
-            checks=args.check,
             create_pr=args.create_pr,
             auto_mode=args.auto_mode,
             non_interactive=args.non_interactive,
@@ -1382,6 +1419,16 @@ def cmd_install(args: argparse.Namespace) -> int:
     worc_written, _ = _copy_worc_docs(worc_home, overwrite=args.reconfigure, dry=False)
     if worc_written:
         print(f"install: wrote agent task-authoring docs to {worc_home / 'guide'}")
+    # Editable, active copies of the built-in flows + their per-node prompt templates land in
+    # .worc/flows/ (these override the packaged built-ins). A plain re-run only fills in missing
+    # files; --reconfigure snapshots the existing dir first, then refreshes to the packaged version.
+    if args.reconfigure:
+        flows_backup = _backup_flows_dir(worc_home)
+        if flows_backup is not None:
+            print(f"install: backed up existing flows to {flows_backup}")
+    flows_written, _ = _copy_packaged_flows(worc_home, overwrite=args.reconfigure, dry=False)
+    if flows_written:
+        print(f"install: wrote built-in flows + node prompts to {worc_home / 'flows'}")
     if _install_write_env_example(worc_home):
         print(f"install: wrote {worc_home / ENV_EXAMPLE_FILENAME} (copy to .worc/.env, fill in)")
     # Gitignore the whole .worc/ runtime home so the operator's `git status` stays clean.
@@ -1390,7 +1437,6 @@ def cmd_install(args: argparse.Namespace) -> int:
     if outcome.missing_providers:
         names = ", ".join(p.value for p in outcome.missing_providers)
         print(f"install: note — selected provider(s) not on PATH yet: {names}")
-    _install_resolve_checks(_load_config(str(config_path)))
     return _install_run_preflight(config_path, skip=args.skip_preflight)
 
 

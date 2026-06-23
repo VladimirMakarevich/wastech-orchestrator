@@ -27,7 +27,6 @@ from wastech_orchestrator.core.flow.contracts import (
 )
 from wastech_orchestrator.core.flow.schema import (
     AgentNode,
-    ChecksDiscovery,
     ChecksNode,
     DecompositionConfig,
     Edge,
@@ -109,13 +108,12 @@ _EVALUATOR_FIELDS = frozenset(
         "when",
     }
 )
-_CHECKS_FIELDS = frozenset({"id", "kind", "checker", "discovery", "when"})
+_CHECKS_FIELDS = frozenset({"id", "kind", "checker", "when"})
 _HITL_NODE_FIELDS = frozenset({"id", "kind", "signal", "timeout_s", "when"})
 _PUBLISH_FIELDS = frozenset({"id", "kind", "policy", "when"})
 _EDGE_FIELDS = frozenset({"from", "to", "outcome", "budget", "loop"})
 _WHEN_FIELDS = frozenset({"fact", "equals"})
 _HITL_SETTINGS_FIELDS = frozenset({"allow_question", "allow_approval"})
-_DISCOVERY_FIELDS = frozenset({"mode", "approve_command_changes"})
 _DECOMPOSITION_FIELDS = frozenset(
     {
         "proposed_by",
@@ -256,16 +254,6 @@ def _parse_hitl_settings(raw: Any) -> HitlSettings | None:
     )
 
 
-def _parse_checks_discovery(raw: Any) -> ChecksDiscovery | None:
-    if raw is None:
-        return None
-    _reject_unknown(raw, _DISCOVERY_FIELDS, "checks discovery")
-    return ChecksDiscovery(
-        mode=str(raw.get("mode", "auto")),  # type: ignore[arg-type]
-        approve_command_changes=bool(raw.get("approve_command_changes", False)),
-    )
-
-
 def _parse_agent_node(raw: dict[str, Any]) -> AgentNode:
     nid = str(_require(raw, "id", "agent node"))
     ctx = f"agent node '{nid}'"
@@ -354,7 +342,6 @@ def _parse_checks_node(raw: dict[str, Any]) -> ChecksNode:
         id=nid,
         kind="checks",
         checker=checker,  # type: ignore[arg-type]
-        discovery=_parse_checks_discovery(raw.get("discovery")),
         when=_parse_when(raw.get("when")),
     )
 

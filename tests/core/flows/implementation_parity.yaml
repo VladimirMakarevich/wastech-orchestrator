@@ -38,7 +38,6 @@ flow:
     - id: testing
       kind: checks
       checker: command_profile
-      discovery: { mode: auto, approve_command_changes: true }
     - id: review
       kind: evaluator
       role: review

@@ -137,10 +137,23 @@ def test_checks_timeout_defaults_to_1800() -> None:
     assert result.config.checks.timeout_seconds == 7200
 
 
-def test_checks_timeout_loads() -> None:
-    text = _LEGACY + "checks:\n  commands: ['pytest']\n  timeout_seconds: 60\n"
+def test_checks_command_sets_and_timeout_load() -> None:
+    text = (
+        _LEGACY
+        + "checks:\n"
+        + "  command_sets:\n"
+        + "    backend:\n"
+        + '      paths: ["backend/**"]\n'
+        + "      commands:\n"
+        + "        - { name: bt, argv: [dotnet, test], cwd: backend/src }\n"
+        + "  timeout_seconds: 60\n"
+    )
     result = loads_config(text)
-    assert result.config.checks.commands == ("pytest",)
+    sets = result.config.checks.command_sets
+    assert set(sets) == {"backend"}
+    assert sets["backend"].paths == ("backend/**",)
+    assert sets["backend"].commands[0].argv == ("dotnet", "test")
+    assert sets["backend"].commands[0].cwd == "backend/src"
     assert result.config.checks.timeout_seconds == 60
 
 

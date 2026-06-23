@@ -15,14 +15,12 @@ import re
 from wastech_orchestrator.checks.model import (
     CheckCommandError,
     argv_matches_denied,
+    is_safe_relpath,
     normalize_check_command,
     shell_metachars,
 )
 from wastech_orchestrator.config.loader import ConfigError
-from wastech_orchestrator.config.schema import (
-    CheckDiscoveryMode,
-    OrchestratorConfig,
-)
+from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.security.forbidden_args import find_forbidden_args
 
@@ -139,53 +137,45 @@ def _validate_telegram(config: OrchestratorConfig, issues: list[str]) -> None:
 
 
 def _validate_checks(config: OrchestratorConfig, issues: list[str], warnings: list[str]) -> None:
-    """Validate configured check commands and the discovery block (automatic check discovery).
+    """Validate the operator's ``checks.command_sets``.
 
-    Each command must be a launchable argv with no shell metacharacters, no sandbox-weakening
-    flag, and must not be a denied command (e.g. ``git commit``). The same predicates run at
-    discovery time on candidates (defense in depth, mirroring ``find_forbidden_args``).
+    Each command must be a launchable argv with no shell metacharacters, no sandbox-weakening flag,
+    no path-traversal ``cwd``, and must not be a denied command (e.g. ``git commit``). An empty
+    ``command_sets`` is a valid no-gate config (every task passes the checks node).
     """
     checks = config.checks
     if checks.timeout_seconds <= 0:
         issues.append(f"checks.timeout_seconds must be > 0 (got {checks.timeout_seconds})")
 
     denied = config.security.denied_commands
-    for index, raw in enumerate(checks.commands):
-        where = f"checks.commands[{index}]"
-        if isinstance(raw, str) and not raw.strip():
-            continue  # a blank legacy string is a tolerated no-op
-        try:
-            check = normalize_check_command(raw)
-        except CheckCommandError as exc:
-            issues.append(f"{where}: {exc}")
-            continue
-        bad = shell_metachars(check.argv)
-        if bad is not None:
-            issues.append(f"{where}: argv token {bad!r} contains a shell metacharacter")
-        for reason in find_forbidden_args(check.argv):
-            issues.append(f"{where}: {reason}")
-        matched = argv_matches_denied(check.argv, denied)
-        if matched is not None:
-            issues.append(f"{where}: matches denied command {matched!r}")
-
-    discovery = checks.discovery
-    if discovery.timeout_seconds <= 0:
-        issues.append(
-            f"checks.discovery.timeout_seconds must be > 0 (got {discovery.timeout_seconds})"
-        )
-    if discovery.provider is not None:
-        allowed = frozenset(config.agents.allowed)
-        provider_ids = frozenset(config.agents.providers)
-        if discovery.provider not in allowed:
-            issues.append(
-                f"checks.discovery.provider: {discovery.provider.value!r} is not in agents.allowed"
-            )
-        if discovery.provider not in provider_ids:
-            issues.append(
-                f"checks.discovery.provider: {discovery.provider.value!r} "
-                "has no agents.providers entry"
-            )
-    if discovery.mode is CheckDiscoveryMode.DISABLED:
-        warnings.append(
-            "checks.discovery.mode is 'disabled': the quality gate is OFF — no checks will run"
-        )
+    for name, cset in checks.command_sets.items():
+        base = f"checks.command_sets.{name}"
+        if not name.strip():
+            issues.append("checks.command_sets: a set name must be a non-empty string")
+        if cset.timeout_seconds is not None and cset.timeout_seconds <= 0:
+            issues.append(f"{base}.timeout_seconds must be > 0 (got {cset.timeout_seconds})")
+        if not cset.commands:
+            issues.append(f"{base}.commands must list at least one command")
+        for pi, raw_path in enumerate(cset.paths):
+            if not raw_path.strip():
+                issues.append(f"{base}.paths[{pi}] must be a non-empty string")
+        for index, spec in enumerate(cset.commands):
+            where = f"{base}.commands[{index}]"
+            try:
+                check = normalize_check_command(spec)
+            except CheckCommandError as exc:
+                issues.append(f"{where}: {exc}")
+                continue
+            bad = shell_metachars(check.argv)
+            if bad is not None:
+                issues.append(f"{where}: argv token {bad!r} contains a shell metacharacter")
+            for reason in find_forbidden_args(check.argv):
+                issues.append(f"{where}: {reason}")
+            matched = argv_matches_denied(check.argv, denied)
+            if matched is not None:
+                issues.append(f"{where}: matches denied command {matched!r}")
+            if spec.cwd is not None and not is_safe_relpath(spec.cwd):
+                issues.append(
+                    f"{where}.cwd {spec.cwd!r} must be a repo-relative path "
+                    "(no absolute path, no '..' traversal)"
+                )

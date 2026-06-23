@@ -68,7 +68,14 @@ from wastech_orchestrator.providers.base import ProviderId
 # strips it from both provider blocks; old configs still load fail-open (the key is tolerated). (The
 # same bump also ships explicit default `model`/`reasoning` and makes each provider's full-access
 # mode operator-selectable under `security.strict_isolation: false` — neither is a format change.)
-CONFIG_SCHEMA_VERSION = 14
+# v15 (2026-06-23, checks-monorepo): a *format* change to the `checks` block. The whole
+# `checks.discovery` block (modes / agent-fallback / refresh / approval) is removed and the flat
+# `checks.commands` list is replaced by named `checks.command_sets` — each a `paths` glob list +
+# optional `timeout_seconds` / `skip_if_unavailable` + structured `commands`, every command gaining
+# an optional repo-relative `cwd`. The only check behavior is "operator lists command sets; empty =
+# no gate". A stale `discovery` / `commands` key is tolerated (ignored) on load and `upgrade-config`
+# strips it, but `command_sets` is operator-authored — never auto-generated (no host inspection).
+CONFIG_SCHEMA_VERSION = 15
 
 
 class AuditBranch(StrEnum):
@@ -76,23 +83,6 @@ class AuditBranch(StrEnum):
 
     TASK = "task"
     SIBLING = "sibling"
-
-
-class CheckDiscoveryMode(StrEnum):
-    """How the check profile is resolved (backlog: automatic check discovery)."""
-
-    AUTO = "auto"  # deterministic detection, then agent fallback when confidence is low
-    DETERMINISTIC = "deterministic"  # inspect known project evidence only; never an agent
-    CONFIGURED = "configured"  # use checks.commands as-is (the backward-compatible default)
-    DISABLED = "disabled"  # explicit no-check mode (a prominent warning + audit record)
-
-
-class CheckRefreshPolicy(StrEnum):
-    """When a cached resolved profile is recomputed (backlog: automatic check discovery)."""
-
-    ON_CHANGE = "on_change"  # rediscover when the discovery-input fingerprint changes
-    ALWAYS = "always"
-    NEVER = "never"
 
 
 @dataclass(frozen=True)
@@ -169,50 +159,46 @@ class ValidationConfig:
 
 @dataclass(frozen=True)
 class CheckCommandSpec:
-    """A structured check command: a logical ``name`` plus an explicit argv list (no shell).
+    """One structured check command: a logical ``name``, an explicit argv list (no shell), and an
+    optional repo-relative working directory.
 
-    The backward-compatible alternative to a legacy shell-style string in ``checks.commands``. Both
-    forms normalize to ``checks.model.ResolvedCheck`` at consumption time (the loader stays
-    shapes-only and does no ``shlex`` splitting).
+    Normalizes to ``checks.model.ResolvedCheck`` at consumption time (the loader stays shapes-only
+    and does no ``shlex`` splitting). ``cwd`` (``None`` => the clone root) lets a monorepo set run a
+    command inside a subproject; it is validated against path traversal by the config validator.
     """
 
     argv: tuple[str, ...]
     name: str | None = None
+    cwd: str | None = None
 
 
 @dataclass(frozen=True)
-class CheckDiscoveryConfig:
-    """Check discovery policy (backlog: automatic check discovery).
+class CommandSet:
+    """A named group of check commands for one project in a (poly)repo.
 
-    The defaults are backward compatible: ``configured`` uses ``checks.commands`` as-is. ``install``
-    opts new repositories into ``auto``. ``model``/``reasoning``/``provider``/``timeout_seconds``
-    parameterize the agent-assisted fallback (a deliberately cheap model + low reasoning)."""
+    ``paths`` are repo-relative globs; the runner runs this set when the task diff touches a
+    matching path (empty ``paths`` => the set always runs on any non-empty diff).
+    ``timeout_seconds`` (``None`` => the global ``checks.timeout_seconds``) overrides the
+    per-command timeout for this set. ``skip_if_unavailable`` (default ``False`` = fail-closed) lets
+    the set be skipped — loudly, never "passed" — when its toolchain binary is absent. The set name
+    is the mapping key in ``checks.command_sets`` (not a field), mirroring ``agents.providers``.
+    """
 
-    mode: CheckDiscoveryMode = CheckDiscoveryMode.CONFIGURED
-    agent_fallback: bool = True
-    refresh: CheckRefreshPolicy = CheckRefreshPolicy.ON_CHANGE
-    provider: ProviderId | None = None  # which provider runs discovery; None => first available
-    model: str = ""  # a cheap model id for discovery; empty => skip agent fallback
-    reasoning: str | None = "low"  # low | medium | high | xhigh | max
-    timeout_seconds: int = 120
-    # Run discovery inside the state machine at task start (not only at install), so `auto` mode can
-    # resolve/agent-assist when the task begins. Deterministic install-time discovery stays a
-    # cache-warming option. Default on; the agent fallback still only fires in `auto` + opted-in.
-    run_at_task_start: bool = True
-    # Treat a *changed* set of check commands as a sensitive change: write it to the resolved
-    # profile and require human approval on first use. Disabling it under auto/deterministic
-    # is the operator's call but is logged loudly (it decides what "passing" means).
-    approve_command_changes: bool = True
+    commands: tuple[CheckCommandSpec, ...]
+    paths: tuple[str, ...] = ()
+    timeout_seconds: int | None = None
+    skip_if_unavailable: bool = False
 
 
 @dataclass(frozen=True)
 class ChecksConfig:
-    # A backward-compatible union: legacy shell-style strings and/or structured CheckCommandSpec.
-    commands: tuple[str | CheckCommandSpec, ...]
-    # Per-command timeout for the Check Runner. The process runner requires a timeout;
-    # each ``commands`` entry is launched as an argv list (no shell) and bounded by this value.
+    # Named per-project command sets (monorepo). Empty mapping = no gate (every task passes the
+    # checks node — the former empty-`configured` semantics). Keyed by set name, loader-insertion
+    # order. The flow never supplies commands (security ceiling); the operator authors this block.
+    command_sets: dict[str, CommandSet] = field(default_factory=dict)
+    # Global per-command timeout for the Check Runner (the process runner requires a timeout; each
+    # command is launched as an argv list, no shell). A set's ``timeout_seconds`` overrides it.
     timeout_seconds: int = 7200
-    discovery: CheckDiscoveryConfig = field(default_factory=CheckDiscoveryConfig)
 
 
 @dataclass(frozen=True)

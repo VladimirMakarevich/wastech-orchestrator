@@ -1,4 +1,4 @@
-"""Unit tests for the canonical check model and shared predicates (automatic check discovery)."""
+"""Unit tests for the canonical check model and shared predicates."""
 
 from __future__ import annotations
 
@@ -7,11 +7,12 @@ import pytest
 from wastech_orchestrator.checks.model import (
     CheckCommandError,
     argv_matches_denied,
+    is_safe_relpath,
     normalize_check_command,
-    normalize_commands,
+    normalize_command_sets,
     shell_metachars,
 )
-from wastech_orchestrator.config.schema import CheckCommandSpec
+from wastech_orchestrator.config.schema import CheckCommandSpec, CommandSet
 
 
 def test_normalize_legacy_string_splits_and_names_from_argv0() -> None:
@@ -60,9 +61,38 @@ def test_normalize_mapping_without_argv_raises() -> None:
         normalize_check_command({"name": "x"})
 
 
-def test_normalize_commands_skips_blank_legacy_strings() -> None:
-    checks = normalize_commands(["pytest", "  ", {"argv": ["ruff", "check", "."]}])
-    assert [c.name for c in checks] == ["pytest", "ruff"]
+def test_normalize_command_spec_carries_cwd() -> None:
+    spec = CheckCommandSpec(argv=("dotnet", "test"), name="bt", cwd="backend/src")
+    assert normalize_check_command(spec).cwd == "backend/src"
+
+
+def test_normalize_command_sets_carries_paths_timeout_skip_and_cwd() -> None:
+    sets = normalize_command_sets(
+        {
+            "backend": CommandSet(
+                commands=(CheckCommandSpec(argv=("dotnet", "test"), cwd="backend/src"),),
+                paths=("backend/**",),
+                timeout_seconds=2400,
+                skip_if_unavailable=True,
+            )
+        }
+    )
+    assert len(sets) == 1
+    s = sets[0]
+    assert s.name == "backend"
+    assert s.paths == ("backend/**",)
+    assert s.timeout_seconds == 2400
+    assert s.skip_if_unavailable is True
+    assert s.checks[0].cwd == "backend/src"
+
+
+def test_is_safe_relpath_rejects_traversal_and_absolute() -> None:
+    assert is_safe_relpath("backend/src")
+    assert is_safe_relpath("mobile")
+    assert not is_safe_relpath("../escape")
+    assert not is_safe_relpath("/etc")
+    assert not is_safe_relpath("~/x")
+    assert not is_safe_relpath("")
 
 
 def test_shell_metachars_detects_injection_shapes() -> None:

@@ -24,9 +24,9 @@ All 32 functional blocks (B01–B32) carry the status `documented`, (re)built fr
 
 ### B03 — Installer and Project Scaffolding
 
-- **Purpose:** `install` (wizard → generate valid `config.yaml`, scaffold `<repo>/.worc/` + repo-root `tasks/`, gitignore `.worc/`, seed the check profile, auto-preflight); `upgrade-config`/`upgrade-docs`.
+- **Purpose:** `install` (wizard → generate valid `config.yaml` with an empty `command_sets`, scaffold `<repo>/.worc/` + repo-root `tasks/`, seed editable copies of the built-in flows + node prompts into `.worc/flows/`, gitignore `.worc/`, auto-preflight); `upgrade-config`/`upgrade-docs`.
 - **Entry points:** `cli.py` `cmd_install`; `install/wizard.py` `run_wizard`; `install/config_writer.py` `build_and_validate`; `install/detect.py`.
-- **Dependencies:** B01, B04, B05, B23 (seed profile), B29 (preflight validates flows), B22 (`append_runtime_excludes`).
+- **Dependencies:** B01, B04, B05, B29 (preflight validates flows; source of the seeded `.worc/flows/` copies), B22 (`append_runtime_excludes`).
 - **Status:** `documented` · [file](./blocks/B03-installer-and-scaffolding.md)
 
 ### B04 — Install Registry and Config Discovery
@@ -47,7 +47,7 @@ All 32 functional blocks (B01–B32) carry the status `documented`, (re)built fr
 
 ### B06 — Orchestrator Pipeline
 
-- **Purpose:** the single-slot wrapper around the flow engine: gate → slot → flow resolution → isolation/check preflight → branch → drive the engine in phases → terminal handling (cleanup, ledger, auto-merge); `rerun`/`finalize`/`resume`.
+- **Purpose:** the single-slot wrapper around the flow engine: gate → slot → flow resolution → isolation/check preflight (normalize command sets) → branch → drive the engine in phases → terminal handling (cleanup, ledger, auto-merge — skipped on an incomplete check gate); `rerun`/`finalize`/`resume`.
 - **Entry points:** `orchestrator.py` `Orchestrator`, `run_task` ([:342](../../src/wastech_orchestrator/core/orchestrator.py#L342)), `_drive_via_engine`/`_engine_run`/`_run_phases`, `resume`, `build_orchestrator` ([:1974](../../src/wastech_orchestrator/core/orchestrator.py#L1974)).
 - **Dependencies:** B28/B30/B31 (engine, runners, supervisor), B16, B07, B08–B15, B17, B22, B23/B24, B26.
 - **Status:** `documented` · [file](./blocks/B06-orchestrator-pipeline.md)
@@ -89,9 +89,9 @@ All 32 functional blocks (B01–B32) carry the status `documented`, (re)built fr
 
 ### B12 — HITL and Typed Node Output
 
-- **Purpose:** the typed node-output schema (selected per node by an `OutputContract`: question/approval + planning skills/subtasks) and the durable interaction-artifact lifecycle that the human gate and check-command approval build on.
+- **Purpose:** the typed node-output schema (selected per node by an `OutputContract`: question/approval + planning skills/subtasks) and the durable interaction-artifact lifecycle that the human gate and dangerous-diff approval build on.
 - **Entry points:** `core/hitl.py`; `notify/interface.py` (`AskHandle`/`AskResult`).
-- **Dependencies:** B30 (HumanGate + runners), B26 (transport), B14 (guardrail approval), B06 (check-command approval), B16.
+- **Dependencies:** B30 (HumanGate + runners), B26 (transport), B14 (guardrail approval), B16.
 - **Status:** `documented` · [file](./blocks/B12-hitl-and-typed-output.md)
 
 ### B13 — Skill Inventory and Selection
@@ -209,18 +209,18 @@ All 32 functional blocks (B01–B32) carry the status `documented`, (re)built fr
 
 ## Checks (quality gate)
 
-### B23 — Check Discovery and Resolution
+### B23 — Check Resolution and Selection
 
-- **Purpose:** the deterministic inspect→detect→(agent)→validate→probe→store pipeline; discovery modes; the resolved profile cache + approval signature.
-- **Entry points:** `checks/model.py`, `checks/resolver.py`, `checks/detect.py`, `checks/inspect.py`, `checks/validate.py`, `checks/profile.py`, `checks/discovery_factory.py`, `checks/agent.py`.
-- **Dependencies:** B24 (executes the profile), B30 (checks node re-resolve), B06 (preflight + approval), B19 (probing).
+- **Purpose:** normalize the operator's `checks.command_sets` into runnable `ResolvedCheckSet`s (the trivial resolver — no discovery, cache, or agent) and select which sets run for a task's diff (the pure, deterministic `select_check_sets`); the canonical check/check-set model + argv-safety predicates. An empty `command_sets` mapping = no gate.
+- **Entry points:** `checks/model.py` (`ResolvedCheck`, `ResolvedCheckSet`, `normalize_command_sets`, `is_safe_relpath`, predicates), `checks/resolver.py` (`CheckResolver.resolve`), `checks/selection.py` (`select_check_sets`).
+- **Dependencies:** B05 (config shapes + safety predicates at load); used by B24 (executes the selected sets), B30 (checks node selects + runs), B06 (preflight normalizes), B01 (command-set summary).
 - **Status:** `documented` · [file](./blocks/B23-check-discovery.md)
 
-### B24 — Check Execution (command-profile)
+### B24 — Check Execution (command-set)
 
-- **Purpose:** run the resolved checks in order, stop at first failure; launch-failure (infra) vs non-zero exit (quality) distinction.
-- **Entry points:** `check_runner.py` (`CheckRunner`, `CheckOutcome`).
-- **Dependencies:** B23 (what to run), B30 (the checks node), B32 (other checkers), B19, B25 (env).
+- **Purpose:** run every check in the diff-selected command sets through the safe runner (run-all, no fail-fast), each in its `cwd` under a per-set-or-global timeout, with a `skip_if_unavailable` toolchain probe; aggregate into `CheckOutcome` (quality-fail vs launch-fail vs skip / nothing-ran).
+- **Entry points:** `check_runner.py` (`CheckRunner`, `CheckOutcome`, `CheckRunResult`).
+- **Dependencies:** B23 (what to run — `ResolvedCheckSet`), B30 (the checks node), B32 (other checkers), B19, B25 (env).
 - **Status:** `documented` · [file](./blocks/B24-check-execution.md)
 
 ## Security
@@ -277,7 +277,7 @@ Every module under `src/wastech_orchestrator/` is assigned to exactly one block:
 | `providers/artifacts.py` | B20 |
 | `providers/redaction.py` | B21 |
 | `git_manager.py` | B22 |
-| `checks/{model,resolver,detect,inspect,validate,profile,discovery_factory,agent}.py` | B23 |
+| `checks/{model,resolver,selection}.py` | B23 |
 | `check_runner.py` | B24 |
 | `security/{forbidden_args,env,injection,isolation,profiles}.py` | B25 |
 | `notify/{interface,telegram,__init__}.py` | B26 |

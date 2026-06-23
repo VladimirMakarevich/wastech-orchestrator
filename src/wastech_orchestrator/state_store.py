@@ -68,7 +68,12 @@ def _utc_now_iso() -> str:
 # task-level integer was never populated). A destructive change (dropped column), so an older
 # versioned DB is refused fail-closed and recreated (greenfield). ``node_runs.stage_attempts`` is
 # untouched.
-DB_SCHEMA_VERSION = 11
+# v12 (2026-06-23, checks-monorepo): added ``check_runs.skipped`` — a check whose ``command_sets``
+# entry is ``skip_if_unavailable`` and whose toolchain binary is absent is recorded as skipped
+# (distinct from a quality failure), which surfaces in the summary/PR and blocks ``git.auto_merge``
+# (an incomplete gate is never auto-merged). Created on a fresh DB by ``_SCHEMA``; an older
+# versioned DB is refused fail-closed and recreated (greenfield — no production data to migrate).
+DB_SCHEMA_VERSION = 12
 
 
 class IncompatibleStateError(Exception):
@@ -206,6 +211,7 @@ CREATE TABLE IF NOT EXISTS check_runs (
     timed_out INTEGER NOT NULL DEFAULT 0,
     passed INTEGER NOT NULL,
     log_path TEXT NOT NULL,
+    skipped INTEGER NOT NULL DEFAULT 0,
     started_at TEXT,
     finished_at TEXT
 );
@@ -370,6 +376,9 @@ class CheckRunRow:
     subtask_order: int | None = None
     exit_code: int | None = None
     timed_out: bool = False
+    # A check skipped because its ``skip_if_unavailable`` set's toolchain binary was absent (never a
+    # quality pass/fail). Distinct from ``passed`` so the gate stays loud and auto-merge is gated.
+    skipped: bool = False
     started_at: str | None = None
     finished_at: str | None = None
 
@@ -912,8 +921,8 @@ class StateStore:
                 """
                 INSERT INTO check_runs (
                     task_id, subtask_order, command, exit_code, timed_out, passed,
-                    log_path, started_at, finished_at
-                ) VALUES (?,?,?,?,?,?,?,?,?)
+                    log_path, skipped, started_at, finished_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     run.task_id,
@@ -923,24 +932,41 @@ class StateStore:
                     _b(run.timed_out),
                     _b(run.passed),
                     run.log_path,
+                    _b(run.skipped),
                     run.started_at,
                     run.finished_at,
                 ),
             )
 
     def latest_failed_check_log(self, task_id: str, subtask_order: int | None = None) -> str | None:
-        """Return the newest failed check log for recovery of a fixing stage."""
+        """Return the newest *quality*-failed check log for recovery of a fixing stage.
+
+        Excludes skipped runs (``passed = 0`` but not a quality failure) so the fixing loop never
+        points at a "toolchain absent" log.
+        """
         row = self._conn.execute(
             """
             SELECT log_path
             FROM check_runs
-            WHERE task_id = ? AND subtask_order IS ? AND passed = 0
+            WHERE task_id = ? AND subtask_order IS ? AND passed = 0 AND skipped = 0
             ORDER BY id DESC
             LIMIT 1
             """,
             (task_id, subtask_order),
         ).fetchone()
         return str(row["log_path"]) if row is not None else None
+
+    def task_had_skipped_checks(self, task_id: str) -> bool:
+        """Whether any check for the task was skipped (toolchain absent) — an incomplete gate.
+
+        The orchestrator consults this before ``git.auto_merge``: a partial skip can still pass the
+        checks node but must never be auto-merged (the gate did not fully run).
+        """
+        row = self._conn.execute(
+            "SELECT 1 FROM check_runs WHERE task_id = ? AND skipped = 1 LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        return row is not None
 
     def register_artifact(
         self, artifact: ArtifactRow, conn: sqlite3.Connection | None = None

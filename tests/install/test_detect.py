@@ -1,5 +1,5 @@
-"""Detection DoD: git root/origin/branch/cleanliness, CLI discovery on PATH, and ecosystem-based
-check auto-detection (backlog: interactive installer)."""
+"""Detection DoD: git root/origin/branch/cleanliness and CLI discovery on PATH (interactive
+installer)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from typing import Any
 import pytest
 
 from wastech_orchestrator import preflight
-from wastech_orchestrator.checks.detect import propose_default_commands
 from wastech_orchestrator.install import detect
 from wastech_orchestrator.providers.base import ProviderId
 
@@ -164,52 +163,3 @@ def test_warn_if_gh_logged_out_never_raises(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(preflight, "has_gh", lambda: True)
     monkeypatch.setattr(preflight, "gh_auth_ok", lambda: False)
     assert preflight.warn_if_gh_logged_out() is None  # default emit = logger; no exception
-
-
-@pytest.mark.parametrize(
-    ("marker", "content", "expected"),
-    [
-        ("pyproject.toml", "[project]\n", ["pytest"]),
-        ("Cargo.toml", "[package]\n", ["cargo test"]),
-        ("go.mod", "module x\n", ["go test ./..."]),
-    ],
-)
-def test_propose_defaults_by_marker(
-    tmp_path: Path, marker: str, content: str, expected: list[str]
-) -> None:
-    (tmp_path / marker).write_text(content, encoding="utf-8")
-    assert propose_default_commands(tmp_path) == expected
-
-
-def test_propose_defaults_node_uses_scripts(tmp_path: Path) -> None:
-    (tmp_path / "package.json").write_text(
-        '{"scripts": {"test": "jest", "lint": "eslint ."}}', encoding="utf-8"
-    )
-    # Names are emitted in sorted logical order (lint before tests); npm is the default runner.
-    assert propose_default_commands(tmp_path) == ["npm run lint", "npm test"]
-
-
-def test_propose_defaults_node_is_lockfile_aware(tmp_path: Path) -> None:
-    (tmp_path / "package.json").write_text(
-        '{"scripts": {"test": "vitest", "lint": "eslint ."}}', encoding="utf-8"
-    )
-    (tmp_path / "pnpm-lock.yaml").write_text("lockfileVersion: 9\n", encoding="utf-8")
-    # The lockfile makes the detector prefer pnpm over the first-match npm of the old installer.
-    assert propose_default_commands(tmp_path) == ["pnpm run lint", "pnpm test"]
-
-
-def test_propose_defaults_python_is_lockfile_aware(tmp_path: Path) -> None:
-    (tmp_path / "pyproject.toml").write_text(
-        '[project]\nname = "x"\n[dependency-groups]\ndev = ["pytest"]\n', encoding="utf-8"
-    )
-    (tmp_path / "uv.lock").write_text("version = 1\n", encoding="utf-8")
-    assert propose_default_commands(tmp_path) == ["uv run pytest"]
-
-
-def test_propose_defaults_node_without_scripts(tmp_path: Path) -> None:
-    (tmp_path / "package.json").write_text('{"name": "x"}', encoding="utf-8")
-    assert propose_default_commands(tmp_path) == []
-
-
-def test_propose_defaults_empty_when_no_markers(tmp_path: Path) -> None:
-    assert propose_default_commands(tmp_path) == []

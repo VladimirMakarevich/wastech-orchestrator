@@ -25,6 +25,7 @@ Where to find the design detail:
 | [provider-config-cleanup.md](provider-config-cleanup.md) | Detail file for the `follow_ups.md` task that makes each provider's full-access mode operator-selectable under `strict_isolation: false` (Codex `danger-full-access` sandbox; Claude `bypassPermissions` / profile-escalating `--permission-mode`), deletes the unused `max_budget_usd` field, and ships explicit default model/reasoning for both providers (one config-version bump). |
 | [per-node-network-access.md](per-node-network-access.md) | Detail file for the `follow_ups.md` task that adds an opt-in, operator-owned `network_access: true\|false` field to agent/evaluator flow nodes — a per-node override of the flow-wide `network_policy` default (default off; backward compatible). |
 | [operator-authored-decomposition.md](operator-authored-decomposition.md) | Detail file for the operator-authored-decomposition feature (**shipped 2026-06-22**): one root task with a `subtasks:` list of references runs like a planning-proposed split (sequential, one branch, one PR), reusing the whole decomposition pipeline — only the source of the `DecompositionDecision` changes. |
+| [checks-monorepo.md](checks-monorepo.md) | Detail file for the accepted direction to delete `checks.discovery` and support polyglot monorepos via operator-owned `command_sets` (named sets with `cwd`) selected deterministically by `git diff`. Records the rejected alternatives (commands-in-flow, agent/supervisor filtering) and the heterogeneous-toolchain host constraint. |
 | [runtime_provider_capacity_gate.md](runtime_provider_capacity_gate.md) | Detailed backlog task for checking Codex and Claude capacity before autonomous `watch` admits a pending task. |
 | [archive/token_optimization.md](token_optimization.md) | Detailed backlog task for measuring and reducing token usage. |
 | [archive/outdated/](archive/outdated/) | Historical design documents for shipped items and the pre-implementation flow-engine engineering specs. DO NOT USE as a source of truth — the [Functional Map](../functional/index.md) is. |
@@ -47,7 +48,7 @@ These are deferred by the v1 spec or described in architecture notes; not schedu
 | PR template support | Generate PR bodies from a configurable template in addition to `summary.md`. | Should integrate with the existing summary stage and Git Manager. |
 | GitHub Issues integration | Link tasks to issues, update status, optionally close on PR creation/merge. | Requires GitHub auth through the existing external credential model. |
 | Web UI for tasks and logs | Browser UI for pending/running/done tasks, artifacts, logs, stuck states. | Read-only first; mutations need auth/audit. |
-| Auto-retry on network errors | Retry transient network/provider failures before fallback or terminal failure. | Must be bounded and audited; never retry quality failures. |
+| [Auto-retry on network errors](transient-provider-failure-recovery.md) | Retry transient network/provider failures before fallback or terminal failure. | Must be bounded and audited; never retry quality failures. Investigation + options in the detail file (**proposed**). |
 | Per-task budget limit | Task-level budget/time/token limits. | Must not let a task raise global security or cost ceilings. |
 | Auto-close stale tasks | Detect and close/archive/escalate stale pending/running/manual tasks. | Needs explicit policy and audit trail. |
 | Dry-run without push | Run planning/check/review/publish prep without pushing or opening a PR. | Must clearly mark that no publish operation occurred. |
@@ -65,6 +66,7 @@ These are deferred by the v1 spec or described in architecture notes; not schedu
 | Item | Detail |
 | --- | --- |
 | Runtime provider capacity gate | [runtime_provider_capacity_gate.md](runtime_provider_capacity_gate.md) |
+| Auto-retry on network errors (transient provider-failure recovery) | [transient-provider-failure-recovery.md](transient-provider-failure-recovery.md) |
 | Token optimization | [archive/token_optimization.md](token_optimization.md) |
 
 ## Rules

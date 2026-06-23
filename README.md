@@ -63,8 +63,9 @@ Bind an existing repository and let the orchestrator process a task end to end.
 pipx install "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git"
 
 # 2. Set up your repo: generates a validated config.yaml under <repo>/.worc/.
-#    The task & its summary are committed to this repo; config, state.db, logs/, and the
-#    task-authoring guide all live under the gitignored .worc/ home, leaving tracked files clean.
+#    The task & its summary are committed to this repo; config, state.db, logs/, the
+#    task-authoring guide, and editable copies of the built-in flows + node prompts all live
+#    under the gitignored .worc/ home, leaving tracked files clean.
 cd /path/to/my-repo
 worc install .          # interactive wizard (detects origin, branch, agents, checks)
 
@@ -122,7 +123,7 @@ The orchestrator creates `agent/task-001-...`, runs the pipeline and your checks
 | `orchestrator.auto_mode.enabled` | Process the next pending task automatically after cleanup (default `false`). |
 | `orchestrator.poll_interval_seconds` | `watch` tick: fetch/pull + re-scan interval (default `300`; `0` = single pass). |
 | `agents.allowed` / `agents.providers.<id>.primary` | Which providers are enabled, and which one is the global primary (runs any flow node with no `provider`, and is the sole infrastructure-fallback target). Per-node routing lives on the flow, not in config. |
-| `checks.commands` / `checks.discovery` | Your project's test/lint commands (argv list, no shell), or auto-discovery of them, run as the `testing` stage. |
+| `checks.command_sets` | Operator-authored, diff-selected test/lint commands (argv list, no shell) run as the `testing` stage. Empty (`{}`) = no gate. |
 | `supervisor` | The constant read-only supervisor layer that watches every step and writes the PR summary (model/reasoning/role_file). |
 | `git.create_pull_request` | Open a PR after push (needs `gh`); disabling it does not disable commit/push. |
 | `telegram.*` | Optional terminal notifications and blocking HITL; credentials stay in environment variables. |
@@ -137,7 +138,7 @@ Secrets (e.g. the Telegram token/chat id) are read from the environment. Keep th
 ## Commands
 
 ```text
-worc install [repo]     set up the orchestrator under <repo>/.worc/: generate config + guide, gitignore .worc/
+worc install [repo]     set up the orchestrator under <repo>/.worc/: generate config + guide + flows, gitignore .worc/
                           --non-interactive --provider codex|claude|both|auto --no-create-pr --reconfigure
 worc preflight          check both CLIs' health + the isolation policy (read-only)
 worc telegram-test      send a real correlated Telegram prompt and wait for reply
@@ -193,15 +194,15 @@ Project layout:
 src/wastech_orchestrator/
   cli.py                  # install / preflight / telegram-test / run / rerun / finalize / watch / stop / restart / status / upgrade-config / upgrade-docs
   core/                   # the orchestrator wrapper (spine), HITL, dangerous-diff guardrail, recovery, decomposition, the constant supervisor layer
-    flow/                 # the flow engine + graph traversal, node runners, validation, checkers; packaged flows + role files
+    flow/                 # the flow engine + graph traversal, node runners, validation, checkers; packaged flows + role files (copied to .worc/flows/ by `install`)
   notify/                 # Notifier contract + Telegram transport
   providers/              # AgentProvider contract + Codex / Claude adapters, durable sessions, redaction
   routing/                # node-based provider routing + global-primary infrastructure fallback
   config/                 # schema, loader, fail-closed validator, upgrade-config
-  checks/                 # check discovery / resolution + the command profile
-  check_runner.py         # runs the resolved checks as bounded subprocesses
+  checks/                 # command-set model, resolution, and diff-based selection
+  check_runner.py         # runs the selected command sets as bounded subprocesses
   git_manager.py          # the only commit/push/PR owner; scoped staging + the audit commit
-  state_store.py          # SQLite checkpoints (schema v10)
+  state_store.py          # SQLite checkpoints (schema v12)
   ledger.py               # the append-only completed-task ledger + failure reports
   task/                   # parser + §19 validation gate
   install/                # the install wizard, config writer, detection
