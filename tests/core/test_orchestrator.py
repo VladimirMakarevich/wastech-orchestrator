@@ -379,6 +379,40 @@ def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: 
     assert "agent/task-001-add-a-thing" in branches
 
 
+def test_documentation_node_edit_is_committed(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # docs/backlog/documentation-node.md: the packaged implementation flow runs the documentation
+    # node after review accepts; its workspace-write edit (here a docs file) joins the same diff the
+    # orchestrator commits/publishes, using the same prompt/lineage/commit machinery as the others.
+    providers = _both()
+    orch, store, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        if request.node_id == "documentation":
+            (git_repo.clone / "README.md").write_text("# project\n\nNow does a thing.\n", "utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    result = orch.run_task(_complete_task(tmp_path, "task-doc"))
+    assert result.final_status is Status.DONE
+    # The documentation node executed (after review, before publish), not skipped.
+    ran = _ran_nodes(store, "task-doc")
+    assert "documentation" in ran
+    assert ran.index("review") < ran.index("documentation") < ran.index("publish")
+    # Its docs edit is part of the committed change on the task branch (one shared diff).
+    branch = "agent/task-doc-add-a-thing"
+    committed = git_run(["show", "--name-only", "--format=", branch], git_repo.clone)
+    assert "README.md" in committed
+    assert "feature.py" in committed
+
+
 def _evaluations(store: StateStore, task_id: str) -> list:
     return store._conn.execute(  # noqa: SLF001
         "SELECT node_id, kind, verdict FROM evaluations WHERE task_id = ? ORDER BY id", (task_id,)
@@ -406,7 +440,8 @@ def test_supervisor_layer_observes_each_step_and_writes_one_summary(
     assert all(r["node_id"] is None for r in supervisor_rows)
     steps = [r for r in rows if r["kind"] == "supervisor_step"]
     finals = [r for r in rows if r["kind"] == "supervisor_final"]
-    # One observation per executed non-publish node (planning, implementation, testing, review).
+    # One observation per executed non-publish node (planning, implementation, testing, review,
+    # documentation).
     assert len(steps) >= 4
     assert len(finals) == 1  # the summary synthesis is once per whole task
     # The in-flow review evaluator also recorded an immutable verdict (a separate kind).
@@ -1644,7 +1679,7 @@ def test_dangerous_diff_requires_approval(
     notifier = RecordingNotifier(
         ask_results=[AskResult(answered=True, text="approved", approved=True)]
     )
-    orch, _, _, _ = _build(
+    orch, store, _, _ = _build(
         git_repo,
         make_git_config,
         tmp_path,
@@ -1656,8 +1691,12 @@ def test_dangerous_diff_requires_approval(
     result = orch.run_task(_complete_task(tmp_path, f"task-{danger}-approval"))
 
     assert result.final_status is Status.DONE
+    # Exactly one approval despite TWO workspace-write nodes (implementation + documentation) seeing
+    # the same uncommitted dangerous diff: the guard honors the prior in-task approval and the
+    # documentation node does not re-prompt for the already-cleared change.
     assert len(notifier.ask_calls) == 1
     assert notifier.ask_calls[0]["kind"] == "approval"
+    assert "documentation" in _ran_nodes(store, f"task-{danger}-approval")
 
 
 def test_denied_dependency_change_gets_one_safe_reconsideration(
@@ -2311,10 +2350,11 @@ def test_prompt_audit_records_steps_in_order(git_repo, make_git_config, tmp_path
     # Filenames are zero-padded node_run_id → lexical sort is chronological.
     ids = [int(p.name.split("-")[0]) for p in step_files]
     assert ids == sorted(ids)
-    # complete task → refinement skipped; planning/implementation/review run agents. The summary is
-    # written by the supervisor layer now (not a graph node), so no summary step is audited.
+    # complete task → refinement skipped; planning/implementation/review/documentation run agents.
+    # The summary is written by the supervisor layer now (not a graph node), so no summary step is
+    # audited.
     stages = [json.loads(p.read_text())["node_id"] for p in step_files]
-    assert stages == ["planning", "implementation", "review"]
+    assert stages == ["planning", "implementation", "review", "documentation"]
 
     # The combined timeline has one line per step, in the same chronological order.
     lines = (audit_dir / "timeline.jsonl").read_text().splitlines()

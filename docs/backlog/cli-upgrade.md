@@ -20,6 +20,7 @@ That is sound generic CLI advice. The improvement below is to **aim it at this o
 4. **Cancellation is honestly limited — and the console must say so.** There is no mid-stage cancel: the only graceful interruption is the daemon's `SIGTERM`-between-ticks, which lets the in-flight task finish its current stage ([process_control.py:1-9](../../src/wastech_orchestrator/process_control.py#L1-L9), [watch_loop honoring `stop_event`](../../src/wastech_orchestrator/cli.py#L740-L761)). So a console `cancel` can only **de-queue a pending file** or **stop/restart the daemon between ticks** — it cannot kill a running agent mid-stage. True mid-task cancellation (cooperative flag + subprocess termination) is a separate, larger feature.
 5. **HITL is already Telegram, not stdin.** Human-in-the-loop questions go out over Telegram and the task waits on the reply or a timeout ([core/hitl.py](../../src/wastech_orchestrator/core/hitl.py), [notify/telegram.py](../../src/wastech_orchestrator/notify/telegram.py)). The sketch's "post an event to the UI loop and prompt there" is the right _shape_, but bridging HITL into the console is a distinct feature; it must not be entangled with the first cut.
 6. **The command set already exists — the console is a dispatcher.** `status`, `finalize`, `rerun`, `stop`, `restart` (and `prs`/`merge-task` once [orchestrator-driven-pr-merge.md](orchestrator-driven-pr-merge.md) lands) are the verbs. A console reuses these `cmd_*` functions; it adds no orchestration logic, keeping "the core does not know the CLI" intact and the surface DRY.
+7. **Stopping is unconditional today, and a hard mid-stage stop is not even possible.** `worc stop` ([cmd_stop](../../src/wastech_orchestrator/cli.py#L1164-L1180)) takes only `--timeout` — **no idle/busy distinction, no confirmation**: it fires `SIGTERM` whether or not a task is mid-flight, and after the timeout escalates to `SIGKILL` **on the daemon PID only**. And because agents launch via plain `subprocess.run` with **no process group** ([process.py:88-99](../../src/wastech_orchestrator/providers/process.py#L88-L99)), that `SIGKILL` would **orphan the running agent** rather than stop it. So the "finish the current step, then stop softly" behavior exists (it _is_ the `SIGTERM`-between-ticks path) but is neither gated nor named, and an "instantly stop all agents" behavior has **no mechanism at all**. Both are addressed by the stop-safety design below (§ Stop safety).
 
 Net: ~70% of this is **presentation + process supervision** over machinery that already exists (the daemon, the PID file, read-only `state.db`, file logging, the lifecycle dirs, the one-shot `cmd_*` verbs). The genuinely new code is a small **prompt_toolkit event loop** that (a) tails a log stream above a live prompt and (b) supervises/attaches a `watch` child.
 
@@ -27,7 +28,7 @@ Net: ~70% of this is **presentation + process supervision** over machinery that 
 
 1. **`worc run <file>`** — runs exactly one task file synchronously to completion and returns ([cli.py:765-791](../../src/wastech_orchestrator/cli.py#L765-L791) → [run_task](../../src/wastech_orchestrator/core/orchestrator.py#L365-L406)). Blocks the shell. This is the CI/script path and stays as-is.
 2. **`worc watch`** — the daemon. With `poll_interval > 0` it loops: refresh `base_branch`, `watch_once` (resume any in-flight task, then pick one pending task when the slot is free), sleep ([watch_loop](../../src/wastech_orchestrator/cli.py#L723-L762), [watch_once](../../src/wastech_orchestrator/cli.py#L679-L720)). `poll_interval <= 0` is a single pass. It writes a PID file `orchestrator.pid` ([process_control.py:36,76-77](../../src/wastech_orchestrator/process_control.py#L36-L77)) so `stop`/`restart` can find it. Tasks flow through the lifecycle dirs `tasks/{pending,processing,done,failed}` + `tasks/rejected` ([cli.py:79-89](../../src/wastech_orchestrator/cli.py#L79-L89)).
-3. **`worc stop` / `worc restart`** — read the PID file, send `SIGTERM` (escalate to `SIGKILL` after a timeout), which the daemon's `SIGTERM` handler turns into a `threading.Event` the loop polls **between ticks** ([cli.py:1164-1224](../../src/wastech_orchestrator/cli.py#L1164-L1224), [process_control.py:192-279](../../src/wastech_orchestrator/process_control.py#L192-L279)). Graceful, never mid-stage.
+3. **`worc stop` / `worc restart`** — read the PID file, send `SIGTERM` (escalate to `SIGKILL` after `--timeout`), which the daemon's `SIGTERM` handler turns into a `threading.Event` the loop polls **between ticks** ([cli.py:1164-1224](../../src/wastech_orchestrator/cli.py#L1164-L1224), [process_control.py:192-279](../../src/wastech_orchestrator/process_control.py#L192-L279)). Graceful, never mid-stage — and **unconditional**: there is no check for whether a task is active, no confirmation, and the timeout `SIGKILL` targets only the daemon PID (the agent subprocess is not in its own group, so it would be orphaned, not killed). Recovery after any abrupt exit is already handled: `resume()` re-enters the persisted flow node on the next start ([orchestrator.py:890](../../src/wastech_orchestrator/core/orchestrator.py#L890)).
 4. **`worc status`** — read-only, DB-only report of the active or latest task ([cli.py:1225-1282](../../src/wastech_orchestrator/cli.py#L1225-L1282)), via `StateStore.open_readonly`. It is a **one-shot snapshot of one task** — re-run it to refresh, and it does not show the queue.
 5. **Logging** — configured once at startup to stderr (logfmt/JSON) or, with `--log-file`, a rotating file ([configure_logging](../../src/wastech_orchestrator/cli.py#L640-L645)). Agent stdout goes to artifact files, not the console. So a separate process can observe progress two ways: poll `state.db` read-only, and tail the daemon's `--log-file`.
 
@@ -79,9 +80,9 @@ The console never imports the engine. It supervises a `watch` **child** (or atta
   | `logs [<id>]` | tail artifact stdout / daemon log | read-only |
   | `prs` / `merge-task <id>` | `cmd_prs` / `cmd_merge_task` | once [orchestrator-driven-pr-merge.md](orchestrator-driven-pr-merge.md) lands; slot-guarded |
   | `finalize` / `rerun` | `cmd_finalize` / `cmd_rerun` | slot-guarded (refuse while a task is active) |
-  | `up` / `down` / `restart` | spawn child / `cmd_stop` / `cmd_restart` | daemon lifecycle |
-  | `cancel <id>` | de-queue pending file, or `down` | **best-effort only** — see § Cancellation |
-  | `quit` / Ctrl-D | stop the supervised child (if spawned), exit | detached daemons are left running |
+  | `up` / `down [--force\|--force-full]` / `restart` | spawn child / `cmd_stop` / `cmd_restart` | daemon lifecycle; `down` follows the **stop ladder** (§ Stop safety): idle → no prompt; busy → confirm `YES` / `--force` (soft) or `--force-full` (hard) |
+  | `cancel <id>` | de-queue pending file, or `down` | **best-effort** — see § Stop safety / Cancellation |
+  | `quit` / Ctrl-D | detach (busy) or stop the supervised child (idle), exit | busy + spawned child → offer **detach** (default) / soft / `--force-full`; detached daemons are always left running |
 
   `worc shell` is a **dispatcher**: each command calls an existing `cmd_*` function or a thin enqueue/tail helper. It adds no orchestration logic.
 
@@ -103,14 +104,27 @@ This gives the "one process to sit in" feel (spawn) without precluding the detac
 
 No new tables, no schema bump — purely new **read** views + presentation.
 
-### Cancellation (honest scope)
+### Stop safety: idle/busy gate + two force levels
 
-`cancel <id>` is best-effort by construction:
+Stopping must be **safe when a task is in flight and frictionless when nothing is running**. This is one behavior shared by the bare `worc stop`/`restart` commands **and** the console's `down`/`quit` — implementing it once in `stop_process` + `cmd_stop` upgrades both. The model is a three-rung **stop ladder**, keyed on whether a task is active (a read-only `find_active_tasks()` probe — the daemon may be alive but idle between ticks, which counts as idle):
 
-- **Pending** (file in `tasks/pending`, no active run) → move the file out (e.g. into `tasks/rejected`); the daemon simply never picks it up.
-- **Active** → there is no mid-stage cancel; the console offers `down`/`restart`, which stops the daemon **between ticks** after the current stage finishes (the existing `SIGTERM`→event path). The console must **say this plainly** rather than imply an instant kill.
+| invocation | **idle** (no active task) | **busy** (a task is active) |
+| --- | --- | --- |
+| `worc stop` / console `down` (no flag) | **stop, no prompt** | **refuse** — interactive TTY: prompt `Type YES to stop (a task is active)`; non-interactive (CI/pipe): exit non-zero, "pass `--force` or `--force-full`" |
+| `--force` _(or typed `YES`)_ | stop, no prompt | **soft stop**: `SIGTERM` → the daemon finishes the **current step**, then exits between ticks (today's `SIGTERM`→`stop_event` path — now explicitly named and gated) |
+| `--force-full` | stop, no prompt | **hard stop**: terminate the **active agent subprocess group immediately** (mid-stage), then exit — recovery is the existing `resume()` on next start |
 
-True mid-task cancellation (a cooperative cancel flag threaded through the flow engine + terminating the agent subprocess via the `process_control` kill path) is a **separate, larger feature** — explicitly out of scope here (§ Out of scope).
+Design points:
+
+1. **Idle is always frictionless.** With no active task there is nothing to lose, so any form (no flag, `--force`, `--force-full`) just stops — no prompt. The gate fires **only** when `find_active_tasks()` is non-empty.
+2. **Busy without an explicit go-ahead is refused.** Consequential by default: an interactive operator is prompted for `YES`; a non-interactive caller (no TTY) must pass `--force`/`--force-full` (there is no one to prompt). Mirrors the existing `-y/--yes` precedent on `finalize` ([cli.py:289](../../src/wastech_orchestrator/cli.py#L289)), inverted to "confirm only when busy".
+3. **`YES`/`--force` is the _soft_ rung; hard kill needs the explicit `--force-full` flag.** The interactive `YES` shortcut maps to the graceful path only — destroying in-flight agent work is deliberate enough to require typing the dedicated flag, never an interactive shortcut.
+4. **Soft already exists; hard is the genuinely new capability.** The soft rung is the current `SIGTERM`-between-ticks behavior. The hard rung needs plumbing that does not exist today (§ TL;DR #7): agents must launch in **their own process group** (`start_new_session=True` in [providers/process.py](../../src/wastech_orchestrator/providers/process.py#L88-L99)) so the daemon (or `stop`) can signal the whole group without orphaning it; `--force-full` then `SIGKILL`s that group (daemon + active agent + any checks subprocess) and lets `resume()` recover. The recommended mechanism: `stop --force-full` resolves the daemon's process group (`os.getpgid(pid)`) and `os.killpg(...)`; the alternative (the daemon tracks the live `Popen` and a second signal triggers `killpg` from its own handler) is heavier and only needed if the group approach proves unreliable.
+5. **`restart`** reuses the same ladder for its stop half (a busy `restart` confirms/forces exactly like `stop`).
+
+`cancel <id>` rides on this: a **pending** task (file in `tasks/pending`, no active run) is simply moved out (e.g. into `tasks/rejected`) so the daemon never picks it up; an **active** task has no clean per-task cancel — `cancel` routes to the stop ladder (`down` soft, or `--force-full` to kill now). The console must **state the rung plainly** rather than imply an instant kill at the soft level.
+
+Still deferred (§ Out of scope): a **clean cooperative cancel** that unwinds the flow and marks the task `cancelled` _without_ a hard group-kill — a richer feature than `--force-full`'s "kill now, rely on resume".
 
 ### Dependency & packaging
 
@@ -120,17 +134,19 @@ Add `prompt_toolkit` under a new `shell` optional-dependency group in [pyproject
 
 - **B — in-process engine REPL (the sketch verbatim).** Run `run_task` inside the REPL via `asyncio.to_thread`, fan out "jobs" as `asyncio.create_task`. **Rejected:** it makes a second engine host competing with the daemon, contradicts the single-slot invariant (the "jobs" plural does not exist), and re-implements slot/resume/PID logic the daemon already owns. The console-as-client (above) reuses all of it.
 - **Textual full TUI now.** A panel/log/job-table TUI is genuinely nice, but it is a heavier dependency and more surface than the first cut needs. **Deferred:** `prompt_toolkit` + `patch_stdout` covers "live logs above a prompt" with far less. Revisit Textual only if operators want panes/mouse/hotkeys (§ Out of scope).
-- **Mid-stage task cancellation in the first cut.** Killing a running agent and unwinding the flow safely needs a cooperative cancel contract + subprocess termination + state cleanup — a feature in its own right. **Deferred** to a follow-up; the first cut is honest about de-queue + graceful daemon stop only.
+- **A _clean cooperative_ per-task cancel.** Unwinding the flow gracefully, marking the task `cancelled`, and cleaning up partial state — distinct from the in-scope `--force-full` hard group-kill (which kills now and leans on `resume()`). **Deferred** to a follow-up: `--force-full` covers "stop the agents now"; the clean unwind is a richer feature few operators need before the hard stop exists.
 - **HITL-over-stdin in the console.** Bridging Telegram HITL prompts into the console prompt is desirable but a separate feature with its own routing/timeout semantics. **Deferred**; Telegram stays the HITL channel for now.
 - **A daemon control _socket_/IPC.** A Unix-socket RPC between console and daemon would enable richer live control. **YAGNI for now:** read-only `state.db` polling + log tailing + file enqueue + signals cover the first cut without a new protocol. Revisit if the console needs to push commands into a running task.
 
 ## Decision (recommended)
 
-Add an **attended operator console that is a client over the existing `watch` daemon, not a second engine host.** Ship in two independently-useful pieces: **`worc top`** (a read-only, auto-refreshing live monitor — active task + node, the `tasks/pending` queue, recent terminal tasks, a tail of the daemon log; polls `state.db` read-only) and **`worc shell`** (a `prompt_toolkit` + `patch_stdout` REPL layering command dispatch onto that view — `enqueue`/`status`/`logs`/`prs`/`merge-task`/`finalize`/`rerun`/`up`/`down`/`restart`/best-effort `cancel`). The console **spawns or attaches to** the daemon, **enqueues** by dropping files into `tasks/pending`, **slot-guards** mutating verbs, and reuses the existing `cmd_*` functions. `prompt_toolkit` is an **optional `[shell]` extra**; the daemon never imports it. **No new task status, no schema bump** — only new read views + presentation.
+Add an **attended operator console that is a client over the existing `watch` daemon, not a second engine host.** Ship in two independently-useful pieces: **`worc top`** (a read-only, auto-refreshing live monitor — active task + node, the `tasks/pending` queue, recent terminal tasks, a tail of the daemon log; polls `state.db` read-only) and **`worc shell`** (a `prompt_toolkit` + `patch_stdout` REPL layering command dispatch onto that view — `enqueue`/`status`/`logs`/`prs`/`merge-task`/`finalize`/`rerun`/`up`/`down`/`restart`/best-effort `cancel`). The console **spawns or attaches to** the daemon, **enqueues** by dropping files into `tasks/pending`, **slot-guards** mutating verbs, and reuses the existing `cmd_*` functions. `prompt_toolkit` is an **optional `[shell]` extra**; the daemon never imports it.
 
-This reframes the original idea: the orchestrator is _already_ non-blocking (daemon + captured subprocesses + one-shot control verbs); what is missing is a single attended surface to watch the single-slot queue and drive control — so the upgrade is **presentation + process supervision**, not a new execution model.
+Stopping follows a **three-rung stop ladder** (§ Stop safety), shared by the bare `worc stop`/`restart` and the console's `down`/`quit`: **idle → stop with no prompt**; **busy + no flag → refuse** (interactive: confirm `YES`; non-interactive: require a flag); **busy + `--force`/`YES` → soft stop** (finish the current step, then exit between ticks — today's behavior, now gated and named); **busy + `--force-full` → hard stop** (kill the active agent's process group immediately, recover via `resume()`). The soft rung exists today; the hard rung adds the missing plumbing (launch agents with `start_new_session=True` so a group-kill never orphans them). **No new task status, no schema bump** — only new read views, presentation, and the stop-ladder gate.
 
-Deliberately **out of scope** (YAGNI / greenfield-MVP): an in-process engine REPL (Option B); parallel "jobs" (single-slot invariant); a full Textual TUI (revisit if panes/hotkeys are wanted); **mid-stage task cancellation** (separate feature — cooperative cancel + subprocess kill); HITL-over-stdin (Telegram stays the channel); a daemon control socket/IPC.
+This reframes the original idea: the orchestrator is _already_ non-blocking (daemon + captured subprocesses + one-shot control verbs); what is missing is a single attended surface to watch the single-slot queue, drive control, and **stop safely** — so the upgrade is **presentation + process supervision + a stop gate**, not a new execution model.
+
+Deliberately **out of scope** (YAGNI / greenfield-MVP): an in-process engine REPL (Option B); parallel "jobs" (single-slot invariant); a full Textual TUI (revisit if panes/hotkeys are wanted); a **clean cooperative per-task cancel** that unwinds the flow and marks the task `cancelled` (distinct from the in-scope `--force-full` hard kill); HITL-over-stdin (Telegram stays the channel); a daemon control socket/IPC.
 
 ## Building blocks (kept from the original sketch)
 
@@ -166,8 +182,8 @@ async def main(config):
             if cmd in {"enqueue", "run"}:   enqueue(rest[0])          # copy into tasks/pending
             elif cmd in {"ps", "jobs"}:     render_view(open_readonly(db))  # 1 active + queue + recent
             elif cmd == "status":           cmd_status(...)
-            elif cmd in {"down"}:           cmd_stop(...)             # SIGTERM between ticks
-            elif cmd in {"quit", "exit"}:   break
+            elif cmd in {"down"}:           cmd_stop(...)             # stop ladder: idle→go; busy→YES/--force (soft) | --force-full (hard)
+            elif cmd in {"quit", "exit"}:   break                    # busy+spawned → offer detach (default) / soft / --force-full
             # … finalize / rerun / prs / merge-task / cancel (best-effort) …
     tail.cancel()
     await stop_child_if_spawned(child)
@@ -181,7 +197,7 @@ async def main(config):
 
 Раздел на русском по просьбе владельца. Рекомендованное решение — **операторская консоль как клиент над существующим демоном `watch` (не второй хост движка)**: `worc top` (read-only live-монитор) + `worc shell` (prompt_toolkit-REPL поверх него). Деление на «Фазы» ниже — логическая структура работ, а не отдельные итерации/мержи. **Проверки и документация — один раз в самом конце** (`/run-checks`, затем `/sync-docs` и `prettier` по докам) — см. [§ Проверки и документация](#проверки-и-документация).
 
-Целевой сквозной сценарий: оператор запускает `worc shell` → консоль поднимает (или подхватывает) демон `watch`, логи демона текут **над** промптом → оператор делает `enqueue task.md` (файл падает в `tasks/pending`, демон берёт его на следующем тике, ввод не блокируется) → `ps` показывает одну активную задачу + очередь + недавние терминальные → `down`/`quit` корректно гасит дочерний демон между тиками.
+Целевой сквозной сценарий: оператор запускает `worc shell` → консоль поднимает (или подхватывает) демон `watch`, логи демона текут **над** промптом → оператор делает `enqueue task.md` (файл падает в `tasks/pending`, демон берёт его на следующем тике, ввод не блокируется) → `ps` показывает одну активную задачу + очередь + недавние терминальные → `down` при активной задаче спрашивает `YES` (или принимает `--force`) и мягко гасит после текущего шага; `--force-full` убивает агентов сразу; при idle гасит без вопросов.
 
 ### Зафиксированные решения (ответы на форки)
 
@@ -190,7 +206,8 @@ async def main(config):
 3. **Два независимо полезных артефакта.** `worc top` (read-only, фаза 1) и `worc shell` (интерактив, фаза 2). `top` ценен сам по себе.
 4. **`prompt_toolkit` — опциональный extra `[shell]`.** Демон и headless/CI его не импортируют; `worc top`/`shell` без него падают с понятным сообщением.
 5. **Без нового статуса задачи и без bump схемы** — только новые read-вью + презентация.
-6. **Отмена — best-effort и честно названная.** `cancel` снимает только pending-файл или гасит демон между тиками; mid-stage cancel — отдельная фича (см. [§ Out of scope](#decision-recommended)).
+6. **Стоп — лестница из трёх ступеней (idle/busy + два уровня force).** idle → стоп без подтверждения; busy без флага → отказ (интерактив: подтверждение `YES`; не-интерактив: требуется флаг); busy + `--force`/`YES` → мягкий стоп (доделать текущий шаг, выйти между тиками — сегодняшнее поведение, теперь под гейтом); busy + `--force-full` → жёсткий стоп (убить группу процессов активного агента сразу, восстановление через `resume()`). Применяется и к базовым `worc stop`/`restart`, и к консольным `down`/`quit`. См. [§ Stop safety](#stop-safety-idlebusy-gate--two-force-levels).
+7. **Отмена — best-effort поверх лестницы стопа.** `cancel` снимает pending-файл или маршрутизирует в стоп-лестницу (`down` мягко / `--force-full` жёстко). Чистый кооперативный per-task cancel (размотать флоу + пометить `cancelled` без group-kill) — отдельная фича (см. [§ Out of scope](#decision-recommended)).
 
 ### Фаза 1 — read-surface + live-монитор `worc top`
 
@@ -202,23 +219,33 @@ async def main(config):
 
 - **[pyproject.toml](../../pyproject.toml)** — новая группа `[project.optional-dependencies] shell = ["prompt_toolkit>=3"]`. Ленивая загрузка; при отсутствии — выход с подсказкой `install wastech-orchestrator[shell]`.
 - **`cli_shell.py`** (новый модуль в пакете) — `PromptSession` + `patch_stdout()`: рендер шапки/лога из фазы 1 над промптом; диспетчер команд на существующие `cmd_*` + тонкие хелперы `enqueue`/`tail`; **spawn-or-attach** демона через `read_pid_record` ([process_control.py:97-120](../../src/wastech_orchestrator/process_control.py#L97-L120)) — живой демон подхватываем (tail лога + read-only DB, на выходе оставляем), иначе поднимаем `worc watch --log-file <path>` дочерним процессом (argv-список, без shell) и гасим на `quit` через `cmd_stop`.
-- **[cli.py](../../src/wastech_orchestrator/cli.py)** — сабпарсер `shell` + `cmd_shell` (вход в loop). Команды: `enqueue/run <file>` (копия в `tasks/pending`), `ps/jobs`, `status [<id>]`, `logs [<id>]`, `prs`/`merge-task <id>` (после [orchestrator-driven-pr-merge.md](orchestrator-driven-pr-merge.md)), `finalize`/`rerun`, `up`/`down`/`restart`, `cancel <id>` (best-effort), `quit`. **Slot-guard:** мутационные команды (`finalize`/`rerun`/`merge-task`) отказывают при активной задаче (`find_active_tasks`) — как и сами эти команды сегодня.
-- **Тесты:** диспетч `enqueue` → файл в `tasks/pending`; `ps` рендер; slot-guard (`finalize` при активной → refuse); spawn/attach логика через фейковый PID-файл и фейковый `watch` (скилл `fake-cli` для дочернего процесса); `cancel` pending → файл уехал в `tasks/rejected`; graceful `down` → `SIGTERM` пути `cmd_stop`. prompt_toolkit-loop тестируем через инъекцию заранее заданного списка строк (не реальный TTY).
+- **[cli.py](../../src/wastech_orchestrator/cli.py)** — сабпарсер `shell` + `cmd_shell` (вход в loop). Команды: `enqueue/run <file>` (копия в `tasks/pending`), `ps/jobs`, `status [<id>]`, `logs [<id>]`, `prs`/`merge-task <id>` (после [orchestrator-driven-pr-merge.md](orchestrator-driven-pr-merge.md)), `finalize`/`rerun`, `up`/`down [--force|--force-full]`/`restart`, `cancel <id>` (best-effort), `quit`. **Slot-guard:** мутационные команды (`finalize`/`rerun`/`merge-task`) отказывают при активной задаче (`find_active_tasks`) — как и сами эти команды сегодня. `down`/`quit` идут через стоп-лестницу (Фаза 3).
+- **Тесты:** диспетч `enqueue` → файл в `tasks/pending`; `ps` рендер; slot-guard (`finalize` при активной → refuse); spawn/attach логика через фейковый PID-файл и фейковый `watch` (скилл `fake-cli` для дочернего процесса); `cancel` pending → файл уехал в `tasks/rejected`. prompt_toolkit-loop тестируем через инъекцию заранее заданного списка строк (не реальный TTY).
+
+### Фаза 3 — стоп-лестница (idle/busy + `--force`/`--force-full`) + изоляция группы процессов
+
+Апгрейдит **базовые** `worc stop`/`restart` (не только консоль) — поэтому ценен сам по себе и не зависит от фаз 1–2; консольные `down`/`quit` его переиспользуют.
+
+- **[providers/process.py](../../src/wastech_orchestrator/providers/process.py)** — запускать агента в собственной группе процессов: `start_new_session=True` в `subprocess.run(...)` ([process.py:88-99](../../src/wastech_orchestrator/providers/process.py#L88-L99)). Без этого `--force-full` осиротит агента, а не убьёт. (Поведение `timeout`/захвата stdout/stderr не меняется; argv-список, без shell.)
+- **[process_control.py](../../src/wastech_orchestrator/process_control.py)** — `stop_process(...)` получает уровень жёсткости: `soft` (текущее: `SIGTERM` демону, эскалация в `SIGKILL` по `--timeout` — мягкая остановка между тиками) и `full` (резолв группы демона `os.getpgid(pid)` + `os.killpg(pgid, SIGKILL)` — убить демон + активного агента + субпроцесс проверок разом). Все OS-seam'ы (`getpgid`/`killpg`) — инъектируемые, как уже сделано для `kill_fn`/`now_fn`.
+- **[cli.py](../../src/wastech_orchestrator/cli.py)** — `stop`/`restart` получают `--force`/`--force-full` (взаимоисключающие) рядом с `--timeout` ([cli.py:207-214](../../src/wastech_orchestrator/cli.py#L207-L214)); `cmd_stop` сначала read-only-проба `find_active_tasks()`: **idle → стоп без подтверждения** (любая форма); **busy без флага** → интерактивный TTY: запрос `YES` (мягко), не-TTY → выход не-ноль с подсказкой про флаги; **busy + `--force`/`YES`** → `stop_process(level=soft)`; **busy + `--force-full`** → `stop_process(level=full)`. Подтверждение по образцу `-y/--yes` у `finalize` ([cli.py:289](../../src/wastech_orchestrator/cli.py#L289)), но инвертировано в «спрашиваем только когда busy».
+- **Тесты:** idle → стоп без промпта (все три формы); busy без флага + не-TTY → refuse, ничего не сигналим; busy + `--force` → soft путь; busy + `--force-full` → `killpg` группы (через инъекцию `getpgid`/`killpg`); `YES` в TTY → soft; агент стартует с `start_new_session=True` (через перехват kwargs `subprocess.run`); `--force-full` на idle = обычный стоп.
 
 ### Инварианты (соблюдены)
 
 - **Один слот**: вид — одна активная + очередь; мутационные команды slot-guard'ятся.
 - **Коммит/пуш/PR/merge — только оркестратор**: консоль лишь enqueue'ит файлы и зовёт существующие `cmd_*`; новых git/сетевых возможностей нет.
-- **Ядро не знает CLI**: консоль живёт в слое `cli.py`, логики в `core/` не добавляет.
+- **Ядро не знает CLI**: консоль живёт в слое `cli.py`, логики в `core/` не добавляет; стоп-лестница — в `cli.py`/`process_control.py`.
 - **Один читатель stdin**: prompt_toolkit-loop; дочерний демон stdin не наследует; фоновые логи — через `patch_stdout()`.
 - **Без секретов**: консоль только рендерит уже редактированные лог/DB-данные; своих логов не пишет.
-- **Без shell-интерполяции**: дочерний `watch` запускается argv-списком.
+- **Без shell-интерполяции**: дочерний `watch` и агенты запускаются argv-списком; `start_new_session` не вводит shell.
+- **Безопасный стоп**: жёсткий стоп возможен только по явному `--force-full`; восстановление после любого резкого выхода — существующий `resume()`.
 - **Без новой зависимости в hot-path**: `prompt_toolkit` — extra `[shell]`, демон его не импортирует.
 
 ### Связи и хвосты
 
 - **`prs`/`merge-task`** ([orchestrator-driven-pr-merge.md](orchestrator-driven-pr-merge.md)) — консоль их подхватит как обычные команды, когда они появятся; зависимость по порядку не жёсткая (без них просто нет этих двух verb'ов).
-- **Mid-stage cancel** — отдельный backlog-айтем: кооперативный cancel-флаг через флоу-движок + терминация субпроцесса агента (путь `process_control` kill). Записать в [follow_ups.md](follow_ups.md).
+- **Чистый кооперативный per-task cancel** — отдельный backlog-айтем: размотать флоу и пометить задачу `cancelled` **без** group-kill (богаче, чем `--force-full`). Записать в [follow_ups.md](follow_ups.md).
 - **HITL-в-консоли** — мост Telegram-HITL ([core/hitl.py](../../src/wastech_orchestrator/core/hitl.py)) в промпт консоли; отдельная фича. Записать в [follow_ups.md](follow_ups.md).
 - **Textual-TUI** — богатый вариант с панелями/хоткеями, если понадобится. Записать в [follow_ups.md](follow_ups.md).
 - **Control-socket/IPC** — если консоли понадобится пушить команды в активную задачу (а не только enqueue + сигналы). Записать в [follow_ups.md](follow_ups.md).
@@ -228,5 +255,5 @@ async def main(config):
 Всё — **один раз после всех фаз**.
 
 - **Проверки:** `ruff check .`, `mypy src`, `pytest` (через `/run-checks`); затем `npx prettier@3 --write "**/*.md"` по затронутым докам.
-- **Документация (`/sync-docs`):** [Functional Map](../functional/index.md) (блок CLI/демона — добавить `top`/`shell` рядом с `watch`/`status`/`stop`/`restart`; отметить, что консоль — клиент демона, не хост движка); [docs/operations.md](../operations.md) — операторская заметка про `worc top`/`worc shell` (spawn/attach, enqueue в `tasks/pending`, slot-guard, честные границы `cancel`); [docs/configuration.md](../configuration.md)/README — extra `[shell]` и `pip install wastech-orchestrator[shell]`; при изменении топологии — модель C4 в [docs/likec4](../likec4).
-- **Отложенные хвосты** — в [follow_ups.md](follow_ups.md) (см. § Связи и хвосты): mid-stage cancel, HITL-в-консоли, Textual-TUI, control-socket.
+- **Документация (`/sync-docs`):** [Functional Map](../functional/index.md) (блок CLI/демона — добавить `top`/`shell` рядом с `watch`/`status`/`stop`/`restart`; отметить, что консоль — клиент демона, не хост движка; обновить `stop`/`restart` под стоп-лестницу + изоляцию группы процессов агента); [docs/operations.md](../operations.md) — операторская заметка про `worc top`/`worc shell` (spawn/attach, enqueue в `tasks/pending`, slot-guard) и про стоп-лестницу (`idle`/`busy`, `--force` мягко vs `--force-full` жёстко); [docs/configuration.md](../configuration.md)/README — extra `[shell]` и `pip install wastech-orchestrator[shell]`; при изменении топологии — модель C4 в [docs/likec4](../likec4).
+- **Отложенные хвосты** — в [follow_ups.md](follow_ups.md) (см. § Связи и хвосты): чистый кооперативный per-task cancel, HITL-в-консоли, Textual-TUI, control-socket.

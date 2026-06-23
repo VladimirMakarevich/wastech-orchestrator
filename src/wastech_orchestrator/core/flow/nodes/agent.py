@@ -49,6 +49,7 @@ from wastech_orchestrator.core.hitl import (
     TypedStageOutput,
     guardrail_interaction_path,
     interaction_path,
+    iter_task_interactions,
     load_interaction,
     mark_consumed,
     mark_interaction_status,
@@ -272,8 +273,8 @@ class AgentNodeRunner:
         persisted = load_interaction(path)
         if persisted is not None:
             approved = self._resume_guardrail(node, path, persisted, dangerous)
-        elif self._planning_approval_matches(ctx, dangerous):
-            return  # the dangerous diff was pre-approved during planning
+        elif self._already_approved_in_task(ctx, dangerous):
+            return  # this exact dangerous diff was already approved earlier in the task
         else:
             result = self._gate().request(
                 task_id=ctx.task_id,
@@ -346,17 +347,21 @@ class AgentNodeRunner:
             )
         mark_interaction_status(path, "reconsidered")
 
-    def _planning_approval_matches(self, ctx: NodeContext, dangerous: DangerousDiff) -> bool:
-        """A dangerous diff is pre-approved if the planning node (the decomposition proposer) got a
-        matching human approval. No decomposition config → no planning node → no pre-approval."""
-        decomp = ctx.snapshot.doc.decomposition
-        if decomp is None:
-            return False
-        path = interaction_path(self._s.artifacts_root, ctx.task_id, decomp.proposed_by)
-        persisted = load_interaction(path)
-        if persisted is None or persisted.get("approved") is not True:
-            return False
-        return _guardrail_request_matches(persisted, dangerous)
+    def _already_approved_in_task(self, ctx: NodeContext, dangerous: DangerousDiff) -> bool:
+        """True if the operator already approved this exact dangerous diff earlier in the task.
+
+        The dangerous-diff classifier runs over the whole *uncommitted* working-tree diff, so a
+        second workspace-write node (``documentation`` after ``implementation``, or ``fixing`` in a
+        re-test loop) re-sees a deletion/dependency change an upstream node already got cleared.
+        Honoring any prior in-task approval of the identical change (same risk + exact path set) —
+        the planning pre-approval, or an earlier node's guardrail approval — keeps the guard from
+        re-prompting for it. A new or expanded dangerous set does not match, so it still prompts:
+        the guard never weakens, it only avoids asking twice for the same approved change.
+        """
+        return any(
+            persisted.get("approved") is True and _guardrail_request_matches(persisted, dangerous)
+            for persisted in iter_task_interactions(self._s.artifacts_root, ctx.task_id)
+        )
 
     def _build_request(
         self,

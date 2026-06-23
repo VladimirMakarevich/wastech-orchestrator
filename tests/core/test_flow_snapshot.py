@@ -51,8 +51,8 @@ def test_load_implementation_yaml(impl_snap: FlowSnapshot) -> None:
     assert doc.permission_ceiling == PermissionProfile.WORKSPACE_WRITE
     assert doc.output_policy == OutputPolicy.CODE_CHANGE
     assert doc.publishing == PublishingPolicy.PULL_REQUEST
-    assert len(doc.nodes) == 7
-    assert len(doc.edges) == 8
+    assert len(doc.nodes) == 8  # + documentation (after review, before publish)
+    assert len(doc.edges) == 9
 
 
 def test_load_deep_research_yaml() -> None:
@@ -98,6 +98,7 @@ def test_nodes_by_id_all_reachable(impl_snap: FlowSnapshot) -> None:
         "testing",
         "review",
         "fixing",
+        "documentation",
         "publish",
     }
     assert set(impl_snap.nodes_by_id.keys()) == expected_ids
@@ -114,12 +115,12 @@ def test_nodes_by_id_kinds(impl_snap: FlowSnapshot) -> None:
 
 
 def test_adjacency_multi_outcome_node(impl_snap: FlowSnapshot) -> None:
-    # review has two outgoing edges: accept → publish, rework → fixing
+    # review has two outgoing edges: accept → documentation (then publish), rework → fixing
     edges = impl_snap.adjacency["review"]
     outcomes = {e.outcome for e in edges}
     assert outcomes == {"accept", "rework"}
     targets = {e.to for e in edges}
-    assert targets == {"publish", "fixing"}
+    assert targets == {"documentation", "fixing"}
 
 
 def test_adjacency_terminal_node_absent(impl_snap: FlowSnapshot) -> None:

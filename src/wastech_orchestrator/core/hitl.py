@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, get_args
@@ -332,6 +332,22 @@ def discovery_interaction_id(task_id: str, signature: str) -> str:
     *changed* set yields a fresh interaction (fits Telegram callback-data limits)."""
     raw = f"{task_id}:check-discovery:{signature}"
     return "d" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def iter_task_interactions(artifacts_root: str | Path, task_id: str) -> Iterator[dict[str, Any]]:
+    """Yield every durable interaction artifact recorded for a task, in stable filename order.
+
+    Covers embedded-HITL round-trips, dangerous-diff guardrails, and gate-node interactions (every
+    ``hitl/*.json``). The dangerous-diff guard uses this to honor a prior in-task approval of an
+    identical dangerous diff so a later workspace-write node does not re-prompt for it.
+    """
+    hitl_dir = task_artifact_dir(artifacts_root, task_id) / "hitl"
+    if not hitl_dir.is_dir():
+        return
+    for path in sorted(hitl_dir.glob("*.json")):
+        persisted = load_interaction(path)
+        if persisted is not None:
+            yield persisted
 
 
 def load_interaction(path: Path) -> dict[str, Any] | None:

@@ -127,8 +127,9 @@ def test_operator_dir_no_matching_file_falls_back_to_packaged(tmp_path: Path) ->
     flows_dir.mkdir()
     snap = FlowRegistry(operator_flows_dir=flows_dir).resolve("implementation")
     # packaged implementation: refinement, planning, implementation, testing, review, fixing,
-    # publish — the summary node is gone (the constant supervisor layer writes the summary).
-    assert len(snap.doc.nodes) == 7
+    # documentation, publish — the summary node is gone (the constant supervisor layer writes the
+    # summary); documentation updates the target project's docs after review accepts.
+    assert len(snap.doc.nodes) == 8
 
 
 def test_no_operator_dir_uses_packaged_only() -> None:
@@ -248,7 +249,7 @@ def test_operator_flow_overrides_builtin(tmp_path: Path) -> None:
     flows_dir.mkdir()
     (flows_dir / "implementation.yaml").write_text(_MINIMAL_YAML)
     snap = FlowRegistry(operator_flows_dir=flows_dir).resolve("implementation")
-    # The 2-node operator flow wins over the 7-node packaged implementation.
+    # The 2-node operator flow wins over the 8-node packaged implementation.
     assert len(snap.doc.nodes) == 2
 
 
