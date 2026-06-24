@@ -229,6 +229,27 @@ def _config_with_supervisor(packaged_config_text: str, block: str) -> Any:
     return loads_config(packaged_config_text + "\n" + block).config
 
 
+def _without_supervisor_section(text: str) -> str:
+    """Drop the top-level ``supervisor:`` block (header + its indented body) from a config YAML.
+
+    The packaged example config ships a *populated* supervisor section, so this yields the
+    genuinely-absent case — exercising the loader's ``SupervisorConfig()`` default path.
+    """
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.strip() and not line[0].isspace() and line.split(":", 1)[0].strip() == "supervisor":
+            i += 1
+            while i < len(lines) and (not lines[i].strip() or lines[i][0].isspace()):
+                i += 1  # skip the block's indented body and any trailing blank line
+            continue
+        out.append(line)
+        i += 1
+    return "".join(out)
+
+
 def test_supervisor_config_from_config_yaml(packaged_config_text: str) -> None:
     block = "supervisor:\n  model: sonnet\n  reasoning: high\n  role_file: roles/supervisor.md\n"
     config = _config_with_supervisor(packaged_config_text, block)
@@ -239,7 +260,7 @@ def test_supervisor_config_from_config_yaml(packaged_config_text: str) -> None:
 
 
 def test_supervisor_absent_section_defaults(packaged_config_text: str) -> None:
-    config = loads_config(packaged_config_text).config
+    config = loads_config(_without_supervisor_section(packaged_config_text)).config
     assert config.supervisor == SupervisorConfig()  # safe default when the section is absent
     validate_config(config)
 

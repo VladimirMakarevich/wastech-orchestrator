@@ -331,21 +331,21 @@ def _iter_template_files(root: Path) -> Iterator[Path]:
 
 
 def _worc_root() -> Traversable:
-    """The packaged ``worc/`` agent task-authoring docs (works from a source tree or a wheel).
+    """The packaged agent task-authoring docs (works from a source tree or a wheel).
 
-    These ship as package data next to ``templates/`` and are copied into ``.worc/guide/`` by
-    ``install`` so an AI agent can author tasks from a local, self-contained guide. Unlike
-    ``templates/``, they are generated content with no operator edits — ``upgrade-docs`` overwrites
-    them to the packaged version.
+    These ship as package data under ``packaged/guide/`` (the single aggregated home for everything
+    shipped/seeded) and are copied into ``.worc/guide/`` by ``install`` so an AI agent can author
+    tasks from a local, self-contained guide. Unlike the operator-editable flows, they are generated
+    content with no operator edits — ``upgrade-docs`` overwrites them to the packaged version.
     """
-    return resources.files("wastech_orchestrator").joinpath("worc")
+    return resources.files("wastech_orchestrator").joinpath("packaged", "guide")
 
 
 def _copy_worc_docs(dest_root: Path, *, overwrite: bool, dry: bool) -> tuple[list[str], list[str]]:
     """Copy the packaged ``worc/`` docs into ``dest_root/guide`` (the installed authoring guide).
 
-    The packaged source dir is ``worc/``; it lands as ``guide/`` so the path reads ``.worc/guide/``
-    rather than the redundant ``.worc/worc/``. Existing files are skipped unless ``overwrite``;
+    The packaged source dir is ``packaged/guide/``; it lands as ``guide/`` so the path reads
+    ``.worc/guide/``. Existing files are skipped unless ``overwrite``;
     ``dry`` writes nothing. Returns ``(written, skipped)`` as ``guide/...`` relative paths.
     """
     written: list[str] = []
@@ -374,7 +374,7 @@ def _flows_root() -> Traversable:
     ``guide/``, these are operator-editable, so a plain re-run never clobbers them (see
     ``_copy_packaged_flows`` / ``_backup_flows_dir``).
     """
-    return resources.files("wastech_orchestrator.core.flow").joinpath("packaged")
+    return resources.files("wastech_orchestrator").joinpath("packaged", "flows")
 
 
 def _copy_packaged_flows(

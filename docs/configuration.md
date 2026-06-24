@@ -1,6 +1,6 @@
 # Configuration Reference
 
-`config.yaml` controls repositories, providers, security, validation, checks, git publishing, and optional notification settings. The packaged example is [`config.example.yaml`](../config.example.yaml), and the canonical contract is the config schema in the code (`config/schema.py`); see the [Functional Map](functional/index.md).
+`config.yaml` controls repositories, providers, security, validation, checks, git publishing, and optional notification settings. The packaged example is [`config.example.yaml`](../src/wastech_orchestrator/packaged/config.example.yaml), and the canonical contract is the config schema in the code (`config/schema.py`); see the [Functional Map](functional/index.md).
 
 The loader is fail-closed:
 
@@ -378,7 +378,7 @@ The runner runs the **union** of sets whose `paths` glob match the task diff (th
 
 - A set with **no `paths`** always runs (on a non-empty diff).
 - An **empty diff** (nothing changed) selects nothing → the checks node **passes vacuously**.
-- **Fail-safe:** if any changed path is claimed by **no** set, the runner runs **all** sets (rather than skip a check for an unmatched file).
+- A changed path claimed by **no** set runs no set on its account (it does **not** trigger a full run). Cover shared/root files with a no-`paths` catch-all set or by listing them in a set's `paths`.
 
 ### Run-all, then aggregate
 

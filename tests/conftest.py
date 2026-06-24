@@ -17,7 +17,6 @@ import pytest
 from wastech_orchestrator.config.loader import loads_config
 from wastech_orchestrator.config.schema import OrchestratorConfig
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 _FAKE_AGENT = Path(__file__).resolve().parent / "fakes" / "fake_agent.py"
 
 # A broad-but-explicit env allowlist so git runs under the orchestrator's allowlisted environment on
@@ -40,15 +39,9 @@ def packaged_config_text() -> str:
     """The packaged config.example.yaml shipped as package data (used by ``init``)."""
     return (
         resources.files("wastech_orchestrator")
-        .joinpath("templates", "config.example.yaml")
+        .joinpath("packaged", "config.example.yaml")
         .read_text(encoding="utf-8")
     )
-
-
-@pytest.fixture
-def repo_root_config_text() -> str:
-    """The repo-root config.example.yaml (must stay in sync with the packaged copy)."""
-    return (REPO_ROOT / "config.example.yaml").read_text(encoding="utf-8")
 
 
 @pytest.fixture

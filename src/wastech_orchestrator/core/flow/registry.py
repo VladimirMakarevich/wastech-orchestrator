@@ -4,7 +4,7 @@ Two lookup layers, in priority order:
 
   1. **Operator flows**: ``<operator_flows_dir>/<task_type>.yaml`` — allows operators to
      override or extend built-ins by placing YAML files in ``<repo>/.worc/flows/``.
-  2. **Packaged built-ins**: shipped with the wheel under ``packaged/`` (``implementation``,
+  2. **Packaged built-ins**: shipped with the wheel under ``packaged/flows/`` (``implementation``,
      ``deep_research``, ``security_audit``).
 
 Resolution rules:
@@ -39,7 +39,10 @@ from wastech_orchestrator.core.flow.validator import (
 
 DEFAULT_TASK_TYPE: str = "implementation"
 
-_PACKAGED_DIR: Path = Path(__file__).parent / "packaged"
+# Built-in flow YAML + role prompts ship as package data under the aggregated
+# ``wastech_orchestrator/packaged/flows/`` tree (the single home for everything shipped/seeded);
+# the flow-engine code lives here in ``core/flow/``.
+_PACKAGED_DIR: Path = Path(__file__).resolve().parents[2] / "packaged" / "flows"
 
 
 class FlowResolutionError(Exception):

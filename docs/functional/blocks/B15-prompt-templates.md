@@ -65,7 +65,7 @@ flowchart TB
 
 ## Dependencies
 
-- **Uses:** none in `core.prompts` (stdlib `re` only); `core.flow.prompt` uses `pathlib` and re-exports through `render_prompt`. The `role_file` is package data shipped inside the flow (e.g. `core/flow/packaged/roles/`), not copied to `.worc` by the installer ([B03](B03-installer-and-scaffolding.md)).
+- **Uses:** none in `core.prompts` (stdlib `re` only); `core.flow.prompt` uses `pathlib` and re-exports through `render_prompt`. The `role_file` is package data shipped inside the flow (e.g. `packaged/flows/roles/`), not copied to `.worc` by the installer ([B03](B03-installer-and-scaffolding.md)).
 - **Used by:** B30 (the agent/evaluator node runners call `render_role_prompt`), B31 (the supervisor layer calls it for its base prompt), B06 (wires `flow_dir`/inputs), B13 (`{skills_path}`), B18 (the renderer outputs `prompt`; the provider then appends a separate paths-only context footer via `build_context_footer`, [codex.py:129](../../../src/wastech_orchestrator/providers/codex.py#L129)). B16/B25 rely on the path-only substitution as the structural anti-injection guarantee. B05 (config v9 removed the `prompts` block; the upgrader strips it, [upgrade.py:31-36](../../../src/wastech_orchestrator/config/upgrade.py#L31)). B29 validates `role_file` traversal at load.
 
 ## Audit candidates

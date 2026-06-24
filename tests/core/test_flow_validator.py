@@ -19,12 +19,7 @@ from wastech_orchestrator.core.flow.validator import (
 )
 
 CODESIGN = (
-    Path(__file__).parent.parent.parent
-    / "src"
-    / "wastech_orchestrator"
-    / "core"
-    / "flow"
-    / "packaged"
+    Path(__file__).parent.parent.parent / "src" / "wastech_orchestrator" / "packaged" / "flows"
 )
 
 

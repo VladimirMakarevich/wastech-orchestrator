@@ -187,4 +187,4 @@ def test_minimal_summary_without_task_ref(tmp_path: Path) -> None:
     md_path, _ = write_minimal_summary(tmp_path, "t", title="X", diff_stat="")
     md = Path(md_path).read_text(encoding="utf-8")
     assert "See the task file for the full description." in md
-    assert "(no committed changes)" in md
+    assert "(no changes detected)" in md

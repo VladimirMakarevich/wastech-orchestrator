@@ -1,8 +1,8 @@
 # Flow: `implementation` (the default coding pipeline)
 
-> Reconstructed from code (`src/wastech_orchestrator/core/flow/packaged/implementation.yaml` and the node runners). The code is the only source of truth. Significant claims carry a `file:line` reference.
+> Reconstructed from code (`src/wastech_orchestrator/packaged/flows/implementation.yaml` and the node runners). The code is the only source of truth. Significant claims carry a `file:line` reference.
 
-The packaged default flow ([implementation.yaml](../../../src/wastech_orchestrator/core/flow/packaged/implementation.yaml)) — resolved when a task has no `task_type` (or `task_type: implementation`). Flow-wide ceilings: `permission_ceiling: workspace-write`, `output_policy: code_change`, `publishing: pull_request`.
+The packaged default flow ([implementation.yaml](../../../src/wastech_orchestrator/packaged/flows/implementation.yaml)) — resolved when a task has no `task_type` (or `task_type: implementation`). Flow-wide ceilings: `permission_ceiling: workspace-write`, `output_policy: code_change`, `publishing: pull_request`.
 
 ## The graph
 
@@ -27,11 +27,11 @@ flowchart LR
 | `documentation` | agent | workspace-write · editing_lineage | `lineage_affinity: implementation`; updates the target project's docs to match the accepted change — its edits join the same diff the orchestrator commits; no `output_artifact`, no `hitl`/`when` (disable per task via `nodes.documentation.enabled: false`) |
 | `publish` | publish | `pull_request` | commit code + audit, push, open PR (idempotent) |
 
-(Node fields verified against [implementation.yaml:33-80](../../../src/wastech_orchestrator/core/flow/packaged/implementation.yaml#L33); the `testing` checks node is just `{id, kind, checker}` — the former `discovery` field was removed with the checks-monorepo change.)
+(Node fields verified against [implementation.yaml:33-80](../../../src/wastech_orchestrator/packaged/flows/implementation.yaml#L33); the `testing` checks node is just `{id, kind, checker}` — the former `discovery` field was removed with the checks-monorepo change.)
 
 ## Loops and budgets
 
-Two fix loops feed back into `fixing`, plus the global cap ([implementation.yaml:82-96](../../../src/wastech_orchestrator/core/flow/packaged/implementation.yaml#L82)):
+Two fix loops feed back into `fixing`, plus the global cap ([implementation.yaml:82-96](../../../src/wastech_orchestrator/packaged/flows/implementation.yaml#L82)):
 
 - `testing → fixing` (`fail`, loop **`test_fix`**, budget 15), `fixing → testing` forward.
 - `review → fixing` (`rework`, loop **`review_fix`**, budget 15).
@@ -51,7 +51,7 @@ A partial skip (some checks ran and passed, others skipped) still **passes** the
 
 ## Decomposition
 
-A `decomposition` block ([implementation.yaml:98-101](../../../src/wastech_orchestrator/core/flow/packaged/implementation.yaml#L98)) lets planning propose a split: `proposed_by: planning`, `sub_flow: [implementation, testing, review, fixing]`, `shared_budget: global_fix_iterations`. The orchestrator decides the split deterministically ([B11](../blocks/B11-task-decomposition.md)) and runs the region once per subtask (committing each — subtask commit is unconditional), with per-loop budgets reset between subtasks and the global counter accumulating. See [B06](../blocks/B06-orchestrator-pipeline.md) `_run_phases`/`_fan_out_subtasks`. `documentation` is deliberately kept **out** of `sub_flow`: it is the post-region phase entry (`review --accept-->` leaves the region), so it runs **once** after the last subtask's code is accepted — a whole-task docs update, not a per-subtask one. The accept gate uses `agents.decomposition.max_subtasks` and always enforces a 2..n linear DAG (the decorative `decomposition.gate` + `commit_each_subtask` fields were removed — audit #4/#5).
+A `decomposition` block ([implementation.yaml:98-101](../../../src/wastech_orchestrator/packaged/flows/implementation.yaml#L98)) lets planning propose a split: `proposed_by: planning`, `sub_flow: [implementation, testing, review, fixing]`, `shared_budget: global_fix_iterations`. The orchestrator decides the split deterministically ([B11](../blocks/B11-task-decomposition.md)) and runs the region once per subtask (committing each — subtask commit is unconditional), with per-loop budgets reset between subtasks and the global counter accumulating. See [B06](../blocks/B06-orchestrator-pipeline.md) `_run_phases`/`_fan_out_subtasks`. `documentation` is deliberately kept **out** of `sub_flow`: it is the post-region phase entry (`review --accept-->` leaves the region), so it runs **once** after the last subtask's code is accepted — a whole-task docs update, not a per-subtask one. The accept gate uses `agents.decomposition.max_subtasks` and always enforces a 2..n linear DAG (the decorative `decomposition.gate` + `commit_each_subtask` fields were removed — audit #4/#5).
 
 ## HITL
 

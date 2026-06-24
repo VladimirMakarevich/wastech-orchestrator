@@ -1,6 +1,6 @@
 # Flows: the Executable Node Graphs
 
-> Reconstructed from code (`src/wastech_orchestrator/core/flow/`, `core/flow/packaged/*.yaml`). The code is the only source of truth; this was rebuilt from the implementation, not from prose. Significant claims carry a `file:line` reference.
+> Reconstructed from code (`src/wastech_orchestrator/core/flow/`, `packaged/flows/*.yaml`). The code is the only source of truth; this was rebuilt from the implementation, not from prose. Significant claims carry a `file:line` reference.
 
 A **flow** is the pipeline expressed as data: a YAML document defining a graph of typed nodes and the edges (with fix loops) between them, plus flow-wide ceilings. A task's `task_type` selects its flow; the [flow engine](../blocks/B28-flow-engine.md) drives the graph; the [node runners](../blocks/B30-flow-node-runners.md) execute the nodes; the [orchestrator](../blocks/B06-orchestrator-pipeline.md) wraps it all. This replaced the former fixed eight-stage (S01–S08) pipeline — there is no longer a hardcoded stage loop, and the per-stage docs that described it are superseded by these per-flow docs.
 

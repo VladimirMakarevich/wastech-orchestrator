@@ -226,7 +226,7 @@ def write_minimal_summary(
 
     what = title
     how = "No provider-authored summary was available; see the changed-files summary below."
-    integration = "Derived deterministically from the task and the committed diff stat."
+    integration = "Derived deterministically from the task and its diff stat."
     why = (
         f"See the task file `{task_ref}` for the full description."
         if task_ref
@@ -239,7 +239,7 @@ def write_minimal_summary(
         json.dumps(summary_json, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
 
-    changes = diff_stat.strip() or "(no committed changes)"
+    changes = diff_stat.strip() or "(no changes detected)"
     md = (
         f"# {what}\n\n"
         f"## What\n\n{what}\n\n"

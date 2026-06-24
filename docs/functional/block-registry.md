@@ -127,7 +127,7 @@ All 32 functional blocks (B01–B32) carry the status `documented`, (re)built fr
 ### B29 — Flow Definition, Registry and Validation
 
 - **Purpose:** the typed flow document + provider-neutral contracts; the fail-closed YAML loader; the registry (`task_type` → snapshot, operator override, `validate_all`); the three-layer fatal validator.
-- **Entry points:** `core/flow/schema.py`, `core/flow/contracts.py`, `core/flow/snapshot.py`, `core/flow/registry.py`, `core/flow/validator.py`; packaged `core/flow/packaged/*.yaml`.
+- **Entry points:** `core/flow/schema.py`, `core/flow/contracts.py`, `core/flow/snapshot.py`, `core/flow/registry.py`, `core/flow/validator.py`; packaged `packaged/flows/*.yaml`.
 - **Dependencies:** B25 (forbidden-args, profiles), B05 (config-aware layer), B18 (`ProviderId`); used by B28, B06.
 - **Status:** `documented` · [file](./blocks/B29-flow-definition-and-validation.md)
 
@@ -283,7 +283,7 @@ Every module under `src/wastech_orchestrator/` is assigned to exactly one block:
 | `notify/{interface,telegram,__init__}.py` | B26 |
 | `observability/{logging,progress}.py`, `core/flow/observability.py` | B27 |
 | `core/flow/{engine,engine_driver,run_state,snapshot}.py` | B28 |
-| `core/flow/{schema,contracts,registry,validator}.py`, `core/flow/packaged/*.yaml` | B29 |
+| `core/flow/{schema,contracts,registry,validator}.py`, `packaged/flows/*.yaml` | B29 |
 | `core/flow/nodes/*.py`, `core/flow/{postprocess,output_policy,wiring}.py` | B30 |
 | `core/supervisor.py` | B31 |
 | `core/flow/checkers/{citation,dependency_scan}.py` | B32 |

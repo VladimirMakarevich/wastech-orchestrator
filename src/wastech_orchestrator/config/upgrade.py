@@ -69,7 +69,7 @@ def packaged_template_mapping() -> dict[str, Any]:
     """The packaged ``config.example.yaml`` parsed into a mapping (source of new-key defaults)."""
     text = (
         resources.files("wastech_orchestrator")
-        .joinpath("templates", "config.example.yaml")
+        .joinpath("packaged", "config.example.yaml")
         .read_text(encoding="utf-8")
     )
     return parse_mapping(text)

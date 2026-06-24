@@ -42,7 +42,8 @@ worc = "wastech_orchestrator.cli:main"
 source = "vcs"
 
 [tool.hatch.build.targets.wheel]
-# Non-.py files under the package (e.g. templates/, used by `init`) ship as package data.
+# Non-.py files under the package (the aggregated `packaged/` tree — config example, built-in
+# flows + role prompts, and the task-authoring guide, used by `init`) ship as package data.
 packages = ["src/wastech_orchestrator"]
 
 [tool.ruff]

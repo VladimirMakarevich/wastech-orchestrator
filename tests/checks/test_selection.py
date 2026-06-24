@@ -66,14 +66,17 @@ def test_markdown_only_change_runs_only_docs_and_always_on() -> None:
     assert _names(select_check_sets(_SETS, ["README.md", "docs/x.md"])) == ["docs", "lint"]
 
 
-def test_unmatched_path_fails_safe_to_all() -> None:
-    # A changed path claimed by no path-bearing set → run all (transitive-breakage guard).
-    assert _names(select_check_sets(_SETS, ["build/codegen.py"])) == [
-        "backend",
-        "frontend",
-        "docs",
-        "lint",
-    ]
+def test_unmatched_path_runs_only_always_on_sets() -> None:
+    # A changed path claimed by no path-bearing set runs no set on its account: only the always-on
+    # set (no `paths`) runs. (Previously this fell back to running ALL sets — removed because on a
+    # real monorepo any unclaimed root/docs edit then triggered a full-repo run.)
+    assert _names(select_check_sets(_SETS, ["build/codegen.py"])) == ["lint"]
+
+
+def test_unmatched_path_with_no_always_on_set_runs_nothing() -> None:
+    # No catch-all set + an unclaimed path → nothing runs (the node passes vacuously). The operator
+    # covers shared/root paths by adding a no-`paths` set or listing them in a set's `paths`.
+    assert select_check_sets((_BE, _FE, _DOCS), ["build/codegen.py"]) == ()
 
 
 def test_union_of_multiple_matched_sets() -> None:

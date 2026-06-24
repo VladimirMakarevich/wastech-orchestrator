@@ -1,9 +1,8 @@
-"""Packaged ``worc/`` agent task-authoring docs: availability, source sync, and example validity.
+"""Packaged agent task-authoring docs: availability, source sync, and example validity.
 
-Mirrors the packaged-template tests (``test_cli_init.test_templates_are_discoverable``) and the
-repo-root-vs-packaged sync test (``tests/config/test_roundtrip``): the authored docs live in
-``docs/worc/`` and a byte-identical copy ships as package data under ``wastech_orchestrator/worc/``.
-The shipped example tasks must pass the validation gate.
+The authored docs live in ``docs/worc/`` and a byte-identical copy ships as package data under
+``wastech_orchestrator/packaged/guide/`` (the aggregated package-data home). The shipped example
+tasks must pass the validation gate.
 """
 
 from __future__ import annotations
@@ -28,7 +27,7 @@ def test_worc_packaged_data_discoverable() -> None:
 
 def test_docs_worc_in_sync_with_packaged() -> None:
     # Single source of truth: the authored docs/worc/ and the packaged copy must not drift. Update
-    # both (copy docs/worc/* into src/wastech_orchestrator/worc/) when editing either.
+    # both (copy docs/worc/* into src/wastech_orchestrator/packaged/guide/) when editing either.
     docs_files = {p.relative_to(_DOCS_WORC) for p in _DOCS_WORC.rglob("*") if p.is_file()}
     with resources.as_file(_worc_root()) as wroot:
         packaged_files = set(_iter_template_files(Path(wroot)))

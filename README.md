@@ -194,7 +194,7 @@ Project layout:
 src/wastech_orchestrator/
   cli.py                  # install / preflight / telegram-test / run / rerun / finalize / watch / stop / restart / status / upgrade-config / upgrade-docs
   core/                   # the orchestrator wrapper (spine), HITL, dangerous-diff guardrail, recovery, decomposition, the constant supervisor layer
-    flow/                 # the flow engine + graph traversal, node runners, validation, checkers; packaged flows + role files (copied to .worc/flows/ by `install`)
+    flow/                 # the flow engine + graph traversal, node runners, validation, checkers
   notify/                 # Notifier contract + Telegram transport
   providers/              # AgentProvider contract + Codex / Claude adapters, durable sessions, redaction
   routing/                # node-based provider routing + global-primary infrastructure fallback
@@ -206,11 +206,10 @@ src/wastech_orchestrator/
   ledger.py               # the append-only completed-task ledger + failure reports
   task/                   # parser + §19 validation gate
   install/                # the install wizard, config writer, detection
-  templates/              # the packaged config.example.yaml (source for `install`/`upgrade-config`)
-  worc/                   # agent task-authoring guide copied to .worc/guide/ by `install`
+  packaged/               # all shipped package data (one home): config.example.yaml (source for `install`/`upgrade-config`); flows/ = built-in flows + role prompts (-> .worc/flows/); guide/ = task-authoring guide (-> .worc/guide/)
 docs/                     # operations, cookbook, configuration, task authoring, telegram, architecture, rules, backlog
   functional/             # code-derived block + flow reference (the source of truth on any discrepancy)
-  worc/                   # authored source for the packaged worc/ guide (kept in sync by a test)
+  worc/                   # authored source for the packaged guide/ (kept in sync by a test)
 tests/                    # unit / integration / e2e (see .agents/rules/testing.md)
 ```
 

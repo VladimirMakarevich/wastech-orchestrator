@@ -21,12 +21,7 @@ from wastech_orchestrator.core.flow.snapshot import FlowSnapshot, load_flow
 from wastech_orchestrator.core.flow.validator import validate_disabled_nodes, validate_flow
 
 _PACKAGED = (
-    Path(__file__).resolve().parents[2]
-    / "src"
-    / "wastech_orchestrator"
-    / "core"
-    / "flow"
-    / "packaged"
+    Path(__file__).resolve().parents[2] / "src" / "wastech_orchestrator" / "packaged" / "flows"
 )
 
 

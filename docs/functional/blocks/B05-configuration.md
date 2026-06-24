@@ -118,7 +118,7 @@ flowchart TB
 
 See [the audit](../../backlog/2026-06-21-audit.md) for the consolidated list.
 
-- `templates/config.example.yaml:83` ([loader.py:462](../../../src/wastech_orchestrator/config/loader.py#L462)) — the example sets `quarantine_folder: "./tasks/rejected"` while the loader default is `"./.worc/tasks/rejected"`; the two disagree on where rejected tasks land. Example/default drift.
+- `packaged/config.example.yaml:83` ([loader.py:462](../../../src/wastech_orchestrator/config/loader.py#L462)) — the example sets `quarantine_folder: "./tasks/rejected"` while the loader default is `"./.worc/tasks/rejected"`; the two disagree on where rejected tasks land. Example/default drift.
 
 ## Tests
 

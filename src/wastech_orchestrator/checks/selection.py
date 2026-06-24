@@ -26,9 +26,11 @@ def select_check_sets(
     * ``[]`` — the diff is empty (the task changed no code) → run **nothing**; the node then passes
       vacuously (there is nothing to check).
     * a non-empty list — match each set's ``paths`` globs against the changed paths and run the
-      union. A set with no ``paths`` always runs (on any non-empty diff). **Fail-safe to full**: if
-      any changed path is claimed by no path-bearing set (a root / shared / codegen edit), run
-      **all** sets.
+      **union** of the matching sets. A set with no ``paths`` always runs (on any non-empty diff),
+      so a catch-all set is how an operator covers shared / root files. A changed path claimed by no
+      set simply matches nothing and runs no set on its account — it does **not** fall back to
+      running every set (that "fail-safe to full" turned any unclaimed root/docs edit into a
+      full-repo run on real monorepos, e.g. pulling an unrunnable backend gate into a frontend job).
 
     The result preserves ``sets`` order and de-dups by set name.
     """
@@ -37,11 +39,6 @@ def select_check_sets(
     if not changed_paths:
         return ()
     paths = [p.replace("\\", "/") for p in changed_paths]
-    path_bearing = [s for s in sets if s.paths]
-    # A changed path claimed by no path-bearing set cannot be attributed to a project → run all.
-    for path in paths:
-        if not any(_set_matches_path(s, path) for s in path_bearing):
-            return tuple(sets)
     selected: list[ResolvedCheckSet] = []
     seen: set[str] = set()
     for cset in sets:

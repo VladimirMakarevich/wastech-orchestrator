@@ -1,8 +1,8 @@
 # Flow: `security_audit`
 
-> Reconstructed from code (`src/wastech_orchestrator/core/flow/packaged/security_audit.yaml` and the node runners). The code is the only source of truth. Significant claims carry a `file:line` reference.
+> Reconstructed from code (`src/wastech_orchestrator/packaged/flows/security_audit.yaml` and the node runners). The code is the only source of truth. Significant claims carry a `file:line` reference.
 
-An advisory security-audit flow ([security_audit.yaml](../../../src/wastech_orchestrator/core/flow/packaged/security_audit.yaml), `task_type: security_audit`). Flow-wide ceilings: `permission_ceiling: workspace-write`, `output_policy: private_control_workspace_report` (the report lives under the gitignored `.worc/security-reports/<task-id>/` and must never enter git), `publishing: none` — the publish node touches git **not at all** and fails closed if the report would be git-trackable ([B30](../blocks/B30-flow-node-runners.md)). `network_policy: advisories` grants the network needed to fetch vulnerability advisories.
+An advisory security-audit flow ([security_audit.yaml](../../../src/wastech_orchestrator/packaged/flows/security_audit.yaml), `task_type: security_audit`). Flow-wide ceilings: `permission_ceiling: workspace-write`, `output_policy: private_control_workspace_report` (the report lives under the gitignored `.worc/security-reports/<task-id>/` and must never enter git), `publishing: none` — the publish node touches git **not at all** and fails closed if the report would be git-trackable ([B30](../blocks/B30-flow-node-runners.md)). `network_policy: advisories` grants the network needed to fetch vulnerability advisories.
 
 ## The graph
 
@@ -24,12 +24,12 @@ flowchart LR
 | `report` | agent | workspace-write · fresh_disposable | writes `report.md` under the private report dir |
 | `private_storage` | publish | `private_control_workspace_report` | registers the report as an artifact; no git |
 
-(Verified against [security_audit.yaml:14-58](../../../src/wastech_orchestrator/core/flow/packaged/security_audit.yaml#L14).)
+(Verified against [security_audit.yaml:14-58](../../../src/wastech_orchestrator/packaged/flows/security_audit.yaml#L14).)
 
 ## Loops and budgets
 
 One feedback edge: `finding_verification → threat_analysis` (`rework`, inline budget 2); `finding_verification` is non-blocking and self-caps at `max_rework_per_stage: 2` then accepts. The `dependency_scan` checker never gates (it always emits `pass`); whether its findings matter is expressed by the flow's edges, which here proceed unconditionally to `threat_analysis`.
 
-As with `deep_research`, the flow declares `budgets.global_fix_iterations: 8` ([security_audit.yaml:60-61](../../../src/wastech_orchestrator/core/flow/packaged/security_audit.yaml#L60)) — the reserved key the engine's global cap reads — so cumulative rework stops at `min(8, agents.max_total_fix_iterations)`.
+As with `deep_research`, the flow declares `budgets.global_fix_iterations: 8` ([security_audit.yaml:60-61](../../../src/wastech_orchestrator/packaged/flows/security_audit.yaml#L60)) — the reserved key the engine's global cap reads — so cumulative rework stops at `min(8, agents.max_total_fix_iterations)`.
 
 The supervisor layer writes the task summary; the audit deliverable is the private report under `.worc/`. See [flows/index.md](index.md), [B31](../blocks/B31-supervisor.md).

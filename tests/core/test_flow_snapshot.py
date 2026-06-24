@@ -22,12 +22,7 @@ from wastech_orchestrator.core.flow.schema import (
 from wastech_orchestrator.core.flow.snapshot import FlowLoadError, FlowSnapshot, load_flow
 
 CODESIGN = (
-    Path(__file__).parent.parent.parent
-    / "src"
-    / "wastech_orchestrator"
-    / "core"
-    / "flow"
-    / "packaged"
+    Path(__file__).parent.parent.parent / "src" / "wastech_orchestrator" / "packaged" / "flows"
 )
 
 

@@ -1,8 +1,8 @@
 # Flow: `deep_research`
 
-> Reconstructed from code (`src/wastech_orchestrator/core/flow/packaged/deep_research.yaml` and the node runners). The code is the only source of truth. Significant claims carry a `file:line` reference.
+> Reconstructed from code (`src/wastech_orchestrator/packaged/flows/deep_research.yaml` and the node runners). The code is the only source of truth. Significant claims carry a `file:line` reference.
 
-A research-synthesis flow ([deep_research.yaml](../../../src/wastech_orchestrator/core/flow/packaged/deep_research.yaml), `task_type: deep_research`). Flow-wide ceilings: `permission_ceiling: workspace-write`, `output_policy: repository_document` (the deliverable is `docs/research/<task-id>/{report.md,sources.json}`), `publishing: documentation_pull_request`, and crucially `network_policy: research` — declaring `network_policy` is what grants every node network access and enables the optional external-research node ([B25](../blocks/B25-security-policy.md), [B30](../blocks/B30-flow-node-runners.md)).
+A research-synthesis flow ([deep_research.yaml](../../../src/wastech_orchestrator/packaged/flows/deep_research.yaml), `task_type: deep_research`). Flow-wide ceilings: `permission_ceiling: workspace-write`, `output_policy: repository_document` (the deliverable is `docs/research/<task-id>/{report.md,sources.json}`), `publishing: documentation_pull_request`, and crucially `network_policy: research` — declaring `network_policy` is what grants every node network access and enables the optional external-research node ([B25](../blocks/B25-security-policy.md), [B30](../blocks/B30-flow-node-runners.md)).
 
 ## The graph
 
@@ -29,12 +29,12 @@ flowchart LR
 | `critical_review` | evaluator | read-only · **`resume_own_lineage`** · non-blocking, `max_rework_per_stage: 3` | remembers prior rounds via its own durable session ([B30](../blocks/B30-flow-node-runners.md)) |
 | `publish` | publish | `documentation_pull_request` | the after-stage output guard already confined writes to the report dir |
 
-(Verified against [deep_research.yaml:14-77](../../../src/wastech_orchestrator/core/flow/packaged/deep_research.yaml#L14).)
+(Verified against [deep_research.yaml:14-77](../../../src/wastech_orchestrator/packaged/flows/deep_research.yaml#L14).)
 
 ## Loops and budgets
 
 All three feedback edges point back to `synthesis` with **inline** budgets (not named loops): `citation_check → synthesis` (`fail`, budget 1), `fact_verification → synthesis` (`rework`, budget 2), `critical_review → synthesis` (`rework`, budget 3). The two evaluators are **non-blocking**: each reworks up to its own `max_rework_per_stage` (counted from the immutable `in_flow_verdict` rows) then takes `accept` — never `manual` ([B30](../blocks/B30-flow-node-runners.md)).
 
-The flow declares `budgets.global_fix_iterations: 12` ([deep_research.yaml:79-80](../../../src/wastech_orchestrator/core/flow/packaged/deep_research.yaml#L79)) — the reserved key the engine's global cap reads (`run_state.GLOBAL_FIX_KEY`). The effective ceiling is `min(12, agents.max_total_fix_iterations)`, so cumulative rework across all feedback edges stops at 12 (tighter than the config default).
+The flow declares `budgets.global_fix_iterations: 12` ([deep_research.yaml:79-80](../../../src/wastech_orchestrator/packaged/flows/deep_research.yaml#L79)) — the reserved key the engine's global cap reads (`run_state.GLOBAL_FIX_KEY`). The effective ceiling is `min(12, agents.max_total_fix_iterations)`, so cumulative rework across all feedback edges stops at 12 (tighter than the config default).
 
 The supervisor layer still writes the task summary; the deliverable PR body is the committed summary. See [flows/index.md](index.md) and [B31](../blocks/B31-supervisor.md).

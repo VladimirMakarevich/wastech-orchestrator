@@ -255,6 +255,38 @@ def test_audit_commit_noop_when_no_tasks(
     assert gm.commit_audit("task-001") is None
 
 
+def test_audit_commit_stages_lifecycle_move_deletion(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # A task file already tracked under tasks/failed/ that is moved to tasks/done/ must have its
+    # *deletion* staged too — otherwise the dangling removal rides back onto the base branch as a
+    # `D` status after terminal cleanup (the task-023 regression).
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x")
+    failed = git_repo.clone / "tasks" / "failed"
+    failed.mkdir(parents=True, exist_ok=True)
+    (failed / "task-001.md").write_text("t\n", encoding="utf-8")
+    git_run(["add", "tasks/failed/task-001.md"], git_repo.clone)
+    git_run(["commit", "-m", "track failed task file"], git_repo.clone)
+    # Lifecycle move: failed -> done (the orchestrator's _relocate_task_file does this on disk).
+    (failed / "task-001.md").unlink()
+    done = git_repo.clone / "tasks" / "done"
+    done.mkdir(parents=True, exist_ok=True)
+    (done / "task-001.md").write_text("t\n", encoding="utf-8")
+    (done / "task-001.summary.md").write_text("s\n", encoding="utf-8")
+
+    sha = gm.commit_audit("task-001")
+    assert sha is not None
+    # The move is committed: the old path is gone from the tree (git may record it as a delete or
+    # a rename) and the new path is tracked — so the removal is part of the commit, not dangling.
+    tracked = git_run(["ls-files"], git_repo.clone)
+    assert "tasks/failed/task-001.md" not in tracked
+    assert "tasks/done/task-001.md" in tracked
+    # The working tree is clean: no dangling `D tasks/failed/task-001.md` to ride back to base.
+    assert "tasks/failed/task-001.md" not in git_run(["status", "--porcelain"], git_repo.clone)
+
+
 def test_snapshot_capture_and_partial_change(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
 ) -> None:

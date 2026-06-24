@@ -38,7 +38,7 @@ The module is "shapes and normalization only: no provider/CLI syntax, no process
 
 - `None` — the diff could not be computed (e.g. git is not wired in a unit harness) → run **all** sets (a subset cannot be proven safe).
 - `[]` — the diff is empty (the task changed no code) → run **nothing** (the checks node then passes vacuously).
-- a non-empty list — match each set's `paths` globs against the changed paths and run the **union**. A set with no `paths` always runs (on any non-empty diff). **Fail-safe to full:** if any changed path is claimed by no path-bearing set (a root / shared / codegen edit), run **all** sets ([selection.py:42-44](../../../src/wastech_orchestrator/checks/selection.py#L42)). The result preserves `sets` order and de-dups by set name.
+- a non-empty list — match each set's `paths` globs against the changed paths and run the **union** of the matching sets. A set with no `paths` always runs (on any non-empty diff), so a catch-all set is how an operator covers shared / root files. A changed path claimed by no set matches nothing and runs no set on its account — it does **not** fall back to running every set (that "fail-safe to full" turned any unclaimed root/docs edit into a full-repo run on real monorepos, e.g. pulling an unrunnable backend gate into a frontend-only task) ([selection.py:40-52](../../../src/wastech_orchestrator/checks/selection.py#L40)). The result preserves `sets` order and de-dups by set name.
 
 The glob matcher `_compile_glob` translates a repo-relative glob into an anchored regex, dependency-free so it works on the 3.12 floor: `**/` is zero-or-more leading directories (so `**/*.md` matches both `README.md` and `docs/a/b.md`), `**` crosses separators, a single `*` and `?` stay within one path segment ([selection.py:59-92](../../../src/wastech_orchestrator/checks/selection.py#L59)). It is `lru_cache`d.
 
@@ -51,9 +51,7 @@ flowchart TB
     sel --> tri{"changed_paths"}
     tri -->|None: git not wired| all["run ALL sets"]
     tri -->|empty diff| none["run NOTHING (vacuous pass)"]
-    tri -->|non-empty| match{"every changed path<br/>claimed by some set?"}
-    match -->|no: root/shared/codegen edit| all
-    match -->|yes| union["union of matching sets<br/>(no-paths set always runs)"]
+    tri -->|non-empty| union["union of matching sets<br/>(no-paths set always runs;<br/>an unclaimed path runs no set)"]
 ```
 
 ## Invariants & guarantees
@@ -61,7 +59,7 @@ flowchart TB
 - Checks are always argv tuples, never shell strings; shell metacharacters and denied/forbidden commands are rejected by the predicates at config-load (B05), with the runner launching the list with `shell=False` (B24) ([model.py:26](../../../src/wastech_orchestrator/checks/model.py#L26), [model.py:142-161](../../../src/wastech_orchestrator/checks/model.py#L142)).
 - Resolution and selection are pure: no process launch, no file read, no cache, no fingerprint ([model.py:8-9](../../../src/wastech_orchestrator/checks/model.py#L8), [resolver.py:1-7](../../../src/wastech_orchestrator/checks/resolver.py#L1), [selection.py:1-6](../../../src/wastech_orchestrator/checks/selection.py#L1)).
 - An empty `command_sets` mapping is a no-gate config — `resolve()` returns `()` and the checks node passes vacuously ([resolver.py:22-23](../../../src/wastech_orchestrator/checks/resolver.py#L22)).
-- Selection is conservative by construction: it only ever _narrows_ from "run all" when every changed path is attributable to a path-bearing set; an unclaimed path or an unknown diff falls back to running all sets ([selection.py:35-44](../../../src/wastech_orchestrator/checks/selection.py#L35)).
+- Selection is the union of sets whose `paths` match, plus any no-`paths` catch-all. Only an **unknown** diff (`None`, git not wired) runs all sets; an unclaimed path on a known diff runs no set on its account, so covering shared/root files is the operator's job (a catch-all set or explicit `paths`) ([selection.py:35-52](../../../src/wastech_orchestrator/checks/selection.py#L35)).
 - The "flow never supplies commands" ceiling is preserved: commands come from config, and selection is a pure function of the diff — never an agent decision ([selection.py:1-6](../../../src/wastech_orchestrator/checks/selection.py#L1)).
 - A check `cwd` is repo-relative and validated against traversal at config-load by `is_safe_relpath` ([model.py:130-139](../../../src/wastech_orchestrator/checks/model.py#L130)).
 
@@ -73,5 +71,5 @@ flowchart TB
 ## Tests
 
 - `tests/checks/test_checks_model.py` — normalization of `CheckCommandSpec` / mappings / legacy strings, name derivation across path flavors, the `cwd` round-trip, blank/malformed rejection, `normalize_command_sets` carrying `paths` / `timeout_seconds` / `skip_if_unavailable` / `cwd`, the `shell_metachars` / `argv_matches_denied` predicates, and `is_safe_relpath` (rejecting traversal/absolute/`~`).
-- `tests/checks/test_selection.py` — the tri-state contract (`None` → all, `[]` → none, non-empty → union), the no-`paths` set always running, fail-safe-to-full on an unclaimed path, the union of multiple matched sets, and the `_compile_glob` `**/` vs `*` (single-segment) vs `?` matching.
+- `tests/checks/test_selection.py` — the tri-state contract (`None` → all, `[]` → none, non-empty → union), the no-`paths` set always running, an unclaimed path running only the always-on set (no fail-safe-to-full) or nothing when there is no catch-all, the union of multiple matched sets, and the `_compile_glob` `**/` vs `*` (single-segment) vs `?` matching.
 - `CheckResolver.resolve()` (normalizing the operator's command sets, no shell splitting) is exercised on the real path by `tests/security/test_no_shell_interpolation.py` and end-to-end in `tests/core/test_orchestrator.py`.

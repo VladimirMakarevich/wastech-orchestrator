@@ -2,7 +2,7 @@
 
 > Reconstructed from code (`src/wastech_orchestrator/core/flow/schema.py`, `contracts.py`, `snapshot.py`, `registry.py`, `validator.py`, `packaged/*.yaml`) and tests (`tests/core/flow/`). The code is the only source of truth; this document was rebuilt from the implementation, not from prose or comments. Significant claims carry a `file:line` reference.
 
-**Status:** documented · **Source modules:** `core/flow/schema.py`, `core/flow/contracts.py`, `core/flow/snapshot.py`, `core/flow/registry.py`, `core/flow/validator.py`, `core/flow/packaged/`
+**Status:** documented · **Source modules:** `core/flow/schema.py`, `core/flow/contracts.py`, `core/flow/snapshot.py`, `core/flow/registry.py`, `core/flow/validator.py`, `packaged/flows/`
 
 ## Responsibility
 
@@ -51,7 +51,7 @@ The resulting `FlowSnapshot` ([snapshot.py:118](../../../src/wastech_orchestrato
 `FlowRegistry.resolve(task_type)` ([registry.py:66](../../../src/wastech_orchestrator/core/flow/registry.py#L66)) maps a task's `task_type` to a validated snapshot through two layers in priority order ([registry.py:113](../../../src/wastech_orchestrator/core/flow/registry.py#L113)):
 
 1. **Operator flows** — `<repo>/.worc/flows/<task_type>.yaml`, if present (operators override/extend built-ins);
-2. **Packaged built-ins** — shipped under `core/flow/packaged/`: `implementation`, `deep_research`, `security_audit`.
+2. **Packaged built-ins** — shipped under `packaged/flows/`: `implementation`, `deep_research`, `security_audit`.
 
 `task_type=None` defaults to `implementation` ([registry.py:40](../../../src/wastech_orchestrator/core/flow/registry.py#L40)); an unknown `task_type`, or a YAML whose `flow.task_type` field does not match the lookup key, raises `FlowResolutionError` before any side effect ([registry.py:79-89](../../../src/wastech_orchestrator/core/flow/registry.py#L79)). Every resolved snapshot passes `validate_flow`, plus `validate_flow_against_config` when the registry was constructed with a config ([registry.py:90-93](../../../src/wastech_orchestrator/core/flow/registry.py#L90)). `validate_all()` ([registry.py:95](../../../src/wastech_orchestrator/core/flow/registry.py#L95)) loads + validates **every** resolvable flow (packaged + operator) for the install/preflight gate, returning `(name, error)` per flow without raising — the caller (`install`/`preflight`, [B01](B01-cli-and-operator-commands.md)/[B03](B03-installer-and-scaffolding.md)) treats any error as fatal.
 

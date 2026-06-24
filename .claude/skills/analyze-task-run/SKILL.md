@@ -35,9 +35,9 @@ Confirm which run you're analyzing (task id + final status + finished_at) before
 
 | Symptom (in target `<target>/.worc/`) | Lever to fix (in orchestrator repo) |
 | --- | --- |
-| Active role prompt used by the run — `roles/*.md` | Packaged default `src/wastech_orchestrator/core/flow/packaged/roles/*.md` (change the default) **or** the target's own `roles/*.md` (change just this repo) |
-| Active flow graph — `flows/*.yaml` (nodes, edges, per-node `provider`/`model`/`reasoning`/`when`/`enabled`) | Packaged `src/wastech_orchestrator/core/flow/packaged/*.yaml`; node schema `core/flow/schema.py`, parse `core/flow/snapshot.py`, validate `core/flow/validator.py` |
-| Active config — `config.yaml` (providers, budgets, checks, decomposition, supervisor) | Defaults: `config/loader.py` (`_DEFAULT_*`), `install/config_writer.py`, `templates/config.example.yaml`; schema `config/schema.py` |
+| Active role prompt used by the run — `roles/*.md` | Packaged default `src/wastech_orchestrator/packaged/flows/roles/*.md` (change the default) **or** the target's own `roles/*.md` (change just this repo) |
+| Active flow graph — `flows/*.yaml` (nodes, edges, per-node `provider`/`model`/`reasoning`/`when`/`enabled`) | Packaged `src/wastech_orchestrator/packaged/flows/*.yaml`; node schema `core/flow/schema.py`, parse `core/flow/snapshot.py`, validate `core/flow/validator.py` |
+| Active config — `config.yaml` (providers, budgets, checks, decomposition, supervisor) | Defaults: `config/loader.py` (`_DEFAULT_*`), `install/config_writer.py`, `packaged/config.example.yaml`; schema `config/schema.py` |
 | Model/reasoning that actually ran | Resolution: node value wins, else provider default — `providers/claude.py` (`request.model or config.model`, `request.reasoning or config.reasoning`), `_adapter_base.py` |
 | Final rendered prompt the agent received | `rendered-prompt.md` is the literal text = role file + Core-built instruction + context footer (`_adapter_base.build_effective_prompt`). The editable part is the **role file**; the scaffolding is code |
 

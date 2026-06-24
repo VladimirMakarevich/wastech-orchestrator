@@ -569,9 +569,19 @@ class GitManager:
             for state in ("done", "failed")
             for suffix in (".md", ".summary.md")
         ]
-        present = [rel for rel in audit_files if (Path(self._clone) / rel).exists()]
+        # Stage the task file's *appearance* in its new lifecycle folder AND its *removal* from the
+        # old one. A lifecycle move (failed -> done) deletes the source path; a plain `git add` of
+        # only the files that still exist would miss that deletion when the source is tracked in the
+        # branch's base (e.g. committed to base by hand) — leaving the base working tree dirty (a
+        # dangling `D`) after terminal cleanup. `git add -A` over the candidate pathspecs stages
+        # both adds and deletes. Pass only paths that exist on disk or are tracked, so an unmatched
+        # pathspec can never abort the whole add.
+        tracked = set(self._git("ls-files", "--", *audit_files).stdout.splitlines())
+        stageable = [
+            rel for rel in audit_files if (Path(self._clone) / rel).exists() or rel in tracked
+        ]
         sha: str | None = None
-        if present and self._git("add", "--", *present).ok:
+        if stageable and self._git("add", "-A", "--", *stageable).ok:
             commit = self._git("commit", "-m", message)
             if commit.ok:
                 sha = self._git_checked("rev-parse", "HEAD")
@@ -739,14 +749,19 @@ class GitManager:
         return result.stdout
 
     def diff_stat(self) -> str:
-        """``git diff --stat base...HEAD`` — changed files + line counts only, no patch body.
+        """``git diff --stat`` of the task change vs ``base_branch`` — files + line counts only.
 
-        Used by the deterministic minimal summary so the committed ``summary.md`` stays
-        compact. ``--stat`` carries only file paths and counts (never patch content), so unlike
-        :meth:`cumulative_committed_diff` there is nothing secret to redact.
+        Diffs ``base_branch`` against the **working tree** (not ``base...HEAD``), so it reflects the
+        pending change whether or not it is committed yet. The deterministic minimal summary is
+        built during ``finalize`` — *before* the publish node's ``commit_code`` — so a
+        committed-only diff (``base...HEAD``) is still empty there and renders a misleading "(no
+        changes)". The task branch is cut from ``base_branch`` and ``base_branch`` does not advance
+        during a task, so this equals the task's net change (tracked files; same coverage as the
+        redacted ``current.diff``). ``--stat`` carries only file paths and counts (never patch
+        content), so unlike :meth:`cumulative_committed_diff` there is nothing secret to redact.
         """
         base = self._config.repo.base_branch
-        return self._git("diff", "--stat", f"{base}...HEAD").stdout
+        return self._git("diff", "--stat", base).stdout
 
     # --- terminal cleanup ----------------------------------------------------------
 
