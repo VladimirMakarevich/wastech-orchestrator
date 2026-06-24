@@ -277,6 +277,7 @@ security:
   allowed_environment:
     - "PATH"
     - "HOME"
+    - "USER"
     - "USERPROFILE"
     - "CODEX_HOME"
     - "CLAUDE_CONFIG_DIR"
@@ -292,7 +293,7 @@ security:
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `strict_isolation` | boolean | `true` | Preflight fails if the required isolation cannot be enforced. This is also the **sole gate** for operator-selected full access: a Codex `danger-full-access` sandbox or a Claude `--permission-mode bypassPermissions` — in provider config _or_ a flow node's `extra_args` — is rejected at preflight while this is `true` (the default). Set it `false` to opt in (you own the risk). |
-| `allowed_environment` | list of strings | `PATH`, `HOME`, `USERPROFILE`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR` | Only these environment variables reach child processes. |
+| `allowed_environment` | list of strings | `PATH`, `HOME`, `USER`, `USERPROFILE`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR` | Only these environment variables reach child processes. `USER` is required on macOS so subscription/OAuth-authenticated provider CLIs can reach their Keychain credentials (without it the CLI reports "Not logged in"). |
 | `denied_read_paths` | list of strings | `.env`, `secrets/**` | Paths agents must not read and artifacts must not expose. |
 | `denied_commands` | list of strings | `git commit`, `git push`, `gh pr create` | Commands agents are forbidden to run. |
 
@@ -531,6 +532,43 @@ nodes:
     permission_profile: workspace-write
     network_access: true # only this node may reach the network; siblings stay offline
 ```
+
+### Per-node overrides in flows
+
+Every `agent` and `evaluator` node may **override** provider/model/reasoning for that node alone. All three are optional; omit one and the node inherits the `config.yaml` provider default — `provider` ⇒ the global primary, `model` ⇒ `agents.providers.<provider>.model`, `reasoning` ⇒ `agents.providers.<provider>.reasoning`. This is how you spend more on the nodes that need it and less on the cheap ones — e.g. a low-reasoning model for a mechanical step, a stronger model + higher reasoning for review — without touching the global defaults. The packaged flows ship every agent/evaluator node with these slots present but commented out, so the configuration surface is visible at a glance; uncomment to pin a node.
+
+```yaml
+nodes:
+  - id: planning
+    kind: agent
+    role_file: roles/planning.md
+    provider: claude # ∈ agents.allowed; default = global primary
+    model: claude-opus-4-8 # default = agents.providers.<provider>.model
+    reasoning: high # low | medium | high | xhigh | max; default = provider reasoning
+  - id: review
+    kind: evaluator
+    role: review
+    role_file: roles/review.md
+    model: claude-opus-4-8
+    reasoning: xhigh # spend the most reasoning where rework is decided
+```
+
+The full set of optional per-node fields (all default to the value shown):
+
+| Field | Node kinds | Default | Meaning |
+| --- | --- | --- | --- |
+| `provider` | agent, evaluator | global primary | Which agent runs the node; must be in `agents.allowed`. |
+| `model` | agent, evaluator | provider's `model` | Model id for this node (not allowlisted — config carries one model per provider). Confirm ids against your installed CLIs. |
+| `reasoning` | agent, evaluator | provider's `reasoning` | `low`/`medium`/`high`/`xhigh`/`max` (Codex clamps `max`→`xhigh`). |
+| `network_access` | agent, evaluator | flow `network_policy` | Tri-state per-node network grant/deny (see above). |
+| `timeout_seconds` | agent | provider `timeout_seconds` | Per-node wall-clock cap. |
+| `extra_args` | agent | `()` | Extra CLI flags for this node, concatenated after the provider list (same forbidden-args screen). |
+| `permission_profile` | agent | flow `permission_ceiling` | May only be **≤** the ceiling; evaluators are forced `read-only`. |
+| `best_effort` | agent | `false` | Tolerate an infra failure (engine continues) instead of failing the task. |
+| `blocking` | evaluator | `true` | A failing verdict blocks (`true`) vs is advisory (`false`). |
+| `max_rework_per_stage` | evaluator | `1` | Rework loops this evaluator may trigger per stage. |
+
+Note: **disabling** a node is not a flow field — it is a per-task override (`nodes.<id>.enabled: false` in the task file; see [operations.md](operations.md#disabling-flow-nodes-per-task)).
 
 ## `skills`
 

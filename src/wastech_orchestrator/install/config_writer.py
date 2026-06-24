@@ -114,6 +114,8 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "allowed_environment": [
                 "PATH",
                 "HOME",
+                # macOS subscription/OAuth auth resolves Keychain credentials via $USER.
+                "USER",
                 "USERPROFILE",
                 "CODEX_HOME",
                 "CLAUDE_CONFIG_DIR",

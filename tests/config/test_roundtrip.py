@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from wastech_orchestrator.config.loader import _DEFAULT_DENIED_COMMANDS, loads_config
+from wastech_orchestrator.config.loader import (
+    _DEFAULT_ALLOWED_ENV,
+    _DEFAULT_DENIED_COMMANDS,
+    loads_config,
+)
 from wastech_orchestrator.config.validation import validate_config
 
 
@@ -11,6 +15,13 @@ def test_example_denied_commands_match_loader_default(packaged_config_text: str)
     # must not silently lose a default denial (e.g. ``gh pr merge``). Guards drift in either copy.
     cfg = loads_config(packaged_config_text).config
     assert cfg.security.denied_commands == _DEFAULT_DENIED_COMMANDS
+
+
+def test_example_allowed_environment_matches_loader_default(packaged_config_text: str) -> None:
+    # allowed_environment REPLACES the default too, so an operator copying the example must not
+    # lose a default key (e.g. ``USER``, needed for macOS auth). Guards drift in either copy.
+    cfg = loads_config(packaged_config_text).config
+    assert cfg.security.allowed_environment == _DEFAULT_ALLOWED_ENV
 
 
 def test_packaged_example_loads_and_validates_clean(packaged_config_text: str) -> None:

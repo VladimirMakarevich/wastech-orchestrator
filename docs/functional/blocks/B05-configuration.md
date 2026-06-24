@@ -21,7 +21,7 @@ The split is deliberate: `schema.py` holds _shapes only_ (no parsing, no validat
 - `ConfigLoadResult(config, warnings)` ([loader.py:72-77](../../../src/wastech_orchestrator/config/loader.py#L72)) — the parsed config plus non-fatal warnings.
 - `validate_config(config)` → `list[str]` ([validation.py:66](../../../src/wastech_orchestrator/config/validation.py#L66)) — semantic gate; raises `ConfigError`, returns warnings.
 - `upgrade_config_mapping(template, operator)` → `(merged, added, removed)` ([upgrade.py:64-80](../../../src/wastech_orchestrator/config/upgrade.py#L64)); `parse_mapping` / `packaged_template_mapping` / `render` ([upgrade.py:46](../../../src/wastech_orchestrator/config/upgrade.py#L46), [upgrade.py:54](../../../src/wastech_orchestrator/config/upgrade.py#L54), [upgrade.py:121](../../../src/wastech_orchestrator/config/upgrade.py#L121)).
-- `DEFAULT_ALLOWED_ENV` — the `_DEFAULT_ALLOWED_ENV` constant ([loader.py:52-58](../../../src/wastech_orchestrator/config/loader.py#L52)): `PATH`, `HOME`, `USERPROFILE`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR`.
+- `DEFAULT_ALLOWED_ENV` — the `_DEFAULT_ALLOWED_ENV` constant ([loader.py:50-59](../../../src/wastech_orchestrator/config/loader.py#L50)): `PATH`, `HOME`, `USER`, `USERPROFILE`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR` (`USER` is needed for macOS Keychain-based subscription/OAuth auth).
 
 ## Behavior
 

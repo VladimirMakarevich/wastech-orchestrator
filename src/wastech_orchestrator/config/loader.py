@@ -50,6 +50,9 @@ _REASONING_LEVELS: frozenset[str] = frozenset({"low", "medium", "high", "xhigh",
 _DEFAULT_ALLOWED_ENV: tuple[str, ...] = (
     "PATH",
     "HOME",
+    # USER is needed on macOS: subscription/OAuth-authenticated Claude/Codex resolve their
+    # Keychain credentials via $USER. Without it the spawned CLI reports "Not logged in".
+    "USER",
     "USERPROFILE",
     "CODEX_HOME",
     "CLAUDE_CONFIG_DIR",

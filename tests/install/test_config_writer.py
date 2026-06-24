@@ -81,6 +81,8 @@ def test_generated_config_is_stamped_with_schema_version(tmp_path: Path) -> None
 def test_safe_security_defaults_are_written(tmp_path: Path) -> None:
     cfg = loads_config(build_and_validate(_spec(tmp_path, (ProviderId.CODEX,)))).config
     assert cfg.security.strict_isolation is True
+    # USER must be allowlisted so macOS subscription CLIs can reach their Keychain credentials.
+    assert "USER" in cfg.security.allowed_environment
     assert "git push" in cfg.security.denied_commands
     assert "gh pr create" in cfg.security.denied_commands
     assert "gh pr merge" in cfg.security.denied_commands

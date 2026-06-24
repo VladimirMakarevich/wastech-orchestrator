@@ -1,5 +1,20 @@
 # Packaged built-in flow: deep_research.
 # Canonical version; co-design reference in docs/backlog/flows/co-design/deep_research.yaml.
+#
+# ----------------------------------------------------------------------------------------------------
+# Per-node tuning (ALL fields below are OPTIONAL — omit one to inherit the default). Every
+# agent/evaluator node carries the provider/model/reasoning slots commented out so the full
+# configuration surface is visible; uncomment and edit to pin a single node.
+#   agent + evaluator nodes:
+#     provider:  codex | claude            which agent runs the node (∈ agents.allowed); default: global primary
+#     model:     <model id>                overrides agents.providers.<provider>.model for THIS node
+#     reasoning: low|medium|high|xhigh|max  default: agents.providers.<provider>.reasoning
+#     network_access: true | false         per-node network grant/deny; default: flow network_policy (research)
+#   agent nodes also: timeout_seconds, extra_args, best_effort, permission_profile (≤ flow ceiling), when
+#   evaluator nodes also: blocking, max_rework_per_stage
+#   Disabling a node is PER-TASK: set `nodes.<id>.enabled: false` in the task file.
+#   Full reference: docs/configuration.md → "Per-node overrides in flows".
+# ----------------------------------------------------------------------------------------------------
 flow:
   name: deep_research
   task_type: deep_research
@@ -19,27 +34,62 @@ flow:
       permission_profile: read-only
       hitl: { allow_question: true, allow_approval: false }
       when: { fact: derived.needs_refinement }
+      # optional overrides (uncomment to pin this node):
+      # provider: claude
+      # model: claude-opus-4-8
+      # reasoning: high
+      # timeout_seconds: 7200
+      # network_access: false
+      # extra_args: []
     - id: repository_analysis
       kind: agent
       role_file: roles/research/repository_analysis.md
       session_scope: fresh_disposable
       permission_profile: read-only
+      # optional overrides (uncomment to pin this node):
+      # provider: claude
+      # model: claude-opus-4-8
+      # reasoning: high
+      # timeout_seconds: 7200
+      # network_access: false
+      # extra_args: []
     - id: external_research
       kind: agent
       role_file: roles/research/external_research.md
       session_scope: fresh_disposable
       permission_profile: read-only
       when: { fact: config.external_research }
+      # optional overrides (uncomment to pin this node):
+      # provider: claude
+      # model: claude-opus-4-8
+      # reasoning: high
+      # timeout_seconds: 7200
+      # network_access: true
+      # extra_args: []
     - id: architecture_design
       kind: agent
       role_file: roles/research/architecture_design.md
       session_scope: fresh_disposable
       permission_profile: workspace-write
+      # optional overrides (uncomment to pin this node):
+      # provider: claude
+      # model: claude-opus-4-8
+      # reasoning: xhigh
+      # timeout_seconds: 7200
+      # network_access: false
+      # extra_args: []
     - id: synthesis
       kind: agent
       role_file: roles/research/synthesis.md
       session_scope: fresh_disposable
       permission_profile: workspace-write
+      # optional overrides (uncomment to pin this node):
+      # provider: claude
+      # model: claude-opus-4-8
+      # reasoning: high
+      # timeout_seconds: 7200
+      # network_access: false
+      # extra_args: []
     - id: citation_check
       kind: checks
       checker: citation
@@ -51,6 +101,11 @@ flow:
       permission_profile: read-only
       blocking: false
       max_rework_per_stage: 1
+      # optional overrides (uncomment to pin this evaluator):
+      # provider: claude
+      # model: claude-opus-4-8
+      # reasoning: high
+      # network_access: false
     - id: critical_review
       kind: evaluator
       role: critic
@@ -59,6 +114,11 @@ flow:
       permission_profile: read-only
       blocking: false
       max_rework_per_stage: 3
+      # optional overrides (uncomment to pin this evaluator):
+      # provider: claude
+      # model: claude-opus-4-8
+      # reasoning: xhigh
+      # network_access: false
     - id: publish
       kind: publish
       policy: documentation_pull_request

@@ -60,6 +60,7 @@ security:
   allowed_environment:
     - "PATH"
     - "HOME"
+    - "USER" # macOS: subscription/OAuth CLIs resolve Keychain credentials via $USER (else "Not logged in")
     - "USERPROFILE"
     - "CODEX_HOME"
     - "CLAUDE_CONFIG_DIR"
@@ -161,8 +162,8 @@ skills:                             # planning-selected repo skill references (o
 
 supervisor:                          # constant oversight layer above any flow — always active (§P2.1)
   role_file: "roles/supervisor.md"  # role prompt for the supervisor; path-contained under roles/
-  model: null                       # null = use the global primary provider's default model
-  reasoning: null                   # null = use the global primary provider's default reasoning
+  model: "claude-opus-4-8"          # null = use the global primary provider's default model
+  reasoning: medium                 # null = use the global primary provider's default reasoning
 
 prompt_audit: false                 # record each step's prompt + who (provider/model/attempt/fallback/
                                     # status) under logs/<task-id>/prompt-audit/, in chronological order.
