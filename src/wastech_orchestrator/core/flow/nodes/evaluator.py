@@ -27,7 +27,7 @@ from typing import Any
 from wastech_orchestrator.core.flow.contracts import SessionScope, resolve_network_access
 from wastech_orchestrator.core.flow.engine import Finding, NodeContext, NodeOutcome, NodeResult
 from wastech_orchestrator.core.flow.nodes.base import (
-    NodeInfraError,
+    EvaluatorInfraError,
     NodeInputs,
     NodeServices,
 )
@@ -92,7 +92,9 @@ class EvaluatorNodeRunner:
                 if outcome.terminal_error
                 else "no_provider_available"
             )
-            raise NodeInfraError(f"evaluator node {node.id!r}: no provider could run it ({err})")
+            raise EvaluatorInfraError(
+                f"evaluator node {node.id!r}: no provider could run it ({err})"
+            )
         self._persist_own_lineage(node, ctx, outcome)
         raw_findings = self._extract_findings(outcome.result.structured_output)
         findings = tuple(_to_finding(f) for f in raw_findings)

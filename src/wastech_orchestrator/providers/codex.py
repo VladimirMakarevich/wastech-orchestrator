@@ -17,7 +17,7 @@ only as file paths.
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +36,7 @@ from wastech_orchestrator.providers.base import (
     ProviderError,
     ProviderId,
 )
+from wastech_orchestrator.providers.capabilities import normalize_codex_reasoning
 from wastech_orchestrator.providers.errors import (
     StderrSignature,
     make_signatures,
@@ -101,6 +102,14 @@ _CODEX_SIGNATURES = make_signatures(
 )
 
 
+def _effective_sandbox(config: ProviderConfig, request: AgentRunRequest) -> str:
+    """Resolve the Codex sandbox without relaxing the node's requested permission profile."""
+    configured = config.sandbox or config.permission_profile or _DEFAULT_SANDBOX
+    if request.permission_profile == "read-only" or configured == "read-only":
+        return "read-only"
+    return configured
+
+
 def build_codex_argv(
     config: ProviderConfig,
     request: AgentRunRequest,
@@ -124,7 +133,7 @@ def build_codex_argv(
             ErrorClass.CONFIGURATION_ERROR, "rejected unsafe extra_args: " + "; ".join(reasons)
         )
 
-    sandbox = config.sandbox or config.permission_profile or _DEFAULT_SANDBOX
+    sandbox = _effective_sandbox(config, request)
 
     # Approval policy is a global Codex flag. Both Codex CLI 0.57 and current releases reject it
     # when it is placed after the ``exec`` subcommand.
@@ -158,19 +167,16 @@ def build_codex_argv(
     model = request.model or config.model
     if model:
         argv += ["--model", model]
-    # Codex --reasoning-effort accepts none/low/medium/high/xhigh (aliases: extra_high, extra-high).
-    # "max" is Claude-only; clamp it to xhigh (Codex's ceiling).
     # Session resume is handled above via ``exec resume <SESSION_ID>`` (durable sessions, P2.2).
-    _CODEX_EFFORT_MAP: dict[str, str] = {
-        "low": "low",
-        "medium": "medium",
-        "high": "high",
-        "xhigh": "xhigh",
-        "max": "xhigh",
-    }
     reasoning = request.reasoning or config.reasoning
     if reasoning:
-        argv += ["--reasoning-effort", _CODEX_EFFORT_MAP[reasoning]]
+        effort = normalize_codex_reasoning(reasoning)
+        if effort is None:
+            raise ProviderError(
+                ErrorClass.CONFIGURATION_ERROR,
+                f"unsupported Codex reasoning value {reasoning!r}",
+            )
+        argv += ["-c", f'model_reasoning_effort="{effort}"']
     argv += list(combined_extra)
     argv.append("-")  # read the prompt from stdin
     return argv
@@ -265,6 +271,24 @@ class CodexProvider(BaseCliProvider):
 
     def _executable_label(self) -> str:
         return "codex"
+
+    def _preflight_capability_error(self, env: Mapping[str, str]) -> str | None:
+        """Verify ``codex exec`` exposes ``-c/--config`` for model config overrides.
+
+        Codex reasoning is set through the official ``model_reasoning_effort`` config key. Network
+        grants also use ``-c``. Probe ``codex exec --help`` and fail preflight if the subcommand
+        lacks config overrides, catching an incompatible CLI before a real node run. A probe that
+        does not cleanly exit is treated as inconclusive (no block) — the version check already
+        passed.
+        """
+        ok, help_text = self._probe([self._config.command, "exec", "--help"], env)
+        if ok and "--config" not in help_text and "-c" not in help_text:
+            return (
+                "codex exec does not expose -c/--config, required for "
+                "model_reasoning_effort and sandbox network overrides; upgrade Codex CLI or clear "
+                "Codex reasoning/network overrides"
+            )
+        return None
 
     def _signatures(self) -> Sequence[StderrSignature]:
         return _CODEX_SIGNATURES

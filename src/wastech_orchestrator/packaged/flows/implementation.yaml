@@ -30,7 +30,7 @@
 #   agent + evaluator nodes:
 #     provider:  codex | claude            which agent runs the node (∈ agents.allowed); default: global primary
 #     model:     <model id>                overrides agents.providers.<provider>.model for THIS node
-#     reasoning: low|medium|high|xhigh|max  default: agents.providers.<provider>.reasoning
+#     reasoning: minimal|low|medium|high|xhigh|max  default: agents.providers.<provider>.reasoning
 #     network_access: true | false         per-node network grant/deny; default: flow network_policy
 #   agent nodes also: timeout_seconds, extra_args (extra CLI flags), best_effort,
 #                     permission_profile (≤ flow permission_ceiling), when
@@ -82,7 +82,7 @@ flow:
       permission_profile: workspace-write
       # optional overrides (uncomment to pin this node):
       # provider: codex
-      # model: gpt-5.4
+      # model: gpt-5.5
       # reasoning: high
       # timeout_seconds: 7200
       # network_access: false
@@ -112,7 +112,7 @@ flow:
       permission_profile: workspace-write
       # optional overrides (uncomment to pin this node):
       # provider: codex
-      # model: gpt-5.4
+      # model: gpt-5.5
       # reasoning: high
       # timeout_seconds: 7200
       # network_access: false

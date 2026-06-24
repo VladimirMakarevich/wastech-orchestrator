@@ -122,7 +122,7 @@ class ProviderConfig:
     # Provider-specific (optional): Codex sandbox; Claude max_turns.
     sandbox: str | None = None
     max_turns: int | None = None
-    reasoning: str | None = None  # "low" | "medium" | "high" | "xhigh" | "max"
+    reasoning: str | None = None  # provider-specific: "minimal" | "low" | "medium" | "high" | ...
     # Exactly one configured provider must set ``primary: true`` — the global primary that runs any
     # flow node with no ``provider`` field, and the single infrastructure-fallback target (PRE.1).
     primary: bool = False

@@ -436,6 +436,26 @@ def test_agent_node_infra_exhaustion_raises(tmp_path: Path) -> None:
         AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
 
 
+def test_evaluator_node_infra_exhaustion_raises_evaluator_infra_error(tmp_path: Path) -> None:
+    # An evaluator that could not RUN (no provider) raises the dedicated EvaluatorInfraError — a
+    # NodeInfraError subclass — so the orchestrator can degrade to manual (preserve the green diff)
+    # instead of discarding it as failed, unlike an agent node whose infra exhaustion has no result.
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    router, store = FakeRouter(None), FakeStore()  # result None => infra-exhausted
+    services = _services(
+        router,
+        store,
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    node = _evaluator("review")
+    from wastech_orchestrator.core.flow.nodes.base import EvaluatorInfraError, NodeInfraError
+
+    assert issubclass(EvaluatorInfraError, NodeInfraError)
+    with pytest.raises(EvaluatorInfraError):
+        EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+
 def test_agent_workspace_write_writes_diff(tmp_path: Path) -> None:
     (tmp_path / "r.md").write_text("go", "utf-8")
     node = AgentNode(

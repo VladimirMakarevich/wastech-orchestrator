@@ -20,7 +20,7 @@ import os
 import re
 import tempfile
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -226,6 +226,16 @@ class BaseCliProvider:
                 message=f"{label} was found but '{label} --version' did not succeed",
             )
         version = _parse_version(stdout_text)
+        capability_error = self._preflight_capability_error(env)
+        if capability_error is not None:
+            return ProviderHealth(
+                provider_id=self.id,
+                executable_found=True,
+                version=version,
+                authenticated=True,
+                supports_required_features=False,
+                message=capability_error,
+            )
         return ProviderHealth(
             provider_id=self.id,
             executable_found=True,
@@ -234,6 +244,37 @@ class BaseCliProvider:
             supports_required_features=version is not None,
             message=f"{label} {version or 'unknown version'} available",
         )
+
+    def _preflight_capability_error(self, env: Mapping[str, str]) -> str | None:
+        """Subclass hook: a provider-specific capability probe run after the version check.
+
+        Returns an operator-facing message when a *configured* CLI capability is missing — so
+        preflight fails fast instead of a mid-run infra failure (e.g. a flag the installed CLI does
+        not accept) — else ``None``. The base knows no CLI syntax; only the subclass implements the
+        probe (via :meth:`_probe`). Default: no extra checks.
+        """
+        return None
+
+    def _probe(self, argv: list[str], env: Mapping[str, str]) -> tuple[bool, str]:
+        """Run a short, read-only probe command (e.g. ``<cli> … --help``) for a capability check.
+
+        Returns ``(clean_exit, combined_output)`` where ``combined_output`` is stdout + stderr. Used
+        by :meth:`_preflight_capability_error`; bounded by the preflight timeout, never launches the
+        model.
+        """
+        with tempfile.TemporaryDirectory() as scratch:
+            out = os.path.join(scratch, "probe.out")
+            proc = self._run_process(
+                argv,
+                cwd=scratch,
+                env=env,
+                timeout_seconds=_PREFLIGHT_TIMEOUT_SECONDS,
+                stdout_path=out,
+                monotonic=self._monotonic,
+            )
+            stdout_text = read_text(out)
+        ok = proc.launch_error is None and not proc.timed_out and proc.exit_code == 0
+        return ok, f"{stdout_text}\n{proc.stderr_text}"
 
     def run(self, request: AgentRunRequest) -> AgentRunResult:
         """Execute a single stage run. Infrastructure failures raise ``ProviderError``."""

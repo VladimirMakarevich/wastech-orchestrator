@@ -16,12 +16,12 @@ flowchart LR
 
 | Node | Kind | Profile / session | Notes |
 | --- | --- | --- | --- |
-| `scope` | agent | read-only · fresh_disposable | HITL question |
-| `repository_analysis` | agent | read-only · fresh_disposable |  |
+| `scope` | agent | read-only · fresh_disposable · network off | HITL question |
+| `repository_analysis` | agent | read-only · fresh_disposable · network off |  |
 | `dependency_scan` | checks | `dependency_scan` | runs the core-owned argv scanners as **evidence**; always `pass` ([B32](../blocks/B32-flow-checkers.md)) |
-| `threat_analysis` | agent | read-only · fresh_disposable |  |
-| `finding_verification` | evaluator | read-only · fresh_disposable · **non-blocking**, `max_rework_per_stage: 2` | self-caps then accepts |
-| `report` | agent | workspace-write · fresh_disposable | writes `report.md` under the private report dir |
+| `threat_analysis` | agent | read-only · fresh_disposable · network on |  |
+| `finding_verification` | evaluator | read-only · fresh_disposable · network on · **non-blocking**, `max_rework_per_stage: 2` | self-caps then accepts |
+| `report` | agent | workspace-write · fresh_disposable · network off | writes `report.md` under the private report dir |
 | `private_storage` | publish | `private_control_workspace_report` | registers the report as an artifact; no git |
 
 (Verified against [security_audit.yaml:14-58](../../../src/wastech_orchestrator/packaged/flows/security_audit.yaml#L14).)

@@ -42,11 +42,12 @@ from wastech_orchestrator.config.schema import (
     ValidationConfig,
 )
 from wastech_orchestrator.providers.base import ProviderId
+from wastech_orchestrator.providers.capabilities import all_reasoning_levels
 
 # Defaults mirror / the packaged config.example.yaml so a partial config still loads safely.
 _DEFAULT_AUDIT_MESSAGE = "chore(orchestrator): audit trail for {task_id}"
 
-_REASONING_LEVELS: frozenset[str] = frozenset({"low", "medium", "high", "xhigh", "max"})
+_REASONING_LEVELS: frozenset[str] = all_reasoning_levels()
 _DEFAULT_ALLOWED_ENV: tuple[str, ...] = (
     "PATH",
     "HOME",

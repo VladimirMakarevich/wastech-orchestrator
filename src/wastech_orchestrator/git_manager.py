@@ -380,13 +380,21 @@ class GitManager:
     # --- footprint ------------------------------------------------------------------------
 
     def ensure_runtime_excludes(self) -> None:
-        """Ensure the repo's tracked ``.gitignore`` ignores the ``.worc/`` runtime home.
+        """Ensure this clone ignores ``.worc/`` via its LOCAL ``.git/info/exclude``.
 
-        ``install`` normally writes this, but a clone scaffolded another way may lack it.
-        Idempotent; keeps ``.worc/`` (state.db, logs/, workspace/, checks/, config.yaml, …) out of
-        the operator's ``git status``. ``tasks/`` stays trackable — it carries the audit trail.
+        ``install`` writes the *tracked* ``.gitignore`` (operator-facing, committed as part of
+        setup). This per-run fallback uses the clone-local, untracked exclude instead — so the
+        runtime-home ignore is guaranteed however the clone was scaffolded, yet never rides into a
+        task's code commit or PR diff (the tracked ``.gitignore`` is left untouched). Keeps
+        ``.worc/`` (state.db, logs/, workspace/, checks/, config.yaml, …) out of the operator's
+        ``git status``; ``tasks/`` stays trackable — it carries the audit trail. Idempotent.
+        Resolved via ``rev-parse --git-path`` so it is correct for clones and linked worktrees.
         """
-        append_runtime_excludes(self._clone)
+        rel = self._git("rev-parse", "--git-path", "info/exclude").stdout.strip()
+        if not rel:
+            return
+        exclude_path = Path(rel) if Path(rel).is_absolute() else Path(self._clone) / rel
+        _append_missing_lines(exclude_path, RUNTIME_GITIGNORE_LINES)
 
     # --- SnapshotHook --------------------------------------------------------------
 
@@ -566,7 +574,11 @@ class GitManager:
         message = footprint.audit_commit_message.format(task_id=task_id)
         audit_files = [
             f"tasks/{state}/{task_id}{suffix}"
-            for state in ("done", "failed")
+            # Destination states (``done``/``failed``) stage the file's *appearance*; the source
+            # states (``pending``/``processing``) stage its *removal* on a lifecycle move — without
+            # the source paths a ``pending→failed`` / ``pending→done`` move of a base-tracked task
+            # file leaves a dangling ``D`` on the base branch after terminal cleanup.
+            for state in ("done", "failed", "pending", "processing")
             for suffix in (".md", ".summary.md")
         ]
         # Stage the task file's *appearance* in its new lifecycle folder AND its *removal* from the

@@ -14,7 +14,8 @@ one pass:
      paths contain no traversal (``..`` or absolute).
 
 :func:`validate_flow_against_config` is the **config-aware** third layer (P4.2): it needs the
-``OrchestratorConfig`` (node providers ∈ ``agents.allowed``; node reasoning ∈ the closed level set;
+``OrchestratorConfig`` (node providers ∈ ``agents.allowed``; node reasoning is valid for the
+resolved provider; Codex never receives a write-enabled node with network access;
 ``permission_ceiling`` ≤ a configured provider's capability; and — under
 ``security.strict_isolation`` — no node selects a provider full-access mode in ``extra_args`` via
 :func:`~wastech_orchestrator.security.forbidden_args.find_full_access_args`, the flow-side half of
@@ -24,8 +25,9 @@ config) never mix in one signature. The :class:`~.registry.FlowRegistry` calls i
 :func:`validate_flow`; both raise :class:`FlowValidationError`.
 
 It validates only the cases with **no safe runtime fallback** — a node pinned to a missing provider,
-a typo'd reasoning level, or a ceiling no provider can reach. Two related properties are
-deliberately **not** fatal here because the orchestrator already degrades them gracefully:
+a typo'd provider-specific reasoning level, a Codex write+network request, or a ceiling no provider
+can reach. Two related properties are deliberately **not** fatal here because the orchestrator
+already degrades them gracefully:
 
 * Flow ``budgets`` vs ``agents.max_*`` — the config cap is the non-weakenable upper bound, enforced
   by the engine *clamping* every loop to ``min(flow_budget, cap)`` at runtime (``engine.py``).
@@ -48,20 +50,22 @@ from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.core.flow.contracts import (
     PermissionProfile,
     SessionScope,
+    resolve_network_access,
 )
 from wastech_orchestrator.core.flow.engine import _REWORK_OUTCOMES, skip_outcome
 from wastech_orchestrator.core.flow.schema import AgentNode, EvaluatorNode
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
+from wastech_orchestrator.providers.base import ProviderId
+from wastech_orchestrator.providers.capabilities import (
+    all_reasoning_levels,
+    is_reasoning_supported,
+    reasoning_levels_for,
+)
 from wastech_orchestrator.security.forbidden_args import (
     find_forbidden_args,
     find_full_access_args,
 )
 from wastech_orchestrator.security.profiles import is_same_or_stricter
-
-# Reasoning levels the provider adapters understand (``ProviderConfig.reasoning``); a node may not
-# request a level outside this closed set. There is deliberately no per-model allowlist — config
-# carries one configured ``model`` per provider, not a list (greenfield, YAGNI).
-_VALID_REASONING: frozenset[str] = frozenset({"low", "medium", "high", "xhigh", "max"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,8 +103,9 @@ def validate_flow_against_config(snapshot: FlowSnapshot, config: OrchestratorCon
 
     The config-aware third layer, run by the :class:`~.registry.FlowRegistry` after
     :func:`validate_flow`. It rejects a flow that is structurally valid but cannot be safely or
-    usefully run under *this* config: a node pinned to a disallowed provider or an unknown reasoning
-    level, a ``permission_ceiling`` no configured provider can reach, or — under
+    usefully run under *this* config: a node pinned to a disallowed provider, a reasoning level the
+    resolved provider does not support, a Codex write+network request, a ``permission_ceiling`` no
+    configured provider can reach, or — under
     ``security.strict_isolation`` — a node whose ``extra_args`` select a provider full-access mode
     (the flow-side half of the isolation gate; the operator opts in via ``strict_isolation:
     false``). Security can only ever *narrow* here — see ``docs/backlog/flows/security-ceiling.md``.
@@ -427,10 +432,10 @@ def _check_config_consistency(snap: FlowSnapshot, config: OrchestratorConfig) ->
     doc = snap.doc
     agents = config.agents
     allowed = frozenset(agents.allowed)
+    global_primary = _global_primary(config)
 
-    # 1. Every node's explicit provider ∈ agents.allowed; reasoning ∈ the closed level set.
-    #    A node with no provider runs under the config's global primary, which is allowed by
-    #    construction, so only an explicit pin needs checking.
+    # 1. Every node's explicit provider ∈ agents.allowed; reasoning is valid for the resolved
+    #    provider. A node with no provider runs under the config's global primary.
     for node in doc.nodes:
         if not isinstance(node, AgentNode | EvaluatorNode):
             continue
@@ -441,11 +446,36 @@ def _check_config_consistency(snap: FlowSnapshot, config: OrchestratorConfig) ->
                     f"{sorted(p.value for p in allowed)}"
                 )
             )
-        if node.reasoning is not None and node.reasoning not in _VALID_REASONING:
+        resolved_provider = node.provider or global_primary
+        if node.reasoning is not None:
+            if resolved_provider is None:
+                valid = all_reasoning_levels()
+                if node.reasoning not in valid:
+                    errs.append(
+                        cfg(
+                            f"node {node.id!r}: reasoning {node.reasoning!r} not in {sorted(valid)}"
+                        )
+                    )
+            elif not is_reasoning_supported(resolved_provider, node.reasoning):
+                errs.append(
+                    cfg(
+                        f"node {node.id!r}: reasoning {node.reasoning!r} is not supported by "
+                        f"provider {resolved_provider.value!r}; expected one of "
+                        f"{sorted(reasoning_levels_for(resolved_provider))}"
+                    )
+                )
+        if (
+            isinstance(node, AgentNode)
+            and resolved_provider is ProviderId.CODEX
+            and (node.permission_profile or doc.permission_ceiling)
+            is PermissionProfile.WORKSPACE_WRITE
+            and resolve_network_access(node.network_access, doc.network_policy)
+        ):
             errs.append(
                 cfg(
-                    f"node {node.id!r}: reasoning {node.reasoning!r} not in "
-                    f"{sorted(_VALID_REASONING)}"
+                    f"node {node.id!r}: codex cannot run with workspace-write and "
+                    "network_access=true; split network research into a read-only node or set "
+                    "network_access: false"
                 )
             )
 
@@ -485,3 +515,8 @@ def _check_config_consistency(snap: FlowSnapshot, config: OrchestratorConfig) ->
                 )
 
     return errs
+
+
+def _global_primary(config: OrchestratorConfig) -> ProviderId | None:
+    primaries = [pid for pid, provider in config.agents.providers.items() if provider.primary]
+    return primaries[0] if len(primaries) == 1 else None

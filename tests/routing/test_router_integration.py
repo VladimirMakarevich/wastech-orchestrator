@@ -152,3 +152,66 @@ def test_infra_failure_after_changes_hands_diff_to_fallback(
     assert outcome.partial_change is partial
     assert hook.capture_calls == 1
     assert hook.partial_calls == 1
+
+
+def test_cross_provider_fallback_drops_provider_specific_request_fields(
+    config: OrchestratorConfig,
+    make_fake_provider: Callable[..., object],
+    make_request: Callable[..., AgentRunRequest],
+    tmp_path: Path,
+) -> None:
+    # A node pinned to codex-specific settings: when codex infra-fails, the claude fallback must NOT
+    # receive codex's provider-specific model/reasoning/extra_args/session id. Portable context
+    # stays.
+    primary = make_fake_provider(ProviderId.CODEX, raises=ErrorClass.RATE_LIMITED)
+    fallback = make_fake_provider(ProviderId.CLAUDE)
+    router = AgentRouter(config, {ProviderId.CODEX: primary, ProviderId.CLAUDE: fallback})
+    route = router.resolve_route("review", ProviderId.CODEX)
+
+    outcome = router.run_stage(
+        make_request(
+            node_id="review",
+            model="gpt-5.5",
+            reasoning="high",
+            extra_args=["-c", 'model_reasoning_effort="high"'],
+            session_id="codex-session-123",
+            task_path="/logs/task.md",
+            output_schema={"type": "object"},
+            network_access=True,
+        ),
+        route,
+    )
+
+    assert outcome.provider_used is ProviderId.CLAUDE
+    # The primary saw the pins; the cross-provider fallback saw provider-specific fields cleared.
+    assert primary.requests[0].model == "gpt-5.5"  # type: ignore[attr-defined]
+    assert primary.requests[0].reasoning == "high"  # type: ignore[attr-defined]
+    assert primary.requests[0].extra_args == [  # type: ignore[attr-defined]
+        "-c",
+        'model_reasoning_effort="high"',
+    ]
+    assert primary.requests[0].session_id == "codex-session-123"  # type: ignore[attr-defined]
+    assert fallback.requests[0].model is None  # type: ignore[attr-defined]
+    assert fallback.requests[0].reasoning is None  # type: ignore[attr-defined]
+    assert fallback.requests[0].extra_args == []  # type: ignore[attr-defined]
+    assert fallback.requests[0].session_id is None  # type: ignore[attr-defined]
+    assert fallback.requests[0].task_path == "/logs/task.md"  # type: ignore[attr-defined]
+    assert fallback.requests[0].output_schema == {"type": "object"}  # type: ignore[attr-defined]
+    assert fallback.requests[0].network_access is True  # type: ignore[attr-defined]
+
+
+def test_codex_minimal_reasoning_fallback_maps_to_claude_low(
+    config: OrchestratorConfig,
+    make_fake_provider: Callable[..., object],
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    primary = make_fake_provider(ProviderId.CODEX, raises=ErrorClass.RATE_LIMITED)
+    fallback = make_fake_provider(ProviderId.CLAUDE)
+    router = AgentRouter(config, {ProviderId.CODEX: primary, ProviderId.CLAUDE: fallback})
+    route = router.resolve_route("review", ProviderId.CODEX)
+
+    outcome = router.run_stage(make_request(node_id="review", reasoning="minimal"), route)
+
+    assert outcome.provider_used is ProviderId.CLAUDE
+    assert primary.requests[0].reasoning == "minimal"  # type: ignore[attr-defined]
+    assert fallback.requests[0].reasoning == "low"  # type: ignore[attr-defined]

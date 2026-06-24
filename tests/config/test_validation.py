@@ -113,6 +113,29 @@ def test_claude_skip_permissions_extra_arg_is_rejected(base_config: Orchestrator
         validate_config(_with_agents(base_config, providers=providers))
 
 
+def test_codex_minimal_reasoning_is_valid(base_config: OrchestratorConfig) -> None:
+    codex = replace(base_config.agents.providers[ProviderId.CODEX], reasoning="minimal")
+    providers = {**base_config.agents.providers, ProviderId.CODEX: codex}
+    assert validate_config(_with_agents(base_config, providers=providers)) == []
+
+
+def test_claude_minimal_reasoning_is_rejected(base_config: OrchestratorConfig) -> None:
+    claude = replace(base_config.agents.providers[ProviderId.CLAUDE], reasoning="minimal")
+    providers = {**base_config.agents.providers, ProviderId.CLAUDE: claude}
+    with pytest.raises(ConfigError) as exc:
+        validate_config(_with_agents(base_config, providers=providers))
+    assert any("provider 'claude'" in issue and "minimal" in issue for issue in exc.value.issues)
+
+
+def test_supervisor_reasoning_uses_global_primary_provider(
+    base_config: OrchestratorConfig,
+) -> None:
+    bad = replace(base_config, supervisor=replace(base_config.supervisor, reasoning="minimal"))
+    with pytest.raises(ConfigError) as exc:
+        validate_config(bad)
+    assert any("supervisor.reasoning" in issue and "claude" in issue for issue in exc.value.issues)
+
+
 def test_negative_poll_interval_is_rejected(base_config: OrchestratorConfig) -> None:
     runtime = replace(base_config.orchestrator, poll_interval_seconds=-1)
     bad = replace(base_config, orchestrator=runtime)

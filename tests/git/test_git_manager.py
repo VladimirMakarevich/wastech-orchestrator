@@ -165,14 +165,19 @@ def test_resolved_profile_not_in_code_commit(
     assert ".worc/checks/resolved-profile.json" not in gm.changed_code_paths()
 
 
-def test_ensure_runtime_excludes_writes_worc_line(
+def test_ensure_runtime_excludes_writes_worc_line_to_local_exclude(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:
+    # The per-run fallback writes to the clone-local .git/info/exclude, never the tracked
+    # .gitignore — so the runtime-home ignore never rides into a task's code commit / PR diff.
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
     gm.ensure_runtime_excludes()
     gm.ensure_runtime_excludes()  # idempotent
-    gitignore = (git_repo.clone / ".gitignore").read_text(encoding="utf-8")
-    assert gitignore.count(".worc/") == 1
+    local_exclude = (git_repo.clone / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+    assert local_exclude.count(".worc/") == 1
+    # The tracked .gitignore is left untouched by the per-run fallback.
+    gitignore = git_repo.clone / ".gitignore"
+    assert not gitignore.exists() or ".worc/" not in gitignore.read_text(encoding="utf-8")
 
 
 def test_diff_stat_returns_stat_only(
@@ -285,6 +290,37 @@ def test_audit_commit_stages_lifecycle_move_deletion(
     assert "tasks/done/task-001.md" in tracked
     # The working tree is clean: no dangling `D tasks/failed/task-001.md` to ride back to base.
     assert "tasks/failed/task-001.md" not in git_run(["status", "--porcelain"], git_repo.clone)
+
+
+def test_audit_commit_stages_pending_to_failed_move_deletion(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # A task file tracked under tasks/pending/ (committed to base by hand) that the orchestrator
+    # moves to tasks/failed/ on a failed run must have its *deletion* from pending staged too —
+    # otherwise the dangling removal rides back onto the base branch as a `D` after terminal cleanup
+    # (the ion-list regression: the prior fix covered only failed->done, not pending->failed/done).
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x")
+    pending = git_repo.clone / "tasks" / "pending"
+    pending.mkdir(parents=True, exist_ok=True)
+    (pending / "task-001.md").write_text("t\n", encoding="utf-8")
+    git_run(["add", "tasks/pending/task-001.md"], git_repo.clone)
+    git_run(["commit", "-m", "track pending task file"], git_repo.clone)
+    # Lifecycle move: pending -> failed (the orchestrator's _relocate_task_file does this on disk).
+    (pending / "task-001.md").unlink()
+    failed = git_repo.clone / "tasks" / "failed"
+    failed.mkdir(parents=True, exist_ok=True)
+    (failed / "task-001.md").write_text("t\n", encoding="utf-8")
+    (failed / "task-001.summary.md").write_text("s\n", encoding="utf-8")
+
+    sha = gm.commit_audit("task-001")
+    assert sha is not None
+    tracked = git_run(["ls-files"], git_repo.clone)
+    assert "tasks/pending/task-001.md" not in tracked
+    assert "tasks/failed/task-001.md" in tracked
+    # The working tree is clean: no dangling `D tasks/pending/task-001.md` to ride back to base.
+    assert "tasks/pending/task-001.md" not in git_run(["status", "--porcelain"], git_repo.clone)
 
 
 def test_snapshot_capture_and_partial_change(

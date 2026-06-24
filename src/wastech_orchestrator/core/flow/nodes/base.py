@@ -53,6 +53,17 @@ class NodeInfraError(Exception):
     """
 
 
+class EvaluatorInfraError(NodeInfraError):
+    """An *evaluator* node could not run (no provider could complete it).
+
+    A subclass of :class:`NodeInfraError` (so generic infra handling still catches it), raised only
+    by the evaluator runner. The orchestrator distinguishes it: an evaluator that could not *run*
+    (infra/misconfig) must not discard an already-green diff. It degrades to
+    ``manual_action_required`` — the branch is preserved and the operator reviews/publishes — unlike
+    an agent node whose infra exhaustion leaves no usable result to ship (terminal ``failed``).
+    """
+
+
 class NodeManualRequired(Exception):
     """A node needs human action and cannot proceed automatically (terminal manual_action_required).
 

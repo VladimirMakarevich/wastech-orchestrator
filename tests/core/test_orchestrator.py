@@ -736,6 +736,28 @@ def test_review_blocking_then_fix(git_repo, make_git_config, tmp_path: Path) -> 
     assert _ran_nodes(store, "task-005").count("fixing") == 1
 
 
+def test_review_infra_failure_degrades_to_manual_not_failed(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # An evaluator (review) that cannot RUN (both providers infra-fail) must not discard the green
+    # diff: the task degrades to manual_action_required (branch preserved for the operator) and a
+    # failure_report.json / stuck.md is written — never a silent terminal `failed`.
+    providers = _both(infra_fail={"review"})
+    orch, store, ledger, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-rev-infra"))
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
+    assert (art / "logs" / "task-rev-infra" / "failure_report.json").exists()
+    assert (art / "logs" / "task-rev-infra" / "stuck.md").exists()
+    assert ledger.records()[0]["final_status"] == "manual_action_required"
+    # Review was reached; publish never ran (the diff is preserved on the branch, not published).
+    ran = _ran_nodes(store, "task-rev-infra")
+    assert "review" in ran and "publish" not in ran
+
+
 _MINIMAL_FLOW = """
 flow:
   name: implementation
