@@ -104,7 +104,7 @@ repo:
   url: "git@github.com:OWNER/REPO.git"
   local_path: "./workspace/repo"
   base_branch: "main"
-  branch_prefix: "agent"
+  branch_prefix: "worc"
 ```
 
 | Field | Type | Default | Meaning |
@@ -112,7 +112,7 @@ repo:
 | `url` | string | `""` | Remote repository URL. |
 | `local_path` | string | `"./workspace/repo"` | Dedicated clone/worktree used for agent runs. |
 | `base_branch` | string | `"main"` | Branch checked out before task branches and after terminal cleanup. |
-| `branch_prefix` | string | `"agent"` | Prefix for task branches: `agent/<task-id>-<slug>`. |
+| `branch_prefix` | string | `"worc"` | Prefix for default task branches: `worc/<task-id>-<slug>`. A task-level `branch_name` overrides the full branch name. |
 
 Git credentials are not stored in this file. Configure SSH, a credential helper, or `gh auth login` outside the orchestrator.
 
@@ -185,7 +185,7 @@ agents:
       model: "claude-sonnet-4-6" # explicit default; "" = use the CLI/account default
       reasoning: high # low | medium | high | xhigh | max
       timeout_seconds: 7200
-      max_turns: 50
+      max_turns: 400 # positive int = turn cap; "none" or "max" = no cap (unlimited)
       permission_profile: "workspace-write"
       extra_args: []
     codex:
@@ -215,7 +215,7 @@ Provider-specific fields:
 | Provider | Field | Type | Default | Meaning |
 | --- | --- | --- | --- | --- |
 | `codex` | `sandbox` | string or null | `null` if omitted | Codex sandbox mode (`workspace-write`, `read-only`, or `danger-full-access`). The example sets `workspace-write`. `danger-full-access` is operator-selectable but rejected at preflight unless `strict_isolation: false` (see `extra_args` / `security` below). |
-| `claude` | `max_turns` | integer or null | `null` if omitted | Claude Code turn limit. |
+| `claude` | `max_turns` | integer or `none`/`max` | `400` if omitted | Claude turn cap. A positive integer caps agentic turns; `none` or `max` (case-insensitive), or YAML `null`, means **no cap** — the orchestrator omits `--max-turns` so the CLI runs without a turn limit. A non-positive integer or any other string is rejected (falls back to the default 400). |
 
 #### `extra_args`
 
@@ -327,10 +327,12 @@ validation:
 Current task front matter fields are:
 
 ```text
-id, title, pr_title, auto_merge, prompt_audit, contacts, stages
+id, title, task_type, branch_name, auto_merge, prompt_audit, contacts, depends_on, subtasks, nodes
 ```
 
 A task is deliberately "clean" (PRE.3): it carries only identity/dispatch fields plus the two sanctioned exceptions — `nodes.<node-id>.enabled` (per-task node disable) and `auto_merge` (task-wins). Provider, `model`, and `reasoning` live on the **flow node**, not the task; `decompose` was removed (the flow decides splitting); refinement-skip is deterministic (completeness classification, no `refined` flag). Inside a `nodes.<node-id>` block only `enabled` is valid.
+
+`branch_name` is an operational override for the whole task branch name. It is validated as a safe Git branch ref before branch creation and must not equal `repo.base_branch`.
 
 A structurally rejected task is terminal `failed`, gets a `validation_report.json`, and never creates a branch or calls a provider.
 
@@ -467,6 +469,13 @@ The remaining footprint policy is just the audit commit.
 | --- | --- | --- | --- |
 | `audit_commit_message` | string | `"chore(orchestrator): audit trail for {task_id}"` | Commit message for the orchestrator's task+summary audit commit (`{task_id}` is substituted). |
 | `audit_on_branch` | `task`, `sibling` | `task` | Where the audit commit lands: `task` — on the task branch alongside the code; `sibling` — on a separate `<branch>-audit` branch. |
+
+This is not a second code commit. The audit commit is the task's durable paper trail in Git: which task the branch was working on, which lifecycle folder it ended in (`done` / `failed`), and the short human-readable handoff in `<id>.summary.md`.
+
+In practice that means a branch can carry two different commits with different jobs:
+
+- a **code commit** with the source changes;
+- an **audit commit** with `tasks/<state>/<id>.md` plus `tasks/<state>/<id>.summary.md`.
 
 ## `telegram`
 

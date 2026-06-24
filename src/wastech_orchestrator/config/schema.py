@@ -121,6 +121,8 @@ class ProviderConfig:
     extra_args: tuple[str, ...] = ()
     # Provider-specific (optional): Codex sandbox; Claude max_turns.
     sandbox: str | None = None
+    # Claude turn cap: positive int, or ``None`` = no cap. The loader maps ``"none"``/``"max"``/
+    # ``null`` to ``None`` (adapter omits ``--max-turns``); config default 400.
     max_turns: int | None = None
     reasoning: str | None = None  # provider-specific: "minimal" | "low" | "medium" | "high" | ...
     # Exactly one configured provider must set ``primary: true`` — the global primary that runs any

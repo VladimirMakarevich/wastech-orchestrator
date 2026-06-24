@@ -15,7 +15,7 @@ repo:
   url: "git@github.com:OWNER/REPO.git"
   local_path: "./workspace/repo"
   base_branch: "main"
-  branch_prefix: "agent"            # task branches: agent/<task-id>-<slug>
+  branch_prefix: "worc"             # task branches: worc/<task-id>-<slug>
 
 agents:
   allowed:
@@ -42,7 +42,7 @@ agents:
       model: "claude-sonnet-4-6"   # "" = use the Claude CLI/account default
       reasoning: high          # low | medium | high | xhigh | max
       timeout_seconds: 7200
-      max_turns: 50
+      max_turns: 400           # Claude turn cap (positive int); "none" or "max" = no cap (unlimited)
       permission_profile: "workspace-write"
       extra_args: []
       primary: true            # the global primary (exactly one provider; must be in `allowed`)
@@ -135,8 +135,9 @@ git:
   footprint:                        # audit-trail policy (§21). Runtime files always live under the
                                     # gitignored <repo>/.worc/ home; only the task file and its
                                     # <id>.summary.md are committed, at the repo root under tasks/.
+                                    # This is a separate audit commit, not a second code commit.
     audit_commit_message: "chore(orchestrator): audit trail for {task_id}"
-    audit_on_branch: task           # task | sibling
+    audit_on_branch: task           # task = same branch as the code; sibling = <branch>-audit
 
 telegram:                           # human-in-the-loop + notifications (optional)
   enabled: false

@@ -4,11 +4,16 @@
 
 - **[best-practices.md](best-practices.md)** — how to write a _good_ task (testable criteria, scoping, constraints, the project's own working rules).
 - **[decision-guide.md](decision-guide.md)** — _when to use what_ (run vs watch, disabling nodes, auto-merge, where task files live, Telegram).
-- **[examples/task-minimal.md](examples/task-minimal.md)** — the smallest valid task (just `id`, `title`, and a body) and **[examples/task-rich.md](examples/task-rich.md)** — a maximal task that exercises _every_ front-matter field with inline rule notes. Copy one and fill it in.
+- **[tasks/task-minimal.md](tasks/task-minimal.md)** — the smallest valid task (just `id`, `title`, and a body) and **[tasks/task-rich.md](tasks/task-rich.md)** — a maximal task that exercises _every_ front-matter field with inline rule notes. Copy one and fill it in.
+- **[tasks/skills/worc-task/SKILL.md](tasks/skills/worc-task/SKILL.md)** — a copy-ready task-authoring skill that turns raw work into one valid orchestrator task file.
+- **[tasks/skills/worc-deco-task/SKILL.md](tasks/skills/worc-deco-task/SKILL.md)** — a copy-ready task-authoring skill for operator-authored decomposition (root task + subtask specs).
+- **[config/README.md](config/README.md)** — build or tune the orchestrator's own `config.yaml` for this repository.
+- **[config/best-practices.md](config/best-practices.md)** — safe defaults, checks layout, and common config mistakes.
+- **[config/skills/worc-config/SKILL.md](config/skills/worc-config/SKILL.md)** — a copy-ready skill that interviews the operator and assembles a project-specific config.
 
 ## What the orchestrator does with your task
 
-wastech-orchestrator is not a chat agent. It takes one task file and drives it through a fixed pipeline of stages — **refinement → planning → implementation → testing → review → fixing → summary → publishing** — launching a coding-agent CLI (Codex or Claude Code) for the agent stages and running the repository's own checks for testing. When the pipeline succeeds, **the orchestrator** (never the agent) commits, pushes a branch `agent/<task-id>-<slug>`, and opens a pull request.
+wastech-orchestrator is not a chat agent. It takes one task file and drives it through a fixed pipeline of stages — **refinement → planning → implementation → testing → review → fixing → summary → publishing** — launching a coding-agent CLI (Codex or Claude Code) for the agent stages and running the repository's own checks for testing. When the pipeline succeeds, **the orchestrator** (never the agent) commits, pushes a branch `worc/<task-id>-<slug>` by default (or the task's validated `branch_name`), and opens a pull request.
 
 Your task file is the entire contract. Write it so an agent can plan, implement, test, review, and summarize the change **without asking for hidden context**.
 
@@ -44,12 +49,12 @@ Only the fields below are allowed. **Any other key makes the task rejected** (`u
 | Field | Required | Type | Meaning |
 | --- | --: | --- | --- |
 | `id` | **yes** | string | Stable id. Must match `^[a-z0-9][a-z0-9._-]{0,63}$` (lowercase; no spaces, uppercase, or leading separator). |
-| `title` | **yes** | string | Short, non-empty human title. Used for the branch slug and reports. |
+| `title` | **yes** | string | Short, non-empty human title. Used for the default branch slug, PR title, and reports. |
+| `branch_name` | no | string \| null | Full branch-name override. Omit for `<repo.branch_prefix>/<id>-<slug(title)>`; set to match a project's branch convention. |
 | `auto_merge` | no | boolean | `true` requests auto-merge of the PR. **Dangerous**; the per-task value wins outright over the instance default. See the decision guide. |
 | `prompt_audit` | no | boolean | `true`/`false` forces prompt-audit recording for this task; omit = config default. |
 | `contacts` | no | list of strings | Plain-text mentions in Telegram notifications. No access control. |
 | `nodes` | no | mapping | Per-node `enabled: false` disable toggle, keyed by flow node id (the only per-node knob). See the decision guide. |
-| `pr_title` | no | string \| null | PR title override; when set, used verbatim as the pull-request title instead of `title`. |
 
 Provider, model, and reasoning are **not** task fields — they live on the flow node (the operator's flow + `config.yaml providers`). A task cannot repoint a stage's provider or set its model.
 

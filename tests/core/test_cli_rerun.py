@@ -31,7 +31,7 @@ repo:
   url: "git@example.com:o/r.git"
   local_path: {str(clone)!r}
   base_branch: "main"
-  branch_prefix: "agent"
+  branch_prefix: "worc"
 agents:
   allowed: [claude, codex]
   providers:
@@ -127,7 +127,7 @@ def test_rerun_fresh_failed_to_done(git_repo, fake_cli, git_run, tmp_path: Path)
             title="Add a thing",
             status=Status.FAILED,
             source_path=str(source),
-            branch="agent/task-700-add-a-thing",
+            branch="worc/task-700-add-a-thing",
             slug="add-a-thing",
             cleanup_completed=True,
         )
@@ -139,7 +139,7 @@ def test_rerun_fresh_failed_to_done(git_repo, fake_cli, git_run, tmp_path: Path)
     stale = external / "logs" / "task-700" / "plan.md"
     stale.parent.mkdir(parents=True, exist_ok=True)
     stale.write_text("stale plan from the failed attempt\n", encoding="utf-8")
-    git_run(["branch", "agent/task-700-add-a-thing"], git_repo.clone)  # stale local branch
+    git_run(["branch", "worc/task-700-add-a-thing"], git_repo.clone)  # stale local branch
 
     code = cli.main(
         ["--config", str(config), "--heartbeat-seconds", "0", "rerun", "task-700", "--yes"]
@@ -155,7 +155,7 @@ def test_rerun_fresh_failed_to_done(git_repo, fake_cli, git_run, tmp_path: Path)
     # The change is committed on a branch rebuilt from the current base; HEAD back on main.
     assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "main"
     committed = git_run(
-        ["show", "--name-only", "--format=", "agent/task-700-add-a-thing"], git_repo.clone
+        ["show", "--name-only", "--format=", "worc/task-700-add-a-thing"], git_repo.clone
     )
     assert "agent_change.py" in committed
     # Prior artifacts archived; the fresh attempt's summary written at the top level.
@@ -284,7 +284,7 @@ def test_rerun_continue_revives_then_delegates_to_resume(
             "T",
             Status.FAILED,
             source_path=str(source),
-            branch="agent/task-1-t",
+            branch="worc/task-1-t",
             fix_iterations=2,
             finished_at="2026-01-01T00:00:00+00:00",
             cleanup_completed=True,
@@ -310,4 +310,4 @@ def test_rerun_continue_revives_then_delegates_to_resume(
     assert row is not None
     assert row.status is Status.RUNNING  # revived as active; resume re-enters at the checkpoint
     assert row.finished_at is None and row.cleanup_completed is None
-    assert row.branch == "agent/task-1-t" and row.fix_iterations == 2
+    assert row.branch == "worc/task-1-t" and row.fix_iterations == 2

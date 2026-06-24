@@ -19,6 +19,7 @@ A lean orchestrator that turns Markdown tasks into reviewed Pull Requests — dr
 |  |  |
 | --- | --- |
 | [Configuration](configuration.md) | Every `config.yaml` field, default, and validation rule |
+| [Glossary](glossary.md) | Canonical vocabulary for commands, configs, states, flows, artifacts, and legacy terms |
 | [Task authoring](task-authoring.md) | How to write valid task files accepted by the validation gate |
 | [Telegram](telegram.md) | Bot and chat setup, environment config, preflight, smoke test, and troubleshooting |
 

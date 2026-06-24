@@ -77,6 +77,10 @@ class ParsedEvents:
     usage: dict[str, Any] | None
     session_id: str | None
     succeeded: bool
+    # The CLI's terminal ``result`` subtype when the run did not succeed (e.g. ``error_max_turns``),
+    # else ``None``. Lets the adapter classify a parseable terminal failure as a task outcome (never
+    # a crash) and surface a precise message.
+    failure_subtype: str | None = None
 
 
 def build_context_footer(request: AgentRunRequest) -> str:
@@ -332,8 +336,8 @@ class BaseCliProvider:
         )
         Path(paths.events_path).write_text(redacted_stdout, encoding="utf-8")
 
-        # Infrastructure failure (launch / timeout / abnormal exit) → normalized error → raise.
-        if proc.launch_error is not None or proc.timed_out or proc.exit_code != 0:
+        # True infrastructure failure (launch / timeout) → no usable stream → classify + raise.
+        if proc.launch_error is not None or proc.timed_out:
             error = classify(
                 exit_code=proc.exit_code,
                 stderr_text=proc.stderr_text,
@@ -344,10 +348,24 @@ class BaseCliProvider:
             self._finalize_failure(paths, request, started_at, finished_at, proc, error)
             raise ProviderError(error.error_class, error.message)
 
-        # Clean exit: parse the structured event stream.
+        # Parse the structured event stream. A CLI emits a terminal ``result`` event even when it
+        # stops on an error and exits non-zero (e.g. Claude's ``error_max_turns`` exits 1): a
+        # parseable terminal event is an agent OUTCOME, classified by its content below — never as a
+        # crash by exit code. Only a non-zero exit with NO parseable terminal event is a genuine
+        # abnormal termination → classify (stderr signature / process_crashed).
         try:
             parsed = self._parse(raw_stdout, paths, parse_context, extra_secrets)
         except ProviderError as exc:
+            if proc.exit_code != 0:
+                error = classify(
+                    exit_code=proc.exit_code,
+                    stderr_text=proc.stderr_text,
+                    timed_out=proc.timed_out,
+                    launch_error=proc.launch_error,
+                    signatures=self._signatures(),
+                )
+                self._finalize_failure(paths, request, started_at, finished_at, proc, error)
+                raise ProviderError(error.error_class, error.message) from exc
             error = NormalizedError(exc.error_class, str(exc))
             self._finalize_failure(paths, request, started_at, finished_at, proc, error)
             raise
@@ -367,10 +385,13 @@ class BaseCliProvider:
         if parsed.succeeded:
             status, error_obj = RunStatus.SUCCEEDED, None
         else:
+            # A parsed-but-unsuccessful terminal event is a task failure, never a crash. Append the
+            # CLI's own subtype (e.g. ``error_max_turns``) so the cause is visible, not lost.
             status = RunStatus.FAILED
-            error_obj = NormalizedError(
-                ErrorClass.TASK_FAILURE, message_for(ErrorClass.TASK_FAILURE)
-            )
+            detail = message_for(ErrorClass.TASK_FAILURE)
+            if parsed.failure_subtype:
+                detail = f"{detail} ({parsed.failure_subtype})"
+            error_obj = NormalizedError(ErrorClass.TASK_FAILURE, detail)
 
         result = AgentRunResult(
             status=status,

@@ -29,7 +29,7 @@ repo:
   url: "git@example.com:o/r.git"
   local_path: {str(clone)!r}
   base_branch: "main"
-  branch_prefix: "agent"
+  branch_prefix: "worc"
 agents:
   allowed: [claude, codex]
   providers:
@@ -67,7 +67,7 @@ def _seed(
     clone: Path,
     *,
     status: Status = Status.FAILED,
-    branch: str | None = "agent/task-1-t",
+    branch: str | None = "worc/task-1-t",
     pr_url: str | None = None,
     create_pr: bool = False,
 ) -> Path:
@@ -110,7 +110,7 @@ def test_finalize_failed_reconciles(git_repo, git_run, tmp_path: Path) -> None:
     project = tmp_path / "p"
     project.mkdir()
     config = _seed(project, git_repo.clone, status=Status.MANUAL_ACTION_REQUIRED)
-    git_run(["branch", "agent/task-1-t"], git_repo.clone)  # stray local branch, kept by default
+    git_run(["branch", "worc/task-1-t"], git_repo.clone)  # stray local branch, kept by default
 
     code = cli.main(["--config", str(config), "finalize", "task-1", "--as", "failed", "--yes"])
     assert code == 1  # failed exit code
@@ -122,8 +122,8 @@ def test_finalize_failed_reconciles(git_repo, git_run, tmp_path: Path) -> None:
     assert (project / "failed" / "task-1.md").exists()  # moved into its lifecycle folder
     assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "main"
     # No commit/push/PR: the branch is kept and not pushed to the remote.
-    assert git_run(["ls-remote", "--heads", "origin", "agent/task-1-t"], git_repo.clone) == ""
-    assert "agent/task-1-t" in git_run(["branch", "--list", "agent/task-1-t"], git_repo.clone)
+    assert git_run(["ls-remote", "--heads", "origin", "worc/task-1-t"], git_repo.clone) == ""
+    assert "worc/task-1-t" in git_run(["branch", "--list", "worc/task-1-t"], git_repo.clone)
 
 
 def test_finalize_done_uses_recorded_pr_url(
@@ -217,7 +217,7 @@ def test_finalize_delete_branch(git_repo, git_run, tmp_path: Path) -> None:
     project = tmp_path / "p"
     project.mkdir()
     config = _seed(project, git_repo.clone)
-    git_run(["branch", "agent/task-1-t"], git_repo.clone)
+    git_run(["branch", "worc/task-1-t"], git_repo.clone)
 
     code = cli.main(
         [
@@ -232,7 +232,7 @@ def test_finalize_delete_branch(git_repo, git_run, tmp_path: Path) -> None:
         ]
     )
     assert code == 1
-    assert git_run(["branch", "--list", "agent/task-1-t"], git_repo.clone) == ""  # deleted
+    assert git_run(["branch", "--list", "worc/task-1-t"], git_repo.clone) == ""  # deleted
 
 
 def test_finalize_refuses_while_daemon_running(

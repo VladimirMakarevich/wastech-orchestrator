@@ -28,7 +28,7 @@ tasks/pending/task-001.md
         │  watch loop (periodic git fetch/pull) picks it up
         ▼
    ┌──────────────────────────── deterministic flow ───────────────────────────┐
-   │ git fetch/pull → checkout base → create branch agent/<id>-<slug>          │
+   │ git fetch/pull → checkout base → create task branch                       │
    │   refine → plan → implement → test → review → fix(loop) → publish         │
    │   (supervisor watches every step; writes <id>.summary.md at close)        │
    │   → move task → tasks/done/  →  commit (code) + commit (task+summary)     │
@@ -39,7 +39,7 @@ tasks/pending/task-001.md
 ```
 
 - **One task at a time.** A single processing slot; other tasks wait in `tasks/pending/`. Auto mode (off by default) controls whether the next pending task starts automatically after cleanup.
-- **One canonical layout.** The task lifecycle dirs (`tasks/pending|processing|done|failed`) sit at the repo root and are git-tracked; everything else — `config.yaml`, `state.db`, `logs/`, the task-authoring guide — lives under the gitignored `<repo>/.worc/` home. See [Configuration](#configuration).
+- **One canonical layout.** The task lifecycle dirs (`tasks/pending|processing|done|failed`) sit at the repo root and are git-tracked; everything else — `config.yaml`, `state.db`, `logs/`, and the installed guide bundle (task docs, task skills, config helper) — lives under the gitignored `<repo>/.worc/` home. See [Configuration](#configuration).
 - The detailed, code-derived reference (state machine, routing, recovery, security, the audit footprint) is the [Functional Map](docs/functional/index.md); the design rationale is in [docs/worc_architecture.md](docs/worc_architecture.md).
 
 ---
@@ -64,8 +64,9 @@ pipx install "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git
 
 # 2. Set up your repo: generates a validated config.yaml under <repo>/.worc/.
 #    The task & its summary are committed to this repo; config, state.db, logs/, the
-#    task-authoring guide, and editable copies of the built-in flows + node prompts all live
-#    under the gitignored .worc/ home, leaving tracked files clean.
+#    installed guide bundle (`guide/` task docs + task skills + config helper), and editable copies of the
+#    built-in flows + node prompts all live under the gitignored .worc/ home, leaving tracked
+#    files clean.
 cd /path/to/my-repo
 worc install .          # interactive wizard (detects origin, branch, agents, checks)
 
@@ -79,7 +80,8 @@ Author a task in the repo's `tasks/pending/` directory:
 ---
 id: task-001
 title: "Add email validation to the signup form"
-# optional: task_type: deep_research | auto_merge: true | stages: { review: { enabled: false } }
+# optional: task_type: deep_research | branch_name: feature/ABC-123-email-validation
+# optional: auto_merge: true | nodes: { review: { enabled: false } }
 ---
 
 ## Description
@@ -92,7 +94,7 @@ The signup form accepts any string as an email. Validate the `email` field and s
 - A unit test covers valid and invalid cases.
 ```
 
-> Only `id` and `title` are required; the gate **rejects unknown fields**. The full allow-list (`id`, `title`, `task_type`, `pr_title`, `auto_merge`, `prompt_audit`, `contacts`, `stages`) is in [docs/task-authoring.md](docs/task-authoring.md). Provider/model/reasoning are **flow-node concerns, not task fields** — a task names a flow, it never patches the graph.
+> Only `id` and `title` are required; the gate **rejects unknown fields**. The full allow-list (`id`, `title`, `task_type`, `branch_name`, `auto_merge`, `prompt_audit`, `contacts`, `depends_on`, `subtasks`, `nodes`) is in [docs/task-authoring.md](docs/task-authoring.md). Provider/model/reasoning are **flow-node concerns, not task fields** — a task names a flow, it never patches the graph.
 
 Then run it:
 
@@ -108,7 +110,7 @@ worc watch
 worc status
 ```
 
-The orchestrator creates `agent/task-001-...`, runs the pipeline and your checks, commits the code plus the task and its summary, pushes, and (with `gh` present) opens a PR whose body is the summary. A failed attempt is also committed and pushed for inspection — without opening a PR.
+The orchestrator creates `worc/task-001-...` by default (or the task's validated `branch_name`), runs the pipeline and your checks, makes a scoped code commit plus a separate audit commit for the task file and its summary, pushes, and (with `gh` present) opens a PR whose body is the summary. A failed attempt is also committed and pushed for inspection — without opening a PR.
 
 ---
 
@@ -119,7 +121,7 @@ The orchestrator creates `agent/task-001-...`, runs the pipeline and your checks
 | Setting | What it controls |
 | --- | --- |
 | `repo.url` / `repo.local_path` / `repo.base_branch` | The target repository and the branch PRs target. |
-| `git.footprint` | The audit trail: `audit_commit_message` (the message for the orchestrator's task+summary commit) and `audit_on_branch` (`task` — commit onto the task branch, the default; `sibling` — onto an `…-audit` branch). |
+| `git.footprint` | The audit trail: `audit_commit_message` (the message for the orchestrator's task+summary commit) and `audit_on_branch` (`task` — keep that audit commit on the task branch, the default; `sibling` — put it on an `…-audit` branch). |
 | `orchestrator.auto_mode.enabled` | Process the next pending task automatically after cleanup (default `false`). |
 | `orchestrator.poll_interval_seconds` | `watch` tick: fetch/pull + re-scan interval (default `300`; `0` = single pass). |
 | `agents.allowed` / `agents.providers.<id>.primary` | Which providers are enabled, and which one is the global primary (runs any flow node with no `provider`, and is the sole infrastructure-fallback target). Per-node routing lives on the flow, not in config. |
@@ -206,7 +208,7 @@ src/wastech_orchestrator/
   ledger.py               # the append-only completed-task ledger + failure reports
   task/                   # parser + §19 validation gate
   install/                # the install wizard, config writer, detection
-  packaged/               # all shipped package data (one home): config.example.yaml (source for `install`/`upgrade-config`); flows/ = built-in flows + role prompts (-> .worc/flows/); guide/ = task-authoring guide (-> .worc/guide/)
+  packaged/               # all shipped package data (one home): config.example.yaml (source for `install`/`upgrade-config`); flows/ = built-in flows + role prompts (-> .worc/flows/); guide/ = installable docs bundle (task authoring + config helper -> .worc/guide/)
 docs/                     # operations, cookbook, configuration, task authoring, telegram, architecture, rules, backlog
   functional/             # code-derived block + flow reference (the source of truth on any discrepancy)
   worc/                   # authored source for the packaged guide/ (kept in sync by a test)

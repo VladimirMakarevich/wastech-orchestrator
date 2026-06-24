@@ -528,85 +528,118 @@ def test_nodes_review_disable_needs_no_config_opt_in(config: OrchestratorConfig)
 
 
 # ---------------------------------------------------------------------------
-# pr_title field
+# branch_name field
 # ---------------------------------------------------------------------------
 
 
-def test_pr_title_override_stored(config: OrchestratorConfig) -> None:
+def test_pr_title_is_now_an_unknown_field(config: OrchestratorConfig) -> None:
     text = (
         '---\nid: task-001\ntitle: "Task title"\npr_title: "Custom PR title"\n'
         "---\n\n## Description\n\nDo it.\n"
     )
     result = _gate(config).validate(_src(text))
+    assert result.passed is False
+    assert result.reason is ValidationReason.UNKNOWN_TOP_LEVEL_FIELD
+
+
+def test_branch_name_override_stored(config: OrchestratorConfig) -> None:
+    text = (
+        '---\nid: task-001\ntitle: "Task title"\nbranch_name: "feature/ABC-123-task"\n'
+        "---\n\n## Description\n\nDo it.\n"
+    )
+    result = _gate(config).validate(_src(text))
     assert result.passed is True
     assert result.normalized is not None
-    assert result.normalized.pr_title == "Custom PR title"
+    assert result.normalized.branch_name == "feature/ABC-123-task"
     assert result.normalized.title == "Task title"
 
 
-def test_pr_title_absent_is_none(config: OrchestratorConfig) -> None:
+def test_branch_name_absent_is_none(config: OrchestratorConfig) -> None:
     result = _gate(config).validate(_src(_GOOD))
     assert result.passed is True
     assert result.normalized is not None
-    assert result.normalized.pr_title is None
+    assert result.normalized.branch_name is None
 
 
-def test_pr_title_null_is_none(config: OrchestratorConfig) -> None:
-    text = "---\nid: task-001\ntitle: T\npr_title: null\n---\n\n## Description\n\nDo it.\n"
+def test_branch_name_null_is_none(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\nbranch_name: null\n---\n\n## Description\n\nDo it.\n"
     result = _gate(config).validate(_src(text))
     assert result.passed is True
     assert result.normalized is not None
-    assert result.normalized.pr_title is None
+    assert result.normalized.branch_name is None
 
 
-def test_pr_title_empty_string_is_none(config: OrchestratorConfig) -> None:
-    text = '---\nid: task-001\ntitle: T\npr_title: ""\n---\n\n## Description\n\nDo it.\n'
+def test_branch_name_empty_string_is_none(config: OrchestratorConfig) -> None:
+    text = '---\nid: task-001\ntitle: T\nbranch_name: ""\n---\n\n## Description\n\nDo it.\n'
     result = _gate(config).validate(_src(text))
     assert result.passed is True
     assert result.normalized is not None
-    assert result.normalized.pr_title is None
+    assert result.normalized.branch_name is None
 
 
-def test_pr_title_whitespace_only_is_none(config: OrchestratorConfig) -> None:
-    text = '---\nid: task-001\ntitle: T\npr_title: "   "\n---\n\n## Description\n\nDo it.\n'
+def test_branch_name_whitespace_only_is_none(config: OrchestratorConfig) -> None:
+    text = '---\nid: task-001\ntitle: T\nbranch_name: "   "\n---\n\n## Description\n\nDo it.\n'
     result = _gate(config).validate(_src(text))
     assert result.passed is True
     assert result.normalized is not None
-    assert result.normalized.pr_title is None
+    assert result.normalized.branch_name is None
 
 
-def test_pr_title_flag_shaped_rejected(config: OrchestratorConfig) -> None:
-    text = '---\nid: task-001\ntitle: T\npr_title: "--inject"\n---\n\n## Description\n\nDo it.\n'
+def test_branch_name_flag_shaped_rejected(config: OrchestratorConfig) -> None:
+    text = '---\nid: task-001\ntitle: T\nbranch_name: "--inject"\n---\n\n## Description\n\nDo it.\n'
     result = _gate(config).validate(_src(text))
     assert result.passed is False
     assert result.reason is ValidationReason.INJECTION_SUSPECTED
 
 
-def test_pr_title_wrong_type_rejected(config: OrchestratorConfig) -> None:
-    text = "---\nid: task-001\ntitle: T\npr_title: 42\n---\n\n## Description\n\nDo it.\n"
+def test_branch_name_wrong_type_rejected(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\nbranch_name: 42\n---\n\n## Description\n\nDo it.\n"
     result = _gate(config).validate(_src(text))
     assert result.passed is False
     assert result.reason is ValidationReason.INVALID_FIELD_TYPE
 
 
-def test_pr_title_list_type_rejected(config: OrchestratorConfig) -> None:
-    text = "---\nid: task-001\ntitle: T\npr_title:\n  - a\n  - b\n---\n\n## Description\n\nDo it.\n"
+def test_branch_name_list_type_rejected(config: OrchestratorConfig) -> None:
+    text = (
+        "---\nid: task-001\ntitle: T\nbranch_name:\n  - a\n  - b\n---\n\n## Description\n\nDo it.\n"
+    )
     result = _gate(config).validate(_src(text))
     assert result.passed is False
     assert result.reason is ValidationReason.INVALID_FIELD_TYPE
 
 
-def test_pr_title_json_task(config: OrchestratorConfig) -> None:
+@pytest.mark.parametrize(
+    "branch_name",
+    [
+        "main",
+        "feature/has space",
+        "feature//x",
+        "refs/heads/feature",
+        "HEAD",
+    ],
+)
+def test_branch_name_invalid_rejected(config: OrchestratorConfig, branch_name: str) -> None:
+    text = (
+        "---\nid: task-001\ntitle: T\n"
+        f'branch_name: "{branch_name}"\n'
+        "---\n\n## Description\n\nDo it.\n"
+    )
+    result = _gate(config).validate(_src(text))
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_BRANCH_NAME
+
+
+def test_branch_name_json_task(config: OrchestratorConfig) -> None:
     text = json.dumps(
         {
             "id": "task-json",
             "title": "Task title",
-            "pr_title": "Custom PR",
+            "branch_name": "feature/JSON-7-task",
             "description": "Do it. Acceptance: works.",
         }
     )
     result = _gate(config).validate(_src(text, ".json"))
     assert result.passed is True
     assert result.normalized is not None
-    assert result.normalized.pr_title == "Custom PR"
+    assert result.normalized.branch_name == "feature/JSON-7-task"
     assert result.normalized.title == "Task title"

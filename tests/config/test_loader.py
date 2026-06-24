@@ -79,6 +79,54 @@ def test_legacy_max_budget_usd_tolerated_not_error() -> None:
     assert codex_cfg.command == "codex"  # loaded cleanly, dead key ignored
 
 
+def _claude(body: str = "") -> str:
+    return (
+        'repo:\n  url: "git@example.com:o/r.git"\n'
+        "agents:\n  allowed: [claude]\n  providers:\n"
+        '    claude:\n      command: "claude"\n' + body
+    )
+
+
+def _claude_max_turns(text: str) -> int | None:
+    return loads_config(text).config.agents.providers[ProviderId.CLAUDE].max_turns
+
+
+def test_max_turns_defaults_to_400_when_absent() -> None:
+    assert _claude_max_turns(_claude()) == 400
+
+
+def test_max_turns_positive_integer_loads() -> None:
+    assert _claude_max_turns(_claude("      max_turns: 50\n")) == 50
+
+
+def test_max_turns_none_sentinel_means_no_cap() -> None:
+    assert _claude_max_turns(_claude("      max_turns: none\n")) is None
+
+
+def test_max_turns_max_sentinel_means_no_cap() -> None:
+    assert _claude_max_turns(_claude("      max_turns: max\n")) is None
+
+
+def test_max_turns_sentinel_is_case_insensitive() -> None:
+    assert _claude_max_turns(_claude("      max_turns: NONE\n")) is None
+
+
+def test_max_turns_yaml_null_means_no_cap() -> None:
+    assert _claude_max_turns(_claude("      max_turns: null\n")) is None
+
+
+def test_max_turns_zero_is_rejected() -> None:
+    with pytest.raises(ConfigError) as exc:
+        loads_config(_claude("      max_turns: 0\n"))
+    assert any("max_turns" in issue for issue in exc.value.issues)
+
+
+def test_max_turns_unknown_string_is_rejected() -> None:
+    with pytest.raises(ConfigError) as exc:
+        loads_config(_claude("      max_turns: forever\n"))
+    assert any("max_turns" in issue for issue in exc.value.issues)
+
+
 def test_auto_mode_defaults_to_false() -> None:
     result = loads_config(_LEGACY)
     assert result.config.orchestrator.auto_mode.enabled is False

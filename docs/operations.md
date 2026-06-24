@@ -22,7 +22,7 @@ python -m venv .venv
 pip install -e ".[dev]"             # or: pip install wastech-orchestrator
 ```
 
-`install` is the single setup command. It sets up `<repo>/.worc/` in the current repository — a single gitignored home for everything the orchestrator generates: `config.yaml`, a `guide/` (the agent task-authoring docs), `state.db`, `logs/`, and `workspace/`. There is no sibling workspace and no separate clone requirement — the orchestrator branches/commits/pushes in the repo you run it in.
+`install` is the single setup command. It sets up `<repo>/.worc/` in the current repository — a single gitignored home for everything the orchestrator generates: `config.yaml`, a `guide/` (the installed docs bundle: task docs, copy-ready task skills, plus a config helper and copy-ready config skill), `state.db`, `logs/`, and `workspace/`. There is no sibling workspace and no separate clone requirement — the orchestrator branches/commits/pushes in the repo you run it in.
 
 ### Bind the repository (`install`)
 
@@ -34,7 +34,7 @@ cd C:\projects\my-repo
 wastech-orchestrator install .          # interactive wizard
 ```
 
-The wizard detects the Git root, `origin`, base branch, and cleanliness; finds `codex`/`claude`/`gh`; proposes checks from the repo's ecosystem (`pyproject.toml` / `package.json` / `Cargo.toml` / `go.mod`); writes a validated `config.yaml` into `<repo>/.worc/`; and copies the packaged `worc/` guide to `.worc/guide/`. It appends a single line `.worc/` to the repo's tracked `.gitignore` so the whole runtime home is ignored (`tasks/` is intentionally left tracked). (`install --reconfigure` refreshes the `.worc/guide/` docs to the packaged version.) It never installs or authorizes the CLIs; it reports what is missing and auto-runs `preflight` at the end (a failed preflight keeps the config but exits non-zero with instructions).
+The wizard detects the Git root, `origin`, base branch, and cleanliness; finds `codex`/`claude`/`gh`; proposes checks from the repo's ecosystem (`pyproject.toml` / `package.json` / `Cargo.toml` / `go.mod`); writes a validated `config.yaml` into `<repo>/.worc/`; and copies the packaged `worc/` guide to `.worc/guide/`. That installed guide now includes the task docs under `.worc/guide/tasks/`, the copy-ready `worc-task` / `worc-deco-task` skills under `.worc/guide/tasks/skills/`, and the compact config-helper section under `.worc/guide/config/`, including a copy-ready `worc-config` skill template. It appends a single line `.worc/` to the repo's tracked `.gitignore` so the whole runtime home is ignored (`tasks/` is intentionally left tracked). (`install --reconfigure` refreshes the `.worc/guide/` docs to the packaged version.) It never installs or authorizes the CLIs; it reports what is missing and auto-runs `preflight` at the end (a failed preflight keeps the config but exits non-zero with instructions).
 
 Subsequent commands need no `--config` — they walk up from the current directory to the Git root and use `<root>/.worc/config.yaml`, run from anywhere inside the repo:
 
@@ -75,7 +75,7 @@ wastech-orchestrator --config path/to/config.yaml upgrade-config --dry-run   # p
 
 It adds any keys the current format introduced (from the packaged template's defaults), **keeps every existing value**, stamps the current `schema_version`, and backs up the original to `config.yaml.bak-<UTC>` before writing. It is idempotent (an already-current config is left untouched) and fail-closed (it refuses a config that is unparsable or already newer than this version, and never writes a config that would fail validation). **Caveat:** when it does rewrite the file it re-emits via YAML and drops inline comments — see `config.example.yaml` / [configuration.md](configuration.md) for field docs. `--dry-run` lists what would be added without writing.
 
-The agent task-authoring docs also ship with the package (packaged source dir `worc/`, copied to `.worc/guide/`), so an upgrade brings newer docs than your already-installed copy. Refresh the installed copy (under `.worc/guide/`) with **`upgrade-docs`**:
+The installed guide bundle also ships with the package (packaged source dir `worc/`, copied to `.worc/guide/`), so an upgrade brings newer docs than your already-installed copy. That bundle includes the task docs, the copy-ready task skills under `.worc/guide/tasks/skills/`, and the config-helper subtree under `.worc/guide/config/`. Refresh the installed copy (under `.worc/guide/`) with **`upgrade-docs`**:
 
 ```bash
 wastech-orchestrator upgrade-docs                # uses the discovered/bound config location
@@ -278,7 +278,7 @@ python -m wastech_orchestrator --config ./config.yaml status task-001
 
 ## 5. Git footprint and the audit commit
 
-There is one canonical layout. Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home — `config.yaml`, `guide/`, `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `workspace/`, and the `tasks/rejected` quarantine. The **only** things not under `.worc/` are the `tasks/` lifecycle dirs (`pending`/`processing`/`done`/`failed`), which live at the **repo root** and are **git-tracked**: the task file and its `<id>.summary.md` (in `done/` or `failed/`) are the audit trail. `install` appends a single line `.worc/` to the repo's tracked `.gitignore`; `tasks/` is intentionally not ignored.
+There is one canonical layout. Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home — `config.yaml`, `guide/` (task docs + config helper), `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `workspace/`, and the `tasks/rejected` quarantine. The **only** things not under `.worc/` are the `tasks/` lifecycle dirs (`pending`/`processing`/`done`/`failed`), which live at the **repo root** and are **git-tracked**: the task file and its `<id>.summary.md` (in `done/` or `failed/`) are the audit trail. `install` appends a single line `.worc/` to the repo's tracked `.gitignore`; `tasks/` is intentionally not ignored.
 
 Two fields under `git.footprint` shape the audit commit:
 
@@ -288,6 +288,20 @@ Two fields under `git.footprint` shape the audit commit:
 | `audit_on_branch` | `task` | `task` commits the audit onto the task branch; `sibling` commits it onto a `<branch>-audit` branch. |
 
 The orchestrator (never an agent) makes the audit commit, staging **only the current task's own files** — `tasks/<state>/<id>.md` plus `<id>.summary.md` — never `git add -- tasks/` wholesale. The _code_ commit is likewise **scoped** via an explicit pathspec that excludes `.worc/` (gitignored) and `tasks/` (rides the audit commit) — there is never a `git add .`.
+
+Why keep a separate audit commit:
+
+- it preserves the task's intent beside the code, so the branch history shows both "what changed" and "which task it closed";
+- it keeps orchestration metadata out of the code commit, so source history stays clean;
+- it leaves a durable Git record even if the local `.worc/logs/` artifacts are later deleted.
+
+Example:
+
+1. The branch starts with `tasks/pending/task-123.md`.
+2. The orchestrator implements the change and creates the normal code commit, for example `feat(task-123): add rate limiting`.
+3. At finalize/publish time it moves the task to `tasks/done/task-123.md`, writes `tasks/done/task-123.summary.md`, and creates the audit commit, for example `chore(orchestrator): audit trail for task-123`.
+
+After that, a reviewer can read the code diff in the first commit and the task outcome in the second one. The committed `summary.md` is also the PR body, so the same handoff text is visible in GitHub.
 
 ### Auto-merge to the base branch (DANGER: bypasses human review)
 

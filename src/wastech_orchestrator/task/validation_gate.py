@@ -31,6 +31,7 @@ from wastech_orchestrator.task.model import (
     ALLOWED_TASK_KEYS,
     NodeOverride,
     NormalizedTask,
+    is_valid_branch_name,
     is_valid_task_id,
 )
 from wastech_orchestrator.task.parser import (
@@ -58,6 +59,7 @@ class ValidationReason(StrEnum):
     MISSING_REQUIRED_FIELD = "missing_required_field"
     INVALID_FIELD_TYPE = "invalid_field_type"
     INVALID_TASK_ID = "invalid_task_id"
+    INVALID_BRANCH_NAME = "invalid_branch_name"
     DUPLICATE_TASK_ID = "duplicate_task_id"
     INVALID_NODE_OVERRIDE = "invalid_node_override"
     INVALID_DEPENDS_ON = "invalid_depends_on"
@@ -235,8 +237,9 @@ class ValidationGate:
         if finding is not None:
             return _rej(ValidationReason.INJECTION_SUSPECTED, finding.detail)
 
-        raw_pr_title = frontmatter.get("pr_title")
-        pr_title = (str(raw_pr_title).strip() or None) if isinstance(raw_pr_title, str) else None
+        branch_name, branch_reject = self._branch_name(frontmatter.get("branch_name"))
+        if branch_reject is not None:
+            return branch_reject, None
         raw_task_type = frontmatter.get("task_type")
         task_type = (str(raw_task_type).strip() or None) if isinstance(raw_task_type, str) else None
         task = NormalizedTask(
@@ -244,7 +247,7 @@ class ValidationGate:
             title=str(title_value),
             description=body.strip(),
             task_type=task_type,
-            pr_title=pr_title,
+            branch_name=branch_name,
             auto_merge=_as_tristate(frontmatter.get("auto_merge")),
             prompt_audit=_as_tristate(frontmatter.get("prompt_audit")),
             contacts=[str(c) for c in frontmatter.get("contacts", [])],
@@ -264,8 +267,12 @@ class ValidationGate:
     def _check_field_types(self, fm: Mapping[str, Any]) -> _Reject | None:
         if not isinstance(fm.get("title"), str):
             return _Reject(ValidationReason.INVALID_FIELD_TYPE, "title must be a string")
-        if "pr_title" in fm and fm["pr_title"] is not None and not isinstance(fm["pr_title"], str):
-            return _Reject(ValidationReason.INVALID_FIELD_TYPE, "pr_title must be a string")
+        if (
+            "branch_name" in fm
+            and fm["branch_name"] is not None
+            and not isinstance(fm["branch_name"], str)
+        ):
+            return _Reject(ValidationReason.INVALID_FIELD_TYPE, "branch_name must be a string")
         task_type = fm.get("task_type")
         if "task_type" in fm and task_type is not None and not isinstance(task_type, str):
             return _Reject(ValidationReason.INVALID_FIELD_TYPE, "task_type must be a string")
@@ -308,6 +315,24 @@ class ValidationGate:
                     "subtasks must be a list of non-empty path strings",
                 )
         return None
+
+    def _branch_name(self, raw: Any) -> tuple[str | None, _Reject | None]:
+        if raw is None:
+            return None, None
+        assert isinstance(raw, str)  # _check_field_types already enforced string-or-null.
+        if not raw.strip():
+            return None, None
+        if not is_valid_branch_name(raw):
+            return None, _Reject(
+                ValidationReason.INVALID_BRANCH_NAME,
+                "branch_name must be a valid Git branch name",
+            )
+        if raw == self._config.repo.base_branch:
+            return None, _Reject(
+                ValidationReason.INVALID_BRANCH_NAME,
+                "branch_name must not equal repo.base_branch",
+            )
+        return raw, None
 
     def _build_node_overrides(self, raw: Any) -> tuple[dict[str, NodeOverride], _Reject | None]:
         """Map the ``nodes`` front-matter block to ``{node-id: NodeOverride}`` (shape only).

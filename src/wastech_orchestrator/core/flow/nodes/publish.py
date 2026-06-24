@@ -119,7 +119,7 @@ class PublishNodeRunner:
         return git.create_pr(
             ctx.task_id,
             self._in.branch,
-            title=self._in.pr_title or ctx.task_id,
+            title=self._in.pull_request_title or ctx.task_id,
             body_path=body_path,
         )
 

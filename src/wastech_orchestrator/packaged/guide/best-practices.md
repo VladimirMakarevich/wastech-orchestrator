@@ -30,7 +30,7 @@ One task = one branch = one PR. Keep it to a single, reviewable change:
 - Prefer "add a retry budget to webhook delivery" over "improve webhook reliability."
 - If the work spans several independent changes, split it into separate tasks. (Whether one large task is auto-decomposed into sequential subtasks is an operator/flow decision, not a task flag — describe the scope and let planning propose a split.)
 - A tightly scoped task plans better, reviews faster, and is far less likely to need a fixing cycle.
-- If your repo expects a conventional-commit-style PR subject that differs from a plain task `title`, set `pr_title` (e.g. `pr_title: "feat(webhooks): bounded retry budget"`); otherwise omit it and let the PR title be generated from `title`.
+- If your repo expects a customer-specific branch convention, set `branch_name` to the full target branch (e.g. `branch_name: "feature/ABC-123-webhook-retry-budget"`); otherwise omit it and use the orchestrator's default branch naming.
 
 ## 3. State constraints explicitly
 

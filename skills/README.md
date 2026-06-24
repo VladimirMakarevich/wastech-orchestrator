@@ -21,7 +21,9 @@ cp -r skills/worc-task <your-repo>/.claude/skills/
 
 Then run `/worc-task` (or `/worc-deco-task`) in Claude Code and paste your raw task.
 
-A dedicated command to install these skills directly is planned; until then, copy them as above.
+These skill templates are also bundled into the installable guide under `.worc/guide/tasks/skills/`
+when the operator runs `worc install .` or `worc upgrade-docs`. A dedicated command to install them
+directly into a live Claude skills directory is still planned; until then, copy them as above.
 
 ## See also
 

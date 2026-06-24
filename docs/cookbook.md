@@ -46,14 +46,16 @@ repo:
   url: "git@github.com:OWNER/REPO.git"
   local_path: "./workspace/repo"
   base_branch: "main"
-  branch_prefix: "agent"
+  branch_prefix: "worc"
 ```
 
-The branch name produced by the Git Manager follows:
+The default branch name produced by the Git Manager follows:
 
 ```text
-agent/<task-id>-<slug>
+worc/<task-id>-<slug>
 ```
+
+A task may set `branch_name` to override the full branch name when a project or customer requires a different convention.
 
 Credentials are configured outside the orchestrator:
 
@@ -359,6 +361,20 @@ git:
 | --- | --- |
 | `task` (default) | The task + its summary committed onto the task branch, beside the code change. |
 | `sibling` | The audit commit goes onto a separate `<branch>-audit` branch, keeping the task branch limited to the code change. |
+
+The audit commit exists to answer a different question than the code commit:
+
+- the code commit says **what changed in the source tree**;
+- the audit commit says **which task was completed and what its outcome was**.
+
+Typical history for a successful task:
+
+```text
+feat(task-123): add rate limiting
+chore(orchestrator): audit trail for task-123
+```
+
+The first commit carries the source diff. The second carries only the task trail under `tasks/`: the moved `task-123.md` plus `task-123.summary.md`. Everything under `.worc/` stays local and is never committed.
 
 ## 10. Inspect Logs And Artifacts
 

@@ -6,7 +6,7 @@ no user-string interpolation), with an allowlisted environment.
 
 Responsibilities:
 
-* branch flow: ``fetch`` → checkout ``base_branch`` → ``pull`` → create ``agent/<task-id>-<slug>``;
+* branch flow: ``fetch`` → checkout ``base_branch`` → ``pull`` → create the task branch;
 * **scoped staging**: stage only the agent's code paths via an explicit pathspec plus a
   belt-and-braces ``:(exclude)tasks/`` guard — **never** ``git add .``;
 * the canonical footprint: the orchestrator's runtime files live under the gitignored
@@ -234,13 +234,15 @@ class GitManager:
 
     # --- branch flow ----------------------------------------------------------------------
 
-    def branch_name(self, task_id: str, slug: str) -> str:
+    def branch_name(self, task_id: str, slug: str, *, override: str | None = None) -> str:
+        if override:
+            return override
         return f"{self._config.repo.branch_prefix}/{task_id}-{slug}"
 
-    def prepare_branch(self, task_id: str, slug: str) -> str:
+    def prepare_branch(self, task_id: str, slug: str, *, branch_name: str | None = None) -> str:
         """Fetch, sync ``base_branch``, and create (or reuse) the task branch. Returns its name."""
         base = self._config.repo.base_branch
-        branch = self.branch_name(task_id, slug)
+        branch = self.branch_name(task_id, slug, override=branch_name)
         self._active = _ActiveTask(task_id=task_id, slug=slug, branch=branch)
 
         # Fetch is best-effort: a repo without a remote (some tests) still proceeds locally.
@@ -255,7 +257,12 @@ class GitManager:
         return branch
 
     def reset_branch_to_base(
-        self, task_id: str, slug: str, *, force_reset_remote: bool = False
+        self,
+        task_id: str,
+        slug: str,
+        *,
+        branch_name: str | None = None,
+        force_reset_remote: bool = False,
     ) -> str:
         """Delete the stale task branch so a fresh ``rerun`` rebuilds it from the current base.
 
@@ -267,7 +274,7 @@ class GitManager:
         no-op, so re-running ``rerun`` after an interruption is safe. Returns the branch name.
         """
         base = self._config.repo.base_branch
-        branch = self.branch_name(task_id, slug)
+        branch = self.branch_name(task_id, slug, override=branch_name)
         self._git("fetch", "origin")
         self._git_checked("checkout", base)
         self._git("pull", "--ff-only")
@@ -618,7 +625,7 @@ class GitManager:
         """Push the task branch to ``origin``. Idempotent via the publish op + remote check.
 
         Refuses to push directly to ``base_branch``: publishing is PR-only, and the task
-        branch is always ``agent/<task-id>-<slug>``, so a push targeting the base branch signals a
+        branch must not be ``base_branch``, so a push targeting the base branch signals a
         corrupted branch state rather than a normal publish.
         """
         base = self._config.repo.base_branch

@@ -220,9 +220,17 @@ def test_install_writes_config_and_guide_into_worc(
     _present(monkeypatch, "codex")
     assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
     worc = git_repo.clone / ".worc"
-    # The generated config and the agent task-authoring guide land under .worc/. (The built-in flows
-    # and their per-node prompt templates also land there — see the dedicated test below.)
+    # The generated config and the installed guide bundle land under .worc/. The guide includes the
+    # task docs, copy-ready `worc-task` / `worc-deco-task` skills, and the config helper subtree
+    # with `worc-config`. (The built-in flows and their per-node prompt templates also land there —
+    # see the dedicated test below.)
     assert (worc / "guide" / "README.md").is_file()
+    assert (worc / "guide" / "tasks" / "task-minimal.md").is_file()
+    assert (worc / "guide" / "tasks" / "task-rich.md").is_file()
+    assert (worc / "guide" / "tasks" / "skills" / "worc-task" / "SKILL.md").is_file()
+    assert (worc / "guide" / "tasks" / "skills" / "worc-deco-task" / "SKILL.md").is_file()
+    assert (worc / "guide" / "config" / "README.md").is_file()
+    assert (worc / "guide" / "config" / "skills" / "worc-config" / "SKILL.md").is_file()
     assert (worc / "config.yaml").is_file()
 
 

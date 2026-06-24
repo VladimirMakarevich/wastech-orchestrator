@@ -719,7 +719,12 @@ class Orchestrator:
         slug = row.slug or slugify(row.title)
         prior = _ledger_attempt_count(self._ledger, task_id)
         archive_task_artifacts(self._artifacts_root, task_id, prior)
-        self._git.reset_branch_to_base(task_id, slug, force_reset_remote=force_reset_remote)
+        self._git.reset_branch_to_base(
+            task_id,
+            slug,
+            branch_name=row.branch,
+            force_reset_remote=force_reset_remote,
+        )
         self._store.reset_task_for_rerun(task_id)
         self._rerun_attempt[task_id] = prior + 1
         self._log(task_id).info("rerun: fresh attempt", extra={"attempt": prior + 1})
@@ -1037,7 +1042,12 @@ class Orchestrator:
                 p.status = Status.VALIDATED
             return self._drive_via_engine(p, self._gate.phase_b(p.task))
         self._check_preflight(p)  # re-resolve the launchable check profile (idempotent)
-        self._git.prepare_branch(p.task.id, p.slug)  # re-attach the existing branch (reused)
+        p.branch = self._git.prepare_branch(
+            p.task.id,
+            p.slug,
+            branch_name=p.branch or p.task.branch_name,
+        )  # re-attach the existing branch (reused)
+        self._store.update_task(p.task.id, branch=p.branch, slug=p.slug)
         return self._engine_run(p, self._gate.phase_b(p.task), resume=True, run_state=run_state)
 
     def _restore_engine_inputs(self, p: _Pipeline, inputs: NodeInputs) -> None:
@@ -1163,7 +1173,7 @@ class Orchestrator:
             p,
             flow_dir=snapshot.source_path.parent,
             check_sets=self._check_sets(p),  # normalized command_sets; () = no gate
-            pr_title=p.task.pr_title or p.task.title,
+            pull_request_title=p.task.title,
             commit_message=f"feat({p.task.id}): {p.task.title}",
             summary_body_path=self._fallback_summary_path(p),
         )
@@ -1568,7 +1578,11 @@ class Orchestrator:
         p.branch = self._observe(
             p,
             "branch preparation",
-            lambda: self._git.prepare_branch(p.task.id, p.slug),
+            lambda: self._git.prepare_branch(
+                p.task.id,
+                p.slug,
+                branch_name=p.task.branch_name,
+            ),
         )
         self._store.update_task(p.task.id, branch=p.branch, slug=p.slug)
 

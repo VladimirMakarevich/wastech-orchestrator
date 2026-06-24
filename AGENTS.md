@@ -22,7 +22,7 @@ This file is for Codex. The full set of rules matches [CLAUDE.md](CLAUDE.md) and
 
 - Providers: `codex`, `claude`.
 - Stages: `refinement`, `planning`, `implementation`, `testing`, `review`, `fixing`, `summary`, `publishing`.
-- Branch prefix: `agent/<task-id>-<slug>`.
+- Default task branch: `repo.branch_prefix/<task-id>-<slug>` (`worc/...` by default); task `branch_name` may override the full branch name after validation.
 
 ## Check commands
 

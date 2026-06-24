@@ -148,6 +148,39 @@ def test_clean_run_with_error_result_returns_failed_not_raised(
     assert ErrorClass.TASK_FAILURE not in FALLBACK_ELIGIBLE
 
 
+def test_nonzero_exit_with_terminal_error_event_is_task_failure_not_crash(
+    claude_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # Claude exits non-zero on ``error_max_turns`` but still emits a terminal result event. That is
+    # an agent OUTCOME (turn budget exhausted), not a crash: it must be a returned TASK_FAILURE with
+    # the subtype surfaced — never a raised PROCESS_CRASHED.
+    fake = FakeRun(stdout=_success_stream(is_error=True, subtype="error_max_turns"), exit_code=1)
+    provider = _provider(claude_config, security_config, tmp_path, fake)
+    result = provider.run(make_request())
+    assert result.status is RunStatus.FAILED
+    assert result.error is not None
+    assert result.error.error_class is ErrorClass.TASK_FAILURE
+    assert "error_max_turns" in result.error.message
+
+
+def test_nonzero_exit_without_terminal_event_is_process_crashed(
+    claude_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # A non-zero exit with NO parseable terminal event is a genuine abnormal termination
+    # (e.g. killed mid-run) and stays PROCESS_CRASHED.
+    fake = FakeRun(stdout="", exit_code=137)
+    provider = _provider(claude_config, security_config, tmp_path, fake)
+    with pytest.raises(ProviderError) as exc:
+        provider.run(make_request())
+    assert exc.value.error_class is ErrorClass.PROCESS_CRASHED
+
+
 def test_timeout_raises_and_writes_result(
     claude_config: ProviderConfig,
     security_config: SecurityConfig,

@@ -48,7 +48,7 @@ def _fake_pipeline(**over: object) -> SimpleNamespace:
         "review_findings_path": "/a/review/findings.json",
         "selected_skills": (SimpleNamespace(path="/skills/a/SKILL.md"),),
         "decomposition": SimpleNamespace(accepted=True, n=3),
-        "branch": "agent/task-1-x",
+        "branch": "worc/task-1-x",
         "task": SimpleNamespace(contacts=("@me",)),
     }
     base.update(over)
@@ -61,7 +61,7 @@ def test_build_node_inputs_maps_pipeline_paths(tmp_path: Path) -> None:
         p,  # type: ignore[arg-type]
         flow_dir=tmp_path,
         check_sets=(),
-        pr_title="My PR",
+        pull_request_title="My PR",
         summary_body_path="/s/summary.md",
         commit_message="feat: x",
     )
@@ -73,8 +73,8 @@ def test_build_node_inputs_maps_pipeline_paths(tmp_path: Path) -> None:
     assert inputs.review_path == "/a/review/findings.json"
     assert inputs.skill_paths == ("/skills/a/SKILL.md",)
     assert inputs.subtask_count == 3  # decomposition accepted -> n surfaced
-    assert inputs.branch == "agent/task-1-x"
-    assert inputs.pr_title == "My PR"
+    assert inputs.branch == "worc/task-1-x"
+    assert inputs.pull_request_title == "My PR"
     assert inputs.summary_body_path == "/s/summary.md"
     assert inputs.commit_message == "feat: x"
     assert inputs.contacts == ("@me",)

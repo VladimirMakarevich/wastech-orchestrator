@@ -53,9 +53,9 @@ Allowed fields:
 | Field | Required | Type | Meaning |
 | --- | --: | --- | --- |
 | `id` | yes | string | Stable task id. Must match `^[a-z0-9][a-z0-9._-]{0,63}$`. |
-| `title` | yes | string | Short human-readable title. Used for branch slugging and reports. |
+| `title` | yes | string | Short human-readable title. Used for the default branch slug, PR title, commit messages, and reports. |
 | `task_type` | no | string | Selects the flow that runs the task. Omitted ⇒ `implementation` (the default coding pipeline). Built-ins: `implementation`, `deep_research`, `security_audit`; an operator flow in `<repo>/.worc/flows/<task_type>.yaml` may add others. An unknown `task_type` (no matching flow) fails the task before any branch is created. The task only _names_ the flow — it never edits the graph. |
-| `pr_title` | no | string \| null | PR title override; when set, used verbatim as the pull-request title instead of `title`. |
+| `branch_name` | no | string \| null | Full task branch override. Omitted ⇒ `<repo.branch_prefix>/<id>-<slug(title)>`; set it to match a project's branch naming policy. See [`branch_name`](#branch_name). |
 | `auto_merge` | no | boolean | `true` requests auto-merge, `false` always opts out, omitted uses the instance default. A set per-task value wins outright over `git.auto_merge`. See [`auto_merge`](#auto_merge). |
 | `prompt_audit` | no | boolean | `true` records each step's prompt + who for this task, `false` disables it, omitted uses config. Always overrides the global. See [`prompt_audit`](#prompt_audit). |
 | `contacts` | no | list of strings | Plain-text mentions in Telegram notifications/HITL prompts. |
@@ -85,6 +85,25 @@ id: "-task-001"     # leading separator
 ```
 
 The orchestrator rejects invalid ids; it does not sanitize them.
+
+## `branch_name`
+
+By default the orchestrator creates a task branch from `repo.branch_prefix`, the task `id`, and a slug of `title`, for example:
+
+```text
+worc/task-001-add-login-form-validation
+```
+
+Set `branch_name` when a project or customer requires a different branch naming convention:
+
+```yaml
+branch_name: "feature/ABC-123-add-login-validation"
+branch_name: "customer/acme/ABC-123-login-validation"
+```
+
+The value is the **full branch name**, not only a suffix. It is validated before branch creation and provider execution. It must be a safe Git branch ref, must not start with `-` or `refs/`, must not contain whitespace/control characters or Git-ref metacharacters, and must not equal `repo.base_branch`.
+
+The PR title still comes from `title`; `branch_name` changes only the Git branch/head used for push and PR creation.
 
 ## Refinement (automatic)
 

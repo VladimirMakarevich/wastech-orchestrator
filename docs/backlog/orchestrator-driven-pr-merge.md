@@ -146,7 +146,7 @@ Deliberately **out of scope** (YAGNI / greenfield-MVP): a packaged operator-auth
 
 - **Питает `depends_on`**: успешный `merge-task` → `pr_merge_state` = `MERGED` → зависимые задачи становятся eligible (см. [task-dependencies.md](task-dependencies.md)). Сегодня это умеет только `auto_merge` или ручной мерж на GitHub.
 - **Hardening (отдельный хвост, уже в трекере):** добавить `--admin` в `security/forbidden_args.py` — централизованный запрет на обход protection, покрывающий и новый путь мержа (строка про forbid-`--admin` в [follow_ups.md](follow_ups.md)).
-- **Пересечение с `rerun`**: `rerun --allow-done` (хвост в [follow_ups.md](follow_ups.md)) и `merge-task` оба действуют на терминальные задачи — наименования веток/PR не трогаем (контракт `agent/<id>-<slug>` остаётся).
+- **Пересечение с `rerun`**: `rerun --allow-done` (хвост в [follow_ups.md](follow_ups.md)) и `merge-task` оба действуют на терминальные задачи — наименования веток/PR не трогаем (используем сохранённую task branch, default `worc/<id>-<slug>` либо task `branch_name`).
 - **Возможные хвосты:** общий `worc tasks` (если не вошёл в Фазу 1); опциональный `git.merge_strategy`/`git.merge_wait_for_checks` отдельно от `auto_merge_*`, если семантика разойдётся (пока переиспользуем дефолты `auto_merge_*` с override во флагах); Вариант B (флоу) при потребности в операторской настройке резолва.
 
 ### Проверки и документация

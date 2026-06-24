@@ -262,6 +262,8 @@ def build_claude_argv(
             "--json-schema",
             json.dumps(request.output_schema, separators=(",", ":"), sort_keys=True),
         ]
+    # ``None`` (config ``max_turns: none`` / ``max`` / null) means no orchestrator-imposed cap:
+    # omit ``--max-turns`` so the CLI runs without a turn limit. A positive int caps the turns.
     if config.max_turns is not None:
         argv += ["--max-turns", str(config.max_turns)]
     argv += list(combined_extra)
@@ -301,6 +303,7 @@ def parse_stream_json(stdout_text: str) -> ParsedEvents:
     session_id: str | None = None
     terminal_seen = False
     succeeded = False
+    failure_subtype: str | None = None
 
     for line in stdout_text.splitlines():
         stripped = line.strip()
@@ -320,6 +323,7 @@ def parse_stream_json(stdout_text: str) -> ParsedEvents:
             subtype = str(event.get("subtype", _SUCCESS_SUBTYPE)).lower()
             is_error = bool(event.get("is_error", subtype != _SUCCESS_SUBTYPE))
             succeeded = (not is_error) and subtype == _SUCCESS_SUBTYPE
+            failure_subtype = None if succeeded else subtype
             text = event.get("result")
             if isinstance(text, str):
                 final_message = text
@@ -339,6 +343,7 @@ def parse_stream_json(stdout_text: str) -> ParsedEvents:
         usage=usage,
         session_id=session_id,
         succeeded=succeeded,
+        failure_subtype=failure_subtype,
     )
 
 

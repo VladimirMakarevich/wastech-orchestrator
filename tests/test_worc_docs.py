@@ -1,7 +1,7 @@
-"""Packaged agent task-authoring docs: availability, source sync, and example validity.
+"""Packaged installable guide docs: availability, source sync, and shipped task validity.
 
 The authored docs live in ``docs/worc/`` and a byte-identical copy ships as package data under
-``wastech_orchestrator/packaged/guide/`` (the aggregated package-data home). The shipped example
+``wastech_orchestrator/packaged/guide/`` (the aggregated package-data home). The shipped sample
 tasks must pass the validation gate.
 """
 
@@ -22,7 +22,12 @@ _DOCS_WORC = _REPO_ROOT / "docs" / "worc"
 def test_worc_packaged_data_discoverable() -> None:
     # Packaged via importlib.resources, so `init`/`install` work from an installed wheel too.
     assert _worc_root().joinpath("README.md").is_file()
-    assert _worc_root().joinpath("examples", "task-minimal.md").is_file()
+    assert _worc_root().joinpath("tasks", "task-minimal.md").is_file()
+    assert _worc_root().joinpath("tasks", "task-rich.md").is_file()
+    assert _worc_root().joinpath("tasks", "skills", "worc-task", "SKILL.md").is_file()
+    assert _worc_root().joinpath("tasks", "skills", "worc-deco-task", "SKILL.md").is_file()
+    assert _worc_root().joinpath("config", "README.md").is_file()
+    assert _worc_root().joinpath("config", "skills", "worc-config", "SKILL.md").is_file()
 
 
 def test_docs_worc_in_sync_with_packaged() -> None:
@@ -38,7 +43,7 @@ def test_docs_worc_in_sync_with_packaged() -> None:
             )
 
 
-def test_shipped_example_tasks_pass_validation(packaged_config_text: str) -> None:
+def test_shipped_task_samples_pass_validation(packaged_config_text: str) -> None:
     config = loads_config(packaged_config_text).config
     gate = ValidationGate(
         config,
@@ -47,9 +52,9 @@ def test_shipped_example_tasks_pass_validation(packaged_config_text: str) -> Non
         is_recovery_rerun=lambda _i: False,
     )
     with resources.as_file(_worc_root()) as wroot:
-        examples = sorted((Path(wroot) / "examples").glob("*.md"))
-        assert examples, "no example tasks shipped under worc/examples/"
-        for path in examples:
+        samples = sorted((Path(wroot) / "tasks").glob("*.md"))
+        assert samples, "no task samples shipped under worc/tasks/"
+        for path in samples:
             source = ParsedSource(path=str(path), suffix=path.suffix, raw_bytes=path.read_bytes())
             result = gate.validate(source)
             assert result.passed is True, f"{path.name} failed validation: {result.reason}"

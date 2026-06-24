@@ -9,6 +9,7 @@ from wastech_orchestrator.task.model import (
     REQUIRED_TASK_FIELDS,
     NodeOverride,
     NormalizedTask,
+    is_valid_branch_name,
     is_valid_task_id,
 )
 
@@ -39,6 +40,43 @@ def test_invalid_task_ids(task_id: str) -> None:
     assert not is_valid_task_id(task_id)
 
 
+@pytest.mark.parametrize(
+    "branch_name",
+    [
+        "feature/ABC-123-add-login",
+        "customer/jira/PROJ-42",
+        "release/2026.06",
+        "fix_login",
+    ],
+)
+def test_valid_branch_names(branch_name: str) -> None:
+    assert is_valid_branch_name(branch_name)
+
+
+@pytest.mark.parametrize(
+    "branch_name",
+    [
+        "",
+        " main",
+        "feature/has space",
+        "-bad",
+        "feature/-bad",
+        "/feature/x",
+        "feature/x/",
+        "feature//x",
+        "feature/..",
+        "feature/x.lock",
+        "feature/x.",
+        "feature@{x}",
+        "refs/heads/feature",
+        "HEAD",
+        "feature:bad",
+    ],
+)
+def test_invalid_branch_names(branch_name: str) -> None:
+    assert not is_valid_branch_name(branch_name)
+
+
 def test_auto_merge_is_tri_state() -> None:
     assert NormalizedTask(id="t", title="x", description="d").auto_merge is None
     assert NormalizedTask(id="t", title="x", description="d", auto_merge=True).auto_merge is True
@@ -67,7 +105,7 @@ def test_schema_constants() -> None:
         "id",
         "title",
         "task_type",
-        "pr_title",
+        "branch_name",
         "auto_merge",
         "prompt_audit",
         "contacts",

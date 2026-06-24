@@ -16,7 +16,7 @@ There are two levels of git here: (A) how the orchestrator **itself** is develop
 
 This is a product invariant (see [architecture.md](architecture.md) and the [Functional Map](../../docs/functional/index.md)):
 
-- Branch prefix: **`agent/<task-id>-<slug>`**.
+- Default task branch: **`repo.branch_prefix/<task-id>-<slug>`** (`worc/...` by default). A validated task `branch_name` may override the full branch name for project/customer conventions.
 - Sequence: `git fetch` → checkout `base_branch` → `pull` → create the task branch.
 - **Only the orchestrator (Git Manager) performs commit / push / PR**, not the agent provider.
 - Publishing (`publishing`) happens only from the `ready_to_publish` status, when checks succeed and there are no blocking findings.

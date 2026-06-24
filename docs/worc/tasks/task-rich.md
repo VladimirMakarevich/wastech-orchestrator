@@ -5,7 +5,7 @@
 # complete task — description + acceptance criteria — skips it); decomposition is decided by the flow.
 id: task-webhook-retry-budget
 title: "Add a bounded retry budget to webhook delivery"
-pr_title: "feat(webhooks): bounded retry budget for delivery" # overrides the auto-generated PR title (omit to auto-generate from title)
+branch_name: "feature/ABC-123-webhook-retry-budget" # full branch override; omit for repo.branch_prefix/id/title slug.
 auto_merge: false # true = auto-merge (DANGER: skips human review; the task author owns this call) / false = opt out / omit = config default. The task value wins outright.
 contacts: # handles surfaced for human-in-the-loop prompts and approvals
   - "@team-lead"

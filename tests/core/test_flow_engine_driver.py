@@ -143,8 +143,8 @@ def test_drive_flow_runs_tiny_flow_to_done(tmp_path: Path) -> None:
     inputs = NodeInputs(
         flow_dir=flow_dir,
         task_path="/t/task.md",
-        branch="agent/task-1-x",
-        pr_title="PR",
+        branch="worc/task-1-x",
+        pull_request_title="PR",
         summary_body_path="/s.md",
     )
 

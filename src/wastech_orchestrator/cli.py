@@ -813,7 +813,7 @@ def _report_rerun_plan(plan: RerunPlan) -> None:
         print("  artifacts: kept; pending HITL prompt reset so the node re-asks")
         print("  state:     terminal markers cleared; counters/subtasks/publish-ops kept")
     else:
-        target = plan.branch or "agent/<id>-<slug>"
+        target = plan.branch or "worc/<id>-<slug>"
         archive = f"attempt-{max(plan.attempt - 1, 0)}"
         print(f"  branch:    reset {target} to base '{plan.base_branch}'")
         print(f"  artifacts: archived to logs/{plan.task_id}/{archive}/")

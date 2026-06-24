@@ -12,12 +12,12 @@ The module is deliberately layered: `parser.py` is _structural only_ (it splits 
 
 ## Public surface
 
-- `NormalizedTask` ([model.py:61](../../../src/wastech_orchestrator/task/model.py#L61)) — the parsed task: `id`, `title`, `description`, plus optional `task_type`, `pr_title`, tri-state `auto_merge`/`prompt_audit`, `contacts`, and `stage_params`.
-- `NormalizedTask.disabled_stages()` ([model.py:87](../../../src/wastech_orchestrator/task/model.py#L87)) — the stages explicitly disabled via `stages.<stage>.enabled: false` (those whose `enabled is False`).
-- `StageParams` ([model.py:48](../../../src/wastech_orchestrator/task/model.py#L48)) — a per-stage toggle with the single field `enabled: bool | None`.
+- `NormalizedTask` ([model.py](../../../src/wastech_orchestrator/task/model.py)) — the parsed task: `id`, `title`, `description`, plus optional `task_type`, `branch_name`, tri-state `auto_merge`/`prompt_audit`, `contacts`, `depends_on`, `subtasks`, and `node_overrides`.
+- `NormalizedTask.disabled_nodes()` ([model.py](../../../src/wastech_orchestrator/task/model.py)) — the flow node ids explicitly disabled via `nodes.<node-id>.enabled: false`.
+- `NodeOverride` ([model.py](../../../src/wastech_orchestrator/task/model.py)) — a per-node toggle with the single field `enabled: bool | None`.
 - `TASK_ID_PATTERN` / `is_valid_task_id` ([model.py:19](../../../src/wastech_orchestrator/task/model.py#L19), [model.py:43](../../../src/wastech_orchestrator/task/model.py#L43)) — the strict id format, applied with `fullmatch`.
+- `is_valid_branch_name` ([model.py](../../../src/wastech_orchestrator/task/model.py)) — pure Git branch-name safety validation for the task-level `branch_name` override.
 - `ALLOWED_TASK_KEYS` / `REQUIRED_TASK_FIELDS` ([model.py:28](../../../src/wastech_orchestrator/task/model.py#L28), [model.py:40](../../../src/wastech_orchestrator/task/model.py#L40)) — the clean-task front-matter allowlist and the required subset.
-- `SKIPPABLE_STAGES` ([schema.py:65](../../../src/wastech_orchestrator/config/schema.py#L65), B05) — the stages a task may disable; imported by the gate.
 - `read_task_source(path)` ([parser.py:61](../../../src/wastech_orchestrator/task/parser.py#L61)) — read the file as raw bytes + suffix (decoding is the gate's concern).
 - `split_frontmatter(text, suffix)` ([parser.py:95](../../../src/wastech_orchestrator/task/parser.py#L95)) — split front matter from body per format.
 - `extract_section(body, header)` ([parser.py:173](../../../src/wastech_orchestrator/task/parser.py#L173)) — pull a `## <header>` markdown section, case-insensitive.
@@ -41,9 +41,9 @@ The deterministic duplicate-key rejection lets the gate report `frontmatter_malf
 
 ### The clean-task schema
 
-`ALLOWED_TASK_KEYS` is exactly `{id, title, task_type, pr_title, auto_merge, prompt_audit, contacts, stages}` ([model.py:28](../../../src/wastech_orchestrator/task/model.py#L28)); `REQUIRED_TASK_FIELDS` is `{id, title}` ([model.py:40](../../../src/wastech_orchestrator/task/model.py#L40)). A "clean" task carries identity/dispatch only, plus the two sanctioned exceptions — the per-stage skip toggle and `auto_merge` (task-wins). Provider, model, reasoning, decomposition, and the old `refined` flag are **not** task fields; they live on the flow node or are derived, so they fail-closed as `unknown_top_level_field` (tests assert `agents`, `model`, `reasoning`, `refined` are now unknown — [test_validation_gate.py:150](../../../tests/task/test_validation_gate.py#L150), [test_validation_gate.py:192](../../../tests/task/test_validation_gate.py#L192), [test_validation_gate.py:317](../../../tests/task/test_validation_gate.py#L317)).
+`ALLOWED_TASK_KEYS` is exactly `{id, title, task_type, branch_name, auto_merge, prompt_audit, contacts, depends_on, subtasks, nodes}` ([model.py](../../../src/wastech_orchestrator/task/model.py)); `REQUIRED_TASK_FIELDS` is `{id, title}`. A "clean" task carries identity/dispatch only, plus bounded operational knobs: a full branch-name override, merge dependencies, operator-authored subtask references, per-node disable toggles, prompt audit, and auto-merge. Provider, model, reasoning, and the old `refined` flag are **not** task fields; they live on the flow node or are derived, so they fail-closed as `unknown_top_level_field`.
 
-`task_type` is the dispatch key that selects the flow (`implementation` / `deep_research` / `security_audit` / an operator flow); `None` defers to the registry default. It never affects _how_ a node runs ([model.py:73](../../../src/wastech_orchestrator/task/model.py#L73)). `auto_merge` and `prompt_audit` are tri-state (`True`/`False`/`None`): the task value wins outright, and `None` defers to the global config ([model.py:79](../../../src/wastech_orchestrator/task/model.py#L79); `_as_tristate` coerces any non-bool to `None` — [validation_gate.py:362](../../../src/wastech_orchestrator/task/validation_gate.py#L362)).
+`task_type` is the dispatch key that selects the flow (`implementation` / `deep_research` / `security_audit` / an operator flow); `None` defers to the registry default. It never affects _how_ a node runs. `branch_name` is a full task-branch override; when absent, the Git Manager uses `repo.branch_prefix/<task-id>-<slug>`. `auto_merge` and `prompt_audit` are tri-state (`True`/`False`/`None`): the task value wins outright, and `None` defers to the global config.
 
 The task id is strict — `^[a-z0-9][a-z0-9._-]{0,63}$` (1–64 chars, lowercase-alnum first char, no leading dot/separator, no whitespace) — and applied with `fullmatch` ([model.py:19](../../../src/wastech_orchestrator/task/model.py#L19), [model.py:45](../../../src/wastech_orchestrator/task/model.py#L45)). Invalid ids are rejected, never sanitized (accept/reject cases: [test_model.py:17](../../../tests/task/test_model.py#L17)).
 
@@ -61,13 +61,15 @@ Once the front matter parses, `_validate_fields` continues the same short-circui
 
 1. **`UNKNOWN_TOP_LEVEL_FIELD`** — fail-closed: any key not in `ALLOWED_TASK_KEYS` ([validation_gate.py:186](../../../src/wastech_orchestrator/task/validation_gate.py#L186)).
 2. **`MISSING_REQUIRED_FIELD`** — `id` absent, `title` absent or blank, or the body `Description` section empty. The `## Description` section must be non-empty; if the body has no headings the whole body counts as the description ([validation_gate.py:195](../../../src/wastech_orchestrator/task/validation_gate.py#L195), [validation_gate.py:247](../../../src/wastech_orchestrator/task/validation_gate.py#L247)).
-3. **`INVALID_FIELD_TYPE`** — `title` must be a string; `pr_title`/`task_type` must be string-or-null; `auto_merge`/`prompt_audit` must be boolean-or-null; `contacts` must be a list of strings (a bare string/bytes is rejected) ([validation_gate.py:254](../../../src/wastech_orchestrator/task/validation_gate.py#L254)).
-4. **`INVALID_TASK_ID`** — `id` not a string or not matching `TASK_ID_PATTERN` ([validation_gate.py:209](../../../src/wastech_orchestrator/task/validation_gate.py#L209)).
-5. **`DUPLICATE_TASK_ID`** — the id already exists in the tasks store **or** the ledger, unless `is_recovery_rerun(id)` exempts it ([validation_gate.py:214](../../../src/wastech_orchestrator/task/validation_gate.py#L214)).
-6. **`INVALID_STAGE_OVERRIDE`** / **`REVIEW_SKIP_NOT_ALLOWED`** — from `_build_stage_params` (below).
-7. **`INJECTION_SUSPECTED`** — `scan_frontmatter` finds an argv-shaped token in any front-matter value ([validation_gate.py:226](../../../src/wastech_orchestrator/task/validation_gate.py#L226)).
+3. **`INVALID_FIELD_TYPE`** — `title` must be a string; `branch_name`/`task_type` must be string-or-null; `auto_merge`/`prompt_audit` must be boolean-or-null; `contacts`/`depends_on`/`subtasks` must be lists of strings (a bare string/bytes is rejected where a list is expected).
+4. **`INVALID_TASK_ID`** — `id` not a string or not matching `TASK_ID_PATTERN`.
+5. **`INVALID_DEPENDS_ON`** — `depends_on` is malformed or self-referential.
+6. **`DUPLICATE_TASK_ID`** — the id already exists in the tasks store **or** the ledger, unless `is_recovery_rerun(id)` exempts it.
+7. **`INVALID_NODE_OVERRIDE`** — the `nodes` block is malformed or uses any sub-key besides `enabled`.
+8. **`INJECTION_SUSPECTED`** — `scan_frontmatter` finds an argv-shaped token in any front-matter value.
+9. **`INVALID_BRANCH_NAME`** — `branch_name`, when present and non-blank, is not a safe Git branch ref or equals `repo.base_branch`.
 
-Only after every check passes is the `NormalizedTask` assembled. `pr_title` and `task_type` are stripped to `None` when blank/whitespace; the description is `body.strip()` (the **full** body, not just the Description section) ([validation_gate.py:230](../../../src/wastech_orchestrator/task/validation_gate.py#L230)).
+Only after every check passes is the `NormalizedTask` assembled. `branch_name` and `task_type` are `None` when blank/whitespace; the description is `body.strip()` (the **full** body, not just the Description section).
 
 ```mermaid
 flowchart TB
@@ -79,9 +81,9 @@ flowchart TB
     b -->|no| enrich["NEEDS_ENRICHMENT → refinement runs"]
 ```
 
-### Stage overrides
+### Node overrides
 
-`_build_stage_params` maps the `stages` block to `{Stage: StageParams}`, fail-closed ([validation_gate.py:284](../../../src/wastech_orchestrator/task/validation_gate.py#L284)). The whole block may be `null`/`{}` (→ no overrides). Each key must resolve to a `Stage` that is in `SKIPPABLE_STAGES` = `{planning, testing, review, fixing}` ([schema.py:65](../../../src/wastech_orchestrator/config/schema.py#L65)); `implementation`, `refinement`, `summary`, and `publishing` are **not** skippable and reject as `INVALID_STAGE_OVERRIDE` (tests: [test_validation_gate.py:381](../../../tests/task/test_validation_gate.py#L381), [test_validation_gate.py:446](../../../tests/task/test_validation_gate.py#L446)). Within a stage, `enabled` is the **only** valid sub-key — any other (e.g. `model`, `reasoning`, `temperature`) rejects ([validation_gate.py:316](../../../src/wastech_orchestrator/task/validation_gate.py#L316); test [test_validation_gate.py:409](../../../tests/task/test_validation_gate.py#L409)). A per-stage value of `null`/`{}` means "default (runs)"; `enabled` must be boolean-or-`null`. Disabling `review` additionally requires `agents.allow_review_skip`, else `REVIEW_SKIP_NOT_ALLOWED` — and only `enabled: false` is gated; an explicit `enabled: true` is always fine ([validation_gate.py:328](../../../src/wastech_orchestrator/task/validation_gate.py#L328), tests [test_validation_gate.py:463](../../../tests/task/test_validation_gate.py#L463)).
+`_build_node_overrides` maps the `nodes` block to `{node_id: NodeOverride}`, fail-closed. The whole block may be `null`/`{}` (→ no overrides). Keys are flow node ids; the IO-free gate validates only shape, and flow resolution later verifies that each disabled node exists and can be skipped. Within each node block, `enabled` is the **only** valid sub-key — any other (e.g. `model`, `reasoning`, `temperature`) rejects as `INVALID_NODE_OVERRIDE`. A per-node value of `null`/`{}` means "default (runs)"; `enabled` must be boolean-or-`null`.
 
 ### Phase B — completeness (never rejects)
 
@@ -89,7 +91,7 @@ flowchart TB
 
 ### Artifacts and the resume round-trip
 
-`write_normalized` writes `task.normalized.json` under `logs/<task-id>/`, serializing `id`, `title`, `description`, `task_type`, `pr_title`, `auto_merge`, `prompt_audit`, `contacts`, and `stages` (each `StageParams` omitting an unset `enabled`) ([parser.py:201](../../../src/wastech_orchestrator/task/parser.py#L201)). `load_normalized` reads it back on resume ([parser.py:228](../../../src/wastech_orchestrator/task/parser.py#L228)); legacy manifests written before a field existed load with its default (`stages` → `{}`, `auto_merge`/`pr_title` → `None`), exercised by [test_parser.py:175](../../../tests/task/test_parser.py#L175). Persisting `pr_title` is what keeps a custom PR title from silently reverting to the task `title` across a crash-resume before publish. `write_validation_report` writes `validation_report.json` (`task_id`, `passed`, `reason`, `detail`, `completeness`) for both accepted and rejected tasks ([validation_gate.py:368](../../../src/wastech_orchestrator/task/validation_gate.py#L368)).
+`write_normalized` writes `task.normalized.json` under `logs/<task-id>/`, serializing `id`, `title`, `description`, `task_type`, `branch_name`, `auto_merge`, `prompt_audit`, `contacts`, `depends_on`, `subtasks`, and `nodes`. `load_normalized` reads it back on resume; legacy manifests written before a field existed load with its default (`nodes` → `{}`, tri-state fields/`branch_name` → `None`). Persisting `branch_name` keeps a custom branch override from silently reverting to the default branch naming policy across a crash-resume before publish. `write_validation_report` writes `validation_report.json` (`task_id`, `passed`, `reason`, `detail`, `completeness`) for both accepted and rejected tasks.
 
 `slugify` lowercases and collapses runs of non-alphanumerics to a single `-`, trimming leading/trailing dashes, and returns `"task"` for an otherwise-empty result so a branch name is always well-formed ([parser.py:191](../../../src/wastech_orchestrator/task/parser.py#L191)).
 
@@ -101,7 +103,7 @@ flowchart TB
 - **Duplicate front-matter keys are an error, never "last value wins"** — both YAML and JSON loaders raise ([parser.py:67](../../../src/wastech_orchestrator/task/parser.py#L67), [parser.py:86](../../../src/wastech_orchestrator/task/parser.py#L86)).
 - **Ids are validated, not sanitized** ([model.py:18](../../../src/wastech_orchestrator/task/model.py#L18)).
 - **The injection scan is belt-and-braces.** Task content reaches providers only as file paths (§19.5), so a front-matter value can never become a CLI flag regardless; the scan is a second line of defence ([validation_gate.py:14](../../../src/wastech_orchestrator/task/validation_gate.py#L14)).
-- **The task does not patch the flow graph.** The only graph-shaping levers are `task_type` (which flow) and per-task `stages.<skippable>.enabled: false` (a bounded node skip); provider/model/reasoning are never task fields ([model.py:21](../../../src/wastech_orchestrator/task/model.py#L21)).
+- **The task does not patch the flow graph.** The only graph-shaping levers are `task_type` (which flow) and per-task `nodes.<node-id>.enabled: false` (a bounded node skip); provider/model/reasoning are never task fields.
 - **Recovery-rerun bypasses duplicate-id only for the named id.** `is_recovery_rerun` is scoped to exactly the one id being re-run; a re-run set for a different id does not exempt this duplicate ([test_validation_gate.py:185](../../../tests/task/test_validation_gate.py#L185)).
 
 ## Dependencies
@@ -114,13 +116,11 @@ flowchart TB
 See [the audit](../../backlog/2026-06-21-audit.md).
 
 - [parser.py:231](../../../src/wastech_orchestrator/task/parser.py#L231), [parser.py:237](../../../src/wastech_orchestrator/task/parser.py#L237) — `load_normalized` does an unguarded `json.loads` followed by required-key access `data["id"]`/`data["title"]`; a corrupt or truncated `task.normalized.json` raises `JSONDecodeError`/`KeyError`. This is the parser-side cause of the resume crash (the crash itself surfaces in B06/B10, where `load_normalized` is called at [orchestrator.py:727](../../../src/wastech_orchestrator/core/orchestrator.py#L727)). Contrast `write_validation_report`/`load_normalized`'s tolerant `data.get(...)` for optional fields — only the two required keys are unguarded.
-- [parser.py:206](../../../src/wastech_orchestrator/task/parser.py#L206) — `write_normalized` omits `pr_title` from the serialized manifest, and `load_normalized` never restores it (defaults to `None`). A task crash-resumed before publishing therefore loses its custom PR title and falls back to `title` at [orchestrator.py:884](../../../src/wastech_orchestrator/core/orchestrator.py#L884). The sibling tri-state fields (`task_type`, `auto_merge`, `prompt_audit`) all have round-trip tests guarding restart-safety; `pr_title` has neither persistence nor a guard.
 - [validation_gate.py:351](../../../src/wastech_orchestrator/task/validation_gate.py#L351) — Phase-B acceptance detection falls back to `"acceptance" in task.description.lower()` (a bare substring). Any prose mentioning the word — including "no acceptance criteria yet" — classifies the task `COMPLETE` and silently skips refinement, since this classification is the _only_ input to `derived.needs_refinement`.
 - [model.py:1](../../../src/wastech_orchestrator/task/model.py#L1) — stale planning prose: the module docstring states "The actual parsing, the §19 validation gate, and duplicate-id detection are P5 … here we fix only the shapes …", and the inline comments reference "P1 and the P5 parser" ([model.py:18](../../../src/wastech_orchestrator/task/model.py#L18)). Parsing and the gate are now implemented in this same package; the P1/P5 phasing is historical.
-- [validation_gate.py:96](../../../src/wastech_orchestrator/task/validation_gate.py#L96) — the `_STAGE_BY_KEY` comment claims "only skippable stages are valid under the task `stages` block", but the dict is built from **all** `Stage` members (`{stage.value: stage for stage in Stage}`); the skippable filter is applied separately at [validation_gate.py:304](../../../src/wastech_orchestrator/task/validation_gate.py#L304). The comment describes the downstream gate, not the dict it annotates.
 
 ## Tests
 
-- `tests/task/test_model.py` — id accept/reject matrix ([test_model.py:17](../../../tests/task/test_model.py#L17)), tri-state `auto_merge`/`prompt_audit`, independent default collections, the exact `ALLOWED_TASK_KEYS`/`REQUIRED_TASK_FIELDS` schema, and `disabled_stages()` reflecting `enabled: false` only.
-- `tests/task/test_parser.py` — `read_task_source`, the front-matter split for `.md`/`.json` (duplicate-key, unterminated, non-mapping, non-object cases), `extract_section`, `slugify`, and the `write_normalized`/`load_normalized` round-trips for `task_type`/`auto_merge`/`prompt_audit`/`stage_params` plus legacy-manifest defaulting.
-- `tests/task/test_validation_gate.py` — one accept/reject test per `ValidationReason`, the duplicate-id store/ledger/recovery-rerun matrix, the full `stages` override surface (skippable vs not, unknown sub-keys, review-skip opt-in), `pr_title` normalization/injection/type cases, the tri-state field cases, and Phase-B `COMPLETE`/`NEEDS_ENRICHMENT` classification.
+- `tests/task/test_model.py` — id accept/reject matrix, branch-name accept/reject matrix, tri-state `auto_merge`/`prompt_audit`, independent default collections, the exact `ALLOWED_TASK_KEYS`/`REQUIRED_TASK_FIELDS` schema, and `disabled_nodes()` reflecting `enabled: false` only.
+- `tests/task/test_parser.py` — `read_task_source`, the front-matter split for `.md`/`.json` (duplicate-key, unterminated, non-mapping, non-object cases), `extract_section`, `slugify`, and the `write_normalized`/`load_normalized` round-trips for `task_type`/`branch_name`/`auto_merge`/`prompt_audit`/`node_overrides` plus legacy-manifest defaulting.
+- `tests/task/test_validation_gate.py` — one accept/reject test per `ValidationReason`, the duplicate-id store/ledger/recovery-rerun matrix, the full `nodes` override surface, `branch_name` normalization/injection/type/ref-safety cases, the tri-state field cases, and Phase-B `COMPLETE`/`NEEDS_ENRICHMENT` classification.

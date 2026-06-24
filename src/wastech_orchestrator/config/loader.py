@@ -258,6 +258,49 @@ def _opt_int(m: Mapping[str, Any], key: str, where: str, issues: list[str]) -> i
     return value
 
 
+# ``max_turns`` accepts a positive integer (a turn cap), the string ``"none"``/``"max"`` or YAML
+# ``null`` (no orchestrator-imposed cap — the ``--max-turns`` flag is omitted entirely), or nothing
+# (the default below). Sentinels are case-insensitive.
+_DEFAULT_MAX_TURNS = 400
+_MAX_TURNS_UNLIMITED = frozenset({"none", "max"})
+
+
+def _max_turns(m: Mapping[str, Any], where: str, issues: list[str]) -> int | None:
+    """Parse ``max_turns`` to a turn cap (``int``) or ``None`` (no cap → flag omitted).
+
+    Positive int → cap; ``"none"``/``"max"`` (case-insensitive) or YAML ``null`` → ``None``; absent
+    → :data:`_DEFAULT_MAX_TURNS`; anything else (``0``, negative, other strings, wrong type) → an
+    issue plus the default.
+    """
+    key = "max_turns"
+    if key not in m:
+        return _DEFAULT_MAX_TURNS
+    value = m[key]
+    if value is None:
+        return None  # explicit null → no cap
+    if isinstance(value, str):
+        if value.strip().lower() in _MAX_TURNS_UNLIMITED:
+            return None
+        issues.append(
+            f"{where}.{key}: expected a positive integer or one of "
+            f"{sorted(_MAX_TURNS_UNLIMITED)}, got {value!r}"
+        )
+        return _DEFAULT_MAX_TURNS
+    if isinstance(value, bool) or not isinstance(value, int):
+        issues.append(
+            f"{where}.{key}: expected a positive integer or 'none'/'max', "
+            f"got {type(value).__name__}"
+        )
+        return _DEFAULT_MAX_TURNS
+    if value <= 0:
+        issues.append(
+            f"{where}.{key}: expected a positive integer (use 'none' or 'max' for no cap), "
+            f"got {value}"
+        )
+        return _DEFAULT_MAX_TURNS
+    return value
+
+
 def _enum[E: StrEnum](
     value: Any, enum_cls: type[E], where: str, issues: list[str], default: E
 ) -> E:
@@ -301,7 +344,7 @@ def _build_repo(raw: Any, issues: list[str]) -> RepoConfig:
         url=_str(m, "url", "", "repo", issues),
         local_path=_str(m, "local_path", "./workspace/repo", "repo", issues),
         base_branch=_str(m, "base_branch", "main", "repo", issues),
-        branch_prefix=_str(m, "branch_prefix", "agent", "repo", issues),
+        branch_prefix=_str(m, "branch_prefix", "worc", "repo", issues),
     )
 
 
@@ -340,7 +383,7 @@ def _build_provider(raw: Any, pid: ProviderId, issues: list[str]) -> ProviderCon
         permission_profile=_str(m, "permission_profile", "workspace-write", where, issues),
         extra_args=_str_tuple(m, "extra_args", (), where, issues),
         sandbox=_opt_str(m, "sandbox", where, issues),
-        max_turns=_opt_int(m, "max_turns", where, issues),
+        max_turns=_max_turns(m, where, issues),
         reasoning=reasoning_raw,
         primary=_bool(m, "primary", False, where, issues),
     )

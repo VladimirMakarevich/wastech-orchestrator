@@ -69,7 +69,7 @@ def _provider_block(pid: ProviderId, *, primary: bool) -> dict[str, Any]:
     if pid is ProviderId.CODEX:
         block["sandbox"] = "workspace-write"
     if pid is ProviderId.CLAUDE:
-        block["max_turns"] = 50
+        block["max_turns"] = 400
     block["permission_profile"] = "workspace-write"
     block["extra_args"] = []
     if primary:
@@ -94,7 +94,7 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "url": spec.repo_url,
             "local_path": str(spec.repo_local_path),
             "base_branch": spec.base_branch,
-            "branch_prefix": "agent",
+            "branch_prefix": "worc",
         },
         "agents": {
             "allowed": [pid.value for pid in providers],

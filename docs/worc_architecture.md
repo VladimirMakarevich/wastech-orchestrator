@@ -105,7 +105,7 @@ Quality-gate commands are **operator-authored**, never auto-detected or hardcode
 
 ### 4.6 Git Manager
 
-The **only** component that runs commit / push / PR. Before a task it prepares the branch (`agent/<task-id>-<slug>`); on publish it makes a **scoped code commit** (an explicit pathspec that excludes `.worc/` and `tasks/` — never `git add .`/`-A`) plus a separate **task-scoped audit commit** of just that task's `tasks/<state>/<id>.md` + `<id>.summary.md`, pushes, and (when enabled) opens the PR with the summary as its body — all idempotent via `publish_operations` fingerprints. Optional **auto-merge** (off by default) merges the PR; a blocked merge ends `manual_action_required` with the PR left open, never a forced merge. Terminal cleanup returns the working copy to `repo.base_branch`, then `fetch` + `pull --ff-only`.
+The **only** component that runs commit / push / PR. Before a task it prepares the branch (`worc/<task-id>-<slug>` by default, or the task's validated `branch_name`); on publish it makes a **scoped code commit** (an explicit pathspec that excludes `.worc/` and `tasks/` — never `git add .`/`-A`) plus a separate **task-scoped audit commit** of just that task's `tasks/<state>/<id>.md` + `<id>.summary.md`, pushes, and (when enabled) opens the PR with the summary as its body — all idempotent via `publish_operations` fingerprints. Optional **auto-merge** (off by default) merges the PR; a blocked merge ends `manual_action_required` with the PR left open, never a forced merge. Terminal cleanup returns the working copy to `repo.base_branch`, then `fetch` + `pull --ff-only`.
 
 ### 4.7 State Store with checkpoints
 
@@ -196,7 +196,7 @@ orchestrator:
   auto_mode: { enabled: false } # pick the next pending task after cleanup
   poll_interval_seconds: 300 # watch tick: fetch/pull base, then re-scan (0 = single pass)
 
-repo: { url, local_path, base_branch: main, branch_prefix: agent }
+repo: { url, local_path, base_branch: main, branch_prefix: worc }
 
 agents:
   allowed: [claude, codex]
@@ -273,7 +273,7 @@ The **only** things outside `.worc/` are the `tasks/` lifecycle dirs (`pending`/
 3.  acquire the single processing slot; register the task in state.db
 4.  resolve the flow for the task's task_type (operator flow > packaged built-in), validated fail-closed
 5.  isolation + check preflights (both BEFORE any branch)
-6.  prepare branch agent/<task-id>-<slug>; build node services + the supervisor; hand the graph to the engine
+6.  prepare task branch (default worc/<task-id>-<slug>, or validated task branch_name); build node services + the supervisor; hand the graph to the engine
 7.  the engine traverses the flow (default: refine → plan → implement → test → review → fix(loop) → publish):
       - agent nodes run via the router → a provider adapter; the supervisor observes each completed step read-only
       - testing runs the diff-selected command sets; review is a read-only evaluator; edits are guarded by the dangerous-diff classifier

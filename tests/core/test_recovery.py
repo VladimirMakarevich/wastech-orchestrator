@@ -135,7 +135,7 @@ def test_more_than_one_active_is_manual(store, make_git_config, git_repo) -> Non
 
 
 def test_interrupted_cleanup_is_cleanup(store, make_git_config, git_repo) -> None:
-    store.insert_task(TaskRow(task_id="t1", title="t", status=Status.DONE, branch="agent/t1-x"))
+    store.insert_task(TaskRow(task_id="t1", title="t", status=Status.DONE, branch="worc/t1-x"))
     plan = _reconciler(store, make_git_config, git_repo).reconcile()
     assert plan.action is RecoveryAction.CLEANUP
     assert plan.task_id == "t1"
@@ -154,7 +154,7 @@ def _decomposed(store: StateStore, *, completed: int, shas: dict[int, str]) -> N
             task_id="d",
             title="d",
             status=Status.RUNNING,
-            branch="agent/d-x",
+            branch="worc/d-x",
             decomposition_accepted=True,
             subtask_count=2,
             active_subtask=completed + 1,
@@ -400,7 +400,7 @@ def test_resume_interrupted_cleanup_notifies_after_ledger(
         [0],
         notifier=notifier,
     )
-    branch = "agent/task-cleanup-x"
+    branch = "worc/task-cleanup-x"
     git_run(["checkout", "-b", branch], git_repo.clone)
     store.insert_task(
         TaskRow(task_id="task-cleanup", title="cleanup", status=Status.DONE, branch=branch)
@@ -452,7 +452,7 @@ def test_resume_continues_persisted_checkpoint(
     task_id = f"resume-{current_node or 'fresh'}"
     title = "Resume checkpoint"
     slug = slugify(title)
-    branch = f"agent/{task_id}-{slug}"
+    branch = f"worc/{task_id}-{slug}"
     write_normalized(
         NormalizedTask(id=task_id, title=title, description="Implement the requested change."),
         str(art),
@@ -537,7 +537,7 @@ def test_resume_restores_planning_selected_skills(
     task_id = "resume-skills"
     title = "Resume checkpoint"
     slug = slugify(title)
-    branch = f"agent/{task_id}-{slug}"
+    branch = f"worc/{task_id}-{slug}"
     write_normalized(
         NormalizedTask(id=task_id, title=title, description="Implement the requested change."),
         str(art),
@@ -603,7 +603,7 @@ def test_resume_waits_on_persisted_planning_prompt_without_resending(
     task_id = "resume-planning-hitl"
     title = "Resume planning HITL"
     slug = slugify(title)
-    branch = f"agent/{task_id}-{slug}"
+    branch = f"worc/{task_id}-{slug}"
     git_run(["checkout", "-b", branch], git_repo.clone)
     write_normalized(
         NormalizedTask(id=task_id, title=title, description="Implement the requested change."),
@@ -683,7 +683,7 @@ def test_resume_decomposed_at_subtask_without_duplicate_commit(
     )
     task_id = "task-d"
     slug = "add-a-thing"
-    branch = f"agent/{task_id}-{slug}"
+    branch = f"worc/{task_id}-{slug}"
 
     # Simulate an interrupted run: subtask 1 was committed on the branch, subtask 2 is pending.
     git_run(["checkout", "-b", branch], git_repo.clone)

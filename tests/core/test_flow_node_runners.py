@@ -1350,12 +1350,15 @@ def test_publish_pull_request_runs_git_sequence(tmp_path: Path) -> None:
         git=git,
     )
     inputs = _inputs(
-        tmp_path, branch="agent/task-1-x", pr_title="My PR", summary_body_path="/s/summary.md"
+        tmp_path,
+        branch="worc/task-1-x",
+        pull_request_title="My PR",
+        summary_body_path="/s/summary.md",
     )
     result = PublishNodeRunner(services, inputs).run(node, _ctx(node))
     assert result.outcome.kind == "done"
     assert [c[0] for c in git.calls] == ["commit_code", "commit_audit", "push", "create_pr"]
-    assert git.calls[-1] == ("create_pr", "task-1", "agent/task-1-x", "My PR", "/s/summary.md")
+    assert git.calls[-1] == ("create_pr", "task-1", "worc/task-1-x", "My PR", "/s/summary.md")
     # commit_sha_after is the node's result reference; for a publish node that is the PR URL (an
     # intentional, documented overload — see NodeRunRow / Secondary obs 2), not a commit SHA.
     assert store.completed[-1]["commit_sha_after"] == "https://example/pr/1"
@@ -1383,7 +1386,7 @@ def test_publish_pull_request_requires_body_path(tmp_path: Path) -> None:
         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
         git=git,
     )
-    inputs = _inputs(tmp_path, branch="agent/task-1-x")  # summary_body_path is None
+    inputs = _inputs(tmp_path, branch="worc/task-1-x")  # summary_body_path is None
     with pytest.raises(PublishConfigError):
         PublishNodeRunner(services, inputs).run(node, _ctx(node))
     assert git.calls == []  # nothing committed/pushed/PR'd
@@ -1404,13 +1407,17 @@ def test_publish_finalize_provides_pr_body(tmp_path: Path) -> None:
         git=git,
         finalize=lambda: "/done/task-1.summary.md",
     )
-    inputs = _inputs(tmp_path, branch="agent/task-1-x", pr_title="PR")  # no summary_body_path
+    inputs = _inputs(
+        tmp_path,
+        branch="worc/task-1-x",
+        pull_request_title="PR",
+    )  # no summary_body_path
     result = PublishNodeRunner(services, inputs).run(node, _ctx(node))
     assert result.outcome.kind == "done"
     assert git.calls[-1] == (
         "create_pr",
         "task-1",
-        "agent/task-1-x",
+        "worc/task-1-x",
         "PR",
         "/done/task-1.summary.md",
     )
@@ -1455,7 +1462,7 @@ def test_publish_git_failure_after_finalize_raises_manual(tmp_path: Path) -> Non
         git=git,
         finalize=lambda: "/done/task-1.summary.md",  # finalize already ran (file moved + summary)
     )
-    inputs = _inputs(tmp_path, branch="agent/task-1-x", pr_title="PR")
+    inputs = _inputs(tmp_path, branch="worc/task-1-x", pull_request_title="PR")
     with pytest.raises(NodeManualRequired):
         PublishNodeRunner(services, inputs).run(node, _ctx(node))
     # commit_code + commit_audit committed before push failed; create_pr never reached.

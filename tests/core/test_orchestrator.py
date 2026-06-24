@@ -327,7 +327,7 @@ def _impl_writes_file(provider_id: str) -> FakeProvider:
 def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: Path) -> None:
     providers = _both()
     notifier = RecordingNotifier()
-    orch, store, ledger, art = _build(
+    orch, store, ledger, _ = _build(
         git_repo,
         make_git_config,
         tmp_path,
@@ -375,8 +375,60 @@ def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: 
     ]
     assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "main"
     # The commit landed on the task branch.
-    branches = git_run(["branch", "--list", "agent/task-001-add-a-thing"], git_repo.clone)
-    assert "agent/task-001-add-a-thing" in branches
+    branches = git_run(["branch", "--list", "worc/task-001-add-a-thing"], git_repo.clone)
+    assert "worc/task-001-add-a-thing" in branches
+
+
+def test_task_branch_name_override_controls_published_head(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    providers = _both()
+    gh_calls: list[list[str]] = []
+
+    def gh(argv: Sequence[str]) -> GitResult:
+        gh_calls.append(list(argv))
+        return GitResult(
+            exit_code=0,
+            stdout="https://example/pr/1\n",
+            stderr="",
+            timed_out=False,
+            launch_error=None,
+        )
+
+    orch, store, ledger, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        gh=gh,
+    )
+    task = tmp_path / "task-custom-branch.md"
+    task.write_text(
+        '---\nid: task-custom-branch\ntitle: "Add a thing"\n'
+        'branch_name: "feature/ABC-123-customer-branch"\n---\n\n'
+        "## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
+        encoding="utf-8",
+    )
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    result = orch.run_task(str(task))
+    assert result.final_status is Status.DONE
+    row = store.get_task("task-custom-branch")
+    assert row is not None and row.branch == "feature/ABC-123-customer-branch"
+    assert ledger.records()[0]["branch"] == "feature/ABC-123-customer-branch"
+    assert "feature/ABC-123-customer-branch" in git_run(
+        ["branch", "--list", "feature/ABC-123-customer-branch"], git_repo.clone
+    )
+    assert gh_calls and "--head" in gh_calls[0]
+    assert gh_calls[0][gh_calls[0].index("--head") + 1] == "feature/ABC-123-customer-branch"
 
 
 def test_documentation_node_edit_is_committed(
@@ -407,7 +459,7 @@ def test_documentation_node_edit_is_committed(
     assert "documentation" in ran
     assert ran.index("review") < ran.index("documentation") < ran.index("publish")
     # Its docs edit is part of the committed change on the task branch (one shared diff).
-    branch = "agent/task-doc-add-a-thing"
+    branch = "worc/task-doc-add-a-thing"
     committed = git_run(["show", "--name-only", "--format=", branch], git_repo.clone)
     assert "README.md" in committed
     assert "feature.py" in committed
@@ -897,7 +949,7 @@ def test_decomposed_task_commits_each_subtask(
     assert row.subtask_count == 2
     assert row.subtasks_completed == 2
     # Two subtask commits + the final (empty) code commit guard; assert at least 2 new commits.
-    branch = "agent/task-007-add-a-thing"
+    branch = "worc/task-007-add-a-thing"
     count = git_run(["rev-list", "--count", f"main..{branch}"], git_repo.clone)
     assert int(count) >= 2
     subs = store.get_subtasks("task-007")
@@ -1055,7 +1107,7 @@ def test_operator_decomposition_runs_each_subtask_one_pr(
     # The immutable spec carries the operator's verbatim body.
     spec = art / "logs" / "epic-001" / "subtasks" / "01-first.md"
     assert "## Acceptance criteria" in spec.read_text(encoding="utf-8")
-    count = git_run(["rev-list", "--count", "main..agent/epic-001-epic"], git_repo.clone)
+    count = git_run(["rev-list", "--count", "main..worc/epic-001-epic"], git_repo.clone)
     assert int(count) >= 3
 
 
@@ -1138,7 +1190,7 @@ def test_operator_decomposition_bad_manifest_rejected_before_branch(
     # Quarantined with a report, and no branch was created.
     report = art / "logs" / "epic-bad" / "validation_report.json"
     assert json.loads(report.read_text(encoding="utf-8"))["reason"] == reason
-    branches = git_run(["branch", "--list", "agent/epic-bad-epic"], git_repo.clone)
+    branches = git_run(["branch", "--list", "worc/epic-bad-epic"], git_repo.clone)
     assert branches.strip() == ""
 
 
@@ -1188,7 +1240,7 @@ def test_unknown_task_type_fails_before_branch(
     )
     result = orch.run_task(str(task))
     assert result.final_status is Status.FAILED
-    branches = git_run(["branch", "--list", "agent/*"], git_repo.clone)
+    branches = git_run(["branch", "--list", "worc/*"], git_repo.clone)
     assert branches == ""
 
 
@@ -1204,7 +1256,7 @@ def test_disable_unknown_node_fails_before_branch(
     block = "nodes:\n  no_such_node:\n    enabled: false\n"
     result = orch.run_task(_task_with_nodes(tmp_path, block))
     assert result.final_status is Status.FAILED
-    branches = git_run(["branch", "--list", "agent/*"], git_repo.clone)
+    branches = git_run(["branch", "--list", "worc/*"], git_repo.clone)
     assert branches == ""
 
 
@@ -1228,7 +1280,7 @@ def test_rejected_task_no_branch(git_repo, make_git_config, git_run, tmp_path: P
     assert (art / "logs" / "task-009" / "validation_report.json").exists()
     # No branch was created and the file was quarantined.
     assert (quarantine / "task-009.md").exists()
-    branches = git_run(["branch", "--list", "agent/*"], git_repo.clone)
+    branches = git_run(["branch", "--list", "worc/*"], git_repo.clone)
     assert branches == ""
     assert ledger.records()[0]["validation_reason"] == "frontmatter_missing"
     assert notifier.calls == [
@@ -1325,7 +1377,7 @@ def test_strict_isolation_preflight_fails_without_branch(
     assert result.final_status is Status.FAILED
     row = store.get_task("task-iso")
     assert row is not None and row.status is Status.FAILED
-    assert git_run(["branch", "--list", "agent/*"], git_repo.clone) == ""  # no branch created
+    assert git_run(["branch", "--list", "worc/*"], git_repo.clone) == ""  # no branch created
     assert ledger.records()[0]["final_status"] == "failed"
 
 
@@ -1356,7 +1408,7 @@ def test_failed_with_branch_commits_and_pushes_task_and_summary(
 
     assert result.final_status is Status.FAILED
     assert result.pr_url is None  # no PR for a failed attempt
-    branch = "agent/task-fail-add-a-thing"
+    branch = "worc/task-fail-add-a-thing"
     tracked = git_run(["ls-tree", "-r", "--name-only", branch], git_repo.clone)
     assert "tasks/failed/task-fail.md" in tracked  # task moved to failed/ and committed
     assert "tasks/failed/task-fail.summary.md" in tracked  # summary committed beside it

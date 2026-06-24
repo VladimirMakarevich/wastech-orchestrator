@@ -55,9 +55,9 @@ def test_prepare_branch_creates_task_branch(
 ) -> None:
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
     branch = gm.prepare_branch("task-001", "add-thing")
-    assert branch == "agent/task-001-add-thing"
+    assert branch == "worc/task-001-add-thing"
     head = git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone)
-    assert head == "agent/task-001-add-thing"
+    assert head == "worc/task-001-add-thing"
 
 
 def test_prepare_branch_reused_on_restart(
@@ -66,7 +66,33 @@ def test_prepare_branch_reused_on_restart(
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
     gm.prepare_branch("task-001", "x")
     branch = gm.prepare_branch("task-001", "x")  # restart must not fail recreating the branch
-    assert branch == "agent/task-001-x"
+    assert branch == "worc/task-001-x"
+
+
+def test_prepare_branch_uses_explicit_branch_name(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    branch = gm.prepare_branch(
+        "task-001",
+        "ignored-slug",
+        branch_name="feature/ABC-123-customer-branch",
+    )
+    assert branch == "feature/ABC-123-customer-branch"
+    head = git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone)
+    assert head == "feature/ABC-123-customer-branch"
+
+
+def test_reset_branch_to_base_uses_explicit_branch_name(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    branch = gm.prepare_branch("task-001", "x", branch_name="feature/ABC-123-reset")
+    assert branch == "feature/ABC-123-reset"
+    reset = gm.reset_branch_to_base("task-001", "x", branch_name=branch)
+    assert reset == branch
+    assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "main"
+    assert git_run(["branch", "--list", branch], git_repo.clone) == ""
 
 
 def test_scoped_staging_excludes_artifact_dirs(
@@ -406,7 +432,7 @@ def test_create_pr_real_runner_adds_gh_executable_once(
     body = tmp_path / "summary.md"
     body.write_text("# summary\n", encoding="utf-8")
 
-    gm.create_pr("task-001", "agent/task-001-x", title="My PR", body_path=str(body))
+    gm.create_pr("task-001", "worc/task-001-x", title="My PR", body_path=str(body))
 
     assert calls[0][:3] == ["gh", "pr", "create"]
     assert calls[0].count("gh") == 1
@@ -697,6 +723,6 @@ def test_delete_branch_is_idempotent(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
 ) -> None:
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
-    git_run(["branch", "agent/task-001-x"], git_repo.clone)
-    assert gm.delete_branch("agent/task-001-x") is True  # deleted
-    assert gm.delete_branch("agent/task-001-x") is False  # already gone — no-op
+    git_run(["branch", "worc/task-001-x"], git_repo.clone)
+    assert gm.delete_branch("worc/task-001-x") is True  # deleted
+    assert gm.delete_branch("worc/task-001-x") is False  # already gone — no-op

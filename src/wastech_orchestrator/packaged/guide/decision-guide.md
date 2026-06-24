@@ -15,16 +15,16 @@ A live task belongs in the repo's own `tasks/pending/` directory (committed and 
 
 Decomposition is **not** a per-task knob. Whether a large task is broken into sequential subtasks (on one branch, one PR) is decided by the operator's `agents.decomposition.enabled` setting plus the flow's `decomposition:` block and the planning stage's proposal. Keep a task one coherent unit; if the work is genuinely large, say so in the Description and let planning propose a split.
 
-## `pr_title` — override the PR title
+## `branch_name` — override the task branch
 
-By default the orchestrator generates the PR title from the task `title`. Set `pr_title` when you want the published PR to read differently — most often a conventional-commit-style subject:
+By default the orchestrator creates `<repo.branch_prefix>/<task-id>-<slug(title)>`, usually `worc/<task-id>-<slug>`. Set `branch_name` when the target project or customer requires a different branch convention:
 
 ```yaml
 title: "Add a bounded retry budget to webhook delivery"
-pr_title: "feat(webhooks): bounded retry budget for delivery"
+branch_name: "feature/ABC-123-webhook-retry-budget"
 ```
 
-Omit it to auto-generate. It changes only the PR title text; it does not touch the branch name (still `agent/<task-id>-<slug>`), the commit messages, or any routing.
+Omit it to use the default. The value is the full branch name, not a suffix. It must be a valid Git branch name, must not equal the base branch, and is validated before any branch/provider side effect. It changes only the branch/head used for push and PR creation; the PR title still comes from `title`.
 
 ## Disabling nodes — `nodes.<node-id>.enabled: false`
 

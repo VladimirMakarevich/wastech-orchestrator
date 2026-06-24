@@ -77,10 +77,10 @@ def test_set_status_and_update_task(store: StateStore) -> None:
     row = store.get_task("task-001")
     assert row is not None and row.status is Status.VALIDATED
 
-    store.update_task("task-001", branch="agent/task-001-x", validation_passed=True)
+    store.update_task("task-001", branch="worc/task-001-x", validation_passed=True)
     row = store.get_task("task-001")
     assert row is not None
-    assert row.branch == "agent/task-001-x"
+    assert row.branch == "worc/task-001-x"
     assert row.validation_passed is True
 
 
@@ -373,7 +373,7 @@ def _seed_terminal_task(store: StateStore, *, status: Status = Status.FAILED) ->
             task_id="task-001",
             title="A task",
             status=status,
-            branch="agent/task-001-a-task",
+            branch="worc/task-001-a-task",
             slug="a-task",
             test_fix_cycles=2,
             review_fix_cycles=1,
@@ -431,7 +431,7 @@ def test_revive_task_for_continue_preserves_work(store: StateStore) -> None:
     assert row.cleanup_completed is None and row.cleanup_completed_at is None
     assert row.cleanup_target_branch is None
     # The work is kept — that is the whole point of continue.
-    assert row.branch == "agent/task-001-a-task"
+    assert row.branch == "worc/task-001-a-task"
     assert row.fix_iterations == 4 and row.review_fix_cycles == 1
     assert row.decomposition_accepted is True and row.subtask_count == 2
     assert store.get_subtasks("task-001")[0].commit_sha == "abc"

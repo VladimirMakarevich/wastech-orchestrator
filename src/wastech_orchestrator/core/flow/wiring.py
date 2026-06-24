@@ -92,7 +92,7 @@ def build_node_inputs(
     *,
     flow_dir: Path,
     check_sets: tuple[ResolvedCheckSet, ...] = (),
-    pr_title: str | None = None,
+    pull_request_title: str | None = None,
     summary_body_path: str | None = None,
     commit_message: str | None = None,
     subtask_spec_path: str | None = None,
@@ -100,10 +100,11 @@ def build_node_inputs(
     """Build the per-unit :class:`NodeInputs` from the live ``_Pipeline``.
 
     Artifact paths are read straight off the pipeline (the values the legacy ``_prompt_variables``
-    injected). The publish-only fields (``pr_title`` / ``summary_body_path`` / ``commit_message``)
-    are not pipeline attributes — the publish wrapper computes and passes them; ``check_sets`` are
-    the normalized ``checks.command_sets`` (diff-selected at run time by the checks node). Editing-
-    session continuity is durable now (the ``editing_lineage`` store, P2.2), not an in-memory map.
+    injected). The publish-only fields (``pull_request_title`` / ``summary_body_path`` /
+    ``commit_message``) are not pipeline attributes — the publish wrapper computes and passes them;
+    ``check_sets`` are the normalized ``checks.command_sets`` (diff-selected at run time by the
+    checks node). Editing-session continuity is durable now (the ``editing_lineage`` store, P2.2),
+    not an in-memory map.
     """
     return NodeInputs(
         flow_dir=flow_dir,
@@ -117,7 +118,7 @@ def build_node_inputs(
         subtask_spec_path=subtask_spec_path,
         check_sets=check_sets,
         branch=p.branch or None,
-        pr_title=pr_title,
+        pull_request_title=pull_request_title,
         summary_body_path=summary_body_path,
         commit_message=commit_message,
         contacts=tuple(p.task.contacts),

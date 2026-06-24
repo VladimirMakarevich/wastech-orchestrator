@@ -153,13 +153,13 @@ def test_prompt_audit_round_trips(tmp_path: Path, value: bool | None) -> None:
     assert load_normalized(tmp_path, "task-001").prompt_audit is value
 
 
-@pytest.mark.parametrize("value", ["Custom PR", None])
-def test_pr_title_round_trips(tmp_path: Path, value: str | None) -> None:
-    # Restart-safety: a custom pr_title must survive a crash-resume, or a task resumed before
-    # publish would silently fall back to the task title for the PR.
-    task = NormalizedTask(id="task-001", title="T", description="Do it", pr_title=value)
+@pytest.mark.parametrize("value", ["feature/ABC-123-custom", None])
+def test_branch_name_round_trips(tmp_path: Path, value: str | None) -> None:
+    # Restart-safety: a custom branch_name must survive a crash-resume, or a task resumed before
+    # publish would silently fall back to the default branch naming policy.
+    task = NormalizedTask(id="task-001", title="T", description="Do it", branch_name=value)
     write_normalized(task, tmp_path)
-    assert load_normalized(tmp_path, "task-001").pr_title == value
+    assert load_normalized(tmp_path, "task-001").branch_name == value
 
 
 def test_node_overrides_round_trip(tmp_path: Path) -> None:

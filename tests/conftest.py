@@ -124,7 +124,7 @@ repo:
   url: "git@example.com:o/r.git"
   local_path: {str(clone)!r}
   base_branch: "main"
-  branch_prefix: "agent"
+  branch_prefix: "worc"
 agents:
   allowed: [claude, codex]
   max_fix_cycles: {max_fix_cycles}

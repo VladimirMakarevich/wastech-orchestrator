@@ -252,7 +252,7 @@ class NodeInputs:
     check_sets: tuple[ResolvedCheckSet, ...] = ()
     #: publish inputs (set for the unit that reaches a publish node).
     branch: str | None = None
-    pr_title: str | None = None
+    pull_request_title: str | None = None
     summary_body_path: str | None = None
     commit_message: str | None = None
     #: notification recipients for HITL prompts (the task's contacts).

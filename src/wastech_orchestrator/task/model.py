@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 # 63 of [a-z0-9._-]; no whitespace, no leading dot/separator, 1..64 chars. Invalid ids are rejected,
 # never sanitized (.agents/rules/security.md). Shared source of truth for the model and the parser.
 TASK_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+BRANCH_NAME_MAX_BYTES = 255
+_BRANCH_FORBIDDEN_CHARS = frozenset(" ~^:?*[\\")
 
 # Front-matter schema. A task is "clean" (flow-contract, PRE.3): it carries
 # only identity/dispatch fields plus the two sanctioned exceptions — ``nodes.<node-id>.enabled``
@@ -28,7 +30,7 @@ ALLOWED_TASK_KEYS: frozenset[str] = frozenset(
         "id",
         "title",
         "task_type",
-        "pr_title",
+        "branch_name",
         "auto_merge",
         "prompt_audit",
         "contacts",
@@ -43,6 +45,33 @@ REQUIRED_TASK_FIELDS: frozenset[str] = frozenset({"id", "title"})
 def is_valid_task_id(task_id: str) -> bool:
     """Return True iff ``task_id`` matches the normalized id format."""
     return TASK_ID_PATTERN.fullmatch(task_id) is not None
+
+
+def is_valid_branch_name(branch_name: str) -> bool:
+    """Return True iff ``branch_name`` is a safe Git branch ref name.
+
+    This mirrors the practical ``git check-ref-format --branch`` constraints without invoking Git
+    from the IO-free task gate, and adds a few guardrails that keep the value unambiguous in argv:
+    no leading dash, no ``refs/`` prefix, and no ``HEAD`` pseudo-ref.
+    """
+    if not branch_name or len(branch_name.encode("utf-8")) > BRANCH_NAME_MAX_BYTES:
+        return False
+    if branch_name != branch_name.strip():
+        return False
+    if branch_name in {"@", "HEAD"} or branch_name.upper() == "HEAD":
+        return False
+    if branch_name.startswith(("/", "-", "refs/")) or branch_name.endswith(("/", ".")):
+        return False
+    if ".." in branch_name or "//" in branch_name or "@{" in branch_name:
+        return False
+    if any(
+        ord(ch) < 0x20 or ord(ch) == 0x7F or ch in _BRANCH_FORBIDDEN_CHARS for ch in branch_name
+    ):
+        return False
+    for component in branch_name.split("/"):
+        if not component or component.startswith((".", "-")) or component.endswith((".lock", ".")):
+            return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -73,7 +102,8 @@ class NormalizedTask:
     # Dispatch key → flow (P0.4): ``None`` defers to the registry default (``implementation``). The
     # task never selects the flow from prose and never patches the graph — it only names the flow.
     task_type: str | None = None
-    pr_title: str | None = None
+    # Full task branch override. ``None`` uses repo.branch_prefix + task id + slug.
+    branch_name: str | None = None
     # Tri-state opt-in to auto-merge (DANGER: bypasses human review). The task value wins outright
     # (PRE.2): True requests it, False always opts out, None defers to config.git.auto_merge.
     auto_merge: bool | None = None

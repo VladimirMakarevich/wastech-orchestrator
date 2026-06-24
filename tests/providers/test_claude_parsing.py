@@ -48,6 +48,18 @@ def test_error_subtype_marks_not_succeeded() -> None:
     assert parsed.succeeded is False
 
 
+def test_failure_subtype_carries_the_error_subtype() -> None:
+    parsed = parse_stream_json(_stream({"type": "result", "subtype": "error_max_turns"}))
+    assert parsed.succeeded is False
+    assert parsed.failure_subtype == "error_max_turns"
+
+
+def test_success_has_no_failure_subtype() -> None:
+    parsed = parse_stream_json(_stream({"type": "result", "subtype": "success", "is_error": False}))
+    assert parsed.succeeded is True
+    assert parsed.failure_subtype is None
+
+
 def test_non_dict_structured_output_is_ignored() -> None:
     parsed = parse_stream_json(
         _stream({"type": "result", "subtype": "success", "structured_output": "not-a-dict"})
