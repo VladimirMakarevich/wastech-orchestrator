@@ -40,6 +40,8 @@ The request grants network iff the flow declares a `network_policy` ([agent.py:4
 
 A `resume_own_lineage` evaluator (the research critic) resumes its own durable session across rework rounds, persisted in `node_lineage` keyed by `(task_id, node_id, subtask_order)` (`_resume_own_session`/`_persist_own_lineage`, [evaluator.py:188-228](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L188)).
 
+When **no provider could run** the evaluator (infra-exhaustion), it raises `EvaluatorInfraError` — a `NodeInfraError` subclass — rather than the plain `NodeInfraError` an agent node raises ([evaluator.py:89-95](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L89)). The distinction lets the orchestrator degrade an evaluator that could not _run_ to terminal `manual_action_required` (the green diff is shippable — branch preserved for the operator) instead of discarding it as `failed`, while an agent node whose infra exhausted has no usable result and stays `failed` ([B06](B06-orchestrator-pipeline.md)).
+
 ### Checks node
 
 `ChecksNodeRunner.run` ([checks.py:63](../../../src/wastech_orchestrator/core/flow/nodes/checks.py#L63)) dispatches on `node.checker`; every checker maps to the same `pass`/`fail` outcome so the engine needs no per-checker case:

@@ -111,13 +111,20 @@ class Supervisor:
         does not duplicate observations.
         """
         prompt = self._step_prompt(task_id, node_id, outcome_kind, final_message)
-        note = self._run(task_id, prompt)
+        note = self._run(task_id, prompt, node_run_id=node_run_id)
         self._record(
             task_id,
             kind="supervisor_step",
             source_node_run_id=node_run_id,
             subtask_order=subtask_order,
-            payload={"node": node_id, "outcome": outcome_kind, "note": note or ""},
+            # ``note is None`` means the observation could not run (infra/setup), distinct from an
+            # empty advisory note ("nothing to add") — so a silent advisory layer is diagnosable.
+            payload={
+                "node": node_id,
+                "outcome": outcome_kind,
+                "note": note or "",
+                "observation_failed": note is None,
+            },
         )
 
     # -- whole-task finalize ---------------------------------------------------
@@ -131,7 +138,9 @@ class Supervisor:
         fallback applies (summary is *always* written, by one path or the other). ``summary.json``
         (local-only metadata) is always written. Returns the ``summary.md`` path, or ``None``.
         """
-        summary_text = self._run(task_id, self._finalize_prompt(task_id, task_title))
+        # ``node_run_id=0`` is the once-per-task finalize sentinel; per-step observations use the
+        # observed step's id, so each supervisor turn writes a distinct artifact dir (no collision).
+        summary_text = self._run(task_id, self._finalize_prompt(task_id, task_title), node_run_id=0)
         self._record(
             task_id,
             kind="supervisor_final",
@@ -150,13 +159,17 @@ class Supervisor:
 
     # -- internals -------------------------------------------------------------
 
-    def _run(self, task_id: str, prompt: str) -> str | None:
+    def _run(self, task_id: str, prompt: str, *, node_run_id: int) -> str | None:
         """Run one read-only supervisor LLM turn on its own session; return the final message.
 
         Continues the supervisor's own ``resume_own_lineage`` session: it resumes the in-memory id,
         or — on a fresh process after a restart — the persisted ``node_lineage`` session, and writes
         the new session id back after the turn. Best-effort by contract: any failure (no provider,
         infra error, role file unreadable) is logged and yields ``None`` — never raised.
+
+        ``node_run_id`` namespaces the on-disk artifact dir (``stages/supervisor/run-NNNNNN/``):
+        per-step observation passes the observed step's id and finalize passes ``0``, so successive
+        turns never collide on the same path (the artifact writer never overwrites).
         """
         try:
             route = self._router.resolve_route(_SUPERVISOR_IDENTITY, None)
@@ -168,7 +181,7 @@ class Supervisor:
                 permission_profile="read-only",  # forced — the supervisor never writes
                 timeout_seconds=self._default_timeout_seconds,
                 attempt=1,
-                node_run_id=0,  # not a graph node; audit lives in the ``evaluations`` table
+                node_run_id=node_run_id,  # not a graph node; audit lives in ``evaluations``
                 model=self._settings.model,
                 reasoning=self._settings.reasoning,
                 session_id=self._resume_session(task_id, route),

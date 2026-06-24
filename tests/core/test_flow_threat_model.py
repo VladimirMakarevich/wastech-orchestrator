@@ -54,9 +54,15 @@ def _has(vs: list[Violation], category: str, fragment: str) -> bool:
 # A minimal, structurally valid PR-publishing flow with one editing agent + publish; the {extra}
 # slot lets a test inject a hostile field onto the agent node.
 def _flow(
-    *, ceiling: str = "workspace-write", publishing: str = "pull_request", extra: str = ""
+    *,
+    ceiling: str = "workspace-write",
+    publishing: str = "pull_request",
+    profile: str = "workspace-write",
+    network_policy: str | None = None,
+    extra: str = "",
 ) -> str:
     indented = "".join(f"      {line}\n" for line in extra.splitlines()) if extra else ""
+    network_line = f"  network_policy: {network_policy}\n" if network_policy is not None else ""
     return f"""\
 flow:
   name: t
@@ -64,11 +70,12 @@ flow:
   permission_ceiling: {ceiling}
   output_policy: code_change
   publishing: {publishing}
+{network_line}
   nodes:
     - id: work
       kind: agent
       role_file: roles/work.md
-      permission_profile: workspace-write
+      permission_profile: {profile}
 {indented}    - id: out
       kind: publish
       policy: pull_request
@@ -271,6 +278,39 @@ def test_threat_unknown_reasoning_level_fatal(tmp_path: Path) -> None:
     config = _config(tmp_path)
     vs = _config_violations(_flow(extra="reasoning: ultra"), config, tmp_path)
     assert _has(vs, "config", "reasoning")
+
+
+def test_threat_provider_specific_reasoning_level_fatal(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    vs = _config_violations(_flow(extra="reasoning: minimal"), config, tmp_path)
+    assert _has(vs, "config", "provider 'claude'")
+    assert _has(vs, "config", "minimal")
+
+
+def test_codex_minimal_reasoning_level_valid(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    snap = _snap(_flow(extra="provider: codex\nreasoning: minimal"), tmp_path)
+    validate_flow(snap)
+    validate_flow_against_config(snap, config)
+
+
+def test_codex_workspace_write_with_network_is_fatal(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    vs = _config_violations(
+        _flow(network_policy="research", extra="provider: codex"), config, tmp_path
+    )
+    assert _has(vs, "config", "codex")
+    assert _has(vs, "config", "workspace-write")
+    assert _has(vs, "config", "network_access=true")
+
+
+def test_codex_read_only_with_network_is_valid(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    snap = _snap(
+        _flow(profile="read-only", extra="provider: codex\nnetwork_access: true"), tmp_path
+    )
+    validate_flow(snap)
+    validate_flow_against_config(snap, config)
 
 
 def test_threat_ceiling_above_provider_capability_fatal(tmp_path: Path) -> None:

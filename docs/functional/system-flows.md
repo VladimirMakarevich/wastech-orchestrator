@@ -15,7 +15,7 @@ Brief end-to-end flows that span multiple blocks. Details for each block are in 
 
 ## Quality fix loop
 
-A `testing` `fail` takes the `test_fix` loop edge to `fixing`; a `review` `rework` takes the `review_fix` loop edge to `fixing`; `fixing → testing` re-runs the gate. The engine charges each rework against its named loop and the single global counter, capped at `min(flow budget, agents.max_*)` ([B28](./blocks/B28-flow-engine.md)/[B09](./blocks/B09-fix-loop-control.md)). Exhausting any limit ends the run at `manual_action_required` with a failure report ([B08](./blocks/B08-ledger-and-failure-reports.md)). `fixing` resumes `implementation`'s editing session (`lineage_affinity`, durable in `editing_lineage`).
+A `testing` `fail` takes the `test_fix` loop edge to `fixing`; a `review` `rework` takes the `review_fix` loop edge to `fixing`; `fixing → testing` re-runs the gate. The engine charges each rework against its named loop and the single global counter, capped at `min(flow budget, agents.max_*)` ([B28](./blocks/B28-flow-engine.md)/[B09](./blocks/B09-fix-loop-control.md)). Exhausting any limit ends the run at `manual_action_required` with a failure report ([B08](./blocks/B08-ledger-and-failure-reports.md)). An **evaluator that cannot run at all** (no provider — infra/misconfig) likewise degrades to `manual_action_required` (the green diff is preserved on the branch for the operator, not discarded as `failed`); every infra terminal — `failed` or `manual_action_required` — now writes a failure report ([B30](./blocks/B30-flow-node-runners.md)/[B06](./blocks/B06-orchestrator-pipeline.md)). `fixing` resumes `implementation`'s editing session (`lineage_affinity`, durable in `editing_lineage`).
 
 ## Decomposition
 

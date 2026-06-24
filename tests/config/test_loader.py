@@ -226,7 +226,7 @@ def test_reasoning_absent_defaults_to_none() -> None:
 
 
 def test_reasoning_valid_levels_parse() -> None:
-    for level in ("low", "medium", "high", "xhigh", "max"):
+    for level in ("minimal", "low", "medium", "high", "xhigh", "max"):
         text2 = _PROVIDER_BASE.replace(
             '    claude:\n      command: "claude"',
             f'    claude:\n      command: "claude"\n      reasoning: {level}',

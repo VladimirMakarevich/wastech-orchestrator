@@ -167,6 +167,28 @@ def test_supervisor_advisory_never_reworks(tmp_path: Path) -> None:
     assert not hasattr(sup, "route")
 
 
+def test_supervisor_step_artifact_run_id_is_the_observed_step(tmp_path: Path) -> None:
+    # Each per-step observation requests its artifact dir under the OBSERVED step's node_run_id, so
+    # successive supervisor turns never collide on run-000000 (the writer never overwrites a dir).
+    router, store = FakeRouter(), _store(tmp_path)
+    sup = _supervisor(tmp_path, router, store)
+    sup.observe(task_id=_TASK, node_id="implementation", node_run_id=5, outcome_kind="done")
+    sup.observe(task_id=_TASK, node_id="review", node_run_id=7, outcome_kind="accept")
+    assert [r.node_run_id for r in router.requests] == [5, 7]
+
+
+def test_supervisor_records_observation_failure_distinctly(tmp_path: Path) -> None:
+    # A failed observation (no provider) is recorded with observation_failed=True — distinct from an
+    # empty advisory note ("nothing to add") — so a silent advisory layer is diagnosable.
+    router, store = FakeRouter([None, _ok(message="noted")]), _store(tmp_path)
+    sup = _supervisor(tmp_path, router, store)
+    sup.observe(task_id=_TASK, node_id="implementation", node_run_id=1, outcome_kind="done")
+    sup.observe(task_id=_TASK, node_id="review", node_run_id=2, outcome_kind="accept")
+    payloads = [json.loads(e.findings_json) for e in store.get_evaluations(_TASK)]
+    assert payloads[0]["observation_failed"] is True and payloads[0]["note"] == ""
+    assert payloads[1]["observation_failed"] is False and payloads[1]["note"] == "noted"
+
+
 def test_supervisor_own_session_not_editing_lineage(tmp_path: Path) -> None:
     # The supervisor resumes only its OWN session across steps; it has no editing-session map and
     # every request is read-only, so it can never inherit or overwrite an author's editing lineage.

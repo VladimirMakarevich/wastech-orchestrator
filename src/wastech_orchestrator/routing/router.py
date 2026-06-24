@@ -40,6 +40,7 @@ from wastech_orchestrator.providers.base import (
     ProviderId,
     RunStatus,
 )
+from wastech_orchestrator.providers.capabilities import map_reasoning_for_provider_switch
 from wastech_orchestrator.routing.snapshots import PartialChange, SnapshotHook
 from wastech_orchestrator.security.profiles import is_same_or_stricter
 
@@ -211,7 +212,13 @@ class AgentRouter:
             if stage_attempts >= max_attempts:
                 break
             attempt_no = stage_attempts + 1
-            req = self._build_request(request, attempt_no, partial if index > 0 else None)
+            req = self._build_request(
+                request,
+                attempt_no,
+                partial if index > 0 else None,
+                from_provider=sequence[index - 1] if index > 0 else None,
+                to_provider=pid,
+            )
             stage_attempts += 1
             attempt_started = self._monotonic()
             log.info(
@@ -369,13 +376,41 @@ class AgentRouter:
         )
 
     def _build_request(
-        self, request: AgentRunRequest, attempt: int, partial: PartialChange | None
+        self,
+        request: AgentRunRequest,
+        attempt: int,
+        partial: PartialChange | None,
+        *,
+        from_provider: ProviderId | None = None,
+        to_provider: ProviderId | None = None,
     ) -> AgentRunRequest:
         """Per-attempt request. The fallback gets the partial diff; the permission profile is never
-        relaxed (``permission_profile`` is intentionally left untouched), ."""
+        relaxed (``permission_profile`` is intentionally left untouched).
+
+        A ``cross_provider`` fallback attempt (the substitute provider is a *different* CLI) drops
+        provider-specific request fields: ``model``, most ``reasoning`` values, ``extra_args``,
+        and ``session_id``. A model id is provider-specific (codex ``gpt-5.5`` is not a Claude
+        model), provider CLI flags in ``extra_args`` are not portable, and a durable session id
+        belongs to one provider. Cleared values make the substitute re-resolve its own
+        config/defaults while preserving portable context (prompt, paths, schema, permissions,
+        network flag). Codex ``minimal`` maps to Claude ``low`` because Claude has no ``minimal``
+        level. The same-provider session-unavailable retry reuses the already-built ``req`` and is
+        unaffected.
+        """
+        req = replace(request, attempt=attempt)
         if partial is not None:
-            return replace(request, attempt=attempt, diff_path=partial.diff_path)
-        return replace(request, attempt=attempt)
+            req = replace(req, diff_path=partial.diff_path)
+        if from_provider is not None and to_provider is not None and from_provider != to_provider:
+            req = replace(
+                req,
+                model=None,
+                reasoning=map_reasoning_for_provider_switch(
+                    from_provider, to_provider, request.reasoning
+                ),
+                extra_args=[],
+                session_id=None,
+            )
+        return req
 
     def _profile_of(self, pid: ProviderId) -> str:
         return self._config.agents.providers[pid].permission_profile

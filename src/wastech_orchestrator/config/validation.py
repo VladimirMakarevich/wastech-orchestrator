@@ -22,6 +22,7 @@ from wastech_orchestrator.checks.model import (
 from wastech_orchestrator.config.loader import ConfigError
 from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.providers.base import ProviderId
+from wastech_orchestrator.providers.capabilities import is_reasoning_supported, reasoning_levels_for
 from wastech_orchestrator.security.forbidden_args import find_forbidden_args
 
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -61,6 +62,26 @@ def _check_global_primary(
         )
 
 
+def _global_primary(config: OrchestratorConfig) -> ProviderId | None:
+    primaries = [pid for pid, p in config.agents.providers.items() if p.primary]
+    return primaries[0] if len(primaries) == 1 else None
+
+
+def _check_reasoning(
+    *,
+    where: str,
+    provider: ProviderId,
+    reasoning: str | None,
+    issues: list[str],
+) -> None:
+    if reasoning is None or is_reasoning_supported(provider, reasoning):
+        return
+    issues.append(
+        f"{where}: invalid value {reasoning!r} for provider {provider.value!r}, "
+        f"expected one of {sorted(reasoning_levels_for(provider))}"
+    )
+
+
 def validate_config(config: OrchestratorConfig) -> list[str]:
     """Validate a parsed config . Raises :class:`ConfigError` on any violation.
 
@@ -97,6 +118,12 @@ def validate_config(config: OrchestratorConfig) -> list[str]:
 
     # Security: extra_args must not weaken the sandbox/permissions.
     for pid, provider in agents.providers.items():
+        _check_reasoning(
+            where=f"agents.providers.{pid.value}.reasoning",
+            provider=pid,
+            reasoning=provider.reasoning,
+            issues=issues,
+        )
         _check_extra_args(pid, provider.extra_args, issues)
 
     _validate_checks(config, issues, warnings)
@@ -111,11 +138,19 @@ def validate_config(config: OrchestratorConfig) -> list[str]:
 def _validate_supervisor(config: OrchestratorConfig, issues: list[str]) -> None:
     """The supervisor layer is validated under the same ceiling as a flow node (P2.1).
 
-    ``permission_profile`` is forced ``read-only`` in code (the layer never writes), ``reasoning``
-    is already allowlisted by the loader; here we enforce that ``role_file`` contains no path
-    traversal (``..`` or an absolute path) — the same containment rule the flow validator applies to
-    a node ``role_file``.
+    ``permission_profile`` is forced ``read-only`` in code (the layer never writes), and
+    ``reasoning`` resolves through the global primary provider; here we also enforce that
+    ``role_file`` contains no path traversal (``..`` or an absolute path) — the same containment
+    rule the flow validator applies to a node ``role_file``.
     """
+    primary = _global_primary(config)
+    if primary is not None:
+        _check_reasoning(
+            where="supervisor.reasoning",
+            provider=primary,
+            reasoning=config.supervisor.reasoning,
+            issues=issues,
+        )
     role_file = config.supervisor.role_file
     parts = role_file.replace("\\", "/").split("/")
     if ".." in parts or role_file.startswith("/"):

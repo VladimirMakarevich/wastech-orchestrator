@@ -190,8 +190,8 @@ agents:
       extra_args: []
     codex:
       command: "codex"
-      model: "gpt-5.4" # confirm against your Codex CLI; "" = use its default
-      reasoning: high # low | medium | high | xhigh | max→xhigh
+      model: "gpt-5.5" # "" = use the Codex CLI/account default
+      reasoning: high # minimal | low | medium | high | xhigh | max→xhigh
       timeout_seconds: 7200
       sandbox: "workspace-write"
       permission_profile: "workspace-write"
@@ -204,8 +204,8 @@ Common fields:
 | --- | --- | --- | --- |
 | `command` | string | provider id (`"claude"` or `"codex"`) | Executable name or path. |
 | `primary` | boolean | `false` | Marks the **global primary**. Exactly one configured provider must set it; that provider runs any flow node with no explicit `provider` and is the sole infrastructure-fallback target. It must also be in `agents.allowed`. |
-| `model` | string | `claude-sonnet-4-6` (claude), `gpt-5.4` (codex) | Provider model setting. The packaged template ships an explicit default per provider; set `""` to fall back to the CLI/account default. Confirm the Codex id against your installed Codex CLI. (A flow node may override it per node.) |
-| `reasoning` | string or null | `high` (both, in the packaged template) | Reasoning effort level: `low`, `medium`, `high`, `xhigh`, or `max`. Maps to `--effort` for Claude (v2.1+) and `--reasoning-effort` for Codex. Codex supports up to `xhigh`; `max` (Claude-only) is clamped to `xhigh`. `xhigh` requires Opus 4.7+ or Fable 5 for Claude. Set `null` to omit the flag and use the CLI default. (A flow node may override it per node.) |
+| `model` | string | `claude-sonnet-4-6` (claude), `gpt-5.5` (codex) | Provider model setting. The packaged template ships an explicit default per provider; set `""` to fall back to the CLI/account default. (A flow node may override it per node.) |
+| `reasoning` | string or null | `high` (both, in the packaged template) | Provider-specific reasoning effort level. Claude accepts `low`, `medium`, `high`, `xhigh`, `max` and maps it to `--effort`. Codex accepts `minimal`, `low`, `medium`, `high`, `xhigh`, plus legacy `max` mapped to `xhigh`, and passes it as `-c model_reasoning_effort="..."`. Set `null` to omit the override and use the CLI/account default. (A flow node may override it per node.) |
 | `timeout_seconds` | integer | `7200` | Timeout for a stage run. |
 | `permission_profile` | string | `"workspace-write"` | Orchestrator permission profile passed into the adapter. |
 | `extra_args` | list of strings | `[]` | Additional provider CLI arguments after safety validation. |
@@ -518,11 +518,11 @@ There is no flow block in `config.yaml`. Flows live as files in two layers, oper
 
 - **Graph integrity** — edges resolve, outcomes are in the allowed set per node kind, every `rework`/`fail` edge is bounded by a budget or named loop, exactly one entry node, every node can reach a terminal.
 - **Security ceiling** — a node's `permission_profile` may not exceed the flow `permission_ceiling`; evaluators are forced `read-only`; `extra_args` pass the forbidden-args screen; `role_file` paths contain no traversal; unknown fields anywhere fail closed.
-- **Config consistency** — a node's pinned `provider` is in `agents.allowed`, its `reasoning` is a known level (`low`/`medium`/`high`/`xhigh`/`max`), the flow `permission_ceiling` is reachable by at least one configured provider's `permission_profile`, and — under `security.strict_isolation` — no node's `extra_args` selects a provider full-access mode (Codex `--sandbox danger-full-access` / Claude `--permission-mode bypassPermissions`; the flow-side half of the isolation gate). (On resume the live flow is re-validated against the live config, so a config change can only ever _narrow_ what a task may do.)
+- **Config consistency** — a node's pinned `provider` is in `agents.allowed`, its `reasoning` is supported by the provider that will run it, Codex is not routed to a `workspace-write` node that resolves `network_access: true`, the flow `permission_ceiling` is reachable by at least one configured provider's `permission_profile`, and — under `security.strict_isolation` — no node's `extra_args` selects a provider full-access mode (Codex `--sandbox danger-full-access` / Claude `--permission-mode bypassPermissions`; the flow-side half of the isolation gate). (On resume the live flow is re-validated against the live config, so a config change can only ever _narrow_ what a task may do.)
 
 Two things are deliberately **not** fatal here because the orchestrator degrades them gracefully: a flow `budget` above `agents.max_*` is clamped to the cap at runtime (the cap always wins), and a PR-publishing flow under `git.create_pull_request: false` runs in local-commit mode (no PR). Neither is an escalation, so neither blocks the flow.
 
-**Network access (flow-wide default + per-node override).** Network is **off by default**. A flow grants it flow-wide by declaring `network_policy` (`advisories`/`research`); absent that key, every node is offline (only the packaged `deep_research` / `security_audit` flows declare it). On top of that flow-wide default, an `agent` or `evaluator` node may carry an optional tri-state `network_access` field: omitting it (the default) inherits the flow default; `network_access: true` grants the node network **even in a flow that declares no `network_policy`** (so you can let only the `implementation` node fetch packages while `refinement`/`planning`/`review` stay offline); `network_access: false` is an explicit opt-out that forces the node offline even when the flow's `network_policy` would otherwise grant it. The operator owns this grant — they author and run the flow file, and it is preflight-validated like every other field. Like `network_policy`, the resolved grant toggles **only** the network dimension — it never relaxes the filesystem permission profile / sandbox, so a `read-only` node granted network stays read-only on disk. **Codex read-only asymmetry:** Codex only enables sandbox network for the `workspace-write` sandbox, so `network_access: true` on a `read-only` node takes effect under Claude (the `WebFetch`/`WebSearch` tools are added) but is silently ineffective when Codex runs that node.
+**Network access (flow-wide default + per-node override).** Network is **off by default**. A flow grants it flow-wide by declaring `network_policy` (`advisories`/`research`); absent that key, every node is offline (only the packaged `deep_research` / `security_audit` flows declare it). On top of that flow-wide default, an `agent` or `evaluator` node may carry an optional tri-state `network_access` field: omitting it (the default) inherits the flow default; `network_access: true` grants the node network **even in a flow that declares no `network_policy`** (so you can let only the `implementation` node fetch packages while `refinement`/`planning`/`review` stay offline); `network_access: false` is an explicit opt-out that forces the node offline even when the flow's `network_policy` would otherwise grant it. The operator owns this grant — they author and run the flow file, and it is preflight-validated like every other field. Like `network_policy`, the resolved grant toggles **only** the network dimension — it never relaxes the filesystem permission profile / sandbox, so a `read-only` node granted network stays read-only on disk. **Codex hardening:** the flow validator rejects any Codex-routed `workspace-write` agent node that also resolves `network_access: true`; split external research into a `read-only` node or set `network_access: false` on the write node. Codex read-only network remains constrained by Codex CLI sandbox support.
 
 ```yaml
 nodes:
@@ -544,7 +544,7 @@ nodes:
     role_file: roles/planning.md
     provider: claude # ∈ agents.allowed; default = global primary
     model: claude-opus-4-8 # default = agents.providers.<provider>.model
-    reasoning: high # low | medium | high | xhigh | max; default = provider reasoning
+    reasoning: high # provider-specific; default = provider reasoning
   - id: review
     kind: evaluator
     role: review

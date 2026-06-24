@@ -98,7 +98,7 @@ def test_explicit_model_and_reasoning_defaults_are_written(tmp_path: Path) -> No
     codex = cfg.agents.providers[ProviderId.CODEX]
     # provider-config-cleanup #3: fresh installs ship explicit model/reasoning, not "" / null.
     assert (claude.model, claude.reasoning) == ("claude-sonnet-4-6", "high")
-    assert (codex.model, codex.reasoning) == ("gpt-5.4", "high")
+    assert (codex.model, codex.reasoning) == ("gpt-5.5", "high")
     # provider-config-cleanup #2: the unused max_budget_usd field is gone from the generated config.
     assert "max_budget_usd" not in text
     assert not hasattr(claude, "max_budget_usd")

@@ -40,6 +40,7 @@ from wastech_orchestrator.core.flow.engine_driver import (
     partition_decomposition,
 )
 from wastech_orchestrator.core.flow.nodes.base import (
+    EvaluatorInfraError,
     NodeInfraError,
     NodeInputs,
     NodeManualRequired,
@@ -86,6 +87,7 @@ from wastech_orchestrator.git_manager import (
 from wastech_orchestrator.ledger import (
     Ledger,
     LedgerRecord,
+    write_failure_report,
     write_minimal_summary,
 )
 from wastech_orchestrator.notify import (
@@ -1198,9 +1200,20 @@ class Orchestrator:
         except NodeManualRequired as exc:
             self._sync_counters_from_run_state(p, run_state)
             return self._go_terminal(p, Status.MANUAL_ACTION_REQUIRED, manual_reason=str(exc))
+        except EvaluatorInfraError as exc:
+            # An evaluator that could not *run* (infra/misconfig) must not discard an already-green
+            # diff: degrade to manual (branch preserved, operator reviews/publishes), not failed.
+            self._sync_counters_from_run_state(p, run_state)
+            return self._fail(
+                p,
+                str(exc),
+                status=Status.MANUAL_ACTION_REQUIRED,
+                node_id=run_state.current_node,
+                run_state=run_state,
+            )
         except NodeInfraError as exc:
             self._sync_counters_from_run_state(p, run_state)
-            return self._fail(p, str(exc))
+            return self._fail(p, str(exc), node_id=run_state.current_node, run_state=run_state)
         self._sync_counters_from_run_state(p, run_state)
         return self._finish_engine_run(p, result)
 
@@ -1686,29 +1699,75 @@ class Orchestrator:
 
     # --- terminal handling ----------------------------------------------------------------
 
-    def _fail(self, p: _Pipeline, error: str) -> PipelineResult:
-        """Terminal ``failed``. When a task branch exists, finalize like a success — move the task
-        to ``tasks/failed/``, write its ``summary.md``, commit (code + task) and push — so the
-        failed attempt and its summary are stored in git. No PR is opened for a failure. When
-        no branch was created yet (e.g. an isolation-preflight failure), nothing is published.
+    def _fail(
+        self,
+        p: _Pipeline,
+        error: str,
+        *,
+        status: Status = Status.FAILED,
+        node_id: str | None = None,
+        run_state: FlowRunState | None = None,
+    ) -> PipelineResult:
+        """Terminal on an infra failure. Always writes a failure report (so every infra terminal is
+        diagnosable — no silent ``failed`` without ``failure_report.json``/``stuck.md``).
+
+        When a task branch exists, finalize like a success — move the task to ``tasks/failed/``
+        (``failed`` only), write its ``summary.md``, commit (code + task) and push — so the attempt
+        and its summary are stored in git. No PR is opened. When no branch was created yet (e.g. an
+        isolation-preflight failure), nothing is published.
+
+        ``status=MANUAL_ACTION_REQUIRED`` degrades an evaluator that could not *run*: the green diff
+        is shippable, so the branch is preserved (the task file stays put) for the operator to
+        review/publish instead of being discarded as ``failed``.
 
         The git operations are best-effort: a failed task must still reach a terminal state even if
         git is unhappy, so a publish error here is logged, not raised.
         """
+        self._write_infra_failure_report(p, node_id=node_id, error=error, run_state=run_state)
         if not p.branch:
-            return self._go_terminal(p, Status.FAILED, manual_reason=error)
+            return self._go_terminal(p, status, manual_reason=error)
         moved = False
         try:
-            moved = self._finalize_task_artifacts(p, Status.FAILED) is not None
-            message = f"chore({p.task.id}): failed attempt — {p.task.title}"
-            self._git.commit_code(p.task.id, message)
+            moved = self._finalize_task_artifacts(p, status) is not None
+            verb = "failed attempt" if status is Status.FAILED else "manual action required"
+            self._git.commit_code(p.task.id, f"chore({p.task.id}): {verb} — {p.task.title}")
             self._git.commit_audit(p.task.id)
             self._git.push(p.task.id, p.branch)
         except (GitCommandError, OSError) as exc:
             self._log(p.task.id).warning(
-                "failed-task publish incomplete", extra={"error": str(exc)}
+                "infra-terminal publish incomplete", extra={"error": str(exc)}
             )
-        return self._go_terminal(p, Status.FAILED, manual_reason=error, already_moved=moved)
+        return self._go_terminal(p, status, manual_reason=error, already_moved=moved)
+
+    def _write_infra_failure_report(
+        self,
+        p: _Pipeline,
+        *,
+        node_id: str | None,
+        error: str,
+        run_state: FlowRunState | None,
+    ) -> None:
+        """Write ``failure_report.json`` + ``stuck.md`` for an infra terminal (best-effort).
+
+        Reuses the flow-neutral ledger writer. There is no fix-loop budget here, so ``loop="infra"``
+        and ``limit_name`` carries the infra error. A write failure must never mask the terminal
+        outcome, so it is logged, not raised.
+        """
+        try:
+            report_path, _stuck = write_failure_report(
+                self._artifacts_root,
+                p.task.id,
+                loop="infra",
+                limit_name=error,
+                counters=dict(run_state.loop_counters) if run_state is not None else {},
+                last_check_log=None,
+                last_review_findings=None,
+                final_diff="",
+                node_id=node_id,
+            )
+            self._store.update_task(p.task.id, failure_report_path=report_path)
+        except OSError as exc:
+            self._log(p.task.id).warning("failure report not written", extra={"error": str(exc)})
 
     def _go_terminal(
         self,

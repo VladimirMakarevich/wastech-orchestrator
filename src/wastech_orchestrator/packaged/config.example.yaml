@@ -48,8 +48,8 @@ agents:
       primary: true            # the global primary (exactly one provider; must be in `allowed`)
     codex:
       command: "codex"
-      model: "gpt-5.4"         # confirm against your Codex CLI; "" = use its default
-      reasoning: high          # low | medium | high | xhigh | max->xhigh
+      model: "gpt-5.5"         # "" = use the Codex CLI/account default
+      reasoning: high          # minimal | low | medium | high | xhigh | max->xhigh
       timeout_seconds: 7200
       sandbox: "workspace-write"   # workspace-write | read-only | danger-full-access (needs strict_isolation: false)
       permission_profile: "workspace-write"

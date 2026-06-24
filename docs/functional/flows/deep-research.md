@@ -19,14 +19,14 @@ flowchart LR
 
 | Node | Kind | Profile / session | Notes |
 | --- | --- | --- | --- |
-| `refinement` | agent | read-only · fresh_disposable | HITL question; `when: derived.needs_refinement` |
-| `repository_analysis` | agent | read-only · fresh_disposable |  |
-| `external_research` | agent | read-only · fresh_disposable | `when: config.external_research` (true iff network granted) |
-| `architecture_design` | agent | workspace-write · fresh_disposable | writes into the report dir |
-| `synthesis` | agent | workspace-write · fresh_disposable | writes `report.md` + `sources.json` |
+| `refinement` | agent | read-only · fresh_disposable · network off | HITL question; `when: derived.needs_refinement` |
+| `repository_analysis` | agent | read-only · fresh_disposable · network off |  |
+| `external_research` | agent | read-only · fresh_disposable · network on | `when: config.external_research` (true iff network granted) |
+| `architecture_design` | agent | workspace-write · fresh_disposable · network off | writes into the report dir |
+| `synthesis` | agent | workspace-write · fresh_disposable · network off | writes `report.md` + `sources.json` |
 | `citation_check` | checks | `citation` | a hallucinated citation → `fail` ([B32](../blocks/B32-flow-checkers.md)) |
-| `fact_verification` | evaluator | read-only · fresh_disposable · **non-blocking**, `max_rework_per_stage: 1` | self-caps then accepts |
-| `critical_review` | evaluator | read-only · **`resume_own_lineage`** · non-blocking, `max_rework_per_stage: 3` | remembers prior rounds via its own durable session ([B30](../blocks/B30-flow-node-runners.md)) |
+| `fact_verification` | evaluator | read-only · fresh_disposable · network on · **non-blocking**, `max_rework_per_stage: 1` | self-caps then accepts |
+| `critical_review` | evaluator | read-only · **`resume_own_lineage`** · network on · non-blocking, `max_rework_per_stage: 3` | remembers prior rounds via its own durable session ([B30](../blocks/B30-flow-node-runners.md)) |
 | `publish` | publish | `documentation_pull_request` | the after-stage output guard already confined writes to the report dir |
 
 (Verified against [deep_research.yaml:14-77](../../../src/wastech_orchestrator/packaged/flows/deep_research.yaml#L14).)

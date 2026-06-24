@@ -24,6 +24,15 @@ def _argv(config: ProviderConfig, request: AgentRunRequest, **kwargs: object) ->
     )
 
 
+def _config_values(argv: list[str]) -> list[str]:
+    return [argv[index + 1] for index, token in enumerate(argv[:-1]) if token in ("-c", "--config")]
+
+
+def _assert_reasoning_config(argv: list[str], value: str) -> None:
+    assert f'model_reasoning_effort="{value}"' in _config_values(argv)
+    assert "--reasoning-effort" not in argv
+
+
 def test_argv_is_codex_exec_reading_from_stdin(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
@@ -116,6 +125,13 @@ def test_danger_full_access_sandbox_builds_argv(
     assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
 
 
+def test_read_only_request_uses_read_only_sandbox(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    argv = _argv(codex_config, make_request(permission_profile="read-only"))
+    assert argv[argv.index("--sandbox") + 1] == "read-only"
+
+
 def test_safe_extra_args_are_appended(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
@@ -158,21 +174,28 @@ def test_reasoning_request_level_adds_reasoning_effort(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
     argv = _argv(codex_config, make_request(reasoning="high"))
-    assert argv[argv.index("--reasoning-effort") + 1] == "high"
+    _assert_reasoning_config(argv, "high")
+
+
+def test_reasoning_minimal_passes_through(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    argv = _argv(codex_config, make_request(reasoning="minimal"))
+    _assert_reasoning_config(argv, "minimal")
 
 
 def test_reasoning_xhigh_passes_through(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
     argv = _argv(codex_config, make_request(reasoning="xhigh"))
-    assert argv[argv.index("--reasoning-effort") + 1] == "xhigh"
+    _assert_reasoning_config(argv, "xhigh")
 
 
 def test_reasoning_max_clamped_to_xhigh(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
     argv = _argv(codex_config, make_request(reasoning="max"))
-    assert argv[argv.index("--reasoning-effort") + 1] == "xhigh"
+    _assert_reasoning_config(argv, "xhigh")
 
 
 def test_reasoning_config_level_adds_reasoning_effort(
@@ -180,7 +203,7 @@ def test_reasoning_config_level_adds_reasoning_effort(
 ) -> None:
     cfg = replace(codex_config, reasoning="medium")
     argv = _argv(cfg, make_request())
-    assert argv[argv.index("--reasoning-effort") + 1] == "medium"
+    _assert_reasoning_config(argv, "medium")
 
 
 def test_reasoning_request_beats_config(
@@ -188,7 +211,7 @@ def test_reasoning_request_beats_config(
 ) -> None:
     cfg = replace(codex_config, reasoning="low")
     argv = _argv(cfg, make_request(reasoning="high"))
-    assert argv[argv.index("--reasoning-effort") + 1] == "high"
+    _assert_reasoning_config(argv, "high")
 
 
 def test_no_reasoning_means_no_reasoning_effort_flag(
@@ -196,6 +219,7 @@ def test_no_reasoning_means_no_reasoning_effort_flag(
 ) -> None:
     argv = _argv(codex_config, make_request())
     assert "--reasoning-effort" not in argv
+    assert not any(value.startswith("model_reasoning_effort=") for value in _config_values(argv))
 
 
 def test_session_id_builds_exec_resume(

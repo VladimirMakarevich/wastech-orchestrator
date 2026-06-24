@@ -312,3 +312,104 @@ def test_preflight_missing_binary(
     health = provider.preflight()
     assert health.executable_found is False
     assert health.version is None
+
+
+class _ProbingFakeRun:
+    """A fake runner answering ``--version`` and ``exec --help`` probes differently (by argv)."""
+
+    def __init__(self, *, help_has_config: bool) -> None:
+        self._help_has_config = help_has_config
+        self.argvs: list[list[str]] = []
+
+    def __call__(
+        self,
+        argv: list[str],
+        *,
+        cwd: Any,
+        env: Any,
+        timeout_seconds: int,
+        stdout_path: Any,
+        stdin_text: str | None = None,
+        monotonic: Any = None,
+    ) -> ProcessResult:
+        self.argvs.append(list(argv))
+        if "--version" in argv:
+            out = "codex-cli 0.139.0\n"
+        elif "exec" in argv and "--help" in argv:
+            out = "Usage: codex exec [OPTIONS]\n  --model <M>\n"
+            if self._help_has_config:
+                out += "  -c, --config <key=value>\n"
+        else:
+            out = ""
+        Path(stdout_path).write_text(out, encoding="utf-8")
+        return ProcessResult(
+            exit_code=0,
+            timed_out=False,
+            launch_error=None,
+            duration_seconds=0.1,
+            stdout_path=str(stdout_path),
+            stderr_text="",
+        )
+
+
+def _codex_config_with_reasoning() -> ProviderConfig:
+    return ProviderConfig(
+        command="codex",
+        model="",
+        reasoning="high",
+        timeout_seconds=7200,
+        permission_profile="workspace-write",
+        extra_args=(),
+        sandbox="workspace-write",
+    )
+
+
+def test_preflight_fails_when_codex_exec_lacks_config_override(
+    security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # Preflight probes `codex exec --help`; a build whose exec help lacks -c/--config cannot receive
+    # the official model_reasoning_effort override and is reported unsupported before a real run.
+    fake = _ProbingFakeRun(help_has_config=False)
+    provider = CodexProvider(
+        _codex_config_with_reasoning(),
+        security=security_config,
+        artifacts_root=tmp_path,
+        clock=lambda: FIXED_TIME,
+        run_process=fake,
+    )
+    health = provider.preflight()
+    assert health.supports_required_features is False
+    assert "-c/--config" in health.message
+    assert "model_reasoning_effort" in health.message
+
+
+def test_preflight_passes_when_codex_exec_accepts_config_override(
+    security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    fake = _ProbingFakeRun(help_has_config=True)
+    provider = CodexProvider(
+        _codex_config_with_reasoning(),
+        security=security_config,
+        artifacts_root=tmp_path,
+        clock=lambda: FIXED_TIME,
+        run_process=fake,
+    )
+    health = provider.preflight()
+    assert health.supports_required_features is True
+
+
+def test_preflight_probes_config_support_when_reasoning_unset(
+    codex_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # Network grants also use -c, so the capability probe is independent of configured reasoning.
+    fake = _ProbingFakeRun(help_has_config=True)
+    provider = CodexProvider(
+        codex_config,
+        security=security_config,
+        artifacts_root=tmp_path,
+        clock=lambda: FIXED_TIME,
+        run_process=fake,
+    )
+    health = provider.preflight()
+    assert health.supports_required_features is True
+    assert any("--help" in argv for argv in fake.argvs)
