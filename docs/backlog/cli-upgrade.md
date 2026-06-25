@@ -4,6 +4,8 @@ Status: **proposed** (2026-06-23 — design + recommendation; not locked — see
 
 Detail file for the backlog idea _"can we make working through the terminal more comfortable — not block operator input while a task runs, the way Claude Code does in the terminal?"_ It records the original sketch, what the orchestrator's terminal experience already looks like (traced), why the generic "add a REPL" answer is half-aimed here, the improved design (an attended **console that is a client over the existing daemon**, not a second engine host), the rejected alternatives, and a phased plan ([§ План реализации](#план-реализации)).
 
+> **Related:** [Task discovery: `worc list` + shell completion](cli-task-list-and-completion.md) is the small, dependency-free sibling of this item — a one-shot `worc list` + shell-level Tab-completion for task ids. It lands the shared `recent_tasks(limit)` read helper that `worc top` (Phase 1) needs, so the two share a read-surface and do not collide; the in-console prompt_toolkit completer stays with `worc shell` here.
+
 ## The idea (original)
 
 > Can we make working through the terminal more comfortable — not block operator input, the way Claude Code does in the terminal?

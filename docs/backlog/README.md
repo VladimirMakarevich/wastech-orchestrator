@@ -51,6 +51,9 @@ These are deferred by the v1 spec or described in architecture notes; not schedu
 | Multi-repo/project binding | Select a configured repository per task (`repo` field / project map). | Current config targets one repository. Requires validation and workspace isolation. |
 | Agent instruction stubs in target repo | Seed or update target-repo `AGENTS.md`, `CLAUDE.md`, and skills before a run. | **Partial:** the skill-_reference_ half shipped (planning selects target-repo skills, `{skills_path}`); _authoring/managing_ the stubs themselves is still deferred (see [follow_ups.md](follow_ups.md)). |
 | Custom `tool` nodes (P5) | Operator Python/executable as a typed `tool` node, run out-of-process under the ceiling. | Reserved seam exists in the flow engine. See [p5-custom-tool-nodes.md](p5-custom-tool-nodes.md). |
+| [Interactive operator console](cli-upgrade.md) | Attended console as a client over the `watch` daemon: `worc top` (read-only live monitor) + `worc shell` (prompt_toolkit REPL), plus a shared stop ladder for `worc stop`/`restart`. | `prompt_toolkit` ships as an optional `[shell]` extra; the daemon never imports it. No new task status / schema bump. **Proposed.** |
+| [Task discovery: `worc list` + shell completion](cli-task-list-and-completion.md) | One-shot, dependency-free `worc list` (active + `tasks/pending` queue + recent terminal) and a `worc completion bash\|zsh` script that completes task-ids by shelling out to `worc list --format ids`. | Read-only; reuses existing read helpers + a shared `recent_tasks` query (the same one `worc top` needs). No `argcomplete`, no new dependency, no schema bump. Additive down-payment on the console item. **Proposed.** |
+| [Configurable tasks directory](configurable-tasks-dir.md) | `paths.tasks_dir` in `config.yaml` (default `tasks`) makes the task inbox directory name configurable per project; `worc install` prompts for the value. Adding the directory to `.gitignore` degrades gracefully with no extra config key. | `tasks/` is hardcoded in 5+ modules today; collides with projects that already use that directory name. **Proposed.** |
 
 ## Open detail files (in this folder)
 
@@ -59,6 +62,9 @@ These are deferred by the v1 spec or described in architecture notes; not schedu
 | Runtime provider capacity gate | [runtime_provider_capacity_gate.md](archive/runtime_provider_capacity_gate.md) |
 | Auto-retry on network errors (transient provider-failure recovery) | [transient-provider-failure-recovery.md](transient-provider-failure-recovery.md) |
 | Token optimization | [archive/token_optimization.md](archive/token_optimization.md) |
+| Interactive operator console | [cli-upgrade.md](cli-upgrade.md) |
+| Task discovery: `worc list` + shell completion | [cli-task-list-and-completion.md](cli-task-list-and-completion.md) |
+| Configurable tasks directory | [configurable-tasks-dir.md](configurable-tasks-dir.md) |
 
 ## Rules
 
