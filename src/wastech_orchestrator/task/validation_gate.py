@@ -250,6 +250,7 @@ class ValidationGate:
             branch_name=branch_name,
             auto_merge=_as_tristate(frontmatter.get("auto_merge")),
             prompt_audit=_as_tristate(frontmatter.get("prompt_audit")),
+            decomposition=_as_tristate(frontmatter.get("decomposition")),
             contacts=[str(c) for c in frontmatter.get("contacts", [])],
             depends_on=depends_on,
             subtasks=tuple(str(s).strip() for s in frontmatter.get("subtasks", [])),
@@ -288,6 +289,12 @@ class ValidationGate:
             and not isinstance(fm["prompt_audit"], bool)
         ):
             return _Reject(ValidationReason.INVALID_FIELD_TYPE, "prompt_audit must be a boolean")
+        if (
+            "decomposition" in fm
+            and fm["decomposition"] is not None
+            and not isinstance(fm["decomposition"], bool)
+        ):
+            return _Reject(ValidationReason.INVALID_FIELD_TYPE, "decomposition must be a boolean")
         if "contacts" in fm:
             contacts = fm["contacts"]
             if not isinstance(contacts, Sequence) or isinstance(contacts, str | bytes):

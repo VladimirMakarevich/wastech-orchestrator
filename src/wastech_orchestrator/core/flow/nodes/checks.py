@@ -78,9 +78,11 @@ class ChecksNodeRunner:
 
     def _run_command_profile(self, node: ChecksNode, ctx: NodeContext, run_id: int) -> NodeResult:
         before = self._capture()  # working-tree state before the checks can mutate anything
-        # Diff-select which command sets to run (Р3). ``None`` = git not wired (unit harness) → run
-        # all; ``[]`` = empty diff (nothing changed) → run nothing (vacuous pass).
-        changed = self._s.git.changed_code_paths() if self._s.git is not None else None
+        # Diff-select which command sets to run (Р3) from the change vs base — committed (e.g. an
+        # already-committed decomposed subtask) *and* uncommitted, not just the working tree, so a
+        # subtask whose code is already committed is still checked. ``None`` = git not wired (unit
+        # harness) → run all; ``[]`` = empty diff (nothing changed) → run nothing (vacuous pass).
+        changed = self._s.git.changed_code_paths_since_base() if self._s.git is not None else None
         selected = select_check_sets(self._in.check_sets, changed)
         if not selected:
             # Empty diff (nothing changed) or no command_sets configured → nothing to check → pass.

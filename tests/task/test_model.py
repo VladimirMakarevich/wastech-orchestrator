@@ -98,9 +98,9 @@ def test_default_collections_are_independent() -> None:
 
 
 def test_schema_constants() -> None:
-    # A clean task carries only identity/dispatch (``task_type`` selects the flow) + the two
-    # sanctioned exceptions (PRE.3): ``nodes.<node-id>.enabled`` (disable) and ``auto_merge``
-    # (task-wins). No provider/model/reasoning/decompose/refined.
+    # A clean task carries only identity/dispatch (``task_type`` selects the flow) + the sanctioned
+    # task-wins gates (PRE.3): ``nodes.<node-id>.enabled`` (disable), ``auto_merge``,
+    # ``prompt_audit``, and ``decomposition``. No provider/model/reasoning/refined.
     assert {
         "id",
         "title",
@@ -108,6 +108,7 @@ def test_schema_constants() -> None:
         "branch_name",
         "auto_merge",
         "prompt_audit",
+        "decomposition",
         "contacts",
         "depends_on",
         "subtasks",

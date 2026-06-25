@@ -55,6 +55,7 @@ Only these keys are allowed. **Any other key makes the task rejected** (`unknown
 | `pr_title` | no | string \| null | PR title override, used verbatim instead of `title`. Does not change the branch name or commit messages. Omit to auto-generate. |
 | `auto_merge` | no | boolean | `true` requests auto-merge of the PR (**DANGER — skips human review**); `false` always opts out; omit uses the instance default. A set per-task value wins outright. |
 | `prompt_audit` | no | boolean | `true`/`false` forces prompt-audit recording for this task; omit uses the config default. |
+| `decomposition` | no | boolean | `true`/`false` permits/forbids decomposition for this task (task-wins over `agents.decomposition.enabled`); omit uses the config default. Only flips the gate — the flow + planning still decide whether a split happens. Not for operator-authored `subtasks`. |
 | `contacts` | no | list of strings | Plain-text mentions in Telegram notifications/HITL prompts. Cosmetic only — no access control, no chat routing. |
 | `depends_on` | no | list of strings | Other **task ids** that must be **merged** before this task starts (non-blocking, merge-gated). For _separate_ tasks that build on each other. |
 | `subtasks` | no | list of strings | Operator-authored decomposition (one root + ordered subtask spec files → one PR). **Use worc-deco-task to author this**, not by hand. |

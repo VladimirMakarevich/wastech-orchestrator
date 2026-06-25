@@ -140,6 +140,9 @@ _LOG = logging.getLogger(__name__)
 # ``cli.WORC_HOME``; duplicated here because the core must not import the CLI (would be circular).
 _WORC_HOME = ".worc"
 
+# The lifecycle folders a task file moves between under ``tasks/`` (registration → done/failed).
+_LIFECYCLE_FOLDERS = ("pending", "processing", "done", "failed")
+
 
 def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
@@ -629,6 +632,46 @@ class Orchestrator:
 
     # --- rerun (operator-driven re-attempt of a terminal task) ----------------------------
 
+    def _resolve_task_source(self, row: TaskRow) -> tuple[str | None, tuple[str, ...]]:
+        """Resolve a task's source file for rerun, tolerant of lifecycle-folder desync.
+
+        The stored ``source_path`` can point at a stale lifecycle folder (e.g. ``tasks/failed/``)
+        while the file now lives in another (``tasks/pending/``) — a manual or external move then
+        makes the task un-rerunnable if we trust the single stored path. So: if the stored path is
+        a file, use it; otherwise search ``tasks/{pending,processing,done,failed}/`` for the task by
+        id (``<id>.md``/``<id>.json``), then by slug. Returns ``(path, ())`` on a unique resolution,
+        ``(None, ())`` when nothing matches, and ``(None, candidates)`` when more than one file
+        matches (never guessed — the caller surfaces the ambiguity). Read-only.
+        """
+        stored = row.source_path
+        if stored and Path(stored).is_file():
+            return stored, ()
+        if not stored:
+            return None, ()
+        parent = Path(stored).parent
+        tasks_root = parent.parent if parent.name in _LIFECYCLE_FOLDERS else parent
+        stems = [row.task_id]
+        slug = row.slug or (slugify(row.title) if row.title else "")
+        if slug and slug != row.task_id:
+            stems.append(slug)
+        matches: list[str] = []
+        seen: set[str] = set()
+        for stem in stems:
+            for folder in _LIFECYCLE_FOLDERS:
+                for suffix in (".md", ".json"):
+                    candidate = tasks_root / folder / f"{stem}{suffix}"
+                    key = str(candidate.resolve())
+                    if candidate.is_file() and key not in seen:
+                        seen.add(key)
+                        matches.append(str(candidate))
+            if matches:
+                break  # id matched: do not widen the search to the slug
+        if len(matches) == 1:
+            return matches[0], ()
+        if len(matches) > 1:
+            return None, tuple(sorted(matches))
+        return None, ()
+
     def plan_rerun(
         self,
         task_id: str,
@@ -656,9 +699,16 @@ class Orchestrator:
             refusals.append(
                 f"another task is active ({', '.join(others)}); rerun needs an idle slot"
             )
-        source_path = row.source_path
-        if not source_path or not Path(source_path).is_file():
-            refusals.append(f"task source file is missing ({source_path or 'unset'}); cannot rerun")
+        source_path, ambiguous = self._resolve_task_source(row)
+        if ambiguous:
+            refusals.append(
+                f"task source file is ambiguous for '{task_id}'; multiple files match "
+                f"({', '.join(ambiguous)}); leave exactly one and retry"
+            )
+        elif not source_path:
+            refusals.append(
+                f"task source file is missing ({row.source_path or 'unset'}); cannot rerun"
+            )
         dirty = self._git.unaccounted_dirty_paths()
         if dirty:
             refusals.append(
@@ -1380,10 +1430,22 @@ class Orchestrator:
         The constant supervisor layer synthesizes ``summary.{md,json}`` at whole-task close (before
         publish, so the ``summary.md`` is the PR body); ``_finalize_task_artifacts`` then falls back
         to the deterministic minimal summary when the advisory synthesis could not run — so a
-        summary is *always* written, one way or the other (``config.summary_enabled`` is gone)."""
+        summary is *always* written, one way or the other (``config.summary_enabled`` is gone).
+
+        The transitions below are logged (with elapsed time on the supervisor synthesis) so the
+        end-of-run tail is never a silent window: the whole-task summary can take minutes of
+        context assembly + one LLM call, and without a heartbeat that looked like a hang."""
+        log = self._log(p.task.id)
+        log.info("task finalize: starting (whole-task summary, then publish prep)")
         if self._supervisor is not None:
+            started = time.monotonic()
             self._supervisor.finalize(task_id=p.task.id, task_title=p.task.title)
+            log.info(
+                "task finalize: supervisor summary written",
+                extra={"elapsed_seconds": round(time.monotonic() - started, 1)},
+            )
         self._append_skip_section(p)  # note skipped nodes on the supervisor summary (idempotent)
+        log.info("task finalize: publish prep (committed summary + task-file move)")
         summary_md = self._finalize_task_artifacts(p, Status.DONE)
         return str(summary_md) if summary_md is not None else None
 
@@ -1451,7 +1513,7 @@ class Orchestrator:
                 and node.id == decomp.proposed_by
                 and p.operator_decomposition is None
             ):
-                gate_on = self._decomposition_gate_on()
+                gate_on = self._decomposition_gate_on(p.task)
                 decision = read_decomposition(
                     outcome,
                     gate_on=gate_on,
@@ -1862,10 +1924,7 @@ class Orchestrator:
             return None
         src = Path(task_file)
         parent = src.parent
-        if parent.name in ("pending", "processing", "done", "failed"):
-            tasks_root = parent.parent
-        else:
-            tasks_root = parent
+        tasks_root = parent.parent if parent.name in _LIFECYCLE_FOLDERS else parent
         dest = tasks_root / folder_name / src.name
         if src.resolve() == dest.resolve():
             return dest  # already in its lifecycle folder (idempotent restart)
@@ -2003,10 +2062,19 @@ class Orchestrator:
         self._register_artifact(task.id, "validation_report", report_path)
         self._transition_status(task.id, Status.NEW, Status.VALIDATED)
 
-    def _decomposition_gate_on(self) -> bool:
-        """Whether decomposition is permitted at all (PRE.3): the config default. The flow's
-        ``decomposition:`` block + the planning node's gate proposal decide whether a split happens;
-        a clean task carries no decompose flag."""
+    def _decomposition_gate_on(self, task: NormalizedTask) -> bool:
+        """Whether decomposition is permitted at all (PRE.3): the task value overrides the global.
+
+        Mirrors :meth:`_prompt_audit_on`: a per-task ``decomposition: true``/``false`` is honored
+        verbatim (true permits a split even when ``agents.decomposition.enabled`` is off, false
+        forbids one even when it is on); absent (None) defers to the global. This only flips the
+        *gate* — the flow's ``decomposition:`` block + the planning node's proposal (or an operator
+        ``subtasks:`` manifest) still decide whether a split actually happens. There is no operator
+        gate (the task author owns the config too)."""
+        if task.decomposition is True:
+            return True
+        if task.decomposition is False:
+            return False
         return self._config.agents.decomposition.enabled
 
     def _prompt_audit_on(self, task: NormalizedTask) -> bool:

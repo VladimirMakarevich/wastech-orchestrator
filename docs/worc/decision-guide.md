@@ -21,11 +21,11 @@ task_type: deep_research # or: security_audit, implementation (default), or a cu
 
 Built-in flows: `implementation` (default coding pipeline), `deep_research`, `security_audit`. An operator can add more by dropping a `<task_type>.yaml` in the repo's `<repo>/.worc/flows/` directory (the file's own `flow.task_type` must match its name); an operator flow there takes priority over a built-in of the same name. A `task_type` that resolves to no flow fails the task at flow resolution, before any branch is created.
 
-The task only **names** the flow — it never edits the graph, its nodes, or their providers/models. Picking a different built-in is the one task-side choice. To change *which* stages run for a single task, the only per-task knob is disabling a node (see below); to reshape the pipeline or retune a stage's provider/model, edit the flow YAML under `.worc/flows/` (an operator/flow-authoring change, not a task field).
+The task only **names** the flow — it never edits the graph, its nodes, or their providers/models. Picking a different built-in is the one task-side choice. To change _which_ stages run for a single task, the only per-task knob is disabling a node (see below); to reshape the pipeline or retune a stage's provider/model, edit the flow YAML under `.worc/flows/` (an operator/flow-authoring change, not a task field).
 
 ## Decomposition — split a large task
 
-Decomposition is **not** a per-task knob. Whether a large task is broken into sequential subtasks (on one branch, one PR) is decided by the operator's `agents.decomposition.enabled` setting plus the flow's `decomposition:` block and the planning stage's proposal. Keep a task one coherent unit; if the work is genuinely large, say so in the Description and let planning propose a split.
+Whether a large task is broken into sequential subtasks (on one branch, one PR) is decided by the flow's `decomposition:` block and the planning stage's proposal, gated on whether decomposition is _permitted_ for the task. The gate defaults to the operator's `agents.decomposition.enabled` setting, but a task may override it with the optional `decomposition` field: `true` permits a split even when the global setting is off, `false` forbids one even when it is on, omitted defers to the global. The field only flips the gate — it never edits the graph or forces a split: the flow + planning (or an operator `subtasks:` manifest) still decide whether a split actually happens. Keep a task one coherent unit; if the work is genuinely large, say so in the Description and let planning propose a split (set `decomposition: true` if the global gate is off and you want this one task considered for splitting).
 
 ## `branch_name` — override the task branch
 

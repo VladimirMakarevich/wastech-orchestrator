@@ -153,6 +153,15 @@ def test_prompt_audit_round_trips(tmp_path: Path, value: bool | None) -> None:
     assert load_normalized(tmp_path, "task-001").prompt_audit is value
 
 
+@pytest.mark.parametrize("value", [True, False, None])
+def test_decomposition_round_trips(tmp_path: Path, value: bool | None) -> None:
+    # Restart-safety: a resumed task must keep its exact decomposition tri-state, or a crash before
+    # the planning gate could flip whether a split is permitted on recovery.
+    task = NormalizedTask(id="task-001", title="T", description="Do it", decomposition=value)
+    write_normalized(task, tmp_path)
+    assert load_normalized(tmp_path, "task-001").decomposition is value
+
+
 @pytest.mark.parametrize("value", ["feature/ABC-123-custom", None])
 def test_branch_name_round_trips(tmp_path: Path, value: str | None) -> None:
     # Restart-safety: a custom branch_name must survive a crash-resume, or a task resumed before

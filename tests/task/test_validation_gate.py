@@ -394,6 +394,38 @@ def test_prompt_audit_non_boolean_is_rejected(config: OrchestratorConfig) -> Non
     assert "prompt_audit" in result.detail
 
 
+def test_decomposition_true_passes_and_is_stored(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\ndecomposition: true\n---\n\n## Description\n\nx.\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.decomposition is True
+
+
+def test_decomposition_false_is_stored(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\ndecomposition: false\n---\n\n## Description\n\nx.\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.decomposition is False
+
+
+def test_decomposition_absent_normalizes_to_none(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\n---\n\n## Description\n\nDo it.\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.decomposition is None
+
+
+def test_decomposition_non_boolean_is_rejected(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\ndecomposition: maybe\n---\n\n## Description\n\nx.\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_FIELD_TYPE
+    assert "decomposition" in result.detail
+
+
 @pytest.mark.parametrize("field", ["model", "reasoning"])
 def test_model_and_reasoning_are_now_unknown_fields(config: OrchestratorConfig, field: str) -> None:
     # PRE.3: model/reasoning live on the flow node, never the task → unknown top-level fields now.

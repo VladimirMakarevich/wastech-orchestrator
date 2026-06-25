@@ -47,6 +47,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`slug`** - Lowercase branch fragment derived from the task title. It is part of the default branch name, not a separate task field.
 - **`auto_merge`** - Per-task publish override. `true` requests auto-merge, `false` opts out, and omission falls back to the config default.
 - **`prompt_audit`** - Per-task prompt logging override. It wins over the global config value in both directions.
+- **`decomposition`** (task field) - Per-task gate override for whether decomposition is permitted. It wins over `agents.decomposition.enabled` in both directions; it only flips the gate, never forces a split.
 - **`contacts`** - Plain-text mentions that appear in Telegram notifications and HITL prompts. They are not access control.
 - **`depends_on`** - List of other task ids that must be merged before this task can start.
 - **`subtasks`** - Operator-authored decomposition list. It names ordered subtask spec files that the orchestrator will run as one branch and one PR.
@@ -54,7 +55,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`## Description`** - The body section used to describe the requested work. A Markdown task is expected to have a non-empty description body.
 - **`Acceptance criteria`** - Testable statements that define what done looks like. They help a vague task become complete enough to skip refinement.
 - **`refinement`** - The automatic enrichment pass for vague tasks. It adds missing context instead of asking the user to infer it later.
-- **`decomposition`** - A sequential split of one task into multiple subtasks. It is flow- and config-controlled, not a generic task flag.
+- **`decomposition`** (concept) - A sequential split of one task into multiple subtasks. It is flow- and planning-controlled; the per-task `decomposition` field only flips whether a split is _permitted_ (default `agents.decomposition.enabled`), never forces one.
 - **Task statuses** - `new` means the task has been parsed but not yet validated; `validated` means it passed the gate; `preparing` means the orchestrator owns the slot and is setting up execution; `running` means the flow engine is active; `done`, `failed`, and `manual_action_required` are terminal; `pending` is the queue waiting state before the slot is acquired.
 - **State machine** - The finite set of task statuses and allowed transitions between them.
 - **Single processing slot** - The invariant that only one task can be active at a time.

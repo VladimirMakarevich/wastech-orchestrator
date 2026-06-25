@@ -33,6 +33,7 @@ ALLOWED_TASK_KEYS: frozenset[str] = frozenset(
         "branch_name",
         "auto_merge",
         "prompt_audit",
+        "decomposition",
         "contacts",
         "depends_on",
         "subtasks",
@@ -91,9 +92,10 @@ class NodeOverride:
 class NormalizedTask:
     """A parsed, normalized task manifest: front matter plus the body Description.
 
-    A "clean" task: identity/dispatch only, plus the two sanctioned
-    exceptions (``nodes.<node-id>.enabled`` disable and ``auto_merge`` task-wins). The flow node
-    owns provider/model/reasoning; the flow owns decomposition and the deterministic refine-skip.
+    A "clean" task: identity/dispatch only, plus the sanctioned task-wins gates
+    (``nodes.<node-id>.enabled`` disable, ``auto_merge``, ``prompt_audit``, and ``decomposition``).
+    The flow node owns provider/model/reasoning; the flow + planning still own *whether* a split
+    happens (the task only flips the gate); the deterministic refine-skip stays flow-owned.
     """
 
     id: str
@@ -110,6 +112,12 @@ class NormalizedTask:
     # Tri-state prompt-audit opt-in: True forces it for this task, False disables it, None defers to
     # the global config.prompt_audit. The task value always wins (no operator gate).
     prompt_audit: bool | None = None
+    # Tri-state per-task decomposition gate: True permits a split for this task even when the global
+    # ``agents.decomposition.enabled`` is off, False forbids one even when it is on, None defers to
+    # the global. The task value wins (no operator gate). This only flips the *gate* — whether a
+    # split actually happens is still decided by the flow's ``decomposition:`` block + the planning
+    # node's proposal (or an operator ``subtasks:`` manifest); the task never patches the graph.
+    decomposition: bool | None = None
     contacts: list[str] = field(default_factory=list)
     # Other task ids this task needs **merged** before it may start (non-blocking merge-gated
     # scheduling): the scheduler skips a dependent while a dependency is unmerged and runs other

@@ -105,6 +105,9 @@ class _FakeGit:
     def changed_code_paths(self) -> list[str]:
         return ["src/x.py"]  # a non-empty diff so the checks node runs its command sets
 
+    def changed_code_paths_since_base(self) -> list[str]:
+        return ["src/x.py"]  # base-inclusive selection set (what the checks node now reads)
+
 
 def _agents() -> AgentsConfig:
     return AgentsConfig(

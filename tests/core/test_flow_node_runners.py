@@ -1235,11 +1235,32 @@ def test_checks_empty_diff_passes_without_running(tmp_path: Path) -> None:
     node = _checks_node()
     store = FakeStore()
     check_runner = FakeCheckRunner(CheckOutcome(passed=False, runs=(), any_quality_failed=True))
-    # FakeGit.changed_code_paths() returns [] → empty diff → no set selected.
+    # FakeGit.changed_code_paths_since_base() returns [] → empty diff → no set selected.
     services = _services(FakeRouter(_result()), store, check_runner, git=FakeGit())
     result = ChecksNodeRunner(services, _checks_inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "pass"
     assert store.check_runs == []  # nothing ran
+
+
+def test_checks_selects_from_committed_change_when_tree_clean(tmp_path: Path) -> None:
+    # Regression (decomposed subtask): the code is already committed, so the working tree is clean
+    # (changed_code_paths() == []) — but the change is still present vs base, so the base-inclusive
+    # changed_code_paths_since_base() is non-empty and the checks node must run its command set
+    # rather than pass vacuously.
+    class CleanTreeGit(FakeGit):
+        def changed_code_paths(self) -> list[str]:
+            return []  # nothing uncommitted
+
+        def changed_code_paths_since_base(self) -> list[str]:
+            return ["src/x.py"]  # committed since base → still selectable
+
+    node = _checks_node()
+    store = FakeStore()
+    check_runner = FakeCheckRunner(CheckOutcome(passed=True, runs=(_run(True),)))
+    services = _services(FakeRouter(_result()), store, check_runner, git=CleanTreeGit())
+    result = ChecksNodeRunner(services, _checks_inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "pass"
+    assert len(store.check_runs) == 1  # the set ran — not a vacuous pass
 
 
 # -- checks mutation guard (P2.4) --------------------------------------------
@@ -1369,7 +1390,10 @@ class FakeGit:
         return self._changed
 
     def changed_code_paths(self) -> list[str]:
-        return []  # no code changed → the checks node selects nothing (vacuous pass)
+        return []  # the staging set (uncommitted only); unused by the checks node now
+
+    def changed_code_paths_since_base(self) -> list[str]:
+        return []  # base-inclusive selection set: empty → the checks node passes vacuously
 
 
 def test_publish_pull_request_runs_git_sequence(tmp_path: Path) -> None:

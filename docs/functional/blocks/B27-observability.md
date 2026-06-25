@@ -54,6 +54,8 @@ The interval is a single global, threaded from the CLI flag `--heartbeat-seconds
 - **Git manager** wraps each git invocation, message `"git operation heartbeat"`, fields `{operation, timeout_seconds}` ([git_manager.py:205](../../../src/wastech_orchestrator/git_manager.py#L205)).
 - **Check runner** wraps each check, message `"check heartbeat"`, fields including the check name/stage ([check_runner.py:132](../../../src/wastech_orchestrator/check_runner.py#L132)).
 
+Beyond the heartbeat, the **end-of-run tail** emits plain transition log lines so the stretch between the last node and publish is never a silent window: `_engine_finalize` logs `"task finalize: starting"`, then `"task finalize: supervisor summary written"` with an `elapsed_seconds` field around the whole-task summary synthesis (context assembly + one LLM call — the part that previously looked like a hang), then `"task finalize: publish prep"` before the committed summary + task-file move ([orchestrator.py](../../../src/wastech_orchestrator/core/orchestrator.py)).
+
 ### Per-node prompt-audit observability
 
 `record_run_observability` is the engine path's audit hook, called by the agent and evaluator node runners right after `router.run_stage` and keyed by the `node_runs` row id so audit files sort chronologically ([agent.py:223](../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L223)) ([evaluator.py:75](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L75)). Both runners pass the node's own id as `node_id`. It does three things, with two distinct gates:

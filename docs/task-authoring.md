@@ -58,6 +58,7 @@ Allowed fields:
 | `branch_name` | no | string \| null | Full task branch override. Omitted ⇒ `<repo.branch_prefix>/<id>-<slug(title)>`; set it to match a project's branch naming policy. See [`branch_name`](#branch_name). |
 | `auto_merge` | no | boolean | `true` requests auto-merge, `false` always opts out, omitted uses the instance default. A set per-task value wins outright over `git.auto_merge`. See [`auto_merge`](#auto_merge). |
 | `prompt_audit` | no | boolean | `true` records each step's prompt + who for this task, `false` disables it, omitted uses config. Always overrides the global. See [`prompt_audit`](#prompt_audit). |
+| `decomposition` | no | boolean | `true` permits a split for this task, `false` forbids one, omitted uses the instance default `agents.decomposition.enabled`. The task value wins; it only flips the gate (the flow + planning still decide whether a split happens). See [`decomposition`](#decomposition). |
 | `contacts` | no | list of strings | Plain-text mentions in Telegram notifications/HITL prompts. |
 | `depends_on` | no | list of strings | Other task ids that must be **merged** before this task may start (non-blocking, merge-gated scheduling). See [`depends_on`](#depends_on). |
 | `subtasks` | no | list of strings | Operator-authored decomposition: ordered references to per-subtask spec files. Presence ⇒ the task runs as a split (one branch, one PR). See [`subtasks`](#subtasks-operator-authored-decomposition). |
@@ -115,8 +116,8 @@ When it runs, refinement is autonomous: it enriches the task with assumptions an
 
 Decomposition has two sources, both running the same execution machinery (subtasks run sequentially on one task branch → one PR):
 
-1. **Agent-proposed** (this section): not a task knob. Whether a large task is split is decided by the operator's `agents.decomposition.enabled`, the flow's `decomposition:` block, and the planning stage's proposal — not by a front-matter flag. Describe large scope in the `## Description` and let planning propose a split.
-2. **Operator-authored** (the [`subtasks`](#subtasks-operator-authored-decomposition) field): when you already know the ordered units, list references to per-subtask spec files in the root task's `subtasks:`. The Core validates them with the same gate as the agent split.
+1. **Agent-proposed** (this section): whether a large task is split is decided by the flow's `decomposition:` block and the planning stage's proposal, gated on whether decomposition is permitted for the task (default `agents.decomposition.enabled`, overridable per task — see [`decomposition`](#decomposition) below). Describe large scope in the `## Description` and let planning propose a split.
+2. **Operator-authored** (the [`subtasks`](#subtasks-operator-authored-decomposition) field): when you already know the ordered units, list references to per-subtask spec files in the root task's `subtasks:`. The Core validates them with the same gate as the agent split. (The `decomposition` gate does not apply here — an explicit `subtasks:` manifest always runs as a split.)
 
 ## prompt_audit
 
@@ -135,6 +136,24 @@ Values:
 | omitted | Use the global `prompt_audit` from `config.yaml`. |
 
 The per-task value **always overrides** the global one (in both directions — there is no operator gate). When enabled, each agent-routed stage run is written as a self-contained, redacted JSON record under `<repo>/.worc/logs/<task-id>/prompt-audit/`, in chronological order, plus a combined `timeline.jsonl`. See [configuration.md](configuration.md#prompt_audit) for the file layout.
+
+## decomposition
+
+Use `decomposition` to override, for this one task, whether decomposition is **permitted** — without touching the global `agents.decomposition.enabled` config:
+
+```yaml
+decomposition: true
+```
+
+Values:
+
+| Value   | Meaning                                                           |
+| ------- | ----------------------------------------------------------------- |
+| `true`  | Permit a split for this task even if the global gate is off.      |
+| `false` | Forbid a split for this task even if the global gate is on.       |
+| omitted | Use the global `agents.decomposition.enabled` from `config.yaml`. |
+
+The per-task value **always wins** (in both directions — there is no operator gate), mirroring [`auto_merge`](#auto_merge) and [`prompt_audit`](#prompt_audit). It only flips the _gate_: whether a split actually happens is still decided by the flow's `decomposition:` block and the planning stage's proposal (an operator [`subtasks`](#subtasks-operator-authored-decomposition) manifest ignores this gate and always splits). The field never edits the graph or forces a split — it cannot change `max_subtasks`, the provider, or any security setting. It is unrelated to the old `decompose` flag (removed in `schema_version` 11), which forced a split.
 
 ## Provider, model, reasoning (set on the flow, not the task)
 

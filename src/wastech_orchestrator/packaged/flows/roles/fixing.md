@@ -3,5 +3,3 @@ Address the failing checks and/or the blocking review findings in the context fi
 Stay strictly within scope. Fix only what *your* change broke and what the task asked for; do not edit files outside the task's scope to chase an unrelated failure. Do **not** work around a failure caused by a missing or incompatible host toolchain (for example, an SDK or runtime version the environment does not provide) or by a check that was already failing before your change — changing project target frameworks, pinning toolchain versions, or disabling such a check is out of bounds. Leave those failures as they are, revert any experiment you made toward them, and describe them plainly in your final message so a human can act: a check that cannot pass in this environment is not yours to "fix".
 
 If a subtask spec path is listed here, you are fixing subtask {subtask_order} of {subtask_count}; keep your change scoped to that subtask's spec: {subtask_spec_path}
-
-If skill reference paths are listed below, you may read them for guidance; they are advisory read-only references — never execute them: {skills_path}

@@ -220,6 +220,55 @@ def test_diff_stat_returns_stat_only(
     assert "diff --git" not in stat and "@@" not in stat
 
 
+def test_changed_code_paths_since_base_includes_committed_change(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # The regression behind a decomposed subtask shipping unchecked code: once the change is
+    # committed the working tree is clean, so the working-tree-only changed_code_paths() is empty —
+    # but the base-inclusive changed_code_paths_since_base() still sees it, so the checks node can
+    # still select its command sets.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x")
+    (git_repo.clone / "shipped.py").write_text("x = 1\n", encoding="utf-8")
+    gm.commit_code("task-001", "feat: shipped")
+    assert gm.changed_code_paths() == []  # clean working tree
+    assert "shipped.py" in gm.changed_code_paths_since_base()
+
+
+def test_changed_code_paths_since_base_includes_uncommitted_and_untracked(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # Covers the two-dot working-tree diff (a committed file edited again) plus a brand-new
+    # untracked file (git diff never reports those — ls-files --others does).
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x")
+    (git_repo.clone / "tracked.py").write_text("x = 1\n", encoding="utf-8")
+    gm.commit_code("task-001", "feat: tracked")
+    (git_repo.clone / "tracked.py").write_text("x = 2\n", encoding="utf-8")  # uncommitted edit
+    (git_repo.clone / "fresh.py").write_text("y = 1\n", encoding="utf-8")  # untracked
+    paths = gm.changed_code_paths_since_base()
+    assert "tracked.py" in paths and "fresh.py" in paths
+
+
+def test_changed_code_paths_since_base_excludes_artifacts(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # Selection must never be driven by orchestration artifacts (.worc/, tasks/), same as the
+    # staging set — otherwise an artifact write would trigger unrelated command sets.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x")
+    (git_repo.clone / "real.py").write_text("code\n", encoding="utf-8")
+    for d in EXCLUDED_DIRS:
+        (git_repo.clone / d).mkdir(exist_ok=True)
+        (git_repo.clone / d / "junk.txt").write_text("x\n", encoding="utf-8")
+    paths = gm.changed_code_paths_since_base()
+    assert "real.py" in paths
+    assert not any(p.startswith(tuple(f"{d}/" for d in EXCLUDED_DIRS)) for p in paths)
+
+
 def test_refresh_base_pulls_pushed_commits(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
 ) -> None:
@@ -580,6 +629,22 @@ def test_write_current_diff(
     path = gm.write_current_diff("task-001")
     assert Path(path).exists()
     assert "README.md" in Path(path).read_text(encoding="utf-8")
+
+
+def test_write_current_diff_includes_committed_change(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # current.diff is the task change vs base, so an already-committed change (e.g. a decomposed
+    # subtask) is captured — `git diff HEAD` would have shown nothing once committed, badly
+    # understating the diff in the PR body / failure report.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x")
+    (git_repo.clone / "feature.py").write_text("value = 42\n", encoding="utf-8")
+    gm.commit_code("task-001", "feat: feature")
+    path = gm.write_current_diff("task-001")
+    body = Path(path).read_text(encoding="utf-8")
+    assert "feature.py" in body and "value = 42" in body
 
 
 def test_push_to_base_branch_is_refused(

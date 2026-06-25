@@ -28,7 +28,7 @@ If you genuinely want the orchestrator to enrich an under-specified task, omit a
 One task = one branch = one PR. Keep it to a single, reviewable change:
 
 - Prefer "add a retry budget to webhook delivery" over "improve webhook reliability."
-- If the work spans several independent changes, split it into separate tasks. (Whether one large task is auto-decomposed into sequential subtasks is an operator/flow decision, not a task flag — describe the scope and let planning propose a split.)
+- If the work spans several independent changes, split it into separate tasks. (Whether one large task is auto-decomposed into sequential subtasks is a flow/planning decision; the gate defaults to the operator's `agents.decomposition.enabled` but a task may override it with `decomposition: true|false` — describe the scope and let planning propose a split.)
 - A tightly scoped task plans better, reviews faster, and is far less likely to need a fixing cycle.
 - If your repo expects a customer-specific branch convention, set `branch_name` to the full target branch (e.g. `branch_name: "feature/ABC-123-webhook-retry-budget"`); otherwise omit it and use the orchestrator's default branch naming.
 

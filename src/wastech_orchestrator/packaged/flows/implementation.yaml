@@ -125,10 +125,12 @@ flow:
       session_scope: editing_lineage
       lineage_affinity: implementation
       permission_profile: workspace-write
-      # optional overrides (uncomment to pin this node):
+      # Documentation is a mechanical write-up of what already shipped, so it runs at medium
+      # reasoning regardless of the flow-wide default — no quality loss, less wall-time on the tail.
+      reasoning: medium
+      # other optional overrides (uncomment to pin this node):
       # provider: claude
       # model: claude-opus-4-8
-      # reasoning: medium
       # timeout_seconds: 7200
       # network_access: false
       # extra_args: []

@@ -54,6 +54,7 @@ Only the fields below are allowed. **Any other key makes the task rejected** (`u
 | `branch_name` | no | string \| null | Full branch-name override. Omit for `<repo.branch_prefix>/<id>-<slug(title)>`; set to match a project's branch convention. |
 | `auto_merge` | no | boolean | `true` requests auto-merge of the PR. **Dangerous**; the per-task value wins outright over the instance default. See the decision guide. |
 | `prompt_audit` | no | boolean | `true`/`false` forces prompt-audit recording for this task; omit = config default. |
+| `decomposition` | no | boolean | `true`/`false` permits/forbids decomposition for this task (task-wins over `agents.decomposition.enabled`); omit = config default. Only flips the gate — the flow + planning still decide whether a split happens. See the decision guide. |
 | `contacts` | no | list of strings | Plain-text mentions in Telegram notifications. No access control. |
 | `nodes` | no | mapping | Per-node `enabled: false` disable toggle, keyed by flow node id (the only per-node knob). See the decision guide. |
 

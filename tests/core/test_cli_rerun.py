@@ -226,6 +226,60 @@ def test_rerun_refuses_when_daemon_running(
     assert "watch daemon is running" in capsys.readouterr().out
 
 
+def test_rerun_resolves_task_file_moved_between_lifecycle_folders(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The stored source_path points at tasks/failed/, but the file now lives in tasks/pending/
+    # (a manual/external move). The resolver finds it by id across lifecycle folders instead of
+    # refusing — the main "failed → rerun" barrier.
+    project = tmp_path / "project"
+    project.mkdir()
+    actual = project / "pending" / "task-1.md"
+    _complete_task_file(actual, "task-1")
+    stale = project / "failed" / "task-1.md"  # recorded path, but no file there
+    config = _seed(
+        project, git_repo.clone, TaskRow("task-1", "T", Status.FAILED, source_path=str(stale))
+    )
+    code = cli.main(["--config", str(config), "rerun", "task-1", "--dry-run"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "would re-attempt task-1" in out
+    assert "source file is missing" not in out
+
+
+def test_rerun_refuses_when_task_file_ambiguous(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Two files match the id across lifecycle folders → never guessed; the rerun refuses and names
+    # both so the operator leaves exactly one.
+    project = tmp_path / "project"
+    project.mkdir()
+    _complete_task_file(project / "pending" / "task-1.md", "task-1")
+    _complete_task_file(project / "done" / "task-1.md", "task-1")
+    stale = project / "failed" / "task-1.md"
+    config = _seed(
+        project, git_repo.clone, TaskRow("task-1", "T", Status.FAILED, source_path=str(stale))
+    )
+    code = cli.main(["--config", str(config), "rerun", "task-1"])
+    assert code == 1
+    assert "ambiguous" in capsys.readouterr().out
+
+
+def test_rerun_refuses_when_task_file_truly_missing(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # No file matches the id in any lifecycle folder → the original "missing" refusal.
+    project = tmp_path / "project"
+    project.mkdir()
+    stale = project / "failed" / "task-1.md"  # never created anywhere
+    config = _seed(
+        project, git_repo.clone, TaskRow("task-1", "T", Status.FAILED, source_path=str(stale))
+    )
+    code = cli.main(["--config", str(config), "rerun", "task-1"])
+    assert code == 1
+    assert "source file is missing" in capsys.readouterr().out
+
+
 def test_rerun_dry_run_writes_nothing(
     git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

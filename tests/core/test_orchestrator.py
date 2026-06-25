@@ -8,6 +8,7 @@ publishing, terminal cleanup, and the ledger.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -502,6 +503,38 @@ def test_supervisor_layer_observes_each_step_and_writes_one_summary(
     assert (task_artifact_dir(art, "task-sup") / "summary.md").exists()
     # There is no summary graph node anymore — the layer owns it.
     assert "summary" not in _ran_nodes(store, "task-sup")
+
+
+def test_finalize_tail_is_logged(git_repo, make_git_config, tmp_path: Path) -> None:
+    # P2.1: the end-of-run tail (whole-task summary → publish prep) emits transition log lines so a
+    # long silent window (context assembly + the summary LLM call) is observable, not a hang.
+    # Capture on the ``wastech_orchestrator`` logger directly — once any run configures runtime
+    # logging it sets ``propagate = False``, so a root-attached caplog would miss these records.
+    providers = _both()
+    orch, _, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+    messages: list[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    logger = logging.getLogger("wastech_orchestrator")
+    handler = _Collect(level=logging.INFO)
+    logger.addHandler(handler)
+    prior_level = logger.level
+    logger.setLevel(logging.INFO)
+    try:
+        result = orch.run_task(_complete_task(tmp_path, "task-tail"))
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(prior_level)
+    assert result.final_status is Status.DONE
+    assert any("task finalize: starting" in m for m in messages)
+    assert any("task finalize: supervisor summary written" in m for m in messages)
+    assert any("task finalize: publish prep" in m for m in messages)
 
 
 def test_supervisor_summary_once_per_whole_task_not_subtask(
@@ -2387,6 +2420,31 @@ def test_prompt_audit_resolution_matrix(git_repo, make_git_config, tmp_path: Pat
         orch._config = replace(orch._config, prompt_audit=cfg_pa)
         task = NormalizedTask(id="t", title="T", description="d", prompt_audit=task_pa)
         return orch._prompt_audit_on(task)
+
+    # Task True/False win in every global combination (no operator gate).
+    assert eff(True, False) is True
+    assert eff(True, True) is True
+    assert eff(False, True) is False
+    assert eff(False, False) is False
+    # Absent (None) defers to the global flag.
+    assert eff(None, True) is True
+    assert eff(None, False) is False
+
+
+def test_decomposition_gate_resolution_matrix(git_repo, make_git_config, tmp_path: Path) -> None:
+    """Per-task ``decomposition`` overrides the global gate; absent (None) defers to the global."""
+    from wastech_orchestrator.task.model import NormalizedTask
+
+    orch, _, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+
+    def eff(task_dc: bool | None, cfg_enabled: bool) -> bool:
+        agents = orch._config.agents
+        deco = replace(agents.decomposition, enabled=cfg_enabled)
+        orch._config = replace(orch._config, agents=replace(agents, decomposition=deco))
+        task = NormalizedTask(id="t", title="T", description="d", decomposition=task_dc)
+        return orch._decomposition_gate_on(task)
 
     # Task True/False win in every global combination (no operator gate).
     assert eff(True, False) is True

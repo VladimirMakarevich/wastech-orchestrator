@@ -197,6 +197,8 @@ class GitPort(Protocol):
 
     def changed_code_paths(self) -> list[str]: ...
 
+    def changed_code_paths_since_base(self) -> list[str]: ...
+
 
 @dataclass(frozen=True)
 class NodeServices:

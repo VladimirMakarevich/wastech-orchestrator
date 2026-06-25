@@ -483,6 +483,39 @@ class GitManager:
                 entries.append(ChangedPath(status="??", path=path))
         return tuple(entries)
 
+    def changed_code_paths_since_base(self) -> list[str]:
+        """Code paths changed vs ``base_branch`` (committed-since-base + uncommitted), deduped.
+
+        The path-list analog of :meth:`diff_stat`: diffs ``base_branch`` against the working tree
+        (``git diff --name-only <base>``, two-dot — committed *and* uncommitted), plus untracked
+        files (``git ls-files --others``, which ``git diff`` never reports). Used **only** for
+        check-set selection (the ``testing`` node), never for staging: :meth:`changed_code_paths`
+        stays working-tree-only because the commit pathspec must add just the uncommitted change.
+
+        Selection from ``git status --porcelain`` alone missed a decomposed subtask whose code was
+        already committed on the task branch — the working tree was clean, so the checks node saw an
+        empty diff and passed vacuously without running any command set. Diffing against the base
+        catches that case. In a non-decomposed run nothing is committed until publish, so this
+        equals the working-tree change (``base == HEAD``); in a decomposed run it also includes
+        earlier subtasks' committed paths, so a later subtask re-runs their sets too — redundant but
+        fail-safe, matching ``checks.selection``'s bias toward running more, never fewer.
+        """
+        base = self._config.repo.base_branch
+        paths: list[str] = []
+        seen: set[str] = set()
+        tracked = self._git("diff", "--name-only", base, "--").stdout
+        for line in tracked.splitlines():
+            path = line.strip().strip('"')
+            if path and path not in seen and not self._is_artifact_path(path):
+                seen.add(path)
+                paths.append(path)
+        untracked = self._git("ls-files", "--others", "--exclude-standard", "-z").stdout
+        for path in (item for item in untracked.split("\0") if item):
+            if path not in seen and not self._is_artifact_path(path):
+                seen.add(path)
+                paths.append(path)
+        return paths
+
     def _is_artifact_path(self, path: str) -> bool:
         normalized = path.replace("\\", "/")
         return any(normalized == d or normalized.startswith(f"{d}/") for d in EXCLUDED_DIRS)
@@ -745,12 +778,23 @@ class GitManager:
     # --- diffs ----------------------------------------------------------------------------
 
     def write_current_diff(self, task_id: str) -> str:
-        """Write ``logs/<task-id>/current.diff`` (working tree vs HEAD) and return its path.
+        """Write ``logs/<task-id>/current.diff`` (the task change vs ``base_branch``) and return it.
+
+        Diffs ``base_branch`` against the **working tree** (``git diff <base>``, not ``git diff
+        HEAD``), so it captures the task's net change whether or not it is committed yet — the same
+        base-vs-worktree coverage as :meth:`diff_stat`. ``git diff HEAD`` only showed uncommitted
+        working-tree edits, so in a decomposed run (where each subtask is committed) it collapsed to
+        just the trailing uncommitted hunk and badly understated the change in ``current.diff`` /
+        ``{diff_path}`` / the PR body / the failure report. The task branch is cut from
+        ``base_branch`` and ``base_branch`` does not advance during a task, so in a non-decomposed
+        run (nothing committed until publish) this equals ``git diff HEAD``. The dangerous-diff
+        guard classifies from :meth:`changed_code_entries` (HEAD-relative), not this artifact, so
+        widening the base here does not change what the guard gates.
 
         The diff is redacted before writing: the failure report reads it back, so this is
         the single place that keeps a leaked secret out of both ``current.diff`` and the report.
         """
-        diff = self._git("diff", "HEAD").stdout
+        diff = self._git("diff", self._config.repo.base_branch).stdout
         task_dir = task_artifact_dir(self._artifacts_root, task_id)
         task_dir.mkdir(parents=True, exist_ok=True)
         path = task_dir / "current.diff"
