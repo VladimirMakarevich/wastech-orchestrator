@@ -129,6 +129,7 @@ def validate_config(config: OrchestratorConfig) -> list[str]:
     _validate_checks(config, issues, warnings)
     _validate_telegram(config, issues)
     _validate_supervisor(config, issues)
+    _validate_security(config, issues)
 
     if issues:
         raise ConfigError(issues)
@@ -155,6 +156,18 @@ def _validate_supervisor(config: OrchestratorConfig, issues: list[str]) -> None:
     parts = role_file.replace("\\", "/").split("/")
     if ".." in parts or role_file.startswith("/"):
         issues.append(f"supervisor.role_file {role_file!r} contains path traversal")
+
+
+def _validate_security(config: OrchestratorConfig, issues: list[str]) -> None:
+    """The deletion-approval allowlist holds repo-relative globs (it matches against repo-relative
+    diff paths). Reject an absolute path, ``~``, or ``..`` traversal — the same containment rule
+    applied to a check command's ``cwd``."""
+    for index, pattern in enumerate(config.security.deletion_approval_exempt_paths):
+        if not is_safe_relpath(pattern):
+            issues.append(
+                f"security.deletion_approval_exempt_paths[{index}] {pattern!r} must be a "
+                "repo-relative glob (no absolute path, no '~', no '..' traversal)"
+            )
 
 
 def _validate_telegram(config: OrchestratorConfig, issues: list[str]) -> None:

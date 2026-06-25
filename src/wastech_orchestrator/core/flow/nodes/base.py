@@ -232,6 +232,10 @@ class NodeServices:
     run_process: RunProcess = run_process
     process_env: Mapping[str, str] = field(default_factory=dict)
     scan_timeout_s: int = 600
+    #: operator allowlist (repo-relative globs) of deletions/renames exempt from the dangerous-diff
+    #: approval gate (``config.security.deletion_approval_exempt_paths``). Empty = every deletion is
+    #: gated; the dependency-manifest classification is never affected.
+    deletion_approval_exempt_paths: tuple[str, ...] = ()
 
 
 @dataclass

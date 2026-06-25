@@ -50,6 +50,7 @@ Only the fields below are allowed. **Any other key makes the task rejected** (`u
 | --- | --: | --- | --- |
 | `id` | **yes** | string | Stable id. Must match `^[a-z0-9][a-z0-9._-]{0,63}$` (lowercase; no spaces, uppercase, or leading separator). |
 | `title` | **yes** | string | Short, non-empty human title. Used for the default branch slug, PR title, and reports. |
+| `task_type` | no | string | Flow selector — which pipeline runs the task. Omit ⇒ `implementation` (the default coding pipeline). Built-ins: `implementation`, `deep_research`, `security_audit`; an operator may add others as `<repo>/.worc/flows/<task_type>.yaml`. An unknown `task_type` (no matching flow) fails the task before any branch is created. The task only _names_ the flow — it never edits the graph. See the decision guide. |
 | `branch_name` | no | string \| null | Full branch-name override. Omit for `<repo.branch_prefix>/<id>-<slug(title)>`; set to match a project's branch convention. |
 | `auto_merge` | no | boolean | `true` requests auto-merge of the PR. **Dangerous**; the per-task value wins outright over the instance default. See the decision guide. |
 | `prompt_audit` | no | boolean | `true`/`false` forces prompt-audit recording for this task; omit = config default. |

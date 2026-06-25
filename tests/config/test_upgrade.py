@@ -105,6 +105,17 @@ def test_packaged_template_is_complete_and_self_idempotent() -> None:
     assert merged["schema_version"] == CONFIG_SCHEMA_VERSION
 
 
+def test_adds_deletion_exempt_paths_from_packaged_template() -> None:
+    # v16 add: an operator config predating the deletion-approval allowlist gains the key (empty
+    # default) from the packaged template, while keeping its own security customizations.
+    template = packaged_template_mapping()
+    operator = {"schema_version": 15, "security": {"strict_isolation": False}}
+    merged, added, _ = upgrade_config_mapping(template, operator)
+    assert merged["security"]["deletion_approval_exempt_paths"] == []
+    assert merged["security"]["strict_isolation"] is False  # operator value preserved
+    assert "security.deletion_approval_exempt_paths" in added
+
+
 def test_strips_legacy_prompts_block() -> None:
     # config v9 removed the whole `prompts` block; upgrade-config drops it from an operator config.
     template = {"schema_version": CONFIG_SCHEMA_VERSION}

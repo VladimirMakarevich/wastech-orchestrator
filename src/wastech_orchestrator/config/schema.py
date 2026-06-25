@@ -75,7 +75,13 @@ from wastech_orchestrator.providers.base import ProviderId
 # an optional repo-relative `cwd`. The only check behavior is "operator lists command sets; empty =
 # no gate". A stale `discovery` / `commands` key is tolerated (ignored) on load and `upgrade-config`
 # strips it, but `command_sets` is operator-authored — never auto-generated (no host inspection).
-CONFIG_SCHEMA_VERSION = 15
+# v16 (2026-06-25, deletion-approval-allowlist): a *format* add of optional
+# `security.deletion_approval_exempt_paths` — a list of repo-relative globs whose deletions/renames
+# are exempt from the dangerous-diff approval gate (security rule #14). Default `[]` = today's
+# behavior (everything gated). It filters only the deletion classification; dependency manifests are
+# never exemptable. Old configs load fail-open (the key defaults to empty) and `upgrade-config`
+# adds it from the template.
+CONFIG_SCHEMA_VERSION = 16
 
 
 class AuditBranch(StrEnum):
@@ -146,6 +152,10 @@ class SecurityConfig:
     allowed_environment: tuple[str, ...]
     denied_read_paths: tuple[str, ...]
     denied_commands: tuple[str, ...]
+    # Operator-only allowlist (repo-relative globs) of deletions/renames exempt from the
+    # dangerous-diff approval gate (security rule #14). Empty = every deletion is gated (default).
+    # Filters only the deletion classification — dependency manifests are never exemptable.
+    deletion_approval_exempt_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

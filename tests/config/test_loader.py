@@ -219,6 +219,24 @@ def test_unknown_checks_key_is_rejected() -> None:
     assert any("retries" in issue for issue in exc.value.issues)
 
 
+def test_deletion_exempt_paths_defaults_to_empty() -> None:
+    result = loads_config(_LEGACY)
+    assert result.config.security.deletion_approval_exempt_paths == ()
+
+
+def test_deletion_exempt_paths_load_as_tuple() -> None:
+    text = _LEGACY + 'security:\n  deletion_approval_exempt_paths: ["**/*.md", "docs/**"]\n'
+    result = loads_config(text)
+    assert result.config.security.deletion_approval_exempt_paths == ("**/*.md", "docs/**")
+
+
+def test_deletion_exempt_paths_non_string_item_is_rejected() -> None:
+    text = _LEGACY + "security:\n  deletion_approval_exempt_paths: [123]\n"
+    with pytest.raises(ConfigError) as exc:
+        loads_config(text)
+    assert any("deletion_approval_exempt_paths" in issue for issue in exc.value.issues)
+
+
 def test_legacy_routing_block_is_tolerated() -> None:
     # ``agents.routing`` was removed in v11 (routing is node-based now — a node declares its own
     # ``provider``, else the global ``providers.<id>.primary``). An old config still carrying it

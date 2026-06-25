@@ -21,8 +21,31 @@ def _with_agents(config: OrchestratorConfig, **changes: object) -> OrchestratorC
     return replace(config, agents=replace(config.agents, **changes))
 
 
+def _with_security(config: OrchestratorConfig, **changes: object) -> OrchestratorConfig:
+    return replace(config, security=replace(config.security, **changes))
+
+
 def test_packaged_config_validates_clean(base_config: OrchestratorConfig) -> None:
     assert validate_config(base_config) == []
+
+
+def test_deletion_exempt_globs_validate_clean(base_config: OrchestratorConfig) -> None:
+    cfg = _with_security(base_config, deletion_approval_exempt_paths=("**/*.md", "docs/**"))
+    assert validate_config(cfg) == []
+
+
+def test_deletion_exempt_path_traversal_is_rejected(base_config: OrchestratorConfig) -> None:
+    cfg = _with_security(base_config, deletion_approval_exempt_paths=("../escape",))
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("deletion_approval_exempt_paths" in issue for issue in exc.value.issues)
+
+
+def test_deletion_exempt_absolute_path_is_rejected(base_config: OrchestratorConfig) -> None:
+    cfg = _with_security(base_config, deletion_approval_exempt_paths=("/etc/passwd",))
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("deletion_approval_exempt_paths" in issue for issue in exc.value.issues)
 
 
 def test_global_primary_not_in_allowed_is_rejected(base_config: OrchestratorConfig) -> None:

@@ -11,6 +11,18 @@ You usually do not choose this — the operator does — but it affects where yo
 
 A live task belongs in the repo's own `tasks/pending/` directory (committed and pushed there) — that is how a teammate hands work to a watching orchestrator.
 
+## `task_type` — choose the flow
+
+`task_type` selects which **flow** (the fixed pipeline of stages) carries the task. Omit it and the task runs the default `implementation` flow (`planning → implementation → testing → review → fixing → documentation → publish`, with `refinement` skipped automatically when the task is complete) — what almost every coding task wants. Set it to run a different flow:
+
+```yaml
+task_type: deep_research # or: security_audit, implementation (default), or a custom operator flow
+```
+
+Built-in flows: `implementation` (default coding pipeline), `deep_research`, `security_audit`. An operator can add more by dropping a `<task_type>.yaml` in the repo's `<repo>/.worc/flows/` directory (the file's own `flow.task_type` must match its name); an operator flow there takes priority over a built-in of the same name. A `task_type` that resolves to no flow fails the task at flow resolution, before any branch is created.
+
+The task only **names** the flow — it never edits the graph, its nodes, or their providers/models. Picking a different built-in is the one task-side choice. To change *which* stages run for a single task, the only per-task knob is disabling a node (see below); to reshape the pipeline or retune a stage's provider/model, edit the flow YAML under `.worc/flows/` (an operator/flow-authoring change, not a task field).
+
 ## Decomposition — split a large task
 
 Decomposition is **not** a per-task knob. Whether a large task is broken into sequential subtasks (on one branch, one PR) is decided by the operator's `agents.decomposition.enabled` setting plus the flow's `decomposition:` block and the planning stage's proposal. Keep a task one coherent unit; if the work is genuinely large, say so in the Description and let planning propose a split.

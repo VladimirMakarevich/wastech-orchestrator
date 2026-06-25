@@ -17,6 +17,7 @@ PUBLIC_MARKDOWN = [
     Path("docs/how-it-works.md"),
     Path("docs/operations.md"),
     Path("docs/cookbook.md"),
+    Path("docs/glossary.md"),
     Path("docs/configuration.md"),
     Path("docs/task-authoring.md"),
     Path("docs/telegram.md"),

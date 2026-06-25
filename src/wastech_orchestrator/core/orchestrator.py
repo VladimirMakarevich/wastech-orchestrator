@@ -1199,6 +1199,7 @@ class Orchestrator:
             run_process=self._checks.run_process,
             process_env=build_child_env(self._config.security.allowed_environment),
             scan_timeout_s=self._config.checks.timeout_seconds,
+            deletion_approval_exempt_paths=self._config.security.deletion_approval_exempt_paths,
         )
         recorder = StateStoreRunRecorder(
             self._store, p.task.id, artifacts_root=self._artifacts_root

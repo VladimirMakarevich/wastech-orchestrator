@@ -21,10 +21,15 @@ Two core-owned behaviors wrap the run:
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping
 from typing import Any
 
-from wastech_orchestrator.core.dangerous_diff import DangerousDiff, classify_dangerous_diff
+from wastech_orchestrator.core.dangerous_diff import (
+    DangerousDiff,
+    classify_dangerous_diff,
+    exempted_deletions,
+)
 from wastech_orchestrator.core.flow.contracts import (
     PermissionProfile,
     SessionScope,
@@ -56,10 +61,14 @@ from wastech_orchestrator.core.hitl import (
     parse_typed_output,
     typed_output_schema,
 )
+from wastech_orchestrator.git_manager import ChangedPath
 from wastech_orchestrator.notify import AskKind, AskResult
+from wastech_orchestrator.observability.logging import bind
 from wastech_orchestrator.providers.base import AgentRunRequest
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import EditingLineageRow, NodeRunRow
+
+_LOG = logging.getLogger(__name__)
 
 
 class AgentNodeRunner:
@@ -260,7 +269,10 @@ class AgentNodeRunner:
         if self._s.register_artifact is not None:
             self._s.register_artifact(ctx.task_id, "diff", self._in.diff_path)
         self._apply_output_containment_guard(node, ctx)
-        dangerous = classify_dangerous_diff(self._s.git.changed_code_entries())
+        entries = self._s.git.changed_code_entries()
+        exempt = self._s.deletion_approval_exempt_paths
+        self._log_deletion_exemptions(node, ctx, entries, exempt)
+        dangerous = classify_dangerous_diff(entries, exempt)
         if dangerous is None:
             return
         path = guardrail_interaction_path(
@@ -289,6 +301,26 @@ class AgentNodeRunner:
             mark_consumed(path)
             return
         self._reconsider(node, ctx, route, path)
+
+    def _log_deletion_exemptions(
+        self,
+        node: AgentNode,
+        ctx: NodeContext,
+        entries: tuple[ChangedPath, ...],
+        exempt: tuple[str, ...],
+    ) -> None:
+        """Record (never silently) which deletions an operator allowlist waved past the approval
+        gate. The relaxation is auditable here and the files still appear in ``current.diff`` / the
+        PR; paths are the same ones the approval prompt would surface, so they are safe to log."""
+        if not exempt:
+            return
+        waved = exempted_deletions(entries, exempt)
+        if not waved:
+            return
+        bind(_LOG, task_id=ctx.task_id).info(
+            "deletion-approval exemption applied",
+            extra={"stage": node.id, "count": len(waved), "paths": ", ".join(waved)},
+        )
 
     def _apply_output_containment_guard(self, node: AgentNode, ctx: NodeContext) -> None:
         """After a workspace-write edit, enforce the flow's ``output_policy`` write containment.
@@ -341,7 +373,12 @@ class AgentNodeRunner:
         self._invoke(node, ctx, route, human_input_path=str(path))
         assert self._s.git is not None
         self._in.diff_path = self._s.git.write_current_diff(ctx.task_id)
-        if classify_dangerous_diff(self._s.git.changed_code_entries()) is not None:
+        # Re-classify with the same exemptions the request used, so an allowlisted deletion is not
+        # spuriously seen as "retained dangerous changes" on the reconsider pass.
+        still_dangerous = classify_dangerous_diff(
+            self._s.git.changed_code_entries(), self._s.deletion_approval_exempt_paths
+        )
+        if still_dangerous is not None:
             raise NodeManualRequired(
                 f"agent node {node.id!r}: retained dangerous changes after approval was denied"
             )

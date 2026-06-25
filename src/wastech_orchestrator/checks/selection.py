@@ -7,11 +7,10 @@ intact and makes selection reproducible and unit-testable.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Sequence
-from functools import lru_cache
 
 from wastech_orchestrator.checks.model import ResolvedCheckSet
+from wastech_orchestrator.globmatch import path_matches_any
 
 
 def select_check_sets(
@@ -50,40 +49,4 @@ def select_check_sets(
 
 
 def _set_matches_path(cset: ResolvedCheckSet, path: str) -> bool:
-    return any(_compile_glob(pattern).fullmatch(path) is not None for pattern in cset.paths)
-
-
-@lru_cache(maxsize=256)
-def _compile_glob(pattern: str) -> re.Pattern[str]:
-    """Translate a repo-relative glob into an anchored regex.
-
-    ``**`` crosses path separators (``**/`` = zero or more leading directories, so ``**/*.md``
-    matches both ``README.md`` and ``docs/a/b.md``); a single ``*`` and ``?`` stay within one
-    segment. Dependency-free, so it works on the ``requires-python`` floor (3.12, before
-    ``PurePath.full_match``).
-    """
-    norm = pattern.replace("\\", "/")
-    out: list[str] = []
-    i, n = 0, len(norm)
-    while i < n:
-        c = norm[i]
-        if c == "*":
-            if i + 1 < n and norm[i + 1] == "*":
-                if i + 2 < n and norm[i + 2] == "/":
-                    out.append("(?:.*/)?")  # **/  → zero or more leading directories
-                    i += 3
-                else:
-                    out.append(".*")  # ** → anything, including separators
-                    i += 2
-                continue
-            out.append("[^/]*")  # * → within one path segment
-            i += 1
-            continue
-        if c == "?":
-            out.append("[^/]")
-        elif c == "/":
-            out.append("/")
-        else:
-            out.append(re.escape(c))
-        i += 1
-    return re.compile("".join(out))
+    return path_matches_any(path, cset.paths)

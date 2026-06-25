@@ -34,6 +34,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`--config`** - Explicit path to `config.yaml`; it overrides automatic discovery.
 - **`--env-file`** - Explicit path to an environment file; if omitted, the orchestrator auto-loads `<repo>/.worc/.env` when present.
 - **`--version`** - Prints the CLI version and exits.
+- **`operator`** - Typically the person who runs and manages the orchestrator.
 
 ## Task language
 
@@ -209,7 +210,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`denied_read_paths`** - A denylist of secret or sensitive paths that cannot be read by the orchestrator in agent context.
 - **`denied_commands`** - A denylist of commands that cannot be launched, even if they appear in args or flow config.
 - **Forbidden args** - Flags that disable approvals, sandboxing, or hook trust wholesale. They are rejected unconditionally.
-- **Dangerous diff** - A tracked-file deletion or dependency manifest or lock change that requires explicit approval before tests continue.
+- **Dangerous diff** - A tracked-file deletion or dependency manifest or lock change that requires explicit approval before tests continue. An operator may exempt specific deletions/renames from the approval via `security.deletion_approval_exempt_paths` (a repo-relative glob allowlist; dependency manifests are never exemptable).
 - **`approval`** - The HITL decision shape used for dangerous-diff gating.
 - **`network_policy`** - The security ceiling that decides whether a flow may reach the network.
 - **`output_policy`** - The containment policy that keeps writing nodes inside the expected report or workspace area.

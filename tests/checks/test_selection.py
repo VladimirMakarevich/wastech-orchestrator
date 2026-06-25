@@ -1,9 +1,13 @@
-"""Unit tests for deterministic diff-based command-set selection (Р3) and the glob matcher."""
+"""Unit tests for deterministic diff-based command-set selection (Р3).
+
+The repo-relative glob matcher these sets use lives in ``wastech_orchestrator.globmatch`` and is
+tested in ``tests/test_globmatch.py``.
+"""
 
 from __future__ import annotations
 
 from wastech_orchestrator.checks.model import ResolvedCheck, ResolvedCheckSet
-from wastech_orchestrator.checks.selection import _compile_glob, select_check_sets
+from wastech_orchestrator.checks.selection import select_check_sets
 
 
 def _set(name: str, *paths: str) -> ResolvedCheckSet:
@@ -12,30 +16,6 @@ def _set(name: str, *paths: str) -> ResolvedCheckSet:
 
 def _names(sets: tuple[ResolvedCheckSet, ...]) -> list[str]:
     return [s.name for s in sets]
-
-
-# -- glob matcher -------------------------------------------------------------
-
-
-def _m(pattern: str, path: str) -> bool:
-    return _compile_glob(pattern).fullmatch(path) is not None
-
-
-def test_extension_glob_matches_anywhere() -> None:
-    # `**/*.md` runs a Markdown linter only when .md files change (operator's MD-lint set).
-    assert _m("**/*.md", "README.md")
-    assert _m("**/*.md", "docs/a/b.md")
-    assert not _m("**/*.md", "src/x.py")
-
-
-def test_subtree_glob() -> None:
-    assert _m("backend/**", "backend/src/x.cs")
-    assert not _m("backend/**", "mobile/x")
-
-
-def test_single_segment_star_does_not_cross_slash() -> None:
-    assert _m("mobile/*.lock", "mobile/yarn.lock")
-    assert not _m("mobile/*.lock", "mobile/a/b.lock")
 
 
 # -- selection rules ----------------------------------------------------------

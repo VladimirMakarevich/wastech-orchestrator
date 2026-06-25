@@ -288,6 +288,7 @@ security:
     - "git commit"
     - "git push"
     - "gh pr create"
+  deletion_approval_exempt_paths: [] # opt-in; default [] = every deletion is gated
 ```
 
 | Field | Type | Default | Meaning |
@@ -296,8 +297,25 @@ security:
 | `allowed_environment` | list of strings | `PATH`, `HOME`, `USER`, `USERPROFILE`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR` | Only these environment variables reach child processes. `USER` is required on macOS so subscription/OAuth-authenticated provider CLIs can reach their Keychain credentials (without it the CLI reports "Not logged in"). |
 | `denied_read_paths` | list of strings | `.env`, `secrets/**` | Paths agents must not read and artifacts must not expose. |
 | `denied_commands` | list of strings | `git commit`, `git push`, `gh pr create` | Commands agents are forbidden to run. |
+| `deletion_approval_exempt_paths` | list of globs | `[]` | Repo-relative globs whose deletions/renames skip the mid-pipeline dangerous-diff approval (rule #14). Default `[]` gates every deletion. **You own the risk.** See below. |
 
 Only the orchestrator's Git Manager commits, pushes, and creates PRs. Agent providers do not.
+
+### `deletion_approval_exempt_paths` (deletion-approval allowlist)
+
+By default the orchestrator pauses for a human approval whenever an agent's diff deletes or renames a tracked file (or touches a dependency manifest/lock). For repos where deleting/renaming certain files is routine — docs especially — listing their globs here exempts **their deletions** from that approval:
+
+```yaml
+security:
+  deletion_approval_exempt_paths:
+    - "**/*.md" # any Markdown file at any depth
+    - "docs/**" # everything under docs/
+```
+
+- **Glob dialect** is the same as `checks.command_sets[].paths`: `**` crosses directories (`**/*.md` matches `README.md` and `docs/a/b.md`), a single `*` stays within one path segment (`*.md` matches only top-level `.md` files). Patterns are repo-relative; an absolute path, `~`, or `..` traversal is rejected at config load.
+- **Deletions only.** It filters only the deletion classification. A deleted **dependency manifest/lock** (`package.json`, `pyproject.toml`, lockfiles, …) is **never** exemptable — it stays gated even under a `**` exemption.
+- **Operator-only.** A task can never widen this; it lives only in `config.yaml`.
+- **Still auditable.** An exempted deletion is logged and still appears in `logs/<id>/current.diff` and the published PR — the PR review remains the backstop. The one case where no human sees an exempted deletion is when `git.auto_merge` is also enabled (your accepted trade-off).
 
 ## `validation`
 

@@ -32,7 +32,20 @@ One task = one branch = one PR. Keep it to a single, reviewable change:
 - A tightly scoped task plans better, reviews faster, and is far less likely to need a fixing cycle.
 - If your repo expects a customer-specific branch convention, set `branch_name` to the full target branch (e.g. `branch_name: "feature/ABC-123-webhook-retry-budget"`); otherwise omit it and use the orchestrator's default branch naming.
 
-## 3. State constraints explicitly
+## 3. Pick the flow with `task_type` (default: `implementation`)
+
+A task runs a **flow** — a fixed pipeline of stages. Omit `task_type` and you get the default `implementation` flow (`planning → implementation → testing → review → fixing → documentation → publish`), which is what almost every coding task wants. Set `task_type` to run a different flow:
+
+```yaml
+task_type: deep_research # omit ⇒ implementation
+```
+
+- **Built-ins:** `implementation` (default), `deep_research`, `security_audit`.
+- **Custom flows:** an operator can add `<repo>/.worc/flows/<task_type>.yaml`, and you select it by naming it in `task_type`. A `task_type` with no matching flow fails the task before any branch is created.
+
+The task only _names_ the flow; it never edits the graph or a stage's provider/model — those live in the flow YAML (an operator concern). The only per-task pipeline knob is disabling a node (`nodes.<node-id>.enabled: false`); to reshape the pipeline or retune models, author/edit the flow under `.worc/flows/`.
+
+## 4. State constraints explicitly
 
 The `## Constraints` section is how you fence the agent in. Use it for:
 
@@ -42,7 +55,7 @@ The `## Constraints` section is how you fence the agent in. Use it for:
 
 Constraints are cheap to write and prevent the most expensive review failures.
 
-## 4. Respect the project's own working rules
+## 5. Respect the project's own working rules
 
 A task you author should ask for work that fits how this project (and most well-run repos) operate. State these in the task body when relevant so the agent honors them:
 
@@ -51,7 +64,7 @@ A task you author should ask for work that fits how this project (and most well-
 - **Docs kept in sync** — when the change touches user-facing behavior, CLI, config, or architecture, the docs are updated in the same change.
 - **Canonical names** — refer to stages and providers by their real names: stages `refinement, planning, implementation, testing, review, fixing, summary, publishing`; providers `codex`, `claude`.
 
-## 5. Honor the security invariants
+## 6. Honor the security invariants
 
 These are non-negotiable for this orchestrator; never write a task that tries to work around them:
 
@@ -65,6 +78,7 @@ Before handing over a task:
 
 - [ ] `id` is lowercase and matches `^[a-z0-9][a-z0-9._-]{0,63}$`.
 - [ ] `title` is short, specific, and non-empty.
+- [ ] `task_type` is omitted (⇒ `implementation`) or names a flow that exists — a built-in (`deep_research`, `security_audit`) or an operator flow in `.worc/flows/`.
 - [ ] `## Description` is concrete and non-empty.
 - [ ] Acceptance criteria are present and testable (unless you intend refinement to add them).
 - [ ] `## Constraints` lists do-not-touch areas and dependency/compatibility limits.

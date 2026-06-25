@@ -471,7 +471,13 @@ def _build_security(raw: Any, issues: list[str]) -> SecurityConfig:
     m = _mapping(raw, where, issues)
     _check_keys(
         m,
-        {"strict_isolation", "allowed_environment", "denied_read_paths", "denied_commands"},
+        {
+            "strict_isolation",
+            "allowed_environment",
+            "denied_read_paths",
+            "denied_commands",
+            "deletion_approval_exempt_paths",
+        },
         where,
         issues,
     )
@@ -487,6 +493,9 @@ def _build_security(raw: Any, issues: list[str]) -> SecurityConfig:
             _DEFAULT_DENIED_COMMANDS,
             where,
             issues,
+        ),
+        deletion_approval_exempt_paths=_str_tuple(
+            m, "deletion_approval_exempt_paths", (), where, issues
         ),
     )
 

@@ -51,7 +51,7 @@ Only these keys are allowed. **Any other key makes the task rejected** (`unknown
 | --- | --: | --- | --- |
 | `id` | **yes** | string | Stable id. Must match `^[a-z0-9][a-z0-9._-]{0,63}$`. |
 | `title` | **yes** | string | Short, non-empty human title. Branch slug + reports. |
-| `task_type` | no | string | Flow selector. Omit ⇒ `implementation` (the default coding pipeline). Built-ins: `implementation`, `deep_research`, `security_audit`. An unknown type fails the task. The task only _names_ the flow — it never edits it. |
+| `task_type` | no | string | Flow selector. Omit ⇒ `implementation` (the default coding pipeline). Built-ins: `implementation`, `deep_research`, `security_audit`; operators add more as `<repo>/.worc/flows/<task_type>.yaml`. An unknown type (no matching flow) fails the task before any branch is created. The task only _names_ the flow — it never edits it. |
 | `pr_title` | no | string \| null | PR title override, used verbatim instead of `title`. Does not change the branch name or commit messages. Omit to auto-generate. |
 | `auto_merge` | no | boolean | `true` requests auto-merge of the PR (**DANGER — skips human review**); `false` always opts out; omit uses the instance default. A set per-task value wins outright. |
 | `prompt_audit` | no | boolean | `true`/`false` forces prompt-audit recording for this task; omit uses the config default. |

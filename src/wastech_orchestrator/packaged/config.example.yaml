@@ -3,7 +3,7 @@
 # This is the packaged copy used by `wastech-orchestrator init`; keep it in sync with the
 # repo-root config.example.yaml
 
-schema_version: 15                  # config format version; the orchestrator refuses newer configs
+schema_version: 16                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -72,6 +72,13 @@ security:
     - "git push"
     - "gh pr create"
     - "gh pr merge"
+  deletion_approval_exempt_paths: []  # DANGER: deletions/renames matching these repo-relative globs
+                                      # SKIP the dangerous-diff approval gate (rule #14). Default [] =
+                                      # every deletion is gated. You own the risk: an exempted deletion
+                                      # gets no mid-run approval (and, under git.auto_merge, no PR review
+                                      # either) — it still appears in the PR diff / logs/<id>/current.diff.
+                                      # Dependency manifests/locks are NEVER exemptable. Use "**/*.md" for
+                                      # any .md anywhere; "*.md" matches only top-level; "docs/**" a subtree.
 
 validation:                         # input hardening gate (§19); rejects broken tasks before any branch
   max_task_bytes: 262144

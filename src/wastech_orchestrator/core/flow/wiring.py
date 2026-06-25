@@ -57,6 +57,7 @@ def build_node_services(
     run_process: RunProcess = _default_run_process,
     process_env: Mapping[str, str] | None = None,
     scan_timeout_s: int = 600,
+    deletion_approval_exempt_paths: tuple[str, ...] = (),
 ) -> NodeServices:
     """Assemble the unit-shared :class:`NodeServices` (collaborators + the routing map).
 
@@ -84,6 +85,7 @@ def build_node_services(
         run_process=run_process,
         process_env=dict(process_env or {}),
         scan_timeout_s=scan_timeout_s,
+        deletion_approval_exempt_paths=deletion_approval_exempt_paths,
     )
 
 
