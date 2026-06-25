@@ -8,7 +8,7 @@
 
 Given the operator's current directory, find the orchestrator's installed `config.yaml`, and given a loaded config, derive the two filesystem roots every command works against: the gitignored runtime **home** (`<repo>/.worc/`) and the repo-root **tasks/** lifecycle tree. This is the link between [B03](B03-installer-and-scaffolding.md) (which writes the home) and the rest of the CLI (which re-discovers it).
 
-There is **no install-registry module**. Despite the block title, the orchestrator keeps no persistent per-user index of installed projects: a project is "installed" iff `<git-root>/.worc/config.yaml` exists, and that fact is recomputed on every invocation by walking up to the Git root. The only `registry` artifact under `install/` is a stale `registry.cpython-314.pyc` in `__pycache__/` with no corresponding `registry.py` and no importer anywhere in `src/` or `tests/` — see [Audit candidates](#audit-candidates).
+There is **no install-registry module**. Despite the block title, the orchestrator keeps no persistent per-user index of installed projects: a project is "installed" iff `<git-root>/.worc/config.yaml` exists, and that fact is recomputed on every invocation by walking up to the Git root. The only `registry` artifact under `install/` is a stale `registry.cpython-314.pyc` in `__pycache__/` with no corresponding `registry.py` and no importer anywhere in `src/` or `tests/`.
 
 ## Public surface
 
@@ -67,12 +67,6 @@ The directory layout these two roots describe is created by `install`, not by B0
 
 - **Uses:** B03 (`detect.git_info` for Git-root discovery; `install` creates the home + dirs this block names), B05 (the `OrchestratorConfig` / `repo.local_path` it reads).
 - **Used by:** B01 (every config-loading command calls `resolve_config_path` / `load_config_for` / `worc_home_for`), B02 (watch scans `pending_dir`), B07 (`state.db` opened under `worc_home_for`), B20 (run artifacts laid out under `<artifacts_root>` = the home).
-
-## Audit candidates
-
-- `src/wastech_orchestrator/install/__pycache__/registry.cpython-314.pyc` — dead/vestigial artifact — a compiled `registry` module with no `registry.py` source and zero importers in `src/`/`tests/`; the block's named "install registry" concept does not exist in code. See [the audit](../../backlog/2026-06-21-audit.md).
-- `src/wastech_orchestrator/core/orchestrator.py:142` — DRY duplication — `_WORC_HOME = ".worc"` re-declares `cli.WORC_HOME`; justified by a stated circular-import constraint (core must not import the CLI), but the literal is duplicated and can drift. See [the audit](../../backlog/2026-06-21-audit.md).
-- `src/wastech_orchestrator/cli.py:354-360` — stale docstring — `resolve_config_path`'s docstring says the config is "discovered by walking up from the cwd to the Git root", which reads as a manual `.git` walk; the actual mechanism is `git rev-parse --show-toplevel` ([detect.py:67](../../../src/wastech_orchestrator/install/detect.py#L67)). See [the audit](../../backlog/2026-06-21-audit.md).
 
 ## Tests
 

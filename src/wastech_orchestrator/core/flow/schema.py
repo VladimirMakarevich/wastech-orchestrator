@@ -1,6 +1,6 @@
 """Flow schema — Python types for the YAML flow document (P0.2).
 
-Mirrors ``docs/backlog/flows/co-design/flow.schema.json`` as frozen dataclasses.
+The flow-graph document as frozen dataclasses.
 Pure: no IO, no YAML parsing, no fingerprinting — only types.
 
 ``FlowNode`` is a Union discriminated by ``kind``; use ``isinstance`` to narrow.

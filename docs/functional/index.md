@@ -4,7 +4,7 @@
 LastDateSync: 2026-06-21
 ```
 
-> This documentation was reconstructed from executable code and tests (`src/wastech_orchestrator/`, `tests/`). The code is the only source of truth; README files, specifications, comments, and docstrings were not used as sources. Every significant claim in the block documents is accompanied by a reference to the supporting code location (`file:line`). Code problems found during the reconstruction are recorded in [docs/backlog/2026-06-21-audit.md](../backlog/2026-06-21-audit.md).
+> This documentation was reconstructed from executable code and tests (`src/wastech_orchestrator/`, `tests/`). The code is the only source of truth; README files, specifications, comments, and docstrings were not used as sources. Every significant claim in the block documents is accompanied by a reference to the supporting code location (`file:line`).
 
 ## System Purpose (confirmed by code)
 
@@ -271,4 +271,3 @@ System behavior was reconstructed from code; below are remaining caveats about t
 
 - **The "dangerous" diff classifier** ([core/dangerous_diff.py](../../src/wastech_orchestrator/core/dangerous_diff.py), B14) has no dedicated unit test (`tests/core/test_dangerous_diff.py` does not exist); its behavior is confirmed by reading the pure function and indirectly through the HITL/guardrail scenarios ([tests/core/test_hitl.py](../../tests/core/test_hitl.py), and the flow node-runner tests).
 - **The real Telegram network path** ([notify/telegram.py](../../src/wastech_orchestrator/notify/telegram.py), B26) is replaced by a fake client in tests; it is not run against the live Telegram API (by design). The contract and error handling are confirmed by reading the code and by tests against the fake.
-- **Decorative configuration / flow fields (resolved).** The previously-decorative parsed fields — the flow `decomposition.gate` + `commit_each_subtask`, the config `min_size_signal`/`commit_per_subtask`, and the research/audit `global_revision_iterations` budget — have all been removed or repaired (audit #4/#5/#6); the research/audit global budget now uses the enforced `global_fix_iterations` key. See [the audit](../backlog/2026-06-21-audit.md).

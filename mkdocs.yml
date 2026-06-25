@@ -34,6 +34,7 @@ nav:
       - How It Works: how-it-works.md
       - Operations: operations.md
       - Cookbook: cookbook.md
+      - Glossary: glossary.md
   - Reference:
       - Configuration: configuration.md
       - Task Authoring: task-authoring.md

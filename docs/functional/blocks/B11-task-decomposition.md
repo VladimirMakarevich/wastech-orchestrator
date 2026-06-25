@@ -82,14 +82,6 @@ On resume the fan-out reads already-committed orders from the store (`{s.order f
 
 - **Uses:** `providers.artifacts.task_artifact_dir` (artifact rooting, B20). **Used by:** B30 (`postprocess.read_decomposition` reads the contract), B06 (`_engine_materialize_decomposition` + `_fan_out_subtasks` materialize and drive), B28/B29 (the engine + `decomposition:` block partition the graph into pre/region/post, [engine_driver.py:58](../../../src/wastech_orchestrator/core/flow/engine_driver.py#L58)), B07 (the `subtasks` table mirrors `index.json`), B10 (resume from the first uncommitted subtask), B22 (Git Manager commits each subtask).
 
-## Audit candidates
-
-See [the audit](../../backlog/2026-06-21-audit.md).
-
-- `src/wastech_orchestrator/core/decomposition.py:9` — the module docstring says the gate can be on via "the per-task `decompose` tri-state", but no such field exists on `NormalizedTask` (only `auto_merge`/`prompt_audit` are task-wins, [task/model.py:34](../../../src/wastech_orchestrator/task/model.py#L34)) and `_decomposition_gate_on` returns only the config default ([orchestrator.py:1805](../../../src/wastech_orchestrator/core/orchestrator.py#L1805)); stale docstring.
-
-(The decorative flow `decomposition.gate` fields + `commit_each_subtask`, and the config `min_size_signal`/`commit_per_subtask` knobs, were **removed** — audit #4/#5.)
-
 ## Tests
 
 - `tests/core/test_decomposition.py` — the acceptance rule end to end: gate-off, well-formed accept (linear deps), `decompose:false`/missing output, `n<2` and `n>max`, malformed subtask, forward/self/non-sequential dependency rejections; artifact write + atomic index update; spec immutability; rejected-decision-writes-nothing.

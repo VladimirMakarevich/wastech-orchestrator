@@ -23,7 +23,7 @@ ALLOWED_PROMPT_VARS: frozenset[str] = frozenset(
         "task_id",
         "stage",
         "repo_path",
-        "repo",  # flow-engine alias for ``repo_path`` (flow-contract); single shared allowlist
+        "repo",  # flow-engine alias for ``repo_path``; single shared allowlist
         "task_path",
         "plan_path",
         "diff_path",

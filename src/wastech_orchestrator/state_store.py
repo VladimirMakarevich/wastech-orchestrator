@@ -1131,7 +1131,7 @@ class StateStore:
         self, task_id: str, *, node_id: str | None = None, subtask_order: int | None = None
     ) -> int:
         """Count applied in-flow ``rework`` verdicts — the per-instance rework limit derives from
-        this count, not a mutable counter (flow-contract). Scoped to ``node_id`` /
+        this count, not a mutable counter. Scoped to ``node_id`` /
         ``subtask_order`` when given (``subtask_order`` matched with ``IS`` so ``NULL`` works)."""
         sql = (
             "SELECT COUNT(*) FROM evaluations "

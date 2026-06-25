@@ -106,11 +106,6 @@ Each driver begins with `_configure_runtime_logging(args)` ([cli.py:527](../../.
 
 - **Uses:** [B06](B06-orchestrator-pipeline.md) (`build_orchestrator`/`build_providers`, `run_task`, `plan_rerun`/`rerun_task`/`continue_task`, `plan_finalize`/`finalize_task`), [B02](B02-watch-daemon-and-scheduling.md) (`process_control`, the watch loop), [B03](B03-installer-and-scaffolding.md) (`wizard`, `config_writer`, `detect`), [B04](B04-install-registry-and-config-discovery.md) (`detect.git_info` for discovery), [B05](B05-configuration.md) (`load_config`/`validate_config`/`config.upgrade`), [B07](B07-state-machine-and-store.md) (`StateStore.open_readonly`, `Status`), [B18](B18-agent-providers.md) (`provider.preflight`), [B23](B23-check-discovery.md) (command-set summary), [B25](B25-security-policy.md) (`check_isolation`), [B26](B26-notifications-telegram.md) (`build_notifier`, `check_telegram_preflight`), [B27](B27-observability.md) (`configure_logging`), [B29](B29-flow-definition-and-validation.md) (`FlowRegistry.validate_all`). **Used by:** end operators (the entry point of the whole system) and the install auto-preflight (`run_preflight`).
 
-## Audit candidates
-
-- `src/wastech_orchestrator/cli.py:1108` — `_install_atomic_write` hardcodes a `.config-*.yaml` temp name even when `upgrade-docs` writes `.md` files through it — see [the audit](../../backlog/2026-06-21-audit.md).
-- `src/wastech_orchestrator/cli.py:3` — module docstring describes an `init` command that no longer exists (renamed to `install`) — see [the audit](../../backlog/2026-06-21-audit.md).
-
 ## Tests
 
 - `tests/test_cli_version.py` — `--version` prints and exits 0; a newer `schema_version` fails loud with exit 2 (no traceback).

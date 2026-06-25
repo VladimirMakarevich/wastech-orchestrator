@@ -66,14 +66,6 @@ Other callers: B27's `RedactionFilter` runs every log record's message/args/fiel
 - **Uses:** standard library only (`hashlib`, `re`, `pathlib`) — no internal block.
 - **Used by:** B18 (Agent Providers — redact every sink + harvest denied secrets), B20 (Run Artifact Layout — receives already-redacted content), B22 (Git Manager), B26 (Telegram), B27 (Observability — `RedactionFilter`, prompt persistence), B06 (Orchestrator Pipeline — prompt/skill text). See B25 (Security Policy) for the env allowlist and denied-read-path source.
 
-## Audit candidates
-
-See [the audit](../../backlog/2026-06-21-audit.md).
-
-- `providers/redaction.py:41` & `providers/redaction.py:46` — the literal floor `_MIN_LITERAL_LEN = 4` and the harvest floor `_MIN_DENIED_SECRET_LEN = 8` are asymmetric. A real secret of length 4–7 stored in a `denied_read_paths` file is never harvested ([redaction.py:202](../../../src/wastech_orchestrator/providers/redaction.py#L202)), so if the agent prints it verbatim it can reach an artifact/log unless it independently matches a token pattern — a genuine escape window the tests bake in ([test_denied_reads.py:20](../../../tests/security/test_denied_reads.py#L20)).
-- `providers/codex.py:602`, `providers/claude.py:684` — the env-value harvest hardcodes the magic `>= 8` inline instead of importing `_MIN_DENIED_SECRET_LEN`; the threshold is duplicated across three files and itself disagrees with `_MIN_LITERAL_LEN = 4`, so a 4–7 char secret-named env value is likewise never collected.
-- `observability/logging.py:111` — `RedactionFilter` calls `redact_text` with **no** `extra_secrets`, so it only catches token shapes and sensitive assignments. A denied-file or session-id literal that reaches the logging path (rather than an adapter sink) is not scrubbed by this net — the docstring's "even if a call site accidentally interpolates a secret" claim ([logging.py:105](../../../src/wastech_orchestrator/observability/logging.py#L105)) overstates the coverage.
-
 ## Tests
 
 - `tests/providers/test_redaction.py` — token-shape masking, literal `extra_secrets`, the short-literal guard, name-kept/value-redacted assignments, deep recursion, non-mutation, scalar pass-through, and segment-based key sensitivity (incl. `input_tokens` negative).

@@ -20,8 +20,7 @@ accumulated cross-step context instead of starting blind — gated by provider m
 ``resume_own_lineage`` evaluator.
 
 It replaces the old summary provider and the removed blocking ``supervise_impl`` / ``supervise_fix``
-nodes (2026-06-19 revision; see ``docs/backlog/flows/flow-contract.md``,
-``p2-implementation.md``).
+nodes (2026-06-19 revision).
 """
 
 from __future__ import annotations

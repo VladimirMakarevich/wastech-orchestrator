@@ -75,10 +75,6 @@ Both writers funnel through `_write_json`, which dumps `indent=2, ensure_ascii=F
 
 - **Uses:** B18 (`providers/base` — `AgentRunResult` for result serialization; the `node_id` segment is the request's flow node id, not a `Stage`). **Used by:** B18 (Codex/Claude providers call `create_attempt_dir` and the two writers, and join `output-schema.json`/`last-message.txt` onto `attempt_dir`), B24 (check execution joins `task_artifact_dir(...) / "checks"` and writes `<run-id>.log` with its own never-overwrite scheme — [check_runner.py:114](../../../src/wastech_orchestrator/check_runner.py#L114), [check_runner.py:184-188](../../../src/wastech_orchestrator/check_runner.py#L184)), B07 (the artifact row registers `sha256_file(path)` — [orchestrator.py:1779-1780](../../../src/wastech_orchestrator/core/orchestrator.py#L1779)), B06 (drives `archive_task_artifacts` on rerun and joins `task_artifact_dir` for plan/summary/subtasks/HITL). B21 supplies the redaction/normalization the providers apply before calling the writers.
 
-## Audit candidates
-
-- See [the audit](../../backlog/2026-06-21-audit.md). No defects were found in this module.
-
 ## Tests
 
 - `tests/providers/test_artifacts.py` — pins the exact attempt-dir layout including the six-digit `run-` and `provider` leaf ([test_artifacts.py:24-31](../../../tests/providers/test_artifacts.py#L24)), the zero-padded `sub-NN` segment ([test_artifacts.py:33-47](../../../tests/providers/test_artifacts.py#L33)), the never-overwrite `FileExistsError` ([test_artifacts.py:50-53](../../../tests/providers/test_artifacts.py#L50)), distinct dirs per attempt and per `node_run_id` when the attempt counter resets ([test_artifacts.py:56-65](../../../tests/providers/test_artifacts.py#L56)), the `request.json` round-trip ([test_artifacts.py:68-72](../../../tests/providers/test_artifacts.py#L68)), and enum/`NormalizedError` serialization in `result.json` ([test_artifacts.py:75-92](../../../tests/providers/test_artifacts.py#L75)). The test suite does not directly cover `archive_task_artifacts` or `sha256_file` here (exercised via the orchestrator/rerun path).

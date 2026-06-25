@@ -72,10 +72,6 @@ The happy-path edges live in `_BASE_TRANSITIONS` ([state_machine.py:48](../../..
 - **Used by:** [B06](B06-orchestrator-pipeline.md) (read/write), [B28](B28-flow-engine.md) (the `RunRecorder` checkpoint via `recorder.py`), [B30](B30-flow-node-runners.md) (node_runs / evaluations / lineage), [B22](B22-git-manager.md) (publish idempotency), [B10](B10-recovery-and-resume.md) (recovery queries), [B01](B01-cli-and-operator-commands.md) (read-only `status`).
 - **Uses:** [B09](B09-fix-loop-control.md) (`LoopCounters`).
 
-## Audit candidates
-
-- The module docstring ([state_store.py:1-12](../../../src/wastech_orchestrator/state_store.py#L1)) enumerates the entities as "tasks, node_runs, provider_attempts, check_runs, artifacts, publish_operations and subtasks" — it omits `evaluations` / `editing_lineage` / `node_lineage` (added v8/v9/v10). Minor stale comment. See [the audit](../../backlog/2026-06-21-audit.md).
-
 ## Tests
 
 - `tests/test_state_store.py`, `tests/core/test_state_machine.py` — transition legality, schema-version fail-closed, transactional writes, idempotency upserts, checkpoint round-trip, lineage tables.

@@ -4,10 +4,10 @@ Runs the core-owned set of dependency / advisory scanners as argv child processe
 string) through the safe process runner — mandatory timeout, allowlisted environment — and
 structures each scanner's run as evidence. The scan **never gates**: it always reports
 ``passed=True`` (the scan ran) so the ``checks`` node stays uniformly pass/fail and the engine needs
-no "this checker doesn't gate" special case (co-design note #3). Whether the findings gate the flow
+no "this checker doesn't gate" special case. Whether the findings gate the flow
 is the flow's decision, expressed by its edges (``dependency_scan → threat_analysis (pass)``).
 
-The flow cannot specify scanners (security-ceiling) — the set is core-owned here. A scanner that
+The flow cannot specify scanners — the set is core-owned here. A scanner that
 is not installed *launch-fails* and contributes no findings: a missing tool is not a quality failure
 for an evidence scan (unlike a gating ``command_profile`` check, where a launch failure is infra).
 """

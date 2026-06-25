@@ -22,8 +22,8 @@ Budget bookkeeping is generic on purpose: the engine knows nothing about ``test_
 engine). Named loops use ``>=`` semantics — increment then compare (verified by the fix-loop
 scenarios) — and inline ``budget: N`` edges use ``allow N`` semantics. Flow ``budgets`` parameterize
 the limits;
-``agents.max_fix_cycles`` / ``agents.max_total_fix_iterations`` clamp them as the unlosable backstop
-(security-ceiling): the effective cap is ``min(flow_budget, config_cap)``.
+``agents.max_fix_cycles`` / ``agents.max_total_fix_iterations`` clamp them as the unlosable
+backstop — the effective cap is ``min(flow_budget, config_cap)``.
 
 The node runners are the core-owned wrappers in :mod:`~wastech_orchestrator.core.flow.nodes`; the
 checkpoint is persisted by the :class:`RunRecorder` (see ``core.flow.recorder``).

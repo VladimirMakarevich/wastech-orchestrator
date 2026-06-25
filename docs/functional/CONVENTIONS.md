@@ -13,7 +13,7 @@ This document describes how to maintain and keep current the documentation set i
 - The following are **not** used as sources (even as supplementary references): README and existing documentation, architectural descriptions and diagrams, comments/docstrings, task/issue/PR titles, statements about how the system "should" work.
 - Purpose must not be inferred from a file/directory/class/function/variable name. Confirm through actual calls, dependencies, inputs, conditions, state changes, side effects, and return values.
 - A test is evidence of behavior only based on its setup, invocation, and the actual assertion — not based on its name.
-- The 2026-06-21 reconstruction rebuilt every block, flow, and top-level document from the code alone (the prior prose was not trusted); code problems found during that pass are recorded in [docs/backlog/2026-06-21-audit.md](../backlog/2026-06-21-audit.md), not in the functional docs.
+- The 2026-06-21 reconstruction rebuilt every block, flow, and top-level document from the code alone (the prior prose was not trusted).
 
 ## When to Update Documentation
 
@@ -50,7 +50,7 @@ Extract behavior into a separate block if it combines several of the following t
 
 ## Block File Template
 
-Each file `blocks/<id>-<short-name>.md` opens with a reconstructed-from-code blockquote and a `**Status:** … · **Source modules:** …` line, then these sections: **Responsibility**; **Public surface** (key symbols with `file:line`); **Behavior** (subsections, with a mermaid diagram where it clarifies); **Invariants & guarantees**; **Dependencies** (Uses / Used by); **Audit candidates** (code issues found, pointing at the dated audit; omit if none); **Tests**.
+Each file `blocks/<id>-<short-name>.md` opens with a reconstructed-from-code blockquote and a `**Status:** … · **Source modules:** …` line, then these sections: **Responsibility**; **Public surface** (key symbols with `file:line`); **Behavior** (subsections, with a mermaid diagram where it clarifies); **Invariants & guarantees**; **Dependencies** (Uses / Used by); **Tests**.
 
 - One file — one logical block.
 - Block identifiers (`B01`…`B32`) and short file names are fixed; a new block receives the next available `Bxx` and does not reuse a freed one.
@@ -80,7 +80,7 @@ Flow docs **reference** the `B**` blocks that implement the mechanics without du
 
 - Write concisely and precisely; do not paraphrase code line by line. Include technical details only when they affect boundaries, execution order, result, constraint, error, state change, or relationship.
 - Distinguish between a block's own work, initiation, delegation, use of another block's result, and another block's side effect.
-- Do not present unreachable code as working behavior; mark it as unreachable/unconfirmed (and consider an Audit-candidates entry).
+- Do not present unreachable code as working behavior; mark it as unreachable/unconfirmed.
 - Speculative wording is prohibited: "probably", "most likely", "apparently", and similar. State unestablished facts as such, specifying what is unknown and which areas were checked.
 - Markdown: prose **without hard wrapping** — one paragraph = one line (wrap only softly in the editor; do not insert manual line breaks in prose). Surround headings and lists with blank lines; do not use bold text instead of a heading; increment heading levels one at a time.
 - Markdown formatting is standardized by **Prettier** (`proseWrap: never`, see `.prettierrc.json` in the root): `npx prettier@3 --write "**/*.md"`. It removes hard wrapping, aligns tables and blank lines around headings; it does not touch code blocks, mermaid, or links. Exceptions are in `.prettierignore`.

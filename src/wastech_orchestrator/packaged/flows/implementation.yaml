@@ -13,15 +13,13 @@
 # the core-owned commit-candidate mutation guard on `checks` (P2.4 — active whenever a `checks` node
 # is present, not declared here). An optional non-blocking `testing_quality` evaluator (the shared
 # evaluator runner already supports its self-cap) is NOT shipped in this default flow: it is a pure
-# graph-shape choice — an operator who wants it adds the node to their own flow YAML. See the
-# reference graph in docs/backlog/flows/co-design/implementation.yaml.
+# graph-shape choice — an operator who wants it adds the node to their own flow YAML.
 #
 # NOTE (2026-06-19 revision): supervisor is NOT a graph node. It is a constant orchestrator layer
 # ABOVE any flow (summary + per-step advisory oversight, configured in config.yaml: supervisor); the
 # supervise_impl/supervise_fix nodes and the summary-as-node were removed from the target. There is
 # NO `summary` node here: the constant supervisor layer writes the summary at whole-task close
-# (before publish) and observes every completed step. See p2-implementation.md §P2.1,
-# flow-contract §2.2/§7.
+# (before publish) and observes every completed step.
 #
 # ----------------------------------------------------------------------------------------------------
 # Per-node tuning (ALL fields below are OPTIONAL — omit one to inherit the default). Every

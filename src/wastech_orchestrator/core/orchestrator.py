@@ -216,7 +216,7 @@ def _artifact_kind(name: str) -> str:
 
 def effective_skip(task: NormalizedTask) -> frozenset[str]:
     """The flow node ids disabled for ``task`` — its own ``nodes.<node-id>.enabled: false``
-    overrides (per-task node-disable control; flow-contract bounded exception).
+    overrides (per-task node-disable control; the bounded per-task exception).
 
     The gate validated the ``nodes:`` block shape; node existence and routing soundness against the
     task's resolved flow are checked at flow resolution (``validate_disabled_nodes``), so by the
@@ -1114,7 +1114,7 @@ class Orchestrator:
         names a real, safely-skippable node), so a bad ``nodes:`` override fails the same way.
         Resolution runs before branch prep, so either failure happens before any side effect; on
         resume it re-validates against the live config, so a flow made unsafe by a config change is
-        rejected rather than run (the recovery ceiling never widens, security-ceiling).
+        rejected rather than run (the recovery ceiling never widens).
         """
         try:
             snapshot = self._flow_registry.resolve(p.task.task_type)

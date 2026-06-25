@@ -338,7 +338,7 @@ class ValidationGate:
         """Map the ``nodes`` front-matter block to ``{node-id: NodeOverride}`` (shape only).
 
         Keys are flow node ids; the only valid sub-key is ``enabled`` — the node-disable toggle
-        (flow-contract, the one sanctioned per-node knob). ``enabled: false`` disables the node;
+        (the one sanctioned per-node knob). ``enabled: false`` disables the node;
         ``null``/``{}`` means default (it runs). The gate checks shape only — it cannot see the
         task's flow, so it does not validate node ids against any vocabulary. Whether each named
         node exists in the resolved flow (and is safe to disable) is checked at flow resolution.

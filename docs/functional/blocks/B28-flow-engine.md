@@ -92,10 +92,6 @@ When the engine is constructed with a `region` (a frozenset of node ids), the ru
 - **Uses:** [B29](B29-flow-definition-and-validation.md) (`FlowSnapshot`, `Edge`), [B30](B30-flow-node-runners.md) (the `NodeRunner` registry), [B07](B07-state-machine-and-store.md) (`RunRecorder` → state store + checkpoint), [B09](B09-fix-loop-control.md) (`record_rework`, failure report), [B08](B08-ledger-and-failure-reports.md) (`write_failure_report`).
 - **Used by:** [B06](B06-orchestrator-pipeline.md) — the orchestrator builds `NodeServices`/`NodeInputs`, resolves the snapshot via [B29](B29-flow-definition-and-validation.md), and calls `drive_flow` as the single driver.
 
-## Audit candidates
-
-- `partition_decomposition` resolves the region entry and post entry with `next(...)` and **no default** ([engine_driver.py:64-74](../../../src/wastech_orchestrator/core/flow/engine_driver.py#L64)); the validator checks only that decomposition references resolve, not that `proposed_by` connects into the region or that the region has a forward exit ([validator.py:251-259](../../../src/wastech_orchestrator/core/flow/validator.py#L251)), so a structurally-valid but disconnected decomposition would raise `StopIteration` instead of a clean `FlowValidationError`. See [the audit](../../backlog/2026-06-21-audit.md).
-
 ## Tests
 
 - `tests/core/flow/` — engine traversal, budget/fix-loop scenarios (`test_record_rework_single_increment`, the P3 abstraction test that forbids domain knowledge in the engine), region/decomposition driving, resume from checkpoint.

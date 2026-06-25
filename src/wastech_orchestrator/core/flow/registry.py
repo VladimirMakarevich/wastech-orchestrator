@@ -20,9 +20,6 @@ Resolution rules:
   :func:`~.validator.validate_flow_against_config` runs too (P4.2 config-aware layer): node
   providers/reasoning ∈ allowlist, ``permission_ceiling`` ≤ a configured provider, PR-publishing
   needs git, and ``budgets`` ≤ the config safety caps.
-
-See ``docs/backlog/flows/plan.md`` (P0.4), ``p4-operator.md`` (P4.1/P4.2) and
-``flow-contract.md``.
 """
 
 from __future__ import annotations
@@ -101,8 +98,7 @@ class FlowRegistry:
         Returns ``(name, error)`` per flow, where *name* is the file stem and *error* is ``None`` on
         success or a one-line message on failure. Operator files shadow a packaged file of the same
         name (only the operator one is reported, mirroring :meth:`resolve`). Does not raise — the
-        caller decides how to surface failures (``install``/``preflight`` treat any as fatal,
-        ``happy-path.md``).
+        caller decides how to surface failures (``install``/``preflight`` treat any as fatal).
         """
         results: list[tuple[str, str | None]] = []
         for name in self._all_flow_names():

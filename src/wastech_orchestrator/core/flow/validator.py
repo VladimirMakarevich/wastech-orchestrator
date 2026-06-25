@@ -37,8 +37,7 @@ already degrades them gracefully:
   mode (no PR), a supported configuration, so a PR-publishing flow imposes no git requirement.
 
 Call :func:`validate_flow` immediately after :func:`~.snapshot.load_flow` — before branch creation
-and before any provider launch. Together the three layers form the fatal gate described in
-``docs/backlog/flows/security-ceiling.md``.
+and before any provider launch. Together the three layers form the fatal gate.
 """
 
 from __future__ import annotations
@@ -108,7 +107,7 @@ def validate_flow_against_config(snapshot: FlowSnapshot, config: OrchestratorCon
     configured provider can reach, or — under
     ``security.strict_isolation`` — a node whose ``extra_args`` select a provider full-access mode
     (the flow-side half of the isolation gate; the operator opts in via ``strict_isolation:
-    false``). Security can only ever *narrow* here — see ``docs/backlog/flows/security-ceiling.md``.
+    false``). Security can only ever *narrow* here.
     (Flow ``budgets`` and ``publishing`` are handled by graceful runtime degradation, not here — see
     the module docstring.)
 
@@ -274,7 +273,7 @@ def _check_graph(snap: FlowSnapshot) -> list[Violation]:
         errs.append(g("no terminal node (every node has at least one outgoing edge)"))
     else:
         # Reverse reachability from terminals: any node that cannot reach a terminal is a dead end
-        # (security-ceiling "есть путь к терминалу"). Bounded loops guarantee runtime
+        # Bounded loops guarantee runtime
         # termination, but a structurally trapped node still indicates a malformed graph.
         reverse: dict[str, list[str]] = {}
         for edge in doc.edges:

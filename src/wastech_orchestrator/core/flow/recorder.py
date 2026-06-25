@@ -7,8 +7,8 @@ the ledger: it records skipped nodes in ``node_runs``, checkpoints the
 transition, and writes the flow-neutral failure report when a budget is exhausted.
 
 :func:`hydrate_run_state` rebuilds the checkpoint on resume **from the persisted snapshot
-fingerprint** — recovery trusts the stored flow and never re-resolves it from the live config
-(``index.md``, ``flow-contract.md``). Side-effect idempotency lives in ``publish_operations``
+fingerprint** — recovery trusts the stored flow and never re-resolves it from the live config.
+Side-effect idempotency lives in ``publish_operations``
 (unchanged), so a resumed run never duplicates a commit/push/PR.
 """
 

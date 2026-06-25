@@ -66,10 +66,6 @@ This is the single writer for both failure-report paths. The flow recorder's `St
 - **Uses:** B20 (`task_artifact_dir` for the per-task directory layout).
 - **Used by:** B06 (constructs and appends a `LedgerRecord` at every terminal transition; reads via `_ledger_attempt_count`/`_ledger_has_manual`; calls `write_minimal_summary`), B16 (the §19 duplicate-id gate consumes `has_task_id`), B28 (the flow engine's failure report is written through `write_failure_report`, called by B30's recorder), B31 (the supervisor authors the primary summary; this module is the fallback writer).
 
-## Audit candidates
-
-- `src/wastech_orchestrator/ledger.py:9` — see [the audit](../../backlog/2026-06-21-audit.md): the module docstring and `write_minimal_summary`'s docstring frame the fallback as triggered when "no provider can produce the `summary` stage (§5.2)" ([ledger.py:206](../../../src/wastech_orchestrator/ledger.py#L206)), but the whole-task summary is now authored by the supervisor layer (B31), not a provider `summary` stage — stale framing.
-
 ## Tests
 
 - `tests/core/test_ledger.py` — covers append-only growth and round-trip ([test_ledger.py:17](../../../tests/core/test_ledger.py#L17)); `has_task_id` ([test_ledger.py:31](../../../tests/core/test_ledger.py#L31)); empty/missing file ([test_ledger.py:39](../../../tests/core/test_ledger.py#L39)); re-run linkage and tolerance of missing rerun keys ([test_ledger.py:43](../../../tests/core/test_ledger.py#L43)); the `finalize` manual/note/outcome marker and the pipeline default ([test_ledger.py:65](../../../tests/core/test_ledger.py#L65)); decomposition fields ([test_ledger.py:92](../../../tests/core/test_ledger.py#L92)); failure report incl. the decomposed block ([test_ledger.py:113](../../../tests/core/test_ledger.py#L113)); and the minimal summary's four-key contract, compactness, and no-task-ref path ([test_ledger.py:152](../../../tests/core/test_ledger.py#L152)).

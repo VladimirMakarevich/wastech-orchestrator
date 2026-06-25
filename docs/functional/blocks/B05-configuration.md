@@ -114,12 +114,6 @@ flowchart TB
 - **Uses:** [B25](B25-security-policy.md) (`find_forbidden_args`, reused for `extra_args` and check commands), [B23](B23-check-discovery.md) (`checks.model` — `normalize_check_command`, `argv_matches_denied`, `shell_metachars`, `is_safe_relpath` for a check `cwd`), `providers.base` (`ProviderId`), PyYAML.
 - **Used by:** [B01](B01-cli-and-operator-commands.md) (`_load_config`, `cmd_upgrade_config` / `upgrade-config` + `upgrade-docs`), [B04](B04-install-registry-and-config-discovery.md) (resolves the path this module then loads), [B06](B06-orchestrator-pipeline.md) (reads `OrchestratorConfig`), [B18](B18-agent-providers.md) (`ProviderConfig` drives the adapters), [B29](B29-flow-definition-and-validation.md) (the flow config-aware validator reads `providers.allowed`/`reasoning`/the permission ceiling), [B31](B31-supervisor.md) (`SupervisorConfig`), [B13](B13-skill-selection.md) (`SkillsConfig`).
 
-## Audit candidates
-
-See [the audit](../../backlog/2026-06-21-audit.md) for the consolidated list.
-
-- `packaged/config.example.yaml:83` ([loader.py:462](../../../src/wastech_orchestrator/config/loader.py#L462)) — the example sets `quarantine_folder: "./tasks/rejected"` while the loader default is `"./.worc/tasks/rejected"`; the two disagree on where rejected tasks land. Example/default drift.
-
 ## Tests
 
 - [tests/config/test_loader.py](../../../tests/config/test_loader.py) — structural fail-closed paths: non-mapping/empty root, unknown top-level and block keys, type/enum rejection, collect-all-issues, the reasoning closed set, provider/auto-merge/prompt-audit parsing, and all four tolerated-legacy-key paths.

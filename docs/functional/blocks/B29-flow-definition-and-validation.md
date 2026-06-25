@@ -83,10 +83,6 @@ The config-aware layer validates **only the cases with no safe runtime fallback*
 - **Uses:** [B25](B25-security-policy.md) (`find_forbidden_args`, `is_same_or_stricter`), [B05](B05-configuration.md) (`OrchestratorConfig` for the config-aware layer), [B18](B18-agent-providers.md) (`ProviderId`).
 - **Used by:** [B28](B28-flow-engine.md) (consumes the snapshot), [B06](B06-orchestrator-pipeline.md) (resolves the flow per task; runs `validate_all` at preflight).
 
-## Audit candidates
-
-- The config-aware layer carries a comment that there is "deliberately no per-model allowlist" because config holds one `model` per provider ([validator.py:54-57](../../../src/wastech_orchestrator/core/flow/validator.py#L54)); a flow node `model` override is therefore unvalidated against the provider — acceptable by design (greenfield/YAGNI) but worth noting. See [the audit](../../backlog/2026-06-21-audit.md).
-
 ## Tests
 
 - `tests/core/flow/` — loader allowlist/fail-closed cases, registry resolution + operator override, the three validation layers, packaged-flow validity, `validate_all` preflight behavior.

@@ -248,7 +248,7 @@ class AgentNodeRunner:
     ) -> None:
         """After a workspace-write edit, write the diff (``{diff_path}``) and gate dangerous diffs.
 
-        Core-owned and automatic — the flow never declares or disables it (flow-contract). A
+        Core-owned and automatic — the flow never declares or disables it. A
         deletion/dependency diff requires a durable human approval (or a matching planning
         pre-approval); on denial the stage reconsiders once with the denial context and, if the diff
         is still dangerous, fails closed to manual review.
@@ -507,7 +507,7 @@ def _agent_outcome(outcome: StageOutcome) -> NodeOutcome:
 def _wants_hitl(node: AgentNode) -> bool:
     """A node opts into the durable HITL round-trip by declaring ``hitl`` with a capability flag.
 
-    Data-driven (flow-contract): the *decision* to do a human round-trip is the node's
+    Data-driven: the *decision* to do a human round-trip is the node's
     declared ``hitl`` settings, never the stage name. The typed-output schema/parsing that follows
     is selected by the node's derived :data:`~wastech_orchestrator.core.hitl.OutputContract`
     (see :meth:`AgentNodeRunner._contract`), also never the stage name.

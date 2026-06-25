@@ -94,10 +94,6 @@ The Router takes a `before` snapshot via `snapshot.capture()` (if a hook is supp
 - **Uses:** [B18](B18-agent-providers.md) (the `AgentProvider.run` contract, `ErrorClass`, `FALLBACK_ELIGIBLE`, `ProviderError` from `providers/base.py`), [B25](B25-security-policy.md) (`is_same_or_stricter` profile ranking), [B05](B05-configuration.md) (`agents.providers`, the single global `primary`, `max_stage_attempts`, `allowed`), [B22](B22-git-manager.md) (concrete `SnapshotHook` implementation), [B27](B27-observability.md) (structured per-route/per-attempt logs via `bind`).
 - **Used by:** [B30](B30-flow-node-runners.md) (the agent and evaluator node runners call `resolve_route(stage, node.provider)` then `run_stage(...)`), [B31](B31-supervisor.md) (the supervisor layer resolves a route and runs a stage for its per-step review), [B28](B28-flow-engine.md) (the engine model that drives those runners), [B07](B07-state-machine-and-store.md) (the `attempts`/`StageOutcome` are persisted as `provider_attempts` rows by the node observability writer).
 
-## Audit candidates
-
-- `docs/functional/blocks/B17-agent-router-and-fallback.md` (the prior revision) — the doc carried several stale `file:line` references (e.g. partial-diff at `router.py:270-272,314-321`, immediate-return at `router.py:294-303`, `_assert_available` at `router.py:326-348`) that no longer match the current `router.py`. Recorded in [the audit](../../backlog/2026-06-21-audit.md).
-
 ## Tests
 
 - `tests/routing/test_route_resolution.py` — node-based resolution: default-to-global-primary, node→global-primary fallback, primary-is-global-primary (no fallback), allowlist/instance fail-closed, exactly-one-global-primary enforcement, and that the route carries only a `ProviderId` (command/args stay in config).

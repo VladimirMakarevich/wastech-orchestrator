@@ -56,10 +56,6 @@ The classifier is called by the agent node runner's post-edit guard after a work
 - **Uses:** [B22](B22-git-manager.md) (`ChangedPath` shape; `changed_code_entries` supplies the input tuple).
 - **Used by:** [B30](B30-flow-node-runners.md) (the agent node runner's post-edit guard applies the classifier), surfacing into [B12](B12-hitl-and-typed-output.md) (the durable HITL approval).
 
-## Audit candidates
-
-- `src/wastech_orchestrator/core/dangerous_diff.py:88,90` — status prefix matching (`startswith("D")` / `startswith("R")`) — minor fragility: any future code path that ever fed a status string beginning with those letters for an unrelated state would be misclassified; today inputs come only from `changed_code_entries`, which emits Git name-status codes, so this is latent, not active. See [the audit](../../backlog/2026-06-21-audit.md).
-
 ## Tests
 
 - `tests/core/test_hitl.py` — the only **direct** unit tests of the classifier: ordinary modify → `None` ([test_hitl.py:126-128](../../../tests/core/test_hitl.py#L126)), deletion + dependency → `other` with sorted union ([test_hitl.py:131-140](../../../tests/core/test_hitl.py#L131)), renamed manifest → `other` ([test_hitl.py:143-154](../../../tests/core/test_hitl.py#L143)).

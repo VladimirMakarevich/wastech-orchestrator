@@ -2,7 +2,7 @@
 
 Status: **backlog / not scheduled** Date: 2026-06-13 Owner: Vladimir Makarevich
 
-This document captures the product task of checking Codex and Claude Code subscription capacity before an autonomous `watch` process admits a pending task into the active pipeline. It is a backlog item, not current runtime behavior. Nothing here overrides the canonical specification, [CLAUDE.md](../../CLAUDE.md), [AGENTS.md](../../AGENTS.md), or the hard invariants in [.agents/rules/](../../.agents/rules/).
+This document captures the product task of checking Codex and Claude Code subscription capacity before an autonomous `watch` process admits a pending task into the active pipeline. It is a backlog item, not current runtime behavior. Nothing here overrides the canonical specification, [CLAUDE.md](../../../CLAUDE.md), [AGENTS.md](../../../AGENTS.md), or the hard invariants in [.agents/rules/](../../../.agents/rules).
 
 ## 1. Background
 

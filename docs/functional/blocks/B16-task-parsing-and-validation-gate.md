@@ -111,14 +111,6 @@ flowchart TB
 - **Uses:** B05 (`SKIPPABLE_STAGES`, `validation.*` thresholds, `agents.allow_review_skip`), B25 (`scan_frontmatter` injection scan), B20 (`task_artifact_dir` for the manifest/report paths), B07 (injected `store_has_task_id` for the duplicate-id check; `load_normalized` is read on resume), B08 (injected `ledger_has_task_id` for the duplicate-id check). The `Stage` enum is from `providers/base.py`.
 - **Used by:** B06 (the gate runs first in `run_task`; reject → `_reject`; `phase_b` feeds the fact resolver and runs again on resume; `write_normalized`/`load_normalized` bracket registration and recovery; `slugify` names the branch). B11/B12 consume the resulting `NormalizedTask`.
 
-## Audit candidates
-
-See [the audit](../../backlog/2026-06-21-audit.md).
-
-- [parser.py:231](../../../src/wastech_orchestrator/task/parser.py#L231), [parser.py:237](../../../src/wastech_orchestrator/task/parser.py#L237) — `load_normalized` does an unguarded `json.loads` followed by required-key access `data["id"]`/`data["title"]`; a corrupt or truncated `task.normalized.json` raises `JSONDecodeError`/`KeyError`. This is the parser-side cause of the resume crash (the crash itself surfaces in B06/B10, where `load_normalized` is called at [orchestrator.py:727](../../../src/wastech_orchestrator/core/orchestrator.py#L727)). Contrast `write_validation_report`/`load_normalized`'s tolerant `data.get(...)` for optional fields — only the two required keys are unguarded.
-- [validation_gate.py:351](../../../src/wastech_orchestrator/task/validation_gate.py#L351) — Phase-B acceptance detection falls back to `"acceptance" in task.description.lower()` (a bare substring). Any prose mentioning the word — including "no acceptance criteria yet" — classifies the task `COMPLETE` and silently skips refinement, since this classification is the _only_ input to `derived.needs_refinement`.
-- [model.py:1](../../../src/wastech_orchestrator/task/model.py#L1) — stale planning prose: the module docstring states "The actual parsing, the §19 validation gate, and duplicate-id detection are P5 … here we fix only the shapes …", and the inline comments reference "P1 and the P5 parser" ([model.py:18](../../../src/wastech_orchestrator/task/model.py#L18)). Parsing and the gate are now implemented in this same package; the P1/P5 phasing is historical.
-
 ## Tests
 
 - `tests/task/test_model.py` — id accept/reject matrix, branch-name accept/reject matrix, tri-state `auto_merge`/`prompt_audit`, independent default collections, the exact `ALLOWED_TASK_KEYS`/`REQUIRED_TASK_FIELDS` schema, and `disabled_nodes()` reflecting `enabled: false` only.

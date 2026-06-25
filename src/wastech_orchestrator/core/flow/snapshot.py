@@ -51,8 +51,7 @@ class FlowLoadError(Exception):
 #
 # Every mapping in the flow document is checked against an explicit allowlist: an unknown key is a
 # fatal load error, never silently ignored. This is the structural ``additionalProperties: false``
-# gate from the co-design ``flow.schema.json`` and the field-allowlist requirement in
-# ``security-ceiling.md``- — the mechanism that keeps operator YAML a closed allowlist rather
+# field-allowlist gate — the mechanism that keeps operator YAML a closed allowlist rather
 # than an open dict.
 
 _FLOW_FIELDS = frozenset(
@@ -130,14 +129,14 @@ _EVALUATOR_DEFAULTS_FIELDS = frozenset(
     }
 )
 
-# Core checker set (security-ceiling): flow may not invent a checker kind.
+# Core checker set: flow may not invent a checker kind.
 _CHECKER_KINDS = frozenset({"command_profile", "citation", "dependency_scan"})
 
 # Output-artifact slots (P1.4): the well-known names an agent node may persist its output to. The
 # slot vocabulary is core-fixed (a flow may not invent a slot — fail-closed at load).
 _OUTPUT_ARTIFACT_SLOTS = frozenset({"enriched_spec", "plan", "summary"})
 
-# ``when`` fact namespaces (co-design notes #2/#63). The exact value allowlist per namespace is
+# ``when`` fact namespaces. The exact value allowlist per namespace is
 # finalized when the P1 engine fact resolver lands; here we fail-closed on the namespace prefix so
 # a bare/typo'd fact (e.g. ``summary_enabled`` with no namespace) is rejected at load time.
 _WHEN_FACT_NAMESPACES = ("derived.", "config.")

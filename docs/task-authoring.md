@@ -6,7 +6,7 @@ Tasks can be Markdown (`.md`) or JSON (`.json`). Markdown is the normal operator
 
 > **Writing tasks with an AI agent?** A compact, agent-facing version of this guide ships in [`docs/worc/`](worc/README.md) and is copied to `<repo>/.worc/guide/` at `install` time. Point an agent at that local `.worc/guide/` folder and ask it to "write a task for this orchestrator." This document remains the full operator reference.
 
-Use the packaged `templates/task.md` as the editable runtime template. A completed example is kept at [`docs/examples/task-001.example.md`](examples/task-001.example.md). Live task files belong in the repo's own `tasks/pending/` directory at the repository root (committed and pushed there) — that is how a teammate hands the orchestrator work over git. The `tasks/` lifecycle directories are git-tracked and intentionally not ignored; only the orchestrator's own `.worc/` home is gitignored.
+Use the packaged `templates/task.md` as the editable runtime template. Live task files belong in the repo's own `tasks/pending/` directory at the repository root (committed and pushed there) — that is how a teammate hands the orchestrator work over git. The `tasks/` lifecycle directories are git-tracked and intentionally not ignored; only the orchestrator's own `.worc/` home is gitignored.
 
 The canonical task rules are enforced by the validation gate in the code (`src/wastech_orchestrator/task/`); see the [Functional Map](functional/index.md).
 

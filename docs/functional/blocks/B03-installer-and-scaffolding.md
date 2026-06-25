@@ -105,11 +105,6 @@ Two distinct trees ([cli.py:68-84](../../../src/wastech_orchestrator/cli.py#L68)
 - **Uses:** B19 (safe subprocess runner for git probes), B05 (config loader + schema + semantic validator the generator round-trips through; the generated `checks.command_sets` is empty), B22 (`.gitignore` append; `append_runtime_excludes`), B18/B17 (`ProviderId`, per-provider blocks, single primary), B29 (preflight's `FlowRegistry.validate_all`), B26 (Telegram preflight line). It no longer touches B23 — checks are not seeded at install.
 - **Used by:** B01 (the `install` subcommand parser + dispatch to `cmd_install`, plus `run_preflight`/`resolve_config_path` reuse `detect.git_info`), B04 (`.worc/config.yaml` home / config discovery written here), B29 (preflight, also reached standalone by `cmd_preflight`).
 
-## Audit candidates
-
-- ~~**`GhNotAvailableError` / `require_gh` are not used by the installer.**~~ **Resolved (2026-06-22, audit #21):** both moved to `preflight.py` (a runtime startup-gate module) — the read-only detection module no longer carries a raising runtime gate; `has_gh()` (pure detection) stays.
-- The whole ecosystem/check-detection question is moot since the checks-monorepo change (2026-06-23): the installer seeds no checks at all (`command_sets: {}`), so there is no detection to duplicate.
-
 ## Tests
 
 - `tests/install/test_wizard.py` — every wizard path: provider resolution (`auto`/explicit/missing), the four hard stops (no git, not a repo, no origin, aborted confirm), dirty-tree warn-vs-abort, create_pr/auto_mode flag-vs-`gh`-default, and that the wizard seeds no checks (`test_install_does_not_seed_checks` — the spec carries no `checks`/`discovery_mode`).

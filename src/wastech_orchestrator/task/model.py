@@ -18,7 +18,7 @@ TASK_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 BRANCH_NAME_MAX_BYTES = 255
 _BRANCH_FORBIDDEN_CHARS = frozenset(" ~^:?*[\\")
 
-# Front-matter schema. A task is "clean" (flow-contract, PRE.3): it carries
+# Front-matter schema. A task is "clean": it carries
 # only identity/dispatch fields plus the two sanctioned exceptions — ``nodes.<node-id>.enabled``
 # (per-task node disable) and ``auto_merge`` (task-wins). Provider/model/reasoning/decomposition are
 # the flow's job (a node declares ``provider``/``model``/``reasoning``; ``decomposition:`` and the
@@ -91,7 +91,7 @@ class NodeOverride:
 class NormalizedTask:
     """A parsed, normalized task manifest: front matter plus the body Description.
 
-    A "clean" task (flow-contract, PRE.3): identity/dispatch only, plus the two sanctioned
+    A "clean" task: identity/dispatch only, plus the two sanctioned
     exceptions (``nodes.<node-id>.enabled`` disable and ``auto_merge`` task-wins). The flow node
     owns provider/model/reasoning; the flow owns decomposition and the deterministic refine-skip.
     """

@@ -45,7 +45,7 @@ from wastech_orchestrator.providers.base import ProviderId
 # v10 (2026-06-19, flexible-flow stage-skip): the global `agents.skip_stages` list is removed — with
 # fully configurable flows, "skip a stage for every task" is redundant (drop the node from the flow,
 # or author an operator flow). Per-task `stages.<stage>.enabled: false` survives as a bounded,
-# validated toggle (flow-contract), and `agents.allow_review_skip` stays (now gating only the
+# validated toggle, and `agents.allow_review_skip` stays (now gating only the
 # per-task review skip). `upgrade-config` strips `agents.skip_stages`; old configs still load
 # fail-open (the key is tolerated/ignored).
 # v11 (2026-06-19, flow-engine PRE.1/PRE.2): provider routing moves onto the flow node. The

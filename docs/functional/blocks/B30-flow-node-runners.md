@@ -79,10 +79,6 @@ When **no provider could run** the evaluator (infra-exhaustion), it raises `Eval
 - **Uses:** [B17](B17-agent-router-and-fallback.md) (router), [B24](B24-check-execution.md)/[B32](B32-flow-checkers.md) (checks/checkers), [B22](B22-git-manager.md) (git), [B26](B26-notifications-telegram.md) (notifier), [B12](B12-hitl-and-typed-output.md) (typed output + interaction artifacts), [B14](B14-dangerous-diff-guardrail.md), [B15](B15-prompt-templates.md), [B07](B07-state-machine-and-store.md) (`node_runs`, `evaluations`, lineage tables).
 - **Used by:** [B28](B28-flow-engine.md) (runner registry), [B06](B06-orchestrator-pipeline.md) (wiring).
 
-## Audit candidates
-
-(The former `build_stage_map` transitional debt — shoehorning arbitrary node ids into the 8-value `Stage` enum, with same-identity nodes sharing one audit directory — is **resolved**: the node→`Stage` map is gone, each node uses `node.id` directly as its identity, and per-node audit directories now exist (see Wiring, above, and [B27](B27-observability.md)).)
-
 ## Tests
 
 - `tests/core/flow/` — per-runner behavior (agent HITL round-trips, dangerous-diff/containment guard, evaluator verdict mapping + self-cap, checks mutation guard, publish idempotency + resumable manual stop, standalone hitl gate).

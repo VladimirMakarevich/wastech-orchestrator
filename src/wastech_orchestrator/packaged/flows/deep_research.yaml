@@ -1,5 +1,5 @@
 # Packaged built-in flow: deep_research.
-# Canonical version; co-design reference in docs/backlog/flows/co-design/deep_research.yaml.
+# Canonical version.
 #
 # ----------------------------------------------------------------------------------------------------
 # Per-node tuning (ALL fields below are OPTIONAL — omit one to inherit the default). Every

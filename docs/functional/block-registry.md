@@ -2,7 +2,7 @@
 
 Statuses: `discovered` — identified, not yet investigated; `in-progress` — under analysis; `documented` — investigated and documented; `needs-review` — behavior cannot be unambiguously reconstructed; `excluded` — reviewed, but not a standalone block.
 
-All 32 functional blocks (B01–B32) carry the status `documented`, (re)built from executable code and tests in the 2026-06-21 reconstruction. Each is described in a dedicated file under `blocks/` with `file:line` evidence. The flow-graph layer is in [flows/](./flows/index.md) (the per-flow node graphs); code problems found during the reconstruction are in [docs/backlog/2026-06-21-audit.md](../backlog/2026-06-21-audit.md).
+All 32 functional blocks (B01–B32) carry the status `documented`, (re)built from executable code and tests in the 2026-06-21 reconstruction. Each is described in a dedicated file under `blocks/` with `file:line` evidence. The flow-graph layer is in [flows/](./flows/index.md) (the per-flow node graphs).
 
 ---
 

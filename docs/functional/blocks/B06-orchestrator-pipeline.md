@@ -87,11 +87,6 @@ flowchart TD
 - **Drives:** [B28](B28-flow-engine.md)/[B30](B30-flow-node-runners.md) (engine + runners), [B31](B31-supervisor.md) (supervisor). **Calls:** [B16](B16-task-parsing-and-validation-gate.md), [B07](B07-state-machine-and-store.md), [B08](B08-ledger-and-failure-reports.md), [B09](B09-fix-loop-control.md), [B10](B10-recovery-and-resume.md), [B11](B11-task-decomposition.md), [B12](B12-hitl-and-typed-output.md), [B13](B13-skill-selection.md), [B17](B17-agent-router-and-fallback.md), [B22](B22-git-manager.md), [B23](B23-check-discovery.md)/[B24](B24-check-execution.md), [B26](B26-notifications-telegram.md). Normalizes the command sets via [B23](B23-check-discovery.md) at preflight; consults [B07](B07-state-machine-and-store.md) `task_had_skipped_checks` to gate auto-merge.
 - **Used by:** [B01](B01-cli-and-operator-commands.md) (CLI dispatch), [B02](B02-watch-daemon-and-scheduling.md) (watch loop).
 
-## Audit candidates
-
-- The module docstring ([orchestrator.py:1-8](../../../src/wastech_orchestrator/core/orchestrator.py#L1)) still describes the pre-flow-engine linear pipeline "→ summary → publishing" as stages — stale since the summary became the supervisor layer ([B31](B31-supervisor.md)).
-- Production `assert` statements stand in for guards on the resume/run paths (e.g. [orchestrator.py:349](../../../src/wastech_orchestrator/core/orchestrator.py#L349), [orchestrator.py:724](../../../src/wastech_orchestrator/core/orchestrator.py#L724), [orchestrator.py:726](../../../src/wastech_orchestrator/core/orchestrator.py#L726)); `_resume_task` reads `load_normalized` / counters **before** its try/except ([orchestrator.py:727-740](../../../src/wastech_orchestrator/core/orchestrator.py#L727)), so a corrupt artifact crashes resume rather than degrading to manual. See [the audit](../../backlog/2026-06-21-audit.md).
-
 ## Tests
 
 - `tests/core/test_orchestrator.py`, `tests/core/test_hitl.py`, `tests/e2e/` — gate→slot→engine flow, decomposition fan-out, resume/rerun/continue, auto-merge guardrail (including the skipped-check skip-gate), terminal cleanup.

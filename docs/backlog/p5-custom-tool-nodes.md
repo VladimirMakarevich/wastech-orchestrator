@@ -12,9 +12,9 @@
 
 ## Согласованность с инвариантом «нет узла-кода»
 
-[index.md §1](index.md) и [security-ceiling.md §1](security-ceiling.md) отвергают **узел = произвольный код в процессе ядра / inline** — это crewAI-дыра (RCE/sandbox-escape через `allow_code_execution`). P5 **не вводит** такой узел. `tool`-узел — это **типизированный узел, чья «механика» = запуск внешней программы под потолком** (как `agent`-узел запускает CLI-провайдера под потолком). Отличия, удерживающие инвариант:
+index.md §1 и security-ceiling.md §1 отвергают **узел = произвольный код в процессе ядра / inline** — это crewAI-дыра (RCE/sandbox-escape через `allow_code_execution`). P5 **не вводит** такой узел. `tool`-узел — это **типизированный узел, чья «механика» = запуск внешней программы под потолком** (как `agent`-узел запускает CLI-провайдера под потолком). Отличия, удерживающие инвариант:
 
-- tool исполняется **out-of-process** через [`providers/process.py`](../../../src/wastech_orchestrator/providers/process.py) `run_process`: argv-без-shell, **обязательный timeout**, **env-allowlist**, redaction, isolation-preflight — тот же потолок, что у агентов;
+- tool исполняется **out-of-process** через [`providers/process.py`](../../src/wastech_orchestrator/providers/process.py) `run_process`: argv-без-shell, **обязательный timeout**, **env-allowlist**, redaction, isolation-preflight — тот же потолок, что у агентов;
 - tool **side-effect-free** относительно git/state: он **возвращает** outcome/данные/findings; commit/push/PR/запись в `state.db` применяет **только ядро** (инвариант «git только оркестратор»);
 - tool получает **только allowlisted-контекст** (пути/метаданные), **никогда** секреты/env/raw session-id;
 - tool **объявлен под валидатором** (allowlist зарегистрированных tool, path-containment, объявленный набор `outcome`); неизвестный tool → fail-closed.
@@ -27,9 +27,9 @@
 
 ### Touchpoints
 
-- [`core/flow/schema.py`](../../../src/wastech_orchestrator/core/flow/schema.py) — новый `ToolNode` (frozen dataclass); добавить в Union `FlowNode`.
-- [`core/flow/snapshot.py`](../../../src/wastech_orchestrator/core/flow/snapshot.py) — `_parse_tool_node` + `_TOOL_FIELDS` allowlist; ветка в `_parse_node`.
-- [`core/flow/validator.py`](../../../src/wastech_orchestrator/core/flow/validator.py) — allowed-outcome для `tool` (см. ниже); `tool` ∈ зарегистрированного allowlist (config-aware, через `validate_flow_against_config` из [P4.2](p4-operator.md)); path-containment ссылки на tool.
+- [`core/flow/schema.py`](../../src/wastech_orchestrator/core/flow/schema.py) — новый `ToolNode` (frozen dataclass); добавить в Union `FlowNode`.
+- [`core/flow/snapshot.py`](../../src/wastech_orchestrator/core/flow/snapshot.py) — `_parse_tool_node` + `_TOOL_FIELDS` allowlist; ветка в `_parse_node`.
+- [`core/flow/validator.py`](../../src/wastech_orchestrator/core/flow/validator.py) — allowed-outcome для `tool` (см. ниже); `tool` ∈ зарегистрированного allowlist (config-aware, через `validate_flow_against_config` из P4.2); path-containment ссылки на tool.
 
 ### Новый тип
 
@@ -65,12 +65,12 @@ class ToolNode:
 
 ### Touchpoints
 
-- **Новый** `core/flow/tools_registry.py` — `ToolRegistry(tools_dir)` по образцу [`FlowRegistry`](../../../src/wastech_orchestrator/core/flow/registry.py): operator-слой `<repo>/.worc/tools/`. Резолвит `tool`-имя → исполняемый файл; fail-closed если не найден/не исполняемый.
+- **Новый** `core/flow/tools_registry.py` — `ToolRegistry(tools_dir)` по образцу [`FlowRegistry`](../../src/wastech_orchestrator/core/flow/registry.py): operator-слой `<repo>/.worc/tools/`. Резолвит `tool`-имя → исполняемый файл; fail-closed если не найден/не исполняемый.
 - `install`/`preflight` — валидирует реестр tools вместе с flow-файлами (всё фатально до запуска, как сейчас валидируются flow).
 
 ### Поведение
 
-- Доверие — **файловое** (как операторский flow и `config.yaml`): tool лежит в `.worc/tools/`, владелец — оператор. Подпись/хеш-реестр — отложено (то же решение, что для flow, [security-ceiling.md §8](security-ceiling.md)).
+- Доверие — **файловое** (как операторский flow и `config.yaml`): tool лежит в `.worc/tools/`, владелец — оператор. Подпись/хеш-реестр — отложено (то же решение, что для flow, security-ceiling.md §8).
 - Реестр отдаёт **только** зарегистрированные имена; flow не может сослаться на произвольный путь (path-containment + allowlist).
 
 ### Тесты
@@ -89,8 +89,8 @@ class ToolNode:
 
 ### Touchpoints
 
-- **Новый** [`core/flow/nodes/tool.py`](../../../src/wastech_orchestrator/core/flow/nodes/tool.py) — реализует `NodeRunner` (протокол из P1.1).
-- Переиспользует: [`providers/process.py`](../../../src/wastech_orchestrator/providers/process.py) `run_process` (argv-без-shell, timeout, stdout→файл); [`security/env.py`](../../../src/wastech_orchestrator/security/env.py) `build_child_env`; [`security/isolation.py`](../../../src/wastech_orchestrator/security/isolation.py); [`providers/redaction.py`](../../../src/wastech_orchestrator/providers/redaction.py); [`providers/errors.py`](../../../src/wastech_orchestrator/providers/errors.py) `classify`.
+- **Новый** `core/flow/nodes/tool.py` — реализует `NodeRunner` (протокол из P1.1).
+- Переиспользует: [`providers/process.py`](../../src/wastech_orchestrator/providers/process.py) `run_process` (argv-без-shell, timeout, stdout→файл); [`security/env.py`](../../src/wastech_orchestrator/security/env.py) `build_child_env`; [`security/isolation.py`](../../src/wastech_orchestrator/security/isolation.py); [`providers/redaction.py`](../../src/wastech_orchestrator/providers/redaction.py); [`providers/errors.py`](../../src/wastech_orchestrator/providers/errors.py) `classify`.
 
 ### JSON-контракт (как у CC-hooks)
 
@@ -132,7 +132,7 @@ class ToolNode:
 
 ### Поведение
 
-- Контекст собирается ядром (allowlisted-пути) — переиспользует тот же сбор, что prompt-vars ([p1-engine.md §P1.3](p1-engine.md)).
+- Контекст собирается ядром (allowlisted-пути) — переиспользует тот же сбор, что prompt-vars (p1-engine.md §P1.3).
 - Запуск под `run_process` + env-allowlist + isolation; stdout/stderr → артефакты после redaction; чекпоинт `node_run` (как у любого узла, P1.2).
 - Исход → ребро движком (P1.1), без спец-кейса.
 
@@ -154,9 +154,9 @@ class ToolNode:
 
 ## P5.4 — Docs + housekeeping
 
-- [flow-contract.md](flow-contract.md) §2 — добавить `tool` в палитру (доменный, но ceiling-bound; механика = subprocess ядра).
-- [security-ceiling.md](security-ceiling.md) §1/§3 — `tool` в allowlist полей + модель угроз (tool не пробивает потолок).
-- [index.md](index.md) §1 — каузат: «узел-код в процессе» отвергнут; «sandboxed external tool под потолком» = санкционированное расширение (P5).
+- flow-contract.md §2 — добавить `tool` в палитру (доменный, но ceiling-bound; механика = subprocess ядра).
+- security-ceiling.md §1/§3 — `tool` в allowlist полей + модель угроз (tool не пробивает потолок).
+- index.md §1 — каузат: «узел-код в процессе» отвергнут; «sandboxed external tool под потолком» = санкционированное расширение (P5).
 - configuration / how-it-works — `.worc/tools/` раскладка, JSON-контракт.
 
 ---
@@ -170,7 +170,7 @@ class ToolNode:
 3. **`NodeOutcome`/`NodeResult` — kind-агностичны.** P1.1 не зашивает в контракт перечень видов.
 4. **Сбор allowlisted-контекста — переиспользуемый.** P1.3 prompt-vars и P5 tool-context используют один и тот же ядровой allowlist-сборщик; не дублировать.
 5. **Паттерн «checker-реестр» (P3.1) — шаблон для tool-реестра.** Не изобретать второй механизм discovery.
-6. **`validate_flow_against_config` (P4.2) — точка, куда добавится tool-allowlist.** Config-aware валидатор уже отделён ([P4.2](p4-operator.md)).
+6. **`validate_flow_against_config` (P4.2) — точка, куда добавится tool-allowlist.** Config-aware валидатор уже отделён (P4.2).
 
 Если P1–P4 эти швы сохраняют, P5 — ~неделя работы (оценка из обсуждения: доминирует контракт безопасности + тесты угроз, не механика), без переписывания движка.
 
