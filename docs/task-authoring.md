@@ -4,7 +4,7 @@ Task files are the input contract between a human requester and **wastech-orches
 
 Tasks can be Markdown (`.md`) or JSON (`.json`). Markdown is the normal operator format and is what this guide focuses on.
 
-> **Writing tasks with an AI agent?** A compact, agent-facing version of this guide ships in [`docs/worc/`](worc/README.md) and is copied to `<repo>/.worc/guide/` at `install` time. Point an agent at that local `.worc/guide/` folder and ask it to "write a task for this orchestrator." This document remains the full operator reference.
+> **Writing tasks with an AI agent?** A compact, agent-facing version of this guide ships in [`packaged/guide/`](../src/wastech_orchestrator/packaged/guide/README.md) and is copied to `<repo>/.worc/guide/` at `install` time. Point an agent at that local `.worc/guide/` folder and ask it to "write a task for this orchestrator." This document remains the full operator reference.
 
 Use the packaged `templates/task.md` as the editable runtime template. Live task files belong in the repo's own `tasks/pending/` directory at the repository root (committed and pushed there) — that is how a teammate hands the orchestrator work over git. The `tasks/` lifecycle directories are git-tracked and intentionally not ignored; only the orchestrator's own `.worc/` home is gitignored.
 

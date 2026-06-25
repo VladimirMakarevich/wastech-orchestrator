@@ -41,7 +41,7 @@ There is a skill for running all checks: `/run-checks`.
 - Make minimal, focused changes; follow the style of the surrounding code.
 - When adding/changing behavior — add or update tests (see .agents/rules/testing.md).
 - When you change behavior/CLI/config/architecture — update the affected docs **in the same change** (use `/sync-docs`), and record deferred work in [docs/backlog/follow_ups.md](docs/backlog/follow_ups.md). The Stop docs-sync gate enforces this.
-- **Markdown docs are not hard-wrapped.** Write prose as one paragraph per line (rely on editor soft-wrap); never insert manual mid-paragraph line breaks. Formatting is enforced by Prettier (`proseWrap: never`, `.prettierrc.json`) — run `npx prettier@3 --write "**/*.md"` after editing docs. `logs/`, `tasks/`, `src/`, and `docs/worc/` are excluded (`.prettierignore`); don't reformat them.
+- **Markdown docs are not hard-wrapped.** Write prose as one paragraph per line (rely on editor soft-wrap); never insert manual mid-paragraph line breaks. Formatting is enforced by Prettier (`proseWrap: never`, `.prettierrc.json`) — run `npx prettier@3 --write "**/*.md"` after editing docs. `logs/`, `tasks/`, `src/`, and `packaged/guide/` are excluded (`.prettierignore`); don't reformat them.
 - Before committing, run `ruff`, `mypy`, `pytest`.
 
 @RTK.md
