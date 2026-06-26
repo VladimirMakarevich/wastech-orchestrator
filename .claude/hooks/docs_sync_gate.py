@@ -68,10 +68,11 @@ def main() -> int:
     if _should_block(_changed_paths()):
         reason = (
             "You changed code under src/ this session but touched no docs/ files. "
-            "If this affects behavior, the CLI, config, or architecture, update the relevant docs "
+            "If this affects behavior, the CLI, config, or contracts, update the relevant docs "
             "in the same change (run /sync-docs), and record any deferred work in "
-            "docs/backlog/follow_ups.md. If the change has no documentation impact, say so "
-            "explicitly and finish."
+            "docs/backlog/follow_ups.md. Note: docs/functional/ and docs/likec4/ are updated "
+            "separately via weekly reverse engineering — do not touch them here. "
+            "If the change has no documentation impact, say so explicitly and finish."
         )
         print(json.dumps({"decision": "block", "reason": reason}))
     return 0

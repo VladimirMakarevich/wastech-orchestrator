@@ -508,6 +508,172 @@ def test_cmd_status_reports_active_task(
     assert "fix_iterations=2" in output
 
 
+def _seed_list_db(clone: Path, rows: list[TaskRow]) -> None:
+    store = StateStore.open(clone / ".worc" / "state.db")
+    for row in rows:
+        store.insert_task(row)
+    store.close()
+
+
+def test_cmd_list_default_overview(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    _seed_list_db(
+        git_repo.clone,
+        [
+            TaskRow(task_id="task-active", title="Active", status=Status.RUNNING),
+            TaskRow(task_id="task-done", title="Done", status=Status.DONE),
+        ],
+    )
+    pending = git_repo.clone / "tasks" / "pending"
+    pending.mkdir(parents=True, exist_ok=True)
+    _complete_task_file(pending / "task-queued.md", "task-queued")
+
+    code = cli.main(["--config", str(config), "list"])
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "active:" in out and "pending:" in out and "recent:" in out
+    assert "task-active" in out  # the active section
+    assert "task-queued" in out  # the file-derived pending section
+    assert "task-done" in out  # the recent terminal section
+
+
+def test_cmd_list_format_ids_is_bare(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    _seed_list_db(
+        git_repo.clone,
+        [
+            TaskRow(task_id="task-active", title="Active", status=Status.RUNNING),
+            TaskRow(task_id="task-done", title="Done", status=Status.DONE),
+        ],
+    )
+
+    code = cli.main(["--config", str(config), "list", "--format", "ids"])
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "active:" not in out  # no section decoration
+    assert set(out.split()) == {"task-active", "task-done"}  # every known id, bare
+
+
+def test_cmd_list_scope_rerun_only_rerunnable(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    _seed_list_db(
+        git_repo.clone,
+        [
+            TaskRow(task_id="task-fail", title="F", status=Status.FAILED),
+            TaskRow(task_id="task-manual", title="M", status=Status.MANUAL_ACTION_REQUIRED),
+            TaskRow(task_id="task-done", title="D", status=Status.DONE),
+            TaskRow(task_id="task-run", title="R", status=Status.RUNNING),
+        ],
+    )
+
+    code = cli.main(["--config", str(config), "list", "--format", "ids", "--scope", "rerun"])
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert set(out.split()) == {"task-fail", "task-manual"}
+
+
+def test_cmd_list_scope_status_implies_all_ids(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    _seed_list_db(
+        git_repo.clone,
+        [
+            TaskRow(task_id="task-done", title="D", status=Status.DONE),
+            TaskRow(task_id="task-run", title="R", status=Status.RUNNING),
+        ],
+    )
+
+    # --scope alone implies the bare id list (it is completion-facing).
+    code = cli.main(["--config", str(config), "list", "--scope", "status"])
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert set(out.split()) == {"task-done", "task-run"}
+
+
+def test_cmd_list_format_json(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    _seed_list_db(git_repo.clone, [TaskRow(task_id="task-done", title="D", status=Status.DONE)])
+
+    code = cli.main(["--config", str(config), "list", "--format", "json"])
+
+    assert code == 0
+    data = json.loads(capsys.readouterr().out)
+    assert any(entry["task_id"] == "task-done" and entry["status"] == "done" for entry in data)
+
+
+def test_cmd_list_pending_file_without_id_shown_by_filename(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    pending = git_repo.clone / "tasks" / "pending"
+    pending.mkdir(parents=True, exist_ok=True)
+    (pending / "weird.md").write_text("no front matter\n", encoding="utf-8")
+
+    code = cli.main(["--config", str(config), "list", "--pending"])
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "weird.md" in out
+
+
+def test_cmd_list_no_tasks_notice(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+
+    code = cli.main(["--config", str(config), "list"])
+
+    assert code == 0
+    assert "no tasks" in capsys.readouterr().out
+
+
+def test_cmd_completion_bash(capsys: pytest.CaptureFixture[str]) -> None:
+    code = cli.main(["completion", "bash"])
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "worc list --format ids" in out  # single source of truth for ids
+    assert "complete -F _worc worc wastech-orchestrator" in out
+    assert "rerun" in out and "finalize" in out and "status" in out
+
+
+def test_cmd_completion_zsh(capsys: pytest.CaptureFixture[str]) -> None:
+    code = cli.main(["completion", "zsh"])
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "worc list --format ids" in out
+    assert "#compdef worc wastech-orchestrator" in out
+    assert "compdef _worc worc wastech-orchestrator" in out
+
+
 def test_cmd_run_rejected_task(git_repo, tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()

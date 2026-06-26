@@ -23,7 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from wastech_orchestrator.core.loop_control import LoopCounters
-from wastech_orchestrator.core.state_machine import Status
+from wastech_orchestrator.core.state_machine import TERMINAL, Status
 
 
 def _utc_now_iso() -> str:
@@ -628,6 +628,26 @@ class StateStore:
             "AND branch IS NOT NULL AND (cleanup_completed IS NULL OR cleanup_completed = 0)",
             terminal,
         )
+        return [_task_from_row(r) for r in cur.fetchall()]
+
+    def recent_tasks(self, limit: int) -> list[TaskRow]:
+        """The last ``limit`` terminal tasks (done / failed / manual_action_required) by recency.
+
+        The read-only ``worc list`` overview uses this for its "recent" section (and ``worc top``
+        reuses it). ``updated_at`` is an ISO-8601 string, so a lexical DESC sort is chronological.
+        """
+        terminal = tuple(s.value for s in TERMINAL)
+        placeholders = ",".join("?" * len(terminal))
+        cur = self._conn.execute(
+            f"SELECT * FROM tasks WHERE status IN ({placeholders}) "
+            "ORDER BY updated_at DESC LIMIT ?",
+            (*terminal, limit),
+        )
+        return [_task_from_row(r) for r in cur.fetchall()]
+
+    def all_tasks(self) -> list[TaskRow]:
+        """Every task, most recently updated first (backs ``worc list --all``)."""
+        cur = self._conn.execute("SELECT * FROM tasks ORDER BY updated_at DESC")
         return [_task_from_row(r) for r in cur.fetchall()]
 
     def update_task(

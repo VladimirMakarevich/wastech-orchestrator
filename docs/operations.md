@@ -230,6 +230,28 @@ python -m wastech_orchestrator status                          # active/latest p
 
 `watch` respects `orchestrator.auto_mode.enabled`: off (default) it processes/resumes one task and returns the working copy to `repo.base_branch`; on, it processes pending tasks sequentially, checking out the base branch between them. A `manual_action_required` outcome always blocks automatic continuation. Exit code: `0` done, `1` failed, `2` manual_action_required.
 
+### Listing tasks and shell completion (`list` / `completion`)
+
+`worc list` is a read-only snapshot of what exists, so you do not have to recall an exact `task_id` to act on it. With no flags it prints three sections — the **active** task, the `tasks/pending` **queue** (read straight from the files; a file with no parseable id is shown by filename), and the most **recent** terminal tasks. Focus it with `--pending`, `--recent [N]`, or `--all` (every known task across all statuses). It opens `state.db` read-only — safe to run while a `watch` daemon is live — and writes nothing.
+
+```bash
+worc list                       # active + pending queue + recent terminal tasks
+worc list --recent 20           # only the last 20 terminal tasks
+worc list --format json         # structured output for scripting
+worc list --format ids --scope rerun   # bare ids a rerun would accept (failed / manual_action_required)
+```
+
+`--format ids` prints one bare `task_id` per line (notices go to stderr) and `--scope {rerun,status,finalize}` narrows it to the ids that command accepts — the machine-readable surface the completion script consumes.
+
+`worc completion bash|zsh` prints a completion script you wire once. It completes subcommand names and flags statically, completes `run` with task files, and completes the id of `status` / `rerun` / `finalize` dynamically by shelling out to `worc list --format ids --scope <command>` — so the id list is always live and there is no extra dependency to install.
+
+```bash
+# zsh
+source <(worc completion zsh)            # or: worc completion zsh > ~/.zsh/completions/_worc
+# bash
+source <(worc completion bash)           # or drop into ~/.bash_completion.d/
+```
+
 ### Re-attempting a terminal task (`rerun`)
 
 A task that ended `failed` or `manual_action_required` is terminal — `watch`/`resume` never pick it up again. `rerun` re-attempts it without hand-editing `state.db`, the ledger, or git. It needs an **idle slot** (no other active task) and the **watch daemon stopped**, since it drives the pipeline in the shared clone; it records a new ledger entry linked to the prior attempt (`attempt`, `rerun_of`).

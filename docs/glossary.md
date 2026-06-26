@@ -25,6 +25,8 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`stop`** - Stops a running `watch` daemon.
 - **`restart`** - Stops the running watcher and starts a fresh one with new flags.
 - **`status`** - Shows the active or latest persisted task state without starting work.
+- **`list`** - Read-only enumeration of the active task, the `tasks/pending` queue, and recent terminal tasks; `--format ids` (filtered by `--scope`) is the machine-readable source that backs completion.
+- **`completion`** - Prints a `bash`/`zsh` completion script (sourced once) that completes subcommands and flags statically and task ids dynamically via `worc list --format ids`.
 - **`preflight`** - Runs read-only readiness checks for providers, isolation, and configured check sets.
 - **`telegram-test`** - Sends one correlated Telegram prompt and waits for a reply as a smoke test.
 - **`upgrade-config`** - Updates an older `config.yaml` to the current schema shape without changing user values.

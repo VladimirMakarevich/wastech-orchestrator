@@ -9,6 +9,7 @@ processes pending tasks (one at a time, continuing only when ``orchestrator.auto
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import shutil
@@ -52,7 +53,7 @@ from wastech_orchestrator.observability.logging import configure_logging
 from wastech_orchestrator.preflight import preflight_gh
 from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.security.isolation import check_isolation
-from wastech_orchestrator.state_store import IncompatibleStateError, StateStore
+from wastech_orchestrator.state_store import IncompatibleStateError, StateStore, TaskRow
 from wastech_orchestrator.task.model import DEFAULT_QUEUE, priority_rank
 from wastech_orchestrator.task.parser import read_task_source, split_frontmatter
 
@@ -72,6 +73,9 @@ _EXIT_BY_STATUS: dict[Status, int] = {
     Status.FAILED: 1,
     Status.MANUAL_ACTION_REQUIRED: 2,
 }
+
+# Default count for `list --recent` (and the "recent" section of the default overview).
+_LIST_RECENT_DEFAULT = 10
 
 # The orchestrator's runtime home inside the target repo. Everything the orchestrator
 # generates or installs lives under `<repo>/.worc/` — gitignored as a whole — except the audit
@@ -266,6 +270,41 @@ def build_parser() -> argparse.ArgumentParser:
     )
     status_cmd = sub.add_parser("status", help="show the active or latest persisted task status")
     status_cmd.add_argument("task_id", nargs="?", help="specific task id (default: active/latest)")
+
+    list_cmd = sub.add_parser(
+        "list", help="enumerate the active / pending / recent tasks (read-only)"
+    )
+    list_view = list_cmd.add_mutually_exclusive_group()
+    list_view.add_argument(
+        "--pending", action="store_true", help="show only the tasks/pending queue"
+    )
+    list_view.add_argument(
+        "--recent",
+        nargs="?",
+        type=int,
+        const=_LIST_RECENT_DEFAULT,
+        metavar="N",
+        help=f"show only the last N terminal tasks (default {_LIST_RECENT_DEFAULT})",
+    )
+    list_view.add_argument(
+        "--all", action="store_true", help="show every known task, across all statuses"
+    )
+    list_cmd.add_argument(
+        "--format",
+        choices=("table", "ids", "json"),
+        default="table",
+        help="output format: table (human, default), ids (one task id per line), or json",
+    )
+    list_cmd.add_argument(
+        "--scope",
+        choices=("rerun", "status", "finalize"),
+        help="restrict ids to what the named command accepts (completion-facing; implies ids)",
+    )
+
+    completion_cmd = sub.add_parser(
+        "completion", help="print a shell completion script (source it once) for bash or zsh"
+    )
+    completion_cmd.add_argument("shell", choices=("bash", "zsh"), help="the target shell")
 
     upgrade_cfg_cmd = sub.add_parser(
         "upgrade-config",
@@ -1385,6 +1424,252 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _task_entry(row: TaskRow) -> dict[str, str | None]:
+    return {
+        "task_id": row.task_id,
+        "status": row.status.value,
+        "title": row.title,
+        "branch": row.branch,
+    }
+
+
+def _pending_entry(path: Path, task_id: str | None) -> dict[str, str | None]:
+    # A queued file has no DB row yet, so this view is file-derived; the id (if any) comes from the
+    # cheap front-matter scan and an unparseable file is shown by filename instead.
+    return {
+        "task_id": task_id,
+        "status": "pending",
+        "title": None,
+        "branch": None,
+        "file": path.name,
+    }
+
+
+def _entry_line(entry: dict[str, str | None]) -> str:
+    status = entry["status"] or ""
+    label = entry["task_id"] or entry.get("file") or "(unknown)"
+    line = f"{status:<22} {label}"
+    title = entry.get("title")
+    if title:
+        line += f"  {title}"
+    branch = entry.get("branch")
+    if branch:
+        line += f"  ({branch})"
+    return line
+
+
+def _list_sections(
+    args: argparse.Namespace, config: OrchestratorConfig, store: StateStore | None
+) -> list[tuple[str, list[dict[str, str | None]]]]:
+    """The (section name, entries) groups for the table/json views, per the focus flags."""
+    pending = [
+        _pending_entry(path, _scan_pending_meta(path).task_id)
+        for path in select_pending(pending_dir(config))
+    ]
+    if args.all:
+        rows = store.all_tasks() if store else []
+        return [("all", [_task_entry(r) for r in rows])]
+    if args.pending:
+        return [("pending", pending)]
+    if args.recent is not None:
+        rows = store.recent_tasks(args.recent) if store else []
+        return [("recent", [_task_entry(r) for r in rows])]
+    active = store.find_active_tasks() if store else []
+    recent = store.recent_tasks(_LIST_RECENT_DEFAULT) if store else []
+    return [
+        ("active", [_task_entry(r) for r in active]),
+        ("pending", pending),
+        ("recent", [_task_entry(r) for r in recent]),
+    ]
+
+
+def _list_ids(store: StateStore | None, scope: str | None) -> int:
+    """Print bare task ids (one per line, stdout) for completion/scripting.
+
+    DB-derived: these are the ids the id-taking verbs accept. ``--scope rerun`` keeps only
+    rerun-eligible terminal tasks; ``status`` and ``finalize`` both yield every known id —
+    ``finalize`` is status-agnostic (``plan_finalize`` refuses only on a dirty tree or an existing
+    manual ledger record, never on status), so it coincides with ``status`` today. Both stay as
+    distinct, command-aligned scope values so the completion script can pass ``--scope <command>``
+    verbatim and the rule can diverge here later without touching the shell.
+    """
+    if store is None:
+        return 0
+    rows = store.all_tasks()
+    if scope == "rerun":
+        rows = [r for r in rows if r.status in (Status.FAILED, Status.MANUAL_ACTION_REQUIRED)]
+    for task_id in sorted({r.task_id for r in rows}):
+        print(task_id)
+    return 0
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    """Enumerate tasks read-only: the active task, the ``tasks/pending`` queue, and recent terminal
+    tasks. The default view shows all three; ``--pending`` / ``--recent [N]`` / ``--all`` focus it.
+    ``--format ids`` prints bare ids (the completion/scripting source) and ``--scope`` filters them
+    to what a given command accepts. Opens the DB read-only (``status``'s path) and never mutates.
+    """
+    _configure_runtime_logging(args)
+    config = load_config_for(args)
+    if config is None:
+        return 2
+
+    # --scope is completion-facing and only meaningful as an id list.
+    fmt = "ids" if args.scope else args.format
+    db_path = Path(worc_home_for(config)) / "state.db"
+    store = StateStore.open_readonly(db_path) if db_path.is_file() else None
+    try:
+        if fmt == "ids":
+            return _list_ids(store, args.scope)
+        sections = _list_sections(args, config, store)
+    finally:
+        if store is not None:
+            store.close()
+
+    if fmt == "json":
+        entries = [entry for _, items in sections for entry in items]
+        print(json.dumps(entries, indent=2))
+        return 0
+
+    if not any(items for _, items in sections):
+        print("list: no tasks")
+        return 0
+    for index, (name, items) in enumerate(sections):
+        if index:
+            print()
+        print(f"{name}:")
+        if items:
+            for entry in items:
+                print(f"  {_entry_line(entry)}")
+        else:
+            print("  (none)")
+    return 0
+
+
+def _parser_surface() -> tuple[list[str], dict[str, list[str]]]:
+    """The completion surface read off the live parser: subcommand names + each one's flags.
+
+    Sourced from :func:`build_parser` so the emitted completion script never drifts from the CLI.
+    """
+    parser = build_parser()
+    commands: list[str] = []
+    flags: dict[str, list[str]] = {}
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            choices = action.choices
+            if isinstance(choices, dict):
+                for name, subparser in choices.items():
+                    commands.append(name)
+                    flags[name] = sorted(
+                        {opt for a in subparser._actions for opt in a.option_strings}
+                    )
+            break
+    return commands, flags
+
+
+def _flag_cases(commands: list[str], flags: dict[str, list[str]]) -> str:
+    """The shell ``case`` arms mapping each subcommand to its flags (shared by bash and zsh)."""
+    return "\n".join(
+        f'            {name}) flags="{" ".join(flags[name])}";;'
+        for name in commands
+        if flags.get(name)
+    )
+
+
+# The dynamic id completion shells out to `worc list` so the enumeration rule lives in one place
+# (the three id-taking verbs each pass their own name as --scope). Task ids match
+# ^[a-z0-9][a-z0-9._-]{0,63}$ (no shell metacharacters), so feeding the output through
+# compgen/compadd carries no injection risk.
+_BASH_COMPLETION = """\
+_worc_ids() { compgen -W "$(worc list --format ids --scope "$1" 2>/dev/null)" -- "$2"; }
+_worc() {
+    local cur cmd i
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    COMPREPLY=()
+    cmd=""
+    for (( i=1; i < COMP_CWORD; i++ )); do
+        case "${COMP_WORDS[i]}" in
+            -*) ;;
+            *) cmd="${COMP_WORDS[i]}"; break ;;
+        esac
+    done
+    if [[ -z "$cmd" ]]; then
+        COMPREPLY=( $(compgen -W "__SUBCOMMANDS__" -- "$cur") )
+        return
+    fi
+    if [[ "$cur" == -* ]]; then
+        local flags=""
+        case "$cmd" in
+__FLAG_CASES__
+        esac
+        COMPREPLY=( $(compgen -W "$flags" -- "$cur") )
+        return
+    fi
+    case "$cmd" in
+        rerun|status|finalize) COMPREPLY=( $(_worc_ids "$cmd" "$cur") );;
+        run)                   COMPREPLY=( $(compgen -f -- "$cur") );;
+    esac
+}
+complete -F _worc worc wastech-orchestrator
+"""
+
+_ZSH_COMPLETION = """\
+#compdef worc wastech-orchestrator
+_worc_ids() { compadd -- ${(f)"$(worc list --format ids --scope "$1" 2>/dev/null)"}; }
+_worc() {
+    local cmd i
+    cmd=""
+    for (( i=2; i < CURRENT; i++ )); do
+        case "${words[i]}" in
+            -*) ;;
+            *) cmd="${words[i]}"; break ;;
+        esac
+    done
+    if [[ -z "$cmd" ]]; then
+        local -a subcommands
+        subcommands=(__SUBCOMMANDS__)
+        _describe 'command' subcommands
+        return
+    fi
+    if [[ "${words[CURRENT]}" == -* ]]; then
+        local flags=""
+        case "$cmd" in
+__FLAG_CASES__
+        esac
+        compadd -- ${=flags}
+        return
+    fi
+    case "$cmd" in
+        rerun|status|finalize) _worc_ids "$cmd" ;;
+        run)                   _files ;;
+    esac
+}
+# Register on `source <(worc completion zsh)`; run directly when invoked as the completer.
+if [[ "${funcstack[1]}" == "_worc" ]]; then
+    _worc "$@"
+else
+    compdef _worc worc wastech-orchestrator
+fi
+"""
+
+
+def cmd_completion(args: argparse.Namespace) -> int:
+    """Print a bash/zsh completion script (no config needed) to stdout.
+
+    Subcommand names + per-command flags are baked in statically from the live parser; the task-id
+    positionals (``status`` / ``rerun`` / ``finalize``) complete dynamically by shelling out to
+    ``worc list --format ids --scope <command>``, and ``run`` completes task files. Wiring is a
+    single ``source <(worc completion <shell>)``.
+    """
+    commands, flags = _parser_surface()
+    template = _BASH_COMPLETION if args.shell == "bash" else _ZSH_COMPLETION
+    script = template.replace("__SUBCOMMANDS__", " ".join(commands)).replace(
+        "__FLAG_CASES__", _flag_cases(commands, flags)
+    )
+    print(script, end="")
+    return 0
+
+
 def _install_atomic_write(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` atomically (temp file in the same dir + ``os.replace``).
 
@@ -1576,6 +1861,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_telegram_test(args)
         if args.command == "status":
             return cmd_status(args)
+        if args.command == "list":
+            return cmd_list(args)
+        if args.command == "completion":
+            return cmd_completion(args)
         if args.command == "upgrade-config":
             return cmd_upgrade_config(args)
         if args.command == "upgrade-docs":

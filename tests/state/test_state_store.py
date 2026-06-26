@@ -116,6 +116,35 @@ def test_latest_task_uses_updated_at(store: StateStore) -> None:
     assert latest.task_id == "newer"
 
 
+def _stamped(task_id: str, status: Status, updated_at: str) -> TaskRow:
+    return TaskRow(task_id=task_id, title=task_id, status=status, updated_at=updated_at)
+
+
+def test_recent_tasks_only_terminal_by_recency_and_limit(store: StateStore) -> None:
+    store.insert_task(_stamped("run", Status.RUNNING, "2026-01-05"))
+    store.insert_task(_stamped("pend", Status.PENDING, "2026-01-04"))
+    store.insert_task(_stamped("done", Status.DONE, "2026-01-03"))
+    store.insert_task(_stamped("fail", Status.FAILED, "2026-01-02"))
+    store.insert_task(_stamped("manual", Status.MANUAL_ACTION_REQUIRED, "2026-01-01"))
+
+    # Only terminal tasks, most recently updated first.
+    assert [t.task_id for t in store.recent_tasks(10)] == ["done", "fail", "manual"]
+    # The limit caps the result.
+    assert [t.task_id for t in store.recent_tasks(2)] == ["done", "fail"]
+
+
+def test_recent_tasks_empty_when_no_terminal(store: StateStore) -> None:
+    store.insert_task(TaskRow(task_id="run", title="run", status=Status.RUNNING))
+    assert store.recent_tasks(10) == []
+
+
+def test_all_tasks_returns_every_status_by_recency(store: StateStore) -> None:
+    store.insert_task(_stamped("run", Status.RUNNING, "2026-01-03"))
+    store.insert_task(_stamped("done", Status.DONE, "2026-01-02"))
+    store.insert_task(_stamped("pend", Status.PENDING, "2026-01-01"))
+    assert [t.task_id for t in store.all_tasks()] == ["run", "done", "pend"]
+
+
 def test_counters_round_trip(store: StateStore) -> None:
     store.insert_task(_new_task())
     store.save_counters(

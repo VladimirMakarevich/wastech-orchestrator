@@ -181,6 +181,16 @@ Exit codes:
 
 A successful task runs through validation, branch preparation, optional refinement, planning, implementation, checks (testing), review, fixing if needed, then publishing — commit, push, and PR creation — followed by terminal cleanup back to `repo.base_branch`. The plain-language summary that becomes the PR body is **not** a separate stage: the constant supervisor layer writes it at task close (see [configuration.md](configuration.md#supervisor)).
 
+### Find a task to act on (`list`) + Tab-completion
+
+Before `rerun`/`finalize`/`status` you need the task id. `worc list` shows it without hand-scanning folders, and the completion script lets you Tab through ids instead of typing them:
+
+```bash
+worc list                              # active + pending queue + recent terminal tasks
+worc list --format ids --scope rerun   # bare ids a rerun would accept
+source <(worc completion zsh)          # then: worc rerun <Tab> completes rerun-eligible ids
+```
+
 ### Re-attempt a task that ended `failed` / `manual_action_required`
 
 A terminal task is frozen — `watch`/`resume` never pick it up again. `rerun` re-attempts it (stop the `watch` daemon first; it needs an idle slot):

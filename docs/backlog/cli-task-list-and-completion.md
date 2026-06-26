@@ -1,6 +1,6 @@
 # Task discovery: `worc list` + shell completion
 
-Status: **proposed** (2026-06-25 — design + recommendation; not locked — see [§ Decision (recommended)](#decision-recommended)) Date: 2026-06-25 Owner: Vladimir Makarevich
+Status: **implemented** (2026-06-27 — `worc list` + `worc completion bash|zsh` shipped per [§ Decision (recommended)](#decision-recommended); the only deviation is that `--scope finalize` coincides with `--scope status` because `finalize` is status-agnostic) Date: 2026-06-25 Owner: Vladimir Makarevich
 
 Detail file for the backlog idea _"make picking a task easier from the command line — e.g. `worc list` to see the tasks, and Tab-completion so the operator starts typing a task and completes it instead of recalling the full id."_ It records the original sketch, what task selection looks like today (traced), why the pain is concentrated on the **id-based** commands, the design (a one-shot dependency-free `worc list` as the single read-surface + a `worc completion` script that is a thin wrapper over it), the rejected alternatives, and a phased plan ([§ План реализации](#план-реализации)). It also fixes the relationship to the bigger CLI backlog item — the [interactive operator console](cli-upgrade.md) — so the two do not collide.
 

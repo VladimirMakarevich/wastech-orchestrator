@@ -1,6 +1,6 @@
 ---
 name: sync-docs
-description: After a behavior/CLI/config/architecture change in wastech-orchestrator, bring the docs (including the docs/functional map and the docs/likec4 C4 model) and the follow-ups tracker in sync with the code. Use after implementing a change (the Stop docs-sync gate reminds you), before a commit, or whenever the docs no longer match the code.
+description: After a behavior/CLI/config/architecture change in wastech-orchestrator, bring the docs and the follow-ups tracker in sync with the code. Use after implementing a change (the Stop docs-sync gate reminds you), before a commit, or whenever the docs no longer match the code.
 ---
 
 # sync-docs
@@ -11,19 +11,21 @@ Keep the documentation in lockstep with the code. Run this after changing behavi
 
 1. **See what changed.** `git status --porcelain` and `git diff` (vs `HEAD`) for the working set. Classify each change and decide its documentation impact.
 2. **Update the docs that match the change** (only the ones it actually affects):
+
+   > **Out of scope — do not touch:** `docs/functional/` and `docs/likec4/` are regenerated weekly via reverse engineering and must not be edited here.
+
    - **CLI** (new/changed command or flag) → [README.md](../../../README.md), [docs/operations.md](../../../docs/operations.md), [docs/cookbook.md](../../../docs/cookbook.md), and the **Entry points** section of [docs/glossary.md](../../../docs/glossary.md) (add/remove/rename the term there too).
    - **Config schema** (`config.yaml` fields, defaults, validation) → [docs/configuration.md](../../../docs/configuration.md), the packaged `src/wastech_orchestrator/packaged/config.example.yaml` (the single example, validated by the round-trip test), and the **Configuration** section of [docs/glossary.md](../../../docs/glossary.md).
-   - **Architecture / invariants / contracts** → [.agents/rules/architecture.md](../../../.agents/rules/architecture.md), the [Functional Map](../../../docs/functional/index.md), and [docs/worc_architecture.md](../../../docs/worc_architecture.md).
+   - **Packaged defaults** (built-in flows, role prompts, config templates, or any other file under `src/wastech_orchestrator/packaged/`) → update the affected file(s) there directly when the default behaviour or shipped content changes.
+   - **Architecture / invariants / contracts** → [.agents/rules/architecture.md](../../../.agents/rules/architecture.md) and [docs/worc_architecture.md](../../../docs/worc_architecture.md).
    - **Flow graph or node vocabulary** (node ids, `task_type` dispatch, `session_scope`, node kinds, `OutputContract`, etc.) → [docs/glossary.md](../../../docs/glossary.md) **Flow vocabulary** section.
    - **Provider ids, error classes, or routing contracts** → [docs/glossary.md](../../../docs/glossary.md) **Providers** section.
    - **Task status machine or task language fields** (statuses, front-matter keys, lifecycle folders) → [docs/glossary.md](../../../docs/glossary.md) **Task language** section.
    - **Renamed or removed terms** (config keys, CLI flags, stage names) → [docs/glossary.md](../../../docs/glossary.md) **Legacy and renamed terms** section — add or update the entry there.
    - **Persisted state / schema versions** (config `schema_version`, `state.db` `user_version`, registry `version`) → [docs/operations.md](../../../docs/operations.md#upgrading-the-orchestrator) (the current schema versions are documented there).
-   - **Functional map (`docs/functional/`)** — when a block's boundary, contract (signatures, enums, statuses, error codes), entry point, integration, data store, or an internal check/branch changes, or a responsibility appears/disappears → update the affected `blocks/<id>-*.md` (and its cross-links), `block-registry.md`, `index.md`, and `system-flows.md` per [docs/functional/CONVENTIONS.md](../../../docs/functional/CONVENTIONS.md) — evidence-based, `file:line` anchors, and keep the mermaid diagrams in sync with the code. When a **pipeline stage's** order, optionality, agent, or the ping-pong changes, also update the flow docs `docs/functional/flows/coding/` (the `S01`–`S08` stage docs + `flows/coding/index.md`).
-   - **Architecture-as-Code (`docs/likec4/*.likec4`)** — when the high-level structure changes (a block-component added/removed, a cross-block relationship changed, a new external system or data store) → update the LikeC4 model (elements, relationships, views) to match the block registry. It is hand-authored (no `file:line`); validate with `likec4 dev`. See [docs/likec4/README.md](../../../docs/likec4/README.md).
-   - **Any behavior change** → append to [docs/backlog/follow_ups.md](../../../docs/backlog/follow_ups.md) when the change defers work, or update the relevant functional docs to reflect the new behavior.
+   - **Any behavior change** → append to [docs/backlog/follow_ups.md](../../../docs/backlog/follow_ups.md) when the change defers work.
 3. **Record deferred work.** Append anything you intentionally left for later (tech-debt, a next implementation step, a known gap) to [docs/backlog/follow_ups.md](../../../docs/backlog/follow_ups.md) with the date, context, and where it's referenced. If it's a product feature, cross-link it to `docs/backlog/product_backlog.md` instead of duplicating.
-4. **Verify.** Run `/run-checks` (ruff, mypy, pytest) — the two `config.example.yaml` copies must still parse equal, and any doc-embedded examples must still load. If you touched `docs/functional/`, confirm its links resolve (see the link-check snippet in `docs/functional/CONVENTIONS.md`); if you touched the C4 model, run `likec4 dev docs/likec4` once so LikeC4 validates it.
+4. **Verify.** Run `/run-checks` (ruff, mypy, pytest) — the two `config.example.yaml` copies must still parse equal, and any doc-embedded examples must still load.
 
 ## Rules
 

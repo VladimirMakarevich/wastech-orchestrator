@@ -67,7 +67,7 @@ A navigable version of these relationships as **architecture-as-code** (C4 model
 
 - **Console scripts `wastech-orchestrator` and `worc`** ([pyproject.toml](../../pyproject.toml) → `cli:main`) — argument parsing and subcommand dispatch.
 - **`python -m wastech_orchestrator`** ([\_\_main\_\_.py](../../src/wastech_orchestrator/__main__.py) → `cli:main`) — same as the console scripts.
-- **CLI subcommands** ([cli.py build_parser](../../src/wastech_orchestrator/cli.py#L87), dispatcher [main](../../src/wastech_orchestrator/cli.py)) — `install`, `run`, `watch`, `stop`, `restart`, `preflight`, `telegram-test`, `status`, `upgrade-config`, `upgrade-docs`, `rerun`, `finalize` (plus `--version`).
+- **CLI subcommands** ([cli.py build_parser](../../src/wastech_orchestrator/cli.py#L87), dispatcher [main](../../src/wastech_orchestrator/cli.py)) — `install`, `run`, `watch`, `stop`, `restart`, `preflight`, `telegram-test`, `status`, `list`, `completion`, `upgrade-config`, `upgrade-docs`, `rerun`, `finalize` (plus `--version`).
 
 Internal triggers (not user commands), confirmed by code:
 

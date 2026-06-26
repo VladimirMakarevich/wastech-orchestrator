@@ -161,6 +161,11 @@ worc stop               stop a running watch daemon (SIGTERM, then SIGKILL)
 worc restart            stop the running watch daemon, then start a fresh one
                           --timeout SECONDS  --poll-seconds N
 worc status [task-id]   show the active/latest persisted task (no work performed)
+worc list               enumerate active + pending + recent tasks (read-only)
+                          --pending | --recent [N] | --all   focus one section
+                          --format table|ids|json    human / bare ids / structured
+                          --scope rerun|status|finalize   ids a given command accepts (completion-facing)
+worc completion bash|zsh print a shell completion script; wire with: source <(worc completion zsh)
 worc upgrade-config     add config keys from a new version, keeping existing values
                           --dry-run                   preview the keys that would be added
 worc upgrade-docs       refresh the installed worc/ task-authoring docs to the packaged version
