@@ -14,6 +14,7 @@ from wastech_orchestrator.config.validation import validate_config
 from wastech_orchestrator.install import config_writer
 from wastech_orchestrator.install.config_writer import InstallSpec, build_and_validate
 from wastech_orchestrator.providers.base import ProviderId
+from wastech_orchestrator.security.env import default_allowed_environment
 
 
 def _spec(
@@ -89,6 +90,14 @@ def test_safe_security_defaults_are_written(tmp_path: Path) -> None:
     assert cfg.agents.providers[ProviderId.CODEX].permission_profile == "workspace-write"
     assert cfg.agents.providers[ProviderId.CODEX].sandbox == "workspace-write"
     assert cfg.agents.providers[ProviderId.CODEX].extra_args == ()
+
+
+def test_os_launch_essentials_are_allowlisted_for_the_install_host(tmp_path: Path) -> None:
+    # The installer writes the host OS's launch essentials so a fresh install starts the agent CLIs
+    # out of the box (on Windows that includes SystemRoot, without which claude.exe crashes). It
+    # writes only the host OS's set — the other OS's names are never dragged in.
+    cfg = loads_config(build_and_validate(_spec(tmp_path, (ProviderId.CODEX,)))).config
+    assert set(default_allowed_environment()) <= set(cfg.security.allowed_environment)
 
 
 def test_explicit_model_and_reasoning_defaults_are_written(tmp_path: Path) -> None:

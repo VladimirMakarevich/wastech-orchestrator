@@ -274,13 +274,15 @@ Controls isolation, child-process environment allowlisting, denied read paths, a
 ```yaml
 security:
   strict_isolation: true
-  allowed_environment:
+  allowed_environment: # cross-platform base + the OS-launch essentials of your OS
     - "PATH"
     - "HOME"
     - "USER"
     - "USERPROFILE"
     - "CODEX_HOME"
     - "CLAUDE_CONFIG_DIR"
+    - "SystemRoot" # Windows: without it the Node-based claude.exe crashes at startup (0xC0000409)
+    # ... plus the rest of the Windows or Linux/macOS essentials — see config.example.yaml
   denied_read_paths:
     - ".env"
     - "secrets/**"
@@ -294,7 +296,7 @@ security:
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `strict_isolation` | boolean | `true` | Preflight fails if the required isolation cannot be enforced. This is also the **sole gate** for operator-selected full access: a Codex `danger-full-access` sandbox or a Claude `--permission-mode bypassPermissions` — in provider config _or_ a flow node's `extra_args` — is rejected at preflight while this is `true` (the default). Set it `false` to opt in (you own the risk). |
-| `allowed_environment` | list of strings | `PATH`, `HOME`, `USER`, `USERPROFILE`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR` | Only these environment variables reach child processes. `USER` is required on macOS so subscription/OAuth-authenticated provider CLIs can reach their Keychain credentials (without it the CLI reports "Not logged in"). |
+| `allowed_environment` | list of strings | cross-platform base (`PATH`, `HOME`, `USER`, `USERPROFILE`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR`) **+ the OS-launch essentials of the host OS** | Only these environment variables reach child processes. The default is OS-aware: `install` writes the host OS's launch essentials, and a config that omits the key falls back to them. On **Windows** that includes `SystemRoot` (without it the Node-based `claude.exe` aborts at startup with exit `0xC0000409`, so preflight reports it "did not succeed") plus `SystemDrive`, `windir`, `ComSpec`, `PATHEXT`, `TEMP`, `TMP`, `APPDATA`, `LOCALAPPDATA`, `HOMEDRIVE`, `HOMEPATH`, `NUMBER_OF_PROCESSORS`, `PROCESSOR_ARCHITECTURE`; on **Linux/macOS** (and WSL, which is Linux) it adds `TMPDIR`, `LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`. `USER` is required on macOS so subscription/OAuth-authenticated provider CLIs can reach their Keychain credentials (without it the CLI reports "Not logged in"). This list **replaces** (does not extend) the default — keep your OS's launch essentials or the spawned CLI may fail to start; names absent from the host OS are simply skipped. |
 | `denied_read_paths` | list of strings | `.env`, `secrets/**` | Paths agents must not read and artifacts must not expose. |
 | `denied_commands` | list of strings | `git commit`, `git push`, `gh pr create` | Commands agents are forbidden to run. |
 | `deletion_approval_exempt_paths` | list of globs | `[]` | Repo-relative globs whose deletions/renames skip the mid-pipeline dangerous-diff approval (rule #14). Default `[]` gates every deletion. **You own the risk.** See below. |

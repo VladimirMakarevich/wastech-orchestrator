@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from wastech_orchestrator.config.loader import (
-    _DEFAULT_ALLOWED_ENV,
     _DEFAULT_DENIED_COMMANDS,
     loads_config,
 )
 from wastech_orchestrator.config.validation import validate_config
+from wastech_orchestrator.security.env import default_allowed_environment
 
 
 def test_example_denied_commands_match_loader_default(packaged_config_text: str) -> None:
@@ -17,11 +17,17 @@ def test_example_denied_commands_match_loader_default(packaged_config_text: str)
     assert cfg.security.denied_commands == _DEFAULT_DENIED_COMMANDS
 
 
-def test_example_allowed_environment_matches_loader_default(packaged_config_text: str) -> None:
-    # allowed_environment REPLACES the default too, so an operator copying the example must not
-    # lose a default key (e.g. ``USER``, needed for macOS auth). Guards drift in the example.
+def test_example_allowed_environment_covers_every_os_default(packaged_config_text: str) -> None:
+    # allowed_environment REPLACES the default too, and the default is OS-aware, so an operator
+    # copying the cross-platform example must not lose ANY OS's launch essentials (e.g. SystemRoot
+    # on Windows, USER for macOS auth). The example is the union of every OS default; guards drift.
     cfg = loads_config(packaged_config_text).config
-    assert cfg.security.allowed_environment == _DEFAULT_ALLOWED_ENV
+    every_os_default = (
+        set(default_allowed_environment("Windows"))
+        | set(default_allowed_environment("Linux"))
+        | set(default_allowed_environment("Darwin"))
+    )
+    assert set(cfg.security.allowed_environment) == every_os_default
 
 
 def test_packaged_example_loads_and_validates_clean(packaged_config_text: str) -> None:

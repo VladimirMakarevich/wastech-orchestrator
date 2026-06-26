@@ -43,21 +43,12 @@ from wastech_orchestrator.config.schema import (
 )
 from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.providers.capabilities import all_reasoning_levels
+from wastech_orchestrator.security.env import default_allowed_environment
 
 # Defaults mirror / the packaged config.example.yaml so a partial config still loads safely.
 _DEFAULT_AUDIT_MESSAGE = "chore(orchestrator): audit trail for {task_id}"
 
 _REASONING_LEVELS: frozenset[str] = all_reasoning_levels()
-_DEFAULT_ALLOWED_ENV: tuple[str, ...] = (
-    "PATH",
-    "HOME",
-    # USER is needed on macOS: subscription/OAuth-authenticated Claude/Codex resolve their
-    # Keychain credentials via $USER. Without it the spawned CLI reports "Not logged in".
-    "USER",
-    "USERPROFILE",
-    "CODEX_HOME",
-    "CLAUDE_CONFIG_DIR",
-)
 
 # ``denied_commands`` REPLACES (does not extend) this default, so the shipped config.example.yaml
 # must list every entry it wants — guarded by test_example_denied_commands_match_loader_default.
@@ -484,7 +475,7 @@ def _build_security(raw: Any, issues: list[str]) -> SecurityConfig:
     return SecurityConfig(
         strict_isolation=_bool(m, "strict_isolation", True, where, issues),
         allowed_environment=_str_tuple(
-            m, "allowed_environment", _DEFAULT_ALLOWED_ENV, where, issues
+            m, "allowed_environment", default_allowed_environment(), where, issues
         ),
         denied_read_paths=_str_tuple(m, "denied_read_paths", (".env", "secrets/**"), where, issues),
         denied_commands=_str_tuple(

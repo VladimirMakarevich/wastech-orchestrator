@@ -57,13 +57,36 @@ agents:
 
 security:
   strict_isolation: true
-  allowed_environment:
+  allowed_environment:                  # REPLACES (does not extend) the default — keep the OS-launch
+                                        # essentials for YOUR OS or the spawned CLI may fail to start.
+                                        # A name absent from the host OS is simply skipped, so this
+                                        # cross-platform list is safe to keep as-is on any OS.
+    # Cross-platform base
     - "PATH"
     - "HOME"
     - "USER" # macOS: subscription/OAuth CLIs resolve Keychain credentials via $USER (else "Not logged in")
     - "USERPROFILE"
     - "CODEX_HOME"
     - "CLAUDE_CONFIG_DIR"
+    # Windows OS-launch essentials. SystemRoot is load-bearing: without it the Node-based claude.exe
+    # aborts at startup (exit 0xC0000409) before printing anything, and preflight reports it "did not succeed".
+    - "SystemRoot"
+    - "SystemDrive"
+    - "windir"
+    - "ComSpec"
+    - "PATHEXT"
+    - "TEMP"
+    - "TMP"
+    - "APPDATA"
+    - "LOCALAPPDATA"
+    - "HOMEDRIVE"
+    - "HOMEPATH"
+    - "NUMBER_OF_PROCESSORS"
+    - "PROCESSOR_ARCHITECTURE"
+    # Linux/macOS OS-launch essentials (WSL counts as Linux)
+    - "TMPDIR"
+    - "LD_LIBRARY_PATH"
+    - "DYLD_LIBRARY_PATH"
   denied_read_paths:
     - ".env"
     - "secrets/**"
