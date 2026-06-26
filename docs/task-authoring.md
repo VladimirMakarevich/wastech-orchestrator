@@ -121,6 +121,18 @@ Decomposition has two sources, both running the same execution machinery (subtas
 1. **Agent-proposed** (this section): whether a large task is split is decided by the flow's `decomposition:` block and the planning stage's proposal, gated on whether decomposition is permitted for the task (default `agents.decomposition.enabled`, overridable per task — see [`decomposition`](#decomposition) below). Describe large scope in the `## Description` and let planning propose a split.
 2. **Operator-authored** (the [`subtasks`](#subtasks-operator-authored-decomposition) field): when you already know the ordered units, list references to per-subtask spec files in the root task's `subtasks:`. The Core validates them with the same gate as the agent split. (The `decomposition` gate does not apply here — an explicit `subtasks:` manifest always runs as a split.)
 
+## Planning escalation and unattended runs
+
+A flow node can pause the run to ask a human. **Whether it may is a property of the flow node, not the task and not the stage name**: a node escalates only when its `hitl` flags permit it (`allow_question` / `allow_approval`). In the packaged `implementation` flow, `planning` may pause for a clarifying **question** or an **approval**, while `refinement` runs autonomously (see [Refinement](#refinement-automatic) above). The dangerous-diff approval gate (a deletion or dependency-manifest change after a `workspace-write` edit) is separate and **always** human-gated — it is a safety guard, not an autonomy knob.
+
+When a node escalates, the run blocks until a human answers (via the configured notifier, e.g. Telegram) or until `telegram.ask_timeout_s` elapses (default 8 h), after which it resolves to `manual_action_required`. For an unattended `watch` run this is a stall — even when the agent stated a sensible default. There is no task field that pre-answers a question or pre-approves a decision; the lever is to **author the task so the node has no reason to ask**:
+
+- **Be complete and decisive.** Put the material scope boundaries in `## Description` and `## Constraints` — what is in scope, what is explicitly out, which approach to take when there is a fork (e.g. "do not introduce a database migration; keep storage in-memory"). `planning` escalates on genuinely material, unresolved scope decisions; deciding them up front removes the trigger.
+- **Provide acceptance criteria.** A non-empty `## Acceptance criteria` makes the orchestrator skip refinement (it is deterministic — there is no flag), so a complete task goes straight to planning.
+- **Existing levers, if you want to bypass a node entirely.** `nodes.planning.enabled: false` skips planning altogether (a stub plan is written — use only when planning adds nothing); `auto_merge: true` skips the human _review_ gate (the dangerous-diff guard still applies). Neither relaxes an embedded planning/refinement escalation — they remove or bypass the step.
+
+In short: a well-specified task completes unattended because no node needs to ask; an under-specified one will (correctly) stop for a human. See [operations.md → Running](operations.md#4-running) for how this interacts with `auto_mode`.
+
 ## prompt_audit
 
 Use `prompt_audit` to record, for auditing, **who** (which agent) received **what prompt** at each step of this task:

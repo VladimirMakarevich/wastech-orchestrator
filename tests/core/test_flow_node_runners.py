@@ -765,6 +765,175 @@ def test_agent_hitl_question_round_trip(tmp_path: Path) -> None:
     assert router.calls == 2  # initial run + re-run with the answer
 
 
+def test_agent_hitl_round_trip_resumes_first_run_session(tmp_path: Path) -> None:
+    # P0 (operator directive): after a HITL round-trip the node must RESUME the first run's session
+    # so the agent continues the same conversation with the operator's answer — it does not start a
+    # fresh session and re-derive from scratch. A fresh_disposable node has no editing lineage, so
+    # the only reason the re-run carries a session id is the explicit HITL resume.
+    from dataclasses import replace
+
+    from wastech_orchestrator.notify import AskResult
+
+    (tmp_path / "r.md").write_text("refine", "utf-8")
+    node = _refinement_node()
+
+    class ResumeRouter(FakeRouter):
+        """Run 1 asks a question (session hitl-sess-1); the answered re-run resumes that session."""
+
+        def __init__(self) -> None:
+            super().__init__(None)
+            self._n = 0
+
+        def run_stage(self, request: Any, route: Any, *, snapshot: Any = None) -> Any:
+            self.requests.append(request)
+            self._n += 1
+            if self._n == 1:
+                signal = {
+                    "kind": "question",
+                    "question": "Which API?",
+                    "context": "",
+                    "risk": "clarification",
+                    "paths": [],
+                }
+                return _stage_outcome(
+                    route,
+                    replace(
+                        _result({"content": "ok", "human_input": signal}), session_id="hitl-sess-1"
+                    ),
+                )
+            return _stage_outcome(
+                route,
+                replace(_result({"content": "ok", "human_input": None}), session_id="hitl-sess-2"),
+            )
+
+    router = ResumeRouter()
+    notifier = FakeNotifier(AskResult(answered=True, text="use v2"))
+    services = NodeServices(
+        router=router,
+        check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        store=FakeStore(),
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path),
+        clock=lambda: "ts",
+        notifier=notifier,
+        ask_timeout_s=60,
+    )
+    result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+    assert result.outcome.kind == "done"
+    assert len(router.requests) == 2
+    assert router.requests[0].session_id is None  # fresh first run (fresh_disposable, no lineage)
+    assert router.requests[1].session_id == "hitl-sess-1"  # the re-run RESUMES the first session
+
+
+def test_agent_hitl_round_trip_no_resume_when_first_run_used_fallback(tmp_path: Path) -> None:
+    # Same-provider gate: if the first HITL run succeeded only on the FALLBACK provider, its session
+    # belongs to that provider. The re-run resolves the same route and leads with the primary, so
+    # resuming the fallback session there would be a cross-provider resume (which fails) — the gate
+    # must refuse and start fresh.
+    from dataclasses import replace
+
+    from wastech_orchestrator.notify import AskResult
+
+    (tmp_path / "r.md").write_text("refine", "utf-8")
+    node = _refinement_node()
+
+    class FallbackThenPrimaryRouter(FakeRouter):
+        """Run 1 succeeds only on the fallback (claude); the primary re-run must not resume it."""
+
+        def __init__(self) -> None:
+            super().__init__(None)
+            self._n = 0
+
+        def resolve_route(self, node_id: str, override: Any = None) -> ResolvedRoute:
+            return ResolvedRoute(
+                node_id=node_id,
+                primary=ProviderId.CODEX,
+                fallback=ProviderId.CLAUDE,
+                source=RouteSource.CONFIG,
+            )
+
+        def run_stage(self, request: Any, route: Any, *, snapshot: Any = None) -> Any:
+            self.requests.append(request)
+            self._n += 1
+            if self._n == 1:
+                signal = {
+                    "kind": "question",
+                    "question": "Which API?",
+                    "context": "",
+                    "risk": "clarification",
+                    "paths": [],
+                }
+                outcome = _stage_outcome(
+                    route,
+                    replace(
+                        _result({"content": "ok", "human_input": signal}), session_id="claude-sess"
+                    ),
+                )
+                return replace(outcome, provider_used=ProviderId.CLAUDE)  # fell back to fallback
+            return _stage_outcome(
+                route,
+                replace(_result({"content": "ok", "human_input": None}), session_id="codex-sess"),
+            )
+
+    router = FallbackThenPrimaryRouter()
+    notifier = FakeNotifier(AskResult(answered=True, text="use v2"))
+    services = NodeServices(
+        router=router,
+        check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        store=FakeStore(),
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path),
+        clock=lambda: "ts",
+        notifier=notifier,
+        ask_timeout_s=60,
+    )
+    AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+    assert router.requests[1].session_id is None  # fallback-provider session not resumed on primary
+
+
+def test_dangerous_diff_reconsider_resumes_editing_lineage(tmp_path: Path) -> None:
+    # The denial-driven reconsider re-run of an editing node resumes the node's persisted
+    # editing-lineage session (it does not start fresh) — so the agent re-thinks with full context
+    # plus the denial. This comes for free from the editing-lineage machinery; the HITL round-trip
+    # resume above does not need to thread anything into _reconsider.
+    from dataclasses import replace
+
+    from wastech_orchestrator.git_manager import ChangedPath
+    from wastech_orchestrator.notify import AskResult
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(
+        id="implementation",
+        kind="agent",
+        role_file="r.md",
+        session_scope=SessionScope.EDITING_LINEAGE,
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+    )
+    # first classify is dangerous; after the denial-driven reconsider re-run, the diff is clean.
+    git = FakeGit(changed_seq=[(ChangedPath(status="D", path="src/x.py"),), ()])
+    notifier = FakeNotifier(AskResult(answered=True, approved=False))
+    router = FakeRouter(replace(_result(), session_id="edit-sess-1"))
+    services = NodeServices(
+        router=router,
+        check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        store=FakeStore(),
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path),
+        clock=lambda: "ts",
+        git=git,
+        notifier=notifier,
+        ask_timeout_s=60,
+    )
+    result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+    assert result.outcome.kind == "done"
+    assert len(router.requests) == 2  # initial edit + reconsider re-run
+    assert router.requests[0].session_id is None  # no lineage yet → fresh first run
+    assert router.requests[1].session_id == "edit-sess-1"  # reconsider resumed the editing session
+
+
 def test_agent_hitl_dispatch_is_data_driven_not_stage(tmp_path: Path) -> None:
     # A node on the REFINEMENT stage but WITHOUT a declared `hitl` must NOT do a round-trip even if
     # the agent emits a signal — dispatch is by node.hitl, not the stage name (flow-contract).
