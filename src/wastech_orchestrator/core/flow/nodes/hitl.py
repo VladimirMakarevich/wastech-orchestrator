@@ -104,6 +104,7 @@ class HitlNodeRunner:
             self._s.notifier,
             timeout_s=node.timeout_s or self._s.ask_timeout_s,
             contacts=self._in.contacts,
+            heartbeat_seconds=self._s.ask_heartbeat_seconds,
         )
 
     def _require_answer(self, node: HitlNode, result: AskResult) -> None:

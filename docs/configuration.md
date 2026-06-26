@@ -78,7 +78,7 @@ Logging and heartbeat settings are global CLI options, not `config.yaml` fields:
 | `--log-level debug | info | warning | error` | `info` | Minimum operator log level. |
 | `--log-format logfmt | json` | `logfmt` | Format used for stderr and `--log-file`. |
 | `--log-file PATH` | unset | Also write a rotating 10 MB operator log with five backups. |
-| `--heartbeat-seconds N` | `30` | Progress interval for long provider/check/Git calls; `0` disables. |
+| `--heartbeat-seconds N` | `30` | Progress interval for long provider/check/Git calls and the HITL human-input wait; `0` disables. |
 
 The `watch` subcommand also accepts `--poll-seconds N` and `--queue NAME` (placed after `watch`), which override `orchestrator.poll_interval_seconds` and `orchestrator.queue` for that run. `restart` accepts the same two flags for the fresh loop it starts.
 
@@ -548,6 +548,8 @@ There is no `prompts` config block. A flow node's prompt template is the content
 `{task_id}` `{stage}` `{repo_path}` `{repo}` `{task_path}` `{plan_path}` `{diff_path}` `{checks_path}` `{review_path}` `{subtask_order}` `{subtask_count}` `{subtask_spec_path}` `{skills_path}`
 
 A variable with no value for the current node (e.g. `{plan_path}` before planning) renders as the empty string.
+
+**Conditional blocks.** To keep optional prose from leaving dangling empty placeholders, a role file may wrap a region in `{?name}…{/name}`: the body is kept only when `name` is an allowlisted variable with a present, non-empty value, and dropped entirely otherwise (a non-allowlisted name or an unclosed block is left verbatim). The packaged `implementation`/`fixing` roles use this for the decomposition clause — `{?subtask_spec_path}…subtask {subtask_order} of {subtask_count}…{/subtask_spec_path}` — so a non-decomposed task renders no "subtask of …" sentence at all, while a subtask unit still gets the full "subtask N of M" text.
 
 **Safety.** Role files are prompt **text** only — delivered to the CLI on stdin, never as a command argument. A role file cannot change the provider, `extra_args`, sandbox/approval mode, denied commands, denied reads, the environment allowlist, or fallback policy; it cannot enable `git commit`/`git push`/`gh pr create`. Each rendered prompt is written, redacted, to `logs/<task-id>/stages/<stage>/[sub-NN/] rendered-prompt.md` for audit. See [operations.md](operations.md) for troubleshooting.
 

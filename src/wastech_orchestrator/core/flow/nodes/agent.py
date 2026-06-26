@@ -152,7 +152,10 @@ class AgentNodeRunner:
         if self._s.notifier is None:
             raise NodeManualRequired("HITL signal raised but no notifier transport is configured")
         return HumanGate(
-            self._s.notifier, timeout_s=self._s.ask_timeout_s, contacts=self._in.contacts
+            self._s.notifier,
+            timeout_s=self._s.ask_timeout_s,
+            contacts=self._in.contacts,
+            heartbeat_seconds=self._s.ask_heartbeat_seconds,
         )
 
     def _typed(self, node: AgentNode, ctx: NodeContext, outcome: StageOutcome) -> TypedStageOutput:

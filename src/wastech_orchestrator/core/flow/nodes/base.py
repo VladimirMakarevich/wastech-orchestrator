@@ -218,6 +218,10 @@ class NodeServices:
     #: durable HITL transport (refinement/planning embedded HITL + dangerous-diff approval).
     notifier: NotifierPort | None = None
     ask_timeout_s: int = 0
+    #: heartbeat interval (s) for the blocking HITL human-input wait — the orchestrator-wide
+    #: ``--heartbeat-seconds`` value, the same one driving the provider/git/check heartbeats. ``0``
+    #: disables it (the unit-test default); the wait still logs its entry/resolution either way.
+    ask_heartbeat_seconds: float = 0.0
     #: observability (P1.4): whether the prompt-audit JSON is written (per-task/global gate resolved
     #: by the orchestrator), the denied-read secrets to scrub from stored prompts, and the artifact
     #: register callback. ``register_artifact=None`` disables the on-disk audit artifacts.

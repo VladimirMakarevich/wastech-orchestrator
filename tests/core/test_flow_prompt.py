@@ -6,7 +6,10 @@ from pathlib import Path
 
 import pytest
 
+import wastech_orchestrator
 from wastech_orchestrator.core.flow.prompt import RoleFileError, read_role_file, render_role_prompt
+
+_PACKAGED_ROLES = Path(wastech_orchestrator.__file__).parent / "packaged" / "flows" / "roles"
 
 
 def test_render_substitutes_allowlisted_path_vars(tmp_path: Path) -> None:
@@ -34,3 +37,20 @@ def test_role_file_traversal_is_rejected(tmp_path: Path) -> None:
 def test_missing_role_file_raises(tmp_path: Path) -> None:
     with pytest.raises(RoleFileError):
         read_role_file(tmp_path, "nope.md")
+
+
+@pytest.mark.parametrize("role_file", ["implementation.md", "fixing.md"])
+def test_packaged_role_subtask_clause_is_conditional(role_file: str) -> None:
+    # Not decomposed: the subtask clause is dropped entirely — no dangling "subtask" fragment.
+    not_decomposed = render_role_prompt(_PACKAGED_ROLES, role_file, {})
+    assert "subtask" not in not_decomposed.lower()
+
+    # Decomposed: the clause renders with the real subtask numbers and spec path.
+    decomposed = render_role_prompt(
+        _PACKAGED_ROLES,
+        role_file,
+        {"subtask_order": 2, "subtask_count": 3, "subtask_spec_path": "specs/sub-2.md"},
+    )
+    assert "subtask 2 of 3" in decomposed
+    assert "specs/sub-2.md" in decomposed
+    assert "{subtask" not in decomposed  # no unsubstituted placeholders left

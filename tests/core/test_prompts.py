@@ -22,6 +22,40 @@ def test_render_leaves_unknown_and_literal_braces_verbatim() -> None:
     assert out == 'keep {unknown} and {"json": 1} and T-1'
 
 
+def test_conditional_block_kept_when_var_present() -> None:
+    template = (
+        "lead {?subtask_spec_path}subtask {subtask_order} of {subtask_count}: "
+        "{subtask_spec_path}{/subtask_spec_path} tail"
+    )
+    out = render_prompt(
+        template,
+        {"subtask_order": 2, "subtask_count": 3, "subtask_spec_path": "specs/2.md"},
+    )
+    assert out == "lead subtask 2 of 3: specs/2.md tail"
+
+
+def test_conditional_block_dropped_when_var_absent_none_or_empty() -> None:
+    template = (
+        "lead {?subtask_spec_path}subtask {subtask_order} of "
+        "{subtask_count}{/subtask_spec_path} tail"
+    )
+    # absent
+    assert render_prompt(template, {}) == "lead  tail"
+    # explicit None
+    assert render_prompt(template, {"subtask_spec_path": None}) == "lead  tail"
+    # empty string
+    assert render_prompt(template, {"subtask_spec_path": ""}) == "lead  tail"
+
+
+def test_conditional_block_non_allowlisted_or_unclosed_left_verbatim() -> None:
+    # a non-allowlisted block name passes through untouched (safe-renderer contract)
+    assert render_prompt("{?unknown}body{/unknown}", {}) == "{?unknown}body{/unknown}"
+    # an unbalanced/unclosed block is not a block — left verbatim, inner vars still substitute
+    assert render_prompt("{?subtask_spec_path}x {task_id}", {"task_id": "T-1"}) == (
+        "{?subtask_spec_path}x T-1"
+    )
+
+
 def test_allowlist_matches_documented_variables() -> None:
     assert {
         "task_id",

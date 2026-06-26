@@ -325,6 +325,7 @@ class Orchestrator:
         notifier: Notifier | None = None,
         resolver: CheckResolver | None = None,
         skill_scanner: SkillInventoryScanner | None = None,
+        heartbeat_seconds: float = 30.0,
     ) -> None:
         self._config = config
         self._router = router
@@ -336,6 +337,9 @@ class Orchestrator:
         self._artifacts_root = artifacts_root
         self._clock = clock
         self._monotonic = monotonic
+        # The orchestrator-wide ``--heartbeat-seconds`` interval (shared with providers/git/checks),
+        # threaded into NodeServices so the blocking HITL human-input wait heartbeats too.
+        self._heartbeat_seconds = heartbeat_seconds
         self._notifier: Notifier = notifier if notifier is not None else NullNotifier()
         # The check resolver normalizes ``checks.command_sets`` at preflight (before any branch).
         # ``None`` skips it — the Check Runner then normalizes the config itself.
@@ -1241,6 +1245,7 @@ class Orchestrator:
             notifier=self._notifier,
             snapshot_hook=self._git,
             ask_timeout_s=self._config.telegram.ask_timeout_s,
+            ask_heartbeat_seconds=self._heartbeat_seconds,
             prompt_audit=self._prompt_audit_on(p.task),
             prompt_secrets=self._prompt_secrets(),
             register_artifact=self._register_artifact,
@@ -2298,4 +2303,5 @@ def build_orchestrator(
         artifacts_root=str(root),
         notifier=notifier,
         resolver=resolver,
+        heartbeat_seconds=heartbeat_seconds,
     )

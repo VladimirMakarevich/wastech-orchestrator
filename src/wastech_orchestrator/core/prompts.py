@@ -38,6 +38,12 @@ ALLOWED_PROMPT_VARS: frozenset[str] = frozenset(
 
 _VAR_RE = re.compile(r"\{([a-z_]+)\}")
 
+#: A conditional block ``{?name}body{/name}`` whose ``body`` is kept only when ``name`` resolves to
+#: a present, non-empty allowlisted variable; otherwise the whole block (markers included) is
+#: dropped. Lets a role keep optional prose — e.g. the decomposition's "subtask N of M" clause —
+#: inline in its own text without leaving dangling empty placeholders when the variable is absent.
+_BLOCK_RE = re.compile(r"\{\?([a-z_]+)\}(.*?)\{/\1\}", re.DOTALL)
+
 
 def render_prompt(template: str, variables: dict[str, object | None]) -> str:
     """Substitute allowlisted ``{name}`` tokens in *template*; leave everything else verbatim.
@@ -45,7 +51,19 @@ def render_prompt(template: str, variables: dict[str, object | None]) -> str:
     Only names in :data:`ALLOWED_PROMPT_VARS` are replaced. A ``None`` value renders as the empty
     string. Any other ``{...}`` (an unknown name, or literal braces in code/JSON) passes through
     unchanged — there is no ``KeyError`` and no breakage on stray braces (the "safe renderer").
+
+    A conditional block ``{?name}body{/name}`` is resolved first: ``body`` is kept (and then
+    flat-substituted in the normal pass) only when ``name`` is an allowlisted variable whose value
+    is present and not the empty string; otherwise the entire block is removed. A non-allowlisted
+    name or an unclosed/unbalanced block is left verbatim, like an unknown ``{name}``.
     """
+
+    def _resolve_block(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if name not in ALLOWED_PROMPT_VARS:
+            return match.group(0)
+        value = variables.get(name)
+        return "" if value is None or value == "" else match.group(2)
 
     def _replace(match: re.Match[str]) -> str:
         name = match.group(1)
@@ -54,4 +72,4 @@ def render_prompt(template: str, variables: dict[str, object | None]) -> str:
         value = variables.get(name)
         return "" if value is None else str(value)
 
-    return _VAR_RE.sub(_replace, template)
+    return _VAR_RE.sub(_replace, _BLOCK_RE.sub(_resolve_block, template))
