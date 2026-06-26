@@ -34,6 +34,20 @@ SignalHandler = Callable[[int, FrameType | None], object] | int | signal.Handler
 SignalFn = Callable[[int, SignalHandler], SignalHandler]
 
 PID_FILENAME = "orchestrator.pid"
+STOP_FILENAME = "orchestrator.stop"
+
+
+def _can_signal() -> bool:
+    """Whether this platform can probe/signal a process by PID that the caller does not own.
+
+    POSIX: yes — ``os.kill`` (including the signal-0 liveness probe) works on any same-user process,
+    so ``stop`` can SIGTERM/SIGKILL the daemon directly. Windows: no — ``os.kill`` opens the target
+    with ``OpenProcess(PROCESS_ALL_ACCESS)``, which fails for a process the caller holds no handle
+    to, and ``stop`` is a separate process from the daemon. There, liveness and shutdown ride on the
+    PID file the daemon self-manages (written on start, removed on a clean exit) plus the stop-file
+    the watch loop polls — never ``os.kill``.
+    """
+    return os.name != "nt"
 
 
 @dataclass(frozen=True)
@@ -75,6 +89,26 @@ def _read_proc_start_time(pid: int) -> str | None:
 def pid_file_path(artifacts_root: str | os.PathLike[str]) -> Path:
     """The canonical PID-file location under an artifacts root (``<root>/orchestrator.pid``)."""
     return Path(artifacts_root) / PID_FILENAME
+
+
+def stop_file_path(artifacts_root: str | os.PathLike[str]) -> Path:
+    """The canonical stop-sentinel location under an artifacts root (``<root>/orchestrator.stop``).
+
+    The cross-platform graceful-stop channel: ``stop`` writes this file and the watch loop polls it
+    between ticks, so a daemon shuts down cleanly even where ``SIGTERM`` is undeliverable (Windows).
+    """
+    return Path(artifacts_root) / STOP_FILENAME
+
+
+def stop_file_requested(path: Path) -> bool:
+    """True iff the stop-sentinel file exists (the watch loop's cross-platform stop probe)."""
+    return path.exists()
+
+
+def _write_stop_file(path: Path) -> None:
+    """Create the stop-sentinel (content is irrelevant; presence is the signal)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("stop\n", encoding="utf-8")
 
 
 def write_pid_file(
@@ -125,6 +159,16 @@ def read_pid(path: Path) -> int | None:
     return record.pid if record is not None else None
 
 
+def _is_no_such_process(exc: OSError) -> bool:
+    """True when an ``os.kill`` error means the target PID does not exist.
+
+    POSIX raises ``ProcessLookupError`` (ESRCH). Windows has no ESRCH: ``os.kill`` on a missing PID
+    raises a bare ``OSError`` whose ``winerror`` is 87 (``ERROR_INVALID_PARAMETER``) — the
+    ``OpenProcess`` failure for an unknown PID. Both mean the process is gone.
+    """
+    return isinstance(exc, ProcessLookupError) or getattr(exc, "winerror", None) == 87
+
+
 def is_running(
     pid: int,
     *,
@@ -134,17 +178,19 @@ def is_running(
 ) -> bool:
     """True iff a process with ``pid`` exists, is signalable by us, and is not a recycled PID.
 
-    ``ProcessLookupError`` (ESRCH) → not running; ``PermissionError`` (EPERM) → running but owned by
-    another user (treated as alive — we cannot read its start-time). When ``expected_start`` is
-    given and the live process's start-time differs, the PID was recycled → ``False``. When either
-    start-time is unavailable the check degrades to the bare PID probe.
+    A "no such process" error → not running (POSIX ``ProcessLookupError``; Windows ``OSError``
+    winerror 87 — see :func:`_is_no_such_process`). ``PermissionError`` → running but owned by
+    another user (treated as alive). A live start-time that differs from ``expected_start`` means
+    the PID was recycled → ``False``. No start-time available → the bare PID probe.
     """
     try:
         kill_fn(pid, 0)
-    except ProcessLookupError:
-        return False
     except PermissionError:
         return True
+    except OSError as exc:
+        if _is_no_such_process(exc):
+            return False
+        raise
     if expected_start is None:
         return True
     actual_start = start_time_fn(pid)
@@ -154,17 +200,29 @@ def is_running(
 
 
 def running_daemon_pid(
-    path: Path, *, kill_fn: KillFn = os.kill, start_time_fn: StartTimeFn = _read_proc_start_time
+    path: Path,
+    *,
+    kill_fn: KillFn = os.kill,
+    start_time_fn: StartTimeFn = _read_proc_start_time,
+    can_signal: bool | None = None,
 ) -> int | None:
-    """The PID of the genuinely-running daemon recorded in ``path``, or ``None``.
+    """The PID of the running daemon recorded in ``path``, or ``None``.
 
-    Combines :func:`read_pid_record` with :func:`is_running`'s start-time recycling guard: a
-    recorded PID that is dead — or alive but whose start-time no longer matches (recycled) — reads
-    as ``None``.
+    Where the platform can signal an unrelated PID (POSIX; see :func:`_can_signal`), this combines
+    :func:`read_pid_record` with :func:`is_running`'s start-time recycling guard: a recorded PID
+    that is dead — or alive but recycled — reads as ``None``. Where it cannot (Windows), liveness
+    cannot be probed, so PID-file *presence* is the signal: the daemon writes the file on start and
+    removes it on a clean exit, so a present file means "a watcher is running". A stale file left by
+    a crash reads as running until cleared (by ``stop`` or by hand) — the documented Windows
+    trade-off.
     """
+    if can_signal is None:
+        can_signal = _can_signal()
     record = read_pid_record(path)
     if record is None:
         return None
+    if not can_signal:
+        return record.pid  # Windows: cannot probe; presence of the self-managed PID file = running
     if is_running(
         record.pid,
         expected_start=record.start_time,
@@ -184,9 +242,10 @@ class StopOutcome:
 
     found: bool  # was a PID recorded at all?
     pid: int | None
-    signaled: bool  # did we send SIGTERM?
-    killed: bool  # did we escalate to SIGKILL after the timeout?
-    already_dead: bool  # PID file present but the process was not running (stale)
+    signaled: bool  # was a graceful stop requested (POSIX signal and/or the stop-file)?
+    killed: bool  # did we escalate to a hard kill after the timeout (POSIX only)?
+    already_dead: bool  # PID file present but the process was not running (stale; POSIX probe)
+    timed_out: bool = False  # shutdown was not confirmed within ``timeout``
 
 
 def stop_process(
@@ -196,48 +255,154 @@ def stop_process(
     poll: float = 0.2,
     term_sig: int = signal.SIGTERM,
     kill_sig: int = getattr(signal, "SIGKILL", signal.SIGTERM),
+    stop_file: Path | None = None,
     kill_fn: KillFn = os.kill,
     sleep_fn: SleepFn = time.sleep,
     now_fn: NowFn = time.monotonic,
     start_time_fn: StartTimeFn = _read_proc_start_time,
+    can_signal: bool | None = None,
 ) -> StopOutcome:
-    """Signal the daemon recorded in ``path`` to stop, escalating to SIGKILL after ``timeout``.
+    """Ask the daemon recorded in ``path`` to stop, confirming shutdown within ``timeout``.
 
-    Idempotent: an absent, stale, or recycled-PID file sends no signal. Otherwise send SIGTERM and
-    poll liveness up to ``timeout`` seconds; if still alive, send SIGKILL. The recorded start-time
-    guards every liveness probe so a recycled PID is never signaled. The PID file is removed in
-    every terminal branch (the daemon removes its own file on a graceful exit, but cannot after a
-    SIGKILL — so this is the backstop). Pure under test thanks to the injected seams.
+    Idempotent: an absent PID file is a no-op. Otherwise it always writes ``stop_file`` (the
+    cross-platform sentinel the watch loop polls) and waits for shutdown by the platform's strategy
+    (see :func:`_can_signal`):
+
+    * **POSIX** — probe liveness and send ``term_sig`` (SIGTERM) for an immediate wakeup, poll, and
+      escalate to ``kill_sig`` (SIGKILL) if it outlives the timeout. A recorded start-time guards
+      every probe so a recycled PID is never signaled.
+    * **Windows** — ``os.kill`` cannot reach an unrelated process, so wait for the daemon to remove
+      its own PID file (it does so on a clean exit). If the file does not vanish within the timeout
+      (a wedged daemon, or a stale file from a crash), clear it and report ``timed_out``; a survivor
+      must be stopped by hand (Task Manager).
+
+    The PID file and stop-file are removed in every terminal branch. Pure under test via the seams.
     """
+    if can_signal is None:
+        can_signal = _can_signal()
     record = read_pid_record(path)
     if record is None:
+        if stop_file is not None:
+            stop_file.unlink(missing_ok=True)  # reap a stray sentinel; nothing is recorded
         return StopOutcome(found=False, pid=None, signaled=False, killed=False, already_dead=False)
+    if can_signal:
+        return _stop_via_signal(
+            path,
+            record,
+            timeout=timeout,
+            poll=poll,
+            term_sig=term_sig,
+            kill_sig=kill_sig,
+            stop_file=stop_file,
+            kill_fn=kill_fn,
+            sleep_fn=sleep_fn,
+            now_fn=now_fn,
+            start_time_fn=start_time_fn,
+        )
+    return _stop_via_pid_file(
+        path,
+        record,
+        timeout=timeout,
+        poll=poll,
+        stop_file=stop_file,
+        sleep_fn=sleep_fn,
+        now_fn=now_fn,
+    )
+
+
+def _stop_via_signal(
+    path: Path,
+    record: ProcessIdentity,
+    *,
+    timeout: float,
+    poll: float,
+    term_sig: int,
+    kill_sig: int,
+    stop_file: Path | None,
+    kill_fn: KillFn,
+    sleep_fn: SleepFn,
+    now_fn: NowFn,
+    start_time_fn: StartTimeFn,
+) -> StopOutcome:
+    """POSIX stop: probe liveness, SIGTERM (+ stop-file), poll, escalate to SIGKILL on timeout."""
     pid = record.pid
     expected = record.start_time
     if not is_running(pid, expected_start=expected, kill_fn=kill_fn, start_time_fn=start_time_fn):
         path.unlink(missing_ok=True)  # reap the stale (or recycled) file
+        if stop_file is not None:
+            stop_file.unlink(missing_ok=True)
         return StopOutcome(found=True, pid=pid, signaled=False, killed=False, already_dead=True)
 
+    if stop_file is not None:
+        _write_stop_file(stop_file)  # cross-platform fallback; harmless alongside the signal
     try:
         kill_fn(pid, term_sig)
-    except ProcessLookupError:  # raced to exit between the probe and the signal
+    except OSError as exc:  # raced to exit between the probe and the signal
+        if not _is_no_such_process(exc):
+            raise
         path.unlink(missing_ok=True)
+        if stop_file is not None:
+            stop_file.unlink(missing_ok=True)
         return StopOutcome(found=True, pid=pid, signaled=False, killed=False, already_dead=True)
 
     killed = False
+    timed_out = False
     deadline = now_fn() + timeout
     while is_running(pid, expected_start=expected, kill_fn=kill_fn, start_time_fn=start_time_fn):
         if now_fn() >= deadline:
+            timed_out = True
             try:
                 kill_fn(pid, kill_sig)
                 killed = True
-            except ProcessLookupError:  # exited just as we escalated
+            except OSError as exc:  # exited just as we escalated
+                if not _is_no_such_process(exc):
+                    raise
                 killed = False
             break
         sleep_fn(poll)
 
     path.unlink(missing_ok=True)
-    return StopOutcome(found=True, pid=pid, signaled=True, killed=killed, already_dead=False)
+    if stop_file is not None:
+        stop_file.unlink(missing_ok=True)
+    return StopOutcome(
+        found=True, pid=pid, signaled=True, killed=killed, already_dead=False, timed_out=timed_out
+    )
+
+
+def _stop_via_pid_file(
+    path: Path,
+    record: ProcessIdentity,
+    *,
+    timeout: float,
+    poll: float,
+    stop_file: Path | None,
+    sleep_fn: SleepFn,
+    now_fn: NowFn,
+) -> StopOutcome:
+    """Windows stop: request via the stop-file, then wait for the daemon to remove its own PID file.
+
+    No ``os.kill`` — it cannot reach an unrelated process. The daemon removes its own PID file on
+    a clean exit, so the file's disappearance confirms shutdown. If it persists past the timeout
+    (wedged, or a stale file from a crash), clear it and report ``timed_out``.
+    """
+    pid = record.pid
+    if stop_file is not None:
+        _write_stop_file(stop_file)
+    deadline = now_fn() + timeout
+    while path.exists():
+        if now_fn() >= deadline:
+            path.unlink(missing_ok=True)
+            if stop_file is not None:
+                stop_file.unlink(missing_ok=True)
+            return StopOutcome(
+                found=True, pid=pid, signaled=True, killed=False, already_dead=False, timed_out=True
+            )
+        sleep_fn(poll)
+
+    # The PID file is gone: the daemon noticed the stop-file, exited, and reaped it.
+    if stop_file is not None:
+        stop_file.unlink(missing_ok=True)
+    return StopOutcome(found=True, pid=pid, signaled=True, killed=False, already_dead=False)
 
 
 class StopController:

@@ -112,6 +112,37 @@ def test_watch_loop_without_event_uses_sleep_fn(
     assert sleeps == [3]  # slept once between ticks, not after the last
 
 
+def test_watch_loop_stops_before_first_tick_when_stop_file_present(
+    in_repo_config: OrchestratorConfig, tmp_path: Path
+) -> None:
+    stop_file = tmp_path / "orchestrator.stop"
+    stop_file.write_text("stop\n", encoding="utf-8")
+    orch = _FakeOrch()
+    results = cli.watch_loop(
+        orch, in_repo_config, tmp_path / "pending", poll_interval=5, stop_file=stop_file
+    )
+    assert results == []
+    assert orch.refresh_calls == 0  # cross-platform stop honored before any work
+
+
+def test_watch_loop_honors_stop_file_created_during_tick(
+    in_repo_config: OrchestratorConfig, tmp_path: Path
+) -> None:
+    stop_file = tmp_path / "orchestrator.stop"
+    orch = _FakeOrch(on_refresh=lambda: stop_file.write_text("stop\n", encoding="utf-8"))
+    sleeps: list[float] = []
+    cli.watch_loop(
+        orch,
+        in_repo_config,
+        tmp_path / "pending",
+        poll_interval=100,
+        sleep_fn=sleeps.append,
+        stop_file=stop_file,
+    )
+    assert orch.refresh_calls == 1  # noticed the sentinel between ticks; no second tick
+    assert sleeps == [100]
+
+
 def test_stop_no_pid_file_is_idempotent(
     monkeypatch: pytest.MonkeyPatch,
     in_repo_config: OrchestratorConfig,
@@ -128,6 +159,7 @@ def test_stop_clears_stale_pid_file(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr(cli, "load_config_for", lambda args: in_repo_config)
+    monkeypatch.setattr(process_control, "_can_signal", lambda: True)  # exercise the POSIX path
     pid_path = process_control.pid_file_path(cli.worc_home_for(in_repo_config))
     process_control.write_pid_file(pid_path, pid=999111)
     monkeypatch.setattr(process_control, "is_running", lambda pid, **kw: False)
@@ -166,6 +198,29 @@ def test_watch_writes_then_removes_pid_file(
     assert cli.main(["watch", "--poll-seconds", "5"]) == 0
     assert seen["during"] is True
     assert not pid_path.exists()
+
+
+def test_watch_clears_stale_stop_file_on_start_and_reaps_on_exit(
+    monkeypatch: pytest.MonkeyPatch, in_repo_config: OrchestratorConfig
+) -> None:
+    monkeypatch.setattr(cli, "load_config_for", lambda args: in_repo_config)
+    monkeypatch.setattr(cli, "build_orchestrator", lambda *a, **k: object())
+    monkeypatch.setattr(process_control, "StopController", _FakeController)
+    stop_path = process_control.stop_file_path(cli.worc_home_for(in_repo_config))
+    stop_path.parent.mkdir(parents=True, exist_ok=True)
+    stop_path.write_text("stop\n", encoding="utf-8")  # a stale sentinel from a prior run
+    seen: dict[str, object] = {}
+
+    def fake_loop(orch: object, config: object, folder: object, **kw: object) -> list[object]:
+        seen["stop_file_kw"] = kw.get("stop_file")
+        seen["cleared_during"] = not stop_path.exists()
+        return []
+
+    monkeypatch.setattr(cli, "watch_loop", fake_loop)
+    assert cli.main(["watch", "--poll-seconds", "5"]) == 0
+    assert seen["cleared_during"] is True  # stale sentinel cleared before the loop ran
+    assert seen["stop_file_kw"] == stop_path  # the loop received the sentinel path to poll
+    assert not stop_path.exists()  # reaped on exit
 
 
 def test_restart_stops_previous_then_delegates_to_watch(

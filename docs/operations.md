@@ -31,7 +31,9 @@ Install the CLI once, then run `install .` in the repo (the same commands work o
 ```powershell
 pipx install "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git"
 cd C:\projects\my-repo
-wastech-orchestrator install .          # interactive wizard
+worc install .                          # interactive wizard
+# or, without relying on console-script PATH resolution:
+python -m wastech_orchestrator install .
 ```
 
 The wizard detects the Git root, `origin`, base branch, and cleanliness; finds `codex`/`claude`/`gh`; proposes checks from the repo's ecosystem (`pyproject.toml` / `package.json` / `Cargo.toml` / `go.mod`); writes a validated `config.yaml` into `<repo>/.worc/`; and copies the packaged `worc/` guide to `.worc/guide/`. That installed guide now includes the task docs under `.worc/guide/tasks/`, the copy-ready `worc-task` / `worc-deco-task` skills under `.worc/guide/tasks/skills/`, and the compact config-helper section under `.worc/guide/config/`, including a copy-ready `worc-config` skill template. It appends a single line `.worc/` to the repo's tracked `.gitignore` so the whole runtime home is ignored (`tasks/` is intentionally left tracked). (`install --reconfigure` refreshes the `.worc/guide/` docs to the packaged version.) It never installs or authorizes the CLIs; it reports what is missing and auto-runs `preflight` at the end (a failed preflight keeps the config but exits non-zero with instructions).
@@ -45,6 +47,64 @@ wastech-orchestrator status
 ```
 
 Config discovery order: explicit `--config` > `<repo-root>/.worc/config.yaml` (walk up to the Git root) > a hint to run `install .`. Re-running `install` is idempotent; `--reconfigure` writes a timestamped backup and atomically replaces the config. For automation: `wastech-orchestrator install . --non-interactive --provider codex --no-create-pr` (`--non-interactive` replaces scripted setup). `--no-create-pr` disables the PR but not commit/push.
+
+### Windows 10 and 11 / PowerShell
+
+For a native PowerShell setup, use this sequence:
+
+```powershell
+# 1. Install pipx itself (official PyPA path).
+py -m pip install --user pipx
+
+# 2. If `pipx` is not yet on PATH, run the launcher directly from the warning's Scripts dir.
+#    Typical location:
+cd "$env:LOCALAPPDATA\Python\pythoncore-3.14-64\Scripts"
+.\pipx.exe ensurepath
+
+# 3. Restart PowerShell (and your IDE's integrated terminal, if you use one).
+
+# 4. Install the orchestrator CLI.
+pipx install "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git"
+
+# 5. Verify the console script seen by this exact shell.
+where.exe worc
+worc --version
+
+# 6. Bind the repository and run diagnostics.
+cd C:\projects\my-repo
+worc install .
+worc preflight
+```
+
+If you prefer plain `pip` instead of `pipx`, or a shell still does not see `worc`, use the module form directly:
+
+```powershell
+python -m pip install --user "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git"
+python -m wastech_orchestrator install .
+python -m wastech_orchestrator preflight
+```
+
+The distinction matters:
+
+- `worc` and `wastech-orchestrator` are **console scripts** placed in Python's `Scripts` directory.
+- `wastech_orchestrator` is the **Python module**.
+- `python -m wastech_orchestrator ...` is valid.
+- `python -m worc ...` is **invalid** (`worc` is not a Python module).
+
+#### Windows troubleshooting
+
+- `python -m pip ensurepath` fails with `unknown command "ensurepath"`: `ensurepath` belongs to **`pipx`**, not to `pip`. Use `python -m pipx ensurepath` when `pipx` is already importable, or run `.\pipx.exe ensurepath` from the Scripts directory shown by the install warning.
+- `python -m wastech_orchestrator preflight` works, but `worc` / `wastech-orchestrator` says "not recognized": the package is installed, but the current shell does not see Python's `Scripts` directory on `PATH`. Restart the shell first. If it still fails, ask Python for the exact Scripts dir and prepend it for the current session:
+
+  ```powershell
+  $scripts = python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
+  $env:Path = "$scripts;$env:Path"
+  where.exe worc
+  ```
+
+- `worc` works in a standalone PowerShell window, but not in the IDE terminal: the IDE was started before `PATH` changed, or it launches PowerShell with a different environment. Restart the IDE, or apply the temporary `$env:Path = ...` fix in the integrated terminal.
+- `python -m worc preflight` fails with `No module named worc`: expected. Use `worc preflight` or `python -m wastech_orchestrator preflight`.
+- You can verify what the current shell resolves with `where.exe worc`, `where.exe wastech-orchestrator`, and `python -c "import sysconfig; print(sysconfig.get_path('scripts'))"`.
 
 ---
 
@@ -210,11 +270,11 @@ A task can declare other tasks it needs **merged** first via front-matter `depen
 When `watch` runs as a background service (systemd, launchd, `nohup &`) you do not need to track its PID. A looping `watch` writes `<repo>/.worc/orchestrator.pid` on start and removes it on exit; two commands act on it from any shell in the same repo:
 
 ```bash
-worc stop                  # SIGTERM the watcher; SIGKILL after --timeout (default 30s); idempotent
+worc stop                  # ask the watcher to stop gracefully; idempotent
 worc restart --poll-seconds 10   # stop the running watcher, then start a fresh loop with these flags
 ```
 
-Shutdown is **graceful**: the SIGTERM is observed between ticks, so an in-flight task finishes its current stage rather than being interrupted mid-run (`--timeout` is the hard backstop). `stop` is idempotent — it prints a notice and exits `0` when nothing is running or the PID file is stale. Starting a second `watch` for the same artifact root is refused while one is already live.
+Shutdown is **graceful** and works on Linux, macOS, and Windows: the stop is observed _between ticks_, so an in-flight task finishes its current stage rather than being interrupted mid-run. On POSIX, `stop` sends `SIGTERM` (escalating to `SIGKILL` after `--timeout`, the hard backstop) and also writes an `orchestrator.stop` sentinel the loop polls. On Windows, `os.kill` cannot reach a process started in another shell, so `stop` uses the sentinel alone: the watcher notices it at the next tick, exits, and removes its own PID file — whose disappearance is how `stop` confirms shutdown. A Windows watcher that is genuinely wedged (no longer polling) cannot be force-killed by `stop`; after `--timeout` it clears the PID file (so a fresh `watch` can start) and you stop the survivor via Task Manager. `stop` is idempotent — it prints a notice and exits `0` when nothing is running or the PID file is stale. Starting a second `watch` for the same artifact root is refused while one is already live (on Windows, where liveness cannot be probed, a leftover PID file from a crashed watcher reads as "running" until cleared by `stop` or by hand).
 
 > Every command is also available under the short alias **`worc`** (`worc watch`, `worc status`, …); `wastech-orchestrator` remains the canonical long form used throughout this guide.
 

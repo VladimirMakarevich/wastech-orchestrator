@@ -135,7 +135,9 @@ class SkillInventoryScanner:
         if not isinstance(name, str) or not name.strip():
             return None
         desc = description.strip() if isinstance(description, str) else ""
-        return SkillRef(name=name.strip(), description=desc, path=str(skill_md))
+        # ``as_posix`` keeps the surfaced reference path identical across platforms (forward slashes
+        # on Windows too); ``Path`` re-parses it fine when the body is later read.
+        return SkillRef(name=name.strip(), description=desc, path=skill_md.as_posix())
 
     def _read_text(self, path: Path) -> str | None:
         try:

@@ -33,6 +33,17 @@
 - Timeouts are mandatory for all external calls.
 - stdout/stderr are written to artifacts (see spec §10), not discarded.
 
+## Cross-platform support (Windows / Linux / macOS) — mandatory
+
+Every feature must work on **Windows, Linux, and macOS**. This is a release requirement, not an afterthought: design and test for all three as you build, never "POSIX now, Windows later". Concrete rules (each learned from a real Windows break):
+
+- **Paths via `pathlib.Path`** — never hardcode `/` or `\`, and never assume `os.sep`. When a path is **stored, compared, displayed, or asserted as a string** (audit logs, prompts, persisted state, test assertions), normalize it with `Path.as_posix()` so it is identical on every OS. `Path("a/b")` still opens correctly on Windows, so `as_posix()` is safe for round-tripping.
+- **Text files that are committed or byte-compared**: open with `newline=""` (or write bytes) so `\n` is preserved — default text mode rewrites `\n`→`\r\n` on Windows, which corrupts byte-equal comparisons and adds CRLF noise to git-tracked content.
+- **Signals and process control are POSIX-shaped — do not assume them on Windows.** `signal.SIGKILL` is absent (guard with `getattr(signal, "SIGKILL", …)`); `os.kill(pid, sig)` opens the target with `OpenProcess(PROCESS_ALL_ACCESS)` and **cannot probe or signal a process the caller holds no handle to**, so cross-process control (a `stop` command signalling a separate daemon) must **not** rely on `os.kill`/signals — prefer OS-neutral coordination (a sentinel file, the daemon's self-managed PID file). A missing PID on Windows raises a bare `OSError` (winerror 87), not `ProcessLookupError`.
+- **Branch platform differences explicitly** (`os.name == "nt"` / `sys.platform`) and make the seam injectable so **both** branches are unit-tested on any host (see [testing.md](testing.md)).
+- **No POSIX-only filesystem assumptions**: no `/proc`, `/tmp`, `/dev/null`, `fork`, `fcntl`, executable-bit, or symlink dependencies in core paths; use the stdlib cross-platform equivalents (`tempfile`, `os.replace`, `pathlib`). Degrade gracefully where a capability is Linux-only (document the fallback).
+- The argv/no-`shell=True` rule above is itself a portability rule — keep it.
+
 ## Logging
 
 - Standard `logging`, structured (task_id, stage, attempt, provider).

@@ -10,7 +10,7 @@ from __future__ import annotations
 from importlib import resources
 from pathlib import Path
 
-from wastech_orchestrator.cli import _iter_template_files, _worc_root
+from wastech_orchestrator.cli import _worc_root
 from wastech_orchestrator.config.loader import loads_config
 from wastech_orchestrator.task.parser import ParsedSource
 from wastech_orchestrator.task.validation_gate import ValidationGate

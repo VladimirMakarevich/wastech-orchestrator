@@ -61,6 +61,7 @@ On a temporary Git repository:
 
 - Tests are deterministic and isolated (no network calls and no real CLIs in unit/integration).
 - External processes and time are mocked/injected.
+- **The suite must pass on Windows, Linux, and macOS.** No POSIX-only assumptions in tests: compare paths via `pathlib`/`Path.as_posix()` (never a hardcoded `/`), normalize newlines in byte-compares, guard `signal.SIGKILL` and other POSIX signal constants with `getattr`, and exercise **both** platform branches of any `os.name`-split logic by injecting the platform seam rather than depending on the host OS. See the cross-platform rules in [coding-style.md](coding-style.md).
 - Every behavior change is accompanied by a test.
 - The goal is high coverage of critical paths (router, fallback, state machine, security/redaction), not a percentage for its own sake.
 - A green `pytest` is a mandatory precondition for committing and for transitioning between implementation stages.

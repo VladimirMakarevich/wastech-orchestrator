@@ -17,6 +17,7 @@ You are working on **wastech-orchestrator** — an orchestrator that launches co
 - **Only the orchestrator does commit / push / PR**, not the agent provider. Providers do not perform fallback and do not change the state machine.
 - **No secrets** in logs, in SQLite, or in artifacts. Pass only allowlisted env variables to processes.
 - **Launch the CLI without shell interpolation** of user strings (an argument list, not a string).
+- **Cross-platform (Windows / Linux / macOS) is mandatory** for every feature — design and test for all three as you build (see [.agents/rules/coding-style.md](.agents/rules/coding-style.md)). In short: `pathlib` + `Path.as_posix()` for any stored/compared/displayed path string; `newline=""` (or bytes) for committed/templated files; no `os.kill`/`signal` assumptions for cross-process control on Windows (use a sentinel file / the self-managed PID file); branch platform differences explicitly and test both.
 
 ## Canonical names (do not invent your own)
 

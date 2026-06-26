@@ -56,6 +56,8 @@ The three tiers, as files under `.worc/memory/` (names indicative, not final):
 
 **Curation — operator command + autodream.** A new `worc memory …` CLI surface (manual or scheduled) checks memory against the real codebase and drops stale/duplicate/contradicted entries; and `autodream`, a bounded, audited background pass in the `watch_loop` idle gap, does the same self-cleanup opportunistically while no task is active.
 
+**Enable/Disable in config.yaml** Should be able to disable all memory functionality. 
+
 ## Open questions
 
 - **Autodream trigger and safety.** What exactly fires it (every idle tick? after N tasks? a time threshold?), and what is the bound + audit record for autonomous memory edits? It hooks the idle gap in `watch_loop` (after `watch_once`, before the sleep), where the single-slot invariant guarantees no active task — but the cadence and the per-pass edit budget are unresolved.

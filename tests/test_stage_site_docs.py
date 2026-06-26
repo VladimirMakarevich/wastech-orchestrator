@@ -4,7 +4,7 @@ import tools.stage_site_docs as site_docs
 
 
 def test_rewrite_links_keeps_public_docs_relative() -> None:
-    root = Path("/repo")
+    root = Path("/repo").resolve()  # resolve() injects the drive on Windows; do it once up front
     source = root / "docs/functional/index.md"
     target = root / "docs/functional/blocks/B01-cli-and-operator-commands.md"
     public = {source.resolve(), target.resolve()}
@@ -21,7 +21,7 @@ def test_rewrite_links_keeps_public_docs_relative() -> None:
 
 
 def test_rewrite_links_points_private_paths_to_github() -> None:
-    root = Path("/repo")
+    root = Path("/repo").resolve()  # resolve() injects the drive on Windows; do it once up front
     source = root / "docs/functional/index.md"
     public = {source.resolve()}
 
@@ -40,7 +40,7 @@ def test_rewrite_links_points_private_paths_to_github() -> None:
 
 
 def test_rewrite_links_leaves_external_and_anchor_links_unchanged() -> None:
-    root = Path("/repo")
+    root = Path("/repo").resolve()  # resolve() injects the drive on Windows; do it once up front
     source = root / "docs/index.md"
     public = {source.resolve()}
     markdown = "[local](#start) [remote](https://example.com/docs)"

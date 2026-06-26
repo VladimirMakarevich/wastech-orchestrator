@@ -567,7 +567,8 @@ def test_resume_restores_planning_selected_skills(
     skills_json = art / "logs" / task_id / "selected_skills.json"
     skills_json.parent.mkdir(parents=True, exist_ok=True)
     skills_json.write_text(
-        json.dumps([{"name": "safe-change", "description": "d", "path": str(skill_md)}]),
+        # Persisted as_posix, mirroring what a real planning run writes (SkillRef.path is posix).
+        json.dumps([{"name": "safe-change", "description": "d", "path": skill_md.as_posix()}]),
         encoding="utf-8",
     )
 

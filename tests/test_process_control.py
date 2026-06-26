@@ -11,6 +11,12 @@ from pathlib import Path
 
 from wastech_orchestrator import process_control as pc
 
+# Hermetic, OS-independent signal sentinels. ``SIGKILL`` is absent on Windows, so the hard-kill
+# sentinel falls back to its POSIX number (9) — an opaque int distinct from SIGTERM, which is all
+# the state machine needs (the real ``stop_process`` falls back the same way).
+TERM = signal.SIGTERM
+KILL = getattr(signal, "SIGKILL", 9)
+
 
 def _start(_pid: int) -> str | None:
     """A deterministic, hermetic start-time reader (no real /proc or ps subprocess)."""
@@ -22,14 +28,17 @@ class FakeProcess:
 
     ``kill_fn(pid, 0)`` probes liveness (raises ``ProcessLookupError`` once dead); a signal is
     recorded. ``dies_after`` makes it go dead after that many liveness probes (modelling a process
-    that exits in response to SIGTERM); ``SIGKILL`` always kills it.
+    that exits in response to a graceful stop); the ``kill_sig`` hard-kill always kills it.
     """
 
-    def __init__(self, *, alive: bool = True, dies_after: int | None = None) -> None:
+    def __init__(
+        self, *, alive: bool = True, dies_after: int | None = None, kill_sig: int = KILL
+    ) -> None:
         self.alive = alive
         self.signals: list[int] = []
         self._probes = 0
         self._dies_after = dies_after
+        self._kill_sig = kill_sig
 
     def __call__(self, pid: int, sig: int) -> None:
         if sig == 0:  # liveness probe
@@ -40,7 +49,7 @@ class FakeProcess:
                 raise ProcessLookupError
             return
         self.signals.append(sig)
-        if sig == signal.SIGKILL:
+        if sig == self._kill_sig:
             self.alive = False
 
 
@@ -94,6 +103,32 @@ def test_is_running_true_on_permission_error() -> None:
     assert pc.is_running(123, kill_fn=denied) is True
 
 
+def _win_missing_pid_error() -> OSError:
+    """An ``os.kill`` 'no such PID' error as Windows raises it (bare OSError, winerror 87)."""
+    return OSError(22, "The parameter is incorrect", None, 87)
+
+
+def test_is_no_such_process_classifies_missing_pid() -> None:
+    assert pc._is_no_such_process(ProcessLookupError()) is True  # POSIX ESRCH
+    assert pc._is_no_such_process(OSError("some other failure")) is False
+    win = _win_missing_pid_error()
+    if getattr(win, "winerror", None) == 87:  # the 4-arg winerror sticks only on Windows
+        assert pc._is_no_such_process(win) is True
+
+
+def test_is_running_false_on_windows_missing_pid() -> None:
+    # Windows reports a dead/stale PID as a bare OSError(winerror=87), not ProcessLookupError; the
+    # probe must read that as "not running" (else 'watch'/'stop' crash on a stale PID file).
+    win = _win_missing_pid_error()
+    if getattr(win, "winerror", None) != 87:
+        return  # not on Windows — the constructed winerror does not apply
+
+    def missing(pid: int, sig: int) -> None:
+        raise _win_missing_pid_error()
+
+    assert pc.is_running(123, kill_fn=missing) is False
+
+
 def test_is_running_detects_recycled_pid_by_start_time() -> None:
     # Same PID, live, but a different start-time → the PID was recycled by an unrelated process.
     alive = FakeProcess(alive=True)
@@ -118,17 +153,32 @@ def test_is_running_detects_recycled_pid_by_start_time() -> None:
 def test_running_daemon_pid_none_when_recycled(tmp_path: Path) -> None:
     path = tmp_path / "orchestrator.pid"
     pc.write_pid_file(path, pid=4242, start_time_fn=_start)
-    # Live PID but a different start-time → recycled → not our daemon.
+    # Live PID but a different start-time → recycled → not our daemon (POSIX recycling guard).
     assert (
         pc.running_daemon_pid(
-            path, kill_fn=FakeProcess(alive=True), start_time_fn=lambda _pid: "other"
+            path,
+            kill_fn=FakeProcess(alive=True),
+            start_time_fn=lambda _pid: "other",
+            can_signal=True,
         )
         is None
     )
     # Live PID + matching start-time → our daemon.
     assert (
-        pc.running_daemon_pid(path, kill_fn=FakeProcess(alive=True), start_time_fn=_start) == 4242
+        pc.running_daemon_pid(
+            path, kill_fn=FakeProcess(alive=True), start_time_fn=_start, can_signal=True
+        )
+        == 4242
     )
+
+
+def test_running_daemon_pid_uses_file_presence_when_cannot_signal(tmp_path: Path) -> None:
+    # Windows: liveness cannot be probed, so a present PID file reads as "running" (no recycling
+    # guard); an absent file reads as "not running".
+    path = tmp_path / "orchestrator.pid"
+    assert pc.running_daemon_pid(path, can_signal=False) is None
+    pc.write_pid_file(path, pid=4242, start_time_fn=_start)
+    assert pc.running_daemon_pid(path, can_signal=False) == 4242
 
 
 # --- stop_process ---------------------------------------------------------------------------------
@@ -146,7 +196,9 @@ def test_stop_process_absent_pid_is_idempotent_noop(tmp_path: Path) -> None:
 def test_stop_process_stale_file_is_reaped(tmp_path: Path) -> None:
     path = tmp_path / "orchestrator.pid"
     pc.write_pid_file(path, pid=4242, start_time_fn=_start)
-    outcome = pc.stop_process(path, kill_fn=FakeProcess(alive=False), start_time_fn=_start)
+    outcome = pc.stop_process(
+        path, kill_fn=FakeProcess(alive=False), start_time_fn=_start, can_signal=True
+    )
     assert outcome.already_dead is True
     assert outcome.signaled is False
     assert not path.exists()
@@ -156,7 +208,9 @@ def test_stop_process_recycled_pid_is_not_signaled(tmp_path: Path) -> None:
     path = tmp_path / "orchestrator.pid"
     pc.write_pid_file(path, pid=4242, start_time_fn=_start)
     fake = FakeProcess(alive=True)  # the PID is live, but it is now an unrelated process
-    outcome = pc.stop_process(path, kill_fn=fake, start_time_fn=lambda _pid: "recycled")
+    outcome = pc.stop_process(
+        path, kill_fn=fake, start_time_fn=lambda _pid: "recycled", can_signal=True
+    )
     assert outcome.already_dead is True
     assert fake.signals == []  # never signaled the innocent recycled process
     assert not path.exists()
@@ -165,25 +219,28 @@ def test_stop_process_recycled_pid_is_not_signaled(tmp_path: Path) -> None:
 def test_stop_process_graceful_sends_sigterm_only(tmp_path: Path) -> None:
     path = tmp_path / "orchestrator.pid"
     pc.write_pid_file(path, pid=4242, start_time_fn=_start)
-    fake = FakeProcess(dies_after=2)  # alive through the SIGTERM, gone after one poll
+    fake = FakeProcess(dies_after=2)  # alive through the soft signal, gone after one poll
     sleeps: list[float] = []
     outcome = pc.stop_process(
         path,
         timeout=30.0,
         poll=0.2,
+        term_sig=TERM,
+        kill_sig=KILL,
         kill_fn=fake,
         sleep_fn=sleeps.append,
         now_fn=lambda: 0.0,  # never reaches the deadline
         start_time_fn=_start,
+        can_signal=True,
     )
     assert outcome.signaled is True
     assert outcome.killed is False
-    assert fake.signals == [signal.SIGTERM]
+    assert fake.signals == [TERM]
     assert sleeps == [0.2]  # exercised the poll-then-recheck path exactly once
     assert not path.exists()
 
 
-def test_stop_process_escalates_to_sigkill_after_timeout(tmp_path: Path) -> None:
+def test_stop_process_escalates_to_hard_kill_after_timeout(tmp_path: Path) -> None:
     path = tmp_path / "orchestrator.pid"
     pc.write_pid_file(path, pid=4242, start_time_fn=_start)
     fake = FakeProcess(alive=True)  # never dies on its own
@@ -191,16 +248,107 @@ def test_stop_process_escalates_to_sigkill_after_timeout(tmp_path: Path) -> None
     outcome = pc.stop_process(
         path,
         timeout=0.0,  # deadline == now: escalate on the first check
+        term_sig=TERM,
+        kill_sig=KILL,
         kill_fn=fake,
         sleep_fn=sleeps.append,
         now_fn=lambda: 0.0,
         start_time_fn=_start,
+        can_signal=True,
     )
     assert outcome.signaled is True
     assert outcome.killed is True
-    assert fake.signals == [signal.SIGTERM, signal.SIGKILL]
+    assert outcome.timed_out is True
+    assert fake.signals == [TERM, KILL]
     assert sleeps == []
     assert not path.exists()
+
+
+# --- stop-file IPC (cross-platform graceful stop) -------------------------------------------------
+
+
+def test_stop_file_path_and_requested(tmp_path: Path) -> None:
+    sf = pc.stop_file_path(tmp_path)
+    assert sf.name == "orchestrator.stop"
+    assert pc.stop_file_requested(sf) is False
+    sf.write_text("stop\n", encoding="utf-8")
+    assert pc.stop_file_requested(sf) is True
+
+
+def test_stop_process_writes_then_reaps_stop_file(tmp_path: Path) -> None:
+    path = tmp_path / "orchestrator.pid"
+    pc.write_pid_file(path, pid=4242, start_time_fn=_start)
+    stop_file = pc.stop_file_path(tmp_path)
+    fake = FakeProcess(dies_after=2)
+    present_while_waiting: list[bool] = []
+    outcome = pc.stop_process(
+        path,
+        term_sig=TERM,
+        kill_sig=KILL,
+        stop_file=stop_file,
+        kill_fn=fake,
+        sleep_fn=lambda _s: present_while_waiting.append(stop_file.exists()),
+        now_fn=lambda: 0.0,
+        start_time_fn=_start,
+        can_signal=True,
+    )
+    assert present_while_waiting == [True]  # sentinel present while we wait for the graceful exit
+    assert not stop_file.exists()  # reaped in the terminal branch
+    assert outcome.signaled is True
+    assert outcome.killed is False
+
+
+# --- file-based stop (Windows: os.kill cannot reach an unrelated process) -------------------------
+
+
+def test_stop_via_pid_file_graceful_waits_for_pid_file_removal(tmp_path: Path) -> None:
+    # Windows path (can_signal=False): no os.kill. The daemon removes its own PID file on a clean
+    # exit; stop confirms shutdown by that disappearance. Simulate it via the sleep seam.
+    path = tmp_path / "orchestrator.pid"
+    pc.write_pid_file(path, pid=4242, start_time_fn=_start)
+    stop_file = pc.stop_file_path(tmp_path)
+
+    polls: list[bool] = []
+
+    def sleep_fn(_s: float) -> None:
+        polls.append(stop_file.exists())  # stop-file present while we wait
+        path.unlink(missing_ok=True)  # the daemon noticed it and reaped its PID file
+
+    outcome = pc.stop_process(
+        path,
+        timeout=30.0,
+        poll=0.2,
+        stop_file=stop_file,
+        sleep_fn=sleep_fn,
+        now_fn=lambda: 0.0,
+        can_signal=False,
+    )
+    assert polls == [True]
+    assert outcome.signaled is True  # requested via the stop-file
+    assert outcome.killed is False  # never hard-killed
+    assert outcome.timed_out is False
+    assert not path.exists()
+    assert not stop_file.exists()  # both reaped
+
+
+def test_stop_via_pid_file_times_out_when_pid_file_persists(tmp_path: Path) -> None:
+    # A wedged daemon (or a stale PID file from a crash) never removes the PID file → timeout. We
+    # cannot force-kill an unrelated process on Windows, so clear the file and report timed_out.
+    path = tmp_path / "orchestrator.pid"
+    pc.write_pid_file(path, pid=4242, start_time_fn=_start)
+    stop_file = pc.stop_file_path(tmp_path)
+    outcome = pc.stop_process(
+        path,
+        timeout=0.0,  # deadline == now: time out on the first check
+        stop_file=stop_file,
+        sleep_fn=lambda _s: None,
+        now_fn=lambda: 0.0,
+        can_signal=False,
+    )
+    assert outcome.timed_out is True
+    assert outcome.killed is False  # no hard kill on Windows
+    assert not path.exists()  # cleared so a fresh 'watch' can start
+    assert not stop_file.exists()
 
 
 # --- StopController -------------------------------------------------------------------------------

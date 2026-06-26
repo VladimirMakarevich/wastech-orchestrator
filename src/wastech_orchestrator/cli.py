@@ -204,13 +204,13 @@ def build_parser() -> argparse.ArgumentParser:
         "every N seconds (0 = single pass, no loop)",
     )
 
-    stop_cmd = sub.add_parser("stop", help="stop a running 'watch' daemon (SIGTERM, then SIGKILL)")
+    stop_cmd = sub.add_parser("stop", help="stop a running 'watch' daemon gracefully")
     stop_cmd.add_argument(
         "--timeout",
         type=float,
         default=30.0,
         metavar="SECONDS",
-        help="seconds to wait for graceful shutdown before SIGKILL (default: 30)",
+        help="seconds to wait for graceful shutdown before escalating (default: 30)",
     )
 
     restart_cmd = sub.add_parser(
@@ -221,7 +221,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=30.0,
         metavar="SECONDS",
-        help="seconds to wait for the previous watcher to exit before SIGKILL (default: 30)",
+        help="seconds to wait for the previous watcher to exit (default: 30)",
     )
     restart_cmd.add_argument(
         "--poll-seconds",
@@ -729,6 +729,7 @@ def watch_loop(
     max_iterations: int | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
     stop_event: threading.Event | None = None,
+    stop_file: Path | None = None,
 ) -> list[PipelineResult]:
     """Run ``watch_once`` on a loop, refreshing the repo each tick (periodic discovery).
 
@@ -737,15 +738,23 @@ def watch_loop(
     ``poll_interval <= 0`` runs exactly one tick (single pass, no sleep). ``max_iterations`` bounds
     the loop for tests; in production the loop runs until interrupted.
 
-    A ``stop_event`` (set by a ``SIGTERM`` handler) is honored only *between* ticks, so an in-flight
-    task run finishes its current stage rather than being interrupted; when set, it also cuts the
-    poll sleep short for a prompt shutdown. The ``sleep_fn`` path is kept for callers without an
+    A stop is honored only *between* ticks, so an in-flight task run finishes its current stage
+    rather than being interrupted. Two channels are checked: a ``stop_event`` (set by a ``SIGTERM``
+    handler — POSIX) cuts the poll sleep short for a prompt shutdown, and a ``stop_file`` (the
+    cross-platform sentinel ``stop`` writes) is polled at each tick so the daemon stops even where
+    ``SIGTERM`` is undeliverable (Windows). The ``sleep_fn`` path is kept for callers without an
     event (existing tests).
     """
+
+    def _stop_requested() -> bool:
+        if stop_event is not None and stop_event.is_set():
+            return True
+        return stop_file is not None and process_control.stop_file_requested(stop_file)
+
     results: list[PipelineResult] = []
     iteration = 0
     while True:
-        if stop_event is not None and stop_event.is_set():
+        if _stop_requested():
             break
         orchestrator.refresh_repo()
         results.extend(watch_once(orchestrator, config, folder))
@@ -755,10 +764,12 @@ def watch_loop(
         if max_iterations is not None and iteration >= max_iterations:
             break
         if stop_event is not None:
-            if stop_event.wait(poll_interval):  # returns True the instant SIGTERM fires
+            if stop_event.wait(poll_interval):  # returns True the instant SIGTERM fires (POSIX)
                 break
         else:
             sleep_fn(poll_interval)
+        if _stop_requested():  # cross-platform stop-file, noticed between ticks
+            break
     return results
 
 
@@ -1101,9 +1112,11 @@ def cmd_watch(args: argparse.Namespace) -> int:
     processes pending, then sleeps. ``0`` is a single pass. Stop the daemon with Ctrl-C, or from
     another shell with ``stop`` / ``restart``.
 
-    The looping daemon writes ``<artifacts_root>/orchestrator.pid`` and installs a ``SIGTERM``
-    handler so ``stop``/``restart`` can shut it down gracefully between ticks; it refuses to start
-    when another watcher is already live for the same artifact root.
+    The looping daemon writes ``<artifacts_root>/orchestrator.pid`` and shuts down gracefully
+    between ticks when ``stop``/``restart`` ask it to: via a ``SIGTERM`` handler on POSIX and via an
+    ``orchestrator.stop`` sentinel file it polls each tick (the cross-platform channel — ``SIGTERM``
+    is undeliverable cross-process on Windows). It refuses to start when another watcher is already
+    live for the same artifact root, and removes its PID file on exit (how ``stop`` confirms it).
     """
     _configure_runtime_logging(args)
     config = load_config_for(args)
@@ -1119,6 +1132,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
     )
     folder = pending_dir(config)
     pid_path = process_control.pid_file_path(worc_home_for(config))
+    stop_path = process_control.stop_file_path(worc_home_for(config))
 
     # Only the looping mode is a daemon; refuse a second watcher for the same artifact root. A stale
     # PID file (process gone) is overwritten on start.
@@ -1143,20 +1157,30 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
     print(f"watch: polling every {poll}s for git-pushed tasks (Ctrl-C or 'stop' to exit)")
     results: list[PipelineResult] = []
+    stopped = False
     controller = process_control.StopController()  # SIGTERM -> event, restored on exit
     try:
         with controller:
+            stop_path.unlink(missing_ok=True)  # clear a stale sentinel so it can't stop us on start
             process_control.write_pid_file(pid_path)
             results = watch_loop(
-                orchestrator, config, folder, poll_interval=poll, stop_event=controller.event
+                orchestrator,
+                config,
+                folder,
+                poll_interval=poll,
+                stop_event=controller.event,
+                stop_file=stop_path,
             )
+            # Graceful stop arrived via SIGTERM (event) or the stop-file (Windows / cross-shell).
+            stopped = controller.event.is_set() or process_control.stop_file_requested(stop_path)
     except KeyboardInterrupt:
         print("watch: stopped")
         return 0
     finally:
         pid_path.unlink(missing_ok=True)  # clean exit, Ctrl-C, SIGKILL-survivor, or error
-    if controller.event.is_set():
-        print("watch: stopped")  # graceful SIGTERM shutdown
+        stop_path.unlink(missing_ok=True)  # reap our own sentinel
+    if stopped:
+        print("watch: stopped")  # graceful shutdown (SIGTERM or stop-file)
         return 0
     return _summarize_watch(results)
 
@@ -1168,13 +1192,19 @@ def cmd_stop(args: argparse.Namespace) -> int:
     if config is None:
         return 2
     pid_path = process_control.pid_file_path(worc_home_for(config))
-    outcome = process_control.stop_process(pid_path, timeout=args.timeout)
+    stop_path = process_control.stop_file_path(worc_home_for(config))
+    outcome = process_control.stop_process(pid_path, timeout=args.timeout, stop_file=stop_path)
     if not outcome.found:
         print("stop: no running watcher (no PID file)")
     elif outcome.already_dead:
         print(f"stop: no running watcher (cleared stale PID {outcome.pid})")
     elif outcome.killed:
         print(f"stop: watcher {outcome.pid} did not exit in {args.timeout:g}s; sent SIGKILL")
+    elif outcome.timed_out:
+        print(
+            f"stop: watcher {outcome.pid} did not confirm shutdown in {args.timeout:g}s; "
+            "cleared its PID file (if it is still running, stop it via Task Manager)"
+        )
     else:
         print(f"stop: watcher {outcome.pid} stopped")
     return 0
@@ -1191,12 +1221,15 @@ def cmd_restart(args: argparse.Namespace) -> int:
     if config is None:
         return 2
     pid_path = process_control.pid_file_path(worc_home_for(config))
-    outcome = process_control.stop_process(pid_path, timeout=args.timeout)
-    if outcome.found and not outcome.already_dead:
+    stop_path = process_control.stop_file_path(worc_home_for(config))
+    outcome = process_control.stop_process(pid_path, timeout=args.timeout, stop_file=stop_path)
+    if not outcome.found or outcome.already_dead:
+        print("restart: no previous watcher running")
+    elif outcome.timed_out:
+        print(f"restart: previous watcher {outcome.pid} did not confirm shutdown; starting anyway")
+    else:
         suffix = " (SIGKILL)" if outcome.killed else ""
         print(f"restart: stopped previous watcher {outcome.pid}{suffix}")
-    else:
-        print("restart: no previous watcher running")
     return cmd_watch(args)
 
 
@@ -1291,7 +1324,9 @@ def _install_atomic_write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}-", suffix=path.suffix)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        # newline="" disables newline translation so installed/templated files stay LF on every OS
+        # (the packaged sources are LF; otherwise Windows would rewrite them with CRLF).
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)
         os.replace(tmp, path)
     except BaseException:

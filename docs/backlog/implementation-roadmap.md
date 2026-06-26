@@ -1,12 +1,12 @@
 # ADR implementation roadmap (sequencing the 12 open backlog items)
 
-Status: **proposed sequencing** Date: 2026-06-26 Owner: Vladimir Makarevich
+Status: **proposed sequencing** — step 1 (windows) implemented 2026-06-26; steps 2–12 unbuilt. Date: 2026-06-26 Owner: Vladimir Makarevich
 
 This document is a cross-ADR **implementation order**, not a new design. It takes the 12 open backlog ADRs the operator wants built and sequences them so that shared seams (config schema, the CLI, the task-scan path, the watch loop, provider error handling, the Telegram channel, the supervisor/prompt-variable layer) are each touched in one deliberate pass instead of being re-edited by every feature. The goal is to minimize rework and merge conflicts, and to let each feature land on foundations the previous ones already established.
 
 Each ADR keeps its own design file (linked below); this file only governs **order and rationale**. It does not override the hard invariants in [../../CLAUDE.md](../../CLAUDE.md) or [../../.agents/rules/](../../.agents/rules/).
 
-All 12 are confirmed **unbuilt** as of this date: `CONFIG_SCHEMA_VERSION` is `16` and `DB_SCHEMA_VERSION` is `12` from prior unrelated work; none of `RetryConfig` / `PathsConfig` / `MemoryConfig` / `LoggingConfig` / `recent_tasks()` / `worc list` exist yet. (The commit titled "add `worc list`" only added the ADR docs.)
+Step 1 (windows-cross-platform-support) is **implemented** (2026-06-26 — green dev loop on Windows + a cross-platform `worc watch`/`stop`/`restart` daemon; the Windows CI matrix is deferred, see its [outcome section](windows-cross-platform-support.md#implementation-outcome)). The other 11 are confirmed **unbuilt** as of this date: `CONFIG_SCHEMA_VERSION` is `16` and `DB_SCHEMA_VERSION` is `12` from prior unrelated work; none of `RetryConfig` / `PathsConfig` / `MemoryConfig` / `LoggingConfig` / `recent_tasks()` / `worc list` exist yet. (The commit titled "add `worc list`" only added the ADR docs.)
 
 ## Business priority vs. technical order
 
@@ -31,7 +31,7 @@ The operator's business priority (more `+` = higher) is the tie-breaker, not the
 
 | # | ADR | Wave | Business | Size | Config bump | Why here (one line) |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | [windows-cross-platform-support](windows-cross-platform-support.md) | A — Foundation | `+++` | M | — | CI matrix guards every later step; stop-file IPC + cross-platform `fake_cli` are reused downstream. |
+| 1 ✅ | [windows-cross-platform-support](windows-cross-platform-support.md) | A — Foundation | `+++` | M | — | **Done 2026-06-26.** Lands the cross-platform graceful-stop primitive (stop-file + PID-file-disappearance) the console (step 11) reuses. Two scope deltas vs. the plan: Windows CI matrix **deferred**, and `fake_cli` left unchanged (the `.cmd` launcher works on Windows — the Python-launcher rework was unnecessary). |
 | 2 | [configurable-tasks-dir](configurable-tasks-dir.md) | B — Task scan | `+++` | M | 16→17 | Parameterizes the hardcoded `tasks/` path before three other features edit the same scan call-sites. |
 | 3 | [multi-instance-task-queues](multi-instance-task-queues.md) | B — Task scan | `+++` | M | 17→18 | Adds the `queue` field + filter on top of the now-parameterized scan, same seam. |
 | 4 | [cli-task-list-and-completion](cli-task-list-and-completion.md) | B — Task scan | `+++` | S | — | Reads the scan (dir + queue aware); lands `recent_tasks()` that `worc top` later reuses. |
@@ -65,7 +65,7 @@ This is the technical core of the ordering. Each row is a file/subsystem multipl
 | **Task-scan / selection** (`select_pending`, `watch_once`, front-matter scan in `cli.py`; `orchestrator.py`) | tasks-dir (location), queues (filter), list (readout), gates (next-task gate before claim) | tasks-dir → queues → list → gates. |
 | **state.db read helpers** (`state_store.py`) | list (`recent_tasks`), console (reuses `recent_tasks`), pr-merge (`find_open_pr_tasks`) | list lands `recent_tasks` first; console reuses it; pr-merge's helper is independent. |
 | **watch loop** (`cli.py` `watch_loop`/`watch_once`) | windows (stop-file poll), queues (filter), transient (resumable-pause admit), gates (next-task gate), memory (autodream idle hook) | windows → queues → transient → gates → memory. |
-| **Process spawn / signals** (`process_control.py`, `providers/process.py`) | windows (stop-file, signals, `start_new_session`), console (3-rung stop ladder, process-group kill) | windows establishes the primitives; the console's stop ladder builds on them. |
+| **Process spawn / signals** (`process_control.py`, `providers/process.py`) | windows (stop-file IPC + file-based cross-process stop; POSIX `SIGTERM`/`SIGKILL`), console (3-rung stop ladder, process-group kill) | windows establishes the primitives; the console's stop ladder builds on them — but **on Windows the cross-process stop is file-based** (`os.kill`/signals/process-groups don't work cross-process there), so the ladder needs a platform split, not a POSIX-only signal escalation. |
 | **Provider error structuring** (`providers/claude.py`, `errors.py`, `_adapter_base.py`, `NodeInfraError`) | transient (`error_class`, `TRANSIENT_RETRYABLE`), gates (`error_max_turns` as a structured field) | transient establishes structured `error_class`; the max-turns gate adds another field the same way. |
 | **Telegram / Notifier** (`notify/interface.py`, `notify/telegram.py`, HITL `ask_human`) | telegram-trace (`send_trace`, push), gates (approve/deny + continue/stop via existing `ask_human`) | telegram-trace establishes push + prefix discipline; gates reuse the existing receive path. |
 | **Supervisor + prompt-vars + nodes** (`core/supervisor.py`, `core/prompts.py` `ALLOWED_PROMPT_VARS`, `flow/nodes/agent.py`+`evaluator.py`+`base.py`) | skills (`{skills_path}` per node + `propose_skill_map`), memory (`{memory_path}` + `finalize()` emit), pr-merge (reuses the orchestrator-level agent precedent only) | skills establishes per-node injection + the proposer pattern; memory reuses both; pr-merge only reads the precedent, no change here. |
@@ -92,7 +92,7 @@ graph LR
 
 Reading the edges:
 
-- **windows → console**: the stop ladder reuses the stop-file IPC and process-group-safe spawn from windows.
+- **windows → console**: the stop ladder reuses the cross-platform stop-file IPC from windows; on POSIX it adds the signal/process-group escalation, on Windows it stays file-based (`os.kill` can't reach the daemon cross-process).
 - **tasks-dir → queues / list / gates**: all read the task-scan path; parameterize it before they touch it.
 - **queues → list**: `worc list` should surface/filter `queue` from day one rather than be re-edited.
 - **list → console** (hard): the console's `worc top` reuses `recent_tasks()`; list is the down-payment.
@@ -106,9 +106,14 @@ Everything else is independent and ordered only by wave/priority.
 
 ## The waves
 
-### Wave A — Cross-platform & test baseline (step 1)
+### Wave A — Cross-platform & test baseline (step 1) — ✅ done 2026-06-26
 
-**windows-cross-platform-support.** First, alone, because it is pure leverage: it adds the `windows-latest` CI runner and fixes the suite's collection failure, so steps 2–12 are validated cross-platform as they land instead of being retrofitted. Technically it also introduces two primitives later waves build on: the `orchestrator.stop` sentinel-file IPC polled in the watch loop (the console's stop ladder layers on this), and the Python-launcher `fake_cli` (no `.cmd`, no `shell=True`) that the provider/process tests in later waves rely on. Files: `process_control.py`, `cli.py` (watch loop), `tests/conftest.py`, `.github/workflows/ci.yml`. No schema bump.
+**windows-cross-platform-support.** First, alone, because it is pure leverage: a green dev loop on Windows (`/run-checks` — ruff, mypy, full pytest) so steps 2–12 can be verified cross-platform as they land instead of being retrofitted, plus the cross-platform stop primitive later waves build on. **As implemented**, two premises proved wrong (validated on a real Windows 10 / Python 3.14 box — see the ADR's [implementation outcome](windows-cross-platform-support.md#implementation-outcome)):
+
+- The `.cmd` `fake_cli` works on Windows and the integration tests pass, so the Python-launcher rework was **not needed** — `tests/conftest.py` is unchanged. Later provider/process tests reuse the existing fixture as-is.
+- `os.kill` is **unusable cross-process on Windows** (`OpenProcess(PROCESS_ALL_ACCESS)` fails for a process the caller holds no handle to), so the daemon stop is a **platform split**: POSIX keeps `SIGTERM`→`SIGKILL`; Windows uses the `orchestrator.stop` sentinel + waits for the daemon to remove its own PID file (`process_control._can_signal`). This is the primitive the console's stop ladder (step 11) must build on — **not** a signal/process-group kill, which is POSIX-only.
+
+The **Windows CI runner matrix is deferred** (tracked in [follow_ups.md](follow_ups.md)); steps 2–12 are therefore not auto-guarded in CI yet — verify them locally on Windows until the matrix lands. Files actually touched: `process_control.py`, `cli.py` (watch loop + stop/restart), `core/skills.py` (`as_posix`), `cli.py` `_install_atomic_write` (`newline=""`), and the affected tests. No schema bump.
 
 ### Wave B — Task-scan & discovery foundation (steps 2–4)
 
@@ -141,7 +146,7 @@ The "survive unattended + watch and intervene remotely" story. Order is forced b
 
 ### Wave F — Capstone & advanced (steps 11–12)
 
-- **cli-upgrade (interactive console)**: `worc top` (read-only monitor) + `worc shell` (`prompt_toolkit` REPL) + the 3-rung stop ladder. The aggregator — it consumes `recent_tasks` (step 4), the `prs`/`merge-task` verbs (step 9), the resumable-pause state (step 6), and the stop-file/process-group primitives (step 1). Built last so it integrates finished pieces. `prompt_toolkit` is an optional `[shell]` extra; the daemon never imports it. No schema bump.
+- **cli-upgrade (interactive console)**: `worc top` (read-only monitor) + `worc shell` (`prompt_toolkit` REPL) + the 3-rung stop ladder. The aggregator — it consumes `recent_tasks` (step 4), the `prs`/`merge-task` verbs (step 9), the resumable-pause state (step 6), and the stop primitives (step 1). Built last so it integrates finished pieces. **Note the Windows constraint from step 1:** `os.kill`/signals/process-group kills do not work cross-process on Windows, so the stop ladder's escalation rungs are POSIX-only — on Windows the console must drive the file-based stop (sentinel + PID-file-disappearance), and a wedged daemon can't be force-killed without a `taskkill` backstop (a deferred follow-up). `prompt_toolkit` is an optional `[shell]` extra; the daemon never imports it. No schema bump.
 - **orchestrator-memory**: three-tier `.worc/memory/`, supervisor `finalize()` emits a redacted memory-delta, `{memory_path}` prompt var, `worc memory …`, and the bounded `autodream` idle hook. Reuses the skills prompt-var seam (`memory_path` parallels `skills_path`) and the supervisor seam (`finalize()` emit parallels `propose_skill_map`). Last because it is the largest, the riskiest (autonomous self-edit, redaction-on-every-write, several open design questions), and the lowest business priority. Consider shipping only the **Lightweight project memory** slice (long-term tier) first to de-risk. Config 23→24.
 
 ## Config schema version ledger
