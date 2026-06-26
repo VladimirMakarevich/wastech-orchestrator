@@ -53,3 +53,20 @@ def warn_if_gh_logged_out(emit: Callable[[str], None] | None = None) -> None:
     emit = emit if emit is not None else _LOG.warning
     if has_gh() and gh_auth_ok() is False:
         emit(_GH_LOGGED_OUT_MESSAGE)
+
+
+def preflight_gh() -> tuple[bool, str]:
+    """Return ``(ok, line)`` for the gh preflight report line.
+
+    Hard-fails when ``gh`` is not on ``PATH``. Auth failure is non-blocking (mirrors
+    :func:`warn_if_gh_logged_out`: a valid ``GH_TOKEN`` or a flaky probe must not block a run).
+    Only call this when ``git.create_pull_request`` is enabled.
+    """
+    if not has_gh():
+        return False, (
+            "gh: FAIL — not on PATH; install from https://cli.github.com/ "
+            "or set git.create_pull_request: false"
+        )
+    if gh_auth_ok() is False:
+        return True, "gh: WARN — present but not logged in (run 'gh auth login')"
+    return True, "gh: OK"

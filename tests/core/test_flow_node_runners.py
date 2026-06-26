@@ -508,9 +508,7 @@ def _ws_node() -> AgentNode:
     )
 
 
-def _guard_services(
-    tmp_path: Path, git: Any, notifier: Any, exempt: tuple[str, ...] = ()
-) -> Any:
+def _guard_services(tmp_path: Path, git: Any, notifier: Any, exempt: tuple[str, ...] = ()) -> Any:
     return NodeServices(
         router=FakeRouter(_result()),
         check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),

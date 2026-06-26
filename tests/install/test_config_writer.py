@@ -119,6 +119,20 @@ def test_install_seeds_empty_command_sets(tmp_path: Path) -> None:
     assert cfg.checks.command_sets == {}
 
 
+def test_generated_config_includes_optional_sections(tmp_path: Path) -> None:
+    text = build_and_validate(_spec(tmp_path, (ProviderId.CLAUDE,)))
+    cfg = loads_config(text).config
+    assert cfg.supervisor.role_file == "roles/supervisor.md"
+    assert cfg.supervisor.model is None
+    assert cfg.supervisor.reasoning is None
+    assert cfg.skills.scan_root == ""
+    assert list(cfg.skills.exclude) == ["run-checks", "test", "sync-docs"]
+    assert cfg.prompt_audit is False
+    assert cfg.security.deletion_approval_exempt_paths == ()
+    for key in ("supervisor:", "skills:", "prompt_audit:", "deletion_approval_exempt_paths:"):
+        assert key in text
+
+
 @pytest.mark.parametrize(
     "path",
     [

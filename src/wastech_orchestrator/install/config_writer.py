@@ -122,6 +122,7 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             ],
             "denied_read_paths": [".env", "secrets/**"],
             "denied_commands": ["git commit", "git push", "gh pr create", "gh pr merge"],
+            "deletion_approval_exempt_paths": [],
         },
         "validation": {
             "max_task_bytes": 262144,
@@ -157,6 +158,16 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "chat_id_env": "TELEGRAM_CHAT_ID",
             "ask_timeout_s": 28800,
         },
+        "skills": {
+            "scan_root": "",
+            "exclude": ["run-checks", "test", "sync-docs"],
+        },
+        "supervisor": {
+            "role_file": "roles/supervisor.md",
+            "model": None,
+            "reasoning": None,
+        },
+        "prompt_audit": False,
     }
 
 

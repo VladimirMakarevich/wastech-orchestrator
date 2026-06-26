@@ -48,6 +48,7 @@ from wastech_orchestrator.install import config_writer, detect, wizard
 from wastech_orchestrator.notify import build_notifier
 from wastech_orchestrator.notify.telegram import check_telegram_preflight
 from wastech_orchestrator.observability.logging import configure_logging
+from wastech_orchestrator.preflight import preflight_gh
 from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.security.isolation import check_isolation
 from wastech_orchestrator.state_store import IncompatibleStateError, StateStore
@@ -86,7 +87,7 @@ REPO_TASK_DIRS: tuple[str, ...] = (
 )
 
 # Runtime dirs created under `<repo>/.worc/` by `install` (all gitignored).
-WORC_RUNTIME_DIRS: tuple[str, ...] = ("logs", "workspace", "checks", "tasks/rejected")
+WORC_RUNTIME_DIRS: tuple[str, ...] = ("logs", "workspace", "tasks/rejected")
 
 # `install` drops this commented template (never real values) so the operator knows which secrets
 # the orchestrator reads from the environment. Copy it to `.worc/.env` and fill it in; the whole
@@ -1038,6 +1039,12 @@ def run_preflight(config: OrchestratorConfig) -> tuple[bool, list[str]]:
         else:
             ok = False
             lines.append(f"flow {name}: FAIL — {error.splitlines()[0]}")
+
+    if config.git.create_pull_request:
+        gh_ok, gh_line = preflight_gh()
+        if not gh_ok:
+            ok = False
+        lines.append(gh_line)
 
     tg_ok, tg_line = check_telegram_preflight(config.telegram)
     if not tg_ok:
