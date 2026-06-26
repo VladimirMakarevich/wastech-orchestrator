@@ -278,7 +278,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`human_input_path`** - The artifact path that carries a human answer or approval back into the flow.
 - **`manual_action_required`** - The terminal state used when the orchestrator must stop and ask the operator to intervene.
 
-## Legacy and renamed terms
+## Legacy and renamed terms TODO: Need to remove from the solution and any mentions
 
 - **`Stage` enum** - A legacy vocabulary for task lifecycle identity. The current execution identity is the flow node id, not the old stage enum.
 - **`agents.routing`** - A removed stage-keyed provider-routing block. Routing is now node-based.

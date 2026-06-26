@@ -154,9 +154,13 @@ def test_rerun_fresh_failed_to_done(git_repo, fake_cli, git_run, tmp_path: Path)
     assert records[1]["attempt"] == 2 and records[1]["rerun_of"] == "task-700"
     # The change is committed on a branch rebuilt from the current base; HEAD back on main.
     assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "main"
-    committed = git_run(
-        ["show", "--name-only", "--format=", "worc/task-700-add-a-thing"], git_repo.clone
+    # The stale branch was deleted and rebuilt under a fresh epoch; resolve the new name.
+    branch = git_run(
+        ["branch", "--list", "--format=%(refname:short)", "worc/*-task-700-add-a-thing"],
+        git_repo.clone,
     )
+    assert branch
+    committed = git_run(["show", "--name-only", "--format=", branch], git_repo.clone)
     assert "agent_change.py" in committed
     # Prior artifacts archived; the fresh attempt's summary written at the top level.
     assert (external / "logs" / "task-700" / "attempt-1" / "plan.md").exists()

@@ -17,6 +17,10 @@ from typing import Literal
 # never sanitized (.agents/rules/security.md). Shared source of truth for the model and the parser.
 TASK_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 BRANCH_NAME_MAX_BYTES = 255
+# Soft cap for auto-generated branch names (and operator branch_name overrides): keeps the full
+# {prefix}/{epoch}-{task_id}-{slug} within GitHub/CI/`git log` column width. BRANCH_NAME_MAX_BYTES
+# above is the hard Git limit; this is the readability budget the slug is truncated to fit.
+BRANCH_NAME_MAX_LEN = 50
 _BRANCH_FORBIDDEN_CHARS = frozenset(" ~^:?*[\\")
 
 # Front-matter schema. A task is "clean": it carries

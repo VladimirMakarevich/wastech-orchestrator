@@ -355,7 +355,11 @@ def test_cmd_run_happy_path(
     assert code == 0
     # One commit on the task branch; the agent's change is committed; back on main.
     assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "main"
-    branch = "worc/task-100-add-a-thing"
+    branch = git_run(
+        ["branch", "--list", "--format=%(refname:short)", "worc/*-task-100-add-a-thing"],
+        git_repo.clone,
+    )
+    assert branch  # epoch-prefixed; resolve the actual name from the branch list
     committed = git_run(["show", "--name-only", "--format=", branch], git_repo.clone)
     assert "agent_change.py" in committed
     # Artifacts + exactly one ledger record under the gitignored .worc/ home in the repo.
@@ -403,7 +407,11 @@ def test_in_repo_commit_stores_task_and_summary_not_logs(
     code = cli.main(["--config", str(config), "--heartbeat-seconds", "0", "run", str(task_file)])
     assert code == 0
 
-    branch = "worc/task-300-add-a-thing"
+    branch = git_run(
+        ["branch", "--list", "--format=%(refname:short)", "worc/*-task-300-add-a-thing"],
+        git_repo.clone,
+    )
+    assert branch  # epoch-prefixed; resolve the actual name from the branch list
     assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "main"
     tracked = git_run(["ls-tree", "-r", "--name-only", branch], git_repo.clone)
     assert "tasks/done/task-300.md" in tracked  # task moved into done/ and committed
@@ -526,7 +534,11 @@ def test_cmd_watch_auto_mode_two_tasks(
     # working tree is back on base, so the committed files live in git history, not on disk.
     for tid in ("task-201", "task-202"):
         assert not (git_repo.clone / "tasks" / "pending" / f"{tid}.md").exists()
-        branch = f"worc/{tid}-add-a-thing"
+        branch = git_run(
+            ["branch", "--list", "--format=%(refname:short)", f"worc/*-{tid}-add-a-thing"],
+            git_repo.clone,
+        )
+        assert branch  # epoch-prefixed; resolve the actual name
         tracked = git_run(["ls-tree", "-r", "--name-only", branch], git_repo.clone)
         assert f"tasks/done/{tid}.md" in tracked
         assert f"tasks/done/{tid}.summary.md" in tracked

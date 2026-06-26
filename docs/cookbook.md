@@ -52,10 +52,10 @@ repo:
 The default branch name produced by the Git Manager follows:
 
 ```text
-worc/<task-id>-<slug>
+worc/<epoch>-<task-id>-<slug>
 ```
 
-A task may set `branch_name` to override the full branch name when a project or customer requires a different convention.
+`<epoch>` is the unix timestamp captured when the branch is prepared, so re-submitting the same task never collides with a leftover branch. The full auto-generated name is capped at 50 characters: the slug is truncated to whatever fits (or dropped entirely if the prefix already fills the budget). A task may set `branch_name` to override the full branch name when a project or customer requires a different convention; an override longer than 50 characters logs a warning and falls back to the auto-generated name.
 
 Credentials are configured outside the orchestrator:
 

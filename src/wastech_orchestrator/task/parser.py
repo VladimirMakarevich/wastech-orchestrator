@@ -197,6 +197,18 @@ def slugify(value: str) -> str:
     return slug or "task"
 
 
+def slugify_bounded(value: str, max_len: int) -> str:
+    """``slugify`` then truncate to ``max_len`` chars, dropping any trailing dash left by the cut.
+
+    Returns ``""`` (not ``"task"``) when ``max_len <= 0`` so the branch builder can omit the slug
+    segment cleanly when the prefix already fills the budget. ``rstrip`` suffices: ``slugify`` never
+    emits a leading dash, so truncation can only create a trailing one.
+    """
+    if max_len <= 0:
+        return ""
+    return slugify(value)[:max_len].rstrip("-")
+
+
 def write_normalized(task: NormalizedTask, artifacts_root: str | Path) -> str:
     """Write ``task.normalized.json`` under ``logs/<task-id>/`` and return its path."""
     task_dir = task_artifact_dir(artifacts_root, task.id)

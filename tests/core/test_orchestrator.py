@@ -375,9 +375,10 @@ def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: 
         }
     ]
     assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "main"
-    # The commit landed on the task branch.
-    branches = git_run(["branch", "--list", "worc/task-001-add-a-thing"], git_repo.clone)
-    assert "worc/task-001-add-a-thing" in branches
+    # The commit landed on the task branch (epoch-prefixed; read the actual name from the store).
+    assert row.branch is not None
+    branches = git_run(["branch", "--list", row.branch], git_repo.clone)
+    assert row.branch in branches
 
 
 def test_task_branch_name_override_controls_published_head(
@@ -460,8 +461,9 @@ def test_documentation_node_edit_is_committed(
     assert "documentation" in ran
     assert ran.index("review") < ran.index("documentation") < ran.index("publish")
     # Its docs edit is part of the committed change on the task branch (one shared diff).
-    branch = "worc/task-doc-add-a-thing"
-    committed = git_run(["show", "--name-only", "--format=", branch], git_repo.clone)
+    row = store.get_task("task-doc")
+    assert row is not None and row.branch is not None
+    committed = git_run(["show", "--name-only", "--format=", row.branch], git_repo.clone)
     assert "README.md" in committed
     assert "feature.py" in committed
 
@@ -982,8 +984,8 @@ def test_decomposed_task_commits_each_subtask(
     assert row.subtask_count == 2
     assert row.subtasks_completed == 2
     # Two subtask commits + the final (empty) code commit guard; assert at least 2 new commits.
-    branch = "worc/task-007-add-a-thing"
-    count = git_run(["rev-list", "--count", f"main..{branch}"], git_repo.clone)
+    assert row.branch is not None
+    count = git_run(["rev-list", "--count", f"main..{row.branch}"], git_repo.clone)
     assert int(count) >= 2
     subs = store.get_subtasks("task-007")
     assert all(s.commit_sha for s in subs)
@@ -1140,7 +1142,8 @@ def test_operator_decomposition_runs_each_subtask_one_pr(
     # The immutable spec carries the operator's verbatim body.
     spec = art / "logs" / "epic-001" / "subtasks" / "01-first.md"
     assert "## Acceptance criteria" in spec.read_text(encoding="utf-8")
-    count = git_run(["rev-list", "--count", "main..worc/epic-001-epic"], git_repo.clone)
+    assert row.branch is not None
+    count = git_run(["rev-list", "--count", f"main..{row.branch}"], git_repo.clone)
     assert int(count) >= 3
 
 
@@ -1223,7 +1226,7 @@ def test_operator_decomposition_bad_manifest_rejected_before_branch(
     # Quarantined with a report, and no branch was created.
     report = art / "logs" / "epic-bad" / "validation_report.json"
     assert json.loads(report.read_text(encoding="utf-8"))["reason"] == reason
-    branches = git_run(["branch", "--list", "worc/epic-bad-epic"], git_repo.clone)
+    branches = git_run(["branch", "--list", "worc/*"], git_repo.clone)
     assert branches.strip() == ""
 
 
@@ -1441,7 +1444,9 @@ def test_failed_with_branch_commits_and_pushes_task_and_summary(
 
     assert result.final_status is Status.FAILED
     assert result.pr_url is None  # no PR for a failed attempt
-    branch = "worc/task-fail-add-a-thing"
+    row = store.get_task("task-fail")
+    assert row is not None and row.branch is not None
+    branch = row.branch
     tracked = git_run(["ls-tree", "-r", "--name-only", branch], git_repo.clone)
     assert "tasks/failed/task-fail.md" in tracked  # task moved to failed/ and committed
     assert "tasks/failed/task-fail.summary.md" in tracked  # summary committed beside it

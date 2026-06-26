@@ -112,7 +112,7 @@ repo:
 | `url` | string | `""` | Remote repository URL. |
 | `local_path` | string | `"./workspace/repo"` | Dedicated clone/worktree used for agent runs. |
 | `base_branch` | string | `"main"` | Branch checked out before task branches and after terminal cleanup. |
-| `branch_prefix` | string | `"worc"` | Prefix for default task branches: `worc/<task-id>-<slug>`. A task-level `branch_name` overrides the full branch name. |
+| `branch_prefix` | string | `"worc"` | Prefix for default task branches: `worc/<epoch>-<task-id>-<slug>` (`<epoch>` is the unix timestamp at branch-prep time, so a re-run never collides). The full auto-generated name is capped at 50 chars — the slug is truncated to fit, or dropped entirely if the prefix already fills the budget. A task-level `branch_name` overrides the full name; an override longer than 50 chars logs a warning and falls back to the auto-generated name. |
 
 Git credentials are not stored in this file. Configure SSH, a credential helper, or `gh auth login` outside the orchestrator.
 

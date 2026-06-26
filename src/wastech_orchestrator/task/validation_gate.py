@@ -18,6 +18,7 @@ flag — the front-matter injection scan here is belt-and-braces on top of that 
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -29,6 +30,7 @@ from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.security.injection import scan_frontmatter
 from wastech_orchestrator.task.model import (
     ALLOWED_TASK_KEYS,
+    BRANCH_NAME_MAX_LEN,
     NodeOverride,
     NormalizedTask,
     is_valid_branch_name,
@@ -40,6 +42,8 @@ from wastech_orchestrator.task.parser import (
     extract_section,
     split_frontmatter,
 )
+
+logger = logging.getLogger(__name__)
 
 VALIDATION_REPORT_FILENAME = "validation_report.json"
 
@@ -338,6 +342,13 @@ class ValidationGate:
                 ValidationReason.INVALID_BRANCH_NAME,
                 "branch_name must be a valid Git branch name",
             )
+        if len(raw) > BRANCH_NAME_MAX_LEN:
+            logger.warning(
+                "branch_name %r exceeds %d chars; using the auto-generated branch name instead",
+                raw,
+                BRANCH_NAME_MAX_LEN,
+            )
+            return None, None  # fall back to auto-generation, not a hard reject
         if raw == self._config.repo.base_branch:
             return None, _Reject(
                 ValidationReason.INVALID_BRANCH_NAME,

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
 
 from wastech_orchestrator.config.schema import OrchestratorConfig
+from wastech_orchestrator.observability.logging import LOGGER_NAME
 from wastech_orchestrator.task.model import NodeOverride
 from wastech_orchestrator.task.parser import ParsedSource
 from wastech_orchestrator.task.validation_gate import (
@@ -709,3 +711,40 @@ def test_branch_name_json_task(config: OrchestratorConfig) -> None:
     assert result.normalized is not None
     assert result.normalized.branch_name == "feature/JSON-7-task"
     assert result.normalized.title == "Task title"
+
+
+def test_branch_name_at_soft_cap_accepted(config: OrchestratorConfig) -> None:
+    name = "feature/" + "x" * 42  # exactly 50 chars: within the soft cap, kept as-is
+    assert len(name) == 50
+    text = f'---\nid: task-001\ntitle: T\nbranch_name: "{name}"\n---\n\n## Description\n\nDo it.\n'
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.branch_name == name
+
+
+def test_branch_name_over_soft_cap_falls_back(
+    config: OrchestratorConfig,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Another suite's configure_logging sets propagate=False on the package logger (state leaks
+    # across tests); re-enable it so caplog — attached to root — sees the warning.
+    monkeypatch.setattr(logging.getLogger(LOGGER_NAME), "propagate", True)
+    name = "feature/" + "x" * 60  # > 50 chars but a valid ref (<= 255 bytes)
+    text = f'---\nid: task-001\ntitle: T\nbranch_name: "{name}"\n---\n\n## Description\n\nDo it.\n'
+    with caplog.at_level(logging.WARNING):
+        result = _gate(config).validate(_src(text))
+    # Not a hard reject — the task validates and falls back to the auto-generated branch name.
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.branch_name is None
+    assert "exceeds 50 chars" in caplog.text
+
+
+def test_branch_name_over_byte_ceiling_rejected(config: OrchestratorConfig) -> None:
+    name = "feature/" + "x" * 300  # > 255 bytes: the hard Git ceiling stays a hard error
+    text = f'---\nid: task-001\ntitle: T\nbranch_name: "{name}"\n---\n\n## Description\n\nDo it.\n'
+    result = _gate(config).validate(_src(text))
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_BRANCH_NAME

@@ -14,6 +14,7 @@ from wastech_orchestrator.task.parser import (
     read_subtask_spec,
     read_task_source,
     slugify,
+    slugify_bounded,
     split_frontmatter,
     write_normalized,
 )
@@ -109,6 +110,20 @@ def test_slugify() -> None:
     assert slugify("Add login form validation") == "add-login-form-validation"
     assert slugify("  Trim & Fold!!  ") == "trim-fold"
     assert slugify("***") == "task"
+
+
+def test_slugify_bounded() -> None:
+    # Full fit returns the slug unchanged.
+    assert slugify_bounded("Add login form", 50) == "add-login-form"
+    # Truncated to the budget, and the dash the cut would leave is stripped.
+    assert slugify_bounded("Add login form validation", 10) == "add-login"
+    # A cut landing mid-word truncates without a trailing dash to strip.
+    assert slugify_bounded("authentication", 4) == "auth"
+    # Idempotent on an already-slugified input.
+    assert slugify_bounded("add-login-form", 50) == "add-login-form"
+    # No budget → empty (so the branch builder omits the slug segment entirely).
+    assert slugify_bounded("anything", 0) == ""
+    assert slugify_bounded("anything", -5) == ""
 
 
 def test_write_normalized(tmp_path: Path) -> None:

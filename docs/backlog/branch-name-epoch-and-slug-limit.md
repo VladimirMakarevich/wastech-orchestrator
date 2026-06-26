@@ -1,6 +1,6 @@
 # Branch name: epoch prefix + total length cap
 
-Status: **proposed** (2026-06-26) Date: 2026-06-26 Owner: Vladimir Makarevich
+Status: **accepted (implemented 2026-06-26)** Date: 2026-06-26 Owner: Vladimir Makarevich
 
 When the orchestrator creates a branch for a task it derives the name from a static formula — `{prefix}/{task_id}-{slug}` — where the slug is the full task title lowercased and reduced to alphanumerics plus dashes. Two concrete problems emerge in practice: re-running the same task collides with the already-existing branch, and a long task title produces a slug that overflows GitHub's UI, CI log columns, and readable `git log` output. This document records the decision to add a unix-timestamp epoch before the task-id, cap the total auto-generated branch name at 50 characters (slug is truncated dynamically to fit), and degrade gracefully when an operator-supplied `branch_name` is over the limit.
 
@@ -31,7 +31,7 @@ The hard Git ceiling is 255 UTF-8 bytes (`model.py:BRANCH_NAME_MAX_BYTES`). The 
 
 **Auto-generated names.** Change the formula to:
 
-```
+```text
 {prefix}/{epoch}-{task_id}-{slug}
 ```
 

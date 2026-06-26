@@ -23,6 +23,7 @@ import hashlib
 import json
 import logging
 import tempfile
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +41,8 @@ from wastech_orchestrator.providers.redaction import read_denied_secrets, redact
 from wastech_orchestrator.routing.snapshots import PartialChange, WorkingTreeSnapshot
 from wastech_orchestrator.security.env import build_child_env
 from wastech_orchestrator.state_store import PublishOpRow, StateStore
+from wastech_orchestrator.task.model import BRANCH_NAME_MAX_LEN
+from wastech_orchestrator.task.parser import slugify_bounded
 
 # Git/gh operations are bounded but slower than a trivial command (network fetch/push allowed).
 GIT_TIMEOUT_SECONDS = 300
@@ -234,15 +237,23 @@ class GitManager:
 
     # --- branch flow ----------------------------------------------------------------------
 
-    def branch_name(self, task_id: str, slug: str, *, override: str | None = None) -> str:
+    def branch_name(
+        self, task_id: str, slug: str, *, epoch: int, override: str | None = None
+    ) -> str:
         if override:
             return override
-        return f"{self._config.repo.branch_prefix}/{task_id}-{slug}"
+        fixed = f"{self._config.repo.branch_prefix}/{epoch}-{task_id}"
+        # -1 reserves the dash that joins {fixed} and the slug; slugify_bounded returns "" (slug
+        # segment omitted) once {fixed} alone fills the BRANCH_NAME_MAX_LEN budget.
+        bounded = slugify_bounded(slug, BRANCH_NAME_MAX_LEN - len(fixed) - 1)
+        return f"{fixed}-{bounded}" if bounded else fixed
 
-    def prepare_branch(self, task_id: str, slug: str, *, branch_name: str | None = None) -> str:
+    def prepare_branch(
+        self, task_id: str, slug: str, *, epoch: int, branch_name: str | None = None
+    ) -> str:
         """Fetch, sync ``base_branch``, and create (or reuse) the task branch. Returns its name."""
         base = self._config.repo.base_branch
-        branch = self.branch_name(task_id, slug, override=branch_name)
+        branch = self.branch_name(task_id, slug, epoch=epoch, override=branch_name)
         self._active = _ActiveTask(task_id=task_id, slug=slug, branch=branch)
 
         # Fetch is best-effort: a repo without a remote (some tests) still proceeds locally.
@@ -274,7 +285,10 @@ class GitManager:
         no-op, so re-running ``rerun`` after an interruption is safe. Returns the branch name.
         """
         base = self._config.repo.base_branch
-        branch = self.branch_name(task_id, slug, override=branch_name)
+        # The caller (rerun) always supplies the stored ``branch_name``, so the epoch here is
+        # shadowed by that override; it only mints a name in the degenerate "no stored branch" case,
+        # where ``delete_branch`` below is a no-op anyway.
+        branch = self.branch_name(task_id, slug, epoch=int(time.time()), override=branch_name)
         self._git("fetch", "origin")
         self._git_checked("checkout", base)
         self._git("pull", "--ff-only")
