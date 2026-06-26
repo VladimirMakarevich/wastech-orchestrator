@@ -9,6 +9,7 @@ title: "Add a bounded retry budget to webhook delivery"
 task_type: implementation # selects the FLOW. Omit ⇒ implementation (default). Built-ins: implementation, deep_research, security_audit; or a custom operator flow at .worc/flows/<task_type>.yaml. The task only names the flow — never edits it.
 branch_name: "feature/ABC-123-webhook-retry-budget" # full branch override; omit for repo.branch_prefix/id/title slug.
 auto_merge: false # true = auto-merge (DANGER: skips human review; the task author owns this call) / false = opt out / omit = config default. The task value wins outright.
+priority: high # scheduling order under `watch`: eligible tasks run high → mid → low (ties by filename). low|mid|high; omit/unrecognised ⇒ mid (fail-open). depends_on is always stronger.
 contacts: # handles surfaced for human-in-the-loop prompts and approvals
   - "@team-lead"
   - "@webhooks-oncall"

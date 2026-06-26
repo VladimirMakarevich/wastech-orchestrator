@@ -106,7 +106,7 @@ def test_frontmatter_malformed_duplicate_key(config: OrchestratorConfig) -> None
 
 
 def test_unknown_top_level_field(config: OrchestratorConfig) -> None:
-    text = "---\nid: task-001\ntitle: T\npriority: high\n---\n\n## Description\n\nx\n"
+    text = "---\nid: task-001\ntitle: T\nbogus: true\n---\n\n## Description\n\nx\n"
     result = _gate(config).validate(_src(text))
     assert result.reason is ValidationReason.UNKNOWN_TOP_LEVEL_FIELD
 
@@ -201,6 +201,40 @@ def test_depends_on_absent_defaults_empty(config: OrchestratorConfig) -> None:
     assert result.passed is True
     assert result.normalized is not None
     assert result.normalized.depends_on == ()
+
+
+@pytest.mark.parametrize("value", ["low", "mid", "high"])
+def test_priority_valid_values_parsed(config: OrchestratorConfig, value: str) -> None:
+    text = f"---\nid: task-001\ntitle: T\npriority: {value}\n---\n\n## Description\n\nx\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.priority == value
+
+
+def test_priority_absent_defaults_to_mid(config: OrchestratorConfig) -> None:
+    result = _gate(config).validate(_src(_GOOD))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.priority == "mid"
+
+
+def test_priority_unknown_string_is_tolerated_as_mid(config: OrchestratorConfig) -> None:
+    # Fail-open (unlike auto_merge): an unrecognised scheduling hint must not block a valid task.
+    text = "---\nid: task-001\ntitle: T\npriority: urgent\n---\n\n## Description\n\nx\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.priority == "mid"
+
+
+def test_priority_wrong_type_is_tolerated_as_mid(config: OrchestratorConfig) -> None:
+    # A wrong type would reject for auto_merge; priority instead folds to the safe default.
+    text = "---\nid: task-001\ntitle: T\npriority: 3\n---\n\n## Description\n\nx\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.priority == "mid"
 
 
 def test_subtasks_non_list_rejected(config: OrchestratorConfig) -> None:

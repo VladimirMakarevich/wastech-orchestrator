@@ -217,6 +217,23 @@ def test_depends_on_absent_in_legacy_normalized_loads_empty(tmp_path: Path) -> N
     assert load_normalized(tmp_path, "task-001").depends_on == ()
 
 
+@pytest.mark.parametrize("value", ["low", "mid", "high"])
+def test_priority_round_trips(tmp_path: Path, value: str) -> None:
+    # Restart-safety: a resumed task must keep its scheduling priority across recovery.
+    task = NormalizedTask(id="task-001", title="T", description="Do it", priority=value)
+    write_normalized(task, tmp_path)
+    assert load_normalized(tmp_path, "task-001").priority == value
+
+
+def test_priority_absent_in_legacy_normalized_loads_mid(tmp_path: Path) -> None:
+    task_dir = tmp_path / "logs" / "task-001"
+    task_dir.mkdir(parents=True)
+    (task_dir / "task.normalized.json").write_text(
+        json.dumps({"id": "task-001", "title": "T", "description": "d"}), encoding="utf-8"
+    )
+    assert load_normalized(tmp_path, "task-001").priority == "mid"
+
+
 @pytest.mark.parametrize("value", [("sub/01-a.md", "sub/02-b.md"), ()])
 def test_subtasks_round_trips(tmp_path: Path, value: tuple[str, ...]) -> None:
     # Restart-safety: a resumed operator-decomposed task must preserve its subtasks references.

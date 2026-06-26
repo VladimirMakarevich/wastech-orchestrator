@@ -33,6 +33,7 @@ from wastech_orchestrator.task.model import (
     NormalizedTask,
     is_valid_branch_name,
     is_valid_task_id,
+    normalize_priority,
 )
 from wastech_orchestrator.task.parser import (
     ParsedSource,
@@ -253,6 +254,9 @@ class ValidationGate:
             decomposition=_as_tristate(frontmatter.get("decomposition")),
             contacts=[str(c) for c in frontmatter.get("contacts", [])],
             depends_on=depends_on,
+            # Fail-open: an unrecognised priority normalizes to ``mid`` rather than rejecting the
+            # task (a scheduling hint must never block a valid task — see model.normalize_priority).
+            priority=normalize_priority(frontmatter.get("priority")),
             subtasks=tuple(str(s).strip() for s in frontmatter.get("subtasks", [])),
             node_overrides=node_overrides,
         )

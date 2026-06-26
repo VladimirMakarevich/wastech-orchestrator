@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Literal
 
 # A task id is strict and normalized: a lowercase alphanumeric first char, then up to
 # 63 of [a-z0-9._-]; no whitespace, no leading dot/separator, 1..64 chars. Invalid ids are rejected,
@@ -37,10 +38,36 @@ ALLOWED_TASK_KEYS: frozenset[str] = frozenset(
         "contacts",
         "depends_on",
         "subtasks",
+        "priority",
         "nodes",
     }
 )
 REQUIRED_TASK_FIELDS: frozenset[str] = frozenset({"id", "title"})
+
+# Scheduling priority for the eligibility queue. Unlike the other constrained task fields (which
+# reject on a bad value), priority is **fail-open**: an unrecognised string, a wrong type, or a
+# missing value all fold to ``DEFAULT_PRIORITY`` so a typo in a scheduling hint never blocks an
+# otherwise-valid task (see docs/backlog/task-priority.md). This is the one source of truth the
+# gate, the parser, and the cli scheduler all share.
+TaskPriority = Literal["low", "mid", "high"]
+DEFAULT_PRIORITY: TaskPriority = "mid"
+_PRIORITY_RANK: dict[TaskPriority, int] = {"high": 0, "mid": 1, "low": 2}
+
+
+def normalize_priority(value: object) -> TaskPriority:
+    """Fold any front-matter value to ``low``/``mid``/``high``; else ``mid`` (fail-open)."""
+    if isinstance(value, str):
+        folded = value.strip().lower()
+        if folded == "low":
+            return "low"
+        if folded == "high":
+            return "high"
+    return "mid"
+
+
+def priority_rank(value: object) -> int:
+    """Sort rank (lower runs first) for a raw front-matter priority value."""
+    return _PRIORITY_RANK[normalize_priority(value)]
 
 
 def is_valid_task_id(task_id: str) -> bool:
@@ -125,6 +152,11 @@ class NormalizedTask:
     # ``depends_on`` (subtask orders within one task). Eligibility is computed live from PR/merge
     # state — there is no persisted schema for it.
     depends_on: tuple[str, ...] = ()
+    # Scheduling priority for the eligibility queue: the scheduler runs eligible tasks high → mid →
+    # low, breaking ties by filename. Fail-open — any unrecognised value normalizes to ``mid`` (the
+    # default), so a typo never blocks a task. ``depends_on`` is always stronger (only eligible
+    # tasks are ranked); this is a re-ordering, not a concurrency change.
+    priority: TaskPriority = DEFAULT_PRIORITY
     # Operator-authored decomposition: ordered repository-relative references to per-subtask spec
     # files. Presence ⇒ the orchestrator builds the decomposition from this manifest (reason
     # ``operator_authored``) instead of from the planning agent's proposal, and runs the units

@@ -56,6 +56,7 @@ Only the fields below are allowed. **Any other key makes the task rejected** (`u
 | `prompt_audit` | no | boolean | `true`/`false` forces prompt-audit recording for this task; omit = config default. |
 | `decomposition` | no | boolean | `true`/`false` permits/forbids decomposition for this task (task-wins over `agents.decomposition.enabled`); omit = config default. Only flips the gate — the flow + planning still decide whether a split happens. See the decision guide. |
 | `contacts` | no | list of strings | Plain-text mentions in Telegram notifications. No access control. |
+| `priority` | no | `low` \| `mid` \| `high` | Scheduling order under `watch`: eligible tasks run `high → mid → low`, ties by filename. `depends_on` is always stronger. Omit/unrecognised ⇒ `mid` (fail-open — never rejects). |
 | `nodes` | no | mapping | Per-node `enabled: false` disable toggle, keyed by flow node id (the only per-node knob). See the decision guide. |
 
 Provider, model, and reasoning are **not** task fields — they live on the flow node (the operator's flow + `config.yaml providers`). A task cannot repoint a stage's provider or set its model.

@@ -56,7 +56,7 @@ The three tiers, as files under `.worc/memory/` (names indicative, not final):
 
 **Curation — operator command + autodream.** A new `worc memory …` CLI surface (manual or scheduled) checks memory against the real codebase and drops stale/duplicate/contradicted entries; and `autodream`, a bounded, audited background pass in the `watch_loop` idle gap, does the same self-cleanup opportunistically while no task is active.
 
-**Enable/Disable in config.yaml** Should be able to disable all memory functionality. 
+**Enable/Disable in config.yaml** Should be able to disable all memory functionality.
 
 ## Open questions
 

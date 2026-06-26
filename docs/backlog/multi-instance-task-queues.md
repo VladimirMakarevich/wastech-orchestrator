@@ -42,7 +42,7 @@ The mechanism partitions; it does not arbitrate. **Two instances with the same s
 
 Pointers, not a spec:
 
-- **Task parsing**: add `queue` (default `default`, non-empty string, fail-closed on malformed) to the task model, and extend the lightweight front-matter scan (`_scan_depends_on`, `cli.py`) to also read `queue` so eligibility stays a cheap read.
+- **Task parsing**: add `queue` (default `default`, non-empty string, fail-closed on malformed) to the task model, and extend the lightweight front-matter scan (`_scan_pending_meta`, `cli.py`) to also read `queue` so eligibility stays a cheap read.
 - **Selection filter**: in `select_pending()` / `watch_once()` (`cli.py`), drop pending tasks whose `queue` does not equal the instance selector. This is the whole behavioral change in the loop.
 - **Config**: new `orchestrator.queue` key (default `default`) — loader, validation, config-schema version bump, and the install templates / `config_writer`.
 - **CLI**: `--queue` flag on `worc watch` (and consider `worc run`) overriding the config value.

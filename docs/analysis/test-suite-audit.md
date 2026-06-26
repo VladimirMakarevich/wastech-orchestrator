@@ -83,7 +83,7 @@
 
 ### tests/config/test_loader.py → config loader
 
-Оценка: 🟢 **Очень полный.** ~50 тестов: fail-closed структура (non-mapping/empty/unknown-key), толерантность к legacy-ключам (skip_stages, allow_review_skip, max_budget_usd, routing, auto_merge_allow_per_task, prompts-блок), max_turns (дефолт/sentinels none/max/null/case-insensitive/0/строка), auto_mode, poll_interval, footprint, checks command_sets+timeout, deletion_exempt_paths, reasoning-уровни, auto_merge*, prompt_audit, denied gh pr merge, «все issues собираются».
+Оценка: 🟢 **Очень полный.** ~50 тестов: fail-closed структура (non-mapping/empty/unknown-key), толерантность к legacy-ключам (skip_stages, allow_review_skip, max_budget_usd, routing, auto_merge_allow_per_task, prompts-блок), max_turns (дефолт/sentinels none/max/null/case-insensitive/0/строка), auto_mode, poll_interval, footprint, checks command_sets+timeout, deletion_exempt_paths, reasoning-уровни, auto_merge\*, prompt_audit, denied gh pr merge, «все issues собираются».
 
 Находки:
 
@@ -220,7 +220,7 @@
 - 🔴 Пробел: нет драйв-теста на fail/rework и terminal MANUAL через `drive_flow` (только через FlowEngine напрямую). Поведение recorder/checkpoint при не-DONE-исходе не проверено на этом уровне.
 - 🟡 Та же фейк-дрейф проблема (router/checks/git без Protocol).
 
-### tests/core/test_flow_node_runners.py → core/flow/nodes/* (все раннеры)
+### tests/core/test_flow_node_runners.py → core/flow/nodes/\* (все раннеры)
 
 Оценка: 🟢 **Самый сильный файл suite (1500+ строк).** Исчерпывающее поведенческое покрытие всех раннеров: agent (сборка request, матрица network_access, durable-сессии fresh_disposable/editing_lineage/affinity, infra-exhaustion→NodeInfraError, workspace-write diff, dangerous-diff guard: ask/approve/deny-reconsider-clean/deny-still-dangerous/exempt/non-exempt, read-only пропускает guard, prompt_audit on/off, embedded HITL round-trip + data-driven dispatch + timeout), standalone HITL (approve/deny/question/timeout/no-notifier/resume-persisted), evaluator (severity-mapping parametrize, medium non-blocking+carried, test_quality rework/self-cap/read-only/findings-artifact, review=ordinary-evaluator), checks (pass/fail/launch→manual/all-skipped→manual/partial-skip/empty-diff-vacuous/committed-when-clean, mutation-guard active/clean/no-checks-flow), publish (PR-sequence, requires-branch, requires-body, finalize-body, none-policy, git-fail-after-finalize→manual+failed-recorded).
 
@@ -229,4 +229,3 @@
 - 🟢 Эталон. Каждый тест пинит реальный инвариант, кросс-ссылки на спеку (P2.4, F1/MC2, #8). Negative-paths и exhaustion-семантика покрыты так же тщательно, как happy-path.
 - 🟡 Та же системная фейк-дрейф (duck-typed `FakeStore`/`FakeGit`/`FakeRouter` с `# type: ignore`). Учитывая объём раннеров, завязанных на эти фейки, это главный системный риск suite.
 - 🔵 `test_evaluator_maps_blocking_findings` parametrize не покрывает severity=`critical` в маппинге (есть отдельно в test_quality); и нет кейса с несколькими findings разной severity (берётся max?). Мелочь.
-

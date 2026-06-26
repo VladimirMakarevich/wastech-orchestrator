@@ -22,7 +22,7 @@ from typing import Any
 import yaml
 
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
-from wastech_orchestrator.task.model import NodeOverride, NormalizedTask
+from wastech_orchestrator.task.model import NodeOverride, NormalizedTask, normalize_priority
 
 # For a ``.json`` task the body lives in this reserved key (a ``.md`` task carries it as the body
 # after the front matter). It is therefore not a front-matter field for either format.
@@ -213,6 +213,7 @@ def write_normalized(task: NormalizedTask, artifacts_root: str | Path) -> str:
         "decomposition": task.decomposition,
         "contacts": list(task.contacts),
         "depends_on": list(task.depends_on),
+        "priority": task.priority,
         "subtasks": list(task.subtasks),
         "nodes": {node_id: _node_override_json(ov) for node_id, ov in task.node_overrides.items()},
     }
@@ -247,6 +248,7 @@ def load_normalized(artifacts_root: str | Path, task_id: str) -> NormalizedTask:
         decomposition=data.get("decomposition"),
         contacts=list(data.get("contacts", [])),
         depends_on=tuple(data.get("depends_on", [])),
+        priority=normalize_priority(data.get("priority")),
         subtasks=tuple(data.get("subtasks", [])),
         node_overrides=node_overrides,
     )

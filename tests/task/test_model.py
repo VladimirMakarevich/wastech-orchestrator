@@ -111,6 +111,7 @@ def test_schema_constants() -> None:
         "decomposition",
         "contacts",
         "depends_on",
+        "priority",
         "subtasks",
         "nodes",
     } == ALLOWED_TASK_KEYS

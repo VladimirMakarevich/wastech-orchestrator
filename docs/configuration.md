@@ -347,7 +347,7 @@ validation:
 Current task front matter fields are:
 
 ```text
-id, title, task_type, branch_name, auto_merge, prompt_audit, contacts, depends_on, subtasks, nodes
+id, title, task_type, branch_name, auto_merge, prompt_audit, contacts, depends_on, priority, subtasks, nodes
 ```
 
 A task is deliberately "clean" (PRE.3): it carries only identity/dispatch fields plus the two sanctioned exceptions — `nodes.<node-id>.enabled` (per-task node disable) and `auto_merge` (task-wins). Provider, `model`, and `reasoning` live on the **flow node**, not the task; `decompose` was removed (the flow decides splitting); refinement-skip is deterministic (completeness classification, no `refined` flag). Inside a `nodes.<node-id>` block only `enabled` is valid.

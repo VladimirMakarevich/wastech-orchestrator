@@ -171,6 +171,66 @@ def test_watch_rejects_broken_dependent(make_git_config, git_repo, tmp_path: Pat
     assert [r.final_status for r in results] == [Status.FAILED, Status.DONE]
 
 
+# --- watch_once priority ordering --------------------------------------------------
+
+
+def _prio_folder(tmp_path: Path, *specs: tuple[str, str | None, tuple[str, ...]]) -> Path:
+    """Write pending files. Each spec is ``(filename/id stem, priority | None, depends_on)``."""
+    folder = tmp_path / "pending"
+    folder.mkdir()
+    for stem, priority, deps in specs:
+        lines = [f"id: {stem}", 'title: "T"']
+        if priority is not None:
+            lines.append(f"priority: {priority}")
+        if deps:
+            lines.append("depends_on: [" + ", ".join(f'"{d}"' for d in deps) + "]")
+        front = "---\n" + "\n".join(lines) + "\n---\n"
+        (folder / f"{stem}.md").write_text(f"{front}\n## Description\n\nx\n", encoding="utf-8")
+    return folder
+
+
+def test_watch_runs_eligible_in_priority_order(make_git_config, git_repo, tmp_path: Path) -> None:
+    # Filenames are deliberately the reverse of priority order to prove priority — not the
+    # filename — drives selection. An absent/unknown priority folds to ``mid`` (fail-open).
+    config = make_git_config(git_repo.clone, auto_mode=True)
+    orch = _FakeOrch(runs=[_done("x")] * 4)
+    folder = _prio_folder(
+        tmp_path,
+        ("a-low", "low", ()),
+        ("b-high", "high", ()),
+        ("c-default", None, ()),  # → mid
+        ("d-bogus", "urgent", ()),  # → mid (tolerated)
+    )
+    cli.watch_once(orch, config, folder)  # type: ignore[arg-type]
+    # high first, then the two mids in filename order, then low.
+    assert [Path(p).stem for p in orch.run_calls] == ["b-high", "c-default", "d-bogus", "a-low"]
+
+
+def test_watch_priority_ties_break_by_filename(make_git_config, git_repo, tmp_path: Path) -> None:
+    config = make_git_config(git_repo.clone, auto_mode=True)
+    orch = _FakeOrch(runs=[_done("x")] * 3)
+    folder = _prio_folder(
+        tmp_path, ("z-high", "high", ()), ("a-high", "high", ()), ("m-low", "low", ())
+    )
+    cli.watch_once(orch, config, folder)  # type: ignore[arg-type]
+    assert [Path(p).stem for p in orch.run_calls] == ["a-high", "z-high", "m-low"]
+
+
+def test_watch_depends_on_beats_priority(make_git_config, git_repo, tmp_path: Path) -> None:
+    # A higher-priority but WAITING dependent is skipped so a lower-priority eligible task runs —
+    # depends_on is always stronger than priority (the slot never idles on an unmerged dependency).
+    config = make_git_config(git_repo.clone, auto_mode=False)
+    orch = _DepOrch(
+        verdicts={"a-high": DependencyVerdict(Eligibility.WAITING, "dep 'x' unmerged")},
+        runs=[_done("b-low")],
+    )
+    folder = _prio_folder(tmp_path, ("a-high", "high", ("x",)), ("b-low", "low", ()))
+    results = cli.watch_once(orch, config, folder)  # type: ignore[arg-type]
+    assert orch.eligibility_calls == [("a-high", ("x",))]  # high-priority probed first, then skip
+    assert [Path(p).stem for p in orch.run_calls] == ["b-low"]
+    assert [r.task_id for r in results] == ["b-low"]
+
+
 # --- watch_loop unit tests (periodic discovery) ------------------------------------
 
 

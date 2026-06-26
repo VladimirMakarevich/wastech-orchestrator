@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from importlib import resources
 from importlib.resources.abc import Traversable
 from pathlib import Path
+from typing import NamedTuple
 
 from wastech_orchestrator import __version__, preflight, process_control
 from wastech_orchestrator.config import upgrade as config_upgrade
@@ -52,6 +53,7 @@ from wastech_orchestrator.preflight import preflight_gh
 from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.security.isolation import check_isolation
 from wastech_orchestrator.state_store import IncompatibleStateError, StateStore
+from wastech_orchestrator.task.model import priority_rank
 from wastech_orchestrator.task.parser import read_task_source, split_frontmatter
 
 _LOG = logging.getLogger(__name__)
@@ -653,28 +655,38 @@ def select_pending(folder: Path) -> list[Path]:
     return sorted(p for p in folder.iterdir() if p.suffix.lower() in (".md", ".json"))
 
 
-def _scan_depends_on(task_file: Path) -> tuple[str | None, tuple[str, ...]]:
-    """Lightweight front-matter read of a pending file's ``id`` and ``depends_on`` (no validation).
+class _PendingScan(NamedTuple):
+    """Lightweight scheduler view of a pending task file (no validation)."""
 
-    Used by the scheduler for the cheap skip/eligibility decision; full validation still happens in
-    ``run_task``. A read/decode/parse problem (or a malformed ``depends_on``) yields ``(None, ())``,
-    so the file falls through to the gate, which rejects it properly.
+    task_id: str | None
+    depends_on: tuple[str, ...]
+    priority_rank: int
+
+
+def _scan_pending_meta(task_file: Path) -> _PendingScan:
+    """Lightweight front-matter read of a pending file's ``id``/``depends_on``/``priority``.
+
+    Used by the scheduler for the cheap skip/eligibility/ordering decision; full validation still
+    happens in ``run_task``. A read/decode/parse problem (or a malformed ``depends_on``) yields no
+    id and no deps, so the file falls through to the gate, which rejects it properly. ``priority``
+    is fail-open: any unrecognised value sorts as ``mid`` (see :func:`priority_rank`).
     """
     try:
         source = read_task_source(task_file)
         parse = split_frontmatter(source.raw_bytes.decode("utf-8"), source.suffix)
     except (OSError, UnicodeDecodeError):
-        return None, ()
+        return _PendingScan(None, (), priority_rank(None))
     if not parse.present or parse.malformed:
-        return None, ()
+        return _PendingScan(None, (), priority_rank(None))
     raw_id = parse.frontmatter.get("id")
     task_id = raw_id if isinstance(raw_id, str) else None
+    rank = priority_rank(parse.frontmatter.get("priority"))
     raw_deps = parse.frontmatter.get("depends_on", [])
     if not isinstance(raw_deps, (list, tuple)) or not all(
         isinstance(d, str) and d.strip() for d in raw_deps
     ):
-        return task_id, ()
-    return task_id, tuple(d.strip() for d in raw_deps)
+        return _PendingScan(task_id, (), rank)
+    return _PendingScan(task_id, tuple(d.strip() for d in raw_deps), rank)
 
 
 def watch_once(
@@ -690,6 +702,10 @@ def watch_once(
     task can run instead — the slot never idles on CI; a dependency-broken task (cycle / unknown /
     self-ref) is terminally rejected. The skip does **not** consume the auto-mode-off "one task"
     budget, so the slot still runs one real eligible task per tick.
+
+    Eligible tasks are ranked by ``priority`` (high → mid → low), ties broken by the filename order
+    from :func:`select_pending`. ``depends_on`` is always stronger: a higher-priority but WAITING
+    task is skipped, so a lower-priority eligible task still runs ahead of it.
     """
     results: list[PipelineResult] = []
     resumed = orchestrator.resume()
@@ -699,9 +715,13 @@ def watch_once(
             return results
 
     auto = config.orchestrator.auto_mode.enabled
-    scanned = [(p, *_scan_depends_on(p)) for p in select_pending(folder)]
-    pending_map = {task_id: deps for _p, task_id, deps in scanned if task_id is not None}
-    for task_file, task_id, depends_on in scanned:
+    scans = [(p, _scan_pending_meta(p)) for p in select_pending(folder)]
+    # Sort by (priority_rank, filename); select_pending is already filename-sorted, so the path tie
+    # break preserves the deterministic order within a priority. pending_map is order-independent.
+    scans.sort(key=lambda item: (item[1].priority_rank, item[0]))
+    pending_map = {s.task_id: s.depends_on for _p, s in scans if s.task_id is not None}
+    for task_file, scan in scans:
+        task_id, depends_on = scan.task_id, scan.depends_on
         if not orchestrator.acquire_slot(""):
             break  # the slot is not free (an active task remains)
         if task_id is not None and depends_on:
@@ -791,7 +811,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     # Refuse an explicit run of a dependent whose dependencies are not merged — never build it on a
     # stale base. Unlike ``watch`` (which skips/retries), an explicit ``run`` of an ineligible task
     # is a controlled refusal with a non-zero exit; a malformed file falls through to the gate.
-    task_id, depends_on = _scan_depends_on(Path(args.task_file))
+    scan = _scan_pending_meta(Path(args.task_file))
+    task_id, depends_on = scan.task_id, scan.depends_on
     if task_id is not None and depends_on:
         verdict = orchestrator.dependency_eligibility(task_id, depends_on, pending={})
         if verdict.state is not Eligibility.ELIGIBLE:
