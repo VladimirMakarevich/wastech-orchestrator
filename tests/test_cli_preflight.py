@@ -57,13 +57,20 @@ def _args() -> argparse.Namespace:
     return argparse.Namespace(config="config.yaml", log_level="info")
 
 
-def _patch_providers(monkeypatch: pytest.MonkeyPatch, config: object, **healthy: bool) -> None:
+def _patch_providers(
+    monkeypatch: pytest.MonkeyPatch,
+    config: object,
+    *,
+    gh_result: tuple[bool, str] = (True, "gh: OK"),
+    **healthy: bool,
+) -> None:
     monkeypatch.setattr(cli, "_load_config", lambda _path: config)
     providers = {
         ProviderId.CLAUDE: _FakeHealthProvider("claude", healthy=healthy.get("claude", True)),
         ProviderId.CODEX: _FakeHealthProvider("codex", healthy=healthy.get("codex", True)),
     }
     monkeypatch.setattr(cli, "build_providers", lambda _c, *, artifacts_root: providers)
+    monkeypatch.setattr(cli, "preflight_gh", lambda: gh_result)
 
 
 def test_preflight_ready(
@@ -173,6 +180,49 @@ def test_preflight_telegram_fail(
     assert rc == 1
     assert "telegram: FAIL" in out
     assert "preflight: NOT ready" in out
+
+
+def test_preflight_gh_ok_when_pr_enabled(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _patch_providers(monkeypatch, make_git_config(git_repo.clone), gh_result=(True, "gh: OK"))
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "gh: OK" in out
+    assert "preflight: ready" in out
+
+
+def test_preflight_gh_fail_when_missing_and_pr_enabled(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _patch_providers(
+        monkeypatch,
+        make_git_config(git_repo.clone),
+        gh_result=(False, "gh: FAIL — not on PATH; install from https://cli.github.com/"),
+    )
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "gh: FAIL" in out
+    assert "preflight: NOT ready" in out
+
+
+def test_preflight_gh_warn_when_logged_out_and_pr_enabled(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Auth failure is non-blocking — preflight stays ready so a GH_TOKEN env var or a flaky probe
+    # does not prevent tasks from running.
+    _patch_providers(
+        monkeypatch,
+        make_git_config(git_repo.clone),
+        gh_result=(True, "gh: WARN — present but not logged in (run 'gh auth login')"),
+    )
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "gh: WARN" in out
+    assert "preflight: ready" in out
 
 
 def test_telegram_test_success(

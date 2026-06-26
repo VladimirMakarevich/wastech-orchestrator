@@ -51,17 +51,13 @@ def test_dependency_manifest_is_never_exemptable() -> None:
 
 def test_rename_of_exempt_file_is_not_dangerous() -> None:
     # A rename-away deletes the previous path; if it matches the allowlist it is exempt.
-    entries = (
-        ChangedPath(status="R100", path="docs/b.md", previous_path="docs/a.md"),
-    )
+    entries = (ChangedPath(status="R100", path="docs/b.md", previous_path="docs/a.md"),)
     assert classify_dangerous_diff(entries, ("**/*.md",)) is None
 
 
 def test_rename_from_source_to_md_still_gates_the_source_deletion() -> None:
     # Renaming source code to a .md path deletes the source (previous) path, which is not exempt.
-    entries = (
-        ChangedPath(status="R100", path="docs/a.md", previous_path="src/a.py"),
-    )
+    entries = (ChangedPath(status="R100", path="docs/a.md", previous_path="src/a.py"),)
     result = classify_dangerous_diff(entries, ("**/*.md",))
     assert result is not None
     assert result.risk == "deletion"
