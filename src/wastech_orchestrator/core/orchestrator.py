@@ -1095,6 +1095,7 @@ class Orchestrator:
         p.branch = self._git.prepare_branch(
             p.task.id,
             p.slug,
+            epoch=int(time.time()),  # shadowed by the persisted branch override on a normal resume
             branch_name=p.branch or p.task.branch_name,
         )  # re-attach the existing branch (reused)
         self._store.update_task(p.task.id, branch=p.branch, slug=p.slug)
@@ -1638,12 +1639,14 @@ class Orchestrator:
         # scaffolded, so it never leaks into the operator's git status (no branch exists yet).
         self._git.ensure_runtime_excludes()
         p.slug = slugify(p.task.title)
+        epoch = int(time.time())  # makes a fresh attempt's branch unique (re-run never collides)
         p.branch = self._observe(
             p,
             "branch preparation",
             lambda: self._git.prepare_branch(
                 p.task.id,
                 p.slug,
+                epoch=epoch,
                 branch_name=p.task.branch_name,
             ),
         )

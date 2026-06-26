@@ -106,9 +106,11 @@ def build_git_config(
     auto_merge_strategy: str = "squash",
     auto_merge_wait_for_checks: bool = False,
     prompt_audit: bool = False,
+    tasks_dir: str = "tasks",
 ) -> OrchestratorConfig:
     """Build a config pointing ``repo.local_path`` at the clone, with the given footprint/checks."""
     env_lines = "\n".join(f"    - {e}" for e in _TEST_ALLOWED_ENV)
+    paths_block = f"paths:\n  tasks_dir: {tasks_dir!r}\n" if tasks_dir != "tasks" else ""
     # ``checks`` (shell-string commands) map to one always-on ``default`` command set (v15).
     if checks:
         cmd_lines = "\n".join(f"        - {{ argv: {shlex.split(c)!r} }}" for c in checks)
@@ -125,7 +127,7 @@ repo:
   local_path: {str(clone)!r}
   base_branch: "main"
   branch_prefix: "worc"
-agents:
+{paths_block}agents:
   allowed: [claude, codex]
   max_fix_cycles: {max_fix_cycles}
   max_total_fix_iterations: {max_total_fix_iterations}

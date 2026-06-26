@@ -90,13 +90,20 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
     quarantine = str(spec.repo_local_path / ".worc" / "tasks" / "rejected")
     return {
         "schema_version": CONFIG_SCHEMA_VERSION,
-        "orchestrator": {"auto_mode": {"enabled": spec.auto_mode}, "poll_interval_seconds": 300},
+        "orchestrator": {
+            "auto_mode": {"enabled": spec.auto_mode},
+            "poll_interval_seconds": 300,
+            "queue": "default",
+        },
         "repo": {
             "url": spec.repo_url,
             "local_path": str(spec.repo_local_path),
             "base_branch": spec.base_branch,
             "branch_prefix": "worc",
         },
+        # The default reproduces the historical `tasks/` layout; an operator renames it (and creates
+        # the lifecycle subfolders) to avoid clashing with a repo that already uses `tasks/`.
+        "paths": {"tasks_dir": "tasks"},
         "agents": {
             "allowed": [pid.value for pid in providers],
             "max_stage_attempts": 3,

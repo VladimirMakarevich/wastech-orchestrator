@@ -61,6 +61,8 @@ Allowed fields:
 | `decomposition` | no | boolean | `true` permits a split for this task, `false` forbids one, omitted uses the instance default `agents.decomposition.enabled`. The task value wins; it only flips the gate (the flow + planning still decide whether a split happens). See [`decomposition`](#decomposition). |
 | `contacts` | no | list of strings | Plain-text mentions in Telegram notifications/HITL prompts. |
 | `depends_on` | no | list of strings | Other task ids that must be **merged** before this task may start (non-blocking, merge-gated scheduling). See [`depends_on`](#depends_on). |
+| `priority` | no | `low` \| `mid` \| `high` | Scheduling order for the eligibility queue. The scheduler runs eligible tasks `high → mid → low`, ties broken by filename. Omitted/unrecognised ⇒ `mid` (fail-open — a typo never blocks a task). See [`priority`](#priority). |
+| `queue` | no | non-empty string | Routes the task to a worc instance whose `orchestrator.queue` selector equals this value (plain string equality). Lets several instances share one task pool without colliding. Omitted ⇒ `"default"`. **Fail-closed**: a malformed value (non-string, or empty/whitespace) rejects the task. See [`queue`](#queue). |
 | `subtasks` | no | list of strings | Operator-authored decomposition: ordered references to per-subtask spec files. Presence ⇒ the task runs as a split (one branch, one PR). See [`subtasks`](#subtasks-operator-authored-decomposition). |
 | `nodes` | no | mapping | Per-node disable toggle, keyed by flow node id: `nodes.<node-id>.enabled: false` disables a node. `enabled` is the only valid sub-key. See [`nodes`](#nodes). |
 
@@ -199,6 +201,30 @@ Rules and edge cases:
 - **An unsatisfiable dependency waits forever.** If a dependency failed, went `manual_action_required`, or had its PR closed unmerged, the dependent stays pending and is skipped every pass — _indefinitely_, until you remove or fix the dependency. The orchestrator never auto-fails a dependent (an advisory log line records the wait).
 - **Explicit `run` is refused, not skipped.** `worc run <file>` of a task whose dependencies are not merged exits non-zero with a controlled message rather than building on a stale base. Use `watch` for dependency-gated scheduling.
 - Shape: a list of non-empty strings (validated at the gate).
+
+## `priority`
+
+`priority` orders the eligibility queue so a hot-fix or critical feature runs ahead of routine work without renaming files:
+
+```yaml
+priority: high # low | mid | high — default mid
+```
+
+Under `watch`, after dependency resolution the scheduler ranks the **eligible** tasks `high → mid → low` and breaks ties with the existing filename order, then picks the first. `depends_on` is always stronger: a higher-priority task that is still **waiting** on an unmerged dependency is skipped, so a lower-priority eligible task runs ahead of it. Priority is a re-ordering of the queue, not a concurrency change — the single-active-task invariant is unchanged, and it has no effect on an explicit `worc run <file>` (one task, nothing to order).
+
+Unlike the other constrained fields, `priority` is **fail-open**: a missing value, an unknown string (`urgent`), or a wrong type all fold to `mid` and the task still runs — a typo in a scheduling hint must never reject an otherwise-valid task.
+
+## `queue`
+
+`queue` routes a task to a specific worc instance when several instances share one git-distributed task pool. Each instance has a selector (`orchestrator.queue` in its `config.yaml`, overridable with `worc watch --queue <name>`); an instance only picks a pending task when `task.queue` equals its selector — plain string equality, static partitioning. This is how you run, say, a `backend` instance and a `frontend` instance off one repo without both grabbing the same task.
+
+```yaml
+queue: backend # default "default"
+```
+
+Both sides default to `"default"`, so an untagged task and an untagged instance behave exactly as before; an untagged task lands in `"default"` and is taken only by a `"default"` instance. Unlike `priority`, `queue` is **fail-closed**: a non-string value or an empty/whitespace string rejects the task at the gate (no branch created) rather than defaulting silently.
+
+The mechanism partitions; it does not arbitrate — two instances configured with the same selector on the same pool still collide, so "one worc per queue" is an operator-enforced invariant. A task whose `depends_on` points at a task in another queue simply stays waiting until that dependency is merged by whoever serves it; if no instance serves that queue it waits indefinitely. Decomposition subtasks inherit the parent's queue implicitly — they run inside the parent's pipeline on the parent's branch and never pass through the pending-file selection, so there is no separate `queue` to set on a subtask.
 
 ## `subtasks` (operator-authored decomposition)
 

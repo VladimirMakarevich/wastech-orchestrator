@@ -14,6 +14,7 @@ from wastech_orchestrator.task.parser import (
     read_subtask_spec,
     read_task_source,
     slugify,
+    slugify_bounded,
     split_frontmatter,
     write_normalized,
 )
@@ -111,6 +112,20 @@ def test_slugify() -> None:
     assert slugify("***") == "task"
 
 
+def test_slugify_bounded() -> None:
+    # Full fit returns the slug unchanged.
+    assert slugify_bounded("Add login form", 50) == "add-login-form"
+    # Truncated to the budget, and the dash the cut would leave is stripped.
+    assert slugify_bounded("Add login form validation", 10) == "add-login"
+    # A cut landing mid-word truncates without a trailing dash to strip.
+    assert slugify_bounded("authentication", 4) == "auth"
+    # Idempotent on an already-slugified input.
+    assert slugify_bounded("add-login-form", 50) == "add-login-form"
+    # No budget → empty (so the branch builder omits the slug segment entirely).
+    assert slugify_bounded("anything", 0) == ""
+    assert slugify_bounded("anything", -5) == ""
+
+
 def test_write_normalized(tmp_path: Path) -> None:
     task = NormalizedTask(
         id="task-001",
@@ -171,6 +186,24 @@ def test_branch_name_round_trips(tmp_path: Path, value: str | None) -> None:
     assert load_normalized(tmp_path, "task-001").branch_name == value
 
 
+@pytest.mark.parametrize("value", ["backend", "default"])
+def test_queue_round_trips(tmp_path: Path, value: str) -> None:
+    # Restart-safety: a resumed task must keep its queue tag, so the same instance still owns it.
+    task = NormalizedTask(id="task-001", title="T", description="Do it", queue=value)
+    write_normalized(task, tmp_path)
+    assert load_normalized(tmp_path, "task-001").queue == value
+
+
+def test_queue_absent_in_normalized_loads_default(tmp_path: Path) -> None:
+    # A pre-queue normalized file (no `queue` key) loads as the default queue, never None/empty.
+    task = NormalizedTask(id="task-001", title="T", description="Do it")
+    path = write_normalized(task, tmp_path)
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    del data["queue"]
+    Path(path).write_text(json.dumps(data), encoding="utf-8")
+    assert load_normalized(tmp_path, "task-001").queue == "default"
+
+
 def test_node_overrides_round_trip(tmp_path: Path) -> None:
     # Restart-safety: the per-node disable toggle must survive a resume, or a crash could lose a
     # disable and re-run a node the operator turned off.
@@ -215,6 +248,23 @@ def test_depends_on_absent_in_legacy_normalized_loads_empty(tmp_path: Path) -> N
         json.dumps({"id": "task-001", "title": "T", "description": "d"}), encoding="utf-8"
     )
     assert load_normalized(tmp_path, "task-001").depends_on == ()
+
+
+@pytest.mark.parametrize("value", ["low", "mid", "high"])
+def test_priority_round_trips(tmp_path: Path, value: str) -> None:
+    # Restart-safety: a resumed task must keep its scheduling priority across recovery.
+    task = NormalizedTask(id="task-001", title="T", description="Do it", priority=value)
+    write_normalized(task, tmp_path)
+    assert load_normalized(tmp_path, "task-001").priority == value
+
+
+def test_priority_absent_in_legacy_normalized_loads_mid(tmp_path: Path) -> None:
+    task_dir = tmp_path / "logs" / "task-001"
+    task_dir.mkdir(parents=True)
+    (task_dir / "task.normalized.json").write_text(
+        json.dumps({"id": "task-001", "title": "T", "description": "d"}), encoding="utf-8"
+    )
+    assert load_normalized(tmp_path, "task-001").priority == "mid"
 
 
 @pytest.mark.parametrize("value", [("sub/01-a.md", "sub/02-b.md"), ()])

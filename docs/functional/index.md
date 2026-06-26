@@ -249,9 +249,9 @@ The `<artifacts_root>` is the gitignored `<repo>/.worc/` home (`worc_home_for(co
 - **`completed.jsonl`** — `<artifacts_root>/logs/completed.jsonl`; JSONL (append-only); owner [B08](./blocks/B08-ledger-and-failure-reports.md).
 - **Run artifacts** — `<artifacts_root>/logs/<task-id>/...`; per-node attempt dirs (request/result/stdout/stderr/events) + checks logs; owner [B20](./blocks/B20-artifact-layout.md).
 - **HITL interactions** — `<artifacts_root>/logs/<task-id>/...`; JSON; owner [B12](./blocks/B12-hitl-and-typed-output.md).
-- **`config.yaml`** — `<artifacts_root>/config.yaml`; **schema v15**; discovered by walking up to the Git root; owner [B04](./blocks/B04-install-registry-and-config-discovery.md)/[B05](./blocks/B05-configuration.md).
+- **`config.yaml`** — `<artifacts_root>/config.yaml`; **schema v17**; discovered by walking up to the Git root; owner [B04](./blocks/B04-install-registry-and-config-discovery.md)/[B05](./blocks/B05-configuration.md).
 - **Operator flows** — `<artifacts_root>/flows/<task_type>.yaml`; override packaged built-ins; owner [B29](./blocks/B29-flow-definition-and-validation.md).
-- **Task lifecycle folders** — `tasks/{pending,processing,done,failed}` at the repo root (git-tracked; the task file + `<id>.summary.md` are audit-committed) and `tasks/rejected` under `.worc/` (quarantine); owners [B06](./blocks/B06-orchestrator-pipeline.md), [B16](./blocks/B16-task-parsing-and-validation-gate.md).
+- **Task lifecycle folders** — `<paths.tasks_dir>/{pending,processing,done,failed}` (default `tasks`) at the repo root (git-tracked; the task file + `<id>.summary.md` are audit-committed) and `tasks/rejected` under `.worc/` (quarantine); owners [B06](./blocks/B06-orchestrator-pipeline.md), [B16](./blocks/B16-task-parsing-and-validation-gate.md).
 
 ## External Integrations (confirmed)
 

@@ -8,7 +8,7 @@
 
 The single operator-facing entry point. It builds the argparse parser, dispatches each subcommand to its driver, resolves and loads the config, configures runtime logging, computes the read-only preflight verdict, and maps a terminal task outcome to a process exit code. It owns no business logic — every command delegates to the orchestrator ([B06](B06-orchestrator-pipeline.md)), the installer ([B03](B03-installer-and-scaffolding.md)), the watch daemon mechanics ([B02](B02-watch-daemon-and-scheduling.md)), config load/upgrade ([B05](B05-configuration.md)), or diagnostics, and only translates intent into those calls.
 
-It also fixes two repo-layout constants used pervasively downstream: the gitignored runtime home `<repo>/.worc/` ([cli.py:71](../../../src/wastech_orchestrator/cli.py#L71)) and the tracked, audit-committed `tasks/` lifecycle dirs that sit at the repo root, distinct from the `.worc/`-local runtime dirs.
+It also fixes two repo-layout roots used pervasively downstream: the gitignored runtime home `<repo>/.worc/` ([cli.py:71](../../../src/wastech_orchestrator/cli.py#L71)) and the tracked, audit-committed lifecycle dirs that sit at the repo root, distinct from the `.worc/`-local runtime dirs. The lifecycle root name is `config.paths.tasks_dir` (default `tasks`); `install` scaffolds the default while the runtime resolves the configured value.
 
 ## Public surface
 
@@ -33,9 +33,9 @@ It also fixes two repo-layout constants used pervasively downstream: the gitigno
 
 - **install** ([cli.py:154](../../../src/wastech_orchestrator/cli.py#L154)) — set up the orchestrator in a repo under `.worc/` and write `config.yaml`; positional `repo_path` defaults to `.`, with `--provider`, `--create-pr`/`--auto-mode` (BooleanOptional), `--non-interactive`, `--reconfigure`, `--skip-preflight`, `--dry-run`. There is no `--check` flag — `init` writes an empty `command_sets` and the operator authors the gate. Driver delegates to the wizard ([B03](B03-installer-and-scaffolding.md)).
 - **run** ([cli.py:170](../../../src/wastech_orchestrator/cli.py#L170)) — process one task file (`task_file`, `.md`/`.json`) end-to-end through the pipeline ([B06](B06-orchestrator-pipeline.md)).
-- **watch** ([cli.py:173](../../../src/wastech_orchestrator/cli.py#L173)) — resume any in-flight task, then process pending tasks; `--poll-seconds` overrides `orchestrator.poll_interval_seconds` (`0` = single pass). Loop mechanics in [B02](B02-watch-daemon-and-scheduling.md).
+- **watch** ([cli.py:173](../../../src/wastech_orchestrator/cli.py#L173)) — resume any in-flight task, then process pending tasks; `--poll-seconds` overrides `orchestrator.poll_interval_seconds` (`0` = single pass) and `--queue NAME` overrides `orchestrator.queue` (pick only tasks tagged for this instance). Loop mechanics in [B02](B02-watch-daemon-and-scheduling.md).
 - **stop** ([cli.py:183](../../../src/wastech_orchestrator/cli.py#L183)) — stop a running watch daemon (SIGTERM, then SIGKILL after `--timeout`, default 30s).
-- **restart** ([cli.py:192](../../../src/wastech_orchestrator/cli.py#L192)) — stop the running watcher then start a fresh `watch` in-process; takes `--timeout` and `--poll-seconds`.
+- **restart** ([cli.py:192](../../../src/wastech_orchestrator/cli.py#L192)) — stop the running watcher then start a fresh `watch` in-process; takes `--timeout`, `--poll-seconds`, and `--queue`.
 - **preflight** ([cli.py:210](../../../src/wastech_orchestrator/cli.py#L210)) — read-only health/isolation/flow check, no arguments.
 - **telegram-test** ([cli.py:213](../../../src/wastech_orchestrator/cli.py#L213)) — send a correlated Telegram prompt and wait for a reply; `--timeout-seconds` default 60.
 - **status** ([cli.py:224](../../../src/wastech_orchestrator/cli.py#L224)) — show the active or latest persisted task status; optional `task_id`.

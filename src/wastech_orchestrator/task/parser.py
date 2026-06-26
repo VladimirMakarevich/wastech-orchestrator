@@ -22,7 +22,12 @@ from typing import Any
 import yaml
 
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
-from wastech_orchestrator.task.model import NodeOverride, NormalizedTask
+from wastech_orchestrator.task.model import (
+    DEFAULT_QUEUE,
+    NodeOverride,
+    NormalizedTask,
+    normalize_priority,
+)
 
 # For a ``.json`` task the body lives in this reserved key (a ``.md`` task carries it as the body
 # after the front matter). It is therefore not a front-matter field for either format.
@@ -197,6 +202,18 @@ def slugify(value: str) -> str:
     return slug or "task"
 
 
+def slugify_bounded(value: str, max_len: int) -> str:
+    """``slugify`` then truncate to ``max_len`` chars, dropping any trailing dash left by the cut.
+
+    Returns ``""`` (not ``"task"``) when ``max_len <= 0`` so the branch builder can omit the slug
+    segment cleanly when the prefix already fills the budget. ``rstrip`` suffices: ``slugify`` never
+    emits a leading dash, so truncation can only create a trailing one.
+    """
+    if max_len <= 0:
+        return ""
+    return slugify(value)[:max_len].rstrip("-")
+
+
 def write_normalized(task: NormalizedTask, artifacts_root: str | Path) -> str:
     """Write ``task.normalized.json`` under ``logs/<task-id>/`` and return its path."""
     task_dir = task_artifact_dir(artifacts_root, task.id)
@@ -213,6 +230,8 @@ def write_normalized(task: NormalizedTask, artifacts_root: str | Path) -> str:
         "decomposition": task.decomposition,
         "contacts": list(task.contacts),
         "depends_on": list(task.depends_on),
+        "priority": task.priority,
+        "queue": task.queue,
         "subtasks": list(task.subtasks),
         "nodes": {node_id: _node_override_json(ov) for node_id, ov in task.node_overrides.items()},
     }
@@ -247,6 +266,8 @@ def load_normalized(artifacts_root: str | Path, task_id: str) -> NormalizedTask:
         decomposition=data.get("decomposition"),
         contacts=list(data.get("contacts", [])),
         depends_on=tuple(data.get("depends_on", [])),
+        priority=normalize_priority(data.get("priority")),
+        queue=data.get("queue") or DEFAULT_QUEUE,
         subtasks=tuple(data.get("subtasks", [])),
         node_overrides=node_overrides,
     )

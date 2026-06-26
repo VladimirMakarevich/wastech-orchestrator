@@ -1,6 +1,6 @@
 # Configurable tasks directory
 
-Status: **proposed** (2026-06-25) Date: 2026-06-25 Owner: Vladimir Makarevich
+Status: **implemented** (2026-06-26) Date: 2026-06-25 Owner: Vladimir Makarevich
 
 The tasks directory (`tasks/`) — where pending, processing, done, and failed task files live — is currently hardcoded across five modules. Operators cannot rename it or place it at a different path within the repo, which causes friction when a target project already uses `tasks/` for something else or when team conventions call for a different name (e.g. `.tasks/`, `worktasks/`). This document records the design decision for making the directory name and relative path configurable.
 
@@ -41,10 +41,10 @@ If the operator adds the tasks directory to `.gitignore` (e.g. to keep task file
 
 **The operator just adds the directory to `.gitignore` — no orchestrator config key is needed.** The only observable difference is that the lifecycle transitions no longer appear in git history.
 
-## Open questions
+## Open questions (resolved at implementation)
 
-- Should `paths.tasks_dir` also be expressible as a relative path with subdirectories (e.g. `.worc/tasks`)? Or only a single directory name at repo root? Given the git audit and `EXCLUDED_DIRS` semantics, a flat name is simpler — but a relative sub-path within the repo is also safe as long as `../` is blocked.
-- Does `worc install --reconfigure` re-ask for `tasks_dir`, or only on the first install? (The existing `--reconfigure` flow backs up and overwrites config.yaml; same behaviour is likely correct here.)
+- **Subdirectories?** — **Resolved: relative subpaths are allowed.** `paths.tasks_dir` accepts any repo-relative path (e.g. `tasks`, `.tasks`, `worktasks`, `config/tasks`), validated with the existing `is_safe_relpath` helper (no absolute, no `~`, no `..`). One extra guard: the value must not equal or live under `.worc/`, because that home is gitignored and would silently break the audit trail. The orchestrator's `_relocate_task_file` / `_resolve_task_source` already derive the tasks root structurally (walking up from the lifecycle folder), so subpaths need no extra code there.
+- **Install UX / `--reconfigure`?** — **Resolved: config-only, no prompt and no CLI flag.** `worc install` always writes the default `paths.tasks_dir: tasks` and scaffolds `tasks/`. To use a different directory, the operator edits `config.yaml` and creates the lifecycle subfolders by hand. This keeps the installer's spec-driven, non-interactive shape; `--reconfigure` regenerates the default like every other value.
 
 ## Implementation notes
 

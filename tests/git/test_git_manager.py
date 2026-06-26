@@ -11,8 +11,8 @@ import pytest
 from wastech_orchestrator.config.schema import MergeStrategy
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import (
-    EXCLUDED_DIRS,
     KIND_PR_MERGE,
+    RUNTIME_EXCLUDED_DIRS,
     GitCommandError,
     GitManager,
     GitResult,
@@ -40,33 +40,44 @@ def _manager(
     *,
     create_pr: bool = True,
     audit_on_branch: str = "task",
+    tasks_dir: str = "tasks",
     gh_runner=None,
 ) -> GitManager:
     config = make_git_config(
         git_repo.clone,
         create_pr=create_pr,
         audit_on_branch=audit_on_branch,
+        tasks_dir=tasks_dir,
     )
     return GitManager(config, store=store, artifacts_root=str(artifacts_root), gh_runner=gh_runner)
+
+
+# A fixed epoch keeps the auto-generated branch deterministic for assertions.
+_EPOCH = 1700000000
+
+# Dirs kept out of the code commit under the default config: the gitignored runtime home plus the
+# default task lifecycle dir (`paths.tasks_dir` defaults to "tasks").
+_DEFAULT_EXCLUDED_DIRS = (*RUNTIME_EXCLUDED_DIRS, "tasks")
 
 
 def test_prepare_branch_creates_task_branch(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
 ) -> None:
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
-    branch = gm.prepare_branch("task-001", "add-thing")
-    assert branch == "worc/task-001-add-thing"
+    branch = gm.prepare_branch("task-001", "add-thing", epoch=_EPOCH)
+    assert branch == "worc/1700000000-task-001-add-thing"
     head = git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone)
-    assert head == "worc/task-001-add-thing"
+    assert head == "worc/1700000000-task-001-add-thing"
 
 
 def test_prepare_branch_reused_on_restart(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
-    gm.prepare_branch("task-001", "x")
-    branch = gm.prepare_branch("task-001", "x")  # restart must not fail recreating the branch
-    assert branch == "worc/task-001-x"
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    # Same epoch → same name; restart must not fail recreating the branch.
+    branch = gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    assert branch == "worc/1700000000-task-001-x"
 
 
 def test_prepare_branch_uses_explicit_branch_name(
@@ -76,9 +87,10 @@ def test_prepare_branch_uses_explicit_branch_name(
     branch = gm.prepare_branch(
         "task-001",
         "ignored-slug",
+        epoch=_EPOCH,
         branch_name="feature/ABC-123-customer-branch",
     )
-    assert branch == "feature/ABC-123-customer-branch"
+    assert branch == "feature/ABC-123-customer-branch"  # override shadows the epoch + slug
     head = git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone)
     assert head == "feature/ABC-123-customer-branch"
 
@@ -87,7 +99,7 @@ def test_reset_branch_to_base_uses_explicit_branch_name(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
 ) -> None:
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
-    branch = gm.prepare_branch("task-001", "x", branch_name="feature/ABC-123-reset")
+    branch = gm.prepare_branch("task-001", "x", epoch=_EPOCH, branch_name="feature/ABC-123-reset")
     assert branch == "feature/ABC-123-reset"
     reset = gm.reset_branch_to_base("task-001", "x", branch_name=branch)
     assert reset == branch
@@ -95,14 +107,42 @@ def test_reset_branch_to_base_uses_explicit_branch_name(
     assert git_run(["branch", "--list", branch], git_repo.clone) == ""
 
 
+def test_branch_name_truncates_long_slug_to_total_cap(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    long_slug = "implement-user-authentication-with-oauth2-and-google-provider"
+    name = gm.branch_name("task-001", long_slug, epoch=_EPOCH)
+    assert len(name) <= 50
+    assert name.startswith("worc/1700000000-task-001-")
+    assert not name.endswith("-")  # trailing dash from the cut is stripped
+
+
+def test_branch_name_omits_slug_when_prefix_fills_budget(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    long_id = "task-" + "a" * 40  # prefix + epoch + task_id already exceeds the 50-char cap
+    name = gm.branch_name(long_id, "some-slug", epoch=_EPOCH)
+    assert name == f"worc/1700000000-{long_id}"  # task_id is never truncated; slug dropped
+
+
+def test_branch_name_override_wins_regardless_of_length(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    long_override = "feature/" + "x" * 100  # the 50-char soft cap is the gate's job, not here
+    assert gm.branch_name("task-001", "slug", epoch=_EPOCH, override=long_override) == long_override
+
+
 def test_scoped_staging_excludes_artifact_dirs(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
 ) -> None:
     _task(store)
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
-    gm.prepare_branch("task-001", "x")
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     (git_repo.clone / "src.py").write_text("print('hi')\n", encoding="utf-8")
-    for d in EXCLUDED_DIRS:
+    for d in _DEFAULT_EXCLUDED_DIRS:
         (git_repo.clone / d).mkdir(exist_ok=True)
         (git_repo.clone / d / "junk.txt").write_text("x", encoding="utf-8")
 
@@ -110,7 +150,7 @@ def test_scoped_staging_excludes_artifact_dirs(
     assert sha is not None
     committed = git_run(["show", "--name-only", "--format=", "HEAD"], git_repo.clone).split()
     assert "src.py" in committed
-    for d in EXCLUDED_DIRS:
+    for d in _DEFAULT_EXCLUDED_DIRS:
         assert not any(f.startswith(f"{d}/") for f in committed)
 
 
@@ -118,7 +158,7 @@ def test_changed_code_paths_filters_artifacts(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
-    gm.prepare_branch("task-001", "x")
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     (git_repo.clone / "a.py").write_text("x\n", encoding="utf-8")
     (git_repo.clone / ".worc" / "logs").mkdir(parents=True)
     (git_repo.clone / ".worc" / "logs" / "run.log").write_text("x\n", encoding="utf-8")
@@ -141,7 +181,7 @@ def test_never_uses_git_add_dot(
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
     GitManager._run = spy  # type: ignore[method-assign]
     try:
-        gm.prepare_branch("task-001", "x")
+        gm.prepare_branch("task-001", "x", epoch=_EPOCH)
         (git_repo.clone / "src.py").write_text("x\n", encoding="utf-8")
         gm.commit_code("task-001", "feat")
     finally:
@@ -160,7 +200,7 @@ def test_changed_code_paths_excludes_worc_home(
     # Everything the orchestrator generates lives under the in-repo .worc/ home (state.db,
     # config.yaml, …); nothing under it may ever be staged into a code commit.
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
-    gm.prepare_branch("task-001", "x")
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     (git_repo.clone / ".worc").mkdir(exist_ok=True)
     (git_repo.clone / ".worc" / "state.db").write_text("db\n", encoding="utf-8")
     (git_repo.clone / ".worc" / "config.yaml").write_text("cfg\n", encoding="utf-8")
@@ -177,7 +217,7 @@ def test_resolved_profile_not_in_code_commit(
     # ride a code commit.
     _task(store)
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
-    gm.prepare_branch("task-001", "x")
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     (git_repo.clone / "real.py").write_text("code\n", encoding="utf-8")
     (git_repo.clone / ".worc" / "checks").mkdir(parents=True, exist_ok=True)
     (git_repo.clone / ".worc" / "checks" / "resolved-profile.json").write_text(
@@ -212,7 +252,7 @@ def test_diff_stat_returns_stat_only(
     # diff_stat() feeds the compact minimal summary: files + counts, never the patch body.
     _task(store)
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
-    gm.prepare_branch("task-001", "x")
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     (git_repo.clone / "mod.py").write_text("a = 1\nb = 2\n", encoding="utf-8")
     gm.commit_code("task-001", "feat: mod")
     stat = gm.diff_stat()
@@ -229,7 +269,7 @@ def test_changed_code_paths_since_base_includes_committed_change(
     # still select its command sets.
     _task(store)
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
-    gm.prepare_branch("task-001", "x")
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     (git_repo.clone / "shipped.py").write_text("x = 1\n", encoding="utf-8")
     gm.commit_code("task-001", "feat: shipped")
     assert gm.changed_code_paths() == []  # clean working tree
@@ -243,7 +283,7 @@ def test_changed_code_paths_since_base_includes_uncommitted_and_untracked(
     # untracked file (git diff never reports those — ls-files --others does).
     _task(store)
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
-    gm.prepare_branch("task-001", "x")
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     (git_repo.clone / "tracked.py").write_text("x = 1\n", encoding="utf-8")
     gm.commit_code("task-001", "feat: tracked")
     (git_repo.clone / "tracked.py").write_text("x = 2\n", encoding="utf-8")  # uncommitted edit
@@ -259,14 +299,14 @@ def test_changed_code_paths_since_base_excludes_artifacts(
     # staging set — otherwise an artifact write would trigger unrelated command sets.
     _task(store)
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
-    gm.prepare_branch("task-001", "x")
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     (git_repo.clone / "real.py").write_text("code\n", encoding="utf-8")
-    for d in EXCLUDED_DIRS:
+    for d in _DEFAULT_EXCLUDED_DIRS:
         (git_repo.clone / d).mkdir(exist_ok=True)
         (git_repo.clone / d / "junk.txt").write_text("x\n", encoding="utf-8")
     paths = gm.changed_code_paths_since_base()
     assert "real.py" in paths
-    assert not any(p.startswith(tuple(f"{d}/" for d in EXCLUDED_DIRS)) for p in paths)
+    assert not any(p.startswith(tuple(f"{d}/" for d in _DEFAULT_EXCLUDED_DIRS)) for p in paths)
 
 
 def test_refresh_base_pulls_pushed_commits(
@@ -294,7 +334,7 @@ def test_refresh_base_is_noop_off_base_branch(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
 ) -> None:
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
-    branch = gm.prepare_branch("task-001", "x")  # now on the task branch, not base
+    branch = gm.prepare_branch("task-001", "x", epoch=_EPOCH)  # now on the task branch, not base
     gm.refresh_base()  # must not switch branches or pull onto an active task branch
     assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == branch
 
@@ -304,7 +344,7 @@ def test_audit_commit_commits_tasks_and_summary(
 ) -> None:
     _task(store)
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
-    gm.prepare_branch("task-001", "x")
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     (git_repo.clone / "src.py").write_text("x\n", encoding="utf-8")
     gm.commit_code("task-001", "feat")
     (git_repo.clone / "tasks" / "done").mkdir(parents=True, exist_ok=True)
@@ -325,13 +365,44 @@ def test_audit_commit_commits_tasks_and_summary(
     assert ".worc/logs/run.log" not in tracked
 
 
+def test_configured_tasks_dir_drives_audit_and_code_exclusion(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # A custom `paths.tasks_dir` (here a repo-relative subpath) is what the audit commit stages and
+    # what the code commit excludes — the literal "tasks/" must not be assumed anywhere.
+    tasks_dir = "ops/worktasks"
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, tasks_dir=tasks_dir)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    # A code file plus junk under the configured tasks dir: the code commit must skip the tasks dir.
+    (git_repo.clone / "src.py").write_text("print('hi')\n", encoding="utf-8")
+    (git_repo.clone / tasks_dir / "processing").mkdir(parents=True, exist_ok=True)
+    (git_repo.clone / tasks_dir / "processing" / "task-001.md").write_text("t\n", encoding="utf-8")
+    code_sha = gm.commit_code("task-001", "feat: add src")
+    assert code_sha is not None
+    committed = git_run(["show", "--name-only", "--format=", "HEAD"], git_repo.clone).split()
+    assert "src.py" in committed
+    assert not any(f.startswith(f"{tasks_dir}/") for f in committed)
+
+    # The lifecycle file + summary land in the configured dir; the audit commit stages those.
+    done = git_repo.clone / tasks_dir / "done"
+    done.mkdir(parents=True, exist_ok=True)
+    (done / "task-001.md").write_text("t\n", encoding="utf-8")
+    (done / "task-001.summary.md").write_text("s\n", encoding="utf-8")
+    audit_sha = gm.commit_audit("task-001")
+    assert audit_sha is not None
+    tracked = git_run(["ls-files"], git_repo.clone)
+    assert f"{tasks_dir}/done/task-001.md" in tracked
+    assert f"{tasks_dir}/done/task-001.summary.md" in tracked
+
+
 def test_audit_commit_noop_when_no_tasks(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:
     # With nothing staged under tasks/, the audit commit is a no-op (returns None).
     _task(store)
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
-    gm.prepare_branch("task-001", "x")
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     assert gm.commit_audit("task-001") is None
 
 
@@ -343,7 +414,7 @@ def test_audit_commit_stages_lifecycle_move_deletion(
     # `D` status after terminal cleanup (the task-023 regression).
     _task(store)
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
-    gm.prepare_branch("task-001", "x")
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     failed = git_repo.clone / "tasks" / "failed"
     failed.mkdir(parents=True, exist_ok=True)
     (failed / "task-001.md").write_text("t\n", encoding="utf-8")
@@ -376,7 +447,7 @@ def test_audit_commit_stages_pending_to_failed_move_deletion(
     # (the ion-list regression: the prior fix covered only failed->done, not pending->failed/done).
     _task(store)
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
-    gm.prepare_branch("task-001", "x")
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     pending = git_repo.clone / "tasks" / "pending"
     pending.mkdir(parents=True, exist_ok=True)
     (pending / "task-001.md").write_text("t\n", encoding="utf-8")
@@ -402,7 +473,7 @@ def test_snapshot_capture_and_partial_change(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
 ) -> None:
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
-    gm.prepare_branch("task-001", "x")
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     before = gm.capture()
     assert gm.partial_change_since(before) is None  # nothing changed yet
     (git_repo.clone / "new.py").write_text("x\n", encoding="utf-8")
@@ -418,7 +489,7 @@ def test_push_idempotent(
 ) -> None:
     _task(store)
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
-    branch = gm.prepare_branch("task-001", "x")
+    branch = gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     (git_repo.clone / "src.py").write_text("x\n", encoding="utf-8")
     gm.commit_code("task-001", "feat")
     assert gm.push("task-001", branch) is True
@@ -444,7 +515,7 @@ def test_create_pr_with_fake_gh(
         )
 
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=fake_gh)
-    branch = gm.prepare_branch("task-001", "x")
+    branch = gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     body = tmp_path / "summary.md"
     body.write_text("# summary\n", encoding="utf-8")
     url = gm.create_pr("task-001", branch, title="My PR", body_path=str(body))
@@ -491,7 +562,7 @@ def test_create_pr_disabled_returns_none(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config, create_pr=False)
-    branch = gm.prepare_branch("task-001", "x")
+    branch = gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     assert gm.create_pr("task-001", branch, title="t", body_path="x") is None
 
 
@@ -598,7 +669,7 @@ def test_terminal_cleanup_safe(
     _task(store)
     art = tmp_path / "art"
     gm = _manager(git_repo, store, art, make_git_config)
-    gm.prepare_branch("task-001", "x")
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     (git_repo.clone / "src.py").write_text("x\n", encoding="utf-8")
     gm.commit_code("task-001", "feat")
     outcome = gm.terminal_cleanup("task-001")
@@ -612,7 +683,7 @@ def test_terminal_cleanup_unsafe_when_dirty(
 ) -> None:
     _task(store)
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
-    gm.prepare_branch("task-001", "x")
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     (git_repo.clone / "README.md").write_text("changed\n", encoding="utf-8")  # tracked, uncommitted
     outcome = gm.terminal_cleanup("task-001")
     assert outcome.safe is False
@@ -624,7 +695,7 @@ def test_write_current_diff(
 ) -> None:
     art = tmp_path / "art"
     gm = _manager(git_repo, store, art, make_git_config)
-    gm.prepare_branch("task-001", "x")
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     (git_repo.clone / "README.md").write_text("changed\n", encoding="utf-8")
     path = gm.write_current_diff("task-001")
     assert Path(path).exists()
@@ -639,7 +710,7 @@ def test_write_current_diff_includes_committed_change(
     # understating the diff in the PR body / failure report.
     _task(store)
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
-    gm.prepare_branch("task-001", "x")
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     (git_repo.clone / "feature.py").write_text("value = 42\n", encoding="utf-8")
     gm.commit_code("task-001", "feat: feature")
     path = gm.write_current_diff("task-001")
@@ -664,7 +735,7 @@ def test_current_diff_is_redacted(
     # ones via pattern, denied_read_paths values via the content-scan seed.
     _task(store)
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
-    gm.prepare_branch("task-001", "x")
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     token = "ghp_" + "D" * 20
     file_secret = "plainOpaqueSecret12345"
     (git_repo.clone / ".env").write_text(f"APP_SECRET={file_secret}\n", encoding="utf-8")

@@ -23,6 +23,7 @@ import hashlib
 import json
 import logging
 import tempfile
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,14 +41,18 @@ from wastech_orchestrator.providers.redaction import read_denied_secrets, redact
 from wastech_orchestrator.routing.snapshots import PartialChange, WorkingTreeSnapshot
 from wastech_orchestrator.security.env import build_child_env
 from wastech_orchestrator.state_store import PublishOpRow, StateStore
+from wastech_orchestrator.task.model import BRANCH_NAME_MAX_LEN
+from wastech_orchestrator.task.parser import slugify_bounded
 
 # Git/gh operations are bounded but slower than a trivial command (network fetch/push allowed).
 GIT_TIMEOUT_SECONDS = 300
 
-# The directories that must never enter a code commit. `.worc/` is the gitignored runtime
-# home (state.db, logs/, workspace/, checks/, config.yaml, orchestrator.pid, …); `tasks/` is tracked
-# but rides the separate audit commit, so it is kept out of the code commit too.
-EXCLUDED_DIRS = (".worc", "tasks")
+# The gitignored runtime home that must never enter a code commit (state.db, logs/, workspace/,
+# checks/, config.yaml, orchestrator.pid, …). The configured task lifecycle directory
+# (`paths.tasks_dir`, default "tasks") is also excluded from the code commit — it is tracked but
+# rides the separate audit commit — but that name is per-config, so it is added per instance (see
+# `__init__`). Together they form `self._excluded_dirs`.
+RUNTIME_EXCLUDED_DIRS = (".worc",)
 
 # The single ignore line `install` appends to a target repo's tracked `.gitignore`: the
 # whole `.worc/` runtime home, so an operator's `git status` stays clean. `tasks/` is intentionally
@@ -176,6 +181,10 @@ class GitManager:
         self._store = store
         self._artifacts_root = artifacts_root
         self._clone = config.repo.local_path
+        # The configured task lifecycle dir is tracked but rides the audit commit, so it is excluded
+        # from the code commit alongside the gitignored `.worc/` runtime home.
+        self._tasks_dir = config.paths.tasks_dir
+        self._excluded_dirs = (*RUNTIME_EXCLUDED_DIRS, self._tasks_dir)
         self._env = build_child_env(config.security.allowed_environment)
         self._run_process = run_process
         self._gh_runner = gh_runner
@@ -234,15 +243,23 @@ class GitManager:
 
     # --- branch flow ----------------------------------------------------------------------
 
-    def branch_name(self, task_id: str, slug: str, *, override: str | None = None) -> str:
+    def branch_name(
+        self, task_id: str, slug: str, *, epoch: int, override: str | None = None
+    ) -> str:
         if override:
             return override
-        return f"{self._config.repo.branch_prefix}/{task_id}-{slug}"
+        fixed = f"{self._config.repo.branch_prefix}/{epoch}-{task_id}"
+        # -1 reserves the dash that joins {fixed} and the slug; slugify_bounded returns "" (slug
+        # segment omitted) once {fixed} alone fills the BRANCH_NAME_MAX_LEN budget.
+        bounded = slugify_bounded(slug, BRANCH_NAME_MAX_LEN - len(fixed) - 1)
+        return f"{fixed}-{bounded}" if bounded else fixed
 
-    def prepare_branch(self, task_id: str, slug: str, *, branch_name: str | None = None) -> str:
+    def prepare_branch(
+        self, task_id: str, slug: str, *, epoch: int, branch_name: str | None = None
+    ) -> str:
         """Fetch, sync ``base_branch``, and create (or reuse) the task branch. Returns its name."""
         base = self._config.repo.base_branch
-        branch = self.branch_name(task_id, slug, override=branch_name)
+        branch = self.branch_name(task_id, slug, epoch=epoch, override=branch_name)
         self._active = _ActiveTask(task_id=task_id, slug=slug, branch=branch)
 
         # Fetch is best-effort: a repo without a remote (some tests) still proceeds locally.
@@ -274,7 +291,10 @@ class GitManager:
         no-op, so re-running ``rerun`` after an interruption is safe. Returns the branch name.
         """
         base = self._config.repo.base_branch
-        branch = self.branch_name(task_id, slug, override=branch_name)
+        # The caller (rerun) always supplies the stored ``branch_name``, so the epoch here is
+        # shadowed by that override; it only mints a name in the degenerate "no stored branch" case,
+        # where ``delete_branch`` below is a no-op anyway.
+        branch = self.branch_name(task_id, slug, epoch=int(time.time()), override=branch_name)
         self._git("fetch", "origin")
         self._git_checked("checkout", base)
         self._git("pull", "--ff-only")
@@ -518,16 +538,16 @@ class GitManager:
 
     def _is_artifact_path(self, path: str) -> bool:
         normalized = path.replace("\\", "/")
-        return any(normalized == d or normalized.startswith(f"{d}/") for d in EXCLUDED_DIRS)
+        return any(normalized == d or normalized.startswith(f"{d}/") for d in self._excluded_dirs)
 
     def staged_pathspec(self, paths: Sequence[str]) -> list[str]:
         """Build the scoped ``git add`` pathspec: code paths plus a belt-and-braces guard.
 
-        ``.worc/`` is gitignored, so ``git add`` skips it without a guard; ``tasks/`` is tracked (it
-        rides the separate audit commit), so it is guarded with ``:(exclude)`` to ensure it never
-        slips into the *code* commit.
+        ``.worc/`` is gitignored, so ``git add`` skips it without a guard; the task lifecycle dir
+        (``paths.tasks_dir``) is tracked (it rides the separate audit commit), so it is guarded with
+        ``:(exclude)`` to ensure it never slips into the *code* commit.
         """
-        return [*paths, ":(exclude)tasks/"]
+        return [*paths, f":(exclude){self._tasks_dir}/"]
 
     def commit_code(self, task_id: str, message: str) -> str | None:
         """Stage the agent's code paths and make one commit. Idempotent. Returns the commit SHA.
@@ -613,7 +633,7 @@ class GitManager:
 
         message = footprint.audit_commit_message.format(task_id=task_id)
         audit_files = [
-            f"tasks/{state}/{task_id}{suffix}"
+            f"{self._tasks_dir}/{state}/{task_id}{suffix}"
             # Destination states (``done``/``failed``) stage the file's *appearance*; the source
             # states (``pending``/``processing``) stage its *removal* on a lifecycle move — without
             # the source paths a ``pending→failed`` / ``pending→done`` move of a base-tracked task

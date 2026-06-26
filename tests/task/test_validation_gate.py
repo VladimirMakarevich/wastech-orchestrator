@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
 
 from wastech_orchestrator.config.schema import OrchestratorConfig
+from wastech_orchestrator.observability.logging import LOGGER_NAME
 from wastech_orchestrator.task.model import NodeOverride
 from wastech_orchestrator.task.parser import ParsedSource
 from wastech_orchestrator.task.validation_gate import (
@@ -106,7 +108,7 @@ def test_frontmatter_malformed_duplicate_key(config: OrchestratorConfig) -> None
 
 
 def test_unknown_top_level_field(config: OrchestratorConfig) -> None:
-    text = "---\nid: task-001\ntitle: T\npriority: high\n---\n\n## Description\n\nx\n"
+    text = "---\nid: task-001\ntitle: T\nbogus: true\n---\n\n## Description\n\nx\n"
     result = _gate(config).validate(_src(text))
     assert result.reason is ValidationReason.UNKNOWN_TOP_LEVEL_FIELD
 
@@ -142,6 +144,39 @@ def test_task_type_absent_defaults_to_none(config: OrchestratorConfig) -> None:
 
 def test_task_type_must_be_a_string(config: OrchestratorConfig) -> None:
     text = "---\nid: task-001\ntitle: T\ntask_type: 7\n---\n\n## Description\n\nx\n"
+    result = _gate(config).validate(_src(text))
+    assert result.reason is ValidationReason.INVALID_FIELD_TYPE
+
+
+def test_queue_parsed_into_normalized(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\nqueue: backend\n---\n\n## Description\n\nx\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.queue == "backend"
+
+
+def test_queue_absent_defaults_to_default(config: OrchestratorConfig) -> None:
+    result = _gate(config).validate(_src(_GOOD))
+    assert result.normalized is not None
+    assert result.normalized.queue == "default"
+
+
+def test_queue_must_be_a_string(config: OrchestratorConfig) -> None:
+    # Unlike priority (fail-open), queue is fail-closed: a non-string value rejects the task.
+    text = "---\nid: task-001\ntitle: T\nqueue: 7\n---\n\n## Description\n\nx\n"
+    result = _gate(config).validate(_src(text))
+    assert result.reason is ValidationReason.INVALID_FIELD_TYPE
+
+
+def test_queue_empty_string_rejected(config: OrchestratorConfig) -> None:
+    text = '---\nid: task-001\ntitle: T\nqueue: ""\n---\n\n## Description\n\nx\n'
+    result = _gate(config).validate(_src(text))
+    assert result.reason is ValidationReason.INVALID_FIELD_TYPE
+
+
+def test_queue_whitespace_only_rejected(config: OrchestratorConfig) -> None:
+    text = '---\nid: task-001\ntitle: T\nqueue: "   "\n---\n\n## Description\n\nx\n'
     result = _gate(config).validate(_src(text))
     assert result.reason is ValidationReason.INVALID_FIELD_TYPE
 
@@ -201,6 +236,40 @@ def test_depends_on_absent_defaults_empty(config: OrchestratorConfig) -> None:
     assert result.passed is True
     assert result.normalized is not None
     assert result.normalized.depends_on == ()
+
+
+@pytest.mark.parametrize("value", ["low", "mid", "high"])
+def test_priority_valid_values_parsed(config: OrchestratorConfig, value: str) -> None:
+    text = f"---\nid: task-001\ntitle: T\npriority: {value}\n---\n\n## Description\n\nx\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.priority == value
+
+
+def test_priority_absent_defaults_to_mid(config: OrchestratorConfig) -> None:
+    result = _gate(config).validate(_src(_GOOD))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.priority == "mid"
+
+
+def test_priority_unknown_string_is_tolerated_as_mid(config: OrchestratorConfig) -> None:
+    # Fail-open (unlike auto_merge): an unrecognised scheduling hint must not block a valid task.
+    text = "---\nid: task-001\ntitle: T\npriority: urgent\n---\n\n## Description\n\nx\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.priority == "mid"
+
+
+def test_priority_wrong_type_is_tolerated_as_mid(config: OrchestratorConfig) -> None:
+    # A wrong type would reject for auto_merge; priority instead folds to the safe default.
+    text = "---\nid: task-001\ntitle: T\npriority: 3\n---\n\n## Description\n\nx\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.priority == "mid"
 
 
 def test_subtasks_non_list_rejected(config: OrchestratorConfig) -> None:
@@ -675,3 +744,40 @@ def test_branch_name_json_task(config: OrchestratorConfig) -> None:
     assert result.normalized is not None
     assert result.normalized.branch_name == "feature/JSON-7-task"
     assert result.normalized.title == "Task title"
+
+
+def test_branch_name_at_soft_cap_accepted(config: OrchestratorConfig) -> None:
+    name = "feature/" + "x" * 42  # exactly 50 chars: within the soft cap, kept as-is
+    assert len(name) == 50
+    text = f'---\nid: task-001\ntitle: T\nbranch_name: "{name}"\n---\n\n## Description\n\nDo it.\n'
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.branch_name == name
+
+
+def test_branch_name_over_soft_cap_falls_back(
+    config: OrchestratorConfig,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Another suite's configure_logging sets propagate=False on the package logger (state leaks
+    # across tests); re-enable it so caplog — attached to root — sees the warning.
+    monkeypatch.setattr(logging.getLogger(LOGGER_NAME), "propagate", True)
+    name = "feature/" + "x" * 60  # > 50 chars but a valid ref (<= 255 bytes)
+    text = f'---\nid: task-001\ntitle: T\nbranch_name: "{name}"\n---\n\n## Description\n\nDo it.\n'
+    with caplog.at_level(logging.WARNING):
+        result = _gate(config).validate(_src(text))
+    # Not a hard reject — the task validates and falls back to the auto-generated branch name.
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.branch_name is None
+    assert "exceeds 50 chars" in caplog.text
+
+
+def test_branch_name_over_byte_ceiling_rejected(config: OrchestratorConfig) -> None:
+    name = "feature/" + "x" * 300  # > 255 bytes: the hard Git ceiling stays a hard error
+    text = f'---\nid: task-001\ntitle: T\nbranch_name: "{name}"\n---\n\n## Description\n\nDo it.\n'
+    result = _gate(config).validate(_src(text))
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_BRANCH_NAME

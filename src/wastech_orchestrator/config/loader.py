@@ -33,6 +33,7 @@ from wastech_orchestrator.config.schema import (
     MergeStrategy,
     OrchestratorConfig,
     OrchestratorRuntimeConfig,
+    PathsConfig,
     ProviderConfig,
     RepoConfig,
     SecurityConfig,
@@ -321,10 +322,11 @@ def _build_auto_mode(raw: Any, issues: list[str]) -> AutoModeConfig:
 def _build_orchestrator(raw: Any, issues: list[str]) -> OrchestratorRuntimeConfig:
     where = "orchestrator"
     m = _mapping(raw, where, issues)
-    _check_keys(m, {"auto_mode", "poll_interval_seconds"}, where, issues)
+    _check_keys(m, {"auto_mode", "poll_interval_seconds", "queue"}, where, issues)
     return OrchestratorRuntimeConfig(
         auto_mode=_build_auto_mode(m.get("auto_mode"), issues),
         poll_interval_seconds=_int(m, "poll_interval_seconds", 300, where, issues),
+        queue=_str(m, "queue", "default", where, issues),
     )
 
 
@@ -337,6 +339,16 @@ def _build_repo(raw: Any, issues: list[str]) -> RepoConfig:
         base_branch=_str(m, "base_branch", "main", "repo", issues),
         branch_prefix=_str(m, "branch_prefix", "worc", "repo", issues),
     )
+
+
+def _build_paths(raw: Any, issues: list[str]) -> PathsConfig:
+    # The whole block is optional; an absent `paths` yields the default `tasks_dir`. Only the string
+    # shape is checked here — the repo-relative / `.worc` rules are enforced by the gate.
+    if raw is None:
+        return PathsConfig()
+    m = _mapping(raw, "paths", issues)
+    _check_keys(m, {"tasks_dir"}, "paths", issues)
+    return PathsConfig(tasks_dir=_str(m, "tasks_dir", "tasks", "paths", issues))
 
 
 def _build_provider(raw: Any, pid: ProviderId, issues: list[str]) -> ProviderConfig:
@@ -646,6 +658,7 @@ _TOP_LEVEL_KEYS = {
     "telegram",
     "skills",
     "supervisor",
+    "paths",
     "prompt_audit",
 }
 
@@ -686,6 +699,7 @@ def _parse(raw: Mapping[str, Any], issues: list[str], warnings: list[str]) -> Or
         telegram=_build_telegram(raw.get("telegram"), issues),
         skills=_build_skills(raw.get("skills"), issues),
         supervisor=_build_supervisor(raw.get("supervisor"), issues),
+        paths=_build_paths(raw.get("paths"), issues),
         prompt_audit=_bool(raw, "prompt_audit", False, "<root>", issues),
     )
 

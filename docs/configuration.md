@@ -58,14 +58,16 @@ orchestrator:
   auto_mode:
     enabled: false
   poll_interval_seconds: 300
+  queue: "default"
 ```
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `auto_mode.enabled` | boolean | `false` | When `true`, `watch` can pick another pending task after terminal cleanup succeeds. |
 | `poll_interval_seconds` | integer `>= 0` | `300` | `watch` loop interval: each tick runs `git fetch` + `pull --ff-only` on `base_branch` to discover git-pushed tasks, then re-scans. `0` makes `watch` a single pass (no loop, no periodic sync). `--poll-seconds` overrides it. |
+| `queue` | non-empty string | `"default"` | This instance's queue selector. When several worc instances share one git-distributed task pool, `watch` only picks a pending task whose front-matter `queue` equals this value (plain string equality — static partitioning, no balancing). Both sides default to `"default"`, so a single untagged instance behaves exactly as before; an untagged task lands in `"default"` and is taken only by a `"default"` instance. `--queue` overrides it. |
 
-Auto mode does not enable concurrency. The v1 contract keeps one active task at a time.
+Auto mode does not enable concurrency. The v1 contract keeps one active task at a time. The `queue` selector partitions the pool across instances; it does not arbitrate — two instances with the same selector on the same pool still collide, so "one worc per queue" is an operator-enforced invariant. A task in queue A that `depends_on` a task in queue B simply waits until B's task is merged; if no instance serves B it waits indefinitely (operator responsibility).
 
 ### Runtime observability options
 
@@ -78,7 +80,7 @@ Logging and heartbeat settings are global CLI options, not `config.yaml` fields:
 | `--log-file PATH` | unset | Also write a rotating 10 MB operator log with five backups. |
 | `--heartbeat-seconds N` | `30` | Progress interval for long provider/check/Git calls; `0` disables. |
 
-The `watch` subcommand also accepts `--poll-seconds N` (placed after `watch`), which overrides `orchestrator.poll_interval_seconds` for that run.
+The `watch` subcommand also accepts `--poll-seconds N` and `--queue NAME` (placed after `watch`), which override `orchestrator.poll_interval_seconds` and `orchestrator.queue` for that run. `restart` accepts the same two flags for the fresh loop it starts.
 
 The global `--env-file PATH` loads environment variables from a file before any command runs. With no flag, the orchestrator auto-loads the `.env` beside the resolved `config.yaml` (`<repo-root>/.worc/.env`) when present. Loading never overrides an already-exported variable (the real environment wins), only populates the orchestrator's own process (a value reaches a child only if its name is in `security.allowed_environment`), and logs a secret-free `count`/`path` notice. A missing explicit `--env-file` fails closed (exit 2); a missing auto-discovered `.worc/.env` is a silent no-op. See [operations.md §2](operations.md#2-authorization-configured-outside-the-orchestrator).
 
@@ -112,9 +114,26 @@ repo:
 | `url` | string | `""` | Remote repository URL. |
 | `local_path` | string | `"./workspace/repo"` | Dedicated clone/worktree used for agent runs. |
 | `base_branch` | string | `"main"` | Branch checked out before task branches and after terminal cleanup. |
-| `branch_prefix` | string | `"worc"` | Prefix for default task branches: `worc/<task-id>-<slug>`. A task-level `branch_name` overrides the full branch name. |
+| `branch_prefix` | string | `"worc"` | Prefix for default task branches: `worc/<epoch>-<task-id>-<slug>` (`<epoch>` is the unix timestamp at branch-prep time, so a re-run never collides). The full auto-generated name is capped at 50 chars — the slug is truncated to fit, or dropped entirely if the prefix already fills the budget. A task-level `branch_name` overrides the full name; an override longer than 50 chars logs a warning and falls back to the auto-generated name. |
 
 Git credentials are not stored in this file. Configure SSH, a credential helper, or `gh auth login` outside the orchestrator.
+
+## `paths`
+
+Where the task lifecycle lives. Optional — omit the block to take the default.
+
+```yaml
+paths:
+  tasks_dir: "tasks"
+```
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `tasks_dir` | string | `"tasks"` | Repo-relative directory holding the `pending` / `processing` / `done` / `failed` lifecycle subfolders. Rename it to avoid clashing with a repo that already uses `tasks/` for something else. |
+
+The value is validated as repo-relative: no absolute path, no `~`, no `..` traversal, and it must **not** live under the gitignored `.worc/` home (that would silently drop the audit trail from Git). A repo-relative subpath (e.g. `config/tasks`) is allowed. The lifecycle subfolder names themselves are fixed.
+
+`worc install` only scaffolds the default `tasks/` layout. To use a different directory, set `paths.tasks_dir` in `config.yaml` and create the lifecycle subfolders yourself (the orchestrator does not auto-create a renamed root). If the directory is added to `.gitignore`, the audit commit degrades to a no-op and lifecycle moves simply stop appearing in Git history — no extra config needed.
 
 ## `agents`
 
@@ -347,7 +366,7 @@ validation:
 Current task front matter fields are:
 
 ```text
-id, title, task_type, branch_name, auto_merge, prompt_audit, contacts, depends_on, subtasks, nodes
+id, title, task_type, branch_name, auto_merge, prompt_audit, contacts, depends_on, priority, subtasks, nodes
 ```
 
 A task is deliberately "clean" (PRE.3): it carries only identity/dispatch fields plus the two sanctioned exceptions — `nodes.<node-id>.enabled` (per-task node disable) and `auto_merge` (task-wins). Provider, `model`, and `reasoning` live on the **flow node**, not the task; `decompose` was removed (the flow decides splitting); refinement-skip is deterministic (completeness classification, no `refined` flag). Inside a `nodes.<node-id>` block only `enabled` is valid.
@@ -477,9 +496,9 @@ Auto-merge is **off by default** and only affects the publish step — the mid-p
 
 There is one canonical layout — there are no footprint modes to choose. Everything the orchestrator generates or installs lives under a single gitignored `<repo>/.worc/` home: `config.yaml`, `guide/`, `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `workspace/`, and the `tasks/rejected` quarantine. `install` appends a single `.worc/` line to the repo's tracked `.gitignore`.
 
-The only things **not** under `.worc/` are the `tasks/` lifecycle dirs (`pending`/`processing`/`done`/`failed`), which sit at the repo root and are git-tracked. The committed audit trail is the moved task file plus its `<id>.summary.md` in `tasks/done` or `tasks/failed`; the orchestrator's audit commit stages **only that task's own files** (never `git add -- tasks/` wholesale), so a concurrently-pending task is never swept in.
+The only things **not** under `.worc/` are the `tasks/` lifecycle dirs (`pending`/`processing`/`done`/`failed`), which sit at the repo root and are git-tracked. (`tasks` is the default name; it is configurable via [`paths.tasks_dir`](#paths) — substitute the configured name throughout this section.) The committed audit trail is the moved task file plus its `<id>.summary.md` in `tasks/done` or `tasks/failed`; the orchestrator's audit commit stages **only that task's own files** (never `git add -- tasks/` wholesale), so a concurrently-pending task is never swept in.
 
-The code commit always stages changes with an explicit scoped pathspec and excludes `.worc/` and `tasks/` — `.worc/` is gitignored, and `tasks/` rides the separate audit commit instead.
+The code commit always stages changes with an explicit scoped pathspec and excludes `.worc/` and the configured tasks dir — `.worc/` is gitignored, and the tasks dir rides the separate audit commit instead.
 
 ### `git.footprint`
 

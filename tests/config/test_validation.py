@@ -7,7 +7,7 @@ from dataclasses import replace
 import pytest
 
 from wastech_orchestrator.config.loader import ConfigError, loads_config
-from wastech_orchestrator.config.schema import OrchestratorConfig
+from wastech_orchestrator.config.schema import OrchestratorConfig, PathsConfig
 from wastech_orchestrator.config.validation import validate_config
 from wastech_orchestrator.providers.base import ProviderId
 
@@ -167,6 +167,21 @@ def test_negative_poll_interval_is_rejected(base_config: OrchestratorConfig) -> 
     assert any("poll_interval_seconds" in issue for issue in exc.value.issues)
 
 
+def test_default_queue_validates_clean(base_config: OrchestratorConfig) -> None:
+    assert base_config.orchestrator.queue == "default"
+    assert validate_config(base_config) == []
+
+
+@pytest.mark.parametrize("queue", ["", "   "])
+def test_empty_or_whitespace_queue_is_rejected(
+    base_config: OrchestratorConfig, queue: str
+) -> None:
+    bad = replace(base_config, orchestrator=replace(base_config.orchestrator, queue=queue))
+    with pytest.raises(ConfigError) as exc:
+        validate_config(bad)
+    assert any("orchestrator.queue" in issue for issue in exc.value.issues)
+
+
 def test_non_positive_telegram_timeout_is_rejected(base_config: OrchestratorConfig) -> None:
     bad = replace(
         base_config,
@@ -186,3 +201,30 @@ def test_invalid_telegram_env_name_is_rejected(base_config: OrchestratorConfig, 
     with pytest.raises(ConfigError) as exc:
         validate_config(bad)
     assert any(f"telegram.{field}" in issue for issue in exc.value.issues)
+
+
+def _with_tasks_dir(config: OrchestratorConfig, tasks_dir: str) -> OrchestratorConfig:
+    return replace(config, paths=PathsConfig(tasks_dir=tasks_dir))
+
+
+@pytest.mark.parametrize("tasks_dir", ["tasks", ".tasks", "worktasks", "config/tasks", "a/b/c"])
+def test_repo_relative_tasks_dir_validates_clean(
+    base_config: OrchestratorConfig, tasks_dir: str
+) -> None:
+    assert validate_config(_with_tasks_dir(base_config, tasks_dir)) == []
+
+
+@pytest.mark.parametrize("tasks_dir", ["../escape", "/abs/tasks", "~/tasks", "a/../b", ""])
+def test_unsafe_tasks_dir_is_rejected(base_config: OrchestratorConfig, tasks_dir: str) -> None:
+    with pytest.raises(ConfigError) as exc:
+        validate_config(_with_tasks_dir(base_config, tasks_dir))
+    assert any("paths.tasks_dir" in issue for issue in exc.value.issues)
+
+
+@pytest.mark.parametrize("tasks_dir", [".worc", ".worc/tasks"])
+def test_tasks_dir_under_worc_home_is_rejected(
+    base_config: OrchestratorConfig, tasks_dir: str
+) -> None:
+    with pytest.raises(ConfigError) as exc:
+        validate_config(_with_tasks_dir(base_config, tasks_dir))
+    assert any("paths.tasks_dir" in issue and ".worc" in issue for issue in exc.value.issues)

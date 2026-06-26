@@ -18,6 +18,7 @@ flag — the front-matter injection scan here is belt-and-braces on top of that 
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -29,16 +30,21 @@ from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.security.injection import scan_frontmatter
 from wastech_orchestrator.task.model import (
     ALLOWED_TASK_KEYS,
+    BRANCH_NAME_MAX_LEN,
+    DEFAULT_QUEUE,
     NodeOverride,
     NormalizedTask,
     is_valid_branch_name,
     is_valid_task_id,
+    normalize_priority,
 )
 from wastech_orchestrator.task.parser import (
     ParsedSource,
     extract_section,
     split_frontmatter,
 )
+
+logger = logging.getLogger(__name__)
 
 VALIDATION_REPORT_FILENAME = "validation_report.json"
 
@@ -242,6 +248,9 @@ class ValidationGate:
             return branch_reject, None
         raw_task_type = frontmatter.get("task_type")
         task_type = (str(raw_task_type).strip() or None) if isinstance(raw_task_type, str) else None
+        # _check_field_types already enforced a non-empty string when present; absent ⇒ default.
+        raw_queue = frontmatter.get("queue")
+        queue = raw_queue.strip() if isinstance(raw_queue, str) else DEFAULT_QUEUE
         task = NormalizedTask(
             id=id_value,
             title=str(title_value),
@@ -253,6 +262,10 @@ class ValidationGate:
             decomposition=_as_tristate(frontmatter.get("decomposition")),
             contacts=[str(c) for c in frontmatter.get("contacts", [])],
             depends_on=depends_on,
+            # Fail-open: an unrecognised priority normalizes to ``mid`` rather than rejecting the
+            # task (a scheduling hint must never block a valid task — see model.normalize_priority).
+            priority=normalize_priority(frontmatter.get("priority")),
+            queue=queue,
             subtasks=tuple(str(s).strip() for s in frontmatter.get("subtasks", [])),
             node_overrides=node_overrides,
         )
@@ -277,6 +290,16 @@ class ValidationGate:
         task_type = fm.get("task_type")
         if "task_type" in fm and task_type is not None and not isinstance(task_type, str):
             return _Reject(ValidationReason.INVALID_FIELD_TYPE, "task_type must be a string")
+        # queue is fail-closed (unlike priority): present ⇒ must be a non-empty string. A non-string
+        # type or an empty/whitespace value rejects the task rather than defaulting silently.
+        if "queue" in fm:
+            queue = fm["queue"]
+            if not isinstance(queue, str):
+                return _Reject(ValidationReason.INVALID_FIELD_TYPE, "queue must be a string")
+            if not queue.strip():
+                return _Reject(
+                    ValidationReason.INVALID_FIELD_TYPE, "queue must be a non-empty string"
+                )
         if (
             "auto_merge" in fm
             and fm["auto_merge"] is not None
@@ -334,6 +357,13 @@ class ValidationGate:
                 ValidationReason.INVALID_BRANCH_NAME,
                 "branch_name must be a valid Git branch name",
             )
+        if len(raw) > BRANCH_NAME_MAX_LEN:
+            logger.warning(
+                "branch_name %r exceeds %d chars; using the auto-generated branch name instead",
+                raw,
+                BRANCH_NAME_MAX_LEN,
+            )
+            return None, None  # fall back to auto-generation, not a hard reject
         if raw == self._config.repo.base_branch:
             return None, _Reject(
                 ValidationReason.INVALID_BRANCH_NAME,

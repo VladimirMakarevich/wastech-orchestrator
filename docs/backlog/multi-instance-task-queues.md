@@ -1,6 +1,6 @@
 # Task queue tags for multiple worc instances
 
-Status: **proposed** (2026-06-26) Date: 2026-06-26 Owner: Vladimir Makarevich
+Status: **implemented** (2026-06-26) Date: 2026-06-26 Owner: Vladimir Makarevich
 
 Give each task an optional `queue` tag and each orchestrator instance a matching selector, so several worc instances can share one git-distributed task pool without two of them grabbing the same task. Static partitioning by string equality — no dynamic claiming, no auto-balancing, no cross-process coordination. This is the simplest mechanism that satisfies the actual need ("don't collide") and matches the original instinct ("add some kind of tag to tasks").
 
@@ -30,19 +30,20 @@ Each task carries an optional `queue` string in its front-matter; each instance 
 
 The mechanism partitions; it does not arbitrate. **Two instances with the same selector on the same pool still collide** — "one worc per queue" is an operator-enforced invariant, not something the code guarantees. That is the accepted boundary of a static-partition design.
 
-## Open questions
+## Open questions — resolved
 
-- **Same-selector guard.** Add a soft, machine-local guard (a per-queue lock) that refuses to start a second instance on a queue already being watched, or leave it entirely to the operator? A guard re-introduces a local FS side-channel the decision otherwise avoids.
-- **Multi-queue selectors.** Should an instance be able to serve several queues (`--queue alpha,beta`) and/or a task target a set? Kept to single-string equality for now; both are additive extensions if the need appears.
-- **Cross-queue `depends_on`.** A task in `alpha` that depends on a task in `beta` waits until `beta`'s task is merged; if no instance serves `beta`, it waits forever. Document as operator responsibility, or detect "depends on a queue nobody serves" and surface it?
-- **Decomposition inheritance.** Subtasks almost certainly inherit the parent's `queue` (they run on the parent's branch lineage) — confirm and make it explicit rather than implicit.
-- **`worc install` prompt.** Prompt for the instance queue at install, or just default to `default` and let operators set it only when they actually run multiple instances? Leaning toward no prompt.
+- **Same-selector guard.** _Resolved: no guard._ "One worc per queue" stays an operator-enforced invariant; the code does not re-introduce a machine-local FS side-channel the decision otherwise avoids.
+- **Multi-queue selectors.** _Deferred._ Kept to single-string equality (`--queue <name>`, one task `queue`); serving several queues per instance and targeting a set are additive extensions if the need appears.
+- **Cross-queue `depends_on`.** _Resolved: document only._ Out-of-queue tasks are invisible to an instance, so the existing merge-gated scheduling already handles it — a dependent in `alpha` whose dependency is in `beta` stays WAITING until `beta`'s task is merged; if no instance serves `beta` it waits indefinitely (operator responsibility). No detection added.
+- **Decomposition inheritance.** _Resolved: implicit._ Subtasks run inside the parent's pipeline on the parent's branch and never pass through `watch_once`'s pending-file selection, so the parent's `queue` governs them. There is no per-subtask `queue` field. Documented in `docs/task-authoring.md`.
+- **`worc install` prompt.** _Resolved: no prompt._ The install template seeds `orchestrator.queue: "default"`; operators set a queue only when they actually run multiple instances.
+- **`worc list`.** _Deferred._ There is no `worc list` command today; showing/filtering tasks by queue is recorded as a follow-up rather than built now.
 
 ## Implementation notes
 
 Pointers, not a spec:
 
-- **Task parsing**: add `queue` (default `default`, non-empty string, fail-closed on malformed) to the task model, and extend the lightweight front-matter scan (`_scan_depends_on`, `cli.py`) to also read `queue` so eligibility stays a cheap read.
+- **Task parsing**: add `queue` (default `default`, non-empty string, fail-closed on malformed) to the task model, and extend the lightweight front-matter scan (`_scan_pending_meta`, `cli.py`) to also read `queue` so eligibility stays a cheap read.
 - **Selection filter**: in `select_pending()` / `watch_once()` (`cli.py`), drop pending tasks whose `queue` does not equal the instance selector. This is the whole behavioral change in the loop.
 - **Config**: new `orchestrator.queue` key (default `default`) — loader, validation, config-schema version bump, and the install templates / `config_writer`.
 - **CLI**: `--queue` flag on `worc watch` (and consider `worc run`) overriding the config value.

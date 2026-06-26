@@ -171,6 +171,104 @@ def test_watch_rejects_broken_dependent(make_git_config, git_repo, tmp_path: Pat
     assert [r.final_status for r in results] == [Status.FAILED, Status.DONE]
 
 
+# --- watch_once priority ordering --------------------------------------------------
+
+
+def _prio_folder(tmp_path: Path, *specs: tuple[str, str | None, tuple[str, ...]]) -> Path:
+    """Write pending files. Each spec is ``(filename/id stem, priority | None, depends_on)``."""
+    folder = tmp_path / "pending"
+    folder.mkdir()
+    for stem, priority, deps in specs:
+        lines = [f"id: {stem}", 'title: "T"']
+        if priority is not None:
+            lines.append(f"priority: {priority}")
+        if deps:
+            lines.append("depends_on: [" + ", ".join(f'"{d}"' for d in deps) + "]")
+        front = "---\n" + "\n".join(lines) + "\n---\n"
+        (folder / f"{stem}.md").write_text(f"{front}\n## Description\n\nx\n", encoding="utf-8")
+    return folder
+
+
+def test_watch_runs_eligible_in_priority_order(make_git_config, git_repo, tmp_path: Path) -> None:
+    # Filenames are deliberately the reverse of priority order to prove priority — not the
+    # filename — drives selection. An absent/unknown priority folds to ``mid`` (fail-open).
+    config = make_git_config(git_repo.clone, auto_mode=True)
+    orch = _FakeOrch(runs=[_done("x")] * 4)
+    folder = _prio_folder(
+        tmp_path,
+        ("a-low", "low", ()),
+        ("b-high", "high", ()),
+        ("c-default", None, ()),  # → mid
+        ("d-bogus", "urgent", ()),  # → mid (tolerated)
+    )
+    cli.watch_once(orch, config, folder)  # type: ignore[arg-type]
+    # high first, then the two mids in filename order, then low.
+    assert [Path(p).stem for p in orch.run_calls] == ["b-high", "c-default", "d-bogus", "a-low"]
+
+
+def test_watch_priority_ties_break_by_filename(make_git_config, git_repo, tmp_path: Path) -> None:
+    config = make_git_config(git_repo.clone, auto_mode=True)
+    orch = _FakeOrch(runs=[_done("x")] * 3)
+    folder = _prio_folder(
+        tmp_path, ("z-high", "high", ()), ("a-high", "high", ()), ("m-low", "low", ())
+    )
+    cli.watch_once(orch, config, folder)  # type: ignore[arg-type]
+    assert [Path(p).stem for p in orch.run_calls] == ["a-high", "z-high", "m-low"]
+
+
+def test_watch_depends_on_beats_priority(make_git_config, git_repo, tmp_path: Path) -> None:
+    # A higher-priority but WAITING dependent is skipped so a lower-priority eligible task runs —
+    # depends_on is always stronger than priority (the slot never idles on an unmerged dependency).
+    config = make_git_config(git_repo.clone, auto_mode=False)
+    orch = _DepOrch(
+        verdicts={"a-high": DependencyVerdict(Eligibility.WAITING, "dep 'x' unmerged")},
+        runs=[_done("b-low")],
+    )
+    folder = _prio_folder(tmp_path, ("a-high", "high", ("x",)), ("b-low", "low", ()))
+    results = cli.watch_once(orch, config, folder)  # type: ignore[arg-type]
+    assert orch.eligibility_calls == [("a-high", ("x",))]  # high-priority probed first, then skip
+    assert [Path(p).stem for p in orch.run_calls] == ["b-low"]
+    assert [r.task_id for r in results] == ["b-low"]
+
+
+# --- watch_once queue partitioning (multi-instance selector) ------------------------
+
+
+def _queue_folder(tmp_path: Path, *specs: tuple[str, str | None]) -> Path:
+    """Pending files tagged with a ``queue`` (``None`` ⇒ no queue field, folds to ``default``)."""
+    folder = tmp_path / "pending"
+    folder.mkdir()
+    for task_id, queue in specs:
+        q_line = f"queue: {queue}\n" if queue is not None else ""
+        front = f'---\nid: {task_id}\ntitle: "T"\n{q_line}---\n'
+        (folder / f"{task_id}.md").write_text(f"{front}\n## Description\n\nx\n", encoding="utf-8")
+    return folder
+
+
+def test_watch_picks_only_matching_queue(make_git_config, git_repo, tmp_path: Path) -> None:
+    # config queue defaults to "default": the instance runs explicitly-default and untagged tasks
+    # (untagged folds to default), and skips a task tagged for another queue.
+    config = make_git_config(git_repo.clone, auto_mode=True)
+    orch = _FakeOrch(runs=[_done("a-default"), _done("c-untagged")])
+    folder = _queue_folder(
+        tmp_path, ("a-default", "default"), ("b-backend", "backend"), ("c-untagged", None)
+    )
+    cli.watch_once(orch, config, folder)  # type: ignore[arg-type]
+    assert [Path(p).stem for p in orch.run_calls] == ["a-default", "c-untagged"]
+
+
+def test_watch_queue_selector_override_picks_other_queue(
+    make_git_config, git_repo, tmp_path: Path
+) -> None:
+    # An explicit selector (the `worc watch --queue` override) wins over the config default: only
+    # the matching task runs, the default-tagged one is invisible to this instance.
+    config = make_git_config(git_repo.clone, auto_mode=True)
+    orch = _FakeOrch(runs=[_done("b-backend")])
+    folder = _queue_folder(tmp_path, ("a-default", "default"), ("b-backend", "backend"))
+    cli.watch_once(orch, config, folder, queue="backend")  # type: ignore[arg-type]
+    assert [Path(p).stem for p in orch.run_calls] == ["b-backend"]
+
+
 # --- watch_loop unit tests (periodic discovery) ------------------------------------
 
 
@@ -181,7 +279,7 @@ def test_watch_loop_refreshes_each_tick_and_sleeps_between(
     orch = _FakeOrch()
     ticks = {"n": 0}
 
-    def fake_watch_once(_o, _c, _f):
+    def fake_watch_once(_o, _c, _f, *, queue=None):
         ticks["n"] += 1
         return [_done(f"t{ticks['n']}")]
 
@@ -201,7 +299,7 @@ def test_watch_loop_single_pass_when_poll_zero(
 ) -> None:
     config = make_git_config(git_repo.clone)
     orch = _FakeOrch()
-    monkeypatch.setattr(cli, "watch_once", lambda _o, _c, _f: [])
+    monkeypatch.setattr(cli, "watch_once", lambda _o, _c, _f, *, queue=None: [])
     sleeps: list[float] = []
     cli.watch_loop(orch, config, tmp_path, poll_interval=0, sleep_fn=sleeps.append)  # type: ignore[arg-type]
     assert orch.refresh_calls == 1  # one tick (still refreshes before scanning)
@@ -295,7 +393,11 @@ def test_cmd_run_happy_path(
     assert code == 0
     # One commit on the task branch; the agent's change is committed; back on main.
     assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "main"
-    branch = "worc/task-100-add-a-thing"
+    branch = git_run(
+        ["branch", "--list", "--format=%(refname:short)", "worc/*-task-100-add-a-thing"],
+        git_repo.clone,
+    )
+    assert branch  # epoch-prefixed; resolve the actual name from the branch list
     committed = git_run(["show", "--name-only", "--format=", branch], git_repo.clone)
     assert "agent_change.py" in committed
     # Artifacts + exactly one ledger record under the gitignored .worc/ home in the repo.
@@ -343,7 +445,11 @@ def test_in_repo_commit_stores_task_and_summary_not_logs(
     code = cli.main(["--config", str(config), "--heartbeat-seconds", "0", "run", str(task_file)])
     assert code == 0
 
-    branch = "worc/task-300-add-a-thing"
+    branch = git_run(
+        ["branch", "--list", "--format=%(refname:short)", "worc/*-task-300-add-a-thing"],
+        git_repo.clone,
+    )
+    assert branch  # epoch-prefixed; resolve the actual name from the branch list
     assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "main"
     tracked = git_run(["ls-tree", "-r", "--name-only", branch], git_repo.clone)
     assert "tasks/done/task-300.md" in tracked  # task moved into done/ and committed
@@ -466,7 +572,11 @@ def test_cmd_watch_auto_mode_two_tasks(
     # working tree is back on base, so the committed files live in git history, not on disk.
     for tid in ("task-201", "task-202"):
         assert not (git_repo.clone / "tasks" / "pending" / f"{tid}.md").exists()
-        branch = f"worc/{tid}-add-a-thing"
+        branch = git_run(
+            ["branch", "--list", "--format=%(refname:short)", f"worc/*-{tid}-add-a-thing"],
+            git_repo.clone,
+        )
+        assert branch  # epoch-prefixed; resolve the actual name
         tracked = git_run(["ls-tree", "-r", "--name-only", branch], git_repo.clone)
         assert f"tasks/done/{tid}.md" in tracked
         assert f"tasks/done/{tid}.summary.md" in tracked

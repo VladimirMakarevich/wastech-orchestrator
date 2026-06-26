@@ -81,7 +81,19 @@ from wastech_orchestrator.providers.base import ProviderId
 # behavior (everything gated). It filters only the deletion classification; dependency manifests are
 # never exemptable. Old configs load fail-open (the key defaults to empty) and `upgrade-config`
 # adds it from the template.
-CONFIG_SCHEMA_VERSION = 16
+# v17 (2026-06-26, configurable-tasks-dir): a *format* add of the optional `paths` block with
+# `tasks_dir` (default "tasks") — the repo-relative directory holding the pending/processing/done/
+# failed task lifecycle. Lets an operator avoid colliding with a repo that already uses `tasks/`.
+# Validated repo-relative (no `..`/absolute, never under `.worc/`). Default reproduces today's
+# behavior; old configs omit it and take the default, and `upgrade-config` adds it from the
+# template.
+# v18 (2026-06-26, queue-tag): a *format* add of the optional `orchestrator.queue` (default
+# "default") — the instance's queue selector. With several worc instances sharing one
+# git-distributed task pool, an instance only picks a pending task when
+# `task.queue == orchestrator.queue` (plain string equality, static partitioning, no balancing).
+# Validated non-empty. Default reproduces today's behavior; old configs omit it and take "default",
+# and `upgrade-config` adds it from the template.
+CONFIG_SCHEMA_VERSION = 18
 
 
 class AuditBranch(StrEnum):
@@ -102,6 +114,11 @@ class OrchestratorRuntimeConfig:
     # Seconds between `watch` ticks; each tick fetch/pulls base_branch to discover tasks pushed to
     # git, then processes pending. 0 = single-pass (no loop, no periodic sync).
     poll_interval_seconds: int
+    # This instance's queue selector. Watch only picks a pending task when `task.queue` equals this
+    # value — plain string equality, static partitioning across multiple worc instances sharing one
+    # git-distributed pool. Non-empty; defaults to "default" (same as an untagged task), so a single
+    # untagged instance behaves exactly as before. Overridable per launch with `worc watch --queue`.
+    queue: str = "default"
 
 
 @dataclass(frozen=True)
@@ -110,6 +127,16 @@ class RepoConfig:
     local_path: str
     base_branch: str
     branch_prefix: str
+
+
+@dataclass(frozen=True)
+class PathsConfig:
+    # Repo-relative directory holding the task lifecycle (pending/processing/done/failed). The
+    # default "tasks" reproduces the historical layout; an operator may rename it to avoid a clash
+    # with a repo that already uses `tasks/`. Validated repo-relative — never absolute, no `..`, and
+    # never under the gitignored `.worc/` home (that would silently break the git audit trail). The
+    # lifecycle subfolder names themselves are not configurable.
+    tasks_dir: str = "tasks"
 
 
 @dataclass(frozen=True)
@@ -301,6 +328,7 @@ class OrchestratorConfig:
     telegram: TelegramConfig
     skills: SkillsConfig = SkillsConfig()
     supervisor: SupervisorConfig = field(default_factory=SupervisorConfig)
+    paths: PathsConfig = field(default_factory=PathsConfig)
     # When true, every task records each step's prompt + who-metadata (provider/model/attempt/
     # fallback/status) under `logs/<task-id>/prompt-audit/`. A per-task `prompt_audit` always
     # overrides this (task wins); recording a prompt is not a privilege escalation, so there is no
