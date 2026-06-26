@@ -230,6 +230,8 @@ python -m wastech_orchestrator status                          # active/latest p
 
 `watch` respects `orchestrator.auto_mode.enabled`: off (default) it processes/resumes one task and returns the working copy to `repo.base_branch`; on, it processes pending tasks sequentially, checking out the base branch between them. A `manual_action_required` outcome always blocks automatic continuation. Exit code: `0` done, `1` failed, `2` manual_action_required.
 
+`auto_mode` governs task _sequencing_, not human-in-the-loop. It does not relax HITL: a node that escalates — an embedded `planning`/`refinement` question/approval, or a dangerous-diff approval — still blocks the run until a human answers, or until `telegram.ask_timeout_s` elapses (default 28800 s / 8 h), after which the wait resolves to `manual_action_required`. So an unattended `watch` completes only when the pending tasks are well-specified enough that no node needs to ask (see [task authoring → planning escalation](task-authoring.md#planning-escalation-and-unattended-runs)).
+
 ### Listing tasks and shell completion (`list` / `completion`)
 
 `worc list` is a read-only snapshot of what exists, so you do not have to recall an exact `task_id` to act on it. With no flags it prints three sections — the **active** task, the `tasks/pending` **queue** (read straight from the files; a file with no parseable id is shown by filename), and the most **recent** terminal tasks. Focus it with `--pending`, `--recent [N]`, or `--all` (every known task across all statuses). It opens `state.db` read-only — safe to run while a `watch` daemon is live — and writes nothing.

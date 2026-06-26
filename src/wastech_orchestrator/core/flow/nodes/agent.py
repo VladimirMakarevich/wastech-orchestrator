@@ -129,7 +129,16 @@ class AgentNodeRunner:
             path=path,
         )
         self._require_human(node, typed.human_input.kind, result)
-        run_id2, outcome2 = self._invoke(node, ctx, route, human_input_path=str(path))
+        # Resume the first run's session so the agent continues the same conversation with the
+        # operator's answer (it does not re-derive from scratch). Same-provider only; across a
+        # restart the first-run outcome is gone, so resume falls back to fresh + the answer file.
+        run_id2, outcome2 = self._invoke(
+            node,
+            ctx,
+            route,
+            human_input_path=str(path),
+            resume_session_id=_hitl_resume_session_id(outcome, route),
+        )
         if self._typed(node, ctx, outcome2).human_input is not None:
             raise NodeManualRequired(f"agent node {node.id!r}: second HITL request after an answer")
         mark_consumed(path)
@@ -215,6 +224,7 @@ class AgentNodeRunner:
         route: ResolvedRoute,
         *,
         human_input_path: str | None,
+        resume_session_id: str | None = None,
     ) -> tuple[int, StageOutcome]:
         started_at = self._s.clock()
         run_id = self._s.store.record_node_run(
@@ -230,7 +240,7 @@ class AgentNodeRunner:
                 started_at=started_at,
             )
         )
-        request = self._build_request(node, ctx, route, run_id, human_input_path)
+        request = self._build_request(node, ctx, route, run_id, human_input_path, resume_session_id)
         outcome = self._s.router.run_stage(request, route, snapshot=self._s.snapshot)
         self._record_completion(run_id, outcome)
         record_run_observability(
@@ -410,6 +420,7 @@ class AgentNodeRunner:
         route: ResolvedRoute,
         run_id: int,
         human_input_path: str | None,
+        resume_session_id: str | None = None,
     ) -> AgentRunRequest:
         ceiling = ctx.snapshot.doc.permission_ceiling
         permission = (node.permission_profile or ceiling).value
@@ -441,7 +452,10 @@ class AgentNodeRunner:
             model=node.model,
             reasoning=node.reasoning,
             extra_args=list(node.extra_args),
-            session_id=self._resume_session_id(node, ctx, route),
+            # An explicit HITL resume id (the in-process round-trip) wins; otherwise fall back to
+            # the durable editing-lineage session. For an editing-lineage node these agree (the
+            # explicit value is the just-persisted lineage session).
+            session_id=resume_session_id or self._resume_session_id(node, ctx, route),
             # Network is a per-node override on top of the flow-wide default: the node's
             # ``network_access`` wins (a node-level grant works even in a flow with no
             # ``network_policy``; a node-level ``False`` opts out), and absent it the node inherits
@@ -542,6 +556,19 @@ def _agent_outcome(outcome: StageOutcome) -> NodeOutcome:
         structured_output=result.structured_output if result is not None else None,
         final_message=result.final_message if result is not None else None,
     )
+
+
+def _hitl_resume_session_id(outcome: StageOutcome, route: ResolvedRoute) -> str | None:
+    """The first HITL run's session to resume on the post-answer re-invoke, or ``None``.
+
+    Resume only when the session belongs to the route's primary provider: the re-invoke resolves the
+    same route and leads with the primary, so a fallback-provider session cannot be resumed there
+    (and the router drops ``session_id`` on a cross-provider fallback anyway). ``None`` everywhere
+    else — no result, no session id, or a provider mismatch — yields a fresh session honestly."""
+    result = outcome.result
+    if result is None or not result.session_id or outcome.provider_used != route.primary:
+        return None
+    return result.session_id
 
 
 def _wants_hitl(node: AgentNode) -> bool:
