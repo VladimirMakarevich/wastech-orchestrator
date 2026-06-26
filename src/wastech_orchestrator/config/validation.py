@@ -130,10 +130,35 @@ def validate_config(config: OrchestratorConfig) -> list[str]:
     _validate_telegram(config, issues)
     _validate_supervisor(config, issues)
     _validate_security(config, issues)
+    _validate_paths(config, issues)
 
     if issues:
         raise ConfigError(issues)
     return warnings
+
+
+def _validate_paths(config: OrchestratorConfig, issues: list[str]) -> None:
+    """The task lifecycle directory must live inside the repo working tree. The git audit commit
+    stages files under ``<tasks_dir>/<state>/<id>.md`` and relies on git tracking them, so the value
+    must be repo-relative (no absolute path, no ``~``, no ``..`` traversal). It must also not live
+    under the gitignored ``.worc/`` home — that would silently drop the audit trail from git."""
+    tasks_dir = config.paths.tasks_dir
+    where = "paths.tasks_dir"
+    if not tasks_dir.strip():
+        issues.append(f"{where}: must be a non-empty repo-relative directory")
+        return
+    if not is_safe_relpath(tasks_dir):
+        issues.append(
+            f"{where} {tasks_dir!r} must be a repo-relative directory "
+            "(no absolute path, no '~', no '..' traversal)"
+        )
+        return
+    normalized = tasks_dir.replace("\\", "/").strip().strip("/")
+    if normalized == ".worc" or normalized.startswith(".worc/"):
+        issues.append(
+            f"{where} {tasks_dir!r} must not live under the gitignored '.worc/' home "
+            "(the task lifecycle would be excluded from the git audit trail)"
+        )
 
 
 def _validate_supervisor(config: OrchestratorConfig, issues: list[str]) -> None:

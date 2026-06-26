@@ -97,6 +97,9 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "base_branch": spec.base_branch,
             "branch_prefix": "worc",
         },
+        # The default reproduces the historical `tasks/` layout; an operator renames it (and creates
+        # the lifecycle subfolders) to avoid clashing with a repo that already uses `tasks/`.
+        "paths": {"tasks_dir": "tasks"},
         "agents": {
             "allowed": [pid.value for pid in providers],
             "max_stage_attempts": 3,

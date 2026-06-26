@@ -11,8 +11,8 @@ import pytest
 from wastech_orchestrator.config.schema import MergeStrategy
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import (
-    EXCLUDED_DIRS,
     KIND_PR_MERGE,
+    RUNTIME_EXCLUDED_DIRS,
     GitCommandError,
     GitManager,
     GitResult,
@@ -40,18 +40,24 @@ def _manager(
     *,
     create_pr: bool = True,
     audit_on_branch: str = "task",
+    tasks_dir: str = "tasks",
     gh_runner=None,
 ) -> GitManager:
     config = make_git_config(
         git_repo.clone,
         create_pr=create_pr,
         audit_on_branch=audit_on_branch,
+        tasks_dir=tasks_dir,
     )
     return GitManager(config, store=store, artifacts_root=str(artifacts_root), gh_runner=gh_runner)
 
 
 # A fixed epoch keeps the auto-generated branch deterministic for assertions.
 _EPOCH = 1700000000
+
+# Dirs kept out of the code commit under the default config: the gitignored runtime home plus the
+# default task lifecycle dir (`paths.tasks_dir` defaults to "tasks").
+_DEFAULT_EXCLUDED_DIRS = (*RUNTIME_EXCLUDED_DIRS, "tasks")
 
 
 def test_prepare_branch_creates_task_branch(
@@ -136,7 +142,7 @@ def test_scoped_staging_excludes_artifact_dirs(
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
     gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     (git_repo.clone / "src.py").write_text("print('hi')\n", encoding="utf-8")
-    for d in EXCLUDED_DIRS:
+    for d in _DEFAULT_EXCLUDED_DIRS:
         (git_repo.clone / d).mkdir(exist_ok=True)
         (git_repo.clone / d / "junk.txt").write_text("x", encoding="utf-8")
 
@@ -144,7 +150,7 @@ def test_scoped_staging_excludes_artifact_dirs(
     assert sha is not None
     committed = git_run(["show", "--name-only", "--format=", "HEAD"], git_repo.clone).split()
     assert "src.py" in committed
-    for d in EXCLUDED_DIRS:
+    for d in _DEFAULT_EXCLUDED_DIRS:
         assert not any(f.startswith(f"{d}/") for f in committed)
 
 
@@ -295,12 +301,12 @@ def test_changed_code_paths_since_base_excludes_artifacts(
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
     gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     (git_repo.clone / "real.py").write_text("code\n", encoding="utf-8")
-    for d in EXCLUDED_DIRS:
+    for d in _DEFAULT_EXCLUDED_DIRS:
         (git_repo.clone / d).mkdir(exist_ok=True)
         (git_repo.clone / d / "junk.txt").write_text("x\n", encoding="utf-8")
     paths = gm.changed_code_paths_since_base()
     assert "real.py" in paths
-    assert not any(p.startswith(tuple(f"{d}/" for d in EXCLUDED_DIRS)) for p in paths)
+    assert not any(p.startswith(tuple(f"{d}/" for d in _DEFAULT_EXCLUDED_DIRS)) for p in paths)
 
 
 def test_refresh_base_pulls_pushed_commits(
@@ -357,6 +363,37 @@ def test_audit_commit_commits_tasks_and_summary(
     assert "tasks/done/task-001.md" in tracked
     assert "tasks/done/task-001.summary.md" in tracked
     assert ".worc/logs/run.log" not in tracked
+
+
+def test_configured_tasks_dir_drives_audit_and_code_exclusion(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # A custom `paths.tasks_dir` (here a repo-relative subpath) is what the audit commit stages and
+    # what the code commit excludes — the literal "tasks/" must not be assumed anywhere.
+    tasks_dir = "ops/worktasks"
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, tasks_dir=tasks_dir)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    # A code file plus junk under the configured tasks dir: the code commit must skip the tasks dir.
+    (git_repo.clone / "src.py").write_text("print('hi')\n", encoding="utf-8")
+    (git_repo.clone / tasks_dir / "processing").mkdir(parents=True, exist_ok=True)
+    (git_repo.clone / tasks_dir / "processing" / "task-001.md").write_text("t\n", encoding="utf-8")
+    code_sha = gm.commit_code("task-001", "feat: add src")
+    assert code_sha is not None
+    committed = git_run(["show", "--name-only", "--format=", "HEAD"], git_repo.clone).split()
+    assert "src.py" in committed
+    assert not any(f.startswith(f"{tasks_dir}/") for f in committed)
+
+    # The lifecycle file + summary land in the configured dir; the audit commit stages those.
+    done = git_repo.clone / tasks_dir / "done"
+    done.mkdir(parents=True, exist_ok=True)
+    (done / "task-001.md").write_text("t\n", encoding="utf-8")
+    (done / "task-001.summary.md").write_text("s\n", encoding="utf-8")
+    audit_sha = gm.commit_audit("task-001")
+    assert audit_sha is not None
+    tracked = git_run(["ls-files"], git_repo.clone)
+    assert f"{tasks_dir}/done/task-001.md" in tracked
+    assert f"{tasks_dir}/done/task-001.summary.md" in tracked
 
 
 def test_audit_commit_noop_when_no_tasks(

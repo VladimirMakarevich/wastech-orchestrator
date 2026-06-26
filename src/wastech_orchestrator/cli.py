@@ -81,6 +81,9 @@ WORC_HOME = ".worc"
 # Task lifecycle dirs created at the repo root by `install` (tracked; the audit commit captures the
 # task file + its `<id>.summary.md` in done/failed). `tasks/rejected` is the quarantine and
 # lives under `.worc/` instead, so rejected tasks are never swept into the audit commit.
+# These are the install-time *default* layout (`paths.tasks_dir` defaults to "tasks"); the runtime
+# reads `config.paths.tasks_dir` (see `pending_dir`). An operator who configures a different
+# directory creates its lifecycle subfolders themselves.
 REPO_TASK_DIRS: tuple[str, ...] = (
     "tasks/pending",
     "tasks/processing",
@@ -636,8 +639,8 @@ def tasks_root_for(config: OrchestratorConfig) -> Path:
 
 
 def pending_dir(config: OrchestratorConfig) -> Path:
-    """The folder ``watch`` scans for new tasks: ``<repo>/tasks/pending``."""
-    return tasks_root_for(config) / "tasks" / "pending"
+    """The folder ``watch`` scans for new tasks: ``<repo>/<paths.tasks_dir>/pending``."""
+    return tasks_root_for(config) / config.paths.tasks_dir / "pending"
 
 
 def _configure_runtime_logging(args: argparse.Namespace) -> None:

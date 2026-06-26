@@ -81,7 +81,13 @@ from wastech_orchestrator.providers.base import ProviderId
 # behavior (everything gated). It filters only the deletion classification; dependency manifests are
 # never exemptable. Old configs load fail-open (the key defaults to empty) and `upgrade-config`
 # adds it from the template.
-CONFIG_SCHEMA_VERSION = 16
+# v17 (2026-06-26, configurable-tasks-dir): a *format* add of the optional `paths` block with
+# `tasks_dir` (default "tasks") — the repo-relative directory holding the pending/processing/done/
+# failed task lifecycle. Lets an operator avoid colliding with a repo that already uses `tasks/`.
+# Validated repo-relative (no `..`/absolute, never under `.worc/`). Default reproduces today's
+# behavior; old configs omit it and take the default, and `upgrade-config` adds it from the
+# template.
+CONFIG_SCHEMA_VERSION = 17
 
 
 class AuditBranch(StrEnum):
@@ -110,6 +116,16 @@ class RepoConfig:
     local_path: str
     base_branch: str
     branch_prefix: str
+
+
+@dataclass(frozen=True)
+class PathsConfig:
+    # Repo-relative directory holding the task lifecycle (pending/processing/done/failed). The
+    # default "tasks" reproduces the historical layout; an operator may rename it to avoid a clash
+    # with a repo that already uses `tasks/`. Validated repo-relative — never absolute, no `..`, and
+    # never under the gitignored `.worc/` home (that would silently break the git audit trail). The
+    # lifecycle subfolder names themselves are not configurable.
+    tasks_dir: str = "tasks"
 
 
 @dataclass(frozen=True)
@@ -301,6 +317,7 @@ class OrchestratorConfig:
     telegram: TelegramConfig
     skills: SkillsConfig = SkillsConfig()
     supervisor: SupervisorConfig = field(default_factory=SupervisorConfig)
+    paths: PathsConfig = field(default_factory=PathsConfig)
     # When true, every task records each step's prompt + who-metadata (provider/model/attempt/
     # fallback/status) under `logs/<task-id>/prompt-audit/`. A per-task `prompt_audit` always
     # overrides this (task wins); recording a prompt is not a privilege escalation, so there is no

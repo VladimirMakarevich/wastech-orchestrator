@@ -47,10 +47,12 @@ from wastech_orchestrator.task.parser import slugify_bounded
 # Git/gh operations are bounded but slower than a trivial command (network fetch/push allowed).
 GIT_TIMEOUT_SECONDS = 300
 
-# The directories that must never enter a code commit. `.worc/` is the gitignored runtime
-# home (state.db, logs/, workspace/, checks/, config.yaml, orchestrator.pid, …); `tasks/` is tracked
-# but rides the separate audit commit, so it is kept out of the code commit too.
-EXCLUDED_DIRS = (".worc", "tasks")
+# The gitignored runtime home that must never enter a code commit (state.db, logs/, workspace/,
+# checks/, config.yaml, orchestrator.pid, …). The configured task lifecycle directory
+# (`paths.tasks_dir`, default "tasks") is also excluded from the code commit — it is tracked but
+# rides the separate audit commit — but that name is per-config, so it is added per instance (see
+# `__init__`). Together they form `self._excluded_dirs`.
+RUNTIME_EXCLUDED_DIRS = (".worc",)
 
 # The single ignore line `install` appends to a target repo's tracked `.gitignore`: the
 # whole `.worc/` runtime home, so an operator's `git status` stays clean. `tasks/` is intentionally
@@ -179,6 +181,10 @@ class GitManager:
         self._store = store
         self._artifacts_root = artifacts_root
         self._clone = config.repo.local_path
+        # The configured task lifecycle dir is tracked but rides the audit commit, so it is excluded
+        # from the code commit alongside the gitignored `.worc/` runtime home.
+        self._tasks_dir = config.paths.tasks_dir
+        self._excluded_dirs = (*RUNTIME_EXCLUDED_DIRS, self._tasks_dir)
         self._env = build_child_env(config.security.allowed_environment)
         self._run_process = run_process
         self._gh_runner = gh_runner
@@ -532,16 +538,16 @@ class GitManager:
 
     def _is_artifact_path(self, path: str) -> bool:
         normalized = path.replace("\\", "/")
-        return any(normalized == d or normalized.startswith(f"{d}/") for d in EXCLUDED_DIRS)
+        return any(normalized == d or normalized.startswith(f"{d}/") for d in self._excluded_dirs)
 
     def staged_pathspec(self, paths: Sequence[str]) -> list[str]:
         """Build the scoped ``git add`` pathspec: code paths plus a belt-and-braces guard.
 
-        ``.worc/`` is gitignored, so ``git add`` skips it without a guard; ``tasks/`` is tracked (it
-        rides the separate audit commit), so it is guarded with ``:(exclude)`` to ensure it never
-        slips into the *code* commit.
+        ``.worc/`` is gitignored, so ``git add`` skips it without a guard; the task lifecycle dir
+        (``paths.tasks_dir``) is tracked (it rides the separate audit commit), so it is guarded with
+        ``:(exclude)`` to ensure it never slips into the *code* commit.
         """
-        return [*paths, ":(exclude)tasks/"]
+        return [*paths, f":(exclude){self._tasks_dir}/"]
 
     def commit_code(self, task_id: str, message: str) -> str | None:
         """Stage the agent's code paths and make one commit. Idempotent. Returns the commit SHA.
@@ -627,7 +633,7 @@ class GitManager:
 
         message = footprint.audit_commit_message.format(task_id=task_id)
         audit_files = [
-            f"tasks/{state}/{task_id}{suffix}"
+            f"{self._tasks_dir}/{state}/{task_id}{suffix}"
             # Destination states (``done``/``failed``) stage the file's *appearance*; the source
             # states (``pending``/``processing``) stage its *removal* on a lifecycle move — without
             # the source paths a ``pending→failed`` / ``pending→done`` move of a base-tracked task

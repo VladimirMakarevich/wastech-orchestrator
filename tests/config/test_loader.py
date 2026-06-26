@@ -46,6 +46,22 @@ def _agents(body: str) -> str:
     )
 
 
+def test_paths_tasks_dir_defaults_when_block_absent() -> None:
+    cfg = loads_config(_LEGACY).config
+    assert cfg.paths.tasks_dir == "tasks"
+
+
+def test_paths_tasks_dir_is_read_when_present() -> None:
+    cfg = loads_config(_LEGACY + "paths:\n  tasks_dir: worktasks\n").config
+    assert cfg.paths.tasks_dir == "worktasks"
+
+
+def test_unknown_paths_subkey_is_rejected() -> None:
+    with pytest.raises(ConfigError) as exc:
+        loads_config(_LEGACY + "paths:\n  nonsense: 1\n")
+    assert any("paths" in issue and "nonsense" in issue for issue in exc.value.issues)
+
+
 def test_legacy_skip_stages_tolerated_not_error() -> None:
     # ``agents.skip_stages`` was removed in config v10 (global stage-skip dropped for flexible
     # flows — drop the node from the flow instead). An old config still carrying it loads fail-open

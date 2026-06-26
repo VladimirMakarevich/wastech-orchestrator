@@ -116,6 +116,23 @@ repo:
 
 Git credentials are not stored in this file. Configure SSH, a credential helper, or `gh auth login` outside the orchestrator.
 
+## `paths`
+
+Where the task lifecycle lives. Optional — omit the block to take the default.
+
+```yaml
+paths:
+  tasks_dir: "tasks"
+```
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `tasks_dir` | string | `"tasks"` | Repo-relative directory holding the `pending` / `processing` / `done` / `failed` lifecycle subfolders. Rename it to avoid clashing with a repo that already uses `tasks/` for something else. |
+
+The value is validated as repo-relative: no absolute path, no `~`, no `..` traversal, and it must **not** live under the gitignored `.worc/` home (that would silently drop the audit trail from Git). A repo-relative subpath (e.g. `config/tasks`) is allowed. The lifecycle subfolder names themselves are fixed.
+
+`worc install` only scaffolds the default `tasks/` layout. To use a different directory, set `paths.tasks_dir` in `config.yaml` and create the lifecycle subfolders yourself (the orchestrator does not auto-create a renamed root). If the directory is added to `.gitignore`, the audit commit degrades to a no-op and lifecycle moves simply stop appearing in Git history — no extra config needed.
+
 ## `agents`
 
 Controls provider availability, retry/fix budgets, decomposition, the global primary, and provider-specific settings.
@@ -477,9 +494,9 @@ Auto-merge is **off by default** and only affects the publish step — the mid-p
 
 There is one canonical layout — there are no footprint modes to choose. Everything the orchestrator generates or installs lives under a single gitignored `<repo>/.worc/` home: `config.yaml`, `guide/`, `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `workspace/`, and the `tasks/rejected` quarantine. `install` appends a single `.worc/` line to the repo's tracked `.gitignore`.
 
-The only things **not** under `.worc/` are the `tasks/` lifecycle dirs (`pending`/`processing`/`done`/`failed`), which sit at the repo root and are git-tracked. The committed audit trail is the moved task file plus its `<id>.summary.md` in `tasks/done` or `tasks/failed`; the orchestrator's audit commit stages **only that task's own files** (never `git add -- tasks/` wholesale), so a concurrently-pending task is never swept in.
+The only things **not** under `.worc/` are the `tasks/` lifecycle dirs (`pending`/`processing`/`done`/`failed`), which sit at the repo root and are git-tracked. (`tasks` is the default name; it is configurable via [`paths.tasks_dir`](#paths) — substitute the configured name throughout this section.) The committed audit trail is the moved task file plus its `<id>.summary.md` in `tasks/done` or `tasks/failed`; the orchestrator's audit commit stages **only that task's own files** (never `git add -- tasks/` wholesale), so a concurrently-pending task is never swept in.
 
-The code commit always stages changes with an explicit scoped pathspec and excludes `.worc/` and `tasks/` — `.worc/` is gitignored, and `tasks/` rides the separate audit commit instead.
+The code commit always stages changes with an explicit scoped pathspec and excludes `.worc/` and the configured tasks dir — `.worc/` is gitignored, and the tasks dir rides the separate audit commit instead.
 
 ### `git.footprint`
 

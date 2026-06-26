@@ -116,6 +116,18 @@ def test_adds_deletion_exempt_paths_from_packaged_template() -> None:
     assert "security.deletion_approval_exempt_paths" in added
 
 
+def test_adds_paths_block_from_packaged_template() -> None:
+    # v17 add: an operator config predating `paths` gains the block (default tasks_dir) from the
+    # packaged template, while keeping its own repo customizations.
+    template = packaged_template_mapping()
+    operator = {"schema_version": 16, "repo": {"branch_prefix": "feat"}}
+    merged, added, _ = upgrade_config_mapping(template, operator)
+    assert merged["paths"]["tasks_dir"] == "tasks"
+    assert merged["repo"]["branch_prefix"] == "feat"  # operator value preserved
+    # A config predating v17 has no `paths` block at all, so the whole block is added.
+    assert "paths" in added
+
+
 def test_strips_legacy_prompts_block() -> None:
     # config v9 removed the whole `prompts` block; upgrade-config drops it from an operator config.
     template = {"schema_version": CONFIG_SCHEMA_VERSION}

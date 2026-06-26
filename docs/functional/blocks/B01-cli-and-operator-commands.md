@@ -8,7 +8,7 @@
 
 The single operator-facing entry point. It builds the argparse parser, dispatches each subcommand to its driver, resolves and loads the config, configures runtime logging, computes the read-only preflight verdict, and maps a terminal task outcome to a process exit code. It owns no business logic — every command delegates to the orchestrator ([B06](B06-orchestrator-pipeline.md)), the installer ([B03](B03-installer-and-scaffolding.md)), the watch daemon mechanics ([B02](B02-watch-daemon-and-scheduling.md)), config load/upgrade ([B05](B05-configuration.md)), or diagnostics, and only translates intent into those calls.
 
-It also fixes two repo-layout constants used pervasively downstream: the gitignored runtime home `<repo>/.worc/` ([cli.py:71](../../../src/wastech_orchestrator/cli.py#L71)) and the tracked, audit-committed `tasks/` lifecycle dirs that sit at the repo root, distinct from the `.worc/`-local runtime dirs.
+It also fixes two repo-layout roots used pervasively downstream: the gitignored runtime home `<repo>/.worc/` ([cli.py:71](../../../src/wastech_orchestrator/cli.py#L71)) and the tracked, audit-committed lifecycle dirs that sit at the repo root, distinct from the `.worc/`-local runtime dirs. The lifecycle root name is `config.paths.tasks_dir` (default `tasks`); `install` scaffolds the default while the runtime resolves the configured value.
 
 ## Public surface
 

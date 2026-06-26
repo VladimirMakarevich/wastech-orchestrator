@@ -3,7 +3,7 @@
 # This is the packaged copy used by `wastech-orchestrator init`; keep it in sync with the
 # repo-root config.example.yaml
 
-schema_version: 16                  # config format version; the orchestrator refuses newer configs
+schema_version: 17                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -16,6 +16,14 @@ repo:
   local_path: "./workspace/repo"
   base_branch: "main"
   branch_prefix: "worc"             # task branches: worc/<task-id>-<slug>
+
+paths:                              # where the task lifecycle lives (optional; omit = defaults)
+  tasks_dir: "tasks"                # repo-relative dir holding pending/processing/done/failed.
+                                    # Rename to avoid clashing with a repo that already uses tasks/.
+                                    # Must be repo-relative (no .. / absolute) and NOT under .worc/
+                                    # (that home is gitignored — the audit trail would be lost). The
+                                    # lifecycle subfolder names are fixed. `install` only scaffolds
+                                    # the default tasks/; for another name, create its subfolders.
 
 agents:
   allowed:
