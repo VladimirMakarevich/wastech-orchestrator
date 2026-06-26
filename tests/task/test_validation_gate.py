@@ -148,6 +148,39 @@ def test_task_type_must_be_a_string(config: OrchestratorConfig) -> None:
     assert result.reason is ValidationReason.INVALID_FIELD_TYPE
 
 
+def test_queue_parsed_into_normalized(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\nqueue: backend\n---\n\n## Description\n\nx\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.queue == "backend"
+
+
+def test_queue_absent_defaults_to_default(config: OrchestratorConfig) -> None:
+    result = _gate(config).validate(_src(_GOOD))
+    assert result.normalized is not None
+    assert result.normalized.queue == "default"
+
+
+def test_queue_must_be_a_string(config: OrchestratorConfig) -> None:
+    # Unlike priority (fail-open), queue is fail-closed: a non-string value rejects the task.
+    text = "---\nid: task-001\ntitle: T\nqueue: 7\n---\n\n## Description\n\nx\n"
+    result = _gate(config).validate(_src(text))
+    assert result.reason is ValidationReason.INVALID_FIELD_TYPE
+
+
+def test_queue_empty_string_rejected(config: OrchestratorConfig) -> None:
+    text = '---\nid: task-001\ntitle: T\nqueue: ""\n---\n\n## Description\n\nx\n'
+    result = _gate(config).validate(_src(text))
+    assert result.reason is ValidationReason.INVALID_FIELD_TYPE
+
+
+def test_queue_whitespace_only_rejected(config: OrchestratorConfig) -> None:
+    text = '---\nid: task-001\ntitle: T\nqueue: "   "\n---\n\n## Description\n\nx\n'
+    result = _gate(config).validate(_src(text))
+    assert result.reason is ValidationReason.INVALID_FIELD_TYPE
+
+
 def test_refined_is_now_an_unknown_field(config: OrchestratorConfig) -> None:
     # PRE.3: the clean task dropped ``refined`` (refinement-skip is completeness-driven). The key
     # is no longer in the allowlist → fail-closed UNKNOWN_TOP_LEVEL_FIELD.

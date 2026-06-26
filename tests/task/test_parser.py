@@ -186,6 +186,24 @@ def test_branch_name_round_trips(tmp_path: Path, value: str | None) -> None:
     assert load_normalized(tmp_path, "task-001").branch_name == value
 
 
+@pytest.mark.parametrize("value", ["backend", "default"])
+def test_queue_round_trips(tmp_path: Path, value: str) -> None:
+    # Restart-safety: a resumed task must keep its queue tag, so the same instance still owns it.
+    task = NormalizedTask(id="task-001", title="T", description="Do it", queue=value)
+    write_normalized(task, tmp_path)
+    assert load_normalized(tmp_path, "task-001").queue == value
+
+
+def test_queue_absent_in_normalized_loads_default(tmp_path: Path) -> None:
+    # A pre-queue normalized file (no `queue` key) loads as the default queue, never None/empty.
+    task = NormalizedTask(id="task-001", title="T", description="Do it")
+    path = write_normalized(task, tmp_path)
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    del data["queue"]
+    Path(path).write_text(json.dumps(data), encoding="utf-8")
+    assert load_normalized(tmp_path, "task-001").queue == "default"
+
+
 def test_node_overrides_round_trip(tmp_path: Path) -> None:
     # Restart-safety: the per-node disable toggle must survive a resume, or a crash could lose a
     # disable and re-run a node the operator turned off.

@@ -112,6 +112,7 @@ def test_schema_constants() -> None:
         "contacts",
         "depends_on",
         "priority",
+        "queue",
         "subtasks",
         "nodes",
     } == ALLOWED_TASK_KEYS

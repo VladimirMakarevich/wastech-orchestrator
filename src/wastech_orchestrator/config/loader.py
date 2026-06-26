@@ -322,10 +322,11 @@ def _build_auto_mode(raw: Any, issues: list[str]) -> AutoModeConfig:
 def _build_orchestrator(raw: Any, issues: list[str]) -> OrchestratorRuntimeConfig:
     where = "orchestrator"
     m = _mapping(raw, where, issues)
-    _check_keys(m, {"auto_mode", "poll_interval_seconds"}, where, issues)
+    _check_keys(m, {"auto_mode", "poll_interval_seconds", "queue"}, where, issues)
     return OrchestratorRuntimeConfig(
         auto_mode=_build_auto_mode(m.get("auto_mode"), issues),
         poll_interval_seconds=_int(m, "poll_interval_seconds", 300, where, issues),
+        queue=_str(m, "queue", "default", where, issues),
     )
 
 

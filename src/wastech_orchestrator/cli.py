@@ -53,7 +53,7 @@ from wastech_orchestrator.preflight import preflight_gh
 from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.security.isolation import check_isolation
 from wastech_orchestrator.state_store import IncompatibleStateError, StateStore
-from wastech_orchestrator.task.model import priority_rank
+from wastech_orchestrator.task.model import DEFAULT_QUEUE, priority_rank
 from wastech_orchestrator.task.parser import read_task_source, split_frontmatter
 
 _LOG = logging.getLogger(__name__)
@@ -209,6 +209,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="override orchestrator.poll_interval_seconds: fetch/pull base_branch and re-scan "
         "every N seconds (0 = single pass, no loop)",
     )
+    watch_cmd.add_argument(
+        "--queue",
+        default=None,
+        metavar="NAME",
+        help="override orchestrator.queue: only pick pending tasks whose `queue` equals NAME "
+        "(lets several worc instances share one task pool without colliding)",
+    )
 
     stop_cmd = sub.add_parser("stop", help="stop a running 'watch' daemon gracefully")
     stop_cmd.add_argument(
@@ -235,6 +242,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="N",
         help="override orchestrator.poll_interval_seconds for the new loop (0 = single pass)",
+    )
+    restart_cmd.add_argument(
+        "--queue",
+        default=None,
+        metavar="NAME",
+        help="override orchestrator.queue for the new loop: only pick tasks whose `queue` is NAME",
     )
 
     sub.add_parser(
@@ -664,42 +677,58 @@ class _PendingScan(NamedTuple):
     task_id: str | None
     depends_on: tuple[str, ...]
     priority_rank: int
+    queue: str
 
 
 def _scan_pending_meta(task_file: Path) -> _PendingScan:
-    """Lightweight front-matter read of a pending file's ``id``/``depends_on``/``priority``.
+    """Lightweight front-matter read of ``id``/``depends_on``/``priority``/``queue``.
 
-    Used by the scheduler for the cheap skip/eligibility/ordering decision; full validation still
-    happens in ``run_task``. A read/decode/parse problem (or a malformed ``depends_on``) yields no
-    id and no deps, so the file falls through to the gate, which rejects it properly. ``priority``
-    is fail-open: any unrecognised value sorts as ``mid`` (see :func:`priority_rank`).
+    Used by the scheduler for the cheap skip/eligibility/ordering/partitioning decision; full
+    validation still happens in ``run_task``. A read/decode/parse problem (or a malformed
+    ``depends_on``) yields no id and no deps, so the file falls through to the gate, which rejects
+    it properly. ``priority`` and ``queue`` are fail-open here: an unrecognised priority sorts as
+    ``mid`` (see :func:`priority_rank`) and a missing/malformed ``queue`` folds to the default
+    queue, so a default instance still picks the file up and the gate then rejects a malformed queue
+    fail-closed.
     """
     try:
         source = read_task_source(task_file)
         parse = split_frontmatter(source.raw_bytes.decode("utf-8"), source.suffix)
     except (OSError, UnicodeDecodeError):
-        return _PendingScan(None, (), priority_rank(None))
+        return _PendingScan(None, (), priority_rank(None), DEFAULT_QUEUE)
     if not parse.present or parse.malformed:
-        return _PendingScan(None, (), priority_rank(None))
+        return _PendingScan(None, (), priority_rank(None), DEFAULT_QUEUE)
     raw_id = parse.frontmatter.get("id")
     task_id = raw_id if isinstance(raw_id, str) else None
     rank = priority_rank(parse.frontmatter.get("priority"))
+    raw_queue = parse.frontmatter.get("queue")
+    queue = raw_queue.strip() if isinstance(raw_queue, str) and raw_queue.strip() else DEFAULT_QUEUE
     raw_deps = parse.frontmatter.get("depends_on", [])
     if not isinstance(raw_deps, (list, tuple)) or not all(
         isinstance(d, str) and d.strip() for d in raw_deps
     ):
-        return _PendingScan(task_id, (), rank)
-    return _PendingScan(task_id, tuple(d.strip() for d in raw_deps), rank)
+        return _PendingScan(task_id, (), rank, queue)
+    return _PendingScan(task_id, tuple(d.strip() for d in raw_deps), rank, queue)
 
 
 def watch_once(
-    orchestrator: Orchestrator, config: OrchestratorConfig, folder: Path
+    orchestrator: Orchestrator,
+    config: OrchestratorConfig,
+    folder: Path,
+    *,
+    queue: str | None = None,
 ) -> list[PipelineResult]:
     """Resume any in-flight task, then process pending tasks per the auto-mode rule.
 
     Resumes the single active task first. Then picks pending tasks **only** when the slot is free;
     with auto mode off it processes exactly one, with auto mode on it continues to the next after a
     successful terminal cleanup. A ``manual_action_required`` outcome blocks further continuation.
+
+    Only pending tasks whose ``queue`` equals this instance's selector are considered — plain
+    string equality, static partitioning so several worc instances can share one git-distributed
+    pool without colliding. ``queue`` defaults to ``config.orchestrator.queue`` (overridable per
+    launch with ``worc watch --queue``). Out-of-queue tasks are invisible to this instance, so a
+    cross-queue ``depends_on`` simply stays WAITING until the dependency is merged elsewhere.
 
     A task with unmerged ``depends_on`` dependencies is **skipped** (non-blocking) so an independent
     task can run instead — the slot never idles on CI; a dependency-broken task (cycle / unknown /
@@ -718,7 +747,13 @@ def watch_once(
             return results
 
     auto = config.orchestrator.auto_mode.enabled
-    scans = [(p, _scan_pending_meta(p)) for p in select_pending(folder)]
+    selector = queue if queue is not None else config.orchestrator.queue
+    # Partition first: drop pending tasks tagged for another queue before ranking and before the
+    # dependency map is built, so this instance only ever sees its own tasks.
+    scans = [
+        (p, s) for p, s in ((p, _scan_pending_meta(p)) for p in select_pending(folder))
+        if s.queue == selector
+    ]
     # Sort by (priority_rank, filename); select_pending is already filename-sorted, so the path tie
     # break preserves the deterministic order within a priority. pending_map is order-independent.
     scans.sort(key=lambda item: (item[1].priority_rank, item[0]))
@@ -750,6 +785,7 @@ def watch_loop(
     folder: Path,
     *,
     poll_interval: int,
+    queue: str | None = None,
     max_iterations: int | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
     stop_event: threading.Event | None = None,
@@ -781,7 +817,7 @@ def watch_loop(
         if _stop_requested():
             break
         orchestrator.refresh_repo()
-        results.extend(watch_once(orchestrator, config, folder))
+        results.extend(watch_once(orchestrator, config, folder, queue=queue))
         iteration += 1
         if poll_interval <= 0:
             break
@@ -1184,7 +1220,9 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
     # Single pass: no PID file, no signal handler.
     if poll <= 0:
-        return _summarize_watch(watch_loop(orchestrator, config, folder, poll_interval=poll))
+        return _summarize_watch(
+            watch_loop(orchestrator, config, folder, poll_interval=poll, queue=args.queue)
+        )
 
     print(f"watch: polling every {poll}s for git-pushed tasks (Ctrl-C or 'stop' to exit)")
     results: list[PipelineResult] = []
@@ -1199,6 +1237,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 config,
                 folder,
                 poll_interval=poll,
+                queue=args.queue,
                 stop_event=controller.event,
                 stop_file=stop_path,
             )

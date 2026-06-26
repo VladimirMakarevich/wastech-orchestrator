@@ -58,14 +58,16 @@ orchestrator:
   auto_mode:
     enabled: false
   poll_interval_seconds: 300
+  queue: "default"
 ```
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `auto_mode.enabled` | boolean | `false` | When `true`, `watch` can pick another pending task after terminal cleanup succeeds. |
 | `poll_interval_seconds` | integer `>= 0` | `300` | `watch` loop interval: each tick runs `git fetch` + `pull --ff-only` on `base_branch` to discover git-pushed tasks, then re-scans. `0` makes `watch` a single pass (no loop, no periodic sync). `--poll-seconds` overrides it. |
+| `queue` | non-empty string | `"default"` | This instance's queue selector. When several worc instances share one git-distributed task pool, `watch` only picks a pending task whose front-matter `queue` equals this value (plain string equality — static partitioning, no balancing). Both sides default to `"default"`, so a single untagged instance behaves exactly as before; an untagged task lands in `"default"` and is taken only by a `"default"` instance. `--queue` overrides it. |
 
-Auto mode does not enable concurrency. The v1 contract keeps one active task at a time.
+Auto mode does not enable concurrency. The v1 contract keeps one active task at a time. The `queue` selector partitions the pool across instances; it does not arbitrate — two instances with the same selector on the same pool still collide, so "one worc per queue" is an operator-enforced invariant. A task in queue A that `depends_on` a task in queue B simply waits until B's task is merged; if no instance serves B it waits indefinitely (operator responsibility).
 
 ### Runtime observability options
 
@@ -78,7 +80,7 @@ Logging and heartbeat settings are global CLI options, not `config.yaml` fields:
 | `--log-file PATH` | unset | Also write a rotating 10 MB operator log with five backups. |
 | `--heartbeat-seconds N` | `30` | Progress interval for long provider/check/Git calls; `0` disables. |
 
-The `watch` subcommand also accepts `--poll-seconds N` (placed after `watch`), which overrides `orchestrator.poll_interval_seconds` for that run.
+The `watch` subcommand also accepts `--poll-seconds N` and `--queue NAME` (placed after `watch`), which override `orchestrator.poll_interval_seconds` and `orchestrator.queue` for that run. `restart` accepts the same two flags for the fresh loop it starts.
 
 The global `--env-file PATH` loads environment variables from a file before any command runs. With no flag, the orchestrator auto-loads the `.env` beside the resolved `config.yaml` (`<repo-root>/.worc/.env`) when present. Loading never overrides an already-exported variable (the real environment wins), only populates the orchestrator's own process (a value reaches a child only if its name is in `security.allowed_environment`), and logs a secret-free `count`/`path` notice. A missing explicit `--env-file` fails closed (exit 2); a missing auto-discovered `.worc/.env` is a silent no-op. See [operations.md §2](operations.md#2-authorization-configured-outside-the-orchestrator).
 

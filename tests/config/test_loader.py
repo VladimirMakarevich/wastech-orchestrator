@@ -171,6 +171,22 @@ def test_poll_interval_defaults_to_300() -> None:
     assert result.config.orchestrator.poll_interval_seconds == 300
 
 
+def test_queue_defaults_to_default() -> None:
+    result = loads_config(_LEGACY)
+    assert result.config.orchestrator.queue == "default"
+
+
+def test_queue_loads_when_present() -> None:
+    result = loads_config(_LEGACY + "orchestrator:\n  queue: backend\n")
+    assert result.config.orchestrator.queue == "backend"
+
+
+def test_queue_wrong_type_is_rejected() -> None:
+    with pytest.raises(ConfigError) as exc:
+        loads_config(_LEGACY + "orchestrator:\n  queue: 7\n")
+    assert any("orchestrator.queue" in issue for issue in exc.value.issues)
+
+
 def test_footprint_defaults_to_task_audit_branch() -> None:
     # The footprint now carries only the audit-trail policy: the task + summary are committed in the
     # repo on the task's own branch, while everything else lives under the gitignored .worc/.

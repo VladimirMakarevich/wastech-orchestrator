@@ -43,10 +43,18 @@ ALLOWED_TASK_KEYS: frozenset[str] = frozenset(
         "depends_on",
         "subtasks",
         "priority",
+        "queue",
         "nodes",
     }
 )
 REQUIRED_TASK_FIELDS: frozenset[str] = frozenset({"id", "title"})
+
+# The queue tag partitions a git-distributed task pool across several worc instances: an instance
+# only picks a pending task when ``task.queue == instance.queue`` (config ``orchestrator.queue``).
+# Both sides default to ``"default"``, so an untagged pool with one untagged instance behaves
+# exactly as before. Unlike ``priority`` (fail-open), the task field is **fail-closed**: a malformed
+# value (non-string, or empty/whitespace) rejects the task. See the multi-instance-task-queues ADR.
+DEFAULT_QUEUE = "default"
 
 # Scheduling priority for the eligibility queue. Unlike the other constrained task fields (which
 # reject on a bad value), priority is **fail-open**: an unrecognised string, a wrong type, or a
@@ -161,6 +169,12 @@ class NormalizedTask:
     # default), so a typo never blocks a task. ``depends_on`` is always stronger (only eligible
     # tasks are ranked); this is a re-ordering, not a concurrency change.
     priority: TaskPriority = DEFAULT_PRIORITY
+    # Queue tag for multi-instance partitioning: an instance only picks this task when its selector
+    # (``orchestrator.queue``) equals this value — plain string equality, no balancing. Always a
+    # non-empty string (the gate normalizes an absent value to ``DEFAULT_QUEUE`` and rejects a
+    # malformed one). Decomposition subtasks inherit it implicitly — they run inside the parent's
+    # pipeline on the parent's branch and never pass through the pending-file selection.
+    queue: str = DEFAULT_QUEUE
     # Operator-authored decomposition: ordered repository-relative references to per-subtask spec
     # files. Presence ⇒ the orchestrator builds the decomposition from this manifest (reason
     # ``operator_authored``) instead of from the planning agent's proposal, and runs the units

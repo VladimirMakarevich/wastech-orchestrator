@@ -102,6 +102,11 @@ def validate_config(config: OrchestratorConfig) -> list[str]:
             f"(got {config.orchestrator.poll_interval_seconds})"
         )
 
+    # Queue selector: the equality filter compares against a task's `queue`, which is itself a
+    # non-empty string; an empty/whitespace selector could never match and is rejected.
+    if not config.orchestrator.queue.strip():
+        issues.append("orchestrator.queue must be a non-empty string")
+
     # Loop-control hard cap: the global cap must be >= a single fix loop.
     if agents.max_total_fix_iterations < agents.max_fix_cycles:
         issues.append(

@@ -90,7 +90,11 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
     quarantine = str(spec.repo_local_path / ".worc" / "tasks" / "rejected")
     return {
         "schema_version": CONFIG_SCHEMA_VERSION,
-        "orchestrator": {"auto_mode": {"enabled": spec.auto_mode}, "poll_interval_seconds": 300},
+        "orchestrator": {
+            "auto_mode": {"enabled": spec.auto_mode},
+            "poll_interval_seconds": 300,
+            "queue": "default",
+        },
         "repo": {
             "url": spec.repo_url,
             "local_path": str(spec.repo_local_path),

@@ -167,6 +167,21 @@ def test_negative_poll_interval_is_rejected(base_config: OrchestratorConfig) -> 
     assert any("poll_interval_seconds" in issue for issue in exc.value.issues)
 
 
+def test_default_queue_validates_clean(base_config: OrchestratorConfig) -> None:
+    assert base_config.orchestrator.queue == "default"
+    assert validate_config(base_config) == []
+
+
+@pytest.mark.parametrize("queue", ["", "   "])
+def test_empty_or_whitespace_queue_is_rejected(
+    base_config: OrchestratorConfig, queue: str
+) -> None:
+    bad = replace(base_config, orchestrator=replace(base_config.orchestrator, queue=queue))
+    with pytest.raises(ConfigError) as exc:
+        validate_config(bad)
+    assert any("orchestrator.queue" in issue for issue in exc.value.issues)
+
+
 def test_non_positive_telegram_timeout_is_rejected(base_config: OrchestratorConfig) -> None:
     bad = replace(
         base_config,

@@ -87,7 +87,13 @@ from wastech_orchestrator.providers.base import ProviderId
 # Validated repo-relative (no `..`/absolute, never under `.worc/`). Default reproduces today's
 # behavior; old configs omit it and take the default, and `upgrade-config` adds it from the
 # template.
-CONFIG_SCHEMA_VERSION = 17
+# v18 (2026-06-26, queue-tag): a *format* add of the optional `orchestrator.queue` (default
+# "default") — the instance's queue selector. With several worc instances sharing one
+# git-distributed task pool, an instance only picks a pending task when
+# `task.queue == orchestrator.queue` (plain string equality, static partitioning, no balancing).
+# Validated non-empty. Default reproduces today's behavior; old configs omit it and take "default",
+# and `upgrade-config` adds it from the template.
+CONFIG_SCHEMA_VERSION = 18
 
 
 class AuditBranch(StrEnum):
@@ -108,6 +114,11 @@ class OrchestratorRuntimeConfig:
     # Seconds between `watch` ticks; each tick fetch/pulls base_branch to discover tasks pushed to
     # git, then processes pending. 0 = single-pass (no loop, no periodic sync).
     poll_interval_seconds: int
+    # This instance's queue selector. Watch only picks a pending task when `task.queue` equals this
+    # value — plain string equality, static partitioning across multiple worc instances sharing one
+    # git-distributed pool. Non-empty; defaults to "default" (same as an untagged task), so a single
+    # untagged instance behaves exactly as before. Overridable per launch with `worc watch --queue`.
+    queue: str = "default"
 
 
 @dataclass(frozen=True)

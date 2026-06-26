@@ -69,7 +69,9 @@ def test_generated_config_uses_worc_home_and_audit_trail(tmp_path: Path) -> None
     assert cfg.validation.quarantine_folder == str(expected_quarantine)
     assert cfg.repo.local_path == str(tmp_path / "my-repo")
     assert cfg.orchestrator.poll_interval_seconds == 300
-    # The generated config carries the default task lifecycle dir and still validates clean.
+    # The generated config carries the default queue selector and task lifecycle dir, and still
+    # validates clean.
+    assert cfg.orchestrator.queue == "default"
     assert cfg.paths.tasks_dir == "tasks"
     assert validate_config(cfg) == []
 

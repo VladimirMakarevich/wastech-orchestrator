@@ -231,6 +231,44 @@ def test_watch_depends_on_beats_priority(make_git_config, git_repo, tmp_path: Pa
     assert [r.task_id for r in results] == ["b-low"]
 
 
+# --- watch_once queue partitioning (multi-instance selector) ------------------------
+
+
+def _queue_folder(tmp_path: Path, *specs: tuple[str, str | None]) -> Path:
+    """Pending files tagged with a ``queue`` (``None`` ⇒ no queue field, folds to ``default``)."""
+    folder = tmp_path / "pending"
+    folder.mkdir()
+    for task_id, queue in specs:
+        q_line = f"queue: {queue}\n" if queue is not None else ""
+        front = f'---\nid: {task_id}\ntitle: "T"\n{q_line}---\n'
+        (folder / f"{task_id}.md").write_text(f"{front}\n## Description\n\nx\n", encoding="utf-8")
+    return folder
+
+
+def test_watch_picks_only_matching_queue(make_git_config, git_repo, tmp_path: Path) -> None:
+    # config queue defaults to "default": the instance runs explicitly-default and untagged tasks
+    # (untagged folds to default), and skips a task tagged for another queue.
+    config = make_git_config(git_repo.clone, auto_mode=True)
+    orch = _FakeOrch(runs=[_done("a-default"), _done("c-untagged")])
+    folder = _queue_folder(
+        tmp_path, ("a-default", "default"), ("b-backend", "backend"), ("c-untagged", None)
+    )
+    cli.watch_once(orch, config, folder)  # type: ignore[arg-type]
+    assert [Path(p).stem for p in orch.run_calls] == ["a-default", "c-untagged"]
+
+
+def test_watch_queue_selector_override_picks_other_queue(
+    make_git_config, git_repo, tmp_path: Path
+) -> None:
+    # An explicit selector (the `worc watch --queue` override) wins over the config default: only
+    # the matching task runs, the default-tagged one is invisible to this instance.
+    config = make_git_config(git_repo.clone, auto_mode=True)
+    orch = _FakeOrch(runs=[_done("b-backend")])
+    folder = _queue_folder(tmp_path, ("a-default", "default"), ("b-backend", "backend"))
+    cli.watch_once(orch, config, folder, queue="backend")  # type: ignore[arg-type]
+    assert [Path(p).stem for p in orch.run_calls] == ["b-backend"]
+
+
 # --- watch_loop unit tests (periodic discovery) ------------------------------------
 
 
@@ -241,7 +279,7 @@ def test_watch_loop_refreshes_each_tick_and_sleeps_between(
     orch = _FakeOrch()
     ticks = {"n": 0}
 
-    def fake_watch_once(_o, _c, _f):
+    def fake_watch_once(_o, _c, _f, *, queue=None):
         ticks["n"] += 1
         return [_done(f"t{ticks['n']}")]
 
@@ -261,7 +299,7 @@ def test_watch_loop_single_pass_when_poll_zero(
 ) -> None:
     config = make_git_config(git_repo.clone)
     orch = _FakeOrch()
-    monkeypatch.setattr(cli, "watch_once", lambda _o, _c, _f: [])
+    monkeypatch.setattr(cli, "watch_once", lambda _o, _c, _f, *, queue=None: [])
     sleeps: list[float] = []
     cli.watch_loop(orch, config, tmp_path, poll_interval=0, sleep_fn=sleeps.append)  # type: ignore[arg-type]
     assert orch.refresh_calls == 1  # one tick (still refreshes before scanning)

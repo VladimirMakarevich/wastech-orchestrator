@@ -128,6 +128,17 @@ def test_adds_paths_block_from_packaged_template() -> None:
     assert "paths" in added
 
 
+def test_adds_orchestrator_queue_from_packaged_template() -> None:
+    # v18 add: an operator config predating the queue tag gains `orchestrator.queue` (default
+    # "default") from the packaged template, while keeping its own orchestrator customizations.
+    template = packaged_template_mapping()
+    operator = {"schema_version": 17, "orchestrator": {"poll_interval_seconds": 60}}
+    merged, added, _ = upgrade_config_mapping(template, operator)
+    assert merged["orchestrator"]["queue"] == "default"
+    assert merged["orchestrator"]["poll_interval_seconds"] == 60  # operator value preserved
+    assert "orchestrator.queue" in added
+
+
 def test_strips_legacy_prompts_block() -> None:
     # config v9 removed the whole `prompts` block; upgrade-config drops it from an operator config.
     template = {"schema_version": CONFIG_SCHEMA_VERSION}

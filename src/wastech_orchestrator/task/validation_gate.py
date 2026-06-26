@@ -31,6 +31,7 @@ from wastech_orchestrator.security.injection import scan_frontmatter
 from wastech_orchestrator.task.model import (
     ALLOWED_TASK_KEYS,
     BRANCH_NAME_MAX_LEN,
+    DEFAULT_QUEUE,
     NodeOverride,
     NormalizedTask,
     is_valid_branch_name,
@@ -247,6 +248,9 @@ class ValidationGate:
             return branch_reject, None
         raw_task_type = frontmatter.get("task_type")
         task_type = (str(raw_task_type).strip() or None) if isinstance(raw_task_type, str) else None
+        # _check_field_types already enforced a non-empty string when present; absent ⇒ default.
+        raw_queue = frontmatter.get("queue")
+        queue = raw_queue.strip() if isinstance(raw_queue, str) else DEFAULT_QUEUE
         task = NormalizedTask(
             id=id_value,
             title=str(title_value),
@@ -261,6 +265,7 @@ class ValidationGate:
             # Fail-open: an unrecognised priority normalizes to ``mid`` rather than rejecting the
             # task (a scheduling hint must never block a valid task — see model.normalize_priority).
             priority=normalize_priority(frontmatter.get("priority")),
+            queue=queue,
             subtasks=tuple(str(s).strip() for s in frontmatter.get("subtasks", [])),
             node_overrides=node_overrides,
         )
@@ -285,6 +290,16 @@ class ValidationGate:
         task_type = fm.get("task_type")
         if "task_type" in fm and task_type is not None and not isinstance(task_type, str):
             return _Reject(ValidationReason.INVALID_FIELD_TYPE, "task_type must be a string")
+        # queue is fail-closed (unlike priority): present ⇒ must be a non-empty string. A non-string
+        # type or an empty/whitespace value rejects the task rather than defaulting silently.
+        if "queue" in fm:
+            queue = fm["queue"]
+            if not isinstance(queue, str):
+                return _Reject(ValidationReason.INVALID_FIELD_TYPE, "queue must be a string")
+            if not queue.strip():
+                return _Reject(
+                    ValidationReason.INVALID_FIELD_TYPE, "queue must be a non-empty string"
+                )
         if (
             "auto_merge" in fm
             and fm["auto_merge"] is not None
