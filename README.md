@@ -40,7 +40,7 @@ tasks/pending/task-001.md
 
 - **One task at a time.** A single processing slot; other tasks wait in `tasks/pending/`. Auto mode (off by default) controls whether the next pending task starts automatically after cleanup.
 - **One canonical layout.** The task lifecycle dirs (`tasks/pending|processing|done|failed`) sit at the repo root and are git-tracked; everything else — `config.yaml`, `state.db`, `logs/`, and the installed guide bundle (task docs, task skills, config helper) — lives under the gitignored `<repo>/.worc/` home. See [Configuration](#configuration).
-- The detailed, code-derived reference (state machine, routing, recovery, security, the audit footprint) is the [Functional Map](docs/functional/index.md); the design rationale is in [docs/worc_architecture.md](docs/worc_architecture.md).
+- The detailed, code-derived reference (state machine, routing, recovery, security, the audit footprint) is the [Functional Map](docs/functional/index.md); the design rationale is in [docs/worc_architecture.md](docs/worc_architecture.md). The canonical project vocabulary (commands, config keys, flow nodes, statuses, artifacts, legacy terms) is in [docs/glossary.md](docs/glossary.md).
 
 ---
 
@@ -209,7 +209,7 @@ src/wastech_orchestrator/
   task/                   # parser + §19 validation gate
   install/                # the install wizard, config writer, detection
   packaged/               # all shipped package data (one home): config.example.yaml (source for `install`/`upgrade-config`); flows/ = built-in flows + role prompts (-> .worc/flows/); guide/ = installable docs bundle (task authoring + config helper -> .worc/guide/)
-docs/                     # operations, cookbook, configuration, task authoring, telegram, architecture, rules, backlog
+docs/                     # operations, cookbook, configuration, glossary, task authoring, telegram, architecture, rules, backlog
   functional/             # code-derived block + flow reference (the source of truth on any discrepancy)
   worc/                   # authored source for the packaged guide/ (kept in sync by a test)
 tests/                    # unit / integration / e2e (see .agents/rules/testing.md)

@@ -1,6 +1,6 @@
 # Configuration Reference
 
-`config.yaml` controls repositories, providers, security, validation, checks, git publishing, and optional notification settings. The packaged example is [`config.example.yaml`](../src/wastech_orchestrator/packaged/config.example.yaml), and the canonical contract is the config schema in the code (`config/schema.py`); see the [Functional Map](functional/index.md).
+`config.yaml` controls repositories, providers, security, validation, checks, git publishing, and optional notification settings. The packaged example is [`config.example.yaml`](../src/wastech_orchestrator/packaged/config.example.yaml), and the canonical contract is the config schema in the code (`config/schema.py`); see the [Functional Map](functional/index.md). For definitions of all config keys and their purpose, see the [Glossary](glossary.md).
 
 The loader is fail-closed:
 
