@@ -22,14 +22,13 @@ from wastech_orchestrator.providers.redaction import redact_text
 
 #: Which built-in typed-output contract a flow node's structured result must satisfy. Derived per
 #: node (never from a stage name): ``human_input`` = a question/approval round-trip; ``planning``
-#: adds the decomposition proposal + the selected skills; ``none`` = a plain author node.
+#: adds the decomposition proposal; ``none`` = a plain author node. (Skill selection is no longer a
+#: planning concern — it is resolved by the Core from operator pins + the supervisor's proposal.)
 OutputContract = Literal["none", "human_input", "planning"]
 
 _RISKS = frozenset({"clarification", "deletion", "dependency", "other"})
 _MAX_PATHS = 100
 _MAX_TEXT = 16_000
-_MAX_SKILLS = 20
-_MAX_SKILL_NAME = 128
 
 _HUMAN_INPUT_SCHEMA: dict[str, Any] = {
     "type": ["object", "null"],
@@ -94,15 +93,14 @@ class TypedStageOutput:
     content: str
     human_input: HumanInputSignal | None
     structured: Mapping[str, Any]
-    skills: tuple[str, ...] = ()  # planning-proposed skill names (validated against the inventory)
 
 
 def typed_output_schema(contract: OutputContract) -> dict[str, Any] | None:
     """Return the strict provider schema for a HITL-capable node's typed output.
 
     ``human_input`` (a refinement-style node): ``content`` plus an optional human question/approval.
-    ``planning``: the same, plus the decomposition proposal and the selected skills. ``none`` (a
-    plain author node) has no built-in typed schema (the node may still set its own schema).
+    ``planning``: the same, plus the decomposition proposal. ``none`` (a plain author node) has no
+    built-in typed schema (the node may still set its own schema).
     """
     if contract == "human_input":
         return {
@@ -126,13 +124,8 @@ def typed_output_schema(contract: OutputContract) -> dict[str, Any] | None:
                     "type": "array",
                     "items": _SUBTASK_SCHEMA,
                 },
-                "skills": {
-                    "type": "array",
-                    "maxItems": _MAX_SKILLS,
-                    "items": {"type": "string", "minLength": 1, "maxLength": _MAX_SKILL_NAME},
-                },
             },
-            "required": ["content", "human_input", "decompose", "subtasks", "skills"],
+            "required": ["content", "human_input", "decompose", "subtasks"],
         }
     return None
 
@@ -149,7 +142,7 @@ def parse_typed_output(
     expected = (
         {"content", "human_input"}
         if contract == "human_input"
-        else {"content", "human_input", "decompose", "subtasks", "skills"}
+        else {"content", "human_input", "decompose", "subtasks"}
     )
     if set(structured) != expected:
         raise StageOutputError(f"output keys must be exactly {sorted(expected)}")
@@ -157,7 +150,6 @@ def parse_typed_output(
     if not isinstance(content, str):
         raise StageOutputError("content must be a string")
 
-    skills: tuple[str, ...] = ()
     if contract == "planning":
         if not isinstance(structured.get("decompose"), bool):
             raise StageOutputError("planning.decompose must be a boolean")
@@ -165,13 +157,10 @@ def parse_typed_output(
         if not isinstance(subtasks, list):
             raise StageOutputError("planning.subtasks must be a list")
         _validate_subtasks(subtasks)
-        skills = _validate_skills(structured.get("skills"))
 
     raw_signal = structured.get("human_input")
     signal = None if raw_signal is None else _parse_signal(raw_signal)
-    return TypedStageOutput(
-        content=content, human_input=signal, structured=structured, skills=skills
-    )
+    return TypedStageOutput(content=content, human_input=signal, structured=structured)
 
 
 def _parse_signal(raw: Any) -> HumanInputSignal:
@@ -239,24 +228,6 @@ def _validate_subtasks(raw_subtasks: list[Any]) -> None:
             raise StageOutputError(
                 f"planning.subtasks[{index}].depends_on must contain positive integers"
             )
-
-
-def _validate_skills(raw_skills: Any) -> tuple[str, ...]:
-    """Validate planning's proposed skill names: a bounded list of non-empty bounded strings.
-
-    Returns the proposed names verbatim (de-duplication and matching against the actual inventory is
-    the Core's deterministic job in :func:`core.skills.resolve_planning_skills`).
-    """
-    if not isinstance(raw_skills, list):
-        raise StageOutputError("planning.skills must be a list")
-    if len(raw_skills) > _MAX_SKILLS:
-        raise StageOutputError(f"planning.skills may contain at most {_MAX_SKILLS} names")
-    names: list[str] = []
-    for index, item in enumerate(raw_skills):
-        if not isinstance(item, str) or not item.strip() or len(item) > _MAX_SKILL_NAME:
-            raise StageOutputError(f"planning.skills[{index}] must be a non-empty bounded string")
-        names.append(item.strip())
-    return tuple(names)
 
 
 def _normalize_path(raw: Any) -> str:

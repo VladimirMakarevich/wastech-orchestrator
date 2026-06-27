@@ -27,14 +27,16 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from wastech_orchestrator.config.schema import SupervisorConfig
 from wastech_orchestrator.core.flow.nodes.base import RegisterArtifact, RouterPort
 from wastech_orchestrator.core.flow.prompt import RoleFileError, render_role_prompt
+from wastech_orchestrator.core.skills import SkillInventory
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
-from wastech_orchestrator.providers.base import AgentRunRequest, ProviderId
+from wastech_orchestrator.providers.base import AgentRunRequest, AgentRunResult, ProviderId
 from wastech_orchestrator.routing.router import ResolvedRoute
 from wastech_orchestrator.state_store import EvaluationRow, NodeLineageRow
 
@@ -48,6 +50,63 @@ _SUPERVISOR_IDENTITY = "supervisor"
 # double-underscore sentinel, distinct from the routing identity above, so it can never collide with
 # a real flow node id (an operator could legally name an evaluator node ``supervisor``).
 _SUPERVISOR_LINEAGE_NODE_ID = "__supervisor__"
+
+# The ``node_run_id`` namespacing the upfront skill-map proposal's artifact dir
+# (``stages/supervisor/run-NNNNNN/``). Distinct from finalize's ``0`` and from any real (positive,
+# small, autoincrement) node-run id, so the three turn kinds never collide on the same path.
+_PROPOSAL_RUN_ID = 999_999
+
+# The strict provider schema for the once-per-task ``node → skills`` proposal. Array-shaped (not an
+# arbitrary-key object) so it validates under strict JSON-schema: each assignment names one node and
+# its proposed skill tokens. The Core resolves the tokens against the discovered inventory.
+_SKILL_MAP_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "assignments": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "node": {"type": "string", "minLength": 1},
+                    "skills": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1, "maxLength": 512},
+                    },
+                },
+                "required": ["node", "skills"],
+            },
+        }
+    },
+    "required": ["assignments"],
+}
+
+
+def _parse_skill_map(structured: Mapping[str, Any] | None) -> dict[str, tuple[str, ...]]:
+    """Parse the proposal's structured output into ``{node_id: (token, ...)}`` — defensively.
+
+    Best-effort to match the advisory contract: a malformed payload yields ``{}`` and a malformed
+    assignment is skipped, never raised. The Core still validates every token against the inventory,
+    so a bad proposal can at worst contribute nothing.
+    """
+    if not isinstance(structured, Mapping):
+        return {}
+    assignments = structured.get("assignments")
+    if not isinstance(assignments, list):
+        return {}
+    out: dict[str, tuple[str, ...]] = {}
+    for item in assignments:
+        if not isinstance(item, Mapping):
+            continue
+        node = item.get("node")
+        skills = item.get("skills")
+        if not isinstance(node, str) or not node.strip() or not isinstance(skills, list):
+            continue
+        tokens = tuple(s.strip() for s in skills if isinstance(s, str) and s.strip())
+        if tokens:
+            out[node.strip()] = tokens
+    return out
 
 
 class SupervisorStorePort(Protocol):
@@ -156,19 +215,70 @@ class Supervisor:
         self._register(task_id, "summary_md", str(md_path))
         return md_path
 
+    # -- upfront skill-map proposal --------------------------------------------
+
+    def propose_skill_map(
+        self,
+        *,
+        task_id: str,
+        agent_node_ids: Sequence[str],
+        inventory: SkillInventory,
+        task_spec_text: str,
+    ) -> dict[str, tuple[str, ...]]:
+        """Propose a ``node → skills`` map once per task (read-only, propose-only — Core decides).
+
+        The supervisor's first turn, on its own durable session, so later per-step observations and
+        the whole-task summary inherit its reasoning about which skills it chose. Skipped (``{}``)
+        when the inventory is empty — a repo with no skills pays nothing. Best-effort by contract:
+        any failure (no provider, infra error, malformed output) is logged and yields ``{}``, and
+        the run continues on operator pins alone. The supervisor only *proposes* tokens; the
+        orchestrator resolves them against the inventory and merges them with the static pins.
+        """
+        if not inventory.skills:
+            return {}
+        prompt = self._proposal_prompt(task_id, agent_node_ids, inventory, task_spec_text)
+        result = self._run_result(
+            task_id, prompt, node_run_id=_PROPOSAL_RUN_ID, output_schema=_SKILL_MAP_SCHEMA
+        )
+        proposal = _parse_skill_map(result.structured_output) if result is not None else {}
+        self._record(
+            task_id,
+            kind="supervisor_skill_proposal",
+            source_node_run_id=None,
+            subtask_order=None,
+            payload={
+                "assignments": {node: list(skills) for node, skills in proposal.items()},
+                "proposal_failed": result is None,
+            },
+        )
+        return proposal
+
     # -- internals -------------------------------------------------------------
 
     def _run(self, task_id: str, prompt: str, *, node_run_id: int) -> str | None:
-        """Run one read-only supervisor LLM turn on its own session; return the final message.
+        """Run one read-only supervisor turn and return its final message (``None`` on failure)."""
+        result = self._run_result(task_id, prompt, node_run_id=node_run_id)
+        return result.final_message if result is not None else None
+
+    def _run_result(
+        self,
+        task_id: str,
+        prompt: str,
+        *,
+        node_run_id: int,
+        output_schema: dict[str, Any] | None = None,
+    ) -> AgentRunResult | None:
+        """Run one read-only supervisor LLM turn on its own session; return the full result.
 
         Continues the supervisor's own ``resume_own_lineage`` session: it resumes the in-memory id,
         or — on a fresh process after a restart — the persisted ``node_lineage`` session, and writes
         the new session id back after the turn. Best-effort by contract: any failure (no provider,
         infra error, role file unreadable) is logged and yields ``None`` — never raised.
 
-        ``node_run_id`` namespaces the on-disk artifact dir (``stages/supervisor/run-NNNNNN/``):
-        per-step observation passes the observed step's id and finalize passes ``0``, so successive
-        turns never collide on the same path (the artifact writer never overwrites).
+        ``node_run_id`` namespaces the on-disk artifact dir (``stages/supervisor/run-NNNNNN/``): the
+        upfront proposal, per-step observation, and finalize each pass a distinct id, so successive
+        turns never collide on the same path (the artifact writer never overwrites). A non-None
+        ``output_schema`` forces structured output (the proposal); ``None`` leaves it free-text.
         """
         try:
             route = self._router.resolve_route(_SUPERVISOR_IDENTITY, None)
@@ -183,12 +293,13 @@ class Supervisor:
                 node_run_id=node_run_id,  # not a graph node; audit lives in ``evaluations``
                 model=self._settings.model,
                 reasoning=self._settings.reasoning,
+                output_schema=output_schema,
                 session_id=self._resume_session(task_id, route),
             )
             outcome = self._router.run_stage(request, route)
         except Exception as exc:  # noqa: BLE001 — advisory layer must never break the task
             _LOG.warning(
-                "supervisor observation failed (advisory, ignored)",
+                "supervisor turn failed (advisory, ignored)",
                 extra={"task_id": task_id, "error_type": type(exc).__name__},
             )
             return None
@@ -198,7 +309,7 @@ class Supervisor:
         if result.session_id:
             self._own_session_id = result.session_id  # resume_own_lineage continuity (in-memory)
             self._persist_session(task_id, result.session_id, outcome.provider_used)
-        return result.final_message
+        return result
 
     def _resume_session(self, task_id: str, route: ResolvedRoute) -> str | None:
         """The own session to resume: the in-memory id if a turn already ran this process, else the
@@ -260,6 +371,33 @@ class Supervisor:
         if final_message:
             observed += f"\nThe step reported:\n{final_message}\n"
         return self._base_prompt(task_id) + "\n\n" + observed
+
+    def _proposal_prompt(
+        self,
+        task_id: str,
+        agent_node_ids: Sequence[str],
+        inventory: SkillInventory,
+        task_spec_text: str,
+    ) -> str:
+        nodes = "\n".join(f"- {nid}" for nid in agent_node_ids) or "- (none)"
+        skills = "\n".join(
+            f"- {s.name} — {s.description} [{s.path}]" for s in inventory.skills
+        )
+        return (
+            self._base_prompt(task_id)
+            + "\n\n## Skill map proposal\n"
+            + "Before any step runs, propose which repo skills (if any) each flow node below "
+            + "should receive. This is read-only and propose-only — you do not route or edit; the "
+            + "Core decides which proposals it accepts and resolves each against the real "
+            + "inventory. Address a skill by its name; if a name is shared by more than one skill, "
+            + "use the repo-relative path shown in [brackets]. Propose a skill only when it is "
+            + "clearly relevant to that node's job, and do not propose orchestrator gate skills "
+            + "(run-checks / test / sync-docs and the like). Return assignments only for the nodes "
+            + "that need skills; omit the rest.\n\n"
+            + f"### Flow nodes (agent)\n{nodes}\n\n"
+            + f"### Available skills\n{skills}\n\n"
+            + f"### Task\n{task_spec_text}\n"
+        )
 
     def _finalize_prompt(self, task_id: str, task_title: str) -> str:
         return (

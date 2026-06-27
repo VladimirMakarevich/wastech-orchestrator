@@ -86,7 +86,6 @@ class FakeProvider:
                 "human_input": None,
                 "decompose": planning.get("decompose") is True,
                 "subtasks": planning.get("subtasks") or [],
-                "skills": planning.get("skills") or [],
             }
         return AgentRunResult(
             status=RunStatus.SUCCEEDED,
@@ -545,7 +544,6 @@ def test_supervisor_summary_once_per_whole_task_not_subtask(
     # P2.1: with decomposition the summary synthesis is once at whole-task close — not per subtask.
     subtasks = {
         "decompose": True,
-        "skills": [],
         "subtasks": [
             {
                 "order": 1,
@@ -919,7 +917,6 @@ def test_decomposed_task_commits_each_subtask(
 ) -> None:
     subtasks = {
         "decompose": True,
-        "skills": [],
         "subtasks": [
             {
                 "order": 1,
@@ -999,7 +996,6 @@ def test_decomposed_subtask_spec_path_reaches_implementation_prompt(
     # so subtask 1 sees 01-first.md and subtask 2 sees 02-second.md.
     subtasks = {
         "decompose": True,
-        "skills": [],
         "subtasks": [
             {
                 "order": 1,
@@ -1526,7 +1522,6 @@ def test_decomposed_failure_report_has_subtask_fields(
     # A decomposed task that gets stuck in subtask 1 records its decomposition context.
     subtasks = {
         "decompose": True,
-        "skills": [],
         "subtasks": [
             {
                 "order": 1,
@@ -1604,9 +1599,6 @@ def _stage_result(
     request: AgentRunRequest,
     structured: dict[str, object],
 ) -> AgentRunResult:
-    # Planning output requires the `skills` key; default it so test fixtures stay terse.
-    if "decompose" in structured and "skills" not in structured:
-        structured = {**structured, "skills": []}
     return AgentRunResult(
         status=RunStatus.SUCCEEDED,
         provider=provider.id,
@@ -2365,11 +2357,12 @@ def test_review_disabled_with_auto_merge_still_merges(
     assert len(_merge_calls(calls)) == 1  # it really did merge without a review gate
 
 
-def test_planning_selected_skills_reach_downstream_stages(
+def test_supervisor_proposed_skills_reach_downstream_stages(
     git_repo, make_git_config, git_run, tmp_path: Path
 ) -> None:
-    # Seed a target-repo skill (committed, so it is a tracked repo file, not an agent change);
-    # planning picks it (plus an unknown name that must be dropped).
+    # skills-selection-rework: discovery is whole-repo (git ls-files); the supervisor proposes a
+    # node->skills map once per task and the Core accepts it deterministically (an unknown node or
+    # skill is filtered, never an error). Seed a committed repo skill so the inventory is non-empty.
     skill_dir = git_repo.clone / ".claude" / "skills" / "safe-change"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
@@ -2378,36 +2371,108 @@ def test_planning_selected_skills_reach_downstream_stages(
     )
     git_run(["add", ".claude/skills/safe-change/SKILL.md"], git_repo.clone)
     git_run(["commit", "-m", "add safe-change skill"], git_repo.clone)
+    proposal = {
+        "assignments": [
+            {"node": "implementation", "skills": ["safe-change", "ghost"]},  # ghost is filtered
+            {"node": "ghost-node", "skills": ["safe-change"]},  # not a flow node → filtered
+        ]
+    }
     providers = {
-        ProviderId.CLAUDE: FakeProvider(
-            "claude", outputs={"planning": ("plan", {"skills": ["safe-change", "ghost"]})}
-        ),
+        ProviderId.CLAUDE: FakeProvider("claude", outputs={"supervisor": ("ok", proposal)}),
         ProviderId.CODEX: FakeProvider("codex"),
     }
-    orch, _, _, art = _build(
+    orch, store, _, art = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
     )
 
     result = orch.run_task(_complete_task(tmp_path, "task-skills"))
     assert result.final_status is Status.DONE
 
-    # plan.md records the selection and the dropped unknown name (auditable).
-    plan = (art / "logs" / "task-skills" / "plan.md").read_text(encoding="utf-8")
-    assert "Skills (planning-selected" in plan
-    assert "safe-change" in plan and "ghost" in plan
+    # The effective per-node map is persisted (resume restores it without re-proposing): only the
+    # known node + known skill survive; the unknown node/skill are filtered.
+    skill_map = json.loads((art / "logs" / "task-skills" / "skill_map.json").read_text("utf-8"))
+    assert [s["name"] for s in skill_map["implementation"]] == ["safe-change"]
+    assert skill_map["implementation"][0]["path"] == ".claude/skills/safe-change/SKILL.md"
+    assert "ghost-node" not in skill_map  # a proposal for a non-flow node is dropped
 
-    # The chosen SKILL.md reaches a downstream stage as a read-only reference path, not its body.
-    downstream = [
-        r
-        for p in providers.values()
-        for r in p.requests
-        if r.node_id in ("implementation", "fixing", "review")
-    ]
-    assert downstream, "a downstream stage ran"
-    impl = next(r for r in downstream if r.node_id == "implementation")
+    # The chosen SKILL.md reaches the implementation node as an absolute read-only reference path,
+    # not its body — and only that node (the proposal was node-scoped).
+    impl = next(
+        r for p in providers.values() for r in p.requests if r.node_id == "implementation"
+    )
     assert any(path.endswith("safe-change/SKILL.md") for path in impl.skill_reference_paths)
     assert "ghost" not in str(impl.skill_reference_paths)  # unknown name never surfaced
     assert "# Body" not in impl.prompt  # the skill body is never inlined into the prompt
+
+    # The proposal is recorded as one advisory evaluation row (it proposes, never routes).
+    rows = _evaluations(store, "task-skills")
+    assert any(
+        r["kind"] == "supervisor_skill_proposal" and r["verdict"] == "advisory" for r in rows
+    )
+
+
+def _write_pinned_flow(flows: Path, pins: list[str]) -> None:
+    """A minimal implement→publish flow with operator ``skills:`` pins on the implement node."""
+    (flows / "roles").mkdir(parents=True, exist_ok=True)
+    (flows / "roles" / "implementation.md").write_text("Implement {task_path}.", "utf-8")
+    flow = _MINIMAL_FLOW.replace(
+        "      permission_profile: workspace-write\n",
+        f"      permission_profile: workspace-write\n      skills: {json.dumps(pins)}\n",
+    )
+    (flows / "implementation.yaml").write_text(flow, "utf-8")
+
+
+def test_operator_pinned_skill_reaches_node(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # The static layer: a skill pinned on a flow node is always included (deterministic, no LLM).
+    # Here the dynamic proposal contributes nothing, so the pin alone drives the per-node selection.
+    from wastech_orchestrator.core.flow.registry import FlowRegistry
+
+    skill_dir = git_repo.clone / ".claude" / "skills" / "safe-change"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: safe-change\ndescription: d\n---\n# Body\n", "utf-8"
+    )
+    git_run(["add", ".claude/skills/safe-change/SKILL.md"], git_repo.clone)
+    git_run(["commit", "-m", "add skill"], git_repo.clone)
+    flows = tmp_path / "flows"
+    _write_pinned_flow(flows, ["safe-change"])
+    providers = _both()
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)  # noqa: SLF001
+    _patch_impl_edit(providers, git_repo)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-pin"))
+    assert result.final_status is Status.DONE
+    impl = next(
+        r for p in providers.values() for r in p.requests if r.node_id == "implementation"
+    )
+    assert any(path.endswith("safe-change/SKILL.md") for path in impl.skill_reference_paths)
+    skill_map = json.loads((art / "logs" / "task-pin" / "skill_map.json").read_text("utf-8"))
+    assert [s["name"] for s in skill_map["implementation"]] == ["safe-change"]
+
+
+def test_strict_unresolved_pin_stops_task(git_repo, make_git_config, tmp_path: Path) -> None:
+    # skills.strict: an operator pin that does not resolve (here: no such skill in the repo) stops
+    # the task in manual_action_required before any node runs — a fixable config/repo error.
+    from wastech_orchestrator.config.schema import SkillsConfig
+    from wastech_orchestrator.core.flow.registry import FlowRegistry
+
+    flows = tmp_path / "flows"
+    _write_pinned_flow(flows, ["ghost-skill"])
+    providers = _both()
+    orch, store, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)  # noqa: SLF001
+    orch._config = replace(orch._config, skills=SkillsConfig(dynamic=False, strict=True))  # noqa: SLF001
+
+    result = orch.run_task(_complete_task(tmp_path, "task-strict"))
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
+    assert "implementation" not in _ran_nodes(store, "task-strict")  # stopped before any node
 
 
 # --- prompt audit (who+prompt per step) -----------------------------------------------------

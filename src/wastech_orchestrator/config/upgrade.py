@@ -33,8 +33,10 @@ from wastech_orchestrator.config.schema import CONFIG_SCHEMA_VERSION
 # ``agents.providers.<p>.max_budget_usd`` is gone — declared/parsed but read nowhere. v15: the whole
 # ``checks.discovery`` block and the flat ``checks.commands`` list are gone — replaced by named
 # ``checks.command_sets``, which ``upgrade-config`` cannot synthesize (host inspection is removed);
-# the operator authors it (see config.example.yaml).) The parent-path may be dotted (walked
-# segment by segment).
+# the operator authors it (see config.example.yaml). v19: ``skills.scan_root``/``skills.exclude``
+# are gone — discovery is automatic and whole-repo, and operators pin skills per flow node instead
+# of denylisting; the block shrinks to ``skills.dynamic``/``skills.strict`` (added from template).)
+# The parent-path may be dotted (walked segment by segment).
 _REMOVED_KEYS: tuple[tuple[str, str], ...] = (
     ("", "prompts"),
     ("agents", "skip_stages"),
@@ -47,6 +49,8 @@ _REMOVED_KEYS: tuple[tuple[str, str], ...] = (
     ("agents.providers.codex", "max_budget_usd"),
     ("checks", "discovery"),
     ("checks", "commands"),
+    ("skills", "scan_root"),
+    ("skills", "exclude"),
 )
 
 _UPGRADE_HEADER = (

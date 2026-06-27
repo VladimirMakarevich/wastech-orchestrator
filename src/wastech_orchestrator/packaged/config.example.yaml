@@ -3,7 +3,7 @@
 # This is the packaged copy used by `wastech-orchestrator init`; keep it in sync with the
 # repo-root config.example.yaml
 
-schema_version: 18                  # config format version; the orchestrator refuses newer configs
+schema_version: 19                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -192,15 +192,13 @@ telegram:                           # human-in-the-loop + notifications (optiona
 # {stage} {repo_path} {task_path} {plan_path} {diff_path} {checks_path} {review_path} {skills_path}
 # {subtask_order} {subtask_count} {subtask_spec_path}) — never task bodies, diffs, env, or secrets.
 
-skills:                             # planning-selected repo skill references (optional, §2.1)
-  scan_root: ""                     # empty = <repo.local_path>/.claude/skills (the target repo's skills)
-  exclude:                          # gate-duplicating skills withheld from planning (orchestrator owns them)
-    - "run-checks"
-    - "test"
-    - "sync-docs"
-  # At task start the orchestrator scans <scan_root>/*/SKILL.md (name+description only). The planning
-  # stage may pick relevant ones; chosen SKILL.md files reach implementation/fixing as read-only
-  # reference paths (never executed, never the Claude Skill tool — Codex has none).
+skills:                             # repo skill selection (optional, §2.1)
+  dynamic: true                     # supervisor proposes a node->skills map once per task (skip when no skills)
+  strict: false                     # false = warn+skip an unresolved operator pin; true = stop the task
+  # At task start the orchestrator discovers every tracked SKILL.md in the clone (git ls-files,
+  # whole-repo). Each flow node gets the skills the operator pinned on it (flow YAML `skills:`) plus,
+  # when `dynamic`, the supervisor's proposed ones — the Core decides. Chosen SKILL.md files reach the
+  # node as read-only reference paths (never executed, never the Claude Skill tool — Codex has none).
 
 supervisor:                          # constant oversight layer above any flow — always active (§P2.1)
   role_file: "roles/supervisor.md"  # role prompt for the supervisor; path-contained under roles/

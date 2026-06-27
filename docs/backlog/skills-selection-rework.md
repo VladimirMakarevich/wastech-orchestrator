@@ -1,6 +1,6 @@
 # Skills selection rework: operator-pinned + supervisor-proposed
 
-Status: **proposed** (2026-06-26) Date: 2026-06-26 Owner: Vladimir Makarevich
+Status: **implemented** (2026-06-27) Date: 2026-06-26 Owner: Vladimir Makarevich
 
 Rework who selects repo skills and where they come from, while keeping the existing **Model A** delivery (a skill is a read-only `SKILL.md` reference path surfaced in the prompt footer — never loaded as a provider Skill tool, never executed). Selection moves off the `planning` node to two layers: operator-pinned skills per flow node (static, deterministic) and an optional once-per-task supervisor proposal (the supervisor proposes a `node → skills` map, the Core decides). The whole-repo skill inventory is discovered automatically (`git ls-files` for `**/SKILL.md` in the clone), so a monorepo with scattered skills is covered without configuration. This design record reflects the resolved decisions from the 2026-06-26 design conversation; a few implementation-level details remain open.
 
@@ -49,6 +49,8 @@ Stay in Model A and select skills through automatic discovery + two attachment l
 **Config.** The `skills:` block shrinks to two keys: `dynamic: true` (the supervisor proposal; `true` + skip-when-empty) and `strict: false`. `scan_root` is removed (discovery is automatic) and `exclude` is dropped (operators pin explicitly; a dynamic proposal of a gate-duplicating skill is low-harm and filtered by the role prompt). Schema version bump, replaced outright (greenfield, no migration).
 
 The cost of the rejected alternatives: Model C/native would have given us providers' auto-selection and progressive disclosure for free; Variant 3 would have given per-node adaptivity; diff-scoped sets would have given deterministic post-implementation relevance — we trade all three away to keep determinism, auditability, provider parity, never-executed safety, operator control over placement, and a small config surface.
+
+**supervisor.** The supervisor becomes more than just an advisor, but something more. This is a gradual evolution for future capabilities and new functionality. For example, repository memory management.
 
 ## Open questions
 

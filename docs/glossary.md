@@ -119,9 +119,9 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`telegram.bot_token_env`** - Environment variable name that holds the bot token.
 - **`telegram.chat_id_env`** - Environment variable name that holds the chat id.
 - **`telegram.ask_timeout_s`** - Timeout for blocking HITL waits.
-- **`skills`** - Planning-selected repository skill references.
-- **`skills.scan_root`** - Root directory scanned for `SKILL.md` files.
-- **`skills.exclude`** - Skills withheld from planning because the orchestrator owns those gates.
+- **`skills`** - Repo skill selection: whole-repo discovery + operator pins + supervisor proposal.
+- **`skills.dynamic`** - Whether the supervisor proposes a `node → skills` map once per task (skipped when the repo ships no skills).
+- **`skills.strict`** - Whether an unresolved operator skill pin stops the task (`true`) or is warned + skipped (`false`).
 - **`supervisor`** - The constant advisory layer above any flow.
 - **`supervisor.role_file`** - Role prompt file used by the supervisor.
 - **`supervisor.model`** - Provider model used by the supervisor, when set.
@@ -255,7 +255,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`flow_fingerprint`** - The hash of the resolved flow snapshot used to detect resume drift.
 - **`ExecutionUnit`** - The `(task_id, subtask_order)` identity for a root task or decomposed subtask.
 - **`active_subtask`** - The current 1-based subtask number on the task row when a task is decomposed, paired with `subtask_count` as the total number of accepted subtasks.
-- **`selected_skills.json`** - The persisted planning-time record of accepted skill paths and dedup information.
+- **`skill_map.json`** - The persisted per-node skill map (operator pins ∪ accepted supervisor proposal), restored on resume without re-proposing.
 - **`rerun`** - The command or workflow that re-attempts a terminal task.
 - **`resume`** - The crash-recovery path that continues an in-flight task from persisted state.
 - **`finalize`** - The workflow that records a manually handled terminal outcome.

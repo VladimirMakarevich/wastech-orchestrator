@@ -622,20 +622,20 @@ Note: **disabling** a node is not a flow field — it is a per-task override (`n
 
 ## `skills`
 
-Planning-selected repo skill references (optional, §2.1). At task start the orchestrator scans the **target repo's** `.claude/skills/*/SKILL.md` (name + description only — a cheap, bounded, frontmatter-only scan). The `planning` stage may pick relevant ones; the chosen `SKILL.md` files are passed to `implementation`/`fixing` as **read-only reference paths** (the `{skills_path}` prompt variable), advisory only — never executed, never the Claude-only Skill tool (Codex has none).
+Repo skill selection (optional, §2.1). At task start the orchestrator **discovers** every tracked `SKILL.md` in the clone (`git ls-files`, whole-repo and ignore-aware — a monorepo may scatter skills under `mobile/`, `backend/`, `.claude/skills/`, `.agents/skills/`, anywhere), reading name + description from each one's frontmatter (bounded, read-only). Each flow node then receives the skills attached to it from two layers the Core merges deterministically: **operator pins** (a `skills:` list on the flow node) and, when `dynamic`, the supervisor's once-per-task **proposal** of a `node → skills` map. The chosen `SKILL.md` files are passed to the node as **read-only reference paths** (the `{skills_path}` prompt variable), advisory only — never executed, never the Claude-only Skill tool (Codex has none).
 
 ```yaml
 skills:
-  scan_root: "" # empty = <repo.local_path>/.claude/skills
-  exclude: ["run-checks", "test", "sync-docs"]
+  dynamic: true # supervisor proposes a node->skills map once per task (skip when no skills)
+  strict: false # false = warn+skip an unresolved operator pin; true = stop the task
 ```
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `scan_root` | string | `""` | Where to scan for `*/SKILL.md`; empty = the target repo's `.claude/skills`. |
-| `exclude` | list | `["run-checks", "test", "sync-docs"]` | Gate-duplicating skills withheld from planning (the orchestrator already owns those gates). |
+| `dynamic` | bool | `true` | Run the once-per-task supervisor proposal of a `node → skills` map (the Core decides). Skipped automatically when the repo ships no skills. |
+| `strict` | bool | `false` | What to do when an operator pin does not resolve (typo, removed skill, ambiguous bare name, missing path): `false` warns + skips it and continues (fail-open); `true` stops the task in `manual_action_required` with a report. A _dynamic_ proposal naming a missing skill is always just filtered, never an error. |
 
-Skill bodies are repo-controlled and only ever surfaced by path. The planning agent **proposes** skill names; the Core keeps only those the scan actually found and that are not excluded, recording the selection (and any dropped names) in `plan.md`.
+A skill is addressed by its globally-unique frontmatter `name`, or — on a name collision — by its repo-relative `SKILL.md` path. Operators pin skills per node in the flow YAML, e.g. `skills: ["safe-change", "backend/.claude/skills/testing/SKILL.md"]`. Selection is provenance-closed: a pin or proposal can only ever resolve to a `SKILL.md` the scan independently discovered. Skill bodies are repo-controlled (untrusted) and only ever surfaced by path; the effective per-node set is persisted to `skill_map.json` and restored on resume without re-proposing.
 
 ## `supervisor`
 

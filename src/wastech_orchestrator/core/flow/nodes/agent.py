@@ -447,7 +447,7 @@ class AgentNodeRunner:
             check_artifacts_path=self._in.checks_path,
             review_artifacts_path=self._in.review_path,
             human_input_path=human_input_path,
-            skill_reference_paths=self._in.skill_paths,
+            skill_reference_paths=self._in.skills_for(node.id),
             output_schema=output_schema,
             model=node.model,
             reasoning=node.reasoning,
@@ -477,7 +477,7 @@ class AgentNodeRunner:
             "diff_path": self._in.diff_path,
             "checks_path": self._in.checks_path,
             "review_path": self._in.review_path,
-            "skills_path": "\n".join(self._in.skill_paths) or None,
+            "skills_path": "\n".join(self._in.skills_for(node.id)) or None,
         }
         if ctx.subtask_order is not None:
             variables["subtask_order"] = ctx.subtask_order

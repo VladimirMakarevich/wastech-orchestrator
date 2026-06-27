@@ -58,7 +58,6 @@ def _schema_output(cli_name: str, cli_args: list[str]) -> dict[str, object]:
             "human_input": None,
             "decompose": False,
             "subtasks": [],
-            "skills": [],
         }
     return {"content": "Fake refinement result.", "human_input": None}
 

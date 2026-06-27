@@ -241,6 +241,22 @@ class GitManager:
             return self._gh_runner(args)
         return self._run(["gh", *args])
 
+    def list_tracked_skill_files(self) -> tuple[str, ...]:
+        """Repo-relative POSIX paths of every tracked ``SKILL.md`` (whole-repo skill discovery).
+
+        Enumerates tracked files via ``git ls-files`` (ignore-aware and bounded for free — untracked
+        ``node_modules``/build/vendor trees never appear) and keeps the ``SKILL.md`` basenames,
+        wherever they sit in the tree. ``ls-files`` emits forward-slash paths on every platform.
+        Best-effort: a working copy with no git data (some tests) yields ``()`` so the inventory is
+        simply empty rather than failing the task.
+        """
+        result = self._git("ls-files", "-z")
+        if not result.ok:
+            return ()
+        return tuple(
+            item for item in result.stdout.split("\0") if item and item.split("/")[-1] == "SKILL.md"
+        )
+
     # --- branch flow ----------------------------------------------------------------------
 
     def branch_name(

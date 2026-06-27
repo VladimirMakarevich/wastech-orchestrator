@@ -163,8 +163,8 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "ask_timeout_s": 28800,
         },
         "skills": {
-            "scan_root": "",
-            "exclude": ["run-checks", "test", "sync-docs"],
+            "dynamic": True,
+            "strict": False,
         },
         "supervisor": {
             "role_file": "roles/supervisor.md",

@@ -242,7 +242,6 @@ class _FakeProvider:
                 "human_input": None,
                 "decompose": False,
                 "subtasks": [],
-                "skills": [],
             }
         return AgentRunResult(
             status=RunStatus.SUCCEEDED,
@@ -518,13 +517,12 @@ def test_resume_continues_persisted_checkpoint(
         assert node_requests[0].check_artifacts_path == str(failed_check)
 
 
-def test_resume_restores_planning_selected_skills(
+def test_resume_restores_skill_map_without_re_proposing(
     git_repo, make_git_config, git_run, tmp_path: Path
 ) -> None:
-    # F7 / MC4: planning selected a skill before the interruption (persisted to
-    # selected_skills.json); a resume past planning must restore it so the resumed implementation
-    # node still receives the skill reference path. `p.selected_skills` is in-memory only, so
-    # without the restore the dedicated skill_reference_paths channel is lost on resume.
+    # skills-selection-rework: the effective per-node skill map was resolved + persisted to
+    # skill_map.json before the interruption. A resume restores it (and does NOT re-run the
+    # supervisor proposal), so the resumed implementation node still receives the skill path.
     import json
 
     from wastech_orchestrator.task.model import NormalizedTask
@@ -560,15 +558,25 @@ def test_resume_restores_planning_selected_skills(
         flow_fingerprint=_impl_fingerprint(),
         fix_iterations=0,
     )
-    # Planning ran before the interruption and persisted its skill selection.
+    # The skill exists in the clone; the per-node map was persisted before the interruption.
+    # Identity is the repo-relative POSIX path (joined onto the clone when surfaced to a provider).
     skill_md = git_repo.clone / ".claude" / "skills" / "safe-change" / "SKILL.md"
     skill_md.parent.mkdir(parents=True, exist_ok=True)
     skill_md.write_text("---\nname: safe-change\ndescription: d\n---\n# Body\n", encoding="utf-8")
-    skills_json = art / "logs" / task_id / "selected_skills.json"
-    skills_json.parent.mkdir(parents=True, exist_ok=True)
-    skills_json.write_text(
-        # Persisted as_posix, mirroring what a real planning run writes (SkillRef.path is posix).
-        json.dumps([{"name": "safe-change", "description": "d", "path": skill_md.as_posix()}]),
+    skill_map = art / "logs" / task_id / "skill_map.json"
+    skill_map.parent.mkdir(parents=True, exist_ok=True)
+    skill_map.write_text(
+        json.dumps(
+            {
+                "implementation": [
+                    {
+                        "name": "safe-change",
+                        "description": "d",
+                        "path": ".claude/skills/safe-change/SKILL.md",
+                    }
+                ]
+            }
+        ),
         encoding="utf-8",
     )
 

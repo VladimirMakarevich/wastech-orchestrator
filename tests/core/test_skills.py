@@ -1,4 +1,4 @@
-"""Repo skill inventory scan, planning-selection acceptance, and dedup (post-test-run)."""
+"""Whole-repo skill discovery (git ls-files based), collision identity, and token resolution."""
 
 from __future__ import annotations
 
@@ -8,128 +8,116 @@ from wastech_orchestrator.core.skills import (
     SkillInventory,
     SkillInventoryScanner,
     SkillRef,
-    compute_skill_dedup,
-    resolve_planning_skills,
+    resolve_skills,
 )
 
 
-def _write_skill(root: Path, name: str, *, description: str = "d", body: str = "") -> Path:
-    skill_dir = root / name
-    skill_dir.mkdir(parents=True, exist_ok=True)
-    path = skill_dir / "SKILL.md"
-    path.write_text(
-        f"---\nname: {name}\ndescription: {description}\n---\n\n{body}", encoding="utf-8"
+def _write_skill(repo: Path, rel_dir: str, name: str, *, description: str = "d") -> str:
+    """Create ``<repo>/<rel_dir>/SKILL.md`` and return its repo-relative POSIX path."""
+    d = repo / rel_dir
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\n\nbody\n", encoding="utf-8"
     )
-    return path
+    return f"{rel_dir}/SKILL.md"
 
 
-# --- inventory scan ----------------------------------------------------------------------------
+def _scanner(
+    repo: Path, tracked: list[str], *, denied: tuple[str, ...] = ()
+) -> SkillInventoryScanner:
+    return SkillInventoryScanner(repo, lambda: tuple(tracked), denied_read_paths=denied)
 
 
-def test_scan_reads_frontmatter_only(tmp_path: Path) -> None:
-    root = tmp_path / ".claude" / "skills"
-    _write_skill(root, "safe-change", description="Review before finishing", body="# Body\nlong")
-    _write_skill(root, "add-provider", description="Add an adapter")
-    inv = SkillInventoryScanner(root, excluded_names=()).collect()
-    names = {s.name: s for s in inv.skills}
-    assert set(names) == {"safe-change", "add-provider"}
-    assert names["safe-change"].description == "Review before finishing"
-    assert names["safe-change"].path.endswith("safe-change/SKILL.md")
+# --- discovery -------------------------------------------------------------------------------
+
+
+def test_scan_discovers_tracked_skills_whole_repo(tmp_path: Path) -> None:
+    p1 = _write_skill(tmp_path, ".claude/skills/safe-change", "safe-change", description="Review")
+    p2 = _write_skill(tmp_path, "backend/.agents/skills/add-provider", "add-provider")
+    inv = _scanner(tmp_path, [p1, p2, "README.md", "src/app.py"]).collect()
+    by = {s.name: s for s in inv.skills}
+    assert set(by) == {"safe-change", "add-provider"}
+    assert by["safe-change"].description == "Review"
+    # identity is the repo-relative POSIX path (not absolute) — stable + collision key
+    assert by["safe-change"].path == ".claude/skills/safe-change/SKILL.md"
+    assert by["add-provider"].path == "backend/.agents/skills/add-provider/SKILL.md"
 
 
 def test_scan_skips_malformed_or_frontmatterless(tmp_path: Path) -> None:
-    root = tmp_path / "skills"
-    root.mkdir(parents=True)
-    (root / "no-frontmatter").mkdir()
-    (root / "no-frontmatter" / "SKILL.md").write_text("# Just a heading\n", encoding="utf-8")
-    (root / "no-name").mkdir()
-    (root / "no-name" / "SKILL.md").write_text("---\ndescription: x\n---\n", encoding="utf-8")
-    _write_skill(root, "good")
-    inv = SkillInventoryScanner(root, excluded_names=()).collect()
+    good = _write_skill(tmp_path, "a/good", "good")
+    (tmp_path / "b").mkdir()
+    (tmp_path / "b" / "SKILL.md").write_text("# just a heading\n", encoding="utf-8")
+    (tmp_path / "c").mkdir()
+    (tmp_path / "c" / "SKILL.md").write_text("---\ndescription: x\n---\n", encoding="utf-8")
+    inv = _scanner(tmp_path, [good, "b/SKILL.md", "c/SKILL.md"]).collect()
     assert [s.name for s in inv.skills] == ["good"]
 
 
-def test_scan_missing_root_is_empty(tmp_path: Path) -> None:
-    inv = SkillInventoryScanner(tmp_path / "absent").collect()
-    assert inv.skills == ()
+def test_scan_filters_non_skill_basenames(tmp_path: Path) -> None:
+    good = _write_skill(tmp_path, "a", "good")
+    # Defensive guard: only ``SKILL.md`` basenames scanned, not ``SKILL.md.bak`` / ``SKILLS.md``.
+    inv = _scanner(tmp_path, [good, "a/SKILL.md.bak", "docs/SKILLS.md"]).collect()
+    assert [s.name for s in inv.skills] == ["good"]
+
+
+def test_scan_empty_when_no_tracked_skills(tmp_path: Path) -> None:
+    assert _scanner(tmp_path, ["README.md", "src/app.py"]).collect().skills == ()
 
 
 def test_scan_honors_denied_read_paths(tmp_path: Path) -> None:
-    root = tmp_path / "skills"
-    _write_skill(root, "secret-skill")
-    _write_skill(root, "ok-skill")
-    inv = SkillInventoryScanner(
-        root, excluded_names=(), denied_read_paths=("secret-skill/SKILL.md",)
-    ).collect()
+    secret = _write_skill(tmp_path, "secret", "secret-skill")
+    ok = _write_skill(tmp_path, "ok", "ok-skill")
+    inv = _scanner(tmp_path, [secret, ok], denied=("secret/SKILL.md",)).collect()
     assert [s.name for s in inv.skills] == ["ok-skill"]
 
 
-def test_relevant_excludes_denylisted_gate_skills(tmp_path: Path) -> None:
-    root = tmp_path / "skills"
-    for name in ("safe-change", "run-checks", "test", "sync-docs"):
-        _write_skill(root, name)
-    inv = SkillInventoryScanner(root).collect()  # default exclude = run-checks/test/sync-docs
-    assert {s.name for s in inv.skills} == {"safe-change", "run-checks", "test", "sync-docs"}
-    assert {s.name for s in inv.relevant()} == {"safe-change"}
-    assert inv.by_name("run-checks") is None  # excluded → not selectable
-    assert inv.by_name("safe-change") is not None
+# --- identity / resolution -------------------------------------------------------------------
 
 
-# --- deterministic planning selection ----------------------------------------------------------
+def _inv(*entries: tuple[str, str]) -> SkillInventory:
+    """Build an inventory from ``(name, repo-relative-path)`` pairs."""
+    return SkillInventory(
+        skills=tuple(SkillRef(name=n, description="", path=p) for n, p in entries)
+    )
 
 
-def _inv(*names: str, excluded: tuple[str, ...] = ()) -> SkillInventory:
-    skills = tuple(SkillRef(name=n, description="", path=f"/skills/{n}/SKILL.md") for n in names)
-    return SkillInventory(skills=skills, excluded=frozenset(excluded))
+def test_resolve_by_unique_name() -> None:
+    inv = _inv(("alpha", "x/alpha/SKILL.md"), ("beta", "y/beta/SKILL.md"))
+    sel = resolve_skills(["beta"], inv)
+    assert [r.name for r in sel.refs] == ["beta"]
+    assert sel.unknown == () and sel.ambiguous == ()
 
 
-def test_resolve_keeps_known_drops_unknown_and_excluded() -> None:
-    inv = _inv("safe-change", "self-review", "run-checks", excluded=("run-checks",))
-    sel = resolve_planning_skills(["self-review", "run-checks", "ghost"], inv)
-    assert [r.name for r in sel.refs] == ["self-review"]
-    assert sel.dropped_excluded == ("run-checks",)
-    assert sel.dropped_unknown == ("ghost",)
+def test_resolve_unknown_token() -> None:
+    sel = resolve_skills(["ghost"], _inv(("alpha", "a/SKILL.md")))
+    assert sel.refs == () and sel.unknown == ("ghost",) and sel.ambiguous == ()
 
 
-def test_resolve_dedups_and_sorts_proposed() -> None:
-    inv = _inv("b-skill", "a-skill")
-    sel = resolve_planning_skills(["b-skill", "a-skill", "b-skill", "  "], inv)
-    assert [r.name for r in sel.refs] == ["a-skill", "b-skill"]
+def test_collision_bare_name_is_ambiguous_resolve_by_path() -> None:
+    inv = _inv(
+        ("testing", "backend/skills/testing/SKILL.md"),
+        ("testing", "mobile/skills/testing/SKILL.md"),
+    )
+    amb = resolve_skills(["testing"], inv)
+    assert amb.refs == () and amb.ambiguous == ("testing",)
+    # addressing the colliding name by its repo-relative path is unambiguous
+    byp = resolve_skills(["backend/skills/testing/SKILL.md"], inv)
+    assert [r.path for r in byp.refs] == ["backend/skills/testing/SKILL.md"]
+
+
+def test_resolve_dedups_by_path_and_sorts() -> None:
+    inv = _inv(("b", "p/b/SKILL.md"), ("a", "p/a/SKILL.md"))
+    # "a" named twice (once by name, once by its path), "b" twice, plus a blank token
+    sel = resolve_skills(["b", "a", "b", "  ", "p/a/SKILL.md"], inv)
+    assert [r.name for r in sel.refs] == ["a", "b"]  # sorted by (name, path), de-duped by path
 
 
 def test_resolve_empty_proposal() -> None:
-    sel = resolve_planning_skills([], _inv("safe-change"))
-    assert sel.refs == () and sel.dropped_unknown == () and sel.dropped_excluded == ()
+    sel = resolve_skills([], _inv(("a", "a/SKILL.md")))
+    assert sel.refs == () and sel.unknown == () and sel.ambiguous == ()
 
 
-# --- dedup (heading-level, deterministic) ------------------------------------------------------
-
-
-def test_dedup_flags_overlapping_heading() -> None:
-    user = "## Testing\nRun the suite my way.\n## Style\nUse tabs."
-    bodies = [
-        (SkillRef("safe-change", "", "/s/safe-change/SKILL.md"), "## Testing\nx\n## Scope\ny"),
-    ]
-    entries = compute_skill_dedup(user, bodies)
-    assert len(entries) == 1
-    assert entries[0].skill == "safe-change"
-    assert entries[0].overlapping_headings == ("Testing",)  # "Scope" not in the user text
-
-
-def test_dedup_no_user_text_is_noop() -> None:
-    bodies = [(SkillRef("s", "", "/s/SKILL.md"), "## Testing\nx")]
-    assert compute_skill_dedup(None, bodies) == ()
-    assert compute_skill_dedup("", bodies) == ()
-
-
-def test_dedup_no_overlap() -> None:
-    user = "## Deployment\nShip it."
-    bodies = [(SkillRef("s", "", "/s/SKILL.md"), "## Testing\nx")]
-    assert compute_skill_dedup(user, bodies) == ()
-
-
-def test_dedup_heading_match_is_normalized() -> None:
-    user = "## Testing!!!\n..."
-    bodies = [(SkillRef("s", "", "/s/SKILL.md"), "### testing\n...")]  # case/punct/level differ
-    entries = compute_skill_dedup(user, bodies)
-    assert len(entries) == 1 and entries[0].overlapping_headings == ("testing",)
+def test_unresolved_property_merges_unknown_and_ambiguous() -> None:
+    inv = _inv(("t", "a/SKILL.md"), ("t", "b/SKILL.md"))
+    sel = resolve_skills(["t", "ghost"], inv)
+    assert sel.unresolved == ("ghost", "t")  # sorted union of ambiguous + unknown

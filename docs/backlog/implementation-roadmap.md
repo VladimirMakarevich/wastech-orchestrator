@@ -40,7 +40,7 @@ The operator's business priority (more `+` = higher) is the tie-breaker, not the
 | 4 ✅ | [configurable-tasks-dir](configurable-tasks-dir.md) | B — Task scan | `+++` | M | 16→17 | Parameterizes the hardcoded `tasks/` path before three other features edit the same scan call-sites. |
 | 5 ✅ | [multi-instance-task-queues](multi-instance-task-queues.md) | B — Task scan | `+++` | M | 17→18 | Adds the `queue` field + filter on top of the now-parameterized scan, same seam. |
 | 6 ✅ | [cli-task-list-and-completion](cli-task-list-and-completion.md) | B — Task scan | `+++` | S | — | Reads the scan (dir + queue + priority aware); lands `recent_tasks()` that `worc top` later reuses. |
-| 7 | [skills-selection-rework](skills-selection-rework.md) | C — Core seam | `++++` | M | 18→19 | Establishes per-node prompt-var injection + "supervisor proposes, Core decides" that memory reuses. |
+| 7 ✅ | [skills-selection-rework](skills-selection-rework.md) | C — Core seam | `++++` | M | 18→19 | Establishes per-node prompt-var injection + "supervisor proposes, Core decides" that memory reuses. |
 | 7a | [task-node-model-override](task-node-model-override.md) | C′ — Task flexibility | `++` | M | — | Extends `NodeOverride` + adds overlay in `engine_driver`. After queues (`NodeOverride` seam) and skills (engine seam); before transient (`AgentRunRequest` path). No config bump. |
 | 8 | [transient-provider-failure-recovery](transient-provider-failure-recovery.md) | D — Resilience | `++` | M | 19→20 | Establishes structured `error_class` on provider errors + the resumable-pause path. |
 | 9 | [telegram-step-trace](telegram-step-trace.md) | D — Resilience | `++` | S | 20→21 | Establishes the per-step Telegram push channel + message-prefix discipline. |

@@ -619,10 +619,10 @@ def _build_skills(raw: Any, issues: list[str]) -> SkillsConfig:
     if raw is None:
         return SkillsConfig()
     m = _mapping(raw, where, issues)
-    _check_keys(m, {"scan_root", "exclude"}, where, issues)
+    _check_keys(m, {"dynamic", "strict"}, where, issues)
     return SkillsConfig(
-        scan_root=_str(m, "scan_root", "", where, issues),
-        exclude=_str_tuple(m, "exclude", ("run-checks", "test", "sync-docs"), where, issues),
+        dynamic=_bool(m, "dynamic", True, where, issues),
+        strict=_bool(m, "strict", False, where, issues),
     )
 
 

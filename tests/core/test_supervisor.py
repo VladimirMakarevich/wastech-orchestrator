@@ -19,6 +19,7 @@ from wastech_orchestrator.config.schema import SupervisorConfig
 from wastech_orchestrator.config.validation import validate_config
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.loop_control import record_rework
+from wastech_orchestrator.core.skills import SkillInventory, SkillRef
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.core.supervisor import Supervisor
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
@@ -175,6 +176,81 @@ def test_supervisor_step_artifact_run_id_is_the_observed_step(tmp_path: Path) ->
     sup.observe(task_id=_TASK, node_id="implementation", node_run_id=5, outcome_kind="done")
     sup.observe(task_id=_TASK, node_id="review", node_run_id=7, outcome_kind="accept")
     assert [r.node_run_id for r in router.requests] == [5, 7]
+
+
+# -- upfront skill-map proposal (skills-selection-rework) ---------------------
+
+_INV = SkillInventory(
+    skills=(SkillRef("safe-change", "review", ".claude/skills/safe-change/SKILL.md"),)
+)
+
+
+def _proposal_result(assignments: list[dict[str, Any]]) -> AgentRunResult:
+    return AgentRunResult(
+        status=RunStatus.SUCCEEDED,
+        provider="claude",
+        node_id="supervisor",
+        attempt=1,
+        exit_code=0,
+        started_at="t0",
+        finished_at="t1",
+        final_message=None,
+        structured_output={"assignments": assignments},
+        session_id="sess-super",
+    )
+
+
+def test_supervisor_propose_skill_map_parses_and_records(tmp_path: Path) -> None:
+    result = _proposal_result([{"node": "implementation", "skills": ["safe-change", "ghost"]}])
+    router, store = FakeRouter([result]), _store(tmp_path)
+    sup = _supervisor(tmp_path, router, store)
+
+    proposed = sup.propose_skill_map(
+        task_id=_TASK,
+        agent_node_ids=["implementation", "review"],
+        inventory=_INV,
+        task_spec_text="do x",
+    )
+    # The supervisor proposes verbatim tokens (the Core resolves them against the inventory later).
+    assert proposed == {"implementation": ("safe-change", "ghost")}
+    # One read-only structured turn, on its own session, carrying the proposal output schema.
+    assert len(router.requests) == 1
+    req = router.requests[0]
+    assert req.permission_profile == "read-only"
+    assert req.output_schema is not None and "assignments" in str(req.output_schema)
+    # Recorded as exactly one advisory evaluation row (the supervisor proposes, never routes).
+    evals = store.get_evaluations(_TASK)
+    assert [e.kind for e in evals] == ["supervisor_skill_proposal"]
+    assert evals[0].verdict == "advisory" and evals[0].node_id is None
+
+
+def test_supervisor_propose_skill_map_skips_when_inventory_empty(tmp_path: Path) -> None:
+    router, store = FakeRouter(), _store(tmp_path)
+    sup = _supervisor(tmp_path, router, store)
+    proposed = sup.propose_skill_map(
+        task_id=_TASK,
+        agent_node_ids=["implementation"],
+        inventory=SkillInventory(),
+        task_spec_text="x",
+    )
+    assert proposed == {}
+    assert router.requests == []  # no LLM call when there is nothing to propose
+    assert store.get_evaluations(_TASK) == []
+
+
+def test_supervisor_propose_skill_map_best_effort_on_infra_failure(tmp_path: Path) -> None:
+    router, store = FakeRouter([None]), _store(tmp_path)  # the turn could not run
+    sup = _supervisor(tmp_path, router, store)
+    proposed = sup.propose_skill_map(
+        task_id=_TASK,
+        agent_node_ids=["implementation"],
+        inventory=_INV,
+        task_spec_text="x",
+    )
+    assert proposed == {}  # advisory: a failed proposal never raises, the run continues on pins
+    evals = store.get_evaluations(_TASK)
+    assert [e.kind for e in evals] == ["supervisor_skill_proposal"]
+    assert json.loads(evals[0].findings_json)["proposal_failed"] is True
 
 
 def test_supervisor_records_observation_failure_distinctly(tmp_path: Path) -> None:

@@ -93,7 +93,13 @@ from wastech_orchestrator.providers.base import ProviderId
 # `task.queue == orchestrator.queue` (plain string equality, static partitioning, no balancing).
 # Validated non-empty. Default reproduces today's behavior; old configs omit it and take "default",
 # and `upgrade-config` adds it from the template.
-CONFIG_SCHEMA_VERSION = 18
+# v19 (2026-06-27, skills-selection-rework): the `skills:` block is replaced outright (greenfield).
+# `scan_root`/`exclude` are gone — discovery is automatic and whole-repo (`git ls-files` for tracked
+# `**/SKILL.md`), and operators pin skills per flow node instead of denylisting. The block shrinks
+# to `dynamic` (the once-per-task supervisor proposal of a node→skills map; on, skip-when-empty) and
+# `strict` (whether an unresolved operator pin stops the task). `upgrade-config` strips the two
+# removed keys.
+CONFIG_SCHEMA_VERSION = 19
 
 
 class AuditBranch(StrEnum):
@@ -285,17 +291,20 @@ class TelegramConfig:
 
 @dataclass(frozen=True)
 class SkillsConfig:
-    """Planning-selected repo skill references (post-test-run).
+    """Repo skill selection (skills-selection-rework): automatic discovery + two attachment layers.
 
-    The orchestrator scans ``<scan_root>`` (default ``<repo.local_path>/.claude/skills``) for
-    ``*/SKILL.md`` name+description, lets ``planning`` pick the relevant ones, and passes the chosen
-    files to downstream stages as read-only reference paths. ``exclude`` is the gate-duplicating
-    denylist withheld from planning. Defaults reproduce the no-config behavior (scan the target repo
-    clone, exclude the three orchestrator-gate skills). ``scan_root`` empty → the default location.
+    The orchestrator discovers every tracked ``SKILL.md`` in the clone (``git ls-files``, whole-repo
+    and ignore-aware), then attaches skills to each flow node from two layers the Core merges
+    deterministically: operator ``skills:`` pins on the flow node (static) and — when ``dynamic`` —
+    a once-per-task supervisor proposal of a ``node → skills`` map (skipped when the inventory is
+    empty). ``strict`` governs only operator pins: an unresolved pin (typo, removed skill, ambiguous
+    bare name, missing path) is a warning that is skipped (``False``, fail-open) or stops the task
+    in ``manual_action_required`` (``True``). A dynamic proposal naming a missing skill is always
+    just filtered, never an error.
     """
 
-    scan_root: str = ""
-    exclude: tuple[str, ...] = ("run-checks", "test", "sync-docs")
+    dynamic: bool = True
+    strict: bool = False
 
 
 @dataclass(frozen=True)

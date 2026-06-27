@@ -87,6 +87,7 @@ _AGENT_FIELDS = frozenset(
         "best_effort",
         "hitl",
         "extra_args",
+        "skills",
         "when",
     }
 )
@@ -168,6 +169,25 @@ def _parse_network_access(raw: dict[str, Any]) -> bool | None:
     """
     na = raw.get("network_access")
     return None if na is None else bool(na)
+
+
+def _parse_skills(raw: Any, ctx: str) -> tuple[str, ...]:
+    """Parse a node's ``skills:`` pin list — structure only (existence is a task-start check).
+
+    Each pin is a non-empty bounded string (a skill's unique ``name`` or repo-relative ``SKILL.md``
+    path); whether it resolves is checked against the discovered inventory at task start, since
+    skills live in the clone (absent at flow-load time). Order is preserved, blanks stripped.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise FlowLoadError(f"'skills' must be a list in {ctx}")
+    pins: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not item.strip() or len(item) > 512:
+            raise FlowLoadError(f"each 'skills' entry must be a non-empty bounded string in {ctx}")
+        pins.append(item.strip())
+    return tuple(pins)
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,6 +314,7 @@ def _parse_agent_node(raw: dict[str, Any]) -> AgentNode:
         best_effort=bool(raw.get("best_effort", False)),
         hitl=_parse_hitl_settings(raw.get("hitl")),
         extra_args=tuple(str(a) for a in raw.get("extra_args", [])),
+        skills=_parse_skills(raw.get("skills"), ctx),
         when=_parse_when(raw.get("when")),
     )
 

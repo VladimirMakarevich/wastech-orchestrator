@@ -1,46 +1,46 @@
-"""Repo skill inventory + planning-selected references (post-test-run).
+"""Repo skill inventory + skill-token resolution (Model A: read-only reference paths).
 
-Skills are provider-neutral ``SKILL.md`` files in the **target repo** (``<repo>/.claude/skills/*``):
-``name``/``description`` frontmatter plus a markdown body of procedural guidance. This module does a
-cheap, bounded, presence-only **inventory scan** (frontmatter only — mirroring
-``checks/inspect.RepositoryInspector``), lets the ``planning`` stage pick the relevant ones, and the
-Core then passes the chosen files to downstream stages as **read-only reference paths** (never the
-Claude-only Skill tool, so both providers behave identically; never executed).
+Skills are provider-neutral ``SKILL.md`` files anywhere in the **target repo** — a monorepo may
+scatter them (``mobile/``, ``backend/``, ``.claude/skills/``, ``.agents/skills/``, or any tracked
+directory). This module discovers them by enumerating tracked ``**/SKILL.md`` via ``git ls-files``
+(ignore-aware and bounded for free — untracked ``node_modules``/build/vendor never appear), reads
+``name``/``description`` frontmatter bounded + denied-aware, and resolves operator-pinned /
+supervisor-proposed skill *tokens* against that inventory.
 
-Two deterministic, auditable steps live here:
-
-* :func:`resolve_planning_skills` — the "agent proposes, Core decides" filter (cf. decomposition):
-  keep only names the scan actually found and that are not on the gate-duplicating denylist.
-* :func:`compute_skill_dedup` — flag skill sections whose heading matches the operator's appended
-  planning guidance, so plan.md can record that the operator's text wins for that topic.
-
-Nothing here builds CLI argv, reads env, or weakens the sandbox; skill bodies are repo-controlled
-(untrusted) and are only ever surfaced by path.
+Selection is **provenance-closed and deterministic** — "the proposer proposes, the Core decides":
+a token is accepted only when it resolves to exactly one *discovered* skill (by globally-unique
+``name``, else by repo-relative path), so a name/path can never introduce a file the scan did not
+independently find. The Core surfaces accepted skills to flow nodes purely as **read-only reference
+paths** (never the Claude-only Skill tool, so both providers behave identically; never executed).
+Skill bodies are repo-controlled (untrusted) and are only ever surfaced by path.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from typing import Literal
 
 import yaml
 
 # Cap per-file reads so a pathological SKILL.md can never wedge or balloon the scan (cf. inspect).
 _MAX_FILE_BYTES = 262_144
 
-# Gate-duplicating skills the orchestrator already owns as deterministic gates/guardrails — excluded
-# from what is surfaced to planning by default (two-sources-of-truth + scope-creep risk).
-DEFAULT_EXCLUDED_SKILLS: tuple[str, ...] = ("run-checks", "test", "sync-docs")
+_SKILL_BASENAME = "SKILL.md"
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
-_HEADING_RE = re.compile(r"^#{1,6}\s+(.*?)\s*#*\s*$", re.MULTILINE)
 
 
 @dataclass(frozen=True)
 class SkillRef:
-    """One repo skill: its name, one-line description, and the path to its ``SKILL.md``."""
+    """One repo skill: frontmatter ``name``/``description`` and its repo-relative ``SKILL.md`` path.
+
+    ``path`` is the repo-relative POSIX path (what ``git ls-files`` yields). It is the collision
+    key, the operator path-pin token, and the persisted identity — stable across platforms. The
+    absolute path surfaced to a provider is derived by joining the clone root at the wiring seam.
+    """
 
     name: str
     description: str
@@ -48,77 +48,92 @@ class SkillRef:
 
 
 @dataclass(frozen=True)
+class SkillResolveResult:
+    """The outcome of resolving one token: a hit, an ambiguous bare name, or no match."""
+
+    ref: SkillRef | None
+    status: Literal["resolved", "ambiguous", "unknown"]
+
+
+@dataclass(frozen=True)
 class SkillInventory:
-    """The scanned skill inventory. ``excluded`` names are present but withheld from planning."""
+    """The discovered skill inventory; a token resolves by unique name, else repo-relative path."""
 
     skills: tuple[SkillRef, ...] = ()
-    excluded: frozenset[str] = frozenset()
 
-    def relevant(self) -> tuple[SkillRef, ...]:
-        """Procedural-knowledge skills offered to planning (everything not on the denylist)."""
-        return tuple(s for s in self.skills if s.name not in self.excluded)
+    def resolve(self, token: str) -> SkillResolveResult:
+        """Resolve one operator/supervisor token to a skill, or report why it cannot.
 
-    def by_name(self, name: str) -> SkillRef | None:
-        for skill in self.relevant():
-            if skill.name == name:
-                return skill
-        return None
+        Exact-match and provenance-closed: a token equal to exactly one repo-relative path resolves
+        to it; else a token equal to exactly one frontmatter ``name`` resolves to it; a bare name
+        shared by more than one skill is ``ambiguous`` (address it by path); anything else is
+        ``unknown``. Identity never depends on scope — a name resolves to exactly one skill or not.
+        """
+        name = token.strip()
+        if not name:
+            return SkillResolveResult(ref=None, status="unknown")
+        by_path = [s for s in self.skills if s.path == name]
+        if by_path:
+            return SkillResolveResult(ref=by_path[0], status="resolved")
+        by_name = [s for s in self.skills if s.name == name]
+        if len(by_name) == 1:
+            return SkillResolveResult(ref=by_name[0], status="resolved")
+        if len(by_name) > 1:
+            return SkillResolveResult(ref=None, status="ambiguous")
+        return SkillResolveResult(ref=None, status="unknown")
 
 
 @dataclass(frozen=True)
 class SkillSelection:
-    """The Core's deterministic acceptance of the planning agent's proposed skill names."""
+    """The Core's deterministic acceptance of a set of tokens (pins or a dynamic proposal).
+
+    ``refs`` are the accepted skills (de-duplicated by path, ordered by ``(name, path)``).
+    ``unknown`` / ``ambiguous`` are the tokens that did not resolve — an error only for operator
+    pins under ``skills.strict``; a dynamic proposal just drops them.
+    """
 
     refs: tuple[SkillRef, ...] = ()
-    dropped_unknown: tuple[str, ...] = ()
-    dropped_excluded: tuple[str, ...] = ()
+    unknown: tuple[str, ...] = ()
+    ambiguous: tuple[str, ...] = ()
 
-
-@dataclass(frozen=True)
-class SkillDedupEntry:
-    """A selected skill with section headings that overlap the operator's planning text."""
-
-    skill: str
-    path: str
-    overlapping_headings: tuple[str, ...]
+    @property
+    def unresolved(self) -> tuple[str, ...]:
+        """All tokens that did not resolve (unknown ∪ ambiguous), sorted — for a pin report."""
+        return tuple(sorted({*self.unknown, *self.ambiguous}))
 
 
 class SkillInventoryScanner:
-    """Scan ``<skills_root>/*/SKILL.md`` for name+description (read-only, bounded, frontmatter)."""
+    """Discover tracked ``**/SKILL.md`` via ``git ls-files`` and read their frontmatter."""
 
     def __init__(
         self,
-        skills_root: str | Path,
+        repo_dir: str | Path,
+        list_tracked: Callable[[], Sequence[str]],
         *,
         denied_read_paths: tuple[str, ...] = (),
-        excluded_names: Sequence[str] = DEFAULT_EXCLUDED_SKILLS,
         max_file_bytes: int = _MAX_FILE_BYTES,
     ) -> None:
-        self._root = Path(skills_root)
+        self._repo = Path(repo_dir)
+        self._list_tracked = list_tracked
         self._denied = tuple(denied_read_paths)
-        self._excluded = frozenset(excluded_names)
         self._max_bytes = max_file_bytes
 
     def collect(self) -> SkillInventory:
-        if not self._root.is_dir():
-            return SkillInventory(skills=(), excluded=self._excluded)
+        """Scan every tracked ``SKILL.md`` for name+description (read-only, bounded frontmatter)."""
         refs: list[SkillRef] = []
-        try:
-            entries = sorted(p for p in self._root.iterdir() if p.is_dir())
-        except OSError:
-            return SkillInventory(skills=(), excluded=self._excluded)
-        for skill_dir in entries:
-            ref = self._scan_one(skill_dir / "SKILL.md")
+        seen: set[str] = set()
+        for raw in sorted(self._list_tracked()):
+            rel = raw.replace("\\", "/")
+            if rel in seen or PurePosixPath(rel).name != _SKILL_BASENAME:
+                continue
+            seen.add(rel)
+            ref = self._scan_one(rel)
             if ref is not None:
                 refs.append(ref)
-        return SkillInventory(skills=tuple(refs), excluded=self._excluded)
+        return SkillInventory(skills=tuple(refs))
 
-    def read_body(self, ref: SkillRef) -> str | None:
-        """Read a selected skill's body (used only by the dedup; bounded, denied-aware)."""
-        return self._read_text(Path(ref.path))
-
-    def _scan_one(self, skill_md: Path) -> SkillRef | None:
-        text = self._read_text(skill_md)
+    def _scan_one(self, rel: str) -> SkillRef | None:
+        text = self._read_text(rel)
         if text is None:
             return None
         match = _FRONTMATTER_RE.match(text)
@@ -135,97 +150,52 @@ class SkillInventoryScanner:
         if not isinstance(name, str) or not name.strip():
             return None
         desc = description.strip() if isinstance(description, str) else ""
-        # ``as_posix`` keeps the surfaced reference path identical across platforms (forward slashes
-        # on Windows too); ``Path`` re-parses it fine when the body is later read.
-        return SkillRef(name=name.strip(), description=desc, path=skill_md.as_posix())
+        # The repo-relative POSIX path is the surfaced reference + collision identity (forward
+        # slashes on Windows too); the clone root is joined back on at the wiring seam.
+        return SkillRef(name=name.strip(), description=desc, path=rel)
 
-    def _read_text(self, path: Path) -> str | None:
-        try:
-            rel = path.relative_to(self._root)
-        except ValueError:
-            rel = path
-        if any(rel.match(glob) or path.match(glob) for glob in self._denied):
+    def _read_text(self, rel: str) -> str | None:
+        """Read one repo-relative file, bounded and denied-aware (matches the security globs)."""
+        rel_path = PurePosixPath(rel)
+        abs_path = self._repo / rel
+        if any(rel_path.match(glob) or abs_path.match(glob) for glob in self._denied):
             return None
         try:
-            if not path.is_file() or path.stat().st_size > self._max_bytes:
+            if not abs_path.is_file() or abs_path.stat().st_size > self._max_bytes:
                 return None
-            return path.read_text(encoding="utf-8", errors="replace")
+            return abs_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return None
 
 
-def resolve_planning_skills(proposed: Sequence[str], inventory: SkillInventory) -> SkillSelection:
-    """Keep only proposed names the scan found and that are not gate-duplicating.
+def resolve_skills(tokens: Sequence[str], inventory: SkillInventory) -> SkillSelection:
+    """Resolve skill *tokens* against the inventory — "the proposer proposes, the Core decides".
 
-    Deterministic, like decomposition's accept rule: the agent proposes names; the Core decides. A
-    name that does not resolve to a relevant skill is dropped (``dropped_unknown``); a name that
-    resolves only to an *excluded* (gate-duplicating) skill is dropped (``dropped_excluded``). The
-    agent can never introduce a path the Core did not independently discover. Order is stable and
-    de-duplicated.
+    Deterministic and provenance-closed: a token is accepted only when it resolves to exactly one
+    discovered skill (by unique name or by repo-relative path). Unresolved tokens are categorized as
+    ``unknown`` (no match) or ``ambiguous`` (a bare name shared by more than one skill). Accepted
+    refs are de-duplicated by path and ordered by ``(name, path)``; the dropped lists are sorted.
     """
     refs: list[SkillRef] = []
-    seen: set[str] = set()
-    dropped_unknown: list[str] = []
-    dropped_excluded: list[str] = []
-    excluded_present = {s.name for s in inventory.skills if s.name in inventory.excluded}
-    for raw in proposed:
-        name = raw.strip() if isinstance(raw, str) else ""
-        if not name or name in seen:
+    seen_paths: set[str] = set()
+    unknown: list[str] = []
+    ambiguous: list[str] = []
+    for raw in tokens:
+        token = raw.strip() if isinstance(raw, str) else ""
+        if not token:
             continue
-        seen.add(name)
-        ref = inventory.by_name(name)
-        if ref is not None:
-            refs.append(ref)
-        elif name in excluded_present:
-            dropped_excluded.append(name)
+        result = inventory.resolve(token)
+        if result.status == "resolved" and result.ref is not None:
+            if result.ref.path not in seen_paths:
+                seen_paths.add(result.ref.path)
+                refs.append(result.ref)
+        elif result.status == "ambiguous":
+            ambiguous.append(token)
         else:
-            dropped_unknown.append(name)
-    refs.sort(key=lambda r: r.name)
+            unknown.append(token)
+    refs.sort(key=lambda r: (r.name, r.path))
     return SkillSelection(
         refs=tuple(refs),
-        dropped_unknown=tuple(sorted(dropped_unknown)),
-        dropped_excluded=tuple(sorted(dropped_excluded)),
+        unknown=tuple(sorted(set(unknown))),
+        ambiguous=tuple(sorted(set(ambiguous))),
     )
-
-
-def _normalize_heading(heading: str) -> str:
-    """Lowercase, drop punctuation/extra whitespace — for deterministic heading match."""
-    cleaned = re.sub(r"[^a-z0-9 ]+", "", heading.lower())
-    return re.sub(r"\s+", " ", cleaned).strip()
-
-
-def markdown_headings(text: str) -> list[str]:
-    """The raw markdown heading titles (``# ...`` .. ``###### ...``) in *text*, in order."""
-    return [m.strip() for m in _HEADING_RE.findall(text)]
-
-
-def compute_skill_dedup(
-    user_text: str | None, bodies: Sequence[tuple[SkillRef, str]]
-) -> tuple[SkillDedupEntry, ...]:
-    """Flag selected-skill sections whose heading matches the operator's planning text.
-
-    Heading-level and fully deterministic (v1): a skill section is "overlapping" when its normalized
-    heading equals a heading in the operator's appended planning guidance. The skill is still
-    referenced by path — nothing is deleted — but plan.md records that the operator's explicit text
-    takes precedence there, so the agent is not handed the same instruction twice. With no appended
-    planning text (the common case) this is a no-op.
-    """
-    if not user_text or not user_text.strip():
-        return ()
-    user_headings = {_normalize_heading(h) for h in markdown_headings(user_text)}
-    user_headings.discard("")
-    if not user_headings:
-        return ()
-    entries: list[SkillDedupEntry] = []
-    for ref, body in bodies:
-        seen: set[str] = set()
-        unique: list[str] = []
-        for heading in markdown_headings(body):
-            if _normalize_heading(heading) in user_headings and heading not in seen:
-                seen.add(heading)
-                unique.append(heading)
-        if unique:
-            entries.append(
-                SkillDedupEntry(skill=ref.name, path=ref.path, overlapping_headings=tuple(unique))
-            )
-    return tuple(entries)

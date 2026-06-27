@@ -69,13 +69,11 @@ from wastech_orchestrator.core.recovery import (
     RecoveryReconciler,
 )
 from wastech_orchestrator.core.skills import (
-    SkillDedupEntry,
     SkillInventory,
     SkillInventoryScanner,
     SkillRef,
     SkillSelection,
-    compute_skill_dedup,
-    resolve_planning_skills,
+    resolve_skills,
 )
 from wastech_orchestrator.core.state_machine import Status, assert_transition
 from wastech_orchestrator.core.supervisor import Supervisor
@@ -107,7 +105,7 @@ from wastech_orchestrator.providers.base import (
     AgentProvider,
     ProviderId,
 )
-from wastech_orchestrator.providers.redaction import read_denied_secrets, redact_text
+from wastech_orchestrator.providers.redaction import read_denied_secrets
 from wastech_orchestrator.routing.router import AgentRouter
 from wastech_orchestrator.security.env import build_child_env
 from wastech_orchestrator.security.isolation import check_isolation
@@ -268,12 +266,12 @@ class _Pipeline:
     branch: str = ""
     slug: str = ""
     check_sets: tuple[ResolvedCheckSet, ...] = ()  # normalized command_sets, resolved at preflight
-    # Repo skill inventory scanned at task start; planning's chosen subset is surfaced to downstream
-    # stages as read-only reference paths. Re-derived per run; `selected_skills` is set when
-    # the planning agent runs this process and is persisted to `selected_skills.json`, so a resume
-    # past planning restores it (see `_persist_selected_skills` / `_restore_engine_inputs`).
+    # Repo skill inventory discovered at task start (`git ls-files`, whole-repo). `skill_map` is the
+    # effective per-node selection (operator pins ∪ the accepted supervisor proposal), keyed by node
+    # id and persisted to `skill_map.json`, so a resume restores it without re-proposing (see
+    # `_resolve_skill_layers`). Both are populated in `_engine_run`, not at construction.
     skill_inventory: SkillInventory = field(default_factory=SkillInventory)
-    selected_skills: tuple[SkillRef, ...] = ()
+    skill_map: dict[str, tuple[SkillRef, ...]] = field(default_factory=dict)
     # Per-task disabled flow node ids (``nodes.<id>.enabled: false``). Re-derived every run/resume
     # from front-matter, so a restart recovers it without persistence (node-disable control).
     skip: frozenset[str] = frozenset()
@@ -360,13 +358,10 @@ class Orchestrator:
         self._supervisor: Supervisor | None = None
 
     def _default_skill_scanner(self) -> SkillInventoryScanner:
-        root = self._config.skills.scan_root or str(
-            Path(self._config.repo.local_path) / ".claude" / "skills"
-        )
         return SkillInventoryScanner(
-            root,
+            self._config.repo.local_path,
+            self._git.list_tracked_skill_files,
             denied_read_paths=self._config.security.denied_read_paths,
-            excluded_names=self._config.skills.exclude,
         )
 
     # --- entry point ----------------------------------------------------------------------
@@ -400,7 +395,6 @@ class Orchestrator:
             counters=LoopCounters(),
             decomposition=DecompositionDecision(accepted=False, reason="pending", n=1),
             skip=effective_skip(task),
-            skill_inventory=self._skill_scanner.collect(),
             operator_decomposition=operator_decision,
         )
         try:
@@ -1054,7 +1048,6 @@ class Orchestrator:
             slug=row.slug or slugify(task.title),
             plan_path=str(task_artifact_dir(self._artifacts_root, plan.task_id) / "plan.md"),
             skip=effective_skip(task),
-            skill_inventory=self._skill_scanner.collect(),
         )
 
         try:
@@ -1119,16 +1112,8 @@ class Orchestrator:
         review = task_dir / "review" / "findings.json"
         if review.exists():
             inputs.review_path = str(review)
-        # Restore the planning-selected skills (in-memory only otherwise; lost on a resume past
-        # planning) so resumed edit nodes keep {skills_path} / skill_reference_paths.
-        skills_file = task_dir / "selected_skills.json"
-        if skills_file.exists():
-            refs = tuple(
-                SkillRef(name=d["name"], description=d["description"], path=d["path"])
-                for d in json.loads(skills_file.read_text(encoding="utf-8"))
-            )
-            p.selected_skills = refs
-            inputs.skill_paths = tuple(r.path for r in refs)
+        # The per-node skill map is restored separately by ``_resolve_skill_layers`` (from
+        # ``skill_map.json``), since it must be in place for a fresh run too — not only on resume.
         # P1: the fixing-resume check log is task-scoped — a decomposed subtask re-runs its region
         # from the top (region entry), regenerating its own check log.
         latest_check = self._store.latest_failed_check_log(p.task.id, None)
@@ -1234,6 +1219,10 @@ class Orchestrator:
         )
         if resume:
             self._restore_engine_inputs(p, inputs)  # diff/checks/review/plan paths from disk
+        # Resolve the per-node skill selection before any node runs: discover the inventory, apply
+        # operator pins (strict/warn) + the supervisor's once-per-task proposal, and thread the
+        # effective map into ``inputs``. On resume the persisted map is restored (no re-proposal).
+        self._resolve_skill_layers(p, snapshot, inputs, resume=resume)
         services = build_node_services(
             router=self._router,
             check_runner=self._checks,
@@ -1502,7 +1491,7 @@ class Orchestrator:
                 )
             if not isinstance(node, AgentNode):
                 return
-            path = apply_output_artifact(
+            apply_output_artifact(
                 node,
                 outcome,
                 artifacts_root=self._artifacts_root,
@@ -1510,8 +1499,6 @@ class Orchestrator:
                 inputs=inputs,
                 register=self._register_artifact,
             )
-            if node.output_artifact == "plan" and path is not None:
-                self._engine_apply_skills(p, outcome, inputs, path)
             # Operator-authored splits are materialized at preflight (the decision comes from the
             # ``subtasks:`` manifest, not this node), so this post-hook is a no-op for them.
             if (
@@ -1569,42 +1556,104 @@ class Orchestrator:
             ]
         )
 
-    def _engine_apply_skills(
-        self, p: _Pipeline, outcome: NodeOutcome, inputs: NodeInputs, plan_path: str
+    def _resolve_skill_layers(
+        self, p: _Pipeline, snapshot: FlowSnapshot, inputs: NodeInputs, *, resume: bool
     ) -> None:
-        """Resolve planning-proposed skills, surface them downstream, append the plan section."""
-        structured = outcome.structured_output
-        skills_raw = structured.get("skills") if isinstance(structured, Mapping) else None
-        proposed = tuple(str(s) for s in skills_raw) if isinstance(skills_raw, list | tuple) else ()
-        selection = resolve_planning_skills(proposed, p.skill_inventory)
-        p.selected_skills = selection.refs
-        inputs.skill_paths = tuple(ref.path for ref in selection.refs)
-        self._persist_selected_skills(p, selection.refs)
-        existing = Path(plan_path).read_text(encoding="utf-8")
-        # dedup: flag selected-skill sections whose heading already appears in the plan so the
-        # plan's own instructions take precedence (the skill stays referenced by path — nothing is
-        # dropped). Skill bodies are read denied-aware/bounded through the inventory scanner.
-        bodies = [
-            (ref, body)
-            for ref in selection.refs
-            if (body := self._skill_scanner.read_body(ref)) is not None
-        ]
-        section = self._render_skill_section(selection, compute_skill_dedup(existing, bodies))
-        if section:
-            Path(plan_path).write_text(existing + section, encoding="utf-8")
+        """Resolve the per-node skill selection once at task start (before any node runs).
 
-    def _persist_selected_skills(self, p: _Pipeline, refs: tuple[SkillRef, ...]) -> None:
-        """Persist the planning-selected skills so a resume past planning can restore them.
+        Discovers the whole-repo inventory, applies operator pins (subject to ``skills.strict``) and
+        — when ``skills.dynamic`` and the inventory is non-empty — the supervisor's once-per-task
+        proposal, then threads the effective per-node map (pins ∪ the accepted proposal) into
+        ``inputs`` as absolute read-only reference paths. The map is persisted to ``skill_map.json``
+        so a resume restores it without re-proposing; a resume whose map file is missing
+        (interrupted before it was written) falls back to a fresh, idempotent resolution.
+        """
+        map_file = task_artifact_dir(self._artifacts_root, p.task.id) / "skill_map.json"
+        if resume and map_file.exists():
+            p.skill_map = self._load_skill_map(map_file)
+            inputs.skill_paths_by_node = self._skill_paths_by_node(p.skill_map)
+            return
+        p.skill_inventory = self._skill_scanner.collect()
+        agent_nodes = [n for n in snapshot.doc.nodes if isinstance(n, AgentNode)]
+        pins = {n.id: resolve_skills(n.skills, p.skill_inventory) for n in agent_nodes}
+        self._enforce_pin_strictness(p, pins)
+        proposed = self._propose_skill_map(p, agent_nodes)
+        # Effective set per node = Core_filter(pins ∪ accepted proposal). Dynamic tokens that do
+        # not resolve are dropped here (only ``.refs`` kept); pins already passed strict/warn.
+        skill_map = {
+            n.id: resolve_skills((*n.skills, *proposed.get(n.id, ())), p.skill_inventory).refs
+            for n in agent_nodes
+        }
+        p.skill_map = {nid: refs for nid, refs in skill_map.items() if refs}
+        self._persist_skill_map(p, map_file)
+        inputs.skill_paths_by_node = self._skill_paths_by_node(p.skill_map)
 
-        ``p.selected_skills`` is in-memory only (set when planning runs this process), so without
-        this a resumed implementation/fixing node would lose ``{skills_path}`` /
-        ``skill_reference_paths``. The fresh run still embeds the skills in plan.md; this restores
-        the dedicated reference-path channel (see :meth:`_restore_engine_inputs`)."""
-        task_dir = task_artifact_dir(self._artifacts_root, p.task.id)
-        data = [{"name": r.name, "description": r.description, "path": r.path} for r in refs]
-        path = task_dir / "selected_skills.json"
-        path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        self._register_artifact(p.task.id, "selected_skills", str(path))
+    def _enforce_pin_strictness(
+        self, p: _Pipeline, pins: dict[str, SkillSelection]
+    ) -> None:
+        """Strict/warn handling for unresolved operator pins (a dynamic proposal is never an error).
+
+        ``skills.strict`` true stops the task in ``manual_action_required`` with a report; false
+        (default, fail-open) logs a warning per node and continues, dropping the unresolved pins.
+        """
+        unresolved = {nid: sel.unresolved for nid, sel in pins.items() if sel.unresolved}
+        if not unresolved:
+            return
+        report = "; ".join(f"{nid}: {', '.join(toks)}" for nid, toks in sorted(unresolved.items()))
+        if self._config.skills.strict:
+            raise ManualActionRequired(f"unresolved skill pin(s) (skills.strict): {report}")
+        self._log(p.task.id).warning(
+            "unresolved skill pin(s) skipped (skills.strict=false)", extra={"pins": report}
+        )
+
+    def _propose_skill_map(
+        self, p: _Pipeline, agent_nodes: list[AgentNode]
+    ) -> dict[str, tuple[str, ...]]:
+        """The supervisor's once-per-task proposal (when ``dynamic`` and skills exist), else {}."""
+        if not self._config.skills.dynamic or not p.skill_inventory.skills:
+            return {}
+        if self._supervisor is None:  # defensive — the layer is built before this runs
+            return {}
+        return self._supervisor.propose_skill_map(
+            task_id=p.task.id,
+            agent_node_ids=[n.id for n in agent_nodes],
+            inventory=p.skill_inventory,
+            task_spec_text=self._skill_task_spec_text(p),
+        )
+
+    def _skill_task_spec_text(self, p: _Pipeline) -> str:
+        """A bounded task spec (title + description) the proposal uses to judge skill relevance."""
+        text = f"{p.task.title}\n\n{(p.task.description or '').strip()}".strip()
+        return text[:8000]
+
+    def _persist_skill_map(self, p: _Pipeline, map_file: Path) -> None:
+        """Persist the effective per-node skill map so a resume restores it without re-proposing."""
+        data = {
+            nid: [{"name": r.name, "description": r.description, "path": r.path} for r in refs]
+            for nid, refs in p.skill_map.items()
+        }
+        map_file.parent.mkdir(parents=True, exist_ok=True)
+        map_file.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        self._register_artifact(p.task.id, "skill_map", str(map_file))
+
+    def _load_skill_map(self, map_file: Path) -> dict[str, tuple[SkillRef, ...]]:
+        """Rebuild the per-node skill map from ``skill_map.json`` (repo-relative paths kept)."""
+        raw = json.loads(map_file.read_text(encoding="utf-8"))
+        return {
+            nid: tuple(
+                SkillRef(name=d["name"], description=d["description"], path=d["path"]) for d in refs
+            )
+            for nid, refs in raw.items()
+        }
+
+    def _skill_paths_by_node(
+        self, skill_map: dict[str, tuple[SkillRef, ...]]
+    ) -> dict[str, tuple[str, ...]]:
+        """Node id → absolute POSIX reference paths (repo-relative identity joined to the clone)."""
+        repo = Path(self._config.repo.local_path)
+        return {
+            nid: tuple((repo / r.path).as_posix() for r in refs) for nid, refs in skill_map.items()
+        }
 
     def _finish_engine_run(self, p: _Pipeline, result: FlowRunResult) -> PipelineResult:
         """Map a terminal :class:`FlowRunResult` to a :class:`PipelineResult` (+ auto-merge)."""
@@ -1656,33 +1705,6 @@ class Orchestrator:
             ),
         )
         self._store.update_task(p.task.id, branch=p.branch, slug=p.slug)
-
-    def _render_skill_section(
-        self, selection: SkillSelection, dedup: tuple[SkillDedupEntry, ...]
-    ) -> str:
-        """Render the deterministic, auditable plan.md skills block."""
-        if not (selection.refs or selection.dropped_unknown or selection.dropped_excluded):
-            return ""
-        lines = ["", "## Skills (planning-selected, read-only references)", ""]
-        if selection.refs:
-            lines += [f"- `{ref.name}`: {ref.path}" for ref in selection.refs]
-        else:
-            lines.append("- (none)")
-        dropped = [f"`{n}` (not in the repo skill inventory)" for n in selection.dropped_unknown]
-        dropped += [
-            f"`{n}` (gate-duplicating; owned by the orchestrator)"
-            for n in selection.dropped_excluded
-        ]
-        if dropped:
-            lines += ["", "Dropped: " + "; ".join(dropped) + "."]
-        if dedup:
-            lines += [
-                "",
-                "De-duplication — your appended planning instructions take precedence; these "
-                "referenced skill sections cover the same topics:",
-            ]
-            lines += [f"- `{e.skill}`: {', '.join(e.overlapping_headings)}" for e in dedup]
-        return "\n" + redact_text("\n".join(lines) + "\n")
 
     def _skip_section_md(self, p: _Pipeline) -> str:
         """A ``## Pipeline nodes skipped`` markdown block, or ``""`` when nothing was skipped."""

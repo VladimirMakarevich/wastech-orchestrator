@@ -65,6 +65,12 @@ class AgentNode:
     best_effort: bool = False
     hitl: HitlSettings | None = None
     extra_args: tuple[str, ...] = ()
+    #: operator-pinned repo skills for this node (skills-selection-rework). Each entry is a skill's
+    #: globally-unique frontmatter ``name`` or — on a name collision — its repo-relative
+    #: ``SKILL.md`` path. Pins are deterministic and always included; the dynamic supervisor
+    #: proposal may add more. Existence is resolved at task start against the discovered inventory
+    #: (the loader checks only structure — skills live in the clone, absent at preflight).
+    skills: tuple[str, ...] = ()
     when: WhenPredicate | None = None
 
 

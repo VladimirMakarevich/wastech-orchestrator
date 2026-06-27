@@ -97,7 +97,7 @@ All 32 functional blocks (B01–B32) carry the status `documented`, (re)built fr
 ### B13 — Skill Inventory and Selection
 
 - **Purpose:** bounded `.claude/skills/**/SKILL.md` inventory scan, planning-proposed selection filtered to known/non-excluded names, read-only reference paths downstream.
-- **Entry points:** `core/skills.py` (`SkillInventoryScanner`, `resolve_planning_skills`).
+- **Entry points:** `core/skills.py` (`SkillInventoryScanner`, `resolve_skills`).
 - **Dependencies:** B06 (scan + apply), B30 (`skill_paths`), B15 (`{skills_path}`), B25 (denied paths), B05.
 - **Status:** `documented` · [file](./blocks/B13-skill-selection.md)
 

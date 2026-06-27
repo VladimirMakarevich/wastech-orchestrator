@@ -248,7 +248,7 @@ git:
     footprint: { audit_commit_message, audit_on_branch },
   }
 telegram: { enabled: false, bot_token_env, chat_id_env, ask_timeout_s }
-skills: { scan_root, exclude } # planning-selected, read-only repo skill references
+skills: { dynamic, strict } # whole-repo discovery + per-node pins + supervisor proposal
 supervisor: { role_file, model, reasoning } # the constant read-only oversight layer
 prompt_audit: false # record each step's prompt + who
 ```
