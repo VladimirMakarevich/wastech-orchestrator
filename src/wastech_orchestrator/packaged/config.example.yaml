@@ -183,6 +183,9 @@ git:
   auto_merge_wait_for_checks: false # true: arm GitHub-native auto-merge (--auto) — merge only after required checks pass
   # NOTE: a per-task `auto_merge: true|false` wins outright over this default (PRE.2). Auto-merge
   # skips the human PR review — the operator (the task author) owns that call; see docs/operations.md.
+  merge_flow: merge                 # flow `worc merge-task` runs to resolve base-merge conflicts
+                                    #   (seeded editable at .worc/flows/merge.yaml). Clean merges are
+                                    #   mechanical (no flow); only a conflicting base-merge runs it.
   footprint:                        # audit-trail policy (§21). Runtime files always live under the
                                     # gitignored <repo>/.worc/ home; only the task file and its
                                     # <id>.summary.md are committed, at the repo root under tasks/.

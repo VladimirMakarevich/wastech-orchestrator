@@ -663,6 +663,26 @@ class StateStore:
         cur = self._conn.execute("SELECT * FROM tasks ORDER BY updated_at DESC")
         return [_task_from_row(r) for r in cur.fetchall()]
 
+    def find_open_pr_tasks(self) -> list[TaskRow]:
+        """Tasks whose orchestrator PR is open and un-merged — the ``worc prs`` population.
+
+        A task qualifies when it has a completed ``pr`` publish op (a PR was created) and **no**
+        completed ``pr_merge`` op (it has not been merged through the orchestrator). Read-only. The
+        ``'pr'``/``'pr_merge'``/``'completed'`` literals are the ``publish_operations`` kind/status
+        values owned by ``GitManager`` (``KIND_PR`` / ``KIND_PR_MERGE`` / ``_STATUS_COMPLETED``);
+        spelled here rather than imported to avoid a state_store→git_manager import cycle.
+        """
+        cur = self._conn.execute(
+            "SELECT * FROM tasks t WHERE EXISTS ("
+            "  SELECT 1 FROM publish_operations po"
+            "  WHERE po.task_id = t.task_id AND po.kind = 'pr' AND po.status = 'completed'"
+            ") AND NOT EXISTS ("
+            "  SELECT 1 FROM publish_operations po"
+            "  WHERE po.task_id = t.task_id AND po.kind = 'pr_merge' AND po.status = 'completed'"
+            ") ORDER BY t.updated_at DESC"
+        )
+        return [_task_from_row(r) for r in cur.fetchall()]
+
     def update_task(
         self, task_id: str, conn: sqlite3.Connection | None = None, **fields: object
     ) -> None:

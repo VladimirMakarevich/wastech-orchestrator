@@ -24,7 +24,7 @@ from typing import Any
 from wastech_orchestrator.check_runner import CheckRunner
 from wastech_orchestrator.checks.model import ResolvedCheckSet
 from wastech_orchestrator.checks.resolver import CheckResolver
-from wastech_orchestrator.config.schema import OrchestratorConfig
+from wastech_orchestrator.config.schema import MergeStrategy, OrchestratorConfig
 from wastech_orchestrator.core.decomposition import (
     REASON_N_OUT_OF_RANGE,
     DecompositionDecision,
@@ -179,6 +179,33 @@ class RerunPlan:
 
 
 @dataclass(frozen=True)
+class MergePlan:
+    """The reconciled facts + warnings/refusals for ``merge-task`` (the read-only dry-run view)."""
+
+    task_id: str
+    found: bool = False
+    status: Status | None = None
+    branch: str | None = None
+    base_branch: str = ""
+    pr_url: str | None = None
+    verify_state: str | None = None  # gh PR state when checked (MERGED/OPEN/CLOSED)
+    already_merged: bool = False  # PR is MERGED on GitHub → merge-task is an idempotent no-op
+    warnings: tuple[str, ...] = ()  # non-fatal (e.g. PR state unverifiable; will still attempt)
+    refusals: tuple[str, ...] = ()  # fatal; abort with exit 1
+
+
+@dataclass(frozen=True)
+class PrSyncEntry:
+    """One task's outcome from ``prs --sync`` reconciliation against GitHub (one printed line)."""
+
+    task_id: str
+    pr_url: str | None
+    state: str | None  # gh PR state: MERGED / CLOSED / OPEN / None (unverifiable)
+    action: str  # record-merge | closed-no-merge | still-open | unverifiable
+    finalized_done: bool = False  # a blocked manual_action_required task was flipped to done
+
+
+@dataclass(frozen=True)
 class FinalizePlan:
     """The reconciled facts + warnings/refusals for a ``finalize`` (read-only)."""
 
@@ -305,6 +332,31 @@ class DependencyVerdict:
 
     state: Eligibility
     detail: str = ""
+
+
+class _EphemeralRunRecorder:
+    """A no-op :class:`~wastech_orchestrator.core.flow.engine.RunRecorder` for the transactional
+    merge-flow run (``worc merge-task``). It persists **no** flow checkpoint to the task row (so the
+    ephemeral merge run never collides with ``rerun --continue`` on the task's own implementation
+    flow) and no failure report. The merge run starts fresh every time and is aborted on failure, so
+    there is nothing to resume."""
+
+    def record_skip(self, node: FlowNode, *, reason: str, subtask_order: int | None) -> None:
+        return None
+
+    def save_checkpoint(self, run_state: FlowRunState) -> None:
+        return None
+
+    def write_failure_report(
+        self,
+        *,
+        node_id: str,
+        loop: str | None,
+        limit_name: str,
+        run_state: FlowRunState,
+        subtask_order: int | None = None,
+    ) -> str:
+        return ""
 
 
 class Orchestrator:
@@ -954,6 +1006,161 @@ class Orchestrator:
         )
         return PipelineResult(task_id=task_id, final_status=declared, pr_url=pr_url)
 
+    def plan_merge(self, task_id: str, *, verify: bool = True) -> MergePlan:
+        """Gather the facts + warnings/refusals for ``merge-task`` (read-only; mutates nothing)."""
+        row = self._store.get_task(task_id)
+        if row is None:
+            return MergePlan(
+                task_id=task_id, found=False, refusals=(f"unknown task id '{task_id}'",)
+            )
+        refusals: list[str] = []
+        warnings: list[str] = []
+        if any(t.task_id != task_id for t in self._store.find_active_tasks()):
+            refusals.append("another task owns the processing slot; merge-task needs it idle")
+        pr_url = self._git.recorded_pr_url(task_id)
+        if pr_url is None:
+            refusals.append(f"task '{task_id}' has no recorded PR to merge")
+        verify_state: str | None = None
+        already_merged = False
+        if pr_url is not None and verify:
+            verify_state = self._git.verify_pr_state(pr_url)
+            if verify_state == "MERGED":
+                already_merged = True  # idempotent: merge-task will just record it
+            elif verify_state == "CLOSED":
+                refusals.append(f"the PR is CLOSED (not merged); nothing to do: {pr_url}")
+            elif verify_state is None:
+                warnings.append(
+                    "could not verify PR state (gh offline/unauthenticated); will still attempt"
+                )
+            # OPEN → proceed
+        return MergePlan(
+            task_id=task_id,
+            found=True,
+            status=row.status,
+            branch=row.branch,
+            base_branch=self._config.repo.base_branch,
+            pr_url=pr_url,
+            verify_state=verify_state,
+            already_merged=already_merged,
+            warnings=tuple(warnings),
+            refusals=tuple(refusals),
+        )
+
+    def merge_task(
+        self,
+        task_id: str,
+        *,
+        strategy: MergeStrategy,
+        wait_for_checks: bool,
+        resolve: bool = True,
+    ) -> PipelineResult:
+        """Operator go-ahead: pull base into the task branch, resolve any conflicts (agent-assisted
+        via the merge flow), then merge the PR. The human-in-the-loop counterpart to ``auto_merge``.
+
+        Holds the single slot for its duration and cleans up after itself, so it needs no new task
+        status. Transactional: on any failure it runs ``git merge --abort``, leaves the PR open, and
+        raises :class:`PipelineFailed` (a ``DONE`` task is never downgraded). Idempotent: a PR that
+        is already merged (through us earlier, or out of band) is recorded and succeeds without
+        re-merging. ``resolve=False`` aborts on a conflict instead of launching the merge flow."""
+        row = self._store.get_task(task_id)
+        if row is None:
+            raise PipelineFailed(f"unknown task id '{task_id}'")
+        if any(t.task_id != task_id for t in self._store.find_active_tasks()):
+            raise PipelineFailed("another task owns the processing slot; merge-task needs it idle")
+        pr_url = self._git.recorded_pr_url(task_id)
+        if pr_url is None:
+            raise PipelineFailed(f"task '{task_id}' has no recorded PR to merge")
+
+        state = self._git.verify_pr_state(pr_url)
+        if state == "MERGED":  # merged already (through us earlier or out of band) → record + done
+            self._git.record_external_merge(task_id, pr_url)
+            return self._merge_finalize(row, pr_url)
+        if state == "CLOSED":
+            raise PipelineFailed(f"the PR is CLOSED (not merged); nothing to do: {pr_url}")
+        # OPEN or unverifiable → proceed.
+
+        branch = row.branch
+        if not branch:
+            raise PipelineFailed(f"task '{task_id}' has no recorded branch to merge")
+
+        log = self._log(task_id)
+        self._git.merge_abort()  # clear a stale merge from a prior crash before starting
+        try:
+            conflicted = self._git.update_branch_with_base(branch, self._config.repo.base_branch)
+            if conflicted:
+                log.info("[MERGE-TASK] conflicts; running merge flow", extra={"branch": branch})
+                if not resolve:
+                    raise PipelineFailed(
+                        f"base merge conflicts and --no-resolve was set; PR left open: {pr_url}"
+                    )
+                p = self._degraded_pipeline(row)  # minimal pipeline from the stored row
+                if not self._run_merge_flow(p, self._resolve_merge_flow()):
+                    raise PipelineFailed(
+                        f"the merge flow produced no clean, passing tree; PR left open: {pr_url}"
+                    )
+                self._git.commit_merge_resolution(
+                    task_id, f"merge({task_id}): resolve base-merge conflicts"
+                )
+            else:
+                log.info("[MERGE-TASK] clean base merge", extra={"branch": branch})
+            self._git.push_branch_update(branch)
+            outcome = self._git.merge_pr(
+                task_id, pr_url, strategy=strategy, wait_for_checks=wait_for_checks
+            )
+            log.info("[MERGE-TASK] merged", extra={"pr_url": pr_url, "outcome": outcome})
+        except (GitCommandError, PipelineFailed) as exc:
+            self._git.merge_abort()  # transactional: restore the tree, leave the PR open
+            raise PipelineFailed(f"merge-task failed: {exc}") from exc
+        return self._merge_finalize(row, pr_url)
+
+    def _merge_finalize(self, row: TaskRow, pr_url: str) -> PipelineResult:
+        """Record the terminal outcome of a successful operator merge.
+
+        The merge itself already persists in the ``pr_merge`` publish op (which unblocks
+        ``depends_on`` dependents). A task that was ``manual_action_required`` because its earlier
+        auto-merge was blocked is flipped to ``DONE`` via the operator ``finalize`` path (its block
+        is now resolved); a ``DONE`` task stays ``DONE`` — never re-finalized."""
+        if row.status is Status.MANUAL_ACTION_REQUIRED:
+            return self.finalize_task(
+                row.task_id, declared=Status.DONE, pr_url=pr_url, note="merged via merge-task"
+            )
+        return PipelineResult(task_id=row.task_id, final_status=row.status, pr_url=pr_url)
+
+    def sync_external_merges(self, *, write: bool) -> list[PrSyncEntry]:
+        """Reconcile open-PR tasks against GitHub for ``prs --sync``: probe each, record externally
+        merged ones (the counterpart to ``merge-task`` for PRs merged directly on GitHub).
+
+        Read-only when ``write`` is False (the dry-run): every task is probed, nothing is written.
+        When ``write`` is True, a ``MERGED`` PR gets a ``pr_merge`` publish op (unblocking
+        ``depends_on`` dependents) and, if the task was ``manual_action_required`` because its merge
+        was blocked, is finalized to ``DONE`` via the ``finalize`` path. ``CLOSED`` (not merged) and
+        still-``OPEN`` PRs are only reported. Idempotent: an already-recorded merge never re-appears
+        (it drops out of ``find_open_pr_tasks``)."""
+        entries: list[PrSyncEntry] = []
+        for row in self._store.find_open_pr_tasks():
+            pr_url = self._git.recorded_pr_url(row.task_id)
+            state = self._git.verify_pr_state(pr_url) if pr_url else None
+            if state == "MERGED" and pr_url is not None:
+                finalized = False
+                if write:
+                    self._git.record_external_merge(row.task_id, pr_url)
+                    if row.status is Status.MANUAL_ACTION_REQUIRED:
+                        self.finalize_task(
+                            row.task_id,
+                            declared=Status.DONE,
+                            pr_url=pr_url,
+                            note="merged externally (prs --sync)",
+                        )
+                        finalized = True
+                entries.append(PrSyncEntry(row.task_id, pr_url, state, "record-merge", finalized))
+            elif state == "CLOSED":
+                entries.append(PrSyncEntry(row.task_id, pr_url, state, "closed-no-merge"))
+            elif state is None:
+                entries.append(PrSyncEntry(row.task_id, pr_url, state, "unverifiable"))
+            else:  # OPEN
+                entries.append(PrSyncEntry(row.task_id, pr_url, state, "still-open"))
+        return entries
+
     def refresh_repo(self) -> None:
         """Best-effort fetch/pull of ``base_branch`` so git-pushed tasks become visible.
 
@@ -1209,6 +1416,87 @@ class Orchestrator:
             self._log(p.task.id).warning("task node override skipped", extra={"detail": warning})
         return resolution.overlay
 
+    def _build_engine_services(
+        self, p: _Pipeline, *, finalize: Callable[[], str | None] | None
+    ) -> NodeServices:
+        """Assemble the per-unit :class:`NodeServices` for an engine run.
+
+        Shared by the task driver (:meth:`_engine_run`) and the operator merge routine
+        (:meth:`_run_merge_flow`). ``finalize`` is the publish node's hook; ``None`` for a flow with
+        no PR-publishing node (the merge flow's ``policy: none`` terminal never calls it).
+        """
+        return build_node_services(
+            router=self._router,
+            check_runner=self._checks,
+            store=self._store,
+            repo_dir=self._config.repo.local_path,
+            artifacts_root=str(self._artifacts_root),
+            clock=self._clock,
+            git=self._git,
+            notifier=self._notifier,
+            snapshot_hook=self._git,
+            ask_timeout_s=self._config.telegram.ask_timeout_s,
+            ask_heartbeat_seconds=self._heartbeat_seconds,
+            # Claude-only max-turns gate (idea 29): resolved once from the claude provider block
+            # (absent in a codex-only setup → off). Preflight guarantees telegram when it is on.
+            max_turns_gate=self._max_turns_gate_enabled(),
+            prompt_audit=self._prompt_audit_on(p.task),
+            prompt_secrets=self._prompt_secrets(),
+            register_artifact=self._register_artifact,
+            finalize=finalize,
+            # The dependency_scan checker launches its argv scanners through the same safe runner
+            # and allowlisted env the Check Runner uses (a test's fake runner drives both).
+            run_process=self._checks.run_process,
+            process_env=build_child_env(self._config.security.allowed_environment),
+            scan_timeout_s=self._config.checks.timeout_seconds,
+            deletion_approval_exempt_paths=self._config.security.deletion_approval_exempt_paths,
+        )
+
+    def _resolve_merge_flow(self) -> FlowSnapshot:
+        """Resolve the configured ``git.merge_flow`` to a validated snapshot (operator-editable).
+
+        Raises :class:`PipelineFailed` (→ a clear operator error) when the flow file is missing or
+        fails graph/config validation, exactly as task-flow resolution does. The seam is a single
+        flow name today; a future path/area-based collection resolves a name here the same way.
+        """
+        try:
+            return self._flow_registry.resolve(self._config.git.merge_flow)
+        except (FlowResolutionError, FlowValidationError) as exc:
+            raise PipelineFailed(
+                f"merge flow {self._config.git.merge_flow!r} could not be resolved: {exc}"
+            ) from exc
+
+    def _run_merge_flow(self, p: _Pipeline, snapshot: FlowSnapshot) -> bool:
+        """Run the merge flow on the already-merged, conflict-marked working tree; True iff it ends
+        clean and green.
+
+        Transactional + ephemeral: a fresh ``FlowRunState`` and a no-op recorder (no checkpoint
+        written to the task row, so no clash with ``rerun --continue``), no supervisor, no post-node
+        hook, no publish. The flow only resolves markers and runs the operator's checks; the
+        orchestrator commits the merge and merges the PR afterward. Returns ``False`` when a bounded
+        loop is exhausted (markers/checks unresolved) so the caller aborts the merge."""
+        assert snapshot.source_path is not None
+        inputs = build_node_inputs(
+            p,
+            flow_dir=snapshot.source_path.parent,
+            check_sets=self._check_sets(p),  # the operator's command_sets; () = no gate
+            commit_message=f"merge({p.task.id}): resolve base-merge conflicts",
+            summary_body_path=self._fallback_summary_path(p),
+        )
+        services = self._build_engine_services(p, finalize=None)
+        run_state = FlowRunState(flow_fingerprint=snapshot.flow_fingerprint)
+        result = drive_flow(
+            snapshot=snapshot,
+            run_state=run_state,
+            recorder=_EphemeralRunRecorder(),
+            services=services,
+            inputs=inputs,
+            facts=lambda _fact: False,  # merge.yaml has no `when` predicates
+            agents=self._config.agents,
+            task_id=p.task.id,
+        )
+        return result.status is Status.DONE
+
     def _drive_via_engine(self, p: _Pipeline, completeness: Completeness) -> PipelineResult:
         """Drive the task through the :class:`FlowEngine`.
 
@@ -1270,32 +1558,7 @@ class Orchestrator:
         # operator pins (strict/warn) + the supervisor's once-per-task proposal, and thread the
         # effective map into ``inputs``. On resume the persisted map is restored (no re-proposal).
         self._resolve_skill_layers(p, snapshot, inputs, resume=resume)
-        services = build_node_services(
-            router=self._router,
-            check_runner=self._checks,
-            store=self._store,
-            repo_dir=self._config.repo.local_path,
-            artifacts_root=str(self._artifacts_root),
-            clock=self._clock,
-            git=self._git,
-            notifier=self._notifier,
-            snapshot_hook=self._git,
-            ask_timeout_s=self._config.telegram.ask_timeout_s,
-            ask_heartbeat_seconds=self._heartbeat_seconds,
-            # Claude-only max-turns gate (idea 29): resolved once from the claude provider block
-            # (absent in a codex-only setup → off). Preflight guarantees telegram when it is on.
-            max_turns_gate=self._max_turns_gate_enabled(),
-            prompt_audit=self._prompt_audit_on(p.task),
-            prompt_secrets=self._prompt_secrets(),
-            register_artifact=self._register_artifact,
-            finalize=lambda: self._engine_finalize(p),
-            # The dependency_scan checker launches its argv scanners through the same safe runner
-            # and allowlisted env the Check Runner uses (a test's fake runner drives both).
-            run_process=self._checks.run_process,
-            process_env=build_child_env(self._config.security.allowed_environment),
-            scan_timeout_s=self._config.checks.timeout_seconds,
-            deletion_approval_exempt_paths=self._config.security.deletion_approval_exempt_paths,
-        )
+        services = self._build_engine_services(p, finalize=lambda: self._engine_finalize(p))
         recorder = StateStoreRunRecorder(
             self._store, p.task.id, artifacts_root=self._artifacts_root
         )

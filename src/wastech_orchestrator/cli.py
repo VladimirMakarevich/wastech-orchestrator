@@ -30,6 +30,7 @@ from wastech_orchestrator.config import upgrade as config_upgrade
 from wastech_orchestrator.config.loader import ConfigError, load_config, loads_config
 from wastech_orchestrator.config.schema import (
     CONFIG_SCHEMA_VERSION,
+    MergeStrategy,
     OrchestratorConfig,
 )
 from wastech_orchestrator.config.validation import validate_config
@@ -37,7 +38,9 @@ from wastech_orchestrator.core.flow.registry import FlowRegistry
 from wastech_orchestrator.core.orchestrator import (
     Eligibility,
     FinalizePlan,
+    MergePlan,
     Orchestrator,
+    PipelineFailed,
     PipelineResult,
     RerunPlan,
     build_orchestrator,
@@ -45,7 +48,12 @@ from wastech_orchestrator.core.orchestrator import (
 )
 from wastech_orchestrator.core.state_machine import TERMINAL, Status
 from wastech_orchestrator.env_file import load_env_file
-from wastech_orchestrator.git_manager import append_runtime_excludes
+from wastech_orchestrator.git_manager import (
+    KIND_PR,
+    GitCommandError,
+    GitManager,
+    append_runtime_excludes,
+)
 from wastech_orchestrator.install import config_writer, detect, wizard
 from wastech_orchestrator.notify import build_notifier
 from wastech_orchestrator.notify.telegram import check_telegram_preflight
@@ -379,6 +387,64 @@ def build_parser() -> argparse.ArgumentParser:
     )
     finalize_cmd.add_argument(
         "-y", "--yes", action="store_true", help="skip confirmation (incl. the WARNING prompts)"
+    )
+
+    prs_cmd = sub.add_parser(
+        "prs", help="list orchestrator PRs that are open and awaiting merge (read-only)"
+    )
+    prs_cmd.add_argument(
+        "--check",
+        action="store_true",
+        help="enrich each row with live GitHub state (needs gh; touches the network)",
+    )
+    prs_cmd.add_argument(
+        "--sync",
+        action="store_true",
+        help="reconcile PRs merged externally on GitHub: record the merge (dry-run unless --yes)",
+    )
+    prs_cmd.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="(with --sync) write the reconciliation instead of a dry-run",
+    )
+
+    merge_cmd = sub.add_parser(
+        "merge-task",
+        help="merge a reviewed orchestrator PR: update branch w/ base, resolve conflicts, merge",
+    )
+    merge_cmd.add_argument("task_id", help="id of the task whose PR to merge")
+    merge_cmd.add_argument(
+        "--strategy",
+        choices=("merge", "squash", "rebase"),
+        help="gh pr merge strategy (default: git.auto_merge_strategy)",
+    )
+    merge_cmd.add_argument(
+        "--wait-for-checks",
+        dest="wait_for_checks",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="arm GitHub-native auto-merge (merge after required checks pass) instead of merging "
+        "immediately (default: git.auto_merge_wait_for_checks)",
+    )
+    merge_cmd.add_argument(
+        "--no-resolve",
+        dest="resolve",
+        action="store_false",
+        help="on a conflict, abort instead of launching the merge flow (mechanical-only)",
+    )
+    merge_cmd.add_argument(
+        "--dry-run", action="store_true", help="print the plan (PR, conflicts?); merge nothing"
+    )
+    merge_cmd.add_argument(
+        "-y", "--yes", action="store_true", help="skip the confirmation (merging is consequential)"
+    )
+
+    tasks_cmd = sub.add_parser(
+        "tasks", help="list all known tasks with status and branch (read-only)"
+    )
+    tasks_cmd.add_argument(
+        "--status", help="show only tasks in this status (e.g. done, failed, running)"
     )
 
     return parser
@@ -1146,6 +1212,207 @@ def cmd_finalize(args: argparse.Namespace) -> int:
     suffix = f" → {result.pr_url}" if result.pr_url else ""
     print(f"{result.task_id}: {result.final_status.value}{suffix} (finalized)")
     return _EXIT_BY_STATUS.get(result.final_status, 1)
+
+
+def _recorded_pr_url(store: StateStore, task_id: str) -> str | None:
+    """The PR URL a task's completed ``pr`` publish op recorded (read straight off the store)."""
+    op = store.get_publish_op(task_id, KIND_PR, None)
+    return op.result_ref if op is not None else None
+
+
+def cmd_prs(args: argparse.Namespace) -> int:
+    """List orchestrator PRs that are open and awaiting merge.
+
+    Default + ``--check`` never write: the listing is DB-only (``status``'s read-only path) and
+    ``--check`` adds a live ``gh`` probe per row. ``--sync`` reconciles PRs merged externally on
+    GitHub — dry-run unless ``-y/--yes``."""
+    _configure_runtime_logging(args)
+    config = load_config_for(args)
+    if config is None:
+        return 2
+    root = worc_home_for(config)
+    db_path = Path(root) / "state.db"
+    if not db_path.is_file():
+        print(f"prs: no state database at {db_path}")
+        return 2
+    if args.sync:
+        return _cmd_prs_sync(args, config, root)
+
+    store = StateStore.open_readonly(db_path)
+    try:
+        rows = store.find_open_pr_tasks()
+        pr_urls = {r.task_id: _recorded_pr_url(store, r.task_id) for r in rows}
+    finally:
+        store.close()
+    if not rows:
+        print("prs: no open orchestrator PRs awaiting merge")
+        return 0
+    # ``--check`` adds a live gh probe; its read-only store is GitManager's (closed in finally).
+    git_store = StateStore.open_readonly(db_path) if args.check else None
+    git = (
+        GitManager(config, store=git_store, artifacts_root=str(root))
+        if git_store is not None
+        else None
+    )
+    try:
+        for row in rows:
+            url = pr_urls.get(row.task_id)
+            line = f"{row.status.value:<22} {row.task_id}  {row.title or ''}"
+            if row.branch:
+                line += f"  ({row.branch})"
+            line += f"  {url or '(no url)'}"
+            if git is not None and url:
+                line += f"  [{git.verify_pr_state(url) or 'unknown'}]"
+            print(line)
+    finally:
+        if git_store is not None:
+            git_store.close()
+    return 0
+
+
+def _cmd_prs_sync(args: argparse.Namespace, config: OrchestratorConfig, root: Path) -> int:
+    """The ``prs --sync`` reconcile path: dry-run by default, writes only with ``-y/--yes``."""
+    # A write run touches the shared clone/DB; refuse while a live watch daemon owns it (like
+    # finalize). The read-only dry-run is always safe.
+    if args.yes:
+        pid = process_control.running_daemon_pid(process_control.pid_file_path(root))
+        if pid is not None:
+            print(f"prs --sync: the watch daemon is running (pid {pid}); stop it first")
+            return 1
+    orchestrator = build_orchestrator(
+        config, artifacts_root=root, heartbeat_seconds=args.heartbeat_seconds
+    )
+    entries = orchestrator.sync_external_merges(write=args.yes)
+    if not entries:
+        print("prs --sync: no open orchestrator PRs to reconcile")
+        return 0
+    prefix = "" if args.yes else "[dry-run] "
+    for e in entries:
+        if e.action == "record-merge":
+            tail = " + finalized done" if e.finalized_done else ""
+            verb = "recorded merge" if args.yes else "would record merge"
+            print(f"{prefix}{e.task_id}: {verb} ({e.pr_url}){tail}")
+        elif e.action == "closed-no-merge":
+            print(f"{prefix}{e.task_id}: PR closed without merge ({e.pr_url}) — no change")
+        elif e.action == "unverifiable":
+            print(f"{prefix}{e.task_id}: PR state unverifiable (gh offline/unauth) — skipped")
+        else:  # still-open
+            print(f"{prefix}{e.task_id}: PR still open — skipped")
+    if not args.yes and any(e.action == "record-merge" for e in entries):
+        print("prs --sync: re-run with --yes to write the above")
+    return 0
+
+
+def _report_merge_plan(
+    plan: MergePlan, *, strategy: MergeStrategy, wait_for_checks: bool, resolve: bool
+) -> None:
+    """Print the ``merge-task --dry-run`` plan (writes/merges nothing)."""
+    print(f"merge-task plan for {plan.task_id}:")
+    print(f"  status:   {plan.status.value if plan.status else '(unknown)'}")
+    print(f"  branch:   {plan.branch or '(none)'}")
+    print(f"  base:     {plan.base_branch}")
+    print(f"  pr:       {plan.pr_url or '(none)'}")
+    if plan.verify_state:
+        print(f"  pr state: {plan.verify_state}")
+    if plan.already_merged:
+        print("  -> PR already merged; merge-task would just record it (idempotent)")
+    else:
+        wait = " (wait for checks)" if wait_for_checks else ""
+        resolve_note = "" if resolve else "; --no-resolve: abort on conflict"
+        print(f"  -> update branch w/ base, then merge via '{strategy.value}'{wait}{resolve_note}")
+    for warning in plan.warnings:
+        print(f"  WARNING — {warning}")
+
+
+def cmd_merge_task(args: argparse.Namespace) -> int:
+    """Operator go-ahead to merge a reviewed orchestrator PR (mirrors ``finalize``'s ergonomics)."""
+    _configure_runtime_logging(args)
+    config = load_config_for(args)
+    if config is None:
+        return 2
+    root = worc_home_for(config)
+    # merge-task updates the branch + runs gh/merge in the shared clone; refuse while the daemon
+    # owns it (like finalize). The merge flow + git ops need the idle slot.
+    pid = process_control.running_daemon_pid(process_control.pid_file_path(root))
+    if pid is not None:
+        print(
+            f"merge-task: the watch daemon is running (pid {pid}); stop it first with "
+            "'wastech-orchestrator stop'"
+        )
+        return 1
+    if not (Path(root) / "state.db").is_file():
+        print(f"merge-task: no state database at {Path(root) / 'state.db'}")
+        return 2
+
+    orchestrator = build_orchestrator(
+        config, artifacts_root=root, heartbeat_seconds=args.heartbeat_seconds
+    )
+    plan = orchestrator.plan_merge(args.task_id, verify=True)
+    if plan.refusals:
+        for reason in plan.refusals:
+            print(f"merge-task: {reason}")
+        return 1
+
+    strategy = MergeStrategy(args.strategy) if args.strategy else config.git.auto_merge_strategy
+    wait_for_checks = (
+        config.git.auto_merge_wait_for_checks
+        if args.wait_for_checks is None
+        else args.wait_for_checks
+    )
+    if args.dry_run:
+        _report_merge_plan(
+            plan, strategy=strategy, wait_for_checks=wait_for_checks, resolve=args.resolve
+        )
+        return 0
+
+    if not args.yes:
+        for warning in plan.warnings:
+            print(f"merge-task: WARNING — {warning}")
+        verb = "Record already-merged" if plan.already_merged else f"Merge via {strategy.value}"
+        if not _confirm(f"{verb} {args.task_id}? [y/N] "):
+            print("merge-task: aborted")
+            return 0
+
+    try:
+        result = orchestrator.merge_task(
+            args.task_id,
+            strategy=strategy,
+            wait_for_checks=wait_for_checks,
+            resolve=args.resolve,
+        )
+    except (PipelineFailed, GitCommandError) as exc:
+        print(f"merge-task: {exc}")
+        return 1
+    suffix = f" → {result.pr_url}" if result.pr_url else ""
+    print(f"{result.task_id}: {result.final_status.value}{suffix} (merged)")
+    return _EXIT_BY_STATUS.get(result.final_status, 1)
+
+
+def cmd_tasks(args: argparse.Namespace) -> int:
+    """List every known task with its status and branch (read-only); ``--status`` filters."""
+    _configure_runtime_logging(args)
+    config = load_config_for(args)
+    if config is None:
+        return 2
+    db_path = Path(worc_home_for(config)) / "state.db"
+    if not db_path.is_file():
+        print("tasks: no tasks")
+        return 0
+    store = StateStore.open_readonly(db_path)
+    try:
+        rows = store.all_tasks()
+    finally:
+        store.close()
+    if args.status:
+        want = args.status.strip().lower()
+        rows = [r for r in rows if r.status.value == want]
+    if not rows:
+        suffix = f" with status '{args.status}'" if args.status else ""
+        print(f"tasks: no tasks{suffix}")
+        return 0
+    for row in rows:
+        print(_entry_line(_task_entry(row)))
+    return 0
 
 
 def run_preflight(config: OrchestratorConfig) -> tuple[bool, list[str]]:
@@ -1941,6 +2208,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_rerun(args)
         if args.command == "finalize":
             return cmd_finalize(args)
+        if args.command == "prs":
+            return cmd_prs(args)
+        if args.command == "merge-task":
+            return cmd_merge_task(args)
+        if args.command == "tasks":
+            return cmd_tasks(args)
     except (ConfigError, IncompatibleStateError, preflight.GhNotAvailableError) as exc:
         print(f"error: {exc}")
         return 2

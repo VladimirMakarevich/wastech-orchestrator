@@ -33,6 +33,9 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`upgrade-docs`** - Refreshes the installed packaged guide copy under `.worc/guide/`.
 - **`rerun`** - Re-attempts a terminal task, either from scratch or by resuming from the saved checkpoint.
 - **`finalize`** - Records a task that was completed or abandoned out of band, without running the pipeline.
+- **`prs`** - Read-only list of orchestrator PRs that are open and awaiting merge; `--check` adds live GitHub state, `--sync` reconciles PRs merged externally (dry-run unless `--yes`).
+- **`merge-task`** - Operator go-ahead to merge a reviewed PR: pulls `base_branch` into the task branch, resolves any conflicts via the merge flow, then merges. The human-in-the-loop counterpart to `git.auto_merge`.
+- **`tasks`** - Read-only list of every known task with its status and branch; `--status` filters.
 - **`--config`** - Explicit path to `config.yaml`; it overrides automatic discovery.
 - **`--env-file`** - Explicit path to an environment file; if omitted, the orchestrator auto-loads `<repo>/.worc/.env` when present.
 - **`--version`** - Prints the CLI version and exits.
@@ -110,8 +113,9 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`git.create_pull_request`** - Controls whether the orchestrator opens a PR after push.
 - **`git.pr_base`** - Target base branch for the PR.
 - **`git.auto_merge`** - Instance-level auto-merge default.
-- **`git.auto_merge_strategy`** - Merge strategy used when auto-merge runs.
-- **`git.auto_merge_wait_for_checks`** - Whether GitHub-native auto-merge waits for required checks.
+- **`git.auto_merge_strategy`** - Merge strategy used when auto-merge runs (and the default for `merge-task --strategy`).
+- **`git.auto_merge_wait_for_checks`** - Whether GitHub-native auto-merge waits for required checks (and the default for `merge-task --wait-for-checks`).
+- **`git.merge_flow`** - Name of the flow `merge-task` runs to resolve a conflicting base-merge (default `merge`). A clean base-merge is mechanical (no flow); only a conflict launches it.
 - **`git.footprint.audit_commit_message`** - Commit message template for the audit trail commit.
 - **`git.footprint.audit_on_branch`** - Chooses whether the audit trail is committed on the task branch or on a sibling branch.
 - **`telegram`** - Optional Telegram human-in-the-loop and notification config.
@@ -136,6 +140,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`implementation`** - The default coding flow that produces a reviewed Pull Request.
 - **`deep_research`** - The research flow that produces a documentation-oriented output.
 - **`security_audit`** - The audit flow that produces a private control-workspace report.
+- **`merge`** - The conflict-resolution flow `worc merge-task` runs (only) when pulling `base_branch` into a task branch conflicts: `conflict_resolution` (agent) → `testing` (checks) with a bounded fix loop, terminating at a no-op `publish` (`policy: none`). It performs no git itself — the orchestrator commits the merge and merges the PR after the flow returns a clean, green tree. Not dispatched for incoming tasks; selected by `git.merge_flow`.
 - **Flow node kinds** - `agent` runs an editing or authoring step, `evaluator` reads an artifact and returns a verdict, `checks` runs the quality gate, `hitl` asks the human in the loop, and `publish` performs the orchestrator-owned publish step.
 - **Run vocabulary** - `RunKind` is the top-level run discriminator (`stage` or `evaluator`); `EvaluatorRole` names the shipped evaluator roles (`review`, `critic`, `verifier`, `test_quality`).
 - **Typed node output** - `OutputContract` selects the strict structured-output parser for agent nodes (`none`, `human_input`, `planning`); `HumanInputSignal` is the validated question/approval payload; `TypedStageOutput` is the parsed structured result.

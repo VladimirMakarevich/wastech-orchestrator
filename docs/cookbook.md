@@ -215,6 +215,19 @@ worc finalize task-001 --as abandoned --note "obsolete"                   # drop
 
 It sets the terminal status, returns the working copy to `base_branch` (fail-closed on a dirty tree), moves the task file, closes any waiting HITL prompt, and appends a `manual` ledger record. See [operations.md](operations.md) "Finalize a task you handled by hand" for the full rules.
 
+### Merge a reviewed PR (`prs` / `merge-task`)
+
+With auto-merge off (the default), the orchestrator leaves its PR open for you to review on GitHub. After you approve it, let the orchestrator finish — pull base in, resolve any conflicts, and merge (daemon must be stopped):
+
+```bash
+worc prs                                 # which orchestrator PRs are open and awaiting merge?
+worc merge-task task-001 --dry-run       # preview: PR, whether base merges cleanly
+worc merge-task task-001                 # go-ahead: update branch w/ base, resolve conflicts, merge
+worc prs --sync --yes                    # record PRs you merged directly on GitHub instead
+```
+
+A clean base-merge is mechanical; a conflicting one runs the operator-editable `merge` flow (`git.merge_flow`) — an agent resolves the markers, the checks re-run, then the orchestrator commits and merges. On any failure it aborts the merge and leaves the PR open. See [operations.md](operations.md) "Merging a reviewed PR" for flags and the safety-only gate.
+
 ## 6. Use `watch`
 
 `watch` resumes an interrupted task first, then processes pending task files:

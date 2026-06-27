@@ -321,6 +321,11 @@ class GitConfig:
     # False: merge immediately (`gh pr merge`). True: arm GitHub-native auto-merge (`--auto`), which
     # merges only after required status checks pass.
     auto_merge_wait_for_checks: bool = False
+    # Name of the flow the operator-driven ``merge-task`` runs to resolve base-merge conflicts
+    # (``<merge_flow>.yaml`` under ``.worc/flows/`` or packaged). Only invoked when pulling ``base``
+    # into the task branch conflicts; a clean merge is mechanical (no flow, no agent). The seam is a
+    # single name today; a future path/area-based collection can replace it.
+    merge_flow: str = "merge"
 
 
 @dataclass(frozen=True)

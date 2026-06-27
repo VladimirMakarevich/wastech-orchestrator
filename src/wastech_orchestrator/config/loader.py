@@ -603,6 +603,7 @@ def _build_git(raw: Any, issues: list[str]) -> GitConfig:
             "auto_merge",
             "auto_merge_strategy",
             "auto_merge_wait_for_checks",
+            "merge_flow",
         },
         where,
         issues,
@@ -621,6 +622,7 @@ def _build_git(raw: Any, issues: list[str]) -> GitConfig:
             MergeStrategy.SQUASH,
         ),
         auto_merge_wait_for_checks=_bool(m, "auto_merge_wait_for_checks", False, where, issues),
+        merge_flow=_str(m, "merge_flow", "merge", where, issues),
     )
 
 

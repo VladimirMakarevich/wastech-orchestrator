@@ -212,6 +212,43 @@ def _run_claude(scenario: str, cli_args: list[str]) -> int:
 _DIALECTS = {"codex": _run_codex, "claude": _run_claude}
 
 
+def _keep_ours(text: str) -> str:
+    """Resolve every conflict block by keeping the HEAD (ours) side and dropping the markers."""
+    out: list[str] = []
+    in_conflict = False
+    keep = True
+    for line in text.splitlines(keepends=True):
+        if line.startswith("<<<<<<<"):
+            in_conflict, keep = True, True
+            continue
+        if in_conflict and line.startswith("======="):
+            keep = False
+            continue
+        if in_conflict and line.startswith(">>>>>>>"):
+            in_conflict = False
+            continue
+        if not in_conflict or keep:
+            out.append(line)
+    return "".join(out)
+
+
+def _resolve_conflicts_in_tree(root: Path) -> None:
+    """Strip conflict markers from every tracked-looking file in the tree (skips dotted dirs)."""
+    for path in root.rglob("*"):
+        rel = path.relative_to(root)
+        if any(part.startswith(".") for part in rel.parts):
+            continue  # skip .git / .worc and other dotted dirs
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if "<<<<<<<" in text:
+            with contextlib.suppress(OSError):
+                path.write_text(_keep_ours(text), encoding="utf-8")
+
+
 def main() -> int:
     cli_name = sys.argv[1] if len(sys.argv) > 1 else "codex"
     scenario = sys.argv[2] if len(sys.argv) > 2 else "success"
@@ -226,6 +263,13 @@ def main() -> int:
     if scenario == "success_edit":
         with contextlib.suppress(OSError), open("agent_change.py", "w", encoding="utf-8") as handle:
             handle.write("# change made by the fake agent\nVALUE = 1\n")
+        scenario = "success"
+
+    # ``resolve_conflicts`` behaves like ``success`` but first resolves every Git conflict marker in
+    # the working tree (keeping the HEAD/ours side), the way a conflict-resolution agent would. Used
+    # by the merge-flow (worc merge-task) integration test.
+    if scenario == "resolve_conflicts":
+        _resolve_conflicts_in_tree(Path.cwd())
         scenario = "success"
 
     # Transient infra scenarios — identical failure surface for both dialects, so handled here:

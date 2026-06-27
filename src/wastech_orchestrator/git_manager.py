@@ -94,6 +94,7 @@ def append_runtime_excludes(repo_root: str | Path) -> list[str]:
 KIND_CODE_COMMIT = "code_commit"
 KIND_SUBTASK_COMMIT = "subtask_commit"
 KIND_AUDIT_COMMIT = "audit_commit"
+KIND_MERGE_COMMIT = "merge_commit"
 KIND_PUSH = "push"
 KIND_PR = "pr"
 KIND_PR_MERGE = "pr_merge"
@@ -278,6 +279,9 @@ class GitManager:
         branch = self.branch_name(task_id, slug, epoch=epoch, override=branch_name)
         self._active = _ActiveTask(task_id=task_id, slug=slug, branch=branch)
 
+        # Clear a stale in-progress merge (e.g. a killed ``merge-task``) so the base checkout below
+        # cannot wedge on "you need to resolve your current index first". No-op in the normal case.
+        self.merge_abort()
         # Fetch is best-effort: a repo without a remote (some tests) still proceeds locally.
         self._git("fetch", "origin")
         self._git_checked("checkout", base)
@@ -413,6 +417,51 @@ class GitManager:
 
     def _branch_exists(self, branch: str) -> bool:
         return self._git("rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").ok
+
+    # --- operator-driven merge (worc merge-task) ------------------------------------------
+
+    def update_branch_with_base(self, branch: str, base: str) -> bool:
+        """Merge ``origin/<base>`` into the task ``branch`` in the clone; True iff it conflicts.
+
+        Checks out the branch, fetches, then ``git merge origin/<base>`` — a **merge commit**, not a
+        rebase (no history rewrite of reviewed commits, no force-push). A clean merge auto-commits
+        (the orchestrator invoking git *is* the orchestrator committing); a conflicting merge stops
+        with ``MERGE_HEAD`` live and conflict markers in the tree for the caller to resolve + commit
+        (or abort). Only the operator merge routine calls this.
+        """
+        self._git_checked("checkout", branch)
+        self._git("fetch", "origin")
+        result = self._git("merge", "--no-edit", f"origin/{base}")
+        if result.ok:
+            return False  # clean (auto-committed / fast-forward / already up to date)
+        if self.merge_in_progress():
+            return True  # the expected, recoverable conflict: MERGE_HEAD live, markers in the tree
+        # Non-zero without MERGE_HEAD: the merge failed for another reason (bad ref / no remote).
+        raise GitCommandError(f"git merge origin/{base} failed: {result.stderr.strip()}")
+
+    def merge_in_progress(self) -> bool:
+        """True iff a merge is mid-flight in the clone (``MERGE_HEAD`` exists)."""
+        return self._git("rev-parse", "-q", "--verify", "MERGE_HEAD").ok
+
+    def merge_abort(self) -> None:
+        """Abort an in-progress merge to restore the working tree. No-op when none is in flight.
+
+        Best-effort (never raises): it runs in the merge routine's cleanup/``finally`` and on entry
+        to clear a stale merge left by a crash.
+        """
+        if self.merge_in_progress():
+            self._git("merge", "--abort")
+
+    def push_branch_update(self, branch: str) -> None:
+        """Fast-forward the remote task branch with its new local commits (the base-merge commit).
+
+        Unlike :meth:`push`, this is NOT gated by the one-shot ``push`` publish op: ``merge-task``
+        runs after the task's PR already exists (its branch is on the remote) and has advanced by
+        the merge commit, so a plain ``git push`` fast-forwards the remote — and a re-run after the
+        commit is already pushed is a git no-op. Without this the completed original ``push`` op
+        would skip publishing the merge commit and ``gh pr merge`` would merge the pre-merge branch.
+        """
+        self._git_checked("push", "origin", branch)
 
     def commit_on_branch(self, sha: str, branch: str) -> bool:
         """True iff ``sha`` is an ancestor of ``branch`` (recovery subtask verification)."""
@@ -624,6 +673,40 @@ class GitManager:
         )
         return sha
 
+    def commit_merge_resolution(self, task_id: str, message: str) -> str | None:
+        """Finalize the in-progress base-merge as one commit (after its conflicts are resolved).
+
+        Distinct from :meth:`commit_code`: a merge also brings in base's incoming changes (not just
+        the agent's edits), so it stages the whole tree (``git add -A``; ``.worc/`` stays ignored)
+        and commits with ``MERGE_HEAD`` as the second parent. Idempotent via the ``merge_commit``
+        publish op; returns the merge commit SHA, or current HEAD when there is nothing to finalize
+        (no merge in flight — e.g. an already-current branch).
+        """
+        existing = self._store.get_publish_op(task_id, KIND_MERGE_COMMIT, None)
+        if existing is not None and existing.status == _STATUS_COMPLETED:
+            return existing.result_ref  # already finalized (restart) — never double-commit
+        if not self.merge_in_progress():
+            return self._git("rev-parse", "HEAD").stdout.strip() or None
+        head_before = self._git("rev-parse", "HEAD").stdout.strip()
+        self._store.record_publish_op(
+            PublishOpRow(
+                task_id=task_id,
+                kind=KIND_MERGE_COMMIT,
+                fingerprint=self._fingerprint(task_id, KIND_MERGE_COMMIT, None, head_before, ()),
+                status=_STATUS_STARTED,
+            )
+        )
+        self._git_checked("add", "-A")
+        # Belt-and-braces: never commit a half-resolved merge. ``git diff --cached --check`` reports
+        # "leftover conflict marker" lines; refuse if any remain (catches the case where no checks
+        # are configured, so the flow's testing node could not catch the markers itself).
+        if "leftover conflict marker" in self._git("diff", "--cached", "--check").stdout.lower():
+            raise GitCommandError("merge resolution left conflict markers; refusing to commit")
+        self._git_checked("commit", "-m", message)
+        sha = self._git_checked("rev-parse", "HEAD")
+        self._record_completed(task_id, KIND_MERGE_COMMIT, head_before, sha)
+        return sha
+
     def commit_audit(self, task_id: str) -> str | None:
         """Make the orchestrator-only commit of the task lifecycle.
 
@@ -792,6 +875,19 @@ class GitManager:
         outcome = "armed" if wait_for_checks else (self._merge_commit_sha(pr_url) or "merged")
         self._record_completed(task_id, KIND_PR_MERGE, pr_url, outcome)
         return outcome
+
+    def record_external_merge(self, task_id: str, pr_url: str) -> None:
+        """Record a ``pr_merge`` publish op for a PR merged out of band (the ``prs --sync`` path).
+
+        ``verify_pr_state`` has already confirmed the PR is MERGED on GitHub, so this writes the
+        idempotency/audit op (which unblocks ``depends_on`` dependents) without any ``gh`` call — no
+        network, no re-merge. Idempotent: a task that already has a completed ``pr_merge`` op is a
+        no-op.
+        """
+        existing = self._store.get_publish_op(task_id, KIND_PR_MERGE, None)
+        if existing is not None and existing.status == _STATUS_COMPLETED:
+            return
+        self._record_completed(task_id, KIND_PR_MERGE, pr_url, "merged")
 
     def _merge_commit_sha(self, pr_url: str) -> str | None:
         """Best-effort merge commit SHA after an immediate merge; ``None`` when unavailable."""

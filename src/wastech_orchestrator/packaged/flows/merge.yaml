@@ -1,0 +1,68 @@
+# Packaged built-in flow: merge — the operator-driven conflict resolver for `worc merge-task`.
+#
+# This flow is NOT dispatched for incoming tasks. The orchestrator runs it ONLY when, during
+# `worc merge-task <id>`, pulling the base branch into the task branch produces conflicts. A clean
+# base-merge needs no flow: the orchestrator pushes and merges the PR mechanically. On a conflict the
+# orchestrator hands the engine the already-merged, MERGE_HEAD-live working tree (markers present);
+# this flow resolves the markers and makes the checks pass, then hands back a clean, green tree.
+#
+# The flow performs NO git operations: there is deliberately no PR-publishing node (its terminal is a
+# `publish` node with `policy: none`, a graph terminal that touches nothing). Finalizing the merge
+# commit, pushing, and merging the PR remain the orchestrator's job (the hard invariant: only the
+# orchestrator commits / pushes / PRs / merges). The flow runs transactionally — on failure the
+# orchestrator runs `git merge --abort` and leaves the PR open.
+#
+# Shape: conflict_resolution(agent) -> testing(checks) -> done; testing fails loop back through
+# fixing (the same bounded test-fix loop the implementation flow uses). Operators may edit this copy
+# under .worc/flows/merge.yaml (and select a different file via config git.merge_flow). Per-node
+# provider/model/reasoning overrides work exactly as in implementation.yaml.
+flow:
+  name: merge
+  task_type: merge
+  permission_ceiling: workspace-write
+  output_policy: code_change
+  publishing: none
+
+  nodes:
+    - id: conflict_resolution
+      kind: agent
+      role_file: roles/conflict_resolution.md
+      session_scope: editing_lineage
+      permission_profile: workspace-write
+      # optional overrides (uncomment to pin this node):
+      # provider: claude
+      # model: claude-opus-4-8
+      # reasoning: high
+      # timeout_seconds: 7200
+      # network_access: false
+      # extra_args: []
+    - id: testing
+      kind: checks
+      checker: command_profile
+    - id: fixing
+      kind: agent
+      role_file: roles/fixing.md
+      session_scope: editing_lineage
+      lineage_affinity: conflict_resolution
+      permission_profile: workspace-write
+      # optional overrides (uncomment to pin this node):
+      # provider: codex
+      # model: gpt-5.5
+      # reasoning: high
+      # timeout_seconds: 7200
+      # network_access: false
+      # extra_args: []
+    # Graph terminal only: `policy: none` touches no git — the orchestrator commits the merge and
+    # merges the PR after this flow returns a clean, green tree.
+    - id: done
+      kind: publish
+      policy: none
+
+  edges:
+    - { from: conflict_resolution, to: testing }
+    - { from: testing, to: done, outcome: pass }
+    - { from: testing, to: fixing, outcome: fail, loop: merge_fix }
+    - { from: fixing, to: testing }
+
+  budgets:
+    merge_fix: 5

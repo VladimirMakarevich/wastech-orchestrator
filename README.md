@@ -154,6 +154,13 @@ worc finalize <task-id> record + tidy a task you handled by hand (no pipeline/co
                           --as done|failed|abandoned  the operator-declared terminal outcome (required)
                           --pr-url URL  --note TEXT    merged-PR URL / ledger note (for --as done)
                           --delete-branch  --no-verify-pr  --dry-run  --yes
+worc prs                open, un-merged orchestrator PRs awaiting merge (read-only)
+                          --check                     enrich each row with live GitHub state (gh)
+                          --sync [--yes]              record PRs merged externally (dry-run unless --yes)
+worc merge-task <id>    go-ahead to merge a reviewed PR: update branch w/ base, resolve conflicts, merge
+                          --strategy merge|squash|rebase   default: git.auto_merge_strategy
+                          --wait-for-checks/--no-wait-for-checks  --no-resolve  --dry-run  --yes
+worc tasks              list every known task with status + branch (read-only); --status filters
 worc watch              process pending tasks; loop + periodic git sync
                           --poll-seconds N            override orchestrator.poll_interval_seconds
 worc stop               stop a running watch daemon (SIGTERM, then SIGKILL)

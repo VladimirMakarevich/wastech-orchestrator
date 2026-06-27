@@ -258,7 +258,12 @@ def test_operator_flow_overrides_builtin(tmp_path: Path) -> None:
 
 def test_validate_all_reports_each_packaged_flow() -> None:
     results = dict(FlowRegistry().validate_all())
-    assert results == {"implementation": None, "deep_research": None, "security_audit": None}
+    assert results == {
+        "implementation": None,
+        "deep_research": None,
+        "security_audit": None,
+        "merge": None,
+    }
 
 
 def test_validate_all_includes_operator_flows(tmp_path: Path) -> None:

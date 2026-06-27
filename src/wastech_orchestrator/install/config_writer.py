@@ -158,6 +158,9 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "auto_merge": False,
             "auto_merge_strategy": "squash",
             "auto_merge_wait_for_checks": False,
+            # Flow that ``worc merge-task`` runs to resolve base-merge conflicts (clean merges are
+            # mechanical). Seeded as an editable copy under .worc/flows/merge.yaml.
+            "merge_flow": "merge",
             "footprint": {
                 # The task file + its <id>.summary.md are audit-committed in the repo under tasks/;
                 # all other runtime artifacts live under the gitignored .worc/ home.

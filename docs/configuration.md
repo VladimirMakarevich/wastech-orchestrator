@@ -496,6 +496,7 @@ git:
   auto_merge: false # DANGER: merge every published PR without human review
   auto_merge_strategy: squash # merge | squash | rebase
   auto_merge_wait_for_checks: false # true: arm GitHub-native auto-merge (--auto)
+  merge_flow: merge # flow `worc merge-task` runs to resolve base-merge conflicts
   footprint:
     audit_commit_message: "chore(orchestrator): audit trail for {task_id}"
     audit_on_branch: task
@@ -506,8 +507,9 @@ git:
 | `create_pull_request` | boolean | `true` | Whether publishing creates a PR. |
 | `pr_base` | string | `"main"` | Base branch for PR creation. Usually matches `repo.base_branch`. |
 | `auto_merge` | boolean | `false` | **DANGER:** when `true`, every successfully published PR is merged to `pr_base` — this removes the human review gate. A per-task `auto_merge` wins outright over this default. |
-| `auto_merge_strategy` | `merge`, `squash`, `rebase` | `squash` | Strategy passed to `gh pr merge` when a merge fires. |
-| `auto_merge_wait_for_checks` | boolean | `false` | When `true`, arm GitHub-native auto-merge (`gh pr merge --auto`): GitHub merges only after required checks pass. When `false`, merge immediately. |
+| `auto_merge_strategy` | `merge`, `squash`, `rebase` | `squash` | Strategy passed to `gh pr merge` when a merge fires (also the default `--strategy` for `worc merge-task`). |
+| `auto_merge_wait_for_checks` | boolean | `false` | When `true`, arm GitHub-native auto-merge (`gh pr merge --auto`): GitHub merges only after required checks pass. When `false`, merge immediately. (Also the default for `worc merge-task --wait-for-checks`.) |
+| `merge_flow` | string | `"merge"` | Name of the flow `worc merge-task` runs to resolve a conflicting base-merge (`<name>.yaml` under `.worc/flows/` or packaged). A clean base-merge is mechanical (no flow, no agent); only a conflict launches it. The flow resolves the markers and runs the checks, then the orchestrator commits the merge and merges the PR. |
 
 `create_pull_request: false` skips only `gh pr create`. The successful publishing path still makes the orchestrator-owned commit and pushes the task branch. Use a disposable fork/test remote for a first self-hosting run; a no-push dry-run mode is not implemented.
 

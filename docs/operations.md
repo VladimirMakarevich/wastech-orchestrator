@@ -291,6 +291,22 @@ It sets the declared terminal status, runs terminal cleanup (back to `base_branc
 
 By default `watch` is a **long-running loop** (`orchestrator.poll_interval_seconds: 300`, overridable with `--poll-seconds N`): each tick it runs `git fetch` + `pull --ff-only` on `base_branch` then re-scans, so a task committed and pushed to git after `watch` started is picked up without a manual pull (discovery is not limited to the local filesystem). Stop it with Ctrl-C. Set `poll_interval_seconds: 0` (or `--poll-seconds 0`) for a single pass — e.g. when an external scheduler re-invokes `watch`.
 
+### Merging a reviewed PR (`prs` / `merge-task`)
+
+With `git.auto_merge` off (the default), an orchestrator PR is left open for you to review on GitHub. Once you approve it, `merge-task` is the human-in-the-loop go-ahead that finishes the job — the counterpart to `auto_merge` for a PR you reviewed.
+
+```bash
+worc prs                              # open, un-merged orchestrator PRs awaiting merge (DB-only)
+worc prs --check                      # ... enriched with live GitHub state per PR (needs gh)
+worc prs --sync                       # reconcile PRs merged externally on GitHub (dry-run)
+worc prs --sync --yes                 # ... actually record those merges
+worc merge-task task-001 --dry-run    # show the plan (PR, conflicts?); merge nothing
+worc merge-task task-001              # go-ahead: update branch w/ base, resolve conflicts, merge
+worc tasks --status done              # every known task with status + branch (read-only)
+```
+
+`merge-task` pulls `base_branch` into the task branch, then: a **clean** base-merge is mechanical (push + `gh pr merge`); a **conflicting** one runs the operator-editable **merge flow** (`git.merge_flow`, default `merge`, seeded at `.worc/flows/merge.yaml`) — a coding agent resolves the conflict markers and the checks re-run — after which the orchestrator commits the merge and merges the PR. Gating is **safety-only**: running the command is the go-ahead (no review-state check), and the orchestrator never passes `--admin`, so branch protection / required checks remain the real gate. On any failure it runs `git merge --abort`, leaves the PR open, and exits non-zero — a `DONE` task is never downgraded. Flags mirror `auto_merge`: `--strategy {merge,squash,rebase}` (default `git.auto_merge_strategy`), `--wait-for-checks/--no-wait-for-checks` (default `git.auto_merge_wait_for_checks`), `--no-resolve` (abort on a conflict instead of running the flow). Like `finalize`/`rerun` it needs the `watch` daemon stopped (it works in the shared clone). Both `merge-task` and `prs --sync` flip a `depends_on` dependency to merged, unblocking dependents.
+
 ### Task dependencies (`depends_on`)
 
 A task can declare other tasks it needs **merged** first via front-matter `depends_on: [<task-id>, …]` (see [task-authoring.md](task-authoring.md#depends_on)). Scheduling is **non-blocking and merge-gated**: under `watch`, a pending task is **eligible** only when every dependency has merged; while a dependency is unmerged the scheduler **skips** the dependent and runs other eligible pending tasks instead, so the single slot never idles on CI. The dependent is re-evaluated each tick (after the `fetch`/`pull`), and once its dependencies merge it branches from a `base_branch` that includes them. "Merged" is probed read-only (`gh pr view → state == MERGED`); a task that committed locally with no PR counts once it is terminal `DONE`. An open or armed PR (e.g. GitHub-native auto-merge still waiting on checks) is **not yet merged**.
