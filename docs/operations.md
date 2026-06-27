@@ -439,6 +439,18 @@ The validation gate checks shape only; node-id **existence** against the task's 
 
 **Audit.** Every disable persists a `node_runs` row with `skipped = 1` and `skip_reason`, and lists the disabled nodes in a `## Pipeline nodes skipped` section of the PR body.
 
+### Overriding a node's model / reasoning / provider (per-task)
+
+The same `nodes:` block can overlay a node's executor for one run — useful for experiments and one-off runs without authoring a separate flow file per (provider, model, reasoning) combination. Each node's flow declaration supplies the default; the task overlay wins for that run:
+
+```yaml
+nodes:
+  implementation: { model: claude-opus-4-8, reasoning: high }
+  review: { provider: codex }
+```
+
+The overlay is **best-effort** and degrades gracefully (so an unattended `watch` queue is never blocked by a typo): a `provider` must be in `agents.allowed` and a `reasoning` must be supported by the resolved provider — an invalid value (or an overlay on a node that runs no agent, e.g. `testing`/`publish`) is **logged as a warning and skipped**, and the node runs on the flow's declared value. `model` is passed through unchecked. The effective (post-override) model, reasoning, and provider appear in the prompt audit (`logs/<task-id>/prompt-audit/`). See [task-authoring.md](task-authoring.md#provider-model-reasoning).
+
 ---
 
 ## 6. Diagnostics — reading what a run produced

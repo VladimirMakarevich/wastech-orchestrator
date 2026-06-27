@@ -205,16 +205,18 @@ def test_queue_absent_in_normalized_loads_default(tmp_path: Path) -> None:
 
 
 def test_node_overrides_round_trip(tmp_path: Path) -> None:
-    # Restart-safety: the per-node disable toggle must survive a resume, or a crash could lose a
-    # disable and re-run a node the operator turned off.
+    # Restart-safety: the per-node disable toggle and the model/reasoning/provider overrides must
+    # survive a resume, or a crash could lose a disable (re-running a turned-off node) or silently
+    # revert an override to the flow's declared default mid-task.
     task = NormalizedTask(
         id="task-001",
         title="T",
         description="Do it",
         node_overrides={
             "planning": NodeOverride(enabled=False),
+            "implementation": NodeOverride(model="claude-opus-4-8", reasoning="high"),
             "testing": NodeOverride(enabled=False),
-            "review": NodeOverride(),
+            "review": NodeOverride(provider="codex"),
         },
     )
     write_normalized(task, tmp_path)

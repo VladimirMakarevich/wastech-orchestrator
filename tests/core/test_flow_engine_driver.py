@@ -49,7 +49,12 @@ flow:
 
 
 class _FakeRouter:
+    def __init__(self) -> None:
+        self.route_overrides: dict[str, Any] = {}  # node_id -> provider override seen
+        self.requests: dict[str, Any] = {}  # node_id -> AgentRunRequest built for it
+
     def resolve_route(self, node_id: str, override: Any = None) -> ResolvedRoute:
+        self.route_overrides[node_id] = override
         return ResolvedRoute(
             node_id=node_id, primary=ProviderId.CODEX, fallback=None, source=RouteSource.CONFIG
         )
@@ -57,6 +62,7 @@ class _FakeRouter:
     def run_stage(
         self, request: Any, route: ResolvedRoute, *, snapshot: Any = None
     ) -> StageOutcome:
+        self.requests[request.node_id] = request
         result = AgentRunResult(
             status=RunStatus.SUCCEEDED,
             provider="codex",
@@ -120,7 +126,7 @@ def _agents() -> AgentsConfig:
     )
 
 
-def test_drive_flow_runs_tiny_flow_to_done(tmp_path: Path) -> None:
+def _drive(tmp_path: Path, *, node_overrides: Any = None) -> tuple[Any, _FakeRouter, StateStore]:
     flow_dir = tmp_path / "flow"
     (flow_dir / "roles").mkdir(parents=True)
     (flow_dir / "flow.yaml").write_text(_FLOW, encoding="utf-8")
@@ -134,8 +140,9 @@ def test_drive_flow_runs_tiny_flow_to_done(tmp_path: Path) -> None:
     store.insert_task(TaskRow(task_id="task-1", title="T", status=Status.RUNNING))
     recorder = StateStoreRunRecorder(store, "task-1", artifacts_root=tmp_path)
 
+    router = _FakeRouter()
     services = NodeServices(
-        router=_FakeRouter(),
+        router=router,
         check_runner=_FakeChecks(),
         store=store,
         repo_dir=str(tmp_path / "repo"),
@@ -160,7 +167,13 @@ def test_drive_flow_runs_tiny_flow_to_done(tmp_path: Path) -> None:
         facts=lambda fact: True,
         agents=_agents(),
         task_id="task-1",
+        **({"node_overrides": node_overrides} if node_overrides is not None else {}),
     )
+    return result, router, store
+
+
+def test_drive_flow_runs_tiny_flow_to_done(tmp_path: Path) -> None:
+    result, _router, store = _drive(tmp_path)
 
     assert result.status is Status.DONE
     assert result.final_node == "publish"
@@ -169,4 +182,28 @@ def test_drive_flow_runs_tiny_flow_to_done(tmp_path: Path) -> None:
     # The checkpoint persisted the terminal node + the flow fingerprint.
     current_node, _counters, fingerprint = store.get_flow_checkpoint("task-1")
     assert current_node == "publish"
-    assert fingerprint == snapshot.flow_fingerprint
+    fingerprint_snapshot = load_flow(tmp_path / "flow" / "flow.yaml").flow_fingerprint
+    assert fingerprint == fingerprint_snapshot
+
+
+def test_drive_flow_forwards_node_overrides_to_request(tmp_path: Path) -> None:
+    # The resolved overlay must reach the AgentRunRequest (model/reasoning) and the route resolution
+    # (provider), without any change to the runners or router.
+    result, router, _store = _drive(
+        tmp_path,
+        node_overrides={
+            "implementation": {
+                "model": "claude-opus-4-8",
+                "reasoning": "high",
+                "provider": ProviderId.CODEX,
+            }
+        },
+    )
+    assert result.status is Status.DONE
+    impl_request = router.requests["implementation"]
+    assert impl_request.model == "claude-opus-4-8"
+    assert impl_request.reasoning == "high"
+    # The route was resolved from the overridden provider, not the flow default (None).
+    assert router.route_overrides["implementation"] is ProviderId.CODEX
+    # A node with no override is untouched.
+    assert router.requests["review"].model is None

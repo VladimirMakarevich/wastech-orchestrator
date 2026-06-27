@@ -1,6 +1,8 @@
 # Per-node model/reasoning/provider override in task front matter
 
-Status: **proposed** (2026-06-26) Date: 2026-06-26 Owner: Vladimir Makarevich
+Status: **implemented** (2026-06-27) Date: 2026-06-26 Owner: Vladimir Makarevich
+
+Implemented 2026-06-27: `NodeOverride` carries `model`/`reasoning`/`provider`; the gate validates shape only; `core.node_overrides.resolve_node_overrides` produces a best-effort, config-validated overlay (warn + skip invalid fields — no model ceiling, per the accepted simplification); the engine applies it mechanically at its single node-fetch seam (covering agent **and** evaluator nodes); and the effective model/reasoning/provider are recorded in the prompt audit. Open questions resolved as accepted below.
 
 This is a bounded, practical extension to the existing `nodes:` task key: add `model`, `reasoning`, and `provider` fields to `NodeOverride` alongside the already-shipped `enabled` toggle. The goal is to let a single default flow cover multiple model/effort variants without multiplying flow files or editing global config per run.
 
@@ -44,7 +46,13 @@ Task node override (best-effort)
 
 1. **Exact merge seam.** `disabled_nodes` is consumed by the engine after snapshot load; `model/reasoning/provider` overrides need to reach `AgentNodeRunner._build_request()`. The cleanest slot is a thin "apply task overrides" step in `engine_driver.drive_flow()` that patches the resolved node before passing it to the runner. Confirm this is cleaner than patching the snapshot at load time (which would require the snapshot builder to receive the task).
 2. **Model ceiling semantics.** Is "skip override + warn" the right call when the task requests a model not within the ceiling? An alternative is to treat ceiling violation as a user error and move the task to `failed`; this would be consistent with other fatal misconfigurations but breaks watch-mode compat.
+
+Accepted: Skip field + warn is the lowest-code path (no new failure routing) and the validation it needs is the existing is_reasoning_supported / agents.allowed checks, not new machinery.
+
 3. **EvaluatorNode.** The feature description covers `AgentNode`; `EvaluatorNode` has the same `model`/`reasoning` fields in the flow schema. Should task-level overrides apply to evaluator nodes too? Probably yes, but confirm.
+
+Yes confirmed: Both node kinds is literally free under the engine-seam design — applying the patched node before either runner sees it covers EvaluatorNode automatically. Restricting to AgentNodes would require adding an exclusion check. So the cheaper, cleaner option is also the broader one.
+
 4. **Audit visibility.** Ensure the effective (post-override) model/reasoning values appear in the prompt audit and `state.db` node_lineage row, not the flow-declared defaults.
 
 ## Implementation notes
@@ -54,3 +62,9 @@ Task node override (best-effort)
 - `src/wastech_orchestrator/core/flow/validator.py` / `validate_flow_against_config` — optionally extend to emit warnings (not errors) when task overrides violate configured ceilings; the runtime fallback is the load-bearing check.
 - `src/wastech_orchestrator/providers/codex.py`, `claude.py` — no change; the override chain already collapses to `request.model or config.model` at the provider level.
 - Tests: `tests/task/` — extend `NodeOverride` parse tests; `tests/flow/` — add engine-driver integration test that verifies a task override reaches `_build_request` and that an invalid override falls back gracefully.
+
+## Analyse before implementation
+
+No refactor first. The area is healthy, the override chain and a well-tested twin (disabled_nodes) already exist, and FlowNode immutability + the single engine node-fetch point give you a clean one-site seam where the runners, router, and _build_request stay untouched. The only "debt" is the three docstrings/rules that assert the old "model/reasoning live on the flow, never the task" boundary — correct those (and .agents/rules/architecture.md) in the same change via /sync-docs, since this feature deliberately widens that invariant.
+
+Next step is /simplify-task to shape the new code — and it has two concrete simplifications already in hand: (1) apply the override at the engine seam (mirroring disabled_nodes), not in drive_flow or the runners; (2) reuse the existing reasoning/provider validators instead of the non-existent "ceiling clamp" the ADR describes.

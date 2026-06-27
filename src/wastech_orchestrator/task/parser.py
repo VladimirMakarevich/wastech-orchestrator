@@ -244,6 +244,12 @@ def _node_override_json(ov: NodeOverride) -> dict[str, Any]:
     out: dict[str, Any] = {}
     if ov.enabled is not None:
         out["enabled"] = ov.enabled
+    if ov.model is not None:
+        out["model"] = ov.model
+    if ov.reasoning is not None:
+        out["reasoning"] = ov.reasoning
+    if ov.provider is not None:
+        out["provider"] = ov.provider
     return out
 
 
@@ -252,7 +258,12 @@ def load_normalized(artifacts_root: str | Path, task_id: str) -> NormalizedTask:
     path = task_artifact_dir(artifacts_root, task_id) / NORMALIZED_FILENAME
     data = json.loads(path.read_text(encoding="utf-8"))
     node_overrides = {
-        str(node_id): NodeOverride(enabled=ov.get("enabled"))
+        str(node_id): NodeOverride(
+            enabled=ov.get("enabled"),
+            model=ov.get("model"),
+            reasoning=ov.get("reasoning"),
+            provider=ov.get("provider"),
+        )
         for node_id, ov in (data.get("nodes") or {}).items()
     }
     return NormalizedTask(

@@ -64,9 +64,9 @@ Allowed fields:
 | `priority` | no | `low` \| `mid` \| `high` | Scheduling order for the eligibility queue. The scheduler runs eligible tasks `high → mid → low`, ties broken by filename. Omitted/unrecognised ⇒ `mid` (fail-open — a typo never blocks a task). See [`priority`](#priority). |
 | `queue` | no | non-empty string | Routes the task to a worc instance whose `orchestrator.queue` selector equals this value (plain string equality). Lets several instances share one task pool without colliding. Omitted ⇒ `"default"`. **Fail-closed**: a malformed value (non-string, or empty/whitespace) rejects the task. See [`queue`](#queue). |
 | `subtasks` | no | list of strings | Operator-authored decomposition: ordered references to per-subtask spec files. Presence ⇒ the task runs as a split (one branch, one PR). See [`subtasks`](#subtasks-operator-authored-decomposition). |
-| `nodes` | no | mapping | Per-node disable toggle, keyed by flow node id: `nodes.<node-id>.enabled: false` disables a node. `enabled` is the only valid sub-key. See [`nodes`](#nodes). |
+| `nodes` | no | mapping | Per-node overrides keyed by flow node id: `enabled: false` disables a node, and `model` / `reasoning` / `provider` overlay that node's executor for this run (best-effort). See [`nodes`](#nodes). |
 
-The current validation gate rejects unknown fields fail-closed (`unknown_top_level_field`). Keep task front matter limited to the fields above. Provider, model, and reasoning are **flow-node concerns, not task fields** — each flow node declares its own `provider`/`model`/`reasoning`, and a task cannot repoint or override them (see [Provider, model, reasoning](#provider-model-reasoning-set-on-the-flow-not-the-task)).
+The current validation gate rejects unknown fields fail-closed (`unknown_top_level_field`). Keep task front matter limited to the fields above. A task can overlay a flow node's `model`/`reasoning`/`provider` per run via the `nodes` block (best-effort — an invalid value is warned and skipped at run time, never fatal), but cannot change commands, `extra_args`, credentials, sandbox, or any security policy (see [Provider, model, reasoning](#provider-model-reasoning)).
 
 ## `id`
 
@@ -81,10 +81,10 @@ id: api_pagination
 Invalid ids:
 
 ```yaml
-id: Task-001        # uppercase
-id: "task 001"      # whitespace
-id: "../task-001"   # path traversal shape
-id: "-task-001"     # leading separator
+id: Task-001 # uppercase
+id: "task 001" # whitespace
+id: "../task-001" # path traversal shape
+id: "-task-001" # leading separator
 ```
 
 The orchestrator rejects invalid ids; it does not sanitize them.
@@ -169,9 +169,9 @@ Values:
 
 The per-task value **always wins** (in both directions — there is no operator gate), mirroring [`auto_merge`](#auto_merge) and [`prompt_audit`](#prompt_audit). It only flips the _gate_: whether a split actually happens is still decided by the flow's `decomposition:` block and the planning stage's proposal (an operator [`subtasks`](#subtasks-operator-authored-decomposition) manifest ignores this gate and always splits). The field never edits the graph or forces a split — it cannot change `max_subtasks`, the provider, or any security setting. It is unrelated to the old `decompose` flag (removed in `schema_version` 11), which forced a split.
 
-## Provider, model, reasoning (set on the flow, not the task)
+## Provider, model, reasoning
 
-A task **cannot** choose a provider, model, or reasoning level for any stage. Provider routing is node-based: each flow node declares its own `provider:` — or, when omitted, defaults to the operator's single global primary provider (the one with `primary: true` in `config.yaml` under `agents.providers`). Model and reasoning live on the flow node as well. A task has no `agents`, `model`, or `reasoning` field, and cannot repoint a stage's provider or change commands, `extra_args`, credentials, sandbox, or any security policy.
+The flow node owns the **default** provider, model, and reasoning: each node declares its own `provider:` — or, when omitted, defaults to the operator's single global primary provider (the one with `primary: true` in `config.yaml` under `agents.providers`) — plus its `model`/`reasoning`. A task may **overlay** those defaults per run via the [`nodes`](#nodes) block (`nodes.<node-id>.{model,reasoning,provider}`), so one default flow can cover several model/effort/provider variants without a separate flow file. The overlay is **best-effort**: a `provider` must be in `agents.allowed`, a `reasoning` must be one the resolved provider supports, and any value that is invalid for the resolved flow/config is **warned and skipped at run time** (the flow's declared value stands — the task is never aborted). `model` is passed through unchecked. A task still **cannot** change commands, `extra_args`, credentials, sandbox, or any security policy.
 
 > **Tasks cannot supply or weaken checks.** The quality-gate commands are an operator/infrastructure concern, authored only in `config.yaml` under `checks.command_sets` (see [configuration.md](configuration.md#checks)). A task file has no field to add, replace, relax, or re-select a check — which sets run is a deterministic function of the task diff, not task content — keeping the quality gate independent of the task.
 
@@ -297,7 +297,7 @@ A set per-task `auto_merge` **wins outright** over the instance default `git.aut
 
 ## `nodes`
 
-The `nodes` block carries the per-node **disable** toggle, `enabled: false` — the one surviving per-node knob. Keys are flow **node ids** (the ids in the task's resolved flow); `enabled: false` disables a node so the engine skips it and takes its forward edge:
+The `nodes` block carries the per-node overrides. Keys are flow **node ids** (the ids in the task's resolved flow). Two kinds of override live here: the **disable** toggle `enabled: false` (the engine skips the node and takes its forward edge), and the best-effort `model` / `reasoning` / `provider` overlay (run this node with a different executor than the flow declares):
 
 ```yaml
 nodes:
@@ -305,19 +305,26 @@ nodes:
     enabled: false # write a stub plan and run as a single unit (no decomposition)
   testing:
     enabled: false # bypass the Check Runner (e.g. a repo with no test suite)
+  implementation:
+    model: claude-opus-4-8 # run the author node on a stronger model for this task
+    reasoning: high
+  review:
+    provider: codex # review this task with codex instead of the flow's default
 ```
 
 Any node present in the task's resolved flow may be disabled — there is no fixed allowlist. **Which nodes are safe to disable is the operator's responsibility** (they author the flow and run the tasks). The node ids above (`planning`, `testing`, `review`, `fixing`, …) are those of the default `implementation` flow; a custom flow exposes its own node ids (e.g. `code_review`). `refinement` is skipped automatically by completeness, not by a `nodes` entry. The whole-task **summary** is not a graph node — it is written by the constant supervisor layer at task close (see [configuration.md](configuration.md#supervisor)). Node-disable is **per-task only** — there is no global config knob (to drop a node everywhere, remove it from the flow).
 
 What disabling the default-flow nodes does: `planning` → stub plan, single unit; `testing` → straight to review (no checks); `review` → commit with no agent quality gate; `fixing` → the test/review fix loop runs as a no-op to its cap, then `manual_action_required`. Every disable is recorded in `state.db` (`node_runs.skipped`) and listed in the PR body / summary.
 
-**Failure mode (controlled).** If `nodes` names an id that is **not** in the task's resolved flow, the task ends `failed` (moved to `tasks/failed/`) with a clear message — checked at flow resolution, before any branch/PR side effect. The same controlled failure catches a disabled node whose skip cannot route to a forward edge in that flow.
+The `model`/`reasoning`/`provider` overlay is **best-effort** (see [Provider, model, reasoning](#provider-model-reasoning)): it overlays the flow node's declared executor for this run only. `provider` must be in `agents.allowed` and `reasoning` must be supported by the resolved provider; an invalid value (or an overlay on a node that has no executor, e.g. a `checks`/`publish` node) is **warned and skipped at run time** — the flow's declared value stands and the task runs on. The overlay applies to both agent and evaluator nodes; the effective model/reasoning/provider is recorded in the prompt audit. `model` is passed through unchecked.
+
+**Failure mode (controlled).** If `nodes` uses `enabled: false` on an id that is **not** in the task's resolved flow, the task ends `failed` (moved to `tasks/failed/`) with a clear message — checked at flow resolution, before any branch/PR side effect. The same controlled failure catches a disabled node whose skip cannot route to a forward edge in that flow. (A stray `model`/`reasoning`/`provider` override on an unknown node is not fatal — it is warned and skipped, since these overlays never abort a task.)
 
 Rules:
 
-- `enabled` is the **only** valid sub-key under `nodes.<node-id>`. Any other sub-key (including `model`/`reasoning`, which are flow-node concerns) is rejected fail-closed (`invalid_node_override`);
-- `enabled` must be a boolean; the `nodes` block must be a mapping and each value a mapping (or null);
-- the gate validates **shape only** — it cannot see the flow, so node-id existence is checked later, at flow resolution (the failure mode above), not at the gate.
+- valid sub-keys are `enabled`, `model`, `reasoning`, and `provider`; any other sub-key is rejected fail-closed (`invalid_node_override`);
+- `enabled` must be a boolean; `model`/`reasoning`/`provider` must each be a non-empty string; the `nodes` block must be a mapping and each value a mapping (or null);
+- the gate validates **shape only** — it cannot see the flow or config, so node-id existence (for `enabled`) and override validity (for `model`/`reasoning`/`provider`) are resolved later, not at the gate.
 
 ## Body Sections
 
@@ -423,7 +430,7 @@ id: task-044
 title: "Add retries"
 nodes:
   implementation:
-    model: claude-opus-4-8
+    temperature: 1
 ---
 
 ## Description
@@ -431,7 +438,7 @@ nodes:
 Add retries to webhooks.
 ```
 
-Reason: `invalid_node_override`. `model` is not a valid `nodes.<node-id>` sub-key (model/reasoning are flow-node concerns) — `enabled` is the only valid sub-key. (The gate checks shape only; whether a node id exists in the task's flow is checked later, at flow resolution.)
+Reason: `invalid_node_override`. `temperature` is not a valid `nodes.<node-id>` sub-key — only `enabled`, `model`, `reasoning`, and `provider` are. The same reason rejects a `model`/`reasoning`/`provider` that is not a non-empty string. (The gate checks shape only; whether a node id exists and whether a provider/reasoning value is supported are resolved later — an unsupported-but-well-formed override is warned and skipped at run time, never rejected here.)
 
 Injection-shaped front matter:
 
@@ -473,7 +480,7 @@ Before placing a task in `tasks/pending/`:
 - include a clear `## Description`;
 - include acceptance criteria unless you intentionally want refinement to enrich the task;
 - list constraints for modules, dependencies, migrations, or compatibility;
-- use `nodes.<node-id>.enabled: false` only when you intentionally want to disable a node in the task's flow;
+- use `nodes.<node-id>.enabled: false` only when you intentionally want to disable a node in the task's flow, and `nodes.<node-id>.{model,reasoning,provider}` only to overlay a node's executor for this run (best-effort);
 - do not include credentials or secret values;
 - do not try to pass CLI flags through front matter;
 - prefer one coherent change per task.

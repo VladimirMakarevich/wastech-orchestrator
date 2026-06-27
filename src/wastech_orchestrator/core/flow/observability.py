@@ -39,6 +39,7 @@ def record_run_observability(
     route: ResolvedRoute,
     outcome: StageOutcome,
     model: str | None,
+    reasoning: str | None,
     started_at: str,
 ) -> None:
     """Record provider attempts + (when wired) the rendered prompt and the prompt-audit step."""
@@ -66,6 +67,7 @@ def record_run_observability(
             route=route,
             outcome=outcome,
             model=model,
+            reasoning=reasoning,
             started_at=started_at,
             secrets=services.prompt_secrets,
             register=register,
@@ -133,6 +135,7 @@ def write_prompt_audit(
     route: ResolvedRoute,
     outcome: StageOutcome,
     model: str | None,
+    reasoning: str | None,
     started_at: str,
     secrets: tuple[str, ...],
     register: RegisterArtifact,
@@ -159,6 +162,7 @@ def write_prompt_audit(
         "route_primary": route.primary.value,
         "provider_used": outcome.provider_used.value if outcome.provider_used else None,
         "model": model,
+        "reasoning": reasoning,
         "started_at": started_at,
         "agents": agents,
         "prompt": redact_text(prompt, extra_secrets=secrets),

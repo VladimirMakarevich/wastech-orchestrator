@@ -41,9 +41,7 @@ def gate_caplog(caplog: pytest.LogCaptureFixture) -> pytest.LogCaptureFixture:
 class FakeNotifier:
     """Returns a programmed answer; an optional ``on_wait`` makes the wait block."""
 
-    def __init__(
-        self, result: AskResult, *, on_wait: object | None = None
-    ) -> None:
+    def __init__(self, result: AskResult, *, on_wait: object | None = None) -> None:
         self._result = result
         self._on_wait = on_wait
 

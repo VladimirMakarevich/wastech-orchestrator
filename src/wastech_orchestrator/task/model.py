@@ -24,10 +24,12 @@ BRANCH_NAME_MAX_LEN = 50
 _BRANCH_FORBIDDEN_CHARS = frozenset(" ~^:?*[\\")
 
 # Front-matter schema. A task is "clean": it carries
-# only identity/dispatch fields plus the two sanctioned exceptions — ``nodes.<node-id>.enabled``
-# (per-task node disable) and ``auto_merge`` (task-wins). Provider/model/reasoning/decomposition are
-# the flow's job (a node declares ``provider``/``model``/``reasoning``; ``decomposition:`` and the
-# planning gate decide splitting); refinement-skip is deterministic (completeness classification).
+# only identity/dispatch fields plus the sanctioned exceptions — the per-node ``nodes.<node-id>``
+# block (``enabled`` disable + the best-effort ``model``/``reasoning``/``provider`` overrides) and
+# ``auto_merge`` (task-wins). The flow node still *declares* the defaults for provider/model/
+# reasoning; the ``nodes:`` overrides only overlay them per run, best-effort (an invalid override is
+# warned + skipped, never fatal — see :class:`NodeOverride`). ``decomposition:`` and the planning
+# gate still decide splitting; refinement-skip is deterministic (completeness classification).
 # ``task_type`` is the dispatch key — it selects the flow (``implementation`` / ``deep_research`` /
 # ``security_audit`` / an operator flow), never anything about *how* a node runs (P0.4).
 ALLOWED_TASK_KEYS: frozenset[str] = frozenset(
@@ -116,15 +118,26 @@ def is_valid_branch_name(branch_name: str) -> bool:
 
 @dataclass(frozen=True)
 class NodeOverride:
-    """Per-node toggle (task front matter ``nodes.<node-id>``).
+    """Per-node task front matter (``nodes.<node-id>``): a disable toggle plus best-effort override.
 
-    ``enabled`` is the node-disable toggle and the only sanctioned per-node knob: ``None`` means
-    default (the node runs), ``False`` disables the node (any node present in the task's resolved
-    flow may be disabled — which nodes are safe to disable is the operator's flow-authoring
-    responsibility). Provider, model, and reasoning live on the flow node, never the task.
+    ``enabled`` is the node-disable toggle: ``None`` means default (the node runs), ``False``
+    disables the node (any node present in the task's resolved flow may be disabled — which nodes
+    are safe to disable is the operator's flow-authoring responsibility).
+
+    ``model`` / ``reasoning`` / ``provider`` overlay the flow node's declared executor for this run
+    only, letting one default flow cover several model/effort/provider variants without a separate
+    flow file. They are **best-effort**: the gate validates only their shape (a non-empty string),
+    and an override invalid for the resolved flow/config (provider not in ``agents.allowed``, or a
+    reasoning level the provider does not support) is warned + skipped at run time, falling back to
+    the flow's declared value — the task is never aborted (watch-mode compat). ``model`` is passed
+    through unchecked (model names have no reliable tier ordering). The override chain is: task node
+    override → flow node declaration → provider config default.
     """
 
     enabled: bool | None = None
+    model: str | None = None
+    reasoning: str | None = None
+    provider: str | None = None
 
 
 @dataclass(frozen=True)
@@ -132,9 +145,11 @@ class NormalizedTask:
     """A parsed, normalized task manifest: front matter plus the body Description.
 
     A "clean" task: identity/dispatch only, plus the sanctioned task-wins gates
-    (``nodes.<node-id>.enabled`` disable, ``auto_merge``, ``prompt_audit``, and ``decomposition``).
-    The flow node owns provider/model/reasoning; the flow + planning still own *whether* a split
-    happens (the task only flips the gate); the deterministic refine-skip stays flow-owned.
+    (the ``nodes.<node-id>`` block, ``auto_merge``, ``prompt_audit``, and ``decomposition``).
+    The flow node *declares* provider/model/reasoning defaults; a task may overlay them per run via
+    best-effort ``nodes.<node-id>.{model,reasoning,provider}`` overrides (:class:`NodeOverride`).
+    The flow + planning still own *whether* a split happens (the task only flips the gate); the
+    deterministic refine-skip stays flow-owned.
     """
 
     id: str
@@ -181,8 +196,11 @@ class NormalizedTask:
     # exactly like an accepted agent split (one branch, one PR). The gate validates only the list
     # shape; path/file/count/linear validation runs at the pre-branch preflight in ``run_task``.
     subtasks: tuple[str, ...] = ()
-    # Per-node disable toggle, keyed by flow node id. The gate validates shape only; node existence
-    # against the resolved flow is checked at flow resolution (fail-closed → terminal ``failed``).
+    # Per-node front matter, keyed by flow node id: the disable toggle plus the best-effort
+    # model/reasoning/provider overrides. The gate validates shape only; for the disable toggle node
+    # existence against the resolved flow is checked at flow resolution (fail-closed → terminal
+    # ``failed``), while the model/reasoning/provider overrides are resolved best-effort at run time
+    # (invalid fields warned + skipped, never fatal).
     node_overrides: dict[str, NodeOverride] = field(default_factory=dict)
 
     def disabled_nodes(self) -> frozenset[str]:

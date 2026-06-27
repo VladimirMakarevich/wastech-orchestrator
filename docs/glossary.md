@@ -53,7 +53,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`contacts`** - Plain-text mentions that appear in Telegram notifications and HITL prompts. They are not access control.
 - **`depends_on`** - List of other task ids that must be merged before this task can start.
 - **`subtasks`** - Operator-authored decomposition list. It names ordered subtask spec files that the orchestrator will run as one branch and one PR.
-- **`nodes`** - Per-node disable toggle keyed by flow node id. `enabled: false` skips that node for the task.
+- **`nodes`** - Per-node overrides keyed by flow node id: `enabled: false` skips that node for the task, and `model` / `reasoning` / `provider` overlay that node's executor for this run (best-effort — an invalid value is warned and skipped at run time, never fatal).
 - **`## Description`** - The body section used to describe the requested work. A Markdown task is expected to have a non-empty description body.
 - **`Acceptance criteria`** - Testable statements that define what done looks like. They help a vague task become complete enough to skip refinement.
 - **`refinement`** - The automatic enrichment pass for vague tasks. It adds missing context instead of asking the user to infer it later.

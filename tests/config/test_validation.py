@@ -173,9 +173,7 @@ def test_default_queue_validates_clean(base_config: OrchestratorConfig) -> None:
 
 
 @pytest.mark.parametrize("queue", ["", "   "])
-def test_empty_or_whitespace_queue_is_rejected(
-    base_config: OrchestratorConfig, queue: str
-) -> None:
+def test_empty_or_whitespace_queue_is_rejected(base_config: OrchestratorConfig, queue: str) -> None:
     bad = replace(base_config, orchestrator=replace(base_config.orchestrator, queue=queue))
     with pytest.raises(ConfigError) as exc:
         validate_config(bad)

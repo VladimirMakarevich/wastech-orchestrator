@@ -32,7 +32,8 @@ checkpoint is persisted by the :class:`RunRecorder` (see ``core.flow.recorder``)
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from types import MappingProxyType
 from typing import Literal, Protocol
 
 from wastech_orchestrator.config.schema import AgentsConfig
@@ -173,6 +174,7 @@ class _Stuck:
 
 _REWORK_OUTCOMES: frozenset[str] = frozenset({"rework", "fail"})
 _LARGE = 1 << 60  # absent flow budget => only the config cap clamps
+_NO_OVERRIDES: Mapping[str, Mapping[str, object]] = MappingProxyType({})
 
 
 def edge_key(edge: Edge) -> str:
@@ -222,6 +224,7 @@ class FlowEngine:
         post_node: PostNodeHook | None = None,
         region: frozenset[str] | None = None,
         disabled_nodes: frozenset[str] = frozenset(),
+        node_overrides: Mapping[str, Mapping[str, object]] = _NO_OVERRIDES,
     ) -> None:
         self._snapshot = snapshot
         self._run_state = run_state
@@ -237,6 +240,12 @@ class FlowEngine:
         # from front-matter every run/resume (not persisted). Existence + routing soundness were
         # already checked at flow resolution, so the engine can skip these unconditionally.
         self._disabled_nodes = disabled_nodes
+        # Per-node field overlay (``node_id -> {field: value}``) the task requested via
+        # ``nodes.<id>.{model,reasoning,provider}``, already validated by the resolver
+        # (``core.node_overrides``). The engine applies it mechanically to the fetched node before
+        # the runner sees it — it never learns what a field means (same separation as
+        # ``disabled_nodes``). Re-derived from front-matter every run/resume (not persisted).
+        self._node_overrides = node_overrides
         # When set, the run is confined to this node-id set (a decomposition sub_flow region): it
         # ends when a *forward* edge leaves the region (the driver then runs the next subtask or the
         # post-region phase). Rework/fail edges always point back into the region, so they never
@@ -258,7 +267,7 @@ class FlowEngine:
             self._run_state.current_node = self._entry_node_id()
         while True:
             assert self._run_state.current_node is not None
-            node = self._snapshot.nodes_by_id[self._run_state.current_node]
+            node = self._apply_overrides(self._snapshot.nodes_by_id[self._run_state.current_node])
             outcome = self._execute_node(node)
             self._run_state.mark_completed(node.id)
 
@@ -298,6 +307,18 @@ class FlowEngine:
                 return FlowRunResult(status=Status.DONE, final_node=node.id)
 
     # -- node execution --------------------------------------------------------
+
+    def _apply_overrides(self, node: FlowNode) -> FlowNode:
+        """Overlay the task's per-node field overrides onto the fetched node, if any.
+
+        Mechanical: the resolver guarantees every overlay key is a valid field of this node kind, so
+        the engine just ``replace``s the fields (``provider``/``model``/``reasoning``) before the
+        runner resolves the route and builds the request. ``id`` is never overridden, so skip /
+        edge-selection / completion bookkeeping (all id-keyed) are unaffected."""
+        fields = self._node_overrides.get(node.id)
+        # The resolver guarantees every key is a real field of this node kind with a type-correct
+        # value, but mypy's dataclass plugin can't verify keys unpacked from a generic mapping.
+        return replace(node, **fields) if fields else node  # type: ignore[arg-type]
 
     def _execute_node(self, node: FlowNode) -> NodeOutcome:
         if self._should_skip(node):

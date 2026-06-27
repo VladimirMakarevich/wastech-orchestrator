@@ -14,7 +14,9 @@ its live ``_Pipeline``, resolves the flow snapshot via the ``FlowRegistry``, and
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from wastech_orchestrator.config.schema import AgentsConfig
 from wastech_orchestrator.core.flow.engine import (
@@ -134,12 +136,15 @@ def drive_flow(
     post_node: PostNodeHook | None = None,
     region: frozenset[str] | None = None,
     disabled_nodes: frozenset[str] = frozenset(),
+    node_overrides: Mapping[str, Mapping[str, object]] = MappingProxyType({}),
 ) -> FlowRunResult:
     """Run one unit through the flow engine with the core-owned node runners.
 
     ``region`` confines the run to a decomposition sub_flow (it ends at the forward edge leaving the
     region); ``subtask_order`` scopes the node_runs to that subtask. ``disabled_nodes`` are the flow
     node ids the task disabled (``nodes.<id>.enabled: false``) — each is skipped by the engine.
+    ``node_overrides`` is the resolved per-node ``model``/``reasoning``/``provider`` field overlay
+    (``core.node_overrides``) the engine applies to each node before its runner sees it.
     """
     engine = FlowEngine(
         snapshot,
@@ -153,5 +158,6 @@ def drive_flow(
         post_node=post_node,
         region=region,
         disabled_nodes=disabled_nodes,
+        node_overrides=node_overrides,
     )
     return engine.run()

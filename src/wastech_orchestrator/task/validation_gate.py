@@ -374,14 +374,17 @@ class ValidationGate:
     def _build_node_overrides(self, raw: Any) -> tuple[dict[str, NodeOverride], _Reject | None]:
         """Map the ``nodes`` front-matter block to ``{node-id: NodeOverride}`` (shape only).
 
-        Keys are flow node ids; the only valid sub-key is ``enabled`` — the node-disable toggle
-        (the one sanctioned per-node knob). ``enabled: false`` disables the node;
-        ``null``/``{}`` means default (it runs). The gate checks shape only — it cannot see the
-        task's flow, so it does not validate node ids against any vocabulary. Whether each named
-        node exists in the resolved flow (and is safe to disable) is checked at flow resolution.
+        Keys are flow node ids; the valid sub-keys are ``enabled`` (the node-disable toggle) and the
+        best-effort ``model`` / ``reasoning`` / ``provider`` overrides. ``enabled: false`` disables
+        the node; ``null``/``{}`` means default (it runs). The gate checks shape only — it cannot
+        see the task's flow or config, so it does not validate node ids against any vocabulary, nor
+        whether a provider/reasoning value is supported. Whether each named node exists (for the
+        disable toggle) is checked at flow resolution; whether an override is valid for the resolved
+        flow/config is resolved best-effort at run time (warned + skipped, never fatal).
 
-        Non-mapping block, non-mapping values, unknown sub-keys, and a non-bool ``enabled`` all
-        reject with ``INVALID_NODE_OVERRIDE``.
+        Non-mapping block, non-mapping values, unknown sub-keys, a non-bool ``enabled``, and a
+        ``model``/``reasoning``/``provider`` that is not a non-empty string all reject with
+        ``INVALID_NODE_OVERRIDE``.
         """
         if raw is None:
             return {}, None
@@ -398,7 +401,7 @@ class ValidationGate:
                     ValidationReason.INVALID_NODE_OVERRIDE,
                     f"nodes.{node_id} must be a mapping",
                 )
-            unknown = {str(k) for k in value} - {"enabled"}
+            unknown = {str(k) for k in value} - {"enabled", "model", "reasoning", "provider"}
             if unknown:
                 return {}, _Reject(
                     ValidationReason.INVALID_NODE_OVERRIDE,
@@ -410,7 +413,18 @@ class ValidationGate:
                     ValidationReason.INVALID_NODE_OVERRIDE,
                     f"nodes.{node_id} enabled must be a boolean",
                 )
-            node_overrides[node_id] = NodeOverride(enabled=enabled)
+            fields: dict[str, str] = {}
+            for field_name in ("model", "reasoning", "provider"):
+                value_raw = value.get(field_name)
+                if value_raw is None:
+                    continue
+                if not isinstance(value_raw, str) or not value_raw.strip():
+                    return {}, _Reject(
+                        ValidationReason.INVALID_NODE_OVERRIDE,
+                        f"nodes.{node_id}.{field_name} must be a non-empty string",
+                    )
+                fields[field_name] = value_raw.strip()
+            node_overrides[node_id] = NodeOverride(enabled=enabled, **fields)
         return node_overrides, None
 
     # --- Phase B --------------------------------------------------------------------------

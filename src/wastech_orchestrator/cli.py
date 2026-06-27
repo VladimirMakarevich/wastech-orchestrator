@@ -790,7 +790,8 @@ def watch_once(
     # Partition first: drop pending tasks tagged for another queue before ranking and before the
     # dependency map is built, so this instance only ever sees its own tasks.
     scans = [
-        (p, s) for p, s in ((p, _scan_pending_meta(p)) for p in select_pending(folder))
+        (p, s)
+        for p, s in ((p, _scan_pending_meta(p)) for p in select_pending(folder))
         if s.queue == selector
     ]
     # Sort by (priority_rank, filename); select_pending is already filename-sorted, so the path tie

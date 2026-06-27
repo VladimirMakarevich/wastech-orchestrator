@@ -609,9 +609,7 @@ def test_cmd_list_scope_status_implies_all_ids(
     assert set(out.split()) == {"task-done", "task-run"}
 
 
-def test_cmd_list_format_json(
-    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_cmd_list_format_json(git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     project = tmp_path / "project"
     project.mkdir()
     config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")

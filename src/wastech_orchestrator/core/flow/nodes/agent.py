@@ -253,6 +253,7 @@ class AgentNodeRunner:
             route=route,
             outcome=outcome,
             model=node.model,
+            reasoning=node.reasoning,
             started_at=started_at,
         )
         if outcome.result is None:

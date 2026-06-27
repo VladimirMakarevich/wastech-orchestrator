@@ -380,9 +380,7 @@ class Supervisor:
         task_spec_text: str,
     ) -> str:
         nodes = "\n".join(f"- {nid}" for nid in agent_node_ids) or "- (none)"
-        skills = "\n".join(
-            f"- {s.name} — {s.description} [{s.path}]" for s in inventory.skills
-        )
+        skills = "\n".join(f"- {s.name} — {s.description} [{s.path}]" for s in inventory.skills)
         return (
             self._base_prompt(task_id)
             + "\n\n## Skill map proposal\n"

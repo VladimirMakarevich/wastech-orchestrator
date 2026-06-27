@@ -583,10 +583,53 @@ def test_nodes_non_mapping_top_level_rejected(config: OrchestratorConfig) -> Non
     assert result.reason is ValidationReason.INVALID_NODE_OVERRIDE
 
 
-@pytest.mark.parametrize("subkey", ["model", "reasoning"])
-def test_nodes_model_reasoning_subkeys_unknown(config: OrchestratorConfig, subkey: str) -> None:
-    # ``enabled`` is the only valid per-node sub-key — model/reasoning live on the flow node.
-    block = f"nodes:\n  planning:\n    {subkey}: x\n"
+# --- per-node model/reasoning/provider overrides (shape only) ----------------------------
+
+
+def test_nodes_model_reasoning_provider_accepted_and_stored(config: OrchestratorConfig) -> None:
+    # The gate validates shape only — provider/reasoning support is resolved at run time.
+    block = (
+        "nodes:\n  implementation:\n    model: claude-opus-4-8\n"
+        "    reasoning: high\n    provider: claude\n"
+    )
+    result = _gate(config).validate(_src(_nodes_task(block)))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.node_overrides == {
+        "implementation": NodeOverride(model="claude-opus-4-8", reasoning="high", provider="claude")
+    }
+
+
+def test_nodes_override_combined_with_enabled(config: OrchestratorConfig) -> None:
+    block = "nodes:\n  review:\n    enabled: false\n    provider: codex\n"
+    result = _gate(config).validate(_src(_nodes_task(block)))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.node_overrides == {
+        "review": NodeOverride(enabled=False, provider="codex")
+    }
+
+
+def test_nodes_override_value_is_stripped(config: OrchestratorConfig) -> None:
+    block = 'nodes:\n  planning:\n    model: "  opus  "\n'
+    result = _gate(config).validate(_src(_nodes_task(block)))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.node_overrides["planning"].model == "opus"
+
+
+@pytest.mark.parametrize("subkey", ["model", "reasoning", "provider"])
+def test_nodes_override_empty_string_rejected(config: OrchestratorConfig, subkey: str) -> None:
+    block = f'nodes:\n  planning:\n    {subkey}: "  "\n'
+    result = _gate(config).validate(_src(_nodes_task(block)))
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_NODE_OVERRIDE
+    assert subkey in result.detail
+
+
+@pytest.mark.parametrize("subkey", ["model", "reasoning", "provider"])
+def test_nodes_override_non_string_rejected(config: OrchestratorConfig, subkey: str) -> None:
+    block = f"nodes:\n  planning:\n    {subkey}: 3\n"
     result = _gate(config).validate(_src(_nodes_task(block)))
     assert result.passed is False
     assert result.reason is ValidationReason.INVALID_NODE_OVERRIDE

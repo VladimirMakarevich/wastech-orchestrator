@@ -2397,9 +2397,7 @@ def test_supervisor_proposed_skills_reach_downstream_stages(
 
     # The chosen SKILL.md reaches the implementation node as an absolute read-only reference path,
     # not its body — and only that node (the proposal was node-scoped).
-    impl = next(
-        r for p in providers.values() for r in p.requests if r.node_id == "implementation"
-    )
+    impl = next(r for p in providers.values() for r in p.requests if r.node_id == "implementation")
     assert any(path.endswith("safe-change/SKILL.md") for path in impl.skill_reference_paths)
     assert "ghost" not in str(impl.skill_reference_paths)  # unknown name never surfaced
     assert "# Body" not in impl.prompt  # the skill body is never inlined into the prompt
@@ -2447,9 +2445,7 @@ def test_operator_pinned_skill_reaches_node(
 
     result = orch.run_task(_complete_task(tmp_path, "task-pin"))
     assert result.final_status is Status.DONE
-    impl = next(
-        r for p in providers.values() for r in p.requests if r.node_id == "implementation"
-    )
+    impl = next(r for p in providers.values() for r in p.requests if r.node_id == "implementation")
     assert any(path.endswith("safe-change/SKILL.md") for path in impl.skill_reference_paths)
     skill_map = json.loads((art / "logs" / "task-pin" / "skill_map.json").read_text("utf-8"))
     assert [s["name"] for s in skill_map["implementation"]] == ["safe-change"]

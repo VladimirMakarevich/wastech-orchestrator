@@ -288,7 +288,7 @@ Provider routing is **node-based** — it lives on the flow, not the task. Each 
   provider: codex # this node runs on codex; omit to use the global primary
 ```
 
-A **task** cannot repoint a stage's provider, set a model, or change reasoning — those are flow/operator concerns (see [configuration.md](configuration.md#agentsproviders)). `testing` and `publishing` run no agent (Check Runner / Git Manager). A node `provider` must be in `agents.allowed` (a fatal preflight error otherwise) and can never change provider commands, credentials, sandbox settings, `extra_args`, or any security policy.
+A node's declared `provider`/`model`/`reasoning` are the **defaults**; a **task** may overlay them per run with `nodes.<node-id>.{model,reasoning,provider}` (best-effort — an invalid value is warned and skipped at run time, never fatal; see [task-authoring.md](task-authoring.md#provider-model-reasoning)). This lets one default flow cover several model/effort/provider variants without a separate flow file. `testing` and `publishing` run no agent (Check Runner / Git Manager). A `provider` (node-declared or task-overridden) must be in `agents.allowed`, and neither the flow nor a task can change provider commands, credentials, sandbox settings, `extra_args`, or any security policy.
 
 ## 7a. Customize a Node's Prompt
 

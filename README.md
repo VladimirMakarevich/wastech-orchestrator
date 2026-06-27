@@ -94,7 +94,7 @@ The signup form accepts any string as an email. Validate the `email` field and s
 - A unit test covers valid and invalid cases.
 ```
 
-> Only `id` and `title` are required; the gate **rejects unknown fields**. The full allow-list (`id`, `title`, `task_type`, `branch_name`, `auto_merge`, `prompt_audit`, `contacts`, `depends_on`, `subtasks`, `nodes`) is in [docs/task-authoring.md](docs/task-authoring.md). Provider/model/reasoning are **flow-node concerns, not task fields** — a task names a flow, it never patches the graph.
+> Only `id` and `title` are required; the gate **rejects unknown fields**. The full allow-list (`id`, `title`, `task_type`, `branch_name`, `auto_merge`, `prompt_audit`, `contacts`, `depends_on`, `subtasks`, `nodes`) is in [docs/task-authoring.md](docs/task-authoring.md). Provider/model/reasoning **default** to the flow node; a task may overlay them per node (best-effort) via the `nodes` block, but it names a flow and never patches the graph.
 
 Then run it:
 

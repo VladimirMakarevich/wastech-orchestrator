@@ -104,6 +104,7 @@ def test_write_prompt_audit_step_timeline_who_metadata_and_redaction(tmp_path: P
         route=_route(),
         outcome=_outcome(),
         model="gpt-x",
+        reasoning="high",
         started_at="t0",
         secrets=("TOKEN_ABC123",),
         register=_register(calls),
@@ -113,6 +114,8 @@ def test_write_prompt_audit_step_timeline_who_metadata_and_redaction(tmp_path: P
     record = json.loads(step.read_text("utf-8"))
     assert record["provider_used"] == "claude"
     assert record["model"] == "gpt-x"
+    # The effective reasoning (post-override) is auditable alongside the model (ADR Q#4).
+    assert record["reasoning"] == "high"
     # who-metadata: primary codex marked fallback=False, claude fallback=True.
     by_provider = {a["provider"]: a for a in record["agents"]}
     assert by_provider["codex"]["is_fallback"] is False

@@ -18,6 +18,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from wastech_orchestrator.check_runner import CheckRunner
@@ -63,6 +64,7 @@ from wastech_orchestrator.core.hitl import (
     reset_pending_interactions,
 )
 from wastech_orchestrator.core.loop_control import LoopCounters
+from wastech_orchestrator.core.node_overrides import resolve_node_overrides
 from wastech_orchestrator.core.recovery import (
     RecoveryAction,
     RecoveryPlan,
@@ -1163,6 +1165,20 @@ class Orchestrator:
         except (FlowResolutionError, FlowValidationError) as exc:
             raise PipelineFailed(str(exc)) from exc
 
+    def _resolve_node_overrides(
+        self, p: _Pipeline, snapshot: FlowSnapshot
+    ) -> Mapping[str, Mapping[str, object]]:
+        """Resolve the task's per-node model/reasoning/provider overrides into a field overlay.
+
+        Best-effort (watch-mode compat): an override invalid for this flow/config is warned +
+        skipped here, the flow's declared value stands, and the task runs unaffected. Re-derived
+        from front matter every run/resume (never persisted), like the ``disabled_nodes`` set.
+        """
+        resolution = resolve_node_overrides(snapshot, p.task.node_overrides, self._config)
+        for warning in resolution.warnings:
+            self._log(p.task.id).warning("task node override skipped", extra={"detail": warning})
+        return resolution.overlay
+
     def _drive_via_engine(self, p: _Pipeline, completeness: Completeness) -> PipelineResult:
         """Drive the task through the :class:`FlowEngine`.
 
@@ -1204,6 +1220,7 @@ class Orchestrator:
         (preflight, branch) + terminal handling live in the callers; this is the engine core."""
         snapshot = self._resolve_flow(p)  # task_type → flow (P0.4 dispatch)
         assert snapshot.source_path is not None
+        node_overrides = self._resolve_node_overrides(p, snapshot)
         if run_state is None:
             run_state = FlowRunState(flow_fingerprint=snapshot.flow_fingerprint)
         # The constant supervisor layer starts at task start and lives the whole cycle (P2.1); it
@@ -1251,7 +1268,15 @@ class Orchestrator:
         )
         try:
             result = self._run_phases(
-                p, snapshot, run_state, recorder, services, inputs, completeness, resume=resume
+                p,
+                snapshot,
+                run_state,
+                recorder,
+                services,
+                inputs,
+                completeness,
+                node_overrides=node_overrides,
+                resume=resume,
             )
         except NodeManualRequired as exc:
             self._sync_counters_from_run_state(p, run_state)
@@ -1299,6 +1324,7 @@ class Orchestrator:
         inputs: NodeInputs,
         completeness: Completeness,
         *,
+        node_overrides: Mapping[str, Mapping[str, object]] = MappingProxyType({}),
         resume: bool = False,
     ) -> FlowRunResult:
         """Drive the flow in phases. Fresh: a flow with no decomposition runs in one pass; a
@@ -1330,6 +1356,7 @@ class Orchestrator:
                 subtask_order=subtask,
                 region=region,
                 disabled_nodes=p.skip,
+                node_overrides=node_overrides,
             )
 
         if snapshot.doc.decomposition is None:
@@ -1588,9 +1615,7 @@ class Orchestrator:
         self._persist_skill_map(p, map_file)
         inputs.skill_paths_by_node = self._skill_paths_by_node(p.skill_map)
 
-    def _enforce_pin_strictness(
-        self, p: _Pipeline, pins: dict[str, SkillSelection]
-    ) -> None:
+    def _enforce_pin_strictness(self, p: _Pipeline, pins: dict[str, SkillSelection]) -> None:
         """Strict/warn handling for unresolved operator pins (a dynamic proposal is never an error).
 
         ``skills.strict`` true stops the task in ``manual_action_required`` with a report; false

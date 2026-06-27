@@ -132,3 +132,32 @@ def test_disabled_nodes_reflects_enabled_false_only() -> None:
         },
     )
     assert task.disabled_nodes() == frozenset({"review"})
+
+
+def test_node_override_fields_default_to_none() -> None:
+    ov = NodeOverride()
+    assert ov.enabled is None
+    assert ov.model is None
+    assert ov.reasoning is None
+    assert ov.provider is None
+
+
+def test_node_override_carries_model_reasoning_provider() -> None:
+    ov = NodeOverride(model="claude-opus-4-8", reasoning="high", provider="claude")
+    assert (ov.model, ov.reasoning, ov.provider) == ("claude-opus-4-8", "high", "claude")
+    # An override that only sets model/reasoning/provider never disables the node.
+    assert ov.enabled is None
+
+
+def test_disabled_nodes_ignores_override_only_nodes() -> None:
+    # A node carrying a model/reasoning/provider override (but no ``enabled: false``) still runs.
+    task = NormalizedTask(
+        id="t",
+        title="x",
+        description="d",
+        node_overrides={
+            "implementation": NodeOverride(model="x", reasoning="high"),
+            "review": NodeOverride(enabled=False, provider="codex"),
+        },
+    )
+    assert task.disabled_nodes() == frozenset({"review"})

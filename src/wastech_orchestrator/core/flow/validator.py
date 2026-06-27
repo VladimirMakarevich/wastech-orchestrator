@@ -431,7 +431,7 @@ def _check_config_consistency(snap: FlowSnapshot, config: OrchestratorConfig) ->
     doc = snap.doc
     agents = config.agents
     allowed = frozenset(agents.allowed)
-    global_primary = _global_primary(config)
+    primary = global_primary(config)
 
     # 1. Every node's explicit provider ∈ agents.allowed; reasoning is valid for the resolved
     #    provider. A node with no provider runs under the config's global primary.
@@ -445,7 +445,7 @@ def _check_config_consistency(snap: FlowSnapshot, config: OrchestratorConfig) ->
                     f"{sorted(p.value for p in allowed)}"
                 )
             )
-        resolved_provider = node.provider or global_primary
+        resolved_provider = node.provider or primary
         if node.reasoning is not None:
             if resolved_provider is None:
                 valid = all_reasoning_levels()
@@ -516,6 +516,12 @@ def _check_config_consistency(snap: FlowSnapshot, config: OrchestratorConfig) ->
     return errs
 
 
-def _global_primary(config: OrchestratorConfig) -> ProviderId | None:
+def global_primary(config: OrchestratorConfig) -> ProviderId | None:
+    """The single global-primary provider, or ``None`` when zero or several are marked primary.
+
+    A node with no declared provider runs under this provider (PRE.1). Shared by the config-aware
+    flow validator and the task node-override resolver (``core.node_overrides``) so both resolve the
+    same effective provider when a node/override leaves it implicit.
+    """
     primaries = [pid for pid, provider in config.agents.providers.items() if provider.primary]
     return primaries[0] if len(primaries) == 1 else None

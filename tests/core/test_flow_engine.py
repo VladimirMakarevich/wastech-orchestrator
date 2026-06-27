@@ -390,3 +390,73 @@ def test_engine_inline_budget_resets_after_forward_edge() -> None:
     runner = StubRunner({"ev": ["rework", "accept", "rework", "accept"], "t": ["fail", "pass"]})
     result = _engine(snap, runner, RecordingRecorder()).run()
     assert result.status is Status.DONE
+
+
+# -- per-node field overrides (task nodes.<id>.{model,reasoning,provider}) -----
+
+
+class CapturingRunner(StubRunner):
+    """Records the exact node object each runner call received (post-override)."""
+
+    def __init__(self, outcomes: dict[str, list[str]] | None = None) -> None:
+        super().__init__(outcomes)
+        self.nodes: dict[str, FlowNode] = {}
+
+    def run(self, node: FlowNode, ctx: NodeContext) -> NodeResult:
+        self.nodes[node.id] = node
+        return super().run(node, ctx)
+
+
+def test_engine_applies_node_field_overlay() -> None:
+    # The overlay patches model/reasoning/provider on the fetched node before the runner sees it.
+    snap = _snapshot([_agent("impl"), _publish("c")], [Edge("impl", "c")])
+    runner, recorder = CapturingRunner(), RecordingRecorder()
+    registry = dict.fromkeys(("agent", "evaluator", "checks", "hitl", "publish"), runner)
+    engine = FlowEngine(
+        snap,
+        FlowRunState(flow_fingerprint="fp"),
+        registry,
+        recorder,
+        facts=lambda fact: False,
+        agents=_agents(),
+        task_id="task-1",
+        node_overrides={
+            "impl": {"model": "claude-opus-4-8", "reasoning": "high", "provider": ProviderId.CODEX}
+        },
+    )
+    assert engine.run().status is Status.DONE
+    patched = runner.nodes["impl"]
+    assert isinstance(patched, AgentNode)
+    assert (patched.model, patched.reasoning, patched.provider) == (
+        "claude-opus-4-8",
+        "high",
+        ProviderId.CODEX,
+    )
+
+
+def test_engine_overlay_only_patches_matching_node() -> None:
+    snap = _snapshot([_agent("a"), _agent("b"), _publish("c")], [Edge("a", "b"), Edge("b", "c")])
+    runner, recorder = CapturingRunner(), RecordingRecorder()
+    registry = dict.fromkeys(("agent", "evaluator", "checks", "hitl", "publish"), runner)
+    engine = FlowEngine(
+        snap,
+        FlowRunState(flow_fingerprint="fp"),
+        registry,
+        recorder,
+        facts=lambda fact: False,
+        agents=_agents(),
+        task_id="task-1",
+        node_overrides={"a": {"model": "x"}},
+    )
+    assert engine.run().status is Status.DONE
+    assert runner.nodes["a"].model == "x"
+    assert runner.nodes["b"].model is None  # untouched
+
+
+def test_engine_empty_overlay_is_noop() -> None:
+    snap = _snapshot([_agent("a"), _publish("c")], [Edge("a", "c")])
+    runner, recorder = CapturingRunner(), RecordingRecorder()
+    # The default (no node_overrides) leaves nodes exactly as declared.
+    result = _engine(snap, runner, recorder).run()
+    assert result.status is Status.DONE
+    assert runner.nodes["a"].model is None and runner.nodes["a"].provider is None
