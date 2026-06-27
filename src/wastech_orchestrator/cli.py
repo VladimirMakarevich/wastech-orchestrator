@@ -720,6 +720,9 @@ class _PendingScan(NamedTuple):
     depends_on: tuple[str, ...]
     priority_rank: int
     queue: str
+    # Front-matter ``title`` (or ``None``) — shown in the next-task confirmation prompt (idea 27),
+    # alongside the id. Allowlisted for the prompt; never carries diff/prompt content.
+    title: str | None = None
 
 
 def _scan_pending_meta(task_file: Path) -> _PendingScan:
@@ -742,6 +745,8 @@ def _scan_pending_meta(task_file: Path) -> _PendingScan:
         return _PendingScan(None, (), priority_rank(None), DEFAULT_QUEUE)
     raw_id = parse.frontmatter.get("id")
     task_id = raw_id if isinstance(raw_id, str) else None
+    raw_title = parse.frontmatter.get("title")
+    title = raw_title.strip() if isinstance(raw_title, str) and raw_title.strip() else None
     rank = priority_rank(parse.frontmatter.get("priority"))
     raw_queue = parse.frontmatter.get("queue")
     queue = raw_queue.strip() if isinstance(raw_queue, str) and raw_queue.strip() else DEFAULT_QUEUE
@@ -749,8 +754,41 @@ def _scan_pending_meta(task_file: Path) -> _PendingScan:
     if not isinstance(raw_deps, (list, tuple)) or not all(
         isinstance(d, str) and d.strip() for d in raw_deps
     ):
-        return _PendingScan(task_id, (), rank, queue)
-    return _PendingScan(task_id, tuple(d.strip() for d in raw_deps), rank, queue)
+        return _PendingScan(task_id, (), rank, queue, title)
+    return _PendingScan(task_id, tuple(d.strip() for d in raw_deps), rank, queue, title)
+
+
+def _confirm_next_task(
+    orchestrator: Orchestrator,
+    config: OrchestratorConfig,
+    task_id: str | None,
+    title: str | None,
+) -> bool:
+    """Ask the operator (Telegram) to approve claiming the next pending task (idea 27).
+
+    Returns ``True`` only on an explicit approval; deny / timeout / no transport → ``False``
+    (fail-closed STOP — the task stays pending, the operator decides later). Non-durable by design:
+    a daemon restart mid-prompt simply re-asks next tick. Carries the task id + title only — never
+    diff or prompt content. Preflight guarantees ``telegram.enabled`` when this gate is on.
+    """
+    label = task_id or "(unknown id)"
+    context = f"Task {label}" + (f" — {title}" if title else "")
+    result = orchestrator.notifier.ask_human(
+        question="Start this task next?",
+        context=context,
+        task_id=task_id or "next-task",
+        kind="approval",
+        timeout_s=config.telegram.ask_timeout_s,
+        interaction_id="next-task-" + uuid.uuid4().hex[:16],
+    )
+    approved = result.failure is None and result.answered and result.approved is True
+    if not approved:
+        _LOG.info(
+            "next-task gate: not claiming %s (%s)",
+            label,
+            result.failure or ("denied" if result.answered else "no answer"),
+        )
+    return approved
 
 
 def watch_once(
@@ -818,6 +856,10 @@ def watch_once(
             if verdict.state is Eligibility.BROKEN:
                 results.append(orchestrator.reject_dependency(str(task_file), verdict.detail))
                 continue  # fail-closed terminal reject; the slot stays free
+        if config.orchestrator.auto_mode.confirm_next_task and not _confirm_next_task(
+            orchestrator, config, task_id, scan.title
+        ):
+            break  # operator denied / silent → leave pending, stop chaining this cycle (idea 27)
         result = orchestrator.run_task(str(task_file))
         results.append(result)
         if result.final_status is Status.MANUAL_ACTION_REQUIRED:

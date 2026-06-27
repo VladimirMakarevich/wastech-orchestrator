@@ -391,7 +391,9 @@ class BaseCliProvider:
             detail = message_for(ErrorClass.TASK_FAILURE)
             if parsed.failure_subtype:
                 detail = f"{detail} ({parsed.failure_subtype})"
-            error_obj = NormalizedError(ErrorClass.TASK_FAILURE, detail)
+            error_obj = NormalizedError(
+                ErrorClass.TASK_FAILURE, detail, failure_subtype=parsed.failure_subtype
+            )
 
         result = AgentRunResult(
             status=status,

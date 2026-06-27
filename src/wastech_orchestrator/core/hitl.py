@@ -283,6 +283,23 @@ def node_interaction_path(
     return task_artifact_dir(artifacts_root, task_id) / "hitl" / f"node-{node_id}{suffix}.json"
 
 
+def turn_gate_interaction_path(
+    artifacts_root: str | Path,
+    task_id: str,
+    node_id: str,
+    *,
+    subtask: int | None = None,
+) -> Path:
+    """Durable artifact for a node's max-turns continue/stop gate (idea 29), keyed by node id.
+
+    One file per node (no cycle index): with no resume cap there is nothing to count, so each
+    continue/stop round-trip reuses and overwrites this artifact (``mark_consumed`` after each
+    answer). Prefixed ``turn-gate-`` so it never collides with the embedded-HITL or guardrail files.
+    """
+    suffix = f"-subtask-{subtask}" if subtask is not None else ""
+    return task_artifact_dir(artifacts_root, task_id) / "hitl" / f"turn-gate-{node_id}{suffix}.json"
+
+
 def interaction_id(task_id: str, node_id: str, subtask: int | None = None) -> str:
     """Return a compact deterministic id that fits Telegram callback-data limits.
 

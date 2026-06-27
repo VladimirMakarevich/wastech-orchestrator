@@ -97,6 +97,25 @@ def test_task_failure_returns_failed(
     assert result.error.error_class is ErrorClass.TASK_FAILURE
 
 
+def test_claude_error_max_turns_surfaces_structured_subtype(
+    fake_cli: Callable[..., str],
+    integration_security: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # Claude-only: exhausting the turn cap is a returned TASK_FAILURE (with the subtype surfaced
+    # structurally — the max-turns gate's trigger), never a raised crash, even on a non-zero exit.
+    provider = _build(
+        "claude", fake_cli("error_max_turns", "claude"), integration_security, tmp_path
+    )
+    result = provider.run(make_request())
+    assert result.status is RunStatus.FAILED
+    assert result.error is not None
+    assert result.error.error_class is ErrorClass.TASK_FAILURE
+    assert result.error.failure_subtype == "error_max_turns"
+    assert result.session_id == "sess-fake"
+
+
 @pytest.mark.parametrize("provider_name", PROVIDERS)
 def test_binary_not_found(
     provider_name: str,

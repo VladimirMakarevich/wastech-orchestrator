@@ -43,7 +43,7 @@ The operator's business priority (more `+` = higher) is the tie-breaker, not the
 | 7 ✅ | [skills-selection-rework](skills-selection-rework.md) | C — Core seam | `++++` | M | 18→19 | Establishes per-node prompt-var injection + "supervisor proposes, Core decides" that memory reuses. |
 | 7a ✅ | [task-node-model-override](task-node-model-override.md) | C′ — Task flexibility | `++` | M | — | Extends `NodeOverride` + adds overlay in `engine_driver`. After queues (`NodeOverride` seam) and skills (engine seam); before transient (`AgentRunRequest` path). No config bump. |
 | 8 ✅ | [transient-provider-failure-recovery](transient-provider-failure-recovery.md) | D — Resilience | `++` | M | 19→20 | Establishes structured `error_class` on provider errors + the resumable-pause path. |
-| 9 | [telegram-step-trace](telegram-step-trace.md) | D — Resilience | `++` | S | 20→21 | Establishes the per-step Telegram push channel + message-prefix discipline. |
+| 9 ✅ | [telegram-step-trace](telegram-step-trace.md) | D — Resilience | `++` | S | 20→21 | Establishes the per-step Telegram push channel + message-prefix discipline. |
 | 10 | [operator-confirmation-gates](operator-confirmation-gates.md) | D — Resilience | `++` | S/M | 21→22 | Confluence: needs the scan (next-task gate), structured errors (max-turns gate), and the Telegram channel. |
 | 11 | [orchestrator-driven-pr-merge](orchestrator-driven-pr-merge.md) | E — Merge/hygiene | `++` | M/L | — | Adds `worc prs` / `merge-task` so the console can include them; reuses the supervisor agent precedent. |
 | 12 | [log-management](log-management.md) | E — Merge/hygiene | `++` | M | 22→23 | `worc logs clean` + `logging.*`; shapes the log tail the console later renders. |

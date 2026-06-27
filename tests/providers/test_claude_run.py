@@ -164,6 +164,8 @@ def test_nonzero_exit_with_terminal_error_event_is_task_failure_not_crash(
     assert result.error is not None
     assert result.error.error_class is ErrorClass.TASK_FAILURE
     assert "error_max_turns" in result.error.message
+    # Surfaced structurally so the flow layer detects the gate trigger without substring-matching.
+    assert result.error.failure_subtype == "error_max_turns"
 
 
 def test_nonzero_exit_without_terminal_event_is_process_crashed(

@@ -71,6 +71,9 @@ def _provider_block(pid: ProviderId, *, primary: bool) -> dict[str, Any]:
         block["sandbox"] = "workspace-write"
     if pid is ProviderId.CLAUDE:
         block["max_turns"] = 400
+        # Off by default; when on, a run that hits ``max_turns`` pauses for a Telegram continue/stop
+        # prompt (requires telegram.enabled) and a low ``max_turns`` (~50–100) becomes safe.
+        block["max_turns_gate"] = False
     block["permission_profile"] = "workspace-write"
     block["extra_args"] = []
     if primary:
@@ -91,7 +94,7 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
     return {
         "schema_version": CONFIG_SCHEMA_VERSION,
         "orchestrator": {
-            "auto_mode": {"enabled": spec.auto_mode},
+            "auto_mode": {"enabled": spec.auto_mode, "confirm_next_task": False},
             "poll_interval_seconds": 300,
             "queue": "default",
         },

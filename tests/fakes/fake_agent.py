@@ -167,6 +167,24 @@ def _run_claude(scenario: str, cli_args: list[str]) -> int:
         )
         return 0
 
+    if scenario == "error_max_turns":
+        # A clean run that exhausted its turn cap: a terminal result event with the CLI's own
+        # ``error_max_turns`` subtype + a session id (so the max-turns gate can resume it). The real
+        # CLI exits non-zero here; the adapter classifies from the terminal event, not the code.
+        _emit(
+            [
+                {"type": "system", "subtype": "init", "session_id": _SESSION_ID},
+                {
+                    "type": "result",
+                    "subtype": "error_max_turns",
+                    "is_error": True,
+                    "result": "Reached the maximum number of turns.",
+                    "session_id": _SESSION_ID,
+                },
+            ]
+        )
+        return 1
+
     if scenario == "auth_failed":
         sys.stderr.write("Error: not logged in. Run `claude login` to authenticate.\n")
         return 1

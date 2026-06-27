@@ -59,12 +59,13 @@ from wastech_orchestrator.core.hitl import (
     mark_consumed,
     mark_interaction_status,
     parse_typed_output,
+    turn_gate_interaction_path,
     typed_output_schema,
 )
 from wastech_orchestrator.git_manager import ChangedPath
 from wastech_orchestrator.notify import AskKind, AskResult
 from wastech_orchestrator.observability.logging import bind
-from wastech_orchestrator.providers.base import AgentRunRequest
+from wastech_orchestrator.providers.base import MAX_TURNS_SUBTYPE, AgentRunRequest, ProviderId
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import EditingLineageRow, NodeRunRow
 
@@ -95,7 +96,7 @@ class AgentNodeRunner:
     # -- simple (non-HITL) agent run ------------------------------------------
 
     def _run_simple(self, node: AgentNode, ctx: NodeContext, route: ResolvedRoute) -> NodeResult:
-        run_id, outcome = self._invoke(node, ctx, route, human_input_path=None)
+        run_id, outcome = self._invoke_with_turn_gate(node, ctx, route, human_input_path=None)
         self._apply_post_edit_guard(node, ctx, route)
         return NodeResult(node_id=node.id, outcome=_agent_outcome(outcome), node_run_id=run_id)
 
@@ -111,7 +112,9 @@ class AgentNodeRunner:
         if persisted is not None:
             human_input_path = self._resume_interaction(node, path, persisted)
 
-        run_id, outcome = self._invoke(node, ctx, route, human_input_path=human_input_path)
+        run_id, outcome = self._invoke_with_turn_gate(
+            node, ctx, route, human_input_path=human_input_path
+        )
         typed = self._typed(node, ctx, outcome)
         if typed.human_input is None:
             if had_interaction:
@@ -132,12 +135,12 @@ class AgentNodeRunner:
         # Resume the first run's session so the agent continues the same conversation with the
         # operator's answer (it does not re-derive from scratch). Same-provider only; across a
         # restart the first-run outcome is gone, so resume falls back to fresh + the answer file.
-        run_id2, outcome2 = self._invoke(
+        run_id2, outcome2 = self._invoke_with_turn_gate(
             node,
             ctx,
             route,
             human_input_path=str(path),
-            resume_session_id=_hitl_resume_session_id(outcome, route),
+            resume_session_id=_same_provider_session_id(outcome, route),
         )
         if self._typed(node, ctx, outcome2).human_input is not None:
             raise NodeManualRequired(f"agent node {node.id!r}: second HITL request after an answer")
@@ -214,6 +217,75 @@ class AgentNodeRunner:
         if kind == "question" and isinstance(answer, str) and answer.strip():
             return
         raise NodeManualRequired(f"agent node {node.id!r}: human input invalid")
+
+    # -- max-turns gate (idea 29) ---------------------------------------------
+
+    def _invoke_with_turn_gate(
+        self,
+        node: AgentNode,
+        ctx: NodeContext,
+        route: ResolvedRoute,
+        *,
+        human_input_path: str | None,
+        resume_session_id: str | None = None,
+    ) -> tuple[int, StageOutcome]:
+        """Invoke the provider; when the Claude max-turns gate is on, pause on ``error_max_turns``
+        for a durable operator continue/stop decision instead of failing immediately.
+
+        Continue resumes the same agent session with a fresh turn grant (the adapter re-passes
+        ``--max-turns`` on every invocation). Deny / timeout / no transport → STOP: the original
+        max-turns failure is returned unchanged (terminal exactly as it is with the gate off). The
+        gate is fail-closed across a daemon restart: a pending decision left ``waiting`` by an
+        interrupted run is resolved at entry, before the provider is touched, so a restart never
+        silently burns a fresh grant. Reuses the existing durable HITL primitive — no new transport.
+        """
+        if not self._s.max_turns_gate:
+            return self._invoke(
+                node,
+                ctx,
+                route,
+                human_input_path=human_input_path,
+                resume_session_id=resume_session_id,
+            )
+        gate_path = turn_gate_interaction_path(
+            self._s.artifacts_root, ctx.task_id, node.id, subtask=ctx.subtask_order
+        )
+        persisted = load_interaction(gate_path)
+        if persisted is not None and str(persisted.get("status", "")) == "waiting":
+            result = self._gate().resume(gate_path, dict(persisted))
+            if not _gate_approved(result):
+                # Deny / timeout / no answer after a restart → fail-closed terminal (manual review):
+                # the original max-turns outcome is gone, so there is nothing to return as today.
+                reason = result.failure or ("denied" if result.answered else "no answer")
+                raise NodeManualRequired(
+                    f"agent node {node.id!r}: max-turns gate stopped after restart ({reason})"
+                )
+            mark_consumed(gate_path)
+            # The in-memory session is gone after a restart; let _invoke fall back to the durable
+            # editing-lineage session (state.db) for editing nodes, else a fresh run + fresh grant.
+            resume_session_id = None
+        run_id, outcome = self._invoke(
+            node, ctx, route, human_input_path=human_input_path, resume_session_id=resume_session_id
+        )
+        while _is_max_turns(outcome):
+            result = self._gate().request(
+                task_id=ctx.task_id,
+                node_id=node.id,
+                subtask=ctx.subtask_order,
+                signal=_turn_limit_signal(node.id),
+                path=gate_path,
+            )
+            if not _gate_approved(result):
+                return run_id, outcome  # deny / timeout / transport → STOP (terminal as today)
+            mark_consumed(gate_path)
+            run_id, outcome = self._invoke(
+                node,
+                ctx,
+                route,
+                human_input_path=human_input_path,
+                resume_session_id=_same_provider_session_id(outcome, route),
+            )
+        return run_id, outcome
 
     # -- shared invocation ----------------------------------------------------
 
@@ -559,17 +631,51 @@ def _agent_outcome(outcome: StageOutcome) -> NodeOutcome:
     )
 
 
-def _hitl_resume_session_id(outcome: StageOutcome, route: ResolvedRoute) -> str | None:
-    """The first HITL run's session to resume on the post-answer re-invoke, or ``None``.
+def _same_provider_session_id(outcome: StageOutcome, route: ResolvedRoute) -> str | None:
+    """The just-run session to resume on a same-route re-invoke, or ``None``.
 
-    Resume only when the session belongs to the route's primary provider: the re-invoke resolves the
-    same route and leads with the primary, so a fallback-provider session cannot be resumed there
-    (and the router drops ``session_id`` on a cross-provider fallback anyway). ``None`` everywhere
-    else — no result, no session id, or a provider mismatch — yields a fresh session honestly."""
+    Used by both the embedded-HITL post-answer re-run and the max-turns gate's continue. Resume only
+    when the session belongs to the route's primary provider: the re-invoke resolves the same route
+    and leads with the primary, so a fallback-provider session cannot be resumed there (and the
+    router drops ``session_id`` on a cross-provider fallback anyway). ``None`` everywhere else — no
+    result, no session id, or a provider mismatch — yields a fresh session honestly."""
     result = outcome.result
     if result is None or not result.session_id or outcome.provider_used != route.primary:
         return None
     return result.session_id
+
+
+def _is_max_turns(outcome: StageOutcome) -> bool:
+    """True when the outcome is a Claude run that exhausted its ``max_turns`` cap (idea 29).
+
+    Detected structurally via ``NormalizedError.failure_subtype`` — a quality ``task_failure`` the
+    router returns as-is (no fallback), carrying the session id needed to resume on continue."""
+    result = outcome.result
+    return (
+        result is not None
+        and result.error is not None
+        and outcome.provider_used is ProviderId.CLAUDE
+        and result.error.failure_subtype == MAX_TURNS_SUBTYPE
+    )
+
+
+def _gate_approved(result: AskResult) -> bool:
+    """True only on an explicit approval; deny / timeout / transport / invalid → False (STOP)."""
+    return result.failure is None and result.answered and result.approved is True
+
+
+def _turn_limit_signal(node_id: str) -> HumanInputSignal:
+    """The continue/stop approval prompt for the max-turns gate — task/node ids only, no secrets."""
+    return HumanInputSignal(
+        kind="approval",
+        question="Turn limit reached — continue this run?",
+        context=(
+            f"Node {node_id!r} hit its turn cap (max_turns). Approve to resume the same agent "
+            "session with a fresh turn grant, or deny to stop the run."
+        ),
+        risk="other",
+        paths=(),
+    )
 
 
 def _wants_hitl(node: AgentNode) -> bool:

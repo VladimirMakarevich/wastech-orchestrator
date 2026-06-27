@@ -119,10 +119,20 @@ class AgentRunRequest:
     network_access: bool = False
 
 
+# The Claude CLI's terminal ``result`` subtype when a run exhausts its ``--max-turns`` cap. A clean
+# (quality) ``task_failure``, never an infrastructure crash — surfaced structurally on
+# ``NormalizedError.failure_subtype`` so the flow layer can offer the operator a continue/stop gate
+# without substring-matching the message.
+MAX_TURNS_SUBTYPE = "error_max_turns"
+
+
 @dataclass(frozen=True)
 class NormalizedError:
     error_class: ErrorClass
     message: str  # without secrets
+    # The CLI's own terminal subtype for a quality failure (e.g. Claude ``error_max_turns``), when
+    # the adapter parsed one. ``None`` for infra errors that never reached a terminal event.
+    failure_subtype: str | None = None
 
 
 @dataclass(frozen=True)

@@ -150,6 +150,7 @@ def validate_config(config: OrchestratorConfig) -> list[str]:
 
     _validate_checks(config, issues, warnings)
     _validate_telegram(config, issues)
+    _validate_confirmation_gates(config, issues)
     _validate_supervisor(config, issues)
     _validate_security(config, issues)
     _validate_paths(config, issues)
@@ -228,6 +229,24 @@ def _validate_telegram(config: OrchestratorConfig, issues: list[str]) -> None:
         if not _ENV_NAME_RE.fullmatch(value):
             issues.append(
                 f"telegram.{field} must be a valid environment variable name (got {value!r})"
+            )
+
+
+def _validate_confirmation_gates(config: OrchestratorConfig, issues: list[str]) -> None:
+    """An enabled operator-confirmation gate requires a Telegram transport (idea 27 / 29).
+
+    Both gates resolve to STOP on silence; an enabled gate with no transport could never reach the
+    operator and would be a silently-failing safety control, so it is a misconfiguration rather than
+    a no-op (fail-closed at preflight).
+    """
+    if config.telegram.enabled:
+        return
+    if config.orchestrator.auto_mode.confirm_next_task:
+        issues.append("orchestrator.auto_mode.confirm_next_task requires telegram.enabled: true")
+    for pid, provider in config.agents.providers.items():
+        if provider.max_turns_gate:
+            issues.append(
+                f"agents.providers.{pid.value}.max_turns_gate requires telegram.enabled: true"
             )
 
 

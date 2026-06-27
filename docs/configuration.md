@@ -57,6 +57,7 @@ Controls the outer queue behavior.
 orchestrator:
   auto_mode:
     enabled: false
+    confirm_next_task: false
   poll_interval_seconds: 300
   queue: "default"
 ```
@@ -64,6 +65,7 @@ orchestrator:
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `auto_mode.enabled` | boolean | `false` | When `true`, `watch` can pick another pending task after terminal cleanup succeeds. |
+| `auto_mode.confirm_next_task` | boolean | `false` | When `true`, `watch` sends a Telegram approve/deny prompt before claiming each pending task. Approve → claim and run it; deny / timeout / no transport → leave it pending and stop chaining for this cycle (fail-closed STOP). Gates **new claims only** — resuming an in-flight task on daemon restart is never gated. Requires `telegram.enabled` (preflight rejects the gate otherwise). Non-durable: a daemon restart mid-prompt simply re-asks next tick. |
 | `poll_interval_seconds` | integer `>= 0` | `300` | `watch` loop interval: each tick runs `git fetch` + `pull --ff-only` on `base_branch` to discover git-pushed tasks, then re-scans. `0` makes `watch` a single pass (no loop, no periodic sync). `--poll-seconds` overrides it. |
 | `queue` | non-empty string | `"default"` | This instance's queue selector. When several worc instances share one git-distributed task pool, `watch` only picks a pending task whose front-matter `queue` equals this value (plain string equality — static partitioning, no balancing). Both sides default to `"default"`, so a single untagged instance behaves exactly as before; an untagged task lands in `"default"` and is taken only by a `"default"` instance. `--queue` overrides it. |
 
@@ -222,6 +224,7 @@ agents:
       reasoning: high # low | medium | high | xhigh | max
       timeout_seconds: 7200
       max_turns: 400 # positive int = turn cap; "none" or "max" = no cap (unlimited)
+      max_turns_gate: false # on: hitting max_turns prompts continue/stop (needs telegram)
       permission_profile: "workspace-write"
       extra_args: []
     codex:
@@ -252,6 +255,7 @@ Provider-specific fields:
 | --- | --- | --- | --- | --- |
 | `codex` | `sandbox` | string or null | `null` if omitted | Codex sandbox mode (`workspace-write`, `read-only`, or `danger-full-access`). The example sets `workspace-write`. `danger-full-access` is operator-selectable but rejected at preflight unless `strict_isolation: false` (see `extra_args` / `security` below). |
 | `claude` | `max_turns` | integer or `none`/`max` | `400` if omitted | Claude turn cap. A positive integer caps agentic turns; `none` or `max` (case-insensitive), or YAML `null`, means **no cap** — the orchestrator omits `--max-turns` so the CLI runs without a turn limit. A non-positive integer or any other string is rejected (falls back to the default 400). |
+| `claude` | `max_turns_gate` | boolean | `false` | When `true`, a run that exhausts `max_turns` (`error_max_turns`) pauses for a durable Telegram **continue/stop** prompt instead of failing immediately. Continue resumes the same agent session with a fresh turn grant; deny / timeout / no answer stops (terminal, as without the gate). Each continue needs a fresh approval, and timeout → STOP bounds an unattended loop (no separate resume cap in v1). With this on, a low `max_turns` (~50–100) is safe — short by default, extendable on demand. Requires `telegram.enabled` (preflight). Claude-only (Codex has no turn cap). |
 
 #### `extra_args`
 

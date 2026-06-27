@@ -316,8 +316,11 @@ def _enum[E: StrEnum](
 def _build_auto_mode(raw: Any, issues: list[str]) -> AutoModeConfig:
     where = "orchestrator.auto_mode"
     m = _mapping(raw, where, issues)
-    _check_keys(m, {"enabled"}, where, issues)
-    return AutoModeConfig(enabled=_bool(m, "enabled", False, where, issues))
+    _check_keys(m, {"enabled", "confirm_next_task"}, where, issues)
+    return AutoModeConfig(
+        enabled=_bool(m, "enabled", False, where, issues),
+        confirm_next_task=_bool(m, "confirm_next_task", False, where, issues),
+    )
 
 
 def _build_orchestrator(raw: Any, issues: list[str]) -> OrchestratorRuntimeConfig:
@@ -365,6 +368,7 @@ def _build_provider(raw: Any, pid: ProviderId, issues: list[str]) -> ProviderCon
             "extra_args",
             "sandbox",
             "max_turns",
+            "max_turns_gate",
             "reasoning",
             "primary",
         },
@@ -390,6 +394,7 @@ def _build_provider(raw: Any, pid: ProviderId, issues: list[str]) -> ProviderCon
         max_turns=_max_turns(m, where, issues),
         reasoning=reasoning_raw,
         primary=_bool(m, "primary", False, where, issues),
+        max_turns_gate=_bool(m, "max_turns_gate", False, where, issues),
     )
 
 

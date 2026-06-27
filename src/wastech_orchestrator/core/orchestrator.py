@@ -360,6 +360,24 @@ class Orchestrator:
         # task's own resume_own_lineage session). Single-slot, so one live instance at a time.
         self._supervisor: Supervisor | None = None
 
+    @property
+    def notifier(self) -> Notifier:
+        """The notifier transport (Telegram or a null fallback) — read-only.
+
+        Exposed for the CLI ``watch`` loop's next-task confirmation gate (idea 27), which asks the
+        operator before claiming a pending task. The orchestration decision (claim vs skip) stays in
+        the watch loop; the orchestrator only owns the transport."""
+        return self._notifier
+
+    def _max_turns_gate_enabled(self) -> bool:
+        """Whether the Claude max-turns continue/stop gate is configured on (idea 29).
+
+        Reads ``agents.providers.claude.max_turns_gate``; ``False`` when claude is not configured
+        (codex-only setups never produce ``error_max_turns``). Preflight guarantees ``telegram`` is
+        enabled when this is on, so a configured gate always has a live transport."""
+        claude = self._config.agents.providers.get(ProviderId.CLAUDE)
+        return claude is not None and claude.max_turns_gate
+
     def _default_skill_scanner(self) -> SkillInventoryScanner:
         return SkillInventoryScanner(
             self._config.repo.local_path,
@@ -1264,6 +1282,9 @@ class Orchestrator:
             snapshot_hook=self._git,
             ask_timeout_s=self._config.telegram.ask_timeout_s,
             ask_heartbeat_seconds=self._heartbeat_seconds,
+            # Claude-only max-turns gate (idea 29): resolved once from the claude provider block
+            # (absent in a codex-only setup → off). Preflight guarantees telegram when it is on.
+            max_turns_gate=self._max_turns_gate_enabled(),
             prompt_audit=self._prompt_audit_on(p.task),
             prompt_secrets=self._prompt_secrets(),
             register_artifact=self._register_artifact,

@@ -258,3 +258,43 @@ def test_retry_disable_via_zero_attempts_validates_clean(base_config: Orchestrat
     # max_attempts=0 is the legitimate "disable transient retry" value, not a bounds violation.
     cfg = _with_agents(base_config, retry=replace(base_config.agents.retry, max_attempts=0))
     assert validate_config(cfg) == []
+
+
+# --- operator confirmation gates (idea 27 / 29): on requires telegram (fail-closed) ----------
+
+
+def _with_auto_mode(config: OrchestratorConfig, **changes: object) -> OrchestratorConfig:
+    return replace(
+        config,
+        orchestrator=replace(
+            config.orchestrator, auto_mode=replace(config.orchestrator.auto_mode, **changes)
+        ),
+    )
+
+
+def _with_claude_gate(config: OrchestratorConfig, on: bool) -> OrchestratorConfig:
+    providers = dict(config.agents.providers)
+    providers[ProviderId.CLAUDE] = replace(providers[ProviderId.CLAUDE], max_turns_gate=on)
+    return _with_agents(config, providers=providers)
+
+
+def test_confirm_next_task_without_telegram_is_rejected(base_config: OrchestratorConfig) -> None:
+    # The packaged config has telegram disabled — an enabled next-task gate then has no transport.
+    cfg = _with_auto_mode(base_config, confirm_next_task=True)
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("confirm_next_task" in issue for issue in exc.value.issues)
+
+
+def test_max_turns_gate_without_telegram_is_rejected(base_config: OrchestratorConfig) -> None:
+    cfg = _with_claude_gate(base_config, on=True)
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("max_turns_gate" in issue for issue in exc.value.issues)
+
+
+def test_confirmation_gates_with_telegram_validate_clean(base_config: OrchestratorConfig) -> None:
+    cfg = replace(base_config, telegram=replace(base_config.telegram, enabled=True))
+    cfg = _with_auto_mode(cfg, confirm_next_task=True)
+    cfg = _with_claude_gate(cfg, on=True)
+    assert validate_config(cfg) == []

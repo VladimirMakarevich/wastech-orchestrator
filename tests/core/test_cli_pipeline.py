@@ -38,12 +38,13 @@ def _reset_package_logger() -> Iterator[None]:
 
 
 class _FakeOrch:
-    def __init__(self, *, resume=None, runs=None) -> None:
+    def __init__(self, *, resume=None, runs=None, notifier=None) -> None:
         self._resume = resume
         self._runs = list(runs or [])
         self.run_calls: list[str] = []
         self.resume_calls = 0
         self.refresh_calls = 0
+        self.notifier = notifier  # the next-task gate (idea 27) reads this
 
     def resume(self):
         self.resume_calls += 1
@@ -129,6 +130,81 @@ def test_summarize_watch_labels_parked_and_exit_code() -> None:
     parked = PipelineResult(task_id="r", final_status=Status.RUNNING)
     assert cli._summarize_watch([parked]) == 3
     assert cli._EXIT_BY_STATUS[Status.RUNNING] == 3
+
+
+# --- next-task confirmation gate (idea 27) -----------------------------------------------
+
+
+class _GateNotifier:
+    """Records ask_human calls and returns a programmed approve/deny/timeout result."""
+
+    def __init__(self, result) -> None:
+        self._result = result
+        self.asks = 0
+
+    def ask_human(self, **kwargs):
+        self.asks += 1
+        return self._result
+
+
+def _confirm_config(config):
+    """Flip ``auto_mode.confirm_next_task`` on (the conftest builder has no knob for it)."""
+    from dataclasses import replace
+
+    return replace(
+        config,
+        orchestrator=replace(
+            config.orchestrator,
+            auto_mode=replace(config.orchestrator.auto_mode, confirm_next_task=True),
+        ),
+    )
+
+
+def test_watch_confirm_next_task_approve_claims(make_git_config, git_repo, tmp_path: Path) -> None:
+    from wastech_orchestrator.notify import AskResult
+
+    config = _confirm_config(make_git_config(git_repo.clone, auto_mode=True))
+    notifier = _GateNotifier(AskResult(answered=True, approved=True))
+    orch = _FakeOrch(runs=[_done("a"), _done("b")], notifier=notifier)
+    folder = _pending(tmp_path, "a.md", "b.md")
+    cli.watch_once(orch, config, folder)  # type: ignore[arg-type]
+    assert len(orch.run_calls) == 2  # both approvals → both claimed
+    assert notifier.asks == 2
+
+
+def test_watch_confirm_next_task_deny_stops(make_git_config, git_repo, tmp_path: Path) -> None:
+    from wastech_orchestrator.notify import AskResult
+
+    config = _confirm_config(make_git_config(git_repo.clone, auto_mode=True))
+    notifier = _GateNotifier(AskResult(answered=True, approved=False))
+    orch = _FakeOrch(runs=[_done("a")], notifier=notifier)
+    folder = _pending(tmp_path, "a.md", "b.md")
+    cli.watch_once(orch, config, folder)  # type: ignore[arg-type]
+    assert orch.run_calls == []  # denied → not claimed, chaining stops for this cycle
+    assert notifier.asks == 1
+
+
+def test_watch_confirm_next_task_timeout_stops(make_git_config, git_repo, tmp_path: Path) -> None:
+    from wastech_orchestrator.notify import AskResult
+
+    config = _confirm_config(make_git_config(git_repo.clone, auto_mode=True))
+    notifier = _GateNotifier(AskResult(answered=False, timed_out=True, failure="timeout"))
+    orch = _FakeOrch(runs=[_done("a")], notifier=notifier)
+    folder = _pending(tmp_path, "a.md")
+    cli.watch_once(orch, config, folder)  # type: ignore[arg-type]
+    assert orch.run_calls == []  # silence never advances an autonomous claim (fail-closed STOP)
+    assert notifier.asks == 1
+
+
+def test_watch_confirm_next_task_off_no_prompt(make_git_config, git_repo, tmp_path: Path) -> None:
+    # Default (off): no gate, no notifier call — existing watch behavior unchanged.
+    config = make_git_config(git_repo.clone, auto_mode=True)
+    notifier = _GateNotifier(None)
+    orch = _FakeOrch(runs=[_done("a"), _done("b")], notifier=notifier)
+    folder = _pending(tmp_path, "a.md", "b.md")
+    cli.watch_once(orch, config, folder)  # type: ignore[arg-type]
+    assert len(orch.run_calls) == 2
+    assert notifier.asks == 0
 
 
 # --- watch_once dependency gating (``depends_on`` merge-gated scheduling) -----------

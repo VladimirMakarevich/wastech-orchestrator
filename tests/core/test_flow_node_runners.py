@@ -1693,3 +1693,230 @@ def test_publish_git_failure_after_finalize_raises_manual(tmp_path: Path) -> Non
     # The node run is closed as failed (not left dangling, not "published").
     assert store.completed[-1]["status"] == "failed"
     assert store.completed[-1]["error_class"] == "publish_failed"
+
+
+# -- max-turns gate (idea 29) -------------------------------------------------
+
+
+def _claude_route(node_id: str = "implementation") -> ResolvedRoute:
+    return ResolvedRoute(
+        node_id=node_id, primary=ProviderId.CLAUDE, fallback=None, source=RouteSource.CONFIG
+    )
+
+
+def _max_turns_result() -> AgentRunResult:
+    """A claude run that exhausted its turn cap — the structured ``error_max_turns`` subtype + the
+    session id the gate resumes on continue."""
+    from wastech_orchestrator.providers.base import (
+        MAX_TURNS_SUBTYPE,
+        ErrorClass,
+        NormalizedError,
+    )
+
+    return AgentRunResult(
+        status=RunStatus.FAILED,
+        provider="claude",
+        node_id="implementation",
+        attempt=1,
+        exit_code=1,
+        started_at="t0",
+        finished_at="t1",
+        session_id="sess-1",
+        error=NormalizedError(
+            ErrorClass.TASK_FAILURE,
+            "task failure (error_max_turns)",
+            failure_subtype=MAX_TURNS_SUBTYPE,
+        ),
+    )
+
+
+def _claude_outcome(route: ResolvedRoute, result: AgentRunResult) -> StageOutcome:
+    return StageOutcome(
+        route=route,
+        result=result,
+        provider_used=ProviderId.CLAUDE,
+        stage_attempts=1,
+        terminal_error=None,
+        attempts=(),
+    )
+
+
+class _GateRouter:
+    """Returns a programmed sequence of claude outcomes (one per run_stage), recording requests."""
+
+    def __init__(self, results: list[AgentRunResult]) -> None:
+        self._results = results
+        self.requests: list[Any] = []
+        self._n = 0
+
+    def resolve_route(self, node_id: str, override: Any = None) -> ResolvedRoute:
+        return _claude_route(node_id)
+
+    def run_stage(
+        self, request: Any, route: ResolvedRoute, *, snapshot: Any = None
+    ) -> StageOutcome:
+        self.requests.append(request)
+        result = self._results[min(self._n, len(self._results) - 1)]
+        self._n += 1
+        return _claude_outcome(route, result)
+
+    @property
+    def calls(self) -> int:
+        return self._n
+
+
+def _gate_node() -> AgentNode:
+    # read-only so the post-edit dangerous-diff guard (which needs git) never engages.
+    return AgentNode(
+        id="implementation",
+        kind="agent",
+        role_file="r.md",
+        permission_profile=PermissionProfile.READ_ONLY,
+    )
+
+
+def _gate_services(
+    tmp_path: Path, router: Any, store: FakeStore, notifier: Any, *, on: bool = True
+) -> NodeServices:
+    return NodeServices(
+        router=router,
+        check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        store=store,
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path),
+        clock=lambda: "ts",
+        notifier=notifier,
+        ask_timeout_s=60,
+        max_turns_gate=on,
+    )
+
+
+def _seed_waiting_turn_gate(tmp_path: Path, node: AgentNode, task_id: str) -> Path:
+    """Persist a ``waiting`` turn-gate artifact, as an interrupted run mid-prompt would leave."""
+    from wastech_orchestrator.core.hitl import (
+        HumanInputSignal,
+        turn_gate_interaction_path,
+        write_waiting_interaction,
+    )
+    from wastech_orchestrator.notify import AskHandle
+
+    path = turn_gate_interaction_path(str(tmp_path), task_id, node.id)
+    write_waiting_interaction(
+        path,
+        task_id=task_id,
+        node_id=node.id,
+        subtask=None,
+        signal=HumanInputSignal(
+            kind="approval", question="continue?", context="", risk="other", paths=()
+        ),
+        handle=AskHandle(interaction_id="hX", kind="approval", expires_at=1.0, message_id=1),
+    )
+    return path
+
+
+def test_max_turns_gate_continue_resumes_session(tmp_path: Path) -> None:
+    # error_max_turns → operator approves → the node resumes the SAME session with a fresh grant and
+    # the resumed run succeeds. The gate adds one provider call carrying the first run's session id.
+    from wastech_orchestrator.notify import AskResult
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    router = _GateRouter([_max_turns_result(), _result({"content": "done"})])
+    notifier = FakeNotifier(AskResult(answered=True, approved=True))
+    services = _gate_services(tmp_path, router, FakeStore(), notifier)
+    runner = AgentNodeRunner(services, _inputs(tmp_path))
+    result = runner.run(_gate_node(), _ctx(_gate_node()))
+
+    assert result.outcome.kind == "done"
+    assert router.calls == 2  # initial max-turns run + the approved resume
+    assert router.requests[1].session_id == "sess-1"  # resumed the exhausted session
+    assert len(notifier.asks) == 1  # exactly one continue/stop prompt
+
+
+def test_max_turns_gate_deny_stops_unchanged(tmp_path: Path) -> None:
+    # Deny → STOP: the original max-turns failure flows on unchanged (no resume), exactly as the run
+    # would terminate with the gate off.
+    from wastech_orchestrator.notify import AskResult
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    router = _GateRouter([_max_turns_result()])
+    notifier = FakeNotifier(AskResult(answered=True, approved=False))
+    services = _gate_services(tmp_path, router, FakeStore(), notifier)
+    runner = AgentNodeRunner(services, _inputs(tmp_path))
+    result = runner.run(_gate_node(), _ctx(_gate_node()))
+
+    assert result.outcome.kind == "done"  # failed result flows on (terminal as today)
+    assert router.calls == 1  # no resume
+    assert len(notifier.asks) == 1
+
+
+def test_max_turns_gate_timeout_stops(tmp_path: Path) -> None:
+    # Silence (timeout) never advances the run — fail-closed STOP.
+    from wastech_orchestrator.notify import AskResult
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    router = _GateRouter([_max_turns_result()])
+    notifier = FakeNotifier(AskResult(answered=False, timed_out=True, failure="timeout"))
+    services = _gate_services(tmp_path, router, FakeStore(), notifier)
+    runner = AgentNodeRunner(services, _inputs(tmp_path))
+    result = runner.run(_gate_node(), _ctx(_gate_node()))
+
+    assert result.outcome.kind == "done"
+    assert router.calls == 1
+
+
+def test_max_turns_gate_off_does_not_prompt(tmp_path: Path) -> None:
+    # Gate off: error_max_turns flows on untouched — no prompt, no resume (today's behavior).
+    from wastech_orchestrator.notify import AskResult
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    router = _GateRouter([_max_turns_result()])
+    notifier = FakeNotifier(AskResult(answered=True, approved=True))
+    services = _gate_services(tmp_path, router, FakeStore(), notifier, on=False)
+    runner = AgentNodeRunner(services, _inputs(tmp_path))
+    result = runner.run(_gate_node(), _ctx(_gate_node()))
+
+    assert result.outcome.kind == "done"
+    assert router.calls == 1
+    assert notifier.asks == []  # gate off → never asked
+
+
+def test_max_turns_gate_resumes_pending_decision_after_restart(tmp_path: Path) -> None:
+    # Fail-closed across restart: a turn-gate left ``waiting`` by an interrupted run is resolved at
+    # ENTRY, before the provider is touched (it reuses the persisted prompt, never re-asks). Approve
+    # → one provider run (the resume), success, artifact consumed.
+    from wastech_orchestrator.core.hitl import load_interaction
+    from wastech_orchestrator.notify import AskResult
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node, ctx = _gate_node(), _ctx(_gate_node())
+    gate_path = _seed_waiting_turn_gate(tmp_path, node, ctx.task_id)
+    router = _GateRouter([_result({"content": "done"})])
+    notifier = FakeNotifier(AskResult(answered=True, approved=True))
+    services = _gate_services(tmp_path, router, FakeStore(), notifier)
+    runner = AgentNodeRunner(services, _inputs(tmp_path))
+    result = runner.run(node, ctx)
+
+    assert result.outcome.kind == "done"
+    assert router.calls == 1  # the resume run only — the pending decision was resolved first
+    assert notifier.asks == []  # resumed the persisted prompt (wait), never started a fresh one
+    persisted = load_interaction(gate_path)
+    assert persisted is not None and persisted["status"] == "consumed"
+
+
+def test_max_turns_gate_restart_deny_goes_manual(tmp_path: Path) -> None:
+    # A pending decision denied after restart fails closed to manual review — the provider is never
+    # touched (no silent auto-continue).
+    from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
+    from wastech_orchestrator.notify import AskResult
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node, ctx = _gate_node(), _ctx(_gate_node())
+    _seed_waiting_turn_gate(tmp_path, node, ctx.task_id)
+    router = _GateRouter([_result({"content": "done"})])
+    notifier = FakeNotifier(AskResult(answered=True, approved=False))
+    services = _gate_services(tmp_path, router, FakeStore(), notifier)
+    runner = AgentNodeRunner(services, _inputs(tmp_path))
+
+    with pytest.raises(NodeManualRequired):
+        runner.run(node, ctx)
+    assert router.calls == 0  # stopped at the gate, never ran the provider

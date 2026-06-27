@@ -227,6 +227,11 @@ class NodeServices:
     #: durable HITL transport (refinement/planning embedded HITL + dangerous-diff approval).
     notifier: NotifierPort | None = None
     ask_timeout_s: int = 0
+    #: Claude max-turns gate (idea 29): when true, a node run that exhausts ``max_turns`` pauses for
+    #: a durable operator continue/stop decision (via ``notifier``) instead of failing immediately.
+    #: Resolved by the orchestrator from ``agents.providers.claude.max_turns_gate``; off everywhere
+    #: else (unit harnesses, codex-only setups). Requires a ``notifier``, guaranteed by preflight.
+    max_turns_gate: bool = False
     #: heartbeat interval (s) for the blocking HITL human-input wait — the orchestrator-wide
     #: ``--heartbeat-seconds`` value, the same one driving the provider/git/check heartbeats. ``0``
     #: disables it (the unit-test default); the wait still logs its entry/resolution either way.

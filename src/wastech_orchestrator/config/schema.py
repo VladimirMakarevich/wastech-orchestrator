@@ -108,7 +108,11 @@ from wastech_orchestrator.providers.base import ProviderId
 # (default false) — a one-way, best-effort live progress feed that pushes one message per flow node
 # finish (`<emoji> <node-id> → <outcome>`, node id + outcome only, no secrets). A no-op when
 # Telegram is disabled. Old configs omit it and take false; `upgrade-config` adds it from template.
-CONFIG_SCHEMA_VERSION = 21
+# v22 adds two fail-closed operator-confirmation gates for full-auto `watch`: optional
+# `orchestrator.auto_mode.confirm_next_task` (Telegram approve/deny before claiming a pending task)
+# and optional `agents.providers.<id>.max_turns_gate` (a continue/stop prompt when a Claude run hits
+# its turn cap). Both default false and require `telegram.enabled` when on (preflight-enforced).
+CONFIG_SCHEMA_VERSION = 22
 
 
 class AuditBranch(StrEnum):
@@ -121,6 +125,11 @@ class AuditBranch(StrEnum):
 @dataclass(frozen=True)
 class AutoModeConfig:
     enabled: bool
+    # When true, `watch` sends a Telegram approve/deny prompt before claiming each pending task
+    # (idea 27). Deny / timeout / no transport stops chaining for that cycle (fail-closed); the task
+    # stays pending. Requires `telegram.enabled` (preflight). Gates new claims only — resuming an
+    # in-flight task on daemon restart is never gated.
+    confirm_next_task: bool = False
 
 
 @dataclass(frozen=True)
@@ -195,6 +204,11 @@ class ProviderConfig:
     # Exactly one configured provider must set ``primary: true`` — the global primary that runs any
     # flow node with no ``provider`` field, and the single infrastructure-fallback target (PRE.1).
     primary: bool = False
+    # Claude-only (idea 29): when true, a run that exhausts ``max_turns`` (``error_max_turns``)
+    # pauses for a durable Telegram continue/stop prompt instead of failing immediately; continue
+    # resumes the same agent session with a fresh turn grant. Requires ``telegram.enabled``
+    # (preflight). With this on, a low ``max_turns`` (~50–100) is safe — extendable on demand.
+    max_turns_gate: bool = False
 
 
 @dataclass(frozen=True)

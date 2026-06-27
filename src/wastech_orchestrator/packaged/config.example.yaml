@@ -3,11 +3,13 @@
 # This is the packaged copy used by `wastech-orchestrator init`; keep it in sync with the
 # repo-root config.example.yaml
 
-schema_version: 21                  # config format version; the orchestrator refuses newer configs
+schema_version: 22                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
     enabled: false                  # when true, pick the next pending task after terminal cleanup
+    confirm_next_task: false        # when true, ask approve/deny in Telegram before claiming each
+                                    # pending task; deny/timeout stops chaining (requires telegram)
   poll_interval_seconds: 300        # `watch` tick: fetch/pull base_branch to discover git-pushed
                                     # tasks, then process pending. 0 = single-pass (no loop, no sync)
   queue: "default"                  # this instance's queue selector: only pick tasks whose `queue`
@@ -60,6 +62,8 @@ agents:
       reasoning: high          # low | medium | high | xhigh | max
       timeout_seconds: 7200
       max_turns: 400           # Claude turn cap (positive int); "none" or "max" = no cap (unlimited)
+      max_turns_gate: false    # when true, hitting max_turns pauses for a Telegram continue/stop
+                               # prompt (requires telegram); a low cap (~50–100) is then safe
       permission_profile: "workspace-write"
       extra_args: []
       primary: true            # the global primary (exactly one provider; must be in `allowed`)
