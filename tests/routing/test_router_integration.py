@@ -10,6 +10,7 @@ a router/Core data-exchange concern, best observed on the ``AgentRunRequest`` it
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ import pytest
 from wastech_orchestrator.config.schema import (
     OrchestratorConfig,
     ProviderConfig,
+    RetryConfig,
     SecurityConfig,
 )
 from wastech_orchestrator.providers.base import (
@@ -215,3 +217,122 @@ def test_codex_minimal_reasoning_fallback_maps_to_claude_low(
     assert outcome.provider_used is ProviderId.CLAUDE
     assert primary.requests[0].reasoning == "minimal"  # type: ignore[attr-defined]
     assert fallback.requests[0].reasoning == "low"  # type: ignore[attr-defined]
+
+
+def _with_retry(
+    config: OrchestratorConfig,
+    retry: RetryConfig,
+    *,
+    allowed: tuple[ProviderId, ...] | None = None,
+) -> OrchestratorConfig:
+    agents = config.agents
+    return replace(
+        config,
+        agents=replace(
+            agents,
+            retry=retry,
+            allowed=allowed if allowed is not None else agents.allowed,
+        ),
+    )
+
+
+def test_transient_500_recovers_same_provider(
+    config: OrchestratorConfig,
+    integration_security: SecurityConfig,
+    fake_cli: Callable[..., str],
+    make_request: Callable[..., AgentRunRequest],
+    tmp_path: Path,
+) -> None:
+    # The real Claude adapter over a CLI that 5xx's twice then succeeds. Single allowed provider →
+    # no fallback; the same-provider transient retry must carry it. Inject a no-op sleep via tiny
+    # delays so the test never actually waits.
+    cfg = _with_retry(
+        config,
+        RetryConfig(max_attempts=2, base_delay_s=0.0, max_delay_s=0.0),
+        allowed=(ProviderId.CLAUDE,),
+    )
+    claude = _build_provider(
+        "claude", fake_cli("flaky_500_2", "claude"), integration_security, tmp_path
+    )
+    router = AgentRouter(cfg, {ProviderId.CLAUDE: claude}, sleep=lambda _d: None)
+    route = router.resolve_route("implementation")
+    assert route.fallback is None
+
+    outcome = router.run_stage(
+        make_request(node_id="implementation", working_directory=str(tmp_path / "clone")), route
+    )
+
+    assert outcome.result is not None and outcome.result.status is RunStatus.SUCCEEDED
+    assert outcome.provider_used is ProviderId.CLAUDE
+    assert outcome.stage_attempts == 1  # retries do not spend a stage hop
+    # Three audit rows: two transient failures then the success.
+    assert [a.error_class for a in outcome.attempts] == [
+        ErrorClass.PROVIDER_UNAVAILABLE,
+        ErrorClass.PROVIDER_UNAVAILABLE,
+        None,
+    ]
+
+
+def test_transient_500_exhaustion_falls_back(
+    config: OrchestratorConfig,
+    integration_security: SecurityConfig,
+    fake_cli: Callable[..., str],
+    make_request: Callable[..., AgentRunRequest],
+    tmp_path: Path,
+) -> None:
+    # Default route (claude primary, codex symmetric fallback): claude always 5xx, codex succeeds.
+    cfg = _with_retry(config, RetryConfig(max_attempts=2, base_delay_s=0.0, max_delay_s=0.0))
+    claude = _build_provider(
+        "claude", fake_cli("provider_unavailable", "claude"), integration_security, tmp_path
+    )
+    codex = _build_provider("codex", fake_cli("success", "codex"), integration_security, tmp_path)
+    router = AgentRouter(
+        cfg, {ProviderId.CLAUDE: claude, ProviderId.CODEX: codex}, sleep=lambda _d: None
+    )
+    route = router.resolve_route("implementation")
+    assert (route.primary, route.fallback) == (ProviderId.CLAUDE, ProviderId.CODEX)
+
+    outcome = router.run_stage(
+        make_request(node_id="implementation", working_directory=str(tmp_path / "clone")), route
+    )
+
+    assert outcome.result is not None and outcome.result.status is RunStatus.SUCCEEDED
+    assert outcome.provider_used is ProviderId.CODEX
+    assert outcome.stage_attempts == 2
+    # 3 claude attempts (1 + 2 retries) then codex.
+    assert [a.provider for a in outcome.attempts] == [
+        ProviderId.CLAUDE,
+        ProviderId.CLAUDE,
+        ProviderId.CLAUDE,
+        ProviderId.CODEX,
+    ]
+
+
+def test_transient_500_exhaustion_terminal_when_single_provider(
+    config: OrchestratorConfig,
+    integration_security: SecurityConfig,
+    fake_cli: Callable[..., str],
+    make_request: Callable[..., AgentRunRequest],
+    tmp_path: Path,
+) -> None:
+    # Single allowed provider, always 5xx: no fallback, retries exhaust → terminal infra error
+    # carrying the transient class (which the orchestrator would turn into a B-lite soft pause).
+    cfg = _with_retry(
+        config,
+        RetryConfig(max_attempts=2, base_delay_s=0.0, max_delay_s=0.0),
+        allowed=(ProviderId.CLAUDE,),
+    )
+    claude = _build_provider(
+        "claude", fake_cli("provider_unavailable", "claude"), integration_security, tmp_path
+    )
+    router = AgentRouter(cfg, {ProviderId.CLAUDE: claude}, sleep=lambda _d: None)
+    route = router.resolve_route("implementation")
+
+    outcome = router.run_stage(
+        make_request(node_id="implementation", working_directory=str(tmp_path / "clone")), route
+    )
+
+    assert outcome.result is None
+    assert outcome.terminal_error is not None
+    assert outcome.terminal_error.error_class is ErrorClass.PROVIDER_UNAVAILABLE
+    assert len(outcome.attempts) == 3  # 1 + max_attempts retries

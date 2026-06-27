@@ -59,6 +59,18 @@ FALLBACK_ELIGIBLE: frozenset[ErrorClass] = frozenset(
     }
 )
 
+# Transient infra classes the Router retries on the SAME provider (with backoff) before falling
+# back (Option A — bounded same-provider transient retry). A deliberate STRICT SUBSET of
+# FALLBACK_ELIGIBLE: TIMEOUT is excluded (a timeout often means long/partial work already ran — a
+# retry risks duplicating it) and RATE_LIMITED is excluded (it wants a long defer, not a tight
+# retry loop — that is the fallback / capacity-gate's job).
+TRANSIENT_RETRYABLE: frozenset[ErrorClass] = frozenset(
+    {
+        ErrorClass.PROVIDER_UNAVAILABLE,
+        ErrorClass.NETWORK_UNAVAILABLE,
+    }
+)
+
 
 # --- Contract data structures ---
 

@@ -21,7 +21,7 @@ from wastech_orchestrator.check_runner import CheckOutcome
 from wastech_orchestrator.checks.model import ResolvedCheckSet
 from wastech_orchestrator.git_manager import ChangedPath
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult
-from wastech_orchestrator.providers.base import AgentRunRequest, ProviderId
+from wastech_orchestrator.providers.base import AgentRunRequest, ErrorClass, ProviderId
 from wastech_orchestrator.providers.process import ProcessResult, run_process
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.routing.snapshots import SnapshotHook
@@ -50,7 +50,16 @@ class NodeInfraError(Exception):
     *launch* failure both raise this; the orchestrator maps it to terminal ``failed`` — it never
     routes to fixing (no code change can fix infrastructure). Mirrors the legacy ``PipelineFailed``
     + ``CheckOutcome.launch_failed`` handling.
+
+    ``error_class`` carries the normalized terminal error class (``None`` when unknown — e.g. a
+    check launch failure) so the orchestrator can tell a *transient* exhaustion
+    (PROVIDER_UNAVAILABLE / NETWORK_UNAVAILABLE — both providers down) apart from a hard infra
+    failure: the former parks the task as resumable (B-lite), the latter goes terminal.
     """
+
+    def __init__(self, message: str, *, error_class: ErrorClass | None = None) -> None:
+        super().__init__(message)
+        self.error_class = error_class
 
 
 class EvaluatorInfraError(NodeInfraError):

@@ -88,13 +88,11 @@ class EvaluatorNodeRunner:
             started_at=started_at,
         )
         if outcome.result is None:
-            err = (
-                outcome.terminal_error.error_class.value
-                if outcome.terminal_error
-                else "no_provider_available"
-            )
+            error_class = outcome.terminal_error.error_class if outcome.terminal_error else None
+            err = error_class.value if error_class else "no_provider_available"
             raise EvaluatorInfraError(
-                f"evaluator node {node.id!r}: no provider could run it ({err})"
+                f"evaluator node {node.id!r}: no provider could run it ({err})",
+                error_class=error_class,
             )
         self._persist_own_lineage(node, ctx, outcome)
         raw_findings = self._extract_findings(outcome.result.structured_output)

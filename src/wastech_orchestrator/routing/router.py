@@ -31,6 +31,7 @@ from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.observability.logging import bind
 from wastech_orchestrator.providers.base import (
     FALLBACK_ELIGIBLE,
+    TRANSIENT_RETRYABLE,
     AgentProvider,
     AgentRunRequest,
     AgentRunResult,
@@ -147,10 +148,12 @@ class AgentRouter:
         providers: Mapping[ProviderId, AgentProvider],
         *,
         monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._config = config
         self._providers = providers
         self._monotonic = monotonic
+        self._sleep = sleep
         self._global_primary = _resolve_global_primary(config)
 
     def resolve_route(
@@ -161,17 +164,38 @@ class AgentRouter:
         """Resolve ``(primary, fallback)`` for a node from its declared ``provider`` (PRE.1).
 
         A non-``None`` ``provider`` (the flow node's declared executor) runs the node; ``None``
-        defaults to the config's global primary. The fallback is always that global primary — the
-        single infrastructure-fallback target — unless the resolved primary already *is* the global
-        primary, in which case there is no fallback (a primary infra failure is terminal).
-        ``node_id`` is carried for audit/logging only; it no longer selects the provider. Raises
-        :class:`ConfigError` on an unknown or unavailable provider.
+        defaults to the config's global primary. When the resolved primary differs from the global
+        primary, the fallback is that global primary. When the resolved primary already *is* the
+        global primary, the fallback is the single *other* allowed+configured provider — symmetric
+        cross-provider failover (transient provider recovery, extending PRE.1's single fallback
+        target). With only one allowed provider there is no fallback (an infra failure on it is
+        handled by the same-provider retry budget, then the soft pause). ``node_id`` is carried for
+        audit/logging only; it no longer selects the provider. Raises :class:`ConfigError` on an
+        unknown or unavailable provider.
         """
         primary = provider if provider is not None else self._global_primary
         source = RouteSource.FLOW_NODE if provider is not None else RouteSource.CONFIG
-        fallback = self._global_primary if primary != self._global_primary else None
+        fallback: ProviderId | None
+        if primary != self._global_primary:
+            fallback = self._global_primary
+        else:
+            fallback = self._other_allowed_provider(primary)
         self._assert_available(node_id, primary, fallback)
         return ResolvedRoute(node_id=node_id, primary=primary, fallback=fallback, source=source)
+
+    def _other_allowed_provider(self, primary: ProviderId) -> ProviderId | None:
+        """The single *other* allowed+configured provider, or ``None`` (symmetric fallback target).
+
+        When the resolved primary is the global primary, the fallback is the one other provider in
+        ``agents.allowed`` that also has a configured ``providers.<id>`` block. With a single
+        allowed provider — or, defensively, >2 — there is no unambiguous target → ``None``.
+        Supports exactly the Claude/Codex pair (the canonical provider universe)."""
+        others = [
+            pid
+            for pid in self._config.agents.allowed
+            if pid != primary and pid in self._config.agents.providers
+        ]
+        return others[0] if len(others) == 1 else None
 
     def run_stage(
         self,
@@ -205,13 +229,21 @@ class AgentRouter:
 
         attempts: list[ProviderAttempt] = []
         stage_attempts = 0
+        # The audit attempt number increments on EVERY provider invocation (each hop, the
+        # session-unavailable fresh retry, and each transient retry), so every provider_attempts row
+        # gets a distinct, gap-free number. It is intentionally decoupled from ``stage_attempts``,
+        # which counts only provider *hops* and bounds ``max_stage_attempts`` — transient retries
+        # (Option A) must not consume that hop budget.
+        audit_attempt = 0
         last_error: NormalizedError | None = None
         partial: PartialChange | None = None
 
         for index, pid in enumerate(sequence):
             if stage_attempts >= max_attempts:
                 break
-            attempt_no = stage_attempts + 1
+            stage_attempts += 1
+            audit_attempt += 1
+            attempt_no = audit_attempt
             req = self._build_request(
                 request,
                 attempt_no,
@@ -219,7 +251,6 @@ class AgentRouter:
                 from_provider=sequence[index - 1] if index > 0 else None,
                 to_provider=pid,
             )
-            stage_attempts += 1
             attempt_started = self._monotonic()
             log.info(
                 "provider attempt started",
@@ -262,9 +293,10 @@ class AgentRouter:
                     and req.session_id is not None
                     and stage_attempts < max_attempts
                 ):
-                    fresh_no = stage_attempts + 1
+                    audit_attempt += 1
+                    fresh_no = audit_attempt
                     fresh_req = replace(req, session_id=None, attempt=fresh_no)
-                    stage_attempts += 1
+                    stage_attempts += 1  # session retry still spends a hop (unchanged semantics)
                     log.info(
                         "session unavailable; retrying fresh (no resume)",
                         extra={"provider": pid.value, "attempt": fresh_no},
@@ -304,6 +336,38 @@ class AgentRouter:
                             terminal_error=None,
                             partial_change=partial,
                         )
+                # Transient infra blip (Option A): retry the SAME provider with backoff before
+                # falling back. A separate per-provider budget (``agents.retry.max_attempts``) that
+                # does NOT consume ``stage_attempts`` — so it survives even when the hop budget is
+                # spent — and a real sleep window (the CLI already exhausted its own retries).
+                # Mutually exclusive with the session-unavailable branch (a non-transient class).
+                elif (
+                    exc.error_class in TRANSIENT_RETRYABLE
+                    and self._config.agents.retry.max_attempts > 0
+                ):
+                    retried, last_class, audit_attempt = self._retry_transient(
+                        pid,
+                        req,
+                        first_error=exc,
+                        audit_attempt=audit_attempt,
+                        attempts=attempts,
+                        log=log,
+                    )
+                    if retried is not None:
+                        return StageOutcome(
+                            route=route,
+                            result=retried,
+                            provider_used=pid,
+                            stage_attempts=stage_attempts,
+                            attempts=tuple(attempts),
+                            terminal_error=None,
+                            partial_change=partial,
+                        )
+                    last_error = NormalizedError(
+                        error_class=last_class,
+                        message=f"transient retries exhausted on {pid.value}",
+                    )
+                    exc = ProviderError(last_class, str(last_error.message))  # fallback uses this
                 has_next = index + 1 < len(sequence)
                 if not has_next or stage_attempts >= max_attempts:
                     continue  # exhausted — the loop will exit and surface last_error
@@ -374,6 +438,93 @@ class AgentRouter:
             terminal_error=last_error,
             partial_change=partial,
         )
+
+    def _retry_transient(
+        self,
+        pid: ProviderId,
+        req: AgentRunRequest,
+        *,
+        first_error: ProviderError,
+        audit_attempt: int,
+        attempts: list[ProviderAttempt],
+        log: logging.LoggerAdapter[logging.Logger],
+    ) -> tuple[AgentRunResult | None, ErrorClass, int]:
+        """Retry one provider up to ``agents.retry.max_attempts`` times for a transient infra blip.
+
+        Resumes by reusing ``req`` (the durable session is preserved); if a retry itself raises
+        ``SESSION_UNAVAILABLE`` the session is dropped for the remaining tries (resume → fresh
+        degrade, same shape as the session-unavailable safety net). Sleeps a deterministic
+        exponential backoff ``min(base * 2**k, max_delay_s)`` (no jitter) before each try and
+        appends a ``provider_attempts`` audit row per try. Stops early if a retry is non-transient,
+        non-session class (no point burning the window on a class that will not recover). Returns
+        ``(result | None, last_error_class, audit_attempt)`` — the caller advances to fallback when
+        the result is ``None``."""
+        retry = self._config.agents.retry
+        last_class = first_error.error_class
+        resume_req = req  # reuse the built request → resume the session
+        for k in range(retry.max_attempts):
+            delay = min(retry.base_delay_s * (2**k), retry.max_delay_s)
+            log.info(
+                "transient retry backoff",
+                extra={
+                    "provider": pid.value,
+                    "retry": k + 1,
+                    "delay_seconds": delay,
+                    "error_class": last_class.value,
+                },
+            )
+            self._sleep(delay)
+            audit_attempt += 1
+            attempt_req = replace(resume_req, attempt=audit_attempt)
+            started = self._monotonic()
+            try:
+                result = self._providers[pid].run(attempt_req)
+            except ProviderError as exc:
+                last_class = exc.error_class
+                attempts.append(
+                    ProviderAttempt(
+                        provider=pid,
+                        attempt=audit_attempt,
+                        status=None,
+                        error_class=exc.error_class,
+                        result=None,
+                    )
+                )
+                log.info(
+                    "transient retry failed",
+                    extra={
+                        "provider": pid.value,
+                        "attempt": audit_attempt,
+                        "error_class": exc.error_class.value,
+                        "duration_seconds": round(self._monotonic() - started, 3),
+                    },
+                )
+                if exc.error_class is ErrorClass.SESSION_UNAVAILABLE:
+                    if resume_req.session_id is not None:
+                        resume_req = replace(resume_req, session_id=None)  # degrade for next tries
+                elif exc.error_class not in TRANSIENT_RETRYABLE:
+                    return None, last_class, audit_attempt  # non-transient → stop; fallback decides
+                continue
+            attempts.append(
+                ProviderAttempt(
+                    provider=pid,
+                    attempt=audit_attempt,
+                    status=result.status,
+                    error_class=result.error.error_class if result.error else None,
+                    result=result,
+                )
+            )
+            log.info(
+                "transient retry succeeded",
+                extra={
+                    "provider": pid.value,
+                    "attempt": audit_attempt,
+                    "status": result.status.value,
+                    "duration_seconds": round(self._monotonic() - started, 3),
+                },
+            )
+            return result, last_class, audit_attempt
+        return None, last_class, audit_attempt
 
     def _build_request(
         self,

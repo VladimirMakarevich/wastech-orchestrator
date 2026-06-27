@@ -226,3 +226,35 @@ def test_tasks_dir_under_worc_home_is_rejected(
     with pytest.raises(ConfigError) as exc:
         validate_config(_with_tasks_dir(base_config, tasks_dir))
     assert any("paths.tasks_dir" in issue and ".worc" in issue for issue in exc.value.issues)
+
+
+# --- agents.retry bounds (transient provider-failure recovery) ---
+
+
+def test_retry_negative_max_attempts_is_rejected(base_config: OrchestratorConfig) -> None:
+    cfg = _with_agents(base_config, retry=replace(base_config.agents.retry, max_attempts=-1))
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("agents.retry.max_attempts" in issue for issue in exc.value.issues)
+
+
+def test_retry_max_delay_below_base_is_rejected(base_config: OrchestratorConfig) -> None:
+    cfg = _with_agents(
+        base_config, retry=replace(base_config.agents.retry, base_delay_s=10.0, max_delay_s=5.0)
+    )
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("agents.retry.max_delay_s" in issue for issue in exc.value.issues)
+
+
+def test_retry_negative_max_blocked_is_rejected(base_config: OrchestratorConfig) -> None:
+    cfg = _with_agents(base_config, retry=replace(base_config.agents.retry, max_blocked_s=-1.0))
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("agents.retry.max_blocked_s" in issue for issue in exc.value.issues)
+
+
+def test_retry_disable_via_zero_attempts_validates_clean(base_config: OrchestratorConfig) -> None:
+    # max_attempts=0 is the legitimate "disable transient retry" value, not a bounds violation.
+    cfg = _with_agents(base_config, retry=replace(base_config.agents.retry, max_attempts=0))
+    assert validate_config(cfg) == []

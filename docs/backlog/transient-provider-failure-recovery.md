@@ -1,6 +1,8 @@
 # Transient provider-failure recovery (API 5xx mid-task)
 
-Status: **accepted** (2026-06-23, A + symmetric fallback + B-lite — see [§ Decision (locked)](#decision-locked)) Date: 2026-06-23 Owner: Vladimir Makarevich
+Status: **implemented** (2026-06-27, A + symmetric fallback + B-lite — see [§ Decision (locked)](#decision-locked)) Date: 2026-06-23 Owner: Vladimir Makarevich
+
+> **Implemented 2026-06-27.** All three parts shipped in one change: bounded same-provider transient retry with backoff (`agents.retry`), symmetric Claude↔Codex fallback (`resolve_route`), and the B-lite resumable soft pause (`tasks.blocked_since`, ceiling on resume). **Version note:** the plan text below predates later schema bumps — the actual bumps were **config `schema_version` 19 → 20** (not 15 → 16) and **`DB_SCHEMA_VERSION` 12 → 13** (B-lite's `blocked_since` column). **Phase 0 note:** the CLI-internal-retry verification spike was _not_ run (it needs the real binaries against a live outage, not reproducible in CI); the ADR's stated defaults shipped as-is and are operator-tunable — tracked in [follow_ups.md](follow_ups.md).
 
 Detail file for the [README.md](README.md) backlog item _"Auto-retry on network errors — retry transient network/provider failures before fallback or terminal failure (must be bounded and audited; never retry quality failures)."_ It records the investigation of what happens today when a provider returns a transient server error mid-task, the options for surviving it, and the **locked decision** (A + symmetric fallback + B-lite) with its implementation plan ([§ План реализации](#план-реализации)).
 

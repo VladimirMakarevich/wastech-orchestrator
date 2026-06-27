@@ -84,6 +84,16 @@ def test_set_status_and_update_task(store: StateStore) -> None:
     assert row.validation_passed is True
 
 
+def test_blocked_since_round_trips_and_clears(store: StateStore) -> None:
+    # B-lite (DB v13): the soft-pause marker defaults to None, is set on park, cleared at terminal.
+    store.insert_task(_new_task())
+    assert store.get_task("task-001").blocked_since is None  # type: ignore[union-attr]
+    store.update_task("task-001", blocked_since="2026-06-27T00:00:00+00:00")
+    assert store.get_task("task-001").blocked_since == "2026-06-27T00:00:00+00:00"  # type: ignore[union-attr]
+    store.update_task("task-001", blocked_since=None)
+    assert store.get_task("task-001").blocked_since is None  # type: ignore[union-attr]
+
+
 def test_find_active_tasks_excludes_terminal_and_pending(store: StateStore) -> None:
     store.insert_task(TaskRow(task_id="a", title="a", status=Status.RUNNING))
     store.insert_task(TaskRow(task_id="b", title="b", status=Status.PENDING))

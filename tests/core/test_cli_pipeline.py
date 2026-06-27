@@ -110,6 +110,27 @@ def test_watch_resume_manual_blocks(make_git_config, git_repo, tmp_path: Path) -
     assert orch.run_calls == []  # resume's manual outcome blocks picking pending
 
 
+def test_watch_resume_parked_blocks_continuation(
+    make_git_config, git_repo, tmp_path: Path
+) -> None:
+    # A B-lite soft pause (non-terminal RUNNING) holds the slot: watch_once returns early without
+    # picking a pending task; the between-tick poll sleep is the cool-off, the next tick re-resumes.
+    config = make_git_config(git_repo.clone, auto_mode=True)
+    parked = PipelineResult(task_id="r", final_status=Status.RUNNING)
+    orch = _FakeOrch(resume=parked, runs=[_done("a")])
+    folder = _pending(tmp_path, "a.md")
+    results = cli.watch_once(orch, config, folder)  # type: ignore[arg-type]
+    assert results == [parked]
+    assert orch.run_calls == []  # the parked active task blocks picking pending
+
+
+def test_summarize_watch_labels_parked_and_exit_code() -> None:
+    # A parked RUNNING result gets a distinct, non-failure exit code and a "paused" summary line.
+    parked = PipelineResult(task_id="r", final_status=Status.RUNNING)
+    assert cli._summarize_watch([parked]) == 3
+    assert cli._EXIT_BY_STATUS[Status.RUNNING] == 3
+
+
 # --- watch_once dependency gating (``depends_on`` merge-gated scheduling) -----------
 
 

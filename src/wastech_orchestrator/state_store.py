@@ -73,7 +73,13 @@ def _utc_now_iso() -> str:
 # (distinct from a quality failure), which surfaces in the summary/PR and blocks ``git.auto_merge``
 # (an incomplete gate is never auto-merged). Created on a fresh DB by ``_SCHEMA``; an older
 # versioned DB is refused fail-closed and recreated (greenfield — no production data to migrate).
-DB_SCHEMA_VERSION = 12
+# v13 (2026-06-27, transient provider recovery): added the **additive** ``tasks.blocked_since``
+# column — the wall-clock instant a task first parked as resumable because every allowed provider
+# was transiently unavailable (B-lite). Set once on first park, cleared at terminal; the task is
+# failed only after it stays parked longer than ``agents.retry.max_blocked_s``. Additive, so
+# ``_migrate`` adds it on a brand-new (``0``) database; an older versioned DB is still refused
+# fail-closed and recreated (greenfield).
+DB_SCHEMA_VERSION = 13
 
 
 class IncompatibleStateError(Exception):
@@ -94,6 +100,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE tasks ADD COLUMN flow_run_counters TEXT")
     if "flow_fingerprint" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN flow_fingerprint TEXT")
+    # v13: the B-lite soft-pause timestamp (transient-provider-failure-recovery).
+    if "blocked_since" not in task_cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN blocked_since TEXT")
 
 
 def _enforce_schema_version(conn: sqlite3.Connection, *, writable: bool) -> None:
@@ -163,7 +172,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     finished_at TEXT,
     current_node TEXT,
     flow_run_counters TEXT,
-    flow_fingerprint TEXT
+    flow_fingerprint TEXT,
+    blocked_since TEXT
 );
 
 CREATE TABLE IF NOT EXISTS node_runs (
@@ -316,6 +326,9 @@ class TaskRow:
     finished_at: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
+    # ISO instant of the first B-lite soft-pause (every provider transiently unavailable); cleared
+    # at terminal. None = not parked. The ceiling is measured from here (total parked wall-clock).
+    blocked_since: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1364,4 +1377,5 @@ def _task_from_row(row: sqlite3.Row) -> TaskRow:
         finished_at=row["finished_at"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        blocked_since=row["blocked_since"],
     )

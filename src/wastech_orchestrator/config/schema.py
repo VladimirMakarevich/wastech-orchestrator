@@ -99,7 +99,12 @@ from wastech_orchestrator.providers.base import ProviderId
 # to `dynamic` (the once-per-task supervisor proposal of a node→skills map; on, skip-when-empty) and
 # `strict` (whether an unresolved operator pin stops the task). `upgrade-config` strips the two
 # removed keys.
-CONFIG_SCHEMA_VERSION = 19
+# v20 (2026-06-27, transient-provider-failure-recovery): a *format* add of the optional
+# `agents.retry` block — `{max_attempts, base_delay_s, max_delay_s, max_blocked_s}` — the bounded
+# same-provider transient-retry policy (Option A) plus the B-lite soft-pause ceiling. Absent => safe
+# defaults (max_attempts=2, base_delay_s=2.0, max_delay_s=30.0, max_blocked_s=3600.0); old configs
+# load fail-open and `upgrade-config` adds it from the template.
+CONFIG_SCHEMA_VERSION = 20
 
 
 class AuditBranch(StrEnum):
@@ -152,6 +157,25 @@ class DecompositionConfig:
 
 
 @dataclass(frozen=True)
+class RetryConfig:
+    """Bounded same-provider transient-retry + soft-pause policy (transient provider recovery).
+
+    ``max_attempts`` is the number of retries *after* the first failed attempt (so ``2`` ⇒ up to 3
+    invocations of one provider) and applies independently to *each* provider in the route's
+    ``[primary, fallback]`` sequence; it is counted **separately** from ``max_stage_attempts`` (a
+    stage hop). Only the ``TRANSIENT_RETRYABLE`` classes (PROVIDER_UNAVAILABLE / NETWORK_UNAVAIL)
+    are retried. Backoff is deterministic exponential ``min(base_delay_s * 2**k, max_delay_s)`` with
+    no jitter — a single-slot orchestrator has no thundering-herd. ``max_blocked_s`` is the B-lite
+    ceiling: once both providers are exhausted a task parks as resumable (not terminal) and is only
+    failed if it stays parked longer than this (total parked wall-clock)."""
+
+    max_attempts: int = 2
+    base_delay_s: float = 2.0
+    max_delay_s: float = 30.0
+    max_blocked_s: float = 3600.0
+
+
+@dataclass(frozen=True)
 class ProviderConfig:
     command: str
     model: str
@@ -177,6 +201,8 @@ class AgentsConfig:
     max_total_fix_iterations: int
     decomposition: DecompositionConfig
     providers: dict[ProviderId, ProviderConfig]
+    # Optional; a default keeps every existing positional/`replace` construction valid. Last field.
+    retry: RetryConfig = field(default_factory=RetryConfig)
 
 
 @dataclass(frozen=True)

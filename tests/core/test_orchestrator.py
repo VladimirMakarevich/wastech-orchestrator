@@ -11,6 +11,7 @@ import json
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -50,11 +51,18 @@ class FakeProvider:
         *,
         outputs: dict[str, tuple[str, dict | None]] | None = None,
         infra_fail: set[str] | None = None,
+        infra_error_class: ErrorClass = ErrorClass.TIMEOUT,
     ) -> None:
         self.id = provider_id
         self._outputs = outputs or {}
         self._infra_fail = infra_fail or set()
+        self._infra_error_class = infra_error_class
+        self._healed = False
         self.requests: list[AgentRunRequest] = []
+
+    def heal(self) -> None:
+        """Stop infra-failing — simulate the provider's outage clearing (B-lite resume tests)."""
+        self._healed = True
 
     def preflight(self) -> ProviderHealth:
         return ProviderHealth(
@@ -68,8 +76,8 @@ class FakeProvider:
 
     def run(self, request: AgentRunRequest) -> AgentRunResult:
         self.requests.append(request)
-        if request.node_id in self._infra_fail:
-            raise ProviderError(error_class=ErrorClass.TIMEOUT, message="infra fail")
+        if request.node_id in self._infra_fail and not self._healed:
+            raise ProviderError(error_class=self._infra_error_class, message="infra fail")
         message, structured = self._outputs.get(request.node_id, ("done", None))
         if request.node_id == "refinement":
             structured = (
@@ -271,6 +279,7 @@ def _build(
     config_kwargs: dict | None = None,
     notifier: Notifier | None = None,
     gh: Callable[[Sequence[str]], GitResult] | None = None,
+    clock: Callable[[], str] | None = None,
 ) -> tuple[Orchestrator, StateStore, Ledger, Path]:
     from wastech_orchestrator.checks.resolver import CheckResolver
     from wastech_orchestrator.routing.router import AgentRouter
@@ -279,7 +288,8 @@ def _build(
     config = make_git_config(git_repo.clone, checks=["pytest"], **(config_kwargs or {}))
     store = StateStore.open(art / "state.db")
     ledger = Ledger(art / "logs")
-    router = AgentRouter(config, providers)  # type: ignore[arg-type]
+    # A no-op sleep so the Router's transient backoff never actually waits in tests.
+    router = AgentRouter(config, providers, sleep=lambda _d: None)  # type: ignore[arg-type]
     git = GitManager(config, store=store, artifacts_root=str(art), gh_runner=gh or _fake_gh())
     checks = CheckRunner(config, run_process=_fake_proc(check_verdicts))  # type: ignore[arg-type]
     gate = ValidationGate(
@@ -287,6 +297,7 @@ def _build(
         store_has_task_id=store.task_id_exists,
         ledger_has_task_id=ledger.has_task_id,
     )
+    extra = {"clock": clock} if clock is not None else {}
     orch = Orchestrator(
         config,
         router=router,
@@ -298,6 +309,7 @@ def _build(
         artifacts_root=str(art),
         notifier=notifier,
         resolver=CheckResolver(config),  # normalize checks.command_sets (production wires this)
+        **extra,
     )
     return orch, store, ledger, art
 
@@ -841,6 +853,119 @@ def test_review_infra_failure_degrades_to_manual_not_failed(
     # Review was reached; publish never ran (the diff is preserved on the branch, not published).
     ran = _ran_nodes(store, "task-rev-infra")
     assert "review" in ran and "publish" not in ran
+
+
+# --- B-lite: transient-infra exhaustion parks the task as resumable -----------------------------
+
+
+class _Clock:
+    """A controllable wall clock (ISO strings) for the B-lite max_blocked ceiling test."""
+
+    def __init__(self) -> None:
+        self._t = 0.0
+
+    def __call__(self) -> str:
+        return datetime.fromtimestamp(self._t, tz=UTC).isoformat()
+
+    def advance(self, seconds: float) -> None:
+        self._t += seconds
+
+
+def test_transient_exhaustion_parks_task_resumable(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # Every provider is transiently unavailable on implementation (PROVIDER_UNAVAILABLE): the task
+    # must NOT go terminal — it parks as resumable (still RUNNING, blocked_since stamped), with no
+    # failure report and no ledger record.
+    providers = _both(
+        infra_fail={"implementation"}, infra_error_class=ErrorClass.PROVIDER_UNAVAILABLE
+    )
+    orch, store, ledger, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-park"))
+
+    assert result.final_status is Status.RUNNING  # parked, not terminal
+    task = store.get_task("task-park")
+    assert task is not None
+    assert task.status is Status.RUNNING
+    assert task.blocked_since is not None
+    assert ledger.records() == []  # no terminal ledger record yet
+    assert not (art / "logs" / "task-park" / "failure_report.json").exists()
+    assert "publish" not in _ran_nodes(store, "task-park")
+
+
+def test_parked_task_resumes_when_provider_recovers(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # After parking, the outage clears: resume() continues from the checkpoint to DONE, clearing
+    # blocked_since. The implementation is committed exactly once (the parked run never committed).
+    providers = _both(
+        infra_fail={"implementation"}, infra_error_class=ErrorClass.PROVIDER_UNAVAILABLE
+    )
+    orch, store, ledger, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    first = orch.run_task(_complete_task(tmp_path, "task-resume"))
+    assert first.final_status is Status.RUNNING
+
+    for provider in providers.values():
+        provider.heal()
+    result = orch.resume()
+
+    assert result is not None and result.final_status is Status.DONE
+    task = store.get_task("task-resume")
+    assert task is not None and task.blocked_since is None  # cleared at terminal
+    assert ledger.records()[0]["final_status"] == "done"
+    assert "publish" in _ran_nodes(store, "task-resume")
+
+
+def test_parked_task_fails_after_max_blocked(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # A sustained outage: the task stays parked past agents.retry.max_blocked_s (default 3600s) →
+    # on the next resume it goes terminal FAILED (nothing hangs forever).
+    clock = _Clock()
+    providers = _both(
+        infra_fail={"implementation"}, infra_error_class=ErrorClass.PROVIDER_UNAVAILABLE
+    )
+    orch, store, ledger, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0], clock=clock
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    first = orch.run_task(_complete_task(tmp_path, "task-ceiling"))
+    assert first.final_status is Status.RUNNING
+
+    clock.advance(3600 + 60)  # past the default max_blocked_s
+    result = orch.resume()
+
+    assert result is not None and result.final_status is Status.FAILED
+    assert (art / "logs" / "task-ceiling" / "failure_report.json").exists()
+    assert ledger.records()[0]["final_status"] == "failed"
+
+
+def test_non_transient_infra_still_fails_immediately(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # A non-transient infra class (TIMEOUT) is NOT parked — it goes terminal FAILED at once, with a
+    # failure report and no blocked_since. Only the transient classes earn a soft pause.
+    providers = _both(infra_fail={"implementation"})  # default error class is TIMEOUT
+    orch, store, ledger, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-hard"))
+
+    assert result.final_status is Status.FAILED
+    task = store.get_task("task-hard")
+    assert task is not None and task.blocked_since is None
+    assert (art / "logs" / "task-hard" / "failure_report.json").exists()
 
 
 _MINIMAL_FLOW = """
