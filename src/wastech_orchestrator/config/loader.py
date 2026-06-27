@@ -36,6 +36,7 @@ from wastech_orchestrator.config.schema import (
     PathsConfig,
     ProviderConfig,
     RepoConfig,
+    RetryConfig,
     SecurityConfig,
     SkillsConfig,
     SupervisorConfig,
@@ -423,6 +424,20 @@ def _build_decomposition(raw: Any, issues: list[str]) -> DecompositionConfig:
     )
 
 
+def _build_retry(raw: Any, issues: list[str]) -> RetryConfig:
+    where = "agents.retry"
+    if raw is None:
+        return RetryConfig()  # whole block optional → defaults (back-compat)
+    m = _mapping(raw, where, issues)
+    _check_keys(m, {"max_attempts", "base_delay_s", "max_delay_s", "max_blocked_s"}, where, issues)
+    return RetryConfig(
+        max_attempts=_int(m, "max_attempts", 2, where, issues),
+        base_delay_s=_float(m, "base_delay_s", 2.0, where, issues),
+        max_delay_s=_float(m, "max_delay_s", 30.0, where, issues),
+        max_blocked_s=_float(m, "max_blocked_s", 3600.0, where, issues),
+    )
+
+
 def _build_allowed(raw: Any, issues: list[str]) -> tuple[ProviderId, ...]:
     if raw is None:
         return (ProviderId.CLAUDE, ProviderId.CODEX)
@@ -453,6 +468,7 @@ def _build_agents(raw: Any, issues: list[str]) -> AgentsConfig:
             "max_fix_cycles",
             "max_total_fix_iterations",
             "decomposition",
+            "retry",
             "providers",
         },
         "agents",
@@ -465,6 +481,7 @@ def _build_agents(raw: Any, issues: list[str]) -> AgentsConfig:
         max_fix_cycles=_int(m, "max_fix_cycles", 15, "agents", issues),
         max_total_fix_iterations=_int(m, "max_total_fix_iterations", 30, "agents", issues),
         decomposition=_build_decomposition(m.get("decomposition"), issues),
+        retry=_build_retry(m.get("retry"), issues),
         providers=_build_providers(m.get("providers"), issues),
     )
 

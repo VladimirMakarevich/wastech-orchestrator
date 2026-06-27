@@ -121,6 +121,23 @@ def validate_config(config: OrchestratorConfig) -> list[str]:
             f"(got {agents.decomposition.max_subtasks})"
         )
 
+    # Transient-retry policy: counts and delays cannot be negative (0 attempts = disable retry), and
+    # a per-retry delay cap below the base delay would silently clamp every backoff to the base.
+    retry = agents.retry
+    if retry.max_attempts < 0:
+        issues.append(f"agents.retry.max_attempts must be >= 0 (got {retry.max_attempts})")
+    if retry.base_delay_s < 0:
+        issues.append(f"agents.retry.base_delay_s must be >= 0 (got {retry.base_delay_s})")
+    if retry.max_delay_s < 0:
+        issues.append(f"agents.retry.max_delay_s must be >= 0 (got {retry.max_delay_s})")
+    if retry.max_delay_s < retry.base_delay_s:
+        issues.append(
+            "agents.retry.max_delay_s must be >= agents.retry.base_delay_s "
+            f"({retry.max_delay_s} < {retry.base_delay_s})"
+        )
+    if retry.max_blocked_s < 0:
+        issues.append(f"agents.retry.max_blocked_s must be >= 0 (got {retry.max_blocked_s})")
+
     # Security: extra_args must not weaken the sandbox/permissions.
     for pid, provider in agents.providers.items():
         _check_reasoning(

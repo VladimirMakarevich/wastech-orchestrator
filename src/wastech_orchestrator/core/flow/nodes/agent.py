@@ -257,12 +257,12 @@ class AgentNodeRunner:
             started_at=started_at,
         )
         if outcome.result is None:
-            err = (
-                outcome.terminal_error.error_class.value
-                if outcome.terminal_error
-                else "no_provider_available"
+            error_class = outcome.terminal_error.error_class if outcome.terminal_error else None
+            err = error_class.value if error_class else "no_provider_available"
+            raise NodeInfraError(
+                f"agent node {node.id!r}: no provider could complete it ({err})",
+                error_class=error_class,
             )
-            raise NodeInfraError(f"agent node {node.id!r}: no provider could complete it ({err})")
         self._persist_session(node, ctx, outcome)
         return run_id, outcome
 

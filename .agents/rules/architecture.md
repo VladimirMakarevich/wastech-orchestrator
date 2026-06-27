@@ -31,11 +31,14 @@ Dependency direction: `core → router → provider(interface)`. Providers do no
 - **Validation gate** (spec §19): every task passes a structural gate on `new -> validated` before any branch or provider run. A broken task is terminal `failed`, quarantined to `tasks/rejected/`, and never branched.
 - **Final `summary`** (spec §5.2) is an agent-driven, no-edit stage after `review` that writes a plain-language handoff (what / how / integration / why) which becomes the PR body. It is **best-effort, not a quality gate**: a provider failure falls back, and ultimately the Core writes a deterministic minimal summary — a reviewed, passing change is never blocked by it.
 
-## Fallback
+## Fallback and transient-failure recovery
 
 - Allowed **only** for infrastructure error classes (see spec §7.2).
 - **Forbidden** for: failed tests/linters, review findings, incomplete fulfillment of requirements despite a successful CLI run, Git errors, an invalid task/config, exhaustion of fix cycles, or a security violation. These cases → `fixing` / `failed` / `manual_action_required`.
 - Partial changes made after an infrastructure error are not rolled back automatically: a snapshot+diff is preserved, the fallback receives the current diff, and it goes through the full set of checks.
+- **Symmetric cross-provider fallback** (extends PRE.1's single-target rule): a node running on the global primary falls back to the **other** allowed provider (Claude↔Codex), not just nodes pinned away from the primary. With a single allowed provider there is no fallback target. The fallback target lives in the Router (`resolve_route`); the Core never changes the CLI it speaks.
+- **Bounded same-provider transient retry** (`agents.retry`, Router-owned): a _raised_ infra `ProviderError` of a **transient** class (`provider_unavailable` / `network_unavailable` — never `timeout`/`rate_limited`, never a quality `status=failed`) is retried on the same provider with deterministic exponential backoff before falling back. The retry budget is **per provider** and counted **separately** from `max_stage_attempts`; every attempt is recorded in `provider_attempts` (bounded and audited). A quality verdict is never retried.
+- **Soft, resumable pause (B-lite)**: when retries **and** the cross-provider fallback are exhausted for a transient class (both providers down), the orchestrator does **not** go terminal `failed`; it parks the task as **resumable** (still active, `tasks.blocked_since` stamped, checkpoint preserved) and resumes it on the next watch tick / restart via the existing reconcile path. A non-transient infra exhaustion stays terminal; an evaluator that cannot run stays `manual_action_required`. The pause is bounded by `agents.retry.max_blocked_s`, after which the task goes terminal `failed` — nothing hangs forever.
 
 ## State machine and idempotency
 

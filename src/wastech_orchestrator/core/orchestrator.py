@@ -104,6 +104,7 @@ from wastech_orchestrator.providers.artifacts import (
     task_artifact_dir,
 )
 from wastech_orchestrator.providers.base import (
+    TRANSIENT_RETRYABLE,
     AgentProvider,
     ProviderId,
 )
@@ -1083,6 +1084,17 @@ class Orchestrator:
         PR) lives in ``publish_operations``, so a resumed run never duplicates them."""
         snapshot = self._resolve_flow(p)
         run_state = hydrate_run_state(self._store, p.task.id)
+        # B-lite ceiling: a task parked because every provider was transiently unavailable resumes
+        # here. If it has stayed parked longer than ``agents.retry.max_blocked_s`` (total parked
+        # wall-clock), stop waiting and go terminal — nothing must hang forever.
+        ceiling = self._park_ceiling_exceeded(p)
+        if ceiling is not None:
+            return self._fail(
+                p,
+                ceiling,
+                node_id=run_state.current_node if run_state is not None else None,
+                run_state=run_state,
+            )
         if run_state is None or run_state.flow_fingerprint != snapshot.flow_fingerprint:
             # No usable checkpoint (interrupted before the engine wrote one, or the flow changed) →
             # restart from the top via the full driver (re-does preflight + branch prep + engine).
@@ -1294,9 +1306,60 @@ class Orchestrator:
             )
         except NodeInfraError as exc:
             self._sync_counters_from_run_state(p, run_state)
+            if exc.error_class in TRANSIENT_RETRYABLE:
+                # Every allowed provider is transiently unavailable (retries + fallback exhausted).
+                # Don't discard the task: park it as resumable (B-lite). The checkpoint is already
+                # persisted; the next watch tick / process start resumes from current_node.
+                return self._park(p, run_state, exc)
             return self._fail(p, str(exc), node_id=run_state.current_node, run_state=run_state)
         self._sync_counters_from_run_state(p, run_state)
         return self._finish_engine_run(p, result)
+
+    def _park(
+        self, p: _Pipeline, run_state: FlowRunState, exc: NodeInfraError
+    ) -> PipelineResult:
+        """Soft, resumable pause on transient infra exhaustion (B-lite). NOT a terminal transition.
+
+        The task stays ``RUNNING`` (active) so :meth:`resume` picks it up via the reconciler next
+        tick / next start; the flow checkpoint is already saved (``current_node``). Records the
+        first park instant in ``tasks.blocked_since`` (kept across re-parks so the ceiling measures
+        total parked wall-clock); the ceiling is checked on resume in :meth:`_resume_via_engine`. No
+        commit/push and no failure report — the partial work is preserved by the checkpoint."""
+        existing = self._store.get_task(p.task.id)
+        if existing is None or existing.blocked_since is None:
+            self._store.update_task(p.task.id, blocked_since=self._clock())
+        log = bind(_LOG, task_id=p.task.id)
+        log.info(
+            "task parked (resumable): every provider transiently unavailable",
+            extra={
+                "node_id": run_state.current_node,
+                "error_class": exc.error_class.value if exc.error_class else None,
+            },
+        )
+        return PipelineResult(task_id=p.task.id, final_status=Status.RUNNING)
+
+    def _park_ceiling_exceeded(self, p: _Pipeline) -> str | None:
+        """Return a terminal reason if the task has been parked (B-lite) past ``max_blocked_s``.
+
+        ``None`` when the task is not parked or is still within the ceiling. Measured from the first
+        park (``tasks.blocked_since``) to now, using the injected clock; a malformed timestamp is
+        treated as not-exceeded (the next park re-stamps it)."""
+        task = self._store.get_task(p.task.id)
+        if task is None or task.blocked_since is None:
+            return None
+        try:
+            elapsed = (
+                datetime.fromisoformat(self._clock()) - datetime.fromisoformat(task.blocked_since)
+            ).total_seconds()
+        except ValueError:
+            return None
+        ceiling = self._config.agents.retry.max_blocked_s
+        if elapsed > ceiling:
+            return (
+                f"provider outage exceeded agents.retry.max_blocked_s "
+                f"({elapsed:.0f}s parked > {ceiling:.0f}s)"
+            )
+        return None
 
     def _sync_counters_from_run_state(self, p: _Pipeline, run_state: FlowRunState) -> None:
         """Mirror the engine's authoritative loop counters into the operator-facing LoopCounters.
@@ -1932,6 +1995,7 @@ class Orchestrator:
             cleanup_completed=cleanup.safe,
             cleanup_completed_at=self._clock() if cleanup.safe else None,
             cleanup_last_error=last_error,
+            blocked_since=None,  # B-lite: a terminal task is no longer parked
         )
         # The flow checkpoint marks where ``rerun --continue`` re-enters — meaningful only for a
         # non-success terminal. A ``done`` task has no resume position, so clear it (``node_runs``

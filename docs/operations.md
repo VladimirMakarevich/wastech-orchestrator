@@ -228,9 +228,19 @@ python -m wastech_orchestrator --log-level debug run <task>    # more verbose op
 python -m wastech_orchestrator status                          # active/latest persisted task
 ```
 
-`watch` respects `orchestrator.auto_mode.enabled`: off (default) it processes/resumes one task and returns the working copy to `repo.base_branch`; on, it processes pending tasks sequentially, checking out the base branch between them. A `manual_action_required` outcome always blocks automatic continuation. Exit code: `0` done, `1` failed, `2` manual_action_required.
+`watch` respects `orchestrator.auto_mode.enabled`: off (default) it processes/resumes one task and returns the working copy to `repo.base_branch`; on, it processes pending tasks sequentially, checking out the base branch between them. A `manual_action_required` outcome always blocks automatic continuation. Exit code: `0` done, `1` failed, `2` manual_action_required, `3` paused (a task soft-parked on a provider outage — see [provider outage behavior](#provider-outage-behavior)).
 
 `auto_mode` governs task _sequencing_, not human-in-the-loop. It does not relax HITL: a node that escalates — an embedded `planning`/`refinement` question/approval, or a dangerous-diff approval — still blocks the run until a human answers, or until `telegram.ask_timeout_s` elapses (default 28800 s / 8 h), after which the wait resolves to `manual_action_required`. So an unattended `watch` completes only when the pending tasks are well-specified enough that no node needs to ask (see [task authoring → planning escalation](task-authoring.md#planning-escalation-and-unattended-runs)).
+
+### Provider outage behavior
+
+When a coding-agent CLI dies mid-task with a **transient** server error (a 5xx / network blip classified `provider_unavailable` or `network_unavailable`), the orchestrator no longer throws the task away. It recovers in three bounded, audited steps, all tuned by [`agents.retry`](configuration.md#agentsretry):
+
+1. **Same-provider retry** — retry the same provider with exponential backoff (`base_delay_s`, doubling, capped at `max_delay_s`), up to `max_attempts` times. The CLIs already retry 5xx internally, so the value here is the longer wait window, not a tight loop.
+2. **Symmetric fallback** — if retries are exhausted, switch to the other allowed provider (Claude↔Codex) and retry it the same way. (With a single allowed provider there is no switch target.)
+3. **Soft pause** — if **both** providers are unavailable, the task is **parked as resumable** rather than failed: it stays active, `watch` shows it as `running (paused)`, the checkpoint is preserved, and the next tick / restart resumes it from where it stopped (no work or commits are lost). A one-off `worc run` exits `3` and leaves the task resumable for the next `run`/`watch`/restart. The pause is bounded by `max_blocked_s` (default 1 h) — once exceeded, the task goes terminal `failed` so nothing hangs forever.
+
+`timeout` and `rate_limited` are deliberately **not** treated as transient (a timeout may have done long/partial work; a rate limit wants a long defer, not a retry loop) — they take the existing fallback/terminal paths. Quality failures are never retried. Every attempt is in the `provider_attempts` audit trail.
 
 ### Listing tasks and shell completion (`list` / `completion`)
 

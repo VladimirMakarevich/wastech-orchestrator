@@ -3,7 +3,7 @@
 # This is the packaged copy used by `wastech-orchestrator init`; keep it in sync with the
 # repo-root config.example.yaml
 
-schema_version: 19                  # config format version; the orchestrator refuses newer configs
+schema_version: 20                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -40,6 +40,12 @@ agents:
   decomposition:                    # optional task decomposition (§5.1); OFF by default
     enabled: false
     max_subtasks: 8                 # a split with n > this (or n < 2) is rejected; runs as a single task
+
+  retry:                            # optional: transient provider-failure recovery; safe defaults
+    max_attempts: 2                 # same-provider retries AFTER the first attempt (per provider); 0 disables
+    base_delay_s: 2.0               # exponential backoff: min(base * 2**k, max_delay_s), no jitter
+    max_delay_s: 30.0               # cap per-retry delay (total retry window stays well under a minute)
+    max_blocked_s: 3600.0           # both providers down -> park as resumable; fail only after this much parked time
 
   # Provider routing is node-based: a flow node declares its own `provider` (else the global
   # primary below). Exactly one configured provider must set `primary: true` — it runs every node

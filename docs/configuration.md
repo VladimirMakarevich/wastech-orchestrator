@@ -37,7 +37,7 @@ Exactly one configured provider must set `primary: true` — the **global primar
 schema_version: 1
 ```
 
-Optional top-level integer marking the `config.yaml` **format** version (current: `15`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
+Optional top-level integer marking the `config.yaml` **format** version (current: `20`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
 
 ## Config Discovery
 
@@ -73,12 +73,7 @@ Auto mode does not enable concurrency. The v1 contract keeps one active task at 
 
 Logging and heartbeat settings are global CLI options, not `config.yaml` fields:
 
-| Option | Default | Meaning |
-| --- | --: | --- | --- | --- | --- |
-| `--log-level debug | info | warning | error` | `info` | Minimum operator log level. |
-| `--log-format logfmt | json` | `logfmt` | Format used for stderr and `--log-file`. |
-| `--log-file PATH` | unset | Also write a rotating 10 MB operator log with five backups. |
-| `--heartbeat-seconds N` | `30` | Progress interval for long provider/check/Git calls and the HITL human-input wait; `0` disables. |
+| Option | Default | Meaning | | --- | --: | --- | --- | --- | --- | | `--log-level debug | info | warning | error` | `info` | Minimum operator log level. | | `--log-format logfmt | json` | `logfmt` | Format used for stderr and `--log-file`. | | `--log-file PATH` | unset | Also write a rotating 10 MB operator log with five backups. | | `--heartbeat-seconds N` | `30` | Progress interval for long provider/check/Git calls and the HITL human-input wait; `0` disables. |
 
 The `watch` subcommand also accepts `--poll-seconds N` and `--queue NAME` (placed after `watch`), which override `orchestrator.poll_interval_seconds` and `orchestrator.queue` for that run. `restart` accepts the same two flags for the fresh loop it starts.
 
@@ -153,7 +148,7 @@ agents:
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `allowed` | list of `claude`, `codex` | `["claude", "codex"]` | Providers the router may use. Every flow node's `provider` (and the global primary) must be in this list. |
-| `max_stage_attempts` | integer | `3` | Attempts allowed for a stage (primary + the global-primary fallback). |
+| `max_stage_attempts` | integer | `3` | Provider **hops** allowed for a stage (primary + cross-provider fallback). The transient-retry budget (`agents.retry`) is separate and does **not** count against this. |
 | `max_fix_cycles` | integer | `15` | Fix cycles for a single local failing loop (test-driven or review-driven, counted separately). |
 | `max_total_fix_iterations` | integer | `30` | Hard global fix cap across the whole task and all subtasks. Must be `>= max_fix_cycles`. |
 
@@ -177,9 +172,31 @@ agents:
 
 `agents.decomposition.enabled` sets the **default** decomposition gate; whether a split actually happens is decided by the flow's `decomposition:` block and the planning node's gate proposal, accepted only under the deterministic rules. A task may override the _gate_ (not the logic) with the optional `decomposition: true|false` field — task-wins over the global, mirroring `auto_merge`/`prompt_audit` (see [task authoring](task-authoring.md#decomposition)). A task still cannot change `max_subtasks`, the provider, or security settings, and the old `decompose` flag (removed in `schema_version` 11) is unrelated — it forced a split; `decomposition` only permits one. The decorative `min_size_signal` and `commit_per_subtask` keys were **removed in `schema_version` 12** (neither was ever read — the size hint lives in the planning role prompt and every accepted subtask is always committed). Older configs that still carry them load fail-open (the keys are ignored); `upgrade-config` strips them.
 
+### `agents.retry`
+
+Optional (added in `schema_version` 20); absent → the defaults below. Bounds the orchestrator's recovery from a **transient** provider failure — a 5xx / network blip classified `provider_unavailable` or `network_unavailable` (never a quality failure, never a `timeout` or `rate_limited`, which are excluded by design). The flow is: retry the **same** provider with exponential backoff → switch to the other allowed provider (symmetric Claude↔Codex) → if **both** are unavailable, **park** the task as resumable instead of failing it, until `max_blocked_s` elapses.
+
+```yaml
+agents:
+  retry:
+    max_attempts: 2
+    base_delay_s: 2.0
+    max_delay_s: 30.0
+    max_blocked_s: 3600.0
+```
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `max_attempts` | integer | `2` | Same-provider retries **after** the first failed attempt (so `2` ⇒ up to 3 invocations). Applied **per provider** in the `[primary, fallback]` sequence; counted separately from `max_stage_attempts`. `0` disables transient retry. |
+| `base_delay_s` | number | `2.0` | Backoff base. Each retry waits `min(base_delay_s * 2**k, max_delay_s)` (deterministic, no jitter). |
+| `max_delay_s` | number | `30.0` | Per-retry delay cap. Must be `>= base_delay_s`. |
+| `max_blocked_s` | number | `3600.0` | Soft-pause ceiling: a task parked because **both** providers were transiently unavailable is failed only after it has stayed parked this long (total wall-clock). |
+
+Validation rejects negative values and `max_delay_s < base_delay_s`. Each attempt (including every retry) is recorded in the `provider_attempts` audit trail. See [operations.md](operations.md#provider-outage-behavior) for the operator-facing behavior.
+
 ### Provider routing (node-based)
 
-There is no `agents.routing` block. Provider routing lives on the **flow node**: each agent/evaluator node may declare a `provider:` (`codex` | `claude`), and a node with no `provider` runs on the **global primary** — the one configured provider with `primary: true` (see [`agents.providers`](#agentsproviders)). The global primary is also the sole infrastructure-fallback target: when a node's primary differs from it, an infrastructure failure falls back to the global primary; when the node already runs on the global primary, an infrastructure failure is terminal (there is no other target).
+There is no `agents.routing` block. Provider routing lives on the **flow node**: each agent/evaluator node may declare a `provider:` (`codex` | `claude`), and a node with no `provider` runs on the **global primary** — the one configured provider with `primary: true` (see [`agents.providers`](#agentsproviders)). Infrastructure fallback is **symmetric** across the two allowed providers: when a node's primary differs from the global primary, an infrastructure failure falls back to the global primary; when the node already runs on the global primary, it falls back to the **other** allowed provider (Claude↔Codex). With only one allowed provider there is no fallback target — an infrastructure failure is handled by the `agents.retry` same-provider budget, then the soft pause.
 
 `testing` and `publishing` never run an agent. The Check Runner owns `testing`; the Git Manager owns `publishing`.
 

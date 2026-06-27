@@ -24,10 +24,10 @@ def router(config: OrchestratorConfig, make_fake_provider: Callable[..., object]
 
 @pytest.mark.parametrize("node_id", _NODE_IDS, ids=lambda s: s)
 def test_no_provider_defaults_to_global_primary(router: AgentRouter, node_id: str) -> None:
-    # The packaged config marks claude the global primary. A node with no provider → claude, and
-    # since the primary already *is* the global primary there is no fallback target.
+    # The packaged config marks claude the global primary, with codex also allowed. A node with no
+    # provider → claude, and the symmetric fallback target is the one other allowed provider, codex.
     route = router.resolve_route(node_id)
-    assert (route.primary, route.fallback) == (ProviderId.CLAUDE, None)
+    assert (route.primary, route.fallback) == (ProviderId.CLAUDE, ProviderId.CODEX)
     assert route.source is RouteSource.CONFIG
     assert route.node_id == node_id
 
@@ -39,11 +39,40 @@ def test_node_provider_falls_back_to_global_primary(router: AgentRouter) -> None
     assert route.source is RouteSource.FLOW_NODE
 
 
-def test_node_provider_equal_to_primary_has_no_fallback(router: AgentRouter) -> None:
-    # A node pinned to the global primary has no fallback (a primary infra failure is terminal).
+def test_node_provider_equal_to_primary_falls_back_symmetrically(router: AgentRouter) -> None:
+    # A node pinned to the global primary still gets the symmetric fallback — the one other allowed
+    # provider — so failover is symmetric in both directions (transient-provider-failure-recovery).
     route = router.resolve_route("implementation", ProviderId.CLAUDE)
-    assert (route.primary, route.fallback) == (ProviderId.CLAUDE, None)
+    assert (route.primary, route.fallback) == (ProviderId.CLAUDE, ProviderId.CODEX)
     assert route.source is RouteSource.FLOW_NODE
+
+
+def test_single_allowed_provider_has_no_fallback(
+    config: OrchestratorConfig, make_fake_provider: Callable[..., object]
+) -> None:
+    # With only one allowed provider there is nowhere to switch → no fallback (B-lite soft-pause
+    # territory). The global primary (claude) defaults to itself with fallback None.
+    cfg = replace(config, agents=replace(config.agents, allowed=(ProviderId.CLAUDE,)))
+    providers = {pid: make_fake_provider(pid) for pid in (ProviderId.CODEX, ProviderId.CLAUDE)}
+    router = AgentRouter(cfg, providers)
+    route = router.resolve_route("planning")
+    assert (route.primary, route.fallback) == (ProviderId.CLAUDE, None)
+
+
+def test_codex_global_primary_default_falls_back_to_claude(
+    config: OrchestratorConfig, make_fake_provider: Callable[..., object]
+) -> None:
+    # Flip the global primary to codex; the default route must fall back to claude — proves the
+    # symmetry is real (not a claude-first special case).
+    providers_cfg = {
+        pid: replace(cfg, primary=(pid is ProviderId.CODEX))
+        for pid, cfg in config.agents.providers.items()
+    }
+    cfg = replace(config, agents=replace(config.agents, providers=providers_cfg))
+    instances = {pid: make_fake_provider(pid) for pid in (ProviderId.CODEX, ProviderId.CLAUDE)}
+    router = AgentRouter(cfg, instances)
+    route = router.resolve_route("implementation")
+    assert (route.primary, route.fallback) == (ProviderId.CODEX, ProviderId.CLAUDE)
 
 
 def test_node_provider_not_allowlisted_is_rejected(

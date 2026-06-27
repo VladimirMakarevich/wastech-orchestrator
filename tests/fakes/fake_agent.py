@@ -19,10 +19,19 @@ import contextlib
 import json
 import sys
 import time
+from pathlib import Path
 
 _SESSION_ID = "sess-fake"
 _FINAL_MESSAGE = "Fake implemented the task."
 _STRUCTURED_OUTPUT = {"summary": "fake done"}
+
+# A transient 5xx both adapters classify as PROVIDER_UNAVAILABLE (matches `internal server error` /
+# `\b50[023]\b` / `service unavailable`). No network, no randomness — a fixed string.
+_PROVIDER_UNAVAILABLE_STDERR = (
+    "API Error: 500 Internal server error. This is a server-side issue, usually temporary.\n"
+)
+# State file (in the working dir) for the stateful `flaky_500_<n>` scenario: fail <n>, then pass.
+_FLAKY_500_COUNTER = ".fake_500_count"
 
 
 def _arg_value(args: list[str], flag: str) -> str | None:
@@ -199,6 +208,24 @@ def main() -> int:
     if scenario == "success_edit":
         with contextlib.suppress(OSError), open("agent_change.py", "w", encoding="utf-8") as handle:
             handle.write("# change made by the fake agent\nVALUE = 1\n")
+        scenario = "success"
+
+    # Transient infra scenarios — identical failure surface for both dialects, so handled here:
+    # ``provider_unavailable`` always emits a 5xx; ``flaky_500_<n>`` fails <n> times (counted in a
+    # cwd state file) then succeeds — deterministic (no time/random), to drive the Router's retry.
+    if scenario == "provider_unavailable":
+        sys.stderr.write(_PROVIDER_UNAVAILABLE_STDERR)
+        return 1
+    if scenario.startswith("flaky_500_"):
+        threshold = int(scenario.rsplit("_", 1)[1])
+        counter = Path.cwd() / _FLAKY_500_COUNTER
+        seen = int(counter.read_text()) if counter.exists() else 0
+        if seen < threshold:
+            counter.write_text(str(seen + 1))
+            sys.stderr.write(_PROVIDER_UNAVAILABLE_STDERR)
+            return 1
+        with contextlib.suppress(OSError):
+            counter.unlink()
         scenario = "success"
 
     dialect = _DIALECTS.get(cli_name)

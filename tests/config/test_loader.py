@@ -434,3 +434,47 @@ def test_legacy_prompts_block_is_tolerated() -> None:
     text = _LEGACY + "prompts:\n  templates_dir: './tpl'\n  mode: append\n  preamble: 'hi'\n"
     cfg = loads_config(text).config
     assert not hasattr(cfg, "prompts")
+
+
+# --- agents.retry (transient provider-failure recovery, config v20) ---
+
+
+def test_retry_defaults_when_block_absent() -> None:
+    # The whole `agents.retry` block is optional → safe defaults (back-compat for old configs).
+    cfg = loads_config(_agents("")).config
+    retry = cfg.agents.retry
+    assert (retry.max_attempts, retry.base_delay_s, retry.max_delay_s, retry.max_blocked_s) == (
+        2,
+        2.0,
+        30.0,
+        3600.0,
+    )
+
+
+def test_retry_block_is_read_when_present() -> None:
+    body = (
+        "  retry:\n    max_attempts: 5\n    base_delay_s: 1.0\n"
+        "    max_delay_s: 60.0\n    max_blocked_s: 120.0\n"
+    )
+    cfg = loads_config(_agents(body)).config
+    retry = cfg.agents.retry
+    assert (retry.max_attempts, retry.base_delay_s, retry.max_delay_s, retry.max_blocked_s) == (
+        5,
+        1.0,
+        60.0,
+        120.0,
+    )
+
+
+def test_retry_wrong_types_rejected() -> None:
+    with pytest.raises(ConfigError) as exc:
+        loads_config(_agents('  retry:\n    max_attempts: "x"\n    base_delay_s: "y"\n'))
+    issues = exc.value.issues
+    assert any("agents.retry.max_attempts" in i for i in issues)
+    assert any("agents.retry.base_delay_s" in i for i in issues)
+
+
+def test_unknown_retry_subkey_is_rejected() -> None:
+    with pytest.raises(ConfigError) as exc:
+        loads_config(_agents("  retry:\n    nonsense: 1\n"))
+    assert any("agents.retry" in i and "nonsense" in i for i in exc.value.issues)

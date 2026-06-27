@@ -43,7 +43,7 @@ from wastech_orchestrator.core.orchestrator import (
     build_orchestrator,
     build_providers,
 )
-from wastech_orchestrator.core.state_machine import Status
+from wastech_orchestrator.core.state_machine import TERMINAL, Status
 from wastech_orchestrator.env_file import load_env_file
 from wastech_orchestrator.git_manager import append_runtime_excludes
 from wastech_orchestrator.install import config_writer, detect, wizard
@@ -67,11 +67,14 @@ _LOG_LEVELS: dict[str, int] = {
     "error": logging.ERROR,
 }
 
-# Exit codes for a terminal pipeline outcome.
+# Exit codes for a pipeline outcome. ``RUNNING`` is the B-lite soft pause: not a terminal failure,
+# the task stays resumable and the next watch tick / run continues it — a distinct code so an
+# operator (or CI) can tell "paused, provider down" from "failed".
 _EXIT_BY_STATUS: dict[Status, int] = {
     Status.DONE: 0,
     Status.FAILED: 1,
     Status.MANUAL_ACTION_REQUIRED: 2,
+    Status.RUNNING: 3,
 }
 
 # Default count for `list --recent` (and the "recent" section of the default overview).
@@ -784,6 +787,11 @@ def watch_once(
         results.append(resumed)
         if resumed.final_status is Status.MANUAL_ACTION_REQUIRED:
             return results
+        if resumed.final_status not in TERMINAL:
+            # B-lite soft pause (RUNNING): the active task is still parked on a provider outage and
+            # holds the slot. Stop this tick — the between-tick poll sleep is the cool-off; the next
+            # tick's resume() re-enters from the checkpoint (or fails it past max_blocked_s).
+            return results
 
     auto = config.orchestrator.auto_mode.enabled
     selector = queue if queue is not None else config.orchestrator.queue
@@ -898,6 +906,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(f"error: refusing to run {task_id}: {verdict.detail}", file=sys.stderr)
             return 2
     result = orchestrator.run_task(args.task_file)
+    if result.final_status is Status.RUNNING:
+        # B-lite soft pause: every provider was transiently unavailable. The task is left resumable;
+        # the next `run`/`watch`/restart continues it from the checkpoint (until max_blocked_s).
+        print(f"{result.task_id}: paused — provider unavailable, will resume")
+        return _EXIT_BY_STATUS[Status.RUNNING]
     suffix = f" → {result.pr_url}" if result.pr_url else ""
     print(f"{result.task_id}: {result.final_status.value}{suffix}")
     return _EXIT_BY_STATUS.get(result.final_status, 1)
@@ -1207,7 +1220,12 @@ def _summarize_watch(results: list[PipelineResult]) -> int:
         print("watch: nothing to do (slot free, no pending tasks)")
         return 0
     for result in results:
-        print(f"{result.task_id}: {result.final_status.value}")
+        label = (
+            "paused (provider unavailable)"
+            if result.final_status is Status.RUNNING
+            else result.final_status.value
+        )
+        print(f"{result.task_id}: {label}")
     return max(_EXIT_BY_STATUS.get(r.final_status, 1) for r in results)
 
 
@@ -1426,9 +1444,16 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def _task_entry(row: TaskRow) -> dict[str, str | None]:
+    # A RUNNING task with a blocked_since marker is parked on a provider outage (B-lite), not
+    # actively executing — surface that so it does not read as a stuck/hung run.
+    status = (
+        f"{row.status.value} (paused)"
+        if row.status is Status.RUNNING and row.blocked_since
+        else row.status.value
+    )
     return {
         "task_id": row.task_id,
-        "status": row.status.value,
+        "status": status,
         "title": row.title,
         "branch": row.branch,
     }
