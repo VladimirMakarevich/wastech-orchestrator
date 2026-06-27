@@ -143,6 +143,10 @@ class TelegramNotifier:
         )
         self._safe_send(body, op="send_notification", task_id=task_id)
 
+    def send_trace(self, *, task_id: str, node_id: str, outcome: str) -> None:
+        body = _format_trace_message(task_id=task_id, node_id=node_id, outcome=outcome)
+        self._safe_send(body, op="send_trace", task_id=task_id)
+
     def ask_human(
         self,
         *,
@@ -408,6 +412,22 @@ def _format_terminal_message(
     if contacts:
         parts.append(f"contacts={' '.join(contacts)}")
     return " ".join(parts)
+
+
+# Maps a node's edge-selecting outcome (NodeOutcome.kind) to a glanceable emoji. The distinct
+# leading glyph also keeps a trace line visually separable from HITL gate prompts in the same chat.
+_TRACE_EMOJI: dict[str, str] = {
+    "done": "✅",
+    "accept": "✅",
+    "pass": "✅",
+    "rework": "🔁",
+    "fail": "❌",
+}
+
+
+def _format_trace_message(*, task_id: str, node_id: str, outcome: str) -> str:
+    emoji = _TRACE_EMOJI.get(outcome, "▶️")
+    return f"[{task_id}] {emoji} {node_id} → {outcome}"
 
 
 def _format_ask_message(

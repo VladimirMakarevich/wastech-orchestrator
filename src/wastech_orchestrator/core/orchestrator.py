@@ -1579,6 +1579,13 @@ class Orchestrator:
                     outcome_kind=outcome.kind,
                     final_message=outcome.final_message,
                 )
+            # Best-effort live progress trace: one message per executed node finish (never on a
+            # skip). Gated on the flag alone — when Telegram is off the notifier is a NullNotifier
+            # and this is a no-op. Carries only node id + outcome (no secrets); never raises.
+            if self._config.telegram.trace:
+                self._notifier.send_trace(
+                    task_id=p.task.id, node_id=node.id, outcome=outcome.kind
+                )
             if not isinstance(node, AgentNode):
                 return
             apply_output_artifact(

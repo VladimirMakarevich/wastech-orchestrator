@@ -66,6 +66,13 @@ class Notifier(Protocol):
     ) -> None:
         """Best-effort terminal notification — never raises, never blocks the pipeline."""
 
+    def send_trace(self, *, task_id: str, node_id: str, outcome: str) -> None:
+        """Best-effort live progress trace for one finished flow node — never raises, never blocks.
+
+        Carries only the node id and its outcome (never diff/prompt/agent text), preserving the
+        no-secrets invariant by construction.
+        """
+
     def start_ask(
         self,
         *,
@@ -108,6 +115,9 @@ class NullNotifier:
         reason: str | None,
         contacts: tuple[str, ...] = (),
     ) -> None:
+        return None
+
+    def send_trace(self, *, task_id: str, node_id: str, outcome: str) -> None:
         return None
 
     def start_ask(

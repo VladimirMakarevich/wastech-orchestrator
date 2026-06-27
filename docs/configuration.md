@@ -37,7 +37,7 @@ Exactly one configured provider must set `primary: true` — the **global primar
 schema_version: 1
 ```
 
-Optional top-level integer marking the `config.yaml` **format** version (current: `20`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
+Optional top-level integer marking the `config.yaml` **format** version (current: `21`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
 
 ## Config Discovery
 
@@ -543,6 +543,7 @@ telegram:
   bot_token_env: "TELEGRAM_BOT_TOKEN"
   chat_id_env: "TELEGRAM_CHAT_ID"
   ask_timeout_s: 28800
+  trace: false
 ```
 
 | Field | Type | Default | Meaning |
@@ -551,6 +552,7 @@ telegram:
 | `bot_token_env` | string | `"TELEGRAM_BOT_TOKEN"` | Valid environment-variable name containing the bot token. |
 | `chat_id_env` | string | `"TELEGRAM_CHAT_ID"` | Valid environment-variable name containing the numeric target chat id. |
 | `ask_timeout_s` | integer | `28800` | Maximum wait for a human reply; must be greater than zero. |
+| `trace` | boolean | `false` | Live per-node progress feed (added in `schema_version` 21). When on, the orchestrator pushes one best-effort message per executed flow node finish — `<emoji> <node-id> → <outcome>` (e.g. `✅ implementation → done`, `🔁 review → rework`, `❌ testing → fail`), carrying only the node id + outcome (no diff/prompt/agent text). Fire-and-forget: a send failure never touches the pipeline, and it is a no-op when Telegram is disabled. |
 
 The config stores environment variable **names only**. Token and chat-id values are resolved from the orchestrator process environment at startup and are never written to config, SQLite, logs, or artifacts. Terminal delivery is best-effort and never changes a completed task outcome. A blocking question/approval is fail-closed: disabled/unconfigured transport, timeout, transport failure, or an ambiguous approval moves the task to `manual_action_required`.
 

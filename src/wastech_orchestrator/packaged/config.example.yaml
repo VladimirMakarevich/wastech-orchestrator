@@ -3,7 +3,7 @@
 # This is the packaged copy used by `wastech-orchestrator init`; keep it in sync with the
 # repo-root config.example.yaml
 
-schema_version: 20                  # config format version; the orchestrator refuses newer configs
+schema_version: 21                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -191,6 +191,7 @@ telegram:                           # human-in-the-loop + notifications (optiona
   bot_token_env: "TELEGRAM_BOT_TOKEN"
   chat_id_env: "TELEGRAM_CHAT_ID"   # must resolve to a non-zero numeric chat id
   ask_timeout_s: 28800              # > 0; blocking HITL fails closed on timeout
+  trace: false                      # live per-node progress feed (best-effort; node id + outcome only)
 
 # Prompt templates are not configured here: a flow node's prompt is the content of its `role_file`
 # (packaged flow roles, or `.worc/flows/roles/*.md` for an operator flow). Edit the role file to

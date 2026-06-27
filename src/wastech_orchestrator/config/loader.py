@@ -622,12 +622,18 @@ def _build_git(raw: Any, issues: list[str]) -> GitConfig:
 def _build_telegram(raw: Any, issues: list[str]) -> TelegramConfig:
     where = "telegram"
     m = _mapping(raw, where, issues)
-    _check_keys(m, {"enabled", "bot_token_env", "chat_id_env", "ask_timeout_s"}, where, issues)
+    _check_keys(
+        m,
+        {"enabled", "bot_token_env", "chat_id_env", "ask_timeout_s", "trace"},
+        where,
+        issues,
+    )
     return TelegramConfig(
         enabled=_bool(m, "enabled", False, where, issues),
         bot_token_env=_str(m, "bot_token_env", "TELEGRAM_BOT_TOKEN", where, issues),
         chat_id_env=_str(m, "chat_id_env", "TELEGRAM_CHAT_ID", where, issues),
         ask_timeout_s=_int(m, "ask_timeout_s", 28800, where, issues),
+        trace=_bool(m, "trace", False, where, issues),
     )
 
 

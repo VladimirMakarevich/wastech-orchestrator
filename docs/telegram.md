@@ -88,6 +88,7 @@ telegram:
   bot_token_env: "TELEGRAM_BOT_TOKEN"
   chat_id_env: "TELEGRAM_CHAT_ID"
   ask_timeout_s: 28800
+  trace: false # optional live per-node progress feed
 ```
 
 `ask_timeout_s` must be greater than zero. Environment-variable names must match normal shell env name syntax. A service manager such as systemd, launchd, Docker, or Kubernetes can inject the same variables into the orchestrator process, or point it at a file with `--env-file PATH`.
@@ -155,6 +156,7 @@ The command does not run a provider, process a task, edit repository files, comm
 - Ordinary diffs and routine commit/push/PR publishing do not require Telegram approval.
 - Timeout, transport failure, ambiguous approval, or a repeated stage request moves the task to `manual_action_required`.
 - `contacts` from task front matter are plain-text mentions only. They do not select the chat.
+- **Live step-trace** (`telegram.trace: true`, off by default): the orchestrator pushes one best-effort message per executed flow node finish — `<emoji> <node-id> → <outcome>`, e.g. `✅ implementation → done`, `🔁 review → rework`, `❌ testing → fail` (✅ accept/done/pass, 🔁 rework, ❌ fail, ▶️ otherwise). This gives a remote operator live visibility into a long `watch` run between the start and the terminal notification. It carries only the node id + outcome — never diff, prompt, or agent text — and is fire-and-forget: a send failure never affects the pipeline, and a skipped node emits nothing. Independent of local log verbosity (this is a Telegram push, not a file). The leading emoji keeps trace lines visually distinct from approval/question prompts in the same chat.
 
 Waiting state is stored in `logs/<task-id>/hitl/*.json`, not as a new state-machine status. After a restart, the orchestrator resumes the persisted message/deadline or re-runs the stage with the persisted answer.
 

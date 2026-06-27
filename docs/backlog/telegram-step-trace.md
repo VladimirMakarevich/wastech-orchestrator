@@ -1,6 +1,6 @@
 # Telegram step-trace (live run progress)
 
-Status: **proposed** Date: 2026-06-26 Owner: Vladimir Makarevich
+Status: **implemented** (2026-06-27, config v21, suite green) Date: 2026-06-26 Owner: Vladimir Makarevich
 
 A one-way, best-effort live progress feed pushed to Telegram so a remote operator can see which flow node just ran and how it resolved, toggled by a single global config flag. Builds entirely on the existing `Notifier` abstraction and the per-node observability seam — no new transport, no new persisted state.
 
@@ -46,3 +46,13 @@ Add a single global on/off flag and push one best-effort message per **node fini
 - Call it from `core/flow/observability.py` `record_run_observability` (the existing post-node hook), passing node id and outcome — the data is already in hand there. Gate the call on `telegram.trace`.
 - Add the `trace` field to `TelegramConfig` in `config/schema.py` and parse it in `config/loader.py`. Additive optional field — confirm whether a `CONFIG_SCHEMA_VERSION` bump is needed.
 - No new persistence and no provider changes. Tests: assert a node finish triggers `send_trace` when `telegram.trace` is on, that it is a no-op when off / with `NullNotifier`, and that a send failure never propagates.
+
+## Implementation outcome (2026-06-27)
+
+Shipped exactly the Decision (per-node-finish trace, single `telegram.trace` bool, default `false`, config v21). Key correction to the notes above and resolved open questions:
+
+- **Seam: the engine post-node hook, not `record_run_observability`.** `record_run_observability` runs inside the node runners right after `router.run_stage`, where the flow **verdict is not yet known** (agent nodes carry only a provider `RunStatus`; an evaluator's accept/rework is computed later) and the orchestrator's config/notifier are not cleanly in scope. The emit lives in `Orchestrator._engine_post_node` → `post_node` (`core/orchestrator.py`), the existing once-per-executed-node hook where the supervisor already observes each step. It has `node.id`, the canonical `NodeOutcome.kind`, `self._config.telegram.trace`, and `self._notifier` all in hand. Gated on `telegram.trace` alone — when Telegram is off the notifier is a `NullNotifier`, so it is a no-op automatically.
+- **Outcome vocabulary.** The message is `[task] <emoji> <node-id> → <outcome>` where outcome is the real `NodeOutcome.kind`: `done` (agent), `accept`/`rework` (evaluator), `pass`/`fail` (checks), `route:<label>` (explicit). The idealized examples above (`implementation → accept`) read as `implementation → done` in practice — agent nodes resolve `done`. Emoji: ✅ accept/done/pass, 🔁 rework, ❌ fail, ▶️ otherwise.
+- **CONFIG_SCHEMA_VERSION bump: yes (20 → 21).** Additive/optional, so no migration code — `upgrade-config` merges the new template key into old configs and the loader accepts absent/lower versions; the bump is the convention that signals operators to re-sync.
+- **Gate-prompt interleaving (open Q2): handled by the distinct leading emoji** — trace lines are visually separable from approve/deny prompts in the same chat.
+- **Deferred** (recorded in [follow_ups.md](follow_ups.md)): task-start bookend (open Q3), the `off/milestones/verbose` verbosity enum (noise-at-scale, open Q1), and the static per-node human-label map.

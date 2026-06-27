@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from wastech_orchestrator.notify.interface import NullNotifier
 from wastech_orchestrator.notify.telegram import TelegramNotifier, _Secrets
 
 from .conftest import FakeTelegramClient
@@ -102,6 +103,42 @@ def test_send_failure_log_redacts_token_and_chat_id(
     assert token not in rendered
     assert chat_id not in rendered
     assert "[REDACTED]" in rendered
+
+
+def test_send_trace_contains_task_node_and_outcome(fake_client: FakeTelegramClient) -> None:
+    n = _notifier(fake_client)
+    n.send_trace(task_id="task-001", node_id="implementation", outcome="done")
+    assert len(fake_client.sent) == 1
+    text = fake_client.sent[0]["text"]
+    assert "task-001" in text and "implementation" in text and "done" in text
+
+
+def test_send_trace_emoji_per_outcome(fake_client: FakeTelegramClient) -> None:
+    n = _notifier(fake_client)
+    cases = {
+        "accept": "✅",
+        "done": "✅",
+        "pass": "✅",
+        "rework": "🔁",
+        "fail": "❌",
+        "route:retry": "▶️",  # any unmapped outcome falls back to the neutral glyph
+    }
+    for outcome, emoji in cases.items():
+        fake_client.sent.clear()
+        n.send_trace(task_id="t", node_id="review", outcome=outcome)
+        assert emoji in fake_client.sent[0]["text"]
+
+
+def test_send_trace_failure_is_swallowed(fake_client: FakeTelegramClient) -> None:
+    fake_client.send_error = RuntimeError("network down")
+    n = _notifier(fake_client)
+    # Must not raise — best-effort by contract.
+    n.send_trace(task_id="task-004", node_id="testing", outcome="fail")
+    assert fake_client.sent == []
+
+
+def test_null_notifier_send_trace_is_a_noop() -> None:
+    assert NullNotifier().send_trace(task_id="t", node_id="implementation", outcome="done") is None
 
 
 def test_outgoing_message_is_redacted_and_bounded(fake_client: FakeTelegramClient) -> None:

@@ -107,6 +107,7 @@ def build_git_config(
     auto_merge_wait_for_checks: bool = False,
     prompt_audit: bool = False,
     tasks_dir: str = "tasks",
+    telegram_trace: bool = False,
 ) -> OrchestratorConfig:
     """Build a config pointing ``repo.local_path`` at the clone, with the given footprint/checks."""
     env_lines = "\n".join(f"    - {e}" for e in _TEST_ALLOWED_ENV)
@@ -118,6 +119,7 @@ def build_git_config(
     else:
         checks_block = "  command_sets: {}\n"
     validation_block = f"validation:\n  quarantine_folder: {quarantine!r}\n" if quarantine else ""
+    telegram_block = "telegram:\n  trace: true\n" if telegram_trace else ""
     text = f"""
 orchestrator:
   auto_mode:
@@ -143,7 +145,7 @@ repo:
 security:
   allowed_environment:
 {env_lines}
-{validation_block}checks:
+{validation_block}{telegram_block}checks:
 {checks_block}  timeout_seconds: 30
 git:
   create_pull_request: {str(create_pr).lower()}

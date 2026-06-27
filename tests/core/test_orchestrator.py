@@ -139,9 +139,15 @@ class RecordingNotifier:
         ask_results: list[AskResult] | None = None,
     ) -> None:
         self.calls: list[dict[str, object]] = []
+        self.trace_calls: list[dict[str, object]] = []
         self.ask_calls: list[dict[str, object]] = []
         self._raise_on_send = raise_on_send
         self._ask_results = list(ask_results or [])
+
+    def send_trace(self, *, task_id: str, node_id: str, outcome: str) -> None:
+        self.trace_calls.append({"task_id": task_id, "node_id": node_id, "outcome": outcome})
+        if self._raise_on_send:
+            raise RuntimeError("trace failed")
 
     def send_notification(
         self,
@@ -390,6 +396,60 @@ def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: 
     assert row.branch is not None
     branches = git_run(["branch", "--list", row.branch], git_repo.clone)
     assert row.branch in branches
+
+
+def _run_happy_task_with_trace(
+    git_repo, make_git_config, tmp_path: Path, *, telegram_trace: bool
+) -> RecordingNotifier:
+    """Drive one complete happy-path task, returning the notifier that recorded its step traces."""
+    providers = _both()
+    notifier = RecordingNotifier()
+    orch, _store, _ledger, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
+        config_kwargs={"telegram_trace": telegram_trace},
+    )
+    task_file = _complete_task(tmp_path)
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+    result = orch.run_task(task_file)
+    assert result.final_status is Status.DONE
+    return notifier
+
+
+def test_step_trace_emits_one_message_per_executed_node(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    notifier = _run_happy_task_with_trace(
+        git_repo, make_git_config, tmp_path, telegram_trace=True
+    )
+    traced = {c["node_id"] for c in notifier.trace_calls}
+    # One trace per executed node finish; the skipped refinement node emits nothing.
+    assert {"planning", "implementation", "testing", "review", "publish"} <= traced
+    assert "refinement" not in traced
+    # Every call carries the task id + the node's edge-selecting outcome (no secrets, no payload).
+    impl = [c for c in notifier.trace_calls if c["node_id"] == "implementation"]
+    assert impl == [{"task_id": "task-001", "node_id": "implementation", "outcome": "done"}]
+    assert all(c["task_id"] == "task-001" for c in notifier.trace_calls)
+
+
+def test_step_trace_off_by_default_emits_nothing(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    notifier = _run_happy_task_with_trace(
+        git_repo, make_git_config, tmp_path, telegram_trace=False
+    )
+    assert notifier.trace_calls == []
 
 
 def test_task_branch_name_override_controls_published_head(

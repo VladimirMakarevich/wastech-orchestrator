@@ -104,7 +104,11 @@ from wastech_orchestrator.providers.base import ProviderId
 # same-provider transient-retry policy (Option A) plus the B-lite soft-pause ceiling. Absent => safe
 # defaults (max_attempts=2, base_delay_s=2.0, max_delay_s=30.0, max_blocked_s=3600.0); old configs
 # load fail-open and `upgrade-config` adds it from the template.
-CONFIG_SCHEMA_VERSION = 20
+# v21 (2026-06-27, telegram-step-trace): a *format* add of the optional `telegram.trace` bool
+# (default false) — a one-way, best-effort live progress feed that pushes one message per flow node
+# finish (`<emoji> <node-id> → <outcome>`, node id + outcome only, no secrets). A no-op when
+# Telegram is disabled. Old configs omit it and take false; `upgrade-config` adds it from template.
+CONFIG_SCHEMA_VERSION = 21
 
 
 class AuditBranch(StrEnum):
@@ -313,6 +317,7 @@ class TelegramConfig:
     bot_token_env: str
     chat_id_env: str
     ask_timeout_s: int
+    trace: bool = False
 
 
 @dataclass(frozen=True)
