@@ -1,6 +1,6 @@
 # Memory subsystem — task hub
 
-Status: **proposed (in design)** Date: 2026-06-28 Owner: Vladimir Makarevich
+Status: **accepted (V1 design); build pending** Date: 2026-06-29 Owner: Vladimir Makarevich
 
 This is the root for the **persistent, repo-scoped memory subsystem** task — the place to start and the index of everything. The goal: stop losing expensive, repo-specific lessons between independent runs, without turning into an opaque, rotting, or attackable context dump.
 
@@ -13,6 +13,7 @@ One-line shape: a **files-first, supervisor-distilled, deterministically-managed
 | [problem.md](problem.md) | The original problem and why it matters now. |
 | [requirements.md](requirements.md) | Functional / non-functional requirements + hard constraints (firm vs to-refine). |
 | [design.md](design.md) | The buildable detailed design (components, data flow, layout, tiers, lifecycle, safety). |
+| [adr-0001-memory-subsystem-v1.md](adr-0001-memory-subsystem-v1.md) | **The accepted V1 architecture decision** — the capstone decision record. |
 | [acceptance-criteria.md](acceptance-criteria.md) | Testable criteria per area. |
 | [out-of-scope.md](out-of-scope.md) | What V1 excludes and what is rejected outright, with rationale. |
 | [definition-of-done.md](definition-of-done.md) | The V1 merge gate. |
@@ -37,5 +38,7 @@ Documents carry only what is **decided and buildable**; everything still open li
 ## Current status & next steps
 
 - ✅ Research consolidated into the [blueprint](research/memory-architecture-blueprint.md); task structure scaffolded (this hub + spec docs + plan skeleton).
-- ✅ [requirements.md](requirements.md) walked through and **locked for V1** (FR1–8, NFR1–9, C1–5); decided Q4 / Q6 / Q8, narrowed Q1 / Q5. Only tunable default integers remain.
-- 🔜 Finalize [design.md](design.md) against the locked requirements; resolve the remaining [questions.md](questions.md) (Q2, Q3, Q7, Q9, Q10); then break [plan/](plan/index.md) phase 01 into committed task files and (optionally) raise an ADR for V1.
+- ✅ [requirements.md](requirements.md) **locked for V1** (FR1–8, NFR1–9, C1–5) and **all [questions.md](questions.md) resolved (Q1–Q10)**; concrete contracts/defaults captured in [design.md](design.md) §10.
+- ✅ [ADR-0001](adr-0001-memory-subsystem-v1.md) **accepted** — the V1 architecture is ratified.
+- ✅ [plan/](plan/index.md) **fully detailed** — all five phases broken into committed task files (Goal / Scope / Approach / Files / Tests / Done-when each), grounded in the verified code seams (design §9). Three actualization deltas folded in: `.worc/` is already gitignored wholesale (no new ignore rule — 01.1); `supervisor.finalize()` is today a free-text turn that 02.2 converts to structured output on the same turn; the `evaluations` table already exists as the home for the Q6 marker (02.6).
+- 🔜 Implement phase by phase starting with [01 — Foundations](plan/01-foundations/index.md); tune the provisional Q1/Q5 integers against the eval baseline.

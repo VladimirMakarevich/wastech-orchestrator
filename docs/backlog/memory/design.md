@@ -109,6 +109,14 @@ Audit: every mutation logs id, timestamp, actor, source artifact ids, affected i
 - Config: [../../../src/wastech_orchestrator/config/schema.py](../../../src/wastech_orchestrator/config/schema.py), [../../../src/wastech_orchestrator/config/loader.py](../../../src/wastech_orchestrator/config/loader.py).
 - New modules (deterministic, unit-testable, no fake-CLI needed): `MemoryService`, `PacketBuilder`, `CleanupJob`, `DerivedIndex`.
 
-## Open design points
+## 10. Resolved parameters & contracts (V1)
 
-Tracked in [questions.md](questions.md): autodream cadence/budget, codebase-reconciliation source of truth, promotion thresholds, CLI verbs & scheduling, `memory_path` naming & caps, audit home (dedicated log vs `evaluations` row vs both), where resume/debug-grade episodic detail lives.
+All design questions are resolved (full trail: [questions.md](questions.md)). The concrete contracts and provisional (tunable) defaults:
+
+- **Candidate-delta contract (Q9).** On success only, the supervisor emits `candidate_memory_delta` via structured output on its existing finalize turn: `{ lessons: [{kind, subject, statement, rationale, scope{paths,symbols,nodes}, evidence[], trust_hint}], failures: [{signature, paths, remedy?, evidence[]}], entities: [{entity_id, type, paths, symbols, summary, relationships[], risk_notes[]}] }`. `trust_hint` is advisory; `MemoryService` assigns the final trust (no self-certification). Absent/malformed → skip + log, never blocks publish.
+- **Staleness reconciliation (Q2).** `DerivedIndex` answers path/symbol existence (`git ls-files` + stat + symbol grep). Missing target → rename-remap attempt → else mark stale → **quarantine, never silent delete**. Judgment cases quarantine (fail-closed); a lesson auto-drops only on existence failure or 2× explicit contradiction.
+- **Promotion thresholds (Q3).** ≥ 2 tasks within 60d **or** trust ∈ {human-curated, review-verified} **or** explained a recurring failure **or** annotates a stable hotspot. Defaults `2` / `60d` tunable.
+- **Packet caps (Q5).** Variable `memory_path` (final). Per-node defaults (tunable): ≤ 3 long-term / ≤ 5 entity / ≤ 3 episodic, ~120-line backstop; `implementation` → more entity, `review` → more reviewer.
+- **Cleanup budget (Q1).** `min_interval 300s`, `max_scanned 200`, `max_edits 50`, `max_wall_clock 5s`, `promotions_per_pass 0` — all tunable.
+- **Episodic detail home (Q7).** Raw resume/debug detail stays in `logs/<task-id>/` + `state.db`; short-term memory stores a distilled episode + `artifact_paths` pointers only.
+- **Enable default (Q10).** Absent `memory` block → disabled; `worc install` (fresh) → `enabled: true`. Disabled = no dir, no delta, empty `memory_path`, CLI no-op, no cleanup.
