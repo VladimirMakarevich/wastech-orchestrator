@@ -90,7 +90,7 @@ Redaction + secret scan before any disk write (reuse `redact_text` / `redact_map
 | `agent-inferred` | LLM synthesis, unconfirmed | no — quarantine / short-term |
 | `external-untrusted` | from web/MCP/user/API content | never auto — quarantine, human |
 
-Audit: every mutation logs id, timestamp, actor, source artifact ids, affected ids, action, pre/post hashes, rationale; append-only + hash-chained; batch cleanup snapshots first; a `restore` makes bad writes cheap to undo. Bounded autonomy: max scan/edit per pass (promotions-per-pass default 0), wall-clock budget, fail-closed, no active-task writes. Enforcement is deterministic (policies/hooks), never memory prose. (Blueprint §7.)
+Audit: every mutation logs id, timestamp, actor, source artifact ids, affected ids, action, pre/post hashes, rationale; append-only + hash-chained, plus a best-effort `evaluations` marker row in the existing decision trail; batch cleanup snapshots first; a `restore` makes bad writes cheap to undo. Bounded autonomy: max scan/edit per pass (promotions-per-pass default 0), wall-clock budget, fail-closed, no active-task writes. Enforcement is deterministic (policies/hooks), never memory prose. (Blueprint §7.)
 
 ## 8. Config
 

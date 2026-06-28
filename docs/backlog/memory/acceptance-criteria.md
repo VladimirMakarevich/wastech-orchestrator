@@ -36,7 +36,7 @@ Testable criteria for V1, grouped by area. Each maps to one or more requirements
 
 ## Curation
 
-- **AC-C1** `worc memory show | validate | compact | restore` exist and operate with a `--dry-run` plan before execution. **[refine]** final verbs.
+- **AC-C1** `worc memory show | validate | compact | restore` exist and operate with a `--dry-run` plan before execution (verbs locked — Q4).
 - **AC-C2** The background cleanup runs only when no task is active, within its configured budget, and never delays the next task pickup.
 - **AC-C3** Cleanup may demote/expire/quarantine/merge but **never** creates a new long-term lesson and **never** edits code/docs/skills.
 - **AC-C4** A stale entity (referenced path/symbol removed) is detected and marked/quarantined by cleanup or validate.

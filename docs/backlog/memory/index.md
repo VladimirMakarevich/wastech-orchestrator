@@ -37,5 +37,5 @@ Documents carry only what is **decided and buildable**; everything still open li
 ## Current status & next steps
 
 - ✅ Research consolidated into the [blueprint](research/memory-architecture-blueprint.md); task structure scaffolded (this hub + spec docs + plan skeleton).
-- 🔜 Lock [requirements.md](requirements.md) and the firm/to-refine split; work through the high-priority items in [questions.md](questions.md) (esp. Q8 first-slice ordering, Q9 candidate-delta contract).
-- 🔜 Finalize [design.md](design.md), then break [plan/](plan/index.md) phase 01 into committed task files and (optionally) raise an ADR for V1.
+- ✅ [requirements.md](requirements.md) walked through and **locked for V1** (FR1–8, NFR1–9, C1–5); decided Q4 / Q6 / Q8, narrowed Q1 / Q5. Only tunable default integers remain.
+- 🔜 Finalize [design.md](design.md) against the locked requirements; resolve the remaining [questions.md](questions.md) (Q2, Q3, Q7, Q9, Q10); then break [plan/](plan/index.md) phase 01 into committed task files and (optionally) raise an ADR for V1.

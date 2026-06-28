@@ -8,7 +8,7 @@ Status: **outline** — [plan](../index.md) · [design §5,§7](../../design.md)
 
 ## Tasks (split into files at scope-lock)
 
-- **`worc memory` CLI** — first nested subparser (own `add_subparsers`), modeled on `cmd_upgrade_config`: `show`, `validate`, `compact`/`defrag`, `restore`, each with a `--dry-run` plan before execute. Final verbs: [questions.md](../../questions.md) Q4/Q5.
+- **`worc memory` CLI** — first nested subparser (own `add_subparsers`), modeled on `cmd_upgrade_config`: `show`, `validate`, `compact`, `restore`, each with a `--dry-run` plan before execute (verbs decided — Q4; no `defrag` alias).
 - **`CleanupJob.run_once`** — TTL expiry, path/symbol existence checks (via `DerivedIndex`), duplicate-merge candidates, stale marking, quarantine of uncertain cases; snapshot-before-batch; bounded scan/edit/wall-clock budget; promotions-per-pass default 0.
 - **Idle hook** — call `CleanupJob.run_once()` in the `watch_loop` idle gap (after `watch_once`, before the poll sleep); short, interruptible, no-network, no active-task writes.
 - **`DerivedIndex` (minimal)** — just enough to answer "does this path/symbol still exist?" for stale detection (see Q2); full index is a separate concern.
