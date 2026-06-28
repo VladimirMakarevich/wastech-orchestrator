@@ -21,10 +21,12 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`wastech-orchestrator` / `worc`** - The CLI entry point. Both names expose the same commands, so the short alias is just a convenience, not a different interface.
 - **`install`** - Binds the current repository into `<repo>/.worc/`, writes or refreshes `config.yaml`, seeds the packaged guide and flow copies, and can run preflight after setup.
 - **`run`** - Processes one task file end to end through the orchestrator.
-- **`watch`** - Watches the task queue, resumes in-flight work first, then picks pending tasks one at a time.
-- **`stop`** - Stops a running `watch` daemon.
-- **`restart`** - Stops the running watcher and starts a fresh one with new flags.
+- **`watch`** - Watches the task queue, resumes in-flight work first, then picks pending tasks one at a time. `--queue NAME` serves only that queue.
+- **`stop`** - Stops a running `watch` daemon via the **stop ladder**: idle stops with no prompt; a busy daemon is refused unless confirmed (`YES`) or forced — `--force` (soft: finish the current step) or `--force-full` (hard: kill the agent's process group now; POSIX only, Windows degrades to soft).
+- **`restart`** - Stops the running watcher (same stop ladder) and starts a fresh one with new flags.
 - **`status`** - Shows the active or latest persisted task state without starting work.
+- **`top`** - Live, read-only monitor (a client over the daemon, not an engine host): the active task + flow node, a parked/gate-pending marker, the queue-filtered priority-sorted pending queue, recent terminal tasks, and a tail of the daemon `--log-file`; polls `state.db` read-only and quits on `q`. Stdlib-only — no extra needed.
+- **`shell`** - Interactive operator console (the `[shell]` extra): a prompt_toolkit REPL that spawns or attaches to the `watch` daemon, streams its log above the prompt, and dispatches `enqueue`/`ps`/`status`/`logs`/`prs`/`merge-task`/`finalize`/`rerun`/`up`/`down`/`restart`/`cancel` onto the existing commands. It never hosts the engine itself.
 - **`list`** - Read-only enumeration of the active task, the `tasks/pending` queue, and recent terminal tasks; `--format ids` (filtered by `--scope`) is the machine-readable source that backs completion.
 - **`completion`** - Prints a `bash`/`zsh` completion script (sourced once) that completes subcommands and flags statically and task ids dynamically via `worc list --format ids`.
 - **`preflight`** - Runs read-only readiness checks for providers, isolation, and configured check sets.

@@ -29,6 +29,12 @@ dev = [
 docs = [
     "mkdocs>=1.6",
 ]
+# `worc shell` (the interactive operator console). Optional: the daemon, headless/CI installs, and
+# every non-console command never import prompt_toolkit. `worc top` is stdlib-only and needs nothing
+# here. Install with `pip install wastech-orchestrator[shell]`.
+shell = [
+    "prompt_toolkit>=3",
+]
 
 [project.scripts]
 wastech-orchestrator = "wastech_orchestrator.cli:main"
@@ -59,6 +65,12 @@ python_version = "3.12"
 strict = true
 files = ["src"]
 exclude = ["^tests/"]
+
+# prompt_toolkit is the optional [shell] extra — not installed for a headless `mypy src` run in CI,
+# so tolerate its absence (imported lazily inside `worc shell`).
+[[tool.mypy.overrides]]
+module = "prompt_toolkit.*"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

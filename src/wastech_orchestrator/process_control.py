@@ -20,7 +20,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import FrameType, TracebackType
 
@@ -29,6 +29,8 @@ KillFn = Callable[[int, int], None]  # os.kill(pid, sig)
 SleepFn = Callable[[float], None]  # time.sleep
 NowFn = Callable[[], float]  # time.monotonic
 StartTimeFn = Callable[[int], str | None]  # opaque per-pid start-time token (recycling guard)
+GetpgidFn = Callable[[int], int]  # os.getpgid(pid) -> the process group id (POSIX)
+KillpgFn = Callable[[int, int], None]  # os.killpg(pgid, sig) (POSIX)
 # The handler/return type accepted by signal.signal (mirrors typeshed's _HANDLER).
 SignalHandler = Callable[[int, FrameType | None], object] | int | signal.Handlers | None
 SignalFn = Callable[[int, SignalHandler], SignalHandler]
@@ -48,6 +50,17 @@ def _can_signal() -> bool:
     the watch loop polls — never ``os.kill``.
     """
     return os.name != "nt"
+
+
+def _unavailable_killpg(pgid: int, sig: int) -> None:  # pragma: no cover - Windows-only guard
+    raise OSError("os.killpg is unavailable on this platform")
+
+
+# Defaults resolved at import time: ``os.getpgid``/``os.killpg`` do not exist on Windows, so a bare
+# ``os.killpg`` default would raise at import there. The full (group-kill) path is gated on
+# ``_can_signal()`` (POSIX), so these fallbacks are never actually invoked on Windows.
+_DEFAULT_GETPGID: GetpgidFn = getattr(os, "getpgid", lambda pid: pid)
+_DEFAULT_KILLPG: KillpgFn = getattr(os, "killpg", _unavailable_killpg)
 
 
 @dataclass(frozen=True)
@@ -246,6 +259,8 @@ class StopOutcome:
     killed: bool  # did we escalate to a hard kill after the timeout (POSIX only)?
     already_dead: bool  # PID file present but the process was not running (stale; POSIX probe)
     timed_out: bool = False  # shutdown was not confirmed within ``timeout``
+    group_killed: bool = False  # ``level="full"``: the daemon's process group was SIGKILLed (POSIX)
+    degraded_to_soft: bool = False  # ``level="full"`` on Windows fell back to the soft stop
 
 
 def stop_process(
@@ -256,27 +271,32 @@ def stop_process(
     term_sig: int = signal.SIGTERM,
     kill_sig: int = getattr(signal, "SIGKILL", signal.SIGTERM),
     stop_file: Path | None = None,
+    level: str = "soft",
     kill_fn: KillFn = os.kill,
     sleep_fn: SleepFn = time.sleep,
     now_fn: NowFn = time.monotonic,
     start_time_fn: StartTimeFn = _read_proc_start_time,
+    getpgid_fn: GetpgidFn = _DEFAULT_GETPGID,
+    killpg_fn: KillpgFn = _DEFAULT_KILLPG,
     can_signal: bool | None = None,
 ) -> StopOutcome:
     """Ask the daemon recorded in ``path`` to stop, confirming shutdown within ``timeout``.
 
-    Idempotent: an absent PID file is a no-op. Otherwise it always writes ``stop_file`` (the
-    cross-platform sentinel the watch loop polls) and waits for shutdown by the platform's strategy
-    (see :func:`_can_signal`):
+    Idempotent: an absent PID file is a no-op. ``level`` is the stop ladder's hardness:
 
-    * **POSIX** — probe liveness and send ``term_sig`` (SIGTERM) for an immediate wakeup, poll, and
-      escalate to ``kill_sig`` (SIGKILL) if it outlives the timeout. A recorded start-time guards
-      every probe so a recycled PID is never signaled.
-    * **Windows** — ``os.kill`` cannot reach an unrelated process, so wait for the daemon to remove
-      its own PID file (it does so on a clean exit). If the file does not vanish within the timeout
-      (a wedged daemon, or a stale file from a crash), clear it and report ``timed_out``; a survivor
-      must be stopped by hand (Task Manager).
+    * ``"soft"`` (default) — graceful, between-ticks stop. **POSIX**: write ``stop_file``, probe
+      liveness, send ``term_sig`` (SIGTERM) for an immediate wakeup, poll, and escalate to
+      ``kill_sig`` (SIGKILL) only if the daemon outlives the timeout. **Windows**: ``os.kill`` can't
+      reach an unrelated process, so write ``stop_file`` and wait for the daemon to remove its own
+      PID file; if it does not vanish within the timeout, clear it and report ``timed_out``.
+    * ``"full"`` — hard stop. **POSIX only**: SIGKILL the daemon's whole process group at once
+      (daemon + active agent + any checks child — they share a group because the agent launches
+      with ``start_new_session=True``), so nothing is orphaned; recovery is the next ``resume()``.
+      On **Windows** there is no cross-process group kill, so it **degrades to the soft path** and
+      sets ``degraded_to_soft`` (the CLI surfaces "use Task Manager / taskkill").
 
-    The PID file and stop-file are removed in every terminal branch. Pure under test via the seams.
+    A recorded start-time guards every probe so a recycled PID is never signaled. The PID file and
+    stop-file are removed in every terminal branch. Pure under test via the injectable seams.
     """
     if can_signal is None:
         can_signal = _can_signal()
@@ -285,6 +305,17 @@ def stop_process(
         if stop_file is not None:
             stop_file.unlink(missing_ok=True)  # reap a stray sentinel; nothing is recorded
         return StopOutcome(found=False, pid=None, signaled=False, killed=False, already_dead=False)
+    if level == "full" and can_signal:
+        return _stop_via_group_kill(
+            path,
+            record,
+            kill_sig=kill_sig,
+            stop_file=stop_file,
+            kill_fn=kill_fn,
+            start_time_fn=start_time_fn,
+            getpgid_fn=getpgid_fn,
+            killpg_fn=killpg_fn,
+        )
     if can_signal:
         return _stop_via_signal(
             path,
@@ -299,7 +330,8 @@ def stop_process(
             now_fn=now_fn,
             start_time_fn=start_time_fn,
         )
-    return _stop_via_pid_file(
+    # Windows: no cross-process signal. A "full" request degrades to the soft PID-file wait.
+    outcome = _stop_via_pid_file(
         path,
         record,
         timeout=timeout,
@@ -307,6 +339,53 @@ def stop_process(
         stop_file=stop_file,
         sleep_fn=sleep_fn,
         now_fn=now_fn,
+    )
+    return replace(outcome, degraded_to_soft=True) if level == "full" else outcome
+
+
+def _stop_via_group_kill(
+    path: Path,
+    record: ProcessIdentity,
+    *,
+    kill_sig: int,
+    stop_file: Path | None,
+    kill_fn: KillFn,
+    start_time_fn: StartTimeFn,
+    getpgid_fn: GetpgidFn,
+    killpg_fn: KillpgFn,
+) -> StopOutcome:
+    """POSIX hard stop: SIGKILL the daemon's whole process group at once (no graceful wait).
+
+    Guards recycling with the recorded start-time before killing, so a recycled PID's unrelated
+    group is never destroyed. A "no such process" race (daemon exited first) reads as already-dead.
+    """
+    pid = record.pid
+    if not is_running(
+        pid, expected_start=record.start_time, kill_fn=kill_fn, start_time_fn=start_time_fn
+    ):
+        path.unlink(missing_ok=True)  # reap the stale (or recycled) file
+        if stop_file is not None:
+            stop_file.unlink(missing_ok=True)
+        return StopOutcome(found=True, pid=pid, signaled=False, killed=False, already_dead=True)
+    try:
+        killpg_fn(getpgid_fn(pid), kill_sig)
+    except OSError as exc:  # raced to exit between probe and kill (ESRCH from getpgid/killpg)
+        if not _is_no_such_process(exc):
+            raise
+        path.unlink(missing_ok=True)
+        if stop_file is not None:
+            stop_file.unlink(missing_ok=True)
+        return StopOutcome(found=True, pid=pid, signaled=False, killed=False, already_dead=True)
+    path.unlink(missing_ok=True)
+    if stop_file is not None:
+        stop_file.unlink(missing_ok=True)
+    return StopOutcome(
+        found=True,
+        pid=pid,
+        signaled=True,
+        killed=True,
+        already_dead=False,
+        group_killed=True,
     )
 
 

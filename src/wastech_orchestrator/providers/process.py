@@ -96,6 +96,11 @@ def run_process(
                     errors="replace",
                     timeout=timeout_seconds,
                     shell=False,
+                    # Run the agent in its own process group (POSIX setsid). This lets `stop
+                    # --force-full` SIGKILL the daemon's whole group without orphaning the agent or
+                    # any checks subprocess it spawned. A documented no-op on Windows (the hard stop
+                    # degrades to soft there); no platform branch is needed at the launch site.
+                    start_new_session=True,
                     **stdin_kwargs,
                 )
             exit_code = completed.returncode
@@ -118,6 +123,32 @@ def run_process(
         duration_seconds=duration_seconds,
         stdout_path=os.fspath(stdout_path),
         stderr_text=stderr_text,
+    )
+
+
+def spawn_detached(
+    argv: Sequence[str],
+    *,
+    cwd: str | Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> subprocess.Popen[bytes]:
+    """Launch a long-running child (the ``watch`` daemon the console supervises); return its handle.
+
+    The detached counterpart to :func:`run_process`: it neither waits nor captures — the caller
+    supervises/stops the child itself. Same safety invariants: an **argv list**, ``shell=False``,
+    and the child's stdin is ``DEVNULL`` (the parent's stdin is never inherited). Its stdout/stderr
+    are discarded — a supervised daemon is observed through its ``--log-file``, not the console's
+    terminal (which the prompt owns). ``env``/``cwd`` default to the parent's (the daemon is the
+    orchestrator itself and needs its normal environment), unlike the allowlisted-env agent runner.
+    """
+    return subprocess.Popen(
+        list(argv),
+        cwd=os.fspath(cwd) if cwd is not None else None,
+        env=dict(env) if env is not None else None,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        shell=False,
     )
 
 

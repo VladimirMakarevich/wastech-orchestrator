@@ -49,6 +49,7 @@ tasks/pending/task-001.md
 - **Python 3.12+** and **git**.
 - The agent CLIs you intend to route to on `PATH`: **`codex`** and/or **`claude`**.
 - **GitHub CLI (`gh`)** — only if you want PRs opened automatically (`git.create_pull_request: true`).
+- For the interactive console (`worc shell`): install the optional extra — `pip install wastech-orchestrator[shell]`. `worc top` and every other command need nothing extra; the daemon never imports it.
 
 The orchestrator **never installs or authorizes** the CLIs and never stores credentials. Authorize git push for your remote, `gh auth login`, and sign in to `codex` / `claude` yourself, once, in the environment the orchestrator runs in. Only allowlisted environment variables are passed to child processes. See [docs/operations.md §2](docs/operations.md).
 
@@ -163,11 +164,18 @@ worc merge-task <id>    go-ahead to merge a reviewed PR: update branch w/ base, 
 worc tasks              list every known task with status + branch (read-only); --status filters
 worc watch              process pending tasks; loop + periodic git sync
                           --poll-seconds N            override orchestrator.poll_interval_seconds
-worc stop               stop a running watch daemon (SIGTERM, then SIGKILL)
+                          --queue NAME                serve only this queue (override orchestrator.queue)
+worc stop               stop a running watch daemon (stop ladder: idle stops, busy confirms/forces)
                           --timeout SECONDS           graceful-shutdown wait before SIGKILL (default: 30)
-worc restart            stop the running watch daemon, then start a fresh one
-                          --timeout SECONDS  --poll-seconds N
+                          --force                     stop a busy daemon softly (finish the current step)
+                          --force-full                hard-stop now: kill the agent's group (POSIX; Windows: soft)
+worc restart            stop the running watch daemon (same stop ladder), then start a fresh one
+                          --timeout SECONDS  --poll-seconds N  --queue NAME  --force  --force-full
 worc status [task-id]   show the active/latest persisted task (no work performed)
+worc top                live read-only monitor: active task + node, queue, recent, daemon log (q quits)
+                          --poll-seconds N  --queue NAME  --log-file PATH  --recent N
+worc shell              interactive operator console over the watch daemon (needs the [shell] extra)
+                          --queue NAME  --log-file PATH
 worc list               enumerate active + pending + recent tasks (read-only)
                           --pending | --recent [N] | --all   focus one section
                           --format table|ids|json    human / bare ids / structured
