@@ -1,6 +1,8 @@
 # Orchestrator memory (cross-task reuse, defrag, autodream)
 
-Status: **proposed** (2026-06-26) Date: 2026-06-26 Owner: Vladimir Makarevich
+Status: **superseded** (2026-06-28) — consolidated into the research-backed [Memory subsystem — architecture blueprint](memory/memory-architecture-blueprint.md), which is now the authoritative design to build the implementation plan and ADR(s) from. Date: 2026-06-26 Owner: Vladimir Makarevich
+
+> This document is kept as the historical exploratory predecessor. The blueprint keeps its spine and refines it where the [internal](memory/worc-report/worc-deeep-research-memory-report.md) and [external](memory/3rd-party-report/00-3rd-party-deep-research-memory-report.md) deep-research efforts and the [supervisor role-split note](memory/supervisor-role-split.md) pointed (see the blueprint's "How this refines the predecessor draft").
 
 This is an exploratory stake-in-the-ground, not a build spec. It records the direction for a persistent memory subsystem that lets the orchestrator reuse context across tasks, owned by the supervisor. It is a deliberate superset of the existing [Lightweight project memory](README.md) backlog item — that item is the minimal first slice; this document frames the full vision so the slice is built toward the right shape. This revision grounds the design in the actual codebase (supervisor, artifact/redaction, CLI/watch, config/prompt seams) and corrects where the original framing did not fit how the project is wired.
 
