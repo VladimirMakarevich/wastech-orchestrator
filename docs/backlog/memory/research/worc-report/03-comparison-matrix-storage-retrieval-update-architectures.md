@@ -28,4 +28,3 @@
 - `SQLite` выигрывает, как только появляются реальные потребности в dedup, FTS, validation scans и entity joins.
 - `Vector store` хорош как complement к episodic history, но плох как source of truth для conventions/review rules.
 - `Knowledge graph` хорошо работает как index over code/entities, но плохо как first storage layer для произвольно извлеченных LLM facts.
-

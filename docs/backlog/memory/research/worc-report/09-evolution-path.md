@@ -54,4 +54,3 @@ Entity graph becomes justified when:
 - deterministic code index can already produce a decent relation graph.
 
 Until then, `entities.json` plus links is enough.
-

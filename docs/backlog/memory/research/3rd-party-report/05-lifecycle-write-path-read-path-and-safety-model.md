@@ -21,6 +21,7 @@ Fixing packet должен быть самым причинно-ориентир
 
 **Cleanup and bounded autodream between tasks.**  
 “Autodream” для WORC я бы не реализовывал как свободное autonomous memory writing. Лучший вариант — **bounded reconciliation job** между задачами, с жёстким budget и no network, который умеет:
+
 - deduplicate near-duplicates;
 - compact indices;
 - revalidate commands or path existence read-only;
@@ -35,7 +36,7 @@ Fixing packet должен быть самым причинно-ориентир
 Ниже — рекомендуемые decision rules. Это уже design proposal, но он основан на cited patterns above.
 
 | Decision | Rule |
-|---|---|
+| --- | --- |
 | **Promote to long-term** | если знание repo-stable, backed by artifact evidence, и либо повторилось в нескольких задачах, либо критично для planning/review every time |
 | **Promote to entity memory** | если знание naturally attaches to a file/module/context/dependency/owner and improves future path-scoped retrieval |
 | **Keep only in short-term** | если факт task-specific, recent, still possibly superseded, or useful mainly for resume/debug |
@@ -62,6 +63,7 @@ Persist only allowlisted fields and types. This is my recommendation, but it is 
 
 **Trust levels and provenance.**  
 Каждая memory entry должна иметь `trust_level` and `provenance`:
+
 - `repo-observed` — directly verifiable from code/config;
 - `artifact-backed` — derived from task artifacts, checks, review comments;
 - `review-verified` — confirmed in review/fixing outcome;
@@ -78,4 +80,3 @@ Hooks and enforcement should remain deterministic. Anthropic explicitly notes th
 
 **Containment over supervision-only.**  
 Anthropic’s engineering writeup on containing Claude stresses that human approvals alone degrade because users approve most prompts, and that strict access boundaries and sandboxes are central to limiting blast radius. For WORC this means memory cleanup, extraction and retrieval should run under the same containment assumptions as agents themselves: no secret-bearing environment, no arbitrary network, no hidden write channels into core state. citeturn24view0
-

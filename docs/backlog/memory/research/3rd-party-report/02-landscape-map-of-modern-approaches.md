@@ -9,7 +9,7 @@
 Для repo agents в реальной инженерной практике полезны не все типы одинаково. Наиболее полезны:
 
 | Memory type | Что реально даёт coding/repo agent | Практический статус |
-|---|---|---|
+| --- | --- | --- |
 | **Semantic memory** | repo conventions, stable architecture facts, critical commands, fragile areas, dependency gotchas | production-proven |
 | **Procedural memory** | rollout/fix/review workflows, “как здесь обычно чинят X”, test and verification routines | production-proven if explicit; speculative if self-modifying |
 | **Entity memory** | file/module/service/owner/hotspot cards с путями, связями и ссылками на evidence | production-proven in lightweight form; graph-heavy variants are research-adjacent |
@@ -27,4 +27,3 @@ Production-proven patterns сегодня — это **small project guidance fi
 Research-promising patterns — это **repository knowledge graphs**, **historical-commit distillation**, **workflow memory induction** и **memory-enhanced long-horizon navigation**. KGCompass показывает, что graph, связывающий code entities и repo artifacts вроде issues/PRs, даёт точнее bug localization и path-guided repair; Prometheus показывает, что working memory plus lightweight repository graph может улучшать long-horizon navigation; MemCoder показывает сильный сигнал, что структура historical commits и human-validated solutions может быть ценным source of long-term repo memory; AWM показывает, что reusable workflow induction может очень заметно улучшать long-horizon task solving — пусть и в web/navigation, а не в code repositories. Всё это важно для WORC как ориентир на будущее, но пока это скорее **направление эволюции**, чем обязательный MVP. citeturn10view7turn12view0turn12view3turn11view0turn11view1turn16view0turn16view2
 
 Отдельно важно, что evidence против “больше текста = лучше” уже достаточно сильный. AGENTbench нашёл только marginal upside у developer context files и small downside у LLM-generated ones, а ContextBench показывает систематическое over-retrieval. Даже long-context systems не отменяют задачу context engineering: Sourcegraph found quality gains from long context, but also notes linear time-to-first-token growth with context size, so long context — это не замена disciplined retrieval and memory shaping. citeturn10view0turn7search0turn23view3
-

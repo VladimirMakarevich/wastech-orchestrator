@@ -38,7 +38,10 @@
   "created_at": "2026-06-28T18:00:00Z",
   "kind": "review_finding",
   "summary": "Review found that dependency lockfile must be updated together with config schema changes.",
-  "entities": ["path:pyproject.toml", "path:src/wastech_orchestrator/config/schema.py"],
+  "entities": [
+    "path:pyproject.toml",
+    "path:src/wastech_orchestrator/config/schema.py"
+  ],
   "source_artifacts": ["summary_json", "review_path", "checks_path"],
   "trust": "internal_validated",
   "promotion_state": "candidate",
@@ -55,10 +58,13 @@
   "subject": "config-schema-changes",
   "statement": "Any config schema change must update docs and packaged config examples in the same change.",
   "rationale": "Docs-sync gate and config versioning otherwise break operator workflows.",
-  "entities": ["path:src/wastech_orchestrator/config/schema.py", "path:docs/configuration.md"],
+  "entities": [
+    "path:src/wastech_orchestrator/config/schema.py",
+    "path:docs/configuration.md"
+  ],
   "evidence": [
-    {"kind": "repo_doc", "ref": "AGENTS.md"},
-    {"kind": "task", "ref": "task-1177"}
+    { "kind": "repo_doc", "ref": "AGENTS.md" },
+    { "kind": "task", "ref": "task-1177" }
   ],
   "first_seen_task_id": "task-1177",
   "last_validated_commit": "abc1234",
@@ -77,14 +83,14 @@
   "canonical_name": "core/supervisor.py",
   "aliases": ["Supervisor", "__supervisor__ lineage"],
   "bounded_context": "supervision",
-  "hotspots": [
-    "best-effort finalize behavior",
-    "durable own-session lineage"
-  ],
+  "hotspots": ["best-effort finalize behavior", "durable own-session lineage"],
   "linked_lessons": ["lt_000381"],
   "relationships": [
-    {"type": "writes", "target": "artifact:summary.md"},
-    {"type": "depends_on", "target": "path:src/wastech_orchestrator/state_store.py"}
+    { "type": "writes", "target": "artifact:summary.md" },
+    {
+      "type": "depends_on",
+      "target": "path:src/wastech_orchestrator/state_store.py"
+    }
   ],
   "last_seen_task_ids": ["task-1177", "task-1183"],
   "last_validated_commit": "abc1234",
@@ -149,4 +155,3 @@ Canonical merge policy:
 - global forever-growing `memory.md`;
 - memory writes on every stage completion;
 - autonomous procedural memory that can alter security, routing, or publish behavior.
-

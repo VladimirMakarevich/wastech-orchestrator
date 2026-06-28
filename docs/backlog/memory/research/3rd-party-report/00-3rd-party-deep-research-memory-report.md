@@ -1,7 +1,6 @@
 # Persistent memory for LLM coding agents in `wastech-orchestrator`
 
-This report is split into numbered parts. Read in order or jump directly to a section.
-Each part includes `Previous` / `Next` links back into the sequence.
+This report is split into numbered parts. Read in order or jump directly to a section. Each part includes `Previous` / `Next` links back into the sequence.
 
 ## Parts
 

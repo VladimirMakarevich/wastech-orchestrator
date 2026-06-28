@@ -21,6 +21,7 @@
 ### What to defer and what not to build yet
 
 **Defer until later:**
+
 - embeddings as canonical retrieval path;
 - automatic prompt/procedure rewriting from noisy review logs;
 - full issue/PR plus code entity graph;
@@ -29,6 +30,7 @@
 - model-driven freeform “autodream” without deterministic guardrails.
 
 **Do not build yet:**
+
 - vector-only memory architecture;
 - transcript warehouse as memory;
 - provider-native memory as system of record;
@@ -41,6 +43,7 @@
 **Files are enough when** memory volume is still human-browsable, writes are sequential, and most retrieval can be driven by touched paths, stage, simple tags and a concise index. That is exactly your v1 shape: one active task, one repo, supervisor-owned memory.
 
 **SQLite becomes justified when** you start needing:
+
 - robust dedup and conflict queries;
 - filtered search by stage/path/entity/trust/status;
 - FTS over hundreds or thousands of records;
@@ -58,7 +61,7 @@
 Рекомендую такой metric stack:
 
 | Category | Metrics |
-|---|---|
+| --- | --- |
 | **End-to-end quality** | task success, review pass rate, reopen rate, fix-after-review iterations |
 | **Retrieval quality** | context recall, precision, efficiency, explored-vs-used gap |
 | **Planning quality** | first relevant file hit rate, files opened before first correct edit, plan acceptance by supervisor |
@@ -128,4 +131,3 @@ Success criteria should be framed in benefit-versus-cost terms: fewer rediscover
 - LangGraph/LangMem docs — semantic, episodic, procedural memory; hot-path vs background writing; prompt optimization. citeturn28view0turn28view1turn27view2turn27view3turn27view0
 - MCP Security Best Practices and Microsoft MCP injection guidance — treat untrusted content as adversarial; secure tool/context surfaces. citeturn24view1turn24view2
 - Recent memory poisoning work and Unit 42 field writeup — persistent memory as attack surface, incomplete defenses, need for provenance and quarantine. citeturn24view3turn24view4turn24view5
-

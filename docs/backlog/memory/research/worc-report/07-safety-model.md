@@ -79,4 +79,3 @@ Autonomous cleanup must have hard limits:
 - max wall-clock budget;
 - fail-closed if validator uncertain;
 - no writes during active task.
-

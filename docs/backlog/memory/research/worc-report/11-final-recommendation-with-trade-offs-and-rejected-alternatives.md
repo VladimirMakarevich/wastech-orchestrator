@@ -30,4 +30,3 @@ Rejected for now:
 - session-resume-as-memory: violates architecture and provider portability.
 - giant repo summary file: prompt bloat and staleness.
 - automatic procedural skill synthesis: too risky until governance exists.
-

@@ -4,20 +4,15 @@
 
 ### 4.1 Architectural principles
 
-1. **Authoritative repo knowledge остается вне generated memory.**
-   Источники истины уже есть: `AGENTS.md`, `.agents/rules/`, `docs/functional/`, код, role prompts. Memory не должна их дублировать большим prose; максимум - хранить short references и delta-facts. [docs/functional/index.md](../functional/index.md)
+1. **Authoritative repo knowledge остается вне generated memory.** Источники истины уже есть: `AGENTS.md`, `.agents/rules/`, `docs/functional/`, код, role prompts. Memory не должна их дублировать большим prose; максимум - хранить short references и delta-facts. [docs/functional/index.md](../functional/index.md)
 
-2. **Memory не равна repo index.**
-   Repo map / symbol index отвечает на current structure. Persistent memory отвечает на cross-run lessons, hotspots, recurring failure patterns и entity annotations.
+2. **Memory не равна repo index.** Repo map / symbol index отвечает на current structure. Persistent memory отвечает на cross-run lessons, hotspots, recurring failure patterns и entity annotations.
 
-3. **Memory writes делает orchestrator-controlled component, не provider session напрямую.**
-   Это важно и для security, и для auditability, и для соблюдения текущего инварианта, что supervisor advisory/read-only. [B31 Supervisor](../functional/blocks/B31-supervisor.md)
+3. **Memory writes делает orchestrator-controlled component, не provider session напрямую.** Это важно и для security, и для auditability, и для соблюдения текущего инварианта, что supervisor advisory/read-only. [B31 Supervisor](../functional/blocks/B31-supervisor.md)
 
-4. **Read path всегда bounded.**
-   Агент получает не memory root, а `memory brief` file, сгенерированный для конкретного stage/task.
+4. **Read path всегда bounded.** Агент получает не memory root, а `memory brief` file, сгенерированный для конкретного stage/task.
 
-5. **Durable promotion требует evidence и validation.**
-   Без cited evidence новая память живет максимум в short-term/quarantine.
+5. **Durable promotion требует evidence и validation.** Без cited evidence новая память живет максимум в short-term/quarantine.
 
 ### 4.2 Recommended component model
 

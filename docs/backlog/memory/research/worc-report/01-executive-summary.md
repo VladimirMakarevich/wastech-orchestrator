@@ -29,4 +29,3 @@
 - V2: отдельный SQLite/FTS index, когда файловые merge/query станут неудобны.
 - V3: embeddings only after measured recall failures on lexical/entity retrieval.
 - V4: entity graph only after реальная потребность в multi-hop repo reasoning, а не "на всякий случай".
-

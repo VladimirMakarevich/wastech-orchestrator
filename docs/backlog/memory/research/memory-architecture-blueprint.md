@@ -2,7 +2,7 @@
 
 Status: **proposed (consolidated design)** Date: 2026-06-28 Owner: Vladimir Makarevich
 
-This is the single authoritative design document for a persistent, repo-scoped memory subsystem in `wastech-orchestrator`. It consolidates and supersedes the exploratory [orchestrator-memory.md](../orchestrator-memory.md) stake-in-the-ground by folding in the findings of two independent deep-research efforts and one design note, and it is the document the implementation plan and the ADR(s) should be built from.
+This is the single authoritative design document for a persistent, repo-scoped memory subsystem in `wastech-orchestrator`. It consolidates and supersedes the exploratory [orchestrator-memory.md](../../orchestrator-memory.md) stake-in-the-ground by folding in the findings of two independent deep-research efforts and one design note, and it is the document the implementation plan and the ADR(s) should be built from.
 
 It is a **blueprint**, not a build spec: it fixes the shape, the invariants, the lifecycle, the safety model, the roadmap, and the evaluation gates. The exact module names, function signatures, and config keys are settled at ADR/implementation time.
 
@@ -11,7 +11,7 @@ Sources synthesized here:
 - Internal deep research — [worc-report/](./worc-report/worc-deeep-research-memory-report.md) (13 parts).
 - External deep research — [3rd-party-report/](./3rd-party-report/00-3rd-party-deep-research-memory-report.md) (6 parts).
 - Supervisor role-split note — [supervisor-role-split.md](./supervisor-role-split.md).
-- Predecessor exploratory direction — [orchestrator-memory.md](../orchestrator-memory.md).
+- Predecessor exploratory direction — [orchestrator-memory.md](../../orchestrator-memory.md).
 
 This document deliberately optimizes for **what is best, highest-quality, most reliable, and most efficient**, not for the smallest diff against the current codebase. Where it refines or corrects the predecessor draft, that is called out explicitly in [§ 12. How this refines the predecessor draft](#12-how-this-refines-the-predecessor-draft).
 
@@ -51,7 +51,7 @@ Both research efforts, run independently, converged on the same answer. That con
 
 ## 3. Non-negotiable design principles
 
-These bound every downstream decision. They are the distilled invariants of this blueprint; they extend (never override) the repo's hard invariants in [.agents/rules/](../../../.agents/rules/), [AGENTS.md](../../../AGENTS.md), and [CLAUDE.md](../../../CLAUDE.md).
+These bound every downstream decision. They are the distilled invariants of this blueprint; they extend (never override) the repo's hard invariants in [.agents/rules/](../../../../.agents/rules/), [AGENTS.md](../../../../AGENTS.md), and [CLAUDE.md](../../../../CLAUDE.md).
 
 - **P1 — Memory is advisory.** It shapes prompts; it never routes, gates, enforces, or acts. The Core still decides; the supervisor stays advisory.
 - **P2 — Code + artifacts + checks are the source of truth.** Memory is distilled, provenanced knowledge _about_ them, never a replacement.
@@ -380,17 +380,17 @@ The concrete things this design **brings along** — the levers, seams, and reus
 
 **Reuse, don't reinvent:**
 
-- Redaction: `redact_text` / `redact_mapping` in [providers/redaction.py](../../../src/wastech_orchestrator/providers/redaction.py), before every write — same discipline as HITL/result-artifact paths.
-- Atomic writes: the temp-file-then-rename pattern from [core/hitl.py](../../../src/wastech_orchestrator/core/hitl.py) (`_atomic_json`).
-- Prompt path-variable model: add a single allowlisted `memory_path` to `ALLOWED_PROMPT_VARS` ([core/prompts.py:21](../../../src/wastech_orchestrator/core/prompts.py#L21)); populate it in the node prompt-variable builders; reference `{memory_path}` in the packaged role prompts (seeded into `.worc/flows/roles/` at install). It points at the per-stage **packet**, never the memory root.
-- Supervisor seam: extend `Supervisor.finalize()` ([core/supervisor.py](../../../src/wastech_orchestrator/core/supervisor.py)) to optionally return a `candidate_memory_delta` from the existing summary turn — **zero new LLM calls**; reuse the durable `__supervisor__` lineage.
-- Idle hook: `watch_loop` in [cli.py](../../../src/wastech_orchestrator/cli.py) — run `CleanupJob.run_once()` after `watch_once(...)` and before the poll sleep; short and interruptible.
+- Redaction: `redact_text` / `redact_mapping` in [providers/redaction.py](../../../../src/wastech_orchestrator/providers/redaction.py), before every write — same discipline as HITL/result-artifact paths.
+- Atomic writes: the temp-file-then-rename pattern from [core/hitl.py](../../../../src/wastech_orchestrator/core/hitl.py) (`_atomic_json`).
+- Prompt path-variable model: add a single allowlisted `memory_path` to `ALLOWED_PROMPT_VARS` ([core/prompts.py:21](../../../../src/wastech_orchestrator/core/prompts.py#L21)); populate it in the node prompt-variable builders; reference `{memory_path}` in the packaged role prompts (seeded into `.worc/flows/roles/` at install). It points at the per-stage **packet**, never the memory root.
+- Supervisor seam: extend `Supervisor.finalize()` ([core/supervisor.py](../../../../src/wastech_orchestrator/core/supervisor.py)) to optionally return a `candidate_memory_delta` from the existing summary turn — **zero new LLM calls**; reuse the durable `__supervisor__` lineage.
+- Idle hook: `watch_loop` in [cli.py](../../../../src/wastech_orchestrator/cli.py) — run `CleanupJob.run_once()` after `watch_once(...)` and before the poll sleep; short and interruptible.
 
 **Build new (deterministic, model-free, unit-testable):**
 
 - `MemoryService`, `PacketBuilder`, `CleanupJob`, `DerivedIndex` as separate modules (see §4.1). These need no fake-CLI fixtures — they are pure logic and should be tested without a model.
-- `worc memory …` CLI: the first nested subparser (a `memory` parser with its own `add_subparsers`), modeled on `cmd_upgrade_config` (resolve config → validate → `--dry-run` plan → execute). Verbs: `show`, `validate`, `compact`/`defrag`, `restore`. (Distinct from `worc logs clean`, which is disk-space cleanup of artifacts — see [log-management.md](../log-management.md).)
-- `MemoryConfig` dataclass in [config/schema.py](../../../src/wastech_orchestrator/config/schema.py), wired into `OrchestratorConfig` with a safe default, parsed in [config/loader.py](../../../src/wastech_orchestrator/config/loader.py), documented in `packaged/config.example.yaml`, with a global enable/disable flag and the tier caps/TTLs/budgets. Bump `CONFIG_SCHEMA_VERSION` (currently **23**). Keep new **fatal** checks to a minimum — fatal only when there is no safe runtime fallback.
+- `worc memory …` CLI: the first nested subparser (a `memory` parser with its own `add_subparsers`), modeled on `cmd_upgrade_config` (resolve config → validate → `--dry-run` plan → execute). Verbs: `show`, `validate`, `compact`/`defrag`, `restore`. (Distinct from `worc logs clean`, which is disk-space cleanup of artifacts — see [log-management.md](../../log-management.md).)
+- `MemoryConfig` dataclass in [config/schema.py](../../../../src/wastech_orchestrator/config/schema.py), wired into `OrchestratorConfig` with a safe default, parsed in [config/loader.py](../../../../src/wastech_orchestrator/config/loader.py), documented in `packaged/config.example.yaml`, with a global enable/disable flag and the tier caps/TTLs/budgets. Bump `CONFIG_SCHEMA_VERSION` (currently **23**). Keep new **fatal** checks to a minimum — fatal only when there is no safe runtime fallback.
 - Install-time `.gitignore` seeding for `.worc/memory/` (and the per-task `logs/<task-id>/memory/` packets follow the existing logs gitignore).
 
 **Hard constraints to keep in front of the build:**
@@ -493,7 +493,7 @@ Accepted trade-offs: we give up some semantic recall (no day-one embeddings) for
 
 ## 12. How this refines the predecessor draft
 
-[orchestrator-memory.md](../orchestrator-memory.md) was a sound stake-in-the-ground; this blueprint keeps its spine (supervisor-distilled, `.worc/memory/` files, three tiers, redaction, piggyback on `finalize`, `memory_path`, idle cleanup, config enable/disable, no `state.db`, no embeddings day-one) and sharpens it where the research pointed:
+[orchestrator-memory.md](../../orchestrator-memory.md) was a sound stake-in-the-ground; this blueprint keeps its spine (supervisor-distilled, `.worc/memory/` files, three tiers, redaction, piggyback on `finalize`, `memory_path`, idle cleanup, config enable/disable, no `state.db`, no embeddings day-one) and sharpens it where the research pointed:
 
 - **Narrow supervisor + deterministic services.** "Supervisor owns it" → supervisor _distills_ (emits a candidate delta); `MemoryService`/`PacketBuilder`/`CleanupJob`/`DerivedIndex` own validation, promotion, retrieval, and cleanup. Cheaper, safer, testable.
 - **Memory ≠ derived index** is now a first-class principle (P3); repo map/symbol index are a separate rebuildable plane.
@@ -557,6 +557,6 @@ Accepted trade-offs: we give up some semantic recall (no day-one embeddings) for
 
 ### Repo context
 
-30. Predecessor direction — [orchestrator-memory.md](../orchestrator-memory.md); supervisor role split — [supervisor-role-split.md](./supervisor-role-split.md).
+30. Predecessor direction — [orchestrator-memory.md](../../orchestrator-memory.md); supervisor role split — [supervisor-role-split.md](./supervisor-role-split.md).
 31. Internal deep research — [worc-report/](./worc-report/worc-deeep-research-memory-report.md); external deep research — [3rd-party-report/](./3rd-party-report/00-3rd-party-deep-research-memory-report.md).
-32. Seams — [core/supervisor.py](../../../src/wastech_orchestrator/core/supervisor.py), [core/prompts.py](../../../src/wastech_orchestrator/core/prompts.py), [providers/redaction.py](../../../src/wastech_orchestrator/providers/redaction.py), [cli.py](../../../src/wastech_orchestrator/cli.py), [config/schema.py](../../../src/wastech_orchestrator/config/schema.py).
+32. Seams — [core/supervisor.py](../../../../src/wastech_orchestrator/core/supervisor.py), [core/prompts.py](../../../../src/wastech_orchestrator/core/prompts.py), [providers/redaction.py](../../../../src/wastech_orchestrator/providers/redaction.py), [cli.py](../../../../src/wastech_orchestrator/cli.py), [config/schema.py](../../../../src/wastech_orchestrator/config/schema.py).

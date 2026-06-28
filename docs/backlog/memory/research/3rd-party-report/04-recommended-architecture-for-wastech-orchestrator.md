@@ -102,7 +102,7 @@ Reviewed artifacts, task summaries, checks output и commits — это evidence
 `long-term` должно содержать четыре practically useful вида записей:
 
 | Kind | Что хранить | Когда это полезно |
-|---|---|---|
+| --- | --- | --- |
 | **semantic** | stable repo facts, commands, conventions, fragile integrations, architectural facts | planning, implementation, review |
 | **procedural** | verified workflows, stage-specific checklists, “как здесь обычно делать X” | planning, fixing, review |
 | **reviewer** | recurring review feedback patterns, common misses, “what reviewers care about here” | review, fixing |
@@ -148,8 +148,8 @@ Reviewed artifacts, task summaries, checks output и commits — это evidence
     "fixing": "done"
   },
   "checks": [
-    {"name": "unit", "status": "passed"},
-    {"name": "lint", "status": "passed"}
+    { "name": "unit", "status": "passed" },
+    { "name": "lint", "status": "passed" }
   ],
   "review_findings": [
     {
@@ -216,8 +216,8 @@ Reviewed artifacts, task summaries, checks output и commits — это evidence
   "symbols": ["MemorySupervisor", "MemoryStore"],
   "summary": "Owns memory extraction, promotion, retrieval packets, and cleanup.",
   "relationships": [
-    {"type": "depends_on", "entity_id": "module:task-artifacts"},
-    {"type": "writes_to", "entity_id": "path:.worc/memory/"}
+    { "type": "depends_on", "entity_id": "module:task-artifacts" },
+    { "type": "writes_to", "entity_id": "path:.worc/memory/" }
   ],
   "hotspot_score": 0.81,
   "commands": ["pnpm test memory", "pnpm lint src/supervisor"],
@@ -252,4 +252,3 @@ Reviewed artifacts, task summaries, checks output и commits — это evidence
 - high-churn repo map snapshots that are better derived from code.
 
 Этот boundary важен не только из-за token efficiency, но и из-за security. свежие poisoning papers и field reports показывают, что persistent memory can become an attack vector when untrusted or weakly grounded content is promoted into future-context authority. citeturn24view3turn24view4turn24view5
-

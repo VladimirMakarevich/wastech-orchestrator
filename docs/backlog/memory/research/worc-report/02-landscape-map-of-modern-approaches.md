@@ -44,4 +44,3 @@
 - MPBench и related poisoning work показывают, что memory itself становится attack surface, особенно если она high-impact и плохо валидируется. [MPBench](https://arxiv.org/html/2606.04329v1)
 
 Интерпретация: knowledge graph и embeddings нужны не как ideology, а как response to measured failure modes у более простого дизайна.
-
