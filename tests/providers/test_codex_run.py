@@ -221,6 +221,63 @@ def test_configuration_error_raises_before_launch(
     assert (_attempt_dir(tmp_path) / "request.json").exists()
 
 
+def _provider_at_level(
+    config: ProviderConfig, security: SecurityConfig, root: Path, fake: FakeRun, level: str
+) -> CodexProvider:
+    return CodexProvider(
+        config,
+        security=security,
+        artifacts_root=root,
+        clock=lambda: FIXED_TIME,
+        run_process=fake,
+        artifact_level=level,
+    )
+
+
+def test_artifact_level_minimal_prunes_on_success(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    fake = FakeRun(stdout=_success_stream())
+    provider = _provider_at_level(codex_config, security_config, tmp_path, fake, "minimal")
+    provider.run(make_request())
+    survivors = {p.name for p in _attempt_dir(tmp_path).iterdir()}
+    assert survivors == {"result.json"}
+
+
+def test_artifact_level_minimal_is_strict_on_failure(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # A timeout raises, but _finalize_failure still writes result.json and then prunes — minimal is
+    # strict: only result.json survives, even on failure (it carries the exit code + error class).
+    fake = FakeRun(timed_out=True)
+    provider = _provider_at_level(codex_config, security_config, tmp_path, fake, "minimal")
+    with pytest.raises(ProviderError):
+        provider.run(make_request())
+    survivors = {p.name for p in _attempt_dir(tmp_path).iterdir()}
+    assert survivors == {"result.json"}
+    result_json = json.loads((_attempt_dir(tmp_path) / "result.json").read_text(encoding="utf-8"))
+    assert result_json["error"]["error_class"] == "timeout"
+
+
+def test_artifact_level_standard_keeps_stdout_stderr_result(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    fake = FakeRun(stdout=_success_stream())
+    provider = _provider_at_level(codex_config, security_config, tmp_path, fake, "standard")
+    provider.run(make_request())
+    survivors = {p.name for p in _attempt_dir(tmp_path).iterdir()}
+    assert survivors == {"result.json", "stdout.log", "stderr.log"}
+
+
 def test_prompt_is_delivered_via_stdin_not_argv(
     codex_config: ProviderConfig,
     security_config: SecurityConfig,

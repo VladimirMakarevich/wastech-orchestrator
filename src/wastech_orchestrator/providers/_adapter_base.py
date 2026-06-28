@@ -32,6 +32,7 @@ from wastech_orchestrator.observability.progress import run_with_heartbeat
 from wastech_orchestrator.providers.artifacts import (
     ArtifactPaths,
     create_attempt_dir,
+    prune_attempt_artifacts,
     write_request_artifact,
     write_result_artifact,
 )
@@ -152,6 +153,7 @@ class BaseCliProvider:
         monotonic: Callable[[], float] = time.monotonic,
         run_process: RunProcess = run_process,
         heartbeat_seconds: float = 30.0,
+        artifact_level: str = "full",
     ) -> None:
         self._config = config
         self._security = security
@@ -160,6 +162,10 @@ class BaseCliProvider:
         self._monotonic = monotonic
         self._run_process = run_process
         self._heartbeat_seconds = heartbeat_seconds
+        # logging.artifacts level (minimal|standard|full): which per-attempt files survive a run.
+        # The constructor default is a no-op (keep everything); the real policy is the operator's
+        # `logging.artifacts` (default "standard"), threaded in by build_providers.
+        self._artifact_level = artifact_level
 
     # --- subclass hooks (the only CLI-aware seams) ---------------------------------------------
 
@@ -415,6 +421,7 @@ class BaseCliProvider:
         # result.json carries the normalized (non-secret) session id; the raw id is returned
         # in-memory for the orchestrator's editing_lineage store (state.db only).
         write_result_artifact(paths, _redact_result_session(result))
+        prune_attempt_artifacts(paths, self._artifact_level)
         return result
 
     # --- shared internals ----------------------------------------------------------------------
@@ -486,6 +493,9 @@ class BaseCliProvider:
             error=error,
         )
         write_result_artifact(paths, result)
+        # ``minimal`` is strict — only result.json survives, even on failure (it records the exit
+        # code + normalized error class). ``standard`` keeps stdout/stderr for debuggability.
+        prune_attempt_artifacts(paths, self._artifact_level)
 
     def _extra_secrets(self, request: AgentRunRequest) -> tuple[str, ...]:
         """Literal secrets to redact: secret-named parent env values + denied-read file contents +

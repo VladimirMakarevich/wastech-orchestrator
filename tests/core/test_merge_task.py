@@ -20,8 +20,17 @@ from wastech_orchestrator.git_manager import KIND_PR, KIND_PR_MERGE, GitResult
 from wastech_orchestrator.state_store import PublishOpRow, StateStore, TaskRow
 
 GitRunner = Callable[[Sequence[str], Path], str]
-_ENV = ["PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "TEMP", "TMP", "APPDATA", "LOCALAPPDATA",
-        "GIT_EXEC_PATH"]
+_ENV = [
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "GIT_EXEC_PATH",
+]
 _URL = "https://github.com/o/r/pull/1"
 _BRANCH = "worc/m1"
 
@@ -81,8 +90,9 @@ git:
 def _seed_task(store: StateStore, status: Status = Status.DONE) -> None:
     store.insert_task(TaskRow(task_id="m1", title="merge me", status=status, branch=_BRANCH))
     store.record_publish_op(
-        PublishOpRow(task_id="m1", kind=KIND_PR, fingerprint=_BRANCH, status="completed",
-                     result_ref=_URL)
+        PublishOpRow(
+            task_id="m1", kind=KIND_PR, fingerprint=_BRANCH, status="completed", result_ref=_URL
+        )
     )
 
 

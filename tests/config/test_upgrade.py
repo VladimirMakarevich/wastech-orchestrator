@@ -139,6 +139,17 @@ def test_adds_orchestrator_queue_from_packaged_template() -> None:
     assert "orchestrator.queue" in added
 
 
+def test_adds_logging_block_from_packaged_template() -> None:
+    # v23 add: an operator config predating the `logging` block gains it (default info/standard)
+    # from the packaged template, while keeping its own customizations.
+    template = packaged_template_mapping()
+    operator = {"schema_version": 22, "prompt_audit": True}
+    merged, added, _ = upgrade_config_mapping(template, operator)
+    assert merged["logging"] == {"level": "info", "artifacts": "standard"}
+    assert merged["prompt_audit"] is True  # operator value preserved
+    assert "logging" in added
+
+
 def test_strips_legacy_prompts_block() -> None:
     # config v9 removed the whole `prompts` block; upgrade-config drops it from an operator config.
     template = {"schema_version": CONFIG_SCHEMA_VERSION}

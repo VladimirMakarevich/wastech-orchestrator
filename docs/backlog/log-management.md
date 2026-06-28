@@ -1,6 +1,8 @@
 # Log management: `worc logs clean` and `logging.*` config
 
-Status: **proposed** Date: 2026-06-26 Owner: Vladimir Makarevich
+Status: **implemented** (2026-06-27, config `schema_version` 23) Date: 2026-06-26 Owner: Vladimir Makarevich
+
+Shipped as specified, with these decisions locked during implementation: default `logging.artifacts` is `standard` (greenfield — no migration concern); `minimal` is strict (only `result.json`, even on failure — no errors-only exception); `--keep 0` confirms like the bare delete-all; a config `schema_version` bump to 23 was made (this repo bumps for every format change). `logging.artifacts` scope is the per-attempt provider files only — prompt-audit stays governed by `prompt_audit`. See [configuration.md §logging](../configuration.md#logging) and [operations.md §logs clean](../operations.md). The original proposal follows.
 
 Two complementary log-management features proposed together because they share a root cause: `.worc/logs/` grows unboundedly and the operator trace verbosity is not persisted between sessions.
 

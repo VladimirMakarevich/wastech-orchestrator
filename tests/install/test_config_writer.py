@@ -83,6 +83,12 @@ def test_generated_config_is_stamped_with_schema_version(tmp_path: Path) -> None
     assert f"schema_version: {CONFIG_SCHEMA_VERSION}" in text
 
 
+def test_generated_config_includes_logging_defaults(tmp_path: Path) -> None:
+    cfg = loads_config(build_and_validate(_spec(tmp_path, (ProviderId.CODEX,)))).config
+    assert cfg.logging.level == "info"
+    assert cfg.logging.artifacts == "standard"
+
+
 def test_safe_security_defaults_are_written(tmp_path: Path) -> None:
     cfg = loads_config(build_and_validate(_spec(tmp_path, (ProviderId.CODEX,)))).config
     assert cfg.security.strict_isolation is True

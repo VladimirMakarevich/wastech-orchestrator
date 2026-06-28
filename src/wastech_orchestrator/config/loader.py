@@ -30,6 +30,7 @@ from wastech_orchestrator.config.schema import (
     DecompositionConfig,
     FootprintConfig,
     GitConfig,
+    LoggingConfig,
     MergeStrategy,
     OrchestratorConfig,
     OrchestratorRuntimeConfig,
@@ -676,6 +677,32 @@ def _build_supervisor(raw: Any, issues: list[str]) -> SupervisorConfig:
     )
 
 
+_LOG_LEVELS: frozenset[str] = frozenset({"debug", "info", "warning", "error"})
+_ARTIFACT_LEVELS: frozenset[str] = frozenset({"minimal", "standard", "full"})
+
+
+def _build_logging(raw: Any, issues: list[str]) -> LoggingConfig:
+    where = "logging"
+    if raw is None:
+        return LoggingConfig()
+    m = _mapping(raw, where, issues)
+    _check_keys(m, {"level", "artifacts"}, where, issues)
+    level = _str(m, "level", "info", where, issues)
+    if level not in _LOG_LEVELS:
+        issues.append(
+            f"{where}.level: invalid value {level!r}, expected one of {sorted(_LOG_LEVELS)}"
+        )
+        level = "info"
+    artifacts = _str(m, "artifacts", "standard", where, issues)
+    if artifacts not in _ARTIFACT_LEVELS:
+        issues.append(
+            f"{where}.artifacts: invalid value {artifacts!r}, "
+            f"expected one of {sorted(_ARTIFACT_LEVELS)}"
+        )
+        artifacts = "standard"
+    return LoggingConfig(level=level, artifacts=artifacts)
+
+
 _TOP_LEVEL_KEYS = {
     "schema_version",
     "orchestrator",
@@ -689,6 +716,7 @@ _TOP_LEVEL_KEYS = {
     "skills",
     "supervisor",
     "paths",
+    "logging",
     "prompt_audit",
 }
 
@@ -730,6 +758,7 @@ def _parse(raw: Mapping[str, Any], issues: list[str], warnings: list[str]) -> Or
         skills=_build_skills(raw.get("skills"), issues),
         supervisor=_build_supervisor(raw.get("supervisor"), issues),
         paths=_build_paths(raw.get("paths"), issues),
+        logging=_build_logging(raw.get("logging"), issues),
         prompt_audit=_bool(raw, "prompt_audit", False, "<root>", issues),
     )
 

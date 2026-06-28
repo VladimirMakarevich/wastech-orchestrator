@@ -174,7 +174,9 @@ def test_exhaustion_falls_back_symmetrically(
     )
     delays: list[float] = []
     router = AgentRouter(
-        cfg, {ProviderId.CLAUDE: claude, ProviderId.CODEX: codex}, sleep=delays.append  # type: ignore[dict-item]
+        cfg,
+        {ProviderId.CLAUDE: claude, ProviderId.CODEX: codex},
+        sleep=delays.append,  # type: ignore[dict-item]
     )
     route = router.resolve_route("implementation")
     assert (route.primary, route.fallback) == (ProviderId.CLAUDE, ProviderId.CODEX)
@@ -204,7 +206,9 @@ def test_both_providers_exhausted_is_terminal(
     )
     delays: list[float] = []
     router = AgentRouter(
-        cfg, {ProviderId.CLAUDE: claude, ProviderId.CODEX: codex}, sleep=delays.append  # type: ignore[dict-item]
+        cfg,
+        {ProviderId.CLAUDE: claude, ProviderId.CODEX: codex},
+        sleep=delays.append,  # type: ignore[dict-item]
     )
     route = router.resolve_route("implementation")
 
@@ -228,7 +232,9 @@ def test_rate_limited_is_not_transient_retried(
     codex = _FlakyProvider(ProviderId.CODEX, fail_times=0, error_class=ErrorClass.RATE_LIMITED)
     delays: list[float] = []
     router = AgentRouter(
-        cfg, {ProviderId.CLAUDE: claude, ProviderId.CODEX: codex}, sleep=delays.append  # type: ignore[dict-item]
+        cfg,
+        {ProviderId.CLAUDE: claude, ProviderId.CODEX: codex},
+        sleep=delays.append,  # type: ignore[dict-item]
     )
     route = router.resolve_route("implementation")
 
@@ -248,7 +254,9 @@ def test_timeout_is_not_transient_retried(
     codex = _FlakyProvider(ProviderId.CODEX, fail_times=0, error_class=ErrorClass.TIMEOUT)
     delays: list[float] = []
     router = AgentRouter(
-        cfg, {ProviderId.CLAUDE: claude, ProviderId.CODEX: codex}, sleep=delays.append  # type: ignore[dict-item]
+        cfg,
+        {ProviderId.CLAUDE: claude, ProviderId.CODEX: codex},
+        sleep=delays.append,  # type: ignore[dict-item]
     )
     route = router.resolve_route("implementation")
 
@@ -318,9 +326,7 @@ def test_resume_then_fresh_degrade(
     router = AgentRouter(cfg, {ProviderId.CLAUDE: claude}, sleep=delays.append)  # type: ignore[dict-item]
     route = router.resolve_route("implementation")
 
-    outcome = router.run_stage(
-        make_request(node_id="implementation", session_id="sess"), route
-    )
+    outcome = router.run_stage(make_request(node_id="implementation", session_id="sess"), route)
 
     assert outcome.result is not None and outcome.result.status is RunStatus.SUCCEEDED
     assert claude.run_count == 3
@@ -341,7 +347,9 @@ def test_max_attempts_zero_disables_transient_retry(
     )
     delays: list[float] = []
     router = AgentRouter(
-        cfg, {ProviderId.CLAUDE: claude, ProviderId.CODEX: codex}, sleep=delays.append  # type: ignore[dict-item]
+        cfg,
+        {ProviderId.CLAUDE: claude, ProviderId.CODEX: codex},
+        sleep=delays.append,  # type: ignore[dict-item]
     )
     route = router.resolve_route("implementation")
 

@@ -1599,9 +1599,7 @@ class Orchestrator:
         self._sync_counters_from_run_state(p, run_state)
         return self._finish_engine_run(p, result)
 
-    def _park(
-        self, p: _Pipeline, run_state: FlowRunState, exc: NodeInfraError
-    ) -> PipelineResult:
+    def _park(self, p: _Pipeline, run_state: FlowRunState, exc: NodeInfraError) -> PipelineResult:
         """Soft, resumable pause on transient infra exhaustion (B-lite). NOT a terminal transition.
 
         The task stays ``RUNNING`` (active) so :meth:`resume` picks it up via the reconciler next
@@ -1867,9 +1865,7 @@ class Orchestrator:
             # skip). Gated on the flag alone — when Telegram is off the notifier is a NullNotifier
             # and this is a no-op. Carries only node id + outcome (no secrets); never raises.
             if self._config.telegram.trace:
-                self._notifier.send_trace(
-                    task_id=p.task.id, node_id=node.id, outcome=outcome.kind
-                )
+                self._notifier.send_trace(task_id=p.task.id, node_id=node.id, outcome=outcome.kind)
             if not isinstance(node, AgentNode):
                 return
             apply_output_artifact(
@@ -2635,6 +2631,7 @@ def build_providers(
     from wastech_orchestrator.providers.codex import CodexProvider
 
     root = str(Path(artifacts_root))
+    artifact_level = config.logging.artifacts
     providers: dict[ProviderId, AgentProvider] = {}
     for pid, provider_cfg in config.agents.providers.items():
         if pid is ProviderId.CLAUDE:
@@ -2643,6 +2640,7 @@ def build_providers(
                 security=config.security,
                 artifacts_root=root,
                 heartbeat_seconds=heartbeat_seconds,
+                artifact_level=artifact_level,
             )
         elif pid is ProviderId.CODEX:
             providers[pid] = CodexProvider(
@@ -2650,6 +2648,7 @@ def build_providers(
                 security=config.security,
                 artifacts_root=root,
                 heartbeat_seconds=heartbeat_seconds,
+                artifact_level=artifact_level,
             )
     return providers
 

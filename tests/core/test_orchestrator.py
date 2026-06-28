@@ -430,9 +430,7 @@ def _run_happy_task_with_trace(
 def test_step_trace_emits_one_message_per_executed_node(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    notifier = _run_happy_task_with_trace(
-        git_repo, make_git_config, tmp_path, telegram_trace=True
-    )
+    notifier = _run_happy_task_with_trace(git_repo, make_git_config, tmp_path, telegram_trace=True)
     traced = {c["node_id"] for c in notifier.trace_calls}
     # One trace per executed node finish; the skipped refinement node emits nothing.
     assert {"planning", "implementation", "testing", "review", "publish"} <= traced
@@ -443,12 +441,8 @@ def test_step_trace_emits_one_message_per_executed_node(
     assert all(c["task_id"] == "task-001" for c in notifier.trace_calls)
 
 
-def test_step_trace_off_by_default_emits_nothing(
-    git_repo, make_git_config, tmp_path: Path
-) -> None:
-    notifier = _run_happy_task_with_trace(
-        git_repo, make_git_config, tmp_path, telegram_trace=False
-    )
+def test_step_trace_off_by_default_emits_nothing(git_repo, make_git_config, tmp_path: Path) -> None:
+    notifier = _run_happy_task_with_trace(git_repo, make_git_config, tmp_path, telegram_trace=False)
     assert notifier.trace_calls == []
 
 
@@ -984,9 +978,7 @@ def test_parked_task_resumes_when_provider_recovers(
     assert "publish" in _ran_nodes(store, "task-resume")
 
 
-def test_parked_task_fails_after_max_blocked(
-    git_repo, make_git_config, tmp_path: Path
-) -> None:
+def test_parked_task_fails_after_max_blocked(git_repo, make_git_config, tmp_path: Path) -> None:
     # A sustained outage: the task stays parked past agents.retry.max_blocked_s (default 3600s) →
     # on the next resume it goes terminal FAILED (nothing hangs forever).
     clock = _Clock()

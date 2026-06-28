@@ -57,8 +57,9 @@ def _seed_open_pr(clone: Path, task_id: str = "task-1", status: Status = Status.
     store = _store(clone)
     store.insert_task(TaskRow(task_id=task_id, title=task_id, status=status, branch="worc/b"))
     store.record_publish_op(
-        PublishOpRow(task_id=task_id, kind="pr", fingerprint="worc/b", status="completed",
-                     result_ref=_URL)
+        PublishOpRow(
+            task_id=task_id, kind="pr", fingerprint="worc/b", status="completed", result_ref=_URL
+        )
     )
     store.close()
 

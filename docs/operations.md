@@ -353,6 +353,21 @@ python -m wastech_orchestrator \
 
 These are global CLI options and must come before the subcommand. The file rotates at 10 MB and keeps five backups. Supported formats are `logfmt` and newline-delimited `json`. `--heartbeat-seconds 0` disables heartbeat records.
 
+The persisted operator verbosity lives in [`logging.level`](configuration.md#logging); `--log-level` overrides it for a single run.
+
+### Cleaning up logs (`logs clean`)
+
+`.worc/logs/<task-id>/` directories accumulate indefinitely — every task leaves per-attempt artifacts. `worc logs clean` reclaims that disk. It removes the per-task artifact directories and, by default, **preserves the ledger** (`completed.jsonl`, the task-state audit trail).
+
+```bash
+worc logs clean                 # remove ALL task dirs (keeps the ledger); confirms first
+worc logs clean --keep 20       # keep the 20 most recently modified task dirs, remove the rest
+worc logs clean --all           # also remove the ledger; always confirms
+worc logs clean --yes           # skip the confirmation prompt (for scripts/cron)
+```
+
+`--keep N` runs without a prompt (an explicit count is clear intent), except `--keep 0` (≡ delete-all), which confirms like the bare form. Run it while `watch` is idle — running it against an active task is unsupported (no hard guard in v1). To bound the footprint going forward instead of cleaning periodically, lower the per-run artifact retention with [`logging.artifacts`](configuration.md#logging) (`minimal` / `standard` / `full`).
+
 ### Telegram HITL and notifications
 
 Set `telegram.enabled: true`, then export the variables named by `telegram.bot_token_env` and `telegram.chat_id_env`. The values themselves must not be placed in `config.yaml`. Use a dedicated project bot/chat and only one long-poll consumer; webhook mode is incompatible.

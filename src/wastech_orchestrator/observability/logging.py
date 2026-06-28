@@ -80,6 +80,16 @@ def configure_logging(
     _configured = True
 
 
+def set_log_level(level: int) -> None:
+    """Update the verbosity of the configured logger after :func:`configure_logging`.
+
+    Used to apply a persisted ``logging.level`` once the config has loaded (the ``--log-level``
+    flag, when given, wins and skips this). Bypasses the first-call-wins guard so it takes effect
+    even though the handlers are already installed; a plain ``setLevel`` on the package logger.
+    """
+    logging.getLogger(LOGGER_NAME).setLevel(level)
+
+
 def bind(logger: logging.Logger, **context: Any) -> logging.LoggerAdapter[logging.Logger]:
     """Return a logger adapter that stamps ``context`` (task_id/stage/attempt/…) on every record."""
     return _BoundLogger(logger, context)

@@ -73,9 +73,9 @@ Auto mode does not enable concurrency. The v1 contract keeps one active task at 
 
 ### Runtime observability options
 
-Logging and heartbeat settings are global CLI options, not `config.yaml` fields:
+Logging and heartbeat settings are global CLI options. `--log-level` is the only one that also has a persisted config key ([`logging.level`](#logging)); the rest are CLI-only:
 
-| Option | Default | Meaning | | --- | --: | --- | --- | --- | --- | | `--log-level debug | info | warning | error` | `info` | Minimum operator log level. | | `--log-format logfmt | json` | `logfmt` | Format used for stderr and `--log-file`. | | `--log-file PATH` | unset | Also write a rotating 10 MB operator log with five backups. | | `--heartbeat-seconds N` | `30` | Progress interval for long provider/check/Git calls and the HITL human-input wait; `0` disables. |
+| Option | Default | Meaning | | --- | --: | --- | --- | --- | --- | | `--log-level debug | info | warning | error` | `logging.level`, else `info` | Minimum operator log level; **overrides** the persisted `logging.level`. | | `--log-format logfmt | json` | `logfmt` | Format used for stderr and `--log-file`. | | `--log-file PATH` | unset | Also write a rotating 10 MB operator log with five backups. | | `--heartbeat-seconds N` | `30` | Progress interval for long provider/check/Git calls and the HITL human-input wait; `0` disables. |
 
 The `watch` subcommand also accepts `--poll-seconds N` and `--queue NAME` (placed after `watch`), which override `orchestrator.poll_interval_seconds` and `orchestrator.queue` for that run. `restart` accepts the same two flags for the fresh loop it starts.
 
@@ -686,6 +686,31 @@ What the layer does (see the [Functional Map](functional/blocks/B31-supervisor.m
 - At whole-task **close** (before `publish` in the `implementation` flow) it synthesizes the plain-language `summary.md` (the PR body) plus advisory caveats and records `supervisor_final`. If the synthesis call cannot run, the orchestrator's **minimal-summary fallback** writes `summary.md` instead — the summary is _always_ produced, by one path or the other.
 
 The layer is **advisory by construction**: it never reworks, reopens, or routes — blocking is the job of the in-flow `review`/evaluator nodes. It runs on the **global primary** provider, and its `permission_profile` is **forced `read-only`** in code (it can never edit), validated under the same ceiling as flow nodes (`reasoning` in the allowlist, `role_file` path-contained).
+
+## `logging`
+
+Optional block (`schema_version` **23**) persisting operator log verbosity and on-disk artifact retention. Omit it to take the defaults.
+
+```yaml
+logging:
+  level: info # debug | info | warning | error
+  artifacts: standard # minimal | standard | full
+```
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `level` | enum | `info` | Minimum operator trace level. The `--log-level` CLI flag overrides it when given; precedence is `--log-level` > `logging.level` > `info`. |
+| `artifacts` | enum | `standard` | Which per-attempt provider files survive under `logs/<task-id>/stages/.../<attempt>-<provider>/`. |
+
+The `artifacts` level prunes each attempt directory at the end of a run (after the stream has been parsed and `result.json` written, so it is always safe — the orchestrator's authoritative state lives in `state.db`, not the artifacts):
+
+| Level | Files kept |
+| --- | --- |
+| `minimal` | `result.json` only — even on failure (it records the exit code + normalized error class). |
+| `standard` | `result.json`, `stdout.log`, `stderr.log`. (`events.jsonl` is a redacted copy of `stdout.log`, so nothing unique is lost; `request.json` is dropped.) |
+| `full` | everything: `request.json`, `stdout.log`, `stderr.log`, `events.jsonl`, `output-schema.json`, `result.json`. |
+
+`minimal` makes remote post-mortem debugging harder (no stdout/stderr from failed runs); use it only on well-understood, frequently-run pipelines. Prompt-audit is **independent** of this key (governed by [`prompt_audit`](#prompt_audit)); `rendered-prompt.md` and task-level artifacts (`plan.md`, `summary.md`, `current.diff`, `review/`, `checks/`) are out of scope and always written. Reclaim disk from accumulated task directories with [`worc logs clean`](operations.md).
 
 ## `prompt_audit`
 

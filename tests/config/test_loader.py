@@ -62,6 +62,36 @@ def test_unknown_paths_subkey_is_rejected() -> None:
     assert any("paths" in issue and "nonsense" in issue for issue in exc.value.issues)
 
 
+def test_logging_defaults_when_block_absent() -> None:
+    cfg = loads_config(_LEGACY).config
+    assert cfg.logging.level == "info"
+    assert cfg.logging.artifacts == "standard"
+
+
+def test_logging_block_is_read_when_present() -> None:
+    cfg = loads_config(_LEGACY + "logging:\n  level: warning\n  artifacts: minimal\n").config
+    assert cfg.logging.level == "warning"
+    assert cfg.logging.artifacts == "minimal"
+
+
+def test_logging_invalid_level_is_rejected() -> None:
+    with pytest.raises(ConfigError) as exc:
+        loads_config(_LEGACY + "logging:\n  level: chatty\n")
+    assert any("logging.level" in issue and "chatty" in issue for issue in exc.value.issues)
+
+
+def test_logging_invalid_artifacts_is_rejected() -> None:
+    with pytest.raises(ConfigError) as exc:
+        loads_config(_LEGACY + "logging:\n  artifacts: everything\n")
+    assert any("logging.artifacts" in issue and "everything" in issue for issue in exc.value.issues)
+
+
+def test_unknown_logging_subkey_is_rejected() -> None:
+    with pytest.raises(ConfigError) as exc:
+        loads_config(_LEGACY + "logging:\n  nonsense: 1\n")
+    assert any("logging" in issue and "nonsense" in issue for issue in exc.value.issues)
+
+
 def test_legacy_skip_stages_tolerated_not_error() -> None:
     # ``agents.skip_stages`` was removed in config v10 (global stage-skip dropped for flexible
     # flows — drop the node from the flow instead). An old config still carrying it loads fail-open

@@ -183,6 +183,10 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "model": None,
             "reasoning": None,
         },
+        "logging": {
+            "level": "info",
+            "artifacts": "standard",
+        },
         "prompt_audit": False,
     }
 

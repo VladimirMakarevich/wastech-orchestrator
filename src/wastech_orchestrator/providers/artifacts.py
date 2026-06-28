@@ -30,6 +30,14 @@ STDERR_FILENAME = "stderr.log"
 EVENTS_FILENAME = "events.jsonl"
 RESULT_FILENAME = "result.json"
 
+# Which per-attempt files survive at each ``logging.artifacts`` level. ``full`` (or any unknown
+# level) keeps everything. ``result.json`` is always kept — it is the machine-readable outcome and
+# carries the exit code + normalized error class even on failure.
+_ARTIFACT_KEEP: dict[str, set[str]] = {
+    "minimal": {RESULT_FILENAME},
+    "standard": {RESULT_FILENAME, STDOUT_FILENAME, STDERR_FILENAME},
+}
+
 
 @dataclass(frozen=True)
 class ArtifactPaths:
@@ -117,6 +125,23 @@ def write_request_artifact(paths: ArtifactPaths, redacted_request: Mapping[str, 
 def write_result_artifact(paths: ArtifactPaths, result: AgentRunResult) -> str:
     """Write the machine-readable :class:`AgentRunResult` to ``result.json``."""
     return _write_json(paths.result_path, dataclasses.asdict(result))
+
+
+def prune_attempt_artifacts(paths: ArtifactPaths, level: str) -> None:
+    """Delete the per-attempt files not retained at ``level`` (``logging.artifacts``).
+
+    Called at the very end of a run — after the stream has been parsed into memory and
+    ``result.json`` written — so removing ``stdout.log``/``events.jsonl``/etc. is always safe; the
+    in-memory :class:`AgentRunResult` keeps its path strings and the authoritative state lives in
+    ``state.db``. ``full`` (and any unknown level) is a no-op. Iterating the directory also prunes
+    provider-specific extras (e.g. ``output-schema.json``) below ``full``.
+    """
+    keep = _ARTIFACT_KEEP.get(level)
+    if keep is None:
+        return
+    for entry in Path(paths.attempt_dir).iterdir():
+        if entry.is_file() and entry.name not in keep:
+            entry.unlink()
 
 
 def _write_json(path: str, data: Any) -> str:

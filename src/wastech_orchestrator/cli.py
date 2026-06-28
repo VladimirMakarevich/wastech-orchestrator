@@ -55,9 +55,10 @@ from wastech_orchestrator.git_manager import (
     append_runtime_excludes,
 )
 from wastech_orchestrator.install import config_writer, detect, wizard
+from wastech_orchestrator.ledger import Ledger
 from wastech_orchestrator.notify import build_notifier
 from wastech_orchestrator.notify.telegram import check_telegram_preflight
-from wastech_orchestrator.observability.logging import configure_logging
+from wastech_orchestrator.observability.logging import configure_logging, set_log_level
 from wastech_orchestrator.preflight import preflight_gh
 from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.security.isolation import check_isolation
@@ -150,8 +151,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--log-level",
         choices=sorted(_LOG_LEVELS),
-        default="info",
-        help="structured operator log level (default: info)",
+        default=None,
+        help="operator log level; overrides logging.level (default: logging.level, else info)",
     )
     parser.add_argument(
         "--log-format",
@@ -447,6 +448,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--status", help="show only tasks in this status (e.g. done, failed, running)"
     )
 
+    logs_cmd = sub.add_parser("logs", help="manage task log artifacts under .worc/logs/")
+    logs_sub = logs_cmd.add_subparsers(dest="logs_action", required=True)
+    logs_clean = logs_sub.add_parser(
+        "clean",
+        help="remove task artifact directories under .worc/logs/ (the ledger is kept by default)",
+    )
+    logs_clean.add_argument(
+        "--keep",
+        type=int,
+        metavar="N",
+        help="keep the N most recently modified task dirs, remove the rest (no prompt unless N=0)",
+    )
+    logs_clean.add_argument(
+        "--all",
+        action="store_true",
+        help="also remove the ledger (completed.jsonl); always confirms unless --yes",
+    )
+    logs_clean.add_argument("-y", "--yes", action="store_true", help="skip the confirmation prompt")
+
     return parser
 
 
@@ -737,7 +757,12 @@ def load_config_for(args: argparse.Namespace) -> OrchestratorConfig | None:
             "repository to set one up, or pass --config PATH."
         )
         return None
-    return _load_config(path)
+    config = _load_config(path)
+    # Apply the persisted logging.level unless the operator passed --log-level (the flag wins).
+    # Every command calls this right after _configure_runtime_logging, so this is the single seam.
+    if getattr(args, "log_level", None) is None:
+        set_log_level(_LOG_LEVELS[config.logging.level])
+    return config
 
 
 def worc_home_for(config: OrchestratorConfig) -> Path:
@@ -765,8 +790,11 @@ def pending_dir(config: OrchestratorConfig) -> Path:
 
 
 def _configure_runtime_logging(args: argparse.Namespace) -> None:
+    # The flag wins; absent (default None) we set up at INFO and let load_config_for re-apply the
+    # persisted logging.level once the config is known.
+    level = _LOG_LEVELS[args.log_level] if args.log_level else logging.INFO
     configure_logging(
-        level=_LOG_LEVELS[args.log_level],
+        level=level,
         fmt=getattr(args, "log_format", "logfmt"),
         file_path=getattr(args, "log_file", None),
     )
@@ -1412,6 +1440,80 @@ def cmd_tasks(args: argparse.Namespace) -> int:
         return 0
     for row in rows:
         print(_entry_line(_task_entry(row)))
+    return 0
+
+
+def _task_log_dirs(logs_root: Path) -> list[Path]:
+    """Per-task artifact dirs under ``.worc/logs/`` (direct subdirectories), newest first.
+
+    ``completed.jsonl`` is a file, so it is naturally excluded. Sorted by mtime descending so
+    ``--keep N`` retains the most recently modified runs.
+    """
+    if not logs_root.is_dir():
+        return []
+    dirs = [p for p in logs_root.iterdir() if p.is_dir()]
+    return sorted(dirs, key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def cmd_logs(args: argparse.Namespace) -> int:
+    """Dispatch the ``logs`` subcommands (currently only ``clean``)."""
+    _configure_runtime_logging(args)
+    config = load_config_for(args)
+    if config is None:
+        return 2
+    if args.logs_action == "clean":
+        return _cmd_logs_clean(args, config)
+    raise SystemExit(f"Unknown logs action '{args.logs_action}'.")
+
+
+def _cmd_logs_clean(args: argparse.Namespace, config: OrchestratorConfig) -> int:
+    """Remove task artifact dirs under ``.worc/logs/`` to reclaim disk.
+
+    ``--keep N`` retains the N newest task dirs (no prompt unless N=0); bare ``clean`` removes every
+    task dir; ``--all`` additionally removes the ledger. The ledger (``completed.jsonl``) is the
+    audit trail and is preserved unless ``--all``. Running this while a task is active is
+    unsupported.
+    """
+    logs_root = worc_home_for(config) / "logs"
+    ledger_path = Ledger(logs_root).path
+    task_dirs = _task_log_dirs(logs_root)
+    if not task_dirs and not (args.all and ledger_path.exists()):
+        print("logs clean: nothing to remove")
+        return 0
+
+    if args.keep is not None:
+        if args.keep < 0:
+            print("logs clean: --keep must be >= 0")
+            return 2
+        kept, doomed = task_dirs[: args.keep], task_dirs[args.keep :]
+        # N=0 is equivalent to delete-all → confirm like the bare form.
+        if (
+            args.keep == 0
+            and not args.yes
+            and not _confirm(
+                f"Remove all {len(doomed)} task log dir(s) under {logs_root.as_posix()}? [y/N] "
+            )
+        ):
+            print("logs clean: aborted")
+            return 0
+        for path in doomed:
+            shutil.rmtree(path, ignore_errors=True)
+        print(f"logs clean: removed {len(doomed)} task dir(s); kept {len(kept)}")
+        return 0
+
+    # Bare clean (optionally --all): a full sweep — always confirm unless --yes.
+    target = "all task logs and the ledger" if args.all else "all task logs"
+    if not args.yes and not _confirm(f"Remove {target} under {logs_root.as_posix()}? [y/N] "):
+        print("logs clean: aborted")
+        return 0
+    for path in task_dirs:
+        shutil.rmtree(path, ignore_errors=True)
+    removed_ledger = False
+    if args.all and ledger_path.exists():
+        ledger_path.unlink()
+        removed_ledger = True
+    suffix = " and the ledger" if removed_ledger else " (ledger kept)"
+    print(f"logs clean: removed {len(task_dirs)} task dir(s){suffix}")
     return 0
 
 
@@ -2214,6 +2316,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_merge_task(args)
         if args.command == "tasks":
             return cmd_tasks(args)
+        if args.command == "logs":
+            return cmd_logs(args)
     except (ConfigError, IncompatibleStateError, preflight.GhNotAvailableError) as exc:
         print(f"error: {exc}")
         return 2

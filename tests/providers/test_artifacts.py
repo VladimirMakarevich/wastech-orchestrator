@@ -8,7 +8,9 @@ from pathlib import Path
 import pytest
 
 from wastech_orchestrator.providers.artifacts import (
+    ArtifactPaths,
     create_attempt_dir,
+    prune_attempt_artifacts,
     write_request_artifact,
     write_result_artifact,
 )
@@ -89,3 +91,45 @@ def test_write_result_artifact_serializes_enums_and_error(tmp_path: Path) -> Non
     assert loaded["node_id"] == "review"
     assert loaded["error"]["error_class"] == "task_failure"
     assert loaded["error"]["message"] == "did not satisfy the task"
+
+
+_FULL_FILE_SET = frozenset(
+    {
+        "request.json",
+        "stdout.log",
+        "stderr.log",
+        "events.jsonl",
+        "result.json",
+        "output-schema.json",  # provider-specific extra (typed-output nodes)
+    }
+)
+
+
+def _seed_attempt(tmp_path: Path, task_id: str = "task-001") -> ArtifactPaths:
+    """Create an attempt dir with the full per-attempt file set and return its paths."""
+    paths = create_attempt_dir(tmp_path, task_id, "planning", 1, "codex", node_run_id=1)
+    for name in _FULL_FILE_SET:
+        (Path(paths.attempt_dir) / name).write_text("x", encoding="utf-8")
+    return paths
+
+
+def test_prune_minimal_keeps_only_result_json(tmp_path: Path) -> None:
+    paths = _seed_attempt(tmp_path)
+    prune_attempt_artifacts(paths, "minimal")
+    survivors = {entry.name for entry in Path(paths.attempt_dir).iterdir()}
+    assert survivors == {"result.json"}
+
+
+def test_prune_standard_keeps_stdout_stderr_result(tmp_path: Path) -> None:
+    paths = _seed_attempt(tmp_path)
+    prune_attempt_artifacts(paths, "standard")
+    survivors = {entry.name for entry in Path(paths.attempt_dir).iterdir()}
+    assert survivors == {"result.json", "stdout.log", "stderr.log"}
+
+
+@pytest.mark.parametrize("level", ["full", "weird-unknown-level"])
+def test_prune_full_and_unknown_keep_everything(tmp_path: Path, level: str) -> None:
+    paths = _seed_attempt(tmp_path, task_id=f"task-{level}")
+    prune_attempt_artifacts(paths, level)
+    survivors = {entry.name for entry in Path(paths.attempt_dir).iterdir()}
+    assert survivors == set(_FULL_FILE_SET)

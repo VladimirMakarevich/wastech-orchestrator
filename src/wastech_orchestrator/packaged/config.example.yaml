@@ -3,7 +3,7 @@
 # This is the packaged copy used by `wastech-orchestrator init`; keep it in sync with the
 # repo-root config.example.yaml
 
-schema_version: 22                  # config format version; the orchestrator refuses newer configs
+schema_version: 23                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -218,6 +218,16 @@ supervisor:                          # constant oversight layer above any flow â
   role_file: "roles/supervisor.md"  # role prompt for the supervisor; path-contained under roles/
   model: "claude-opus-4-8"          # null = use the global primary provider's default model
   reasoning: medium                 # null = use the global primary provider's default reasoning
+
+logging:                            # operator log verbosity + on-disk artifact retention (optional)
+  level: info                       # debug | info | warning | error. Persists the structured operator
+                                    #   trace level; the --log-level CLI flag overrides it when given.
+  artifacts: standard               # per-attempt provider files kept under logs/<id>/stages/.../<attempt>-<provider>/:
+                                    #   minimal  = result.json only (even on failure)
+                                    #   standard = + stdout.log, stderr.log  (events.jsonl is a dup of stdout)
+                                    #   full     = all (request.json, events.jsonl, output-schema.json, ...)
+                                    # Prompt-audit is independent (see prompt_audit). Reclaim disk with
+                                    # `worc logs clean [--keep N | --all]`.
 
 prompt_audit: false                 # record each step's prompt + who (provider/model/attempt/fallback/
                                     # status) under logs/<task-id>/prompt-audit/, in chronological order.

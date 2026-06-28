@@ -112,7 +112,13 @@ from wastech_orchestrator.providers.base import ProviderId
 # `orchestrator.auto_mode.confirm_next_task` (Telegram approve/deny before claiming a pending task)
 # and optional `agents.providers.<id>.max_turns_gate` (a continue/stop prompt when a Claude run hits
 # its turn cap). Both default false and require `telegram.enabled` when on (preflight-enforced).
-CONFIG_SCHEMA_VERSION = 22
+# v23 (2026-06-27, log-management): a *format* add of the optional `logging` block — `level`
+# (debug|info|warning|error, default info) persists the operator trace verbosity (the `--log-level`
+# flag overrides it) and `artifacts` (minimal|standard|full, default standard) controls which
+# per-attempt provider files are kept under `logs/<task-id>/stages/.../<attempt>-<provider>/`
+# (minimal=result.json only; standard=+stdout/stderr; full=all). Absent => safe defaults; old
+# configs load fail-open and `upgrade-config` adds it from the template.
+CONFIG_SCHEMA_VERSION = 23
 
 
 class AuditBranch(StrEnum):
@@ -376,6 +382,23 @@ class SupervisorConfig:
 
 
 @dataclass(frozen=True)
+class LoggingConfig:
+    """Operator log verbosity + on-disk artifact retention (log-management).
+
+    ``level`` (``debug|info|warning|error``) persists the structured operator trace verbosity; the
+    ``--log-level`` CLI flag overrides it when given. ``artifacts`` (``minimal|standard|full``)
+    governs which per-attempt provider files survive under
+    ``logs/<task-id>/stages/.../<attempt>-<provider>/``: ``minimal`` keeps only ``result.json``
+    (even on failure — ``result.json`` records the exit code + error class), ``standard`` adds
+    ``stdout.log``/``stderr.log``, ``full`` keeps everything. Prompt-audit is independent (governed
+    by ``prompt_audit``); ``rendered-prompt.md`` and task-level artifacts are out of scope.
+    """
+
+    level: str = "info"
+    artifacts: str = "standard"
+
+
+@dataclass(frozen=True)
 class OrchestratorConfig:
     orchestrator: OrchestratorRuntimeConfig
     repo: RepoConfig
@@ -388,6 +411,7 @@ class OrchestratorConfig:
     skills: SkillsConfig = SkillsConfig()
     supervisor: SupervisorConfig = field(default_factory=SupervisorConfig)
     paths: PathsConfig = field(default_factory=PathsConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
     # When true, every task records each step's prompt + who-metadata (provider/model/attempt/
     # fallback/status) under `logs/<task-id>/prompt-audit/`. A per-task `prompt_audit` always
     # overrides this (task wins); recording a prompt is not a privilege escalation, so there is no

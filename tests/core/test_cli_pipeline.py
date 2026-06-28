@@ -111,9 +111,7 @@ def test_watch_resume_manual_blocks(make_git_config, git_repo, tmp_path: Path) -
     assert orch.run_calls == []  # resume's manual outcome blocks picking pending
 
 
-def test_watch_resume_parked_blocks_continuation(
-    make_git_config, git_repo, tmp_path: Path
-) -> None:
+def test_watch_resume_parked_blocks_continuation(make_git_config, git_repo, tmp_path: Path) -> None:
     # A B-lite soft pause (non-terminal RUNNING) holds the slot: watch_once returns early without
     # picking a pending task; the between-tick poll sleep is the cool-off, the next tick re-resumes.
     config = make_git_config(git_repo.clone, auto_mode=True)
