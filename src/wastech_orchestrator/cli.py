@@ -23,7 +23,7 @@ from datetime import UTC, datetime
 from importlib import resources
 from importlib.resources.abc import Traversable
 from pathlib import Path
-from typing import NamedTuple
+from typing import NamedTuple, TextIO
 
 from wastech_orchestrator import __version__, preflight, process_control
 from wastech_orchestrator.config import upgrade as config_upgrade
@@ -35,6 +35,7 @@ from wastech_orchestrator.config.schema import (
 )
 from wastech_orchestrator.config.validation import validate_config
 from wastech_orchestrator.core.flow.registry import FlowRegistry
+from wastech_orchestrator.core.hitl import iter_task_interactions
 from wastech_orchestrator.core.orchestrator import (
     Eligibility,
     FinalizePlan,
@@ -129,6 +130,27 @@ TELEGRAM_CHAT_ID=
 # (codex / claude / git / gh / checks) only if its name is also in security.allowed_environment.
 # GH_TOKEN=
 """
+
+
+def _add_stop_force_flags(parser: argparse.ArgumentParser) -> None:
+    """The stop-ladder force flags shared by ``stop`` and ``restart`` (mutually exclusive).
+
+    No flag → idle stops with no prompt; a busy daemon refuses (interactive: confirm ``YES``).
+    ``--force`` → soft stop (finish the current step). ``--force-full`` → hard stop: kill the active
+    agent's process group now (POSIX; Windows degrades to soft). See ``_resolve_stop_level``.
+    """
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--force",
+        action="store_true",
+        help="stop even while a task is active: soft (finish the current step, then exit)",
+    )
+    group.add_argument(
+        "--force-full",
+        dest="force_full",
+        action="store_true",
+        help="hard stop: kill the active agent's process group now (POSIX; Windows: soft)",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -241,6 +263,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SECONDS",
         help="seconds to wait for graceful shutdown before escalating (default: 30)",
     )
+    _add_stop_force_flags(stop_cmd)
 
     restart_cmd = sub.add_parser(
         "restart", help="stop the running 'watch' daemon, then start a fresh one with these flags"
@@ -252,6 +275,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SECONDS",
         help="seconds to wait for the previous watcher to exit (default: 30)",
     )
+    _add_stop_force_flags(restart_cmd)
     restart_cmd.add_argument(
         "--poll-seconds",
         type=int,
@@ -282,6 +306,55 @@ def build_parser() -> argparse.ArgumentParser:
     )
     status_cmd = sub.add_parser("status", help="show the active or latest persisted task status")
     status_cmd.add_argument("task_id", nargs="?", help="specific task id (default: active/latest)")
+
+    top_cmd = sub.add_parser(
+        "top", help="live read-only monitor: active task + queue + recent + daemon log (q to quit)"
+    )
+    top_cmd.add_argument(
+        "--poll-seconds",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=f"refresh interval (default: {_TOP_DEFAULT_POLL_SECONDS:g})",
+    )
+    top_cmd.add_argument(
+        "--queue",
+        default=None,
+        metavar="NAME",
+        help="show only this queue's pending tasks (default: orchestrator.queue)",
+    )
+    top_cmd.add_argument(
+        "--log-file",
+        dest="tail_file",
+        default=None,
+        metavar="PATH",
+        help="the daemon log file to tail (the path passed to 'watch --log-file')",
+    )
+    top_cmd.add_argument(
+        "--recent",
+        type=int,
+        default=None,
+        metavar="N",
+        help=f"how many recent terminal tasks to show (default: {_LIST_RECENT_DEFAULT})",
+    )
+
+    shell_cmd = sub.add_parser(
+        "shell",
+        help="interactive operator console over the watch daemon (needs the [shell] extra)",
+    )
+    shell_cmd.add_argument(
+        "--queue",
+        default=None,
+        metavar="NAME",
+        help="serve and monitor this queue (default: orchestrator.queue)",
+    )
+    shell_cmd.add_argument(
+        "--log-file",
+        dest="tail_file",
+        default=None,
+        metavar="PATH",
+        help="daemon log file to spawn-with and tail (default: .worc/logs/daemon.log)",
+    )
 
     list_cmd = sub.add_parser(
         "list", help="enumerate the active / pending / recent tasks (read-only)"
@@ -789,6 +862,22 @@ def pending_dir(config: OrchestratorConfig) -> Path:
     return tasks_root_for(config) / config.paths.tasks_dir / "pending"
 
 
+def has_active_task(config: OrchestratorConfig) -> bool:
+    """True iff a task currently owns the processing slot (read-only ``state.db`` probe).
+
+    An absent database is "idle" (``False``). Shared by the console's daemon shutdown and the stop
+    ladder's idle/busy gate — the daemon may be alive but idle between ticks, which counts as idle.
+    """
+    db_path = Path(worc_home_for(config)) / "state.db"
+    if not db_path.is_file():
+        return False
+    store = StateStore.open_readonly(db_path)
+    try:
+        return bool(store.find_active_tasks())
+    finally:
+        store.close()
+
+
 def _configure_runtime_logging(args: argparse.Namespace) -> None:
     # The flag wins; absent (default None) we set up at INFO and let load_config_for re-apply the
     # persisted logging.level once the config is known.
@@ -850,6 +939,24 @@ def _scan_pending_meta(task_file: Path) -> _PendingScan:
     ):
         return _PendingScan(task_id, (), rank, queue, title)
     return _PendingScan(task_id, tuple(d.strip() for d in raw_deps), rank, queue, title)
+
+
+def scan_pending_sorted(folder: Path, selector: str) -> list[tuple[Path, _PendingScan]]:
+    """Pending files for ``selector``'s queue, ranked exactly as :func:`watch_once` runs them.
+
+    Keep only files whose ``queue`` equals ``selector`` (static partitioning across instances), then
+    sort by ``(priority_rank, path)`` — :func:`select_pending` is already filename-sorted, so the
+    path tie-break preserves the deterministic order within a priority. This is the single source of
+    truth for "what order will the daemon actually run", shared by ``watch_once`` and the read-only
+    monitor (``worc top`` / the console ``ps`` view) so the displayed order can never drift.
+    """
+    scans = [
+        (p, s)
+        for p, s in ((p, _scan_pending_meta(p)) for p in select_pending(folder))
+        if s.queue == selector
+    ]
+    scans.sort(key=lambda item: (item[1].priority_rank, item[0]))
+    return scans
 
 
 def _confirm_next_task(
@@ -927,16 +1034,9 @@ def watch_once(
 
     auto = config.orchestrator.auto_mode.enabled
     selector = queue if queue is not None else config.orchestrator.queue
-    # Partition first: drop pending tasks tagged for another queue before ranking and before the
-    # dependency map is built, so this instance only ever sees its own tasks.
-    scans = [
-        (p, s)
-        for p, s in ((p, _scan_pending_meta(p)) for p in select_pending(folder))
-        if s.queue == selector
-    ]
-    # Sort by (priority_rank, filename); select_pending is already filename-sorted, so the path tie
-    # break preserves the deterministic order within a priority. pending_map is order-independent.
-    scans.sort(key=lambda item: (item[1].priority_rank, item[0]))
+    # Partition + rank in one place (shared with the read-only monitor): drop other-queue tasks,
+    # then order by (priority_rank, filename). pending_map is order-independent.
+    scans = scan_pending_sorted(folder, selector)
     pending_map = {s.task_id: s.depends_on for _p, s in scans if s.task_id is not None}
     for task_file, scan in scans:
         task_id, depends_on = scan.task_id, scan.depends_on
@@ -1059,6 +1159,18 @@ def _confirm(prompt: str) -> bool:
     except EOFError:
         return False
     return answer.strip().lower() in ("y", "yes")
+
+
+def _confirm_yes(prompt: str) -> bool:
+    """Require the literal uppercase ``YES`` (a deliberate, consequential confirmation; EOF → no).
+
+    Used by the stop ladder when a task is active: typing ``YES`` maps to the *soft* stop only —
+    destroying in-flight agent work needs the explicit ``--force-full`` flag, not a typed shortcut.
+    """
+    try:
+        return input(prompt).strip() == "YES"
+    except EOFError:
+        return False
 
 
 def _report_rerun_plan(plan: RerunPlan) -> None:
@@ -1724,19 +1836,86 @@ def cmd_watch(args: argparse.Namespace) -> int:
     return _summarize_watch(results)
 
 
+class _StopDecision(NamedTuple):
+    """The stop ladder's verdict for one invocation (see :func:`_resolve_stop_level`)."""
+
+    proceed: bool
+    level: str = "soft"  # "soft" | "full" — passed to stop_process when proceeding
+    message: str | None = None  # printed when not proceeding (refusal / abort)
+    exit_code: int = 0  # exit code when not proceeding
+
+
+def _resolve_stop_level(
+    config: OrchestratorConfig, *, force: bool, force_full: bool, interactive: bool
+) -> _StopDecision:
+    """The stop ladder, keyed on whether a task is active (a read-only ``find_active_tasks`` probe).
+
+    Idle → ordinary (soft) stop, no prompt, any form. Busy + no flag → refuse (interactive: confirm
+    the literal ``YES`` → soft; non-interactive: exit non-zero, require a flag). Busy + ``--force``
+    → soft; busy + ``--force-full`` → hard (full).
+    """
+    if not has_active_task(config):
+        return _StopDecision(proceed=True, level="soft")  # nothing in flight: any form just stops
+    if force_full:
+        return _StopDecision(proceed=True, level="full")
+    if force:
+        return _StopDecision(proceed=True, level="soft")
+    if interactive:
+        if _confirm_yes("a task is active — type YES to stop it (soft, finishes the step): "):
+            return _StopDecision(proceed=True, level="soft")
+        return _StopDecision(proceed=False, message="stop: aborted", exit_code=0)
+    return _StopDecision(
+        proceed=False,
+        message="stop: a task is active; pass --force (soft) or --force-full (hard, POSIX)",
+        exit_code=1,
+    )
+
+
+def _gated_stop(
+    config: OrchestratorConfig, args: argparse.Namespace
+) -> tuple[int, process_control.StopOutcome | None]:
+    """Run the stop ladder. Returns ``(exit_code, outcome)``; ``outcome`` is ``None`` if refused."""
+    decision = _resolve_stop_level(
+        config,
+        force=getattr(args, "force", False),
+        force_full=getattr(args, "force_full", False),
+        interactive=sys.stdin.isatty(),
+    )
+    if not decision.proceed:
+        print(decision.message)
+        return decision.exit_code, None
+    pid_path = process_control.pid_file_path(worc_home_for(config))
+    stop_path = process_control.stop_file_path(worc_home_for(config))
+    outcome = process_control.stop_process(
+        pid_path, timeout=args.timeout, stop_file=stop_path, level=decision.level
+    )
+    return 0, outcome
+
+
 def cmd_stop(args: argparse.Namespace) -> int:
-    """Stop a running ``watch`` daemon (SIGTERM, then SIGKILL after ``--timeout``). Idempotent."""
+    """Stop a running ``watch`` daemon via the stop ladder (idle: no prompt; busy: confirm/force).
+
+    Soft (default / ``--force`` / typed ``YES``) finishes the current step, then exits;
+    ``--force-full`` hard-kills the agent's group now (POSIX; Windows: soft). Idempotent.
+    """
     _configure_runtime_logging(args)
     config = load_config_for(args)
     if config is None:
         return 2
-    pid_path = process_control.pid_file_path(worc_home_for(config))
-    stop_path = process_control.stop_file_path(worc_home_for(config))
-    outcome = process_control.stop_process(pid_path, timeout=args.timeout, stop_file=stop_path)
+    code, outcome = _gated_stop(config, args)
+    if outcome is None:
+        return code
+    if outcome.degraded_to_soft:
+        print("stop: hard stop (--force-full) is unavailable on Windows; doing a soft stop")
     if not outcome.found:
         print("stop: no running watcher (no PID file)")
     elif outcome.already_dead:
         print(f"stop: no running watcher (cleared stale PID {outcome.pid})")
+    elif outcome.group_killed:
+        print(
+            f"stop: watcher {outcome.pid} hard-stopped (killed its process group); "
+            "it resumes from its checkpoint on next start"
+        )
     elif outcome.killed:
         print(f"stop: watcher {outcome.pid} did not exit in {args.timeout:g}s; sent SIGKILL")
     elif outcome.timed_out:
@@ -1750,20 +1929,25 @@ def cmd_stop(args: argparse.Namespace) -> int:
 
 
 def cmd_restart(args: argparse.Namespace) -> int:
-    """Stop the running watcher (if any), then start a fresh ``watch`` with these flags.
+    """Stop the running watcher (via the stop ladder), then start a fresh ``watch`` with the flags.
 
     Targets the daemon recorded in the PID file (a different process), waits for it to exit, then
-    runs its own loop in-process — it does not need to remember the old daemon's arguments.
+    runs its own loop in-process. A busy daemon confirms/forces exactly like ``stop``; a refusal
+    does **not** start a new daemon.
     """
     _configure_runtime_logging(args)
     config = load_config_for(args)
     if config is None:
         return 2
-    pid_path = process_control.pid_file_path(worc_home_for(config))
-    stop_path = process_control.stop_file_path(worc_home_for(config))
-    outcome = process_control.stop_process(pid_path, timeout=args.timeout, stop_file=stop_path)
+    code, outcome = _gated_stop(config, args)
+    if outcome is None:
+        return code  # refused (busy, no go-ahead) → do not start a new daemon
+    if outcome.degraded_to_soft:
+        print("restart: hard stop (--force-full) is unavailable on Windows; doing a soft stop")
     if not outcome.found or outcome.already_dead:
         print("restart: no previous watcher running")
+    elif outcome.group_killed:
+        print(f"restart: hard-stopped previous watcher {outcome.pid} (process group)")
     elif outcome.timed_out:
         print(f"restart: previous watcher {outcome.pid} did not confirm shutdown; starting anyway")
     else:
@@ -1893,6 +2077,326 @@ def _entry_line(entry: dict[str, str | None]) -> str:
     if branch:
         line += f"  ({branch})"
     return line
+
+
+# Reverse of task.model._PRIORITY_RANK for display (the scheduler keeps only the rank).
+_PRIORITY_LABEL: dict[int, str] = {0: "high", 1: "mid", 2: "low"}
+
+
+def tail_lines(path: Path | None, n: int) -> list[str]:
+    """The last ``n`` lines of ``path`` (oldest first), or ``[]`` when absent/unreadable.
+
+    Re-reads the whole current file each call: rotation-immune (no byte offsets) and cheap for an
+    operator log. A burst between polls larger than the returned tail can be missed — acceptable for
+    a monitor. Used by ``worc top`` / the console to stream the daemon ``--log-file``.
+    """
+    if path is None or n <= 0 or not path.is_file():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    return text.splitlines()[-n:]
+
+
+class _ActiveView(NamedTuple):
+    """One active (slot-owning) task, as the read-only monitor shows it."""
+
+    task_id: str
+    status_label: str  # "running" or "running (paused)" (B-lite park)
+    title: str | None
+    branch: str | None
+    current_node: str | None  # flow checkpoint: where the engine will resume
+    fix_iterations: int
+    subtask: str | None  # "2/5" for a decomposed task, else None
+    parked_since: str | None  # tasks.blocked_since (ISO) when parked, else None
+    gate_pending: bool  # a durable HITL gate is waiting on the operator
+
+
+class _QueueView(NamedTuple):
+    """One pending file, in the exact order the daemon will run it."""
+
+    label: str  # the front-matter id, or the filename when unparseable
+    priority: str  # high / mid / low
+    queue: str
+
+
+class TopSnapshot(NamedTuple):
+    """A single read-only frame for ``worc top`` / the console ``ps`` view.
+
+    Pure data assembled by :func:`build_top_snapshot` from already-redacted sources; rendered by
+    :func:`render_top`. No live handles — safe to build under a poll and assert on in tests.
+    """
+
+    db_present: bool
+    selector: str  # the served queue: what the daemon picks + what the queue view is filtered to
+    active: tuple[_ActiveView, ...]
+    queue: tuple[_QueueView, ...]
+    recent: tuple[dict[str, str | None], ...]  # reuses the _task_entry dicts
+    log_path: str | None
+    log_lines: tuple[str, ...]
+
+
+def _has_pending_gate(worc_home: Path, task_id: str) -> bool:
+    """True iff a durable HITL gate interaction is waiting on the operator (e.g. max-turns gate).
+
+    Reads the durable ``hitl/*.json`` artifacts via :func:`iter_task_interactions`; the non-durable
+    next-task gate has no artifact and is deliberately not surfaced. Fail-safe: a read/parse error
+    yields ``False`` so the monitor never crashes on a malformed artifact.
+    """
+    try:
+        return any(
+            interaction.get("status") == "waiting"
+            for interaction in iter_task_interactions(worc_home, task_id)
+        )
+    except (OSError, ValueError):  # StageOutputError (non-dict JSON) is a ValueError subclass
+        return False
+
+
+def build_top_snapshot(
+    config: OrchestratorConfig,
+    store: StateStore | None,
+    *,
+    selector: str,
+    log_path: Path | None,
+    log_tail_lines: int,
+    recent_limit: int,
+) -> TopSnapshot:
+    """Assemble the read-only monitor view from already-redacted sources.
+
+    Reads the active task(s) + flow checkpoint + parked marker + pending-gate marker from the
+    read-only ``state.db``, the pending queue ranked exactly as the daemon runs it
+    (:func:`scan_pending_sorted`, filtered to ``selector``), recent terminal tasks
+    (``store.recent_tasks``), and a tail of the daemon log. Pure given ``store`` + ``log_path``;
+    ``store`` is ``None`` when no database exists yet (fresh install), yielding empty task sections.
+    """
+    worc_home = worc_home_for(config)
+    active: list[_ActiveView] = []
+    for row in store.find_active_tasks() if store is not None else []:
+        try:
+            current_node = store.get_flow_checkpoint(row.task_id)[0] if store else None
+        except KeyError:
+            current_node = None  # row vanished between the two reads (terminal race)
+        parked = row.blocked_since if (row.status is Status.RUNNING and row.blocked_since) else None
+        subtask = (
+            f"{row.active_subtask}/{row.subtask_count}"
+            if row.active_subtask is not None and row.subtask_count is not None
+            else None
+        )
+        active.append(
+            _ActiveView(
+                task_id=row.task_id,
+                status_label=_task_entry(row)["status"] or row.status.value,
+                title=row.title,
+                branch=row.branch,
+                current_node=current_node,
+                fix_iterations=row.fix_iterations,
+                subtask=subtask,
+                parked_since=parked,
+                gate_pending=_has_pending_gate(worc_home, row.task_id),
+            )
+        )
+    queue = tuple(
+        _QueueView(
+            label=s.task_id or path.name,
+            priority=_PRIORITY_LABEL.get(s.priority_rank, "mid"),
+            queue=s.queue,
+        )
+        for path, s in scan_pending_sorted(pending_dir(config), selector)
+    )
+    recent = tuple(_task_entry(r) for r in (store.recent_tasks(recent_limit) if store else []))
+    return TopSnapshot(
+        db_present=store is not None,
+        selector=selector,
+        active=tuple(active),
+        queue=queue,
+        recent=recent,
+        log_path=str(log_path) if log_path is not None else None,
+        log_lines=tuple(tail_lines(log_path, log_tail_lines)),
+    )
+
+
+# `worc top` defaults: refresh cadence and how many daemon-log lines to tail per frame.
+_TOP_DEFAULT_POLL_SECONDS = 2.0
+_TOP_LOG_TAIL_LINES = 12
+
+
+def render_top(snapshot: TopSnapshot) -> str:
+    """Render one read-only monitor frame as plain text (pure; golden-tested).
+
+    Mirrors what the daemon will actually do: the queue is already filtered to ``selector`` and
+    priority-ordered by :func:`build_top_snapshot`. Carries no ANSI styling — the loop owns the
+    screen clear; this is just text, so it is trivially asserted on in tests.
+    """
+    lines: list[str] = [
+        f"worc top — queue {snapshot.selector!r}    (type q + Enter to quit)",
+        "=" * 78,
+        "ACTIVE",
+    ]
+    if not snapshot.db_present:
+        lines.append("  (no state database yet)")
+    elif not snapshot.active:
+        lines.append("  (idle — no active task)")
+    else:
+        for view in snapshot.active:
+            head = f"  {view.status_label:<18} {view.task_id}"
+            if view.title:
+                head += f"  {view.title}"
+            lines.append(head)
+            meta = [f"node={view.current_node}"] if view.current_node else []
+            meta.append(f"fix={view.fix_iterations}")
+            if view.subtask:
+                meta.append(f"subtask={view.subtask}")
+            if view.branch:
+                meta.append(f"branch={view.branch}")
+            lines.append("    " + "  ".join(meta))
+            if view.parked_since:
+                lines.append(f"    paused — every provider unavailable since {view.parked_since}")
+            if view.gate_pending:
+                lines.append("    awaiting operator (gate pending)")
+
+    lines += ["", f"QUEUE ({snapshot.selector})"]
+    if snapshot.queue:
+        lines += [f"  {view.priority:<4}  {view.label}" for view in snapshot.queue]
+    else:
+        lines.append("  (empty)")
+
+    lines += ["", "RECENT"]
+    if snapshot.recent:
+        lines += [f"  {_entry_line(entry)}" for entry in snapshot.recent]
+    else:
+        lines.append("  (none)")
+
+    lines += ["", f"LOG ({snapshot.log_path or 'no --log-file'})"]
+    if snapshot.log_lines:
+        lines += [f"  {line}" for line in snapshot.log_lines]
+    else:
+        lines.append("  (no output)")
+
+    return "\n".join(lines)
+
+
+def _stdin_quit_watcher(stop_event: threading.Event, stream: TextIO | None = None) -> None:
+    """Set ``stop_event`` when the operator types ``q``/``quit`` on stdin (blocking reader thread).
+
+    A blocking ``readline`` is platform-neutral (no select / termios / msvcrt) and works whether
+    stdin is a TTY or a pipe; EOF (closed stdin) ends the watcher without quitting, leaving Ctrl-C
+    as the other exit. Costs an Enter after the key — a trade for zero platform branching.
+    """
+    source = stream if stream is not None else sys.stdin
+    while not stop_event.is_set():
+        line = source.readline()
+        if line == "":  # EOF: stdin closed — stop watching, but let the loop keep refreshing
+            return
+        if line.strip().lower() in ("q", "quit"):
+            stop_event.set()
+            return
+
+
+def _run_top_loop(
+    config: OrchestratorConfig,
+    *,
+    selector: str,
+    log_path: Path | None,
+    poll_seconds: float,
+    recent_limit: int,
+    log_tail_lines: int,
+    stop_event: threading.Event,
+    out: TextIO = sys.stdout,
+    clear: bool = True,
+) -> int:
+    """Refresh the read-only monitor until ``stop_event`` fires (``q`` or a signal).
+
+    Re-opens ``state.db`` read-only each tick (so a database the daemon creates a tick later starts
+    showing), renders a frame, then waits ``poll_seconds`` on the event. Pure given the seams: a
+    pre-set ``stop_event`` renders exactly one frame and returns, which is how it is tested.
+    """
+    db_path = Path(worc_home_for(config)) / "state.db"
+    while True:
+        store = StateStore.open_readonly(db_path) if db_path.is_file() else None
+        try:
+            snapshot = build_top_snapshot(
+                config,
+                store,
+                selector=selector,
+                log_path=log_path,
+                log_tail_lines=log_tail_lines,
+                recent_limit=recent_limit,
+            )
+        finally:
+            if store is not None:
+                store.close()
+        if clear:
+            out.write("\x1b[H\x1b[2J")  # cursor home + clear screen
+        out.write(render_top(snapshot) + "\n")
+        out.flush()
+        if stop_event.wait(poll_seconds):
+            return 0
+
+
+def cmd_top(args: argparse.Namespace) -> int:
+    """Live, read-only monitor of the single slot: active task + node, the priority-ordered pending
+    queue (filtered to the served queue), recent terminal tasks, and a tail of the daemon log.
+
+    A client over the daemon — it never starts the engine; it polls ``state.db`` read-only and tails
+    the ``--log-file`` the daemon was launched with. ``q``/``quit`` (or Ctrl-C) exits.
+    """
+    # Read-only UI: keep our own logging quiet (errors only, no file) so stray lines don't fight the
+    # full-screen redraw — and never open the tailed --log-file for writing (that would race the
+    # daemon's rotating handler). ``--log-file`` here names the daemon log to *tail*, not a sink.
+    configure_logging(
+        level=logging.ERROR, fmt=getattr(args, "log_format", "logfmt"), file_path=None
+    )
+    config = load_config_for(args)
+    if config is None:
+        return 2
+    set_log_level(logging.ERROR)
+    selector = args.queue or config.orchestrator.queue
+    log_path = Path(args.tail_file) if args.tail_file else None
+    recent_limit = args.recent if args.recent is not None else _LIST_RECENT_DEFAULT
+    poll = float(args.poll_seconds) if args.poll_seconds is not None else _TOP_DEFAULT_POLL_SECONDS
+    stop_event = threading.Event()
+    watcher = threading.Thread(target=_stdin_quit_watcher, args=(stop_event,), daemon=True)
+    watcher.start()
+    try:
+        return _run_top_loop(
+            config,
+            selector=selector,
+            log_path=log_path,
+            poll_seconds=poll,
+            recent_limit=recent_limit,
+            log_tail_lines=_TOP_LOG_TAIL_LINES,
+            stop_event=stop_event,
+        )
+    except KeyboardInterrupt:
+        return 0
+
+
+def cmd_shell(args: argparse.Namespace) -> int:
+    """Interactive operator console: a client over the watch daemon (needs the ``[shell]`` extra).
+
+    Spawns or attaches to a ``watch`` daemon, streams its log above a prompt, and dispatches console
+    commands onto the existing ``cmd_*`` verbs — it never starts the engine itself. prompt_toolkit
+    is imported lazily inside the console; without the extra it exits with an install hint.
+    """
+    # The console owns the screen, like `top`: keep our own logging quiet so stray lines don't fight
+    # the prompt. The forwarded cmd_* verbs print their own output (above the prompt).
+    configure_logging(
+        level=logging.ERROR, fmt=getattr(args, "log_format", "logfmt"), file_path=None
+    )
+    config = load_config_for(args)
+    if config is None:
+        return 2
+    set_log_level(logging.ERROR)
+    cfg_path = resolve_config_path(args)
+    from wastech_orchestrator import cli_shell  # lazy: avoids a circular import at module load
+
+    return cli_shell.run_shell(
+        config,
+        config_path=str(cfg_path) if cfg_path else None,
+        queue=args.queue,
+        log_file=args.tail_file,
+    )
 
 
 def _list_sections(
@@ -2298,6 +2802,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_telegram_test(args)
         if args.command == "status":
             return cmd_status(args)
+        if args.command == "top":
+            return cmd_top(args)
+        if args.command == "shell":
+            return cmd_shell(args)
         if args.command == "list":
             return cmd_list(args)
         if args.command == "completion":

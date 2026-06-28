@@ -288,6 +288,20 @@ python -m wastech_orchestrator --config ./config.yaml status task-001
 
 Without a task id, `status` shows active tasks or the most recently updated task. It reports the persisted status, current stage when applicable, configured primary provider, branch, subtask, fix counter, last update time, and elapsed time since that update. It opens `state.db` read-only.
 
+For a single attended surface instead of re-running `status`, use `worc top` — a live, read-only monitor that auto-refreshes the active task + flow node, a parked/gate-pending marker, the queue (filtered to the served queue and priority-sorted, exactly as the daemon runs it), recent terminal tasks, and a tail of the daemon log. Point it at the daemon's log file and quit with `q`:
+
+```bash
+worc watch --log-file ./logs/daemon.jsonl &      # daemon writes its log here
+worc top --log-file ./logs/daemon.jsonl          # live monitor; q (then Enter) to quit
+```
+
+`worc top` is stdlib-only (no extra). For an interactive console that also drives commands — `enqueue` a task, `ps`, `logs`, `down` the daemon — install the `[shell]` extra and run `worc shell`; it spawns or attaches to the daemon and streams its log above a prompt:
+
+```bash
+pip install wastech-orchestrator[shell]
+worc shell                                       # spawns/attaches the daemon; enqueue / ps / down / quit
+```
+
 ## 7. Choose Which Provider Runs a Node
 
 Provider routing is **node-based** — it lives on the flow, not the task. Each agent/evaluator node in the flow YAML may declare its own `provider:` (`codex` | `claude`); a node with no `provider` runs on the **global primary** (the one `config.yaml` provider marked `primary: true`, which must be in `agents.allowed`). The global primary is also the sole infrastructure-fallback target.

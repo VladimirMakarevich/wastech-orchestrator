@@ -154,3 +154,55 @@ def test_duration_uses_injected_monotonic(tmp_path: Path) -> None:
         monotonic=lambda: next(ticks),
     )
     assert result.duration_seconds == 42.5
+
+
+def test_agent_launches_in_its_own_process_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The agent is spawned with ``start_new_session=True`` so ``stop --force-full`` can group-kill
+    it without orphaning (a no-op on Windows). Intercept subprocess.run to assert the kwarg."""
+    import subprocess
+
+    captured: dict[str, object] = {}
+
+    class _Done:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(argv: object, **kwargs: object) -> _Done:
+        captured.update(kwargs)
+        return _Done()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    run_process(
+        _py("pass"), cwd=tmp_path, env={}, timeout_seconds=30, stdout_path=tmp_path / "o.log"
+    )
+    assert captured.get("start_new_session") is True
+    assert captured.get("shell") is False
+
+
+def test_spawn_detached_uses_argv_list_shell_false_and_devnull_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The detached daemon launch is an argv list with ``shell=False`` and stdin not inherited —
+    the same no-shell-interpolation guarantee as ``run_process``, at the one chokepoint."""
+    import subprocess
+
+    from wastech_orchestrator.providers import process as proc_mod
+
+    captured: dict[str, object] = {}
+
+    class _Popen:
+        def __init__(self, argv: object, **kwargs: object) -> None:
+            captured["argv"] = argv
+            captured["kwargs"] = kwargs
+            self.pid = 4242
+
+    monkeypatch.setattr(subprocess, "Popen", _Popen)
+    handle = proc_mod.spawn_detached(["worc", "watch"])
+    assert handle.pid == 4242  # type: ignore[attr-defined]
+    assert captured["argv"] == ["worc", "watch"]
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["shell"] is False
+    assert kwargs["stdin"] is subprocess.DEVNULL

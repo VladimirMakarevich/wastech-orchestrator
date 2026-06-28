@@ -264,6 +264,28 @@ source <(worc completion zsh)            # or: worc completion zsh > ~/.zsh/comp
 source <(worc completion bash)           # or drop into ~/.bash_completion.d/
 ```
 
+### Live monitor and interactive console (`top` / `shell`)
+
+To watch a run without juggling terminals or re-running `status`, `worc top` is a single auto-refreshing, **read-only** surface: the active task + flow node, a `parked` marker (a task soft-paused on a provider outage) or `gate pending` marker (a durable max-turns gate awaiting the operator), the pending **queue** (filtered to the served queue and priority-sorted, exactly the order the daemon will run), recent terminal tasks, and a tail of the daemon `--log-file`. It polls `state.db` read-only — safe while a daemon is live — and quits on `q` (then Enter). It is a _client_ over the daemon; it never starts the engine. Stdlib-only (no extra):
+
+```bash
+worc watch --log-file ./logs/daemon.jsonl &        # the daemon writes its log here
+worc top --log-file ./logs/daemon.jsonl            # match --queue to the daemon's queue if you set one
+```
+
+`worc shell` is the interactive console layered on the same view (it needs the optional `[shell]` extra — `pip install wastech-orchestrator[shell]`; the daemon and headless installs never import it). On start it **spawns** a `watch` daemon (passing `--log-file` and `--queue`) or **attaches** to one already running (left running on exit), streams its log above a prompt, and dispatches commands onto the existing verbs: `enqueue <file>` (drops the file into `tasks/pending`, picked up next tick — input is never blocked), `ps` (the live view), `status`/`logs`/`tasks`/`prs`/`merge-task`/`finalize`/`rerun`, `up`/`down`/`restart`, best-effort `cancel <id>`, and `quit`. Slot-guarded verbs still apply: `merge-task`/`finalize`/`rerun` refuse while the daemon is up, so stop it (`down`) first.
+
+### Stopping the daemon safely (the stop ladder)
+
+`worc stop` and `worc restart` (and the console's `down`) follow a **stop ladder** keyed on whether a task is active:
+
+- **Idle** (no active task) → stops immediately, no prompt — any form.
+- **Busy, no flag** → refused. An interactive terminal prompts for a literal `YES` (maps to the soft stop); a non-interactive caller (CI/pipe) exits non-zero and must pass a flag.
+- **Busy, `--force`** (or typed `YES`) → **soft** stop: the daemon finishes the current step, then exits between ticks (today's graceful stop, now gated). Works on every platform.
+- **Busy, `--force-full`** → **hard** stop (POSIX only): the active agent's process group is killed immediately and the task resumes from its checkpoint on the next start. **On Windows this degrades to a soft stop** (no cross-process group kill; stop a wedged daemon via Task Manager / `taskkill`).
+
+`--timeout SECONDS` (default 30) still bounds how long a soft stop waits before escalating. A hard stop never destroys committed work — recovery is the same `resume()` that reconciles any abrupt exit.
+
 ### Re-attempting a terminal task (`rerun`)
 
 A task that ended `failed` or `manual_action_required` is terminal — `watch`/`resume` never pick it up again. `rerun` re-attempts it without hand-editing `state.db`, the ledger, or git. It needs an **idle slot** (no other active task) and the **watch daemon stopped**, since it drives the pipeline in the shared clone; it records a new ledger entry linked to the prior attempt (`attempt`, `rerun_of`).

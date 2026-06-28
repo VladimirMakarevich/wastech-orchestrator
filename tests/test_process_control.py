@@ -371,3 +371,129 @@ def test_stop_controller_installs_handler_sets_event_and_restores() -> None:
         assert controller.event.is_set()
     # the previous disposition is restored on exit
     assert table[signal.SIGTERM] is signal.SIG_DFL
+
+
+# --- stop_process level="full" (hard process-group kill; the stop ladder's top rung) --------------
+
+
+def test_stop_full_kills_the_process_group_on_posix(tmp_path: Path) -> None:
+    path = tmp_path / "orchestrator.pid"
+    pc.write_pid_file(path, pid=4242, start_time_fn=_start)
+    killpg_calls: list[tuple[int, int]] = []
+    outcome = pc.stop_process(
+        path,
+        level="full",
+        can_signal=True,
+        kill_fn=FakeProcess(alive=True),  # the daemon is live
+        start_time_fn=_start,
+        getpgid_fn=lambda _pid: 9000,
+        killpg_fn=lambda pgid, sig: killpg_calls.append((pgid, sig)),
+        kill_sig=KILL,
+        now_fn=lambda: 0.0,
+    )
+    assert killpg_calls == [(9000, KILL)]  # one group SIGKILL
+    assert outcome.group_killed is True
+    assert outcome.killed is True
+    assert outcome.already_dead is False
+    assert not path.exists()
+
+
+def test_stop_full_already_dead_when_pid_not_running(tmp_path: Path) -> None:
+    path = tmp_path / "orchestrator.pid"
+    pc.write_pid_file(path, pid=4242, start_time_fn=_start)
+    touched: list[object] = []
+    outcome = pc.stop_process(
+        path,
+        level="full",
+        can_signal=True,
+        kill_fn=FakeProcess(alive=False),  # already gone
+        start_time_fn=_start,
+        getpgid_fn=lambda pid: touched.append(pid) or 1,
+        killpg_fn=lambda *a: touched.append(a),
+    )
+    assert outcome.already_dead is True
+    assert outcome.group_killed is False
+    assert touched == []  # never resolved/killed a dead pid's group
+    assert not path.exists()
+
+
+def test_stop_full_already_dead_when_getpgid_races(tmp_path: Path) -> None:
+    path = tmp_path / "orchestrator.pid"
+    pc.write_pid_file(path, pid=4242, start_time_fn=_start)
+    killpg_calls: list[object] = []
+
+    def getpgid_raises(_pid: int) -> int:
+        raise ProcessLookupError
+
+    outcome = pc.stop_process(
+        path,
+        level="full",
+        can_signal=True,
+        kill_fn=FakeProcess(alive=True),
+        start_time_fn=_start,
+        getpgid_fn=getpgid_raises,  # daemon exited between the liveness probe and the kill
+        killpg_fn=lambda *a: killpg_calls.append(a),
+    )
+    assert outcome.already_dead is True
+    assert killpg_calls == []
+    assert not path.exists()
+
+
+def test_stop_full_does_not_kill_a_recycled_pid_group(tmp_path: Path) -> None:
+    path = tmp_path / "orchestrator.pid"
+    pc.write_pid_file(path, pid=4242, start_time_fn=_start)
+    touched: list[object] = []
+    outcome = pc.stop_process(
+        path,
+        level="full",
+        can_signal=True,
+        kill_fn=FakeProcess(alive=True),  # the PID is live, but recycled (start-time differs)
+        start_time_fn=lambda _pid: "recycled",
+        getpgid_fn=lambda pid: touched.append(pid) or 1,
+        killpg_fn=lambda *a: touched.append(a),
+    )
+    assert outcome.already_dead is True
+    assert touched == []
+
+
+def test_stop_full_degrades_to_soft_on_windows(tmp_path: Path) -> None:
+    path = tmp_path / "orchestrator.pid"
+    pc.write_pid_file(path, pid=4242, start_time_fn=_start)
+    group_seams: list[object] = []
+
+    def daemon_self_reaps(_seconds: float) -> None:
+        path.unlink()  # the daemon noticed the stop-file and removed its own PID file
+
+    outcome = pc.stop_process(
+        path,
+        level="full",
+        can_signal=False,  # Windows: no cross-process group kill
+        getpgid_fn=lambda pid: group_seams.append(pid) or 1,
+        killpg_fn=lambda *a: group_seams.append(a),
+        sleep_fn=daemon_self_reaps,
+        now_fn=lambda: 0.0,
+    )
+    assert outcome.degraded_to_soft is True
+    assert outcome.group_killed is False
+    assert group_seams == []  # never group-killed on Windows
+    assert not path.exists()
+
+
+def test_stop_soft_never_touches_the_group_seams(tmp_path: Path) -> None:
+    path = tmp_path / "orchestrator.pid"
+    pc.write_pid_file(path, pid=4242, start_time_fn=_start)
+    touched: list[object] = []
+    outcome = pc.stop_process(
+        path,
+        level="soft",
+        can_signal=True,
+        kill_fn=FakeProcess(dies_after=1),  # alive for the SIGTERM, gone on the first poll
+        start_time_fn=_start,
+        getpgid_fn=lambda pid: touched.append(pid) or 1,
+        killpg_fn=lambda *a: touched.append(a),
+        now_fn=lambda: 0.0,
+    )
+    assert touched == []
+    assert outcome.group_killed is False
+    assert outcome.signaled is True  # soft path sent SIGTERM
+    assert outcome.killed is False
