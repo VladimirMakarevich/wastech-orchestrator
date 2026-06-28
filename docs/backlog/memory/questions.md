@@ -13,10 +13,9 @@ Decisions still to lock. As we "потихоньку фиксируем", move a
 - **Q5 — `memory_path` naming & caps.** Final variable name/semantics and the exact per-stage caps (lines/bullets/lessons/entities/episodic). _Needs:_ packet-size sanity check against real packets.
 - **Q6 — Audit home.** Dedicated `audit/log.jsonl`, an `evaluations` marker row, or both? (Blueprint recommends both.) _Needs:_ confirm the `evaluations` row shape the supervisor already writes.
 - **Q7 — Episodic detail home.** Where does resume/debug-grade detail live so short-term memory stays a distillation layer, not a transcript store? _Needs:_ confirm what task artifacts already persist for resume.
-- **Q8 — First slice ordering.** Land the long-term tier end-to-end first (write→read), then short-term + entity? Or all three together? (Requirements allow either; leaning long-term-first.) _Needs:_ phase 01/02 scoping sign-off.
 - **Q9 — Candidate-delta contract.** The exact structured schema the supervisor returns (fields, trust hints, evidence pointers) and how `finalize()` stays best-effort if the delta is malformed. _Needs:_ design sign-off before phase 02.
 - **Q10 — Disabled-state guarantees.** Exactly what "disabled = today's behavior" covers (no dir created? no prompt var? no CLI?). _Needs:_ confirm with the regression test in AC-S4.
 
 ## Decided
 
-_(none yet — move items here as we lock them, with the decision and date.)_
+- **Q8 — First-slice ordering.** ✅ Decided 2026-06-28 — all three tiers ship in V1, **staged**: long-term lessons end-to-end first, then short-term episodic, then entity cards (entity last to isolate staleness / `DerivedIndex` risk). See [requirements.md](requirements.md) FR2.

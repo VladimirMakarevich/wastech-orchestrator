@@ -12,7 +12,7 @@ Status: **outline** — [plan](../index.md) · [design §2,§5](../../design.md)
 - **Supervisor emit** — extend `finalize()` to return the delta from the existing summary turn; stays best-effort (malformed delta → skip, never block publish); reuse the `__supervisor__` durable lineage.
 - **`MemoryService.apply_delta`** — redact → validate (resolve paths/symbols, reject missing evidence, label external-only) → assign trust → merge/dedup → promote (rules in design §5) or quarantine → audit.
 - **Tier persistence** — append episodic; update entity cards; promote to long-term only when rules pass.
-- **Outcome modulation** — success → full write; failed/manual → short-term/failure only; external-context tasks → quarantine-unless-validated.
+- **Two write seams** — success (publish) → supervisor candidate delta via the existing `_engine_finalize` turn → full write (long-term eligible). Terminal failure / manual (`_fail` / `_go_terminal` in `process_one`, **no** supervisor turn) → **deterministic** short-term/failure record (no LLM), never long-term. External-context tasks → quarantine-unless-validated.
 - **Audit marker** — record the write in `audit/log.jsonl` and (per Q6) an `evaluations` marker row.
 
 ## Notes

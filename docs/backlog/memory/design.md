@@ -20,7 +20,7 @@ The supervisor never assembles packets, writes the canonical store directly, hol
 
 ## 2. Data flow
 
-**Write (once, at finalization):** task artifacts → `Supervisor.finalize()` emits `summary.md` + optional structured `candidate_memory_delta` → `MemoryService.apply_delta()`: redact → validate (resolve paths/symbols, reject missing evidence, label external-only) → assign trust → merge/dedup → promote (if rules pass) else quarantine → append audit row (+ hashes) → `.worc/memory/`.
+**Write (once, at finalization):** task artifacts → `Supervisor.finalize()` emits `summary.md` + optional structured `candidate_memory_delta` → `MemoryService.apply_delta()`: redact → validate (resolve paths/symbols, reject missing evidence, label external-only) → assign trust → merge/dedup → promote (if rules pass) else quarantine → append audit row (+ hashes) → `.worc/memory/`. **Two write sources, one funnel:** on success the publish-node hook `_engine_finalize` calls `supervisor.finalize()` (the candidate delta rides that already-happening LLM turn); on terminal failure / manual (`_fail` / `_go_terminal` in `process_one`) there is **no** supervisor turn, so `MemoryService` builds a deterministic short-term/failure record there (no LLM), never promoted to long-term.
 
 **Read (per stage):** `PacketBuilder.build(stage, task_context)`: deterministic filter (stage, touched paths/symbols, task type, recency, trust, entity links) → precision-first top-k → [optional rerank, later] → token-capped brief → write `logs/<task-id>/memory/<stage>.md` → node prompt gets `memory_path` → agent reads the packet itself.
 
@@ -75,7 +75,7 @@ Store only what **repeats**, **stays true**, or **saves rediscovery**. Never sto
 1. **Deterministic filter** by stage, touched paths/symbols, bounded context, task type, recency, trust, entity relations.
 2. **Optional semantic rerank** — later (V3), only over the filtered set, never primary.
 
-Per-packet hard caps (tunable, deliberately small): ≤ ~120 lines, ≤ ~15 bullets, ≤ 3 long-term lessons, ≤ 5 entity records, ≤ 3 related episodic notes. Default = pass the path to the generated stage brief; never the raw memory root. Progressive disclosure via links to deeper evidence. (Blueprint §6.2–§6.3.)
+Packets are built **per-node and node-driven**: PacketBuilder builds a packet for any node whose role prompt references `{memory_path}` and skips the rest — no hardcoded node set, so any node (incl. custom operator nodes) can opt in. Per-packet hard caps (tunable, deliberately small): ≤ ~120 lines, ≤ ~15 bullets, ≤ 3 long-term lessons, ≤ 5 entity records, ≤ 3 related episodic notes. Default = pass the path to the generated per-node brief; never the raw memory root. Progressive disclosure via links to deeper evidence. (Blueprint §6.2–§6.3.)
 
 ## 7. Safety & trust
 
@@ -102,8 +102,9 @@ Audit: every mutation logs id, timestamp, actor, source artifact ids, affected i
 
 - Redaction: `redact_text` / `redact_mapping` in [../../../src/wastech_orchestrator/providers/redaction.py](../../../src/wastech_orchestrator/providers/redaction.py).
 - Atomic writes: `_atomic_json` in [../../../src/wastech_orchestrator/core/hitl.py](../../../src/wastech_orchestrator/core/hitl.py).
-- Prompt path-variable: add `memory_path` to `ALLOWED_PROMPT_VARS` in [../../../src/wastech_orchestrator/core/prompts.py](../../../src/wastech_orchestrator/core/prompts.py); populate in node prompt-variable builders; reference `{memory_path}` in packaged role prompts.
-- Supervisor: extend `finalize()` in [../../../src/wastech_orchestrator/core/supervisor.py](../../../src/wastech_orchestrator/core/supervisor.py) to return `candidate_memory_delta`; reuse the durable `__supervisor__` lineage.
+- Prompt path-variable (node-driven, no hardcoded node set): add `memory_path` to `ALLOWED_PROMPT_VARS` in [../../../src/wastech_orchestrator/core/prompts.py](../../../src/wastech_orchestrator/core/prompts.py); PacketBuilder builds a packet for **any** node whose role prompt references `{memory_path}` (and skips the rest); packaged role prompts reference it in `planning` / `implementation` / `review` / `fixing` by default (operator-editable, not a Core constraint).
+- Supervisor (success seam): extend `finalize()` in [../../../src/wastech_orchestrator/core/supervisor.py](../../../src/wastech_orchestrator/core/supervisor.py) to return `candidate_memory_delta` from its existing turn — called by the publish-node hook `_engine_finalize` ([../../../src/wastech_orchestrator/core/orchestrator.py](../../../src/wastech_orchestrator/core/orchestrator.py)); reuse the durable `__supervisor__` lineage.
+- Failure seam (no LLM): terminal failure / manual close in `process_one` — `_fail` / `_go_terminal` ([../../../src/wastech_orchestrator/core/orchestrator.py](../../../src/wastech_orchestrator/core/orchestrator.py)) — has no supervisor turn; write the deterministic failure record there.
 - Idle hook: `watch_loop` in [../../../src/wastech_orchestrator/cli.py](../../../src/wastech_orchestrator/cli.py).
 - Config: [../../../src/wastech_orchestrator/config/schema.py](../../../src/wastech_orchestrator/config/schema.py), [../../../src/wastech_orchestrator/config/loader.py](../../../src/wastech_orchestrator/config/loader.py).
 - New modules (deterministic, unit-testable, no fake-CLI needed): `MemoryService`, `PacketBuilder`, `CleanupJob`, `DerivedIndex`.

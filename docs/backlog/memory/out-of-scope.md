@@ -10,6 +10,7 @@ What this task deliberately does **not** include. Rationale and the full rejecte
 - **Separate SQLite + FTS store** → **V2**, only when file-based dedup/merge/validation-scan gets messy or slow (rough trigger: ≳500 durable lessons or ≳5000 episodic). When it lands it is `.worc/memory/memory.sqlite`, never a `state.db` schema bump.
 - **Entity / knowledge graph with multi-hop traversal** → **V4**, only when tasks regularly need relational reasoning (issues/PRs ↔ code ↔ owners ↔ hotspots). V1 ships lightweight entity cards with explicit relations instead.
 - **Cross-repo / shared operator-level memory.** V1 is single-repo, single-active-task.
+- **Shared / committed / synced memory across clones, machines, or team members.** V1 memory is local gitignored state (like `state.db`); making it travel — by committing or syncing it — is a deliberate non-goal that would enlarge the secret-leak surface (C1) and add PR/merge noise. A possible future option, not V1.
 - **Concurrent-task memory access.** Tied to the worktree-concurrency item; out until the single-active-task invariant is relaxed.
 
 ## Not in this subsystem at all (wrong shape / rejected)
