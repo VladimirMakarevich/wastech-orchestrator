@@ -149,7 +149,7 @@ The command does not run a provider, process a task, edit repository files, comm
 
 ## 8. Runtime behavior
 
-- `refinement` and `planning` may send one question or approval per checkpoint.
+- `planning` may send one question or approval per checkpoint; `refinement` may send one question only (it carries `allow_question` but no approval capability).
 - Questions require a reply to the exact prompt.
 - Approvals use inline Approve/Deny buttons. **Every** press in the configured chat is acknowledged so you always get feedback: a matching press shows "Approved — continuing." / "Denied — will reconsider."; a stale or duplicate press (a superseded request, or a button left over after a restart) shows an alert, "This approval is no longer active — check the latest message", and is logged as a near-miss rather than silently dropped. Press the button on the **most recent** request.
 - Deletions and dependency manifest/lock changes produced by `implementation` or `fixing` require approval unless an exact planning approval already covers the same category and path set.
