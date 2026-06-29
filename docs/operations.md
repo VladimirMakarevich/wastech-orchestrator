@@ -22,7 +22,7 @@ python -m venv .venv
 pip install -e ".[dev]"             # or: pip install wastech-orchestrator
 ```
 
-`install` is the single setup command. It sets up `<repo>/.worc/` in the current repository — a single gitignored home for everything the orchestrator generates: `config.yaml`, a `guide/` (the installed docs bundle: task docs, copy-ready task skills, plus a config helper and copy-ready config skill), `state.db`, `logs/`, and `workspace/`. There is no sibling workspace and no separate clone requirement — the orchestrator branches/commits/pushes in the repo you run it in.
+`install` is the single setup command. It sets up `<repo>/.worc/` in the current repository — a single gitignored home for everything the orchestrator generates: `config.yaml`, a `guide/` (the installed docs bundle: task docs, copy-ready task skills, plus a config helper and copy-ready config skill), the editable `flows/` copies (built-in flows + their `roles/` prompts), `state.db`, `logs/`, and `workspace/`. There is no sibling workspace and no separate clone requirement — the orchestrator branches/commits/pushes in the repo you run it in.
 
 ### Bind the repository (`install`)
 
@@ -121,10 +121,10 @@ Do it **between tasks**, not mid-run: an in-flight task holds the single process
 
 The persisted state survives an upgrade — back it up first so you can roll back. That is everything under `<repo>/.worc/` (`config.yaml` and `state.db` live there), plus the git-tracked `tasks/` lifecycle dirs at the repo root. Copy at least `.worc/config.yaml` + `.worc/state.db`. The orchestrator **fail-closes on a backward-incompatible workspace**: if the `config.yaml` `schema_version` or the `state.db` schema is **newer** than the installed version understands, the command prints a clear `error:` and exits non-zero (2) instead of running against a format it cannot read. To recover, upgrade the package to a version that supports it (or, for a throwaway setup, start a fresh workspace via `install --reconfigure`).
 
-The current schema versions are `state.db` **v12** and `config.yaml` `schema_version` **17**, and the two are handled differently because the orchestrator is **greenfield** (no production data to preserve):
+The current schema versions are `state.db` **v13** and `config.yaml` `schema_version` **23**, and the two are handled differently because the orchestrator is **greenfield** (no production data to preserve):
 
 - **`config.yaml`** does **not** auto-migrate, and an **older or absent** `schema_version` is accepted as-is (a new release adds keys with safe defaults, so an older config still runs). To materialize the new keys in your file run **`upgrade-config`** (below).
-- **`state.db`** does **not** migrate across versions. A brand-new (or pre-versioning) database is created at the current shape; a database stamped an **older** version (`1 ≤ v < 12`) is **refused fail-closed** — several past bumps dropped/renamed tables, and the store only ever adds columns, so an old shape cannot be reshaped in place. Recovery is to delete the local `state.db` and start a fresh workspace (greenfield: there is nothing to preserve). Do this **between tasks**, never with a task in flight.
+- **`state.db`** does **not** migrate across versions. A brand-new (or pre-versioning) database is created at the current shape; a database stamped an **older** version (`1 ≤ v < 13`) is **refused fail-closed** — several past bumps dropped/renamed tables, and the store only ever adds columns, so an old shape cannot be reshaped in place. Recovery is to delete the local `state.db` and start a fresh workspace (greenfield: there is nothing to preserve). Do this **between tasks**, never with a task in flight.
 
 To bring the rest of your deployment current after a package upgrade, run **`upgrade-config`** (and **`upgrade-docs`**):
 
@@ -425,7 +425,7 @@ python -m wastech_orchestrator --config ./config.yaml status task-001
 
 ## 5. Git footprint and the audit commit
 
-There is one canonical layout. Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home — `config.yaml`, `guide/` (task docs + config helper), `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `workspace/`, and the `tasks/rejected` quarantine. The **only** things not under `.worc/` are the `tasks/` lifecycle dirs (`pending`/`processing`/`done`/`failed`), which live at the **repo root** and are **git-tracked**: the task file and its `<id>.summary.md` (in `done/` or `failed/`) are the audit trail. `install` appends a single line `.worc/` to the repo's tracked `.gitignore`; `tasks/` is intentionally not ignored.
+There is one canonical layout. Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home — `config.yaml`, `guide/` (task docs + config helper), `flows/` (editable flow + role-prompt copies), `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `workspace/`, and the `tasks/rejected` quarantine. The **only** things not under `.worc/` are the `tasks/` lifecycle dirs (`pending`/`processing`/`done`/`failed`), which live at the **repo root** and are **git-tracked**: the task file and its `<id>.summary.md` (in `done/` or `failed/`) are the audit trail. `install` appends a single line `.worc/` to the repo's tracked `.gitignore`; `tasks/` is intentionally not ignored.
 
 Two fields under `git.footprint` shape the audit commit:
 
