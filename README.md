@@ -95,7 +95,7 @@ The signup form accepts any string as an email. Validate the `email` field and s
 - A unit test covers valid and invalid cases.
 ```
 
-> Only `id` and `title` are required; the gate **rejects unknown fields**. The full allow-list (`id`, `title`, `task_type`, `branch_name`, `auto_merge`, `prompt_audit`, `contacts`, `depends_on`, `subtasks`, `nodes`) is in [docs/task-authoring.md](docs/task-authoring.md). Provider/model/reasoning **default** to the flow node; a task may overlay them per node (best-effort) via the `nodes` block, but it names a flow and never patches the graph.
+> Only `id` and `title` are required; the gate **rejects unknown fields**. The full allow-list (`id`, `title`, `task_type`, `branch_name`, `auto_merge`, `prompt_audit`, `decomposition`, `contacts`, `depends_on`, `priority`, `queue`, `subtasks`, `nodes`) is in [docs/task-authoring.md](docs/task-authoring.md). Provider/model/reasoning **default** to the flow node; a task may overlay them per node (best-effort) via the `nodes` block, but it names a flow and never patches the graph.
 
 Then run it:
 
@@ -162,6 +162,10 @@ worc merge-task <id>    go-ahead to merge a reviewed PR: update branch w/ base, 
                           --strategy merge|squash|rebase   default: git.auto_merge_strategy
                           --wait-for-checks/--no-wait-for-checks  --no-resolve  --dry-run  --yes
 worc tasks              list every known task with status + branch (read-only); --status filters
+worc logs clean         reclaim disk: remove per-task dirs under .worc/logs/ (keeps the ledger)
+                          --keep N                    keep the N most recently modified task dirs
+                          --all                       also remove the ledger (completed.jsonl)
+                          --yes                       skip the confirmation prompt
 worc watch              process pending tasks; loop + periodic git sync
                           --poll-seconds N            override orchestrator.poll_interval_seconds
                           --queue NAME                serve only this queue (override orchestrator.queue)
@@ -214,7 +218,7 @@ Project layout:
 
 ```text
 src/wastech_orchestrator/
-  cli.py                  # install / preflight / telegram-test / run / rerun / finalize / watch / stop / restart / status / upgrade-config / upgrade-docs
+  cli.py                  # install / preflight / telegram-test / run / rerun / finalize / prs / merge-task / watch / stop / restart / status / top / shell / list / tasks / completion / logs / upgrade-config / upgrade-docs
   core/                   # the orchestrator wrapper (spine), HITL, dangerous-diff guardrail, recovery, decomposition, the constant supervisor layer
     flow/                 # the flow engine + graph traversal, node runners, validation, checkers
   notify/                 # Notifier contract + Telegram transport
@@ -224,7 +228,7 @@ src/wastech_orchestrator/
   checks/                 # command-set model, resolution, and diff-based selection
   check_runner.py         # runs the selected command sets as bounded subprocesses
   git_manager.py          # the only commit/push/PR owner; scoped staging + the audit commit
-  state_store.py          # SQLite checkpoints (schema v12)
+  state_store.py          # SQLite checkpoints (schema v13)
   ledger.py               # the append-only completed-task ledger + failure reports
   task/                   # parser + §19 validation gate
   install/                # the install wizard, config writer, detection

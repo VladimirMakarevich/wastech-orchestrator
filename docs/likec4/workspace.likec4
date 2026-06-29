@@ -87,9 +87,16 @@ model {
       config = component 'B05 Configuration' 'Load and validate config.yaml (fail-closed)' {
         link ../functional/blocks/B05-configuration.md 'Block B05'
       }
-      pipeline = component 'B06 Pipeline' 'Spine: drives a task through all stages, owns statuses' {
+      pipeline = component 'B06 Orchestrator wrapper' 'Spine: gate · slot · branch · terminal cleanup; hands the graph to the engine' {
         #spine
         link ../functional/blocks/B06-orchestrator-pipeline.md 'Block B06'
+      }
+      engine = component 'B28 Flow Engine' 'Drives the node graph: routes outcomes, owns budgets, writes checkpoints' {
+        #spine
+        link ../functional/blocks/B28-flow-engine.md 'Block B28'
+      }
+      supervisor = component 'B31 Supervisor' 'Constant read-only advisory layer; writes the PR summary at task close' {
+        link ../functional/blocks/B31-supervisor.md 'Block B31'
       }
       state = component 'B07 State Store' 'State machine + persistence in SQLite' {
         link ../functional/blocks/B07-state-machine-and-store.md 'Block B07'
@@ -133,7 +140,8 @@ model {
 
       // Remaining blocks — components of the same proc; added by the same pattern:
       // B03 Installer, B04 Config-discovery, B08 Ledger, B09 Fix-loop, B10 Recovery,
-      // B11 Decomposition, B12 HITL, B13 Skills, B14 Dangerous-diff, B15 Prompts, B20 Artifact-layout.
+      // B11 Decomposition, B12 HITL, B13 Skills, B14 Dangerous-diff, B15 Prompts, B20 Artifact-layout,
+      // B29 Flow-definition/validation, B30 Flow-node-runners, B32 Flow-checkers.
     }
 
     db = store 'State Store (state.db)' 'tasks, node_runs, provider_attempts, check_runs, …' {
@@ -160,16 +168,19 @@ model {
   pipeline -> state 'Status transitions (transactional)'
   state -> db 'Read / write'
   pipeline -> resolver 'Normalize command_sets (preflight)'
-  pipeline -> router 'Agent stages'
+  pipeline -> engine 'drive_flow (hand off the validated graph)'
+  supervisor -> engine 'Observes each completed step (read-only)'
+  engine -> router 'Agent / evaluator nodes'
   router -> providers 'AgentProvider.run'
   providers -> subprocess 'run_process'
   providers -> codex 'Launch (argv, no shell)'
   providers -> claude 'Launch (argv, no shell)'
   providers -> security 'Profile / env / forbidden'
   providers -> redaction 'Stream redaction'
-  pipeline -> checks 'testing stage'
+  engine -> checks 'Checks nodes (testing)'
   checks -> subprocess 'run_process'
-  pipeline -> gitmgr 'Branch / commit / push / PR'
+  pipeline -> gitmgr 'Branch prep / terminal cleanup'
+  engine -> gitmgr 'Publish node (commit / push / PR)'
   gitmgr -> subprocess 'run_process'
   gitmgr -> github 'git / gh'
   gitmgr -> db 'publish_operations (idempotency)'
@@ -216,28 +227,31 @@ views {
     pipeline -> state 'acquire slot, NEW→VALIDATED'
     pipeline -> resolver 'normalize command_sets (preflight)'
     pipeline -> gitmgr 'branch preparation'
-    pipeline -> router 'implementation / planning'
+    pipeline -> engine 'drive_flow'
+    engine -> router 'implementation / planning'
     router -> providers 'AgentProvider.run'
     providers -> codex 'argv (no shell)'
-    pipeline -> checks 'testing'
-    pipeline -> router 'review'
-    pipeline -> gitmgr 'commit / push / PR'
+    engine -> checks 'testing'
+    engine -> router 'review'
+    supervisor -> engine 'observes each step (read-only)'
+    engine -> gitmgr 'commit / push / PR'
     gitmgr -> github 'gh pr create'
     pipeline -> notifier 'outcome notification'
   }
 
   dynamic view implementationFlow {
-    title 'Unit execution flow: stages S01-S08 with ping-pong loop'
-    pipeline -> router 'S01 refinement (opt.)'
-    pipeline -> router 'S02 planning (opt.) + decomposition'
-    pipeline -> router 'S03 implementation (+ guardrail B14)'
-    pipeline -> checks 'S04 testing (opt.)'
-    checks -> pipeline 'quality failure'
-    pipeline -> router 'S06 fixing (limits B09)'
-    pipeline -> checks 'back to testing — ping-pong'
-    pipeline -> router 'S05 review (opt.)'
-    router -> pipeline 'blocking findings → fixing'
-    pipeline -> gitmgr 'S07 summary → S08 commit / push / PR'
+    title 'Implementation flow: the node graph with the bounded fix loop'
+    pipeline -> engine 'drive_flow (validated graph)'
+    engine -> router 'refinement (opt.) · planning (+ decomposition)'
+    engine -> router 'implementation (+ dangerous-diff guard B14)'
+    engine -> checks 'testing (diff-selected command sets)'
+    checks -> engine 'quality failure → fixing'
+    engine -> router 'fixing (bounded loops B09)'
+    engine -> checks 'back to testing — ping-pong'
+    engine -> router 'review (read-only evaluator)'
+    router -> engine 'blocking findings → fixing'
+    supervisor -> engine 'observes each step; writes summary at close'
+    engine -> gitmgr 'publish: commit / push / PR'
     gitmgr -> github 'gh pr create'
   }
 }

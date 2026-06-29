@@ -242,7 +242,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`publish idempotency`** - The guarantee that a rerun does not create duplicate commits, pushes, or PRs.
 - **`terminal cleanup`** - The safe return of the working tree to `base_branch` after a task reaches a terminal status.
 - **`workspace/repo`** - The dedicated clone or workspace used for agent edits.
-- **`<repo>/.worc/`** - The orchestrator runtime home. It holds config, logs, checks, workspace state, and other generated files.
+- **`<repo>/.worc/`** - The orchestrator runtime home. It holds config, the seeded editable `flows/` (and their `roles/`), the installed `guide/`, logs (check logs included, under `logs/<task-id>/checks/`), workspace state, and other generated files.
 - **State Store** - The SQLite-backed persistence layer around `state.db` that stores task state and run records.
 - **Ledger** - The append-only completed-task record in `completed.jsonl`.
 - **`state.db`** - The SQLite state store that keeps task progress and run bookkeeping.
@@ -289,7 +289,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`human_input_path`** - The artifact path that carries a human answer or approval back into the flow.
 - **`manual_action_required`** - The terminal state used when the orchestrator must stop and ask the operator to intervene.
 
-## Legacy and renamed terms TODO: Need to remove from the solution and any mentions
+## Legacy and renamed terms
 
 - **`Stage` enum** - A legacy vocabulary for task lifecycle identity. The current execution identity is the flow node id, not the old stage enum.
 - **`agents.routing`** - A removed stage-keyed provider-routing block. Routing is now node-based.

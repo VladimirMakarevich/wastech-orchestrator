@@ -44,7 +44,7 @@ flowchart TB
     agents["codex / claude<br/>CLI coding agents"]
     vcs["git / gh — CLI"]
     tg["Telegram Bot API"]
-    db[("state.db<br/>SQLite v12")]
+    db[("state.db<br/>SQLite v13")]
     art[("Artifacts<br/>.worc/ · tasks/")]
 
     operator -->|"run · watch · rerun · ..."| cli
@@ -190,7 +190,7 @@ Each transition is asserted against an explicit `ALLOWED_TRANSITIONS` table and 
 `config.yaml` is **infrastructure + provider defaults + non-weakenable safety caps** — the flow owns the graph, the config owns the environment. The full reference (every field, default, and validation rule) is [configuration.md](configuration.md); the packaged starting point is [`config.example.yaml`](../src/wastech_orchestrator/packaged/config.example.yaml). The shape, in brief:
 
 ```yaml
-schema_version: 15
+schema_version: 23
 
 orchestrator:
   auto_mode: { enabled: false } # pick the next pending task after cleanup
@@ -299,9 +299,14 @@ telegram-test send a real correlated Telegram prompt and wait for a reply
 run          process exactly one task end to end
 rerun        re-attempt a terminal task (fresh from base, or --continue from the flow checkpoint)
 finalize     record + tidy a task you handled by hand (no pipeline / commit / PR)
+prs          list open, un-merged orchestrator PRs awaiting merge (read-only)
+merge-task   go-ahead to merge a reviewed PR (update branch w/ base, resolve conflicts, merge)
 watch        process pending tasks; long-running loop with periodic git sync (Ctrl-C / `stop` to end)
 stop / restart  manage the watch daemon via <repo>/.worc/orchestrator.pid
 status       read-only snapshot from state.db (no providers / checks / git)
+top / shell  live read-only monitor / interactive operator console over the watch daemon
+list / tasks / completion  enumerate tasks / list with status + branch / print a shell-completion script
+logs clean   reclaim disk: remove per-task dirs under .worc/logs/ (keeps the ledger)
 upgrade-config / upgrade-docs  materialize new config keys / refresh the packaged guide
 ```
 
