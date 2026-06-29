@@ -2,7 +2,7 @@
 
 This cookbook shows common ways to use **wastech-orchestrator**. It is written for operators who run the orchestrator and for developers who want a practical path from "empty workspace" to "task processed into a Pull Request".
 
-The canonical product reference remains the [Functional Map](functional/index.md). The full CLI surface (`install`, `preflight`, `telegram-test`, `run`, `rerun`, `finalize`, `watch`, `stop`, `restart`, `status`, `upgrade-config`, `upgrade-docs`) exists in the current codebase; this guide focuses on the everyday subset.
+The canonical product reference remains the [Functional Map](functional/index.md). The full CLI surface (`install`, `preflight`, `telegram-test`, `run`, `rerun`, `finalize`, `prs`, `merge-task`, `watch`, `stop`, `restart`, `status`, `top`, `shell`, `list`, `tasks`, `completion`, `logs`, `upgrade-config`, `upgrade-docs`) exists in the current codebase; this guide focuses on the everyday subset.
 
 ## 1. Install Into A Repository
 
@@ -33,7 +33,7 @@ wastech-orchestrator install .                 # interactive wizard (same on mac
 wastech-orchestrator install . --non-interactive --provider codex --no-create-pr
 ```
 
-Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home: `config.yaml`, the agent task-authoring `guide/` (the packaged `worc/` docs copied to `.worc/guide/`), SQLite `state.db` (with `-wal`/`-shm`), `orchestrator.pid`, `logs/`, `workspace/`, `checks/`, and the `tasks/rejected` quarantine. `install` appends a single `.worc/` line to the repo's tracked `.gitignore`. The only things kept outside `.worc/` are the `tasks/` lifecycle dirs (`pending/`/`processing/`/`done/`/`failed/`) at the repo root — they are intentionally git-tracked, and the task file plus its `<id>.summary.md` (in `done/` or `failed/`) are the audit trail the orchestrator commits.
+Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home: `config.yaml`, the agent task-authoring `guide/` (the packaged `worc/` docs copied to `.worc/guide/`), the editable `flows/` copies (built-in flows + their `roles/` prompts), SQLite `state.db` (with `-wal`/`-shm`), `orchestrator.pid`, `logs/`, and `workspace/`, plus the `tasks/rejected` quarantine. (Check logs are not a top-level directory — they live under `logs/<task-id>/checks/`.) `install` appends a single `.worc/` line to the repo's tracked `.gitignore`. The only things kept outside `.worc/` are the `tasks/` lifecycle dirs (`pending/`/`processing/`/`done/`/`failed/`) at the repo root — they are intentionally git-tracked, and the task file plus its `<id>.summary.md` (in `done/` or `failed/`) are the audit trail the orchestrator commits.
 
 Re-running is idempotent (existing files are skipped and `config.yaml` is never overwritten); `--reconfigure` backs up and regenerates; `--dry-run` writes nothing. See [configuration.md](configuration.md) for the discovery order and [operations.md](operations.md) for the full wizard. The remaining recipes all run from inside the repo without `--config`.
 
