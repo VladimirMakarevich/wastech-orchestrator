@@ -6,7 +6,7 @@ Tasks can be Markdown (`.md`) or JSON (`.json`). Markdown is the normal operator
 
 > **Writing tasks with an AI agent?** A compact, agent-facing version of this guide ships in [`packaged/guide/`](../src/wastech_orchestrator/packaged/guide/README.md) and is copied to `<repo>/.worc/guide/` at `install` time. Point an agent at that local `.worc/guide/` folder and ask it to "write a task for this orchestrator." This document remains the full operator reference.
 
-Use the packaged `templates/task.md` as the editable runtime template. Live task files belong in the repo's own `tasks/pending/` directory at the repository root (committed and pushed there) — that is how a teammate hands the orchestrator work over git. The `tasks/` lifecycle directories are git-tracked and intentionally not ignored; only the orchestrator's own `.worc/` home is gitignored.
+Start from the packaged example tasks — `task-minimal.md` and `task-rich.md`, installed under `<repo>/.worc/guide/tasks/` — as editable starting points. Live task files belong in the repo's own `tasks/pending/` directory at the repository root (committed and pushed there) — that is how a teammate hands the orchestrator work over git. The `tasks/` lifecycle directories are git-tracked and intentionally not ignored; only the orchestrator's own `.worc/` home is gitignored.
 
 The canonical task rules are enforced by the validation gate in the code (`src/wastech_orchestrator/task/`); see the [Functional Map](functional/index.md). For the meaning of all task-file fields, task statuses, and related vocabulary, see the [Glossary](glossary.md).
 
@@ -112,7 +112,7 @@ The PR title still comes from `title`; `branch_name` changes only the Git branch
 
 Refinement-skip is deterministic — there is no task flag. The orchestrator skips refinement automatically when the task is **complete**: a non-empty `## Description` plus acceptance criteria. Provide acceptance criteria to skip refinement; omit them to let refinement enrich the task. Missing acceptance criteria never rejects the task — it makes refinement run.
 
-When it runs, refinement is autonomous: it enriches the task with assumptions and acceptance criteria; it does not ask a human clarifying question.
+When it runs, refinement is mostly autonomous: it enriches the task with documented assumptions and acceptance criteria. It **may** pause for one clarifying **question** — and only a question, never an approval — when a material ambiguity cannot be resolved safely from repository evidence (the packaged `refinement` node carries `hitl: allow_question`); otherwise it proceeds without asking. To keep an unattended run from stalling here, make the task complete and decisive (see [Planning escalation and unattended runs](#planning-escalation-and-unattended-runs)).
 
 ## Decomposition (operator/flow-controlled)
 
@@ -123,7 +123,7 @@ Decomposition has two sources, both running the same execution machinery (subtas
 
 ## Planning escalation and unattended runs
 
-A flow node can pause the run to ask a human. **Whether it may is a property of the flow node, not the task and not the stage name**: a node escalates only when its `hitl` flags permit it (`allow_question` / `allow_approval`). In the packaged `implementation` flow, `planning` may pause for a clarifying **question** or an **approval**, while `refinement` runs autonomously (see [Refinement](#refinement-automatic) above). The dangerous-diff approval gate (a deletion or dependency-manifest change after a `workspace-write` edit) is separate and **always** human-gated — it is a safety guard, not an autonomy knob.
+A flow node can pause the run to ask a human. **Whether it may is a property of the flow node, not the task and not the stage name**: a node escalates only when its `hitl` flags permit it (`allow_question` / `allow_approval`). In the packaged `implementation` flow, `planning` may pause for a clarifying **question** or an **approval**, and `refinement` may pause for one **question** only (no approval) on a material ambiguity it cannot resolve from repository evidence (see [Refinement](#refinement-automatic) above) — otherwise both run without asking. The dangerous-diff approval gate (a deletion or dependency-manifest change after a `workspace-write` edit) is separate and **always** human-gated — it is a safety guard, not an autonomy knob.
 
 When a node escalates, the run blocks until a human answers (via the configured notifier, e.g. Telegram) or until `telegram.ask_timeout_s` elapses (default 8 h), after which it resolves to `manual_action_required`. For an unattended `watch` run this is a stall — even when the agent stated a sensible default. There is no task field that pre-answers a question or pre-approves a decision; the lever is to **author the task so the node has no reason to ask**:
 
