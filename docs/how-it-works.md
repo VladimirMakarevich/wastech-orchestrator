@@ -45,8 +45,9 @@ This is where the order can loop:
 
 This cannot loop forever. There is a safety limit on how many fix attempts are allowed. If the limit is reached, the orchestrator stops on its own, writes a short report of what was still wrong, and leaves the task for a human to look at.
 
-A couple of other things can pause a run for a person:
+A few things can pause a run for a person:
 
+- During **planning** (and, more rarely, refinement), if a genuinely material decision cannot be settled from the repository, the agent can pause to ask one clarifying question — and planning can also ask for an approval — before continuing. A well-specified task avoids this.
 - If a change does something **risky** — like deleting tracked files or changing dependencies — the orchestrator asks a human to approve it before continuing.
 - If something genuinely cannot be launched (for example a test command whose program is missing), that is treated as a setup problem, not something the agent can fix by editing code.
 
