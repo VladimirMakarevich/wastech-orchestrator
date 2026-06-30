@@ -143,6 +143,47 @@ def test_watch_loop_honors_stop_file_created_during_tick(
     assert sleeps == [100]
 
 
+# --- idle-gap memory cleanup hook (04.3 / AC-C2) --------------------------------------------------
+
+
+def test_idle_cleanup_runs_when_no_task_active(
+    in_repo_config: OrchestratorConfig, tmp_path: Path
+) -> None:
+    # No state.db under the clone → idle → the hook fires once per tick in the idle gap.
+    calls: list[int] = []
+    cli.watch_loop(
+        _FakeOrch(),
+        in_repo_config,
+        tmp_path / "pending",
+        poll_interval=0,  # single pass
+        cleanup_hook=lambda: calls.append(1),
+    )
+    assert calls == [1]
+
+
+def test_idle_cleanup_skipped_while_task_active(
+    in_repo_config: OrchestratorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # AC-C2: a busy slot (RUNNING soft-pause) must never trigger cleanup.
+    monkeypatch.setattr(cli, "has_active_task", lambda _config: True)
+    calls: list[int] = []
+    cli.watch_loop(
+        _FakeOrch(),
+        in_repo_config,
+        tmp_path / "pending",
+        poll_interval=0,
+        cleanup_hook=lambda: calls.append(1),
+    )
+    assert calls == []
+
+
+def test_build_cleanup_hook_none_when_disabled(
+    in_repo_config: OrchestratorConfig,
+) -> None:
+    # Memory disabled (Q10) → no cleanup is ever scheduled.
+    assert cli._build_cleanup_hook(in_repo_config) is None
+
+
 def test_stop_no_pid_file_is_idempotent(
     monkeypatch: pytest.MonkeyPatch,
     in_repo_config: OrchestratorConfig,

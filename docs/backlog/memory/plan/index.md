@@ -15,7 +15,7 @@ Sequence by **shared seam** to minimize rework: storage + config first, then the
 | [01 — Foundations](01-foundations/index.md) | `.worc/memory/` store, `MemoryConfig` + schema bump, gitignore, `MemoryService` skeleton, audit/snapshots | — |
 | [02 — Write path](02-write-path/index.md) | Supervisor `candidate_memory_delta`; `MemoryService.apply_delta` (validate→trust→merge→promote/quarantine→audit); tier persistence | 01 |
 | [03 — Read path](03-read-path/index.md) ✅ **done** | `PacketBuilder` deterministic per-stage packets; `memory_path` prompt var; role-prompt references; caps | 01 (02 for content) |
-| [04 — Curation](04-curation/index.md) | `worc memory show/validate/compact/restore`; bounded `CleanupJob` in the watch-loop idle gap | 01–03 |
+| [04 — Curation](04-curation/index.md) ✅ **done** | `worc memory show/validate/compact/restore`; bounded `CleanupJob` in the watch-loop idle gap | 01–03 |
 | [05 — Safety & evaluation](05-safety-and-evaluation/index.md) | Redaction/poisoning/staleness/rollback drills; offline replay harness + baseline; docs sync | 01–04 |
 
 ## First-slice option (see [questions.md](../questions.md) Q8)

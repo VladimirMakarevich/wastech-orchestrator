@@ -57,6 +57,15 @@ from wastech_orchestrator.git_manager import (
 )
 from wastech_orchestrator.install import config_writer, detect, wizard
 from wastech_orchestrator.ledger import Ledger
+from wastech_orchestrator.memory import (
+    AuditActor,
+    AuditContext,
+    CleanupJob,
+    DerivedIndex,
+    LongTermKind,
+    MemoryLayout,
+    MemoryService,
+)
 from wastech_orchestrator.notify import build_notifier
 from wastech_orchestrator.notify.telegram import check_telegram_preflight
 from wastech_orchestrator.observability.logging import configure_logging, set_log_level
@@ -539,6 +548,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="also remove the ledger (completed.jsonl); always confirms unless --yes",
     )
     logs_clean.add_argument("-y", "--yes", action="store_true", help="skip the confirmation prompt")
+
+    memory_cmd = sub.add_parser(
+        "memory", help="inspect and curate the persistent memory store (.worc/memory/)"
+    )
+    memory_sub = memory_cmd.add_subparsers(dest="memory_action", required=True)
+    memory_sub.add_parser("show", help="summarize the store: tiers, counts, audit (read-only)")
+    memory_sub.add_parser(
+        "validate", help="report stale entities whose paths/symbols are gone (read-only)"
+    )
+    mem_compact = memory_sub.add_parser(
+        "compact", help="run a fuller cleanup pass now: expire/remap/quarantine/merge (mutating)"
+    )
+    mem_compact.add_argument(
+        "--dry-run", action="store_true", help="print the plan without writing anything"
+    )
+    mem_restore = memory_sub.add_parser(
+        "restore", help="roll the store back to an audit snapshot (mutating)"
+    )
+    mem_restore.add_argument(
+        "--snapshot",
+        metavar="LABEL",
+        help="snapshot dir under audit/snapshots/ to restore (default: the most recent)",
+    )
+    mem_restore.add_argument(
+        "--dry-run", action="store_true", help="print the plan without writing anything"
+    )
 
     return parser
 
@@ -1063,6 +1098,45 @@ def watch_once(
     return results
 
 
+def _build_cleanup_hook(config: OrchestratorConfig) -> Callable[[], None] | None:
+    """A rate-limited memory-cleanup callable for the ``watch_loop`` idle gap, or ``None``.
+
+    Returns ``None`` when memory is disabled (Q10) — then no cleanup is ever scheduled. Otherwise a
+    best-effort closure that runs one bounded :meth:`CleanupJob.run_once` at most every
+    ``cleanup_min_interval_s`` (Q1), building a fresh store view + ``DerivedIndex`` each pass so the
+    repo-introspection never goes stale across a long-lived daemon. A failure is logged and
+    swallowed — cleanup must never crash the watcher or delay the next task pickup (AC-C2)."""
+    if not config.memory.enabled:
+        return None
+    min_interval = float(config.memory.cleanup_min_interval_s)
+    state: dict[str, float | None] = {"last": None}
+
+    def _run() -> None:
+        last = state["last"]
+        now = time.monotonic()
+        if last is not None and (now - last) < min_interval:
+            return  # rate-limited: too soon since the last pass
+        state["last"] = now
+        try:
+            layout = MemoryLayout.for_repo(config.repo.local_path)
+            if not layout.root.exists():
+                return  # nothing written yet — no work
+            service = MemoryService(layout, config=config.memory)
+            index = DerivedIndex(config.repo.local_path, derived_dir=layout.derived)
+            job = CleanupJob(service, index, config.memory)
+            report = job.run_once(audit=_memory_audit_context(AuditActor.CLEANUP))
+            if report.ran and (report.expired or report.remapped or report.quarantined
+                               or report.merged):
+                _LOG.info(
+                    "memory cleanup: expired %d, remapped %d, quarantined %d, merged %d",
+                    report.expired, report.remapped, report.quarantined, report.merged,
+                )
+        except Exception as exc:  # noqa: BLE001 — best-effort; never crash the watcher
+            _LOG.warning("memory cleanup failed (best-effort, ignored): %s", type(exc).__name__)
+
+    return _run
+
+
 def watch_loop(
     orchestrator: Orchestrator,
     config: OrchestratorConfig,
@@ -1074,6 +1148,7 @@ def watch_loop(
     sleep_fn: Callable[[float], None] = time.sleep,
     stop_event: threading.Event | None = None,
     stop_file: Path | None = None,
+    cleanup_hook: Callable[[], None] | None = None,
 ) -> list[PipelineResult]:
     """Run ``watch_once`` on a loop, refreshing the repo each tick (periodic discovery).
 
@@ -1103,6 +1178,11 @@ def watch_loop(
         orchestrator.refresh_repo()
         results.extend(watch_once(orchestrator, config, folder, queue=queue))
         iteration += 1
+        # Idle-gap memory cleanup: the single-slot invariant guarantees no active task here, but
+        # double-check (a RUNNING soft-pause still holds the slot) so cleanup never races a task or
+        # delays the next pickup (AC-C2). Rate-limiting + bounds live inside the hook.
+        if cleanup_hook is not None and not has_active_task(config):
+            cleanup_hook()
         if poll_interval <= 0:
             break
         if max_iterations is not None and iteration >= max_iterations:
@@ -1629,6 +1709,156 @@ def _cmd_logs_clean(args: argparse.Namespace, config: OrchestratorConfig) -> int
     return 0
 
 
+def cmd_memory(args: argparse.Namespace) -> int:
+    """Dispatch the ``memory`` subcommands: show / validate (read-only) | compact / restore.
+
+    Disabled memory (``memory.enabled: false`` or the block absent) is a clean no-op for every verb
+    (Q10). The mutating verbs (compact / restore) refuse while a task is active and offer
+    ``--dry-run`` to print their plan first (AC-C1)."""
+    _configure_runtime_logging(args)
+    config = load_config_for(args)
+    if config is None:
+        return 2
+    if not config.memory.enabled:
+        print("memory: disabled in config (memory.enabled: false) — nothing to do")
+        return 0
+    layout = MemoryLayout.for_repo(config.repo.local_path)
+    action = args.memory_action
+    if action == "show":
+        return _cmd_memory_show(layout)
+    if action == "validate":
+        return _cmd_memory_validate(config, layout)
+    if action == "compact":
+        return _cmd_memory_compact(config, layout, dry_run=args.dry_run)
+    if action == "restore":
+        return _cmd_memory_restore(config, layout, snapshot=args.snapshot, dry_run=args.dry_run)
+    raise SystemExit(f"Unknown memory action '{args.memory_action}'.")
+
+
+def _memory_audit_context(actor: AuditActor) -> AuditContext:
+    """An operator-actor audit context stamped with the current UTC time (the CLI's clock)."""
+    return AuditContext(timestamp=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"), actor=actor)
+
+
+def _cmd_memory_show(layout: MemoryLayout) -> int:
+    """Read-only summary of the store: per-tier counts, audit health, snapshot count."""
+    if not layout.root.exists():
+        print("memory: no store yet (.worc/memory/ has not been written)")
+        return 0
+    service = MemoryService(layout)
+    long_term = {kind.value: len(service.read_long_term(kind)) for kind in LongTermKind}
+    print(f"memory store: {layout.as_posix()}")
+    print(f"  episodes (short-term): {len(service.read_episodes())}")
+    print(f"  long-term: {sum(long_term.values())} ({_counts_line(long_term)})")
+    print(f"  entities: {len(service.read_entities())}")
+    print(f"  quarantine: {len(service.read_quarantine())}")
+    rows = service.audit.rows()
+    intact = "intact" if service.audit.verify_chain() else "BROKEN"
+    print(f"  audit: {len(rows)} row(s), chain {intact}")
+    for row in rows[-5:]:
+        print(f"    {row.get('timestamp')} {row.get('action')} {row.get('affected_ids')}")
+    snaps = _snapshot_labels(layout)
+    print(f"  snapshots: {len(snaps)}" + (f" (latest {snaps[-1]})" if snaps else ""))
+    return 0
+
+
+def _cmd_memory_validate(config: OrchestratorConfig, layout: MemoryLayout) -> int:
+    """Read-only staleness report: entities whose paths are gone, split into remap vs quarantine."""
+    if not layout.root.exists():
+        print("memory: no store yet — nothing to validate")
+        return 0
+    service = MemoryService(layout)
+    index = DerivedIndex(config.repo.local_path, derived_dir=layout.derived)
+    remap: list[str] = []
+    stale: list[str] = []
+    for row in service.read_entities():
+        if str(row.get("status") or "active") != "active":
+            continue
+        paths = [p for p in (row.get("paths") or []) if isinstance(p, str)]
+        missing = [p for p in paths if not index.path_exists(p)]
+        if not missing:
+            continue
+        eid = str(row.get("entity_id"))
+        if all(len(index.find_by_basename(p)) == 1 for p in missing):
+            remap.append(f"{eid}: {missing} → same-basename move")
+        else:
+            stale.append(f"{eid}: {missing} gone")
+    print(f"memory validate: {len(remap)} remappable, {len(stale)} stale entity card(s)")
+    for line in (*remap, *stale):
+        print(f"  - {line}")
+    if not remap and not stale:
+        print("  store is clean (no missing-path entities)")
+    print("(read-only; run 'worc memory compact' to apply remaps/quarantines)")
+    return 0
+
+
+def _cmd_memory_compact(config: OrchestratorConfig, layout: MemoryLayout, *, dry_run: bool) -> int:
+    """Run a fuller (uncapped) cleanup pass now — refused while a task is active (FR6/AC-C2)."""
+    if has_active_task(config):
+        print("memory compact: a task is active — refusing; run when the orchestrator is idle")
+        return 1
+    if not layout.root.exists():
+        print("memory compact: no store yet — nothing to do")
+        return 0
+    service = MemoryService(layout, config=config.memory)
+    index = DerivedIndex(config.repo.local_path, derived_dir=layout.derived)
+    job = CleanupJob(service, index, config.memory)
+    audit = _memory_audit_context(AuditActor.OPERATOR)
+    report = job.run_once(audit=audit, full=True, dry_run=dry_run)
+    verb = "would" if dry_run else "did"
+    if not report.ran:
+        print("memory compact: nothing on disk to act on")
+        return 0
+    print(
+        f"memory compact ({'dry-run' if dry_run else 'done'}): scanned {report.scanned}; "
+        f"{verb} expire {report.expired}, remap {report.remapped}, "
+        f"quarantine {report.quarantined}, merge {report.merged}"
+    )
+    if not dry_run and report.snapshot is not None:
+        print(f"  snapshot: {report.snapshot}")
+    return 0
+
+
+def _cmd_memory_restore(
+    config: OrchestratorConfig, layout: MemoryLayout, *, snapshot: str | None, dry_run: bool
+) -> int:
+    """Roll the store back to an audit snapshot — refused while a task is active (AC-SF4)."""
+    if has_active_task(config):
+        print("memory restore: a task is active — refusing; run when the orchestrator is idle")
+        return 1
+    labels = _snapshot_labels(layout)
+    if not labels:
+        print("memory restore: no snapshots under audit/snapshots/")
+        return 1
+    chosen = snapshot if snapshot is not None else labels[-1]
+    if chosen not in labels:
+        print(f"memory restore: snapshot {chosen!r} not found; available: {', '.join(labels)}")
+        return 2
+    target = layout.snapshots / chosen
+    files = sorted(p for p in target.rglob("*") if p.is_file())
+    if dry_run:
+        print(f"memory restore (dry-run): would restore {len(files)} file(s) from {chosen}")
+        for path in files:
+            print(f"  - {path.relative_to(target).as_posix()}")
+        return 0
+    service = MemoryService(layout, config=config.memory)
+    restored = service.restore(target, audit=_memory_audit_context(AuditActor.OPERATOR))
+    print(f"memory restore: restored {len(restored)} file(s) from {chosen}")
+    return 0
+
+
+def _counts_line(counts: dict[str, int]) -> str:
+    return ", ".join(f"{name} {n}" for name, n in counts.items() if n)
+
+
+def _snapshot_labels(layout: MemoryLayout) -> list[str]:
+    """Snapshot dir names under ``audit/snapshots/``, sorted (timestamps sort chronologically)."""
+    snaps = layout.snapshots
+    if not snaps.is_dir():
+        return []
+    return sorted(p.name for p in snaps.iterdir() if p.is_dir())
+
+
 def run_preflight(config: OrchestratorConfig) -> tuple[bool, list[str]]:
     """Compute the read-only preflight verdict + report lines; no task is processed.
 
@@ -1799,10 +2029,19 @@ def cmd_watch(args: argparse.Namespace) -> int:
         heartbeat_seconds=args.heartbeat_seconds,
     )
 
+    cleanup_hook = _build_cleanup_hook(config)  # None when memory is disabled (Q10)
+
     # Single pass: no PID file, no signal handler.
     if poll <= 0:
         return _summarize_watch(
-            watch_loop(orchestrator, config, folder, poll_interval=poll, queue=args.queue)
+            watch_loop(
+                orchestrator,
+                config,
+                folder,
+                poll_interval=poll,
+                queue=args.queue,
+                cleanup_hook=cleanup_hook,
+            )
         )
 
     print(f"watch: polling every {poll}s for git-pushed tasks (Ctrl-C or 'stop' to exit)")
@@ -1821,6 +2060,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 queue=args.queue,
                 stop_event=controller.event,
                 stop_file=stop_path,
+                cleanup_hook=cleanup_hook,
             )
             # Graceful stop arrived via SIGTERM (event) or the stop-file (Windows / cross-shell).
             stopped = controller.event.is_set() or process_control.stop_file_requested(stop_path)
@@ -2826,6 +3066,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_tasks(args)
         if args.command == "logs":
             return cmd_logs(args)
+        if args.command == "memory":
+            return cmd_memory(args)
     except (ConfigError, IncompatibleStateError, preflight.GhNotAvailableError) as exc:
         print(f"error: {exc}")
         return 2

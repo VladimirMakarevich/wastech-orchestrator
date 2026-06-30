@@ -342,6 +342,41 @@ class MemoryService:
         for path, rows in grouped.items():
             self._replace_rows(path, rows, ids=_ids(rows), action=action, audit=audit)
 
+    # --- tier rewrites for curation (redacted + atomic + audited) -------------
+    #
+    # The cleanup/curation path (``CleanupJob`` / ``worc memory``) reads tier rows as dicts,
+    # computes the new contents (expire / quarantine / merge — never a new long-term lesson), and
+    # rewrites a whole tier file through one of these. Each routes through ``_replace_rows`` so the
+    # redaction chokepoint and the one-audit-row-per-file discipline hold exactly as on the writes.
+
+    def replace_long_term(
+        self,
+        kind: LongTermKind,
+        rows: Sequence[Mapping[str, Any]],
+        *,
+        action: AuditAction,
+        audit: AuditContext,
+    ) -> None:
+        path = self._long_term_path(kind)
+        self._replace_rows(path, rows, ids=_ids(rows), action=action, audit=audit)
+
+    def replace_entities(
+        self, rows: Sequence[Mapping[str, Any]], *, action: AuditAction, audit: AuditContext
+    ) -> None:
+        self._replace_rows(self._entities_path(), rows, ids=_ids(rows), action=action, audit=audit)
+
+    def replace_episodes(
+        self, rows: Sequence[Mapping[str, Any]], *, action: AuditAction, audit: AuditContext
+    ) -> None:
+        self._replace_rows(
+            self._layout.short_term / _RECENT_FILE, rows, ids=_ids(rows), action=action, audit=audit
+        )
+
+    def replace_quarantine(
+        self, rows: Sequence[Mapping[str, Any]], *, action: AuditAction, audit: AuditContext
+    ) -> None:
+        self._replace_rows(self._pending_path(), rows, ids=_ids(rows), action=action, audit=audit)
+
     # --- snapshot / restore (design §7) ---------------------------------------
 
     def tier_files(self) -> list[Path]:

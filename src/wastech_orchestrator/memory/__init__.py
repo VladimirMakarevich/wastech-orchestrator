@@ -21,6 +21,7 @@ from wastech_orchestrator.memory.audit import (
     restore_snapshot,
     take_snapshot,
 )
+from wastech_orchestrator.memory.cleanup import CleanupJob, CleanupReport
 from wastech_orchestrator.memory.delta import (
     DELTA_OUTPUT_SCHEMA,
     CandidateDelta,
@@ -29,6 +30,7 @@ from wastech_orchestrator.memory.delta import (
     CandidateLesson,
     parse_delta,
 )
+from wastech_orchestrator.memory.derived import DerivedIndex, git_tracked_paths
 from wastech_orchestrator.memory.packet import PacketBuilder, PacketContext, SelectedPacket
 from wastech_orchestrator.memory.paths import (
     MEMORY_SCHEMA_VERSION,
@@ -68,6 +70,9 @@ __all__ = [
     "CandidateEntity",
     "CandidateFailure",
     "CandidateLesson",
+    "CleanupJob",
+    "CleanupReport",
+    "DerivedIndex",
     "EntityRecord",
     "EpisodeRecord",
     "Evidence",
@@ -88,6 +93,7 @@ __all__ = [
     "content_hash",
     "ensure_store",
     "file_content_hash",
+    "git_tracked_paths",
     "is_durable_candidate",
     "parse_delta",
     "record_id",
