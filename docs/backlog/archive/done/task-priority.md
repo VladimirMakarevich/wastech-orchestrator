@@ -6,7 +6,7 @@ The orchestrator currently picks pending tasks in deterministic lexicographic fi
 
 ## The problem
 
-When a `tasks/` folder contains several pending tasks, the orchestrator processes them in alphabetical filename order ([cli.py `select_pending()`](../../src/wastech_orchestrator/cli.py)). There is no way to promote a hot-fix or critical feature to the front of the queue without renaming files.
+When a `tasks/` folder contains several pending tasks, the orchestrator processes them in alphabetical filename order ([cli.py `select_pending()`](../../../../src/wastech_orchestrator/cli.py)). There is no way to promote a hot-fix or critical feature to the front of the queue without renaming files.
 
 ## Constraints
 
@@ -42,15 +42,15 @@ The change is concentrated in three places:
 
 1. **Task schema** — add `priority: Literal["low", "mid", "high"] = "mid"` to the Pydantic task model (wherever `id`, `title`, `auto_merge` are defined). Fail-closed: accept and strip unknown strings, falling back to `"mid"`.
 
-2. **`_scan_depends_on()`** in [cli.py](../../src/wastech_orchestrator/cli.py) — also extract `priority` from the lightweight scan pass (same YAML/JSON parse used today).
+2. **`_scan_depends_on()`** in [cli.py](../../../../src/wastech_orchestrator/cli.py) — also extract `priority` from the lightweight scan pass (same YAML/JSON parse used today).
 
-3. **`select_pending()` / `watch_once()`** in [cli.py](../../src/wastech_orchestrator/cli.py) — after `dependency_eligibility()` classifies tasks as ELIGIBLE/WAITING/BROKEN, sort the ELIGIBLE slice by `(priority_rank, filename)` before picking the first candidate. Priority rank: `high=0`, `mid=1`, `low=2` (lower = runs first).
+3. **`select_pending()` / `watch_once()`** in [cli.py](../../../../src/wastech_orchestrator/cli.py) — after `dependency_eligibility()` classifies tasks as ELIGIBLE/WAITING/BROKEN, sort the ELIGIBLE slice by `(priority_rank, filename)` before picking the first candidate. Priority rank: `high=0`, `mid=1`, `low=2` (lower = runs first).
 
 No new config keys, no state-db change, no CLI flag needed for the basic feature. The `worc list` command (if/when built) should display priority alongside status.
 
 ## As built (2026-06-26)
 
-The shared `TaskPriority` literal, `DEFAULT_PRIORITY` (`mid`), `normalize_priority()`, and `priority_rank()` live in [model.py](../../src/wastech_orchestrator/task/model.py) (the one source of truth the gate, parser, and scheduler share); `priority` is in `ALLOWED_TASK_KEYS`. The gate populates `NormalizedTask.priority` via `normalize_priority`; the parser round-trips it (legacy manifests → `mid`). The lightweight scan `_scan_depends_on` was renamed to **`_scan_pending_meta`** and now returns a `_PendingScan` named tuple (`task_id`, `depends_on`, `priority_rank`). `watch_once` sorts the whole scanned list by `(priority_rank, filename)` and keeps the existing skip-WAITING / reject-BROKEN loop — equivalent to "sort the eligible slice", and a minimal change.
+The shared `TaskPriority` literal, `DEFAULT_PRIORITY` (`mid`), `normalize_priority()`, and `priority_rank()` live in [model.py](../../../../src/wastech_orchestrator/task/model.py) (the one source of truth the gate, parser, and scheduler share); `priority` is in `ALLOWED_TASK_KEYS`. The gate populates `NormalizedTask.priority` via `normalize_priority`; the parser round-trips it (legacy manifests → `mid`). The lightweight scan `_scan_depends_on` was renamed to **`_scan_pending_meta`** and now returns a `_PendingScan` named tuple (`task_id`, `depends_on`, `priority_rank`). `watch_once` sorts the whole scanned list by `(priority_rank, filename)` and keeps the existing skip-WAITING / reject-BROKEN loop — equivalent to "sort the eligible slice", and a minimal change.
 
 Two small deltas from the notes above:
 
