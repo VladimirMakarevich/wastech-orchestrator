@@ -45,7 +45,7 @@ from wastech_orchestrator.core.flow.nodes.base import (
 from wastech_orchestrator.core.flow.nodes.human_gate import HumanGate
 from wastech_orchestrator.core.flow.observability import record_run_observability
 from wastech_orchestrator.core.flow.output_policy import resolve_output_policy, within_subdir
-from wastech_orchestrator.core.flow.prompt import render_role_prompt
+from wastech_orchestrator.core.flow.prompt import RoleFileError, read_role_file, render_role_prompt
 from wastech_orchestrator.core.flow.schema import AgentNode, FlowNode
 from wastech_orchestrator.core.hitl import (
     HumanInputSignal,
@@ -65,6 +65,7 @@ from wastech_orchestrator.core.hitl import (
 from wastech_orchestrator.git_manager import ChangedPath
 from wastech_orchestrator.notify import AskKind, AskResult
 from wastech_orchestrator.observability.logging import bind
+from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.providers.base import MAX_TURNS_SUBTYPE, AgentRunRequest, ProviderId
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import EditingLineageRow, NodeRunRow
@@ -551,12 +552,37 @@ class AgentNodeRunner:
             "checks_path": self._in.checks_path,
             "review_path": self._in.review_path,
             "skills_path": "\n".join(self._in.skills_for(node.id)) or None,
+            "memory_path": self._memory_path(node, ctx),
         }
         if ctx.subtask_order is not None:
             variables["subtask_order"] = ctx.subtask_order
             variables["subtask_count"] = self._in.subtask_count
             variables["subtask_spec_path"] = self._in.subtask_spec_path
         return variables
+
+    def _memory_path(self, node: AgentNode, ctx: NodeContext) -> str | None:
+        """Build this node's memory packet and return its path — node-driven (FR4/D5).
+
+        Returns the per-node packet path only when memory is enabled AND the node's (operator-
+        editable) role prompt references ``{memory_path}``; otherwise ``None`` (so the variable
+        renders empty and the conditional block drops). A node not referencing it never triggers a
+        build, so a custom operator node opts in with no Core change. Best-effort: a memory read
+        must never break a node run, so any failure degrades to no packet (AC-R4)."""
+        builder = self._s.packet_builder
+        if builder is None:  # memory disabled (Q10) — no store, empty variable, today's behavior
+            return None
+        try:
+            template = read_role_file(self._in.flow_dir, node.role_file)
+        except RoleFileError:
+            return None  # render_role_prompt surfaces the real read error
+        if "{memory_path}" not in template and "{?memory_path}" not in template:
+            return None
+        touched = self._s.git.changed_code_paths_since_base() if self._s.git is not None else []
+        dest = task_artifact_dir(self._s.artifacts_root, ctx.task_id) / "memory" / f"{node.id}.md"
+        written = builder.write_packet(
+            node_id=node.id, task_type=self._in.task_type, touched_paths=touched, dest=dest
+        )
+        return str(written) if written is not None else None
 
     def _record_completion(self, run_id: int, outcome: StageOutcome) -> None:
         result = outcome.result

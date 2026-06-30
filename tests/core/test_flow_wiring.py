@@ -48,7 +48,7 @@ def _fake_pipeline(**over: object) -> SimpleNamespace:
         "review_findings_path": "/a/review/findings.json",
         "decomposition": SimpleNamespace(accepted=True, n=3),
         "branch": "worc/task-1-x",
-        "task": SimpleNamespace(contacts=("@me",)),
+        "task": SimpleNamespace(contacts=("@me",), task_type="implementation"),
     }
     base.update(over)
     return SimpleNamespace(**base)
@@ -65,6 +65,7 @@ def test_build_node_inputs_maps_pipeline_paths(tmp_path: Path) -> None:
         commit_message="feat: x",
     )
     assert inputs.flow_dir == tmp_path
+    assert inputs.task_type == "implementation"  # packet-retrieval signal (memory phase 03)
     assert inputs.task_path == "/t/task.md"
     assert inputs.plan_path == "/a/plan.md"
     assert inputs.diff_path == "/a/current.diff"

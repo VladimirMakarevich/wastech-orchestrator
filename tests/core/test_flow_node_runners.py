@@ -180,6 +180,7 @@ def _services(
     git: Any = None,
     artifacts_root: str = "/art",
     snapshot: Any = None,
+    packet_builder: Any = None,
 ) -> Any:
     return NodeServices(
         router=router,
@@ -191,7 +192,25 @@ def _services(
         default_timeout_seconds=100,
         git=git,
         snapshot=snapshot,
+        packet_builder=packet_builder,
     )
+
+
+class FakePacketBuilder:
+    """Records the packet-build call and writes a stub packet to ``dest`` (the read-path seam)."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def write_packet(
+        self, *, node_id: str, task_type: str | None, touched_paths: Any, dest: Path
+    ) -> Path | None:
+        self.calls.append(
+            {"node_id": node_id, "task_type": task_type, "touched_paths": list(touched_paths)}
+        )
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text("# Repository memory\n", encoding="utf-8")
+        return dest
 
 
 def _ctx(node: FlowNode) -> NodeContext:
@@ -243,6 +262,57 @@ def test_agent_node_equals_direct_router_call(tmp_path: Path) -> None:
     assert req.plan_path == "/t/plan.md"
     assert req.working_directory == "/repo"
     assert store.completed[-1]["outcome"] == "done"
+
+
+def test_agent_node_builds_memory_packet_when_role_references_it(tmp_path: Path) -> None:
+    # Node-driven (FR4): a node whose role references {memory_path} gets a per-node packet built
+    # and its PATH injected — never the memory root (AC-R1). A custom node opts in, no Core change.
+    role = "Work. {?memory_path}brief: {memory_path}{/memory_path}"
+    (tmp_path / "r.md").write_text(role, "utf-8")
+    node = AgentNode(id="impl", kind="agent", role_file="r.md")
+    router, store, builder = FakeRouter(_result()), FakeStore(), FakePacketBuilder()
+    services = _services(
+        router,
+        store,
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+        packet_builder=builder,
+    )
+    inputs = _inputs(tmp_path, task_type="implementation")
+    AgentNodeRunner(services, inputs).run(node, _ctx(node))
+
+    assert len(builder.calls) == 1  # built exactly once, for this node
+    assert builder.calls[0] == {
+        "node_id": "impl",
+        "task_type": "implementation",
+        "touched_paths": [],
+    }
+    dest = tmp_path / "logs" / "task-1" / "memory" / "impl.md"
+    assert router.requests[0].prompt == f"Work. brief: {dest}"
+
+
+def test_agent_node_skips_memory_when_role_does_not_reference_it(tmp_path: Path) -> None:
+    # A node not referencing {memory_path} triggers no build and the prompt is unaffected.
+    (tmp_path / "r.md").write_text("Just work.", "utf-8")
+    node = AgentNode(id="impl", kind="agent", role_file="r.md")
+    router, store, builder = FakeRouter(_result()), FakeStore(), FakePacketBuilder()
+    services = _services(
+        router, store, FakeCheckRunner(CheckOutcome(passed=True, runs=())), packet_builder=builder
+    )
+    AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert builder.calls == []
+    assert router.requests[0].prompt == "Just work."
+
+
+def test_agent_node_memory_disabled_renders_empty(tmp_path: Path) -> None:
+    # Memory disabled (no packet_builder, Q10): {memory_path} renders empty, block drops cleanly.
+    role = "Work.{?memory_path} brief: {memory_path}{/memory_path}"
+    (tmp_path / "r.md").write_text(role, "utf-8")
+    node = AgentNode(id="impl", kind="agent", role_file="r.md")
+    router, store = FakeRouter(_result()), FakeStore()
+    services = _services(router, store, FakeCheckRunner(CheckOutcome(passed=True, runs=())))
+    AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert router.requests[0].prompt == "Work."
 
 
 def test_agent_node_network_access_grant_in_policyless_flow(tmp_path: Path) -> None:

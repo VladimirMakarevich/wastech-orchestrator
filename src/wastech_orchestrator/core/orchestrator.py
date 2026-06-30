@@ -97,6 +97,7 @@ from wastech_orchestrator.memory import (
     EpisodeRecord,
     MemoryLayout,
     MemoryService,
+    PacketBuilder,
     TrustLevel,
     WriteSource,
     ensure_store,
@@ -1462,6 +1463,7 @@ class Orchestrator:
             process_env=build_child_env(self._config.security.allowed_environment),
             scan_timeout_s=self._config.checks.timeout_seconds,
             deletion_approval_exempt_paths=self._config.security.deletion_approval_exempt_paths,
+            packet_builder=self._packet_builder(),
         )
 
     def _resolve_merge_flow(self) -> FlowSnapshot:
@@ -1842,6 +1844,18 @@ class Orchestrator:
         layout = MemoryLayout.for_repo(self._config.repo.local_path)
         ensure_store(layout, created_at=self._clock())
         return MemoryService(layout, config=self._config.memory, marker=self._memory_marker)
+
+    def _packet_builder(self) -> PacketBuilder | None:
+        """Build the read-path ``PacketBuilder`` for this run, or ``None`` when memory is disabled.
+
+        Read-only: it never mutates the store and writes no audit rows, so it needs no marker and
+        does not seed the tree (a missing store reads as empty → an empty packet → no file, AC-R4).
+        The per-node packet is built lazily by the node runner only when the role prompt references
+        ``{memory_path}`` (node-driven), so a disabled config touches nothing (Q10)."""
+        if not self._config.memory.enabled:
+            return None
+        layout = MemoryLayout.for_repo(self._config.repo.local_path)
+        return PacketBuilder(MemoryService(layout, config=self._config.memory), self._config.memory)
 
     def _memory_marker(self, row: Mapping[str, Any]) -> None:
         """Mirror one memory audit row into the existing ``evaluations`` decision trail (Q6)."""

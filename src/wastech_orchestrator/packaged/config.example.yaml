@@ -204,7 +204,8 @@ telegram:                           # human-in-the-loop + notifications (optiona
 # (packaged flow roles, or `.worc/flows/roles/*.md` for an operator flow). Edit the role file to
 # customize a node's prompt. Role files render only allowlisted path/metadata variables ({task_id}
 # {stage} {repo_path} {task_path} {plan_path} {diff_path} {checks_path} {review_path} {skills_path}
-# {subtask_order} {subtask_count} {subtask_spec_path}) — never task bodies, diffs, env, or secrets.
+# {memory_path} {subtask_order} {subtask_count} {subtask_spec_path}) — never task bodies, diffs,
+# env, or secrets.
 
 skills:                             # repo skill selection (optional, §2.1)
   dynamic: true                     # supervisor proposes a node->skills map once per task (skip when no skills)

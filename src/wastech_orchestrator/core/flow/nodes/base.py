@@ -181,6 +181,25 @@ class NotifierPort(Protocol):
     def wait_for_answer(self, handle: AskHandle) -> AskResult: ...
 
 
+class PacketBuilderPort(Protocol):
+    """The slice of the memory :class:`~wastech_orchestrator.memory.packet.PacketBuilder` the node
+    runners use: build a per-node retrieval packet and write it to ``dest``.
+
+    Returns the packet path when one was written, or ``None`` when there is no relevant memory (no
+    file is created — so ``{memory_path}`` renders empty). Set only when memory is enabled; ``None``
+    on :class:`NodeServices` is the disabled state (a no-op, today's behavior).
+    """
+
+    def write_packet(
+        self,
+        *,
+        node_id: str,
+        task_type: str | None,
+        touched_paths: Sequence[str],
+        dest: Path,
+    ) -> Path | None: ...
+
+
 class GitPort(Protocol):
     """The slice of :class:`~wastech_orchestrator.git_manager.GitManager` the node runners use.
 
@@ -256,6 +275,10 @@ class NodeServices:
     #: approval gate (``config.security.deletion_approval_exempt_paths``). Empty = every deletion is
     #: gated; the dependency-manifest classification is never affected.
     deletion_approval_exempt_paths: tuple[str, ...] = ()
+    #: memory read path (phase 03): builds a per-node retrieval packet for any node whose role
+    #: prompt references ``{memory_path}``. ``None`` when memory is disabled (the default) — then no
+    #: packet is built and ``{memory_path}`` renders empty (today's behavior).
+    packet_builder: PacketBuilderPort | None = None
 
 
 @dataclass
@@ -263,6 +286,9 @@ class NodeInputs:
     """Per-execution-unit data the runners read (artifact paths + resolved checks + session map)."""
 
     flow_dir: Path
+    #: the task's ``task_type`` (flow dispatch key) — a packet-retrieval signal (memory phase 03);
+    #: ``None`` for the default implementation flow.
+    task_type: str | None = None
     task_path: str | None = None
     plan_path: str | None = None
     diff_path: str | None = None

@@ -29,6 +29,7 @@ from wastech_orchestrator.memory.delta import (
     CandidateLesson,
     parse_delta,
 )
+from wastech_orchestrator.memory.packet import PacketBuilder, PacketContext, SelectedPacket
 from wastech_orchestrator.memory.paths import (
     MEMORY_SCHEMA_VERSION,
     MemoryLayout,
@@ -75,8 +76,11 @@ __all__ = [
     "MemoryLayout",
     "MemoryRecord",
     "MemoryService",
+    "PacketBuilder",
+    "PacketContext",
     "Relationship",
     "Scope",
+    "SelectedPacket",
     "TrustLevel",
     "WriteSource",
     "as_row",
