@@ -5,11 +5,11 @@ Status: **P0 done (in-process resume) · P2 documented (no code knobs)** Date: 2
 ## Resolution (2026-06-27)
 
 - **#1 session resume (P0) — done, in-process.** The HITL post-answer re-invoke now threads the first run's `session_id` so the agent resumes the same conversation instead of starting fresh. `_hitl_resume_session_id` gates resume to the same provider (`outcome.provider_used == route.primary`); `_invoke`/`_build_request` take a `resume_session_id` that wins over the editing-lineage lookup (`core/flow/nodes/agent.py`). `_reconsider` needed no change — the dangerous-diff denial re-run targets `editing_lineage` author nodes, which already resume via `_resume_session_id`. **Scope cut (confirmed):** resume is **in-process only**. Across an orchestrator restart the first-run session id is gone (a `fresh_disposable` node has no durable session slot, by design), so the re-entered round-trip falls back honestly to a fresh session + the persisted answer context file — no new persistence, no `state.db` bump. Regression tests: `test_agent_hitl_round_trip_resumes_first_run_session` (acceptance), `test_agent_hitl_round_trip_no_resume_when_first_run_used_fallback` (provider gate), `test_dangerous_diff_reconsider_resumes_editing_lineage` (reconsider resumes for free).
-- **#2 autonomy (P2) — documented, no code.** The "escalation policy explicitly documented" acceptance branch: [task-authoring.md → Planning escalation and unattended runs](../task-authoring.md#planning-escalation-and-unattended-runs) and [operations.md → Running](../operations.md#4-running) (auto_mode governs sequencing, not HITL). No code knobs this round — the per-node agent-HITL timeout and a bounded-wait "auto-proceed on default" are deferred (see [follow_ups.md](follow_ups.md)).
+- **#2 autonomy (P2) — documented, no code.** The "escalation policy explicitly documented" acceptance branch: [task-authoring.md → Planning escalation and unattended runs](../../../task-authoring.md#planning-escalation-and-unattended-runs) and [operations.md → Running](../../../operations.md#4-running) (auto_mode governs sequencing, not HITL). No code knobs this round — the per-node agent-HITL timeout and a bounded-wait "auto-proceed on default" are deferred (see [follow_ups.md](../../follow_ups.md)).
 
 ---
 
-Carved out of the `td-be-003-conform-m1-m2-contract-shapes` run post-mortem (first real Windows run on `argudebate`): [docs/analysis/td-be-003-conform-m1-m2-contract-shapes-run-analysis.md](../analysis/td-be-003-conform-m1-m2-contract-shapes-run-analysis.md), findings **0** (critical) and **4**. Both concern how a HITL round-trip behaves at the `planning` node: the session is thrown away across the human round-trip, and the escalation makes an otherwise-autonomous run depend on a human tap.
+Carved out of the `td-be-003-conform-m1-m2-contract-shapes` run post-mortem (first real Windows run on `argudebate`): [docs/analysis/td-be-003-conform-m1-m2-contract-shapes-run-analysis.md](../../../analysis/td-be-003-conform-m1-m2-contract-shapes-run-analysis.md), findings **0** (critical) and **4**. Both concern how a HITL round-trip behaves at the `planning` node: the session is thrown away across the human round-trip, and the escalation makes an otherwise-autonomous run depend on a human tap.
 
 ## The problem
 
@@ -61,6 +61,6 @@ Orchestrator default (every repo, every HITL-capable node) for #1. Target/task-a
 
 ## References
 
-- Analysis: [td-be-003-conform-m1-m2-contract-shapes-run-analysis.md](../analysis/td-be-003-conform-m1-m2-contract-shapes-run-analysis.md) findings 0 and 4.
-- Related deferred item: HITL pause invisibility in the operator log — [hitl-wait-observability-and-prompt-cleanup.md](hitl-wait-observability-and-prompt-cleanup.md) (finding 5) and the 2026-06-24 watch-autonomy row (c) in [follow_ups.md](follow_ups.md).
+- Analysis: [td-be-003-conform-m1-m2-contract-shapes-run-analysis.md](../../../analysis/td-be-003-conform-m1-m2-contract-shapes-run-analysis.md) findings 0 and 4.
+- Related deferred item: HITL pause invisibility in the operator log — [hitl-wait-observability-and-prompt-cleanup.md](hitl-wait-observability-and-prompt-cleanup.md) (finding 5) and the 2026-06-24 watch-autonomy row (c) in [follow_ups.md](../../follow_ups.md).
 - Code: `core/flow/nodes/agent.py` (`_run_with_hitl`, `_reconsider`, `_resume_session_id`, `_build_request`); `providers/{claude,_adapter_base}.py` (session resume); `core/hitl.py` (round-trip).
