@@ -1,6 +1,6 @@
 # Phase 02 — Write path
 
-Status: **planned** — [plan](../index.md) · [design §2,§5](../../design.md) · [acceptance: AC-W1..W4](../../acceptance-criteria.md)
+Status: **implemented** (2026-06-30, branch `feat/memory-subsystem`) — [plan](../index.md) · [design §2,§5](../../design.md) · [acceptance: AC-W1..W4](../../acceptance-criteria.md)
 
 **Goal:** memory gets written once per task at finalization, deterministically and safely, with zero new LLM calls. Depends on phase 01.
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from wastech_orchestrator.memory import (
     AuditAction,
@@ -101,3 +102,27 @@ def test_snapshot_label_is_filesystem_safe(tmp_path: Path) -> None:
 def test_content_hash_is_deterministic() -> None:
     assert content_hash(b"abc") == content_hash(b"abc")
     assert content_hash(b"abc") != content_hash(b"abd")
+
+
+def test_marker_is_emitted_per_mutation_with_task_id(tmp_path: Path) -> None:
+    # 02.6 (AC-SF3): every memory mutation mirrors into a best-effort secondary marker.
+    markers: list[dict[str, Any]] = []
+    service = MemoryService(MemoryLayout.for_repo(tmp_path), marker=markers.append)
+    audit = AuditContext(timestamp="2026-06-30T00:00:00Z", task_id="task-7")
+    service.append(_semantic("a"), audit=audit)
+    assert len(markers) == 1
+    assert markers[0]["task_id"] == "task-7"
+    assert markers[0]["action"] == "append"
+    assert markers[0]["post_hash"]
+
+
+def test_marker_failure_does_not_break_the_write(tmp_path: Path) -> None:
+    # FR8: a failing secondary marker (e.g. state.db down) must never fail the memory write.
+    def boom(_row: Any) -> None:
+        raise RuntimeError("marker sink down")
+
+    service = MemoryService(MemoryLayout.for_repo(tmp_path), marker=boom)
+    audit = AuditContext(timestamp="2026-06-30T00:00:00Z", task_id="task-7")
+    service.append(_semantic("a"), audit=audit)  # must not raise
+    assert len(service.read_long_term(LongTermKind.SEMANTIC)) == 1  # the primary write still landed
+    assert service.audit.verify_chain() is True

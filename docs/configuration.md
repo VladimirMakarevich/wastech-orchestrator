@@ -749,7 +749,7 @@ memory:
 | `cleanup_max_wall_clock_s` | float | `5.0` | Per-pass wall-clock ceiling, in seconds. |
 | `cleanup_promotions_per_pass` | int | `0` | Promotions a cleanup pass may make; `0` = cleanup never creates a long-term lesson (it only demotes / expires / quarantines / merges). |
 
-The subsystem is built phase by phase ([plan](backlog/memory/plan/index.md)); in the foundations phase these knobs are parsed and validated but **not yet consumed** — the store, write path, retrieval, and cleanup land in later phases. The canonical store lives under the gitignored `<repo>/.worc/memory/` home and is never committed.
+The subsystem is built phase by phase ([plan](backlog/memory/plan/index.md)). When enabled, the **write path** is active: memory is written once per task at finalization — the supervisor proposes a candidate delta on its existing summary turn (zero extra LLM calls), and the deterministic `MemoryService` redacts, validates, assigns trust, merges, and promotes-or-quarantines it; a terminal failure writes a deterministic short-term record (never long-term). The **read path** (per-stage retrieval packets) and background cleanup land in later phases. The canonical store lives under the gitignored `<repo>/.worc/memory/` home and is never committed.
 
 ## `prompt_audit`
 

@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable, Mapping, Sequence
+import logging
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -27,6 +28,13 @@ from typing import Any
 from wastech_orchestrator.memory import _io
 from wastech_orchestrator.memory.paths import MemoryLayout
 from wastech_orchestrator.providers.redaction import redact_mapping
+
+_LOG = logging.getLogger(__name__)
+
+# A best-effort secondary sink (Q6): the orchestrator wires it to mirror each memory mutation
+# into the existing ``evaluations`` decision trail. It receives the (redacted) audit row; a failure
+# is swallowed — it must never fail the memory write (FR8). No ``state.db`` schema change (C2).
+AuditMarker = Callable[[Mapping[str, Any]], None]
 
 
 class AuditActor(StrEnum):
@@ -56,6 +64,7 @@ class AuditContext:
     actor: AuditActor = AuditActor.FINALIZER
     rationale: str = ""
     source_artifacts: tuple[str, ...] = ()
+    task_id: str = ""  # the owning task (recorded on the row + used for the evaluations marker)
 
 
 def content_hash(data: bytes) -> str:
@@ -77,9 +86,16 @@ def _canonical(payload: Mapping[str, Any]) -> bytes:
 class AuditLog:
     """The append-only, hash-chained ``audit/log.jsonl`` (design §7)."""
 
-    def __init__(self, layout: MemoryLayout, *, extra_secrets: Sequence[str] = ()) -> None:
+    def __init__(
+        self,
+        layout: MemoryLayout,
+        *,
+        extra_secrets: Sequence[str] = (),
+        marker: AuditMarker | None = None,
+    ) -> None:
         self._path = layout.audit / "log.jsonl"
         self._extra_secrets = tuple(extra_secrets)
+        self._marker = marker
 
     @property
     def path(self) -> Path:
@@ -107,6 +123,7 @@ class AuditLog:
         body: dict[str, Any] = redact_mapping(
             {
                 "id": f"audit_{len(existing):06d}",
+                "task_id": context.task_id,
                 "timestamp": context.timestamp,
                 "actor": str(context.actor),
                 "action": str(action),
@@ -121,7 +138,20 @@ class AuditLog:
         )
         body["row_hash"] = content_hash(_canonical(body))
         _io.append_jsonl(self._path, body)
+        self._emit_marker(body)
         return body
+
+    def _emit_marker(self, row: Mapping[str, Any]) -> None:
+        """Best-effort secondary marker (Q6): a marker failure never fails the write (FR8)."""
+        if self._marker is None:
+            return
+        try:
+            self._marker(row)
+        except Exception as exc:  # noqa: BLE001 — best-effort; the primary jsonl row already landed
+            _LOG.warning(
+                "memory audit marker failed (best-effort, ignored)",
+                extra={"error_type": type(exc).__name__},
+            )
 
     def verify_chain(self) -> bool:
         """Recompute every row's hash + linkage; ``True`` iff the chain is intact (append-only)."""

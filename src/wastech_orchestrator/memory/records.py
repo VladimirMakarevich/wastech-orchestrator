@@ -111,6 +111,11 @@ class LongTermRecord:
     last_verified_at: str | None = None
     usage_count: int = 0
     supersedes: tuple[str, ...] = ()
+    # Recurrence bookkeeping (design §5 / Q3): the distinct tasks that have proposed this lesson and
+    # when it was first seen — drive the "recurred in >= N tasks within the window" promotion gate.
+    # Carried on quarantined (pending) records; an active promoted record keeps the history too.
+    first_seen_at: str | None = None
+    seen_task_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

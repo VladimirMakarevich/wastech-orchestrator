@@ -90,6 +90,17 @@ from wastech_orchestrator.ledger import (
     write_failure_report,
     write_minimal_summary,
 )
+from wastech_orchestrator.memory import (
+    AuditActor,
+    AuditContext,
+    CandidateDelta,
+    EpisodeRecord,
+    MemoryLayout,
+    MemoryService,
+    TrustLevel,
+    WriteSource,
+    ensure_store,
+)
 from wastech_orchestrator.notify import (
     AskKind,
     AskResult,
@@ -114,6 +125,7 @@ from wastech_orchestrator.security.env import build_child_env
 from wastech_orchestrator.security.isolation import check_isolation
 from wastech_orchestrator.state_store import (
     ArtifactRow,
+    EvaluationRow,
     StateStore,
     SubtaskRow,
     TaskRow,
@@ -1806,7 +1818,12 @@ class Orchestrator:
         log.info("task finalize: starting (whole-task summary, then publish prep)")
         if self._supervisor is not None:
             started = time.monotonic()
-            self._supervisor.finalize(task_id=p.task.id, task_title=p.task.title)
+            memory_on = self._config.memory.enabled
+            finalized = self._supervisor.finalize(
+                task_id=p.task.id, task_title=p.task.title, emit_delta=memory_on
+            )
+            if memory_on:
+                self._write_memory(p, finalized.candidate_delta, WriteSource.SUCCESS)
             log.info(
                 "task finalize: supervisor summary written",
                 extra={"elapsed_seconds": round(time.monotonic() - started, 1)},
@@ -1815,6 +1832,71 @@ class Orchestrator:
         log.info("task finalize: publish prep (committed summary + task-file move)")
         summary_md = self._finalize_task_artifacts(p, Status.DONE)
         return str(summary_md) if summary_md is not None else None
+
+    # --- memory write path (best-effort; never blocks publish or a terminal) --------------
+
+    def _memory_service(self) -> MemoryService | None:
+        """Build a ``MemoryService`` for this run, or ``None`` when memory is disabled (Q10)."""
+        if not self._config.memory.enabled:
+            return None
+        layout = MemoryLayout.for_repo(self._config.repo.local_path)
+        ensure_store(layout, created_at=self._clock())
+        return MemoryService(layout, config=self._config.memory, marker=self._memory_marker)
+
+    def _memory_marker(self, row: Mapping[str, Any]) -> None:
+        """Mirror one memory audit row into the existing ``evaluations`` decision trail (Q6)."""
+        timestamp = row.get("timestamp")
+        self._store.record_evaluation(
+            EvaluationRow(
+                task_id=str(row.get("task_id") or ""),
+                kind="memory_write",
+                verdict="advisory",
+                findings_json=json.dumps(
+                    {key: row.get(key) for key in ("action", "affected_ids", "post_hash")},
+                    ensure_ascii=False,
+                ),
+                created_at=timestamp if isinstance(timestamp, str) else None,
+            )
+        )
+
+    def _record_failure_memory(self, p: _Pipeline, final: Status) -> None:
+        """Deterministic short-term failure episode (no LLM); never long-term (AC-W3)."""
+        self._write_memory(p, None, WriteSource.FAILURE, outcomes={"task": final.value})
+
+    def _write_memory(
+        self,
+        p: _Pipeline,
+        delta: CandidateDelta | None,
+        source: WriteSource,
+        *,
+        outcomes: dict[str, str] | None = None,
+    ) -> None:
+        """Write the per-task episode (+ a SUCCESS candidate delta) through ``apply_delta``.
+
+        Best-effort: a memory write must never block publish or a terminal transition, so every
+        failure is logged and swallowed. The store is built lazily, so a disabled config touches
+        nothing (Q10).
+        """
+        service = self._memory_service()
+        if service is None:
+            return
+        now = self._clock()
+        episode = EpisodeRecord(
+            id=f"ep_{p.task.id}",
+            task_id=p.task.id,
+            created_at=now,
+            trust_level=TrustLevel.ARTIFACT_BACKED,
+            stage_outcomes=outcomes or {},
+            artifact_paths=(Path(task_artifact_dir(self._artifacts_root, p.task.id)).as_posix(),),
+        )
+        audit = AuditContext(timestamp=now, actor=AuditActor.FINALIZER, task_id=p.task.id)
+        try:
+            service.apply_delta(delta, episode=episode, source=source, audit=audit)
+        except Exception as exc:  # noqa: BLE001 — memory is best-effort; never block the task
+            self._log(p.task.id).warning(
+                "memory write failed (best-effort, ignored)",
+                extra={"error_type": type(exc).__name__, "source": source.value},
+            )
 
     def _engine_facts(
         self, completeness: Completeness, snapshot: FlowSnapshot
@@ -2274,6 +2356,9 @@ class Orchestrator:
         if not cleanup.safe and status is Status.DONE:
             # Publishing finished but the working copy could not be safely restored → manual.
             final = Status.MANUAL_ACTION_REQUIRED
+        if status is not Status.DONE:
+            # Deterministic short-term failure episode (no LLM); never long-term (AC-W3).
+            self._record_failure_memory(p, final)
         # Record the terminal-cleanup outcome and the reason this task stopped (when applicable).
         last_error = cleanup.error or manual_reason
         self._store.update_task(
