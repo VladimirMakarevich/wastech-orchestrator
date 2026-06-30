@@ -17,6 +17,7 @@ Where to find the design detail:
 | Document | Purpose |
 | --- | --- |
 | [implementation-roadmap.md](implementation-roadmap.md) | Cross-ADR **build order** for the 14 open ADRs — sequences them by shared seam (config, CLI, task-scan, watch loop, provider errors, Telegram, supervisor) to minimize rework and conflicts. Ordering only, not a new design. |
+| [improvements.md](improvements.md) | Aggregated intake of improvement ideas from real `worc` usage, processed one item at a time into bounded tasks. |
 | [follow_ups.md](follow_ups.md) | **Open** implementation follow-ups / tech-debt discovered while building — distinct from product features. Recorded via `/sync-docs`. Completed/superseded entries are archived in [archive/follow_ups_history.md](archive/follow_ups_history.md). |
 | [archive/follow_ups_history.md](archive/follow_ups_history.md) | Frozen historical log of completed and superseded `follow_ups.md` entries (as of 2026-06-22). Traceability only — not a source of truth. |
 | [runtime_provider_capacity_gate.md](archive/runtime_provider_capacity_gate.md) | Detailed backlog task for checking Codex and Claude capacity before autonomous `watch` admits a pending task. |
