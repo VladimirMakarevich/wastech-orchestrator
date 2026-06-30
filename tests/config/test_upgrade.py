@@ -150,6 +150,18 @@ def test_adds_logging_block_from_packaged_template() -> None:
     assert "logging" in added
 
 
+def test_adds_memory_block_from_packaged_template() -> None:
+    # v24 add: an operator config predating the `memory` block gains it (enabled + bounded knobs)
+    # from the packaged template, while keeping its own customizations.
+    template = packaged_template_mapping()
+    operator = {"schema_version": 23, "prompt_audit": True}
+    merged, added, _ = upgrade_config_mapping(template, operator)
+    assert merged["memory"]["enabled"] is True
+    assert merged["memory"]["promote_min_tasks"] == 2
+    assert merged["prompt_audit"] is True  # operator value preserved
+    assert "memory" in added
+
+
 def test_strips_legacy_prompts_block() -> None:
     # config v9 removed the whole `prompts` block; upgrade-config drops it from an operator config.
     template = {"schema_version": CONFIG_SCHEMA_VERSION}

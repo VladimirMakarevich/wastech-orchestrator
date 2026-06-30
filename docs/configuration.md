@@ -37,7 +37,7 @@ Exactly one configured provider must set `primary: true` — the **global primar
 schema_version: 1
 ```
 
-Optional top-level integer marking the `config.yaml` **format** version (current: `21`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
+Optional top-level integer marking the `config.yaml` **format** version (current: `24`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
 
 ## Config Discovery
 
@@ -711,6 +711,45 @@ The `artifacts` level prunes each attempt directory at the end of a run (after t
 | `full` | everything: `request.json`, `stdout.log`, `stderr.log`, `events.jsonl`, `output-schema.json`, `result.json`. |
 
 `minimal` makes remote post-mortem debugging harder (no stdout/stderr from failed runs); use it only on well-understood, frequently-run pipelines. Prompt-audit is **independent** of this key (governed by [`prompt_audit`](#prompt_audit)); `rendered-prompt.md` and task-level artifacts (`plan.md`, `summary.md`, `current.diff`, `review/`, `checks/`) are out of scope and always written. Reclaim disk from accumulated task directories with [`worc logs clean`](operations.md).
+
+## `memory`
+
+Optional block (`schema_version` **24**) configuring the persistent, repo-scoped [memory subsystem](backlog/memory/index.md). Omit the whole block (or set `enabled: false`) for today's behavior exactly: no store is written, no candidate delta is produced, memory packets are empty, `worc memory` is a no-op, and no background cleanup runs. A fresh `worc install` ships `enabled: true`.
+
+```yaml
+memory:
+  enabled: true
+  short_term_ttl_days: 30
+  packet_max_lines: 120
+  packet_max_long_term: 3
+  packet_max_entity: 5
+  packet_max_episodic: 3
+  promote_min_tasks: 2
+  promote_window_days: 60
+  cleanup_min_interval_s: 300
+  cleanup_max_scanned: 200
+  cleanup_max_edits: 50
+  cleanup_max_wall_clock_s: 5.0
+  cleanup_promotions_per_pass: 0
+```
+
+| Field | Type | Default | Meaning |
+| --- | --- | --: | --- |
+| `enabled` | bool | `false` | Master switch. Absent block or `false` = no memory behavior at all (today's behavior). A fresh `worc install` ships `true`. |
+| `short_term_ttl_days` | int | `30` | Episodic entries expire after this many days; long-term has no TTL. |
+| `packet_max_lines` | int | `120` | Hard line backstop for one per-node memory brief. |
+| `packet_max_long_term` | int | `3` | Max long-term lessons in one retrieval packet. |
+| `packet_max_entity` | int | `5` | Max entity cards in one packet. |
+| `packet_max_episodic` | int | `3` | Max recent-episode notes in one packet. |
+| `promote_min_tasks` | int | `2` | A lesson must have recurred in ≥ this many tasks ... |
+| `promote_window_days` | int | `60` | ... within this many days to be eligible for long-term promotion. |
+| `cleanup_min_interval_s` | int | `300` | Minimum seconds between background-cleanup passes. |
+| `cleanup_max_scanned` | int | `200` | Max records examined per cleanup pass. |
+| `cleanup_max_edits` | int | `50` | Max records changed per cleanup pass. |
+| `cleanup_max_wall_clock_s` | float | `5.0` | Per-pass wall-clock ceiling, in seconds. |
+| `cleanup_promotions_per_pass` | int | `0` | Promotions a cleanup pass may make; `0` = cleanup never creates a long-term lesson (it only demotes / expires / quarantines / merges). |
+
+The subsystem is built phase by phase ([plan](backlog/memory/plan/index.md)); in the foundations phase these knobs are parsed and validated but **not yet consumed** — the store, write path, retrieval, and cleanup land in later phases. The canonical store lives under the gitignored `<repo>/.worc/memory/` home and is never committed.
 
 ## `prompt_audit`
 

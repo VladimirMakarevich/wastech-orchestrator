@@ -1,6 +1,6 @@
 # Phase 01 — Foundations
 
-Status: **provisional** — [plan](../index.md) · [design](../../design.md) · [acceptance-criteria](../../acceptance-criteria.md)
+Status: **implemented** (2026-06-30, branch `feat/memory-subsystem`) — [plan](../index.md) · [design](../../design.md) · [acceptance-criteria](../../acceptance-criteria.md)
 
 **Goal:** stand up the canonical store, config, and the deterministic `MemoryService` skeleton — everything the write/read paths build on — with safety primitives (audit, snapshots) in place from the first commit. No LLM involvement in this phase.
 

@@ -3,7 +3,7 @@
 # This is the packaged copy used by `wastech-orchestrator init`; keep it in sync with the
 # repo-root config.example.yaml
 
-schema_version: 23                  # config format version; the orchestrator refuses newer configs
+schema_version: 24                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -228,6 +228,26 @@ logging:                            # operator log verbosity + on-disk artifact 
                                     #   full     = all (request.json, events.jsonl, output-schema.json, ...)
                                     # Prompt-audit is independent (see prompt_audit). Reclaim disk with
                                     # `worc logs clean [--keep N | --all]`.
+
+memory:                             # persistent, repo-scoped memory (optional; docs/backlog/memory/)
+  enabled: true                     # false / omit the whole block = today's behavior: no store, no
+                                    #   candidate delta, empty memory packets, CLI no-op, no cleanup
+  short_term_ttl_days: 30           # episodic entries expire after N days (long-term has no TTL)
+  # Per-node retrieval packet caps — deliberately small (precision over recall):
+  packet_max_lines: 120             # hard line backstop for a per-node memory brief
+  packet_max_long_term: 3           # max long-term lessons in one packet
+  packet_max_entity: 5              # max entity cards in one packet
+  packet_max_episodic: 3            # max recent-episode notes in one packet
+  # Promotion to long-term — a candidate lesson must clear this gate, else it stays short-term:
+  promote_min_tasks: 2              # recurred in >= this many tasks ...
+  promote_window_days: 60           # ... within this many days
+  # Background-cleanup budget — bounded autonomy; runs only between tasks, never delays a pickup:
+  cleanup_min_interval_s: 300       # minimum seconds between cleanup passes
+  cleanup_max_scanned: 200          # max records examined per pass
+  cleanup_max_edits: 50             # max records changed per pass
+  cleanup_max_wall_clock_s: 5.0     # per-pass wall-clock ceiling (seconds)
+  cleanup_promotions_per_pass: 0    # 0 = cleanup NEVER creates a long-term lesson (only demote /
+                                    #   expire / quarantine / merge)
 
 prompt_audit: false                 # record each step's prompt + who (provider/model/attempt/fallback/
                                     # status) under logs/<task-id>/prompt-audit/, in chronological order.
