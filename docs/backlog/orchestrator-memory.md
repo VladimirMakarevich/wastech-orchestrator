@@ -65,7 +65,7 @@ The three tiers, as files under `.worc/memory/` (names indicative, not final):
 - **Autodream trigger and safety.** What exactly fires it (every idle tick? after N tasks? a time threshold?), and what is the bound + audit record for autonomous memory edits? It hooks the idle gap in `watch_loop` (after `watch_once`, before the sleep), where the single-slot invariant guarantees no active task — but the cadence and the per-pass edit budget are unresolved.
 - **Codebase reconciliation.** How does entity-memory get verified against the actual repo during cleanup — does a referenced file/module still exist, has it moved, does a recorded convention still hold? What is the source of truth for "this entry is stale"?
 - **Promotion boundary.** What promotes a short-term entry to long-term, and when — frequency, recency, explicit reviewer signal? This is decided before the first real lesson exists, so expect to tune it once memory is live.
-- **CLI surface and schedule.** Exact verbs (`worc memory clean` / `defrag` / `show`?), and whether scheduling is an external cron vs. the autodream hook. (Note the related `worc logs clean` in [log-management.md](log-management.md) — disk-space cleanup of artifacts is a distinct concern from memory curation.)
+- **CLI surface and schedule.** Exact verbs (`worc memory clean` / `defrag` / `show`?), and whether scheduling is an external cron vs. the autodream hook. (Note the related `worc logs clean` in [log-management.md](archive/done/log-management.md) — disk-space cleanup of artifacts is a distinct concern from memory curation.)
 - **Scope of supervisor expansion.** Exactly which new powers the supervisor gains as memory owner, kept within "advisory, cannot rework, Core decides."
 
 ## Implementation notes

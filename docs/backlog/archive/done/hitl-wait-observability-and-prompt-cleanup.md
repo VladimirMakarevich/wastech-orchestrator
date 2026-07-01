@@ -2,9 +2,9 @@
 
 Status: **done (2026-06-27)** — both findings implemented Date: 2026-06-26 Owner: Vladimir Makarevich
 
-Resolution: (1) `HumanGate.request`/`resume` ([core/flow/nodes/human_gate.py](../../src/wastech_orchestrator/core/flow/nodes/human_gate.py)) now bracket the blocking wait with an `awaiting human input` entry line, a `awaiting human input heartbeat` per tick (reusing `run_with_heartbeat`), and a `human input resolved` exit line carrying the resolution status — secret-free ids/kind/timeout only. The interval is the orchestrator-wide `--heartbeat-seconds`, threaded via `NodeServices.ask_heartbeat_seconds`. (2) The safe renderer ([core/prompts.py](../../src/wastech_orchestrator/core/prompts.py)) gained a backward-compatible `{?name}…{/name}` conditional block; the packaged `implementation`/`fixing` roles wrap their subtask clause in `{?subtask_spec_path}…{/subtask_spec_path}`, so a non-decomposed run renders no dangling "subtask of …" sentence.
+Resolution: (1) `HumanGate.request`/`resume` ([core/flow/nodes/human_gate.py](../../../../src/wastech_orchestrator/core/flow/nodes/human_gate.py)) now bracket the blocking wait with an `awaiting human input` entry line, a `awaiting human input heartbeat` per tick (reusing `run_with_heartbeat`), and a `human input resolved` exit line carrying the resolution status — secret-free ids/kind/timeout only. The interval is the orchestrator-wide `--heartbeat-seconds`, threaded via `NodeServices.ask_heartbeat_seconds`. (2) The safe renderer ([core/prompts.py](../../../../src/wastech_orchestrator/core/prompts.py)) gained a backward-compatible `{?name}…{/name}` conditional block; the packaged `implementation`/`fixing` roles wrap their subtask clause in `{?subtask_spec_path}…{/subtask_spec_path}`, so a non-decomposed run renders no dangling "subtask of …" sentence.
 
-Carved out of the `td-be-003-conform-m1-m2-contract-shapes` run post-mortem: [docs/analysis/td-be-003-conform-m1-m2-contract-shapes-run-analysis.md](../analysis/td-be-003-conform-m1-m2-contract-shapes-run-analysis.md), findings **5** and **6**. Two independent polish items grouped as one low-risk cleanup task.
+Carved out of the `td-be-003-conform-m1-m2-contract-shapes` run post-mortem: [docs/analysis/td-be-003-conform-m1-m2-contract-shapes-run-analysis.md](../../../analysis/td-be-003-conform-m1-m2-contract-shapes-run-analysis.md), findings **5** and **6**. Two independent polish items grouped as one low-risk cleanup task.
 
 ## The problem
 
@@ -47,6 +47,6 @@ Orchestrator default for #1 (HITL logging). Target roles (`implementation_backen
 
 ## References
 
-- Analysis: [td-be-003-conform-m1-m2-contract-shapes-run-analysis.md](../analysis/td-be-003-conform-m1-m2-contract-shapes-run-analysis.md) findings 5 and 6.
+- Analysis: [td-be-003-conform-m1-m2-contract-shapes-run-analysis.md](../../../analysis/td-be-003-conform-m1-m2-contract-shapes-run-analysis.md) findings 5 and 6.
 - Related: HITL session resume & autonomy — [hitl-session-resume-and-autonomy.md](hitl-session-resume-and-autonomy.md); 2026-06-24 watch-autonomy follow-up (c) (HITL pause invisibility).
 - Code: `core/hitl.py`; `core/orchestrator.py` (ask path); `core/flow/nodes/agent.py` `_prompt_variables`; `core/flow/prompt.py`; `roles/implementation_backend/{implementation,fixing}.md`.

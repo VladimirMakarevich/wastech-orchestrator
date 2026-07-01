@@ -1,12 +1,12 @@
-# ADR implementation roadmap (sequencing the 14 open backlog items)
+# ADR implementation roadmap (historical sequencing of the 14 backlog items)
 
-Status: **proposed sequencing** — step 1 (windows) implemented 2026-06-26; steps 2–14 unbuilt. Date: 2026-06-26 Owner: Vladimir Makarevich
+Status: **historical sequencing** — steps 1–13 implemented 2026-06-26/27; step 14 remains open. Date: 2026-06-26 Owner: Vladimir Makarevich
 
-This document is a cross-ADR **implementation order**, not a new design. It takes the 14 open backlog ADRs the operator wants built and sequences them so that shared seams (config schema, the CLI, the task-scan path, the watch loop, provider error handling, the Telegram channel, the supervisor/prompt-variable layer) are each touched in one deliberate pass instead of being re-edited by every feature. The goal is to minimize rework and merge conflicts, and to let each feature land on foundations the previous ones already established.
+This document is a cross-ADR **implementation order**, not a new design. It captures the 14 backlog ADRs that were sequenced for build order so that shared seams (config schema, the CLI, the task-scan path, the watch loop, provider error handling, the Telegram channel, the supervisor/prompt-variable layer) were each touched in one deliberate pass instead of being re-edited by every feature. Steps 1–13 are now archived in [archive/done/](archive/done/README.md); step 14 remains open. The goal is to minimize rework and merge conflicts, and to let each feature land on foundations the previous ones already established.
 
 Each ADR keeps its own design file (linked below); this file only governs **order and rationale**. It does not override the hard invariants in [../../CLAUDE.md](../../CLAUDE.md) or [../../.agents/rules/](../../.agents/rules/).
 
-Step 1 (windows-cross-platform-support) is **implemented** (2026-06-26 — green dev loop on Windows + a cross-platform `worc watch`/`stop`/`restart` daemon; the Windows CI matrix is deferred, see its [outcome section](windows-cross-platform-support.md#implementation-outcome)). The other 13 are confirmed **unbuilt** as of this date: `CONFIG_SCHEMA_VERSION` is `16` and `DB_SCHEMA_VERSION` is `12` from prior unrelated work; none of `RetryConfig` / `PathsConfig` / `MemoryConfig` / `LoggingConfig` / `recent_tasks()` / `worc list` exist yet. (The commit titled "add `worc list`" only added the ADR docs.)
+Step 1 (windows-cross-platform-support) is **implemented** (2026-06-26 — green dev loop on Windows + a cross-platform `worc watch`/`stop`/`restart` daemon; the Windows CI matrix is deferred, see its [outcome section](archive/done/windows-cross-platform-support.md#implementation-outcome)). Steps 2–13 are also implemented and archived in [archive/done/](archive/done/README.md); step 14 is the only remaining open item.
 
 ## Business priority vs. technical order
 
@@ -34,19 +34,19 @@ The operator's business priority (more `+` = higher) is the tie-breaker, not the
 
 | # | ADR | Wave | Business | Size | Config bump | Why here (one line) |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 ✅ | [windows-cross-platform-support](windows-cross-platform-support.md) | A — Foundation | `+++` | M | — | **Done 2026-06-26.** Lands the cross-platform graceful-stop primitive (stop-file + PID-file-disappearance) the console (step 13) reuses. Two scope deltas vs. the plan: Windows CI matrix **deferred**, and `fake_cli` left unchanged (the `.cmd` launcher works on Windows — the Python-launcher rework was unnecessary). |
-| 2 ✅ | [branch-name-epoch-and-slug-limit](branch-name-epoch-and-slug-limit.md) | A′ — Quick wins | `+++` | S | — | Fixes re-run branch collision (epoch prefix) + slug overflow (50-char cap); 4-file git-seam change, fully independent of all Wave B/C seams. |
-| 3 ✅ | [task-priority](task-priority.md) | A′ — Quick wins | `++` | S | — | Adds optional `priority: low\|mid\|high` + priority-descending sort in `select_pending`; lands before Wave B so scan functions are touched in order (priority → path → queue). |
-| 4 ✅ | [configurable-tasks-dir](configurable-tasks-dir.md) | B — Task scan | `+++` | M | 16→17 | Parameterizes the hardcoded `tasks/` path before three other features edit the same scan call-sites. |
-| 5 ✅ | [multi-instance-task-queues](multi-instance-task-queues.md) | B — Task scan | `+++` | M | 17→18 | Adds the `queue` field + filter on top of the now-parameterized scan, same seam. |
-| 6 ✅ | [cli-task-list-and-completion](cli-task-list-and-completion.md) | B — Task scan | `+++` | S | — | Reads the scan (dir + queue + priority aware); lands `recent_tasks()` that `worc top` later reuses. |
-| 7 ✅ | [skills-selection-rework](skills-selection-rework.md) | C — Core seam | `++++` | M | 18→19 | Establishes per-node prompt-var injection + "supervisor proposes, Core decides" that memory reuses. |
-| 7a ✅ | [task-node-model-override](task-node-model-override.md) | C′ — Task flexibility | `++` | M | — | Extends `NodeOverride` + adds overlay in `engine_driver`. After queues (`NodeOverride` seam) and skills (engine seam); before transient (`AgentRunRequest` path). No config bump. |
-| 8 ✅ | [transient-provider-failure-recovery](transient-provider-failure-recovery.md) | D — Resilience | `++` | M | 19→20 | Establishes structured `error_class` on provider errors + the resumable-pause path. |
-| 9 ✅ | [telegram-step-trace](telegram-step-trace.md) | D — Resilience | `++` | S | 20→21 | Establishes the per-step Telegram push channel + message-prefix discipline. |
-| 10 ✅ | [operator-confirmation-gates](operator-confirmation-gates.md) | D — Resilience | `++` | S/M | 21→22 | Confluence: needs the scan (next-task gate), structured errors (max-turns gate), and the Telegram channel. |
-| 11 ✅ | [orchestrator-driven-pr-merge](orchestrator-driven-pr-merge.md) | E — Merge/hygiene | `++` | M/L | — | Adds `worc prs` / `merge-task` / `tasks`. Implemented 2026-06-27 as an operator-editable `merge` flow (not the locked routine). |
-| 12 ✅ | [log-management](log-management.md) | E — Merge/hygiene | `++` | M | 22→23 | `worc logs clean` + `logging.*`; shapes the log tail the console later renders. Implemented 2026-06-27 (default `artifacts: standard`, strict `minimal`). |
+| 1 ✅ | [windows-cross-platform-support](archive/done/windows-cross-platform-support.md) | A — Foundation | `+++` | M | — | **Done 2026-06-26.** Lands the cross-platform graceful-stop primitive (stop-file + PID-file-disappearance) the console (step 13) reuses. Two scope deltas vs. the plan: Windows CI matrix **deferred**, and `fake_cli` left unchanged (the `.cmd` launcher works on Windows — the Python-launcher rework was unnecessary). |
+| 2 ✅ | [branch-name-epoch-and-slug-limit](archive/done/branch-name-epoch-and-slug-limit.md) | A′ — Quick wins | `+++` | S | — | Fixes re-run branch collision (epoch prefix) + slug overflow (50-char cap); 4-file git-seam change, fully independent of all Wave B/C seams. |
+| 3 ✅ | [task-priority](archive/done/task-priority.md) | A′ — Quick wins | `++` | S | — | Adds optional `priority: low\|mid\|high` + priority-descending sort in `select_pending`; lands before Wave B so scan functions are touched in order (priority → path → queue). |
+| 4 ✅ | [configurable-tasks-dir](archive/done/configurable-tasks-dir.md) | B — Task scan | `+++` | M | 16→17 | Parameterizes the hardcoded `tasks/` path before three other features edit the same scan call-sites. |
+| 5 ✅ | [multi-instance-task-queues](archive/done/multi-instance-task-queues.md) | B — Task scan | `+++` | M | 17→18 | Adds the `queue` field + filter on top of the now-parameterized scan, same seam. |
+| 6 ✅ | [cli-task-list-and-completion](archive/done/cli-task-list-and-completion.md) | B — Task scan | `+++` | S | — | Reads the scan (dir + queue + priority aware); lands `recent_tasks()` that `worc top` later reuses. |
+| 7 ✅ | [skills-selection-rework](archive/done/skills-selection-rework.md) | C — Core seam | `++++` | M | 18→19 | Establishes per-node prompt-var injection + "supervisor proposes, Core decides" that memory reuses. |
+| 7a ✅ | [task-node-model-override](archive/done/task-node-model-override.md) | C′ — Task flexibility | `++` | M | — | Extends `NodeOverride` + adds overlay in `engine_driver`. After queues (`NodeOverride` seam) and skills (engine seam); before transient (`AgentRunRequest` path). No config bump. |
+| 8 ✅ | [transient-provider-failure-recovery](archive/done/transient-provider-failure-recovery.md) | D — Resilience | `++` | M | 19→20 | Establishes structured `error_class` on provider errors + the resumable-pause path. |
+| 9 ✅ | [telegram-step-trace](archive/done/telegram-step-trace.md) | D — Resilience | `++` | S | 20→21 | Establishes the per-step Telegram push channel + message-prefix discipline. |
+| 10 ✅ | [operator-confirmation-gates](archive/done/operator-confirmation-gates.md) | D — Resilience | `++` | S/M | 21→22 | Confluence: needs the scan (next-task gate), structured errors (max-turns gate), and the Telegram channel. |
+| 11 ✅ | [orchestrator-driven-pr-merge](archive/done/orchestrator-driven-pr-merge.md) | E — Merge/hygiene | `++` | M/L | — | Adds `worc prs` / `merge-task` / `tasks`. Implemented 2026-06-27 as an operator-editable `merge` flow (not the locked routine). |
+| 12 ✅ | [log-management](archive/done/log-management.md) | E — Merge/hygiene | `++` | M | 22→23 | `worc logs clean` + `logging.*`; shapes the log tail the console later renders. Implemented 2026-06-27 (default `artifacts: standard`, strict `minimal`). |
 | 13 ✅ | [cli-upgrade](cli-upgrade.md) | F — Capstone | `+` | L | — | Capstone console: consumes `recent_tasks`, `prs`/`merge-task`, the pause state, and the stop primitives. |
 | 14 | [orchestrator-memory](orchestrator-memory.md) | F — Capstone | `+` | L | 23→24 | Reuses the skills prompt-var/supervisor seam; riskiest, most open questions, lowest business. |
 
@@ -126,7 +126,7 @@ Everything else is independent and ordered only by wave/priority.
 
 ### Wave A — Cross-platform & test baseline (step 1) — ✅ done 2026-06-26
 
-**windows-cross-platform-support.** First, alone, because it is pure leverage: a green dev loop on Windows (`/run-checks` — ruff, mypy, full pytest) so steps 2–14 can be verified cross-platform as they land instead of being retrofitted, plus the cross-platform stop primitive later waves build on. **As implemented**, two premises proved wrong (validated on a real Windows 10 / Python 3.14 box — see the ADR's [implementation outcome](windows-cross-platform-support.md#implementation-outcome)):
+**windows-cross-platform-support.** First, alone, because it is pure leverage: a green dev loop on Windows (`/run-checks` — ruff, mypy, full pytest) so steps 2–14 can be verified cross-platform as they land instead of being retrofitted, plus the cross-platform stop primitive later waves build on. **As implemented**, two premises proved wrong (validated on a real Windows 10 / Python 3.14 box — see the ADR's [implementation outcome](archive/done/windows-cross-platform-support.md#implementation-outcome)):
 
 - The `.cmd` `fake_cli` works on Windows and the integration tests pass, so the Python-launcher rework was **not needed** — `tests/conftest.py` is unchanged. Later provider/process tests reuse the existing fixture as-is.
 - `os.kill` is **unusable cross-process on Windows** (`OpenProcess(PROCESS_ALL_ACCESS)` fails for a process the caller holds no handle to), so the daemon stop is a **platform split**: POSIX keeps `SIGTERM`→`SIGKILL`; Windows uses the `orchestrator.stop` sentinel + waits for the daemon to remove its own PID file (`process_control._can_signal`). This is the primitive the console's stop ladder (step 13) must build on — **not** a signal/process-group kill, which is POSIX-only.
@@ -223,18 +223,18 @@ Steps 1 (windows), 2 (branch-name), 3 (task-priority), 6 (list), 11 (pr-merge), 
 
 | Step | ADR | Detail file |
 | --- | --- | --- |
-| 1 | Windows / cross-platform support | [windows-cross-platform-support.md](windows-cross-platform-support.md) |
-| 2 | Branch name: epoch prefix + length cap | [branch-name-epoch-and-slug-limit.md](branch-name-epoch-and-slug-limit.md) |
-| 3 | Task priority field | [task-priority.md](task-priority.md) |
-| 4 | Configurable tasks directory | [configurable-tasks-dir.md](configurable-tasks-dir.md) |
-| 5 | Task queue tags for multiple instances | [multi-instance-task-queues.md](multi-instance-task-queues.md) |
-| 6 | Task discovery: `worc list` + completion | [cli-task-list-and-completion.md](cli-task-list-and-completion.md) |
-| 7 | Skills selection rework | [skills-selection-rework.md](skills-selection-rework.md) |
-| 7a | Per-node model/reasoning/provider in task front matter | [task-node-model-override.md](task-node-model-override.md) |
-| 8 | Transient provider-failure recovery | [transient-provider-failure-recovery.md](transient-provider-failure-recovery.md) |
-| 9 | Telegram step-trace | [telegram-step-trace.md](telegram-step-trace.md) |
-| 10 | Operator confirmation gates | [operator-confirmation-gates.md](operator-confirmation-gates.md) |
-| 11 | Orchestrator-driven PR merge | [orchestrator-driven-pr-merge.md](orchestrator-driven-pr-merge.md) |
-| 12 | Log management | [log-management.md](log-management.md) |
+| 1 | Windows / cross-platform support | [windows-cross-platform-support.md](archive/done/windows-cross-platform-support.md) |
+| 2 | Branch name: epoch prefix + length cap | [branch-name-epoch-and-slug-limit.md](archive/done/branch-name-epoch-and-slug-limit.md) |
+| 3 | Task priority field | [task-priority.md](archive/done/task-priority.md) |
+| 4 | Configurable tasks directory | [configurable-tasks-dir.md](archive/done/configurable-tasks-dir.md) |
+| 5 | Task queue tags for multiple instances | [multi-instance-task-queues.md](archive/done/multi-instance-task-queues.md) |
+| 6 | Task discovery: `worc list` + completion | [cli-task-list-and-completion.md](archive/done/cli-task-list-and-completion.md) |
+| 7 | Skills selection rework | [skills-selection-rework.md](archive/done/skills-selection-rework.md) |
+| 7a | Per-node model/reasoning/provider in task front matter | [task-node-model-override.md](archive/done/task-node-model-override.md) |
+| 8 | Transient provider-failure recovery | [transient-provider-failure-recovery.md](archive/done/transient-provider-failure-recovery.md) |
+| 9 | Telegram step-trace | [telegram-step-trace.md](archive/done/telegram-step-trace.md) |
+| 10 | Operator confirmation gates | [operator-confirmation-gates.md](archive/done/operator-confirmation-gates.md) |
+| 11 | Orchestrator-driven PR merge | [orchestrator-driven-pr-merge.md](archive/done/orchestrator-driven-pr-merge.md) |
+| 12 | Log management | [log-management.md](archive/done/log-management.md) |
 | 13 | Interactive operator console | [cli-upgrade.md](cli-upgrade.md) |
 | 14 | Orchestrator memory | [orchestrator-memory.md](orchestrator-memory.md) |

@@ -19,7 +19,7 @@ How this maps onto the orchestrator:
 | --- | --- | --- |
 | Context | operator, human-in-the-loop, `codex`/`claude`, `git`/`gh`, Telegram | `landscape` |
 | Container | single process + `state.db` / `.worc/` artifact storage | `containers` |
-| Component | **functional blocks B0x–B2x** | `components` |
+| Component | **functional blocks B01–B32** | `components` |
 | Code | — | (skipped; details in `docs/functional/`) |
 
 L2 is intentionally thin here: the orchestrator is a **single process**, so "containers" means the process itself plus the storage it owns; child CLIs are external systems launched as subprocesses.
@@ -82,7 +82,7 @@ To extend further:
 - **Icons** (looks "production-ready"): in an element's `style { … }` block add `icon tech:python`, `icon tech:sqlite`, etc. — see the icon catalog on the LikeC4 website. (Not added by default to avoid coupling to specific icon names without local verification.)
 - **Split into files**: `spec.likec4` / `model.likec4` / `views.likec4` (LikeC4 merges all `*.likec4` files in the directory) — convenient as the model grows.
 - **Typed relationships**: declare relationship kinds (`relationship async`, `relationship spawns`) with their own line style.
-- **All 27 blocks**: a representative subset (~16) is currently included; the rest are listed as comments in `workspace.likec4` and can be added following the same pattern.
+- **All 32 blocks**: a representative subset (~18, now including the B28 flow engine and B31 supervisor) is currently included; the rest are listed as comments in `workspace.likec4` and can be added following the same pattern.
 - **CI**: run `likec4 build`/`export` in the pipeline to catch drift and publish the site.
 
 ## Keeping in Sync with Code (important)

@@ -2,9 +2,9 @@
 
 Status: **implemented** (2026-06-27, A + symmetric fallback + B-lite — see [§ Decision (locked)](#decision-locked)) Date: 2026-06-23 Owner: Vladimir Makarevich
 
-> **Implemented 2026-06-27.** All three parts shipped in one change: bounded same-provider transient retry with backoff (`agents.retry`), symmetric Claude↔Codex fallback (`resolve_route`), and the B-lite resumable soft pause (`tasks.blocked_since`, ceiling on resume). **Version note:** the plan text below predates later schema bumps — the actual bumps were **config `schema_version` 19 → 20** (not 15 → 16) and **`DB_SCHEMA_VERSION` 12 → 13** (B-lite's `blocked_since` column). **Phase 0 note:** the CLI-internal-retry verification spike was _not_ run (it needs the real binaries against a live outage, not reproducible in CI); the ADR's stated defaults shipped as-is and are operator-tunable — tracked in [follow_ups.md](follow_ups.md).
+> **Implemented 2026-06-27.** All three parts shipped in one change: bounded same-provider transient retry with backoff (`agents.retry`), symmetric Claude↔Codex fallback (`resolve_route`), and the B-lite resumable soft pause (`tasks.blocked_since`, ceiling on resume). **Version note:** the plan text below predates later schema bumps — the actual bumps were **config `schema_version` 19 → 20** (not 15 → 16) and **`DB_SCHEMA_VERSION` 12 → 13** (B-lite's `blocked_since` column). **Phase 0 note:** the CLI-internal-retry verification spike was _not_ run (it needs the real binaries against a live outage, not reproducible in CI); the ADR's stated defaults shipped as-is and are operator-tunable — tracked in [follow_ups.md](../../follow_ups.md).
 
-Detail file for the [README.md](README.md) backlog item _"Auto-retry on network errors — retry transient network/provider failures before fallback or terminal failure (must be bounded and audited; never retry quality failures)."_ It records the investigation of what happens today when a provider returns a transient server error mid-task, the options for surviving it, and the **locked decision** (A + symmetric fallback + B-lite) with its implementation plan ([§ План реализации](#план-реализации)).
+Detail file for the [README.md](../../README.md) backlog item _"Auto-retry on network errors — retry transient network/provider failures before fallback or terminal failure (must be bounded and audited; never retry quality failures)."_ It records the investigation of what happens today when a provider returns a transient server error mid-task, the options for surviving it, and the **locked decision** (A + symmetric fallback + B-lite) with its implementation plan ([§ План реализации](#план-реализации)).
 
 ## The situation
 
@@ -32,30 +32,30 @@ Net: the error class that is _most_ recoverable in principle (transient, server-
 
 ### 1 — Surfacing and classification (the adapter)
 
-The CLI exits non-zero with the error on stderr. The adapter's `classify()` matches a provider-specific stderr signature and raises a `ProviderError` carrying a normalized, secret-free error class ([providers/errors.py:63-86](../../src/wastech_orchestrator/providers/errors.py#L63-L86)). Both adapters map a 5xx to `PROVIDER_UNAVAILABLE`:
+The CLI exits non-zero with the error on stderr. The adapter's `classify()` matches a provider-specific stderr signature and raises a `ProviderError` carrying a normalized, secret-free error class ([providers/errors.py:63-86](../../../../src/wastech_orchestrator/providers/errors.py#L63-L86)). Both adapters map a 5xx to `PROVIDER_UNAVAILABLE`:
 
-- Claude — `service unavailable|\b50[023]\b|bad gateway|internal server error` ([claude.py:109-110](../../src/wastech_orchestrator/providers/claude.py#L109-L110))
-- Codex — same pattern ([codex.py:88-91](../../src/wastech_orchestrator/providers/codex.py#L88-L91))
+- Claude — `service unavailable|\b50[023]\b|bad gateway|internal server error` ([claude.py:109-110](../../../../src/wastech_orchestrator/providers/claude.py#L109-L110))
+- Codex — same pattern ([codex.py:88-91](../../../../src/wastech_orchestrator/providers/codex.py#L88-L91))
 
 Two classification edges worth noting, because they change which recovery path runs:
 
-- The signature matches `500/502/503` but **not `504`** (a gateway timeout would fall through to `PROCESS_CRASHED`, or to `TIMEOUT` if the watchdog fired first) and **not `529`** (Anthropic's "overloaded"). For Claude, `529` is instead caught by the rate-limit signature (`overloaded`) → `RATE_LIMITED` ([claude.py:97](../../src/wastech_orchestrator/providers/claude.py#L97)); Codex has no `overloaded` token, so a `529` there would land in `PROVIDER_UNAVAILABLE`/`PROCESS_CRASHED`. Any "transient retry" policy must decide which of these classes it covers.
+- The signature matches `500/502/503` but **not `504`** (a gateway timeout would fall through to `PROCESS_CRASHED`, or to `TIMEOUT` if the watchdog fired first) and **not `529`** (Anthropic's "overloaded"). For Claude, `529` is instead caught by the rate-limit signature (`overloaded`) → `RATE_LIMITED` ([claude.py:97](../../../../src/wastech_orchestrator/providers/claude.py#L97)); Codex has no `overloaded` token, so a `529` there would land in `PROVIDER_UNAVAILABLE`/`PROCESS_CRASHED`. Any "transient retry" policy must decide which of these classes it covers.
 
 ### 2 — Routing (the Router)
 
-`PROVIDER_UNAVAILABLE` is in `FALLBACK_ELIGIBLE` ([providers/base.py:48-60](../../src/wastech_orchestrator/providers/base.py#L48-L60)), so a fallback is _allowed_. But whether one _exists_ depends on the route:
+`PROVIDER_UNAVAILABLE` is in `FALLBACK_ELIGIBLE` ([providers/base.py:48-60](../../../../src/wastech_orchestrator/providers/base.py#L48-L60)), so a fallback is _allowed_. But whether one _exists_ depends on the route:
 
-- The Router builds its attempt sequence as `[primary]` plus `[fallback]` only when a fallback exists ([router.py:191-193](../../src/wastech_orchestrator/routing/router.py#L191-L193)).
-- The fallback is the global primary, _unless the resolved primary already is the global primary_, in which case `fallback is None` and "a primary infra failure is terminal" ([router.py:169-173](../../src/wastech_orchestrator/routing/router.py#L169-L173)).
+- The Router builds its attempt sequence as `[primary]` plus `[fallback]` only when a fallback exists ([router.py:191-193](../../../../src/wastech_orchestrator/routing/router.py#L191-L193)).
+- The fallback is the global primary, _unless the resolved primary already is the global primary_, in which case `fallback is None` and "a primary infra failure is terminal" ([router.py:169-173](../../../../src/wastech_orchestrator/routing/router.py#L169-L173)).
 - **No packaged flow declares a per-node `provider:`** (verified: zero `provider:` keys across `packaged/flows/*.yaml`). So every default-flow node resolves its primary to the global primary → `fallback is None` → the sequence is a single attempt.
 
-There is **no backoff and no same-provider retry** for `PROVIDER_UNAVAILABLE`. The _only_ same-provider retry is the `SESSION_UNAVAILABLE` safety net: when a session could not be resumed, the Router retries the same provider once with a fresh session ([router.py:248-299](../../src/wastech_orchestrator/routing/router.py#L248-L299)). That path is the natural template for a transient-retry feature, but `PROVIDER_UNAVAILABLE` does not use it.
+There is **no backoff and no same-provider retry** for `PROVIDER_UNAVAILABLE`. The _only_ same-provider retry is the `SESSION_UNAVAILABLE` safety net: when a session could not be resumed, the Router retries the same provider once with a fresh session ([router.py:248-299](../../../../src/wastech_orchestrator/routing/router.py#L248-L299)). That path is the natural template for a transient-retry feature, but `PROVIDER_UNAVAILABLE` does not use it.
 
-When attempts are exhausted (or there is no fallback), the Router returns a `StageOutcome` with `result=None` and `terminal_error` set ([router.py:361-369](../../src/wastech_orchestrator/routing/router.py#L361-L369)). Note it _does_ capture the partial diff and would hand it to a fallback without rolling back ([router.py:327-329](../../src/wastech_orchestrator/routing/router.py#L327-L329)) — but with no fallback, nothing consumes it.
+When attempts are exhausted (or there is no fallback), the Router returns a `StageOutcome` with `result=None` and `terminal_error` set ([router.py:361-369](../../../../src/wastech_orchestrator/routing/router.py#L361-L369)). Note it _does_ capture the partial diff and would hand it to a fallback without rolling back ([router.py:327-329](../../../../src/wastech_orchestrator/routing/router.py#L327-L329)) — but with no fallback, nothing consumes it.
 
 ### 3 — Core reaction (the node runner and orchestrator)
 
-A `StageOutcome` with `result is None` makes the agent (or evaluator) node raise `NodeInfraError` ([agent.py:235-241](../../src/wastech_orchestrator/core/flow/nodes/agent.py#L235-L241), [evaluator.py:91-95](../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L91-L95)). The orchestrator catches it and **fails the task** ([orchestrator.py:1201-1203](../../src/wastech_orchestrator/core/orchestrator.py#L1201-L1203)):
+A `StageOutcome` with `result is None` makes the agent (or evaluator) node raise `NodeInfraError` ([agent.py:235-241](../../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L235-L241), [evaluator.py:91-95](../../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L91-L95)). The orchestrator catches it and **fails the task** ([orchestrator.py:1201-1203](../../../../src/wastech_orchestrator/core/orchestrator.py#L1201-L1203)):
 
 ```python
 except NodeInfraError as exc:
@@ -63,15 +63,15 @@ except NodeInfraError as exc:
     return self._fail(p, str(exc))
 ```
 
-`_fail` commits and pushes the failed attempt (no PR), then transitions to terminal `FAILED` ([orchestrator.py:1689-1711](../../src/wastech_orchestrator/core/orchestrator.py#L1689-L1711)). `FAILED` is terminal — it has no outgoing transitions and releases the processing slot ([state_machine.py:37-38](../../src/wastech_orchestrator/core/state_machine.py#L37-L38)). There is no automatic re-queue.
+`_fail` commits and pushes the failed attempt (no PR), then transitions to terminal `FAILED` ([orchestrator.py:1689-1711](../../../../src/wastech_orchestrator/core/orchestrator.py#L1689-L1711)). `FAILED` is terminal — it has no outgoing transitions and releases the processing slot ([state_machine.py:37-38](../../../../src/wastech_orchestrator/core/state_machine.py#L37-L38)). There is no automatic re-queue.
 
 ### 4 — The recovery machinery that exists, and why it does not help here
 
 The orchestrator is _not_ short on recovery primitives:
 
-- **Checkpoints.** `current_node` is seeded and `recorder.save_checkpoint(run_state)` is written before each phase ([orchestrator.py:1249-1250](../../src/wastech_orchestrator/core/orchestrator.py#L1249-L1250)). The phase driver can resume from the hydrated `current_node`.
-- **Restart recovery.** On startup the reconciler resumes the single _active_ task idempotently (`RecoveryAction.RESUME`), skipping already-committed subtasks and never re-committing a recorded SHA ([core/recovery.py:57-107](../../src/wastech_orchestrator/core/recovery.py#L57-L107)).
-- **Durable provider sessions.** A `resume_own_lineage` node (the supervisor / research critic) persists and rehydrates its provider session across restarts via the `node_lineage` table ([core/supervisor.py:156-187](../../src/wastech_orchestrator/core/supervisor.py#L156-L187)).
+- **Checkpoints.** `current_node` is seeded and `recorder.save_checkpoint(run_state)` is written before each phase ([orchestrator.py:1249-1250](../../../../src/wastech_orchestrator/core/orchestrator.py#L1249-L1250)). The phase driver can resume from the hydrated `current_node`.
+- **Restart recovery.** On startup the reconciler resumes the single _active_ task idempotently (`RecoveryAction.RESUME`), skipping already-committed subtasks and never re-committing a recorded SHA ([core/recovery.py:57-107](../../../../src/wastech_orchestrator/core/recovery.py#L57-L107)).
+- **Durable provider sessions.** A `resume_own_lineage` node (the supervisor / research critic) persists and rehydrates its provider session across restarts via the `node_lineage` table ([core/supervisor.py:156-187](../../../../src/wastech_orchestrator/core/supervisor.py#L156-L187)).
 
 The reason none of this fires for a transient 500: **an infra failure is _caught_, not a crash.** It is converted to terminal `FAILED` inside the same process. The process keeps running, so restart-recovery never triggers; and a `FAILED` task is no longer active, so the reconciler would not resume it even on a later restart. The machinery is keyed to _process death_ and _quality reworks_, not to a provider blip.
 
@@ -81,10 +81,10 @@ The orchestrator can resume a task after _its own_ crash, but throws the task aw
 
 ## Constraints that bound any solution
 
-These come from [.agents/rules/architecture.md](../../.agents/rules/architecture.md) and the code as it stands:
+These come from [.agents/rules/architecture.md](../../../../.agents/rules/architecture.md) and the code as it stands:
 
-1. **Never retry a quality failure.** Only a _raised infrastructure_ `ProviderError` may be retried; a returned `AgentRunResult(status=failed)` is a quality verdict and must flow to the fix-loop, never be re-run as infra ([router.py:17-18](../../src/wastech_orchestrator/routing/router.py#L17-L18)). This boundary already exists and must be preserved.
-2. **Bounded and audited.** Any retry must have a hard cap and every attempt must be recorded (the Router already writes a `provider_attempts` audit row per attempt — [router.py:114-123](../../src/wastech_orchestrator/routing/router.py#L114-L123)).
+1. **Never retry a quality failure.** Only a _raised infrastructure_ `ProviderError` may be retried; a returned `AgentRunResult(status=failed)` is a quality verdict and must flow to the fix-loop, never be re-run as infra ([router.py:17-18](../../../../src/wastech_orchestrator/routing/router.py#L17-L18)). This boundary already exists and must be preserved.
+2. **Bounded and audited.** Any retry must have a hard cap and every attempt must be recorded (the Router already writes a `provider_attempts` audit row per attempt — [router.py:114-123](../../../../src/wastech_orchestrator/routing/router.py#L114-L123)).
 3. **Commit/push/PR is orchestrator-only and _post_-node.** A node never commits; the orchestrator commits after the node returns. So a retried or resumed node **cannot double-commit**, and Git Manager fingerprints already enforce commit/push/PR idempotency. This is why a transient retry is safe even when the failed run made partial edits.
 4. **The core does not know CLI syntax; retry/backoff belongs in the Router.** The Router already owns the attempt budget _and_ the one existing same-provider retry — it is the correct home, no new layer needed.
 5. **Single processing slot.** A backoff that sleeps blocks the slot. For a single-active-task orchestrator this is acceptable _if bounded_ to seconds–low-minutes; a sustained outage should not hold the slot for an hour.
@@ -96,7 +96,7 @@ These come from [.agents/rules/architecture.md](../../.agents/rules/architecture
 
 Treat a small, explicit set of _transient_ infra classes — start with `PROVIDER_UNAVAILABLE` and `NETWORK_UNAVAILABLE`; consider `TIMEOUT` — as **same-provider retryable**: before declaring the stage exhausted, retry the same provider up to _N_ times with exponential backoff + jitter, then fall back to the other engine (if any), then terminal. Resume the node's session when one is available (so partial reasoning/edits are not lost); if the session itself was the outage's casualty, fall back to a fresh attempt that sees the partial diff — exactly the degrade path the `SESSION_UNAVAILABLE` retry already uses.
 
-- **Reuses** the `SESSION_UNAVAILABLE` same-provider-retry shape ([router.py:248-299](../../src/wastech_orchestrator/routing/router.py#L248-L299)) — a known, tested, accepted pattern. New surface is one config block (`agents.retry: {max_attempts, base_delay_s, max_delay_s}`) and a backoff sleep.
+- **Reuses** the `SESSION_UNAVAILABLE` same-provider-retry shape ([router.py:248-299](../../../../src/wastech_orchestrator/routing/router.py#L248-L299)) — a known, tested, accepted pattern. New surface is one config block (`agents.retry: {max_attempts, base_delay_s, max_delay_s}`) and a backoff sleep.
 - **Fixes the common case** the current design misses: a default-flow node on the global primary, where there is no fallback today, finally gets a recovery path.
 - **Honors the "try again in a moment" semantics** and stays inside one node run — no fix-iteration charged, no state-machine change.
 - **Bounded + audited** by construction (cap + existing per-attempt audit rows).
@@ -120,7 +120,7 @@ Accept that the CLIs already retry 5xx internally (constraint 6) and treat a sur
 
 ### E — Pre-admission capacity gate _(related, not a recovery)_
 
-The existing [runtime provider capacity gate](README.md) backlog item would check provider health _before_ `watch` claims a pending task, deferring admission when a provider is down. Worth noting because it reduces _how often_ we start a task into an outage — but it does **not** recover a task that fails _mid-run_, which is this document's problem. Complementary, not a substitute.
+The existing [runtime provider capacity gate](../../README.md) backlog item would check provider health _before_ `watch` claims a pending task, deferring admission when a provider is down. Worth noting because it reduces _how often_ we start a task into an outage — but it does **not** recover a task that fails _mid-run_, which is this document's problem. Complementary, not a substitute.
 
 ## Decision (locked)
 
@@ -140,13 +140,13 @@ Deliberately **out of scope** for a first cut (YAGNI, per the greenfield-MVP pos
 
 ### Зафиксированные решения (ответы на открытые вопросы)
 
-1. **Какие классы считаем «транзиентными» (ретраим в A).** Только `PROVIDER_UNAVAILABLE` и `NETWORK_UNAVAILABLE`. `TIMEOUT` **исключаем** (таймаут часто означает частично/долго выполнявшуюся работу — повтор рискует дорого продублировать её; поведение как сейчас). `RATE_LIMITED` **исключаем** (ему нужен длинный defer, а не плотный ретрай — это зона fallback'а и будущего capacity-gate, Вариант E). Набор оформляем как отдельное множество `TRANSIENT_RETRYABLE` в [providers/base.py](../../src/wastech_orchestrator/providers/base.py) рядом с `FALLBACK_ELIGIBLE`.
-2. **Resume или fresh при ретрае.** По умолчанию **resume сессии ноды** (сохраняем частичную работу/рассуждения), с деградацией в **fresh-попытку с диффом**, если resume не удался — ровно та же логика, что уже есть в ветке `SESSION_UNAVAILABLE` ([router.py:248-299](../../src/wastech_orchestrator/routing/router.py#L248-L299)).
+1. **Какие классы считаем «транзиентными» (ретраим в A).** Только `PROVIDER_UNAVAILABLE` и `NETWORK_UNAVAILABLE`. `TIMEOUT` **исключаем** (таймаут часто означает частично/долго выполнявшуюся работу — повтор рискует дорого продублировать её; поведение как сейчас). `RATE_LIMITED` **исключаем** (ему нужен длинный defer, а не плотный ретрай — это зона fallback'а и будущего capacity-gate, Вариант E). Набор оформляем как отдельное множество `TRANSIENT_RETRYABLE` в [providers/base.py](../../../../src/wastech_orchestrator/providers/base.py) рядом с `FALLBACK_ELIGIBLE`.
+2. **Resume или fresh при ретрае.** По умолчанию **resume сессии ноды** (сохраняем частичную работу/рассуждения), с деградацией в **fresh-попытку с диффом**, если resume не удался — ровно та же логика, что уже есть в ветке `SESSION_UNAVAILABLE` ([router.py:248-299](../../../../src/wastech_orchestrator/routing/router.py#L248-L299)).
 3. **Backoff блокирует слот.** В A — да: короткий ограниченный `sleep` в Router (один активный слот → блокировка приемлема). Суммарное окно жёстко ограничено (по умолчанию ≤ ~60 c). Длительный аутэйдж сверх этого окна — зона Фазы 2 (пауза с резюмом, слот освобождается).
 4. **Max blocked duration (Фаза 2).** У припаркованной задачи есть потолок `max_blocked` (предлагаемый дефолт — 1 час); по его истечении задача переходит в терминальный `FAILED` (или `manual_action_required`), чтобы ничего не висело вечно.
 5. **Jitter не добавляем.** Оркестратор однослотовый, конкурирующих клиентов нет — «thundering herd» не возникает, поэтому детерминированный экспоненциальный backoff проще и достаточен (и удобнее для тестов).
 6. **Верификация внутреннего ретрая CLI** (спайк) — см. ниже; от неё зависят дефолты задержек.
-7. **Fallback симметричный (Claude↔Codex), а не только «на глобальный primary».** Сегодня цель fallback — единственный глобальный primary, и она существует, только если провайдер ноды ≠ primary ([router.py:169-173](../../src/wastech_orchestrator/routing/router.py#L169-L173)); для дефолтного флоу (нода без `provider:`) это значит `fallback = None`, т.е. отказ primary никуда не переключается. **Расширяем правило PRE.1:** когда резолвнутый primary _и есть_ глобальный primary, цель fallback — **второй разрешённый+сконфигурированный провайдер** из `agents.allowed` (если он ровно один). Так failover становится симметричным в обе стороны. Если разрешён только один провайдер — fallback остаётся `None` (переключаться некуда → сразу зона B-lite). Бюджет повторов (A) применяется к каждому провайдеру в последовательности.
+7. **Fallback симметричный (Claude↔Codex), а не только «на глобальный primary».** Сегодня цель fallback — единственный глобальный primary, и она существует, только если провайдер ноды ≠ primary ([router.py:169-173](../../../../src/wastech_orchestrator/routing/router.py#L169-L173)); для дефолтного флоу (нода без `provider:`) это значит `fallback = None`, т.е. отказ primary никуда не переключается. **Расширяем правило PRE.1:** когда резолвнутый primary _и есть_ глобальный primary, цель fallback — **второй разрешённый+сконфигурированный провайдер** из `agents.allowed` (если он ровно один). Так failover становится симметричным в обе стороны. Если разрешён только один провайдер — fallback остаётся `None` (переключаться некуда → сразу зона B-lite). Бюджет повторов (A) применяется к каждому провайдеру в последовательности.
 
 ### Бюджет ретрая отделён от `max_stage_attempts`
 
@@ -154,20 +154,20 @@ Deliberately **out of scope** for a first cut (YAGNI, per the greenfield-MVP pos
 
 ### Фаза 0 — спайк-верификация поведения CLI
 
-Проверить фактическое поведение внутреннего ретрая у запиненных версий Codex и Claude Code на 5xx/429 (количество повторов, backoff, env/конфиг-ручки). Цель — убедиться, что к моменту, когда оркестратор видит `PROVIDER_UNAVAILABLE`, CLI уже исчерпал свой бюджет (тогда ценность A — именно **окно ожидания** и **другой движок**, а не плотный цикл), и осмысленно задать дефолты `base_delay_s` / `max_delay_s`. Результат записать в этот файл (короткой заметкой) и, при необходимости, в [follow_ups.md](follow_ups.md).
+Проверить фактическое поведение внутреннего ретрая у запиненных версий Codex и Claude Code на 5xx/429 (количество повторов, backoff, env/конфиг-ручки). Цель — убедиться, что к моменту, когда оркестратор видит `PROVIDER_UNAVAILABLE`, CLI уже исчерпал свой бюджет (тогда ценность A — именно **окно ожидания** и **другой движок**, а не плотный цикл), и осмысленно задать дефолты `base_delay_s` / `max_delay_s`. Результат записать в этот файл (короткой заметкой) и, при необходимости, в [follow_ups.md](../../follow_ups.md).
 
 ### Фаза 1 — Вариант A: bounded same-provider retry + backoff в Router
 
 Самодостаточна, целиком внутри Router + конфига. Изменения по файлам:
 
-- **[providers/base.py](../../src/wastech_orchestrator/providers/base.py)** — добавить `TRANSIENT_RETRYABLE: frozenset[ErrorClass] = {PROVIDER_UNAVAILABLE, NETWORK_UNAVAILABLE}` рядом с `FALLBACK_ELIGIBLE`.
-- **[config/schema.py](../../src/wastech_orchestrator/config/schema.py)** — новый frozen-dataclass `RetryConfig(max_attempts: int, base_delay_s: float, max_delay_s: float)`; поле `retry: RetryConfig` в `AgentsConfig`; поднять `CONFIG_SCHEMA_VERSION` 15 → 16.
-- **[config/loader.py](../../src/wastech_orchestrator/config/loader.py)** — распарсить `agents.retry` по образцу `_int(m, "max_stage_attempts", 3, ...)` ([loader.py:414](../../src/wastech_orchestrator/config/loader.py#L414)); дефолты `max_attempts=2`, `base_delay_s=2.0`, `max_delay_s=30.0`. Блок `retry` опционален (отсутствует → дефолты), это сохраняет обратную совместимость существующих конфигов.
-- **[packaged/config.example.yaml](../../src/wastech_orchestrator/packaged/config.example.yaml)**, **[install/config_writer.py](../../src/wastech_orchestrator/install/config_writer.py)** — добавить дефолтный блок `agents.retry` (синхронно с дефолтами загрузчика).
-- **[routing/router.py](../../src/wastech_orchestrator/routing/router.py)** — основная логика:
-  - **`resolve_route` (симметричный fallback, решение №7):** когда резолвнутый primary совпадает с глобальным primary, выбирать цель fallback как второй провайдер из `agents.allowed` (если он ровно один разрешён и сконфигурирован), а не `None` ([router.py:169-173](../../src/wastech_orchestrator/routing/router.py#L169-L173)). При единственном разрешённом провайдере — `None`, как сейчас;
+- **[providers/base.py](../../../../src/wastech_orchestrator/providers/base.py)** — добавить `TRANSIENT_RETRYABLE: frozenset[ErrorClass] = {PROVIDER_UNAVAILABLE, NETWORK_UNAVAILABLE}` рядом с `FALLBACK_ELIGIBLE`.
+- **[config/schema.py](../../../../src/wastech_orchestrator/config/schema.py)** — новый frozen-dataclass `RetryConfig(max_attempts: int, base_delay_s: float, max_delay_s: float)`; поле `retry: RetryConfig` в `AgentsConfig`; поднять `CONFIG_SCHEMA_VERSION` 15 → 16.
+- **[config/loader.py](../../../../src/wastech_orchestrator/config/loader.py)** — распарсить `agents.retry` по образцу `_int(m, "max_stage_attempts", 3, ...)` ([loader.py:414](../../../../src/wastech_orchestrator/config/loader.py#L414)); дефолты `max_attempts=2`, `base_delay_s=2.0`, `max_delay_s=30.0`. Блок `retry` опционален (отсутствует → дефолты), это сохраняет обратную совместимость существующих конфигов.
+- **[packaged/config.example.yaml](../../../../src/wastech_orchestrator/packaged/config.example.yaml)**, **[install/config_writer.py](../../../../src/wastech_orchestrator/install/config_writer.py)** — добавить дефолтный блок `agents.retry` (синхронно с дефолтами загрузчика).
+- **[routing/router.py](../../../../src/wastech_orchestrator/routing/router.py)** — основная логика:
+  - **`resolve_route` (симметричный fallback, решение №7):** когда резолвнутый primary совпадает с глобальным primary, выбирать цель fallback как второй провайдер из `agents.allowed` (если он ровно один разрешён и сконфигурирован), а не `None` ([router.py:169-173](../../../../src/wastech_orchestrator/routing/router.py#L169-L173)). При единственном разрешённом провайдере — `None`, как сейчас;
   - в конструктор добавить инъекцию `sleep: Callable[[float], None] = time.sleep` (рядом с уже инъектируемым `monotonic` — для детерминизма тестов);
-  - в `run_stage`, в `except ProviderError`: если `exc.error_class in TRANSIENT_RETRYABLE` и остался бюджет `retry.max_attempts` — **до** перехода к fallback повторить **тот же** провайдер с экспоненциальным backoff (`min(base*2**k, max_delay_s)`), резюмя сессию при наличии, с деградацией в fresh+`diff_path` при провале resume (переиспользуем форму ветки `SESSION_UNAVAILABLE`, [router.py:248-299](../../src/wastech_orchestrator/routing/router.py#L248-L299));
+  - в `run_stage`, в `except ProviderError`: если `exc.error_class in TRANSIENT_RETRYABLE` и остался бюджет `retry.max_attempts` — **до** перехода к fallback повторить **тот же** провайдер с экспоненциальным backoff (`min(base*2**k, max_delay_s)`), резюмя сессию при наличии, с деградацией в fresh+`diff_path` при провале resume (переиспользуем форму ветки `SESSION_UNAVAILABLE`, [router.py:248-299](../../../../src/wastech_orchestrator/routing/router.py#L248-L299));
   - бюджет повторов применяется к **каждому** провайдеру в последовательности `[primary, fallback]`: исчерпали повторы primary → переключение на второй провайдер → повторы для него;
   - каждую попытку фиксировать как `ProviderAttempt`/`provider_attempts`; счётчик повторов — отдельный, не уменьшает `max_stage_attempts`;
   - после исчерпания повторов и fallback — терминальная инфра-ошибка (которую Фаза 2 переводит в мягкую паузу, а не в `FAILED`).
@@ -183,17 +183,17 @@ Deliberately **out of scope** for a first cut (YAGNI, per the greenfield-MVP pos
 
 Для **длительного** аутэйджа (минуты–часы, или оба движка лежат), который окно A не пересидит. Опирается на уже существующую машинерию checkpoint + restart-resume (§ How a 500 is handled today, п. 4). Изменения:
 
-- **[core/flow/nodes/base.py](../../src/wastech_orchestrator/core/flow/nodes/base.py)** — `NodeInfraError` начинает нести `error_class: ErrorClass | None`, чтобы оркестратор мог отличить транзиентно-инфра-исчерпание от прочих инфра-фейлов.
-- **[core/flow/nodes/agent.py](../../src/wastech_orchestrator/core/flow/nodes/agent.py)** ([agent.py:235-241](../../src/wastech_orchestrator/core/flow/nodes/agent.py#L235-L241)) и **[evaluator.py](../../src/wastech_orchestrator/core/flow/nodes/evaluator.py)** ([evaluator.py:91-95](../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L91-L95)) — прокинуть `outcome.terminal_error.error_class` в `NodeInfraError`.
-- **[core/orchestrator.py](../../src/wastech_orchestrator/core/orchestrator.py)** ([orchestrator.py:1201-1203](../../src/wastech_orchestrator/core/orchestrator.py#L1201-L1203)) — при `NodeInfraError` с транзиентным классом и исчерпанным окном A: не `_fail()`, а оставить задачу **резюмируемой**. Чекпойнт уже сохранён ([orchestrator.py:1249-1250](../../src/wastech_orchestrator/core/orchestrator.py#L1249-L1250)); задача остаётся `active`, текущий прогон завершается без терминального перехода, с записью времени паузы.
-- **watch-loop + [core/recovery.py](../../src/wastech_orchestrator/core/recovery.py)** — после cool-off переадмитить задачу; на рестарте процесса `reconcile` уже резюмит единственную активную задачу с `current_node` ([recovery.py:57-107](../../src/wastech_orchestrator/core/recovery.py#L57-L107)). Потолок `max_blocked`: по истечении — `_fail()` (терминал). **Точку интеграции в watch-loop уточнить на этапе дизайна Фазы 2** (для одноразового `run` без тиков задача просто остаётся резюмируемой до следующего `run`/рестарта).
-- **State machine** — по возможности **без нового статуса**: переиспользуем `active` + restart-resume. Отдельный статус `blocked` дал бы более явный operator-surface, но это более крупное изменение [state_machine.py](../../src/wastech_orchestrator/core/state_machine.py) — выносим в отдельное решение, если по итогам Фазы 2 понадобится.
+- **[core/flow/nodes/base.py](../../../../src/wastech_orchestrator/core/flow/nodes/base.py)** — `NodeInfraError` начинает нести `error_class: ErrorClass | None`, чтобы оркестратор мог отличить транзиентно-инфра-исчерпание от прочих инфра-фейлов.
+- **[core/flow/nodes/agent.py](../../../../src/wastech_orchestrator/core/flow/nodes/agent.py)** ([agent.py:235-241](../../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L235-L241)) и **[evaluator.py](../../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py)** ([evaluator.py:91-95](../../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L91-L95)) — прокинуть `outcome.terminal_error.error_class` в `NodeInfraError`.
+- **[core/orchestrator.py](../../../../src/wastech_orchestrator/core/orchestrator.py)** ([orchestrator.py:1201-1203](../../../../src/wastech_orchestrator/core/orchestrator.py#L1201-L1203)) — при `NodeInfraError` с транзиентным классом и исчерпанным окном A: не `_fail()`, а оставить задачу **резюмируемой**. Чекпойнт уже сохранён ([orchestrator.py:1249-1250](../../../../src/wastech_orchestrator/core/orchestrator.py#L1249-L1250)); задача остаётся `active`, текущий прогон завершается без терминального перехода, с записью времени паузы.
+- **watch-loop + [core/recovery.py](../../../../src/wastech_orchestrator/core/recovery.py)** — после cool-off переадмитить задачу; на рестарте процесса `reconcile` уже резюмит единственную активную задачу с `current_node` ([recovery.py:57-107](../../../../src/wastech_orchestrator/core/recovery.py#L57-L107)). Потолок `max_blocked`: по истечении — `_fail()` (терминал). **Точку интеграции в watch-loop уточнить на этапе дизайна Фазы 2** (для одноразового `run` без тиков задача просто остаётся резюмируемой до следующего `run`/рестарта).
+- **State machine** — по возможности **без нового статуса**: переиспользуем `active` + restart-resume. Отдельный статус `blocked` дал бы более явный operator-surface, но это более крупное изменение [state_machine.py](../../../../src/wastech_orchestrator/core/state_machine.py) — выносим в отдельное решение, если по итогам Фазы 2 понадобится.
 - **Тесты** — сценарий «исчерпание окна A и fallback → мягкая пауза → резюм с чекпойнта без повторного коммита» (идемпотентность коммитов уже гарантируют фингерпринты Git Manager).
 
 ### Риски и границы
 
 - **Инварианты соблюдены:** ретраим только _поднятый_ инфра-`ProviderError`, никогда quality (`status=failed`); коммит/пуш/PR — только оркестратор и только _после_ ноды, поэтому повтор/резюм не делает двойной коммит; всё bounded и пишется в аудит; backoff в Router — ядро не учит синтаксис CLI.
-- **PRE.1 расширяется осознанно:** симметричный fallback (решение №7) меняет правило «единственный primary — единственная цель fallback». Это явное архитектурное решение, поэтому его нужно отразить в [.agents/rules/architecture.md](../../.agents/rules/architecture.md) и функциональной карте.
+- **PRE.1 расширяется осознанно:** симметричный fallback (решение №7) меняет правило «единственный primary — единственная цель fallback». Это явное архитектурное решение, поэтому его нужно отразить в [.agents/rules/architecture.md](../../../../.agents/rules/architecture.md) и функциональной карте.
 - **Сознательно вне скоупа (YAGNI, greenfield-MVP):** первоклассный статус `blocked`, перенос вендорской сессии между движками (источник истины — артефакты, не сессии), пер-модельный/пер-нодовый тюнинг ретрая (стартуем с одного блока `agents.retry`), fallback при >2 разрешённых провайдерах (поддерживаем ровно пару Claude/Codex).
 
 ### Проверки и документация (в самом конце)
@@ -201,6 +201,6 @@ Deliberately **out of scope** for a first cut (YAGNI, per the greenfield-MVP pos
 Всё это запускается **один раз, после того как реализованы все фазы** (A + симметричный fallback + B-lite), а не пофазно.
 
 - **Проверки:** `ruff check .`, `mypy src`, `pytest` (одной командой через `/run-checks`); затем `npx prettier@3 --write "**/*.md"` по затронутым докам.
-- **Техническая документация (обязательно обновить всю затронутую):** `/sync-docs` для [Functional Map](../functional/index.md) (блоки роутинга/ретрая/fallback и восстановления) и, если затронута топология, модель C4 в [docs/likec4](../likec4); [docs/configuration.md](../configuration.md) — новый блок `agents.retry` и bump `config_version` до 16; [.agents/rules/architecture.md](../../.agents/rules/architecture.md) — расширение правила fallback (решение №7).
-- **Краткая заметка в пользовательских документах:** добавить короткий абзац про отказоустойчивость провайдеров (ретрай → симметричный fallback Claude↔Codex → мягкая пауза при недоступности обоих) в [docs/worc_architecture.md](../worc_architecture.md) (раздел про архитектуру/восстановление) и операторскую заметку (поведение при аутэйдже + новые ручки `agents.retry`) в [docs/operations.md](../operations.md). Если найдётся более подходящее место — добавить туда.
-- **Отложенные хвосты** — в [follow_ups.md](follow_ups.md).
+- **Техническая документация (обязательно обновить всю затронутую):** `/sync-docs` для [Functional Map](../../../functional/index.md) (блоки роутинга/ретрая/fallback и восстановления) и, если затронута топология, модель C4 в [docs/likec4](../../../likec4); [docs/configuration.md](../../../configuration.md) — новый блок `agents.retry` и bump `config_version` до 16; [.agents/rules/architecture.md](../../../../.agents/rules/architecture.md) — расширение правила fallback (решение №7).
+- **Краткая заметка в пользовательских документах:** добавить короткий абзац про отказоустойчивость провайдеров (ретрай → симметричный fallback Claude↔Codex → мягкая пауза при недоступности обоих) в [docs/worc_architecture.md](../worc_architecture.md) (раздел про архитектуру/восстановление) и операторскую заметку (поведение при аутэйдже + новые ручки `agents.retry`) в [docs/operations.md](../../../operations.md). Если найдётся более подходящее место — добавить туда.
+- **Отложенные хвосты** — в [follow_ups.md](../../follow_ups.md).

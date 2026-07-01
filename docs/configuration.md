@@ -34,7 +34,7 @@ Exactly one configured provider must set `primary: true` — the **global primar
 ## `schema_version`
 
 ```yaml
-schema_version: 1
+schema_version: 23
 ```
 
 Optional top-level integer marking the `config.yaml` **format** version (current: `24`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
@@ -387,7 +387,7 @@ validation:
 Current task front matter fields are:
 
 ```text
-id, title, task_type, branch_name, auto_merge, prompt_audit, contacts, depends_on, priority, subtasks, nodes
+id, title, task_type, branch_name, auto_merge, prompt_audit, decomposition, contacts, depends_on, priority, queue, subtasks, nodes
 ```
 
 A task is deliberately "clean" (PRE.3): it carries only identity/dispatch fields plus the sanctioned exceptions — the per-node `nodes.<node-id>` block and `auto_merge` (task-wins). The **flow node** still declares the provider/`model`/`reasoning` defaults; a task may overlay them per run via `nodes.<node-id>.{model,reasoning,provider}` (best-effort — an invalid override is warned and skipped at run time, never fatal), but it never patches the graph. `decompose` was removed (the flow decides splitting); refinement-skip is deterministic (completeness classification, no `refined` flag). Inside a `nodes.<node-id>` block the valid sub-keys are `enabled`, `model`, `reasoning`, and `provider`.
@@ -517,7 +517,7 @@ Auto-merge is **off by default** and only affects the publish step — the mid-p
 
 ### The canonical layout
 
-There is one canonical layout — there are no footprint modes to choose. Everything the orchestrator generates or installs lives under a single gitignored `<repo>/.worc/` home: `config.yaml`, `guide/`, `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `workspace/`, and the `tasks/rejected` quarantine. `install` appends a single `.worc/` line to the repo's tracked `.gitignore`.
+There is one canonical layout — there are no footprint modes to choose. Everything the orchestrator generates or installs lives under a single gitignored `<repo>/.worc/` home: `config.yaml`, `guide/`, `flows/` (editable flow + role-prompt copies), `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `workspace/`, and the `tasks/rejected` quarantine. `install` appends a single `.worc/` line to the repo's tracked `.gitignore`.
 
 The only things **not** under `.worc/` are the `tasks/` lifecycle dirs (`pending`/`processing`/`done`/`failed`), which sit at the repo root and are git-tracked. (`tasks` is the default name; it is configurable via [`paths.tasks_dir`](#paths) — substitute the configured name throughout this section.) The committed audit trail is the moved task file plus its `<id>.summary.md` in `tasks/done` or `tasks/failed`; the orchestrator's audit commit stages **only that task's own files** (never `git add -- tasks/` wholesale), so a concurrently-pending task is never swept in.
 

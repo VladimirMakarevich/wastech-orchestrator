@@ -14,6 +14,7 @@ venv/
 htmlcov/
 site/
 .site-src/
+uv.lock
 
 # Secrets (DO NOT commit)
 .env
