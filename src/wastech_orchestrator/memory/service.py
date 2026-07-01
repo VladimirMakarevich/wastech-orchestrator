@@ -10,7 +10,10 @@ The storage core plus the **write-path funnel** (``apply_delta``). Defining inva
 
 ``apply_delta`` is the single funnel both write seams feed (success delta + deterministic failure
 record): validate → assign trust → merge/dedup → promote-or-quarantine → audit (design §2/§5/§7).
-Retrieval/packets and ``DerivedIndex``-backed path/symbol validation are later phases.
+The ``validate`` step resolves entity-card **paths** against the live repo via an injected
+:class:`DerivedIndex` (NFR2: durable entries verified against code) — an unverifiable card is
+downgraded off ``repo-observed`` and quarantined. Symbol-level validation and retrieval/packets are
+separate concerns.
 """
 
 from __future__ import annotations
@@ -40,6 +43,7 @@ from wastech_orchestrator.memory.delta import (
     CandidateFailure,
     CandidateLesson,
 )
+from wastech_orchestrator.memory.derived import DerivedIndex
 from wastech_orchestrator.memory.lifecycle import (
     assign_entity_trust,
     assign_trust,
@@ -96,6 +100,8 @@ class MemoryService:
 
     ``extra_secrets`` are literal values the caller already knows (redacted alongside the structural
     patterns). ``config`` supplies the promotion thresholds (Q3); it defaults to ``MemoryConfig()``.
+    ``index`` is the live-repo :class:`DerivedIndex` used to validate entity-card paths at write
+    time (NFR2); when ``None`` (read-only callers) that check is skipped — see ``_ingest_entity``.
     """
 
     def __init__(
@@ -105,10 +111,12 @@ class MemoryService:
         extra_secrets: Sequence[str] = (),
         config: MemoryConfig | None = None,
         marker: AuditMarker | None = None,
+        index: DerivedIndex | None = None,
     ) -> None:
         self._layout = layout
         self._extra_secrets = tuple(extra_secrets)
         self._config = config or MemoryConfig()
+        self._index = index
         self._audit = AuditLog(layout, extra_secrets=self._extra_secrets, marker=marker)
 
     @property
@@ -288,7 +296,10 @@ class MemoryService:
     def _ingest_entity(
         self, cand: CandidateEntity, *, source: WriteSource, audit: AuditContext, r: ApplyResult
     ) -> ApplyResult:
-        trust = assign_entity_trust(cand.paths)
+        # Validate the card's paths against the live repo (NFR2): a card whose target is gone is
+        # downgraded off repo-observed → it falls into the non-durable quarantine branch below.
+        path_exists = self._index.path_exists if self._index is not None else None
+        trust = assign_entity_trust(cand.paths, path_exists=path_exists)
         record = EntityRecord(
             entity_id=cand.entity_id,
             entity_type=cand.entity_type,
@@ -379,22 +390,41 @@ class MemoryService:
 
     # --- snapshot / restore (design §7) ---------------------------------------
 
-    def tier_files(self) -> list[Path]:
-        """The canonical tier files that currently exist (snapshot targets for a batch mutation)."""
-        candidates = [
+    def _tier_candidates(self) -> list[Path]:
+        """Every canonical tier-file path, whether or not it currently exists on disk."""
+        return [
             self._layout.short_term / _RECENT_FILE,
             self._layout.entities / _ENTITIES_FILE,
             self._layout.quarantine / _PENDING_FILE,
             *(self._layout.long_term / name for name in _LONG_TERM_FILES.values()),
         ]
-        return [path for path in candidates if path.is_file()]
+
+    def tier_files(self) -> list[Path]:
+        """The canonical tier files that currently exist (snapshot targets for a batch mutation)."""
+        return [path for path in self._tier_candidates() if path.is_file()]
 
     def snapshot(self, paths: Iterable[Path], *, label: str) -> Path:
         """Copy ``paths`` byte-for-byte into ``audit/snapshots/<label>/`` before a batch."""
         return take_snapshot(self._layout, paths, label=label)
 
     def restore(self, snapshot_dir: Path, *, audit: AuditContext) -> list[Path]:
-        """Restore tier files from a snapshot byte-for-byte and log a ``rollback`` audit row."""
+        """Restore tier files from a snapshot byte-for-byte and log a ``rollback`` audit row.
+
+        Also **prunes** any canonical tier file created after the snapshot (so absent from it) —
+        e.g. a ``quarantine/pending.jsonl`` first written by the very cleanup pass being rolled
+        back — so the store returns to the *exact* pre-snapshot state, not merely a superset of it
+        (AC-SF4). Only canonical tier files are pruned; the append-only audit log, the snapshots,
+        and the derived cache are never touched.
+        """
+        captured = {
+            path.relative_to(snapshot_dir).as_posix()
+            for path in snapshot_dir.rglob("*")
+            if path.is_file()
+        }
+        for candidate in self._tier_candidates():
+            rel = candidate.relative_to(self._layout.root).as_posix()
+            if candidate.is_file() and rel not in captured:
+                candidate.unlink()
         restored = restore_snapshot(self._layout, snapshot_dir)
         self._audit.record(
             action=AuditAction.ROLLBACK,

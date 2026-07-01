@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from wastech_orchestrator.providers.redaction import REDACTED, redact_mapping, redact_text
+from wastech_orchestrator.providers.redaction import (
+    REDACTED,
+    redact_mapping,
+    redact_text,
+    secret_env_values,
+)
 
 # Fake credential-shaped strings (assembled so they are obviously not real secrets).
 FAKE_GH = "ghp_" + "0123456789abcdef0123456789"
@@ -88,3 +93,21 @@ def test_usage_counter_keys_are_not_redacted() -> None:
 def test_access_token_key_is_redacted() -> None:
     out = redact_mapping({"access_token": "value", "github_token": "value"})
     assert out == {"access_token": REDACTED, "github_token": REDACTED}
+
+
+def test_secret_env_values_harvests_only_non_allowlisted_secret_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The shared env-secret harvester (used by the provider adapters and the memory write path):
+    # collect the value of a secret-named, non-allowlisted, long-enough env var — and nothing else.
+    monkeypatch.setenv("MY_API_KEY", "supersecretvalue123")  # secret name, not allowlisted -> kept
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_notarealtoken_value")  # secret name -> kept
+    monkeypatch.setenv("PATH_TO_NOWHERE", "/usr/bin")  # not a secret name -> skipped
+    monkeypatch.setenv("ALLOWED_SECRET_TOKEN", "exportedonpurpose1")  # allowlisted -> skipped
+    monkeypatch.setenv("SHORT_TOKEN", "x")  # secret name but too short -> skipped
+    harvested = set(secret_env_values(allowed_environment=("ALLOWED_SECRET_TOKEN", "PATH")))
+    assert "supersecretvalue123" in harvested
+    assert "ghp_notarealtoken_value" in harvested
+    assert "/usr/bin" not in harvested
+    assert "exportedonpurpose1" not in harvested
+    assert "x" not in harvested

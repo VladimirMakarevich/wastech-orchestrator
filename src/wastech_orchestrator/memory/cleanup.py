@@ -5,7 +5,9 @@ the ``watch_loop`` idle gap (the single-slot invariant guarantees no active task
 the operator ``worc memory compact``. Hard invariants:
 
 * **Demote / expire / quarantine / merge only.** It **never** creates a new long-term lesson and
-  **never** edits code/docs/skills (AC-C3); ``promotions_per_pass`` is effectively 0.
+  **never** edits code/docs/skills (AC-C3): there is no promote code path here, so the
+  ``cleanup_promotions_per_pass`` config knob is a documentation-only invariant (it stays 0 by
+  construction; the runtime never reads it).
 * **Snapshot first, then bounded.** A snapshot of the touched tiers precedes the batch (AC-SF4), and
   the idle pass honors the Q1 budget (``max_scanned`` / ``max_edits`` / ``max_wall_clock``); the
   foreground ``compact`` pass (``full=True``) lifts the caps (FR6) but keeps every safety rule.
@@ -40,7 +42,7 @@ class CleanupReport:
     scanned: int = 0
     expired: int = 0  # episodes pruned past TTL
     remapped: int = 0  # entities whose moved file was remapped by basename
-    quarantined: int = 0  # stale entities moved to quarantine (never deleted)
+    quarantined: int = 0  # stale entities + lessons moved to quarantine (never deleted)
     merged: int = 0  # duplicate long-term lessons collapsed
     promoted: int = 0  # always 0 — cleanup never creates a long-term lesson
     snapshot: str | None = None
@@ -65,7 +67,8 @@ class CleanupJob:
     def run_once(
         self, *, audit: AuditContext, full: bool = False, dry_run: bool = False
     ) -> CleanupReport:
-        """Run one pass: snapshot → expire episodes → reconcile entities → merge duplicates.
+        """Run one pass: snapshot → expire episodes → reconcile entities → reconcile lessons →
+        merge duplicates.
 
         ``full`` (the foreground ``compact`` pass) lifts the scan/edit/wall-clock caps but keeps
         every safety rule. ``dry_run`` computes the same counts but writes nothing (no snapshot, no
@@ -82,6 +85,7 @@ class CleanupJob:
 
         expired = self._expire_episodes(audit, budget, dry_run=dry_run)
         remapped, quarantined = self._reconcile_entities(audit, budget, dry_run=dry_run)
+        quarantined += self._reconcile_lessons(audit, budget, dry_run=dry_run)
         merged = self._merge_long_term_duplicates(audit, budget, dry_run=dry_run)
         return CleanupReport(
             ran=True,
@@ -129,7 +133,7 @@ class CleanupJob:
         newly_quarantined: list[dict[str, Any]] = []
         remapped = quarantined = 0
         for row in rows:
-            if not budget.can_scan() or not budget.can_edit() or not _entity_active(row):
+            if not budget.can_scan() or not budget.can_edit() or not _record_active(row):
                 kept.append(row)
                 continue
             budget.scan(1)
@@ -183,6 +187,60 @@ class CleanupJob:
         if moved:
             return ("remap", {**row, "paths": remapped_paths})
         return None
+
+    # --- lesson staleness: a lesson scoped to a vanished path is quarantined (F2; never deleted) --
+
+    def _reconcile_lessons(self, audit: AuditContext, budget: _Budget, *, dry_run: bool) -> int:
+        """Quarantine an **active** long-term lesson whose ``scope.paths`` names a vanished target.
+
+        Mirrors :meth:`_reconcile_entities` but quarantine-only (no basename remap — a lesson's path
+        scope is advisory metadata, so a missing target moves the whole lesson to quarantine, never
+        a silent delete (Q2) and never a judgment-based drop). A path-less lesson has no existence
+        signal and is left fully intact. The design §5 "contradicted twice" drop stays a V2 item
+        (no contradiction ledger in V1). Honors the same scan/edit budget as the other passes.
+        """
+        quarantined_total = 0
+        for kind in LongTermKind:
+            if not budget.can_scan() or not budget.can_edit():
+                break
+            rows = self._service.read_long_term(kind)
+            if not rows:
+                continue
+            kept: list[dict[str, Any]] = []
+            newly_quarantined: list[dict[str, Any]] = []
+            for row in rows:
+                if not budget.can_scan() or not budget.can_edit() or not _record_active(row):
+                    kept.append(row)
+                    continue
+                budget.scan(1)
+                if self._lesson_path_gone(row):
+                    newly_quarantined.append({**row, "status": _QUARANTINED})
+                    budget.spend_edits(1)
+                else:
+                    kept.append(row)
+            if not newly_quarantined:
+                continue
+            quarantined_total += len(newly_quarantined)
+            if not dry_run:
+                self._service.replace_long_term(
+                    kind, kept, action=AuditAction.QUARANTINE, audit=audit
+                )
+                pending = [*self._service.read_quarantine(), *newly_quarantined]
+                self._service.replace_quarantine(
+                    pending, action=AuditAction.QUARANTINE, audit=audit
+                )
+        return quarantined_total
+
+    def _lesson_path_gone(self, row: Mapping[str, Any]) -> bool:
+        """Whether a lesson is scoped to a path that no longer exists (any missing scope path).
+
+        A lesson with no ``scope.paths`` returns ``False`` — there is no existence signal, so it is
+        never dropped on judgment (preserves the long-term auto-drop boundary)."""
+        scope = row.get("scope")
+        paths = _str_list(scope.get("paths")) if isinstance(scope, Mapping) else []
+        if not paths:
+            return False
+        return any(not self._index.path_exists(path) for path in paths)
 
     # --- duplicate long-term merge (design §5: keep oldest id, union evidence) -------------
 
@@ -276,7 +334,7 @@ def _episode_id(row: Mapping[str, Any]) -> Any:
     return row.get("id")
 
 
-def _entity_active(row: Mapping[str, Any]) -> bool:
+def _record_active(row: Mapping[str, Any]) -> bool:
     return str(row.get("status") or "active") == "active"
 
 

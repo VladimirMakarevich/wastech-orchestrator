@@ -48,13 +48,12 @@ from wastech_orchestrator.providers.base import (
 from wastech_orchestrator.providers.errors import StderrSignature, classify, message_for
 from wastech_orchestrator.providers.process import ProcessResult, run_process
 from wastech_orchestrator.providers.redaction import (
-    _MIN_DENIED_SECRET_LEN,
     REDACTED,
-    is_sensitive_key,
     normalized_session_id,
     read_denied_secrets,
     redact_mapping,
     redact_text,
+    secret_env_values,
 )
 from wastech_orchestrator.security.env import build_child_env
 
@@ -510,12 +509,7 @@ class BaseCliProvider:
 
     def _secret_env_values(self) -> tuple[str, ...]:
         """Values of non-allowlisted, secret-named parent env vars, for defensive redaction."""
-        allowed = set(self._security.allowed_environment)
-        return tuple(
-            value
-            for key, value in os.environ.items()
-            if key not in allowed and len(value) >= _MIN_DENIED_SECRET_LEN and is_sensitive_key(key)
-        )
+        return secret_env_values(self._security.allowed_environment)
 
 
 def _parse_version(text: str) -> str | None:

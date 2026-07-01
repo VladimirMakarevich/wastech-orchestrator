@@ -19,6 +19,7 @@ from wastech_orchestrator.memory import (
     LongTermRecord,
     MemoryLayout,
     MemoryService,
+    Scope,
     TrustLevel,
 )
 
@@ -34,6 +35,16 @@ def _entity(service: MemoryService, entity_id: str, paths: tuple[str, ...]) -> N
         EntityRecord(
             entity_id=entity_id, entity_type="module", canonical_name=paths[0],
             trust_level=TrustLevel.REPO_OBSERVED, paths=paths,
+        ),
+        audit=_AUDIT,
+    )
+
+
+def _lesson(service: MemoryService, memory_id: str, *, paths: tuple[str, ...] = ()) -> None:
+    service.append(
+        LongTermRecord(
+            memory_id=memory_id, kind=LongTermKind.SEMANTIC, subject=memory_id, statement="keep me",
+            trust_level=TrustLevel.HUMAN_CURATED, scope=Scope(paths=paths),
         ),
         audit=_AUDIT,
     )
@@ -76,17 +87,35 @@ def test_ambiguous_move_quarantines_rather_than_guessing(tmp_path: Path) -> None
     assert [row["entity_id"] for row in service.read_quarantine()] == ["ambiguous"]
 
 
-def test_lesson_with_present_path_is_never_dropped_on_judgment(tmp_path: Path) -> None:
-    # The auto-drop boundary: cleanup never drops a long-term lesson on judgment — only an entity
-    # whose target is gone is quarantined. A lesson whose path still exists is left fully intact.
+def test_pathless_lesson_is_never_dropped_on_judgment(tmp_path: Path) -> None:
+    # The auto-drop boundary: a lesson with no scope.paths has no existence signal, so cleanup never
+    # drops it on judgment (the contradiction-based drop is a deferred V2 item, no ledger in V1).
     service = _service(tmp_path)
-    service.append(
-        LongTermRecord(
-            memory_id="ltm_live", kind=LongTermKind.SEMANTIC, subject="live", statement="keep me",
-            trust_level=TrustLevel.HUMAN_CURATED,
-        ),
-        audit=_AUDIT,
-    )
-    _job(service, tracked={"src/present.py"}, repo=tmp_path).run_once(audit=_AUDIT)
+    _lesson(service, "ltm_live")  # no scope.paths
+    report = _job(service, tracked={"src/present.py"}, repo=tmp_path).run_once(audit=_AUDIT)
     active = service.read_long_term(LongTermKind.SEMANTIC)
+    assert report.quarantined == 0
     assert len(active) == 1 and active[0]["memory_id"] == "ltm_live"
+
+
+def test_lesson_scoped_to_present_path_is_kept(tmp_path: Path) -> None:
+    # F2: a lesson whose scope.paths still exist is left fully intact (active, not quarantined).
+    service = _service(tmp_path)
+    _lesson(service, "ltm_live", paths=("src/present.py",))
+    report = _job(service, tracked={"src/present.py"}, repo=tmp_path).run_once(audit=_AUDIT)
+    active = service.read_long_term(LongTermKind.SEMANTIC)
+    assert report.quarantined == 0
+    assert [row["memory_id"] for row in active] == ["ltm_live"]
+    assert service.read_quarantine() == []
+
+
+def test_lesson_scoped_to_vanished_path_is_quarantined_not_deleted(tmp_path: Path) -> None:
+    # F2: a lesson scoped to a since-removed path is quarantined (kept), never silently deleted.
+    service = _service(tmp_path)
+    _lesson(service, "ltm_stale", paths=("src/removed.py",))
+    report = _job(service, tracked=set(), repo=tmp_path).run_once(audit=_AUDIT)
+    assert report.quarantined == 1
+    assert service.read_long_term(LongTermKind.SEMANTIC) == []  # removed from the active tier...
+    pending = service.read_quarantine()
+    assert [row["memory_id"] for row in pending] == ["ltm_stale"]  # ...preserved in quarantine
+    assert pending[0]["status"] == "quarantined"

@@ -40,8 +40,23 @@ def test_external_evidence_dominates() -> None:
 
 
 def test_assign_entity_trust_keys_off_paths() -> None:
+    # No predicate (legacy/read-only callers): naming >= 1 path is repo-observed; path-less is not.
     assert assign_entity_trust(("src/a.py",)) is TrustLevel.REPO_OBSERVED
     assert assign_entity_trust(()) is TrustLevel.AGENT_INFERRED
+
+
+def test_assign_entity_trust_validates_paths_when_predicate_given() -> None:
+    # F1/NFR2: with a live-repo predicate, repo-observed requires every named path present; any
+    # missing path downgrades the whole card off durable trust (the write funnel quarantines it).
+    present = {"src/real.py", "src/also.py"}.__contains__
+
+    def trust(*paths: str) -> TrustLevel:
+        return assign_entity_trust(paths, path_exists=present)
+
+    assert trust("src/real.py") is TrustLevel.REPO_OBSERVED
+    assert trust("src/real.py", "src/also.py") is TrustLevel.REPO_OBSERVED
+    assert trust("src/gone.py") is TrustLevel.AGENT_INFERRED
+    assert trust("src/real.py", "src/gone.py") is TrustLevel.AGENT_INFERRED
 
 
 def test_normalize_subject_lowercases_and_collapses_whitespace() -> None:

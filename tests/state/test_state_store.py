@@ -32,6 +32,33 @@ def _new_task(task_id: str = "task-001") -> TaskRow:
     return TaskRow(task_id=task_id, title="A task", status=Status.NEW)
 
 
+def test_no_memory_tables_in_state_db(store: StateStore) -> None:
+    # AC-S3: the memory subsystem is files-first — its tiers/audit/quarantine live under
+    # .worc/memory/, NEVER in state.db. Guard the exact table set so an accidental memory table is
+    # caught; the subsystem's only state.db touch is the reused `evaluations` marker row
+    # (kind="memory_write"), not a new table. (Update this set consciously when a table is added.)
+    names = {
+        row[0]
+        for row in store._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        )
+    }
+    assert names == {
+        "tasks",
+        "node_runs",
+        "provider_attempts",
+        "check_runs",
+        "artifacts",
+        "publish_operations",
+        "subtasks",
+        "evaluations",
+        "editing_lineage",
+        "node_lineage",
+    }
+    memory_keywords = ("memory", "lesson", "episode", "entit", "quarantine")
+    assert not any(kw in name for name in names for kw in memory_keywords)
+
+
 def test_open_creates_schema_and_persists(tmp_path: Path) -> None:
     db = tmp_path / "nested" / "state.db"
     store = StateStore.open(db)

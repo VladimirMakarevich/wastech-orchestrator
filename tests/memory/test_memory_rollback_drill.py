@@ -54,12 +54,19 @@ def test_restore_returns_byte_identical_pre_cleanup_state(tmp_path: Path) -> Non
     assert report.quarantined == 1 and report.snapshot is not None
     assert _tier_bytes(service) != before  # the bad cleanup did change the store
 
+    # The store started with no quarantine file; the cleanup first-creates quarantine/pending.jsonl.
+    assert (layout.quarantine / "pending.jsonl").is_file()
+
     restored = service.restore(Path(report.snapshot), audit=_AUDIT)
     assert restored  # files were put back
     after = _tier_bytes(service)
     # Byte-identical for every file present before the cleanup (UTF-8 + explicit \n → stable bytes).
     for name, content in before.items():
         assert after[name] == content, f"{name} not restored byte-identically"
+    # F4: a tier file the cleanup first-created (pending.jsonl) is pruned on restore — the store is
+    # the exact pre-cleanup set, not a superset with an inert leftover quarantine file.
+    assert set(after) == set(before)
+    assert not (layout.quarantine / "pending.jsonl").exists()
 
 
 def test_rollback_is_recorded_as_an_audit_row(tmp_path: Path) -> None:

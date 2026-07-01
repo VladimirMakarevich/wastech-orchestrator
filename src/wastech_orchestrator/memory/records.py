@@ -82,6 +82,9 @@ class EpisodeRecord:
     head_commit: str | None = None
     touched_paths: tuple[str, ...] = ()
     touched_symbols: tuple[str, ...] = ()
+    # Write-once: built at construction and only ever read (serialized via ``as_row``). Kept a
+    # ``dict`` for JSON symmetry, so it is mutable in place despite ``frozen=True`` — treat as
+    # immutable (nothing mutates it after construction).
     stage_outcomes: dict[str, str] = field(default_factory=dict)
     artifact_paths: tuple[str, ...] = ()
     expires_at: str | None = None

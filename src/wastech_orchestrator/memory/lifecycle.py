@@ -13,7 +13,7 @@ Keeping these here (small, total functions) makes the write-path policy unit-tes
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from wastech_orchestrator.memory.records import Evidence
 from wastech_orchestrator.memory.trust import DURABLE_TRUST_LEVELS, TrustLevel
@@ -54,12 +54,26 @@ def assign_trust(evidence: Sequence[Evidence]) -> TrustLevel:
     return TrustLevel.AGENT_INFERRED
 
 
-def assign_entity_trust(paths: Sequence[str]) -> TrustLevel:
+def assign_entity_trust(
+    paths: Sequence[str], *, path_exists: Callable[[str], bool] | None = None
+) -> TrustLevel:
     """Trust for an entity card. Candidate entities have no evidence — they are grounded in the repo
-    paths/symbols they name. A card naming >= 1 path is treated as ``repo-observed`` (a later phase
-    verifies the paths via ``DerivedIndex``); a path-less card is ``agent-inferred`` (non-durable).
+    paths they name. A card earns the durable ``repo-observed`` only when it names >= 1 path **and**
+    those paths verify present in the live repo (NFR2: durable entries are verified against code);
+    a card whose target is gone — or a path-less card — is ``agent-inferred`` (non-durable, so the
+    write funnel quarantines it).
+
+    ``path_exists`` is the live-repo predicate (``DerivedIndex.path_exists``). Best-effort and
+    fail-closed: it never raises (a git-unavailable repo falls back to a filesystem stat), and a
+    path it cannot confirm present downgrades the card off durable trust → quarantine (recoverable),
+    never a silent durable card. When ``path_exists`` is ``None`` (read-only / legacy callers that
+    wire no index) the check is skipped and naming >= 1 path is ``repo-observed`` as before.
     """
-    return TrustLevel.REPO_OBSERVED if paths else TrustLevel.AGENT_INFERRED
+    if not paths:
+        return TrustLevel.AGENT_INFERRED
+    if path_exists is not None and not all(path_exists(p) for p in paths):
+        return TrustLevel.AGENT_INFERRED
+    return TrustLevel.REPO_OBSERVED
 
 
 def normalize_subject(subject: str) -> str:

@@ -435,8 +435,10 @@ class MemoryConfig:
     cleanup_max_scanned: int = 200
     cleanup_max_edits: int = 50
     cleanup_max_wall_clock_s: float = 5.0
-    # Promotions a cleanup pass may make. Default 0 = cleanup NEVER creates a long-term lesson
-    # (it only demotes / expires / quarantines / merges) — AC-C3.
+    # Documentation-only invariant (not read at runtime): the never-promote guarantee is
+    # structural — `CleanupJob` only demotes / expires / quarantines / merges and has no promote
+    # code path, so this stays 0 (AC-C3). The knob states the invariant in config; a non-zero value
+    # is inert (cleanup still never creates a long-term lesson).
     cleanup_promotions_per_pass: int = 0
 
 

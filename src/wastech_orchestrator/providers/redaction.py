@@ -18,6 +18,7 @@ artifact**.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -103,6 +104,24 @@ def is_sensitive_key(name: str) -> bool:
     like ``input_tokens`` (segment ``tokens``) is not.
     """
     return any(seg in _SENSITIVE_SEGMENTS for seg in _SEGMENT_SPLIT.split(name.lower()) if seg)
+
+
+def secret_env_values(allowed_environment: Iterable[str]) -> tuple[str, ...]:
+    """Values of non-allowlisted, secret-named parent env vars, as defensive redaction literals.
+
+    The single source of truth for env-secret harvesting: a value is collected only when its env-var
+    name looks secret-bearing (:func:`is_sensitive_key`), the name is **not** on the process
+    allowlist (allowlisted vars are deliberately exported, not secrets to scrub), and the value is
+    at least :data:`_MIN_DENIED_SECRET_LEN` chars (so short values like ``true`` are never turned
+    into a redaction literal that would mangle unrelated output). Used by the provider adapters and
+    the memory write path to scrub a known secret value that matches no structural token shape (C1).
+    """
+    allowed = set(allowed_environment)
+    return tuple(
+        value
+        for key, value in os.environ.items()
+        if key not in allowed and len(value) >= _MIN_DENIED_SECRET_LEN and is_sensitive_key(key)
+    )
 
 
 def redact_text(text: str, *, extra_secrets: Iterable[str] = ()) -> str:

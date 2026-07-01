@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from wastech_orchestrator.config.schema import MemoryConfig
 from wastech_orchestrator.memory import (
     AuditContext,
@@ -27,7 +29,11 @@ from wastech_orchestrator.memory import (
     WriteSource,
 )
 from wastech_orchestrator.memory.records import LongTermKind
-from wastech_orchestrator.providers.redaction import REDACTED
+from wastech_orchestrator.providers.redaction import REDACTED, secret_env_values
+
+# A repo-specific secret value that matches NO structural token pattern (the F3 gap): only the
+# orchestrator's env-secret harvesting (fed into ``extra_secrets``) can catch it.
+ENV_SECRET_VALUE = "pla1n-repo-value-not-a-token-shape"
 
 # Credential-shaped strings (assembled so they are obviously not real), plus a literal extra secret.
 FAKE_GH = "ghp_" + "0123456789abcdef0123456789"
@@ -109,3 +115,42 @@ def test_planted_secret_never_reaches_a_rendered_packet(tmp_path: Path) -> None:
     for secret in _PLANTED:
         assert secret not in rendered
     assert REDACTED in rendered  # the redaction marker did land where a secret was
+
+
+def _episode_naming(secret: str) -> EpisodeRecord:
+    return EpisodeRecord(
+        id="ep_t1", task_id="t1", created_at="2026-07-01T00:00:00Z",
+        trust_level=TrustLevel.ARTIFACT_BACKED, stage_outcomes={"note": f"used {secret}"},
+    )
+
+
+def test_env_secret_leaks_without_harvesting(tmp_path: Path) -> None:
+    # F3 baseline: a repo-specific secret that matches no token shape is NOT caught by the
+    # structural patterns alone — proving the gap the orchestrator's extra_secrets wiring closes.
+    layout = MemoryLayout.for_repo(tmp_path)
+    service = MemoryService(layout, config=MemoryConfig(enabled=True))  # extra_secrets=() (old)
+    service.apply_delta(
+        None, episode=_episode_naming(ENV_SECRET_VALUE), source=WriteSource.FAILURE, audit=_AUDIT
+    )
+    recent = (layout.short_term / "recent.jsonl").read_text(encoding="utf-8")
+    assert ENV_SECRET_VALUE in recent  # structural patterns miss it
+
+
+def test_orchestrator_style_env_secret_is_scrubbed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # F3 fix: built the way the orchestrator now does — extra_secrets harvested from secret-named
+    # env vars — the same non-pattern value is scrubbed from every memory file.
+    monkeypatch.setenv("REPO_DB_SECRET", ENV_SECRET_VALUE)  # secret name, not allowlisted
+    layout = MemoryLayout.for_repo(tmp_path)
+    service = MemoryService(
+        layout,
+        config=MemoryConfig(enabled=True),
+        extra_secrets=secret_env_values(allowed_environment=()),
+    )
+    service.apply_delta(
+        None, episode=_episode_naming(ENV_SECRET_VALUE), source=WriteSource.FAILURE, audit=_AUDIT
+    )
+    for path in sorted(layout.root.rglob("*")):
+        if path.is_file():
+            assert ENV_SECRET_VALUE not in path.read_text(encoding="utf-8")

@@ -110,6 +110,10 @@ class DerivedIndex:
         Scope-bounded: a symbol is checked only against the paths it is attached to. With **no**
         paths to scan the answer is conservatively ``True`` — an unscoped symbol is never treated as
         stale (fail-closed: cleanup must not drop on a check it cannot perform).
+
+        Built and unit-tested, but **intentionally not yet wired into production**: V1 validates
+        only path existence (write-path entity validation — F1 — and cleanup staleness — F2).
+        Symbol-level validation is a deferred follow-up; this is the seam it will use.
         """
         if not symbol:
             return True

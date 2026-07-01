@@ -12,6 +12,7 @@ from wastech_orchestrator.memory import (
     CandidateEntity,
     CandidateFailure,
     CandidateLesson,
+    DerivedIndex,
     EpisodeRecord,
     Evidence,
     LongTermKind,
@@ -138,7 +139,37 @@ def test_failure_with_remedy_promotes_via_explained_failure(service: MemoryServi
     assert rows[0]["remedy"] == "do y"
 
 
-def test_entity_with_paths_is_stored_pathless_is_quarantined(service: MemoryService) -> None:
+def _indexed_service(tmp_path: Path, tracked: set[str]) -> MemoryService:
+    """A service whose write funnel validates entity paths against an injected tracked-path set."""
+    index = DerivedIndex(tmp_path, tracked_paths_provider=lambda _r: frozenset(tracked))
+    return MemoryService(MemoryLayout.for_repo(tmp_path), index=index)
+
+
+def test_entity_verified_path_stored_missing_or_pathless_quarantined(tmp_path: Path) -> None:
+    # F1/NFR2: with a DerivedIndex wired, an entity card earns durable repo-observed only when its
+    # paths verify present in the live repo. A hallucinated/gone path is downgraded -> quarantine;
+    # a path-less card is quarantined as before. Nothing is ever silently deleted.
+    service = _indexed_service(tmp_path, tracked={"src/real.py"})
+    delta = CandidateDelta(
+        entities=(
+            CandidateEntity(entity_id="module:real", entity_type="module", paths=("src/real.py",)),
+            CandidateEntity(
+                entity_id="module:gone", entity_type="module", paths=("src/hallucinated.py",)
+            ),
+            CandidateEntity(entity_id="ctx:b", entity_type="context"),  # no paths -> quarantine
+        )
+    )
+    _apply(service, delta)
+    entities = service.read_entities()
+    assert [row["entity_id"] for row in entities] == ["module:real"]
+    assert entities[0]["trust_level"] == "repo-observed"
+    quarantined = {row.get("entity_id") for row in service.read_quarantine()}
+    assert quarantined == {"module:gone", "ctx:b"}
+
+
+def test_entity_without_index_stores_any_named_path(service: MemoryService) -> None:
+    # Back-compat: a service built with no DerivedIndex (read-only/legacy callers) skips the
+    # existence check — a card naming >= 1 path is still stored, a path-less card quarantined.
     delta = CandidateDelta(
         entities=(
             CandidateEntity(entity_id="module:a", entity_type="module", paths=("src/a.py",)),

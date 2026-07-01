@@ -94,6 +94,7 @@ from wastech_orchestrator.memory import (
     AuditActor,
     AuditContext,
     CandidateDelta,
+    DerivedIndex,
     EpisodeRecord,
     MemoryLayout,
     MemoryService,
@@ -120,7 +121,7 @@ from wastech_orchestrator.providers.base import (
     AgentProvider,
     ProviderId,
 )
-from wastech_orchestrator.providers.redaction import read_denied_secrets
+from wastech_orchestrator.providers.redaction import read_denied_secrets, secret_env_values
 from wastech_orchestrator.routing.router import AgentRouter
 from wastech_orchestrator.security.env import build_child_env
 from wastech_orchestrator.security.isolation import check_isolation
@@ -1838,12 +1839,38 @@ class Orchestrator:
     # --- memory write path (best-effort; never blocks publish or a terminal) --------------
 
     def _memory_service(self) -> MemoryService | None:
-        """Build a ``MemoryService`` for this run, or ``None`` when memory is disabled (Q10)."""
+        """Build a ``MemoryService`` for this run, or ``None`` when memory is disabled (Q10).
+
+        The service is given a live-repo ``DerivedIndex`` (same construction as the cleanup hook) so
+        the write funnel validates entity-card paths against the current tree (NFR2): an
+        unverifiable card is downgraded off ``repo-observed`` and quarantined, not kept durable.
+        """
         if not self._config.memory.enabled:
             return None
         layout = MemoryLayout.for_repo(self._config.repo.local_path)
         ensure_store(layout, created_at=self._clock())
-        return MemoryService(layout, config=self._config.memory, marker=self._memory_marker)
+        index = DerivedIndex(self._config.repo.local_path, derived_dir=layout.derived)
+        return MemoryService(
+            layout,
+            config=self._config.memory,
+            marker=self._memory_marker,
+            index=index,
+            extra_secrets=self._memory_extra_secrets(),
+        )
+
+    def _memory_extra_secrets(self) -> tuple[str, ...]:
+        """Known secret literals to scrub from every memory write (C1), beyond the structural
+        patterns — closes the structural-only gap F3 raised against C1.
+
+        The same sources the provider adapters scrub from artifacts: the values of non-allowlisted,
+        secret-named parent env vars + the contents of the repo's denied-read files (`.env` /
+        `secrets/**`). Best-effort and read-only (missing files are skipped); the values are only
+        ever used as redaction literals and are never themselves written anywhere.
+        """
+        security = self._config.security
+        return secret_env_values(security.allowed_environment) + read_denied_secrets(
+            self._config.repo.local_path, security.denied_read_paths
+        )
 
     def _packet_builder(self) -> PacketBuilder | None:
         """Build the read-path ``PacketBuilder`` for this run, or ``None`` when memory is disabled.
