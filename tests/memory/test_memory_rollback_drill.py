@@ -34,15 +34,21 @@ def test_restore_returns_byte_identical_pre_cleanup_state(tmp_path: Path) -> Non
     # Two entities, one of which the cleanup will find stale (its path is gone) and quarantine.
     service.append(
         EntityRecord(
-            entity_id="keep", entity_type="module", canonical_name="src/keep.py",
-            trust_level=TrustLevel.REPO_OBSERVED, paths=("src/keep.py",),
+            entity_id="keep",
+            entity_type="module",
+            canonical_name="src/keep.py",
+            trust_level=TrustLevel.REPO_OBSERVED,
+            paths=("src/keep.py",),
         ),
         audit=_AUDIT,
     )
     service.append(
         EntityRecord(
-            entity_id="gone", entity_type="module", canonical_name="src/gone.py",
-            trust_level=TrustLevel.REPO_OBSERVED, paths=("src/gone.py",),
+            entity_id="gone",
+            entity_type="module",
+            canonical_name="src/gone.py",
+            trust_level=TrustLevel.REPO_OBSERVED,
+            paths=("src/gone.py",),
         ),
         audit=_AUDIT,
     )
@@ -74,8 +80,11 @@ def test_rollback_is_recorded_as_an_audit_row(tmp_path: Path) -> None:
     service = MemoryService(layout, config=MemoryConfig(enabled=True))
     service.append(
         EntityRecord(
-            entity_id="e1", entity_type="module", canonical_name="src/a.py",
-            trust_level=TrustLevel.REPO_OBSERVED, paths=("src/a.py",),
+            entity_id="e1",
+            entity_type="module",
+            canonical_name="src/a.py",
+            trust_level=TrustLevel.REPO_OBSERVED,
+            paths=("src/a.py",),
         ),
         audit=_AUDIT,
     )

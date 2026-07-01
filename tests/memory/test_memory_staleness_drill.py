@@ -33,8 +33,11 @@ def _service(tmp_path: Path) -> MemoryService:
 def _entity(service: MemoryService, entity_id: str, paths: tuple[str, ...]) -> None:
     service.append(
         EntityRecord(
-            entity_id=entity_id, entity_type="module", canonical_name=paths[0],
-            trust_level=TrustLevel.REPO_OBSERVED, paths=paths,
+            entity_id=entity_id,
+            entity_type="module",
+            canonical_name=paths[0],
+            trust_level=TrustLevel.REPO_OBSERVED,
+            paths=paths,
         ),
         audit=_AUDIT,
     )
@@ -43,8 +46,12 @@ def _entity(service: MemoryService, entity_id: str, paths: tuple[str, ...]) -> N
 def _lesson(service: MemoryService, memory_id: str, *, paths: tuple[str, ...] = ()) -> None:
     service.append(
         LongTermRecord(
-            memory_id=memory_id, kind=LongTermKind.SEMANTIC, subject=memory_id, statement="keep me",
-            trust_level=TrustLevel.HUMAN_CURATED, scope=Scope(paths=paths),
+            memory_id=memory_id,
+            kind=LongTermKind.SEMANTIC,
+            subject=memory_id,
+            statement="keep me",
+            trust_level=TrustLevel.HUMAN_CURATED,
+            scope=Scope(paths=paths),
         ),
         audit=_AUDIT,
     )

@@ -1125,11 +1125,15 @@ def _build_cleanup_hook(config: OrchestratorConfig) -> Callable[[], None] | None
             index = DerivedIndex(config.repo.local_path, derived_dir=layout.derived)
             job = CleanupJob(service, index, config.memory)
             report = job.run_once(audit=_memory_audit_context(AuditActor.CLEANUP))
-            if report.ran and (report.expired or report.remapped or report.quarantined
-                               or report.merged):
+            if report.ran and (
+                report.expired or report.remapped or report.quarantined or report.merged
+            ):
                 _LOG.info(
                     "memory cleanup: expired %d, remapped %d, quarantined %d, merged %d",
-                    report.expired, report.remapped, report.quarantined, report.merged,
+                    report.expired,
+                    report.remapped,
+                    report.quarantined,
+                    report.merged,
                 )
         except Exception as exc:  # noqa: BLE001 — best-effort; never crash the watcher
             _LOG.warning("memory cleanup failed (best-effort, ignored): %s", type(exc).__name__)

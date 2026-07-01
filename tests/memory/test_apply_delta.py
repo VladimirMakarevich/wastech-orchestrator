@@ -98,13 +98,17 @@ def test_artifact_backed_promotes_only_after_recurrence(service: MemoryService) 
 
 def test_merge_keeps_oldest_id_and_unions_evidence(service: MemoryService) -> None:
     first = CandidateLesson(
-        kind=LongTermKind.SEMANTIC, subject="cfg", statement="v1",
+        kind=LongTermKind.SEMANTIC,
+        subject="cfg",
+        statement="v1",
         evidence=(Evidence("operator", "r1"),),
     )
     _apply(service, CandidateDelta(lessons=(first,)), task_id="t1")
     original_id = service.read_long_term(LongTermKind.SEMANTIC)[0]["memory_id"]
     second = CandidateLesson(
-        kind=LongTermKind.SEMANTIC, subject="cfg", statement="v2-newer",
+        kind=LongTermKind.SEMANTIC,
+        subject="cfg",
+        statement="v2-newer",
         evidence=(Evidence("operator", "r2"),),
     )
     result = _apply(service, CandidateDelta(lessons=(second,)), task_id="t2")
@@ -129,9 +133,7 @@ def test_failure_source_writes_episode_but_never_long_term(service: MemoryServic
 
 
 def test_failure_with_remedy_promotes_via_explained_failure(service: MemoryService) -> None:
-    failure = CandidateFailure(
-        signature="boom", remedy="do y", evidence=(Evidence("check", "ci"),)
-    )
+    failure = CandidateFailure(signature="boom", remedy="do y", evidence=(Evidence("check", "ci"),))
     result = _apply(service, CandidateDelta(failures=(failure,)))
     assert result.promoted == 1
     rows = service.read_long_term(LongTermKind.FAILURE)

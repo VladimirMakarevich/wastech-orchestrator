@@ -105,7 +105,9 @@ def test_planted_secret_never_reaches_a_rendered_packet(tmp_path: Path) -> None:
     config = MemoryConfig(enabled=True)
     service = MemoryService(layout, extra_secrets=[LITERAL], config=config)
     episode = EpisodeRecord(
-        id="ep_t1", task_id="t1", created_at="2026-07-01T00:00:00Z",
+        id="ep_t1",
+        task_id="t1",
+        created_at="2026-07-01T00:00:00Z",
         trust_level=TrustLevel.ARTIFACT_BACKED,
     )
     service.apply_delta(_planted_delta(), episode=episode, source=WriteSource.SUCCESS, audit=_AUDIT)
@@ -119,8 +121,11 @@ def test_planted_secret_never_reaches_a_rendered_packet(tmp_path: Path) -> None:
 
 def _episode_naming(secret: str) -> EpisodeRecord:
     return EpisodeRecord(
-        id="ep_t1", task_id="t1", created_at="2026-07-01T00:00:00Z",
-        trust_level=TrustLevel.ARTIFACT_BACKED, stage_outcomes={"note": f"used {secret}"},
+        id="ep_t1",
+        task_id="t1",
+        created_at="2026-07-01T00:00:00Z",
+        trust_level=TrustLevel.ARTIFACT_BACKED,
+        stage_outcomes={"note": f"used {secret}"},
     )
 
 

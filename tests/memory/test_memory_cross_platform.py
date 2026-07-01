@@ -176,9 +176,7 @@ def test_backslash_path_normalizes_and_resolves_on_windows(tmp_path: Path) -> No
     (tmp_path / "src" / "a.py").write_text("z = 3\n", encoding="utf-8")
 
     # A tracked entry supplied in native Windows form is normalized to POSIX on ingest…
-    index = DerivedIndex(
-        tmp_path, tracked_paths_provider=lambda _root: frozenset({"src\\a.py"})
-    )
+    index = DerivedIndex(tmp_path, tracked_paths_provider=lambda _root: frozenset({"src\\a.py"}))
     assert "src/a.py" in index.tracked_paths()
     assert all("\\" not in path for path in index.tracked_paths())
 

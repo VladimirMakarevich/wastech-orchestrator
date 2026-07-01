@@ -43,31 +43,37 @@ def _populate(layout: MemoryLayout) -> MemoryService:
     service = MemoryService(layout)
     service.append(
         EpisodeRecord(
-            id="ep1", task_id="t1", created_at="2026-06-29T00:00:00Z",
+            id="ep1",
+            task_id="t1",
+            created_at="2026-06-29T00:00:00Z",
             trust_level=TrustLevel.ARTIFACT_BACKED,
         ),
         audit=_AUDIT,
     )
     service.append(
         LongTermRecord(
-            memory_id="m1", kind=LongTermKind.SEMANTIC, subject="s", statement="x",
+            memory_id="m1",
+            kind=LongTermKind.SEMANTIC,
+            subject="s",
+            statement="x",
             trust_level=TrustLevel.HUMAN_CURATED,
         ),
         audit=_AUDIT,
     )
     service.append(
         EntityRecord(
-            entity_id="e1", entity_type="module", canonical_name="src/gone.py",
-            trust_level=TrustLevel.REPO_OBSERVED, paths=("src/gone.py",),
+            entity_id="e1",
+            entity_type="module",
+            canonical_name="src/gone.py",
+            trust_level=TrustLevel.REPO_OBSERVED,
+            paths=("src/gone.py",),
         ),
         audit=_AUDIT,
     )
     return service
 
 
-def test_show_summarizes_store(
-    layout: MemoryLayout, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_show_summarizes_store(layout: MemoryLayout, capsys: pytest.CaptureFixture[str]) -> None:
     _populate(layout)
     assert cli._cmd_memory_show(layout) == 0
     out = capsys.readouterr().out
@@ -164,8 +170,11 @@ def test_idle_hook_runs_then_rate_limits(
     def _add_stale(entity_id: str) -> None:
         MemoryService(layout).append(
             EntityRecord(
-                entity_id=entity_id, entity_type="module", canonical_name="src/gone.py",
-                trust_level=TrustLevel.REPO_OBSERVED, paths=("src/gone.py",),
+                entity_id=entity_id,
+                entity_type="module",
+                canonical_name="src/gone.py",
+                trust_level=TrustLevel.REPO_OBSERVED,
+                paths=("src/gone.py",),
             ),
             audit=_AUDIT,
         )

@@ -26,10 +26,24 @@ from tests.eval.harness import (
 def _off() -> list[TaskMetrics]:
     # memory-off: more tokens, lower first-pass on the repeated hotspot.
     return [
-        TaskMetrics("t1", tokens=12000, wall_clock_s=300.0, first_pass_pass=False,
-                    repeated_repo=True, hotspot=True, active_records=0),
-        TaskMetrics("t2", tokens=11000, wall_clock_s=280.0, first_pass_pass=True,
-                    repeated_repo=True, hotspot=True, active_records=0),
+        TaskMetrics(
+            "t1",
+            tokens=12000,
+            wall_clock_s=300.0,
+            first_pass_pass=False,
+            repeated_repo=True,
+            hotspot=True,
+            active_records=0,
+        ),
+        TaskMetrics(
+            "t2",
+            tokens=11000,
+            wall_clock_s=280.0,
+            first_pass_pass=True,
+            repeated_repo=True,
+            hotspot=True,
+            active_records=0,
+        ),
         TaskMetrics("t3", tokens=9000, wall_clock_s=200.0, first_pass_pass=True, active_records=0),
     ]
 
@@ -37,10 +51,24 @@ def _off() -> list[TaskMetrics]:
 def _on() -> list[TaskMetrics]:
     # memory-on: ~17% fewer tokens on repeated tasks, both hotspots pass first time, clean safety.
     return [
-        TaskMetrics("t1", tokens=10000, wall_clock_s=250.0, first_pass_pass=True,
-                    repeated_repo=True, hotspot=True, active_records=20),
-        TaskMetrics("t2", tokens=9000, wall_clock_s=240.0, first_pass_pass=True,
-                    repeated_repo=True, hotspot=True, active_records=20),
+        TaskMetrics(
+            "t1",
+            tokens=10000,
+            wall_clock_s=250.0,
+            first_pass_pass=True,
+            repeated_repo=True,
+            hotspot=True,
+            active_records=20,
+        ),
+        TaskMetrics(
+            "t2",
+            tokens=9000,
+            wall_clock_s=240.0,
+            first_pass_pass=True,
+            repeated_repo=True,
+            hotspot=True,
+            active_records=20,
+        ),
         TaskMetrics("t3", tokens=8800, wall_clock_s=195.0, first_pass_pass=True, active_records=20),
     ]
 
@@ -71,16 +99,22 @@ def test_no_lift_keeps_the_ac_o4_gate_closed() -> None:
 
 
 def test_safety_counters_fail_ac_o3() -> None:
-    leaky = [TaskMetrics("t1", tokens=1, wall_clock_s=1.0, first_pass_pass=True,
-                         secret_leaks=1, active_records=10)]
+    leaky = [
+        TaskMetrics(
+            "t1",
+            tokens=1,
+            wall_clock_s=1.0,
+            first_pass_pass=True,
+            secret_leaks=1,
+            active_records=10,
+        )
+    ]
     comp = compare_modes(summarize_mode(MODE_OFF, _off()), summarize_mode(MODE_ON, leaky))
     assert not comp.meets_ac_o3  # a single planted-secret leak fails the safety gate
 
 
 def test_build_baseline_and_render_report(tmp_path: Path) -> None:
-    baseline = build_baseline(
-        {MODE_OFF: _off(), MODE_ON: _on(), MODE_ON_NO_ENTITY: _on()}
-    )
+    baseline = build_baseline({MODE_OFF: _off(), MODE_ON: _on(), MODE_ON_NO_ENTITY: _on()})
     assert len(baseline.modes) == 3
     assert baseline.comparison is not None and baseline.comparison.measured_lift
     report = render_baseline_markdown(baseline)

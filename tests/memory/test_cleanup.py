@@ -39,9 +39,7 @@ def _index(repo_root: Path, tracked: set[str]) -> DerivedIndex:
     return DerivedIndex(repo_root, tracked_paths_provider=lambda _r: frozenset(tracked))
 
 
-def _job(
-    service: MemoryService, index: DerivedIndex, **cfg: object
-) -> CleanupJob:
+def _job(service: MemoryService, index: DerivedIndex, **cfg: object) -> CleanupJob:
     config = MemoryConfig(enabled=True, **cfg)  # type: ignore[arg-type]
     # Freeze wall-clock at 0 so only the scan/edit caps gate the pass deterministically.
     return CleanupJob(service, index, config, monotonic=lambda: 0.0)
@@ -161,9 +159,9 @@ def test_edit_budget_is_respected(layout: MemoryLayout) -> None:
     for i in range(5):
         # five stale episodes (all far past the TTL) but max_edits=2 → only two expired this pass
         _episode(service, f"e{i}", f"2026-01-0{i + 1}T00:00:00Z")
-    report = _job(
-        service, _index(layout.root.parent.parent, set()), cleanup_max_edits=2
-    ).run_once(audit=_AUDIT)
+    report = _job(service, _index(layout.root.parent.parent, set()), cleanup_max_edits=2).run_once(
+        audit=_AUDIT
+    )
     assert report.expired == 2
     assert len(service.read_episodes()) == 3  # three left for a later pass
 

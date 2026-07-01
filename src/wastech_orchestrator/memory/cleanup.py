@@ -160,9 +160,7 @@ class CleanupJob:
                 )
         return remapped, quarantined
 
-    def _classify_entity(
-        self, row: Mapping[str, Any]
-    ) -> tuple[str, dict[str, Any]] | None:
+    def _classify_entity(self, row: Mapping[str, Any]) -> tuple[str, dict[str, Any]] | None:
         """Classify one entity card: ``None`` (fresh), a remapped copy, or a quarantined copy.
 
         An entity is stale when any of its paths no longer exists. A missing path with exactly one

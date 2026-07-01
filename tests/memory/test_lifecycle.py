@@ -66,9 +66,7 @@ def test_normalize_subject_lowercases_and_collapses_whitespace() -> None:
 def _promote(
     trust: TrustLevel, *, ev: bool = True, recur: int = 1, mn: int = 2, **kw: bool
 ) -> bool:
-    return should_promote(
-        trust=trust, has_evidence=ev, recurrence_tasks=recur, min_tasks=mn, **kw
-    )
+    return should_promote(trust=trust, has_evidence=ev, recurrence_tasks=recur, min_tasks=mn, **kw)
 
 
 def test_promotion_requires_durable_trust_and_evidence_and_no_contradiction() -> None:
