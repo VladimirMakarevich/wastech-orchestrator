@@ -2,7 +2,7 @@
 
 Status: **proposed (consolidated design)** Date: 2026-06-28 Owner: Vladimir Makarevich
 
-This is the single authoritative design document for a persistent, repo-scoped memory subsystem in `wastech-orchestrator`. It consolidates and supersedes the exploratory [orchestrator-memory.md](../../orchestrator-memory.md) stake-in-the-ground by folding in the findings of two independent deep-research efforts and one design note, and it is the document the implementation plan and the ADR(s) should be built from.
+This is the single authoritative design document for a persistent, repo-scoped memory subsystem in `wastech-orchestrator`. It consolidates and supersedes the exploratory [archive/done/archive/done/orchestrator-memory.md](../../archive/done/orchestrator-memory.md) stake-in-the-ground by folding in the findings of two independent deep-research efforts and one design note, and it is the document the implementation plan and the ADR(s) should be built from.
 
 It is a **blueprint**, not a build spec: it fixes the shape, the invariants, the lifecycle, the safety model, the roadmap, and the evaluation gates. The exact module names, function signatures, and config keys are settled at ADR/implementation time.
 
@@ -11,7 +11,7 @@ Sources synthesized here:
 - Internal deep research — [worc-report/](./worc-report/worc-deeep-research-memory-report.md) (13 parts).
 - External deep research — [3rd-party-report/](./3rd-party-report/00-3rd-party-deep-research-memory-report.md) (6 parts).
 - Supervisor role-split note — [supervisor-role-split.md](./supervisor-role-split.md).
-- Predecessor exploratory direction — [orchestrator-memory.md](../../orchestrator-memory.md).
+- Predecessor exploratory direction — [archive/done/orchestrator-memory.md](../../archive/done/orchestrator-memory.md).
 
 This document deliberately optimizes for **what is best, highest-quality, most reliable, and most efficient**, not for the smallest diff against the current codebase. Where it refines or corrects the predecessor draft, that is called out explicitly in [§ 12. How this refines the predecessor draft](#12-how-this-refines-the-predecessor-draft).
 
@@ -493,7 +493,7 @@ Accepted trade-offs: we give up some semantic recall (no day-one embeddings) for
 
 ## 12. How this refines the predecessor draft
 
-[orchestrator-memory.md](../../orchestrator-memory.md) was a sound stake-in-the-ground; this blueprint keeps its spine (supervisor-distilled, `.worc/memory/` files, three tiers, redaction, piggyback on `finalize`, `memory_path`, idle cleanup, config enable/disable, no `state.db`, no embeddings day-one) and sharpens it where the research pointed:
+[archive/done/orchestrator-memory.md](../../archive/done/orchestrator-memory.md) was a sound stake-in-the-ground; this blueprint keeps its spine (supervisor-distilled, `.worc/memory/` files, three tiers, redaction, piggyback on `finalize`, `memory_path`, idle cleanup, config enable/disable, no `state.db`, no embeddings day-one) and sharpens it where the research pointed:
 
 - **Narrow supervisor + deterministic services.** "Supervisor owns it" → supervisor _distills_ (emits a candidate delta); `MemoryService`/`PacketBuilder`/`CleanupJob`/`DerivedIndex` own validation, promotion, retrieval, and cleanup. Cheaper, safer, testable.
 - **Memory ≠ derived index** is now a first-class principle (P3); repo map/symbol index are a separate rebuildable plane.
@@ -557,6 +557,6 @@ Accepted trade-offs: we give up some semantic recall (no day-one embeddings) for
 
 ### Repo context
 
-30. Predecessor direction — [orchestrator-memory.md](../../orchestrator-memory.md); supervisor role split — [supervisor-role-split.md](./supervisor-role-split.md).
+30. Predecessor direction — [archive/done/orchestrator-memory.md](../../archive/done/orchestrator-memory.md); supervisor role split — [supervisor-role-split.md](./supervisor-role-split.md).
 31. Internal deep research — [worc-report/](./worc-report/worc-deeep-research-memory-report.md); external deep research — [3rd-party-report/](./3rd-party-report/00-3rd-party-deep-research-memory-report.md).
 32. Seams — [core/supervisor.py](../../../../src/wastech_orchestrator/core/supervisor.py), [core/prompts.py](../../../../src/wastech_orchestrator/core/prompts.py), [providers/redaction.py](../../../../src/wastech_orchestrator/providers/redaction.py), [cli.py](../../../../src/wastech_orchestrator/cli.py), [config/schema.py](../../../../src/wastech_orchestrator/config/schema.py).

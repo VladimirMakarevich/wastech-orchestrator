@@ -34,7 +34,7 @@ Spec-driven, in order, iterating as we go:
 5. **Sequence the work** — [plan/](plan/index.md), derived from the design once it is locked.
 6. **Build & verify** — phase by phase, each gated by its acceptance criteria and `/run-checks`.
 
-Documents carry only what is **decided and buildable**; everything still open lives in [questions.md](questions.md) with a status, and moves to "Decided" with its decision (not deleted). This task supersedes the exploratory [../orchestrator-memory.md](../orchestrator-memory.md) and is indexed from the [backlog README](../README.md).
+Documents carry only what is **decided and buildable**; everything still open lives in [questions.md](questions.md) with a status, and moves to "Decided" with its decision (not deleted). This task supersedes the exploratory [../archive/done/orchestrator-memory.md](../archive/done/orchestrator-memory.md) and is indexed from the [backlog README](../README.md).
 
 ## Current status & next steps
 
