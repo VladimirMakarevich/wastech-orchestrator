@@ -58,11 +58,13 @@ A two-layer handoff brief, produced at each subtask boundary and injected into t
 
 ## Implementation notes
 
+Sequencing: this builds on the flow-local supervisor-prompt contract in [prompt-and-supervisor-authoring-contract.md](prompt-and-supervisor-authoring-contract.md) — land it after that ADR's Cluster B so `handoff()` inherits the refactored `_base_prompt` and declares its brief prompt as a flow-local `handoff_role_file` (a third supervisor prompt: wording in a file, schema in code); `predecessor_context` is then covered by that ADR's allowlist lint.
+
 Key seams to touch:
 
 - **Boundary producer** — `_fan_out_subtasks` in `src/wastech_orchestrator/core/orchestrator.py`: after `_commit_subtask` (so `commit_sha` is available) and before `reset_for_next_subtask`, assemble the deterministic floor and, when enabled, call the supervisor handoff; write `logs/<task-id>/subtasks/NN-slug.handoff.md`.
 - **Supervisor brief** — a new `handoff(subtask_order)` method in `src/wastech_orchestrator/core/supervisor.py` mirroring `finalize` / `_finalize_turn`, with its own structured schema in the spirit of `_FINALIZE_SCHEMA`: resume the durable `__supervisor__` lineage session and emit the three-section brief; best-effort; run the output through the memory-subsystem redaction before writing.
 - **Prompt variable** — add `predecessor_context` to `ALLOWED_PROMPT_VARS` in `src/wastech_orchestrator/core/prompts.py`; it reuses the existing `{?name}…{/name}` conditional-block mechanism as-is.
 - **Builder + wiring** — a `_predecessor_context()` resolver in `src/wastech_orchestrator/core/flow/nodes/agent.py` alongside `_memory_path()`: return the assembled path only when a decompose region is active, the current subtask has at least one `depends_on` predecessor, and the node template references `{predecessor_context}`; wire it in `_prompt_variables()`.
-- **Role prompts** — add a `{?predecessor_context}…{/predecessor_context}` block to `implementation.md` under `packaged/flows/roles/`.
+- **Role prompts** — add a `{?predecessor_context}…{/predecessor_context}` block to `implementation.md` under `packaged/flows/implementation/` (its flow-owned folder since the flow-owned-prompt-directories change).
 - **Storage helper** — extend the subtask-artifact helpers (near `subtask_spec_path`) with a `handoff` path. No config change, no new DB table — the `subtasks` table already tracks order/slug/commit_sha.
