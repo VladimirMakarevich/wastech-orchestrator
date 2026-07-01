@@ -18,9 +18,6 @@ as flow nodes: ``permission_profile`` is forced ``read-only`` here, ``reasoning`
 a reserved sentinel node id (``state.db`` only), so a resumed task continues the supervisor's
 accumulated cross-step context instead of starting blind — gated by provider match, exactly like the
 ``resume_own_lineage`` evaluator.
-
-It replaces the old summary provider and the removed blocking ``supervise_impl`` / ``supervise_fix``
-nodes (2026-06-19 revision).
 """
 
 from __future__ import annotations

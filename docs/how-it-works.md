@@ -88,7 +88,7 @@ The list of steps above is the **default** flow, used for ordinary coding tasks.
 - **deep_research** — researches a question and produces a documentation pull request, with a citation gate and permission to reach the network.
 - **security_audit** — an advisory audit that writes a private report instead of changing code.
 
-All flows use the same machinery — the same gates, the same fix loops, the same read-only supervisor. They differ only in the steps and the kind of output. An operator can also drop a flow file into the project to add a new task type or override a built-in one.
+All flows use the same machinery — the same gates, the same fix loops, the same read-only supervisor. They differ only in the steps and the kind of output. An operator can also drop a flow file into the project to add a new task type or override a built-in one — see [Flow authoring](flow-authoring.md).
 
 ## How a task can end
 

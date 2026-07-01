@@ -82,8 +82,8 @@ from wastech_orchestrator.providers.base import ProviderId
 # never exemptable. Old configs load fail-open (the key defaults to empty) and `upgrade-config`
 # adds it from the template.
 # v17 (2026-06-26, configurable-tasks-dir): a *format* add of the optional `paths` block with
-# `tasks_dir` (default "tasks") — the repo-relative directory holding the pending/processing/done/
-# failed task lifecycle. Lets an operator avoid colliding with a repo that already uses `tasks/`.
+# `tasks_dir` (default "tasks") — the repo-relative directory holding the pending/done/failed task
+# lifecycle. Lets an operator avoid colliding with a repo that already uses `tasks/`.
 # Validated repo-relative (no `..`/absolute, never under `.worc/`). Default reproduces today's
 # behavior; old configs omit it and take the default, and `upgrade-config` adds it from the
 # template.
@@ -168,7 +168,7 @@ class RepoConfig:
 
 @dataclass(frozen=True)
 class PathsConfig:
-    # Repo-relative directory holding the task lifecycle (pending/processing/done/failed). The
+    # Repo-relative directory holding the task lifecycle (pending/done/failed). The
     # default "tasks" reproduces the historical layout; an operator may rename it to avoid a clash
     # with a repo that already uses `tasks/`. Validated repo-relative — never absolute, no `..`, and
     # never under the gitignored `.worc/` home (that would silently break the git audit trail). The

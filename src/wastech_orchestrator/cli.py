@@ -112,7 +112,6 @@ WORC_HOME = ".worc"
 # directory creates its lifecycle subfolders themselves.
 REPO_TASK_DIRS: tuple[str, ...] = (
     "tasks/pending",
-    "tasks/processing",
     "tasks/done",
     "tasks/failed",
 )
@@ -621,12 +620,14 @@ def _copy_worc_docs(dest_root: Path, *, overwrite: bool, dry: bool) -> tuple[lis
 
 def _flows_root() -> Traversable:
     """The packaged built-in flows (``implementation``/``deep_research``/``security_audit``) and
-    their per-node role-prompt templates under ``roles/`` (works from a source tree or a wheel).
+    their per-node role-prompt templates under each flow's own subdir (works from a source tree or a
+    wheel).
 
     ``install`` copies this whole tree into ``.worc/flows/`` so the operator gets editable, *active*
     copies: the registry prefers ``<repo>/.worc/flows/<task_type>.yaml`` over the packaged built-in,
-    and a node's ``role_file`` resolves beside it under ``.worc/flows/roles/``. Unlike the generated
-    ``guide/``, these are operator-editable, so a plain re-run never clobbers them (see
+    and a node's ``role_file`` resolves under its flow-owned dir ``.worc/flows/<task_type>/``.
+    Unlike the generated ``guide/``, these are operator-editable, so a plain re-run never clobbers
+    them (see
     ``_copy_packaged_flows`` / ``_backup_flows_dir``).
     """
     return resources.files("wastech_orchestrator").joinpath("packaged", "flows")
@@ -669,6 +670,31 @@ def _backup_flows_dir(worc_home: Path) -> Path | None:
     backup = flows.with_name(f"flows.bak-{stamp}")
     shutil.copytree(flows, backup)
     return backup
+
+
+def _config_example_root() -> Traversable:
+    """The packaged commented ``config.example.yaml`` (works from a source tree or a wheel).
+
+    ``install`` copies it verbatim into ``.worc/config.example.yaml`` so the operator has the
+    field-by-field commentary beside the generated executable ``config.yaml``. It is a reference
+    only — never read at runtime and never edited; --reconfigure refreshes it to the packaged copy.
+    """
+    return resources.files("wastech_orchestrator").joinpath("packaged", "config.example.yaml")
+
+
+def _install_write_config_example(worc_home: Path, *, overwrite: bool) -> bool:
+    """Copy the packaged ``config.example.yaml`` byte-for-byte into ``.worc/config.example.yaml``.
+
+    Returns True iff a file was written. Existing files are skipped unless ``overwrite`` (a plain
+    re-run leaves it; --reconfigure refreshes it). ``write_bytes`` keeps it byte-for-byte (LF).
+    """
+    dest = worc_home / "config.example.yaml"
+    if dest.exists() and not overwrite:
+        return False
+    with resources.as_file(_config_example_root()) as src:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(Path(src).read_bytes())
+    return True
 
 
 def _load_config(path: str) -> OrchestratorConfig:
@@ -3004,6 +3030,10 @@ def cmd_install(args: argparse.Namespace) -> int:
     flows_written, _ = _copy_packaged_flows(worc_home, overwrite=args.reconfigure, dry=False)
     if flows_written:
         print(f"install: wrote built-in flows + node prompts to {worc_home / 'flows'}")
+    # A commented reference copy beside the executable config.yaml — never read at runtime.
+    # --reconfigure refreshes it; a plain re-run leaves an existing copy in place.
+    if _install_write_config_example(worc_home, overwrite=args.reconfigure):
+        print(f"install: wrote {worc_home / 'config.example.yaml'} (commented reference)")
     if _install_write_env_example(worc_home):
         print(f"install: wrote {worc_home / ENV_EXAMPLE_FILENAME} (copy to .worc/.env, fill in)")
     # Gitignore the whole .worc/ runtime home so the operator's `git status` stays clean.

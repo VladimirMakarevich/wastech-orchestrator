@@ -29,7 +29,7 @@ flow:
   nodes:
     - id: scope
       kind: agent
-      role_file: roles/audit/scope.md
+      role_file: security_audit/scope.md
       session_scope: fresh_disposable
       permission_profile: read-only
       network_access: false
@@ -43,7 +43,7 @@ flow:
       # extra_args: []
     - id: repository_analysis
       kind: agent
-      role_file: roles/audit/repository_analysis.md
+      role_file: security_audit/repository_analysis.md
       session_scope: fresh_disposable
       permission_profile: read-only
       network_access: false
@@ -59,7 +59,7 @@ flow:
       checker: dependency_scan
     - id: threat_analysis
       kind: agent
-      role_file: roles/audit/threat_analysis.md
+      role_file: security_audit/threat_analysis.md
       session_scope: fresh_disposable
       permission_profile: read-only
       network_access: true
@@ -73,7 +73,7 @@ flow:
     - id: finding_verification
       kind: evaluator
       role: verifier
-      role_file: roles/audit/verifier.md
+      role_file: security_audit/verifier.md
       session_scope: fresh_disposable
       permission_profile: read-only
       network_access: true
@@ -86,7 +86,7 @@ flow:
       # network_access: true
     - id: report
       kind: agent
-      role_file: roles/audit/report.md
+      role_file: security_audit/report.md
       session_scope: fresh_disposable
       permission_profile: workspace-write
       network_access: false

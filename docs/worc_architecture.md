@@ -253,7 +253,7 @@ supervisor: { role_file, model, reasoning } # the constant read-only oversight l
 prompt_audit: false # record each step's prompt + who
 ```
 
-Prompt templates are **not** a config block: a node's prompt is the content of its `role_file`. `install` delivers editable copies under `.worc/flows/roles/` (overriding the packaged built-ins), so a node's prompt is customized by editing the delivered role file. Role files render only an allowlisted set of path/metadata variables — never task bodies, diffs, env, or secrets.
+Prompt templates are **not** a config block: a node's prompt is the content of its `role_file`. `install` delivers editable copies under `.worc/flows/` (each flow owns its prompts in a `<task_type>/` subdir), overriding the packaged built-ins, so a node's prompt is customized by editing the delivered role file. Role files render only an allowlisted set of path/metadata variables — never task bodies, diffs, env, or secrets.
 
 ---
 
@@ -261,14 +261,14 @@ Prompt templates are **not** a config block: a node's prompt is the content of i
 
 There is **one canonical layout**. Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home: `config.yaml`, the agent task-authoring `guide/`, `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `workspace/`, operator `flows/`, and the `tasks/rejected` quarantine. `install` appends a single `.worc/` line to the repo's tracked `.gitignore`.
 
-The **only** things outside `.worc/` are the `tasks/` lifecycle dirs (`pending`/`processing`/`done`/`failed`) at the repo root, which are git-tracked: the task file plus its `<id>.summary.md` (in `done/` or `failed/`) are the committed audit trail. The code commit excludes both `.worc/` (gitignored) and `tasks/` (it rides the separate audit commit). Parallel tasks via `git worktree` remain on the roadmap (see [backlog/](backlog/)).
+The **only** things outside `.worc/` are the `tasks/` lifecycle dirs (`pending`/`done`/`failed`) at the repo root, which are git-tracked: the task file plus its `<id>.summary.md` (in `done/` or `failed/`) are the committed audit trail. The code commit excludes both `.worc/` (gitignored) and `tasks/` (it rides the separate audit commit). Parallel tasks via `git worktree` remain on the roadmap (see [backlog/](backlog/)).
 
 ---
 
 ## 9. Task processing flow (end to end)
 
 ```text
-1.  watch finds a new task in tasks/pending/ (or a teammate pushed one to git) → it is moved to processing/
+1.  watch finds a new task in tasks/pending/ (or a teammate pushed one to git) → it is picked up for this run (the file stays in pending/ until terminal; "running" is a state.db status, not a folder)
 2.  §19 validation gate parses + hardens the task; a structural reject is terminal `failed` (quarantine, no branch)
 3.  acquire the single processing slot; register the task in state.db
 4.  resolve the flow for the task's task_type (operator flow > packaged built-in), validated fail-closed

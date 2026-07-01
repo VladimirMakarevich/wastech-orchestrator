@@ -1,6 +1,6 @@
 # Improvements
 
-Status: **intake in progress** Date: 2026-06-30 Owner: Vladimir Makarevich
+Status: **5 of 8 implemented** (2, 4, 6, 7, 8 done; 1, 3, 5 open) Date: 2026-07-01 Owner: Vladimir Makarevich
 
 This file aggregates improvement ideas captured after real `worc` usage. The source intake list is [00-raw-topics.md](00-raw-topics.md). We process one item at a time: inspect the current implementation, define a bounded improvement task, record constraints and scope, then move to the next item.
 
@@ -9,13 +9,13 @@ This file aggregates improvement ideas captured after real `worc` usage. The sou
 | # | Topic | Status |
 | --- | --- | --- |
 | 1 | Supervisor finalization should also surface technical debt and refactor candidates | candidate |
-| 2 | `config.example.yaml` should be copied from packaged data during install, with comments intact | candidate |
+| 2 | `config.example.yaml` should be copied from packaged data during install, with comments intact | done |
 | 3 | Supervisor/summary prompts should be overrideable per flow, with fallback to root/static prompt | candidate |
-| 4 | Remove stale historical comments and implementation notes from the codebase | candidate |
+| 4 | Remove stale historical comments and implementation notes from the codebase | done |
 | 5 | Document all prompt variables available to role files | candidate |
-| 6 | Rework delivered role/flow directory layout so each flow owns its prompt folder, including `implementation` | candidate |
-| 7 | Re-evaluate whether the repo-root `tasks/processing` folder is still needed | candidate |
-| 8 | Write a tutorial and best-practices guide for custom flows | candidate |
+| 6 | Rework delivered role/flow directory layout so each flow owns its prompt folder, including `implementation` | done |
+| 7 | Re-evaluate whether the repo-root `tasks/processing` folder is still needed | done |
+| 8 | Write a tutorial and best-practices guide for custom flows | done |
 
 ## 01. Supervisor finalization: technical debt and refactor signals
 
@@ -102,7 +102,7 @@ Should these structured hints remain local task artifacts only, or should a late
 
 ## 02. Install should ship a local `config.example.yaml`
 
-Status: **candidate** Source: [00-raw-topics.md](00-raw-topics.md)
+Status: **done** Source: [00-raw-topics.md](00-raw-topics.md)
 
 ### Current state
 
@@ -191,7 +191,7 @@ This task aligns naturally with task 06 (flow-owned prompt directories), but the
 
 ## 04. Remove stale historical comments and implementation notes
 
-Status: **candidate** Source: [00-raw-topics.md](00-raw-topics.md)
+Status: **done** Source: [00-raw-topics.md](00-raw-topics.md)
 
 ### Current state
 
@@ -276,7 +276,7 @@ Out of scope:
 
 ## 06. Flow-owned prompt directories
 
-Status: **candidate** Source: [00-raw-topics.md](00-raw-topics.md)
+Status: **done** Source: [00-raw-topics.md](00-raw-topics.md)
 
 ### Current state
 
@@ -321,7 +321,7 @@ Out of scope:
 
 ## 07. Remove the repo-root `tasks/processing` lifecycle folder
 
-Status: **candidate** Source: [00-raw-topics.md](00-raw-topics.md)
+Status: **done** Source: [00-raw-topics.md](00-raw-topics.md)
 
 ### Current state
 
@@ -365,7 +365,7 @@ Out of scope:
 
 ## 08. Custom flow tutorial and best-practices guide
 
-Status: **candidate** Source: [00-raw-topics.md](00-raw-topics.md)
+Status: **done** Source: [00-raw-topics.md](00-raw-topics.md)
 
 ### Current state
 

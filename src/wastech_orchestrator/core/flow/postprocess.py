@@ -34,12 +34,12 @@ class _Slot:
     filename: str
     artifact_kind: str
     #: the :class:`NodeInputs` attribute to point at the slot file, or ``None`` for an audit-only
-    #: slot not fed to any prompt (the enriched spec has no ``{...}`` variable in the legacy).
+    #: slot not fed to any prompt (the enriched spec has no ``{...}`` variable).
     inputs_field: str | None
 
 
-#: Core-fixed slot table (mirrors the legacy ``_refinement`` / ``_planning`` / ``_summary`` artifact
-#: writes). The set of keys equals the loader allowlist ``snapshot._OUTPUT_ARTIFACT_SLOTS``.
+#: Core-fixed slot table: where each node's ``output_artifact`` lands. The set of keys equals the
+#: loader allowlist ``snapshot._OUTPUT_ARTIFACT_SLOTS``.
 OUTPUT_SLOTS: dict[str, _Slot] = {
     "enriched_spec": _Slot("task.enriched.md", "enriched", None),
     "plan": _Slot("plan.md", "plan", "plan_path"),

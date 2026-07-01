@@ -376,8 +376,8 @@ def test_configured_tasks_dir_drives_audit_and_code_exclusion(
     gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     # A code file plus junk under the configured tasks dir: the code commit must skip the tasks dir.
     (git_repo.clone / "src.py").write_text("print('hi')\n", encoding="utf-8")
-    (git_repo.clone / tasks_dir / "processing").mkdir(parents=True, exist_ok=True)
-    (git_repo.clone / tasks_dir / "processing" / "task-001.md").write_text("t\n", encoding="utf-8")
+    (git_repo.clone / tasks_dir / "pending").mkdir(parents=True, exist_ok=True)
+    (git_repo.clone / tasks_dir / "pending" / "task-001.md").write_text("t\n", encoding="utf-8")
     code_sha = gm.commit_code("task-001", "feat: add src")
     assert code_sha is not None
     committed = git_run(["show", "--name-only", "--format=", "HEAD"], git_repo.clone).split()

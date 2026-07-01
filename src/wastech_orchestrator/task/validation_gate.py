@@ -5,7 +5,7 @@ branch/provider. Two phases:
 
 * **Phase A — structural, hard reject**: deterministic, no agent. Each failure maps to a
   machine-readable :class:`ValidationReason`; the **first** failure short-circuits. A Phase-A
-  failure is terminal ``failed``: the task file moves ``processing/ -> tasks/rejected/`` and the
+  failure is terminal ``failed``: the task file moves into ``.worc/tasks/rejected/`` and the
   only artifact written is ``validation_report.json`` — **no branch is ever created**.
 * **Phase B — semantic completeness**: never rejects. Classifies ``complete`` vs.
   ``needs_enrichment`` to feed the deterministic refinement-skip decision. Missing acceptance

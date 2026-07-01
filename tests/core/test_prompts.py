@@ -96,7 +96,7 @@ def test_packaged_default_role_prompts_reference_memory_path(role: str) -> None:
     # so they render the reference when memory is on and drop it cleanly when memory is off (AC-R4).
     template = (
         resources.files("wastech_orchestrator")
-        .joinpath("packaged", "flows", "roles", f"{role}.md")
+        .joinpath("packaged", "flows", "implementation", f"{role}.md")
         .read_text(encoding="utf-8")
     )
     assert "{?memory_path}" in template and "{memory_path}" in template

@@ -156,7 +156,8 @@ _LOG = logging.getLogger(__name__)
 _WORC_HOME = ".worc"
 
 # The lifecycle folders a task file moves between under ``tasks/`` (registration → done/failed).
-_LIFECYCLE_FOLDERS = ("pending", "processing", "done", "failed")
+# "Currently running" is tracked by the task's ``state.db`` status, not a physical folder.
+_LIFECYCLE_FOLDERS = ("pending", "done", "failed")
 
 
 def _utc_now_iso() -> str:
@@ -723,7 +724,7 @@ class Orchestrator:
         The stored ``source_path`` can point at a stale lifecycle folder (e.g. ``tasks/failed/``)
         while the file now lives in another (``tasks/pending/``) — a manual or external move then
         makes the task un-rerunnable if we trust the single stored path. So: if the stored path is
-        a file, use it; otherwise search ``tasks/{pending,processing,done,failed}/`` for the task by
+        a file, use it; otherwise search ``tasks/{pending,done,failed}/`` for the task by
         id (``<id>.md``/``<id>.json``), then by slug. Returns ``(path, ())`` on a unique resolution,
         ``(None, ())`` when nothing matches, and ``(None, candidates)`` when more than one file
         matches (never guessed — the caller surfaces the ambiguity). Read-only.
@@ -1352,9 +1353,9 @@ class Orchestrator:
         return self._engine_run(p, self._gate.phase_b(p.task), resume=True, run_state=run_state)
 
     def _restore_engine_inputs(self, p: _Pipeline, inputs: NodeInputs) -> None:
-        """Repopulate the artifact paths a resumed fixing/review node reads (port of the legacy
-        ``_restore_recovery_context``): the diff, the latest failed check log, the review findings,
-        and the plan — from disk + the store, scoped to the active subtask when decomposed."""
+        """Repopulate the artifact paths a resumed fixing/review node reads: the diff, the latest
+        failed check log, the review findings, and the plan — from disk + the store, scoped to the
+        active subtask when decomposed."""
         task_dir = task_artifact_dir(self._artifacts_root, p.task.id)
         diff = task_dir / "current.diff"
         if diff.exists():
@@ -1778,7 +1779,7 @@ class Orchestrator:
         return phase(regions.post_entry, None)
 
     def _commit_subtask(self, p: _Pipeline, unit: SubtaskSpec) -> None:
-        """Commit one completed subtask + persist its SHA (legacy ``_on_review_passed`` parity)."""
+        """Commit one completed subtask + persist its SHA."""
         message = f"feat({p.task.id}): subtask {unit.order:02d} {unit.title}"
         sha = self._git.commit_subtask(p.task.id, unit.order, unit.slug, message)
         update_subtask_index(
@@ -2494,7 +2495,7 @@ class Orchestrator:
         return PipelineResult(task_id=task_id, final_status=Status.FAILED, validation_reason=reason)
 
     def _quarantine(self, task_file: str) -> str | None:
-        """Move the task file ``processing/ -> tasks/rejected/`` when a tasks/ layout is present."""
+        """Move the task file into ``.worc/tasks/rejected/`` (the quarantine) when it exists."""
         src = Path(task_file)
         if not src.exists():
             return None

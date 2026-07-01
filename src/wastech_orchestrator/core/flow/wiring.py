@@ -65,8 +65,8 @@ def build_node_services(
 ) -> NodeServices:
     """Assemble the unit-shared :class:`NodeServices` (collaborators + the routing map).
 
-    ``snapshot_hook`` is the git snapshot hook handed to the router for provider observability
-    (the legacy ``run_stage(..., snapshot=git)``); the same git manager satisfies both ``git`` and
+    ``snapshot_hook`` is the git snapshot hook handed to the router for provider observability;
+    the same git manager satisfies both ``git`` and
     ``SnapshotHook``, so callers usually pass it for both. The observability / finalize / re-resolve
     hooks are orchestrator-provided (see :class:`NodeServices`); they default off for unit tests.
     """
@@ -108,9 +108,9 @@ def build_node_inputs(
 ) -> NodeInputs:
     """Build the per-unit :class:`NodeInputs` from the live ``_Pipeline``.
 
-    Artifact paths are read straight off the pipeline (the values the legacy ``_prompt_variables``
-    injected). The publish-only fields (``pull_request_title`` / ``summary_body_path`` /
-    ``commit_message``) are not pipeline attributes — the publish wrapper computes and passes them;
+    Artifact paths are read straight off the pipeline. The publish-only fields
+    (``pull_request_title`` / ``summary_body_path`` / ``commit_message``) are not pipeline
+    attributes — the publish wrapper computes and passes them;
     ``check_sets`` are the normalized ``checks.command_sets`` (diff-selected at run time by the
     checks node). Editing-session continuity is durable now (the ``editing_lineage`` store, P2.2),
     not an in-memory map.

@@ -26,7 +26,7 @@ flow:
   nodes:
     - id: conflict_resolution
       kind: agent
-      role_file: roles/conflict_resolution.md
+      role_file: merge/conflict_resolution.md
       session_scope: editing_lineage
       permission_profile: workspace-write
       # optional overrides (uncomment to pin this node):
@@ -41,7 +41,7 @@ flow:
       checker: command_profile
     - id: fixing
       kind: agent
-      role_file: roles/fixing.md
+      role_file: merge/fixing.md
       session_scope: editing_lineage
       lineage_affinity: conflict_resolution
       permission_profile: workspace-write

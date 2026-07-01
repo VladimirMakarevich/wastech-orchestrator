@@ -66,7 +66,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **Task statuses** - `new` means the task has been parsed but not yet validated; `validated` means it passed the gate; `preparing` means the orchestrator owns the slot and is setting up execution; `running` means the flow engine is active; `done`, `failed`, and `manual_action_required` are terminal; `pending` is the queue waiting state before the slot is acquired.
 - **State machine** - The finite set of task statuses and allowed transitions between them.
 - **Single processing slot** - The invariant that only one task can be active at a time.
-- **Task lifecycle folders** - `tasks/pending` holds queued tasks, `tasks/processing` holds active work, `tasks/done` and `tasks/failed` hold terminal tasks, and `.worc/tasks/rejected` is the quarantine folder for invalid tasks. The `tasks` root is the default; it is configurable via `paths.tasks_dir` (the subfolder names are fixed).
+- **Task lifecycle folders** - `tasks/pending` holds queued tasks, `tasks/done` and `tasks/failed` hold terminal tasks, and `.worc/tasks/rejected` is the quarantine folder for invalid tasks. A running task keeps its file in `tasks/pending` — "currently active" is tracked by its `state.db` status, not a folder. The `tasks` root is the default; it is configurable via `paths.tasks_dir` (the subfolder names are fixed).
 - **`summary.md`** - The plain-language handoff written at task close. In the default publish path it becomes the PR body; when synthesis cannot run, the orchestrator falls back to a deterministic minimal summary.
 - **`validation_report.json`** - The structured report written by the validation gate. Rejected tasks use it to explain the failure, and accepted tasks may also persist it for resume/audit.
 - **`task.normalized.json`** - The normalized resume-safe copy of the parsed task metadata written under `logs/<task-id>/` and loaded back on recovery.
@@ -85,7 +85,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`repo.base_branch`** - The branch checked out before task work and restored after terminal cleanup.
 - **`repo.branch_prefix`** - Prefix for the default task branch name.
 - **`paths`** - Optional block locating the task lifecycle on disk.
-- **`paths.tasks_dir`** - Repo-relative directory holding the `pending`/`processing`/`done`/`failed` lifecycle subfolders (default `tasks`). Validated repo-relative (no `..`/absolute) and rejected if it lives under the gitignored `.worc/` home; a subpath such as `config/tasks` is allowed.
+- **`paths.tasks_dir`** - Repo-relative directory holding the `pending`/`done`/`failed` lifecycle subfolders (default `tasks`). Validated repo-relative (no `..`/absolute) and rejected if it lives under the gitignored `.worc/` home; a subpath such as `config/tasks` is allowed.
 - **`agents`** - Provider availability, retry budgets, decomposition, and provider-specific settings.
 - **`agents.allowed`** - The provider ids the router may use.
 - **`agents.max_stage_attempts`** - Maximum attempts for one stage, including fallback.

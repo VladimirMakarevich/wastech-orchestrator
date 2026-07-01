@@ -10,10 +10,11 @@
 - **[config/README.md](config/README.md)** — build or tune the orchestrator's own `config.yaml` for this repository.
 - **[config/best-practices.md](config/best-practices.md)** — safe defaults, checks layout, and common config mistakes.
 - **[config/skills/worc-config/SKILL.md](config/skills/worc-config/SKILL.md)** — a copy-ready skill that interviews the operator and assembles a project-specific config.
+- **[flows/README.md](flows/README.md)** — author a _custom flow_ (a new `task_type`): the graph of steps, where the flow YAML + its prompts live, registration, and validation.
 
 ## What the orchestrator does with your task
 
-wastech-orchestrator is not a chat agent. It takes one task file and drives it through a fixed pipeline of stages — **refinement → planning → implementation → testing → review → fixing → summary → publishing** — launching a coding-agent CLI (Codex or Claude Code) for the agent stages and running the repository's own checks for testing. When the pipeline succeeds, **the orchestrator** (never the agent) commits, pushes a branch `worc/<task-id>-<slug>` by default (or the task's validated `branch_name`), and opens a pull request.
+wastech-orchestrator is not a chat agent. It takes one task file and drives it through a fixed pipeline of stages — **refinement → planning → implementation → testing → review → fixing → publishing** (a constant supervisor writes the summary at the end) — launching a coding-agent CLI (Codex or Claude Code) for the agent stages and running the repository's own checks for testing. When the pipeline succeeds, **the orchestrator** (never the agent) commits, pushes a branch `worc/<task-id>-<slug>` by default (or the task's validated `branch_name`), and opens a pull request.
 
 Your task file is the entire contract. Write it so an agent can plan, implement, test, review, and summarize the change **without asking for hidden context**.
 

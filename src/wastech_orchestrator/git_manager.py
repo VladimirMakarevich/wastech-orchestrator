@@ -734,10 +734,10 @@ class GitManager:
         audit_files = [
             f"{self._tasks_dir}/{state}/{task_id}{suffix}"
             # Destination states (``done``/``failed``) stage the file's *appearance*; the source
-            # states (``pending``/``processing``) stage its *removal* on a lifecycle move — without
-            # the source paths a ``pending→failed`` / ``pending→done`` move of a base-tracked task
-            # file leaves a dangling ``D`` on the base branch after terminal cleanup.
-            for state in ("done", "failed", "pending", "processing")
+            # state (``pending``) stages its *removal* on a lifecycle move — without the source
+            # path a ``pending→failed`` / ``pending→done`` move of a base-tracked task file leaves
+            # a dangling ``D`` on the base branch after terminal cleanup.
+            for state in ("done", "failed", "pending")
             for suffix in (".md", ".summary.md")
         ]
         # Stage the task file's *appearance* in its new lifecycle folder AND its *removal* from the

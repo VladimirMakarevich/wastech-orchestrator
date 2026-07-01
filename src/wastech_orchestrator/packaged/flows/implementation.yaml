@@ -15,11 +15,10 @@
 # evaluator runner already supports its self-cap) is NOT shipped in this default flow: it is a pure
 # graph-shape choice — an operator who wants it adds the node to their own flow YAML.
 #
-# NOTE (2026-06-19 revision): supervisor is NOT a graph node. It is a constant orchestrator layer
-# ABOVE any flow (summary + per-step advisory oversight, configured in config.yaml: supervisor); the
-# supervise_impl/supervise_fix nodes and the summary-as-node were removed from the target. There is
-# NO `summary` node here: the constant supervisor layer writes the summary at whole-task close
-# (before publish) and observes every completed step.
+# NOTE: the supervisor is NOT a graph node. It is a constant orchestrator layer ABOVE any flow
+# (summary + per-step advisory oversight, configured in config.yaml: supervisor). There is NO
+# `summary` node here: the constant supervisor layer writes the summary at whole-task close (before
+# publish) and observes every completed step.
 #
 # ----------------------------------------------------------------------------------------------------
 # Per-node tuning (ALL fields below are OPTIONAL — omit one to inherit the default). Every
@@ -46,7 +45,7 @@ flow:
   nodes:
     - id: refinement
       kind: agent
-      role_file: roles/refinement.md
+      role_file: implementation/refinement.md
       session_scope: fresh_disposable
       permission_profile: read-only
       output_artifact: enriched_spec
@@ -61,7 +60,7 @@ flow:
       # extra_args: []
     - id: planning
       kind: agent
-      role_file: roles/planning.md
+      role_file: implementation/planning.md
       session_scope: fresh_disposable
       permission_profile: read-only
       output_artifact: plan
@@ -75,7 +74,7 @@ flow:
       # extra_args: []
     - id: implementation
       kind: agent
-      role_file: roles/implementation.md
+      role_file: implementation/implementation.md
       session_scope: editing_lineage
       permission_profile: workspace-write
       # optional overrides (uncomment to pin this node):
@@ -92,7 +91,7 @@ flow:
     - id: review
       kind: evaluator
       role: review
-      role_file: roles/review.md
+      role_file: implementation/review.md
       session_scope: fresh_disposable
       permission_profile: read-only
       # optional overrides (uncomment to pin this evaluator):
@@ -104,7 +103,7 @@ flow:
       # max_rework_per_stage: 1
     - id: fixing
       kind: agent
-      role_file: roles/fixing.md
+      role_file: implementation/fixing.md
       session_scope: editing_lineage
       lineage_affinity: implementation
       permission_profile: workspace-write
@@ -121,7 +120,7 @@ flow:
     # decomposition.sub_flow so it runs once per task (after the last subtask), not once per subtask.
     - id: documentation
       kind: agent
-      role_file: roles/documentation.md
+      role_file: implementation/documentation.md
       session_scope: editing_lineage
       lineage_affinity: implementation
       permission_profile: workspace-write

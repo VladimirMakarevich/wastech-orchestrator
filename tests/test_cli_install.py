@@ -71,6 +71,8 @@ def test_non_interactive_codex_only(git_repo: Any, monkeypatch: pytest.MonkeyPat
     # The task lifecycle dirs live at the repo root (tracked audit trail); everything else —
     # runtime dirs and the rejected-task quarantine — lives under the gitignored .worc/.
     assert (git_repo.clone / "tasks" / "pending").is_dir()
+    # No physical "processing" folder: "currently running" is a state.db status, not a dir.
+    assert not (git_repo.clone / "tasks" / "processing").exists()
     assert (git_repo.clone / ".worc" / "logs").is_dir()
     assert (git_repo.clone / ".worc" / "tasks" / "rejected").is_dir()
     cfg = load_config(config_path).config
@@ -244,6 +246,23 @@ def test_reconfigure_refreshes_guide_docs(git_repo: Any, monkeypatch: pytest.Mon
     assert readme.read_text(encoding="utf-8") != "# stale\n"  # refreshed from the package
 
 
+def test_install_delivers_config_example_reference(
+    git_repo: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _present(monkeypatch, "codex")
+    assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
+    example = git_repo.clone / ".worc" / "config.example.yaml"
+    packaged = _PACKAGED_DIR.parent / "config.example.yaml"
+    # The commented reference lands beside the generated executable config.yaml, byte-for-byte.
+    assert example.read_bytes() == packaged.read_bytes()
+    assert (git_repo.clone / ".worc" / "config.yaml").is_file()  # the executable one is separate
+    # --reconfigure refreshes a locally-modified reference back to the packaged copy.
+    example.write_text("# stale\n", encoding="utf-8")
+    redo = _ni(git_repo.clone, "--provider", "codex", "--reconfigure", "--skip-preflight")
+    assert cli.main(redo) == 0
+    assert example.read_bytes() == packaged.read_bytes()
+
+
 def test_install_delivers_builtin_flows_and_node_prompts(
     git_repo: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -253,7 +272,11 @@ def test_install_delivers_builtin_flows_and_node_prompts(
     # All three built-in flows + their per-node role-prompt templates are delivered, editable.
     for name in ("implementation", "deep_research", "security_audit"):
         assert (flows / f"{name}.yaml").is_file()
-    for rel in ("roles/refinement.md", "roles/research/synthesis.md", "roles/audit/scope.md"):
+    for rel in (
+        "implementation/refinement.md",
+        "deep_research/synthesis.md",
+        "security_audit/scope.md",
+    ):
         assert (flows / rel).is_file()
     # Delivered byte-for-byte from the packaged source (not regenerated or rewritten).
     assert (flows / "implementation.yaml").read_bytes() == (
@@ -272,7 +295,7 @@ def test_reconfigure_backs_up_and_refreshes_flows(
     _present(monkeypatch, "codex")
     assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
     worc = git_repo.clone / ".worc"
-    role = worc / "flows" / "roles" / "implementation.md"
+    role = worc / "flows" / "implementation" / "implementation.md"
     role.write_text("# stale operator prompt\n", encoding="utf-8")
     redo = _ni(git_repo.clone, "--provider", "codex", "--reconfigure", "--skip-preflight")
     assert cli.main(redo) == 0
@@ -281,7 +304,7 @@ def test_reconfigure_backs_up_and_refreshes_flows(
     # ...but the operator's edit stays recoverable from the timestamped backup dir under .worc/.
     backups = list(worc.glob("flows.bak-*"))
     assert len(backups) == 1
-    assert (backups[0] / "roles" / "implementation.md").read_text(
+    assert (backups[0] / "implementation" / "implementation.md").read_text(
         encoding="utf-8"
     ) == "# stale operator prompt\n"
 

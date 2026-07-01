@@ -29,7 +29,7 @@ flow:
   nodes:
     - id: refinement
       kind: agent
-      role_file: roles/research/refinement.md
+      role_file: deep_research/refinement.md
       session_scope: fresh_disposable
       permission_profile: read-only
       network_access: false
@@ -44,7 +44,7 @@ flow:
       # extra_args: []
     - id: repository_analysis
       kind: agent
-      role_file: roles/research/repository_analysis.md
+      role_file: deep_research/repository_analysis.md
       session_scope: fresh_disposable
       permission_profile: read-only
       network_access: false
@@ -57,7 +57,7 @@ flow:
       # extra_args: []
     - id: external_research
       kind: agent
-      role_file: roles/research/external_research.md
+      role_file: deep_research/external_research.md
       session_scope: fresh_disposable
       permission_profile: read-only
       network_access: true
@@ -71,7 +71,7 @@ flow:
       # extra_args: []
     - id: architecture_design
       kind: agent
-      role_file: roles/research/architecture_design.md
+      role_file: deep_research/architecture_design.md
       session_scope: fresh_disposable
       permission_profile: workspace-write
       network_access: false
@@ -84,7 +84,7 @@ flow:
       # extra_args: []
     - id: synthesis
       kind: agent
-      role_file: roles/research/synthesis.md
+      role_file: deep_research/synthesis.md
       session_scope: fresh_disposable
       permission_profile: workspace-write
       network_access: false
@@ -101,7 +101,7 @@ flow:
     - id: fact_verification
       kind: evaluator
       role: verifier
-      role_file: roles/research/verifier.md
+      role_file: deep_research/verifier.md
       session_scope: fresh_disposable
       permission_profile: read-only
       network_access: true
@@ -115,7 +115,7 @@ flow:
     - id: critical_review
       kind: evaluator
       role: critic
-      role_file: roles/research/critic.md
+      role_file: deep_research/critic.md
       session_scope: resume_own_lineage
       permission_profile: read-only
       network_access: true

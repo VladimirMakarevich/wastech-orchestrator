@@ -36,21 +36,21 @@ def test_implementation_flow_loads_with_documentation_node(impl_snap: FlowSnapsh
     node = impl_snap.nodes_by_id["documentation"]
     assert isinstance(node, AgentNode)
     assert node.kind == "agent"
-    assert node.role_file == "roles/documentation.md"
+    assert node.role_file == "implementation/documentation.md"
     # An editing node, not an evaluator/check: it edits the working tree at the flow ceiling.
     assert node.permission_profile == PermissionProfile.WORKSPACE_WRITE
     # No persisted artifact slot and no human gate / when-skip (consistent with fixing).
     assert node.output_artifact is None
     assert node.hitl is None
     assert node.when is None
-    # Its role prompt ships in the packaged flow tree (seeded into .worc/flows/roles by install).
-    assert (_PACKAGED / "roles" / "documentation.md").is_file()
+    # Its role prompt ships in the packaged flow tree (seeded into .worc/flows/implementation/).
+    assert (_PACKAGED / "implementation" / "documentation.md").is_file()
 
 
 def test_documentation_role_prompt_only_interpolates_allowed_vars() -> None:
     from wastech_orchestrator.core.prompts import ALLOWED_PROMPT_VARS, render_prompt
 
-    template = (_PACKAGED / "roles" / "documentation.md").read_text(encoding="utf-8")
+    template = (_PACKAGED / "implementation" / "documentation.md").read_text(encoding="utf-8")
     rendered = render_prompt(template, {"plan_path": "/p", "diff_path": "/d", "skills_path": None})
     # The plan/diff path tokens are substituted; no unresolved allowlisted token leaks through.
     assert "{plan_path}" not in rendered and "/p" in rendered

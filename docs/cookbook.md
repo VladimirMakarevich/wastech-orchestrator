@@ -33,7 +33,7 @@ wastech-orchestrator install .                 # interactive wizard (same on mac
 wastech-orchestrator install . --non-interactive --provider codex --no-create-pr
 ```
 
-Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home: `config.yaml`, the agent task-authoring `guide/` (the packaged `worc/` docs copied to `.worc/guide/`), the editable `flows/` copies (built-in flows + their `roles/` prompts), SQLite `state.db` (with `-wal`/`-shm`), `orchestrator.pid`, `logs/`, and `workspace/`, plus the `tasks/rejected` quarantine. (Check logs are not a top-level directory — they live under `logs/<task-id>/checks/`.) `install` appends a single `.worc/` line to the repo's tracked `.gitignore`. The only things kept outside `.worc/` are the `tasks/` lifecycle dirs (`pending/`/`processing/`/`done/`/`failed/`) at the repo root — they are intentionally git-tracked, and the task file plus its `<id>.summary.md` (in `done/` or `failed/`) are the audit trail the orchestrator commits.
+Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home: `config.yaml`, the agent task-authoring `guide/` (the packaged `worc/` docs copied to `.worc/guide/`), the editable `flows/` copies (built-in flows + their per-flow prompt dirs), SQLite `state.db` (with `-wal`/`-shm`), `orchestrator.pid`, `logs/`, and `workspace/`, plus the `tasks/rejected` quarantine. (Check logs are not a top-level directory — they live under `logs/<task-id>/checks/`.) `install` appends a single `.worc/` line to the repo's tracked `.gitignore`. The only things kept outside `.worc/` are the `tasks/` lifecycle dirs (`pending/`/`done/`/`failed/`) at the repo root — they are intentionally git-tracked, and the task file plus its `<id>.summary.md` (in `done/` or `failed/`) are the audit trail the orchestrator commits.
 
 Re-running is idempotent (existing files are skipped and `config.yaml` is never overwritten); `--reconfigure` backs up and regenerates; `--dry-run` writes nothing. See [configuration.md](configuration.md) for the discovery order and [operations.md](operations.md) for the full wizard. The remaining recipes all run from inside the repo without `--config`.
 
@@ -311,7 +311,7 @@ Provider routing is **node-based** — it lives on the flow, not the task. Each 
 - id: review
   kind: evaluator
   role: review
-  role_file: roles/review.md
+  role_file: implementation/review.md
   provider: codex # this node runs on codex; omit to use the global primary
 ```
 
@@ -319,12 +319,12 @@ A node's declared `provider`/`model`/`reasoning` are the **defaults**; a **task*
 
 ## 7a. Customize a Node's Prompt
 
-To add repository-specific engineering rules or a review rubric to a stage without editing Python, edit that node's **`role_file`** (see [configuration.md](configuration.md#prompt-templates-no-longer-a-config-block)). `install` delivers the built-in flows + their role files under `.worc/flows/` (`roles/*.md`), and those copies override the packaged built-ins, so edit the delivered role file (a custom operator flow likewise keeps its role files under `.worc/flows/roles/`). The role file's content **is** the prompt template — edit it and the change takes effect on the next run.
+To add repository-specific engineering rules or a review rubric to a stage without editing Python, edit that node's **`role_file`** (see [configuration.md](configuration.md#prompt-templates-no-longer-a-config-block)). `install` delivers the built-in flows + their role files under `.worc/flows/` (each flow's prompts in its own `<task_type>/` subdir), and those copies override the packaged built-ins, so edit the delivered role file (a custom operator flow likewise keeps its role files under its own `.worc/flows/<task_type>/` subdir). The role file's content **is** the prompt template — edit it and the change takes effect on the next run.
 
 For example, a review node's role file replaced with a security rubric:
 
 ```markdown
-<!-- roles/review.md -->
+<!-- implementation/review.md -->
 
 Review for security first. Reject the change unless:
 

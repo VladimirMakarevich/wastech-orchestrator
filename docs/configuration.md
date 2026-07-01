@@ -1,6 +1,6 @@
 # Configuration Reference
 
-`config.yaml` controls repositories, providers, security, validation, checks, git publishing, and optional notification settings. The packaged example is [`config.example.yaml`](../src/wastech_orchestrator/packaged/config.example.yaml), and the canonical contract is the config schema in the code (`config/schema.py`); see the [Functional Map](functional/index.md). For definitions of all config keys and their purpose, see the [Glossary](glossary.md).
+`config.yaml` controls repositories, providers, security, validation, checks, git publishing, and optional notification settings. The packaged example is [`config.example.yaml`](../src/wastech_orchestrator/packaged/config.example.yaml); `install` copies it verbatim to `.worc/config.example.yaml` as a commented, field-by-field reference beside the generated **executable** `.worc/config.yaml` (the reference is never loaded at runtime — only `config.yaml` is read). The canonical contract is the config schema in the code (`config/schema.py`); see the [Functional Map](functional/index.md). For definitions of all config keys and their purpose, see the [Glossary](glossary.md).
 
 The loader is fail-closed:
 
@@ -126,7 +126,7 @@ paths:
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `tasks_dir` | string | `"tasks"` | Repo-relative directory holding the `pending` / `processing` / `done` / `failed` lifecycle subfolders. Rename it to avoid clashing with a repo that already uses `tasks/` for something else. |
+| `tasks_dir` | string | `"tasks"` | Repo-relative directory holding the `pending` / `done` / `failed` lifecycle subfolders. Rename it to avoid clashing with a repo that already uses `tasks/` for something else. |
 
 The value is validated as repo-relative: no absolute path, no `~`, no `..` traversal, and it must **not** live under the gitignored `.worc/` home (that would silently drop the audit trail from Git). A repo-relative subpath (e.g. `config/tasks`) is allowed. The lifecycle subfolder names themselves are fixed.
 
@@ -517,9 +517,9 @@ Auto-merge is **off by default** and only affects the publish step — the mid-p
 
 ### The canonical layout
 
-There is one canonical layout — there are no footprint modes to choose. Everything the orchestrator generates or installs lives under a single gitignored `<repo>/.worc/` home: `config.yaml`, `guide/`, `flows/` (editable flow + role-prompt copies), `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `workspace/`, and the `tasks/rejected` quarantine. `install` appends a single `.worc/` line to the repo's tracked `.gitignore`.
+There is one canonical layout — there are no footprint modes to choose. Everything the orchestrator generates or installs lives under a single gitignored `<repo>/.worc/` home: `config.yaml` (plus the commented `config.example.yaml` reference), `guide/`, `flows/` (editable flow + role-prompt copies), `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `workspace/`, and the `tasks/rejected` quarantine. `install` appends a single `.worc/` line to the repo's tracked `.gitignore`.
 
-The only things **not** under `.worc/` are the `tasks/` lifecycle dirs (`pending`/`processing`/`done`/`failed`), which sit at the repo root and are git-tracked. (`tasks` is the default name; it is configurable via [`paths.tasks_dir`](#paths) — substitute the configured name throughout this section.) The committed audit trail is the moved task file plus its `<id>.summary.md` in `tasks/done` or `tasks/failed`; the orchestrator's audit commit stages **only that task's own files** (never `git add -- tasks/` wholesale), so a concurrently-pending task is never swept in.
+The only things **not** under `.worc/` are the `tasks/` lifecycle dirs (`pending`/`done`/`failed`), which sit at the repo root and are git-tracked. (`tasks` is the default name; it is configurable via [`paths.tasks_dir`](#paths) — substitute the configured name throughout this section.) The committed audit trail is the moved task file plus its `<id>.summary.md` in `tasks/done` or `tasks/failed`; the orchestrator's audit commit stages **only that task's own files** (never `git add -- tasks/` wholesale), so a concurrently-pending task is never swept in.
 
 The code commit always stages changes with an explicit scoped pathspec and excludes `.worc/` and the configured tasks dir — `.worc/` is gitignored, and the tasks dir rides the separate audit commit instead.
 
@@ -566,7 +566,7 @@ Preflight requires a non-zero numeric chat id, bot access to the chat, no config
 
 ## Prompt templates (no longer a config block)
 
-There is no `prompts` config block. A flow node's prompt template is the content of its **`role_file`**. `install` delivers the built-in flows + their role files as editable copies under `.worc/flows/` (`roles/*.md`), and those copies **override** the packaged built-ins, so to customize a node's prompt you edit the delivered role file (a custom operator flow likewise keeps its role files under `.worc/flows/roles/`). (Removed in `config.yaml` `schema_version` **9**; an older config that still carries a `prompts` block loads fail-open — the key is ignored — and `upgrade-config` strips it.)
+There is no `prompts` config block. A flow node's prompt template is the content of its **`role_file`**. `install` delivers the built-in flows + their role files as editable copies under `.worc/flows/` (each flow's prompts in its own `<task_type>/` subdir), and those copies **override** the packaged built-ins, so to customize a node's prompt you edit the delivered role file (a custom operator flow likewise keeps its role files under its own `.worc/flows/<task_type>/` subdir). (Removed in `config.yaml` `schema_version` **9**; an older config that still carries a `prompts` block loads fail-open — the key is ignored — and `upgrade-config` strips it.)
 
 **Template variables.** A role file may reference an allowlisted set of `{name}` tokens; everything else (an unknown name, or literal braces in code/JSON) is left verbatim, so a template never breaks on stray braces. The variables are **metadata and artifact paths only** — never task bodies, diffs, check logs, environment values, or secrets (those stay in the artifact files the agent reads by path):
 
@@ -582,9 +582,9 @@ A variable with no value for the current node (e.g. `{plan_path}` before plannin
 
 The pipeline a task runs is a **flow** — a declarative YAML graph of nodes (agent / checks / evaluator / hitl / publish) and edges. A task's `task_type` front-matter field selects which flow runs (a clean task carries only identity/dispatch/operational inputs — it never patches the graph). `task_type` is omitted ⇒ `implementation`; an unknown `task_type` fails before any branch.
 
-There is no flow block in `config.yaml`. Flows live as files in two layers, operator-first:
+There is no flow block in `config.yaml`. Flows live as files in two layers, operator-first (see the [Flow authoring guide](flow-authoring.md) for a from-scratch walkthrough):
 
-1. **Operator flows** — `<repo>/.worc/flows/<task_type>.yaml`. Drop a YAML file here to add a new `task_type` or to **override** a packaged flow of the same name. Role files live beside them under `.worc/flows/roles/*.md`. **`install` seeds this directory** with editable copies of all three built-ins below (each `<task_type>.yaml` plus the shared `roles/`), so out of the box every built-in is already an operator flow you can edit. Because the seeded copies override the packaged layer, a package upgrade does not refresh them — `install --reconfigure` refreshes them to the packaged version (snapshotting the existing dir to `flows.bak-<UTC>` first).
+1. **Operator flows** — `<repo>/.worc/flows/<task_type>.yaml`. Drop a YAML file here to add a new `task_type` or to **override** a packaged flow of the same name. Role files live in each flow's own subdir under `.worc/flows/<task_type>/*.md`. **`install` seeds this directory** with editable copies of all three built-ins below (each `<task_type>.yaml` plus its `<task_type>/` prompt dir), so out of the box every built-in is already an operator flow you can edit. Because the seeded copies override the packaged layer, a package upgrade does not refresh them — `install --reconfigure` refreshes them to the packaged version (snapshotting the existing dir to `flows.bak-<UTC>` first).
 2. **Packaged built-ins** — shipped with the orchestrator and the source for the seeded copies above: `implementation`, `deep_research`, `security_audit`.
 
 `config.yaml` is **infrastructure + provider defaults** that the flow's nodes fall back to (`model`/`reasoning`/`permission_profile`/`timeout`), plus the non-weakenable safety caps. The flow owns the graph; the config owns the environment. Trust is file-level: an operator flow is trusted to the same degree as `config.yaml` (same owner, same directory), and the fatal validator below guarantees it can never escalate beyond the ceiling.
@@ -603,7 +603,7 @@ Two things are deliberately **not** fatal here because the orchestrator degrades
 nodes:
   - id: implementation
     kind: agent
-    role_file: roles/implementation.md
+    role_file: implementation/implementation.md
     permission_profile: workspace-write
     network_access: true # only this node may reach the network; siblings stay offline
 ```
@@ -616,14 +616,14 @@ Every `agent` and `evaluator` node may **override** provider/model/reasoning for
 nodes:
   - id: planning
     kind: agent
-    role_file: roles/planning.md
+    role_file: implementation/planning.md
     provider: claude # ∈ agents.allowed; default = global primary
     model: claude-opus-4-8 # default = agents.providers.<provider>.model
     reasoning: high # provider-specific; default = provider reasoning
   - id: review
     kind: evaluator
     role: review
-    role_file: roles/review.md
+    role_file: implementation/review.md
     model: claude-opus-4-8
     reasoning: xhigh # spend the most reasoning where rework is decided
 ```

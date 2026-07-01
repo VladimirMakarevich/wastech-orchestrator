@@ -39,9 +39,9 @@ def record_rework(run_state: FlowRunState) -> int:
 
     Every in-flow rework/fail edge the engine takes — the test-driven loop (``test_fix``) and the
     review-driven loop (``review_fix``) alike — charges its global cost here and **only** here, so a
-    rework is counted exactly once and never double-incremented (the failure mode the old
-    ``supervise_fix → fixing`` edge risked, now structurally impossible: the supervisor is an
-    advisory layer that never reworks). Returns the new global counter value.
+    rework is counted exactly once and never double-incremented — the supervisor is an advisory
+    layer that never reworks, so no rework edge can double-count. Returns the new global counter
+    value.
 
     The named-loop / inline-edge budgets stay with the engine's edge bookkeeping; this owns only the
     one global counter. The immutable per-verdict audit lives in the ``evaluations`` table, written

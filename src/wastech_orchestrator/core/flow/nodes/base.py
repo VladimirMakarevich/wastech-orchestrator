@@ -48,8 +48,7 @@ class NodeInfraError(Exception):
 
     Agent infra-exhaustion (no provider could complete the stage even after fallback) and a check
     *launch* failure both raise this; the orchestrator maps it to terminal ``failed`` — it never
-    routes to fixing (no code change can fix infrastructure). Mirrors the legacy ``PipelineFailed``
-    + ``CheckOutcome.launch_failed`` handling.
+    routes to fixing (no code change can fix infrastructure).
 
     ``error_class`` carries the normalized terminal error class (``None`` when unknown — e.g. a
     check launch failure) so the orchestrator can tell a *transient* exhaustion
@@ -77,7 +76,7 @@ class NodeManualRequired(Exception):
     """A node needs human action and cannot proceed automatically (terminal manual_action_required).
 
     Raised by the dangerous-diff guard when a workspace-write edit produced a deletion/dependency
-    change. Mirrors the legacy ``ManualActionRequired``. The orchestrator maps it to terminal
+    change. The orchestrator maps it to terminal
     ``manual_action_required``. (The full durable approval round-trip — prompt, persist, resume,
     reconsider-on-denial — is the next Step-B piece; until then a dangerous diff fails closed.)
     """
