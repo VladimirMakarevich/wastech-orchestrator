@@ -24,4 +24,4 @@ The orchestrator stops losing expensive, repo-specific lessons between independe
 
 ## Sources
 
-The full problem framing, landscape, and evidence are in [research/](research/index.md) (the two deep-research reports and the consolidated [blueprint](research/memory-architecture-blueprint.md)). This task supersedes the exploratory predecessor [../orchestrator-memory.md](../orchestrator-memory.md).
+The full problem framing, landscape, and evidence are in [research/](research/index.md) (the two deep-research reports and the consolidated [blueprint](research/memory-architecture-blueprint.md)). This task supersedes the exploratory predecessor [../archive/done/orchestrator-memory.md](../archive/done/orchestrator-memory.md).

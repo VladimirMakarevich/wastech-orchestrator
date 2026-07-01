@@ -90,6 +90,19 @@ from wastech_orchestrator.ledger import (
     write_failure_report,
     write_minimal_summary,
 )
+from wastech_orchestrator.memory import (
+    AuditActor,
+    AuditContext,
+    CandidateDelta,
+    DerivedIndex,
+    EpisodeRecord,
+    MemoryLayout,
+    MemoryService,
+    PacketBuilder,
+    TrustLevel,
+    WriteSource,
+    ensure_store,
+)
 from wastech_orchestrator.notify import (
     AskKind,
     AskResult,
@@ -108,12 +121,13 @@ from wastech_orchestrator.providers.base import (
     AgentProvider,
     ProviderId,
 )
-from wastech_orchestrator.providers.redaction import read_denied_secrets
+from wastech_orchestrator.providers.redaction import read_denied_secrets, secret_env_values
 from wastech_orchestrator.routing.router import AgentRouter
 from wastech_orchestrator.security.env import build_child_env
 from wastech_orchestrator.security.isolation import check_isolation
 from wastech_orchestrator.state_store import (
     ArtifactRow,
+    EvaluationRow,
     StateStore,
     SubtaskRow,
     TaskRow,
@@ -1450,6 +1464,7 @@ class Orchestrator:
             process_env=build_child_env(self._config.security.allowed_environment),
             scan_timeout_s=self._config.checks.timeout_seconds,
             deletion_approval_exempt_paths=self._config.security.deletion_approval_exempt_paths,
+            packet_builder=self._packet_builder(),
         )
 
     def _resolve_merge_flow(self) -> FlowSnapshot:
@@ -1806,7 +1821,12 @@ class Orchestrator:
         log.info("task finalize: starting (whole-task summary, then publish prep)")
         if self._supervisor is not None:
             started = time.monotonic()
-            self._supervisor.finalize(task_id=p.task.id, task_title=p.task.title)
+            memory_on = self._config.memory.enabled
+            finalized = self._supervisor.finalize(
+                task_id=p.task.id, task_title=p.task.title, emit_delta=memory_on
+            )
+            if memory_on:
+                self._write_memory(p, finalized.candidate_delta, WriteSource.SUCCESS)
             log.info(
                 "task finalize: supervisor summary written",
                 extra={"elapsed_seconds": round(time.monotonic() - started, 1)},
@@ -1815,6 +1835,109 @@ class Orchestrator:
         log.info("task finalize: publish prep (committed summary + task-file move)")
         summary_md = self._finalize_task_artifacts(p, Status.DONE)
         return str(summary_md) if summary_md is not None else None
+
+    # --- memory write path (best-effort; never blocks publish or a terminal) --------------
+
+    def _memory_service(self) -> MemoryService | None:
+        """Build a ``MemoryService`` for this run, or ``None`` when memory is disabled (Q10).
+
+        The service is given a live-repo ``DerivedIndex`` (same construction as the cleanup hook) so
+        the write funnel validates entity-card paths against the current tree (NFR2): an
+        unverifiable card is downgraded off ``repo-observed`` and quarantined, not kept durable.
+        """
+        if not self._config.memory.enabled:
+            return None
+        layout = MemoryLayout.for_repo(self._config.repo.local_path)
+        ensure_store(layout, created_at=self._clock())
+        index = DerivedIndex(self._config.repo.local_path, derived_dir=layout.derived)
+        return MemoryService(
+            layout,
+            config=self._config.memory,
+            marker=self._memory_marker,
+            index=index,
+            extra_secrets=self._memory_extra_secrets(),
+        )
+
+    def _memory_extra_secrets(self) -> tuple[str, ...]:
+        """Known secret literals to scrub from every memory write (C1), beyond the structural
+        patterns — closes the structural-only gap F3 raised against C1.
+
+        The same sources the provider adapters scrub from artifacts: the values of non-allowlisted,
+        secret-named parent env vars + the contents of the repo's denied-read files (`.env` /
+        `secrets/**`). Best-effort and read-only (missing files are skipped); the values are only
+        ever used as redaction literals and are never themselves written anywhere.
+        """
+        security = self._config.security
+        return secret_env_values(security.allowed_environment) + read_denied_secrets(
+            self._config.repo.local_path, security.denied_read_paths
+        )
+
+    def _packet_builder(self) -> PacketBuilder | None:
+        """Build the read-path ``PacketBuilder`` for this run, or ``None`` when memory is disabled.
+
+        Read-only: it never mutates the store and writes no audit rows, so it needs no marker and
+        does not seed the tree (a missing store reads as empty → an empty packet → no file, AC-R4).
+        The per-node packet is built lazily by the node runner only when the role prompt references
+        ``{memory_path}`` (node-driven), so a disabled config touches nothing (Q10)."""
+        if not self._config.memory.enabled:
+            return None
+        layout = MemoryLayout.for_repo(self._config.repo.local_path)
+        return PacketBuilder(MemoryService(layout, config=self._config.memory), self._config.memory)
+
+    def _memory_marker(self, row: Mapping[str, Any]) -> None:
+        """Mirror one memory audit row into the existing ``evaluations`` decision trail (Q6)."""
+        timestamp = row.get("timestamp")
+        self._store.record_evaluation(
+            EvaluationRow(
+                task_id=str(row.get("task_id") or ""),
+                kind="memory_write",
+                verdict="advisory",
+                findings_json=json.dumps(
+                    {key: row.get(key) for key in ("action", "affected_ids", "post_hash")},
+                    ensure_ascii=False,
+                ),
+                created_at=timestamp if isinstance(timestamp, str) else None,
+            )
+        )
+
+    def _record_failure_memory(self, p: _Pipeline, final: Status) -> None:
+        """Deterministic short-term failure episode (no LLM); never long-term (AC-W3)."""
+        self._write_memory(p, None, WriteSource.FAILURE, outcomes={"task": final.value})
+
+    def _write_memory(
+        self,
+        p: _Pipeline,
+        delta: CandidateDelta | None,
+        source: WriteSource,
+        *,
+        outcomes: dict[str, str] | None = None,
+    ) -> None:
+        """Write the per-task episode (+ a SUCCESS candidate delta) through ``apply_delta``.
+
+        Best-effort: a memory write must never block publish or a terminal transition, so every
+        failure is logged and swallowed. The store is built lazily, so a disabled config touches
+        nothing (Q10).
+        """
+        service = self._memory_service()
+        if service is None:
+            return
+        now = self._clock()
+        episode = EpisodeRecord(
+            id=f"ep_{p.task.id}",
+            task_id=p.task.id,
+            created_at=now,
+            trust_level=TrustLevel.ARTIFACT_BACKED,
+            stage_outcomes=outcomes or {},
+            artifact_paths=(Path(task_artifact_dir(self._artifacts_root, p.task.id)).as_posix(),),
+        )
+        audit = AuditContext(timestamp=now, actor=AuditActor.FINALIZER, task_id=p.task.id)
+        try:
+            service.apply_delta(delta, episode=episode, source=source, audit=audit)
+        except Exception as exc:  # noqa: BLE001 — memory is best-effort; never block the task
+            self._log(p.task.id).warning(
+                "memory write failed (best-effort, ignored)",
+                extra={"error_type": type(exc).__name__, "source": source.value},
+            )
 
     def _engine_facts(
         self, completeness: Completeness, snapshot: FlowSnapshot
@@ -2274,6 +2397,9 @@ class Orchestrator:
         if not cleanup.safe and status is Status.DONE:
             # Publishing finished but the working copy could not be safely restored → manual.
             final = Status.MANUAL_ACTION_REQUIRED
+        if status is not Status.DONE:
+            # Deterministic short-term failure episode (no LLM); never long-term (AC-W3).
+            self._record_failure_memory(p, final)
         # Record the terminal-cleanup outcome and the reason this task stopped (when applicable).
         last_error = cleanup.error or manual_reason
         self._store.update_task(

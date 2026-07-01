@@ -6,6 +6,10 @@ This folder holds the inputs that the task is built on: two independent deep-res
 
 - [memory-architecture-blueprint.md](memory-architecture-blueprint.md) — the consolidated, evidence-backed architecture blueprint that merges both reports + the role-split note. It is the single richest reference for **why** the design is shaped the way it is (landscape, comparison matrices, rejected alternatives, sources). The task's [../design.md](../design.md) is the buildable distillation of it; this blueprint is the rationale behind that.
 
+## Recorded results
+
+- [eval-baseline.md](eval-baseline.md) — the offline replay harness's recorded baseline (the AC-O1..O4 gate). Currently **synthetic** (greenfield: no real task corpus yet); the approach + thresholds are locked, and the integers are replaced by a real baseline once production runs accrue.
+
 ## Raw research
 
 - [worc-report/](worc-report/worc-deeep-research-memory-report.md) — internal deep research (13 parts): executive summary, landscape map, storage/retrieval/update comparison matrices, recommended architecture, tiers, lifecycle, safety, concrete proposals, evolution path, evaluation plan, final recommendation, sources, bottom line.

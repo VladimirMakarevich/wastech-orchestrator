@@ -296,7 +296,7 @@ def test_supervisor_runs_above_any_flow_writes_summary(tmp_path: Path) -> None:
     router, store = FakeRouter([_ok("s1", "The whole task summary.")]), _store(tmp_path)
     sup = _supervisor(tmp_path, router, store)
 
-    path = sup.finalize(task_id=_TASK, task_title="T")
+    path = sup.finalize(task_id=_TASK, task_title="T").summary_path
     assert path is not None and path.name == "summary.md"
     assert "The whole task summary." in path.read_text("utf-8")
 
@@ -313,11 +313,70 @@ def test_supervisor_finalize_best_effort_when_llm_unavailable(tmp_path: Path) ->
     router, store = FakeRouter([None]), _store(tmp_path)
     sup = _supervisor(tmp_path, router, store)
 
-    path = sup.finalize(task_id=_TASK, task_title="T")
+    path = sup.finalize(task_id=_TASK, task_title="T").summary_path
     assert path is None
     summary_json = Path(task_artifact_dir(tmp_path / "art", _TASK)) / "summary.json"
     assert summary_json.exists()
     assert len([e for e in store.get_evaluations(_TASK) if e.kind == "supervisor_final"]) == 1
+
+
+def _structured(summary: str, memory_delta: dict[str, Any]) -> AgentRunResult:
+    return AgentRunResult(
+        status=RunStatus.SUCCEEDED,
+        provider="claude",
+        node_id="supervisor",
+        attempt=1,
+        exit_code=0,
+        started_at="t0",
+        finished_at="t1",
+        final_message="",
+        session_id="s1",
+        structured_output={"summary": summary, "memory_delta": memory_delta},
+    )
+
+
+def test_finalize_emits_delta_on_the_same_turn(tmp_path: Path) -> None:
+    # AC-W1: with memory enabled, the SAME finalize turn yields the summary + the candidate delta.
+    memory_delta = {
+        "lessons": [
+            {
+                "kind": "semantic",
+                "subject": "cfg",
+                "statement": "bump docs",
+                "evidence": [{"type": "repo_doc", "ref": "CLAUDE.md"}],
+            }
+        ]
+    }
+    router = FakeRouter([_structured("The summary.", memory_delta)])
+    sup = _supervisor(tmp_path, router, _store(tmp_path))
+    result = sup.finalize(task_id=_TASK, task_title="T", emit_delta=True)
+    assert len(router.requests) == 1  # exactly one turn — zero extra LLM calls
+    assert result.summary_path is not None
+    assert "The summary." in result.summary_path.read_text("utf-8")
+    assert result.candidate_delta is not None
+    assert result.candidate_delta.lessons[0].subject == "cfg"
+
+
+def test_finalize_call_count_identical_with_memory_on_or_off(tmp_path: Path) -> None:
+    # AC-W1: enabling memory adds no provider turns.
+    counts: list[int] = []
+    cases = (("off", FakeRouter([_ok("s", "sum")])), ("on", FakeRouter([_structured("sum", {})])))
+    for name, router in cases:
+        case_dir = tmp_path / name
+        case_dir.mkdir()
+        sup = _supervisor(case_dir, router, _store(case_dir))
+        sup.finalize(task_id=_TASK, task_title="T", emit_delta=(name == "on"))
+        counts.append(len(router.requests))
+    assert counts == [1, 1]
+
+
+def test_finalize_malformed_delta_still_writes_summary(tmp_path: Path) -> None:
+    # Best-effort: an unusable memory_delta never blocks the summary / publish.
+    router = FakeRouter([_structured("Good summary.", {"lessons": "not-a-list"})])
+    sup = _supervisor(tmp_path, router, _store(tmp_path))
+    result = sup.finalize(task_id=_TASK, task_title="T", emit_delta=True)
+    assert result.summary_path is not None  # summary still written
+    assert result.candidate_delta is None  # unusable delta -> None, never an exception
 
 
 # -- config (validated under the node ceiling) --------------------------------

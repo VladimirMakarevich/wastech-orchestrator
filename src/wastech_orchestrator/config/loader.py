@@ -31,6 +31,7 @@ from wastech_orchestrator.config.schema import (
     FootprintConfig,
     GitConfig,
     LoggingConfig,
+    MemoryConfig,
     MergeStrategy,
     OrchestratorConfig,
     OrchestratorRuntimeConfig,
@@ -703,6 +704,48 @@ def _build_logging(raw: Any, issues: list[str]) -> LoggingConfig:
     return LoggingConfig(level=level, artifacts=artifacts)
 
 
+def _build_memory(raw: Any, issues: list[str]) -> MemoryConfig:
+    where = "memory"
+    if raw is None:
+        return MemoryConfig()  # absent => disabled defaults (Q10): today's behavior exactly
+    m = _mapping(raw, where, issues)
+    _check_keys(
+        m,
+        {
+            "enabled",
+            "short_term_ttl_days",
+            "packet_max_lines",
+            "packet_max_long_term",
+            "packet_max_entity",
+            "packet_max_episodic",
+            "promote_min_tasks",
+            "promote_window_days",
+            "cleanup_min_interval_s",
+            "cleanup_max_scanned",
+            "cleanup_max_edits",
+            "cleanup_max_wall_clock_s",
+            "cleanup_promotions_per_pass",
+        },
+        where,
+        issues,
+    )
+    return MemoryConfig(
+        enabled=_bool(m, "enabled", False, where, issues),
+        short_term_ttl_days=_int(m, "short_term_ttl_days", 30, where, issues),
+        packet_max_lines=_int(m, "packet_max_lines", 120, where, issues),
+        packet_max_long_term=_int(m, "packet_max_long_term", 3, where, issues),
+        packet_max_entity=_int(m, "packet_max_entity", 5, where, issues),
+        packet_max_episodic=_int(m, "packet_max_episodic", 3, where, issues),
+        promote_min_tasks=_int(m, "promote_min_tasks", 2, where, issues),
+        promote_window_days=_int(m, "promote_window_days", 60, where, issues),
+        cleanup_min_interval_s=_int(m, "cleanup_min_interval_s", 300, where, issues),
+        cleanup_max_scanned=_int(m, "cleanup_max_scanned", 200, where, issues),
+        cleanup_max_edits=_int(m, "cleanup_max_edits", 50, where, issues),
+        cleanup_max_wall_clock_s=_float(m, "cleanup_max_wall_clock_s", 5.0, where, issues),
+        cleanup_promotions_per_pass=_int(m, "cleanup_promotions_per_pass", 0, where, issues),
+    )
+
+
 _TOP_LEVEL_KEYS = {
     "schema_version",
     "orchestrator",
@@ -717,6 +760,7 @@ _TOP_LEVEL_KEYS = {
     "supervisor",
     "paths",
     "logging",
+    "memory",
     "prompt_audit",
 }
 
@@ -759,6 +803,7 @@ def _parse(raw: Mapping[str, Any], issues: list[str], warnings: list[str]) -> Or
         supervisor=_build_supervisor(raw.get("supervisor"), issues),
         paths=_build_paths(raw.get("paths"), issues),
         logging=_build_logging(raw.get("logging"), issues),
+        memory=_build_memory(raw.get("memory"), issues),
         prompt_audit=_bool(raw, "prompt_audit", False, "<root>", issues),
     )
 

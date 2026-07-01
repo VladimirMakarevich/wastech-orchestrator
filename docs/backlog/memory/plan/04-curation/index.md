@@ -1,6 +1,6 @@
 # Phase 04 — Curation
 
-Status: **planned** — [plan](../index.md) · [design §5,§7](../../design.md) · [acceptance: AC-C1..C4](../../acceptance-criteria.md)
+Status: **done** (2026-07-01, on `feat/memory-subsystem`) — [plan](../index.md) · [design §5,§7](../../design.md) · [acceptance: AC-C1..C4](../../acceptance-criteria.md)
 
 **Goal:** the operator can inspect and repair memory, and a bounded background job keeps it from rotting — without ever touching an active task. Depends on phases 01–03.
 
@@ -14,6 +14,10 @@ Status: **planned** — [plan](../index.md) · [design §5,§7](../../design.md)
 | 2 | [`CleanupJob.run_once`](02-cleanup-job.md) | new `memory/cleanup.py` — bounded, snapshotted, audited pass |
 | 3 | [Idle hook](03-idle-hook.md) | `cli.py` `watch_loop` idle gap, work-gated + rate-limited |
 | 4 | [`DerivedIndex` (minimal)](04-derived-index.md) | new `memory/derived.py` — path/symbol existence for staleness |
+
+## Outcome (2026-07-01)
+
+Built on `feat/memory-subsystem`: `memory/derived.py` (`DerivedIndex` — path/symbol existence via an injectable `git ls-files` provider routed through the safe `run_process` runner + filesystem stat; `find_by_basename` for rename-remap; a rebuildable `derived/repo_map.json` cache); `memory/cleanup.py` (`CleanupJob.run_once` — snapshot-first, budget-bounded `_Budget`, episode TTL expiry + entity staleness (basename remap → else quarantine) + duplicate long-term merge; `full=True` for the foreground pass, `dry_run=True` for the plan; never promotes, never edits code — AC-C3); four redacted+audited tier-rewrite methods on `MemoryService` (`replace_long_term`/`replace_entities`/`replace_episodes`/`replace_quarantine`); the `worc memory show|validate|compact|restore` nested subparser with `--dry-run` and an active-task gate on the mutating verbs (AC-C1); and the rate-limited, idle-gated `_build_cleanup_hook` threaded into `watch_loop`'s idle gap (AC-C2, no `os.kill`/signal). AC-C1..C4 + AC-SF4 groundwork hold; suite + ruff + mypy green.
 
 ## Notes
 

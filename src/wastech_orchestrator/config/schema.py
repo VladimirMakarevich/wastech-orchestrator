@@ -118,7 +118,14 @@ from wastech_orchestrator.providers.base import ProviderId
 # per-attempt provider files are kept under `logs/<task-id>/stages/.../<attempt>-<provider>/`
 # (minimal=result.json only; standard=+stdout/stderr; full=all). Absent => safe defaults; old
 # configs load fail-open and `upgrade-config` adds it from the template.
-CONFIG_SCHEMA_VERSION = 23
+# v24 (2026-06-30, memory-subsystem foundations): a *format* add of the optional `memory` block — a
+# global enable/disable plus bounded knobs (short-term TTL, per-node packet caps, promotion
+# thresholds, background-cleanup budget) for the persistent repo-scoped memory subsystem
+# (docs/backlog/memory/). Absent block => disabled (today's behavior exactly: no store, no delta,
+# empty packets, CLI no-op, no cleanup); the packaged template ships `enabled: true` for a fresh
+# install. Old configs load fail-open with defaults and `upgrade-config` adds it from the template.
+# No behavior consumes the knobs yet (phase 01 wires the shape only).
+CONFIG_SCHEMA_VERSION = 24
 
 
 class AuditBranch(StrEnum):
@@ -399,6 +406,43 @@ class LoggingConfig:
 
 
 @dataclass(frozen=True)
+class MemoryConfig:
+    """Repo-scoped persistent memory (docs/backlog/memory/): global toggle + bounded knobs.
+
+    Absent block => ``enabled=False`` — today's behavior (no store, no candidate delta, empty
+    memory packets, ``worc memory`` is a no-op, no background cleanup; Q10). The packaged template
+    ships ``enabled: true`` for a fresh ``worc install``. Every numeric knob carries the design's
+    locked default (§10) and is a bounded, runtime-clamped value — none is a fatal config error (a
+    later phase clamps an odd value at use, per the "fatal only without a safe fallback" rule). No
+    behavior consumes these yet; phase 01 wires the *shape* so the schema bumps once.
+    """
+
+    enabled: bool = False
+    # Short-term episodic TTL in days (design §4: 14–45d window). Long-term has no TTL.
+    short_term_ttl_days: int = 30
+    # Per-node retrieval packet caps (Q5) — deliberately small (precision over recall); the
+    # PacketBuilder enforces them (a later phase).
+    packet_max_lines: int = 120
+    packet_max_long_term: int = 3
+    packet_max_entity: int = 5
+    packet_max_episodic: int = 3
+    # Promotion-to-long-term thresholds (Q3): a lesson clears the gate if it recurred in
+    # >= ``promote_min_tasks`` tasks within ``promote_window_days`` (or other gates added later).
+    promote_min_tasks: int = 2
+    promote_window_days: int = 60
+    # Background-cleanup budget (Q1) — bounded autonomy; the CleanupJob honors it (a later phase).
+    cleanup_min_interval_s: int = 300
+    cleanup_max_scanned: int = 200
+    cleanup_max_edits: int = 50
+    cleanup_max_wall_clock_s: float = 5.0
+    # Documentation-only invariant (not read at runtime): the never-promote guarantee is
+    # structural — `CleanupJob` only demotes / expires / quarantines / merges and has no promote
+    # code path, so this stays 0 (AC-C3). The knob states the invariant in config; a non-zero value
+    # is inert (cleanup still never creates a long-term lesson).
+    cleanup_promotions_per_pass: int = 0
+
+
+@dataclass(frozen=True)
 class OrchestratorConfig:
     orchestrator: OrchestratorRuntimeConfig
     repo: RepoConfig
@@ -412,6 +456,7 @@ class OrchestratorConfig:
     supervisor: SupervisorConfig = field(default_factory=SupervisorConfig)
     paths: PathsConfig = field(default_factory=PathsConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
     # When true, every task records each step's prompt + who-metadata (provider/model/attempt/
     # fallback/status) under `logs/<task-id>/prompt-audit/`. A per-task `prompt_audit` always
     # overrides this (task wins); recording a prompt is not a privilege escalation, so there is no

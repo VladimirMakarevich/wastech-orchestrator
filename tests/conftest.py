@@ -108,6 +108,7 @@ def build_git_config(
     prompt_audit: bool = False,
     tasks_dir: str = "tasks",
     telegram_trace: bool = False,
+    memory_enabled: bool = False,
 ) -> OrchestratorConfig:
     """Build a config pointing ``repo.local_path`` at the clone, with the given footprint/checks."""
     env_lines = "\n".join(f"    - {e}" for e in _TEST_ALLOWED_ENV)
@@ -120,6 +121,7 @@ def build_git_config(
         checks_block = "  command_sets: {}\n"
     validation_block = f"validation:\n  quarantine_folder: {quarantine!r}\n" if quarantine else ""
     telegram_block = "telegram:\n  trace: true\n" if telegram_trace else ""
+    memory_block = "memory:\n  enabled: true\n" if memory_enabled else ""
     text = f"""
 orchestrator:
   auto_mode:
@@ -157,7 +159,7 @@ git:
     audit_commit_message: "chore(orchestrator): audit trail for {{task_id}}"
     audit_on_branch: {audit_on_branch}
 prompt_audit: {str(prompt_audit).lower()}
-"""
+{memory_block}"""
     return loads_config(text).config
 
 

@@ -446,6 +446,51 @@ def test_step_trace_off_by_default_emits_nothing(git_repo, make_git_config, tmp_
     assert notifier.trace_calls == []
 
 
+def _run_complete_task_store_dir(
+    git_repo, make_git_config, tmp_path: Path, *, memory_enabled: bool
+) -> Path:
+    """Drive one complete happy-path task; return the ``.worc/memory`` store dir (may not exist)."""
+    providers = _both()
+    orch, _store, _ledger, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"memory_enabled": memory_enabled},
+    )
+    task_file = _complete_task(tmp_path)
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+    assert orch.run_task(task_file).final_status is Status.DONE
+    return git_repo.clone / ".worc" / "memory"
+
+
+def test_memory_disabled_run_writes_no_store(git_repo, make_git_config, tmp_path: Path) -> None:
+    # AC-S4: the default (disabled) run is byte-for-byte the pre-memory behavior — the same task
+    # completes DONE and NO `.worc/memory` store is written at all.
+    store_dir = _run_complete_task_store_dir(
+        git_repo, make_git_config, tmp_path, memory_enabled=False
+    )
+    assert not store_dir.exists()
+
+
+def test_memory_enabled_run_writes_store(git_repo, make_git_config, tmp_path: Path) -> None:
+    # The contrast: the same happy-path run with memory enabled writes the store (a short-term
+    # episode at minimum) — confirming the disabled run's emptiness above is the toggle's doing.
+    store_dir = _run_complete_task_store_dir(
+        git_repo, make_git_config, tmp_path, memory_enabled=True
+    )
+    assert store_dir.is_dir()
+    assert list(store_dir.rglob("recent.jsonl")), "expected a short-term episode to be written"
+
+
 def test_task_branch_name_override_controls_published_head(
     git_repo, make_git_config, git_run, tmp_path: Path
 ) -> None:

@@ -98,5 +98,5 @@
 
 - supervisor finalize already synthesizes task-level summary at close and is best-effort; это естественная точка для memory extraction, если сама запись memory не блокирует publish. [src/wastech_orchestrator/core/supervisor.py](../../src/wastech_orchestrator/core/supervisor.py) [B31 Supervisor](../functional/blocks/B31-supervisor.md)
 - prompt renderer already works через allowlisted path variables; туда естественно добавить `memory_path`. [src/wastech_orchestrator/core/prompts.py](../../src/wastech_orchestrator/core/prompts.py)
-- orchestrator already has idle watch gaps; туда естественно встраивается bounded cleanup/autodream. [docs/backlog/orchestrator-memory.md](../backlog/orchestrator-memory.md)
+- orchestrator already has idle watch gaps; туда естественно встраивается bounded cleanup/autodream. [docs/backlog/archive/done/orchestrator-memory.md](../backlog/archive/done/orchestrator-memory.md)
 - project already explicitly rejects using provider session as source of truth; значит persistent memory должна жить вне vendor session resume. [AGENTS.md](../../AGENTS.md) [docs/functional/index.md](../functional/index.md)

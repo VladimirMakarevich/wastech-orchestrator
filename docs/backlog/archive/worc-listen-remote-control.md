@@ -14,7 +14,7 @@ Concretely, the operator should be able to, from chat:
 - **Get oriented in the project** — light navigation questions about the current work and recent history (the orchestrator's memory of what it has been doing), not a free read of the repository.
 - **Drive the next step** — start a specific **already-queued** task, rerun a terminal one, stop/restart the daemon — over the bounded verb set, with consequential actions confirmed in-chat.
 
-The "navigator agent" is what ties this together: rather than memorizing a command grammar, the operator converses, and the agent translates intent into the bounded verbs, proposing consequential actions for confirmation. It is an **orchestrator-level assistant** (a sibling of the [supervisor layer](orchestrator-memory.md)), not a task-pipeline agent — its job is to help the operator see and steer, not to write code.
+The "navigator agent" is what ties this together: rather than memorizing a command grammar, the operator converses, and the agent translates intent into the bounded verbs, proposing consequential actions for confirmation. It is an **orchestrator-level assistant** (a sibling of the [supervisor layer](archive/done/orchestrator-memory.md)), not a task-pipeline agent — its job is to help the operator see and steer, not to write code.
 
 ## The problem
 
@@ -57,7 +57,7 @@ This is not a new transport — it is the **bidirectional, operator-initiated** 
 | [Telegram step-trace](telegram-step-trace.md) | **The outbound half.** Node→outcome feed. A consumer of the same single poll loop's sibling send path; the navigator's "what just happened?" answers overlap with it. |
 | [Operator confirmation gates](operator-confirmation-gates.md) | **The correlated-question half.** Approve/deny at decision points via `ask_human`. `listen` generalizes inbound from "answer the question the orchestrator asked" to "issue the command the operator chose"; both must share the broker. |
 | `worc list` / `worc status` (shipped) | **The read surface the navigator queries.** "What tasks now?" reuses the `worc list` read helpers and `StateStore.open_readonly`; no new read machinery. |
-| [Supervisor layer](orchestrator-memory.md) + [orchestrator memory](orchestrator-memory.md) | **The navigator's knowledge source and natural voice.** "Help me navigate current project affairs" is exactly a memory-backed assistant; the navigator is the conversational front-end to orchestrator memory. Connection, not dependency. |
+| [Supervisor layer](archive/done/orchestrator-memory.md) + [orchestrator memory](archive/done/orchestrator-memory.md) | **The navigator's knowledge source and natural voice.** "Help me navigate current project affairs" is exactly a memory-backed assistant; the navigator is the conversational front-end to orchestrator memory. Connection, not dependency. |
 
 ## Architecture sketch
 
@@ -130,7 +130,7 @@ What genuinely widens, and why this is the furthest rung: the chat can now **int
 - **Intent authentication.** Is "from the configured chat" enough, or is a configured operator **user id** within the chat warranted (group chats, forwarded messages)? Lean toward an optional user-id narrowing.
 - **LLM secret-leak surface.** Even reading only redacted state, does letting a model compose free-text answers create any new exfiltration path the line-based redaction net does not cover? Needs a deliberate look before L2.
 - **Sequencing vs. siblings.** L0 is a shared prerequisite for this, gates, and step-trace — build it once, first? And how much of L1 is literally the [console](cli-upgrade.md)'s verb set re-skinned for Telegram (shared dispatcher) vs. duplicated?
-- **Navigator memory.** Does the navigator get its own short-term context, or is it purely the read-only voice of [orchestrator memory](orchestrator-memory.md)? The latter keeps it bounded; the former is richer but unbounded.
+- **Navigator memory.** Does the navigator get its own short-term context, or is it purely the read-only voice of [orchestrator memory](archive/done/orchestrator-memory.md)? The latter keeps it bounded; the former is richer but unbounded.
 
 ## Implementation notes
 

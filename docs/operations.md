@@ -390,6 +390,22 @@ worc logs clean --yes           # skip the confirmation prompt (for scripts/cron
 
 `--keep N` runs without a prompt (an explicit count is clear intent), except `--keep 0` (≡ delete-all), which confirms like the bare form. Run it while `watch` is idle — running it against an active task is unsupported (no hard guard in v1). To bound the footprint going forward instead of cleaning periodically, lower the per-run artifact retention with [`logging.artifacts`](configuration.md#logging) (`minimal` / `standard` / `full`).
 
+### Managing the memory store (`worc memory`)
+
+When the [`memory`](configuration.md#memory) subsystem is enabled, the orchestrator keeps a persistent, repo-scoped store under the gitignored `.worc/memory/`. It is self-maintaining — a bounded background `CleanupJob` runs in the `watch` daemon's idle gap — but `worc memory` lets an operator inspect and repair it directly. With memory disabled (or the block absent) every verb is a clean no-op.
+
+```bash
+worc memory show                # tier counts, audit-chain health, snapshot count (read-only)
+worc memory validate            # entity cards whose paths/symbols are gone (read-only)
+worc memory compact             # run a fuller cleanup pass now (expire/remap/quarantine/merge)
+worc memory compact --dry-run   # print the plan without writing anything
+worc memory restore             # roll the store back to the most recent audit snapshot
+worc memory restore --snapshot LABEL   # roll back to a specific snapshot
+worc memory restore --dry-run   # list the files that would be restored
+```
+
+`show` and `validate` are read-only. The mutating verbs (`compact`, `restore`) **refuse while a task is active** (run them when the orchestrator is idle) and support `--dry-run` to preview the plan first. `compact` is the foreground counterpart of the idle cleanup: it lifts the scan/edit/wall-clock budget but keeps every safety rule — it never creates a long-term lesson, never edits code, snapshots before mutating, and quarantines (never silently deletes) stale entries. A bad pass is reversible with `restore`, which rewinds the tier files from an `audit/snapshots/` snapshot (the append-only audit log itself is never rewound). Hand-editing the plain `*.jsonl` / `*.md` files under `.worc/memory/` stays a supported path; the curation verbs are the audited, redaction-safe alternative.
+
 ### Telegram HITL and notifications
 
 Set `telegram.enabled: true`, then export the variables named by `telegram.bot_token_env` and `telegram.chat_id_env`. The values themselves must not be placed in `config.yaml`. Use a dedicated project bot/chat and only one long-poll consumer; webhook mode is incompatible.

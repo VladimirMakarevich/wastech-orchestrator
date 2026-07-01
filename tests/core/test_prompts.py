@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from importlib import resources
+
+import pytest
+
 from wastech_orchestrator.core.prompts import ALLOWED_PROMPT_VARS, render_prompt
 
 
@@ -71,4 +75,32 @@ def test_allowlist_matches_documented_variables() -> None:
         "subtask_count",
         "subtask_spec_path",
         "skills_path",
+        "memory_path",  # per-node retrieval packet path (memory subsystem, phase 03)
     } == ALLOWED_PROMPT_VARS
+
+
+def test_memory_path_conditional_block_kept_and_dropped() -> None:
+    # The packaged role prompts wrap the memory reference in {?memory_path}...{/memory_path} so it
+    # is present only when a packet was built, and disappears cleanly when memory is empty (AC-R4).
+    template = "plan {?memory_path}see brief at {memory_path}{/memory_path} done"
+    assert render_prompt(template, {"memory_path": "/logs/t1/memory/planning.md"}) == (
+        "plan see brief at /logs/t1/memory/planning.md done"
+    )
+    assert render_prompt(template, {"memory_path": None}) == "plan  done"
+    assert render_prompt(template, {}) == "plan  done"
+
+
+@pytest.mark.parametrize("role", ["planning", "implementation", "review", "fixing"])
+def test_packaged_default_role_prompts_reference_memory_path(role: str) -> None:
+    # 03.4 / AC-R1: the four default role prompts reference {memory_path} inside a conditional block
+    # so they render the reference when memory is on and drop it cleanly when memory is off (AC-R4).
+    template = (
+        resources.files("wastech_orchestrator")
+        .joinpath("packaged", "flows", "roles", f"{role}.md")
+        .read_text(encoding="utf-8")
+    )
+    assert "{?memory_path}" in template and "{memory_path}" in template
+    on = render_prompt(template, {"memory_path": "/logs/t1/memory/brief.md"})
+    assert "/logs/t1/memory/brief.md" in on
+    off = render_prompt(template, {"memory_path": None})
+    assert "memory_path" not in off  # no dangling variable or block marker when memory is empty

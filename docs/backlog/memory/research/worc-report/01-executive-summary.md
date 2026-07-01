@@ -21,7 +21,7 @@
 - не смешивать deterministic repo index и generated memory: repo map/symbol index отвечает на "что сейчас в коде", memory отвечает на "что важно помнить между задачами";
 - писать memory только на task-finalization и в bounded idle cleanup, не на каждом stage step;
 - читать memory через stage-specific brief file (`memory_path`), а не скармливать агенту весь `.worc/memory/`;
-- не класть memory в существующий `state.db`: это ломает его роль как state-machine store; если позже понадобится database shape, нужен отдельный `memory.sqlite` под `.worc/memory/`, не schema bump `state.db`. Это также соответствует уже существующему backlog-направлению проекта. [docs/backlog/orchestrator-memory.md](../backlog/orchestrator-memory.md)
+- не класть memory в существующий `state.db`: это ломает его роль как state-machine store; если позже понадобится database shape, нужен отдельный `memory.sqlite` под `.worc/memory/`, не schema bump `state.db`. Это также соответствует уже существующему backlog-направлению проекта. [docs/backlog/archive/done/orchestrator-memory.md](../backlog/archive/done/orchestrator-memory.md)
 
 Итоговая рекомендация:
 

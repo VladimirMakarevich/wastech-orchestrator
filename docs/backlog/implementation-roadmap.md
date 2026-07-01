@@ -48,7 +48,7 @@ The operator's business priority (more `+` = higher) is the tie-breaker, not the
 | 11 ✅ | [orchestrator-driven-pr-merge](archive/done/orchestrator-driven-pr-merge.md) | E — Merge/hygiene | `++` | M/L | — | Adds `worc prs` / `merge-task` / `tasks`. Implemented 2026-06-27 as an operator-editable `merge` flow (not the locked routine). |
 | 12 ✅ | [log-management](archive/done/log-management.md) | E — Merge/hygiene | `++` | M | 22→23 | `worc logs clean` + `logging.*`; shapes the log tail the console later renders. Implemented 2026-06-27 (default `artifacts: standard`, strict `minimal`). |
 | 13 ✅ | [cli-upgrade](cli-upgrade.md) | F — Capstone | `+` | L | — | Capstone console: consumes `recent_tasks`, `prs`/`merge-task`, the pause state, and the stop primitives. |
-| 14 | [orchestrator-memory](orchestrator-memory.md) | F — Capstone | `+` | L | 23→24 | Reuses the skills prompt-var/supervisor seam; riskiest, most open questions, lowest business. |
+| 14 ✅ | [orchestrator-memory](archive/done/orchestrator-memory.md) | F — Capstone | `+` | L | 23→24 | Reuses the skills prompt-var/supervisor seam; riskiest, most open questions, lowest business. |
 
 ## How this order was derived
 
@@ -237,4 +237,4 @@ Steps 1 (windows), 2 (branch-name), 3 (task-priority), 6 (list), 11 (pr-merge), 
 | 11 | Orchestrator-driven PR merge | [orchestrator-driven-pr-merge.md](archive/done/orchestrator-driven-pr-merge.md) |
 | 12 | Log management | [log-management.md](archive/done/log-management.md) |
 | 13 | Interactive operator console | [cli-upgrade.md](cli-upgrade.md) |
-| 14 | Orchestrator memory | [orchestrator-memory.md](orchestrator-memory.md) |
+| 14 | Orchestrator memory | [archive/done/orchestrator-memory.md](archive/done/orchestrator-memory.md) |

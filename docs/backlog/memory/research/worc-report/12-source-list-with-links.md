@@ -62,7 +62,7 @@
 
 ### Repo-specific current context
 
-19. Existing project direction: [docs/backlog/orchestrator-memory.md](../backlog/orchestrator-memory.md)
+19. Existing project direction: [docs/backlog/archive/done/orchestrator-memory.md](../backlog/archive/done/orchestrator-memory.md)
 20. Current supervisor contract: [docs/functional/blocks/B31-supervisor.md](../functional/blocks/B31-supervisor.md)
 21. Current prompt path-variable model: [src/wastech_orchestrator/core/prompts.py](../../src/wastech_orchestrator/core/prompts.py)
 22. Repo invariants and security rules: [AGENTS.md](../../AGENTS.md), [.agents/rules/security.md](../../.agents/rules/security.md), [docs/functional/index.md](../functional/index.md)

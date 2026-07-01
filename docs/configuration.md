@@ -37,7 +37,7 @@ Exactly one configured provider must set `primary: true` — the **global primar
 schema_version: 23
 ```
 
-Optional top-level integer marking the `config.yaml` **format** version (current: `23`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
+Optional top-level integer marking the `config.yaml` **format** version (current: `24`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
 
 ## Config Discovery
 
@@ -570,9 +570,9 @@ There is no `prompts` config block. A flow node's prompt template is the content
 
 **Template variables.** A role file may reference an allowlisted set of `{name}` tokens; everything else (an unknown name, or literal braces in code/JSON) is left verbatim, so a template never breaks on stray braces. The variables are **metadata and artifact paths only** — never task bodies, diffs, check logs, environment values, or secrets (those stay in the artifact files the agent reads by path):
 
-`{task_id}` `{stage}` `{repo_path}` `{repo}` `{task_path}` `{plan_path}` `{diff_path}` `{checks_path}` `{review_path}` `{subtask_order}` `{subtask_count}` `{subtask_spec_path}` `{skills_path}`
+`{task_id}` `{stage}` `{repo_path}` `{repo}` `{task_path}` `{plan_path}` `{diff_path}` `{checks_path}` `{review_path}` `{subtask_order}` `{subtask_count}` `{subtask_spec_path}` `{skills_path}` `{memory_path}`
 
-A variable with no value for the current node (e.g. `{plan_path}` before planning) renders as the empty string.
+A variable with no value for the current node (e.g. `{plan_path}` before planning) renders as the empty string. `{memory_path}` is the path to this node's [memory](#memory) retrieval packet — present only when the memory subsystem is enabled and this node has relevant memory; otherwise empty (wrap it in a `{?memory_path}…{/memory_path}` conditional block so the section drops cleanly when empty).
 
 **Conditional blocks.** To keep optional prose from leaving dangling empty placeholders, a role file may wrap a region in `{?name}…{/name}`: the body is kept only when `name` is an allowlisted variable with a present, non-empty value, and dropped entirely otherwise (a non-allowlisted name or an unclosed block is left verbatim). The packaged `implementation`/`fixing` roles use this for the decomposition clause — `{?subtask_spec_path}…subtask {subtask_order} of {subtask_count}…{/subtask_spec_path}` — so a non-decomposed task renders no "subtask of …" sentence at all, while a subtask unit still gets the full "subtask N of M" text.
 
@@ -711,6 +711,45 @@ The `artifacts` level prunes each attempt directory at the end of a run (after t
 | `full` | everything: `request.json`, `stdout.log`, `stderr.log`, `events.jsonl`, `output-schema.json`, `result.json`. |
 
 `minimal` makes remote post-mortem debugging harder (no stdout/stderr from failed runs); use it only on well-understood, frequently-run pipelines. Prompt-audit is **independent** of this key (governed by [`prompt_audit`](#prompt_audit)); `rendered-prompt.md` and task-level artifacts (`plan.md`, `summary.md`, `current.diff`, `review/`, `checks/`) are out of scope and always written. Reclaim disk from accumulated task directories with [`worc logs clean`](operations.md).
+
+## `memory`
+
+Optional block (`schema_version` **24**) configuring the persistent, repo-scoped [memory subsystem](backlog/memory/index.md). Omit the whole block (or set `enabled: false`) for today's behavior exactly: no store is written, no candidate delta is produced, memory packets are empty, `worc memory` is a no-op, and no background cleanup runs. A fresh `worc install` ships `enabled: true`.
+
+```yaml
+memory:
+  enabled: true
+  short_term_ttl_days: 30
+  packet_max_lines: 120
+  packet_max_long_term: 3
+  packet_max_entity: 5
+  packet_max_episodic: 3
+  promote_min_tasks: 2
+  promote_window_days: 60
+  cleanup_min_interval_s: 300
+  cleanup_max_scanned: 200
+  cleanup_max_edits: 50
+  cleanup_max_wall_clock_s: 5.0
+  cleanup_promotions_per_pass: 0
+```
+
+| Field | Type | Default | Meaning |
+| --- | --- | --: | --- |
+| `enabled` | bool | `false` | Master switch. Absent block or `false` = no memory behavior at all (today's behavior). A fresh `worc install` ships `true`. |
+| `short_term_ttl_days` | int | `30` | Episodic entries expire after this many days; long-term has no TTL. |
+| `packet_max_lines` | int | `120` | Hard line backstop for one per-node memory brief. |
+| `packet_max_long_term` | int | `3` | Max long-term lessons in one retrieval packet. |
+| `packet_max_entity` | int | `5` | Max entity cards in one packet. |
+| `packet_max_episodic` | int | `3` | Max recent-episode notes in one packet. |
+| `promote_min_tasks` | int | `2` | A lesson must have recurred in ≥ this many tasks ... |
+| `promote_window_days` | int | `60` | ... within this many days to be eligible for long-term promotion. |
+| `cleanup_min_interval_s` | int | `300` | Minimum seconds between background-cleanup passes. |
+| `cleanup_max_scanned` | int | `200` | Max records examined per cleanup pass. |
+| `cleanup_max_edits` | int | `50` | Max records changed per cleanup pass. |
+| `cleanup_max_wall_clock_s` | float | `5.0` | Per-pass wall-clock ceiling, in seconds. |
+| `cleanup_promotions_per_pass` | int | `0` | Promotions a cleanup pass may make; `0` = cleanup never creates a long-term lesson (it only demotes / expires / quarantines / merges). |
+
+The subsystem is built phase by phase ([plan](backlog/memory/plan/index.md)). When enabled, the **write path** is active: memory is written once per task at finalization — the supervisor proposes a candidate delta on its existing summary turn (zero extra LLM calls), and the deterministic `MemoryService` redacts, validates, assigns trust, merges, and promotes-or-quarantines it; a terminal failure writes a deterministic short-term record (never long-term). The **read path** is also active: before a node runs, a deterministic, model-free `PacketBuilder` assembles a small per-node retrieval packet (precision-first filter + ranking, within the `packet_max_*` caps) and writes it under the gitignored `logs/<task-id>/memory/<node>.md`; the node prompt receives only that packet's path via the `{memory_path}` variable, never the store root. The packet is **node-driven**: it is built for any node whose role prompt references `{memory_path}` (the packaged `planning` / `implementation` / `review` / `fixing` prompts do by default, and a custom node opts in with no code change), and a node with no relevant memory gets no packet (the variable renders empty). The **curation path** is also active: a bounded, model-free `CleanupJob` runs in the `watch` daemon's idle gap (only when no task is active, rate-limited by `cleanup_min_interval_s`, within the `cleanup_max_*` budget) and expires episodes past their TTL, remaps moved entity files (same basename) or quarantines stale ones, and merges duplicate lessons — it **never** creates a long-term lesson and **never** edits code/docs (it snapshots first, so a bad pass is reversible). Operators inspect and repair the store with [`worc memory`](operations.md#managing-the-memory-store) (`show` / `validate` / `compact` / `restore`). The canonical store lives under the gitignored `<repo>/.worc/memory/` home and is never committed.
 
 ## `prompt_audit`
 

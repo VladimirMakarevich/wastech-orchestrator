@@ -26,6 +26,7 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NodeRunStorePort,
     NodeServices,
     NotifierPort,
+    PacketBuilderPort,
     RegisterArtifact,
     RouterPort,
     RunProcess,
@@ -60,6 +61,7 @@ def build_node_services(
     process_env: Mapping[str, str] | None = None,
     scan_timeout_s: int = 600,
     deletion_approval_exempt_paths: tuple[str, ...] = (),
+    packet_builder: PacketBuilderPort | None = None,
 ) -> NodeServices:
     """Assemble the unit-shared :class:`NodeServices` (collaborators + the routing map).
 
@@ -90,6 +92,7 @@ def build_node_services(
         process_env=dict(process_env or {}),
         scan_timeout_s=scan_timeout_s,
         deletion_approval_exempt_paths=deletion_approval_exempt_paths,
+        packet_builder=packet_builder,
     )
 
 
@@ -114,6 +117,7 @@ def build_node_inputs(
     """
     return NodeInputs(
         flow_dir=flow_dir,
+        task_type=p.task.task_type,
         task_path=p.task_file,
         plan_path=p.plan_path,
         diff_path=p.diff_path,

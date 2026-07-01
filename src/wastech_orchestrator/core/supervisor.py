@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -35,6 +36,7 @@ from wastech_orchestrator.config.schema import SupervisorConfig
 from wastech_orchestrator.core.flow.nodes.base import RegisterArtifact, RouterPort
 from wastech_orchestrator.core.flow.prompt import RoleFileError, render_role_prompt
 from wastech_orchestrator.core.skills import SkillInventory
+from wastech_orchestrator.memory.delta import DELTA_OUTPUT_SCHEMA, CandidateDelta, parse_delta
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.providers.base import AgentRunRequest, AgentRunResult, ProviderId
 from wastech_orchestrator.routing.router import ResolvedRoute
@@ -81,6 +83,29 @@ _SKILL_MAP_SCHEMA: dict[str, Any] = {
     },
     "required": ["assignments"],
 }
+
+
+# The finalize turn's structured schema when memory is enabled: the prose summary AND the candidate
+# memory delta, emitted on the SAME turn (no extra LLM call — AC-W1). When memory is disabled the
+# finalize turn stays free-text (today's behavior exactly — AC-S4).
+_FINALIZE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "summary": {"type": "string", "minLength": 1},
+        "memory_delta": DELTA_OUTPUT_SCHEMA,
+    },
+    "required": ["summary"],
+}
+
+
+@dataclass(frozen=True)
+class FinalizeResult:
+    """What ``finalize`` produced: the ``summary.md`` path (or ``None``) and the optional candidate
+    memory delta (present only when memory is enabled and the turn yielded a parseable one)."""
+
+    summary_path: Path | None
+    candidate_delta: CandidateDelta | None = None
 
 
 def _parse_skill_map(structured: Mapping[str, Any] | None) -> dict[str, tuple[str, ...]]:
@@ -187,33 +212,59 @@ class Supervisor:
 
     # -- whole-task finalize ---------------------------------------------------
 
-    def finalize(self, *, task_id: str, task_title: str) -> Path | None:
+    def finalize(
+        self, *, task_id: str, task_title: str, emit_delta: bool = False
+    ) -> FinalizeResult:
         """Synthesize the whole-task summary (once, at task close) and record ``supervisor_final``.
 
         Writes the working ``summary.{md,json}`` under the task artifact dir (the ``summary.md`` is
-        the PR body). Best-effort: when the synthesis LLM call cannot run, no ``summary.md`` is
-        written and ``None`` is returned, so the orchestrator's deterministic minimal-summary
-        fallback applies (summary is *always* written, by one path or the other). ``summary.json``
-        (local-only metadata) is always written. Returns the ``summary.md`` path, or ``None``.
+        the PR body). When ``emit_delta`` (memory enabled) the SAME finalize turn also yields a
+        structured ``candidate_memory_delta`` — zero additional LLM calls (AC-W1); when disabled the
+        turn is free-text, exactly today's behavior (AC-S4). Best-effort: a turn that cannot run
+        yields no ``summary.md`` (the orchestrator's deterministic minimal summary then applies) and
+        a ``None`` delta. ``summary.json`` is always written. Returns the summary path + the delta.
         """
         # ``node_run_id=0`` is the once-per-task finalize sentinel; per-step observations use the
         # observed step's id, so each supervisor turn writes a distinct artifact dir (no collision).
-        summary_text = self._run(task_id, self._finalize_prompt(task_id, task_title), node_run_id=0)
+        summary_text, delta = self._finalize_turn(task_id, task_title, emit_delta)
         self._record(
             task_id,
             kind="supervisor_final",
             source_node_run_id=None,
             subtask_order=None,
-            payload={"summary_written": summary_text is not None},
+            payload={
+                "summary_written": summary_text is not None,
+                "memory_delta": delta is not None,
+            },
         )
         task_dir = Path(task_artifact_dir(self._artifacts_root, task_id))
         self._write_summary_json(task_dir, task_id, task_title, summary_text)
         if not summary_text or not summary_text.strip():
-            return None  # orchestrator's deterministic minimal summary writes summary.md
+            return FinalizeResult(summary_path=None, candidate_delta=delta)
         md_path = task_dir / "summary.md"
         md_path.write_text(summary_text.rstrip("\n") + "\n", encoding="utf-8")
         self._register(task_id, "summary_md", str(md_path))
-        return md_path
+        return FinalizeResult(summary_path=md_path, candidate_delta=delta)
+
+    def _finalize_turn(
+        self, task_id: str, task_title: str, emit_delta: bool
+    ) -> tuple[str | None, CandidateDelta | None]:
+        """Run the single finalize turn. Free-text when ``emit_delta`` is off (today's behavior);
+        structured ``{summary, memory_delta}`` when on, so summary + delta ride one turn (AC-W1)."""
+        if not emit_delta:
+            text = self._run(task_id, self._finalize_prompt(task_id, task_title), node_run_id=0)
+            return text, None
+        result = self._run_result(
+            task_id,
+            self._finalize_prompt(task_id, task_title, with_delta=True),
+            node_run_id=0,
+            output_schema=_FINALIZE_SCHEMA,
+        )
+        if result is None or result.structured_output is None:
+            return None, None
+        summary = result.structured_output.get("summary")
+        summary_text = summary if isinstance(summary, str) and summary.strip() else None
+        return summary_text, parse_delta(result.structured_output.get("memory_delta"))
 
     # -- upfront skill-map proposal --------------------------------------------
 
@@ -397,14 +448,27 @@ class Supervisor:
             + f"### Task\n{task_spec_text}\n"
         )
 
-    def _finalize_prompt(self, task_id: str, task_title: str) -> str:
-        return (
+    def _finalize_prompt(self, task_id: str, task_title: str, *, with_delta: bool = False) -> str:
+        prompt = (
             self._base_prompt(task_id)
             + "\n\n## Final synthesis\n"
             + f"Synthesize a plain-language summary of the whole task ({task_title}): what was "
             + "done, how it works, how it integrates, and why. List any advisory caveats / "
             + "follow-ups you noted across the steps in a final section. Do not edit code.\n"
         )
+        if with_delta:
+            prompt += (
+                "\n## Candidate memory delta\n"
+                "Also propose what is worth REMEMBERING for future tasks on this repo, as the "
+                "structured `memory_delta`: durable `lessons` (stable facts/commands/conventions, "
+                "fragile areas, recurring reviewer expectations — each with `kind`, `subject`, "
+                "`statement`, and `evidence` pointers to repo files/commits/checks), recurring "
+                "`failures` (signature + remedy), and important `entities` (files/modules with "
+                "their paths). Propose only what repeats, stays true, or saves rediscovery — never "
+                "secrets, raw diffs, or one-off details; every lesson needs evidence. Leave a list "
+                "empty when nothing qualifies.\n"
+            )
+        return prompt
 
     def _base_prompt(self, task_id: str) -> str:
         try:
