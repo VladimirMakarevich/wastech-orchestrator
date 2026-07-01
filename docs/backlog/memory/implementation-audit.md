@@ -1,6 +1,6 @@
 # V1 implementation audit
 
-Status: **findings remediated — F1–F4 + F6 resolved, F5 partial** Date: 2026-07-01 Owner: Vladimir Makarevich — [task hub](index.md)
+Status: **findings remediated — F1–F4 + F6 resolved, F5 partial (AC-X now verified on real Windows; only AC-SF5 remains)** Date: 2026-07-01 Owner: Vladimir Makarevich — [task hub](index.md)
 
 A full review of the shipped V1 memory subsystem against its own contract — every functional/non-functional requirement, constraint, acceptance criterion, resolved question, and the design and ADR — cross-referenced against the implementation (`src/wastech_orchestrator/memory/` plus the supervisor / orchestrator / config / prompts / CLI seams) and the test suite. This document records _what was found_; it does not change behavior. It complements [definition-of-done.md](definition-of-done.md) (the merge gate, which holds) by capturing the residual gaps the gate does not catch.
 
@@ -10,7 +10,7 @@ A full review of the shipped V1 memory subsystem against its own contract — ev
 
 The implementation is **faithful and high-quality**. The architecture matches [adr.md](adr.md) (D1–D8), the safety properties are real and adversarially tested, and the gates pass: **137 memory tests green, `ruff check` clean, `mypy src/wastech_orchestrator/memory` clean** (verified 2026-07-01). The team was disciplined about recording V1 scope-cuts (`follow_ups.md` rows 58–61), so most of what first looks "missing" is deliberately deferred and tracked.
 
-The findings are now remediated (2026-07-01): **F1** wired `DerivedIndex` write-time entity-path validation into `apply_delta`; **F2** added lesson existence reconciliation to `CleanupJob` (contradiction-detection stays an explicit V2 item); **F3** seeded runtime redaction with the known config/env secret literals; **F4** made `restore` prune snapshot-absent tier files; **F6** annotated the minor nits. **F5** is partial — AC-S3 and an AC-S4 disabled-vs-baseline run were backfilled; the Windows path round-trip (AC-X) and AC-SF5 ride the standing Windows-CI follow-up. Per-finding resolution notes are inline below.
+The findings are now remediated (2026-07-01): **F1** wired `DerivedIndex` write-time entity-path validation into `apply_delta`; **F2** added lesson existence reconciliation to `CleanupJob` (contradiction-detection stays an explicit V2 item); **F3** seeded runtime redaction with the known config/env secret literals; **F4** made `restore` prune snapshot-absent tier files; **F6** annotated the minor nits. **F5** is nearly closed — AC-S3, an AC-S4 disabled-vs-baseline run, and now the Windows path round-trip (AC-X) were all backfilled; the last was **verified on real Windows** (Windows 10 / Python 3.14.5, 2026-07-01) with no production fix required, so only AC-SF5 still rides the standing Windows-CI follow-up. Per-finding resolution notes are inline below.
 
 ## Conformance summary (what holds)
 
@@ -29,7 +29,7 @@ The findings are now remediated (2026-07-01): **F1** wired `DerivedIndex` write-
 | FR6 / NFR6 / AC-C2 / AC-C3 — bounded idle cleanup | ✅ | idle-gap + no-active-task gate + rate-limit + budget; never promotes / edits code; no network; no `os.kill`/`signal` |
 | AC-C1 — `worc memory show \| validate \| compact \| restore` + `--dry-run` | ✅ | read-only `show`/`validate`; mutating verbs gated on no active task; disabled → no-op |
 | NFR4 / AC-R2 / AC-R3 — caps + whole-record drop + determinism | ✅ | `packet._fit` / `_drop_lowest`; deterministic-build test |
-| NFR8 / AC-X1 — POSIX + `newline="\n"` + deterministic JSON | ✅\* | `as_posix()` throughout; `_io.py` fixes newline + `sort_keys` (\* Windows round-trip untested — see F5) |
+| NFR8 / AC-X1 — POSIX + `newline="\n"` + deterministic JSON | ✅ | `as_posix()` throughout; `_io.py` fixes newline + `sort_keys`; **verified on real Windows** (Windows 10 / Python 3.14.5, 2026-07-01) — the memory suite + the four drills run green and `tests/memory/test_memory_cross_platform.py` pins the round-trip (see F5) |
 | Q1 / Q3 / Q5 config defaults | ✅ | every integer matches the locked design |
 
 ## Findings
@@ -88,9 +88,9 @@ The original finding, for the record:
 
 **Recommendation.** Have the snapshot record the expected file _set_ (or have `restore` prune tier files absent from the snapshot), and extend the rollback drill to start from an empty-quarantine store. Low frequency, inert leftover, but a real fidelity hole.
 
-### F5 — ◑ PARTIAL (2026-07-01) — AC-S3 + AC-S4 backfilled; Windows / AC-SF5 ride the standing follow-up
+### F5 — ◑ PARTIAL (2026-07-01) — AC-S3 + AC-S4 + Windows AC-X backfilled; only AC-SF5 rides the standing follow-up
 
-**Resolution.** **AC-S3** now has a state-store guard (`test_state_store.py::test_no_memory_tables_in_state_db`) asserting the exact table set carries no memory-tier table — the subsystem's only `state.db` touch stays the reused `evaluations` marker. **AC-S4** now has a real disabled-vs-baseline pair (`test_orchestrator.py::{test_memory_disabled_run_writes_no_store,test_memory_enabled_run_writes_store}`): the same complete happy-path task writes **no** `.worc/memory` store when disabled and a short-term episode when enabled. Still deferred (consistent with the documented "Windows CI matrix is the standing follow-up"): **AC-X1/AC-X2** Windows path round-trip, and **AC-SF5** re-blocking a hand-edited low-trust _active_ record.
+**Resolution.** **AC-S3** now has a state-store guard (`test_state_store.py::test_no_memory_tables_in_state_db`) asserting the exact table set carries no memory-tier table — the subsystem's only `state.db` touch stays the reused `evaluations` marker. **AC-S4** now has a real disabled-vs-baseline pair (`test_orchestrator.py::{test_memory_disabled_run_writes_no_store,test_memory_enabled_run_writes_store}`): the same complete happy-path task writes **no** `.worc/memory` store when disabled and a short-term episode when enabled. **AC-X1/AC-X2 are now verified on real Windows** — the memory subsystem (which landed 2026-06-30..07-01, after the earlier 2026-06-26 Windows suite pass) was run for the first time on Windows 10 / Python 3.14.5 (2026-07-01): the memory suite (127 tests) + the four safety drills are green, and a dedicated `tests/memory/test_memory_cross_platform.py` (5 tests) pins the round-trip — a POSIX-stored path resolving against the native Windows filesystem; an end-to-end F1 entity card stored forward-slashed (verified path → `repo-observed`, missing path → quarantine); LF-not-CRLF, key-sorted deterministic tier bytes; `git ls-files` POSIX output over a real Windows git repo; and a win32-guarded backslash→`as_posix()` normalization. **No production fix was needed** — the `as_posix()` + `newline="\n"` invariants hold as written on real Windows; `ruff` and `mypy` are clean there too. AC-X2 (no `os.kill`/`signal`) re-confirmed by grep over `memory/`. Still deferred: **AC-SF5** — re-blocking a hand-edited low-trust _active_ record.
 
 The original finding, for the record:
 
@@ -120,7 +120,7 @@ None are behavioral bugs; they are confidence gaps in the test net for criteria 
 2. **F2 — done (existence half).** Added `CleanupJob._reconcile_lessons` (quarantine a lesson scoped to a vanished path, never delete) and recorded the contradiction-rot risk + the watch-queue trigger as an explicit V2 item in `follow_ups.md` 59(a).
 3. **F3 — done.** `_memory_service` passes known config/env secret literals as `extra_secrets` (`secret_env_values` + `read_denied_secrets`), via a shared harvesting helper the adapters reuse.
 4. **F4 — done.** `restore` prunes snapshot-absent canonical tier files; the rollback drill now starts from an empty-quarantine store.
-5. **F5 — partial.** Backfilled AC-S3 (no memory table in `state.db`) and an AC-S4 disabled-vs-baseline run; AC-X (Windows round-trip) and AC-SF5 ride the standing Windows-CI follow-up.
+5. **F5 — partial.** Backfilled AC-S3 (no memory table in `state.db`), an AC-S4 disabled-vs-baseline run, and the AC-X Windows round-trip — the last **verified on real Windows** (Windows 10 / Python 3.14.5, 2026-07-01: memory suite + drills green, `tests/memory/test_memory_cross_platform.py` added, no production fix needed); only AC-SF5 still rides the standing Windows-CI follow-up.
 6. **F6 — done.** Annotated `cleanup_promotions_per_pass` (documentation-only invariant), `symbol_exists` (intentionally unwired in V1), and `EpisodeRecord.stage_outcomes` (write-once); the wholesale entity merge stays the tracked row-61(c) scope cut.
 
 All changes are additive; none blocks the existing V1 merge gate. F1 and F2 — the two touching the subsystem's stated invariants (NFR2, anti-rot) — landed first, before the subsystem is exercised on a long-lived repo.
