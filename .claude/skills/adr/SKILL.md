@@ -86,6 +86,7 @@ Status: **proposed** (YYYY-MM-DD) Date: YYYY-MM-DD Owner: Vladimir Makarevich
 ```
 
 Rules for writing:
+
 - Status is always `**proposed**` unless the user explicitly says "accepted" or "locked".
 - Filename is a short kebab-case slug derived from the title (e.g. `operator-driven-merge.md`).
 - Prose is one paragraph per line, no manual mid-paragraph line breaks (Prettier `proseWrap: never`).

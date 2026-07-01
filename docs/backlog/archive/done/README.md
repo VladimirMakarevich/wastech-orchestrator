@@ -1,7 +1,6 @@
 # Completed backlog
 
-This folder contains backlog documents for product work that has already shipped or been superseded.
-The root [backlog README](../../README.md) now lists only open items.
+This folder contains backlog documents for product work that has already shipped or been superseded. The root [backlog README](../../README.md) now lists only open items.
 
 ## Completed items
 
@@ -22,4 +21,3 @@ The root [backlog README](../../README.md) now lists only open items.
 | [Telegram step-trace (live run progress)](telegram-step-trace.md) | implemented |
 | [Transient provider-failure recovery](transient-provider-failure-recovery.md) | implemented |
 | [Windows / Cross-Platform Support](windows-cross-platform-support.md) | implemented |
-

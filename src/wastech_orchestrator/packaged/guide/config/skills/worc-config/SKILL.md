@@ -18,20 +18,17 @@ Produce a project-specific config that:
 
 ## How to run
 
-1. Inspect the repo before asking questions.
-   Look for:
+1. Inspect the repo before asking questions. Look for:
    - an existing `.worc/config.yaml`;
    - `pyproject.toml`, `package.json`, `go.mod`, `Cargo.toml`, lockfiles, CI config;
    - the Git remote and the likely base branch.
-2. Ask only the missing essentials.
-   Usually:
+2. Ask only the missing essentials. Usually:
    - which provider(s) should be enabled now;
    - whether PR creation should stay on;
    - whether auto-merge is allowed here;
    - which checks are mandatory for safe delivery;
    - whether Telegram should stay disabled.
-3. Start from the existing `.worc/config.yaml` when present.
-   If there is no installed config yet, draft one in the packaged block order (`schema_version`, `orchestrator`, `repo`, `agents`, `security`, `validation`, `checks`, `git`, `telegram`, `skills`, `supervisor`, `prompt_audit`).
+3. Start from the existing `.worc/config.yaml` when present. If there is no installed config yet, draft one in the packaged block order (`schema_version`, `orchestrator`, `repo`, `agents`, `security`, `validation`, `checks`, `git`, `telegram`, `skills`, `supervisor`, `prompt_audit`).
 4. Keep the safe defaults unless the operator overrides them deliberately.
    - exactly one provider is `primary: true`;
    - `strict_isolation: true`;
