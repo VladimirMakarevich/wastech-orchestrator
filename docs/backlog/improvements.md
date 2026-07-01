@@ -1,6 +1,8 @@
 # Improvements
 
-Status: **5 of 8 implemented** (2, 4, 6, 7, 8 done; 1, 3, 5 open) Date: 2026-07-01 Owner: Vladimir Makarevich
+Status: **5 of 9 implemented** (2, 4, 6, 7, 8 done; 1, 3, 5, 9 open) Date: 2026-07-01 Owner: Vladimir Makarevich
+
+Items 1, 3, 5, and 9 share the prompt/supervisor authoring surface and are worked through together in one refinement ADR: [prompt-and-supervisor-authoring-contract.md](prompt-and-supervisor-authoring-contract.md).
 
 This file aggregates improvement ideas captured after real `worc` usage. The source intake list is [00-raw-topics.md](00-raw-topics.md). We process one item at a time: inspect the current implementation, define a bounded improvement task, record constraints and scope, then move to the next item.
 
@@ -16,10 +18,11 @@ This file aggregates improvement ideas captured after real `worc` usage. The sou
 | 6 | Rework delivered role/flow directory layout so each flow owns its prompt folder, including `implementation` | done |
 | 7 | Re-evaluate whether the repo-root `tasks/processing` folder is still needed | done |
 | 8 | Write a tutorial and best-practices guide for custom flows | done |
+| 9 | More flexible prompt-variable substitution: no unknown-var leaks, sanctioned optional-var pattern | candidate |
 
 ## 01. Supervisor finalization: technical debt and refactor signals
 
-Status: **candidate** Source: [00-raw-topics.md](00-raw-topics.md)
+Status: **candidate** Source: [00-raw-topics.md](00-raw-topics.md) Refined in: [prompt-and-supervisor-authoring-contract.md](prompt-and-supervisor-authoring-contract.md)
 
 ### Current state
 
@@ -143,7 +146,7 @@ Out of scope:
 
 ## 03. Flow-local supervisor/final-summary prompts with fallback
 
-Status: **candidate** Source: [00-raw-topics.md](00-raw-topics.md)
+Status: **candidate** Source: [00-raw-topics.md](00-raw-topics.md) Refined in: [prompt-and-supervisor-authoring-contract.md](prompt-and-supervisor-authoring-contract.md)
 
 ### Current state
 
@@ -234,7 +237,7 @@ Out of scope:
 
 ## 05. Canonical prompt-variable contract for role authors
 
-Status: **candidate** Source: [00-raw-topics.md](00-raw-topics.md)
+Status: **candidate** Source: [00-raw-topics.md](00-raw-topics.md) Refined in: [prompt-and-supervisor-authoring-contract.md](prompt-and-supervisor-authoring-contract.md)
 
 ### Current state
 
@@ -405,3 +408,42 @@ Out of scope:
 - A new operator can create a minimal custom flow from the docs without reading the code first.
 - The guide explains how to register the flow and invoke it via `task_type`.
 - The best-practices section covers security ceilings, `role_file` discipline, prompt variables, validation, and debugging.
+
+## 09. More flexible prompt-variable substitution
+
+Status: **candidate** Source: real `worc` usage Refined in: [prompt-and-supervisor-authoring-contract.md](prompt-and-supervisor-authoring-contract.md)
+
+### Current state
+
+- The Core populates the full allowlisted variable set for every node in `_prompt_variables`; operators do not "declare" variables in the flow — they only choose which to reference in a `role_file`.
+- `render_prompt` has three behaviors: an allowlisted `{name}` with a value is substituted; an allowlisted `{name}` that is empty/`None` renders as the empty string; an unknown `{name}` (a typo, or a variable that does not exist) is left verbatim so code/JSON braces in a template survive.
+- A conditional block `{?name}...{/name}` already keeps its body only when the value is present — the existing drop-if-empty mechanism.
+
+### Problem
+
+An unknown or misspelled variable ships to the agent as literal placeholder text, and an inline empty variable leaves dangling prose (`See the plan at .`). The `{?name}...{/name}` pattern that would prevent the second case is undiscoverable, so authors do not use it.
+
+### Decision
+
+Keep `render_prompt` and `ALLOWED_PROMPT_VARS` unchanged (the fixed security core). Make `{?name}...{/name}` the sanctioned pattern for optional variables and document it, and add a preflight/validate-time lint that warns (never fatal) when a role file references a `{name}` outside the allowlist. An auto-append "context references" model was considered and deferred. Full analysis in the refinement ADR.
+
+### Scope
+
+In scope:
+
+- validate-time lint for unknown `{name}` tokens in role files;
+- documenting `{?name}...{/name}` and adopting it in packaged prompts;
+- the lint doubling as the docs↔`ALLOWED_PROMPT_VARS` anti-drift guard shared with task 05.
+
+Out of scope:
+
+- widening `ALLOWED_PROMPT_VARS`;
+- an auto-append reference model;
+- injecting content (non-path) variables;
+- making the lint a fatal error.
+
+### Acceptance criteria
+
+- A role file referencing a variable outside the allowlist produces a preflight warning that names the file and token.
+- The lint is a warning, not a failure: a verbatim `{name}` render (code/JSON braces) still passes.
+- The optional-variable pattern `{?name}...{/name}` is documented where role authors will see it, and the packaged prompts use it for optional variables.
