@@ -154,6 +154,47 @@ def test_scoped_staging_excludes_artifact_dirs(
         assert not any(f.startswith(f"{d}/") for f in committed)
 
 
+def test_commit_code_root_file_when_tasks_dir_gitignored(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    """Regression (F15): a root-level code change must still commit when the task lifecycle dir is
+    gitignored (what ``worc install`` seeds). The ``:(exclude)tasks/`` guard makes ``git add`` abort
+    with "paths ignored: tasks" (exit 1) beside a repo-root path, so it must be dropped when the dir
+    is ignored — otherwise no root-level change (package.json / tsconfig.json / …) can be committed.
+    """
+    _task(store)
+    (git_repo.clone / ".gitignore").write_text("tasks/\n.worc/\n", encoding="utf-8")
+    git_run(["add", ".gitignore"], git_repo.clone)
+    git_run(["commit", "-m", "chore: gitignore tasks/"], git_repo.clone)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    # Mirror finalize: the task file is moved into the (ignored) lifecycle dir before the commit.
+    (git_repo.clone / "tasks" / "done").mkdir(parents=True)
+    (git_repo.clone / "tasks" / "done" / "task-001.md").write_text("moved\n", encoding="utf-8")
+    (git_repo.clone / "tsconfig.json").write_text("{}\n", encoding="utf-8")  # a repo-root change
+
+    sha = gm.commit_code("task-001", "feat: root-level change")
+    assert sha is not None
+    committed = git_run(["show", "--name-only", "--format=", "HEAD"], git_repo.clone).split()
+    assert "tsconfig.json" in committed
+    assert not any(f.startswith("tasks/") for f in committed)
+
+
+def test_staged_pathspec_conditional_on_tasks_dir_ignore(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    """``staged_pathspec`` keeps the ``:(exclude)`` guard when the lifecycle dir is *tracked* but
+    drops it when the dir is *gitignored* (the guard is redundant there and breaks ``git add``)."""
+    # Tracked (the fixture ships no .gitignore): the exclude guard is present.
+    gm_tracked = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    assert gm_tracked.staged_pathspec(["a.py"]) == ["a.py", ":(exclude)tasks/"]
+
+    # Gitignored: the guard is dropped (fresh manager so the ignore-state cache reflects the file).
+    (git_repo.clone / ".gitignore").write_text("tasks/\n", encoding="utf-8")
+    gm_ignored = _manager(git_repo, store, tmp_path / "art2", make_git_config)
+    assert gm_ignored.staged_pathspec(["a.py"]) == ["a.py"]
+
+
 def test_changed_code_paths_filters_artifacts(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:

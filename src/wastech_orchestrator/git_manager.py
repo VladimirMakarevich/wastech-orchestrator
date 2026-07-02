@@ -191,6 +191,8 @@ class GitManager:
         self._gh_runner = gh_runner
         self._heartbeat_seconds = heartbeat_seconds
         self._active: _ActiveTask | None = None
+        # Whether the task lifecycle dir is gitignored (cached; drives the code-commit pathspec).
+        self._tasks_dir_ignored_cache: bool | None = None
 
     # --- low-level command execution ------------------------------------------------------
 
@@ -619,13 +621,34 @@ class GitManager:
         return any(normalized == d or normalized.startswith(f"{d}/") for d in self._excluded_dirs)
 
     def staged_pathspec(self, paths: Sequence[str]) -> list[str]:
-        """Build the scoped ``git add`` pathspec: code paths plus a belt-and-braces guard.
+        """Build the scoped ``git add`` pathspec: the code paths, plus a ``:(exclude)`` guard for
+        the task lifecycle dir **only when that dir is tracked**.
 
-        ``.worc/`` is gitignored, so ``git add`` skips it without a guard; the task lifecycle dir
-        (``paths.tasks_dir``) is tracked (it rides the separate audit commit), so it is guarded with
-        ``:(exclude)`` to ensure it never slips into the *code* commit.
+        ``.worc/`` is gitignored, so ``git add`` skips it without a guard. The task lifecycle dir
+        (``paths.tasks_dir``) rides the separate audit commit; when it is *tracked* it is guarded
+        with ``:(exclude)`` so it never slips into the *code* commit. When it is *gitignored* (what
+        ``worc install`` seeds by default), that guard is redundant — git already skips it — **and**
+        it breaks ``git add`` for repo-root paths: git aborts with "The following paths are ignored
+        … use -f" (exit 1) whenever a positive pathspec sits beside the ignored dir at the root, so
+        a root-level code change (``package.json``/``tsconfig.json``/…) could not be committed at
+        all. So the guard is dropped when the dir is ignored (the explicit ``changed_code_paths``
+        never include an ignored path anyway).
         """
+        if self._tasks_dir_ignored():
+            return list(paths)
         return [*paths, f":(exclude){self._tasks_dir}/"]
+
+    def _tasks_dir_ignored(self) -> bool:
+        """Whether the task lifecycle dir is gitignored (cached ``git check-ignore``).
+
+        Probes with a trailing slash (``tasks/``) so a directory-only ignore pattern matches whether
+        or not the dir currently exists on disk (a bare ``tasks`` probe only matches an existing
+        directory).
+        """
+        if self._tasks_dir_ignored_cache is None:
+            probe = f"{self._tasks_dir}/"
+            self._tasks_dir_ignored_cache = self._git("check-ignore", "-q", probe).ok
+        return self._tasks_dir_ignored_cache
 
     def commit_code(self, task_id: str, message: str) -> str | None:
         """Stage the agent's code paths and make one commit. Idempotent. Returns the commit SHA.
