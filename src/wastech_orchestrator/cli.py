@@ -1936,6 +1936,12 @@ def run_preflight(config: OrchestratorConfig) -> tuple[bool, list[str]]:
         else:
             ok = False
             lines.append(f"flow {name}: FAIL — {error.splitlines()[0]}")
+    # Non-fatal anti-drift lint: role prompts referencing an unknown ``{name}`` (a typo, or a
+    # variable outside the flow-derived valid-set) render verbatim to the agent. Warn, never fail —
+    # a verbatim render is the safe-renderer fallback (code/JSON braces must pass through).
+    for name, messages in flow_registry.lint_all():
+        for message in messages:
+            lines.append(f"flow {name}: WARN — {message} (renders verbatim to the agent)")
 
     if config.git.create_pull_request:
         gh_ok, gh_line = preflight_gh()

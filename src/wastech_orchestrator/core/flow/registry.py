@@ -30,6 +30,7 @@ from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.core.flow.snapshot import FlowLoadError, FlowSnapshot, load_flow
 from wastech_orchestrator.core.flow.validator import (
     FlowValidationError,
+    lint_prompt_variables,
     validate_flow,
     validate_flow_against_config,
 )
@@ -107,6 +108,31 @@ class FlowRegistry:
                 results.append((name, None))
             except (FlowResolutionError, FlowLoadError, FlowValidationError) as exc:
                 results.append((name, str(exc)))
+        return results
+
+    def lint_all(self) -> list[tuple[str, list[str]]]:
+        """Lint every resolvable flow's role prompts for unknown ``{name}`` tokens (non-fatal).
+
+        Returns ``(name, messages)`` per flow that produced at least one warning; a clean flow (or
+        one that fails to resolve — that is :meth:`validate_all`'s fatal job, not this) is omitted.
+        Each message names the role file and the token that would render verbatim. Does not raise —
+        the preflight surfaces the warnings without failing the gate (verbatim render is the safe
+        fallback the renderer guarantees).
+        """
+        results: list[tuple[str, list[str]]] = []
+        for name in self._all_flow_names():
+            try:
+                snap = self.resolve(name)
+            except (FlowResolutionError, FlowLoadError, FlowValidationError):
+                continue  # a broken flow is reported (fatally) by validate_all, not linted here
+            warnings = lint_prompt_variables(snap)
+            if warnings:
+                results.append(
+                    (
+                        name,
+                        [f"{w.role_file} references unknown {{{w.token}}}" for w in warnings],
+                    )
+                )
         return results
 
     def _find(self, task_type: str) -> Path | None:

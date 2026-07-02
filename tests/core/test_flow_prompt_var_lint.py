@@ -1,0 +1,95 @@
+"""Unit tests for the non-fatal prompt-variable anti-drift lint (prompt-authoring contract).
+
+The lint scans each flow's role files for ``{name}`` / ``{?name}`` tokens outside the flow-derived
+valid-set (core allowlist ∪ node-output names) and reports each as rendering verbatim. It is a
+warning, never fatal — a verbatim render is the safe-renderer fallback (code/JSON braces must pass
+through). The valid-set is a *function of the flow graph*, so it grows as nodes are added (the seam
+the node-output ADR extends without reworking the lint).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from wastech_orchestrator.core.flow.prompt_vars import valid_prompt_vars
+from wastech_orchestrator.core.flow.snapshot import load_flow
+from wastech_orchestrator.core.flow.validator import lint_prompt_variables
+
+PACKAGED = (
+    Path(__file__).parent.parent.parent / "src" / "wastech_orchestrator" / "packaged" / "flows"
+)
+
+_FLOW = """\
+flow:
+  name: t
+  task_type: t
+  permission_ceiling: workspace-write
+  output_policy: code_change
+  publishing: pull_request
+  nodes:
+    - id: implement
+      kind: agent
+      role_file: t/implement.md
+    - id: scan
+      kind: agent
+      role_file: t/scan.md
+  edges:
+    - { from: implement, to: scan }
+  budgets: {}
+"""
+
+
+def _load(tmp_path: Path, implement_body: str, scan_body: str = "read {repo}"):
+    flow_dir = tmp_path / "flows"
+    (flow_dir / "t").mkdir(parents=True)
+    (flow_dir / "t.yaml").write_text(_FLOW, encoding="utf-8")
+    (flow_dir / "t" / "implement.md").write_text(implement_body, encoding="utf-8")
+    (flow_dir / "t" / "scan.md").write_text(scan_body, encoding="utf-8")
+    return load_flow(flow_dir / "t.yaml")
+
+
+def test_lint_flags_typo_variable(tmp_path: Path) -> None:
+    # A typo'd variable is outside the valid-set → warned (file + token), never raised.
+    warnings = lint_prompt_variables(_load(tmp_path, "Base on the plan at {plna_path}."))
+    assert [(w.role_file, w.token) for w in warnings] == [("t/implement.md", "plna_path")]
+
+
+def test_lint_passes_known_vars_and_conditional_blocks(tmp_path: Path) -> None:
+    # Core allowlisted vars, inside a {?...} block or bare, produce no warning.
+    body = "task {task_id} {?memory_path}see {memory_path}{/memory_path} at {repo}"
+    assert lint_prompt_variables(_load(tmp_path, body)) == []
+
+
+def test_lint_valid_set_is_flow_derived(tmp_path: Path) -> None:
+    # The valid-set is a function of the flow graph: an agent node's own {<id>_path} name is
+    # reachable, so referencing a sibling node by id is NOT flagged, while an id that names no node
+    # is. This is the seam the node-output channel extends with zero lint rework.
+    warnings = lint_prompt_variables(_load(tmp_path, "use {scan_path} but not {ghost_path}"))
+    assert [(w.role_file, w.token) for w in warnings] == [("t/implement.md", "ghost_path")]
+
+
+def test_valid_prompt_vars_grows_with_nodes(tmp_path: Path) -> None:
+    snap = _load(tmp_path, "x")
+    allowed = valid_prompt_vars(snap)
+    assert {"implement_path", "scan_path"} <= allowed  # node-derived names present
+    assert "task_id" in allowed and "memory_path" in allowed  # core allowlist retained
+
+
+def test_lint_no_source_path_returns_empty() -> None:
+    # A unit-constructed snapshot (no on-disk role files) has nothing to scan.
+    snap = load_flow(PACKAGED / "implementation.yaml")
+    stripped = type(snap)(
+        doc=snap.doc,
+        nodes_by_id=snap.nodes_by_id,
+        adjacency=snap.adjacency,
+        flow_fingerprint=snap.flow_fingerprint,
+        source_path=None,
+    )
+    assert lint_prompt_variables(stripped) == []
+
+
+def test_packaged_flows_lint_clean() -> None:
+    # The packaged prompts are the steady state: every token they use is in the valid-set, so the
+    # lint is silent on them (its value is catching operator typos, not packaged drift).
+    for yaml in sorted(PACKAGED.glob("*.yaml")):
+        assert lint_prompt_variables(load_flow(yaml)) == [], yaml.name

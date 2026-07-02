@@ -52,8 +52,11 @@ from wastech_orchestrator.core.flow.contracts import (
     resolve_network_access,
 )
 from wastech_orchestrator.core.flow.engine import _REWORK_OUTCOMES, skip_outcome
+from wastech_orchestrator.core.flow.prompt import RoleFileError, read_role_file
+from wastech_orchestrator.core.flow.prompt_vars import valid_prompt_vars
 from wastech_orchestrator.core.flow.schema import AgentNode, EvaluatorNode
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
+from wastech_orchestrator.core.prompts import referenced_variables
 from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.providers.capabilities import (
     all_reasoning_levels,
@@ -514,6 +517,58 @@ def _check_config_consistency(snap: FlowSnapshot, config: OrchestratorConfig) ->
                 )
 
     return errs
+
+
+# -- prompt-variable anti-drift lint (non-fatal) ------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class PromptVarWarning:
+    """A role file references a ``{name}`` outside the flow's valid prompt-variable set.
+
+    Advisory only — the renderer leaves an unknown ``{name}`` verbatim by design (so code/JSON
+    braces survive), so this is never fatal. It surfaces the one real leak: a typo'd or invented
+    variable that silently ships to the agent as literal placeholder text instead of substituted.
+    """
+
+    role_file: str
+    token: str
+
+
+def lint_prompt_variables(snapshot: FlowSnapshot) -> list[PromptVarWarning]:
+    """Scan every node role file for ``{name}`` / ``{?name}`` tokens outside the flow's valid-set.
+
+    The valid-set is **flow-derived** (:func:`~.prompt_vars.valid_prompt_vars`: core allowlist ∪
+    node-output names), so an author who references a real core variable or an in-flow node's
+    ``{<id>_path}`` is never flagged, while a typo (``{plna_path}``) or an unknown name — including
+    a ``{X_path}`` that names no node — is reported (file + token) as rendering verbatim.
+
+    Deliberately **not fatal**: a verbatim render is the safe-renderer fallback (literal braces must
+    pass through), so a warning is the correct signal, not an aborted run. Best-effort on IO: a role
+    file that cannot be read here is skipped (a genuinely missing/traversing file is caught by the
+    fatal path checks and surfaced when the node runs). Returns an empty list when the snapshot has
+    no ``source_path`` (a unit-constructed snapshot with no on-disk role files to scan).
+    """
+    if snapshot.source_path is None:
+        return []
+    flow_dir = snapshot.source_path.parent
+    allowed = valid_prompt_vars(snapshot)
+    seen: set[tuple[str, str]] = set()
+    warnings: list[PromptVarWarning] = []
+    for node in snapshot.doc.nodes:
+        role_file = getattr(node, "role_file", None)
+        if not isinstance(role_file, str):
+            continue  # checks / hitl / publish nodes carry no prompt template
+        try:
+            template = read_role_file(flow_dir, role_file)
+        except RoleFileError:
+            continue  # unreadable/traversing — surfaced by the fatal path check / at run time
+        for token in sorted(referenced_variables(template)):
+            if token in allowed or (role_file, token) in seen:
+                continue
+            seen.add((role_file, token))
+            warnings.append(PromptVarWarning(role_file=role_file, token=token))
+    return warnings
 
 
 def global_primary(config: OrchestratorConfig) -> ProviderId | None:

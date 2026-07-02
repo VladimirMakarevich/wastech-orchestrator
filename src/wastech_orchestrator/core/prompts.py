@@ -74,3 +74,17 @@ def render_prompt(template: str, variables: dict[str, object | None]) -> str:
         return "" if value is None else str(value)
 
     return _VAR_RE.sub(_replace, _BLOCK_RE.sub(_resolve_block, template))
+
+
+def referenced_variables(template: str) -> set[str]:
+    """The variable names *template* references via ``{name}`` or a ``{?name}...{/name}`` block.
+
+    Uses the same token shape :func:`render_prompt` substitutes, so it is the single source of truth
+    for "which names does this prompt actually use". Names outside the render allowlist are still
+    returned — the caller (the flow validator's anti-drift lint) decides which are unknown; this
+    function only extracts, it does not judge. Literal code/JSON braces that do not match the token
+    shape are ignored, exactly as the renderer leaves them verbatim.
+    """
+    names = set(_VAR_RE.findall(template))
+    names.update(match.group(1) for match in _BLOCK_RE.finditer(template))
+    return names
