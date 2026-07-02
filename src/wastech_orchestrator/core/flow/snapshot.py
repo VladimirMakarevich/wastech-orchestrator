@@ -38,6 +38,7 @@ from wastech_orchestrator.core.flow.schema import (
     HitlNode,
     HitlSettings,
     PublishNode,
+    SupervisorBlock,
     WhenPredicate,
 )
 from wastech_orchestrator.providers.base import ProviderId
@@ -67,6 +68,7 @@ _FLOW_FIELDS = frozenset(
         "edges",
         "budgets",
         "decomposition",
+        "supervisor",
     }
 )
 _AGENT_FIELDS = frozenset(
@@ -119,6 +121,13 @@ _DECOMPOSITION_FIELDS = frozenset(
         "proposed_by",
         "sub_flow",
         "shared_budget",
+    }
+)
+_SUPERVISOR_FIELDS = frozenset(
+    {
+        "role_file",
+        "finalize_role_file",
+        "emit_follow_ups",
     }
 )
 _DEFAULTS_FIELDS = frozenset({"evaluator"})
@@ -460,6 +469,19 @@ def _parse_decomposition(raw: Any) -> DecompositionConfig | None:
     )
 
 
+def _parse_supervisor(raw: Any) -> SupervisorBlock | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise FlowLoadError(f"'supervisor' must be a mapping, got {type(raw).__name__}")
+    _reject_unknown(raw, _SUPERVISOR_FIELDS, "supervisor")
+    return SupervisorBlock(
+        role_file=raw.get("role_file") or None,
+        finalize_role_file=raw.get("finalize_role_file") or None,
+        emit_follow_ups=bool(raw.get("emit_follow_ups", False)),
+    )
+
+
 def _parse_defaults(raw: Any) -> FlowDefaults:
     if raw is None:
         return FlowDefaults()
@@ -524,4 +546,5 @@ def _parse_flow_doc(raw: dict[str, Any], source: str) -> FlowDoc:
         budgets=MappingProxyType({str(k): int(v) for k, v in budgets_raw.items()}),
         network_policy=network_policy,
         decomposition=_parse_decomposition(raw.get("decomposition")),
+        supervisor=_parse_supervisor(raw.get("supervisor")),
     )

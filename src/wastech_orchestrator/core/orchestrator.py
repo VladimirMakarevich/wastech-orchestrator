@@ -1807,6 +1807,9 @@ class Orchestrator:
             repo_dir=self._config.repo.local_path,
             artifacts_root=str(self._artifacts_root),
             flow_dir=snapshot.source_path.parent,
+            # Flow-local supervisor prompts + the follow-ups opt-in (prompt-and-supervisor ADR);
+            # ``None`` when the flow declares no ``supervisor:`` block (global config + built-ins).
+            flow_supervisor=snapshot.doc.supervisor,
             register_artifact=self._register_artifact,
         )
 

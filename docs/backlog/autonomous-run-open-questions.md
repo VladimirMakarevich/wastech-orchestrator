@@ -39,3 +39,21 @@ Each entry: **Situation** (what was ambiguous/contradictory), **Decision** (what
 - **Situation:** the ADR requires `<node_id>.out.md` to pass "the same redaction the memory/handoff writes use". `structured_output` (a possible content source) is **not** adapter-redacted, unlike `final_message`.
 - **Decision:** `write_node_output` runs `redact_text(content, extra_secrets=…)`; the orchestrator passes `_memory_extra_secrets()` (secret-named env values + denied-read-file secrets — the exact set the memory write path uses), computed **once per run** and captured in the post-node closure rather than re-harvested per node.
 - **Impact / files:** `core/flow/postprocess.py`, `core/orchestrator.py`. Reversible.
+
+## [Block 3] Deleted the dead packaged `roles/summary.md`; kept `roles/supervisor.md` — 2026-07-02
+
+- **Situation:** the ADR flags `roles/summary.md` as "currently-dead" and asks to "revive it as a flow-owned finalize prompt file". Implementation-time check required (grep for a reader).
+- **Decision:** confirmed no Python reader (config default is `roles/supervisor.md`; no `finalize` global prompt exists) and no test references the _packaged_ copy (the parity fixture has its own separate `tests/core/flows/roles/summary.md`, untouched). So I **deleted** the packaged `roles/summary.md` and created the flow-owned finalize lens at `packaged/flows/implementation/summary.md`, plus the flow-owned observe lens `packaged/flows/implementation/supervisor.md`. Kept `roles/supervisor.md` — it is still the live global `config.supervisor.role_file` default (and the observe fallback for flows without a `supervisor:` block, e.g. deep_research / security_audit).
+- **Impact / files:** deleted `packaged/flows/roles/summary.md`; added `implementation/{supervisor,summary}.md`; set the `supervisor:` block in `implementation.yaml`. Reversible (restore from git). `install`/`upgrade-flows` seed whatever exists under `packaged/flows/`, so the deletion just stops seeding a dead file.
+
+## [Block 3] Finalize prompt = finalize lens + task + structured sections (AC-S4 preserved) — 2026-07-02
+
+- **Situation:** today's `_finalize_prompt` was `observe_lens + hardcoded "## Final synthesis" text`. The ADR makes finalize a separate flow-local lens (`finalize_role_file` → built-in). Restructuring changes the _wording_ of the finalize prompt.
+- **Decision:** `_finalize_prompt` now = the **finalize lens** (`finalize_role_file` → `_BUILTIN_FINALIZE`, self-contained) + a `## Task under review` line + the code-appended structured sections (`follow_ups`, `memory_delta`). The observe lens is no longer prepended to finalize (the warm session already carries the observations). AC-S4 holds by construction: when neither memory nor `emit_follow_ups` is on, the turn stays **free-text** (no `output_schema`), exactly as before — only the prompt text changed, not the turn's structure. `emit_follow_ups` is stored on the Supervisor from the flow block; memory's `emit_delta` stays a finalize() param (orthogonal, config-level).
+- **Impact / files:** `core/supervisor.py`. Reversible. Double-check: for a flow with **no** `finalize_role_file` the finalize wording is now the leaner `_BUILTIN_FINALIZE` (not the old observe-lens + synthesis text) — behavior-equivalent (same free-text summary), wording only.
+
+## [Block 3] follow_ups are evidence-gated; severity defaults to medium — 2026-07-02
+
+- **Situation:** the ADR says each `follow_ups` record is "minimal and grounded" with `evidence`, but did not spell out the drop rule or defaults.
+- **Decision:** `parse_follow_ups` is **evidence-gated** — a record with no non-empty `title` or no non-empty `evidence` is silently dropped (never raised), so an ungrounded "refactor idea" the model invents cannot reach `summary.{json,md}`. An invalid/missing `severity` defaults to `medium`. Schema stays hardcoded in code (a flow reshapes wording, never the contract). Mirrors `_parse_skill_map`'s best-effort discipline.
+- **Impact / files:** `core/supervisor.py`. Reversible.

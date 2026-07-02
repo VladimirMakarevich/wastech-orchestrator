@@ -46,11 +46,11 @@ The valid-set is **flow-derived**, not the static `ALLOWED_PROMPT_VARS`: `valid_
 
 ### Callers (variable assembly)
 
-This block does not collect variable values — the node runners do, then call `render_role_prompt(flow_dir, role_file, variables)`:
+This block does not collect variable values — the node runners do, then call `render_role_prompt(flow_dir, role_file, variables, *, allowed=…)`:
 
-- `AgentNodeRunner._build_request` ([agent.py:356](../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L356)), with `_prompt_variables` building the full dictionary including the subtask trio when `ctx.subtask_order` is set ([agent.py:388-405](../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L388)).
-- `EvaluatorNodeRunner._build_request` ([evaluator.py:161](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L161)), with a smaller `_prompt_variables` (no subtask/skills keys) ([evaluator.py:233-244](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L233)).
-- `Supervisor._base_prompt` ([supervisor.py:212](../../../src/wastech_orchestrator/core/supervisor.py#L212)), passing only `{task_id, repo, repo_path}`; a `RoleFileError` is caught and degrades to a minimal hardcoded instruction (the supervisor is best-effort) ([supervisor.py:217-220](../../../src/wastech_orchestrator/core/supervisor.py#L217)) — see [B31](B31-supervisor.md).
+- `AgentNodeRunner._build_request` ([agent.py](../../../src/wastech_orchestrator/core/flow/nodes/agent.py)), with `_prompt_variables` building the full dictionary including the subtask trio when `ctx.subtask_order` is set and every agent node's `{<id>_path}`; it passes the **flow-derived** `allowed` set (`valid_prompt_vars`) so a node can reference an upstream node's output.
+- `EvaluatorNodeRunner._build_request` ([evaluator.py](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py)), with a smaller `_prompt_variables` (no subtask/skills keys) and the default static `ALLOWED_PROMPT_VARS` (the generic `{<id>_path}` channel does not extend to evaluators).
+- The `Supervisor` prompts ([supervisor.py](../../../src/wastech_orchestrator/core/supervisor.py)) pass only `{task_id, repo, repo_path}` and resolve via **flow-local fallback chains** — observe: flow `role_file` → `config.supervisor.role_file` → built-in; finalize: flow `finalize_role_file` → built-in — each step best-effort (a `RoleFileError` falls through to the next) — see [B31](B31-supervisor.md).
 
 `flow_dir` reaches the runners via `NodeInputs.flow_dir` ([base.py:237](../../../src/wastech_orchestrator/core/flow/nodes/base.py#L237)); they are wired by the pipeline ([B06](B06-orchestrator-pipeline.md)) and invoked by the flow engine ([B30](B30-flow-node-runners.md)).
 

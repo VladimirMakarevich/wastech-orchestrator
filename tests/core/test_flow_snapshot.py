@@ -425,6 +425,30 @@ def test_agent_node_id_near_reserved_name_accepted(tmp_path: Path) -> None:
     assert "reviewer" in load_flow(_write(tmp_path, body)).nodes_by_id
 
 
+def test_supervisor_block_parsed(tmp_path: Path) -> None:
+    block = (
+        "  supervisor:\n"
+        "    role_file: roles/s.md\n"
+        "    finalize_role_file: roles/f.md\n"
+        "    emit_follow_ups: true\n"
+    )
+    sup = load_flow(_write(tmp_path, _VALID_BODY.replace(_PUB, _PUB + block))).doc.supervisor
+    assert sup is not None
+    assert sup.role_file == "roles/s.md"
+    assert sup.finalize_role_file == "roles/f.md"
+    assert sup.emit_follow_ups is True
+
+
+def test_supervisor_block_absent_is_none(tmp_path: Path) -> None:
+    assert load_flow(_write(tmp_path, _VALID_BODY)).doc.supervisor is None
+
+
+def test_unknown_supervisor_field_rejected(tmp_path: Path) -> None:
+    body = _VALID_BODY.replace(_PUB, _PUB + "  supervisor:\n    bogus: 1\n")
+    with pytest.raises(FlowLoadError, match=r"unknown field.*bogus.*supervisor"):
+        load_flow(_write(tmp_path, body))
+
+
 def test_agent_network_access_tristate(tmp_path: Path) -> None:
     # Tri-state parse: true → True, false → False, omitted → None (inherit the flow default).
     def _na(value: str) -> str:

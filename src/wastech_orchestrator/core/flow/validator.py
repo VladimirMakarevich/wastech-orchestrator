@@ -412,6 +412,15 @@ def _check_ceiling(snap: FlowSnapshot) -> list[Violation]:
                     errs.append(c(f"agent {node.id!r}: extra_args {reason}"))
             _check_path(node.id, node.role_file, errs)
 
+    # Flow-local supervisor prompt files are flow-dir-contained, exactly like a node role_file: a
+    # path that escapes the flow directory is fatal (prompt-and-supervisor authoring contract).
+    supervisor = doc.supervisor
+    if supervisor is not None:
+        if supervisor.role_file is not None:
+            _check_path("supervisor", supervisor.role_file, errs)
+        if supervisor.finalize_role_file is not None:
+            _check_path("supervisor", supervisor.finalize_role_file, errs)
+
     return errs
 
 
