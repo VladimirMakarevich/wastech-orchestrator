@@ -16,7 +16,7 @@ decomposition driver (slice 5), which calls :func:`read_decomposition` then orch
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +25,7 @@ from wastech_orchestrator.core.flow.engine import NodeOutcome
 from wastech_orchestrator.core.flow.nodes.base import NodeInputs, RegisterArtifact
 from wastech_orchestrator.core.flow.schema import AgentNode
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
+from wastech_orchestrator.providers.redaction import redact_text
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,44 @@ def apply_output_artifact(
     register(task_id, slot.artifact_kind, str(path))
     if slot.inputs_field is not None:
         setattr(inputs, slot.inputs_field, str(path))
+    return str(path)
+
+
+def write_node_output(
+    node: AgentNode,
+    outcome: NodeOutcome,
+    *,
+    artifacts_root: str | Path,
+    task_id: str,
+    register: RegisterArtifact,
+    extra_secrets: Iterable[str] = (),
+) -> str | None:
+    """Persist a node's output to ``<artifacts>/<node_id>.out.md``; return the path or ``None``.
+
+    The generic node-output channel (node-output ADR): every agent node's output is written and
+    exposed downstream as ``{<node_id>_path}`` (a *path*, never inlined content). The content is the
+    same as a slot (``structured_output["content"]`` or ``final_message``, via ``_slot_content``);
+    it is **redaction-scrubbed** before writing — a node's raw output can echo a secret, and unlike
+    ``final_message`` (redacted by the adapter) ``structured_output`` is not. Local/uncommitted, and
+    registered as an artifact so it doubles as a per-node audit record.
+
+    No-op (returns ``None``) when:
+
+    * the node fills one of the three special slots via ``output_artifact`` — that slot *is* its
+      output channel (``{plan_path}`` etc.), so no duplicate ``.out.md`` is written (one node = one
+      output); or
+    * there is no content to persist (a best-effort node that produced nothing).
+    """
+    if node.output_artifact is not None:
+        return None  # special-slot node: its slot is the channel, no duplicate generic output
+    content = _slot_content(outcome)
+    if not content:
+        return None
+    task_dir = task_artifact_dir(artifacts_root, task_id)
+    task_dir.mkdir(parents=True, exist_ok=True)
+    path = task_dir / f"{node.id}.out.md"
+    path.write_text(redact_text(content, extra_secrets=extra_secrets), encoding="utf-8")
+    register(task_id, "node_output", str(path))
     return str(path)
 
 

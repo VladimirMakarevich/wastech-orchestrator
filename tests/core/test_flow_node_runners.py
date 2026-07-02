@@ -264,6 +264,92 @@ def test_agent_node_equals_direct_router_call(tmp_path: Path) -> None:
     assert store.completed[-1]["outcome"] == "done"
 
 
+def test_node_output_path_variable_resolves_downstream(tmp_path: Path) -> None:
+    # The generic {<id>_path} channel: a node references an upstream agent node's persisted output
+    # by id, and it resolves to that node's <id>.out.md once the file exists (node-output ADR).
+    (tmp_path / "impl.md").write_text(
+        "Build.{?scan_path} Read the scan at {scan_path}.{/scan_path}", "utf-8"
+    )
+    scan = AgentNode(id="scan", kind="agent", role_file="scan.md")
+    impl = AgentNode(
+        id="implement",
+        kind="agent",
+        role_file="impl.md",
+        permission_profile=PermissionProfile.READ_ONLY,
+    )
+    doc = FlowDoc(
+        name="t",
+        task_type="t",
+        permission_ceiling=PermissionProfile.WORKSPACE_WRITE,
+        output_policy=OutputPolicy.CODE_CHANGE,
+        publishing=PublishingPolicy.PULL_REQUEST,
+        nodes=(scan, impl),
+        edges=(),
+        budgets=MappingProxyType({}),
+    )
+    snap = FlowSnapshot(
+        doc=doc,
+        nodes_by_id=MappingProxyType({"scan": scan, "implement": impl}),
+        adjacency=MappingProxyType({}),
+        flow_fingerprint="fp",
+    )
+    scan_out = tmp_path / "logs" / "task-1" / "scan.out.md"
+    scan_out.parent.mkdir(parents=True, exist_ok=True)
+    scan_out.write_text("SCAN RESULT", "utf-8")
+
+    router, store = FakeRouter(_result()), FakeStore()
+    services = _services(
+        router,
+        store,
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    ctx = NodeContext(
+        snapshot=snap, run_state=FlowRunState(flow_fingerprint="fp"), node=impl, task_id="task-1"
+    )
+    AgentNodeRunner(services, _inputs(tmp_path)).run(impl, ctx)
+
+    prompt = router.requests[0].prompt
+    assert f"Read the scan at {scan_out.as_posix()}." in prompt
+
+
+def test_node_output_var_empty_before_upstream_runs(tmp_path: Path) -> None:
+    # Before the upstream node has produced output, {?scan_path} drops cleanly (no dangling text).
+    (tmp_path / "impl.md").write_text(
+        "Build.{?scan_path} Read the scan at {scan_path}.{/scan_path}", "utf-8"
+    )
+    scan = AgentNode(id="scan", kind="agent", role_file="scan.md")
+    impl = AgentNode(id="implement", kind="agent", role_file="impl.md")
+    doc = FlowDoc(
+        name="t",
+        task_type="t",
+        permission_ceiling=PermissionProfile.WORKSPACE_WRITE,
+        output_policy=OutputPolicy.CODE_CHANGE,
+        publishing=PublishingPolicy.PULL_REQUEST,
+        nodes=(scan, impl),
+        edges=(),
+        budgets=MappingProxyType({}),
+    )
+    snap = FlowSnapshot(
+        doc=doc,
+        nodes_by_id=MappingProxyType({"scan": scan, "implement": impl}),
+        adjacency=MappingProxyType({}),
+        flow_fingerprint="fp",
+    )
+    router, store = FakeRouter(_result()), FakeStore()
+    services = _services(
+        router,
+        store,
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    ctx = NodeContext(
+        snapshot=snap, run_state=FlowRunState(flow_fingerprint="fp"), node=impl, task_id="task-1"
+    )
+    AgentNodeRunner(services, _inputs(tmp_path)).run(impl, ctx)
+    assert router.requests[0].prompt == "Build."
+
+
 def test_agent_node_builds_memory_packet_when_role_references_it(tmp_path: Path) -> None:
     # Node-driven (FR4): a node whose role references {memory_path} gets a per-node packet built
     # and its PATH injected — never the memory root (AC-R1). A custom node opts in, no Core change.

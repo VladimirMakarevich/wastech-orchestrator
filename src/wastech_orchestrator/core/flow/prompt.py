@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from wastech_orchestrator.core.prompts import render_prompt
+from wastech_orchestrator.core.prompts import ALLOWED_PROMPT_VARS, render_prompt
 
 
 class RoleFileError(Exception):
@@ -38,6 +38,18 @@ def read_role_file(flow_dir: Path, role_file: str) -> str:
         raise RoleFileError(f"cannot read role_file {target}: {exc}") from exc
 
 
-def render_role_prompt(flow_dir: Path, role_file: str, variables: dict[str, object | None]) -> str:
-    """Build a node's prompt: read its ``role_file`` and substitute allowlisted path variables."""
-    return render_prompt(read_role_file(flow_dir, role_file), variables)
+def render_role_prompt(
+    flow_dir: Path,
+    role_file: str,
+    variables: dict[str, object | None],
+    *,
+    allowed: frozenset[str] = ALLOWED_PROMPT_VARS,
+) -> str:
+    """Build a node's prompt: read its ``role_file`` and substitute allowlisted path variables.
+
+    *allowed* is the effective substitutable-name set. It defaults to :data:`ALLOWED_PROMPT_VARS`;
+    the agent runner passes the flow-derived set (core allowlist ∪ each agent node's
+    ``{<id>_path}``) so a node can reference an upstream node's output by id. The renderer stays the
+    fixed security core — every value in *variables* is still a Core-written artifact path.
+    """
+    return render_prompt(read_role_file(flow_dir, role_file), variables, allowed=allowed)

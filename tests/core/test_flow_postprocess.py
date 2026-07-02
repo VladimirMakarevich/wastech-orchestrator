@@ -10,7 +10,11 @@ from pathlib import Path
 
 from wastech_orchestrator.core.flow.engine import NodeOutcome
 from wastech_orchestrator.core.flow.nodes.base import NodeInputs
-from wastech_orchestrator.core.flow.postprocess import apply_output_artifact, read_decomposition
+from wastech_orchestrator.core.flow.postprocess import (
+    apply_output_artifact,
+    read_decomposition,
+    write_node_output,
+)
 from wastech_orchestrator.core.flow.schema import AgentNode
 
 
@@ -21,6 +25,66 @@ def _agent(node_id: str, *, output_artifact: str | None = None) -> AgentNode:
 def _recorder() -> tuple[list[tuple[str, str, str]], object]:
     calls: list[tuple[str, str, str]] = []
     return calls, lambda t, k, p: calls.append((t, k, p))
+
+
+# -- generic node-output channel ({<node_id>_path}) ---------------------------
+
+
+def test_node_output_written_redacted_and_registered(tmp_path: Path) -> None:
+    node = _agent("scan")  # no output_artifact → generic channel applies
+    outcome = NodeOutcome("done", structured_output={"content": "found key ghp_" + "a" * 36})
+    calls, register = _recorder()
+
+    path = write_node_output(
+        node, outcome, artifacts_root=tmp_path, task_id="task-1", register=register
+    )
+
+    assert path is not None and path.endswith("scan.out.md")
+    body = Path(path).read_text("utf-8")
+    assert "ghp_" not in body and "[REDACTED]" in body  # structured output is redaction-scrubbed
+    assert calls == [("task-1", "node_output", path)]
+
+
+def test_node_output_extra_secret_scrubbed(tmp_path: Path) -> None:
+    node = _agent("analyze")
+    outcome = NodeOutcome("done", final_message="the token is s3cr3t-value-here")
+    _, register = _recorder()
+
+    path = write_node_output(
+        node,
+        outcome,
+        artifacts_root=tmp_path,
+        task_id="t",
+        register=register,
+        extra_secrets=("s3cr3t-value-here",),
+    )
+    assert path is not None
+    assert "s3cr3t-value-here" not in Path(path).read_text("utf-8")
+
+
+def test_node_output_skipped_for_special_slot_node(tmp_path: Path) -> None:
+    # A node filling a special slot uses that slot as its channel — no duplicate .out.md.
+    node = _agent("planning", output_artifact="plan")
+    outcome = NodeOutcome("done", structured_output={"content": "PLAN"})
+    calls, register = _recorder()
+
+    assert (
+        write_node_output(node, outcome, artifacts_root=tmp_path, task_id="t", register=register)
+        is None
+    )
+    assert calls == []
+    assert not (tmp_path / "logs" / "t" / "planning.out.md").exists()
+
+
+def test_node_output_noop_when_empty(tmp_path: Path) -> None:
+    node = _agent("scan")
+    outcome = NodeOutcome("done", structured_output=None, final_message=None)
+    calls, register = _recorder()
+    assert (
+        write_node_output(node, outcome, artifacts_root=tmp_path, task_id="t", register=register)
+        is None
+    )
+    assert calls == []
 
 
 # -- output_artifact slots ----------------------------------------------------

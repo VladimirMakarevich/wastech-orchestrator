@@ -41,6 +41,29 @@ Wrap the **entire clause**, not just the token. This is the sanctioned pattern f
 
 A block whose name is not an allowlisted variable, or an unbalanced `{?a}…{/b}`, is left verbatim like any unknown token (and the lint warns).
 
+## Node outputs: `{<node_id>_path}`
+
+Every **agent** node's output is automatically persisted to `<node_id>.out.md` and exposed to later nodes as `{<node_id>_path}` — a **path** to that file (never the inlined content). This is how you chain your own nodes: a node reads what an upstream node produced by naming it. No declaration, no config — the channel is derived from the node id.
+
+```text
+{?analyze_path}Base the implementation on the analysis at {analyze_path}.{/analyze_path}
+```
+
+- **Fan-in is free.** A node that runs after `scan` and `analyze` references both `{scan_path}` and `{analyze_path}`. A diamond (`build ← [analyze, scan]`) reads `{analyze_path}` and `{scan_path}`.
+- **Empty until produced.** `{<id>_path}` is empty until that node has run, so a cross-branch or forward reference must be wrapped in `{?name}…{/name}` (as above) — otherwise it renders as an empty string.
+
+**Allowed:**
+
+- Reference any agent node in the flow by its id: `{scan_path}`, `{static-scan_path}`, `{pass2_path}` (ids may contain letters, digits, `-`, `_`).
+- Need several outputs? **Split into several nodes** — one node, one output.
+
+**Not allowed:**
+
+- A node id that collides with a reserved core-variable prefix (`task`, `plan`, `diff`, `checks`, `review`, `repo`, `skills`, `memory`, `stage`, or anything starting with `subtask`) — a fatal flow-load error, because `{plan_path}` etc. already mean the core variable.
+- `{X_path}` where `X` names no node in the flow — it renders verbatim (and the lint warns).
+- Expecting **two** named outputs from one node — a node exposes exactly one `{<id>_path}`. A node that fills a special slot (`plan` / `summary` / `enriched_spec` via `output_artifact`) uses that slot's variable (`{plan_path}` …) as its channel and writes **no** `{<id>_path}`.
+- `{<id>_path}` from an **evaluator / checks / human** node — only agent nodes expose it; those kinds keep their dedicated `{review_path}` / `{checks_path}`.
+
 ## What the renderer will never do
 
 - It never substitutes a task body, a diff, a check log, an environment value, or a secret — only the paths/metadata above. Read large or sensitive content from the artifact file the path points to.

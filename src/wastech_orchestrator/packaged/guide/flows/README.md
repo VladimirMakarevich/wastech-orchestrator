@@ -53,7 +53,37 @@ flow:
     test_fix: 5 # every fail/rework loop must be bounded
 ```
 
-`my_flow/implement.md` is an ordinary Markdown prompt; it may use only allowlisted path variables like `{task_path}`, `{repo_path}`, `{plan_path}`, `{diff_path}` (never task bodies, diffs, env, or secrets).
+`my_flow/implement.md` is an ordinary Markdown prompt; it may use only allowlisted path variables like `{task_path}`, `{repo_path}`, `{plan_path}`, `{diff_path}` (never task bodies, diffs, env, or secrets). See `prompt-variables.md` in this folder for the full list, which runner populates each, and the `{?name}…{/name}` optional-variable syntax.
+
+## Chaining node outputs (`{<node_id>_path}`)
+
+Every **agent** node's output is persisted and exposed to later nodes as `{<node_id>_path}` — a path to that node's `<id>.out.md`, never the inlined content. That is how a multi-step flow hands one node's result to the next by name, with no extra config:
+
+```yaml
+nodes:
+  - id: scan
+    kind: agent
+    role_file: my_flow/scan.md # writes scan.out.md → {scan_path}
+  - id: analyze
+    kind: agent
+    role_file: my_flow/analyze.md # references {?scan_path}…{/scan_path}
+  - id: build
+    kind: agent
+    role_file: my_flow/build.md # references {scan_path} and {analyze_path} (fan-in)
+    session_scope: editing_lineage
+    permission_profile: workspace-write
+edges:
+  - { from: scan, to: analyze }
+  - { from: analyze, to: build }
+```
+
+In `my_flow/build.md`:
+
+```text
+Implement the change.{?analyze_path} Follow the analysis at {analyze_path}.{/analyze_path}{?scan_path} The raw scan is at {scan_path}.{/scan_path}
+```
+
+One node exposes exactly one output — to publish several results, split into several nodes. A node id may not collide with a reserved core-variable prefix (`task`, `plan`, `diff`, `checks`, `review`, `repo`, `skills`, `memory`, `stage`, `subtask*`); that is a fatal load error.
 
 ## Register, run, validate
 

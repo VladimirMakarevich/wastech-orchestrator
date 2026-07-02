@@ -26,11 +26,11 @@ This block is two thin layers: the security-critical fixed core renderer (`rende
 
 ### The "safe renderer"
 
-`render_prompt` compiles a single regex `_VAR_RE = re.compile(r"\{([a-z_]+)\}")` ([prompts.py:39](../../../src/wastech_orchestrator/core/prompts.py#L39)) and runs it with a replacement callback ([prompts.py:50-57](../../../src/wastech_orchestrator/core/prompts.py#L50)):
+`render_prompt(template, variables, *, allowed=ALLOWED_PROMPT_VARS)` compiles a single regex `_VAR_RE = re.compile(r"\{([a-z0-9_-]+)\}")` ([prompts.py](../../../src/wastech_orchestrator/core/prompts.py)) and runs it with a replacement callback:
 
-- A token whose name is **not** in `ALLOWED_PROMPT_VARS` is returned unchanged (`return match.group(0)`) — no `KeyError`, no exception.
-- An allowlisted name whose value is `None` renders as the empty string; any other value renders via `str(value)`.
-- Because the pattern only matches `{` + one-or-more `[a-z_]` + `}`, any other brace usage never even matches: literal code/JSON braces like `{"json": 1}` (digits/quotes), `{ }` with spaces, or uppercase `{NAME}` all pass through verbatim. So a template carrying code or JSON renders unchanged ([test_prompts.py:18-22](../../../tests/core/test_prompts.py#L18), [test_flow_prompt.py:21-24](../../../tests/core/test_flow_prompt.py#L21)).
+- A token whose name is **not** in the effective `allowed` set is returned unchanged (`return match.group(0)`) — no `KeyError`, no exception. `allowed` defaults to `ALLOWED_PROMPT_VARS`; the agent runner passes the wider **flow-derived** set (`ALLOWED_PROMPT_VARS ∪ {<node_id>_path}`, see the anti-drift-lint section) so a node can reference an upstream node's output — the renderer stays the fixed core, substituting only names in the set it is given, and only ever a path value.
+- An allowed name whose value is `None` renders as the empty string; any other value renders via `str(value)`.
+- The token shape is an all-lowercase word plus digits and `-` (so a node id like `static-scan` / `pass2` resolves as `{static-scan_path}`), kept lowercase-only so any other brace usage never matches: literal code/JSON braces like `{"json": 1}` (quotes/spaces) or camelCase `{someVar}` (uppercase) all pass through verbatim. So a template carrying code or JSON renders unchanged ([test_prompts.py](../../../tests/core/test_prompts.py)).
 
 This is the structural injection guarantee: only path/metadata is substituted, so a template can carry **only** path references to artifacts — the actual task body, diff, check logs, env, and secrets stay in the files the provider opens by path ([prompts.py:5-7](../../../src/wastech_orchestrator/core/prompts.py#L5)). That is the property B25's injection scan relies on (see [B16](B16-task-parsing-and-validation-gate.md), [B25](B25-security-policy.md)).
 

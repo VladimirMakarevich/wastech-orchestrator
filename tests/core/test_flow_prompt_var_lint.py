@@ -75,6 +75,41 @@ def test_valid_prompt_vars_grows_with_nodes(tmp_path: Path) -> None:
     assert "task_id" in allowed and "memory_path" in allowed  # core allowlist retained
 
 
+_EVAL_FLOW = """\
+flow:
+  name: e
+  task_type: e
+  permission_ceiling: workspace-write
+  output_policy: code_change
+  publishing: pull_request
+  nodes:
+    - id: scan
+      kind: agent
+      role_file: e/scan.md
+    - id: judge
+      kind: evaluator
+      role: review
+      role_file: e/judge.md
+  edges:
+    - { from: scan, to: judge }
+  budgets: {}
+"""
+
+
+def test_lint_evaluator_gets_no_generic_node_var(tmp_path: Path) -> None:
+    # The {<id>_path} channel is agent-only. An evaluator referencing {scan_path} renders it
+    # verbatim (its allowlist is the static core set), so the node-kind-aware lint flags it — while
+    # the agent node referencing {task_id} is clean.
+    flow_dir = tmp_path / "flows"
+    (flow_dir / "e").mkdir(parents=True)
+    (flow_dir / "e.yaml").write_text(_EVAL_FLOW, encoding="utf-8")
+    (flow_dir / "e" / "scan.md").write_text("scan {task_id}", encoding="utf-8")
+    (flow_dir / "e" / "judge.md").write_text("judge {scan_path}", encoding="utf-8")
+
+    warnings = lint_prompt_variables(load_flow(flow_dir / "e.yaml"))
+    assert [(w.role_file, w.token) for w in warnings] == [("e/judge.md", "scan_path")]
+
+
 def test_lint_no_source_path_returns_empty() -> None:
     # A unit-constructed snapshot (no on-disk role files) has nothing to scan.
     snap = load_flow(PACKAGED / "implementation.yaml")

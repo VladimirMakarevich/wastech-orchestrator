@@ -48,7 +48,11 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NodeServices,
 )
 from wastech_orchestrator.core.flow.output_policy import is_within
-from wastech_orchestrator.core.flow.postprocess import apply_output_artifact, read_decomposition
+from wastech_orchestrator.core.flow.postprocess import (
+    apply_output_artifact,
+    read_decomposition,
+    write_node_output,
+)
 from wastech_orchestrator.core.flow.recorder import StateStoreRunRecorder, hydrate_run_state
 from wastech_orchestrator.core.flow.registry import FlowRegistry, FlowResolutionError
 from wastech_orchestrator.core.flow.run_state import FlowRunState
@@ -1970,9 +1974,12 @@ class Orchestrator:
         self, p: _Pipeline, inputs: NodeInputs, snapshot: FlowSnapshot
     ) -> Callable[[FlowNode, NodeOutcome, int], None]:
         """Engine post-node hook: let the supervisor layer observe the completed step, persist a
-        node's output_artifact slot, resolve plan skills, and — for the decomposition
-        ``proposed_by`` node — decide + materialize the decomposition."""
+        node's output_artifact slot + its generic ``<node_id>.out.md``, resolve plan skills, and —
+        for the decomposition ``proposed_by`` node — decide + materialize the decomposition."""
         decomp = snapshot.doc.decomposition
+        # Redaction literals for the node-output writer, harvested once per run (same set the memory
+        # write path uses): raw structured output is not adapter-redacted, so scrub it at write.
+        node_output_secrets = self._memory_extra_secrets()
 
         def post_node(node: FlowNode, outcome: NodeOutcome, node_run_id: int) -> None:
             # The constant supervisor layer observes every completed step read-only (advisory) —
@@ -1999,6 +2006,17 @@ class Orchestrator:
                 task_id=p.task.id,
                 inputs=inputs,
                 register=self._register_artifact,
+            )
+            # Generic node-output channel: persist every agent node's output as {<node_id>_path}
+            # (redaction-scrubbed, local/uncommitted). A node filling a special slot above writes no
+            # duplicate — write_node_output is a no-op when output_artifact is set.
+            write_node_output(
+                node,
+                outcome,
+                artifacts_root=self._artifacts_root,
+                task_id=p.task.id,
+                register=self._register_artifact,
+                extra_secrets=node_output_secrets,
             )
             # Operator-authored splits are materialized at preflight (the decision comes from the
             # ``subtasks:`` manifest, not this node), so this post-hook is a no-op for them.

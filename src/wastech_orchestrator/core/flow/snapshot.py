@@ -137,6 +137,17 @@ _CHECKER_KINDS = frozenset({"command_profile", "citation", "dependency_scan"})
 # slot vocabulary is core-fixed (a flow may not invent a slot — fail-closed at load).
 _OUTPUT_ARTIFACT_SLOTS = frozenset({"enriched_spec", "plan", "summary"})
 
+# Reserved core-variable prefixes an **agent** node id may not collide with (node-output ADR): every
+# agent node exposes ``{<id>_path}``, so an id equal to one of these — or starting with ``subtask``
+# — would shadow a fixed core variable (``{plan_path}``, ``{review_path}``, ``{subtask_spec_path}``,
+# …). A collision is a fatal load error. Only agent ids are checked: evaluator/checks/human nodes do
+# not get ``{<id>_path}`` (so the packaged ``review`` evaluator and ``testing`` checks node are
+# fine).
+_RESERVED_NODE_ID_NAMES = frozenset(
+    {"task", "plan", "diff", "checks", "review", "repo", "skills", "memory", "stage"}
+)
+_RESERVED_NODE_ID_PREFIX = "subtask"
+
 # ``when`` fact namespaces. The exact value allowlist per namespace is
 # finalized when the P1 engine fact resolver lands; here we fail-closed on the namespace prefix so
 # a bare/typo'd fact (e.g. ``summary_enabled`` with no namespace) is rejected at load time.
@@ -277,6 +288,13 @@ def _parse_agent_node(raw: dict[str, Any]) -> AgentNode:
     nid = str(_require(raw, "id", "agent node"))
     ctx = f"agent node '{nid}'"
     _reject_unknown(raw, _AGENT_FIELDS, ctx)
+    if nid in _RESERVED_NODE_ID_NAMES or nid.startswith(_RESERVED_NODE_ID_PREFIX):
+        raise FlowLoadError(
+            f"agent node id {nid!r} collides with a reserved core-variable prefix "
+            f"(its {{{nid}_path}} would shadow a fixed core variable); reserved: "
+            f"{sorted(_RESERVED_NODE_ID_NAMES)} and any id starting with "
+            f"{_RESERVED_NODE_ID_PREFIX!r}"
+        )
     role_file = str(_require(raw, "role_file", ctx))
 
     pp_raw = raw.get("permission_profile")

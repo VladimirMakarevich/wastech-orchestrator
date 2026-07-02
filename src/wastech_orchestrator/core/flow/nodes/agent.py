@@ -46,6 +46,7 @@ from wastech_orchestrator.core.flow.nodes.human_gate import HumanGate
 from wastech_orchestrator.core.flow.observability import record_run_observability
 from wastech_orchestrator.core.flow.output_policy import resolve_output_policy, within_subdir
 from wastech_orchestrator.core.flow.prompt import RoleFileError, read_role_file, render_role_prompt
+from wastech_orchestrator.core.flow.prompt_vars import valid_prompt_vars
 from wastech_orchestrator.core.flow.schema import AgentNode, FlowNode
 from wastech_orchestrator.core.hitl import (
     HumanInputSignal,
@@ -498,8 +499,14 @@ class AgentNodeRunner:
     ) -> AgentRunRequest:
         ceiling = ctx.snapshot.doc.permission_ceiling
         permission = (node.permission_profile or ceiling).value
+        # The renderer stays the fixed security core; the caller widens *which names* it may
+        # substitute to the flow-derived set (core allowlist ∪ each agent node's {<id>_path}), and
+        # only ever places path values in the dict — never inlined content.
         prompt = render_role_prompt(
-            self._in.flow_dir, node.role_file, self._prompt_variables(ctx, node)
+            self._in.flow_dir,
+            node.role_file,
+            self._prompt_variables(ctx, node),
+            allowed=valid_prompt_vars(ctx.snapshot),
         )
         output_schema = (
             json.loads(node.output_schema)
@@ -558,7 +565,25 @@ class AgentNodeRunner:
             variables["subtask_order"] = ctx.subtask_order
             variables["subtask_count"] = self._in.subtask_count
             variables["subtask_spec_path"] = self._in.subtask_spec_path
+        variables.update(self._node_output_paths(ctx))
         return variables
+
+    def _node_output_paths(self, ctx: NodeContext) -> dict[str, object | None]:
+        """The generic ``{<node_id>_path}`` variables for every agent node in the flow.
+
+        A value resolves to the persisted ``<node_id>.out.md`` **only when that node has already
+        run** (the file exists on disk) — so a not-yet-run or special-slot node's variable is empty
+        and a ``{?<id>_path}…{/<id>_path}`` block drops cleanly. Fan-in is free: a node names each
+        upstream output it wants (``{scan_path}``, ``{analyze_path}``). The stored value is a POSIX
+        path string (cross-platform). Only agent nodes get this channel (node-output ADR)."""
+        task_dir = task_artifact_dir(self._s.artifacts_root, ctx.task_id)
+        paths: dict[str, object | None] = {}
+        for other in ctx.snapshot.doc.nodes:
+            if not isinstance(other, AgentNode):
+                continue
+            candidate = task_dir / f"{other.id}.out.md"
+            paths[f"{other.id}_path"] = candidate.as_posix() if candidate.exists() else None
+        return paths
 
     def _memory_path(self, node: AgentNode, ctx: NodeContext) -> str | None:
         """Build this node's memory packet and return its path — node-driven (FR4/D5).

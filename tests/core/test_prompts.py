@@ -95,6 +95,41 @@ def test_referenced_variables_reports_unknown_names_without_judging() -> None:
     assert referenced_variables("a {plna_path} b {task_id}") == {"plna_path", "task_id"}
 
 
+def test_referenced_variables_widened_tokens() -> None:
+    # The widened token shape accepts hyphens and digits (node ids like static-scan / pass2).
+    assert referenced_variables("{static-scan_path} {pass2_path}") == {
+        "static-scan_path",
+        "pass2_path",
+    }
+
+
+def test_render_accepts_hyphen_and_digit_tokens_with_custom_allowed() -> None:
+    # The effective allowlist may be widened by the caller (node-output {<id>_path}); the renderer
+    # substitutes those the same way, still only ever a path value.
+    allowed = ALLOWED_PROMPT_VARS | {"static-scan_path", "pass2_path"}
+    out = render_prompt(
+        "a {static-scan_path} b {pass2_path}",
+        {"static-scan_path": "/a", "pass2_path": "/b"},
+        allowed=allowed,
+    )
+    assert out == "a /a b /b"
+
+
+def test_render_widened_regex_still_passes_camelcase_and_json() -> None:
+    # camelCase (uppercase) and JSON braces are not tokens and pass through untouched.
+    template = 'keep {someVar} and {"json": 1} and {task_id}'
+    assert render_prompt(template, {"task_id": "T"}) == 'keep {someVar} and {"json": 1} and T'
+
+
+def test_render_only_substitutes_the_given_allowed_set() -> None:
+    # A name absent from the passed allowed set is left verbatim even when it has a value — the
+    # renderer stays the fixed security core, substituting only names in the set it is given.
+    assert render_prompt("{scan_path}", {"scan_path": "/x"}, allowed=frozenset()) == "{scan_path}"
+    assert (
+        render_prompt("{scan_path}", {"scan_path": "/x"}, allowed=frozenset({"scan_path"})) == "/x"
+    )
+
+
 def test_memory_path_conditional_block_kept_and_dropped() -> None:
     # The packaged role prompts wrap the memory reference in {?memory_path}...{/memory_path} so it
     # is present only when a packet was built, and disappears cleanly when memory is empty (AC-R4).

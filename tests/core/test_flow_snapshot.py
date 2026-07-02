@@ -404,6 +404,27 @@ def test_invalid_output_artifact_slot_rejected(tmp_path: Path) -> None:
         load_flow(_write(tmp_path, body))
 
 
+def test_agent_node_id_colliding_with_reserved_prefix_rejected(tmp_path: Path) -> None:
+    # An agent id equal to a reserved core-variable prefix would make {plan_path} ambiguous with the
+    # fixed core variable — fatal at load (node-output ADR).
+    body = _VALID_BODY.replace("    - id: a\n", "    - id: plan\n")
+    with pytest.raises(FlowLoadError, match=r"reserved core-variable prefix"):
+        load_flow(_write(tmp_path, body))
+
+
+def test_agent_node_id_subtask_prefix_rejected(tmp_path: Path) -> None:
+    body = _VALID_BODY.replace("    - id: a\n", "    - id: subtask_extra\n")
+    with pytest.raises(FlowLoadError, match=r"reserved core-variable prefix"):
+        load_flow(_write(tmp_path, body))
+
+
+def test_agent_node_id_near_reserved_name_accepted(tmp_path: Path) -> None:
+    # Only exact reserved names (and the ``subtask`` prefix) collide; ``reviewer`` / ``planning``
+    # are fine, so the packaged flows' agent ids keep loading.
+    body = _VALID_BODY.replace("    - id: a\n", "    - id: reviewer\n")
+    assert "reviewer" in load_flow(_write(tmp_path, body)).nodes_by_id
+
+
 def test_agent_network_access_tristate(tmp_path: Path) -> None:
     # Tri-state parse: true → True, false → False, omitted → None (inherit the flow default).
     def _na(value: str) -> str:

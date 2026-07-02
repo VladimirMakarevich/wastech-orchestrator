@@ -56,7 +56,7 @@ from wastech_orchestrator.core.flow.prompt import RoleFileError, read_role_file
 from wastech_orchestrator.core.flow.prompt_vars import valid_prompt_vars
 from wastech_orchestrator.core.flow.schema import AgentNode, EvaluatorNode
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
-from wastech_orchestrator.core.prompts import referenced_variables
+from wastech_orchestrator.core.prompts import ALLOWED_PROMPT_VARS, referenced_variables
 from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.providers.capabilities import (
     all_reasoning_levels,
@@ -538,10 +538,13 @@ class PromptVarWarning:
 def lint_prompt_variables(snapshot: FlowSnapshot) -> list[PromptVarWarning]:
     """Scan every node role file for ``{name}`` / ``{?name}`` tokens outside the flow's valid-set.
 
-    The valid-set is **flow-derived** (:func:`~.prompt_vars.valid_prompt_vars`: core allowlist ∪
-    node-output names), so an author who references a real core variable or an in-flow node's
-    ``{<id>_path}`` is never flagged, while a typo (``{plna_path}``) or an unknown name — including
-    a ``{X_path}`` that names no node — is reported (file + token) as rendering verbatim.
+    The valid-set is **flow-derived** and **node-kind-aware**, matching each node's real effective
+    allowlist: an **agent** node is checked against :func:`~.prompt_vars.valid_prompt_vars` (core
+    allowlist ∪ every agent node's ``{<id>_path}``), so referencing an upstream node's output by id
+    is fine; an **evaluator** node is checked against the core :data:`ALLOWED_PROMPT_VARS` alone
+    (the generic ``{<id>_path}`` channel does not extend to evaluators — they render it verbatim, so
+    it *should* be flagged). Either way a typo (``{plna_path}``) or a ``{X_path}`` naming no node is
+    reported (file + token) as rendering verbatim.
 
     Deliberately **not fatal**: a verbatim render is the safe-renderer fallback (literal braces must
     pass through), so a warning is the correct signal, not an aborted run. Best-effort on IO: a role
@@ -552,13 +555,14 @@ def lint_prompt_variables(snapshot: FlowSnapshot) -> list[PromptVarWarning]:
     if snapshot.source_path is None:
         return []
     flow_dir = snapshot.source_path.parent
-    allowed = valid_prompt_vars(snapshot)
+    flow_allowed = valid_prompt_vars(snapshot)
     seen: set[tuple[str, str]] = set()
     warnings: list[PromptVarWarning] = []
     for node in snapshot.doc.nodes:
         role_file = getattr(node, "role_file", None)
         if not isinstance(role_file, str):
             continue  # checks / hitl / publish nodes carry no prompt template
+        allowed = flow_allowed if isinstance(node, AgentNode) else ALLOWED_PROMPT_VARS
         try:
             template = read_role_file(flow_dir, role_file)
         except RoleFileError:
