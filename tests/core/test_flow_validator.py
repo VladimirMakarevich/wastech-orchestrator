@@ -73,6 +73,11 @@ def test_supervisor_finalize_role_file_traversal_rejected(tmp_path: Path) -> Non
     assert _has(_violations(content, tmp_path), "ceiling", "path traversal")
 
 
+def test_supervisor_handoff_role_file_traversal_rejected(tmp_path: Path) -> None:
+    content = _SUPERVISOR_FLOW.format(block="    handoff_role_file: ../escape.md\n")
+    assert _has(_violations(content, tmp_path), "ceiling", "path traversal")
+
+
 def test_supervisor_contained_paths_accepted(tmp_path: Path) -> None:
     content = _SUPERVISOR_FLOW.format(
         block="    role_file: t/supervisor.md\n    finalize_role_file: t/summary.md\n"

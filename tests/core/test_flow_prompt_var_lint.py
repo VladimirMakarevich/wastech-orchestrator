@@ -110,6 +110,40 @@ def test_lint_evaluator_gets_no_generic_node_var(tmp_path: Path) -> None:
     assert [(w.role_file, w.token) for w in warnings] == [("e/judge.md", "scan_path")]
 
 
+_SUPERVISOR_FLOW = """\
+flow:
+  name: s
+  task_type: s
+  permission_ceiling: workspace-write
+  output_policy: code_change
+  publishing: pull_request
+  nodes:
+    - id: implement
+      kind: agent
+      role_file: s/implement.md
+  edges: []
+  budgets: {}
+  supervisor:
+    role_file: s/observe.md
+    finalize_role_file: s/summary.md
+"""
+
+
+def test_lint_scans_supervisor_prompts_against_their_own_tiny_allowlist(tmp_path: Path) -> None:
+    # The flow-local supervisor prompts are role files too, but the supervisor populates only
+    # {task_id, repo, repo_path}. A node-allowlist var ({plan_path}) in a supervisor prompt renders
+    # verbatim just the same, so it is flagged; {task_id}/{repo} are clean.
+    flow_dir = tmp_path / "flows"
+    (flow_dir / "s").mkdir(parents=True)
+    (flow_dir / "s.yaml").write_text(_SUPERVISOR_FLOW, encoding="utf-8")
+    (flow_dir / "s" / "implement.md").write_text("do {task_id}", encoding="utf-8")
+    (flow_dir / "s" / "observe.md").write_text("observe {task_id} in {repo}", encoding="utf-8")
+    (flow_dir / "s" / "summary.md").write_text("summarize using {plan_path}", encoding="utf-8")
+
+    warnings = lint_prompt_variables(load_flow(flow_dir / "s.yaml"))
+    assert [(w.role_file, w.token) for w in warnings] == [("s/summary.md", "plan_path")]
+
+
 def test_lint_no_source_path_returns_empty() -> None:
     # A unit-constructed snapshot (no on-disk role files) has nothing to scan.
     snap = load_flow(PACKAGED / "implementation.yaml")

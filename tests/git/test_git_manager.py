@@ -862,3 +862,30 @@ def test_delete_branch_is_idempotent(
     git_run(["branch", "worc/task-001-x"], git_repo.clone)
     assert gm.delete_branch("worc/task-001-x") is True  # deleted
     assert gm.delete_branch("worc/task-001-x") is False  # already gone — no-op
+
+
+def test_files_in_commit_lists_changed_paths_posix(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # The subtask handoff floor names a predecessor commit's changed files. Paths come back
+    # git-posix (forward slashes) regardless of host OS, so the assertion holds cross-platform.
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    (git_repo.clone / "a.txt").write_text("a\n", encoding="utf-8")
+    (git_repo.clone / "pkg").mkdir()
+    (git_repo.clone / "pkg" / "b.txt").write_text("b\n", encoding="utf-8")
+    git_run(["add", "a.txt", "pkg/b.txt"], git_repo.clone)
+    git_run(["commit", "-m", "add two files"], git_repo.clone)
+    sha = git_run(["rev-parse", "HEAD"], git_repo.clone)
+
+    files = gm.files_in_commit(sha)
+    assert set(files) == {"a.txt", "pkg/b.txt"}
+    assert all("\\" not in f for f in files)  # git yields posix separators
+
+
+def test_files_in_commit_bad_sha_returns_empty(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # Best-effort: an unknown/malformed sha yields [] rather than raising, so the handoff
+    # degrades to the rest of the floor.
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    assert gm.files_in_commit("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef") == []

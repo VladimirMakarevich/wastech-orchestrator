@@ -533,6 +533,13 @@ def _check_config_consistency(snap: FlowSnapshot, config: OrchestratorConfig) ->
 
 # -- prompt-variable anti-drift lint (non-fatal) ------------------------------
 
+# The only names the supervisor's prompts (observe / finalize / handoff lenses) ever receive — the
+# exact dict ``Supervisor._render_chain`` substitutes. Kept here so the lint checks a flow-local
+# supervisor prompt against its real (tiny) allow-set rather than the node allowlist: an operator
+# who writes ``{plan_path}`` in a ``supervisor.md`` gets a warning, since the supervisor never
+# populates it.
+_SUPERVISOR_PROMPT_VARS: frozenset[str] = frozenset({"task_id", "repo", "repo_path"})
+
 
 @dataclass(frozen=True, slots=True)
 class PromptVarWarning:
@@ -557,6 +564,11 @@ def lint_prompt_variables(snapshot: FlowSnapshot) -> list[PromptVarWarning]:
     (the generic ``{<id>_path}`` channel does not extend to evaluators — they render it verbatim, so
     it *should* be flagged). Either way a typo (``{plna_path}``) or a ``{X_path}`` naming no node is
     reported (file + token) as rendering verbatim.
+
+    The flow-local **supervisor** prompts (``supervisor.{role_file, finalize_role_file,
+    handoff_role_file}``) are role files too, scanned against the tiny set the supervisor actually
+    populates (:data:`_SUPERVISOR_PROMPT_VARS`) — so ``{plan_path}`` in a ``supervisor.md`` is
+    flagged, since the supervisor never fills it.
 
     Deliberately **not fatal**: a verbatim render is the safe-renderer fallback (literal braces must
     pass through), so a warning is the correct signal, not an aborted run. Best-effort on IO: a role
@@ -584,6 +596,27 @@ def lint_prompt_variables(snapshot: FlowSnapshot) -> list[PromptVarWarning]:
                 continue
             seen.add((role_file, token))
             warnings.append(PromptVarWarning(role_file=role_file, token=token))
+    # The flow-local supervisor prompts (observe / finalize / handoff lenses) are role files too,
+    # but the supervisor populates only ``_SUPERVISOR_PROMPT_VARS`` — so a node-allowlist variable
+    # there renders verbatim just the same. Scan them against that tiny set.
+    supervisor = snapshot.doc.supervisor
+    if supervisor is not None:
+        for role_file in (
+            supervisor.role_file,
+            supervisor.finalize_role_file,
+            supervisor.handoff_role_file,
+        ):
+            if role_file is None:
+                continue
+            try:
+                template = read_role_file(flow_dir, role_file)
+            except RoleFileError:
+                continue
+            for token in sorted(referenced_variables(template)):
+                if token in _SUPERVISOR_PROMPT_VARS or (role_file, token) in seen:
+                    continue
+                seen.add((role_file, token))
+                warnings.append(PromptVarWarning(role_file=role_file, token=token))
     return warnings
 
 
