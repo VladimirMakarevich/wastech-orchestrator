@@ -141,6 +141,34 @@ class DecompositionConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class SupervisorBlock:
+    """Flow-local supervisor prompt overrides + the follow-ups opt-in (prompt-and-supervisor ADR).
+
+    The supervisor is a constant layer above any flow; this block lets a flow reshape *its wording*
+    without touching global config. Only wording moves into files — the structured-output schemas
+    (``memory_delta``, ``follow_ups``) stay hardcoded in code, so an author can never break the
+    machine contract the orchestrator parses.
+
+    * ``role_file`` — the observe lens, overriding the global ``config.supervisor.role_file``.
+    * ``finalize_role_file`` — the final-summary emphasis (no global counterpart — YAGNI).
+    * ``handoff_role_file`` — the intra-task subtask handoff brief (subtask-context-handoff ADR; no
+      global counterpart). A third supervisor prompt, same contract: wording in a file, schema in
+      code.
+    * ``emit_follow_ups`` — opt the flow's finalize turn into the structured ``{summary,
+      follow_ups}`` contract (a per-flow, code-oriented capability; default off). Memory is
+      orthogonal (the same turn additionally emits ``memory_delta`` when memory is enabled).
+
+    All prompt paths are validated as flow-dir-contained (fatal on traversal), like a node
+    ``role_file``.
+    """
+
+    role_file: str | None = None
+    finalize_role_file: str | None = None
+    handoff_role_file: str | None = None
+    emit_follow_ups: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class EvaluatorDefaults:
     """Default field values applied to evaluator nodes that omit the field."""
 
@@ -173,3 +201,6 @@ class FlowDoc:
     budgets: MappingProxyType[str, int]
     network_policy: NetworkPolicy | None = None
     decomposition: DecompositionConfig | None = None
+    #: flow-local supervisor prompt overrides + the follow-ups opt-in; ``None`` → the supervisor
+    #: uses the global ``config.supervisor`` and its built-in finalize prompt (today's behavior).
+    supervisor: SupervisorBlock | None = None

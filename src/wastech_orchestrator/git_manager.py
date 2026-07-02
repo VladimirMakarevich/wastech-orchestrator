@@ -525,6 +525,19 @@ class GitManager:
         path.write_text(diff_text, encoding="utf-8")
         return str(path)
 
+    def files_in_commit(self, sha: str) -> list[str]:
+        """Repo-relative paths changed by commit ``sha`` (git-posix separators; empty on any error).
+
+        Used by the subtask handoff to name a predecessor subtask's changed files (deterministic
+        ground-truth floor). Routes through the same safe argv runner as every git call — no shell,
+        mandatory timeout — and is best-effort: a bad/missing sha yields ``[]`` rather than raising,
+        so the handoff degrades to the rest of the floor.
+        """
+        result = self._git("diff-tree", "--no-commit-id", "--name-only", "-r", sha)
+        if not result.ok:
+            return []
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
     # --- staging + commit ---------------------------------------------------------
 
     def changed_code_paths(self) -> list[str]:

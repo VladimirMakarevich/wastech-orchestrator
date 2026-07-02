@@ -32,6 +32,7 @@ from typing import Any, Protocol
 from wastech_orchestrator.config.schema import SupervisorConfig
 from wastech_orchestrator.core.flow.nodes.base import RegisterArtifact, RouterPort
 from wastech_orchestrator.core.flow.prompt import RoleFileError, render_role_prompt
+from wastech_orchestrator.core.flow.schema import SupervisorBlock
 from wastech_orchestrator.core.skills import SkillInventory
 from wastech_orchestrator.memory.delta import DELTA_OUTPUT_SCHEMA, CandidateDelta, parse_delta
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
@@ -54,6 +55,14 @@ _SUPERVISOR_LINEAGE_NODE_ID = "__supervisor__"
 # (``stages/supervisor/run-NNNNNN/``). Distinct from finalize's ``0`` and from any real (positive,
 # small, autoincrement) node-run id, so the three turn kinds never collide on the same path.
 _PROPOSAL_RUN_ID = 999_999
+
+# Base for the subtask-boundary handoff turns' artifact-dir namespace (subtask-context-handoff ADR).
+# Each handoff uses ``_HANDOFF_RUN_ID_BASE + subtask_order`` so multiple handoffs in one task (a
+# chain, or a diamond) write to DISTINCT dirs — ``create_attempt_dir`` forbids overwriting
+# (``exist_ok=False``), so a shared id would make the second boundary's turn raise and silently
+# degrade to the floor alone. The base is distinct from the proposal (999999) and finalize (0), and
+# far above any real (small autoincrement) node-run id.
+_HANDOFF_RUN_ID_BASE = 990_000
 
 # The strict provider schema for the once-per-task ``node → skills`` proposal. Array-shaped (not an
 # arbitrary-key object) so it validates under strict JSON-schema: each assignment names one node and
@@ -82,27 +91,176 @@ _SKILL_MAP_SCHEMA: dict[str, Any] = {
 }
 
 
-# The finalize turn's structured schema when memory is enabled: the prose summary AND the candidate
-# memory delta, emitted on the SAME turn (no extra LLM call — AC-W1). When memory is disabled the
-# finalize turn stays free-text (today's behavior exactly — AC-S4).
-_FINALIZE_SCHEMA: dict[str, Any] = {
+# The evidence-gated ``follow_ups`` schema (task 1). Hardcoded in code — a flow author reshapes the
+# supervisor's *wording* via its prompt files, but never the machine contract the orchestrator
+# parses. Each record is minimal and grounded: an unsupported "refactor idea" carries no evidence
+# and is dropped by :func:`parse_follow_ups`.
+_FOLLOW_UPS_SCHEMA: dict[str, Any] = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "title": {"type": "string", "minLength": 1},
+            "rationale": {"type": "string"},
+            "paths": {"type": "array", "items": {"type": "string"}},
+            "evidence": {"type": "array", "items": {"type": "string"}},
+            "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+            "action_hint": {"type": "string"},
+        },
+        "required": ["title", "rationale", "evidence", "severity"],
+    },
+}
+
+# The intra-task subtask handoff brief's structured schema (subtask-context-handoff ADR). Three
+# sections; hardcoded in code (a flow reshapes wording via ``handoff_role_file``, never the
+# contract). All optional — a thin boundary may yield only one useful section.
+_HANDOFF_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "summary": {"type": "string", "minLength": 1},
-        "memory_delta": DELTA_OUTPUT_SCHEMA,
+        "new_surface_area": {"type": "string"},
+        "locked_decisions": {"type": "string"},
+        "open_edges": {"type": "string"},
     },
-    "required": ["summary"],
+    "required": [],
 }
+
+# Built-in supervisor prompt text — the last fallback in each chain, so a flow with no prompt files
+# (and no global config prompt, for finalize/handoff) still runs exactly as before.
+_BUILTIN_OBSERVE = "You are a read-only supervisor observing a software task. Do not edit code."
+_BUILTIN_FINALIZE = (
+    "You are a read-only supervisor closing out a software task. Do not edit code.\n\n"
+    "Synthesize a plain-language summary of the whole task: what was done, how it works, how it "
+    "integrates, and why, grounded in the actual committed change. In a closing section list any "
+    "advisory caveats or follow-ups you noted across the steps."
+)
+_BUILTIN_HANDOFF = (
+    "You are a read-only supervisor briefing the next subtask in a decomposed task. Do not edit "
+    "code. You have observed the predecessor subtask(s); write a focused handoff for the agent "
+    "about to implement the successor."
+)
+
+
+def _finalize_schema(*, with_delta: bool, with_follow_ups: bool) -> dict[str, Any]:
+    """Build the finalize turn's structured schema for the enabled outputs (all on one turn).
+
+    ``summary`` is always required; ``memory_delta`` is added when memory is enabled (AC-W1) and
+    ``follow_ups`` when the flow opted in (``supervisor.emit_follow_ups``). When neither is enabled
+    the caller runs a free-text turn instead (today's behavior — AC-S4), so this is never called."""
+    properties: dict[str, Any] = {"summary": {"type": "string", "minLength": 1}}
+    if with_delta:
+        properties["memory_delta"] = DELTA_OUTPUT_SCHEMA
+    if with_follow_ups:
+        properties["follow_ups"] = _FOLLOW_UPS_SCHEMA
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": properties,
+        "required": ["summary"],
+    }
+
+
+@dataclass(frozen=True)
+class FollowUp:
+    """One evidence-gated technical-debt / follow-up record (task 1). Minimal and grounded."""
+
+    title: str
+    rationale: str
+    severity: str
+    evidence: tuple[str, ...]
+    paths: tuple[str, ...] = ()
+    action_hint: str | None = None
+
+
+def parse_follow_ups(raw: Any) -> tuple[FollowUp, ...]:
+    """Parse the finalize turn's ``follow_ups`` array defensively — **evidence-gated**.
+
+    Best-effort, mirroring :func:`_parse_skill_map`: a non-list yields ``()`` and any record without
+    a non-empty ``title`` or ``evidence`` is dropped (never raised), so an ungrounded "refactor
+    idea" the model invented cannot reach ``summary.{json,md}``.
+    """
+    if not isinstance(raw, list):
+        return ()
+    out: list[FollowUp] = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            continue
+        title = item.get("title")
+        evidence = item.get("evidence")
+        if not isinstance(title, str) or not title.strip():
+            continue
+        if not isinstance(evidence, list):
+            continue
+        ev = tuple(e.strip() for e in evidence if isinstance(e, str) and e.strip())
+        if not ev:  # evidence-gated: no evidence → dropped
+            continue
+        rationale = item.get("rationale")
+        severity = item.get("severity")
+        paths = item.get("paths")
+        action_hint = item.get("action_hint")
+        out.append(
+            FollowUp(
+                title=title.strip(),
+                rationale=rationale if isinstance(rationale, str) else "",
+                severity=severity if severity in ("low", "medium", "high") else "medium",
+                evidence=ev,
+                paths=tuple(p.strip() for p in paths if isinstance(p, str) and p.strip())
+                if isinstance(paths, list)
+                else (),
+                action_hint=action_hint.strip()
+                if isinstance(action_hint, str) and action_hint.strip()
+                else None,
+            )
+        )
+    return tuple(out)
+
+
+def _render_follow_ups_section(follow_ups: tuple[FollowUp, ...]) -> str:
+    """Render the ``## Technical debt / follow-ups`` section appended to ``summary.md``."""
+    lines = ["## Technical debt / follow-ups", ""]
+    for fu in follow_ups:
+        parts = [f"- **[{fu.severity}] {fu.title}**"]
+        if fu.rationale:
+            parts.append(f" — {fu.rationale}")
+        if fu.paths:
+            parts.append(f" Paths: {', '.join(fu.paths)}.")
+        if fu.action_hint:
+            parts.append(f" Suggested: {fu.action_hint}")
+        lines.append("".join(parts))
+    return "\n".join(lines) + "\n"
+
+
+def _render_handoff_brief(structured: Mapping[str, Any]) -> str | None:
+    """Render the interpretive three-section handoff brief; ``None`` when no section has content.
+
+    Defensive: a missing/empty/non-string section is skipped, so a partial structured output still
+    yields a usable brief (or ``None`` — the orchestrator then ships the deterministic floor alone).
+    """
+    sections = (
+        ("New surface area", structured.get("new_surface_area")),
+        ("Locked decisions", structured.get("locked_decisions")),
+        ("Open edges", structured.get("open_edges")),
+    )
+    parts = [
+        f"### {title}\n{body.strip()}"
+        for title, body in sections
+        if isinstance(body, str) and body.strip()
+    ]
+    if not parts:
+        return None
+    return "## Interpretive handoff brief\n\n" + "\n\n".join(parts)
 
 
 @dataclass(frozen=True)
 class FinalizeResult:
-    """What ``finalize`` produced: the ``summary.md`` path (or ``None``) and the optional candidate
-    memory delta (present only when memory is enabled and the turn yielded a parseable one)."""
+    """What ``finalize`` produced: the ``summary.md`` path (or ``None``), the optional candidate
+    memory delta (present only when memory is enabled and the turn yielded a parseable one), and the
+    evidence-gated ``follow_ups`` (present only when the flow opted in via ``emit_follow_ups``)."""
 
     summary_path: Path | None
     candidate_delta: CandidateDelta | None = None
+    follow_ups: tuple[FollowUp, ...] = ()
 
 
 def _parse_skill_map(structured: Mapping[str, Any] | None) -> dict[str, tuple[str, ...]]:
@@ -156,6 +314,7 @@ class Supervisor:
         repo_dir: str,
         artifacts_root: str | Path,
         flow_dir: Path,
+        flow_supervisor: SupervisorBlock | None = None,
         register_artifact: RegisterArtifact | None = None,
         default_timeout_seconds: int = 7200,
     ) -> None:
@@ -165,6 +324,16 @@ class Supervisor:
         self._repo_dir = repo_dir
         self._artifacts_root = artifacts_root
         self._flow_dir = flow_dir
+        # Flow-local supervisor prompt overrides + the follow-ups opt-in (prompt-and-supervisor
+        # ADR). ``None`` → the global config prompt + built-in finalize, free-text finalize (today).
+        self._flow_role_file = flow_supervisor.role_file if flow_supervisor else None
+        self._flow_finalize_role_file = (
+            flow_supervisor.finalize_role_file if flow_supervisor else None
+        )
+        self._flow_handoff_role_file = (
+            flow_supervisor.handoff_role_file if flow_supervisor else None
+        )
+        self._emit_follow_ups = flow_supervisor.emit_follow_ups if flow_supervisor else False
         self._register_artifact = register_artifact
         self._default_timeout_seconds = default_timeout_seconds
         # The supervisor's own session (resume_own_lineage). Held in-memory within a process run and
@@ -216,14 +385,17 @@ class Supervisor:
 
         Writes the working ``summary.{md,json}`` under the task artifact dir (the ``summary.md`` is
         the PR body). When ``emit_delta`` (memory enabled) the SAME finalize turn also yields a
-        structured ``candidate_memory_delta`` — zero additional LLM calls (AC-W1); when disabled the
-        turn is free-text, exactly today's behavior (AC-S4). Best-effort: a turn that cannot run
-        yields no ``summary.md`` (the orchestrator's deterministic minimal summary then applies) and
-        a ``None`` delta. ``summary.json`` is always written. Returns the summary path + the delta.
+        structured ``candidate_memory_delta``, and when the flow opted in (``emit_follow_ups``) that
+        same turn yields the evidence-gated ``follow_ups`` array — zero extra LLM calls (AC-W1).
+        When neither is enabled the turn is free-text, exactly today's behavior (AC-S4).
+
+        Best-effort: a turn that cannot run yields no ``summary.md`` (the orchestrator's
+        deterministic minimal summary then applies), a ``None`` delta, and no follow-ups.
+        ``summary.json`` is always written. Returns the summary path + the delta + the follow-ups.
         """
         # ``node_run_id=0`` is the once-per-task finalize sentinel; per-step observations use the
         # observed step's id, so each supervisor turn writes a distinct artifact dir (no collision).
-        summary_text, delta = self._finalize_turn(task_id, task_title, emit_delta)
+        summary_text, delta, follow_ups = self._finalize_turn(task_id, task_title, emit_delta)
         self._record(
             task_id,
             kind="supervisor_final",
@@ -232,36 +404,73 @@ class Supervisor:
             payload={
                 "summary_written": summary_text is not None,
                 "memory_delta": delta is not None,
+                "follow_ups": len(follow_ups),
             },
         )
         task_dir = Path(task_artifact_dir(self._artifacts_root, task_id))
-        self._write_summary_json(task_dir, task_id, task_title, summary_text)
+        self._write_summary_json(task_dir, task_id, task_title, summary_text, follow_ups)
         if not summary_text or not summary_text.strip():
-            return FinalizeResult(summary_path=None, candidate_delta=delta)
+            return FinalizeResult(summary_path=None, candidate_delta=delta, follow_ups=follow_ups)
         md_path = task_dir / "summary.md"
-        md_path.write_text(summary_text.rstrip("\n") + "\n", encoding="utf-8")
+        body = summary_text.rstrip("\n") + "\n"
+        if follow_ups:  # surface the evidence-gated debt/follow-ups as a section in the PR body
+            body += "\n" + _render_follow_ups_section(follow_ups)
+        md_path.write_text(body, encoding="utf-8")
         self._register(task_id, "summary_md", str(md_path))
-        return FinalizeResult(summary_path=md_path, candidate_delta=delta)
+        return FinalizeResult(summary_path=md_path, candidate_delta=delta, follow_ups=follow_ups)
 
     def _finalize_turn(
         self, task_id: str, task_title: str, emit_delta: bool
-    ) -> tuple[str | None, CandidateDelta | None]:
-        """Run the single finalize turn. Free-text when ``emit_delta`` is off (today's behavior);
-        structured ``{summary, memory_delta}`` when on, so summary + delta ride one turn (AC-W1)."""
-        if not emit_delta:
+    ) -> tuple[str | None, CandidateDelta | None, tuple[FollowUp, ...]]:
+        """Run the single finalize turn. Free-text when neither memory nor follow-ups are enabled
+        (today's behavior — AC-S4); otherwise a structured ``{summary, ...}`` turn, so every enabled
+        output (``memory_delta`` / ``follow_ups``) rides one turn (AC-W1 — no extra LLM call)."""
+        with_follow_ups = self._emit_follow_ups
+        if not emit_delta and not with_follow_ups:
             text = self._run(task_id, self._finalize_prompt(task_id, task_title), node_run_id=0)
-            return text, None
+            return text, None, ()
         result = self._run_result(
             task_id,
-            self._finalize_prompt(task_id, task_title, with_delta=True),
+            self._finalize_prompt(
+                task_id, task_title, with_delta=emit_delta, with_follow_ups=with_follow_ups
+            ),
             node_run_id=0,
-            output_schema=_FINALIZE_SCHEMA,
+            output_schema=_finalize_schema(with_delta=emit_delta, with_follow_ups=with_follow_ups),
         )
         if result is None or result.structured_output is None:
-            return None, None
+            return None, None, ()
         summary = result.structured_output.get("summary")
         summary_text = summary if isinstance(summary, str) and summary.strip() else None
-        return summary_text, parse_delta(result.structured_output.get("memory_delta"))
+        delta = parse_delta(result.structured_output.get("memory_delta")) if emit_delta else None
+        follow_ups = (
+            parse_follow_ups(result.structured_output.get("follow_ups")) if with_follow_ups else ()
+        )
+        return summary_text, delta, follow_ups
+
+    # -- intra-task subtask handoff --------------------------------------------
+
+    def handoff(self, *, task_id: str, subtask_order: int, floor_context: str) -> str | None:
+        """Emit the interpretive handoff brief for a subtask boundary (subtask-context-handoff ADR).
+
+        Resumes the warm durable ``__supervisor__`` session — it already observed the predecessor
+        subtask(s), so this is a small incremental turn, **not** a new turn budget. Returns a
+        rendered three-section brief (New surface area / Locked decisions / Open edges) or ``None``.
+
+        Best-effort by contract, exactly like :meth:`finalize`: any failure (no provider, infra
+        error, unreadable role file, malformed/empty structured output) is logged and yields
+        ``None``, and the orchestrator ships the deterministic factual floor alone. The returned
+        brief is redacted by the caller (with the floor) before it is written — no secret reaches
+        the ``.handoff.md`` artifact.
+        """
+        result = self._run_result(
+            task_id,
+            self._handoff_prompt(task_id, subtask_order, floor_context),
+            node_run_id=_HANDOFF_RUN_ID_BASE + subtask_order,
+            output_schema=_HANDOFF_SCHEMA,
+        )
+        if result is None or result.structured_output is None:
+            return None
+        return _render_handoff_brief(result.structured_output)
 
     # -- upfront skill-map proposal --------------------------------------------
 
@@ -445,14 +654,29 @@ class Supervisor:
             + f"### Task\n{task_spec_text}\n"
         )
 
-    def _finalize_prompt(self, task_id: str, task_title: str, *, with_delta: bool = False) -> str:
-        prompt = (
-            self._base_prompt(task_id)
-            + "\n\n## Final synthesis\n"
-            + f"Synthesize a plain-language summary of the whole task ({task_title}): what was "
-            + "done, how it works, how it integrates, and why. List any advisory caveats / "
-            + "follow-ups you noted across the steps in a final section. Do not edit code.\n"
-        )
+    def _finalize_prompt(
+        self,
+        task_id: str,
+        task_title: str,
+        *,
+        with_delta: bool = False,
+        with_follow_ups: bool = False,
+    ) -> str:
+        # The finalize lens (flow ``finalize_role_file`` → built-in) carries the summary emphasis;
+        # only the machine-contract additions (task context, follow-ups, memory delta) are appended
+        # in code, so a flow author reshapes wording but never the parsed schema.
+        prompt = self._finalize_base(task_id) + f"\n\n## Task under review\n{task_title}\n"
+        if with_follow_ups:
+            prompt += (
+                "\n## Technical debt / follow-ups\n"
+                "Also record concrete technical debt and refactor follow-ups you observed, as the "
+                "structured `follow_ups` array. Each record is minimal and **evidence-gated**: a "
+                "`title`, a short `rationale`, the `paths` it concerns, `evidence` pointers "
+                "(files/lines/commits/checks that substantiate it), a `severity` "
+                "(low/medium/high), and an optional `action_hint`. Propose only debt grounded in "
+                "what actually happened this run — never speculative ideas. Leave the array empty "
+                "when nothing qualifies; a record without evidence is dropped.\n"
+            )
         if with_delta:
             prompt += (
                 "\n## Candidate memory delta\n"
@@ -468,22 +692,78 @@ class Supervisor:
         return prompt
 
     def _base_prompt(self, task_id: str) -> str:
-        try:
-            return render_role_prompt(
-                self._flow_dir,
-                self._settings.role_file,
-                {"task_id": task_id, "repo": self._repo_dir, "repo_path": self._repo_dir},
-            )
-        except RoleFileError:
-            # Fall back to a minimal instruction so a missing/bad role file never breaks the task
-            # (the call is best-effort; the validator already rejects a traversal role_file).
-            return "You are a read-only supervisor observing a software task. Do not edit code."
+        """The observe lens: flow ``role_file`` → global ``config.supervisor.role_file`` → built-in.
+
+        Best-effort: each candidate that is missing/bad/traversing (``RoleFileError``) falls through
+        to the next, so the supervisor's per-step observation and skill proposal never break."""
+        return self._render_chain(
+            task_id, (self._flow_role_file, self._settings.role_file), _BUILTIN_OBSERVE
+        )
+
+    def _finalize_base(self, task_id: str) -> str:
+        """The finalize lens: flow ``finalize_role_file`` → built-in (no global one — YAGNI)."""
+        return self._render_chain(task_id, (self._flow_finalize_role_file,), _BUILTIN_FINALIZE)
+
+    def _handoff_prompt(self, task_id: str, subtask_order: int, floor_context: str) -> str:
+        # The handoff lens (flow ``handoff_role_file`` → built-in) carries the wording; the machine
+        # contract (the three-section schema) is appended by code, not the file.
+        return (
+            self._handoff_base(task_id)
+            + f"\n\n## Handoff to subtask {subtask_order}\n"
+            + "The predecessor subtask(s) it depends on just completed and committed:\n\n"
+            + floor_context
+            + "\n\nWrite a focused brief for the agent implementing this next subtask, as the "
+            "structured output's three sections: `new_surface_area` (what the predecessor(s) built "
+            "that the successor should use), `locked_decisions` (contracts not to revisit, with "
+            "brief rationale), and `open_edges` (what was deferred or must not be touched). Ground "
+            "every claim in the facts above; be concise. Do not edit code."
+        )
+
+    def _handoff_base(self, task_id: str) -> str:
+        """The handoff lens: flow ``handoff_role_file`` → built-in (no global one — YAGNI)."""
+        return self._render_chain(task_id, (self._flow_handoff_role_file,), _BUILTIN_HANDOFF)
+
+    def _render_chain(self, task_id: str, candidates: tuple[str | None, ...], fallback: str) -> str:
+        """Render the first readable role file in *candidates*, else *fallback* (best-effort)."""
+        variables: dict[str, object | None] = {
+            "task_id": task_id,
+            "repo": self._repo_dir,
+            "repo_path": self._repo_dir,
+        }
+        for candidate in candidates:
+            if not candidate:
+                continue
+            try:
+                return render_role_prompt(self._flow_dir, candidate, variables)
+            except RoleFileError:
+                continue  # missing/bad/traversing → next candidate (validator rejects traversal)
+        return fallback
 
     def _write_summary_json(
-        self, task_dir: Path, task_id: str, task_title: str, summary_text: str | None
+        self,
+        task_dir: Path,
+        task_id: str,
+        task_title: str,
+        summary_text: str | None,
+        follow_ups: tuple[FollowUp, ...] = (),
     ) -> None:
-        """Write the local-only ``summary.json`` metadata (never committed). Always written."""
-        payload = {"what": task_title, "summary": summary_text or ""}
+        """Write the local-only ``summary.json`` metadata (never committed). Always written.
+
+        Carries the evidence-gated ``follow_ups`` (empty unless the flow opted in) so the debt
+        signal is machine-readable beside the prose summary."""
+        payload: dict[str, Any] = {"what": task_title, "summary": summary_text or ""}
+        if follow_ups:
+            payload["follow_ups"] = [
+                {
+                    "title": fu.title,
+                    "rationale": fu.rationale,
+                    "severity": fu.severity,
+                    "paths": list(fu.paths),
+                    "evidence": list(fu.evidence),
+                    "action_hint": fu.action_hint,
+                }
+                for fu in follow_ups
+            ]
         path = task_dir / "summary.json"
         try:
             path.parent.mkdir(parents=True, exist_ok=True)

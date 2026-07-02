@@ -8,7 +8,7 @@ If you only want to change _what a step says_, you do not need a new flow — ed
 
 - **Dispatch file:** `<repo>/.worc/flows/<task_type>.yaml`. The file stem is the `task_type`. A file here adds a new `task_type` or overrides a packaged built-in of the same name.
 - **Prompts:** each flow **owns its prompts** in a sibling folder named after the `task_type` — `.worc/flows/<task_type>/*.md`. `role_file` values in the YAML are relative to `.worc/flows/` and point into that folder (e.g. `role_file: my_flow/implement.md`).
-- **Shared supervisor prompt:** `.worc/flows/roles/supervisor.md` stays shared across every flow (the supervisor is a constant layer above all flows, not a node of one).
+- **Supervisor prompts:** the supervisor is a constant layer above all flows (not a node). Its global default observe lens is `.worc/flows/roles/supervisor.md`, but a flow may own its supervisor wording with a `supervisor:` block (see "Flow-local supervisor prompts" below); a flow with no such block uses the shared `roles/supervisor.md`.
 
 `install` seeds editable, active copies of the three built-ins (`implementation`, `deep_research`, `security_audit`); the operator layer shadows the packaged one, so those copies are already yours to edit.
 
@@ -53,7 +53,55 @@ flow:
     test_fix: 5 # every fail/rework loop must be bounded
 ```
 
-`my_flow/implement.md` is an ordinary Markdown prompt; it may use only allowlisted path variables like `{task_path}`, `{repo_path}`, `{plan_path}`, `{diff_path}` (never task bodies, diffs, env, or secrets).
+`my_flow/implement.md` is an ordinary Markdown prompt; it may use only allowlisted path variables like `{task_path}`, `{repo_path}`, `{plan_path}`, `{diff_path}` (never task bodies, diffs, env, or secrets). See `prompt-variables.md` in this folder for the full list, which runner populates each, and the `{?name}…{/name}` optional-variable syntax.
+
+## Chaining node outputs (`{<node_id>_path}`)
+
+Every **agent** node's output is persisted and exposed to later nodes as `{<node_id>_path}` — a path to that node's `<id>.out.md`, never the inlined content. That is how a multi-step flow hands one node's result to the next by name, with no extra config:
+
+```yaml
+nodes:
+  - id: scan
+    kind: agent
+    role_file: my_flow/scan.md # writes scan.out.md → {scan_path}
+  - id: analyze
+    kind: agent
+    role_file: my_flow/analyze.md # references {?scan_path}…{/scan_path}
+  - id: build
+    kind: agent
+    role_file: my_flow/build.md # references {scan_path} and {analyze_path} (fan-in)
+    session_scope: editing_lineage
+    permission_profile: workspace-write
+edges:
+  - { from: scan, to: analyze }
+  - { from: analyze, to: build }
+```
+
+In `my_flow/build.md`:
+
+```text
+Implement the change.{?analyze_path} Follow the analysis at {analyze_path}.{/analyze_path}{?scan_path} The raw scan is at {scan_path}.{/scan_path}
+```
+
+One node exposes exactly one output — to publish several results, split into several nodes. A node id may not collide with a reserved core-variable prefix (`task`, `plan`, `diff`, `checks`, `review`, `repo`, `skills`, `memory`, `stage`, `subtask*`); that is a fatal load error.
+
+## Flow-local supervisor prompts
+
+The supervisor is a constant read-only layer above the flow — it observes each step and writes the final summary (the PR body). A flow can reshape **its wording** (never the machine contract) with an optional `supervisor:` block:
+
+```yaml
+supervisor:
+  role_file: my_flow/supervisor.md # observe lens; fallback: flow -> config.supervisor.role_file -> built-in
+  finalize_role_file: my_flow/summary.md # finalize lens; fallback: flow -> built-in (no global one)
+  handoff_role_file: my_flow/handoff.md # subtask handoff-brief lens (decompose flows); fallback: flow -> built-in
+  emit_follow_ups: true # opt this flow's finalize into the technical-debt / follow-ups signal
+```
+
+- All three prompt files are resolved inside the flow dir (relative paths, no `..`); a traversing path fails validation.
+- Supervisor prompts receive only `{task_id}`, `{repo}` / `{repo_path}` — no node/path variables. The `preflight` anti-drift lint scans them too, so a mistaken `{plan_path}` (or any other `{name}` the supervisor never fills) is flagged as rendering verbatim.
+- **`handoff_role_file`** is only used by decompose flows: at each subtask boundary the supervisor writes an interpretive handoff brief for the next subtask, injected as `{predecessor_context}` into the region's `implementation` node (see `prompt-variables.md`). A deterministic factual floor (changed files, commit, acceptance criteria, spec pointer) is always present; the interpretive brief rides the supervisor's warm session (no extra turn budget) and is best-effort.
+- **`emit_follow_ups`** (default `false`) is a **code-oriented** capability: when on, the supervisor's existing finalize turn (no extra LLM call) also emits an **evidence-gated** `follow_ups` array — technical debt / refactor candidates it saw, each with `title` / `rationale` / `paths` / `evidence` / `severity` / `action_hint` — written into `summary.json` and a "Technical debt / follow-ups" section of `summary.md`. Set it on a code flow (the packaged `implementation` flow does); leave it off for research / prose flows (never ask them to invent "refactor candidates").
+- Only the **wording** moves into files. The structured-output schemas (`follow_ups`, and the memory delta) stay in the orchestrator, so your prompt can change tone and emphasis but can never break what the orchestrator parses.
 
 ## Register, run, validate
 
@@ -64,7 +112,7 @@ flow:
 ## Foot-guns
 
 - Keep `permission_ceiling` as low as the flow needs; grant `workspace-write` only to nodes that edit. A task can never widen it.
-- Put every `role_file` inside the flow's own `<task_type>/` folder; relative paths only (no `..`). Do not point at `roles/` — that is the shared supervisor layer.
+- Put every node `role_file` inside the flow's own `<task_type>/` folder; relative paths only (no `..`). `roles/supervisor.md` is the shared **global** supervisor default; to give this flow its own supervisor wording, use the `supervisor:` block (above) pointing into your own folder, not a node `role_file`.
 - Bound every `fail`/`rework` loop with a `budget`; exactly one entry node (no incoming edges); every node must reach a terminal.
 - Network is off by default; declare `network_policy` for a flow-wide grant or `network_access: true` on one node. A Codex `workspace-write` node with network is rejected — split external fetches into a `read-only` node.
 

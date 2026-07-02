@@ -153,6 +153,16 @@ flow:
     test_fix: 15
     review_fix: 15
 
+  # Flow-local supervisor prompts + the tech-debt/follow-ups opt-in (prompt-and-supervisor ADR). The
+  # supervisor is a constant layer above the flow, not a node; this block only reshapes ITS wording
+  # (the structured-output schemas stay in code). `role_file` overrides the global observe lens;
+  # `finalize_role_file` is the final-summary emphasis; `emit_follow_ups` opts the finalize turn into
+  # the evidence-gated `follow_ups` array (a code-oriented capability — research/prose flows omit it).
+  supervisor:
+    role_file: implementation/supervisor.md
+    finalize_role_file: implementation/summary.md
+    emit_follow_ups: true
+
   decomposition:
     proposed_by: planning
     sub_flow: [implementation, testing, review, fixing]

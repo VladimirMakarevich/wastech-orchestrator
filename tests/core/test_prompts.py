@@ -6,7 +6,11 @@ from importlib import resources
 
 import pytest
 
-from wastech_orchestrator.core.prompts import ALLOWED_PROMPT_VARS, render_prompt
+from wastech_orchestrator.core.prompts import (
+    ALLOWED_PROMPT_VARS,
+    referenced_variables,
+    render_prompt,
+)
 
 
 def test_render_substitutes_only_allowlisted_names() -> None:
@@ -76,7 +80,55 @@ def test_allowlist_matches_documented_variables() -> None:
         "subtask_spec_path",
         "skills_path",
         "memory_path",  # per-node retrieval packet path (memory subsystem, phase 03)
+        "predecessor_context",  # intra-task subtask handoff brief path (subtask-context-handoff)
     } == ALLOWED_PROMPT_VARS
+
+
+def test_referenced_variables_extracts_bare_and_conditional_tokens() -> None:
+    # Both a bare {name} and a {?name}...{/name} block name are reported; literal code/JSON braces
+    # (which do not match the token shape) are ignored, like the renderer leaves them verbatim.
+    template = 'use {plan_path} and {?memory_path}see {memory_path}{/memory_path} keep {"json": 1}'
+    assert referenced_variables(template) == {"plan_path", "memory_path"}
+
+
+def test_referenced_variables_reports_unknown_names_without_judging() -> None:
+    # It extracts, it does not filter against the allowlist — that is the lint's job.
+    assert referenced_variables("a {plna_path} b {task_id}") == {"plna_path", "task_id"}
+
+
+def test_referenced_variables_widened_tokens() -> None:
+    # The widened token shape accepts hyphens and digits (node ids like static-scan / pass2).
+    assert referenced_variables("{static-scan_path} {pass2_path}") == {
+        "static-scan_path",
+        "pass2_path",
+    }
+
+
+def test_render_accepts_hyphen_and_digit_tokens_with_custom_allowed() -> None:
+    # The effective allowlist may be widened by the caller (node-output {<id>_path}); the renderer
+    # substitutes those the same way, still only ever a path value.
+    allowed = ALLOWED_PROMPT_VARS | {"static-scan_path", "pass2_path"}
+    out = render_prompt(
+        "a {static-scan_path} b {pass2_path}",
+        {"static-scan_path": "/a", "pass2_path": "/b"},
+        allowed=allowed,
+    )
+    assert out == "a /a b /b"
+
+
+def test_render_widened_regex_still_passes_camelcase_and_json() -> None:
+    # camelCase (uppercase) and JSON braces are not tokens and pass through untouched.
+    template = 'keep {someVar} and {"json": 1} and {task_id}'
+    assert render_prompt(template, {"task_id": "T"}) == 'keep {someVar} and {"json": 1} and T'
+
+
+def test_render_only_substitutes_the_given_allowed_set() -> None:
+    # A name absent from the passed allowed set is left verbatim even when it has a value — the
+    # renderer stays the fixed security core, substituting only names in the set it is given.
+    assert render_prompt("{scan_path}", {"scan_path": "/x"}, allowed=frozenset()) == "{scan_path}"
+    assert (
+        render_prompt("{scan_path}", {"scan_path": "/x"}, allowed=frozenset({"scan_path"})) == "/x"
+    )
 
 
 def test_memory_path_conditional_block_kept_and_dropped() -> None:

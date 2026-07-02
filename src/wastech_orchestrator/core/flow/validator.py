@@ -52,8 +52,11 @@ from wastech_orchestrator.core.flow.contracts import (
     resolve_network_access,
 )
 from wastech_orchestrator.core.flow.engine import _REWORK_OUTCOMES, skip_outcome
+from wastech_orchestrator.core.flow.prompt import RoleFileError, read_role_file
+from wastech_orchestrator.core.flow.prompt_vars import valid_prompt_vars
 from wastech_orchestrator.core.flow.schema import AgentNode, EvaluatorNode
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
+from wastech_orchestrator.core.prompts import ALLOWED_PROMPT_VARS, referenced_variables
 from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.providers.capabilities import (
     all_reasoning_levels,
@@ -409,6 +412,18 @@ def _check_ceiling(snap: FlowSnapshot) -> list[Violation]:
                     errs.append(c(f"agent {node.id!r}: extra_args {reason}"))
             _check_path(node.id, node.role_file, errs)
 
+    # Flow-local supervisor prompt files are flow-dir-contained, exactly like a node role_file: a
+    # path that escapes the flow directory is fatal (prompt-and-supervisor authoring contract).
+    supervisor = doc.supervisor
+    if supervisor is not None:
+        for path in (
+            supervisor.role_file,
+            supervisor.finalize_role_file,
+            supervisor.handoff_role_file,
+        ):
+            if path is not None:
+                _check_path("supervisor", path, errs)
+
     return errs
 
 
@@ -514,6 +529,95 @@ def _check_config_consistency(snap: FlowSnapshot, config: OrchestratorConfig) ->
                 )
 
     return errs
+
+
+# -- prompt-variable anti-drift lint (non-fatal) ------------------------------
+
+# The only names the supervisor's prompts (observe / finalize / handoff lenses) ever receive — the
+# exact dict ``Supervisor._render_chain`` substitutes. Kept here so the lint checks a flow-local
+# supervisor prompt against its real (tiny) allow-set rather than the node allowlist: an operator
+# who writes ``{plan_path}`` in a ``supervisor.md`` gets a warning, since the supervisor never
+# populates it.
+_SUPERVISOR_PROMPT_VARS: frozenset[str] = frozenset({"task_id", "repo", "repo_path"})
+
+
+@dataclass(frozen=True, slots=True)
+class PromptVarWarning:
+    """A role file references a ``{name}`` outside the flow's valid prompt-variable set.
+
+    Advisory only — the renderer leaves an unknown ``{name}`` verbatim by design (so code/JSON
+    braces survive), so this is never fatal. It surfaces the one real leak: a typo'd or invented
+    variable that silently ships to the agent as literal placeholder text instead of substituted.
+    """
+
+    role_file: str
+    token: str
+
+
+def lint_prompt_variables(snapshot: FlowSnapshot) -> list[PromptVarWarning]:
+    """Scan every node role file for ``{name}`` / ``{?name}`` tokens outside the flow's valid-set.
+
+    The valid-set is **flow-derived** and **node-kind-aware**, matching each node's real effective
+    allowlist: an **agent** node is checked against :func:`~.prompt_vars.valid_prompt_vars` (core
+    allowlist ∪ every agent node's ``{<id>_path}``), so referencing an upstream node's output by id
+    is fine; an **evaluator** node is checked against the core :data:`ALLOWED_PROMPT_VARS` alone
+    (the generic ``{<id>_path}`` channel does not extend to evaluators — they render it verbatim, so
+    it *should* be flagged). Either way a typo (``{plna_path}``) or a ``{X_path}`` naming no node is
+    reported (file + token) as rendering verbatim.
+
+    The flow-local **supervisor** prompts (``supervisor.{role_file, finalize_role_file,
+    handoff_role_file}``) are role files too, scanned against the tiny set the supervisor actually
+    populates (:data:`_SUPERVISOR_PROMPT_VARS`) — so ``{plan_path}`` in a ``supervisor.md`` is
+    flagged, since the supervisor never fills it.
+
+    Deliberately **not fatal**: a verbatim render is the safe-renderer fallback (literal braces must
+    pass through), so a warning is the correct signal, not an aborted run. Best-effort on IO: a role
+    file that cannot be read here is skipped (a genuinely missing/traversing file is caught by the
+    fatal path checks and surfaced when the node runs). Returns an empty list when the snapshot has
+    no ``source_path`` (a unit-constructed snapshot with no on-disk role files to scan).
+    """
+    if snapshot.source_path is None:
+        return []
+    flow_dir = snapshot.source_path.parent
+    flow_allowed = valid_prompt_vars(snapshot)
+    seen: set[tuple[str, str]] = set()
+    warnings: list[PromptVarWarning] = []
+    for node in snapshot.doc.nodes:
+        role_file = getattr(node, "role_file", None)
+        if not isinstance(role_file, str):
+            continue  # checks / hitl / publish nodes carry no prompt template
+        allowed = flow_allowed if isinstance(node, AgentNode) else ALLOWED_PROMPT_VARS
+        try:
+            template = read_role_file(flow_dir, role_file)
+        except RoleFileError:
+            continue  # unreadable/traversing — surfaced by the fatal path check / at run time
+        for token in sorted(referenced_variables(template)):
+            if token in allowed or (role_file, token) in seen:
+                continue
+            seen.add((role_file, token))
+            warnings.append(PromptVarWarning(role_file=role_file, token=token))
+    # The flow-local supervisor prompts (observe / finalize / handoff lenses) are role files too,
+    # but the supervisor populates only ``_SUPERVISOR_PROMPT_VARS`` — so a node-allowlist variable
+    # there renders verbatim just the same. Scan them against that tiny set.
+    supervisor = snapshot.doc.supervisor
+    if supervisor is not None:
+        for role_file in (
+            supervisor.role_file,
+            supervisor.finalize_role_file,
+            supervisor.handoff_role_file,
+        ):
+            if role_file is None:
+                continue
+            try:
+                template = read_role_file(flow_dir, role_file)
+            except RoleFileError:
+                continue
+            for token in sorted(referenced_variables(template)):
+                if token in _SUPERVISOR_PROMPT_VARS or (role_file, token) in seen:
+                    continue
+                seen.add((role_file, token))
+                warnings.append(PromptVarWarning(role_file=role_file, token=token))
+    return warnings
 
 
 def global_primary(config: OrchestratorConfig) -> ProviderId | None:

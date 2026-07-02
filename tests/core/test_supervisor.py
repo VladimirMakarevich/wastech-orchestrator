@@ -18,10 +18,11 @@ from wastech_orchestrator.config.loader import ConfigError, loads_config
 from wastech_orchestrator.config.schema import SupervisorConfig
 from wastech_orchestrator.config.validation import validate_config
 from wastech_orchestrator.core.flow.run_state import FlowRunState
+from wastech_orchestrator.core.flow.schema import SupervisorBlock
 from wastech_orchestrator.core.loop_control import record_rework
 from wastech_orchestrator.core.skills import SkillInventory, SkillRef
 from wastech_orchestrator.core.state_machine import Status
-from wastech_orchestrator.core.supervisor import Supervisor
+from wastech_orchestrator.core.supervisor import Supervisor, parse_follow_ups
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.providers.base import AgentRunResult, ProviderId, RunStatus
 from wastech_orchestrator.routing.router import ResolvedRoute, RouteSource, StageOutcome
@@ -92,6 +93,7 @@ def _supervisor(
     *,
     model: str | None = None,
     reasoning: str | None = None,
+    flow_supervisor: SupervisorBlock | None = None,
 ) -> Supervisor:
     (tmp_path / "roles").mkdir(exist_ok=True)
     (tmp_path / "roles" / "supervisor.md").write_text("Observe {task_id} in {repo}.", "utf-8")
@@ -104,6 +106,7 @@ def _supervisor(
         repo_dir="/repo",
         artifacts_root=str(tmp_path / "art"),
         flow_dir=tmp_path,
+        flow_supervisor=flow_supervisor,
     )
 
 
@@ -377,6 +380,236 @@ def test_finalize_malformed_delta_still_writes_summary(tmp_path: Path) -> None:
     result = sup.finalize(task_id=_TASK, task_title="T", emit_delta=True)
     assert result.summary_path is not None  # summary still written
     assert result.candidate_delta is None  # unusable delta -> None, never an exception
+
+
+# -- Cluster B: flow-local supervisor prompts + emit_follow_ups ----------------
+
+
+def _flow_lens(tmp_path: Path, name: str, body: str) -> str:
+    """Write a flow-owned supervisor prompt file under flow_dir and return its relative path."""
+    (tmp_path / "flow").mkdir(exist_ok=True)
+    (tmp_path / "flow" / name).write_text(body, "utf-8")
+    return f"flow/{name}"
+
+
+def test_observe_lens_fallback_flow_then_config_then_builtin(tmp_path: Path) -> None:
+    # Observe lens resolves flow role_file -> config.supervisor.role_file -> built-in (3 steps).
+    flow_rf = _flow_lens(tmp_path, "supervisor.md", "FLOWLENS {task_id}")
+    # (a) flow file present -> flow lens
+    router = FakeRouter()
+    sup = _supervisor(
+        tmp_path, router, _store(tmp_path), flow_supervisor=SupervisorBlock(role_file=flow_rf)
+    )
+    sup.observe(task_id=_TASK, node_id="n", node_run_id=1, outcome_kind="done")
+    assert "FLOWLENS" in router.requests[0].prompt
+
+    # (b) flow file missing -> config lens (roles/supervisor.md, written by _supervisor)
+    router = FakeRouter()
+    sup = _supervisor(
+        tmp_path,
+        router,
+        _store(tmp_path),
+        flow_supervisor=SupervisorBlock(role_file="flow/nope.md"),
+    )
+    sup.observe(task_id=_TASK, node_id="n", node_run_id=1, outcome_kind="done")
+    assert "Observe" in router.requests[0].prompt  # roles/supervisor.md content
+
+    # (c) no flow block and a missing config file -> built-in
+    router = FakeRouter()
+    sup = Supervisor(
+        settings=SupervisorConfig(role_file="roles/does-not-exist.md"),
+        router=router,
+        store=_store(tmp_path),
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path / "art2"),
+        flow_dir=tmp_path,
+    )
+    sup.observe(task_id=_TASK, node_id="n", node_run_id=1, outcome_kind="done")
+    assert "read-only supervisor observing" in router.requests[0].prompt
+
+
+def test_finalize_lens_fallback_flow_then_builtin(tmp_path: Path) -> None:
+    # Finalize lens resolves flow finalize_role_file -> built-in (2 steps; no global counterpart).
+    fin_rf = _flow_lens(tmp_path, "summary.md", "FINALIZE-EMPHASIS {task_id}")
+    router = FakeRouter([_ok("s", "sum")])
+    sup = _supervisor(
+        tmp_path,
+        router,
+        _store(tmp_path),
+        flow_supervisor=SupervisorBlock(finalize_role_file=fin_rf),
+    )
+    sup.finalize(task_id=_TASK, task_title="T")
+    assert "FINALIZE-EMPHASIS" in router.requests[0].prompt
+
+    # No finalize file -> built-in finalize emphasis.
+    router = FakeRouter([_ok("s", "sum")])
+    sup = _supervisor(tmp_path, router, _store(tmp_path))
+    sup.finalize(task_id=_TASK, task_title="T")
+    assert "closing out a software task" in router.requests[0].prompt
+
+
+def test_finalize_free_text_when_no_follow_ups_no_delta(tmp_path: Path) -> None:
+    # AC-S4: absent/false emit_follow_ups and memory off -> the finalize turn stays free-text (no
+    # output_schema forced), exactly today's behavior.
+    router = FakeRouter([_ok("s", "plain summary")])
+    sup = _supervisor(tmp_path, router, _store(tmp_path))  # no flow block => emit_follow_ups False
+    result = sup.finalize(task_id=_TASK, task_title="T", emit_delta=False)
+    assert router.requests[0].output_schema is None
+    assert result.follow_ups == ()
+    assert "plain summary" in result.summary_path.read_text("utf-8")  # type: ignore[union-attr]
+
+
+def _structured_follow_ups(summary: str, follow_ups: list[dict[str, Any]]) -> AgentRunResult:
+    return AgentRunResult(
+        status=RunStatus.SUCCEEDED,
+        provider="claude",
+        node_id="supervisor",
+        attempt=1,
+        exit_code=0,
+        started_at="t0",
+        finished_at="t1",
+        final_message="",
+        session_id="s1",
+        structured_output={"summary": summary, "follow_ups": follow_ups},
+    )
+
+
+def test_emit_follow_ups_writes_json_and_summary_section(tmp_path: Path) -> None:
+    # A flow that opts in: the SAME finalize turn yields {summary, follow_ups}; evidence-gated
+    # records land in summary.json and a "Technical debt / follow-ups" section in summary.md.
+    follow_ups = [
+        {
+            "title": "Extract the router",
+            "rationale": "resolve_route is doing too much",
+            "paths": ["src/routing/router.py"],
+            "evidence": ["router.py:120 mixes fallback + retry"],
+            "severity": "medium",
+            "action_hint": "split retry into its own unit",
+        },
+        {"title": "ungrounded idea", "rationale": "no evidence", "evidence": [], "severity": "low"},
+    ]
+    router = FakeRouter([_structured_follow_ups("The summary.", follow_ups)])
+    sup = _supervisor(
+        tmp_path,
+        router,
+        _store(tmp_path),
+        flow_supervisor=SupervisorBlock(emit_follow_ups=True),
+    )
+    result = sup.finalize(task_id=_TASK, task_title="T")
+
+    assert len(router.requests) == 1  # one turn — no extra LLM call
+    assert router.requests[0].output_schema is not None  # structured turn
+    assert len(result.follow_ups) == 1  # the evidence-less record was dropped
+    assert result.follow_ups[0].title == "Extract the router"
+
+    md = result.summary_path.read_text("utf-8")  # type: ignore[union-attr]
+    assert "## Technical debt / follow-ups" in md
+    assert "Extract the router" in md and "ungrounded idea" not in md
+
+    summary_json = json.loads((result.summary_path.with_name("summary.json")).read_text("utf-8"))  # type: ignore[union-attr]
+    assert len(summary_json["follow_ups"]) == 1
+    assert summary_json["follow_ups"][0]["evidence"] == ["router.py:120 mixes fallback + retry"]
+
+
+def test_emit_follow_ups_malformed_still_writes_summary(tmp_path: Path) -> None:
+    # Best-effort: a malformed follow_ups payload never blocks the summary.
+    router = FakeRouter([_structured_follow_ups("Good summary.", "not-a-list")])  # type: ignore[arg-type]
+    sup = _supervisor(
+        tmp_path,
+        router,
+        _store(tmp_path),
+        flow_supervisor=SupervisorBlock(emit_follow_ups=True),
+    )
+    result = sup.finalize(task_id=_TASK, task_title="T")
+    assert result.summary_path is not None and result.follow_ups == ()
+    assert "## Technical debt" not in result.summary_path.read_text("utf-8")
+
+
+# -- subtask handoff brief -----------------------------------------------------
+
+
+def _structured_handoff(sections: dict[str, Any]) -> AgentRunResult:
+    return AgentRunResult(
+        status=RunStatus.SUCCEEDED,
+        provider="claude",
+        node_id="supervisor",
+        attempt=1,
+        exit_code=0,
+        started_at="t0",
+        finished_at="t1",
+        final_message="",
+        session_id="s1",
+        structured_output=sections,
+    )
+
+
+def test_handoff_emits_three_section_brief(tmp_path: Path) -> None:
+    sections = {
+        "new_surface_area": "the predecessor added foo()",
+        "locked_decisions": "keep the JSON schema stable",
+        "open_edges": "bar() is stubbed — do not wire it yet",
+    }
+    router = FakeRouter([_structured_handoff(sections)])
+    sup = _supervisor(tmp_path, router, _store(tmp_path))
+    brief = sup.handoff(task_id=_TASK, subtask_order=2, floor_context="THE DETERMINISTIC FLOOR")
+
+    assert brief is not None
+    assert "### New surface area" in brief and "foo()" in brief
+    assert "### Locked decisions" in brief and "### Open edges" in brief
+    assert "THE DETERMINISTIC FLOOR" in router.requests[0].prompt  # floor fed into the prompt
+    assert router.requests[0].output_schema is not None  # structured turn
+
+
+def test_handoff_best_effort_none_on_failure_or_free_text(tmp_path: Path) -> None:
+    # No provider result → None (the orchestrator ships the floor alone); a free-text result with no
+    # structured output → None. Never raises.
+    none_router = _supervisor(tmp_path, FakeRouter([None]), _store(tmp_path))
+    assert none_router.handoff(task_id=_TASK, subtask_order=2, floor_context="F") is None
+    free = _supervisor(tmp_path, FakeRouter([_ok("s", "prose")]), _store(tmp_path))
+    assert free.handoff(task_id=_TASK, subtask_order=2, floor_context="F") is None
+
+
+def test_handoff_empty_sections_yield_none(tmp_path: Path) -> None:
+    router = FakeRouter([_structured_handoff({"new_surface_area": "  ", "open_edges": ""})])
+    sup = _supervisor(tmp_path, router, _store(tmp_path))
+    assert sup.handoff(task_id=_TASK, subtask_order=2, floor_context="F") is None
+
+
+def test_handoff_uses_distinct_run_id_per_subtask(tmp_path: Path) -> None:
+    # Each subtask boundary's handoff must namespace its artifact dir by subtask_order — a shared
+    # node_run_id would make the second handoff's create_attempt_dir (exist_ok=False) raise and
+    # silently degrade every boundary after the first to the floor alone.
+    router = FakeRouter(
+        [_structured_handoff({"new_surface_area": "a"}), _structured_handoff({"open_edges": "b"})]
+    )
+    sup = _supervisor(tmp_path, router, _store(tmp_path))
+    sup.handoff(task_id=_TASK, subtask_order=2, floor_context="F")
+    sup.handoff(task_id=_TASK, subtask_order=3, floor_context="F")
+    run_ids = [r.node_run_id for r in router.requests]
+    assert run_ids[0] != run_ids[1]  # distinct dirs → no create_attempt_dir collision
+
+
+def test_handoff_uses_flow_handoff_role_file(tmp_path: Path) -> None:
+    rf = _flow_lens(tmp_path, "handoff.md", "HANDOFF-LENS {task_id}")
+    router = FakeRouter([_structured_handoff({"new_surface_area": "x"})])
+    sup = _supervisor(
+        tmp_path, router, _store(tmp_path), flow_supervisor=SupervisorBlock(handoff_role_file=rf)
+    )
+    sup.handoff(task_id=_TASK, subtask_order=2, floor_context="F")
+    assert "HANDOFF-LENS" in router.requests[0].prompt
+
+
+def test_parse_follow_ups_is_evidence_gated() -> None:
+    raw = [
+        {"title": "keep", "rationale": "r", "evidence": ["e1"], "severity": "high"},
+        {"title": "drop-no-evidence", "rationale": "r", "evidence": [], "severity": "low"},
+        {"title": "", "rationale": "r", "evidence": ["e"], "severity": "low"},  # blank title
+        "not-a-mapping",
+    ]
+    parsed = parse_follow_ups(raw)
+    assert [f.title for f in parsed] == ["keep"]
+    assert parsed[0].evidence == ("e1",)
+    assert parse_follow_ups("not-a-list") == ()
 
 
 # -- config (validated under the node ceiling) --------------------------------

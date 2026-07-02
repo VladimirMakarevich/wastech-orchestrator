@@ -30,6 +30,7 @@ from wastech_orchestrator.core.decomposition import (
     DecompositionDecision,
     SubtaskSpec,
     decide_operator_decomposition,
+    subtask_handoff_path,
     subtask_spec_path,
     update_subtask_index,
     write_subtask_artifacts,
@@ -48,7 +49,11 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NodeServices,
 )
 from wastech_orchestrator.core.flow.output_policy import is_within
-from wastech_orchestrator.core.flow.postprocess import apply_output_artifact, read_decomposition
+from wastech_orchestrator.core.flow.postprocess import (
+    apply_output_artifact,
+    read_decomposition,
+    write_node_output,
+)
 from wastech_orchestrator.core.flow.recorder import StateStoreRunRecorder, hydrate_run_state
 from wastech_orchestrator.core.flow.registry import FlowRegistry, FlowResolutionError
 from wastech_orchestrator.core.flow.run_state import FlowRunState
@@ -121,7 +126,11 @@ from wastech_orchestrator.providers.base import (
     AgentProvider,
     ProviderId,
 )
-from wastech_orchestrator.providers.redaction import read_denied_secrets, secret_env_values
+from wastech_orchestrator.providers.redaction import (
+    read_denied_secrets,
+    redact_text,
+    secret_env_values,
+)
 from wastech_orchestrator.routing.router import AgentRouter
 from wastech_orchestrator.security.env import build_child_env
 from wastech_orchestrator.security.isolation import check_isolation
@@ -247,6 +256,26 @@ def _ledger_has_manual(ledger: Ledger, task_id: str) -> bool:
 def _ledger_attempt_count(ledger: Ledger, task_id: str) -> int:
     """How many terminal records the ledger already holds for ``task_id`` (prior attempts)."""
     return sum(1 for rec in ledger.records() if rec.get("id") == task_id)
+
+
+def _format_predecessor_floor(
+    spec: SubtaskSpec, commit_sha: str, changed_files: list[str], spec_path: str
+) -> str:
+    """One predecessor subtask's deterministic factual floor for the handoff brief (ground truth).
+
+    Assembled purely from artifacts that already exist — the subtask's spec (title / acceptance
+    criteria / spec pointer), its committed SHA, and the files that commit changed — so it is
+    present even when the supervisor (the interpretive layer) is unavailable.
+    """
+    criteria = "\n".join(f"  - {c}" for c in spec.acceptance_criteria) or "  - (none recorded)"
+    files = "\n".join(f"  - {p}" for p in changed_files) or "  - (none)"
+    return (
+        f"### Subtask {spec.order:02d}: {spec.title}\n"
+        f"- Commit: {commit_sha}\n"
+        f"- Spec: {spec_path}\n"
+        f"- Acceptance criteria:\n{criteria}\n"
+        f"- Changed files:\n{files}"
+    )
 
 
 _SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
@@ -1768,6 +1797,9 @@ class Orchestrator:
             inputs.subtask_spec_path = str(
                 subtask_spec_path(self._artifacts_root, p.task.id, unit.order, unit.slug)
             )
+            # Two-layer handoff brief for this subtask's committed ``depends_on`` predecessors
+            # (subtask-context-handoff ADR); ``None`` when the subtask has no predecessors.
+            inputs.predecessor_context_path = self._assemble_predecessor_context(p, unit)
             sub = phase(regions.region_entry, regions.region, subtask=unit.order)
             if sub.status is not Status.DONE:
                 return sub
@@ -1776,7 +1808,51 @@ class Orchestrator:
                 run_state.reset_for_next_subtask()  # fresh per-loop budgets; global accumulates
                 self._store.update_task(p.task.id, active_subtask=unit.order + 1)
         inputs.subtask_spec_path = None  # post-region phase is whole-task, not subtask-scoped
+        inputs.predecessor_context_path = None
         return phase(regions.post_entry, None)
+
+    def _assemble_predecessor_context(self, p: _Pipeline, unit: SubtaskSpec) -> str | None:
+        """Assemble the subtask handoff brief for *unit* and return its path (or ``None``).
+
+        Two layers (subtask-context-handoff ADR): a **deterministic factual floor** (always, zero
+        LLM) — each ``depends_on`` predecessor's changed files, commit, acceptance criteria, and
+        spec pointer, from artifacts that already exist — plus an **interpretive supervisor brief**
+        when the supervisor is available (it resumes its warm session; no new turn budget). The
+        combined content is redaction-scrubbed and written to ``logs/<task-id>/subtasks/
+        NN-slug.handoff.md`` (local, uncommitted, never in the memory tiers). Best-effort: a subtask
+        with no ``depends_on`` gets ``None``; a failed/empty brief still ships the floor.
+        """
+        if not unit.depends_on:
+            return None
+        specs = {s.order: s for s in p.decomposition.subtasks}
+        rows = {s.order: s for s in self._store.get_subtasks(p.task.id) if s.commit_sha}
+        floors: list[str] = []
+        for dep in unit.depends_on:
+            spec, row = specs.get(dep), rows.get(dep)
+            if spec is None or row is None or row.commit_sha is None:
+                continue  # predecessor not committed yet (should not happen in a sequential run)
+            spec_path = subtask_spec_path(
+                self._artifacts_root, p.task.id, dep, spec.slug
+            ).as_posix()
+            files = self._git.files_in_commit(row.commit_sha) if self._git is not None else []
+            floors.append(_format_predecessor_floor(spec, row.commit_sha, files, spec_path))
+        if not floors:
+            return None
+        floor = "\n\n".join(floors)
+        brief = ""
+        if self._supervisor is not None:
+            brief_text = self._supervisor.handoff(
+                task_id=p.task.id, subtask_order=unit.order, floor_context=floor
+            )
+            if brief_text:
+                brief = "\n\n" + brief_text
+        header = f"# Predecessor context for subtask {unit.order:02d}: {unit.title}\n\n"
+        content = redact_text(header + floor + brief, extra_secrets=self._memory_extra_secrets())
+        path = subtask_handoff_path(self._artifacts_root, p.task.id, unit.order, unit.slug)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        self._register_artifact(p.task.id, "subtask_handoff", str(path))
+        return path.as_posix()
 
     def _commit_subtask(self, p: _Pipeline, unit: SubtaskSpec) -> None:
         """Commit one completed subtask + persist its SHA."""
@@ -1803,6 +1879,9 @@ class Orchestrator:
             repo_dir=self._config.repo.local_path,
             artifacts_root=str(self._artifacts_root),
             flow_dir=snapshot.source_path.parent,
+            # Flow-local supervisor prompts + the follow-ups opt-in (prompt-and-supervisor ADR);
+            # ``None`` when the flow declares no ``supervisor:`` block (global config + built-ins).
+            flow_supervisor=snapshot.doc.supervisor,
             register_artifact=self._register_artifact,
         )
 
@@ -1970,9 +2049,12 @@ class Orchestrator:
         self, p: _Pipeline, inputs: NodeInputs, snapshot: FlowSnapshot
     ) -> Callable[[FlowNode, NodeOutcome, int], None]:
         """Engine post-node hook: let the supervisor layer observe the completed step, persist a
-        node's output_artifact slot, resolve plan skills, and — for the decomposition
-        ``proposed_by`` node — decide + materialize the decomposition."""
+        node's output_artifact slot + its generic ``<node_id>.out.md``, resolve plan skills, and —
+        for the decomposition ``proposed_by`` node — decide + materialize the decomposition."""
         decomp = snapshot.doc.decomposition
+        # Redaction literals for the node-output writer, harvested once per run (same set the memory
+        # write path uses): raw structured output is not adapter-redacted, so scrub it at write.
+        node_output_secrets = self._memory_extra_secrets()
 
         def post_node(node: FlowNode, outcome: NodeOutcome, node_run_id: int) -> None:
             # The constant supervisor layer observes every completed step read-only (advisory) —
@@ -1999,6 +2081,17 @@ class Orchestrator:
                 task_id=p.task.id,
                 inputs=inputs,
                 register=self._register_artifact,
+            )
+            # Generic node-output channel: persist every agent node's output as {<node_id>_path}
+            # (redaction-scrubbed, local/uncommitted). A node filling a special slot above writes no
+            # duplicate — write_node_output is a no-op when output_artifact is set.
+            write_node_output(
+                node,
+                outcome,
+                artifacts_root=self._artifacts_root,
+                task_id=p.task.id,
+                register=self._register_artifact,
+                extra_secrets=node_output_secrets,
             )
             # Operator-authored splits are materialized at preflight (the decision comes from the
             # ``subtasks:`` manifest, not this node), so this post-hook is a no-op for them.

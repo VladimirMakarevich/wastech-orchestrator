@@ -1279,6 +1279,97 @@ def test_decomposed_subtask_spec_path_reaches_implementation_prompt(
     assert "02-second.md" in impl_prompts[1] and "subtask 2 of 2" in impl_prompts[1].lower()
 
 
+def test_subtask_handoff_context_reaches_successor_implementation(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # subtask-context-handoff: each successor subtask's implementation prompt receives
+    # {predecessor_context} pointing at a handoff brief assembled from its depends_on predecessors
+    # (the deterministic factual floor). A diamond (3 <- [1,2]) selects BOTH predecessors; subtask 1
+    # (no deps) gets no brief. The briefs live under logs/ — never in the memory tiers.
+    subtasks = {
+        "decompose": True,
+        "subtasks": [
+            {
+                "order": 1,
+                "title": "First",
+                "slug": "first",
+                "acceptance_criteria": ["crit-one"],
+                "depends_on": [],
+            },
+            {
+                "order": 2,
+                "title": "Second",
+                "slug": "second",
+                "acceptance_criteria": ["crit-two"],
+                "depends_on": [1],
+            },
+            {
+                "order": 3,
+                "title": "Third",
+                "slug": "third",
+                "acceptance_criteria": ["crit-three"],
+                "depends_on": [1, 2],
+            },
+        ],
+    }
+
+    class DecompProvider(FakeProvider):
+        def run(self, request: AgentRunRequest) -> AgentRunResult:
+            if request.node_id == "planning":
+                return AgentRunResult(
+                    status=RunStatus.SUCCEEDED,
+                    provider=self.id,
+                    node_id=request.node_id,
+                    attempt=request.attempt,
+                    exit_code=0,
+                    started_at="t",
+                    finished_at="t",
+                    final_message="plan",
+                    structured_output={"content": "plan", "human_input": None, **subtasks},
+                )
+            if request.node_id == "implementation":
+                (git_repo.clone / f"impl-{state['n']}.py").write_text("x\n", encoding="utf-8")
+                state["n"] += 1
+            return super().run(request)
+
+    state = {"n": 0}
+    providers = {
+        ProviderId.CLAUDE: DecompProvider("claude"),
+        ProviderId.CODEX: DecompProvider("codex"),
+    }
+    orch, _store, _, art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"decomposition": True},
+    )
+    result = orch.run_task(_complete_task(tmp_path, "task-hnd"))
+    assert result.final_status is Status.DONE
+
+    impl_prompts = [
+        r.prompt for r in providers[ProviderId.CLAUDE].requests if r.node_id == "implementation"
+    ]
+    assert len(impl_prompts) == 3
+    assert ".handoff.md" not in impl_prompts[0]  # subtask 1 has no predecessors → no brief injected
+    assert "02-second.handoff.md" in impl_prompts[1]  # subtask 2 reads its brief
+    assert "03-third.handoff.md" in impl_prompts[2]  # subtask 3 reads its brief
+
+    subtasks_dir = task_artifact_dir(art, "task-hnd") / "subtasks"
+    # The floor is assembled from existing artifacts: predecessor spec pointer + acceptance criteria
+    # + changed files. Subtask 2's brief names predecessor 1.
+    h2 = (subtasks_dir / "02-second.handoff.md").read_text("utf-8")
+    assert "01-first.md" in h2 and "crit-one" in h2 and "Changed files" in h2
+    # The diamond: subtask 3's brief names BOTH predecessors 1 and 2.
+    h3 = (subtasks_dir / "03-third.handoff.md").read_text("utf-8")
+    assert "01-first.md" in h3 and "02-second.md" in h3
+    assert "crit-one" in h3 and "crit-two" in h3
+    # Reading the briefs from logs/<task>/subtasks/ IS the memory-tier isolation: they are written
+    # to the transient task-scoped dir, never to the .worc/memory/ store.
+    assert not (subtasks_dir / "01-first.handoff.md").exists()  # no brief for the depless subtask
+
+
 # --- operator-authored decomposition (``subtasks:`` manifest) ------------------------------
 
 

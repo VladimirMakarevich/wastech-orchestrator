@@ -42,6 +42,49 @@ def _has(vs: list[Violation], category: str, fragment: str) -> bool:
     return any(v.category == category and fragment in v.message for v in vs)
 
 
+_SUPERVISOR_FLOW = """\
+flow:
+  name: t
+  task_type: t
+  permission_ceiling: workspace-write
+  output_policy: code_change
+  publishing: pull_request
+  supervisor:
+{block}
+  nodes:
+    - id: a
+      kind: agent
+      role_file: t/a.md
+    - id: b
+      kind: publish
+      policy: pull_request
+  edges:
+    - {{ from: a, to: b }}
+"""
+
+
+def test_supervisor_role_file_traversal_rejected(tmp_path: Path) -> None:
+    content = _SUPERVISOR_FLOW.format(block="    role_file: ../escape.md\n")
+    assert _has(_violations(content, tmp_path), "ceiling", "path traversal")
+
+
+def test_supervisor_finalize_role_file_traversal_rejected(tmp_path: Path) -> None:
+    content = _SUPERVISOR_FLOW.format(block="    finalize_role_file: ../../escape.md\n")
+    assert _has(_violations(content, tmp_path), "ceiling", "path traversal")
+
+
+def test_supervisor_handoff_role_file_traversal_rejected(tmp_path: Path) -> None:
+    content = _SUPERVISOR_FLOW.format(block="    handoff_role_file: ../escape.md\n")
+    assert _has(_violations(content, tmp_path), "ceiling", "path traversal")
+
+
+def test_supervisor_contained_paths_accepted(tmp_path: Path) -> None:
+    content = _SUPERVISOR_FLOW.format(
+        block="    role_file: t/supervisor.md\n    finalize_role_file: t/summary.md\n"
+    )
+    validate_flow(_snap(content, tmp_path))  # flow-dir-contained paths are fine
+
+
 # -- valid flows pass validation ----------------------------------------------
 
 

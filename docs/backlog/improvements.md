@@ -10,19 +10,19 @@ This file aggregates improvement ideas captured after real `worc` usage. The sou
 
 | # | Topic | Status |
 | --- | --- | --- |
-| 1 | Supervisor finalization should also surface technical debt and refactor candidates | candidate |
+| 1 | Supervisor finalization should also surface technical debt and refactor candidates | done |
 | 2 | `config.example.yaml` should be copied from packaged data during install, with comments intact | done |
-| 3 | Supervisor/summary prompts should be overrideable per flow, with fallback to root/static prompt | candidate |
+| 3 | Supervisor/summary prompts should be overrideable per flow, with fallback to root/static prompt | done |
 | 4 | Remove stale historical comments and implementation notes from the codebase | done |
-| 5 | Document all prompt variables available to role files | candidate |
+| 5 | Document all prompt variables available to role files | done |
 | 6 | Rework delivered role/flow directory layout so each flow owns its prompt folder, including `implementation` | done |
 | 7 | Re-evaluate whether the repo-root `tasks/processing` folder is still needed | done |
 | 8 | Write a tutorial and best-practices guide for custom flows | done |
-| 9 | More flexible prompt-variable substitution: no unknown-var leaks, sanctioned optional-var pattern | candidate |
+| 9 | More flexible prompt-variable substitution: no unknown-var leaks, sanctioned optional-var pattern | done |
 
 ## 01. Supervisor finalization: technical debt and refactor signals
 
-Status: **candidate** Source: [00-raw-topics.md](00-raw-topics.md) Refined in: [prompt-and-supervisor-authoring-contract.md](prompt-and-supervisor-authoring-contract.md)
+Status: **done** (2026-07-02, Cluster B) Source: [00-raw-topics.md](00-raw-topics.md) Refined in: [prompt-and-supervisor-authoring-contract.md](prompt-and-supervisor-authoring-contract.md). Landed as the per-flow `supervisor.emit_follow_ups` opt-in: the existing finalize turn (no extra LLM call) emits an evidence-gated `follow_ups` array into `summary.json` + a "Technical debt / follow-ups" section in `summary.md`; the packaged `implementation` flow sets it, research/prose flows do not. Schema hardcoded in `core/supervisor.py`.
 
 ### Current state
 
@@ -146,7 +146,7 @@ Out of scope:
 
 ## 03. Flow-local supervisor/final-summary prompts with fallback
 
-Status: **candidate** Source: [00-raw-topics.md](00-raw-topics.md) Refined in: [prompt-and-supervisor-authoring-contract.md](prompt-and-supervisor-authoring-contract.md)
+Status: **done** (2026-07-02, Cluster B) Source: [00-raw-topics.md](00-raw-topics.md) Refined in: [prompt-and-supervisor-authoring-contract.md](prompt-and-supervisor-authoring-contract.md). Landed as the flow `supervisor:` block: `role_file` (observe lens, fallback flow → `config.supervisor.role_file` → built-in) and `finalize_role_file` (finalize lens, fallback flow → built-in), both flow-dir-contained. Only wording moves to files; the structured-output schemas stay in code.
 
 ### Current state
 
@@ -237,7 +237,7 @@ Out of scope:
 
 ## 05. Canonical prompt-variable contract for role authors
 
-Status: **candidate** Source: [00-raw-topics.md](00-raw-topics.md) Refined in: [prompt-and-supervisor-authoring-contract.md](prompt-and-supervisor-authoring-contract.md)
+Status: **done** (2026-07-02, Cluster A) Source: [00-raw-topics.md](00-raw-topics.md) Refined in: [prompt-and-supervisor-authoring-contract.md](prompt-and-supervisor-authoring-contract.md). Delivered as `packaged/guide/flows/prompt-variables.md` (seeded to `.worc/guide/flows/`) with the preflight anti-drift lint (`lint_prompt_variables`) guarding against `ALLOWED_PROMPT_VARS` drift.
 
 ### Current state
 
@@ -411,7 +411,7 @@ Out of scope:
 
 ## 09. More flexible prompt-variable substitution
 
-Status: **candidate** Source: real `worc` usage Refined in: [prompt-and-supervisor-authoring-contract.md](prompt-and-supervisor-authoring-contract.md)
+Status: **done** (2026-07-02, Cluster A) Source: real `worc` usage Refined in: [prompt-and-supervisor-authoring-contract.md](prompt-and-supervisor-authoring-contract.md). Landed as adoption of the existing `{?name}…{/name}` optional-var pattern in the packaged prompts + the preflight anti-drift lint (`referenced_variables` / `lint_prompt_variables`); the flow-derived valid-set (`valid_prompt_vars`) is the seam the node-output channel extends.
 
 ### Current state
 
