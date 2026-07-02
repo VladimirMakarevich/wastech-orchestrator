@@ -299,6 +299,11 @@ class NodeInputs:
     skill_paths_by_node: dict[str, tuple[str, ...]] = field(default_factory=dict)
     subtask_count: int | None = None
     subtask_spec_path: str | None = None
+    #: the intra-task subtask handoff brief path (subtask-context-handoff ADR), set by the
+    #: orchestrator per subtask that has ``depends_on`` predecessors; ``None`` outside a decompose
+    #: region or for a subtask with no predecessors. Injected as ``{predecessor_context}`` into the
+    #: region's ``implementation`` node only when its template references it (node-driven opt-in).
+    predecessor_context_path: str | None = None
     #: the normalized ``checks.command_sets`` (diff-selected at run time by the checks node). An
     #: empty tuple means *no gate* — the checks node passes vacuously.
     check_sets: tuple[ResolvedCheckSet, ...] = ()

@@ -190,6 +190,17 @@ def subtask_spec_path(artifacts_root: str | Path, task_id: str, order: int, slug
     return _subtasks_dir(artifacts_root, task_id) / f"{order:02d}-{slug}.md"
 
 
+def subtask_handoff_path(artifacts_root: str | Path, task_id: str, order: int, slug: str) -> Path:
+    """Path to one subtask's ``NN-<slug>.handoff.md`` context brief (subtask-context-handoff ADR).
+
+    Sits beside the immutable spec under ``logs/<task-id>/subtasks/`` — local, uncommitted,
+    redaction-scrubbed, archived/deleted with the task, and **never** written to the memory tiers
+    (a transient, single-task horizon distinct from ``.worc/memory/``). Named for the **successor**
+    subtask (the one whose ``implementation`` node reads it as ``{predecessor_context}``).
+    """
+    return _subtasks_dir(artifacts_root, task_id) / f"{order:02d}-{slug}.handoff.md"
+
+
 def _index_entry(spec: SubtaskSpec) -> dict[str, Any]:
     return {
         "order": spec.order,

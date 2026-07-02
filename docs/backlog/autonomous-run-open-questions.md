@@ -57,3 +57,21 @@ Each entry: **Situation** (what was ambiguous/contradictory), **Decision** (what
 - **Situation:** the ADR says each `follow_ups` record is "minimal and grounded" with `evidence`, but did not spell out the drop rule or defaults.
 - **Decision:** `parse_follow_ups` is **evidence-gated** — a record with no non-empty `title` or no non-empty `evidence` is silently dropped (never raised), so an ungrounded "refactor idea" the model invents cannot reach `summary.{json,md}`. An invalid/missing `severity` defaults to `medium`. Schema stays hardcoded in code (a flow reshapes wording, never the contract). Mirrors `_parse_skill_map`'s best-effort discipline.
 - **Impact / files:** `core/supervisor.py`. Reversible.
+
+## [Block 4] Handoff assembled just-before-running the successor (not literally "after \_commit\_subtask") — 2026-07-02
+
+- **Situation:** the ADR's seam says produce the handoff "after `_commit_subtask` (so `commit_sha` is available) and before `reset_for_next_subtask`" — i.e. produce the _next_ unit's brief right after committing the current one.
+- **Decision:** I instead assemble each unit's brief **just before running that unit**, from its committed `depends_on` predecessors (read from the store). For a strictly-sequential run these are equivalent — all predecessors (orders < the unit) are already committed, so `commit_sha` is available — but "before running the unit" is **more robust on resume**: if a predecessor was committed in a prior run and is skipped this run (`unit.order in committed → continue`), the "after-commit" placement would never produce the successor's brief, whereas reading committed predecessors from the store always works. Handles the intra-task diamond (3 ← [1,2]) directly.
+- **Impact / files:** `core/orchestrator.py` `_fan_out_subtasks` + `_assemble_predecessor_context`. Reversible. Behavior matches the ADR's intent; only the placement differs.
+
+## [Block 4] Added `GitManager.files_in_commit` for the floor's "changed files" — 2026-07-02
+
+- **Situation:** the deterministic floor lists a predecessor's **changed files**, but no existing git seam returns the files of a specific commit (`changed_code_*` are working-tree / since-base).
+- **Decision:** added `GitManager.files_in_commit(sha)` (`git diff-tree --no-commit-id --name-only -r <sha>`) routed through the same safe argv runner as every git call (no shell, mandatory timeout), best-effort (`[]` on any error). It is on the concrete `GitManager` only — **not** added to the node-runner `GitPort` — since only the orchestrator (which holds the real GitManager) assembles the floor. The other floor facts (commit sha, acceptance criteria, spec pointer, title) come from the store + `SubtaskSpec`, no new git call.
+- **Impact / files:** `git_manager.py`. Reversible.
+
+## [Block 4] Handoff redaction happens once, at the orchestrator write site — 2026-07-02
+
+- **Situation:** the ADR says the supervisor `handoff()` runs the memory-subsystem redaction "before writing". But the supervisor does **not** write the file — the orchestrator does (it owns the floor + the brief).
+- **Decision:** `handoff()` returns the (unwritten) rendered brief; the orchestrator concatenates the deterministic floor + the brief and redacts the **whole** `.handoff.md` content once via `redact_text(..., extra_secrets=self._memory_extra_secrets())` (the same secret set memory/node-output use) before writing. This satisfies "no secret in the artifact" for both layers with a single chokepoint at the write site, rather than redacting the brief in the supervisor and the floor separately.
+- **Impact / files:** `core/supervisor.py` (`handoff`), `core/orchestrator.py` (`_assemble_predecessor_context`). Reversible.

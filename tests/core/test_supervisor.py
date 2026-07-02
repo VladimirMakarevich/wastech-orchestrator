@@ -525,6 +525,66 @@ def test_emit_follow_ups_malformed_still_writes_summary(tmp_path: Path) -> None:
     assert "## Technical debt" not in result.summary_path.read_text("utf-8")
 
 
+# -- subtask handoff brief -----------------------------------------------------
+
+
+def _structured_handoff(sections: dict[str, Any]) -> AgentRunResult:
+    return AgentRunResult(
+        status=RunStatus.SUCCEEDED,
+        provider="claude",
+        node_id="supervisor",
+        attempt=1,
+        exit_code=0,
+        started_at="t0",
+        finished_at="t1",
+        final_message="",
+        session_id="s1",
+        structured_output=sections,
+    )
+
+
+def test_handoff_emits_three_section_brief(tmp_path: Path) -> None:
+    sections = {
+        "new_surface_area": "the predecessor added foo()",
+        "locked_decisions": "keep the JSON schema stable",
+        "open_edges": "bar() is stubbed — do not wire it yet",
+    }
+    router = FakeRouter([_structured_handoff(sections)])
+    sup = _supervisor(tmp_path, router, _store(tmp_path))
+    brief = sup.handoff(task_id=_TASK, subtask_order=2, floor_context="THE DETERMINISTIC FLOOR")
+
+    assert brief is not None
+    assert "### New surface area" in brief and "foo()" in brief
+    assert "### Locked decisions" in brief and "### Open edges" in brief
+    assert "THE DETERMINISTIC FLOOR" in router.requests[0].prompt  # floor fed into the prompt
+    assert router.requests[0].output_schema is not None  # structured turn
+
+
+def test_handoff_best_effort_none_on_failure_or_free_text(tmp_path: Path) -> None:
+    # No provider result → None (the orchestrator ships the floor alone); a free-text result with no
+    # structured output → None. Never raises.
+    none_router = _supervisor(tmp_path, FakeRouter([None]), _store(tmp_path))
+    assert none_router.handoff(task_id=_TASK, subtask_order=2, floor_context="F") is None
+    free = _supervisor(tmp_path, FakeRouter([_ok("s", "prose")]), _store(tmp_path))
+    assert free.handoff(task_id=_TASK, subtask_order=2, floor_context="F") is None
+
+
+def test_handoff_empty_sections_yield_none(tmp_path: Path) -> None:
+    router = FakeRouter([_structured_handoff({"new_surface_area": "  ", "open_edges": ""})])
+    sup = _supervisor(tmp_path, router, _store(tmp_path))
+    assert sup.handoff(task_id=_TASK, subtask_order=2, floor_context="F") is None
+
+
+def test_handoff_uses_flow_handoff_role_file(tmp_path: Path) -> None:
+    rf = _flow_lens(tmp_path, "handoff.md", "HANDOFF-LENS {task_id}")
+    router = FakeRouter([_structured_handoff({"new_surface_area": "x"})])
+    sup = _supervisor(
+        tmp_path, router, _store(tmp_path), flow_supervisor=SupervisorBlock(handoff_role_file=rf)
+    )
+    sup.handoff(task_id=_TASK, subtask_order=2, floor_context="F")
+    assert "HANDOFF-LENS" in router.requests[0].prompt
+
+
 def test_parse_follow_ups_is_evidence_gated() -> None:
     raw = [
         {"title": "keep", "rationale": "r", "evidence": ["e1"], "severity": "high"},

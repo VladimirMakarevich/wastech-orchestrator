@@ -127,6 +127,7 @@ _SUPERVISOR_FIELDS = frozenset(
     {
         "role_file",
         "finalize_role_file",
+        "handoff_role_file",
         "emit_follow_ups",
     }
 )
@@ -478,6 +479,7 @@ def _parse_supervisor(raw: Any) -> SupervisorBlock | None:
     return SupervisorBlock(
         role_file=raw.get("role_file") or None,
         finalize_role_file=raw.get("finalize_role_file") or None,
+        handoff_role_file=raw.get("handoff_role_file") or None,
         emit_follow_ups=bool(raw.get("emit_follow_ups", False)),
     )
 

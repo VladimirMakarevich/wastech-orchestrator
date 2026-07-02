@@ -565,8 +565,29 @@ class AgentNodeRunner:
             variables["subtask_order"] = ctx.subtask_order
             variables["subtask_count"] = self._in.subtask_count
             variables["subtask_spec_path"] = self._in.subtask_spec_path
+            variables["predecessor_context"] = self._predecessor_context(node, ctx)
         variables.update(self._node_output_paths(ctx))
         return variables
+
+    def _predecessor_context(self, node: AgentNode, ctx: NodeContext) -> str | None:
+        """Return the subtask handoff-brief path for ``{predecessor_context}`` — node-driven.
+
+        Returns the assembled path (set on ``NodeInputs`` by the orchestrator's decomposition
+        fan-out) only when a decompose region is active (``ctx.subtask_order`` set), the current
+        subtask has a handoff assembled — the orchestrator sets the path only for a subtask with ≥1
+        ``depends_on`` predecessor — AND this node's (operator-editable) role prompt references
+        ``{predecessor_context}``. Otherwise ``None`` (the conditional block drops). Best-effort: a
+        role file that cannot be read degrades to no context (mirrors :meth:`_memory_path`)."""
+        path = self._in.predecessor_context_path
+        if path is None:
+            return None
+        try:
+            template = read_role_file(self._in.flow_dir, node.role_file)
+        except RoleFileError:
+            return None
+        if "{predecessor_context}" not in template and "{?predecessor_context}" not in template:
+            return None
+        return path
 
     def _node_output_paths(self, ctx: NodeContext) -> dict[str, object | None]:
         """The generic ``{<node_id>_path}`` variables for every agent node in the flow.

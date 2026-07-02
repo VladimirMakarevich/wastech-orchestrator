@@ -1,6 +1,8 @@
 # Generic node-output prompt variables (`{<node_id>_path}`)
 
-Status: **proposed** (2026-07-01) Date: 2026-07-01 Owner: Vladimir Makarevich
+Status: **implemented** (2026-07-02) Date: 2026-07-01 Owner: Vladimir Makarevich
+
+Implemented on branch `feat/prompt-supervisor-handoff` in commit `cc13d22` (Block 2): every agent node's output persists to `<node_id>.out.md` (redaction-scrubbed) and resolves downstream as `{<node_id>_path}` via the flow-derived allowlist (`valid_prompt_vars`); `_VAR_RE`/`_BLOCK_RE` widened to `[a-z0-9_-]+`; agent node ids validated against the reserved core-variable prefixes at load. See [autonomous-run-open-questions.md](autonomous-run-open-questions.md) for the implementation-time decisions.
 
 Today a custom flow cannot hand one node's output to a later node under a name of its choosing: the prompt-variable allowlist (`ALLOWED_PROMPT_VARS`) and the output-slot table (`_OUTPUT_ARTIFACT_SLOTS = {enriched_spec, plan, summary}`) are both closed, Core-fixed sets, and a node id plays no part in them. This proposes a generic, zero-config channel: every agent node's output is persisted to `<artifacts>/<node_id>.out.md` and exposed downstream as the path variable `{<node_id>_path}`, so an author chains arbitrary nodes by referencing them by id — `{scan_path}`, `{analyze_path}` — without declaring anything or editing the allowlist. It relaxes the _static_ nature of the allowlist while keeping the hard invariant intact: the variable resolves to a Core-written artifact _path_, never inlined content.
 

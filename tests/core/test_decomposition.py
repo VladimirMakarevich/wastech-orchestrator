@@ -14,9 +14,21 @@ from wastech_orchestrator.core.decomposition import (
     REASON_NOT_RECOMMENDED,
     SUBTASK_COMMITTED,
     decide_decomposition,
+    subtask_handoff_path,
+    subtask_spec_path,
     update_subtask_index,
     write_subtask_artifacts,
 )
+
+
+def test_subtask_handoff_path_sits_beside_the_spec(tmp_path: Path) -> None:
+    # The handoff brief is named for the successor subtask and lives beside its immutable spec under
+    # logs/<task-id>/subtasks/ (local, uncommitted; never a memory tier).
+    spec = subtask_spec_path(tmp_path, "task-1", 2, "second")
+    handoff = subtask_handoff_path(tmp_path, "task-1", 2, "second")
+    assert handoff.parent == spec.parent
+    assert handoff.name == "02-second.handoff.md"
+    assert handoff.parent.as_posix().endswith("logs/task-1/subtasks")
 
 
 def _subtask(order: int, depends_on: list[int] | None = None) -> dict:

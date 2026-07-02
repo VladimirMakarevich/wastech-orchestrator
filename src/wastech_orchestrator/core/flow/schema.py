@@ -151,15 +151,20 @@ class SupervisorBlock:
 
     * ``role_file`` — the observe lens, overriding the global ``config.supervisor.role_file``.
     * ``finalize_role_file`` — the final-summary emphasis (no global counterpart — YAGNI).
+    * ``handoff_role_file`` — the intra-task subtask handoff brief (subtask-context-handoff ADR; no
+      global counterpart). A third supervisor prompt, same contract: wording in a file, schema in
+      code.
     * ``emit_follow_ups`` — opt the flow's finalize turn into the structured ``{summary,
       follow_ups}`` contract (a per-flow, code-oriented capability; default off). Memory is
       orthogonal (the same turn additionally emits ``memory_delta`` when memory is enabled).
 
-    Both paths are validated as flow-dir-contained (fatal on traversal), like a node ``role_file``.
+    All prompt paths are validated as flow-dir-contained (fatal on traversal), like a node
+    ``role_file``.
     """
 
     role_file: str | None = None
     finalize_role_file: str | None = None
+    handoff_role_file: str | None = None
     emit_follow_ups: bool = False
 
 

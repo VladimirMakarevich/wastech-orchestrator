@@ -93,10 +93,12 @@ The supervisor is a constant read-only layer above the flow — it observes each
 supervisor:
   role_file: my_flow/supervisor.md # observe lens; fallback: flow -> config.supervisor.role_file -> built-in
   finalize_role_file: my_flow/summary.md # finalize lens; fallback: flow -> built-in (no global one)
+  handoff_role_file: my_flow/handoff.md # subtask handoff-brief lens (decompose flows); fallback: flow -> built-in
   emit_follow_ups: true # opt this flow's finalize into the technical-debt / follow-ups signal
 ```
 
-- Both prompt files are resolved inside the flow dir (relative paths, no `..`); a traversing path fails validation.
+- All three prompt files are resolved inside the flow dir (relative paths, no `..`); a traversing path fails validation.
+- **`handoff_role_file`** is only used by decompose flows: at each subtask boundary the supervisor writes an interpretive handoff brief for the next subtask, injected as `{predecessor_context}` into the region's `implementation` node (see `prompt-variables.md`). A deterministic factual floor (changed files, commit, acceptance criteria, spec pointer) is always present; the interpretive brief rides the supervisor's warm session (no extra turn budget) and is best-effort.
 - **`emit_follow_ups`** (default `false`) is a **code-oriented** capability: when on, the supervisor's existing finalize turn (no extra LLM call) also emits an **evidence-gated** `follow_ups` array — technical debt / refactor candidates it saw, each with `title` / `rationale` / `paths` / `evidence` / `severity` / `action_hint` — written into `summary.json` and a "Technical debt / follow-ups" section of `summary.md`. Set it on a code flow (the packaged `implementation` flow does); leave it off for research / prose flows (never ask them to invent "refactor candidates").
 - Only the **wording** moves into files. The structured-output schemas (`follow_ups`, and the memory delta) stay in the orchestrator, so your prompt can change tone and emphasis but can never break what the orchestrator parses.
 

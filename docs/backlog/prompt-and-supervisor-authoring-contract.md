@@ -1,6 +1,8 @@
 # Prompt & supervisor authoring contract
 
-Status: **proposed** (2026-07-01) Date: 2026-07-01 Owner: Vladimir Makarevich
+Status: **implemented** (2026-07-02) Date: 2026-07-01 Owner: Vladimir Makarevich
+
+Implemented on branch `feat/prompt-supervisor-handoff`: **Cluster A** (prompt-authoring contract — flow-aware anti-drift lint, `{?…}` adoption, delivered `prompt-variables.md` reference) in commit `643c4a5`; **Cluster B** (flow-local `supervisor:` block — `role_file` / `finalize_role_file` fallback chains + evidence-gated `emit_follow_ups`) in commit `14791fe`. See [autonomous-run-open-questions.md](autonomous-run-open-questions.md) for the implementation-time decisions.
 
 This ADR refines the requirements for four open [improvements.md](improvements.md) items that all touch one surface — how flow/role authors write prompts and how the supervisor's prompt and output are shaped: task 5 (canonical prompt-variable contract), a new task on more flexible `ALLOWED_PROMPT_VARS` substitution, task 3 (flow-local supervisor/summary prompts with fallback), and task 1 (supervisor tech-debt / refactor signals). It works those requirements through against the current code so each can move to a bounded task; it does not itself specify the implementation. The four split into two clusters: the **prompt-authoring contract** (task 5 + the new substitution task) and the **supervisor prompt/output contract** (task 3 + task 1).
 

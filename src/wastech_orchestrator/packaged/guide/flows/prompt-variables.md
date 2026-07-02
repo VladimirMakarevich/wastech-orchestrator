@@ -23,6 +23,9 @@ Each variable names **which runner populates it** and **when it may be empty**. 
 | `{subtask_order}` | agent | the task is **not** decomposed (whole-task run) |
 | `{subtask_count}` | agent | the task is **not** decomposed |
 | `{subtask_spec_path}` | agent | the task is **not** decomposed |
+| `{predecessor_context}` | agent | not a decompose subtask, the subtask has no `depends_on` predecessor, or the node does not reference it |
+
+`{predecessor_context}` is the path to the intra-task **subtask handoff brief** — a deterministic factual floor (each predecessor subtask's changed files, commit, acceptance criteria, spec pointer) plus, when the supervisor is available, a three-section interpretive brief (new surface area / locked decisions / open edges). It is injected into a decompose region's `implementation` node for a subtask that has `depends_on` predecessors; wrap it in `{?predecessor_context}…{/predecessor_context}`.
 
 ("agent / evaluator / supervisor" is the node kind whose prompt receives the value. The supervisor is the constant oversight layer above the flow, not a node.)
 

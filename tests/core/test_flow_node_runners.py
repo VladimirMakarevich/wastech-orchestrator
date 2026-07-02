@@ -350,6 +350,61 @@ def test_node_output_var_empty_before_upstream_runs(tmp_path: Path) -> None:
     assert router.requests[0].prompt == "Build."
 
 
+def test_predecessor_context_rendered_when_set_and_referenced(tmp_path: Path) -> None:
+    # The subtask handoff brief is injected as {predecessor_context} into the region's edit node
+    # when a decompose region is active (subtask_order set), the orchestrator assembled a path, AND
+    # the template references it (node-driven, mirrors {memory_path}).
+    (tmp_path / "impl.md").write_text(
+        "Build.{?predecessor_context} Handoff: {predecessor_context}.{/predecessor_context}",
+        "utf-8",
+    )
+    node = AgentNode(id="implementation", kind="agent", role_file="impl.md")
+    router, store = FakeRouter(_result()), FakeStore()
+    services = _services(router, store, FakeCheckRunner(CheckOutcome(passed=True, runs=())))
+    inputs = _inputs(tmp_path, predecessor_context_path="logs/task-1/subtasks/02-x.handoff.md")
+    ctx = NodeContext(
+        snapshot=_snapshot(node),
+        run_state=FlowRunState(flow_fingerprint="fp"),
+        node=node,
+        task_id="task-1",
+        subtask_order=2,
+    )
+    AgentNodeRunner(services, inputs).run(node, ctx)
+    assert "Handoff: logs/task-1/subtasks/02-x.handoff.md." in router.requests[0].prompt
+
+
+def test_predecessor_context_dropped_when_no_path(tmp_path: Path) -> None:
+    # A subtask with no assembled handoff (no depends_on) leaves {?predecessor_context} empty.
+    (tmp_path / "impl.md").write_text(
+        "Build.{?predecessor_context} X {predecessor_context}{/predecessor_context}", "utf-8"
+    )
+    node = AgentNode(id="implementation", kind="agent", role_file="impl.md")
+    router, store = FakeRouter(_result()), FakeStore()
+    services = _services(router, store, FakeCheckRunner(CheckOutcome(passed=True, runs=())))
+    ctx = NodeContext(
+        snapshot=_snapshot(node),
+        run_state=FlowRunState(flow_fingerprint="fp"),
+        node=node,
+        task_id="task-1",
+        subtask_order=2,
+    )
+    AgentNodeRunner(services, _inputs(tmp_path)).run(node, ctx)  # predecessor_context_path=None
+    assert router.requests[0].prompt == "Build."
+
+
+def test_predecessor_context_dropped_outside_decompose_region(tmp_path: Path) -> None:
+    # Not a subtask (subtask_order is None) → the variable is never assembled, so the block drops.
+    (tmp_path / "impl.md").write_text(
+        "Build.{?predecessor_context} X {predecessor_context}{/predecessor_context}", "utf-8"
+    )
+    node = AgentNode(id="implementation", kind="agent", role_file="impl.md")
+    router, store = FakeRouter(_result()), FakeStore()
+    services = _services(router, store, FakeCheckRunner(CheckOutcome(passed=True, runs=())))
+    inputs = _inputs(tmp_path, predecessor_context_path="logs/task-1/subtasks/02-x.handoff.md")
+    AgentNodeRunner(services, inputs).run(node, _ctx(node))  # _ctx has subtask_order=None
+    assert router.requests[0].prompt == "Build."
+
+
 def test_agent_node_builds_memory_packet_when_role_references_it(tmp_path: Path) -> None:
     # Node-driven (FR4): a node whose role references {memory_path} gets a per-node packet built
     # and its PATH injected — never the memory root (AC-R1). A custom node opts in, no Core change.

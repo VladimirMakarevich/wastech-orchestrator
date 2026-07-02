@@ -416,10 +416,13 @@ def _check_ceiling(snap: FlowSnapshot) -> list[Violation]:
     # path that escapes the flow directory is fatal (prompt-and-supervisor authoring contract).
     supervisor = doc.supervisor
     if supervisor is not None:
-        if supervisor.role_file is not None:
-            _check_path("supervisor", supervisor.role_file, errs)
-        if supervisor.finalize_role_file is not None:
-            _check_path("supervisor", supervisor.finalize_role_file, errs)
+        for path in (
+            supervisor.role_file,
+            supervisor.finalize_role_file,
+            supervisor.handoff_role_file,
+        ):
+            if path is not None:
+                _check_path("supervisor", path, errs)
 
     return errs
 

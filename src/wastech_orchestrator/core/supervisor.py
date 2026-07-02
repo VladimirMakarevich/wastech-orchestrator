@@ -56,6 +56,12 @@ _SUPERVISOR_LINEAGE_NODE_ID = "__supervisor__"
 # small, autoincrement) node-run id, so the three turn kinds never collide on the same path.
 _PROPOSAL_RUN_ID = 999_999
 
+# The subtask-boundary handoff turn's artifact-dir namespace — distinct from the proposal and from
+# finalize's ``0`` (subtask-context-handoff ADR). Multiple handoffs in one task share this id but
+# write to distinct dirs because each is on a different subtask order (the artifact writer appends a
+# run counter), and none collides with the proposal / finalize / real node-run ids.
+_HANDOFF_RUN_ID = 999_998
+
 # The strict provider schema for the once-per-task ``node → skills`` proposal. Array-shaped (not an
 # arbitrary-key object) so it validates under strict JSON-schema: each assignment names one node and
 # its proposed skill tokens. The Core resolves the tokens against the discovered inventory.
@@ -104,14 +110,33 @@ _FOLLOW_UPS_SCHEMA: dict[str, Any] = {
     },
 }
 
+# The intra-task subtask handoff brief's structured schema (subtask-context-handoff ADR). Three
+# sections; hardcoded in code (a flow reshapes wording via ``handoff_role_file``, never the
+# contract). All optional — a thin boundary may yield only one useful section.
+_HANDOFF_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "new_surface_area": {"type": "string"},
+        "locked_decisions": {"type": "string"},
+        "open_edges": {"type": "string"},
+    },
+    "required": [],
+}
+
 # Built-in supervisor prompt text — the last fallback in each chain, so a flow with no prompt files
-# (and no global config prompt, for finalize) still runs exactly as before.
+# (and no global config prompt, for finalize/handoff) still runs exactly as before.
 _BUILTIN_OBSERVE = "You are a read-only supervisor observing a software task. Do not edit code."
 _BUILTIN_FINALIZE = (
     "You are a read-only supervisor closing out a software task. Do not edit code.\n\n"
     "Synthesize a plain-language summary of the whole task: what was done, how it works, how it "
     "integrates, and why, grounded in the actual committed change. In a closing section list any "
     "advisory caveats or follow-ups you noted across the steps."
+)
+_BUILTIN_HANDOFF = (
+    "You are a read-only supervisor briefing the next subtask in a decomposed task. Do not edit "
+    "code. You have observed the predecessor subtask(s); write a focused handoff for the agent "
+    "about to implement the successor."
 )
 
 
@@ -204,6 +229,27 @@ def _render_follow_ups_section(follow_ups: tuple[FollowUp, ...]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _render_handoff_brief(structured: Mapping[str, Any]) -> str | None:
+    """Render the interpretive three-section handoff brief; ``None`` when no section has content.
+
+    Defensive: a missing/empty/non-string section is skipped, so a partial structured output still
+    yields a usable brief (or ``None`` — the orchestrator then ships the deterministic floor alone).
+    """
+    sections = (
+        ("New surface area", structured.get("new_surface_area")),
+        ("Locked decisions", structured.get("locked_decisions")),
+        ("Open edges", structured.get("open_edges")),
+    )
+    parts = [
+        f"### {title}\n{body.strip()}"
+        for title, body in sections
+        if isinstance(body, str) and body.strip()
+    ]
+    if not parts:
+        return None
+    return "## Interpretive handoff brief\n\n" + "\n\n".join(parts)
+
+
 @dataclass(frozen=True)
 class FinalizeResult:
     """What ``finalize`` produced: the ``summary.md`` path (or ``None``), the optional candidate
@@ -281,6 +327,9 @@ class Supervisor:
         self._flow_role_file = flow_supervisor.role_file if flow_supervisor else None
         self._flow_finalize_role_file = (
             flow_supervisor.finalize_role_file if flow_supervisor else None
+        )
+        self._flow_handoff_role_file = (
+            flow_supervisor.handoff_role_file if flow_supervisor else None
         )
         self._emit_follow_ups = flow_supervisor.emit_follow_ups if flow_supervisor else False
         self._register_artifact = register_artifact
@@ -395,6 +444,31 @@ class Supervisor:
             parse_follow_ups(result.structured_output.get("follow_ups")) if with_follow_ups else ()
         )
         return summary_text, delta, follow_ups
+
+    # -- intra-task subtask handoff --------------------------------------------
+
+    def handoff(self, *, task_id: str, subtask_order: int, floor_context: str) -> str | None:
+        """Emit the interpretive handoff brief for a subtask boundary (subtask-context-handoff ADR).
+
+        Resumes the warm durable ``__supervisor__`` session — it already observed the predecessor
+        subtask(s), so this is a small incremental turn, **not** a new turn budget. Returns a
+        rendered three-section brief (New surface area / Locked decisions / Open edges) or ``None``.
+
+        Best-effort by contract, exactly like :meth:`finalize`: any failure (no provider, infra
+        error, unreadable role file, malformed/empty structured output) is logged and yields
+        ``None``, and the orchestrator ships the deterministic factual floor alone. The returned
+        brief is redacted by the caller (with the floor) before it is written — no secret reaches
+        the ``.handoff.md`` artifact.
+        """
+        result = self._run_result(
+            task_id,
+            self._handoff_prompt(task_id, subtask_order, floor_context),
+            node_run_id=_HANDOFF_RUN_ID,
+            output_schema=_HANDOFF_SCHEMA,
+        )
+        if result is None or result.structured_output is None:
+            return None
+        return _render_handoff_brief(result.structured_output)
 
     # -- upfront skill-map proposal --------------------------------------------
 
@@ -627,6 +701,25 @@ class Supervisor:
     def _finalize_base(self, task_id: str) -> str:
         """The finalize lens: flow ``finalize_role_file`` → built-in (no global one — YAGNI)."""
         return self._render_chain(task_id, (self._flow_finalize_role_file,), _BUILTIN_FINALIZE)
+
+    def _handoff_prompt(self, task_id: str, subtask_order: int, floor_context: str) -> str:
+        # The handoff lens (flow ``handoff_role_file`` → built-in) carries the wording; the machine
+        # contract (the three-section schema) is appended by code, not the file.
+        return (
+            self._handoff_base(task_id)
+            + f"\n\n## Handoff to subtask {subtask_order}\n"
+            + "The predecessor subtask(s) it depends on just completed and committed:\n\n"
+            + floor_context
+            + "\n\nWrite a focused brief for the agent implementing this next subtask, as the "
+            "structured output's three sections: `new_surface_area` (what the predecessor(s) built "
+            "that the successor should use), `locked_decisions` (contracts not to revisit, with "
+            "brief rationale), and `open_edges` (what was deferred or must not be touched). Ground "
+            "every claim in the facts above; be concise. Do not edit code."
+        )
+
+    def _handoff_base(self, task_id: str) -> str:
+        """The handoff lens: flow ``handoff_role_file`` → built-in (no global one — YAGNI)."""
+        return self._render_chain(task_id, (self._flow_handoff_role_file,), _BUILTIN_HANDOFF)
 
     def _render_chain(self, task_id: str, candidates: tuple[str | None, ...], fallback: str) -> str:
         """Render the first readable role file in *candidates*, else *fallback* (best-effort)."""
