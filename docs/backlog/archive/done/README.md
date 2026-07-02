@@ -11,6 +11,8 @@ This folder contains backlog documents for product work that has already shipped
 | [Task discovery: `worc list` + shell completion](cli-task-list-and-completion.md) | implemented |
 | [HITL session resume & planning autonomy](hitl-session-resume-and-autonomy.md) | P0 done, P2 documented |
 | [HITL-wait observability & prompt cleanup](hitl-wait-observability-and-prompt-cleanup.md) | done |
+| [Interactive operator console](cli-upgrade.md) (+ [post-review remediation](cli-upgrade-remediation.md)) | implemented; R1 done, R2/R3 in follow_ups |
+| [Implementation roadmap (14-item build order)](implementation-roadmap.md) | historical / closed (step 14 pending merge) |
 | [Log management: `worc logs clean` and `logging.*` config](log-management.md) | implemented |
 | [Task queue tags for multiple worc instances](multi-instance-task-queues.md) | implemented |
 | [Operator confirmation gates in autonomous mode](operator-confirmation-gates.md) | implemented |

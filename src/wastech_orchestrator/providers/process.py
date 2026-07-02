@@ -20,6 +20,7 @@ Invariants enforced here:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import time
@@ -96,11 +97,11 @@ def run_process(
                     errors="replace",
                     timeout=timeout_seconds,
                     shell=False,
-                    # Run the agent in its own process group (POSIX setsid). This lets `stop
-                    # --force-full` SIGKILL the daemon's whole group without orphaning the agent or
-                    # any checks subprocess it spawned. A documented no-op on Windows (the hard stop
-                    # degrades to soft there); no platform branch is needed at the launch site.
-                    start_new_session=True,
+                    # Deliberately NOT start_new_session: the agent stays in the daemon's process
+                    # group so `stop --force-full` (POSIX killpg on that group) reaches it, not
+                    # orphans it. The daemon leads the group (see spawn_detached / cmd_watch); a
+                    # setsid-ed child would break away and survive the kill. On Windows the hard
+                    # stop is a `taskkill /T` tree-kill, which reaches this child as a descendant.
                     **stdin_kwargs,
                 )
             exit_code = completed.returncode
@@ -140,6 +141,12 @@ def spawn_detached(
     are discarded — a supervised daemon is observed through its ``--log-file``, not the console's
     terminal (which the prompt owns). ``env``/``cwd`` default to the parent's (the daemon is the
     orchestrator itself and needs its normal environment), unlike the allowlisted-env agent runner.
+
+    On POSIX the daemon launches with ``start_new_session=True`` so it **leads its own process
+    group**: the agents it spawns (without ``setsid``) inherit that group, so ``stop --force-full``
+    can ``killpg`` the whole group without touching the console that spawned the daemon. On Windows
+    the hard stop is a ``taskkill /T`` tree-kill (by parent→child, no group flag needed), so no
+    ``creationflags`` are set here.
     """
     return subprocess.Popen(
         list(argv),
@@ -149,7 +156,29 @@ def spawn_detached(
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         shell=False,
+        # POSIX only: lead a new session/group so the daemon's agents are killable as one group.
+        # A documented no-op on Windows (``start_new_session`` is ignored there).
+        start_new_session=os.name != "nt",
     )
+
+
+def hard_kill_tree(pid: int) -> None:
+    """Windows hard stop: terminate the process tree rooted at ``pid`` via ``taskkill /F /T``.
+
+    Wired into :func:`wastech_orchestrator.process_control.stop_process` as the ``hard_kill_fn``
+    seam so ``process_control`` stays subprocess-free (its no-shell-out invariant): the daemon's
+    agents are its child processes, so ``/T`` (whole tree) reaches them while the daemon's parent
+    (the console) is untouched. An argv list, ``shell=False``; ``check=False`` ignores a non-zero
+    exit (dead / recycled PID — no start-time guard on Windows), and an unlaunchable ``taskkill``
+    is suppressed so the stop stays idempotent (the CLI already points to Task Manager as backstop).
+    """
+    with contextlib.suppress(OSError):
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            shell=False,
+            capture_output=True,
+            check=False,
+        )
 
 
 def _reason(exc: OSError) -> str:

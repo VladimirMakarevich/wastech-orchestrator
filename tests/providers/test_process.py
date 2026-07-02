@@ -6,6 +6,7 @@ Windows and POSIX with no real Codex/Claude binary.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -156,11 +157,12 @@ def test_duration_uses_injected_monotonic(tmp_path: Path) -> None:
     assert result.duration_seconds == 42.5
 
 
-def test_agent_launches_in_its_own_process_group(
+def test_agent_stays_in_the_daemon_process_group(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The agent is spawned with ``start_new_session=True`` so ``stop --force-full`` can group-kill
-    it without orphaning (a no-op on Windows). Intercept subprocess.run to assert the kwarg."""
+    """The agent must NOT ``setsid`` — it stays in the daemon's process group so ``stop
+    --force-full`` (POSIX ``killpg`` on the daemon's group) reaches it instead of orphaning it. A
+    ``start_new_session``-ed agent would break away into its own group and survive the kill."""
     import subprocess
 
     captured: dict[str, object] = {}
@@ -177,7 +179,7 @@ def test_agent_launches_in_its_own_process_group(
     run_process(
         _py("pass"), cwd=tmp_path, env={}, timeout_seconds=30, stdout_path=tmp_path / "o.log"
     )
-    assert captured.get("start_new_session") is True
+    assert not captured.get("start_new_session")  # inherits the daemon's group, does not lead a new
     assert captured.get("shell") is False
 
 
@@ -206,3 +208,29 @@ def test_spawn_detached_uses_argv_list_shell_false_and_devnull_stdin(
     assert isinstance(kwargs, dict)
     assert kwargs["shell"] is False
     assert kwargs["stdin"] is subprocess.DEVNULL
+    # The spawned daemon leads its own process group on POSIX (so `stop --force-full` can group-kill
+    # it + its agents without touching the console); a no-op on Windows.
+    assert kwargs["start_new_session"] is (os.name != "nt")
+
+
+def test_hard_kill_tree_builds_taskkill_argv_and_swallows_missing_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Windows hard-stop seam: an argv-list ``taskkill /F /T /PID`` (shell=False), and a failed
+    call (dead / recycled PID, or taskkill absent) is swallowed so the stop stays idempotent."""
+    import subprocess
+
+    from wastech_orchestrator.providers import process as proc_mod
+
+    seen: dict[str, object] = {}
+
+    def fake_run(argv: object, **kwargs: object) -> object:
+        seen["argv"] = argv
+        seen["kwargs"] = kwargs
+        raise OSError("taskkill missing")  # must not propagate
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    proc_mod.hard_kill_tree(4242)  # does not raise
+    assert seen["argv"] == ["taskkill", "/F", "/T", "/PID", "4242"]
+    assert isinstance(seen["kwargs"], dict)
+    assert seen["kwargs"]["shell"] is False

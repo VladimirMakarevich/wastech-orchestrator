@@ -187,6 +187,10 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "level": "info",
             "artifacts": "standard",
         },
+        # Persistent repo-scoped memory is on out of the box. Omit the block (or set enabled: false)
+        # for the pre-memory behavior. The tunable knobs default per the schema — see the annotated
+        # config.example.yaml / docs/configuration.md#memory to adjust them.
+        "memory": {"enabled": True},
         "prompt_audit": False,
     }
 

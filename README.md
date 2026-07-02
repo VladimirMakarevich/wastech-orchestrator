@@ -172,7 +172,7 @@ worc watch              process pending tasks; loop + periodic git sync
 worc stop               stop a running watch daemon (stop ladder: idle stops, busy confirms/forces)
                           --timeout SECONDS           graceful-shutdown wait before SIGKILL (default: 30)
                           --force                     stop a busy daemon softly (finish the current step)
-                          --force-full                hard-stop now: kill the agent's group (POSIX; Windows: soft)
+                          --force-full                hard-stop now: kill the daemon + agent (POSIX group / Windows tree)
 worc restart            stop the running watch daemon (same stop ladder), then start a fresh one
                           --timeout SECONDS  --poll-seconds N  --queue NAME  --force  --force-full
 worc status [task-id]   show the active/latest persisted task (no work performed)

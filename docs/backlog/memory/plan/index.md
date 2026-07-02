@@ -2,7 +2,7 @@
 
 Status: **all five phases implemented** (numeric defaults provisional, tuned against a real eval baseline) Date: 2026-07-01 — [task hub](../index.md)
 
-Phased build order for V1, derived from the [design](../design.md) and the [blueprint roadmap](../research/memory-architecture-blueprint.md) (§9). Requirements and design are **locked** ([ADR-0001](../adr-0001-memory-subsystem-v1.md) accepted); **all five phases are now detailed into committed task files** (Goal / Scope / Approach / Files / Tests / Done-when each), grounded in the verified code seams (design §9). Only the provisional numeric defaults (Q1 cleanup budget, Q5 packet caps) remain to tune against the eval baseline. Each phase exits only when its slice of [acceptance-criteria.md](../acceptance-criteria.md) passes and `/run-checks` is green.
+Phased build order for V1, derived from the [design](../design.md) and the [blueprint roadmap](../research/memory-architecture-blueprint.md) (§9). Requirements and design are **locked** ([ADR-0001](../adr.md) accepted); **all five phases are now detailed into committed task files** (Goal / Scope / Approach / Files / Tests / Done-when each), grounded in the verified code seams (design §9). Only the provisional numeric defaults (Q1 cleanup budget, Q5 packet caps) remain to tune against the eval baseline. Each phase exits only when its slice of [acceptance-criteria.md](../acceptance-criteria.md) passes and `/run-checks` is green.
 
 ## Principle
 

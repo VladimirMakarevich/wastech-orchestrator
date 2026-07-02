@@ -31,6 +31,7 @@ NowFn = Callable[[], float]  # time.monotonic
 StartTimeFn = Callable[[int], str | None]  # opaque per-pid start-time token (recycling guard)
 GetpgidFn = Callable[[int], int]  # os.getpgid(pid) -> the process group id (POSIX)
 KillpgFn = Callable[[int, int], None]  # os.killpg(pgid, sig) (POSIX)
+HardKillFn = Callable[[int], None]  # tree-kill by pid (Windows ``taskkill /F /T``); injected seam
 # The handler/return type accepted by signal.signal (mirrors typeshed's _HANDLER).
 SignalHandler = Callable[[int, FrameType | None], object] | int | signal.Handlers | None
 SignalFn = Callable[[int, SignalHandler], SignalHandler]
@@ -61,6 +62,10 @@ def _unavailable_killpg(pgid: int, sig: int) -> None:  # pragma: no cover - Wind
 # ``_can_signal()`` (POSIX), so these fallbacks are never actually invoked on Windows.
 _DEFAULT_GETPGID: GetpgidFn = getattr(os, "getpgid", lambda pid: pid)
 _DEFAULT_KILLPG: KillpgFn = getattr(os, "killpg", _unavailable_killpg)
+# ``os.getpgrp``/``os.setpgid`` are POSIX-only (absent on Windows) — ``None`` there disables the
+# daemon group-leader step. Read as module singletons so they are not function-call defaults (B008).
+_DEFAULT_GETPGRP: Callable[[], int] | None = getattr(os, "getpgrp", None)
+_DEFAULT_SETPGID: Callable[[int, int], None] | None = getattr(os, "setpgid", None)
 
 
 @dataclass(frozen=True)
@@ -122,6 +127,34 @@ def _write_stop_file(path: Path) -> None:
     """Create the stop-sentinel (content is irrelevant; presence is the signal)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("stop\n", encoding="utf-8")
+
+
+def ensure_own_process_group(
+    *,
+    getpid_fn: Callable[[], int] = os.getpid,
+    getpgrp_fn: Callable[[], int] | None = _DEFAULT_GETPGRP,
+    setpgid_fn: Callable[[int, int], None] | None = _DEFAULT_SETPGID,
+) -> bool:
+    """Best-effort: make the current (daemon) process a process-group **leader** if it is not one.
+
+    So ``stop --force-full`` can ``killpg`` the daemon's own group (daemon + agents that inherit it)
+    without reaching an unrelated group. The two primary launch paths already lead their group — a
+    foreground ``worc watch`` via shell job control, and a console-spawned daemon via
+    ``start_new_session`` — so this only matters for a script/systemd launch that inherits the
+    parent's group. Guarded: it never runs on Windows (no POSIX process groups), never re-parents a
+    process that is already a leader (so foreground ``Ctrl-C`` is untouched), and swallows ``EPERM``
+    (a session leader cannot ``setpgid``). It does **not** ``setsid`` — the controlling terminal is
+    kept, so a foreground daemon still receives terminal signals. Returns whether we are a leader.
+    """
+    if getpgrp_fn is None or setpgid_fn is None:  # Windows: no POSIX process groups
+        return False
+    if getpgrp_fn() == getpid_fn():
+        return True  # already a leader (foreground job control, or spawned with start_new_session)
+    try:
+        setpgid_fn(0, 0)  # become leader of a new group; keeps the controlling terminal (no setsid)
+    except OSError:
+        return False  # e.g. EPERM (already a session leader) — leave the group as-is
+    return True
 
 
 def write_pid_file(
@@ -260,7 +293,8 @@ class StopOutcome:
     already_dead: bool  # PID file present but the process was not running (stale; POSIX probe)
     timed_out: bool = False  # shutdown was not confirmed within ``timeout``
     group_killed: bool = False  # ``level="full"``: the daemon's process group was SIGKILLed (POSIX)
-    degraded_to_soft: bool = False  # ``level="full"`` on Windows fell back to the soft stop
+    tree_killed: bool = False  # ``level="full"`` on Windows: daemon process tree was taskkilled
+    degraded_to_soft: bool = False  # ``level="full"`` on Windows with no hard_kill_fn: fell to soft
 
 
 def stop_process(
@@ -278,6 +312,7 @@ def stop_process(
     start_time_fn: StartTimeFn = _read_proc_start_time,
     getpgid_fn: GetpgidFn = _DEFAULT_GETPGID,
     killpg_fn: KillpgFn = _DEFAULT_KILLPG,
+    hard_kill_fn: HardKillFn | None = None,
     can_signal: bool | None = None,
 ) -> StopOutcome:
     """Ask the daemon recorded in ``path`` to stop, confirming shutdown within ``timeout``.
@@ -289,11 +324,12 @@ def stop_process(
       ``kill_sig`` (SIGKILL) only if the daemon outlives the timeout. **Windows**: ``os.kill`` can't
       reach an unrelated process, so write ``stop_file`` and wait for the daemon to remove its own
       PID file; if it does not vanish within the timeout, clear it and report ``timed_out``.
-    * ``"full"`` — hard stop. **POSIX only**: SIGKILL the daemon's whole process group at once
-      (daemon + active agent + any checks child — they share a group because the agent launches
-      with ``start_new_session=True``), so nothing is orphaned; recovery is the next ``resume()``.
-      On **Windows** there is no cross-process group kill, so it **degrades to the soft path** and
-      sets ``degraded_to_soft`` (the CLI surfaces "use Task Manager / taskkill").
+    * ``"full"`` — hard stop. **POSIX**: SIGKILL the daemon's whole process group at once (daemon +
+      active agent + any checks child — they share a group because the daemon leads it and the agent
+      inherits it), so nothing is orphaned; recovery is the next ``resume()``. **Windows**: there is
+      no cross-process group kill, so if ``hard_kill_fn`` is supplied it tree-kills the daemon
+      (``taskkill /F /T``, reaching the agent as a descendant) and sets ``tree_killed``; with no
+      ``hard_kill_fn`` it **degrades to the soft path** and sets ``degraded_to_soft``.
 
     A recorded start-time guards every probe so a recycled PID is never signaled. The PID file and
     stop-file are removed in every terminal branch. Pure under test via the injectable seams.
@@ -330,7 +366,10 @@ def stop_process(
             now_fn=now_fn,
             start_time_fn=start_time_fn,
         )
-    # Windows: no cross-process signal. A "full" request degrades to the soft PID-file wait.
+    # Windows: no cross-process signal. A "full" request tree-kills via the injected seam if one is
+    # supplied; otherwise it degrades to the soft PID-file wait.
+    if level == "full" and hard_kill_fn is not None:
+        return _stop_via_tree_kill(path, record, stop_file=stop_file, hard_kill_fn=hard_kill_fn)
     outcome = _stop_via_pid_file(
         path,
         record,
@@ -386,6 +425,35 @@ def _stop_via_group_kill(
         killed=True,
         already_dead=False,
         group_killed=True,
+    )
+
+
+def _stop_via_tree_kill(
+    path: Path,
+    record: ProcessIdentity,
+    *,
+    stop_file: Path | None,
+    hard_kill_fn: HardKillFn,
+) -> StopOutcome:
+    """Windows hard stop: tree-kill the daemon (and its agent/checks descendants) via the seam.
+
+    No liveness probe — ``os.kill`` cannot reach an unrelated process on Windows and there is no
+    start-time recycling guard off Linux, so we call the injected killer on the recorded PID (it
+    swallows a "no such process" exit) and reap the PID/stop files. Recovery is the next
+    ``resume()``.
+    """
+    pid = record.pid
+    hard_kill_fn(pid)
+    path.unlink(missing_ok=True)
+    if stop_file is not None:
+        stop_file.unlink(missing_ok=True)
+    return StopOutcome(
+        found=True,
+        pid=pid,
+        signaled=True,
+        killed=True,
+        already_dead=False,
+        tree_killed=True,
     )
 
 

@@ -479,6 +479,64 @@ def test_stop_full_degrades_to_soft_on_windows(tmp_path: Path) -> None:
     assert not path.exists()
 
 
+def test_stop_full_tree_kills_on_windows_with_hard_kill_fn(tmp_path: Path) -> None:
+    path = tmp_path / "orchestrator.pid"
+    stop_path = tmp_path / "orchestrator.stop"
+    pc.write_pid_file(path, pid=4242, start_time_fn=_start)
+    killed: list[int] = []
+    outcome = pc.stop_process(
+        path,
+        level="full",
+        can_signal=False,  # Windows: no cross-process group kill …
+        hard_kill_fn=lambda pid: killed.append(pid),  # … but a taskkill tree-kill seam is supplied
+        stop_file=stop_path,
+    )
+    assert killed == [4242]  # tree-killed via the seam, not degraded to soft
+    assert outcome.tree_killed is True
+    assert outcome.killed is True
+    assert outcome.degraded_to_soft is False
+    assert not path.exists()  # PID + stop files reaped
+    assert not stop_path.exists()
+
+
+def test_ensure_own_process_group_skips_when_already_leader() -> None:
+    calls: list[object] = []
+    # getpgrp == getpid → already a group leader (foreground job control / spawned with setsid).
+    assert pc.ensure_own_process_group(
+        getpid_fn=lambda: 777,
+        getpgrp_fn=lambda: 777,
+        setpgid_fn=lambda *a: calls.append(a),
+    )
+    assert calls == []  # never re-parents an existing leader (so foreground Ctrl-C is untouched)
+
+
+def test_ensure_own_process_group_leads_when_not_leader() -> None:
+    calls: list[tuple[int, int]] = []
+    assert pc.ensure_own_process_group(
+        getpid_fn=lambda: 777,
+        getpgrp_fn=lambda: 100,  # inherited the parent's group (script/systemd launch)
+        setpgid_fn=lambda pid, pgid: calls.append((pid, pgid)),
+    )
+    assert calls == [(0, 0)]  # become leader of a new group (no setsid)
+
+
+def test_ensure_own_process_group_unavailable_on_windows() -> None:
+    # Windows: os.getpgrp / os.setpgid do not exist → the helper reports "not a leader", no-op.
+    assert pc.ensure_own_process_group(getpgrp_fn=None, setpgid_fn=None) is False
+
+
+def test_ensure_own_process_group_swallows_eperm() -> None:
+    def raise_eperm(_pid: int, _pgid: int) -> None:
+        raise PermissionError("already a session leader")
+
+    assert (
+        pc.ensure_own_process_group(
+            getpid_fn=lambda: 777, getpgrp_fn=lambda: 100, setpgid_fn=raise_eperm
+        )
+        is False
+    )
+
+
 def test_stop_soft_never_touches_the_group_seams(tmp_path: Path) -> None:
     path = tmp_path / "orchestrator.pid"
     pc.write_pid_file(path, pid=4242, start_time_fn=_start)

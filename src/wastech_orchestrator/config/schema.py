@@ -409,12 +409,14 @@ class LoggingConfig:
 class MemoryConfig:
     """Repo-scoped persistent memory (docs/backlog/memory/): global toggle + bounded knobs.
 
-    Absent block => ``enabled=False`` — today's behavior (no store, no candidate delta, empty
-    memory packets, ``worc memory`` is a no-op, no background cleanup; Q10). The packaged template
-    ships ``enabled: true`` for a fresh ``worc install``. Every numeric knob carries the design's
-    locked default (§10) and is a bounded, runtime-clamped value — none is a fatal config error (a
-    later phase clamps an odd value at use, per the "fatal only without a safe fallback" rule). No
-    behavior consumes these yet; phase 01 wires the *shape* so the schema bumps once.
+    Absent block => ``enabled=False`` — the pre-memory behavior (no store, no candidate delta, empty
+    memory packets, ``worc memory`` is a no-op, no background cleanup; Q10). This dataclass default
+    stays ``False`` as the safe fallback, but a fresh ``worc install`` ships ``enabled: true`` (both
+    the packaged ``config.example.yaml`` and the generated ``config.yaml`` via
+    ``config_writer.build_config_mapping``), so memory is on out of the box. Every numeric knob
+    carries the design's locked default (§10) and is a bounded, runtime-clamped value — none is a
+    fatal config error (an odd value is clamped at use, per the "fatal only without a safe fallback"
+    rule). The write / read / curation paths consume these knobs at runtime (all phases shipped).
     """
 
     enabled: bool = False

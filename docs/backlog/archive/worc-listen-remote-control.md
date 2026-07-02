@@ -6,7 +6,7 @@ A stake-in-the-ground for a remote, conversational way to run the orchestrator. 
 
 ## The vision
 
-Today the orchestrator is something you sit next to. `worc watch` is a headless daemon; the only attended ergonomics are local ([interactive operator console](cli-upgrade.md), `worc shell`/`worc top`). The vision is to make the orchestrator something you can **carry in your pocket**: open Telegram, tag the bot, and ask it what it's doing or tell it what to do next — the same way you would lean over to the terminal, but from anywhere.
+Today the orchestrator is something you sit next to. `worc watch` is a headless daemon; the only attended ergonomics are local ([interactive operator console](done/cli-upgrade.md), `worc shell`/`worc top`). The vision is to make the orchestrator something you can **carry in your pocket**: open Telegram, tag the bot, and ask it what it's doing or tell it what to do next — the same way you would lean over to the terminal, but from anywhere.
 
 Concretely, the operator should be able to, from chat:
 
@@ -18,7 +18,7 @@ The "navigator agent" is what ties this together: rather than memorizing a comma
 
 ## The problem
 
-Between "task started" and "task finished" a remote operator is both blind and mute. The only outbound signal is `send_notification` on a terminal status; the only inbound channel is a **correlated** `ask_human` gate (approve/deny a specific question the orchestrator chose to ask — the §14 dangerous-diff gate, and the proposed [confirmation gates](operator-confirmation-gates.md)). There is no way for the operator to **initiate** an interaction: to ask "what's queued?", to redirect "run that one next", or to get oriented — without being at the machine. The [local console](cli-upgrade.md) solves exactly this, but only when you are attended at the terminal. Nothing solves it remotely, even though the Telegram transport for both directions already exists.
+Between "task started" and "task finished" a remote operator is both blind and mute. The only outbound signal is `send_notification` on a terminal status; the only inbound channel is a **correlated** `ask_human` gate (approve/deny a specific question the orchestrator chose to ask — the §14 dangerous-diff gate, and the proposed [confirmation gates](operator-confirmation-gates.md)). There is no way for the operator to **initiate** an interaction: to ask "what's queued?", to redirect "run that one next", or to get oriented — without being at the machine. The [local console](done/cli-upgrade.md) solves exactly this, but only when you are attended at the terminal. Nothing solves it remotely, even though the Telegram transport for both directions already exists.
 
 ## What this is — and what it is not
 
@@ -33,7 +33,7 @@ Explicitly **not** in scope (the trust boundary):
 - **Authoring task content from chat.** A chat message never becomes the body a provider executes. Task content reaches providers only as validated file paths through the §19 ingestion gate (security rules #8/#19); the bot dispatches over already-vetted artifacts, exactly as `worc shell` dispatches over `cmd_*`. (Operator-dictated **creation** of new tasks from chat — composing and running them — is the next rung beyond this vision; recorded in [§ Further horizon](#further-horizon-full-task-dictation-beyond-this-vision).)
 - **New git / network / filesystem capability.** Only the orchestrator commits/pushes/PRs; the bot introduces none of that. The navigator agent gets **no raw shell, git, or filesystem tools** — its only tools are the bounded verbs.
 - **A second engine host.** Like the local console, `listen` is a **client over the daemon**, never a place that runs `run_task`. The single-slot invariant is untouched.
-- **Mid-task control beyond the existing stop ladder.** No per-stage cancel beyond what [cli-upgrade.md](cli-upgrade.md) already scopes.
+- **Mid-task control beyond the existing stop ladder.** No per-stage cancel beyond what [cli-upgrade.md](done/cli-upgrade.md) already scopes.
 - **A free read of the repository by the agent.** Navigation answers come from redacted orchestrator state, not from opening source files (that would reopen the secret-leak surface the redaction net exists to close).
 
 ## Constraints
@@ -53,7 +53,7 @@ This is not a new transport — it is the **bidirectional, operator-initiated** 
 
 | Existing / proposed item | Relationship |
 | --- | --- |
-| [Interactive operator console](cli-upgrade.md) (`worc shell` / `worc top`) | **Local twin.** Identical shape — a client/dispatcher over the daemon, never a second engine host — with Telegram replacing `prompt_toolkit` and the operator remote instead of attended. The verbs and read views are the same; only the transport and the conversational layer differ. |
+| [Interactive operator console](done/cli-upgrade.md) (`worc shell` / `worc top`) | **Local twin.** Identical shape — a client/dispatcher over the daemon, never a second engine host — with Telegram replacing `prompt_toolkit` and the operator remote instead of attended. The verbs and read views are the same; only the transport and the conversational layer differ. |
 | [Telegram step-trace](telegram-step-trace.md) | **The outbound half.** Node→outcome feed. A consumer of the same single poll loop's sibling send path; the navigator's "what just happened?" answers overlap with it. |
 | [Operator confirmation gates](operator-confirmation-gates.md) | **The correlated-question half.** Approve/deny at decision points via `ask_human`. `listen` generalizes inbound from "answer the question the orchestrator asked" to "issue the command the operator chose"; both must share the broker. |
 | `worc list` / `worc status` (shipped) | **The read surface the navigator queries.** "What tasks now?" reuses the `worc list` read helpers and `StateStore.open_readonly`; no new read machinery. |
@@ -95,7 +95,7 @@ Three layers, bottom-up. Only L0 is a hard prerequisite for anything; L1 is inde
 **Launch model (reconciling the operator's two framings).** The 409 constraint pushes the **combined** mode to the fore: one daemon owning one poll loop.
 
 - `worc watch --listen` (or `orchestrator.listen.enabled: true`) — the watch daemon also listens. This is the operator's `worc --watch & listen` intuition, made one process: the orchestrator works autonomously **and** the operator has remote control, with no token conflict.
-- `worc listen` standalone — a listen-only daemon (no autonomous claiming). To also process tasks it would spawn-or-attach a `watch` child, exactly as the [console](cli-upgrade.md) does, so the poll loop stays single-owner.
+- `worc listen` standalone — a listen-only daemon (no autonomous claiming). To also process tasks it would spawn-or-attach a `watch` child, exactly as the [console](done/cli-upgrade.md) does, so the poll loop stays single-owner.
 
 ## Alternatives considered
 
@@ -129,7 +129,7 @@ What genuinely widens, and why this is the furthest rung: the chat can now **int
 - **Which model runs the navigator, and at what cost/bound.** A per-message LLM call adds tokens and latency. The deterministic-first split limits it to genuinely conversational turns, but the model choice, turn budget, and a per-window rate/cost cap are open. Likely a small/cheap model with a tight cap.
 - **Intent authentication.** Is "from the configured chat" enough, or is a configured operator **user id** within the chat warranted (group chats, forwarded messages)? Lean toward an optional user-id narrowing.
 - **LLM secret-leak surface.** Even reading only redacted state, does letting a model compose free-text answers create any new exfiltration path the line-based redaction net does not cover? Needs a deliberate look before L2.
-- **Sequencing vs. siblings.** L0 is a shared prerequisite for this, gates, and step-trace — build it once, first? And how much of L1 is literally the [console](cli-upgrade.md)'s verb set re-skinned for Telegram (shared dispatcher) vs. duplicated?
+- **Sequencing vs. siblings.** L0 is a shared prerequisite for this, gates, and step-trace — build it once, first? And how much of L1 is literally the [console](done/cli-upgrade.md)'s verb set re-skinned for Telegram (shared dispatcher) vs. duplicated?
 - **Navigator memory.** Does the navigator get its own short-term context, or is it purely the read-only voice of [orchestrator memory](archive/done/orchestrator-memory.md)? The latter keeps it bounded; the former is richer but unbounded.
 
 ## Implementation notes

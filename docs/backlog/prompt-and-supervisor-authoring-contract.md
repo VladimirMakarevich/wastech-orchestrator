@@ -15,7 +15,7 @@ On the supervisor side, task 06 moved every per-node role prompt into its flow's
 - `render_prompt` is the fixed security core: it substitutes only allowlisted _path/metadata_ variables, never task bodies, diffs, check logs, env, or secrets ([prompts.py](../../src/wastech_orchestrator/core/prompts.py)). Nothing here may widen what it injects or let a template weaken argv, the sandbox, the env allowlist, or fallback policy.
 - The supervisor invariant holds: advisory, read-only, no routing power, and it must never gain a second LLM turn for this. Task 1 reuses the existing `finalize()` call; task 3 reshapes wording only.
 - Best-effort everywhere the supervisor and renderer touch a run: a missing/bad role file, a malformed structured output, or a memory-disabled run must degrade gracefully and never block `summary.md` or publishing. This matches the project rule "only make a config check fatal if there is no safe runtime fallback."
-- Memory is disabled by default, and the memory subsystem's AC-S4 requires that with memory off the finalize turn behaves exactly as it does today (free-text). Any structured finalize output must respect that.
+- Memory can be off (an absent or `enabled: false` block; note a fresh `worc install` now ships it on), and the memory subsystem's AC-S4 requires that with memory off the finalize turn behaves exactly as it does today (free-text). Any structured finalize output must respect that.
 - Cross-platform path handling stays as-is: variables carry `Path.as_posix()`-style strings; nothing here changes path serialization.
 
 ## Alternatives considered

@@ -70,6 +70,7 @@ from wastech_orchestrator.notify import build_notifier
 from wastech_orchestrator.notify.telegram import check_telegram_preflight
 from wastech_orchestrator.observability.logging import configure_logging, set_log_level
 from wastech_orchestrator.preflight import preflight_gh
+from wastech_orchestrator.providers import process as agent_process
 from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.security.isolation import check_isolation
 from wastech_orchestrator.state_store import IncompatibleStateError, StateStore, TaskRow
@@ -2080,6 +2081,10 @@ def cmd_watch(args: argparse.Namespace) -> int:
     controller = process_control.StopController()  # SIGTERM -> event, restored on exit
     try:
         with controller:
+            # Lead our own process group (POSIX, best-effort) so `stop --force-full` can group-kill
+            # the daemon + its agents without reaching an unrelated group. No-op if we already lead
+            # one (foreground job control / console spawn) or on Windows.
+            process_control.ensure_own_process_group()
             stop_path.unlink(missing_ok=True)  # clear a stale sentinel so it can't stop us on start
             process_control.write_pid_file(pid_path)
             results = watch_loop(
@@ -2157,7 +2162,14 @@ def _gated_stop(
     pid_path = process_control.pid_file_path(worc_home_for(config))
     stop_path = process_control.stop_file_path(worc_home_for(config))
     outcome = process_control.stop_process(
-        pid_path, timeout=args.timeout, stop_file=stop_path, level=decision.level
+        pid_path,
+        timeout=args.timeout,
+        stop_file=stop_path,
+        level=decision.level,
+        # Windows hard rung: tree-kill the daemon (and its agent/checks descendants) via taskkill.
+        # POSIX ignores this and uses the process-group kill; the injected seam keeps the
+        # process_control module free of any direct child-process launch (its no-shell-out rule).
+        hard_kill_fn=agent_process.hard_kill_tree,
     )
     return 0, outcome
 
@@ -2184,6 +2196,11 @@ def cmd_stop(args: argparse.Namespace) -> int:
     elif outcome.group_killed:
         print(
             f"stop: watcher {outcome.pid} hard-stopped (killed its process group); "
+            "it resumes from its checkpoint on next start"
+        )
+    elif outcome.tree_killed:
+        print(
+            f"stop: watcher {outcome.pid} hard-stopped (killed its process tree); "
             "it resumes from its checkpoint on next start"
         )
     elif outcome.killed:
@@ -2218,6 +2235,8 @@ def cmd_restart(args: argparse.Namespace) -> int:
         print("restart: no previous watcher running")
     elif outcome.group_killed:
         print(f"restart: hard-stopped previous watcher {outcome.pid} (process group)")
+    elif outcome.tree_killed:
+        print(f"restart: hard-stopped previous watcher {outcome.pid} (process tree)")
     elif outcome.timed_out:
         print(f"restart: previous watcher {outcome.pid} did not confirm shutdown; starting anyway")
     else:

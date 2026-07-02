@@ -89,6 +89,13 @@ def test_generated_config_includes_logging_defaults(tmp_path: Path) -> None:
     assert cfg.logging.artifacts == "standard"
 
 
+def test_generated_config_enables_memory_out_of_the_box(tmp_path: Path) -> None:
+    # A fresh install ships the memory subsystem on (the schema default stays False as the
+    # absent-block safe fallback; the installer writes enabled: true explicitly).
+    cfg = loads_config(build_and_validate(_spec(tmp_path, (ProviderId.CODEX,)))).config
+    assert cfg.memory.enabled is True
+
+
 def test_safe_security_defaults_are_written(tmp_path: Path) -> None:
     cfg = loads_config(build_and_validate(_spec(tmp_path, (ProviderId.CODEX,)))).config
     assert cfg.security.strict_isolation is True

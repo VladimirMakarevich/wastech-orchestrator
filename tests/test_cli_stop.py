@@ -187,6 +187,35 @@ def test_cmd_stop_reports_group_kill(
     assert "hard-stopped" in capsys.readouterr().out
 
 
+def test_cmd_stop_reports_tree_kill(
+    monkeypatch: pytest.MonkeyPatch, make_git_config: _ConfigFactory, tmp_path, capsys
+) -> None:
+    config = make_git_config(tmp_path / "clone")
+    monkeypatch.setattr(cli, "load_config_for", lambda _a: config)
+    monkeypatch.setattr(cli, "has_active_task", lambda _c: True)
+    monkeypatch.setattr(sys, "stdin", io.StringIO())
+    monkeypatch.setattr(
+        cli.process_control,
+        "stop_process",
+        lambda _p, **_k: process_control.StopOutcome(
+            found=True, pid=7, signaled=True, killed=True, already_dead=False, tree_killed=True
+        ),
+    )
+    cli.cmd_stop(cli.build_parser().parse_args(["stop", "--force-full"]))
+    out = capsys.readouterr().out
+    assert "hard-stopped" in out and "process tree" in out
+
+
+def test_cmd_stop_wires_hard_kill_seam(
+    monkeypatch: pytest.MonkeyPatch, make_git_config: _ConfigFactory, tmp_path
+) -> None:
+    """cmd_stop passes the taskkill seam so the Windows hard rung is real, not a soft-degrade."""
+    config = make_git_config(tmp_path / "clone")
+    captured = _patch_stop(monkeypatch, config, active=True, tty=False)
+    cli.cmd_stop(cli.build_parser().parse_args(["stop", "--force-full"]))
+    assert captured.get("hard_kill_fn") is cli.agent_process.hard_kill_tree
+
+
 def test_cmd_stop_reports_windows_degrade(
     monkeypatch: pytest.MonkeyPatch, make_git_config: _ConfigFactory, tmp_path, capsys
 ) -> None:
