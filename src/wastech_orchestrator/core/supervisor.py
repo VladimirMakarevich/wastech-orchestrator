@@ -56,11 +56,13 @@ _SUPERVISOR_LINEAGE_NODE_ID = "__supervisor__"
 # small, autoincrement) node-run id, so the three turn kinds never collide on the same path.
 _PROPOSAL_RUN_ID = 999_999
 
-# The subtask-boundary handoff turn's artifact-dir namespace — distinct from the proposal and from
-# finalize's ``0`` (subtask-context-handoff ADR). Multiple handoffs in one task share this id but
-# write to distinct dirs because each is on a different subtask order (the artifact writer appends a
-# run counter), and none collides with the proposal / finalize / real node-run ids.
-_HANDOFF_RUN_ID = 999_998
+# Base for the subtask-boundary handoff turns' artifact-dir namespace (subtask-context-handoff ADR).
+# Each handoff uses ``_HANDOFF_RUN_ID_BASE + subtask_order`` so multiple handoffs in one task (a
+# chain, or a diamond) write to DISTINCT dirs — ``create_attempt_dir`` forbids overwriting
+# (``exist_ok=False``), so a shared id would make the second boundary's turn raise and silently
+# degrade to the floor alone. The base is distinct from the proposal (999999) and finalize (0), and
+# far above any real (small autoincrement) node-run id.
+_HANDOFF_RUN_ID_BASE = 990_000
 
 # The strict provider schema for the once-per-task ``node → skills`` proposal. Array-shaped (not an
 # arbitrary-key object) so it validates under strict JSON-schema: each assignment names one node and
@@ -463,7 +465,7 @@ class Supervisor:
         result = self._run_result(
             task_id,
             self._handoff_prompt(task_id, subtask_order, floor_context),
-            node_run_id=_HANDOFF_RUN_ID,
+            node_run_id=_HANDOFF_RUN_ID_BASE + subtask_order,
             output_schema=_HANDOFF_SCHEMA,
         )
         if result is None or result.structured_output is None:

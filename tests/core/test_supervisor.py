@@ -575,6 +575,20 @@ def test_handoff_empty_sections_yield_none(tmp_path: Path) -> None:
     assert sup.handoff(task_id=_TASK, subtask_order=2, floor_context="F") is None
 
 
+def test_handoff_uses_distinct_run_id_per_subtask(tmp_path: Path) -> None:
+    # Each subtask boundary's handoff must namespace its artifact dir by subtask_order — a shared
+    # node_run_id would make the second handoff's create_attempt_dir (exist_ok=False) raise and
+    # silently degrade every boundary after the first to the floor alone.
+    router = FakeRouter(
+        [_structured_handoff({"new_surface_area": "a"}), _structured_handoff({"open_edges": "b"})]
+    )
+    sup = _supervisor(tmp_path, router, _store(tmp_path))
+    sup.handoff(task_id=_TASK, subtask_order=2, floor_context="F")
+    sup.handoff(task_id=_TASK, subtask_order=3, floor_context="F")
+    run_ids = [r.node_run_id for r in router.requests]
+    assert run_ids[0] != run_ids[1]  # distinct dirs → no create_attempt_dir collision
+
+
 def test_handoff_uses_flow_handoff_role_file(tmp_path: Path) -> None:
     rf = _flow_lens(tmp_path, "handoff.md", "HANDOFF-LENS {task_id}")
     router = FakeRouter([_structured_handoff({"new_surface_area": "x"})])
