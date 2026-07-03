@@ -194,6 +194,34 @@ def test_every_mutation_is_audited_and_chain_holds(service: MemoryService) -> No
     assert all(row.get("post_hash") for row in rows)
 
 
+def test_every_audit_row_carries_nonempty_rationale(service: MemoryService) -> None:
+    # F9 (full AC-SF3): every mutation records a human-readable rationale beside the pre/post
+    # hashes, so `worc memory show/validate` explains WHY each record was appended / quarantined.
+    _apply(service, CandidateDelta(lessons=(_lesson(ev_type="operator"),)))  # promotes
+    rows = service.audit.rows()
+    assert rows and all((row.get("rationale") or "").strip() for row in rows)
+    assert any("promoted to long-term" in row.get("rationale", "") for row in rows)
+
+
+def test_quarantine_rationale_names_the_cause(service: MemoryService) -> None:
+    # F9: a non-durable candidate is held with a concrete deterministic cause (not an empty string).
+    _apply(service, CandidateDelta(lessons=(_lesson(ev_type="agent"),)))  # agent-inferred → held
+    rows = service.audit.rows()
+    quarantine_rows = [r for r in rows if r.get("action") == "quarantine"]
+    assert quarantine_rows
+    assert any("non-durable trust" in r.get("rationale", "") for r in quarantine_rows)
+
+
+def test_missing_evidence_quarantine_rationale(service: MemoryService) -> None:
+    # F9: a no-evidence candidate names evidence as the cause.
+    _apply(service, CandidateDelta(lessons=(_lesson(ev_type=None),)))
+    rows = service.audit.rows()
+    assert any(
+        r.get("action") == "quarantine" and "no supporting evidence" in r.get("rationale", "")
+        for r in rows
+    )
+
+
 def test_disabled_window_does_not_block_recurrence_within_default(service: MemoryService) -> None:
     # Two same-day occurrences are within the default 60d window, so recurrence counts.
     for task in ("t1", "t2"):

@@ -36,6 +36,25 @@ def test_has_task_id(tmp_path: Path) -> None:
     assert ledger.has_task_id("missing") is False
 
 
+def test_only_validation_rejects(tmp_path: Path) -> None:
+    # F6: an id whose only record carries a validation_reason is a gate reject, not a real attempt.
+    ledger = Ledger(tmp_path)
+    assert ledger.only_validation_rejects("a") is False  # absent → not a reject-only id
+    ledger.append(
+        LedgerRecord(
+            id="a",
+            title="A",
+            final_status="failed",
+            finished_at="t1",
+            validation_reason="injection_suspected",
+        )
+    )
+    assert ledger.only_validation_rejects("a") is True
+    # A subsequent real attempt (no validation_reason) makes it no longer reject-only.
+    ledger.append(LedgerRecord(id="a", title="A", final_status="failed", finished_at="t2"))
+    assert ledger.only_validation_rejects("a") is False
+
+
 def test_records_empty_when_no_file(tmp_path: Path) -> None:
     assert Ledger(tmp_path / "logs").records() == []
 

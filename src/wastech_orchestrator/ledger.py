@@ -120,6 +120,19 @@ class Ledger:
         """True iff ``task_id`` appears in the ledger (the duplicate-id ledger half)."""
         return any(rec.get("id") == task_id for rec in self.records())
 
+    def only_validation_rejects(self, task_id: str) -> bool:
+        """True iff ``task_id`` appears in the ledger and **every** record for it is a validation
+        reject (F6).
+
+        A gate reject appends a ``failed`` record carrying a ``validation_reason`` before the task
+        was ever claimed — there is no ``tasks`` row and no branch. Such a record must not reserve
+        the id forever: the operator's normal loop is "rejected → fix the file → submit again under
+        the same id". So when the id's only ledger trace is validation reject(s), the duplicate-id
+        gate lets the re-submission through (the caller also confirms there is no ``tasks`` row).
+        """
+        records = [rec for rec in self.records() if rec.get("id") == task_id]
+        return bool(records) and all(rec.get("validation_reason") for rec in records)
+
 
 @dataclass(frozen=True)
 class DecomposedFailureInfo:

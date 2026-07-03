@@ -173,15 +173,24 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "bot_token_env": "TELEGRAM_BOT_TOKEN",
             "chat_id_env": "TELEGRAM_CHAT_ID",
             "ask_timeout_s": 28800,
+            # F3: surface the documented per-message HITL trace knob (schema v21) in the delivered
+            # config so the operator sees it without reading the source; off by default.
+            "trace": False,
         },
         "skills": {
-            "dynamic": True,
+            # F1: off out of the box — the dynamic layer adds a once-per-task supervisor turn even
+            # when the repo has no skills. The operator opts in with `dynamic: true`.
+            "dynamic": False,
             "strict": False,
         },
+        # F2: resolve concrete, visible supervisor model/reasoning rather than an implicit "inherit
+        # from primary" (null). The oversight layer writes summary / follow-ups / memory-delta, so
+        # its model+effort should be transparent. `reasoning` is deliberately NOT a max tier — xhigh
+        # makes the structured finalize turn fragile (F7b).
         "supervisor": {
             "role_file": "roles/supervisor.md",
-            "model": None,
-            "reasoning": None,
+            "model": _PROVIDER_DEFAULTS[primary_pid][0],
+            "reasoning": "high",
         },
         "logging": {
             "level": "info",

@@ -19,6 +19,8 @@ control workspace and touches git not at all — it fails closed if that report 
 
 from __future__ import annotations
 
+import logging
+
 from wastech_orchestrator.core.flow.contracts import PublishingPolicy
 from wastech_orchestrator.core.flow.engine import NodeContext, NodeOutcome, NodeResult
 from wastech_orchestrator.core.flow.nodes.base import (
@@ -29,7 +31,12 @@ from wastech_orchestrator.core.flow.nodes.base import (
 from wastech_orchestrator.core.flow.output_policy import resolve_output_policy, within_subdir
 from wastech_orchestrator.core.flow.schema import FlowNode, PublishNode
 from wastech_orchestrator.git_manager import GitCommandError
+from wastech_orchestrator.observability.logging import bind
+from wastech_orchestrator.providers.artifacts import task_artifact_dir
+from wastech_orchestrator.providers.redaction import redact_text
 from wastech_orchestrator.state_store import NodeRunRow
+
+_LOG = logging.getLogger(__name__)
 
 _PR_POLICIES = frozenset(
     {PublishingPolicy.PULL_REQUEST, PublishingPolicy.DOCUMENTATION_PULL_REQUEST}
@@ -69,6 +76,17 @@ class PublishNodeRunner:
             # path cannot relocate a file it can no longer find at the pre-finalize path). The git
             # operations are idempotent via `publish_operations`, so `rerun --continue` re-enters
             # this node and completes the push/PR without duplicating the commits.
+            #
+            # F12: the git stderr is the only diagnosis of *why* publish failed. Without surfacing
+            # it the operator sees only `error_class=publish_failed` and must reproduce it by hand,
+            # so log it (ERROR, daemon log) and persist it as a node artifact. Scrub secrets: git
+            # stderr (paths/pathspec) is normally safe, but a remote URL / push error can echo a
+            # token, so it goes through the same redactor as stored prompts before it is written.
+            detail = redact_text(str(exc), extra_secrets=self._s.prompt_secrets)
+            bind(_LOG, task_id=ctx.task_id, node_id=node.id).error(
+                "publish git operation failed", extra={"error": detail, "policy": node.policy.value}
+            )
+            self._record_publish_error(ctx, node, detail)
             self._s.store.complete_node_run(
                 run_id,
                 status="failed",
@@ -78,7 +96,7 @@ class PublishNodeRunner:
             )
             raise NodeManualRequired(
                 f"publish node {node.id!r} ({node.policy.value}) could not complete the git "
-                f"publish (resumable via rerun --continue): {exc}"
+                f"publish (resumable via rerun --continue): {detail}"
             ) from exc
         self._s.store.complete_node_run(
             run_id,
@@ -90,6 +108,23 @@ class PublishNodeRunner:
             commit_sha_after=result_ref,
         )
         return NodeResult(node_id=node.id, outcome=NodeOutcome("done"), node_run_id=run_id)
+
+    def _record_publish_error(self, ctx: NodeContext, node: PublishNode, detail: str) -> None:
+        """Persist the (already-redacted) git failure as a ``publish_error`` node artifact so the
+        cause survives the run and is diagnosable off-line (F12). Best-effort: a write/register
+        failure must never mask the manual stop, so it is swallowed."""
+        if self._s.register_artifact is None:
+            return
+        try:
+            dest = task_artifact_dir(self._s.artifacts_root, ctx.task_id) / "publish-error.txt"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(
+                f"publish node {node.id!r} ({node.policy.value}) git failure:\n{detail}\n",
+                encoding="utf-8",
+            )
+            self._s.register_artifact(ctx.task_id, "publish_error", str(dest))
+        except OSError:
+            pass
 
     def _publish(self, node: PublishNode, ctx: NodeContext) -> str | None:
         if node.policy is PublishingPolicy.PRIVATE_CONTROL_WORKSPACE_REPORT:

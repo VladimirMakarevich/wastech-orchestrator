@@ -116,11 +116,13 @@ class ValidationGate:
         store_has_task_id: Callable[[str], bool],
         ledger_has_task_id: Callable[[str], bool],
         is_recovery_rerun: Callable[[str], bool] = lambda _id: False,
+        ledger_only_validation_rejects: Callable[[str], bool] = lambda _id: False,
     ) -> None:
         self._config = config
         self._store_has_task_id = store_has_task_id
         self._ledger_has_task_id = ledger_has_task_id
         self._is_recovery_rerun = is_recovery_rerun
+        self._ledger_only_validation_rejects = ledger_only_validation_rejects
 
     def validate(self, source: ParsedSource) -> ValidationResult:
         """Run Phase A then Phase B and return the combined :class:`ValidationResult`."""
@@ -225,9 +227,17 @@ class ValidationGate:
         if id_value in depends_on:
             return _rej(ValidationReason.INVALID_DEPENDS_ON, f"{id_value!r} depends on itself")
 
-        # duplicate_task_id — vs. the tasks table + the ledger, exempting a recovery re-run.
+        # duplicate_task_id — vs. the tasks table + the ledger, exempting a recovery re-run. F6: a
+        # ledger id whose ONLY trace is a validation reject (no tasks row, never claimed) does not
+        # reserve the id — the operator's "rejected → fix → re-submit under the same id" loop must
+        # work. A real duplicate (a tasks row, or a ledger record from an actual attempt) still
+        # rejects.
+        ledger_blocks = self._ledger_has_task_id(id_value) and not (
+            self._ledger_only_validation_rejects(id_value)
+            and not self._store_has_task_id(id_value)
+        )
         if not self._is_recovery_rerun(id_value) and (
-            self._store_has_task_id(id_value) or self._ledger_has_task_id(id_value)
+            self._store_has_task_id(id_value) or ledger_blocks
         ):
             return _rej(ValidationReason.DUPLICATE_TASK_ID, id_value)
 

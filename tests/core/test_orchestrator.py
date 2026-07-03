@@ -2697,6 +2697,12 @@ def test_supervisor_proposed_skills_reach_downstream_stages(
     orch, store, _, art = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
     )
+    # This test exercises the dynamic proposal, which is opt-in (F1: default off).
+    from dataclasses import replace
+
+    from wastech_orchestrator.config.schema import SkillsConfig
+
+    orch._config = replace(orch._config, skills=SkillsConfig(dynamic=True))  # noqa: SLF001
 
     result = orch.run_task(_complete_task(tmp_path, "task-skills"))
     assert result.final_status is Status.DONE
@@ -3008,6 +3014,35 @@ def test_dependency_eligibility_dep_merged_is_eligible_and_backfills_sha(
     # The readiness probe backfilled the armed merge op with the real SHA (SQLite only).
     op = store.get_publish_op("dep", KIND_PR_MERGE)
     assert op is not None and op.result_ref == "realsha"
+
+
+def test_dependency_eligibility_dep_merged_out_of_band_records_pr_merge_op(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # F11: a dependency whose PR was merged out of band (no orchestrator-armed pr_merge op) still
+    # gets a `pr_merge` audit op written when the daemon auto-advances the dependent on the live
+    # merged-PR check — so the merge-event audit ledger is complete for watch-driven merge-gated
+    # tasks without stopping the daemon for `worc prs --sync`.
+    orch, store, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        gh=_merge_state_gh("MERGED", sha="oobsha"),
+    )
+    _seed_task(store, "dep", Status.DONE)
+    _seed_pr(store, "dep")  # a PR exists but NO pr_merge op (merged on GitHub, not by the orch)
+    assert store.get_publish_op("dep", KIND_PR_MERGE) is None
+
+    verdict = orch.dependency_eligibility("task-001", ("dep",), pending={})
+    assert verdict.state is Eligibility.ELIGIBLE
+    op = store.get_publish_op("dep", KIND_PR_MERGE)
+    assert op is not None and op.status == "completed" and op.result_ref == "oobsha"
+
+    # Idempotent: a second poll does not error or double-write.
+    orch.dependency_eligibility("task-001", ("dep",), pending={})
+    assert store.get_publish_op("dep", KIND_PR_MERGE).result_ref == "oobsha"
 
 
 def test_dependency_eligibility_dep_open_pr_waits(

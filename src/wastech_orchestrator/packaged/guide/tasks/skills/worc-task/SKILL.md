@@ -83,7 +83,7 @@ The validation gate rejects a task **before** any branch or agent runs. To alway
 4. **Only** the allowed front-matter keys appear; types match the table.
 5. `nodes` overrides carry **only** `enabled` (a boolean), keyed by a flow node id. Any other sub-key (including `model`/`reasoning`) is rejected (`invalid_node_override`).
 6. **No secrets** (tokens, keys, passwords) anywhere in the file. Credentials live in the operator's environment, never in a task.
-7. **No CLI-flag-shaped values** in front matter — e.g. a `title` of `"--dangerously-skip-permissions"` is rejected as `injection_suspected`. Front matter is scanned defensively even though the body never builds CLI arguments.
+7. **Front-matter values are plain text.** No value may look like a CLI argument: a value that **starts with `-`** or contains an **argv-shaped token** (a backtick `` ` ``, `;`, `|`, `$(`, or a newline) is rejected as `injection_suspected`. This applies to **every** field, `title` and `contacts` included (the gate does not exempt display fields). Front matter is scanned defensively even though the body never builds CLI arguments — so put code, shell snippets, or punctuation-heavy phrasing in the **body**, and keep front-matter values to short plain labels (e.g. title `Fix parse() on empty input`, not `` Fix `parse()` on empty input ``).
 8. Keep it reasonably sized (the gate caps file size, line count, and per-line length).
 
 **Provider, model, and reasoning are not task fields** — they live on the flow node (the operator's flow + config). A task cannot repoint a stage's provider or set its model. Never add `provider`, `model`, `reasoning`, or `agents` keys.
@@ -117,6 +117,6 @@ Webhook delivery should stop retrying after a bounded number of failed attempts.
 
 - Don't invent `provider`, `model`, `reasoning`, or `agents` keys — they are flow concerns and get the task rejected.
 - Don't add any front-matter key outside the allowed table.
-- Don't embed secrets, and don't try to pass CLI flags through front matter.
+- Don't embed secrets, and don't put CLI-flag-shaped or shell-punctuation values in **any** front-matter field (including `title`/`contacts`) — a leading `-` or a `` ` ``/`;`/`|`/`$(` gets the task rejected. Put such content in the body.
 - Don't try to add, replace, or relax checks, or weaken the sandbox — those are operator config, not task fields.
 - Don't cram several unrelated changes into one task — split into separate tasks. To split **one** change into ordered steps that land as a single PR, use **worc-deco-task**.

@@ -142,7 +142,7 @@ class MemoryService:
         """
         if not audit.task_id:
             audit = replace(audit, task_id=episode.task_id)
-        self.append(episode, audit=audit)
+        self.append(episode, audit=_reason(audit, "recorded short-term episode"))
         result = ApplyResult(episode_id=record_id(episode))
         if delta is None:
             return result
@@ -256,9 +256,14 @@ class MemoryService:
             )
 
         # Quarantine (never long-term): a failure-seam source, missing evidence (AC-W2), or a
-        # non-durable trust level (external-untrusted / agent-inferred — AC-SF2/AC-W4).
+        # non-durable trust level (external-untrusted / agent-inferred — AC-SF2/AC-W4). The audit
+        # rationale records *why* it was held so `worc memory show/validate` explains it (F9).
         if source is WriteSource.FAILURE or not evidence or trust not in DURABLE_TRUST_LEVELS:
-            self._put_pending(pending, build("quarantined"), audit=audit)
+            self._put_pending(
+                pending,
+                build("quarantined"),
+                audit=_reason(audit, _quarantine_reason(source, evidence, trust)),
+            )
             return _bump(r, quarantined=1)
 
         # Merge into an existing active record with the same kind + normalized subject (design §5).
@@ -272,7 +277,7 @@ class MemoryService:
                 rows,
                 ids=_ids(rows),
                 action=AuditAction.MERGE,
-                audit=audit,
+                audit=_reason(audit, f"merged into existing {kind.value} record (same subject)"),
             )
             return _bump(r, merged=1)
 
@@ -286,11 +291,18 @@ class MemoryService:
             min_tasks=self._config.promote_min_tasks,
             explained_failure=explained_failure,
         ):
-            self.append(build("active"), audit=audit)
+            self.append(
+                build("active"),
+                audit=_reason(
+                    audit, f"promoted to long-term ({trust.value} trust, evidence, gate met)"
+                ),
+            )
             if prior is not None:
                 self._drop_pending(pending, memory_id, audit=audit)
             return _bump(r, promoted=1)
-        self._put_pending(pending, build("quarantined"), audit=audit)
+        min_tasks = self._config.promote_min_tasks
+        held = f"held short-term: awaiting recurrence ({recurrence}/{min_tasks} tasks)"
+        self._put_pending(pending, build("quarantined"), audit=_reason(audit, held))
         return _bump(r, quarantined=1)
 
     def _ingest_entity(
@@ -314,7 +326,9 @@ class MemoryService:
         )
         if source is WriteSource.FAILURE or trust not in DURABLE_TRUST_LEVELS:
             self._put_pending(
-                self._read_pending(), replace(record, status="quarantined"), audit=audit
+                self._read_pending(),
+                replace(record, status="quarantined"),
+                audit=_reason(audit, _quarantine_reason(source, cand.paths, trust)),
             )
             return _bump(r, quarantined=1)
         entities = self.read_entities()
@@ -323,10 +337,14 @@ class MemoryService:
             rows = list(entities)
             rows[at] = as_row(record)
             self._replace_rows(
-                self._entities_path(), rows, ids=_ids(rows), action=AuditAction.MERGE, audit=audit
+                self._entities_path(),
+                rows,
+                ids=_ids(rows),
+                action=AuditAction.MERGE,
+                audit=_reason(audit, "upserted entity card (latest card wins)"),
             )
             return _bump(r, merged=1)
-        self.append(record, audit=audit)
+        self.append(record, audit=_reason(audit, f"appended entity card ({trust.value} trust)"))
         return _bump(r, entities=1)
 
     # --- typed writes (redacted + atomic + audited) ---------------------------
@@ -545,6 +563,22 @@ def _derive_id(kind: LongTermKind, subject: str) -> str:
     """Deterministic content-derived long-term id; stable across recurrences of a subject."""
     digest = content_hash(f"{kind.value}:{normalize_subject(subject)}".encode())[:12]
     return f"ltm_{digest}"
+
+
+def _reason(audit: AuditContext, rationale: str) -> AuditContext:
+    """Copy of *audit* carrying a concrete mutation *rationale* — a deterministic human-readable
+    cause every audit row gets, so ``worc memory show/validate`` explains why a record was
+    appended / merged / quarantined (F9). Independent of the model's candidate ``rationale``."""
+    return replace(audit, rationale=rationale)
+
+
+def _quarantine_reason(source: WriteSource, has_support: object, trust: Any) -> str:
+    """The deterministic cause a record was held in quarantine rather than promoted (F9)."""
+    if source is WriteSource.FAILURE:
+        return "quarantined: failure-seam source (never promoted to long-term)"
+    if not has_support:
+        return "quarantined: no supporting evidence"
+    return f"quarantined: non-durable trust '{trust.value}'"
 
 
 def _id_of(row: Mapping[str, Any]) -> Any:

@@ -308,6 +308,10 @@ class PipelineResult:
     final_status: Status
     pr_url: str | None = None
     validation_reason: str | None = None
+    #: the offending field + cause for a validation reject (F5a) — the machine ``reason`` alone is
+    #: opaque ("injection_suspected"); this carries e.g. ``agents.review: forbidden flag shape`` so
+    #: the operator sees WHICH field and WHY on the console without opening the JSON report.
+    validation_detail: str | None = None
 
 
 class SlotBusyError(Exception):
@@ -707,6 +711,12 @@ class Orchestrator:
             return Eligibility.ELIGIBLE, ""  # local-commit mode: DONE means commits on base
         state, sha = self._git.pr_merge_state(pr_url)
         if state == "MERGED":
+            # F11: the daemon auto-advances a dependent on this LIVE merged-PR check. Persist the
+            # `pr_merge` audit op here (idempotent, no network) so the merge event is recorded even
+            # when the PR was merged out of band — otherwise the audit ledger of merge events is
+            # incomplete for watch-driven merge-gated tasks (the only other `pr_merge` writer is
+            # `worc prs --sync`, which refuses while the daemon owns the clone).
+            self._git.record_external_merge(dep, pr_url)
             if sha is not None:
                 self._git.backfill_merge_sha(dep, sha)
             return Eligibility.ELIGIBLE, ""
@@ -787,6 +797,18 @@ class Orchestrator:
             return None, tuple(sorted(matches))
         return None, ()
 
+    def _checkpoint_node_publishes(self, task_id: str, node_id: str) -> bool:
+        """Whether the flow checkpoint ``node_id`` is a publish node (F14).
+
+        Reads it off the recorded ``node_runs`` (``node_kind == "publish"``) rather than re-loading
+        the flow: the publish node that failed recorded exactly that row, so this needs no
+        ``task_type`` and stays correct even if the flow file drifted since the interrupted run.
+        """
+        return any(
+            r.node_id == node_id and r.node_kind == "publish"
+            for r in self._store.get_node_runs(task_id)
+        )
+
     def plan_rerun(
         self,
         task_id: str,
@@ -824,15 +846,10 @@ class Orchestrator:
             refusals.append(
                 f"task source file is missing ({row.source_path or 'unset'}); cannot rerun"
             )
-        dirty = self._git.unaccounted_dirty_paths()
-        if dirty:
-            refusals.append(
-                f"the working tree has unaccounted changes ({', '.join(sorted(dirty))}); "
-                "resolve them before rerun"
-            )
         interrupted_node: str | None = None
         has_remote = False
         pr_url: str | None = None
+        resume_in_publish = False
         if continue_mode:
             # --continue re-enters at the flow checkpoint (current_node); the node id is surfaced
             # in the dry-run view.
@@ -843,7 +860,21 @@ class Orchestrator:
                     "no recoverable node was recorded for this task; use a fresh `rerun` "
                     "(without --continue)"
                 )
-        else:
+            else:
+                resume_in_publish = self._checkpoint_node_publishes(task_id, current_node)
+        # F14: a publish node's own ``commit_code`` failing leaves the agent's code uncommitted in
+        # the working tree — that dirty state is the *expected* input to a ``--continue`` that
+        # re-enters publish (commit_code is idempotent and docommits it), so it must not be rejected
+        # as "unaccounted". Outside the publish region (or a fresh rerun) a dirty tree is still
+        # unexpected work and is refused as before. Artifact dirs (`.worc/`, tasks/) stay excluded
+        # by ``unaccounted_dirty_paths`` in every mode.
+        dirty = self._git.unaccounted_dirty_paths()
+        if dirty and not resume_in_publish:
+            refusals.append(
+                f"the working tree has unaccounted changes ({', '.join(sorted(dirty))}); "
+                "resolve them before rerun"
+            )
+        if not continue_mode:
             pr_url = self._git.recorded_pr_url(task_id)
             has_remote = bool(row.branch) and self._git.remote_branch_exists(row.branch or "")
             if (has_remote or pr_url) and not force_reset_remote:
@@ -2585,7 +2616,12 @@ class Orchestrator:
         self._notify_terminal(
             task_id=task_id, final_status=Status.FAILED, pr_url=None, reason=reason
         )
-        return PipelineResult(task_id=task_id, final_status=Status.FAILED, validation_reason=reason)
+        return PipelineResult(
+            task_id=task_id,
+            final_status=Status.FAILED,
+            validation_reason=reason,
+            validation_detail=result.detail or None,
+        )
 
     def _quarantine(self, task_file: str) -> str | None:
         """Move the task file into ``.worc/tasks/rejected/`` (the quarantine) when it exists."""
@@ -2911,6 +2947,7 @@ def build_orchestrator(
         store_has_task_id=store.task_id_exists,
         ledger_has_task_id=ledger.has_task_id,
         is_recovery_rerun=is_recovery_rerun,
+        ledger_only_validation_rejects=ledger.only_validation_rejects,
     )
     notifier = build_notifier(config.telegram)
     return Orchestrator(

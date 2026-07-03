@@ -47,6 +47,33 @@ from wastech_orchestrator.task.parser import slugify_bounded
 # Git/gh operations are bounded but slower than a trivial command (network fetch/push allowed).
 GIT_TIMEOUT_SECONDS = 300
 
+# F13 defense-in-depth: a push can fail for a genuinely transient reason (a network blip, or
+# `.git/index.lock` contention with a concurrent git process) that a short retry resolves. Only the
+# failures whose stderr matches one of these markers are retried — a deterministic failure (a
+# rejected non-fast-forward, a bad pathspec, an auth error) must still fail loudly and immediately,
+# so F12 surfaces it, never be masked by retries. Matched case-insensitively against the (redacted)
+# git stderr.
+_TRANSIENT_GIT_STDERR_MARKERS = (
+    "index.lock",
+    "another git process",
+    "could not resolve host",
+    "couldn't resolve host",
+    "connection timed out",
+    "connection reset",
+    "connection refused",
+    "operation timed out",
+    "failed to connect",
+    "temporary failure",
+    "the remote end hung up",
+    "rpc failed",
+    "early eof",
+    "unable to access",
+    "ssh: connect to host",
+)
+# Bounded: at most this many extra attempts after the first, with a short fixed backoff each.
+_PUSH_MAX_RETRIES = 2
+_PUSH_RETRY_BACKOFF_SECONDS = 1.5
+
 # The gitignored runtime home that must never enter a code commit (state.db, logs/, workspace/,
 # checks/, config.yaml, orchestrator.pid, …). The configured task lifecycle directory
 # (`paths.tasks_dir`, default "tasks") is also excluded from the code commit — it is tracked but
@@ -193,6 +220,9 @@ class GitManager:
         self._active: _ActiveTask | None = None
         # Whether the task lifecycle dir is gitignored (cached; drives the code-commit pathspec).
         self._tasks_dir_ignored_cache: bool | None = None
+        # Injectable backoff for the transient-push retry (F13); real time in production, patched in
+        # tests so the bounded retry never actually sleeps.
+        self._sleep: Callable[[float], None] = time.sleep
 
     # --- low-level command execution ------------------------------------------------------
 
@@ -237,6 +267,29 @@ class GitManager:
                 f"git {' '.join(args)} failed (exit={result.exit_code}): {result.stderr.strip()}"
             )
         return result.stdout.strip()
+
+    def _git_checked_retryable(self, *args: str) -> str:
+        """Like :meth:`_git_checked` but retries a *transient* failure with a short bounded backoff
+        (F13). A deterministic failure (stderr not matching :data:`_TRANSIENT_GIT_STDERR_MARKERS`)
+        re-raises on the first attempt — retries must never mask a real bug (F12 still surfaces it).
+        """
+        for attempt in range(_PUSH_MAX_RETRIES + 1):
+            try:
+                return self._git_checked(*args)
+            except GitCommandError as exc:
+                lowered = str(exc).lower()
+                transient = any(marker in lowered for marker in _TRANSIENT_GIT_STDERR_MARKERS)
+                if not transient or attempt == _PUSH_MAX_RETRIES:
+                    raise
+                context: dict[str, object] = {"operation": args[0] if args else "git"}
+                if self._active is not None:
+                    context["task_id"] = self._active.task_id
+                bind(_LOG, **context).warning(
+                    "transient git failure; retrying",
+                    extra={"attempt": attempt + 1, "error": str(exc)},
+                )
+                self._sleep(_PUSH_RETRY_BACKOFF_SECONDS)
+        raise AssertionError("unreachable")  # pragma: no cover — the loop always returns or raises
 
     def _gh(self, args: Sequence[str]) -> GitResult:
         """Run GitHub CLI arguments, adding the ``gh`` executable exactly once."""
@@ -620,6 +673,28 @@ class GitManager:
         normalized = path.replace("\\", "/")
         return any(normalized == d or normalized.startswith(f"{d}/") for d in self._excluded_dirs)
 
+    def _fully_staged_deletions(self) -> set[str]:
+        """Code paths whose deletion is already fully staged (porcelain ``D `` — staged in the
+        index, absent from the working tree).
+
+        ``git add -- <path>`` fails on these with ``fatal: pathspec '<path>' did not match any
+        files`` (exit 128): the path exists neither in the working tree nor as an unstaged index
+        difference, so there is nothing for ``git add`` to match. The deletion is already captured
+        in the index, so the commit picks it up without re-adding — they are simply dropped from the
+        ``git add`` pathspec. This happens when the agent itself stages a delete/move (``git rm`` /
+        ``git mv`` that git did not record as a rename); the porcelain X column is ``D`` and the Y
+        (working-tree) column is blank (F18).
+        """
+        porcelain = self._git("status", "--porcelain").stdout
+        deletions: set[str] = set()
+        for line in porcelain.splitlines():
+            if len(line) < 4 or line[0] != "D" or line[1] != " ":
+                continue
+            path = line[3:].strip().strip('"')
+            if path and not self._is_artifact_path(path):
+                deletions.add(path)
+        return deletions
+
     def staged_pathspec(self, paths: Sequence[str]) -> list[str]:
         """Build the scoped ``git add`` pathspec: the code paths, plus a ``:(exclude)`` guard for
         the task lifecycle dir **only when that dir is tracked**.
@@ -633,10 +708,18 @@ class GitManager:
         a root-level code change (``package.json``/``tsconfig.json``/…) could not be committed at
         all. So the guard is dropped when the dir is ignored (the explicit ``changed_code_paths``
         never include an ignored path anyway).
+
+        Fully-staged deletions are dropped from the positive pathspec: ``git add`` cannot match a
+        path that is absent from the working tree with no unstaged difference, and the deletion is
+        already in the index (F18). The returned list may therefore hold only the ``:(exclude)``
+        guard (or be empty); :meth:`_commit` skips ``git add`` entirely when no positive path
+        remains and commits the pre-staged index.
         """
+        staged_deletions = self._fully_staged_deletions()
+        stageable = [p for p in paths if p not in staged_deletions]
         if self._tasks_dir_ignored():
-            return list(paths)
-        return [*paths, f":(exclude){self._tasks_dir}/"]
+            return stageable
+        return [*stageable, f":(exclude){self._tasks_dir}/"]
 
     def _tasks_dir_ignored(self) -> bool:
         """Whether the task lifecycle dir is gitignored (cached ``git check-ignore``).
@@ -694,7 +777,10 @@ class GitManager:
         )
         if not paths:
             return None
-        self._git_checked("add", "--", *self.staged_pathspec(paths))
+        pathspec = self.staged_pathspec(paths)
+        positive = [p for p in pathspec if not p.startswith(":(exclude)")]
+        if positive:  # skip when only fully-staged deletions remain — the index already has them
+            self._git_checked("add", "--", *pathspec)
         self._git_checked("commit", "-m", message)
         sha = self._git_checked("rev-parse", "HEAD")
         self._store.record_publish_op(
@@ -832,7 +918,7 @@ class GitManager:
                 task_id=task_id, kind=KIND_PUSH, fingerprint=branch, status=_STATUS_STARTED
             )
         )
-        self._git_checked("push", "--set-upstream", "origin", branch)
+        self._git_checked_retryable("push", "--set-upstream", "origin", branch)
         self._record_completed(task_id, KIND_PUSH, branch, branch)
         return True
 

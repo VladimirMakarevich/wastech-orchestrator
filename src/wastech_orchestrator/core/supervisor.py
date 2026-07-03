@@ -142,13 +142,48 @@ _BUILTIN_HANDOFF = (
 )
 
 
+# F7b: the max reasoning tiers make a structured-output turn fragile — at ``xhigh`` the provider
+# spends the turn on thinking and fails to emit a valid tool call under the schema (observed:
+# ``error_max_structured_output_retries``), while the same free-text turn passes. A target-only
+# summary/proposal does not need max reasoning, so schema turns are capped to ``high`` — the free-
+# text observe turns keep the configured tier. Deterministic (no reliance on provider error
+# classification), and it keeps the default from being brittle out of the box (relates to F2).
+_MAX_REASONING_TIERS = frozenset({"xhigh", "max"})
+_SCHEMA_REASONING_CAP = "high"
+
+
+def _schema_safe_reasoning(
+    reasoning: str | None, output_schema: dict[str, Any] | None
+) -> str | None:
+    """Cap a structured-output turn's reasoning to ``high`` when configured at a max tier (F7b).
+
+    Free-text turns (``output_schema is None``) keep the configured value unchanged.
+    """
+    if output_schema is None or reasoning is None:
+        return reasoning
+    return _SCHEMA_REASONING_CAP if reasoning in _MAX_REASONING_TIERS else reasoning
+
+
 def _finalize_schema(*, with_delta: bool, with_follow_ups: bool) -> dict[str, Any]:
     """Build the finalize turn's structured schema for the enabled outputs (all on one turn).
 
     ``summary`` is always required; ``memory_delta`` is added when memory is enabled (AC-W1) and
     ``follow_ups`` when the flow opted in (``supervisor.emit_follow_ups``). When neither is enabled
     the caller runs a free-text turn instead (today's behavior — AC-S4), so this is never called."""
-    properties: dict[str, Any] = {"summary": {"type": "string", "minLength": 1}}
+    properties: dict[str, Any] = {
+        "summary": {
+            "type": "string",
+            "minLength": 1,
+            # F10: without guidance the model packs the whole synthesis into one flat line (0 `\n`)
+            # and the PR body renders as a headless slab. Ask for structured markdown prose.
+            "description": (
+                "The whole-task summary as Markdown prose: a short lead paragraph, then 2–4 "
+                "sections with `##` subheadings and real line breaks between them. Plain prose "
+                "only — do NOT embed follow_ups, memory_delta, or lessons here; return those in "
+                "their own fields. Do not wrap the whole thing in a code fence."
+            ),
+        }
+    }
     if with_delta:
         properties["memory_delta"] = DELTA_OUTPUT_SCHEMA
     if with_follow_ups:
@@ -229,6 +264,44 @@ def _render_follow_ups_section(follow_ups: tuple[FollowUp, ...]) -> str:
             parts.append(f" Suggested: {fu.action_hint}")
         lines.append("".join(parts))
     return "\n".join(lines) + "\n"
+
+
+# F16: pseudo-tags a model sometimes emits instead of a clean tool call — the whole
+# `<summary>…</summary><follow_ups>[JSON]</follow_ups><memory_delta>[JSON]</memory_delta>
+# <lessons>[JSON]</lessons>` dump. The machine sections (`follow_ups`/`memory_delta`/`lessons`)
+# must NEVER reach `summary.md` (= the PR body): they belong only in the follow-ups section and the
+# memory tiers. So the prose is cut at the first such tag, and a leading `<summary>` opener dropped.
+_SUMMARY_CUT_TAGS = (
+    "</summary>",
+    "<summary>",
+    "<follow_ups>",
+    "</follow_ups>",
+    "<follow-ups>",
+    "<memory_delta>",
+    "</memory_delta>",
+    "<lessons>",
+    "</lessons>",
+)
+_SUMMARY_OPEN_TAG = "<summary>"
+
+
+def _sanitize_summary(summary_text: str) -> str:
+    """Strip a leaked structured dump from a finalize ``summary`` (F16).
+
+    Returns only the human prose: a leading ``<summary>`` opener is dropped, and the text is cut at
+    the first machine tag (``</summary>``, ``<follow_ups>``, ``<memory_delta>``, ``<lessons>``) so a
+    raw ``memory_delta``/``lessons``/``follow_ups`` JSON dump can never ride into ``summary.md``
+    (the PR body). Clean prose (the common case) passes through unchanged.
+    """
+    text = summary_text.strip()
+    if text.startswith(_SUMMARY_OPEN_TAG):
+        text = text[len(_SUMMARY_OPEN_TAG) :]
+    cut = len(text)
+    for tag in _SUMMARY_CUT_TAGS:
+        idx = text.find(tag)
+        if idx != -1:
+            cut = min(cut, idx)
+    return text[:cut].strip()
 
 
 def _render_handoff_brief(structured: Mapping[str, Any]) -> str | None:
@@ -407,12 +480,23 @@ class Supervisor:
                 "follow_ups": len(follow_ups),
             },
         )
+        # F16: a model sometimes emits its structured output as a `<summary>…</summary>
+        # <follow_ups>[JSON]</follow_ups><memory_delta>…` text dump instead of a clean tool call.
+        # Sanitize so only the human prose reaches summary.md (the PR body) — never a raw
+        # follow_ups/memory_delta/lessons dump.
+        clean_summary = _sanitize_summary(summary_text) if summary_text else ""
         task_dir = Path(task_artifact_dir(self._artifacts_root, task_id))
-        self._write_summary_json(task_dir, task_id, task_title, summary_text, follow_ups)
-        if not summary_text or not summary_text.strip():
+        self._write_summary_json(task_dir, task_id, task_title, clean_summary or None, follow_ups)
+        if not clean_summary:
             return FinalizeResult(summary_path=None, candidate_delta=delta, follow_ups=follow_ups)
         md_path = task_dir / "summary.md"
-        body = summary_text.rstrip("\n") + "\n"
+        # F10: prefix a deterministic H1 so the PR body is never a headless paragraph-slab — unless
+        # the model already opened with its own top-level heading.
+        if clean_summary.startswith("# "):
+            body = clean_summary
+        else:
+            body = f"# {task_title}\n\n{clean_summary}"
+        body = body.rstrip("\n") + "\n"
         if follow_ups:  # surface the evidence-gated debt/follow-ups as a section in the PR body
             body += "\n" + _render_follow_ups_section(follow_ups)
         md_path.write_text(body, encoding="utf-8")
@@ -549,7 +633,7 @@ class Supervisor:
                 attempt=1,
                 node_run_id=node_run_id,  # not a graph node; audit lives in ``evaluations``
                 model=self._settings.model,
-                reasoning=self._settings.reasoning,
+                reasoning=_schema_safe_reasoning(self._settings.reasoning, output_schema),
                 output_schema=output_schema,
                 session_id=self._resume_session(task_id, route),
             )
@@ -747,10 +831,18 @@ class Supervisor:
         summary_text: str | None,
         follow_ups: tuple[FollowUp, ...] = (),
     ) -> None:
-        """Write the local-only ``summary.json`` metadata (never committed). Always written.
+        """Write the local-only ``summary.json`` metadata (never committed).
 
         Carries the evidence-gated ``follow_ups`` (empty unless the flow opted in) so the debt
-        signal is machine-readable beside the prose summary."""
+        signal is machine-readable beside the prose summary.
+
+        F16: a *failed* finalize (empty ``summary_text``) must NOT clobber an existing non-empty
+        ``summary.json`` with a blank one — symmetric to leaving ``summary.md`` untouched on a
+        failure. So an empty summary is a no-op when a prior non-empty one is on disk (e.g. a rerun
+        whose finalize turn failed after the first attempt succeeded)."""
+        path = task_dir / "summary.json"
+        if not summary_text and self._existing_summary_nonempty(path):
+            return
         payload: dict[str, Any] = {"what": task_title, "summary": summary_text or ""}
         if follow_ups:
             payload["follow_ups"] = [
@@ -764,7 +856,6 @@ class Supervisor:
                 }
                 for fu in follow_ups
             ]
-        path = task_dir / "summary.json"
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
@@ -773,6 +864,15 @@ class Supervisor:
         except OSError:
             return
         self._register(task_id, "summary_json", str(path))
+
+    @staticmethod
+    def _existing_summary_nonempty(path: Path) -> bool:
+        """Whether ``summary.json`` at *path* already has a non-empty ``summary`` (F16 guard)."""
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        return bool(isinstance(existing, dict) and str(existing.get("summary", "")).strip())
 
     def _register(self, task_id: str, kind: str, path: str) -> None:
         if self._register_artifact is not None:

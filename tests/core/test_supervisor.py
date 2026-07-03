@@ -323,6 +323,79 @@ def test_supervisor_finalize_best_effort_when_llm_unavailable(tmp_path: Path) ->
     assert len([e for e in store.get_evaluations(_TASK) if e.kind == "supervisor_final"]) == 1
 
 
+def test_finalize_sanitizes_leaked_structured_dump(tmp_path: Path) -> None:
+    # F16: a model that emits its structured output as a `<summary>…</summary><follow_ups>[JSON]
+    # </follow_ups><memory_delta>…` text dump must never let those machine sections ride into
+    # summary.md (the PR body). Only the human prose survives.
+    leaked = (
+        "<summary>Refactored the parser and added tests.</summary>"
+        '<follow_ups>[{"title":"x"}]</follow_ups>'
+        '<memory_delta>{"lessons":[]}</memory_delta><lessons>[]</lessons>'
+    )
+    router, store = FakeRouter([_ok("s1", leaked)]), _store(tmp_path)
+    sup = _supervisor(tmp_path, router, store)
+
+    path = sup.finalize(task_id=_TASK, task_title="T").summary_path
+    assert path is not None
+    body = path.read_text("utf-8")
+    assert "Refactored the parser and added tests." in body
+    for tag in ("<follow_ups>", "<memory_delta>", "<lessons>", "</summary>", "<summary>"):
+        assert tag not in body
+    assert "lessons" not in body and "title" not in body  # no machine JSON leaked
+
+
+def test_finalize_prefixes_h1_when_missing(tmp_path: Path) -> None:
+    # F10: a headless paragraph-slab summary gets a deterministic `# {task_title}` H1 prefix.
+    router, store = FakeRouter([_ok("s1", "One flat line of synthesis.")]), _store(tmp_path)
+    sup = _supervisor(tmp_path, router, store)
+    path = sup.finalize(task_id=_TASK, task_title="My Task").summary_path
+    assert path is not None
+    assert path.read_text("utf-8").startswith("# My Task\n\nOne flat line of synthesis.")
+
+
+def test_finalize_keeps_model_h1_without_double_prefix(tmp_path: Path) -> None:
+    # F10: when the model already opened with its own top-level heading, don't double-prefix.
+    router, store = FakeRouter([_ok("s1", "# Model heading\n\nBody.")]), _store(tmp_path)
+    sup = _supervisor(tmp_path, router, store)
+    path = sup.finalize(task_id=_TASK, task_title="T").summary_path
+    assert path is not None
+    body = path.read_text("utf-8")
+    assert body.startswith("# Model heading")
+    assert "# T" not in body
+
+
+def test_finalize_failed_does_not_clobber_existing_summary_json(tmp_path: Path) -> None:
+    # F16: a failed finalize (no provider result) must NOT overwrite an existing non-empty
+    # summary.json with a blank one (symmetric to leaving summary.md untouched on failure).
+    store = _store(tmp_path)
+    # First finalize succeeds and writes a non-empty summary.json.
+    sup_ok = _supervisor(tmp_path, FakeRouter([_ok("s1", "Real summary.")]), store)
+    sup_ok.finalize(task_id=_TASK, task_title="T")
+    summary_json = Path(task_artifact_dir(tmp_path / "art", _TASK)) / "summary.json"
+    assert json.loads(summary_json.read_text("utf-8"))["summary"] == "Real summary."
+
+    # A later finalize whose turn fails must not blank it.
+    sup_fail = _supervisor(tmp_path, FakeRouter([None]), store)
+    sup_fail.finalize(task_id=_TASK, task_title="T")
+    assert json.loads(summary_json.read_text("utf-8"))["summary"] == "Real summary."
+
+
+def test_schema_turn_caps_max_reasoning_but_free_text_keeps_it(tmp_path: Path) -> None:
+    # F7b: a structured-output turn is capped to `high` when configured at a max tier (xhigh/max) so
+    # the schema turn is not fragile; a free-text turn keeps the configured tier.
+    schema_router, store = FakeRouter([_structured("Sum.", {})]), _store(tmp_path)
+    sup_schema = _supervisor(tmp_path, schema_router, store, reasoning="xhigh")
+    sup_schema.finalize(task_id=_TASK, task_title="T", emit_delta=True)  # schema turn
+    assert schema_router.requests[0].reasoning == "high"
+
+    free_dir = tmp_path / "b"
+    free_dir.mkdir()
+    free_router = FakeRouter([_ok("s", "plain")])
+    sup_free = _supervisor(free_dir, free_router, _store(free_dir), reasoning="xhigh")
+    sup_free.finalize(task_id=_TASK, task_title="T")  # free-text turn (no delta/follow-ups)
+    assert free_router.requests[0].reasoning == "xhigh"
+
+
 def _structured(summary: str, memory_delta: dict[str, Any]) -> AgentRunResult:
     return AgentRunResult(
         status=RunStatus.SUCCEEDED,

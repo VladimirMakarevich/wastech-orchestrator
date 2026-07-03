@@ -653,39 +653,39 @@ Repo skill selection (optional, §2.1). At task start the orchestrator **discove
 
 ```yaml
 skills:
-  dynamic: true # supervisor proposes a node->skills map once per task (skip when no skills)
+  dynamic: false # supervisor proposes a node->skills map once per task; opt in (adds one turn)
   strict: false # false = warn+skip an unresolved operator pin; true = stop the task
 ```
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `dynamic` | bool | `true` | Run the once-per-task supervisor proposal of a `node → skills` map (the Core decides). Skipped automatically when the repo ships no skills. |
+| `dynamic` | bool | `false` | Run the once-per-task supervisor proposal of a `node → skills` map (the Core decides). **Off by default** (and `worc install` writes `false`): the proposal adds one supervisor turn even when the repo ships no skills, so it is opt-in. Skipped automatically when the repo ships no skills even when enabled. |
 | `strict` | bool | `false` | What to do when an operator pin does not resolve (typo, removed skill, ambiguous bare name, missing path): `false` warns + skips it and continues (fail-open); `true` stops the task in `manual_action_required` with a report. A _dynamic_ proposal naming a missing skill is always just filtered, never an error. |
 
 A skill is addressed by its globally-unique frontmatter `name`, or — on a name collision — by its repo-relative `SKILL.md` path. Operators pin skills per node in the flow YAML, e.g. `skills: ["safe-change", "backend/.claude/skills/testing/SKILL.md"]`. Selection is provenance-closed: a pin or proposal can only ever resolve to a `SKILL.md` the scan independently discovered. Skill bodies are repo-controlled (untrusted) and only ever surfaced by path; the effective per-node set is persisted to `skill_map.json` and restored on resume without re-proposing.
 
 ## `supervisor`
 
-Configures the **constant supervisor layer** — a per-task oversight layer that lives _above_ any flow. It is **not a node and not a stage**: there is no `summary` node in any packaged flow because the supervisor owns the summary. The block is optional; when omitted it takes the defaults below (the packaged `config.example.yaml` does not include it).
+Configures the **constant supervisor layer** — a per-task oversight layer that lives _above_ any flow. It is **not a node and not a stage**: there is no `summary` node in any packaged flow because the supervisor owns the summary. The block is optional; when omitted it takes the defaults below. `worc install` **writes the block with concrete values** — `model` resolved to the global primary provider's model and `reasoning: high` — so the oversight layer's cost/effort is visible rather than an implicit inherit-from-primary; the reasoning is deliberately not a max tier (`xhigh`/`max` makes the structured finalize turn fragile, so the delivered default stays `high`).
 
 ```yaml
 supervisor:
   role_file: "roles/supervisor.md"
-  model: null # empty/null → the provider default
-  reasoning: null # low | medium | high | xhigh | max
+  model: "claude-sonnet-4-6" # install writes the primary provider's model; null → provider default
+  reasoning: high # install writes a non-max tier; null → provider default
 ```
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `role_file` | string | `"roles/supervisor.md"` | Role file (resolved inside the active flow's directory) rendering the supervisor's read-only prompt; a missing/unreadable file falls back to a minimal built-in instruction. |
-| `model` | string or null | `null` | Model for the supervisor's calls; empty/null uses the provider default. |
-| `reasoning` | string or null | `null` | Reasoning level (`low`/`medium`/`high`/`xhigh`/`max`); must be a known level. |
+| `model` | string or null | `null` (absent block) / primary model (install) | Model for the supervisor's calls; empty/null uses the provider default. A fresh `worc install` resolves it to the global primary provider's model so it is explicit. |
+| `reasoning` | string or null | `null` (absent block) / `high` (install) | Reasoning level (`low`/`medium`/`high`/`xhigh`/`max`); must be a known level. The delivered default is `high`, never a max tier — structured finalize turns are capped to `high` in code, so a max tier would only cost more without effect. |
 
 What the layer does (see the [Functional Map](functional/blocks/B31-supervisor.md)):
 
 - It exists for **every** task under any flow shape — even a single agent node with no checks/review.
 - After each completed (non-skipped) step it runs **one read-only** observation on its own continuing session (~1 call/step) and records an immutable advisory `supervisor_step` row. Observation is **best-effort**: a failure is logged and swallowed.
-- At whole-task **close** (before `publish` in the `implementation` flow) it synthesizes the plain-language `summary.md` (the PR body) plus advisory caveats and records `supervisor_final`. If the synthesis call cannot run, the orchestrator's **minimal-summary fallback** writes `summary.md` instead — the summary is _always_ produced, by one path or the other.
+- At whole-task **close** (before `publish` in the `implementation` flow) it synthesizes the plain-language `summary.md` (the PR body) plus advisory caveats and records `supervisor_final`. If the synthesis call cannot run, the orchestrator's **minimal-summary fallback** writes `summary.md` instead — the summary is _always_ produced, by one path or the other. `summary.md` carries **only human prose**: it is prefixed with a deterministic `# {task_title}` H1 (so the PR body is never a headless slab) and the evidence-gated follow-ups render as their own section; a leaked structured dump (a model that emits `<summary>…</summary><follow_ups>…<memory_delta>…` text instead of a clean tool call) is sanitized — cut at the first machine tag — so raw `follow_ups`/`memory_delta`/`lessons` never reach the PR body. A finalize turn that fails on a rerun does not overwrite an existing non-empty `summary.json` with a blank one. Structured finalize turns cap reasoning at `high` (a max tier makes the structured output fragile), independent of the configured `reasoning`.
 
 The layer is **advisory by construction**: it never reworks, reopens, or routes — blocking is the job of the in-flow `review`/evaluator nodes. It runs on the **global primary** provider, and its `permission_profile` is **forced `read-only`** in code (it can never edit), validated under the same ceiling as flow nodes (`reasoning` in the allowlist, `role_file` path-contained).
 

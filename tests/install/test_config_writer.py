@@ -149,14 +149,28 @@ def test_generated_config_includes_optional_sections(tmp_path: Path) -> None:
     text = build_and_validate(_spec(tmp_path, (ProviderId.CLAUDE,)))
     cfg = loads_config(text).config
     assert cfg.supervisor.role_file == "roles/supervisor.md"
-    assert cfg.supervisor.model is None
-    assert cfg.supervisor.reasoning is None
-    assert cfg.skills.dynamic is True
+    # F2: the delivered supervisor block carries concrete, visible model/reasoning (the global
+    # primary's model + a non-max reasoning), not an implicit inherit-from-primary null.
+    assert cfg.supervisor.model == "claude-sonnet-4-6"
+    assert cfg.supervisor.reasoning == "high"
+    assert cfg.supervisor.reasoning not in ("xhigh", "max")  # F7b: default must not be fragile
+    # F1: the dynamic skill layer is off out of the box (opt-in).
+    assert cfg.skills.dynamic is False
     assert cfg.skills.strict is False
+    # F3: the documented telegram.trace knob is present in the delivered config.
+    assert cfg.telegram.trace is False
+    assert "trace:" in text
     assert cfg.prompt_audit is False
     assert cfg.security.deletion_approval_exempt_paths == ()
     for key in ("supervisor:", "skills:", "prompt_audit:", "deletion_approval_exempt_paths:"):
         assert key in text
+
+
+def test_supervisor_model_tracks_the_global_primary(tmp_path: Path) -> None:
+    # F2: a Codex-primary install resolves the supervisor model to Codex's model, not Claude's.
+    cfg = loads_config(build_and_validate(_spec(tmp_path, (ProviderId.CODEX,)))).config
+    assert cfg.supervisor.model == "gpt-5.5"
+    assert cfg.supervisor.reasoning == "high"
 
 
 @pytest.mark.parametrize(
