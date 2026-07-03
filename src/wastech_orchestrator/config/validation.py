@@ -207,13 +207,13 @@ def _validate_supervisor(config: OrchestratorConfig, issues: list[str]) -> None:
 
 
 def _validate_security(config: OrchestratorConfig, issues: list[str]) -> None:
-    """The deletion-approval allowlist holds repo-relative globs (it matches against repo-relative
+    """The protected-paths allowlist holds repo-relative globs (it matches against repo-relative
     diff paths). Reject an absolute path, ``~``, or ``..`` traversal — the same containment rule
     applied to a check command's ``cwd``."""
-    for index, pattern in enumerate(config.security.deletion_approval_exempt_paths):
+    for index, pattern in enumerate(config.security.protected_paths):
         if not is_safe_relpath(pattern):
             issues.append(
-                f"security.deletion_approval_exempt_paths[{index}] {pattern!r} must be a "
+                f"security.protected_paths[{index}] {pattern!r} must be a "
                 "repo-relative glob (no absolute path, no '~', no '..' traversal)"
             )
 

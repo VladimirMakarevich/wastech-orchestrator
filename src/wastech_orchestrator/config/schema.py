@@ -125,7 +125,14 @@ from wastech_orchestrator.providers.base import ProviderId
 # empty packets, CLI no-op, no cleanup); the packaged template ships `enabled: true` for a fresh
 # install. Old configs load fail-open with defaults and `upgrade-config` adds it from the template.
 # No behavior consumes the knobs yet (phase 01 wires the shape only).
-CONFIG_SCHEMA_VERSION = 24
+# v25 (2026-07-03, trust-levels-danger-approval): replaces `security.deletion_approval_exempt_paths`
+# with the approval-policy knob `security.trust_level` (strict|auto, default `auto` at install; the
+# dataclass default is the safe fallback `strict`) plus `security.protected_paths` (repo-relative
+# globs that ALWAYS require approval, at any trust_level — the always-ask floor). `strict` keeps the
+# old behavior (gate every deletion/rename or dependency-manifest edit); `auto` turns the diff-shape
+# gate off so only a `protected_paths` match raises approval. The old key is removed outright
+# (greenfield, no back-compat) — a config still carrying it is rejected as an unknown key.
+CONFIG_SCHEMA_VERSION = 25
 
 
 class AuditBranch(StrEnum):
@@ -236,16 +243,26 @@ class AgentsConfig:
     retry: RetryConfig = field(default_factory=RetryConfig)
 
 
+# Approval-policy levels for the dangerous-diff gate (``security.trust_level`` / per-task override):
+# ``strict`` gates any deletion/dependency diff; ``auto`` gates only a ``protected_paths`` match.
+# The canonical allowlist — reused by the config loader and the task validation gate (config v25).
+TRUST_LEVELS: frozenset[str] = frozenset({"strict", "auto"})
+
+
 @dataclass(frozen=True)
 class SecurityConfig:
     strict_isolation: bool
     allowed_environment: tuple[str, ...]
     denied_read_paths: tuple[str, ...]
     denied_commands: tuple[str, ...]
-    # Operator-only allowlist (repo-relative globs) of deletions/renames exempt from the
-    # dangerous-diff approval gate (security rule #14). Empty = every deletion is gated (default).
-    # Filters only the deletion classification — dependency manifests are never exemptable.
-    deletion_approval_exempt_paths: tuple[str, ...] = ()
+    # Approval policy for the mid-task dangerous-diff gate (security rule #14). ``strict`` gates any
+    # deletion/rename or dependency-manifest edit; ``auto`` turns the diff-shape gate off so only a
+    # ``protected_paths`` match raises approval. The dataclass default is the safe fallback
+    # ``strict``; a fresh install writes ``auto`` (config_writer).
+    trust_level: str = "strict"
+    # Operator allowlist (repo-relative globs) of paths that ALWAYS require approval on any change,
+    # regardless of ``trust_level`` — the always-ask floor no level can lower. Empty = no floor.
+    protected_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

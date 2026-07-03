@@ -1524,7 +1524,10 @@ class Orchestrator:
             run_process=self._checks.run_process,
             process_env=build_child_env(self._config.security.allowed_environment),
             scan_timeout_s=self._config.checks.timeout_seconds,
-            deletion_approval_exempt_paths=self._config.security.deletion_approval_exempt_paths,
+            # Per-task override wins outright; otherwise the global default (config_writer ships
+            # "auto"). protected_paths is global-only (no per-task override).
+            trust_level=(p.task.trust_level or self._config.security.trust_level),
+            protected_paths=self._config.security.protected_paths,
             packet_builder=self._packet_builder(),
         )
 

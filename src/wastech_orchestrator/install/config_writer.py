@@ -135,7 +135,10 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "allowed_environment": list(default_allowed_environment()),
             "denied_read_paths": [".env", "secrets/**"],
             "denied_commands": ["git commit", "git push", "gh pr create", "gh pr merge"],
-            "deletion_approval_exempt_paths": [],
+            # Fresh installs default to "auto" (routine in-repo deletions/renames no longer gate);
+            # the schema dataclass default stays "strict" as the absent-block safe fallback.
+            "trust_level": "auto",
+            "protected_paths": [],
         },
         "validation": {
             "max_task_bytes": 262144,

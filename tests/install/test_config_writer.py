@@ -161,8 +161,10 @@ def test_generated_config_includes_optional_sections(tmp_path: Path) -> None:
     assert cfg.telegram.trace is False
     assert "trace:" in text
     assert cfg.prompt_audit is False
-    assert cfg.security.deletion_approval_exempt_paths == ()
-    for key in ("supervisor:", "skills:", "prompt_audit:", "deletion_approval_exempt_paths:"):
+    # Fresh install ships trust_level: auto (routine in-repo deletions no longer gate) + no floor.
+    assert cfg.security.trust_level == "auto"
+    assert cfg.security.protected_paths == ()
+    for key in ("supervisor:", "skills:", "prompt_audit:", "trust_level:", "protected_paths:"):
         assert key in text
 
 

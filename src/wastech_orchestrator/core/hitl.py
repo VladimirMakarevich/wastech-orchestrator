@@ -26,7 +26,7 @@ from wastech_orchestrator.providers.redaction import redact_text
 #: planning concern — it is resolved by the Core from operator pins + the supervisor's proposal.)
 OutputContract = Literal["none", "human_input", "planning"]
 
-_RISKS = frozenset({"clarification", "deletion", "dependency", "other"})
+_RISKS = frozenset({"clarification", "deletion", "dependency", "protected", "other"})
 _MAX_PATHS = 100
 _MAX_TEXT = 16_000
 

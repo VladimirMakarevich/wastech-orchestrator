@@ -25,7 +25,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from wastech_orchestrator.config.schema import OrchestratorConfig
+from wastech_orchestrator.config.schema import TRUST_LEVELS, OrchestratorConfig
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.security.injection import scan_frontmatter
 from wastech_orchestrator.task.model import (
@@ -270,6 +270,12 @@ class ValidationGate:
             auto_merge=_as_tristate(frontmatter.get("auto_merge")),
             prompt_audit=_as_tristate(frontmatter.get("prompt_audit")),
             decomposition=_as_tristate(frontmatter.get("decomposition")),
+            # _check_field_types validated the allowlist when present; absent → defer to global.
+            trust_level=(
+                str(frontmatter["trust_level"]).strip()
+                if frontmatter.get("trust_level") is not None
+                else None
+            ),
             contacts=[str(c) for c in frontmatter.get("contacts", [])],
             depends_on=depends_on,
             # Fail-open: an unrecognised priority normalizes to ``mid`` rather than rejecting the
@@ -328,6 +334,15 @@ class ValidationGate:
             and not isinstance(fm["decomposition"], bool)
         ):
             return _Reject(ValidationReason.INVALID_FIELD_TYPE, "decomposition must be a boolean")
+        # Per-task trust_level is fail-closed: present ⇒ must be a valid level string. A non-string
+        # or out-of-allowlist value rejects the task rather than silently deferring to the global.
+        if "trust_level" in fm and fm["trust_level"] is not None:
+            trust_level = fm["trust_level"]
+            if not isinstance(trust_level, str) or trust_level.strip() not in TRUST_LEVELS:
+                return _Reject(
+                    ValidationReason.INVALID_FIELD_TYPE,
+                    f"trust_level must be one of {sorted(TRUST_LEVELS)}",
+                )
         if "contacts" in fm:
             contacts = fm["contacts"]
             if not isinstance(contacts, Sequence) or isinstance(contacts, str | bytes):

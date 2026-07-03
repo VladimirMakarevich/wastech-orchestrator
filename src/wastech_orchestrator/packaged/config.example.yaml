@@ -3,7 +3,7 @@
 # This is the packaged copy used by `wastech-orchestrator init`; keep it in sync with the
 # repo-root config.example.yaml
 
-schema_version: 24                  # config format version; the orchestrator refuses newer configs
+schema_version: 25                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -116,13 +116,18 @@ security:
     - "git push"
     - "gh pr create"
     - "gh pr merge"
-  deletion_approval_exempt_paths: []  # DANGER: deletions/renames matching these repo-relative globs
-                                      # SKIP the dangerous-diff approval gate (rule #14). Default [] =
-                                      # every deletion is gated. You own the risk: an exempted deletion
-                                      # gets no mid-run approval (and, under git.auto_merge, no PR review
-                                      # either) — it still appears in the PR diff / logs/<id>/current.diff.
-                                      # Dependency manifests/locks are NEVER exemptable. Use "**/*.md" for
-                                      # any .md anywhere; "*.md" matches only top-level; "docs/**" a subtree.
+  trust_level: "auto"                 # approval policy for the mid-task dangerous-diff gate (rule #14):
+                                      #   strict = gate every tracked-file deletion/rename OR dependency
+                                      #            manifest/lock edit (ask before continuing)
+                                      #   auto   = (default) routine in-repo deletions/renames/edits do
+                                      #            NOT gate; only a protected_paths match asks
+                                      # Never lowers the hard ceiling (env-allowlist, bypass ban, cwd
+                                      # containment). A task may override with front-matter `trust_level`.
+  protected_paths: []                 # repo-relative globs that ALWAYS require approval on ANY change,
+                                      # regardless of trust_level — the always-ask floor no level lowers.
+                                      # Same glob dialect as checks.command_sets[].paths: "**" crosses
+                                      # dirs, "*" stays within one segment (e.g. "src/security/**",
+                                      # ".github/workflows/**"). Default [] = no floor.
 
 validation:                         # input hardening gate (§19); rejects broken tasks before any branch
   max_task_bytes: 262144

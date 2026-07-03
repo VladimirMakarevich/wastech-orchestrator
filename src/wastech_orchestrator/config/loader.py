@@ -21,6 +21,7 @@ import yaml
 
 from wastech_orchestrator.config.schema import (
     CONFIG_SCHEMA_VERSION,
+    TRUST_LEVELS,
     AgentsConfig,
     AuditBranch,
     AutoModeConfig,
@@ -503,11 +504,19 @@ def _build_security(raw: Any, issues: list[str]) -> SecurityConfig:
             "allowed_environment",
             "denied_read_paths",
             "denied_commands",
-            "deletion_approval_exempt_paths",
+            "trust_level",
+            "protected_paths",
         },
         where,
         issues,
     )
+    trust_level = _str(m, "trust_level", "strict", where, issues)
+    if trust_level not in TRUST_LEVELS:
+        issues.append(
+            f"{where}.trust_level: invalid value {trust_level!r}, "
+            f"expected one of {sorted(TRUST_LEVELS)}"
+        )
+        trust_level = "strict"
     return SecurityConfig(
         strict_isolation=_bool(m, "strict_isolation", True, where, issues),
         allowed_environment=_str_tuple(
@@ -521,9 +530,8 @@ def _build_security(raw: Any, issues: list[str]) -> SecurityConfig:
             where,
             issues,
         ),
-        deletion_approval_exempt_paths=_str_tuple(
-            m, "deletion_approval_exempt_paths", (), where, issues
-        ),
+        trust_level=trust_level,
+        protected_paths=_str_tuple(m, "protected_paths", (), where, issues),
     )
 
 

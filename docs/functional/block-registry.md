@@ -103,8 +103,8 @@ All 32 functional blocks (B01–B32) carry the status `documented`, (re)built fr
 
 ### B14 — Dangerous Diff Classification
 
-- **Purpose:** the pure classifier (deletion / dependency-manifest / both) over changed paths; the guard that applies it lives in the agent node runner (B30).
-- **Entry points:** `core/dangerous_diff.py` (`classify_dangerous_diff`, `DangerousDiff`).
+- **Purpose:** the pure decision logic (deletion / dependency-manifest / protected-path) over changed paths under the `trust_level` policy + `protected_paths` floor; the guard that applies it lives in the agent node runner (B30).
+- **Entry points:** `core/dangerous_diff.py` (`evaluate_diff_gate`, `classify_dangerous_diff`, `DangerousDiff`).
 - **Dependencies:** B30 (applies the guard), B12 (approval), B22 (`changed_code_entries`).
 - **Status:** `documented` · [file](./blocks/B14-dangerous-diff-guardrail.md)
 

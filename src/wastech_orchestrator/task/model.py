@@ -41,6 +41,7 @@ ALLOWED_TASK_KEYS: frozenset[str] = frozenset(
         "auto_merge",
         "prompt_audit",
         "decomposition",
+        "trust_level",
         "contacts",
         "depends_on",
         "subtasks",
@@ -172,6 +173,10 @@ class NormalizedTask:
     # split actually happens is still decided by the flow's ``decomposition:`` block + the planning
     # node's proposal (or an operator ``subtasks:`` manifest); the task never patches the graph.
     decomposition: bool | None = None
+    # Per-task approval policy for the dangerous-diff gate: ``"strict"`` or ``"auto"``. ``None``
+    # defers to the global ``config.security.trust_level``. The task value wins (no operator gate).
+    # Does not affect the ``security.protected_paths`` floor (global-only).
+    trust_level: str | None = None
     contacts: list[str] = field(default_factory=list)
     # Other task ids this task needs **merged** before it may start (non-blocking merge-gated
     # scheduling): the scheduler skips a dependent while a dependency is unmerged and runs other

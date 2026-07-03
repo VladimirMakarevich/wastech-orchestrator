@@ -455,6 +455,30 @@ def test_auto_merge_non_boolean_is_rejected(config: OrchestratorConfig) -> None:
     assert "auto_merge" in result.detail
 
 
+def test_trust_level_override_passes_and_is_stored(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\ntrust_level: strict\n---\n\n## Description\n\nDo it.\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.trust_level == "strict"
+
+
+def test_trust_level_absent_normalizes_to_none(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\n---\n\n## Description\n\nDo it.\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.trust_level is None
+
+
+def test_trust_level_invalid_value_is_rejected(config: OrchestratorConfig) -> None:
+    text = "---\nid: task-001\ntitle: T\ntrust_level: reckless\n---\n\n## Description\n\nx.\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_FIELD_TYPE
+    assert "trust_level" in result.detail
+
+
 def test_prompt_audit_true_passes_and_is_stored(config: OrchestratorConfig) -> None:
     text = "---\nid: task-001\ntitle: T\nprompt_audit: true\n---\n\n## Description\n\nx.\n"
     result = _gate(config).validate(_src(text))

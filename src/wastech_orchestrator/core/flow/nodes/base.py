@@ -270,10 +270,13 @@ class NodeServices:
     run_process: RunProcess = run_process
     process_env: Mapping[str, str] = field(default_factory=dict)
     scan_timeout_s: int = 600
-    #: operator allowlist (repo-relative globs) of deletions/renames exempt from the dangerous-diff
-    #: approval gate (``config.security.deletion_approval_exempt_paths``). Empty = every deletion is
-    #: gated; the dependency-manifest classification is never affected.
-    deletion_approval_exempt_paths: tuple[str, ...] = ()
+    #: effective approval policy for the dangerous-diff gate (``config.security.trust_level`` with
+    #: any per-task override applied). ``strict`` gates any deletion/dependency diff; ``auto`` gates
+    #: only a ``protected_paths`` match.
+    trust_level: str = "strict"
+    #: operator allowlist (repo-relative globs) of paths that ALWAYS require approval on any change,
+    #: regardless of ``trust_level`` (``config.security.protected_paths``). Empty = no floor.
+    protected_paths: tuple[str, ...] = ()
     #: memory read path (phase 03): builds a per-node retrieval packet for any node whose role
     #: prompt references ``{memory_path}``. ``None`` when memory is disabled (the default) — then no
     #: packet is built and ``{memory_path}`` renders empty (today's behavior).

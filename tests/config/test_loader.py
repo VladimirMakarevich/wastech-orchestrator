@@ -281,19 +281,41 @@ def test_unknown_checks_key_is_rejected() -> None:
     assert any("retries" in issue for issue in exc.value.issues)
 
 
-def test_deletion_exempt_paths_defaults_to_empty() -> None:
+def test_trust_level_defaults_to_strict_and_protected_empty() -> None:
     result = loads_config(_LEGACY)
-    assert result.config.security.deletion_approval_exempt_paths == ()
+    assert result.config.security.trust_level == "strict"
+    assert result.config.security.protected_paths == ()
 
 
-def test_deletion_exempt_paths_load_as_tuple() -> None:
-    text = _LEGACY + 'security:\n  deletion_approval_exempt_paths: ["**/*.md", "docs/**"]\n'
+def test_trust_level_loads() -> None:
+    text = _LEGACY + "security:\n  trust_level: auto\n"
     result = loads_config(text)
-    assert result.config.security.deletion_approval_exempt_paths == ("**/*.md", "docs/**")
+    assert result.config.security.trust_level == "auto"
 
 
-def test_deletion_exempt_paths_non_string_item_is_rejected() -> None:
-    text = _LEGACY + "security:\n  deletion_approval_exempt_paths: [123]\n"
+def test_trust_level_invalid_value_is_rejected() -> None:
+    text = _LEGACY + "security:\n  trust_level: reckless\n"
+    with pytest.raises(ConfigError) as exc:
+        loads_config(text)
+    assert any("trust_level" in issue for issue in exc.value.issues)
+
+
+def test_protected_paths_load_as_tuple() -> None:
+    text = _LEGACY + 'security:\n  protected_paths: ["**/*.md", "docs/**"]\n'
+    result = loads_config(text)
+    assert result.config.security.protected_paths == ("**/*.md", "docs/**")
+
+
+def test_protected_paths_non_string_item_is_rejected() -> None:
+    text = _LEGACY + "security:\n  protected_paths: [123]\n"
+    with pytest.raises(ConfigError) as exc:
+        loads_config(text)
+    assert any("protected_paths" in issue for issue in exc.value.issues)
+
+
+def test_legacy_deletion_exempt_paths_key_is_rejected() -> None:
+    # Removed in v25 (no toleration): a config still carrying it fails as an unknown key.
+    text = _LEGACY + 'security:\n  deletion_approval_exempt_paths: ["**/*.md"]\n'
     with pytest.raises(ConfigError) as exc:
         loads_config(text)
     assert any("deletion_approval_exempt_paths" in issue for issue in exc.value.issues)

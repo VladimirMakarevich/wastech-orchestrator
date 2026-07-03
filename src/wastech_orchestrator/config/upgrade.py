@@ -36,6 +36,9 @@ from wastech_orchestrator.config.schema import CONFIG_SCHEMA_VERSION
 # the operator authors it (see config.example.yaml). v19: ``skills.scan_root``/``skills.exclude``
 # are gone — discovery is automatic and whole-repo, and operators pin skills per flow node instead
 # of denylisting; the block shrinks to ``skills.dynamic``/``skills.strict`` (added from template).)
+# v25: ``security.deletion_approval_exempt_paths`` is gone — replaced by the ``trust_level`` policy
+# (added from template) plus the always-ask ``security.protected_paths`` floor; the old allowlist
+# has no equivalent under the new model, so it is stripped (not migrated).
 # The parent-path may be dotted (walked segment by segment).
 _REMOVED_KEYS: tuple[tuple[str, str], ...] = (
     ("", "prompts"),
@@ -51,6 +54,7 @@ _REMOVED_KEYS: tuple[tuple[str, str], ...] = (
     ("checks", "commands"),
     ("skills", "scan_root"),
     ("skills", "exclude"),
+    ("security", "deletion_approval_exempt_paths"),
 )
 
 _UPGRADE_HEADER = (

@@ -105,15 +105,23 @@ def test_packaged_template_is_complete_and_self_idempotent() -> None:
     assert merged["schema_version"] == CONFIG_SCHEMA_VERSION
 
 
-def test_adds_deletion_exempt_paths_from_packaged_template() -> None:
-    # v16 add: an operator config predating the deletion-approval allowlist gains the key (empty
-    # default) from the packaged template, while keeping its own security customizations.
+def test_upgrade_swaps_deletion_exempt_paths_for_trust_level() -> None:
+    # v25: an operator config carrying the removed `deletion_approval_exempt_paths` allowlist has it
+    # stripped and gains `trust_level` + `protected_paths` from the packaged template, while keeping
+    # its own security customizations.
     template = packaged_template_mapping()
-    operator = {"schema_version": 15, "security": {"strict_isolation": False}}
-    merged, added, _ = upgrade_config_mapping(template, operator)
-    assert merged["security"]["deletion_approval_exempt_paths"] == []
+    operator = {
+        "schema_version": 24,
+        "security": {"strict_isolation": False, "deletion_approval_exempt_paths": ["**/*.md"]},
+    }
+    merged, added, removed = upgrade_config_mapping(template, operator)
+    assert "deletion_approval_exempt_paths" not in merged["security"]
+    assert "security.deletion_approval_exempt_paths" in removed
+    assert merged["security"]["trust_level"] == "auto"
+    assert merged["security"]["protected_paths"] == []
     assert merged["security"]["strict_isolation"] is False  # operator value preserved
-    assert "security.deletion_approval_exempt_paths" in added
+    assert "security.trust_level" in added
+    assert "security.protected_paths" in added
 
 
 def test_adds_paths_block_from_packaged_template() -> None:

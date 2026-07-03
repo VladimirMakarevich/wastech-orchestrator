@@ -330,7 +330,8 @@ security:
     - "git commit"
     - "git push"
     - "gh pr create"
-  deletion_approval_exempt_paths: [] # opt-in; default [] = every deletion is gated
+  trust_level: "auto" # approval policy for the dangerous-diff gate; strict | auto (default)
+  protected_paths: [] # globs that ALWAYS require approval on any change (the always-ask floor)
 ```
 
 | Field | Type | Default | Meaning |
@@ -339,25 +340,36 @@ security:
 | `allowed_environment` | list of strings | cross-platform base (`PATH`, `HOME`, `USER`, `USERPROFILE`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR`) **+ the OS-launch essentials of the host OS** | Only these environment variables reach child processes. The default is OS-aware: `install` writes the host OS's launch essentials, and a config that omits the key falls back to them. On **Windows** that includes `SystemRoot` (without it the Node-based `claude.exe` aborts at startup with exit `0xC0000409`, so preflight reports it "did not succeed") plus `SystemDrive`, `windir`, `ComSpec`, `PATHEXT`, `TEMP`, `TMP`, `APPDATA`, `LOCALAPPDATA`, `HOMEDRIVE`, `HOMEPATH`, `NUMBER_OF_PROCESSORS`, `PROCESSOR_ARCHITECTURE`; on **Linux/macOS** (and WSL, which is Linux) it adds `TMPDIR`, `LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`. `USER` is required on macOS so subscription/OAuth-authenticated provider CLIs can reach their Keychain credentials (without it the CLI reports "Not logged in"). This list **replaces** (does not extend) the default — keep your OS's launch essentials or the spawned CLI may fail to start; names absent from the host OS are simply skipped. |
 | `denied_read_paths` | list of strings | `.env`, `secrets/**` | Paths agents must not read and artifacts must not expose. |
 | `denied_commands` | list of strings | `git commit`, `git push`, `gh pr create` | Commands agents are forbidden to run. |
-| `deletion_approval_exempt_paths` | list of globs | `[]` | Repo-relative globs whose deletions/renames skip the mid-pipeline dangerous-diff approval (rule #14). Default `[]` gates every deletion. **You own the risk.** See below. |
+| `trust_level` | `"strict"` \| `"auto"` | `"auto"` (fresh install; the schema fallback for an absent block is `"strict"`) | Approval policy for the mid-task dangerous-diff gate (rule #14). A task may override it with a front-matter `trust_level` field. See below. |
+| `protected_paths` | list of globs | `[]` | Repo-relative globs that **always** require approval on any change, at any `trust_level` — the always-ask floor no level can lower. See below. |
 
 Only the orchestrator's Git Manager commits, pushes, and creates PRs. Agent providers do not.
 
-### `deletion_approval_exempt_paths` (deletion-approval allowlist)
+### `trust_level` (approval policy)
 
-By default the orchestrator pauses for a human approval whenever an agent's diff deletes or renames a tracked file (or touches a dependency manifest/lock). For repos where deleting/renaming certain files is routine — docs especially — listing their globs here exempts **their deletions** from that approval:
+The dangerous-diff gate pauses for a human approval when an agent's diff deletes/renames a tracked file or touches a dependency manifest/lock. `trust_level` sets **which** of those changes actually ask (it never lowers the hard ceiling — env-allowlist, the `bypassPermissions`/`--dangerously-*` ban, and `cwd` containment hold at every level):
+
+- **`strict`** — gate every tracked-file deletion/rename **or** dependency-manifest/lock edit. The behavior before this knob existed.
+- **`auto`** _(default at install)_ — routine in-repo deletions/renames/edits do **not** gate; the diff-shape gate is off. The only thing that raises an approval is a `protected_paths` match. This is the recommended default: in-repo changes are git-reversible, and the published PR remains the review backstop.
+
+A raised gate is **fail-closed**: a denial, a timeout, or no notifier stops the task in `manual_action_required` (nothing proceeds unreviewed). A task may override the global level with a front-matter `trust_level: strict|auto` (the task value wins; it does not affect `protected_paths`).
+
+### `protected_paths` (always-ask floor)
+
+Repo-relative globs whose files require approval on **any** change (create/edit/delete/rename), regardless of `trust_level`:
 
 ```yaml
 security:
-  deletion_approval_exempt_paths:
-    - "**/*.md" # any Markdown file at any depth
-    - "docs/**" # everything under docs/
+  trust_level: "auto"
+  protected_paths:
+    - "src/security/**" # any change under the security subtree asks first
+    - ".github/workflows/**" # CI changes always ask
 ```
 
 - **Glob dialect** is the same as `checks.command_sets[].paths`: `**` crosses directories (`**/*.md` matches `README.md` and `docs/a/b.md`), a single `*` stays within one path segment (`*.md` matches only top-level `.md` files). Patterns are repo-relative; an absolute path, `~`, or `..` traversal is rejected at config load.
-- **Deletions only.** It filters only the deletion classification. A deleted **dependency manifest/lock** (`package.json`, `pyproject.toml`, lockfiles, …) is **never** exemptable — it stays gated even under a `**` exemption.
-- **Operator-only.** A task can never widen this; it lives only in `config.yaml`.
-- **Still auditable.** An exempted deletion is logged and still appears in `logs/<id>/current.diff` and the published PR — the PR review remains the backstop. The one case where no human sees an exempted deletion is when `git.auto_merge` is also enabled (your accepted trade-off).
+- **A floor, not a deny.** It means "always ask a human," not "never change." It is `config.yaml`-only (a task can never widen or narrow it) and is checked before the level, so even `trust_level: auto` still gates a protected-path change.
+
+> Migration note: `trust_level` + `protected_paths` replace the former `security.deletion_approval_exempt_paths` allowlist. `upgrade-config` strips the old key; there is no automatic conversion (the new model is the inverse — an always-ask floor rather than a skip-list).
 
 ## `validation`
 

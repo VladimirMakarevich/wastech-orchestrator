@@ -719,7 +719,14 @@ def _ws_node() -> AgentNode:
     )
 
 
-def _guard_services(tmp_path: Path, git: Any, notifier: Any, exempt: tuple[str, ...] = ()) -> Any:
+def _guard_services(
+    tmp_path: Path,
+    git: Any,
+    notifier: Any,
+    *,
+    trust_level: str = "strict",
+    protected_paths: tuple[str, ...] = (),
+) -> Any:
     return NodeServices(
         router=FakeRouter(_result()),
         check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),
@@ -730,7 +737,8 @@ def _guard_services(tmp_path: Path, git: Any, notifier: Any, exempt: tuple[str, 
         git=git,
         notifier=notifier,
         ask_timeout_s=60,
-        deletion_approval_exempt_paths=exempt,
+        trust_level=trust_level,
+        protected_paths=protected_paths,
     )
 
 
@@ -776,33 +784,34 @@ def test_agent_dangerous_diff_denied_still_dangerous_goes_manual(tmp_path: Path)
         )
 
 
-def test_agent_exempt_deletion_skips_approval(tmp_path: Path) -> None:
-    # An operator allowlist (`security.deletion_approval_exempt_paths`) waves a matching deletion
-    # past the gate: no approval is requested and the node proceeds.
-    from wastech_orchestrator.git_manager import ChangedPath
-    from wastech_orchestrator.notify import AskResult
-
-    (tmp_path / "r.md").write_text("go", "utf-8")
-    git = FakeGit(changed=(ChangedPath(status="D", path="docs/old.md"),))
-    notifier = FakeNotifier(AskResult(answered=True, approved=True))
-    services = _guard_services(tmp_path, git, notifier, exempt=("**/*.md",))
-    result = AgentNodeRunner(services, _inputs(tmp_path)).run(_ws_node(), _ctx(_ws_node()))
-    assert result.outcome.kind == "done"
-    assert not notifier.asks  # exempt → no approval requested
-
-
-def test_agent_non_exempt_deletion_still_asks(tmp_path: Path) -> None:
-    # A deletion outside the allowlist is still gated even when an allowlist is configured.
+def test_agent_auto_deletion_skips_approval(tmp_path: Path) -> None:
+    # Under `trust_level: auto` the diff-shape gate is off: a routine deletion proceeds with no ask.
     from wastech_orchestrator.git_manager import ChangedPath
     from wastech_orchestrator.notify import AskResult
 
     (tmp_path / "r.md").write_text("go", "utf-8")
     git = FakeGit(changed=(ChangedPath(status="D", path="src/x.py"),))
     notifier = FakeNotifier(AskResult(answered=True, approved=True))
-    services = _guard_services(tmp_path, git, notifier, exempt=("**/*.md",))
+    services = _guard_services(tmp_path, git, notifier, trust_level="auto")
     result = AgentNodeRunner(services, _inputs(tmp_path)).run(_ws_node(), _ctx(_ws_node()))
     assert result.outcome.kind == "done"
-    assert notifier.asks  # non-exempt deletion → approval requested
+    assert not notifier.asks  # auto → no approval requested for a routine deletion
+
+
+def test_agent_protected_path_still_asks_under_auto(tmp_path: Path) -> None:
+    # `protected_paths` is the always-ask floor: a change matching it gates even under `auto`.
+    from wastech_orchestrator.git_manager import ChangedPath
+    from wastech_orchestrator.notify import AskResult
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    git = FakeGit(changed=(ChangedPath(status="M", path="src/security/keys.py"),))
+    notifier = FakeNotifier(AskResult(answered=True, approved=True))
+    services = _guard_services(
+        tmp_path, git, notifier, trust_level="auto", protected_paths=("src/security/**",)
+    )
+    result = AgentNodeRunner(services, _inputs(tmp_path)).run(_ws_node(), _ctx(_ws_node()))
+    assert result.outcome.kind == "done"
+    assert notifier.asks  # protected path → approval requested even under auto
 
 
 def test_agent_read_only_node_skips_diff_guard(tmp_path: Path) -> None:

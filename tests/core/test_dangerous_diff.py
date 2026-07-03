@@ -1,78 +1,104 @@
-"""Unit tests for the deletion-approval allowlist on the dangerous-diff classifier.
+"""Unit tests for the dangerous-diff policy resolver (``evaluate_diff_gate``).
 
-The classifier's base behavior (ordinary modify → None, deletion/dependency risk, renamed manifest)
-is covered in ``tests/core/test_hitl.py``; this file focuses on
-``security.deletion_approval_exempt_paths`` — the operator allowlist that exempts deletions/renames
-from the approval gate without ever waving through a dependency-manifest change.
+The level-independent base rule (``classify_dangerous_diff``: ordinary modify → None,
+deletion/dependency risk, renamed manifest) is covered in ``tests/core/test_hitl.py``; this file
+focuses on ``evaluate_diff_gate`` — the ``trust_level`` × diff-shape × ``security.protected_paths``
+matrix that decides which changes require approval.
 """
 
 from __future__ import annotations
 
-from wastech_orchestrator.core.dangerous_diff import (
-    classify_dangerous_diff,
-    exempted_deletions,
-)
+from wastech_orchestrator.core.dangerous_diff import evaluate_diff_gate
 from wastech_orchestrator.git_manager import ChangedPath
 
-
-def test_exempt_md_deletion_is_not_dangerous() -> None:
-    entries = (ChangedPath(status="D", path="docs/old.md"),)
-    assert classify_dangerous_diff(entries, ("**/*.md",)) is None
-
-
-def test_no_exemptions_reproduces_default_gating() -> None:
-    entries = (ChangedPath(status="D", path="docs/old.md"),)
-    result = classify_dangerous_diff(entries)
-    assert result is not None and result.risk == "deletion"
+_DELETION = (ChangedPath(status="D", path="src/x.py"),)
+_DEPENDENCY = (ChangedPath(status="M", path="package.json"),)
+_PLAIN_EDIT = (ChangedPath(status="M", path="src/app.py"),)
 
 
-def test_mixed_diff_gates_only_the_non_exempt_deletion() -> None:
-    entries = (
-        ChangedPath(status="D", path="docs/a.md"),
-        ChangedPath(status="D", path="src/x.py"),
-    )
-    result = classify_dangerous_diff(entries, ("**/*.md",))
+# -- strict: gate every deletion / dependency, protected floor is redundant but harmless -----------
+
+
+def test_strict_gates_a_deletion() -> None:
+    result = evaluate_diff_gate(_DELETION, "strict")
     assert result is not None
     assert result.risk == "deletion"
     assert result.paths == ("src/x.py",)
-    assert result.deleted_paths == ("src/x.py",)
+    assert result.protected_paths == ()
 
 
-def test_dependency_manifest_is_never_exemptable() -> None:
-    # Even a catch-all `**` exemption cannot wave through a deleted dependency manifest: it stays in
-    # the dependency set, so the diff is still gated (as a `dependency` risk).
-    entries = (ChangedPath(status="D", path="package.json"),)
-    result = classify_dangerous_diff(entries, ("**",))
+def test_strict_gates_a_dependency_edit() -> None:
+    result = evaluate_diff_gate(_DEPENDENCY, "strict")
     assert result is not None
     assert result.risk == "dependency"
-    assert result.deleted_paths == ()
     assert result.dependency_paths == ("package.json",)
 
 
-def test_rename_of_exempt_file_is_not_dangerous() -> None:
-    # A rename-away deletes the previous path; if it matches the allowlist it is exempt.
-    entries = (ChangedPath(status="R100", path="docs/b.md", previous_path="docs/a.md"),)
-    assert classify_dangerous_diff(entries, ("**/*.md",)) is None
+def test_strict_ignores_a_plain_edit() -> None:
+    assert evaluate_diff_gate(_PLAIN_EDIT, "strict") is None
 
 
-def test_rename_from_source_to_md_still_gates_the_source_deletion() -> None:
-    # Renaming source code to a .md path deletes the source (previous) path, which is not exempt.
-    entries = (ChangedPath(status="R100", path="docs/a.md", previous_path="src/a.py"),)
-    result = classify_dangerous_diff(entries, ("**/*.md",))
+# -- auto: the diff-shape gate is off; only a protected_paths match asks ---------------------------
+
+
+def test_auto_does_not_gate_a_deletion() -> None:
+    assert evaluate_diff_gate(_DELETION, "auto") is None
+
+
+def test_auto_does_not_gate_a_dependency_edit() -> None:
+    assert evaluate_diff_gate(_DEPENDENCY, "auto") is None
+
+
+def test_auto_does_not_gate_a_plain_edit() -> None:
+    assert evaluate_diff_gate(_PLAIN_EDIT, "auto") is None
+
+
+# -- protected_paths: the always-ask floor, at any level -------------------------------------------
+
+
+def test_auto_gates_a_protected_plain_edit() -> None:
+    # A protected path flags ANY change, including a plain modification the base rule ignores.
+    result = evaluate_diff_gate(_PLAIN_EDIT, "auto", ("src/**",))
     assert result is not None
-    assert result.risk == "deletion"
-    assert result.deleted_paths == ("src/a.py",)
+    assert result.risk == "protected"
+    assert result.paths == ("src/app.py",)
+    assert result.protected_paths == ("src/app.py",)
+    assert result.deleted_paths == ()
+    assert result.dependency_paths == ()
 
 
-def test_exempted_deletions_reports_the_waved_paths() -> None:
+def test_auto_protected_no_match_still_proceeds() -> None:
+    assert evaluate_diff_gate(_PLAIN_EDIT, "auto", ("config/**",)) is None
+
+
+def test_protected_matches_a_rename_source_and_target() -> None:
+    # Both the new path and a rename's previous path are matched against the floor.
+    entries = (ChangedPath(status="R100", path="src/new.py", previous_path="lib/old.py"),)
+    result = evaluate_diff_gate(entries, "auto", ("lib/**",))
+    assert result is not None
+    assert result.risk == "protected"
+    assert result.protected_paths == ("lib/old.py",)
+
+
+def test_strict_deletion_plus_protected_edit_is_mixed_risk() -> None:
     entries = (
-        ChangedPath(status="D", path="docs/a.md"),
         ChangedPath(status="D", path="src/x.py"),
-        ChangedPath(status="R100", path="docs/c.md", previous_path="docs/b.md"),
+        ChangedPath(status="M", path="config/app.yaml"),
     )
-    assert exempted_deletions(entries, ("**/*.md",)) == ("docs/a.md", "docs/b.md")
+    result = evaluate_diff_gate(entries, "strict", ("config/**",))
+    assert result is not None
+    assert result.risk == "other"
+    assert result.paths == ("config/app.yaml", "src/x.py")
+    assert result.deleted_paths == ("src/x.py",)
+    assert result.protected_paths == ("config/app.yaml",)
 
 
-def test_exempted_deletions_empty_allowlist_is_empty() -> None:
-    entries = (ChangedPath(status="D", path="docs/a.md"),)
-    assert exempted_deletions(entries, ()) == ()
+def test_protected_deletion_is_the_union_not_double_counted() -> None:
+    # A protected path that is also deleted appears once in `paths`, in both subsets, risk `other`.
+    entries = (ChangedPath(status="D", path="src/security/keys.py"),)
+    result = evaluate_diff_gate(entries, "strict", ("src/security/**",))
+    assert result is not None
+    assert result.risk == "other"
+    assert result.paths == ("src/security/keys.py",)
+    assert result.deleted_paths == ("src/security/keys.py",)
+    assert result.protected_paths == ("src/security/keys.py",)

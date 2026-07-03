@@ -29,23 +29,23 @@ def test_packaged_config_validates_clean(base_config: OrchestratorConfig) -> Non
     assert validate_config(base_config) == []
 
 
-def test_deletion_exempt_globs_validate_clean(base_config: OrchestratorConfig) -> None:
-    cfg = _with_security(base_config, deletion_approval_exempt_paths=("**/*.md", "docs/**"))
+def test_protected_paths_globs_validate_clean(base_config: OrchestratorConfig) -> None:
+    cfg = _with_security(base_config, protected_paths=("**/*.md", "docs/**"))
     assert validate_config(cfg) == []
 
 
-def test_deletion_exempt_path_traversal_is_rejected(base_config: OrchestratorConfig) -> None:
-    cfg = _with_security(base_config, deletion_approval_exempt_paths=("../escape",))
+def test_protected_paths_path_traversal_is_rejected(base_config: OrchestratorConfig) -> None:
+    cfg = _with_security(base_config, protected_paths=("../escape",))
     with pytest.raises(ConfigError) as exc:
         validate_config(cfg)
-    assert any("deletion_approval_exempt_paths" in issue for issue in exc.value.issues)
+    assert any("protected_paths" in issue for issue in exc.value.issues)
 
 
-def test_deletion_exempt_absolute_path_is_rejected(base_config: OrchestratorConfig) -> None:
-    cfg = _with_security(base_config, deletion_approval_exempt_paths=("/etc/passwd",))
+def test_protected_paths_absolute_path_is_rejected(base_config: OrchestratorConfig) -> None:
+    cfg = _with_security(base_config, protected_paths=("/etc/passwd",))
     with pytest.raises(ConfigError) as exc:
         validate_config(cfg)
-    assert any("deletion_approval_exempt_paths" in issue for issue in exc.value.issues)
+    assert any("protected_paths" in issue for issue in exc.value.issues)
 
 
 def test_global_primary_not_in_allowed_is_rejected(base_config: OrchestratorConfig) -> None:
