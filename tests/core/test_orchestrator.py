@@ -1134,9 +1134,7 @@ def test_summary_fallback_when_provider_fails(git_repo, make_git_config, tmp_pat
     assert "## What" in summary
 
 
-def test_degraded_summary_is_loud_on_done_path(
-    git_repo, make_git_config, tmp_path: Path
-) -> None:
+def test_degraded_summary_is_loud_on_done_path(git_repo, make_git_config, tmp_path: Path) -> None:
     # Decision A (a): when a provider-authored synthesis was expected on the publish path but
     # failed, the deterministic fallback is marked loud — a WARNING plus a visible callout in the
     # PR body — so a stub is never mistaken for the full synthesis.

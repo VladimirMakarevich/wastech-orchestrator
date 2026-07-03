@@ -228,9 +228,7 @@ def test_minimal_summary_degraded_marks_body_and_json(tmp_path: Path) -> None:
 
 def test_minimal_summary_not_degraded_by_default(tmp_path: Path) -> None:
     """The legitimate no-synthesis case (e.g. a failed terminal) carries no degraded marker."""
-    md_path, json_path = write_minimal_summary(
-        tmp_path, "t", title="X", diff_stat=""
-    )
+    md_path, json_path = write_minimal_summary(tmp_path, "t", title="X", diff_stat="")
     md = Path(md_path).read_text(encoding="utf-8")
     assert "Fallback summary" not in md
     assert "degraded" not in json.loads(Path(json_path).read_text(encoding="utf-8"))

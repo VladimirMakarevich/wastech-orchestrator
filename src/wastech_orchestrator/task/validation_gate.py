@@ -233,8 +233,7 @@ class ValidationGate:
         # work. A real duplicate (a tasks row, or a ledger record from an actual attempt) still
         # rejects.
         ledger_blocks = self._ledger_has_task_id(id_value) and not (
-            self._ledger_only_validation_rejects(id_value)
-            and not self._store_has_task_id(id_value)
+            self._ledger_only_validation_rejects(id_value) and not self._store_has_task_id(id_value)
         )
         if not self._is_recovery_rerun(id_value) and (
             self._store_has_task_id(id_value) or ledger_blocks

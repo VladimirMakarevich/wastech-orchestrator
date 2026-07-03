@@ -318,9 +318,9 @@ def test_duplicate_task_id_in_ledger(config: OrchestratorConfig) -> None:
 def test_validation_reject_only_ledger_id_is_resubmittable(config: OrchestratorConfig) -> None:
     # F6: an id whose only ledger trace is a validation reject (no tasks row) does NOT count as a
     # duplicate — the "rejected → fix → re-submit under the same id" loop works.
-    result = _gate(
-        config, ledger_ids={"task-001"}, validation_reject_ids={"task-001"}
-    ).validate(_src(_GOOD))
+    result = _gate(config, ledger_ids={"task-001"}, validation_reject_ids={"task-001"}).validate(
+        _src(_GOOD)
+    )
     assert result.passed is True
 
 
