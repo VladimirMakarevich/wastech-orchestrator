@@ -1930,6 +1930,7 @@ class Orchestrator:
         context assembly + one LLM call, and without a heartbeat that looked like a hang."""
         log = self._log(p.task.id)
         log.info("task finalize: starting (whole-task summary, then publish prep)")
+        degraded = False
         if self._supervisor is not None:
             started = time.monotonic()
             memory_on = self._config.memory.enabled
@@ -1942,9 +1943,21 @@ class Orchestrator:
                 "task finalize: supervisor summary written",
                 extra={"elapsed_seconds": round(time.monotonic() - started, 1)},
             )
+            # A provider-authored synthesis was expected here. If no summary.md exists after
+            # finalize (the turn produced nothing and no prior good summary was preserved), the
+            # deterministic minimal summary will silently replace it — make that degradation loud
+            # (WARNING + a visible callout in the fallback body) instead of shipping a stub as if
+            # it were the full synthesis. Covers the revived-task / unresumable-session case.
+            summary_md_path = task_artifact_dir(self._artifacts_root, p.task.id) / "summary.md"
+            degraded = not summary_md_path.exists()
+            if degraded:
+                log.warning(
+                    "task finalize: summary degraded to deterministic fallback "
+                    "(no provider-authored synthesis)"
+                )
         self._append_skip_section(p)  # note skipped nodes on the supervisor summary (idempotent)
         log.info("task finalize: publish prep (committed summary + task-file move)")
-        summary_md = self._finalize_task_artifacts(p, Status.DONE)
+        summary_md = self._finalize_task_artifacts(p, Status.DONE, degraded=degraded)
         return str(summary_md) if summary_md is not None else None
 
     # --- memory write path (best-effort; never blocks publish or a terminal) --------------
@@ -2386,8 +2399,12 @@ class Orchestrator:
         """The logs/ working copy of summary.md — PR body fallback when no task file is on disk."""
         return str(task_artifact_dir(self._artifacts_root, p.task.id) / "summary.md")
 
-    def _summary_md_body(self, p: _Pipeline) -> str:
-        """The human-readable summary text; falls back to a deterministic minimal summary."""
+    def _summary_md_body(self, p: _Pipeline, *, degraded: bool = False) -> str:
+        """The human-readable summary text; falls back to a deterministic minimal summary.
+
+        ``degraded`` marks the DONE-path case where a provider-authored synthesis was expected but
+        failed (see ``_engine_finalize``); it flows into the minimal summary as a visible callout.
+        """
         md_path = task_artifact_dir(self._artifacts_root, p.task.id) / "summary.md"
         if not md_path.exists():
             write_minimal_summary(
@@ -2396,6 +2413,7 @@ class Orchestrator:
                 title=p.task.title,
                 diff_stat=self._git.diff_stat(),
                 task_ref=self._task_ref(p),
+                degraded=degraded,
             )
             self._append_skip_section(p)
         return md_path.read_text(encoding="utf-8") if md_path.exists() else (p.task.title + "\n")
@@ -2408,15 +2426,20 @@ class Orchestrator:
         """
         return Path(p.task_file).name if p.task_file else None
 
-    def _finalize_task_artifacts(self, p: _Pipeline, final: Status) -> Path | None:
+    def _finalize_task_artifacts(
+        self, p: _Pipeline, final: Status, *, degraded: bool = False
+    ) -> Path | None:
         """Move the task into its lifecycle folder; write the committed `<id>.summary.md` alongside.
 
         Runs **before** the commit so both land in the task (audit) commit. Returns the
         path to the committed `summary.md`, or ``None`` when there is no on-disk task file (e.g. a
         synthetic ``run`` path). ``summary.json`` and the rest of ``logs/`` are never committed.
+
+        ``degraded`` (DONE path only) flows into the deterministic fallback body as a visible
+        "fallback summary" callout when the supervisor synthesis was expected but failed.
         """
         dest = self._move_task_file(p, final)
-        body = self._summary_md_body(p)
+        body = self._summary_md_body(p, degraded=degraded)
         if dest is None:
             return None
         summary_path = dest.with_name(f"{p.task.id}.summary.md")

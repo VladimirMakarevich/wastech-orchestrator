@@ -1,6 +1,8 @@
 # Post-p0 robustness hardening: revive-finalize durability + doc-node capability policy
 
-Status: **proposed** (2026-07-03) Date: 2026-07-03 Owner: Vladimir Makarevich
+Status: **implemented** (2026-07-03) Date: 2026-07-03 Owner: Vladimir Makarevich
+
+Реализовано 2026-07-03. **Решение A:** оба слоя отгружены — (a) громкая деградация (WARNING + пометка «Fallback summary» в теле) в `_engine_finalize`→`write_minimal_summary`, гейтится на DONE-путь (провальный терминал не помечается); (b) устойчивый re-синтез — `Supervisor._session_live` + `_finalize_digest` собирает дайджест из `supervisor_step`-строк `evaluations`, свежий finalize-турн без резюма мёртвой сессии (тот же один турн). **Решение B (V1):** documentation-узел в packaged `implementation.yaml` явно `network_access: false`; асимметрия enforcement (Codex hard vs Claude tools-only) + рекомендация `provider: codex` задокументированы в [configuration.md](../configuration.md). Ядро не тронуто, ветвления по имени узла нет.
 
 Два отложенных hardening-решения, всплывшие в ходе p0-кампании на `wastech-mdlint` ([TEST-FINDINGS.md](../../TEST-FINDINGS.md)) при закрытии [test-findings-remediation-plan.md](test-findings-remediation-plan.md). Обе находки — про **мягкую гарантию, которая может молча деградировать**: (1) синтез итогового summary — best-effort и на revived-задаче падает в минимальный fallback; (2) скоуп documentation-узла держится на prompt-adherence, а не на capability-политике. Решения **независимы** и планируются по отдельности — сгруппированы в один ADR по общему источнику (p0-фидбэк) и общей теме («убрать тихую деградацию мягкой гарантии»). Ни одно не входило в объём v1.
 
@@ -49,14 +51,14 @@ Status: **proposed** (2026-07-03) Date: 2026-07-03 Owner: Vladimir Makarevich
 
 ### Open questions
 
-- Точная причина непригодности сессии на revive: сессия не сохранена до стопа, или провайдер отклоняет резюм после прерывания? Определяет, достаточно ли (a) или нужен (b).
-- Достаточно ли `supervisor_step`-строк в `evaluations` как входа для осмысленного re-синтеза (b), или наблюдения слишком куцые.
+- Точная причина непригодности сессии на revive: сессия не сохранена до стопа, или провайдер отклоняет резюм после прерывания? Менее критично для (b), чем считалось: (b) сессию не резюмит, поэтому от этой причины не зависит — но ответ уточняет, как часто fallback вообще случается (и, значит, приоритет (b)).
+- **Содержательность, а не наличие.** Присутствие `supervisor_step`-строк гарантировано (см. Constraints); открытый вопрос — достаточно ли заметок observe для осмысленного re-синтеза, или они слишком куцые. Заметки, записанные ДО прерывания (тёплая сессия), богаты; после resume новые observe-турны на сломанной сессии могут падать → пустые строки. Рычаг, если куцых окажется много, — обогатить то, что observe кладёт в `supervisor_step`, а не крэш-снапшот.
 
 ### Implementation notes
 
 - Шов: [core/supervisor.py](../../src/wastech_orchestrator/core/supervisor.py) `_resume_session` / `finalize` / `_finalize_turn`; оркестраторский хук `_engine_finalize` и путь минимального fallback в [core/orchestrator.py](../../src/wastech_orchestrator/core/orchestrator.py).
 - (a): при пустом результате finalize на revive — `WARNING` (task_id, «summary degraded to fallback on revive») и детерминированный префикс/пометка в теле fallback-summary.
-- (b): собрать дайджест из `store.get_evaluations(task_id)` (строки `supervisor_step`) и передать его в свежий finalize-турн как контекст вместо `session_id`.
+- (b): собрать дайджест из `store.get_evaluations(task_id)` (строки `supervisor_step`) и передать его в свежий finalize-турн как контекст вместо `session_id`. **Новый артефакт/файл не вводится** — источник уже лежит в `.worc/state.db`. Если re-синтез окажется куцым — сначала обогащать заметки observe (что кладётся в `supervisor_step`), а не менять механику восстановления.
 
 ---
 

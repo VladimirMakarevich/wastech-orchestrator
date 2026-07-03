@@ -207,3 +207,30 @@ def test_minimal_summary_without_task_ref(tmp_path: Path) -> None:
     md = Path(md_path).read_text(encoding="utf-8")
     assert "See the task file for the full description." in md
     assert "(no changes detected)" in md
+
+
+def test_minimal_summary_degraded_marks_body_and_json(tmp_path: Path) -> None:
+    """A synthesis that was expected but failed is marked loud — a callout + a JSON flag."""
+    md_path, json_path = write_minimal_summary(
+        tmp_path,
+        "task-003",
+        title="Add validation",
+        diff_stat=" a.py | 2 +-\n 1 file changed",
+        task_ref="task-003.md",
+        degraded=True,
+    )
+    md = Path(md_path).read_text(encoding="utf-8")
+    assert "Fallback summary" in md  # the visible degradation callout
+    assert md.index("Fallback summary") < md.index("## What")  # prepended, not buried
+    summary = json.loads(Path(json_path).read_text(encoding="utf-8"))
+    assert summary["degraded"] is True
+
+
+def test_minimal_summary_not_degraded_by_default(tmp_path: Path) -> None:
+    """The legitimate no-synthesis case (e.g. a failed terminal) carries no degraded marker."""
+    md_path, json_path = write_minimal_summary(
+        tmp_path, "t", title="X", diff_stat=""
+    )
+    md = Path(md_path).read_text(encoding="utf-8")
+    assert "Fallback summary" not in md
+    assert "degraded" not in json.loads(Path(json_path).read_text(encoding="utf-8"))

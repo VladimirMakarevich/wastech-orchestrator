@@ -221,6 +221,7 @@ def write_minimal_summary(
     title: str,
     diff_stat: str,
     task_ref: str | None = None,
+    degraded: bool = False,
 ) -> tuple[str, str]:
     """Write a *compact* deterministic ``summary.md`` + ``summary.json``.
 
@@ -233,6 +234,13 @@ def write_minimal_summary(
 
     ``task_ref`` is a short pointer to the task file (e.g. ``<id>.md``, a sibling of the committed
     summary); when ``None`` a generic line is used.
+
+    ``degraded`` marks the case where a real provider-authored summary was *expected* but could not
+    be produced (the supervisor synthesis failed on the publish path — e.g. an unresumable session
+    on a revived task): a blockquote callout is prepended to the body and ``degraded: true`` is set
+    in the JSON, so the operator never mistakes this stub for the full synthesis. It stays ``False``
+    for the legitimate no-synthesis cases (a failed/manual-action terminal), where the minimal
+    summary is the expected artifact, not a degradation.
     """
     task_dir = task_artifact_dir(artifacts_root, task_id)
     task_dir.mkdir(parents=True, exist_ok=True)
@@ -246,15 +254,30 @@ def write_minimal_summary(
         else "See the task file for the full description."
     )
 
-    summary_json = {"what": what, "how": how, "integration": integration, "why": why}
+    summary_json: dict[str, object] = {
+        "what": what,
+        "how": how,
+        "integration": integration,
+        "why": why,
+    }
+    if degraded:
+        summary_json["degraded"] = True
     json_path = task_dir / SUMMARY_JSON_FILENAME
     json_path.write_text(
         json.dumps(summary_json, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
 
     changes = diff_stat.strip() or "(no changes detected)"
+    callout = (
+        "> ⚠️ **Fallback summary — not a provider-authored synthesis.** The supervisor's "
+        "whole-task summary could not be produced for this run; this is the deterministic minimal "
+        "summary derived from the task and its diff.\n\n"
+        if degraded
+        else ""
+    )
     md = (
         f"# {what}\n\n"
+        f"{callout}"
         f"## What\n\n{what}\n\n"
         f"## How\n\n{how}\n\n"
         f"## Integration\n\n{integration}\n\n"
