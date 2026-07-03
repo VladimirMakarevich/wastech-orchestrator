@@ -18,6 +18,7 @@ Where to find the design detail:
 | Document | Purpose |
 | --- | --- |
 | [follow_ups.md](follow_ups.md) | **Open** implementation follow-ups / tech-debt discovered while building — distinct from product features. Recorded via `/sync-docs`. Completed/superseded entries are archived in [archive/follow_ups_history.md](archive/follow_ups_history.md). |
+| [test-findings-remediation-plan.md](test-findings-remediation-plan.md) | Sequential fix plan for defects found during the real p0 campaign on `wastech-mdlint` ([TEST-FINDINGS.md](../../TEST-FINDINGS.md)). Grouped by subsystem, with code levers, tests, and done-criteria per finding. Publish-commit cluster (F18 CRITICAL) first. |
 | [runtime_provider_capacity_gate.md](archive/runtime_provider_capacity_gate.md) | Detailed backlog task for checking Codex and Claude capacity before autonomous `watch` admits a pending task. |
 | [archive/concurrent-task-worktrees.md](archive/concurrent-task-worktrees.md) | Decision record for processing tasks in parallel via `git worktree`: chosen as the v2 concurrency primitive (not for isolation), gated on a mandatory provider capacity gate. |
 | [archive/token_optimization.md](archive/token_optimization.md) | Detailed backlog task for measuring and reducing token usage. |
@@ -34,6 +35,7 @@ These are deferred by the v1 spec or described in architecture notes; not schedu
 
 | Item | Summary | Source / constraint |
 | --- | --- | --- |
+| [Trust levels / danger-approval policy](trust-levels-danger-approval.md) | Operator `trust_level` knob (`strict`/`auto`/`full`, default `auto`) that moves the approval threshold for the mid-task dangerous-diff gate; deterministic diff-shape engine (not supervisor-LLM); replaces `deletion_approval_exempt_paths` with an always-ask `protected_paths` floor. | Never lowers the hard security ceiling (env-allowlist, bypass ban, cwd containment); supervisor stays advisory; from the p0-campaign operator feedback ([TEST-FINDINGS.md](../../TEST-FINDINGS.md)). |
 | [Runtime provider capacity gate](archive/runtime_provider_capacity_gate.md) | Before autonomous `watch` claims a pending task, query the capacity of the Codex/Claude accounts its resolved routes need and defer the task when configured headroom is unavailable. | Runtime admission control, not install preflight. Deferred tasks stay pending, consume no attempts, retried after provider reset. |
 | [Token optimization](archive/token_optimization.md) | Measure and reduce token consumption across stages. | Analysis + candidate levers; not part of v1 scope. |
 | Config-level per-node `node_defaults` | The complement to the shipped per-task `nodes:` overrides: per-node `{model,reasoning}` defaults under each provider in `config.yaml`. | Tracked in [follow_ups.md](follow_ups.md). Touches schema (+version bump), loader, validation. |
