@@ -4,10 +4,13 @@ The source of truth is the code (`src/wastech_orchestrator/`); the [Functional M
 
 ## Layers and dependencies
 
-- **Orchestrator Core** manages the sequence of stages, attempt limits, state machine transitions, and publishing conditions. Core calls **only** the `AgentProvider` interface and **does not build** provider-specific commands.
+- **Orchestrator Core** is a thin wrapper around the FlowEngine: it owns the validation gate, the single processing slot, the isolation/check preamble, node wiring, state-machine transitions, and terminal handling — the pipeline **body** is a data-driven flow graph driven by the engine, **not** a hardcoded stage loop. Core calls **only** the Router (agent nodes), the Check Runner (checks nodes), and the Git Manager (publish); it **does not build** provider-specific commands.
+- **FlowEngine** traverses the validated flow graph, owns the transitions between nodes, charges the fix loops, and drives the node runners; the runners are its only executors.
 - **Provider adapters** (`CodexProvider`, `ClaudeCodeProvider`) are the only place where the syntax of a specific CLI lives. They **do not perform fallback** and **do not change the state machine**.
-- **Agent Router** decides the primary/fallback for a stage, the route source (global config / task override), and availability against the allowlist.
+- **Agent Router** resolves the `(primary, fallback)` for a node — the node's declared `provider` or, if unspecified, the single global primary — from the config, and checks availability against the allowlist. Routing is **node-based**; there is no per-stage route table.
+- **Supervisor** is a constant per-task oversight layer **above** any flow (not a node): it observes each completed step read-only and writes the whole-task summary at close.
 - **Git Manager / Check Runner / State Store / Artifact Store** are separate components with narrow responsibilities.
+- **Memory** (optional, off by default) is a cross-cutting layer with its own hard invariants: redacted atomic writes, an append-only hash-chained audit, and never passing unredacted content into a prompt.
 
 Dependency direction: `core → router → provider(interface)`. Providers do not depend on core.
 
@@ -15,21 +18,23 @@ Dependency direction: `core → router → provider(interface)`. Providers do no
 
 - `AgentProvider`: `id`, `preflight() -> ProviderHealth`, `run(AgentRunRequest) -> AgentRunResult`.
 - `Notifier`: two-phase `start_ask` / `wait_for_answer` with a durable secret-free handle, plus the `ask_human` facade and best-effort terminal notifications.
-- Each stage run is **independent** and receives all context through files/artifacts and the prompt — the vendor session is **not** a source of truth.
+- Each node run receives its context through files/artifacts and the prompt. Read-only/disposable nodes get a `fresh_disposable` session; editing nodes resume a durable vendor session (`editing_lineage` — `fixing` resumes `implementation`) as an affinity optimization, not as an authoritative context channel.
 - The Core persists the `node_runs` row before invoking a provider and passes its ID (`AgentRunRequest.node_run_id`) through; providers use it only to namespace artifacts. Provider fallback attempts share that node-run ID and have distinct attempt numbers.
 - The `AgentRunRequest` / `AgentRunResult` / `ProviderHealth` structures are as defined in §4.3. Do not add hidden state channels beyond them.
 
-## Stages and routing
+## Flow nodes and routing
 
-- Stages: `refinement`, `planning`, `implementation`, `testing`, `review`, `fixing`, `summary`, `publishing`.
-- `testing` is executed by the Check Runner; `publishing` by the Git Manager. The rest are agent-driven.
+- The pipeline is **data, not a fixed stage loop**: each `task_type` resolves to a validated flow — a YAML graph of typed nodes — driven by the FlowEngine. These are flow **node ids**, not a `Stage` type (**there is no `Stage` enum**).
+- The packaged default `implementation` flow is `refinement → planning → implementation → testing → review → documentation → publish`, with the two fix loops (`test_fix`, `review_fix`) through `fixing` and optional decomposition. `summary` is **not** a node — the constant supervisor layer writes it. Other task types (`deep_research`, `security_audit`) resolve to their own packaged graphs; operators can override a built-in or add flows in `.worc/flows/` (all flows are fatally validated at preflight).
+- `testing`/checks nodes are executed by the Check Runner; `review` is a read-only **evaluator**; `publish` is executed by the Git Manager. The rest (`refinement`, `planning`, `implementation`, `fixing`, `documentation`) are agent-driven.
 - Check commands are **operator-authored** in `checks.command_sets` (no discovery, no resolution, no agent). The `CheckResolver` only **normalizes** that config into `ResolvedCheckSet`s and a deterministic diff-based selector picks which sets run; the Core passes those argv lists to the Check Runner and never builds CLI argv itself, preserving "the core does not know the CLI syntax" and "the flow never supplies commands" (§1.2).
-- Default route: refinement/planning/implementation/fixing/summary → primary `claude`, fallback `codex`; review → primary `codex`, fallback `claude`.
-- `refinement` runs first to enrich an incomplete task (no code edits) and is **skipped** by the Core for tasks that are already complete or flagged `refined: true`. The skip decision is deterministic and audited. Refinement/planning may request one typed human round-trip; the answer returns only through a redacted artifact path.
+- Routing is **node-based**: a node runs on its declared `provider` or, if unspecified, the single global primary (`agents.providers.<id>.primary`, `claude` by default); the fallback target is the **other** allowed provider (with a single allowed provider there is no fallback). No node in the packaged flow pins a provider, so all inherit the global primary.
+- `refinement` runs first to enrich an incomplete task (no code edits) and is **skipped** by the Core for tasks that need no enrichment (deterministic `when: derived.needs_refinement`, audited). Refinement/planning may request one typed human round-trip; the answer returns only through a redacted artifact path.
 - A task may override a flow node's executor per run via `nodes.<node-id>.{model,reasoning,provider}` (alongside the `enabled` disable toggle). These overrides are **best-effort**: they never change security/command/credentials (a `provider` must be in `agents.allowed`), and an override invalid for the resolved flow/config (unknown/disallowed provider, a reasoning level the provider rejects) is **warned and skipped at run time** — the flow's declared value stands and the task is never aborted (preserving autonomous `watch` admission). `model` is passed through unchecked (model names have no reliable tier ordering). The override chain is `task node override → flow node declaration → provider config default`; the resolution lives in the orchestrator (`core.node_overrides`) and the engine applies the validated overlay mechanically at its single node-fetch seam — Core still never builds provider-specific CLI.
 - **Decomposition** (spec §5.1) is a flag-gated sub-phase of `planning`, **off by default**. The split is proposed by the agent but accepted deterministically by the Core (gate on; `2 <= n <= max_subtasks`; linear `depends_on` only); otherwise the task runs as a single unit. Subtasks run **strictly sequentially on the single task branch** (one local commit each) into a **single PR**; the global `fix_iterations` budget spans all subtasks.
 - **Validation gate** (spec §19): every task passes a structural gate on `new -> validated` before any branch or provider run. A broken task is terminal `failed`, quarantined to `tasks/rejected/`, and never branched.
-- **Final `summary`** (spec §5.2) is an agent-driven, no-edit stage after `review` that writes a plain-language handoff (what / how / integration / why) which becomes the PR body. It is **best-effort, not a quality gate**: a provider failure falls back, and ultimately the Core writes a deterministic minimal summary — a reviewed, passing change is never blocked by it.
+- **`documentation`** is a workspace-write agent node after `review` accepts the code: it updates the target project's docs to match the shipped change, resuming the `implementation` editing lineage, and its edits join the same diff the orchestrator commits. It is deliberately kept **out** of `decomposition.sub_flow` so it runs once per task, not per subtask.
+- **Constant supervisor layer** (not a node, spec §5.2): a per-task oversight layer above any flow that observes every completed step read-only (advisory — it can flag but **cannot** rework) and writes the whole-task plain-language handoff (what / how / integration / why) at close, before publish; that summary becomes the PR body. It is **best-effort, not a quality gate**: a provider failure falls back, and ultimately the Core writes a deterministic minimal summary — a reviewed, passing change is never blocked by it.
 
 ## Fallback and transient-failure recovery
 
@@ -59,7 +64,7 @@ Dependency direction: `core → router → provider(interface)`. Providers do no
 - Coupling core to a specific CLI.
 - Granting a provider the right to commit/push/PR.
 - Performing fallback on a quality error.
-- Changing the provider route retroactively for a stage that has already begun.
+- Changing the provider route retroactively for a node that has already begun.
 - Continuing work when an inconsistent branch state is detected (→ `manual_action_required`).
 - Running the `fixing` loop without a global per-task bound (→ must stop in `manual_action_required` with a failure report).
 - Processing more than one task at a time in v1 (concurrency and worktrees are v2).
