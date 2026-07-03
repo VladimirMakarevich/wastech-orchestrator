@@ -734,6 +734,51 @@ def test_cmd_list_pending_file_without_id_shown_by_filename(
     assert "weird.md" in out
 
 
+def test_cmd_list_pending_format_ids_reads_disk_queue(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # F4: `--pending --format ids` composes the section focus with the id format — it lists queued
+    # pending files (disk-derived) that have no DB row yet, matching the table view. The DB-only
+    # `_list_ids` path printed nothing for them before.
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    pending = git_repo.clone / "tasks" / "pending"
+    pending.mkdir(parents=True, exist_ok=True)
+    (pending / "queued.md").write_text(
+        '---\nid: task-queued\ntitle: "Q"\n---\n\nbody\n', encoding="utf-8"
+    )
+    # A DB row for a different task must not appear under the pending focus.
+    _seed_list_db(git_repo.clone, [TaskRow(task_id="task-done", title="D", status=Status.DONE)])
+
+    code = cli.main(["--config", str(config), "list", "--pending", "--format", "ids"])
+
+    assert code == 0
+    assert set(capsys.readouterr().out.split()) == {"task-queued"}
+
+
+def test_cmd_list_all_format_ids_unions_disk_and_db(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # F4: `--all --format ids` is consistent with the table's `--all` scope (DB tasks); a plain
+    # `--format ids` (no section) stays DB-derived as before (covered by the bare test above).
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    _seed_list_db(
+        git_repo.clone,
+        [
+            TaskRow(task_id="task-a", title="A", status=Status.DONE),
+            TaskRow(task_id="task-b", title="B", status=Status.RUNNING),
+        ],
+    )
+
+    code = cli.main(["--config", str(config), "list", "--all", "--format", "ids"])
+
+    assert code == 0
+    assert set(capsys.readouterr().out.split()) == {"task-a", "task-b"}
+
+
 def test_cmd_list_no_tasks_notice(
     git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

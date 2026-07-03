@@ -323,6 +323,157 @@ def test_supervisor_finalize_best_effort_when_llm_unavailable(tmp_path: Path) ->
     assert len([e for e in store.get_evaluations(_TASK) if e.kind == "supervisor_final"]) == 1
 
 
+def test_finalize_sanitizes_leaked_structured_dump(tmp_path: Path) -> None:
+    # F16: a model that emits its structured output as a `<summary>…</summary><follow_ups>[JSON]
+    # </follow_ups><memory_delta>…` text dump must never let those machine sections ride into
+    # summary.md (the PR body). Only the human prose survives.
+    leaked = (
+        "<summary>Refactored the parser and added tests.</summary>"
+        '<follow_ups>[{"title":"x"}]</follow_ups>'
+        '<memory_delta>{"lessons":[]}</memory_delta><lessons>[]</lessons>'
+    )
+    router, store = FakeRouter([_ok("s1", leaked)]), _store(tmp_path)
+    sup = _supervisor(tmp_path, router, store)
+
+    path = sup.finalize(task_id=_TASK, task_title="T").summary_path
+    assert path is not None
+    body = path.read_text("utf-8")
+    assert "Refactored the parser and added tests." in body
+    for tag in ("<follow_ups>", "<memory_delta>", "<lessons>", "</summary>", "<summary>"):
+        assert tag not in body
+    assert "lessons" not in body and "title" not in body  # no machine JSON leaked
+
+
+def test_finalize_prefixes_h1_when_missing(tmp_path: Path) -> None:
+    # F10: a headless paragraph-slab summary gets a deterministic `# {task_title}` H1 prefix.
+    router, store = FakeRouter([_ok("s1", "One flat line of synthesis.")]), _store(tmp_path)
+    sup = _supervisor(tmp_path, router, store)
+    path = sup.finalize(task_id=_TASK, task_title="My Task").summary_path
+    assert path is not None
+    assert path.read_text("utf-8").startswith("# My Task\n\nOne flat line of synthesis.")
+
+
+def test_finalize_keeps_model_h1_without_double_prefix(tmp_path: Path) -> None:
+    # F10: when the model already opened with its own top-level heading, don't double-prefix.
+    router, store = FakeRouter([_ok("s1", "# Model heading\n\nBody.")]), _store(tmp_path)
+    sup = _supervisor(tmp_path, router, store)
+    path = sup.finalize(task_id=_TASK, task_title="T").summary_path
+    assert path is not None
+    body = path.read_text("utf-8")
+    assert body.startswith("# Model heading")
+    assert "# T" not in body
+
+
+# -- revive-durable finalize (post-p0 Decision A (b)) --------------------------
+
+
+def _record_step(
+    store: StateStore, run_id: int, *, node: str, outcome: str, note: str, failed: bool = False
+) -> None:
+    """Append a supervisor_step observation as a prior process would (append-only in state.db)."""
+    store.record_evaluation(
+        EvaluationRow(
+            task_id=_TASK,
+            node_id=None,
+            source_node_run_id=run_id,
+            kind="supervisor_step",
+            verdict="advisory",
+            findings_json=json.dumps(
+                {"node": node, "outcome": outcome, "note": note, "observation_failed": failed}
+            ),
+        )
+    )
+
+
+def test_finalize_reseeds_from_digest_when_session_not_live(tmp_path: Path) -> None:
+    # Revive: no supervisor turn succeeded this process (session gone). Finalize must NOT resume the
+    # dead session — it seeds a fresh turn from the recorded supervisor_step observations instead.
+    router, store = FakeRouter([_ok("s1", "Synthesis from recovered notes.")]), _store(tmp_path)
+    _record_step(store, 5, node="implementation", outcome="done", note="wired the parser")
+    _record_step(store, 7, node="review", outcome="accept", note="tests cover the edge case")
+    sup = _supervisor(tmp_path, router, store)
+    assert sup._session_live is False  # nothing ran this process
+
+    path = sup.finalize(task_id=_TASK, task_title="T").summary_path
+
+    assert path is not None and "Synthesis from recovered notes." in path.read_text("utf-8")
+    (req,) = router.requests
+    assert req.session_id is None  # the possibly-dead session is never resumed
+    assert "## Recovered step observations" in req.prompt
+    assert "wired the parser" in req.prompt and "tests cover the edge case" in req.prompt
+    final = next(e for e in store.get_evaluations(_TASK) if e.kind == "supervisor_final")
+    assert json.loads(final.findings_json)["recovered_from_digest"] is True
+
+
+def test_finalize_warm_session_resumes_without_digest(tmp_path: Path) -> None:
+    # A live in-process session (an observe turn succeeded) synthesizes normally: it resumes the
+    # session id and injects no recovered-observations section.
+    router, store = FakeRouter([_ok(), _ok("sess-super", "Warm synthesis.")]), _store(tmp_path)
+    sup = _supervisor(tmp_path, router, store)
+    sup.observe(task_id=_TASK, node_id="implementation", node_run_id=5, outcome_kind="done")
+    assert sup._session_live is True
+
+    path = sup.finalize(task_id=_TASK, task_title="T").summary_path
+
+    assert path is not None
+    finalize_req = router.requests[-1]
+    assert finalize_req.session_id == "sess-super"  # resumed the warm session
+    assert "## Recovered step observations" not in finalize_req.prompt
+    final = next(e for e in store.get_evaluations(_TASK) if e.kind == "supervisor_final")
+    assert json.loads(final.findings_json)["recovered_from_digest"] is False
+
+
+def test_finalize_digest_skips_failed_and_empty_notes(tmp_path: Path) -> None:
+    router, store = FakeRouter(), _store(tmp_path)
+    _record_step(store, 1, node="planning", outcome="done", note="")  # nothing to add
+    _record_step(store, 2, node="impl", outcome="done", note="", failed=True)  # observation failed
+    _record_step(store, 3, node="review", outcome="accept", note="looks solid")
+    sup = _supervisor(tmp_path, router, store)
+
+    digest = sup._finalize_digest(_TASK)
+
+    assert digest == "- [review → accept] looks solid"  # only the substantive note survives
+
+
+def test_finalize_digest_none_when_no_usable_observations(tmp_path: Path) -> None:
+    router, store = FakeRouter(), _store(tmp_path)
+    _record_step(store, 1, node="planning", outcome="done", note="", failed=True)
+    sup = _supervisor(tmp_path, router, store)
+    assert sup._finalize_digest(_TASK) is None
+
+
+def test_finalize_failed_does_not_clobber_existing_summary_json(tmp_path: Path) -> None:
+    # F16: a failed finalize (no provider result) must NOT overwrite an existing non-empty
+    # summary.json with a blank one (symmetric to leaving summary.md untouched on failure).
+    store = _store(tmp_path)
+    # First finalize succeeds and writes a non-empty summary.json.
+    sup_ok = _supervisor(tmp_path, FakeRouter([_ok("s1", "Real summary.")]), store)
+    sup_ok.finalize(task_id=_TASK, task_title="T")
+    summary_json = Path(task_artifact_dir(tmp_path / "art", _TASK)) / "summary.json"
+    assert json.loads(summary_json.read_text("utf-8"))["summary"] == "Real summary."
+
+    # A later finalize whose turn fails must not blank it.
+    sup_fail = _supervisor(tmp_path, FakeRouter([None]), store)
+    sup_fail.finalize(task_id=_TASK, task_title="T")
+    assert json.loads(summary_json.read_text("utf-8"))["summary"] == "Real summary."
+
+
+def test_schema_turn_caps_max_reasoning_but_free_text_keeps_it(tmp_path: Path) -> None:
+    # F7b: a structured-output turn is capped to `high` when configured at a max tier (xhigh/max) so
+    # the schema turn is not fragile; a free-text turn keeps the configured tier.
+    schema_router, store = FakeRouter([_structured("Sum.", {})]), _store(tmp_path)
+    sup_schema = _supervisor(tmp_path, schema_router, store, reasoning="xhigh")
+    sup_schema.finalize(task_id=_TASK, task_title="T", emit_delta=True)  # schema turn
+    assert schema_router.requests[0].reasoning == "high"
+
+    free_dir = tmp_path / "b"
+    free_dir.mkdir()
+    free_router = FakeRouter([_ok("s", "plain")])
+    sup_free = _supervisor(free_dir, free_router, _store(free_dir), reasoning="xhigh")
+    sup_free.finalize(task_id=_TASK, task_title="T")  # free-text turn (no delta/follow-ups)
+    assert free_router.requests[0].reasoning == "xhigh"
+
+
 def _structured(summary: str, memory_delta: dict[str, Any]) -> AgentRunResult:
     return AgentRunResult(
         status=RunStatus.SUCCEEDED,

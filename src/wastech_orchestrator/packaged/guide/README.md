@@ -80,7 +80,7 @@ The validation gate rejects a task **before** any branch or agent runs. To alway
 3. `## Description` (or the body) is **non-empty**.
 4. **Only** the allowed front-matter keys appear; types match the table.
 5. `nodes` overrides carry **only** `enabled: false`, keyed by flow **node id**. Any node in the task's resolved flow may be disabled (the gate checks shape only); an id absent from the flow ends the task `failed` at flow resolution. Which nodes are safe to disable is the operator's flow-authoring call — there is no `agents.allow_review_skip` gate.
-6. **No secrets** and **no CLI-flag-shaped values** in front matter (e.g. a `title` of `"--dangerously-skip-permissions"` is rejected as `injection_suspected`). The task body never builds CLI arguments, but front matter is scanned defensively.
+6. **No secrets** and **no CLI-flag-shaped values** in front matter — **every** value (including `title`/`contacts`) must be plain text: a leading `-`, or a `` ` ``/`;`/`|`/`$(`, is rejected as `injection_suspected` (e.g. a `title` of `"--dangerously-skip-permissions"`). The task body never builds CLI arguments and is not scanned, so put code/shell snippets there, not in front matter.
 7. Keep it reasonably sized (the gate caps file size, line count, and per-line length).
 
 Completeness (separate from rejection): if the task lacks acceptance criteria, it is **not** rejected — the refinement stage runs to enrich it. Provide acceptance criteria when you want refinement skipped (it is skipped automatically for a complete task; there is no flag).

@@ -36,6 +36,25 @@ def test_has_task_id(tmp_path: Path) -> None:
     assert ledger.has_task_id("missing") is False
 
 
+def test_only_validation_rejects(tmp_path: Path) -> None:
+    # F6: an id whose only record carries a validation_reason is a gate reject, not a real attempt.
+    ledger = Ledger(tmp_path)
+    assert ledger.only_validation_rejects("a") is False  # absent → not a reject-only id
+    ledger.append(
+        LedgerRecord(
+            id="a",
+            title="A",
+            final_status="failed",
+            finished_at="t1",
+            validation_reason="injection_suspected",
+        )
+    )
+    assert ledger.only_validation_rejects("a") is True
+    # A subsequent real attempt (no validation_reason) makes it no longer reject-only.
+    ledger.append(LedgerRecord(id="a", title="A", final_status="failed", finished_at="t2"))
+    assert ledger.only_validation_rejects("a") is False
+
+
 def test_records_empty_when_no_file(tmp_path: Path) -> None:
     assert Ledger(tmp_path / "logs").records() == []
 
@@ -188,3 +207,30 @@ def test_minimal_summary_without_task_ref(tmp_path: Path) -> None:
     md = Path(md_path).read_text(encoding="utf-8")
     assert "See the task file for the full description." in md
     assert "(no changes detected)" in md
+
+
+def test_minimal_summary_degraded_marks_body_and_json(tmp_path: Path) -> None:
+    """A synthesis that was expected but failed is marked loud — a callout + a JSON flag."""
+    md_path, json_path = write_minimal_summary(
+        tmp_path,
+        "task-003",
+        title="Add validation",
+        diff_stat=" a.py | 2 +-\n 1 file changed",
+        task_ref="task-003.md",
+        degraded=True,
+    )
+    md = Path(md_path).read_text(encoding="utf-8")
+    assert "Fallback summary" in md  # the visible degradation callout
+    assert md.index("Fallback summary") < md.index("## What")  # prepended, not buried
+    summary = json.loads(Path(json_path).read_text(encoding="utf-8"))
+    assert summary["degraded"] is True
+
+
+def test_minimal_summary_not_degraded_by_default(tmp_path: Path) -> None:
+    """The legitimate no-synthesis case (e.g. a failed terminal) carries no degraded marker."""
+    md_path, json_path = write_minimal_summary(
+        tmp_path, "t", title="X", diff_stat=""
+    )
+    md = Path(md_path).read_text(encoding="utf-8")
+    assert "Fallback summary" not in md
+    assert "degraded" not in json.loads(Path(json_path).read_text(encoding="utf-8"))

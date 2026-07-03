@@ -7,6 +7,17 @@
 - Types: **mypy** in strict mode for `src/`. The entire public API is annotated.
 - Tests: **pytest**.
 
+## Comments And Rationale
+
+- Treat comments as part of the deliverable: all new code must be documented where it is introduced, not left for a later cleanup pass.
+- Follow the rule `why, not what`: comments explain why the code exists, why a constraint matters, and why a specific shape was chosen, not what the syntax already says.
+- Prefer self-documenting names over label-comments. A clear name is part of the documentation rule and should replace comments that merely tag a variable, branch, or helper.
+- Comment the non-obvious parts: rationale, invariants, tradeoffs, external-system constraints, race conditions, portability traps, and bug-prevention context.
+- Do not add comments that merely restate names, types, assignments, loops, or conditionals.
+- When behavior is non-obvious, surprising, or constrained by a real limitation, capture that reason next to the relevant code path.
+- Historical narrative in comments is forbidden. Comments document the current design and intent only; do not leave "used to be", "changed from", or compatibility-tombstone commentary behind after a rewrite.
+- If a block is hard to justify with a short why-comment, simplify or restructure it until the intent and rationale are clear.
+
 ## General principles
 
 - Small, focused functions and modules with a single responsibility.
@@ -51,5 +62,5 @@ Every feature must work on **Windows, Linux, and macOS**. This is a release requ
 
 ## In-code documentation
 
-- Public functions/classes have a docstring: what it does, the input/output contract, and which exceptions it raises.
+- Public functions/classes have a docstring that explains the contract and intent: why the API exists, the guarantees and preconditions it relies on, and which exceptions it raises. Do not use docstrings to narrate the implementation step by step.
 - Comments belong only where they explain "why", not "what".

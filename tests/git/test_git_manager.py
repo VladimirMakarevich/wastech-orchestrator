@@ -11,6 +11,7 @@ import pytest
 from wastech_orchestrator.config.schema import MergeStrategy
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import (
+    _PUSH_RETRY_BACKOFF_SECONDS,
     KIND_PR_MERGE,
     RUNTIME_EXCLUDED_DIRS,
     GitCommandError,
@@ -152,6 +153,160 @@ def test_scoped_staging_excludes_artifact_dirs(
     assert "src.py" in committed
     for d in _DEFAULT_EXCLUDED_DIRS:
         assert not any(f.startswith(f"{d}/") for f in committed)
+
+
+def test_commit_code_root_file_when_tasks_dir_gitignored(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    """Regression (F15): a root-level code change must still commit when the task lifecycle dir is
+    gitignored (what ``worc install`` seeds). The ``:(exclude)tasks/`` guard makes ``git add`` abort
+    with "paths ignored: tasks" (exit 1) beside a repo-root path, so it must be dropped when the dir
+    is ignored — otherwise no root-level change (package.json / tsconfig.json / …) can be committed.
+    """
+    _task(store)
+    (git_repo.clone / ".gitignore").write_text("tasks/\n.worc/\n", encoding="utf-8")
+    git_run(["add", ".gitignore"], git_repo.clone)
+    git_run(["commit", "-m", "chore: gitignore tasks/"], git_repo.clone)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    # Mirror finalize: the task file is moved into the (ignored) lifecycle dir before the commit.
+    (git_repo.clone / "tasks" / "done").mkdir(parents=True)
+    (git_repo.clone / "tasks" / "done" / "task-001.md").write_text("moved\n", encoding="utf-8")
+    (git_repo.clone / "tsconfig.json").write_text("{}\n", encoding="utf-8")  # a repo-root change
+
+    sha = gm.commit_code("task-001", "feat: root-level change")
+    assert sha is not None
+    committed = git_run(["show", "--name-only", "--format=", "HEAD"], git_repo.clone).split()
+    assert "tsconfig.json" in committed
+    assert not any(f.startswith("tasks/") for f in committed)
+
+
+def test_staged_pathspec_conditional_on_tasks_dir_ignore(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    """``staged_pathspec`` keeps the ``:(exclude)`` guard when the lifecycle dir is *tracked* but
+    drops it when the dir is *gitignored* (the guard is redundant there and breaks ``git add``)."""
+    # Tracked (the fixture ships no .gitignore): the exclude guard is present.
+    gm_tracked = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    assert gm_tracked.staged_pathspec(["a.py"]) == ["a.py", ":(exclude)tasks/"]
+
+    # Gitignored: the guard is dropped (fresh manager so the ignore-state cache reflects the file).
+    (git_repo.clone / ".gitignore").write_text("tasks/\n", encoding="utf-8")
+    gm_ignored = _manager(git_repo, store, tmp_path / "art2", make_git_config)
+    assert gm_ignored.staged_pathspec(["a.py"]) == ["a.py"]
+
+
+def test_commit_code_when_agent_staged_deletion(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    """Regression (F18): when the agent itself stages a delete/move (``git rm`` / ``git mv`` that
+    git did not record as a rename), ``changed_code_paths`` reports the removed path, which is
+    absent from the working tree and already fully in the index. ``git add -- <removed>`` would
+    abort with exit 128 ("pathspec did not match any files"). ``commit_code`` must still pass, and
+    the commit must contain both the deletion and the new file.
+    """
+    _task(store)
+    # A tracked file exists on the branch base; commit it first so it can later be `git rm`-ed.
+    (git_repo.clone / "old.py").write_text("old\n", encoding="utf-8")
+    git_run(["add", "old.py"], git_repo.clone)
+    git_run(["commit", "-m", "chore: add old.py"], git_repo.clone)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    # Agent stages a removal + creates a new untracked file (git does not see it as a rename).
+    git_run(["rm", "old.py"], git_repo.clone)
+    (git_repo.clone / "new.py").write_text("new\n", encoding="utf-8")
+
+    sha = gm.commit_code("task-001", "feat: relocate module")
+    assert sha is not None
+    committed = git_run(["show", "--name-status", "--format=", "HEAD"], git_repo.clone)
+    assert "D\told.py" in committed  # the staged deletion rode the commit
+    assert "A\tnew.py" in committed  # and so did the new file
+
+
+def test_commit_code_only_staged_deletion(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    """F18 edge: when the *only* change is a fully-staged deletion, the positive pathspec is empty,
+    so ``git add`` is skipped and the commit is made straight from the index.
+    """
+    _task(store)
+    (git_repo.clone / "gone.py").write_text("bye\n", encoding="utf-8")
+    git_run(["add", "gone.py"], git_repo.clone)
+    git_run(["commit", "-m", "chore: add gone.py"], git_repo.clone)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    git_run(["rm", "gone.py"], git_repo.clone)
+
+    sha = gm.commit_code("task-001", "feat: drop module")
+    assert sha is not None
+    committed = git_run(["show", "--name-status", "--format=", "HEAD"], git_repo.clone)
+    assert "D\tgone.py" in committed
+
+
+def test_staged_pathspec_drops_fully_staged_deletion(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    """Unit (F18): a fully-staged deletion is excluded from the ``git add`` pathspec while ordinary
+    modified/untracked code paths are kept.
+    """
+    (git_repo.clone / "keep.py").write_text("v1\n", encoding="utf-8")
+    git_run(["add", "keep.py"], git_repo.clone)
+    (git_repo.clone / "drop.py").write_text("v1\n", encoding="utf-8")
+    git_run(["add", "drop.py"], git_repo.clone)
+    git_run(["commit", "-m", "chore: seed"], git_repo.clone)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    # Stage a deletion of drop.py and an unstaged modification of keep.py.
+    git_run(["rm", "drop.py"], git_repo.clone)
+    (git_repo.clone / "keep.py").write_text("v2\n", encoding="utf-8")
+
+    pathspec = gm.staged_pathspec(["keep.py", "drop.py"])
+    assert "keep.py" in pathspec  # ordinary change stays
+    assert "drop.py" not in pathspec  # fully-staged deletion dropped
+
+
+def test_push_retries_transient_failure_then_succeeds(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    """F13: a transient git failure (here: ``.git/index.lock`` contention) is retried and then
+    succeeds — no ``manual_action_required`` for a self-healing blip."""
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    slept: list[float] = []
+    gm._sleep = slept.append  # type: ignore[assignment]
+    calls = {"n": 0}
+    real = gm._git_checked
+
+    def flaky(*args: str) -> str:
+        if args[:1] == ("push",):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise GitCommandError("fatal: Unable to create '.git/index.lock': File exists")
+        return real(*args)
+
+    gm._git_checked = flaky  # type: ignore[assignment]
+    assert gm._git_checked_retryable("push", "origin", "main") is not None
+    assert calls["n"] == 2  # failed once, retried once, then succeeded
+    assert slept == [_PUSH_RETRY_BACKOFF_SECONDS]
+
+
+def test_push_does_not_retry_deterministic_failure(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    """F13 regression: a deterministic failure (non-fast-forward reject) is NOT retried — it must
+    fail loudly and immediately so F12 surfaces the real cause, never be masked by retries."""
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    slept: list[float] = []
+    gm._sleep = slept.append  # type: ignore[assignment]
+    calls = {"n": 0}
+
+    def rejecting(*args: str) -> str:
+        calls["n"] += 1
+        raise GitCommandError("! [rejected] main -> main (non-fast-forward)")
+
+    gm._git_checked = rejecting  # type: ignore[assignment]
+    with pytest.raises(GitCommandError, match="non-fast-forward"):
+        gm._git_checked_retryable("push", "origin", "main")
+    assert calls["n"] == 1  # no retry
+    assert slept == []
 
 
 def test_changed_code_paths_filters_artifacts(

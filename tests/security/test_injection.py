@@ -48,6 +48,15 @@ def test_list_item_is_scanned_with_indexed_key() -> None:
     assert finding is not None and finding.key == "contacts[1]"
 
 
+@pytest.mark.parametrize("value", ["Fix `parse()` on empty input", "a | b table", "wat; now"])
+def test_display_fields_are_scanned_too_no_exemption(value: str) -> None:
+    # F5a decision: the scan stays uniform — `title` (and `contacts`) are NOT exempt. A backtick /
+    # pipe / semicolon in a display field is rejected; the rule "front-matter values are plain text"
+    # is documented in the authoring guides instead of weakening the scan.
+    assert scan_frontmatter({"id": "task-1", "title": value}) is not None
+    assert scan_frontmatter({"contacts": [value]}) is not None
+
+
 def test_body_like_content_in_a_value_is_only_caught_by_tokens() -> None:
     # A plain multi-word title is fine; only argv-shaped tokens trip the scanner.
     assert scan_value("title", "Fix the parser for src/foo.py") is None

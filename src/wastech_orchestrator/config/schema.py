@@ -366,7 +366,10 @@ class SkillsConfig:
     just filtered, never an error.
     """
 
-    dynamic: bool = True
+    # Off by default (F1): the once-per-task supervisor proposal is opt-in, so an absent ``skills``
+    # block (and a fresh ``worc install``) does not pay for a dynamic layer the repo may not need —
+    # fail-quiet, symmetric to how ``worc install`` now writes ``dynamic: false`` explicitly.
+    dynamic: bool = False
     strict: bool = False
 
 

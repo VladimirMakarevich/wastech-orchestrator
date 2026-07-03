@@ -208,7 +208,7 @@ telegram:                           # human-in-the-loop + notifications (optiona
 # env, or secrets.
 
 skills:                             # repo skill selection (optional, §2.1)
-  dynamic: true                     # supervisor proposes a node->skills map once per task (skip when no skills)
+  dynamic: false                    # supervisor proposes a node->skills map once per task; opt in (adds one turn)
   strict: false                     # false = warn+skip an unresolved operator pin; true = stop the task
   # At task start the orchestrator discovers every tracked SKILL.md in the clone (git ls-files,
   # whole-repo). Each flow node gets the skills the operator pinned on it (flow YAML `skills:`) plus,

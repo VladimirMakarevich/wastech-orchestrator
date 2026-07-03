@@ -53,7 +53,7 @@ Allowed fields:
 | Field | Required | Type | Meaning |
 | --- | --: | --- | --- |
 | `id` | yes | string | Stable task id. Must match `^[a-z0-9][a-z0-9._-]{0,63}$`. |
-| `title` | yes | string | Short human-readable title. Used for the default branch slug, PR title, commit messages, and reports. |
+| `title` | yes | string | Short human-readable title. Used for the default branch slug, PR title, commit messages, and reports. **Plain text only** — like every front-matter value it must not contain argv-shaped tokens (`` ` ``, `;`, `\|`, `$(`, a leading `-`); put code/shell snippets in the body, not the title. See [front-matter values are plain text](#front-matter-values-are-plain-text). |
 | `task_type` | no | string | Selects the flow that runs the task. Omitted ⇒ `implementation` (the default coding pipeline). Built-ins: `implementation`, `deep_research`, `security_audit`; an operator flow in `<repo>/.worc/flows/<task_type>.yaml` may add others. An unknown `task_type` (no matching flow) fails the task before any branch is created. The task only _names_ the flow — it never edits the graph. To author a new flow, see [flow-authoring.md](flow-authoring.md). |
 | `branch_name` | no | string \| null | Full task branch override. Omitted ⇒ `<repo.branch_prefix>/<id>-<slug(title)>`; set it to match a project's branch naming policy. See [`branch_name`](#branch_name). |
 | `auto_merge` | no | boolean | `true` requests auto-merge, `false` always opts out, omitted uses the instance default. A set per-task value wins outright over `git.auto_merge`. See [`auto_merge`](#auto_merge). |
@@ -67,6 +67,23 @@ Allowed fields:
 | `nodes` | no | mapping | Per-node overrides keyed by flow node id: `enabled: false` disables a node, and `model` / `reasoning` / `provider` overlay that node's executor for this run (best-effort). See [`nodes`](#nodes). |
 
 The current validation gate rejects unknown fields fail-closed (`unknown_top_level_field`). Keep task front matter limited to the fields above. A task can overlay a flow node's `model`/`reasoning`/`provider` per run via the `nodes` block (best-effort — an invalid value is warned and skipped at run time, never fatal), but cannot change commands, `extra_args`, credentials, sandbox, or any security policy (see [Provider, model, reasoning](#provider-model-reasoning)).
+
+A task **rejected at the validation gate** (before it was ever claimed — no branch, no `state.db` row) does not reserve its `id`. The normal loop works: the rejected file lands in `tasks/rejected/` with a reason, you fix it, and submit again **under the same `id`** — it is not treated as a `duplicate_task_id`. On the console the reject prints the machine reason **and** the offending field + cause (e.g. `title: argv-shaped token`), so you can see what to fix without opening the JSON report. A real duplicate (a task that was actually claimed / has a branch) is still rejected.
+
+### Front-matter values are plain text
+
+**Every front-matter value must be plain text** — no value may look like a CLI argument. A value is rejected (`injection_suspected`, quarantined to `tasks/rejected/`) when it **starts with `-`** or contains an **argv-shaped token**: a backtick `` ` ``, `;`, `|`, `$(`, or a newline. This applies uniformly to **all** fields, `title` and `contacts` included — the gate does not exempt "display" fields, so it never has to reason about which value might reach a command.
+
+This is a **structural** guarantee first (task content reaches agents only as file _paths_, never spliced into a CLI argv) and this scan is the belt-and-braces layer on top. In practice it costs you nothing: put any code, shell snippet, or punctuation-heavy phrasing in the task **body** (which is never scanned), and keep the front matter to short plain labels.
+
+```yaml
+# Rejected — backticks / pipe / leading dash in a front-matter value:
+title: "Fix `parse()` on empty | input"
+title: "--dangerously-skip"
+
+# Fine — plain-text title; the code lives in the body:
+title: "Fix parse() on empty input"
+```
 
 ## `id`
 

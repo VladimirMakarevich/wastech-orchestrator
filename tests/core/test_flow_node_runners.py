@@ -1876,8 +1876,25 @@ def test_publish_git_failure_after_finalize_raises_manual(tmp_path: Path) -> Non
     # committed the audit trail surfaces a resumable manual stop, not a terminal failure — so a
     # done-committed task is never mislabeled and its file is never stranded in done/ while marked
     # failed. The node run is recorded as failed for the audit trail. (F1 / MC2.)
+    #
+    # F12: the git stderr must be surfaced — logged at ERROR (daemon log) and persisted as a
+    # `publish_error` node artifact — not swallowed behind a bare `publish_failed`.
+    import logging
+
     from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
     from wastech_orchestrator.git_manager import GitCommandError
+
+    # Capture on the publish logger directly (the app logger sets propagate=False once configured,
+    # so caplog's root handler is unreliable across test orderings).
+    log_records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            log_records.append(record)
+
+    publish_logger = logging.getLogger("wastech_orchestrator.core.flow.nodes.publish")
+    capture = _Capture()
+    publish_logger.addHandler(capture)
 
     class FailingPushGit(FakeGit):
         def push(self, task_id: str, branch: str) -> bool:
@@ -1886,6 +1903,7 @@ def test_publish_git_failure_after_finalize_raises_manual(tmp_path: Path) -> Non
 
     node = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
     git, store = FailingPushGit(), FakeStore()
+    registered: list[tuple[str, str, str]] = []
     services = NodeServices(
         router=FakeRouter(_result()),
         check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),
@@ -1895,15 +1913,28 @@ def test_publish_git_failure_after_finalize_raises_manual(tmp_path: Path) -> Non
         clock=lambda: "ts",
         git=git,
         finalize=lambda: "/done/task-1.summary.md",  # finalize already ran (file moved + summary)
+        register_artifact=lambda t, k, p: registered.append((t, k, p)),
     )
     inputs = _inputs(tmp_path, branch="worc/task-1-x", pull_request_title="PR")
-    with pytest.raises(NodeManualRequired):
-        PublishNodeRunner(services, inputs).run(node, _ctx(node))
+    try:
+        with pytest.raises(NodeManualRequired, match="simulated push failure"):
+            PublishNodeRunner(services, inputs).run(node, _ctx(node))
+    finally:
+        publish_logger.removeHandler(capture)
     # commit_code + commit_audit committed before push failed; create_pr never reached.
     assert [c[0] for c in git.calls] == ["commit_code", "commit_audit", "push"]
     # The node run is closed as failed (not left dangling, not "published").
     assert store.completed[-1]["status"] == "failed"
     assert store.completed[-1]["error_class"] == "publish_failed"
+    # F12: the cause (git stderr) is logged at ERROR (daemon log) and persisted as an artifact —
+    # not swallowed behind a bare `publish_failed`.
+    assert any(
+        r.levelno == logging.ERROR and "publish git operation failed" in r.getMessage()
+        for r in log_records
+    )
+    assert registered and registered[-1][1] == "publish_error"
+    written = Path(registered[-1][2]).read_text(encoding="utf-8")
+    assert "simulated push failure" in written
 
 
 # -- max-turns gate (idea 29) -------------------------------------------------

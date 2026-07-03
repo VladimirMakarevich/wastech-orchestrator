@@ -176,12 +176,33 @@ def test_rerun_fresh_failed_to_done(git_repo, fake_cli, git_run, tmp_path: Path)
 # --- guards / refusals (no pipeline run) -------------------------------------------------
 
 
-def _seed(project: Path, clone: Path, row: TaskRow, *, checkpoint_node: str | None = None) -> Path:
+def _seed(
+    project: Path,
+    clone: Path,
+    row: TaskRow,
+    *,
+    checkpoint_node: str | None = None,
+    node_run: tuple[str, str] | None = None,
+) -> Path:
     config = _write_config(project, clone, claude="claude", codex="codex")
     db = clone / ".worc" / "state.db"
     db.parent.mkdir(parents=True, exist_ok=True)
     store = StateStore.open(db)
     store.insert_task(row)
+    if node_run is not None:  # (node_id, node_kind) for the interrupted node — F14 reads node_kind
+        from wastech_orchestrator.state_store import NodeRunRow
+
+        node_id, node_kind = node_run
+        store.record_node_run(
+            NodeRunRow(
+                task_id=row.task_id,
+                node_id=node_id,
+                node_kind=node_kind,
+                subtask_order=None,
+                status="failed",
+                started_at="2026-01-01T00:00:00+00:00",
+            )
+        )
     if checkpoint_node is not None:  # an interrupted engine task: a flow checkpoint to resume from
         from wastech_orchestrator.core.flow.registry import FlowRegistry
 
@@ -325,6 +346,71 @@ def test_rerun_continue_refuses_without_recoverable_stage(
     code = cli.main(["--config", str(config), "rerun", "task-1", "--continue"])
     assert code == 1
     assert "no recoverable node" in capsys.readouterr().out
+
+
+def test_rerun_continue_in_publish_allows_uncommitted_code(
+    git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F14: when ``commit_code`` failed inside the publish node, the agent's code is left
+    uncommitted in the working tree. ``rerun --continue`` re-enters publish (commit_code is
+    idempotent and docommits it), so that dirty state must NOT be refused as "unaccounted changes".
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "failed" / "task-1.md"
+    _complete_task_file(source, "task-1")
+    config = _seed(
+        project,
+        git_repo.clone,
+        TaskRow(
+            "task-1",
+            "T",
+            Status.MANUAL_ACTION_REQUIRED,
+            source_path=str(source),
+            branch="worc/task-1-t",
+            finished_at="2026-01-01T00:00:00+00:00",
+        ),
+        checkpoint_node="publish",
+        node_run=("publish", "publish"),
+    )
+    # Leave uncommitted code in the working tree (the failed publish's staged-but-uncommitted work).
+    (git_repo.clone / "feature.py").write_text("print('shipped')\n", encoding="utf-8")
+
+    def fake_resume(self: Orchestrator) -> PipelineResult:
+        return PipelineResult(task_id="task-1", final_status=Status.DONE)
+
+    monkeypatch.setattr(Orchestrator, "resume", fake_resume)
+    code = cli.main(["--config", str(config), "rerun", "task-1", "--continue", "--yes"])
+    assert code == 0  # not refused for a dirty tree; --continue proceeds into publish
+
+
+def test_rerun_continue_outside_publish_still_refuses_dirty_tree(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F14 regression: outside the publish region a dirty working tree is still unexpected work and
+    is refused, so relaxing the gate for publish does not weaken it elsewhere.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "failed" / "task-1.md"
+    _complete_task_file(source, "task-1")
+    config = _seed(
+        project,
+        git_repo.clone,
+        TaskRow(
+            "task-1",
+            "T",
+            Status.FAILED,
+            source_path=str(source),
+            branch="worc/task-1-t",
+        ),
+        checkpoint_node="review",
+        node_run=("review", "evaluator"),
+    )
+    (git_repo.clone / "stray.py").write_text("x = 1\n", encoding="utf-8")
+    code = cli.main(["--config", str(config), "rerun", "task-1", "--continue", "--yes"])
+    assert code == 1
+    assert "unaccounted changes" in capsys.readouterr().out
 
 
 def test_rerun_continue_revives_then_delegates_to_resume(

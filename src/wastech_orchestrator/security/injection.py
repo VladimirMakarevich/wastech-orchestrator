@@ -47,7 +47,13 @@ class InjectionFinding:
 
 
 def scan_frontmatter(frontmatter: Mapping[str, Any]) -> InjectionFinding | None:
-    """Scan all front-matter values for argv-shaped tokens; return the first finding or ``None``."""
+    """Scan all front-matter values for argv-shaped tokens; return the first finding or ``None``.
+
+    The scan is uniform across **every** front-matter value (F5a decision: keep it strict, no
+    per-field exemptions — the rule for authors is "front-matter values are plain text", documented
+    in the task-authoring guides). Keeping display fields in scope means the belt-and-braces scan
+    never has to reason about which field could reach an argv, so it cannot regress.
+    """
     for key, value in frontmatter.items():
         finding = scan_value(key, value)
         if finding is not None:

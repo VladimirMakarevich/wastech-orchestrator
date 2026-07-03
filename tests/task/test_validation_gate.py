@@ -26,15 +26,18 @@ def _gate(
     store_ids: set[str] | None = None,
     ledger_ids: set[str] | None = None,
     recovery_ids: set[str] | None = None,
+    validation_reject_ids: set[str] | None = None,
 ) -> ValidationGate:
     store_ids = store_ids or set()
     ledger_ids = ledger_ids or set()
     recovery_ids = recovery_ids or set()
+    validation_reject_ids = validation_reject_ids or set()
     return ValidationGate(
         config,
         store_has_task_id=lambda i: i in store_ids,
         ledger_has_task_id=lambda i: i in ledger_ids,
         is_recovery_rerun=lambda i: i in recovery_ids,
+        ledger_only_validation_rejects=lambda i: i in validation_reject_ids,
     )
 
 
@@ -309,6 +312,27 @@ def test_duplicate_task_id_in_store(config: OrchestratorConfig) -> None:
 
 def test_duplicate_task_id_in_ledger(config: OrchestratorConfig) -> None:
     result = _gate(config, ledger_ids={"task-001"}).validate(_src(_GOOD))
+    assert result.reason is ValidationReason.DUPLICATE_TASK_ID
+
+
+def test_validation_reject_only_ledger_id_is_resubmittable(config: OrchestratorConfig) -> None:
+    # F6: an id whose only ledger trace is a validation reject (no tasks row) does NOT count as a
+    # duplicate — the "rejected → fix → re-submit under the same id" loop works.
+    result = _gate(
+        config, ledger_ids={"task-001"}, validation_reject_ids={"task-001"}
+    ).validate(_src(_GOOD))
+    assert result.passed is True
+
+
+def test_validation_reject_but_also_claimed_still_duplicate(config: OrchestratorConfig) -> None:
+    # F6 regression: if a real tasks row also exists, the id is still reserved (a real attempt),
+    # even though a validation-reject ledger record is present.
+    result = _gate(
+        config,
+        store_ids={"task-001"},
+        ledger_ids={"task-001"},
+        validation_reject_ids={"task-001"},
+    ).validate(_src(_GOOD))
     assert result.reason is ValidationReason.DUPLICATE_TASK_ID
 
 

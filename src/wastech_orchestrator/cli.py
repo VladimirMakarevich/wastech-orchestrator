@@ -1258,6 +1258,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         # the next `run`/`watch`/restart continues it from the checkpoint (until max_blocked_s).
         print(f"{result.task_id}: paused — provider unavailable, will resume")
         return _EXIT_BY_STATUS[Status.RUNNING]
+    if result.validation_reason:
+        # F5a: a gate reject prints the machine reason AND the field+cause detail, so the operator
+        # sees WHICH front-matter field and WHY without opening the JSON validation report.
+        detail = f" ({result.validation_detail})" if result.validation_detail else ""
+        print(f"{result.task_id}: rejected — {result.validation_reason}{detail}", file=sys.stderr)
+        return _EXIT_BY_STATUS.get(result.final_status, 1)
     suffix = f" → {result.pr_url}" if result.pr_url else ""
     print(f"{result.task_id}: {result.final_status.value}{suffix}")
     return _EXIT_BY_STATUS.get(result.final_status, 1)
@@ -2739,6 +2745,16 @@ def _list_ids(store: StateStore | None, scope: str | None) -> int:
     return 0
 
 
+def _print_section_ids(sections: list[tuple[str, list[dict[str, str | None]]]]) -> int:
+    """Print the bare ids of the focused sections (F4): the same disk+DB source as the table view,
+    so `--pending --format ids` lists queued tasks that have no DB row yet. An unparseable pending
+    file has no id and is skipped (there is no usable id to print)."""
+    ids = {tid for _, items in sections for e in items if (tid := e.get("task_id"))}
+    for task_id in sorted(ids):
+        print(task_id)
+    return 0
+
+
 def cmd_list(args: argparse.Namespace) -> int:
     """Enumerate tasks read-only: the active task, the ``tasks/pending`` queue, and recent terminal
     tasks. The default view shows all three; ``--pending`` / ``--recent [N]`` / ``--all`` focus it.
@@ -2754,8 +2770,15 @@ def cmd_list(args: argparse.Namespace) -> int:
     fmt = "ids" if args.scope else args.format
     db_path = Path(worc_home_for(config)) / "state.db"
     store = StateStore.open_readonly(db_path) if db_path.is_file() else None
+    # F4: when a section focus flag is combined with `--format ids`, derive the ids from the same
+    # source as the table view (disk pending files + DB) instead of DB-only — a freshly-queued
+    # pending task has no DB row yet, so the DB-only path printed nothing. `--scope` stays
+    # DB-derived (it is completion-facing, about rerun/status eligibility, which is a DB property).
+    section_focus = bool(args.all or args.pending or args.recent is not None)
     try:
         if fmt == "ids":
+            if args.scope is None and section_focus:
+                return _print_section_ids(_list_sections(args, config, store))
             return _list_ids(store, args.scope)
         sections = _list_sections(args, config, store)
     finally:

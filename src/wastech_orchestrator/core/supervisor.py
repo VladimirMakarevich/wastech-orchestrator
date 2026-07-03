@@ -142,13 +142,48 @@ _BUILTIN_HANDOFF = (
 )
 
 
+# F7b: the max reasoning tiers make a structured-output turn fragile — at ``xhigh`` the provider
+# spends the turn on thinking and fails to emit a valid tool call under the schema (observed:
+# ``error_max_structured_output_retries``), while the same free-text turn passes. A target-only
+# summary/proposal does not need max reasoning, so schema turns are capped to ``high`` — the free-
+# text observe turns keep the configured tier. Deterministic (no reliance on provider error
+# classification), and it keeps the default from being brittle out of the box (relates to F2).
+_MAX_REASONING_TIERS = frozenset({"xhigh", "max"})
+_SCHEMA_REASONING_CAP = "high"
+
+
+def _schema_safe_reasoning(
+    reasoning: str | None, output_schema: dict[str, Any] | None
+) -> str | None:
+    """Cap a structured-output turn's reasoning to ``high`` when configured at a max tier (F7b).
+
+    Free-text turns (``output_schema is None``) keep the configured value unchanged.
+    """
+    if output_schema is None or reasoning is None:
+        return reasoning
+    return _SCHEMA_REASONING_CAP if reasoning in _MAX_REASONING_TIERS else reasoning
+
+
 def _finalize_schema(*, with_delta: bool, with_follow_ups: bool) -> dict[str, Any]:
     """Build the finalize turn's structured schema for the enabled outputs (all on one turn).
 
     ``summary`` is always required; ``memory_delta`` is added when memory is enabled (AC-W1) and
     ``follow_ups`` when the flow opted in (``supervisor.emit_follow_ups``). When neither is enabled
     the caller runs a free-text turn instead (today's behavior — AC-S4), so this is never called."""
-    properties: dict[str, Any] = {"summary": {"type": "string", "minLength": 1}}
+    properties: dict[str, Any] = {
+        "summary": {
+            "type": "string",
+            "minLength": 1,
+            # F10: without guidance the model packs the whole synthesis into one flat line (0 `\n`)
+            # and the PR body renders as a headless slab. Ask for structured markdown prose.
+            "description": (
+                "The whole-task summary as Markdown prose: a short lead paragraph, then 2–4 "
+                "sections with `##` subheadings and real line breaks between them. Plain prose "
+                "only — do NOT embed follow_ups, memory_delta, or lessons here; return those in "
+                "their own fields. Do not wrap the whole thing in a code fence."
+            ),
+        }
+    }
     if with_delta:
         properties["memory_delta"] = DELTA_OUTPUT_SCHEMA
     if with_follow_ups:
@@ -231,6 +266,44 @@ def _render_follow_ups_section(follow_ups: tuple[FollowUp, ...]) -> str:
     return "\n".join(lines) + "\n"
 
 
+# F16: pseudo-tags a model sometimes emits instead of a clean tool call — the whole
+# `<summary>…</summary><follow_ups>[JSON]</follow_ups><memory_delta>[JSON]</memory_delta>
+# <lessons>[JSON]</lessons>` dump. The machine sections (`follow_ups`/`memory_delta`/`lessons`)
+# must NEVER reach `summary.md` (= the PR body): they belong only in the follow-ups section and the
+# memory tiers. So the prose is cut at the first such tag, and a leading `<summary>` opener dropped.
+_SUMMARY_CUT_TAGS = (
+    "</summary>",
+    "<summary>",
+    "<follow_ups>",
+    "</follow_ups>",
+    "<follow-ups>",
+    "<memory_delta>",
+    "</memory_delta>",
+    "<lessons>",
+    "</lessons>",
+)
+_SUMMARY_OPEN_TAG = "<summary>"
+
+
+def _sanitize_summary(summary_text: str) -> str:
+    """Strip a leaked structured dump from a finalize ``summary`` (F16).
+
+    Returns only the human prose: a leading ``<summary>`` opener is dropped, and the text is cut at
+    the first machine tag (``</summary>``, ``<follow_ups>``, ``<memory_delta>``, ``<lessons>``) so a
+    raw ``memory_delta``/``lessons``/``follow_ups`` JSON dump can never ride into ``summary.md``
+    (the PR body). Clean prose (the common case) passes through unchanged.
+    """
+    text = summary_text.strip()
+    if text.startswith(_SUMMARY_OPEN_TAG):
+        text = text[len(_SUMMARY_OPEN_TAG) :]
+    cut = len(text)
+    for tag in _SUMMARY_CUT_TAGS:
+        idx = text.find(tag)
+        if idx != -1:
+            cut = min(cut, idx)
+    return text[:cut].strip()
+
+
 def _render_handoff_brief(structured: Mapping[str, Any]) -> str | None:
     """Render the interpretive three-section handoff brief; ``None`` when no section has content.
 
@@ -295,6 +368,8 @@ class SupervisorStorePort(Protocol):
 
     def record_evaluation(self, row: EvaluationRow) -> int: ...
 
+    def get_evaluations(self, task_id: str) -> list[EvaluationRow]: ...
+
     def get_node_lineage(
         self, task_id: str, node_id: str, subtask_order: int | None = None
     ) -> NodeLineageRow | None: ...
@@ -340,6 +415,12 @@ class Supervisor:
         # persisted to / hydrated from ``node_lineage`` so it survives a restart (independent of the
         # editing-lineage authors). ``None`` until the first turn runs or the persisted row is read.
         self._own_session_id: str | None = None
+        # Whether a supervisor turn actually *succeeded this process* (distinct from
+        # ``_own_session_id``, which ``_resume_session`` sets to the stale persisted id *before* the
+        # turn — so it is non-None even after a failed resume). Gates finalize's session-vs-digest
+        # choice: a warm live session synthesizes normally; otherwise finalize reseeds from the
+        # recorded ``supervisor_step`` observations rather than resuming a possibly-dead session.
+        self._session_live: bool = False
 
     # -- per-step observation --------------------------------------------------
 
@@ -392,10 +473,24 @@ class Supervisor:
         Best-effort: a turn that cannot run yields no ``summary.md`` (the orchestrator's
         deterministic minimal summary then applies), a ``None`` delta, and no follow-ups.
         ``summary.json`` is always written. Returns the summary path + the delta + the follow-ups.
+
+        On a revived task where no supervisor turn succeeded this process (the durable session is
+        gone / unresumable), we do **not** gamble on resuming that dead session: finalize reseeds a
+        single fresh turn from the ``supervisor_step`` observations already recorded in
+        ``state.db``. Same one finalize turn, different input — the budget contract is unchanged.
         """
         # ``node_run_id=0`` is the once-per-task finalize sentinel; per-step observations use the
         # observed step's id, so each supervisor turn writes a distinct artifact dir (no collision).
-        summary_text, delta, follow_ups = self._finalize_turn(task_id, task_title, emit_delta)
+        warm = self._session_live
+        digest = None if warm else self._finalize_digest(task_id)
+        if not warm:
+            _LOG.info(
+                "finalize re-synthesized from recorded observations (session unavailable)",
+                extra={"task_id": task_id, "have_digest": digest is not None},
+            )
+        summary_text, delta, follow_ups = self._finalize_turn(
+            task_id, task_title, emit_delta, digest=digest, resume=warm
+        )
         self._record(
             task_id,
             kind="supervisor_final",
@@ -405,14 +500,26 @@ class Supervisor:
                 "summary_written": summary_text is not None,
                 "memory_delta": delta is not None,
                 "follow_ups": len(follow_ups),
+                "recovered_from_digest": not warm,
             },
         )
+        # F16: a model sometimes emits its structured output as a `<summary>…</summary>
+        # <follow_ups>[JSON]</follow_ups><memory_delta>…` text dump instead of a clean tool call.
+        # Sanitize so only the human prose reaches summary.md (the PR body) — never a raw
+        # follow_ups/memory_delta/lessons dump.
+        clean_summary = _sanitize_summary(summary_text) if summary_text else ""
         task_dir = Path(task_artifact_dir(self._artifacts_root, task_id))
-        self._write_summary_json(task_dir, task_id, task_title, summary_text, follow_ups)
-        if not summary_text or not summary_text.strip():
+        self._write_summary_json(task_dir, task_id, task_title, clean_summary or None, follow_ups)
+        if not clean_summary:
             return FinalizeResult(summary_path=None, candidate_delta=delta, follow_ups=follow_ups)
         md_path = task_dir / "summary.md"
-        body = summary_text.rstrip("\n") + "\n"
+        # F10: prefix a deterministic H1 so the PR body is never a headless paragraph-slab — unless
+        # the model already opened with its own top-level heading.
+        if clean_summary.startswith("# "):
+            body = clean_summary
+        else:
+            body = f"# {task_title}\n\n{clean_summary}"
+        body = body.rstrip("\n") + "\n"
         if follow_ups:  # surface the evidence-gated debt/follow-ups as a section in the PR body
             body += "\n" + _render_follow_ups_section(follow_ups)
         md_path.write_text(body, encoding="utf-8")
@@ -420,22 +527,42 @@ class Supervisor:
         return FinalizeResult(summary_path=md_path, candidate_delta=delta, follow_ups=follow_ups)
 
     def _finalize_turn(
-        self, task_id: str, task_title: str, emit_delta: bool
+        self,
+        task_id: str,
+        task_title: str,
+        emit_delta: bool,
+        *,
+        digest: str | None = None,
+        resume: bool = True,
     ) -> tuple[str | None, CandidateDelta | None, tuple[FollowUp, ...]]:
         """Run the single finalize turn. Free-text when neither memory nor follow-ups are enabled
         (today's behavior — AC-S4); otherwise a structured ``{summary, ...}`` turn, so every enabled
-        output (``memory_delta`` / ``follow_ups``) rides one turn (AC-W1 — no extra LLM call)."""
+        output (``memory_delta`` / ``follow_ups``) rides one turn (AC-W1 — no extra LLM call).
+
+        ``digest`` (recovered ``supervisor_step`` observations) and ``resume=False`` are set
+        together on the revive path: the turn synthesizes from the digest on a fresh session rather
+        than resuming a dead one."""
         with_follow_ups = self._emit_follow_ups
         if not emit_delta and not with_follow_ups:
-            text = self._run(task_id, self._finalize_prompt(task_id, task_title), node_run_id=0)
+            text = self._run(
+                task_id,
+                self._finalize_prompt(task_id, task_title, digest=digest),
+                node_run_id=0,
+                resume_session=resume,
+            )
             return text, None, ()
         result = self._run_result(
             task_id,
             self._finalize_prompt(
-                task_id, task_title, with_delta=emit_delta, with_follow_ups=with_follow_ups
+                task_id,
+                task_title,
+                with_delta=emit_delta,
+                with_follow_ups=with_follow_ups,
+                digest=digest,
             ),
             node_run_id=0,
             output_schema=_finalize_schema(with_delta=emit_delta, with_follow_ups=with_follow_ups),
+            resume_session=resume,
         )
         if result is None or result.structured_output is None:
             return None, None, ()
@@ -446,6 +573,32 @@ class Supervisor:
             parse_follow_ups(result.structured_output.get("follow_ups")) if with_follow_ups else ()
         )
         return summary_text, delta, follow_ups
+
+    def _finalize_digest(self, task_id: str) -> str | None:
+        """Reconstruct the finalize input from recorded ``supervisor_step`` observations.
+
+        The per-step notes are immutable append-only rows in ``evaluations`` (``state.db``) — always
+        present on a revived task, independent of the durable session and of logging config. Renders
+        the usable notes as compact ``- [node → outcome] note`` lines, skipping the ones that failed
+        to run or added nothing (empty note). Returns ``None`` when nothing usable was recorded (the
+        turn then runs unseeded — same as today's fresh-session finalize)."""
+        lines: list[str] = []
+        for row in self._store.get_evaluations(task_id):
+            if row.kind != "supervisor_step":
+                continue
+            try:
+                payload = json.loads(row.findings_json)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            note = str(payload.get("note") or "").strip()
+            if not note:  # observation_failed or "nothing to add" — no material to synthesize from
+                continue
+            node = str(payload.get("node") or "?")
+            outcome = str(payload.get("outcome") or "?")
+            lines.append(f"- [{node} → {outcome}] {note}")
+        return "\n".join(lines) if lines else None
 
     # -- intra-task subtask handoff --------------------------------------------
 
@@ -512,9 +665,13 @@ class Supervisor:
 
     # -- internals -------------------------------------------------------------
 
-    def _run(self, task_id: str, prompt: str, *, node_run_id: int) -> str | None:
+    def _run(
+        self, task_id: str, prompt: str, *, node_run_id: int, resume_session: bool = True
+    ) -> str | None:
         """Run one read-only supervisor turn and return its final message (``None`` on failure)."""
-        result = self._run_result(task_id, prompt, node_run_id=node_run_id)
+        result = self._run_result(
+            task_id, prompt, node_run_id=node_run_id, resume_session=resume_session
+        )
         return result.final_message if result is not None else None
 
     def _run_result(
@@ -524,6 +681,7 @@ class Supervisor:
         *,
         node_run_id: int,
         output_schema: dict[str, Any] | None = None,
+        resume_session: bool = True,
     ) -> AgentRunResult | None:
         """Run one read-only supervisor LLM turn on its own session; return the full result.
 
@@ -536,6 +694,10 @@ class Supervisor:
         upfront proposal, per-step observation, and finalize each pass a distinct id, so successive
         turns never collide on the same path (the artifact writer never overwrites). A non-None
         ``output_schema`` forces structured output (the proposal); ``None`` leaves it free-text.
+
+        ``resume_session=False`` starts a fresh session (no ``session_id``): finalize uses it on a
+        revived task, where resuming the possibly-dead persisted session is the exact failure mode —
+        it reseeds from the recorded observations instead (the digest rides in the prompt).
         """
         try:
             route = self._router.resolve_route(_SUPERVISOR_IDENTITY, None)
@@ -549,9 +711,9 @@ class Supervisor:
                 attempt=1,
                 node_run_id=node_run_id,  # not a graph node; audit lives in ``evaluations``
                 model=self._settings.model,
-                reasoning=self._settings.reasoning,
+                reasoning=_schema_safe_reasoning(self._settings.reasoning, output_schema),
                 output_schema=output_schema,
-                session_id=self._resume_session(task_id, route),
+                session_id=self._resume_session(task_id, route) if resume_session else None,
             )
             outcome = self._router.run_stage(request, route)
         except Exception as exc:  # noqa: BLE001 — advisory layer must never break the task
@@ -565,6 +727,7 @@ class Supervisor:
             return None
         if result.session_id:
             self._own_session_id = result.session_id  # resume_own_lineage continuity (in-memory)
+            self._session_live = True  # a turn succeeded this process — the session is usable
             self._persist_session(task_id, result.session_id, outcome.provider_used)
         return result
 
@@ -661,11 +824,22 @@ class Supervisor:
         *,
         with_delta: bool = False,
         with_follow_ups: bool = False,
+        digest: str | None = None,
     ) -> str:
         # The finalize lens (flow ``finalize_role_file`` → built-in) carries the summary emphasis;
         # only the machine-contract additions (task context, follow-ups, memory delta) are appended
         # in code, so a flow author reshapes wording but never the parsed schema.
         prompt = self._finalize_base(task_id) + f"\n\n## Task under review\n{task_title}\n"
+        if digest:
+            # Revive path: the working session that accumulated per-step context is gone, so seed
+            # the synthesis from the recorded observations instead of relying on session memory.
+            prompt += (
+                "\n## Recovered step observations\n"
+                "Your own working session for this task is unavailable (the task was resumed from "
+                "a checkpoint), so synthesize the summary from these recorded per-step "
+                "observations rather than from session memory:\n\n"
+                f"{digest}\n"
+            )
         if with_follow_ups:
             prompt += (
                 "\n## Technical debt / follow-ups\n"
@@ -747,10 +921,18 @@ class Supervisor:
         summary_text: str | None,
         follow_ups: tuple[FollowUp, ...] = (),
     ) -> None:
-        """Write the local-only ``summary.json`` metadata (never committed). Always written.
+        """Write the local-only ``summary.json`` metadata (never committed).
 
         Carries the evidence-gated ``follow_ups`` (empty unless the flow opted in) so the debt
-        signal is machine-readable beside the prose summary."""
+        signal is machine-readable beside the prose summary.
+
+        F16: a *failed* finalize (empty ``summary_text``) must NOT clobber an existing non-empty
+        ``summary.json`` with a blank one — symmetric to leaving ``summary.md`` untouched on a
+        failure. So an empty summary is a no-op when a prior non-empty one is on disk (e.g. a rerun
+        whose finalize turn failed after the first attempt succeeded)."""
+        path = task_dir / "summary.json"
+        if not summary_text and self._existing_summary_nonempty(path):
+            return
         payload: dict[str, Any] = {"what": task_title, "summary": summary_text or ""}
         if follow_ups:
             payload["follow_ups"] = [
@@ -764,7 +946,6 @@ class Supervisor:
                 }
                 for fu in follow_ups
             ]
-        path = task_dir / "summary.json"
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
@@ -773,6 +954,15 @@ class Supervisor:
         except OSError:
             return
         self._register(task_id, "summary_json", str(path))
+
+    @staticmethod
+    def _existing_summary_nonempty(path: Path) -> bool:
+        """Whether ``summary.json`` at *path* already has a non-empty ``summary`` (F16 guard)."""
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        return bool(isinstance(existing, dict) and str(existing.get("summary", "")).strip())
 
     def _register(self, task_id: str, kind: str, path: str) -> None:
         if self._register_artifact is not None:
