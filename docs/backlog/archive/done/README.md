@@ -23,3 +23,8 @@ This folder contains backlog documents for product work that has already shipped
 | [Telegram step-trace (live run progress)](telegram-step-trace.md) | implemented |
 | [Transient provider-failure recovery](transient-provider-failure-recovery.md) | implemented |
 | [Windows / Cross-Platform Support](windows-cross-platform-support.md) | implemented |
+| [Improvements intake (9 usage-driven items)](improvements.md) | all 9 implemented (2026-07-02) |
+| [Prompt & supervisor authoring contract](prompt-and-supervisor-authoring-contract.md) | implemented (2026-07-02) |
+| [Generic node-output prompt variables](node-output-prompt-variables.md) | implemented (2026-07-02) |
+| [Sub-task context handoff (intra-task decompose)](subtask-context-handoff.md) | implemented (2026-07-02) |
+| [Autonomous run — open questions & decisions](autonomous-run-open-questions.md) | implementation log (2026-07-02) |

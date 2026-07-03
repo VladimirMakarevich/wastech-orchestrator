@@ -1,6 +1,6 @@
 # Improvements
 
-Status: **5 of 9 implemented** (2, 4, 6, 7, 8 done; 1, 3, 5, 9 open) Date: 2026-07-01 Owner: Vladimir Makarevich
+Status: **all 9 implemented** (2026-07-02) Date: 2026-07-01 Owner: Vladimir Makarevich
 
 Items 1, 3, 5, and 9 share the prompt/supervisor authoring surface and are worked through together in one refinement ADR: [prompt-and-supervisor-authoring-contract.md](prompt-and-supervisor-authoring-contract.md).
 
