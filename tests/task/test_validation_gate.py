@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from wastech_orchestrator.config.schema import OrchestratorConfig
+from wastech_orchestrator.config.schema import BranchMode, OrchestratorConfig, PublishScope
 from wastech_orchestrator.observability.logging import LOGGER_NAME
 from wastech_orchestrator.task.model import NodeOverride
 from wastech_orchestrator.task.parser import ParsedSource
@@ -872,3 +872,79 @@ def test_branch_name_over_byte_ceiling_rejected(config: OrchestratorConfig) -> N
     result = _gate(config).validate(_src(text))
     assert result.passed is False
     assert result.reason is ValidationReason.INVALID_BRANCH_NAME
+
+
+# --- branch mode / branch_ref / publish (branch-mode ADR) --------------------------------
+
+_BODY = "\n\n## Description\n\nDo it.\n"
+
+
+def _fm(config: OrchestratorConfig, **fields: str):
+    lines = "".join(f"{k}: {v}\n" for k, v in fields.items())
+    text = f"---\nid: task-001\ntitle: T\n{lines}---{_BODY}"
+    return _gate(config).validate(_src(text))
+
+
+def test_branch_mode_valid_parses(config: OrchestratorConfig) -> None:
+    result = _fm(config, branch_mode="current")
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.branch_mode is BranchMode.CURRENT
+
+
+def test_branch_mode_invalid_rejected(config: OrchestratorConfig) -> None:
+    result = _fm(config, branch_mode="sideways")
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_BRANCH_MODE
+
+
+def test_existing_requires_branch_ref(config: OrchestratorConfig) -> None:
+    result = _fm(config, branch_mode="existing")
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_BRANCH_MODE
+
+
+def test_existing_with_branch_ref_passes(config: OrchestratorConfig) -> None:
+    result = _fm(config, branch_mode="existing", branch_ref="feature/keep")
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.branch_mode is BranchMode.EXISTING
+    assert result.normalized.branch_ref == "feature/keep"
+
+
+def test_branch_ref_without_existing_rejected(config: OrchestratorConfig) -> None:
+    # branch_ref is a contradiction unless the (effective) mode is `existing`.
+    result = _fm(config, branch_ref="feature/keep")  # mode defaults to `new`
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_BRANCH_MODE
+
+
+def test_branch_ref_invalid_name_rejected(config: OrchestratorConfig) -> None:
+    result = _fm(config, branch_mode="existing", branch_ref='"bad ref"')
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_BRANCH_MODE
+
+
+def test_publish_valid_parses(config: OrchestratorConfig) -> None:
+    result = _fm(config, publish="push")
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.publish is PublishScope.PUSH
+
+
+def test_publish_invalid_rejected(config: OrchestratorConfig) -> None:
+    result = _fm(config, publish="rebase")
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_BRANCH_MODE
+
+
+def test_branch_name_ignored_outside_new_mode(
+    config: OrchestratorConfig, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(logging.getLogger(LOGGER_NAME), "propagate", True)
+    with caplog.at_level(logging.WARNING):
+        result = _fm(config, branch_mode="current", branch_name="feature/x")
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.branch_name is None  # dropped, not a hard reject
+    assert "is ignored in branch_mode" in caplog.text

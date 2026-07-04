@@ -15,6 +15,7 @@ import pytest
 
 from wastech_orchestrator.check_runner import CheckOutcome, CheckRunResult
 from wastech_orchestrator.checks.model import ResolvedCheck, ResolvedCheckSet
+from wastech_orchestrator.config.schema import BranchMode, PublishScope
 from wastech_orchestrator.core.flow.contracts import (
     OutputPolicy,
     PermissionProfile,
@@ -1759,8 +1760,8 @@ class FakeGit:
         self.calls.append(("commit_audit", task_id))
         return "sha-audit"
 
-    def push(self, task_id: str, branch: str) -> bool:
-        self.calls.append(("push", task_id, branch))
+    def push(self, task_id: str, branch: str, **kw: object) -> bool:
+        self.calls.append(("push", task_id, branch, kw.get("mode")))
         return True
 
     def create_pr(self, task_id: str, branch: str, *, title: str, body_path: str) -> str | None:
@@ -1835,6 +1836,54 @@ def test_publish_pull_request_requires_body_path(tmp_path: Path) -> None:
     assert git.calls == []  # nothing committed/pushed/PR'd
 
 
+def _publish_git(tmp_path: Path, **input_kw: Any) -> FakeGit:
+    """Run a full PR publish node with the given NodeInputs overrides; return the FakeGit."""
+    node = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
+    git = FakeGit()
+    services = _services(
+        FakeRouter(_result()),
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=git,
+    )
+    inputs = _inputs(tmp_path, branch="feature/x", summary_body_path="/s/summary.md", **input_kw)
+    PublishNodeRunner(services, inputs).run(node, _ctx(node))
+    return git
+
+
+def test_publish_cap_commit_stops_after_commits(tmp_path: Path) -> None:
+    # A `commit` cap stops after the code/audit commits — no push, no PR (branch-mode ADR).
+    git = _publish_git(tmp_path, publish_scope=PublishScope.COMMIT)
+    assert [c[0] for c in git.calls] == ["commit_code", "commit_audit"]
+
+
+def test_publish_cap_commit_needs_no_body(tmp_path: Path) -> None:
+    # A `commit` cap opens no PR, so a missing PR body is not an error (unlike the full path).
+    node = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
+    services = _services(
+        FakeRouter(_result()),
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=FakeGit(),
+    )
+    inputs = _inputs(tmp_path, branch="feature/x", publish_scope=PublishScope.COMMIT)  # no body
+    result = PublishNodeRunner(services, inputs).run(node, _ctx(node))  # no PublishConfigError
+    assert result.outcome.kind == "done"
+
+
+def test_publish_cap_push_stops_before_pr(tmp_path: Path) -> None:
+    # A `push` cap runs commits + push but skips the PR.
+    git = _publish_git(tmp_path, publish_scope=PublishScope.PUSH)
+    assert [c[0] for c in git.calls] == ["commit_code", "commit_audit", "push"]
+
+
+def test_publish_forwards_branch_mode_to_push(tmp_path: Path) -> None:
+    # The effective branch mode reaches push (so it may target the base branch in current/existing).
+    git = _publish_git(tmp_path, branch_mode=BranchMode.CURRENT)
+    push = next(c for c in git.calls if c[0] == "push")
+    assert push[-1] is BranchMode.CURRENT
+
+
 def test_publish_finalize_provides_pr_body(tmp_path: Path) -> None:
     # With a finalize hook, the committed summary it returns is the PR body — no summary_body_path
     # needed, and finalize runs before the audit commit.
@@ -1906,7 +1955,7 @@ def test_publish_git_failure_after_finalize_raises_manual(tmp_path: Path) -> Non
     publish_logger.addHandler(capture)
 
     class FailingPushGit(FakeGit):
-        def push(self, task_id: str, branch: str) -> bool:
+        def push(self, task_id: str, branch: str, **_: object) -> bool:
             self.calls.append(("push", task_id, branch))
             raise GitCommandError("simulated push failure")
 

@@ -305,6 +305,42 @@ def test_rerun_refuses_when_task_file_truly_missing(
     assert "source file is missing" in capsys.readouterr().out
 
 
+def test_rerun_refuses_fresh_in_operator_owned_branch_mode(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # branch-mode ADR: a fresh rerun resets the branch to base — forbidden in existing/current mode,
+    # where the branch is the operator's. The refusal directs them to `rerun --continue` instead.
+    from wastech_orchestrator.config.schema import BranchMode
+    from wastech_orchestrator.task.model import NormalizedTask
+    from wastech_orchestrator.task.parser import write_normalized
+
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "failed" / "task-1.md"
+    _complete_task_file(source, "task-1")
+    config = _seed(
+        project,
+        git_repo.clone,
+        TaskRow("task-1", "T", Status.FAILED, source_path=str(source), branch="feature/keep"),
+    )
+    # The rerun guard reads the effective branch mode from the persisted normalized manifest.
+    write_normalized(
+        NormalizedTask(
+            id="task-1",
+            title="T",
+            description="x",
+            branch_mode=BranchMode.EXISTING,
+            branch_ref="feature/keep",
+        ),
+        git_repo.clone / ".worc",
+    )
+    code = cli.main(["--config", str(config), "rerun", "task-1"])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "branch_mode 'existing'" in out and "operator-owned" in out
+    assert "rerun --continue" in out
+
+
 def test_rerun_dry_run_writes_nothing(
     git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

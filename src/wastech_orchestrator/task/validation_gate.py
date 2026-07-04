@@ -25,7 +25,12 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from wastech_orchestrator.config.schema import TRUST_LEVELS, OrchestratorConfig
+from wastech_orchestrator.config.schema import (
+    TRUST_LEVELS,
+    BranchMode,
+    OrchestratorConfig,
+    PublishScope,
+)
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.security.injection import scan_frontmatter
 from wastech_orchestrator.task.model import (
@@ -51,6 +56,9 @@ VALIDATION_REPORT_FILENAME = "validation_report.json"
 # Characters allowed alongside printable text (everything else counts as a control char).
 _ALLOWED_CONTROL = {"\t", "\n", "\r"}
 
+# The resolved branch-mode field family: (branch_mode, branch_ref, publish, branch_name).
+_BranchFields = tuple[BranchMode | None, str | None, PublishScope | None, str | None]
+
 
 class ValidationReason(StrEnum):
     """The Phase-A structural reject reasons. Canonical machine-readable strings."""
@@ -66,6 +74,11 @@ class ValidationReason(StrEnum):
     INVALID_FIELD_TYPE = "invalid_field_type"
     INVALID_TASK_ID = "invalid_task_id"
     INVALID_BRANCH_NAME = "invalid_branch_name"
+    # The whole branch-mode field family: a bad ``branch_mode``/``publish`` enum value, a malformed
+    # ``branch_ref``, or a mode/ref pairing violation (``existing`` requires ``branch_ref``; a
+    # ``branch_ref`` outside ``existing`` is a contradiction). IO-free — the ref-existence and
+    # detached-HEAD checks run at the orchestrator's pre-branch preflight (they need git).
+    INVALID_BRANCH_MODE = "invalid_branch_mode"
     DUPLICATE_TASK_ID = "duplicate_task_id"
     INVALID_NODE_OVERRIDE = "invalid_node_override"
     INVALID_DEPENDS_ON = "invalid_depends_on"
@@ -255,6 +268,10 @@ class ValidationGate:
         branch_name, branch_reject = self._branch_name(frontmatter.get("branch_name"))
         if branch_reject is not None:
             return branch_reject, None
+        branch_fields, branch_mode_reject = self._branch_fields(frontmatter, branch_name)
+        if branch_mode_reject is not None:
+            return branch_mode_reject, None
+        branch_mode, branch_ref, publish, branch_name = branch_fields
         raw_task_type = frontmatter.get("task_type")
         task_type = (str(raw_task_type).strip() or None) if isinstance(raw_task_type, str) else None
         # _check_field_types already enforced a non-empty string when present; absent ⇒ default.
@@ -266,6 +283,9 @@ class ValidationGate:
             description=body.strip(),
             task_type=task_type,
             branch_name=branch_name,
+            branch_mode=branch_mode,
+            branch_ref=branch_ref,
+            publish=publish,
             auto_merge=_as_tristate(frontmatter.get("auto_merge")),
             prompt_audit=_as_tristate(frontmatter.get("prompt_audit")),
             decomposition=_as_tristate(frontmatter.get("decomposition")),
@@ -305,6 +325,11 @@ class ValidationGate:
         task_type = fm.get("task_type")
         if "task_type" in fm and task_type is not None and not isinstance(task_type, str):
             return _Reject(ValidationReason.INVALID_FIELD_TYPE, "task_type must be a string")
+        # branch_mode/branch_ref/publish primitive shape (their enum-value / ref / pairing rules run
+        # in ``_branch_fields`` where the effective mode is known).
+        for key in ("branch_mode", "branch_ref", "publish"):
+            if key in fm and fm[key] is not None and not isinstance(fm[key], str):
+                return _Reject(ValidationReason.INVALID_FIELD_TYPE, f"{key} must be a string")
         # queue is fail-closed (unlike priority): present ⇒ must be a non-empty string. A non-string
         # type or an empty/whitespace value rejects the task rather than defaulting silently.
         if "queue" in fm:
@@ -395,6 +420,55 @@ class ValidationGate:
             )
         return raw, None
 
+    def _branch_fields(
+        self, fm: Mapping[str, Any], branch_name: str | None
+    ) -> tuple[_BranchFields, _Reject | None]:
+        """Validate the branch-mode field family (IO-free) and resolve the effective-mode pairing.
+
+        Returns ``((branch_mode, branch_ref, publish, branch_name), None)`` on success or
+        ``(_, reject)`` on failure. ``_check_field_types`` already enforced string-or-null shape, so
+        this checks enum membership, ``branch_ref`` shape, and the mode/ref pairing against the
+        *effective* mode (task value, else ``repo.branch_mode``): ``existing`` requires
+        ``branch_ref`` and a ``branch_ref`` outside ``existing`` is a contradiction. A
+        ``branch_name`` set outside ``new`` mode is a warning (nothing to name), dropped not reject.
+        """
+        empty = (None, None, None, branch_name)
+        branch_mode, mode_ok = _parse_enum(fm.get("branch_mode"), BranchMode)
+        if not mode_ok:
+            choices = sorted(m.value for m in BranchMode)
+            return empty, _Reject(ValidationReason.INVALID_BRANCH_MODE, f"branch_mode ∈ {choices}")
+        publish, publish_ok = _parse_enum(fm.get("publish"), PublishScope)
+        if not publish_ok:
+            choices = sorted(m.value for m in PublishScope)
+            return empty, _Reject(ValidationReason.INVALID_BRANCH_MODE, f"publish ∈ {choices}")
+        raw_ref = fm.get("branch_ref")
+        branch_ref = raw_ref.strip() if isinstance(raw_ref, str) and raw_ref.strip() else None
+        if branch_ref is not None and not is_valid_branch_name(branch_ref):
+            return empty, _Reject(
+                ValidationReason.INVALID_BRANCH_MODE, "branch_ref must be a valid Git branch name"
+            )
+
+        effective_mode = branch_mode or self._config.repo.branch_mode
+        if effective_mode is BranchMode.EXISTING and branch_ref is None:
+            return empty, _Reject(
+                ValidationReason.INVALID_BRANCH_MODE,
+                "branch_mode 'existing' requires branch_ref (the branch to work in)",
+            )
+        if branch_ref is not None and effective_mode is not BranchMode.EXISTING:
+            return empty, _Reject(
+                ValidationReason.INVALID_BRANCH_MODE,
+                f"branch_ref requires branch_mode 'existing' (got '{effective_mode.value}')",
+            )
+        if branch_name is not None and effective_mode is not BranchMode.NEW:
+            logger.warning(
+                "branch_name %r is ignored in branch_mode '%s' (nothing to name); using the "
+                "working branch instead",
+                branch_name,
+                effective_mode.value,
+            )
+            branch_name = None
+        return (branch_mode, branch_ref, publish, branch_name), None
+
     def _build_node_overrides(self, raw: Any) -> tuple[dict[str, NodeOverride], _Reject | None]:
         """Map the ``nodes`` front-matter block to ``{node-id: NodeOverride}`` (shape only).
 
@@ -479,6 +553,18 @@ def _as_tristate(value: Any) -> bool | None:
     if isinstance(value, bool):
         return value
     return None
+
+
+def _parse_enum[E: StrEnum](raw: Any, enum_cls: type[E]) -> tuple[E | None, bool]:
+    """Parse a front-matter enum value: ``(member, True)`` for a valid value, ``(None, True)`` for
+    absent/blank (defer to the default), and ``(None, False)`` for a present-but-unrecognized value.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return None, True
+    try:
+        return enum_cls(raw.strip()), True
+    except ValueError:
+        return None, False
 
 
 def write_validation_report(

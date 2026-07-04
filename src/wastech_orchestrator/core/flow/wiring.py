@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from wastech_orchestrator.checks.model import ResolvedCheckSet
+from wastech_orchestrator.config.schema import BranchMode, PublishScope
 from wastech_orchestrator.core.flow.nodes.base import (
     CheckRunnerPort,
     GitPort,
@@ -107,6 +108,8 @@ def build_node_inputs(
     summary_body_path: str | None = None,
     commit_message: str | None = None,
     subtask_spec_path: str | None = None,
+    branch_mode: BranchMode = BranchMode.NEW,
+    publish_scope: PublishScope | None = None,
 ) -> NodeInputs:
     """Build the per-unit :class:`NodeInputs` from the live ``_Pipeline``.
 
@@ -131,6 +134,8 @@ def build_node_inputs(
         subtask_spec_path=subtask_spec_path,
         check_sets=check_sets,
         branch=p.branch or None,
+        branch_mode=branch_mode,
+        publish_scope=publish_scope,
         pull_request_title=pull_request_title,
         summary_body_path=summary_body_path,
         commit_message=commit_message,

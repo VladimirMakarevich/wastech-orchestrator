@@ -25,6 +25,7 @@ from wastech_orchestrator.config.schema import (
     AgentsConfig,
     AuditBranch,
     AutoModeConfig,
+    BranchMode,
     CheckCommandSpec,
     ChecksConfig,
     CommandSet,
@@ -339,12 +340,17 @@ def _build_orchestrator(raw: Any, issues: list[str]) -> OrchestratorRuntimeConfi
 
 def _build_repo(raw: Any, issues: list[str]) -> RepoConfig:
     m = _mapping(raw, "repo", issues)
-    _check_keys(m, {"url", "local_path", "base_branch", "branch_prefix"}, "repo", issues)
+    _check_keys(
+        m, {"url", "local_path", "base_branch", "branch_prefix", "branch_mode"}, "repo", issues
+    )
     return RepoConfig(
         url=_str(m, "url", "", "repo", issues),
         local_path=_str(m, "local_path", "./workspace/repo", "repo", issues),
         base_branch=_str(m, "base_branch", "main", "repo", issues),
         branch_prefix=_str(m, "branch_prefix", "worc", "repo", issues),
+        branch_mode=_enum(
+            m.get("branch_mode"), BranchMode, "repo.branch_mode", issues, BranchMode.NEW
+        ),
     )
 
 

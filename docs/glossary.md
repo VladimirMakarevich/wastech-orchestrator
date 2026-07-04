@@ -50,7 +50,10 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`id`** - Stable normalized task identifier. It is used in task storage, branch naming, artifacts, and reports.
 - **`title`** - Human-readable task name. It is used in branch slugs, PR titles, and summaries.
 - **`task_type`** - Dispatch key that selects the flow. Built-ins are `implementation`, `deep_research`, and `security_audit`; operator flows can add more.
-- **`branch_name`** - Full task-branch override. When omitted, the orchestrator derives a branch from `repo.branch_prefix`, `id`, and a slug of `title`.
+- **`branch_name`** - Full task-branch override (only in `new` branch mode). When omitted, the orchestrator derives a branch from `repo.branch_prefix`, `id`, and a slug of `title`.
+- **`branch_mode`** (task field) - Where the task's git operations point: `new` (fork a fresh branch, the owned default), `existing` (work in `branch_ref`), or `current` (work in the working tree's current branch as-is). Wins over `repo.branch_mode`. A branch is orchestrator-owned only in `new`.
+- **`branch_ref`** - The existing branch a task works in; required iff `branch_mode` is `existing` (a validation error otherwise) and must already exist locally or on the remote.
+- **`publish`** (task field) - Downgrade-only cap on the `publish` node: `commit` (stop after commits), `push` (stop before the PR), or `pull_request` (full). Effective scope is `min(flow_policy, publish)`; a no-op on a flow with no PR-publishing node.
 - **`slug`** - Lowercase branch fragment derived from the task title. It is part of the default branch name, not a separate task field.
 - **`auto_merge`** - Per-task publish override. `true` requests auto-merge, `false` opts out, and omission falls back to the config default.
 - **`prompt_audit`** - Per-task prompt logging override. It wins over the global config value in both directions.
@@ -84,6 +87,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`repo.local_path`** - Dedicated clone or workspace path used for agent runs.
 - **`repo.base_branch`** - The branch checked out before task work and restored after terminal cleanup.
 - **`repo.branch_prefix`** - Prefix for the default task branch name.
+- **`repo.branch_mode`** - Instance default for where task git operations point (`new`/`existing`/`current`, default `new`); a per-task `branch_mode` overrides it.
 - **`paths`** - Optional block locating the task lifecycle on disk.
 - **`paths.tasks_dir`** - Repo-relative directory holding the `pending`/`done`/`failed` lifecycle subfolders (default `tasks`). Validated repo-relative (no `..`/absolute) and rejected if it lives under the gitignored `.worc/` home; a subpath such as `config/tasks` is allowed.
 - **`agents`** - Provider availability, retry budgets, decomposition, and provider-specific settings.

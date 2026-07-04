@@ -55,7 +55,10 @@ Allowed fields:
 | `id` | yes | string | Stable task id. Must match `^[a-z0-9][a-z0-9._-]{0,63}$`. |
 | `title` | yes | string | Short human-readable title. Used for the default branch slug, PR title, commit messages, and reports. **Plain text only** — like every front-matter value it must not contain argv-shaped tokens (`` ` ``, `;`, `\|`, `$(`, a leading `-`); put code/shell snippets in the body, not the title. See [front-matter values are plain text](#front-matter-values-are-plain-text). |
 | `task_type` | no | string | Selects the flow that runs the task. Omitted ⇒ `implementation` (the default coding pipeline). Built-ins: `implementation`, `deep_research`, `security_audit`; an operator flow in `<repo>/.worc/flows/<task_type>.yaml` may add others. An unknown `task_type` (no matching flow) fails the task before any branch is created. The task only _names_ the flow — it never edits the graph. To author a new flow, see [flow-authoring.md](flow-authoring.md). |
-| `branch_name` | no | string \| null | Full task branch override. Omitted ⇒ `<repo.branch_prefix>/<id>-<slug(title)>`; set it to match a project's branch naming policy. See [`branch_name`](#branch_name). |
+| `branch_name` | no | string \| null | Full task branch override (only in `new` branch mode). Omitted ⇒ `<repo.branch_prefix>/<id>-<slug(title)>`; set it to match a project's branch naming policy. Ignored (a validation warning) in `existing`/`current` mode. See [`branch_name`](#branch_name). |
+| `branch_mode` | no | `new` \| `existing` \| `current` | Where this task's git operations point. Omitted ⇒ the instance default `repo.branch_mode`. `new` forks a fresh task branch; `existing` works in `branch_ref`; `current` works in the working tree's current branch as-is. The task value wins. See [`branch_mode`](#branch_mode). |
+| `branch_ref` | no | string | The existing branch to work in — **required iff** the resolved mode is `existing`, and a validation error otherwise. Must already exist locally or on the remote (no auto-create; checked at preflight). See [`branch_mode`](#branch_mode). |
+| `publish` | no | `commit` \| `push` \| `pull_request` | Downgrade-only cap on how far the `publish` node goes: `commit` stops after the commits, `push` stops before the PR, `pull_request` is the full sequence. Omitted ⇒ the flow's publishing policy. A cap, never an escalation (`min(flow_policy, publish)`); a no-op on a flow with no PR-publishing node. See [`publish`](#publish). |
 | `auto_merge` | no | boolean | `true` requests auto-merge, `false` always opts out, omitted uses the instance default. A set per-task value wins outright over `git.auto_merge`. See [`auto_merge`](#auto_merge). |
 | `prompt_audit` | no | boolean | `true` records each step's prompt + who for this task, `false` disables it, omitted uses config. Always overrides the global. See [`prompt_audit`](#prompt_audit). |
 | `decomposition` | no | boolean | `true` permits a split for this task, `false` forbids one, omitted uses the instance default `agents.decomposition.enabled`. The task value wins; it only flips the gate (the flow + planning still decide whether a split happens). See [`decomposition`](#decomposition). |
@@ -124,6 +127,47 @@ branch_name: "customer/acme/ABC-123-login-validation"
 The value is the **full branch name**, not only a suffix. It is validated before branch creation and provider execution. It must be a safe Git branch ref, must not start with `-` or `refs/`, must not contain whitespace/control characters or Git-ref metacharacters, and must not equal `repo.base_branch`.
 
 The PR title still comes from `title`; `branch_name` changes only the Git branch/head used for push and PR creation.
+
+## `branch_mode`
+
+`branch_mode` governs **where** this task's git operations point. It defaults to the instance-wide `repo.branch_mode` (itself `new`), so unless you set it, nothing changes.
+
+| Value | Behavior |
+| --- | --- |
+| `new` (default) | Fork a fresh task branch from `repo.base_branch`, exactly as before. The branch is **orchestrator-owned**. |
+| `existing` | Work in an already-existing branch named by `branch_ref` (checked out with a plain checkout; a local tracking branch is created from `origin/<ref>` when only the remote ref exists). |
+| `current` | Work in whatever branch the working tree is on — no create, no switch, no `pull`, and a dirty tree is left untouched. |
+
+```yaml
+# continue work in an existing feature branch
+branch_mode: existing
+branch_ref: feature/ABC-123-login
+```
+
+```yaml
+# run the task directly in the current checkout (a local experiment)
+branch_mode: current
+```
+
+Rules and safety:
+
+- **`existing` requires `branch_ref`**, and `branch_ref` is only valid with `existing` (either violation is a validation error). The ref must already exist locally or on the remote — the orchestrator never auto-creates it (a missing ref is rejected at preflight, before any slot or branch is taken).
+- **`current` needs a real branch** — a detached `HEAD` is rejected. Because it rides your live checkout, `current` is a poor fit for unattended `watch` (it emits a warning), and sub-tasks from decomposition inherit the parent's one working branch.
+- **The orchestrator never mutates a branch it does not own.** In `existing`/`current` mode it never deletes, resets-to-base, or force-checks-out-away from the branch; terminal cleanup leaves a `current`-mode tree exactly where you left it. Consequently a **fresh** `rerun` is refused in these modes — use `rerun --continue` to resume in place, or clean up the branch yourself.
+- **`branch_name` is ignored** outside `new` mode (there is nothing to name); setting it there is a validation warning.
+- **Publishing is orthogonal.** Branch mode only redirects where the `publish` node's commit/push/PR point; whether a `publish` node runs at all is still the flow's decision. When the working branch resolves to the PR base (e.g. `current` on `main`), a PR is impossible — the orchestrator still commits and pushes (directly to the base, subject to branch protection) and **skips the PR** with a logged note; `auto_merge` then no-ops. A chain of tasks on one shared branch converges on a **single** PR: an already-open `head→base` PR is reused rather than re-created.
+
+## `publish`
+
+`publish` is a **downgrade-only cap** on how far the `publish` node goes for this one task, without switching to a different flow:
+
+```yaml
+publish: commit # commit locally, no push, no PR
+publish: push # commit + push the branch, but open no PR
+publish: pull_request # the full sequence (same as omitting it on a PR flow)
+```
+
+The effective scope is `min(flow_policy, publish)` over `commit < push < pull_request`, so it can only **narrow** what the flow already does — it can never manufacture publishing. On a flow whose graph has no PR-publishing node it is a no-op. This is the low-ceremony way to run a task and stop at a local commit (or a pushed branch) for inspection; it composes with `branch_mode: current` for a local experiment.
 
 ## Refinement (automatic)
 

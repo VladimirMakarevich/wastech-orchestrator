@@ -829,6 +829,25 @@ def test_cmd_run_rejected_task(git_repo, tmp_path: Path) -> None:
     assert (project / "rejected" / "task-bad.md").exists()
 
 
+def test_cmd_run_rejects_existing_branch_mode_with_missing_ref(git_repo, tmp_path: Path) -> None:
+    # branch-mode ADR (fail-closed preflight): `existing` with a branch_ref that exists neither
+    # locally nor on the remote is rejected before any slot/branch is taken (no auto-create).
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    task = project / "task-bm.md"
+    task.write_text(
+        '---\nid: task-bm\ntitle: "T"\nbranch_mode: existing\nbranch_ref: no-such-branch\n---\n\n'
+        "## Description\n\nDo it.\n\n## Acceptance criteria\n\n- works\n",
+        encoding="utf-8",
+    )
+    code = cli.main(["--config", str(config), "run", str(task)])
+    assert code == 1  # failed at preflight
+    report = git_repo.clone / ".worc" / "logs" / "task-bm" / "validation_report.json"
+    assert json.loads(report.read_text(encoding="utf-8"))["reason"] == "invalid_branch_mode"
+    assert (project / "rejected" / "task-bm.md").exists()  # quarantined, no branch created
+
+
 def test_cmd_run_refuses_unmerged_dependency(
     git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

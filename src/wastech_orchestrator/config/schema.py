@@ -132,7 +132,11 @@ from wastech_orchestrator.providers.base import ProviderId
 # old behavior (gate every deletion/rename or dependency-manifest edit); `auto` turns the diff-shape
 # gate off so only a `protected_paths` match raises approval. The old key is removed outright
 # (greenfield, no back-compat) — a config still carrying it is rejected as an unknown key.
-CONFIG_SCHEMA_VERSION = 25
+# v26 (2026-07-04, branch-mode): adds the optional `repo.branch_mode` (new|existing|current, default
+# `new`) — the instance default for where task git operations point. Absent => `new` (today's
+# create-from-base behavior exactly); a per-task `branch_mode` overrides it. Old configs load
+# fail-open with the default and `upgrade-config` adds it from the template.
+CONFIG_SCHEMA_VERSION = 26
 
 
 class AuditBranch(StrEnum):
@@ -140,6 +144,35 @@ class AuditBranch(StrEnum):
 
     TASK = "task"
     SIBLING = "sibling"
+
+
+class BranchMode(StrEnum):
+    """Where a task's git operations point (branch-mode ADR).
+
+    ``new`` (the default) creates a fresh task branch from ``repo.base_branch`` — today's behavior.
+    ``existing`` works in a named, already-existing branch (``branch_ref``). ``current`` works in
+    whatever branch the working tree is on, without creating, switching, or requiring a clean tree.
+    A branch is **orchestrator-owned only in ``new``** — the sole mode where destructive git ops
+    (branch delete, remote delete, reset-to-base, force-checkout-away) may run.
+    """
+
+    NEW = "new"
+    EXISTING = "existing"
+    CURRENT = "current"
+
+
+class PublishScope(StrEnum):
+    """Per-task, downgrade-only cap on how far the ``publish`` node goes (branch-mode ADR).
+
+    A *cap*, never an escalation: the effective scope is ``min(flow_policy, task.publish)`` over the
+    ranking ``commit < push < pull_request``. ``commit`` stops after the code/audit commits,
+    ``push`` stops before the PR, ``pull_request`` is the full sequence. Unset defers to the flow's
+    policy. On a flow whose graph has no PR-publishing node it is a no-op (cannot manufacture one).
+    """
+
+    COMMIT = "commit"
+    PUSH = "push"
+    PULL_REQUEST = "pull_request"
 
 
 @dataclass(frozen=True)
@@ -171,6 +204,10 @@ class RepoConfig:
     local_path: str
     base_branch: str
     branch_prefix: str
+    # Instance default for where task git operations point (branch-mode ADR). A per-task
+    # ``branch_mode`` overrides it. Defaults to ``new`` (create a fresh task branch from
+    # ``base_branch``), so an absent key reproduces today's behavior exactly.
+    branch_mode: BranchMode = BranchMode.NEW
 
 
 @dataclass(frozen=True)

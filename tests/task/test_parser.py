@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from wastech_orchestrator.config.schema import BranchMode, PublishScope
 from wastech_orchestrator.task.model import NodeOverride, NormalizedTask
 from wastech_orchestrator.task.parser import (
     extract_section,
@@ -184,6 +185,27 @@ def test_branch_name_round_trips(tmp_path: Path, value: str | None) -> None:
     task = NormalizedTask(id="task-001", title="T", description="Do it", branch_name=value)
     write_normalized(task, tmp_path)
     assert load_normalized(tmp_path, "task-001").branch_name == value
+
+
+@pytest.mark.parametrize("value", [BranchMode.EXISTING, BranchMode.CURRENT, None])
+def test_branch_mode_round_trips(tmp_path: Path, value: BranchMode | None) -> None:
+    # Restart-safety: a resumed / reran task must keep its exact branch mode, or the rerun guard
+    # could reset a branch the orchestrator does not own (existing/current).
+    ref = "feature/x" if value is BranchMode.EXISTING else None
+    task = NormalizedTask(
+        id="task-001", title="T", description="Do it", branch_mode=value, branch_ref=ref
+    )
+    write_normalized(task, tmp_path)
+    reloaded = load_normalized(tmp_path, "task-001")
+    assert reloaded.branch_mode is value
+    assert reloaded.branch_ref == ref
+
+
+@pytest.mark.parametrize("value", [PublishScope.COMMIT, PublishScope.PUSH, None])
+def test_publish_round_trips(tmp_path: Path, value: PublishScope | None) -> None:
+    task = NormalizedTask(id="task-001", title="T", description="Do it", publish=value)
+    write_normalized(task, tmp_path)
+    assert load_normalized(tmp_path, "task-001").publish is value
 
 
 @pytest.mark.parametrize("value", ["backend", "default"])

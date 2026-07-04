@@ -103,6 +103,8 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "local_path": str(spec.repo_local_path),
             "base_branch": spec.base_branch,
             "branch_prefix": "worc",
+            # Instance default for where task git operations point (a per-task `branch_mode` wins).
+            "branch_mode": "new",
         },
         # The default reproduces the historical `tasks/` layout; an operator renames it (and creates
         # the lifecycle subfolders) to avoid clashing with a repo that already uses `tasks/`.

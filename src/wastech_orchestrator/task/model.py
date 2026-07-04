@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Literal
 
+from wastech_orchestrator.config.schema import BranchMode, PublishScope
+
 # A task id is strict and normalized: a lowercase alphanumeric first char, then up to
 # 63 of [a-z0-9._-]; no whitespace, no leading dot/separator, 1..64 chars. Invalid ids are rejected,
 # never sanitized (.agents/rules/security.md). Shared source of truth for the model and the parser.
@@ -38,6 +40,9 @@ ALLOWED_TASK_KEYS: frozenset[str] = frozenset(
         "title",
         "task_type",
         "branch_name",
+        "branch_mode",
+        "branch_ref",
+        "publish",
         "auto_merge",
         "prompt_audit",
         "decomposition",
@@ -159,8 +164,19 @@ class NormalizedTask:
     # Dispatch key → flow (P0.4): ``None`` defers to the registry default (``implementation``). The
     # task never selects the flow from prose and never patches the graph — it only names the flow.
     task_type: str | None = None
-    # Full task branch override. ``None`` uses repo.branch_prefix + task id + slug.
+    # Full task branch override. ``None`` uses repo.branch_prefix + task id + slug. Ignored (a
+    # validation warning) outside ``new`` branch mode — nothing to name in existing/current.
     branch_name: str | None = None
+    # Where this task's git operations point (branch-mode ADR). ``None`` defers to the instance
+    # default ``repo.branch_mode`` (itself defaulting to ``new``); a task value wins outright.
+    branch_mode: BranchMode | None = None
+    # The existing branch to work in — required iff the resolved mode is ``existing``, a validation
+    # reject otherwise. Must already exist locally or on the remote (checked at the preflight).
+    branch_ref: str | None = None
+    # Downgrade-only cap on the publish node (branch-mode ADR): commit/push/pull_request. ``None``
+    # defers to the flow's policy. A cap, never an escalation — effective scope is
+    # ``min(flow_policy, publish)``; a no-op on a flow with no PR-publishing node.
+    publish: PublishScope | None = None
     # Tri-state opt-in to auto-merge (DANGER: bypasses human review). The task value wins outright
     # (PRE.2): True requests it, False always opts out, None defers to config.git.auto_merge.
     auto_merge: bool | None = None
