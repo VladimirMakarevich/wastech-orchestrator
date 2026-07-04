@@ -6,7 +6,7 @@ There are two levels of git here: (A) how the orchestrator **itself** is develop
 
 - Branches off `main`: `feat/<short-description>`, `fix/<…>`, `docs/<…>`, `chore/<…>`.
 - Atomic commits, imperative mood in the subject: `Add provider health preflight`.
-- Before committing — `ruff check .`, `mypy src`, `pytest` (see [testing.md](testing.md)).
+- Before committing — `ruff check .`, `ruff format --check .`, `mypy src`, `pytest` (see [testing.md](testing.md)). CI runs `ruff format --check .`; run `ruff format .` to fix.
 - Keep docs in sync **in the same change** as the code: when behavior, the CLI, config, or architecture changes, update the affected docs (README, operations, configuration, cookbook, architecture, the functional map) — use `/sync-docs`. Record deferred work in [../../docs/backlog/follow_ups.md](../../docs/backlog/follow_ups.md). The Stop docs-sync gate (`.claude/hooks/docs_sync_gate.py`) blocks once when `src/` changed without any `docs/`/`.agents/` change.
 - Do not commit: `config.yaml`, `.venv/`, `workspace/`, `logs/`, `*.db`, secrets, the transient task folders `tasks/processing|done|failed|rejected/` (see `.gitignore`).
 - PR into `main`; merge only after checks pass.
