@@ -95,6 +95,12 @@ class FakeProvider:
                 "decompose": planning.get("decompose") is True,
                 "subtasks": planning.get("subtasks") or [],
             }
+        elif request.node_id == "review" and (
+            not isinstance(structured, dict) or "findings" not in structured
+        ):
+            # F19: the review evaluator requires a well-formed findings array; a well-formed empty
+            # one is a clean, accepting verdict — the default when a test doesn't override it.
+            structured = {"findings": []}
         return AgentRunResult(
             status=RunStatus.SUCCEEDED,
             provider=self.id,

@@ -2,7 +2,10 @@
 
 Runs the evaluator's ``role_file`` prompt (read-only) through the router and maps its structured
 verdict to an engine outcome: a blocking finding (severity ``high``/``critical``/``blocking``) ->
-``rework``, a clean (or medium-only, advisory) verdict -> ``accept``. A **blocking** evaluator gates
+``rework``, a clean (or medium-only, advisory) verdict -> ``accept``. The findings schema
+(``output_schema``, F19) is mandatory: a run whose ``structured_output`` does not carry a parseable
+``findings`` array never silently accepts — it degrades straight to ``manual`` (fail-closed), the
+same as a provider that could not run the node at all. A **blocking** evaluator gates
 every time it finds a blocking issue; the engine's named-loop budget bounds the rework cycles
 (exhaustion -> manual). A **non-blocking**
 evaluator (e.g. ``test_quality``) self-caps: it reworks until its own per-instance budget
@@ -45,6 +48,35 @@ from wastech_orchestrator.state_store import EvaluationRow, NodeLineageRow, Node
 _BLOCKING_SEVERITIES = frozenset({"blocking", "critical", "high"})
 _MEDIUM_SEVERITIES = frozenset({"medium", "moderate"})
 
+#: F19 — the mandatory structured findings schema every in-flow evaluator role (review / verifier /
+#: critic / operator-defined) is prompted to return. A role-prompt asking for findings "in prose"
+#: was unenforceable: extraction reads only ``structured_output``, which no provider filled without
+#: an ``output_schema`` — the gate silently fail-**opened** to ``accept`` on every real run. An
+#: empty ``findings`` array is well-formed and genuinely clean; a missing/malformed one means the
+#: provider did not honor the schema and fails **closed** (see ``_findings_or_none``/``run``).
+_FINDINGS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "severity": {
+                        "type": "string",
+                        "enum": ["blocking", "critical", "high", "medium", "low"],
+                    },
+                    "path": {"type": "string"},
+                    "what": {"type": "string"},
+                    "fix": {"type": "string"},
+                },
+                "required": ["severity", "what"],
+            },
+        },
+    },
+    "required": ["findings"],
+}
+
 
 class EvaluatorNodeRunner:
     """Run an ``evaluator`` node through the router and map its verdict to accept/rework/done."""
@@ -72,7 +104,12 @@ class EvaluatorNodeRunner:
         )
         request = self._build_request(node, ctx, route, run_id)
         outcome = self._s.router.run_stage(request, route, snapshot=self._s.snapshot)
-        kind = self._verdict(node, ctx, outcome)
+        raw_findings = (
+            self._findings_or_none(outcome.result.structured_output)
+            if outcome.result is not None
+            else None
+        )
+        kind = self._verdict(node, ctx, outcome, raw_findings)
         self._record_completion(run_id, outcome, kind)
         record_run_observability(
             self._s,
@@ -94,8 +131,16 @@ class EvaluatorNodeRunner:
                 f"evaluator node {node.id!r}: no provider could run it ({err})",
                 error_class=error_class,
             )
+        if raw_findings is None:
+            # F19 fail-closed: the provider did not honor the mandatory findings schema (missing
+            # or malformed ``findings`` array) — never silently accept. There is nothing for
+            # `fixing` to act on (no parsed findings), so this degrades straight to manual (like
+            # the no-provider case above) rather than spending a rework cycle on an empty verdict.
+            raise EvaluatorInfraError(
+                f"evaluator node {node.id!r}: verdict fail-closed — structured_output did not "
+                "include a parseable 'findings' array (schema not honored)"
+            )
         self._persist_own_lineage(node, ctx, outcome)
-        raw_findings = self._extract_findings(outcome.result.structured_output)
         findings = tuple(_to_finding(f) for f in raw_findings)
         # Persist the findings artifact and expose it to downstream fixing as {review_path}.
         self._write_findings(ctx, raw_findings, outcome.result.final_message)
@@ -132,11 +177,18 @@ class EvaluatorNodeRunner:
         )
         self._in.review_path = str(review_dir / "findings.json")
 
-    def _verdict(self, node: EvaluatorNode, ctx: NodeContext, outcome: StageOutcome) -> str:
+    def _verdict(
+        self,
+        node: EvaluatorNode,
+        ctx: NodeContext,
+        outcome: StageOutcome,
+        raw_findings: list[dict[str, Any]] | None,
+    ) -> str:
         if outcome.result is None:
-            return "accept"
-        findings = self._extract_findings(outcome.result.structured_output)
-        if not any(self._is_blocking(f) for f in findings):
+            return "accept"  # dead for routing: run() raises EvaluatorInfraError before using this
+        if raw_findings is None:
+            return "manual"  # dead for routing (run() raises); an accurate audit-trail label only
+        if not any(self._is_blocking(f) for f in raw_findings):
             return "accept"
         if node.blocking:
             # A blocking evaluator gates every time it finds a blocking issue; the engine's
@@ -175,7 +227,7 @@ class EvaluatorNodeRunner:
             diff_path=self._in.diff_path,
             check_artifacts_path=self._in.checks_path,
             review_artifacts_path=self._in.review_path,
-            output_schema=None,  # evaluators parse findings directly; no provider schema enforced
+            output_schema=_FINDINGS_SCHEMA,  # F19: mandatory; fail-closed if not honored (run())
             model=node.model,
             reasoning=node.reasoning,
             # Evaluators never inherit an author's editing lineage (validator-enforced read-only).
@@ -266,12 +318,18 @@ class EvaluatorNodeRunner:
         )
 
     @staticmethod
-    def _extract_findings(structured: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    def _findings_or_none(structured: Mapping[str, Any] | None) -> list[dict[str, Any]] | None:
+        """The parsed findings list, or ``None`` when the schema was not honored (F19 fail-closed).
+
+        ``None`` covers a missing ``structured_output``, a non-mapping one, or one whose
+        ``findings`` key is absent/not a list — all mean the provider ignored ``output_schema``.
+        An empty list (``{"findings": []}``) is well-formed and genuinely clean.
+        """
         if not isinstance(structured, Mapping):
-            return []
+            return None
         raw = structured.get("findings")
         if not isinstance(raw, list):
-            return []
+            return None
         return [dict(f) for f in raw if isinstance(f, Mapping)]
 
     @staticmethod
@@ -282,7 +340,13 @@ class EvaluatorNodeRunner:
 
 
 def _to_finding(raw: Mapping[str, Any]) -> Finding:
-    """Map a raw structured finding to the typed :class:`Finding` (severity / reason / paths)."""
+    """Map a raw structured finding to the typed :class:`Finding` (severity / reason / paths).
+
+    ``what``/``path`` are the F19 schema's field names; ``reason``/``title``/``message``/``paths``
+    (plural) stay as fallbacks for any pre-schema finding shape. The full raw dict (incl. ``fix``)
+    is preserved as-is in the ``findings.json`` artifact ``fixing`` reads — this typed projection is
+    only for the audit trail and ``NodeOutcome.findings``.
+    """
     sev_token = str(raw.get("severity", "")).lower()
     if raw.get("blocking") is True or sev_token in _BLOCKING_SEVERITIES:
         severity: str = "high"
@@ -290,9 +354,15 @@ def _to_finding(raw: Mapping[str, Any]) -> Finding:
         severity = "medium"
     else:
         severity = "low"
-    reason = str(raw.get("reason") or raw.get("title") or raw.get("message") or raw)
+    reason = str(
+        raw.get("what") or raw.get("reason") or raw.get("title") or raw.get("message") or raw
+    )
     paths_raw = raw.get("paths")
-    paths = tuple(str(p) for p in paths_raw) if isinstance(paths_raw, list | tuple) else ()
+    if isinstance(paths_raw, list | tuple):
+        paths = tuple(str(p) for p in paths_raw)
+    else:
+        single_path = raw.get("path")
+        paths = (str(single_path),) if single_path else ()
     return Finding(severity=severity, reason=reason, paths=paths)  # type: ignore[arg-type]
 
 

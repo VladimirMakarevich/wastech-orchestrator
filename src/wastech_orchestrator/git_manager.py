@@ -1167,10 +1167,26 @@ class GitManager:
         guard classifies from :meth:`changed_code_entries` (HEAD-relative), not this artifact, so
         widening the base here does not change what the guard gates.
 
+        Two completeness fixes (F20): plain ``git diff`` never reports untracked files, so a brand
+        new file was silently missing from the artifact — bracket the diff with a transient
+        intent-to-add (staged, then immediately reset back to untracked; no persistent index
+        change, so :meth:`changed_code_entries`/:meth:`changed_code_paths` still see them as
+        ``??``) so their full content is included. ``--text`` forces a textual diff even for a file
+        Git's heuristic misclassifies as binary (e.g. a NUL-delimited fixture) — without it such a
+        file rendered as an opaque "Binary files differ", hiding the actual change.
+
         The diff is redacted before writing: the failure report reads it back, so this is
         the single place that keeps a leaked secret out of both ``current.diff`` and the report.
         """
-        diff = self._git("diff", self._config.repo.base_branch).stdout
+        untracked = self._git("ls-files", "--others", "--exclude-standard", "-z").stdout
+        untracked_paths = [p for p in untracked.split("\0") if p]
+        if untracked_paths:
+            self._git("add", "--intent-to-add", "--", *untracked_paths)
+        try:
+            diff = self._git("diff", "--text", self._config.repo.base_branch).stdout
+        finally:
+            if untracked_paths:
+                self._git("reset", "--", *untracked_paths)
         task_dir = task_artifact_dir(self._artifacts_root, task_id)
         task_dir.mkdir(parents=True, exist_ok=True)
         path = task_dir / "current.diff"

@@ -67,11 +67,16 @@ _MODE_ORDER: tuple[str, ...] = ("plan", "default", "acceptEdits", "bypassPermiss
 _PERMISSION_MODE_FLAG = "--permission-mode"
 _BYPASS_MODE = "bypassPermissions"
 
-# Profile → (permission mode, baseline allowed tools). ``read-only`` proposes but executes nothing;
-# ``workspace-write`` may edit files and run safe workspace commands without prompting — the Claude
-# equivalent of the Codex ``workspace-write`` sandbox.
+# Profile → (permission mode, baseline allowed tools). ``read-only`` executes nothing because Edit
+# and Write are simply absent from its allowlist (a hard tool-level gate, not the CLI's built-in
+# ``plan`` mode): plan mode brings its own interactive UX (``AskUserQuestion``/``ExitPlanMode``,
+# ``~/.claude/plans``) that a headless run cannot answer, so a clarifying question raised there
+# never reaches the orchestrator's own durable ``human_input`` field (F21) — ``default`` mode has
+# no such UX, so a read-only agent that needs to ask surfaces it through the role's structured
+# output instead. ``workspace-write`` may edit files and run safe workspace commands without
+# prompting — the Claude equivalent of the Codex ``workspace-write`` sandbox.
 _PROFILE_MAP: dict[str, tuple[str, tuple[str, ...]]] = {
-    "read-only": ("plan", ("Read", "Glob", "Grep")),
+    "read-only": ("default", ("Read", "Glob", "Grep")),
     "workspace-write": ("acceptEdits", ("Read", "Glob", "Grep", "Edit", "Write", "Bash")),
 }
 

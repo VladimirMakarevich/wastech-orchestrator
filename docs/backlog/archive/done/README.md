@@ -30,3 +30,4 @@ This folder contains backlog documents for product work that has already shipped
 | [Autonomous run — open questions & decisions](autonomous-run-open-questions.md) | implementation log (2026-07-02) |
 | [Trust levels / danger-approval policy](trust-levels-danger-approval.md) | implemented (config v25, 2026-07-03) |
 | [Branch mode (existing / current branch) + per-task publish cap](branch-mode.md) | implemented (config v26, 2026-07-04) |
+| [Run-quality & gating hardening (evaluator fail-closed, complete diff, planning HITL, codex usage)](run-quality-gating-hardening.md) | implemented (F19–F22, 2026-07-04) |

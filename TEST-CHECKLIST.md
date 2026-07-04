@@ -27,6 +27,27 @@
 
 ---
 
+## Проход 6 — что проверено (2026-07-04)
+
+Источник: `worc run` задачи `p4-01-context-graph-model-v2` (первая задача кампании P4) → `done` + PR [#8](https://github.com/VladimirMakarevich/wastech-mdlint/pull/8) (НЕ смержен) + `/analyze-task-run`. Отчёт: [docs/analysis/p4-01-context-graph-model-v2-run-analysis.md](docs/analysis/p4-01-context-graph-model-v2-run-analysis.md). Находки — [TEST-FINDINGS.md](TEST-FINDINGS.md) F19–F23. Галочки — только реально наблюдённое в этом прогоне.
+
+**Покрыто (multi-node implementation-флоу, кросс-провайдер):**
+
+- §12 **per-node override (flow-YAML → provider-default)** — ✅ ПОВТОРНО ПОДТВЕРЖДЁН на **codex-evaluator**: review перекрыл глобальный конфиг-дефолт codex `gpt-5.5/high` → declared `gpt-5.4/xhigh` (`stages/review/…/request.json` argv `--model gpt-5.4 -c model_reasoning_effort="xhigh"`). Task-front-matter уровень по-прежнему НЕ проверен (задача задаёт только `nodes.refinement.enabled:false`).
+- **Per-task node-skip** — ✅ `refinement` skipped, `state.db node_runs.skip_reason="disabled by task: nodes.refinement.enabled=false"`.
+- **Изоляция + orchestrator-only commit** — ✅ до publish в основной ветке коммита нет (агент в изолированном workspace); `git log feat/p4-01…` на базе `ce946f6`.
+- **Read-only planning** — ✅ argv `--permission-mode plan --allowedTools Read,Glob,Grep --disallowedTools Bash(git commit)/…/Read(.env)/Read(secrets/**)`.
+- **Независимый checks-гейт** — ✅ testing-узел (kind:checks) прогнал typecheck/lint/**146 тестов**/build (`checks/001–004.log`), совпал с самопроверкой имплементера.
+- **Постоянный supervisor-слой** — ✅ проверил КАЖДЫЙ завершённый шаг (`evaluations` supervisor_step ×6: planning/impl/testing/review/doc + final), advisory, не блокирует.
+- **Чистая инфра** — ✅ 0 ретраев/фоллбэков/крэшей (`provider_attempts` все succeeded, exit 0); codex не утёк на claude-модель.
+- **prompt-audit** — ✅ `timeline.jsonl` присутствует (пробела в данных нет).
+
+**Находки (см. F19–F23):** 🔴 F19 review-evaluator **no-op** (3 codex-blocking → `verdict=accept, findings=[]` → PR с багами как `done`); F20 `current.diff` неполон (нет untracked-тестфайла + ядро «Binary files differ»); F21 planning plan-mode обходит `human_input`; F22 codex usage=0; F23 (target) пре-существующий NUL-делимитер. **Статусы (2026-07-04): F19/F20/F22 RESOLVED, F21 RESOLVED (live-подтверждение allowlist-гейта — follow-up), F23 RESOLVED-BY-TASK** — см. [TEST-FINDINGS.md](TEST-FINDINGS.md) и [run-quality-gating-hardening.md](docs/backlog/archive/done/run-quality-gating-hardening.md).
+
+**Не наблюдалось в этом прогоне:** fix-loop (`fixing`/`review_fix_cycles`>0) — из-за F19 так и не запустился; HITL-пауза оператора; MANUAL_ACTION_REQUIRED; decomposition; fallback/retry.
+
+---
+
 ## 1. Branch name: epoch-префикс + ограничение длины
 
 **Файл:** `archive/done/branch-name-epoch-and-slug-limit.md` · **Статус:** implemented 2026-06-26
@@ -407,7 +428,7 @@ HITL-раунд-трип теперь ВОЗОБНОВЛЯЕТ ту же сес�
 - [ ] Parser-валидация: неизвестные `reasoning`-значения, пустые строки
 - [ ] Гейт валидирует ТОЛЬКО shape (форму)
 - [ ] `core.node_overrides.resolve_node_overrides` — best-effort config-validated overlay (warn + skip невалидных полей; БЕЗ model ceiling — accepted simplification)
-- [~] Override chain: Task node override (best-effort) → Flow node declaration (flow YAML) → Provider config default — прогон 4 (p0-04): **Flow-node-declaration → Provider-default уровень НАБЛЮДЁН** — flow YAML пинит planning=opus-4-8/high, impl/review/fixing=sonnet-5/xhigh, documentation=sonnet-5/medium, и глобальный конфиг-дефолт `claude-opus-4-8` перекрыт per-node; **task-front-matter уровень (`nodes.<id>.model`) ещё НЕ проверен** (задачи P0 его не задают)
+- [~] Override chain: Task node override (best-effort) → Flow node declaration (flow YAML) → Provider config default — прогон 4 (p0-04): **Flow-node-declaration → Provider-default уровень НАБЛЮДЁН** — flow YAML пинит planning=opus-4-8/high, impl/review/fixing=sonnet-5/xhigh, documentation=sonnet-5/medium, и глобальный конфиг-дефолт `claude-opus-4-8` перекрыт per-node; **task-front-matter уровень (`nodes.<id>.model`) ещё НЕ проверен** (задачи P0 его не задают); прогон 6 (p4-01-v2): flow-уровень повторно подтверждён на **codex-evaluator** — review перекрыл глобальный codex `gpt-5.5/high` → `gpt-5.4/xhigh` (`stages/review/…/request.json`)
 - [x] Применяется на единственном node-fetch seam движка (`core/flow/engine_driver.py`), покрывая agent- И evaluator-узлы — прогон 4: override дошёл и до agent-узлов (planning/implementation/documentation), и до **evaluator-узла review** (sonnet-5/xhigh применился на review-verdict), т.е. seam покрыл оба класса
 - [ ] Fallback на невалидный override (provider не в конфиге, нераспознанный reasoning, невалидная model): структурный warning в node artifact log, skip поля, откат на flow-declared значение — задача НЕ аборится
 - [ ] Reasoning-валидация переиспользует `is_reasoning_supported`/`agents.allowed` (не новая «ceiling clamp» машинерия)

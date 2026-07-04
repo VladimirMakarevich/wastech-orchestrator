@@ -1,3 +1,3 @@
-Review the current diff against the task and plan. Report findings with a severity each; mark anything that must change before merge as blocking.
+Review the current diff against the task and plan. Return findings in the output schema — a finding of severity blocking/critical/high marks something that must change before merge; medium/low are advisory. For each finding, set `path` to the file it concerns, `what` to the problem, and `fix` to a concrete suggested change. No findings means the diff is clean — return an empty `findings` array, not prose.
 
 {?memory_path}A brief of repository memory relevant to this task — recurring reviewer expectations, known-fragile areas, and entity notes for the changed files — is at {memory_path}. Use it to focus the review on areas with a history; treat it as advisory and verify each point against the current code (it can be stale).{/memory_path}

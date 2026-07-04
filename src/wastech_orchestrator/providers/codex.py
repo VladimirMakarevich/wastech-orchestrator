@@ -201,11 +201,23 @@ def isolation_reasons(config: ProviderConfig) -> list[str]:
     return reasons
 
 
-def parse_events(stdout_text: str, last_message_text: str | None = None) -> ParsedEvents:
+def parse_events(
+    stdout_text: str, last_message_text: str | None = None, *, schema_requested: bool = False
+) -> ParsedEvents:
     """Parse a Codex JSONL event stream into :class:`ParsedEvents`.
 
     Tolerant of stray non-JSON lines as long as a recognizable terminal ``result`` event is present.
     Raises :class:`ProviderError` (``INVALID_OUTPUT``) when no terminal event can be found.
+
+    F19/F22 (codex-cli 0.139.0, verified by smoke test): the terminal ``turn.completed`` event
+    carries only ``{type, usage}`` — no ``output`` field — so a schema-requested run never fills
+    ``structured_output`` from the event stream alone; the schema result instead lands in the
+    ``--output-last-message`` file (and mirrors it as an ``agent_message`` event's text). When
+    ``schema_requested`` and no terminal ``output`` was seen, parse ``last_message_text`` as the
+    structured output. Fails **closed**: an unparseable/non-object last message leaves
+    ``structured_output`` at ``None`` rather than guessing — the evaluator runner (F19) then routes
+    the verdict to manual instead of a silent accept. ``usage`` is also read directly off the
+    terminal event, mirroring ``claude.py``'s ``parse_stream_json``.
     """
     final_message: str | None = None
     structured_output: dict[str, Any] | None = None
@@ -244,12 +256,22 @@ def parse_events(stdout_text: str, last_message_text: str | None = None) -> Pars
             output = event.get("output")
             if isinstance(output, dict):
                 structured_output = output
+            run_usage = event.get("usage")
+            if isinstance(run_usage, dict):
+                usage = run_usage
 
     if not terminal_seen:
         raise ProviderError(ErrorClass.INVALID_OUTPUT, message_for(ErrorClass.INVALID_OUTPUT))
 
     if last_message_text:
         final_message = last_message_text.strip()
+    if schema_requested and structured_output is None and last_message_text:
+        try:
+            candidate = json.loads(last_message_text.strip())
+        except json.JSONDecodeError:
+            candidate = None
+        if isinstance(candidate, dict):
+            structured_output = candidate
     return ParsedEvents(
         final_message=final_message,
         structured_output=structured_output,
@@ -293,7 +315,9 @@ class CodexProvider(BaseCliProvider):
     def _signatures(self) -> Sequence[StderrSignature]:
         return _CODEX_SIGNATURES
 
-    def _build_argv(self, request: AgentRunRequest, paths: ArtifactPaths) -> tuple[list[str], str]:
+    def _build_argv(
+        self, request: AgentRunRequest, paths: ArtifactPaths
+    ) -> tuple[list[str], tuple[str, bool]]:
         last_message_path = str(Path(paths.attempt_dir) / _LAST_MESSAGE_FILENAME)
         schema_path = self._write_output_schema(paths, request)
         argv = build_codex_argv(
@@ -302,24 +326,26 @@ class CodexProvider(BaseCliProvider):
             output_schema_path=schema_path,
             last_message_path=last_message_path,
         )
-        return argv, last_message_path
+        return argv, (last_message_path, schema_path is not None)
 
     def _parse(
         self,
         raw_stdout: str,
         paths: ArtifactPaths,
-        parse_context: str,
+        parse_context: tuple[str, bool],
         extra_secrets: tuple[str, ...],
     ) -> ParsedEvents:
         # The --output-last-message file is the authoritative final message; redact it on disk too
         # since it may echo agent output.
-        last_message_path = parse_context
+        last_message_path, schema_requested = parse_context
         last_message_text = read_text(last_message_path)
         if last_message_text and Path(last_message_path).exists():
             Path(last_message_path).write_text(
                 redact_text(last_message_text, extra_secrets=extra_secrets), encoding="utf-8"
             )
-        return parse_events(raw_stdout, last_message_text or None)
+        return parse_events(
+            raw_stdout, last_message_text or None, schema_requested=schema_requested
+        )
 
     def _write_output_schema(self, paths: ArtifactPaths, request: AgentRunRequest) -> str | None:
         if request.output_schema is None:

@@ -883,6 +883,41 @@ def test_write_current_diff_includes_committed_change(
     assert "feature.py" in body and "value = 42" in body
 
 
+def test_write_current_diff_includes_untracked_file(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # F20: plain `git diff` never reports untracked files — a brand-new file must still show up
+    # (full content), and the transient intent-to-add bracket must not leave it staged afterward.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    (git_repo.clone / "new_module.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    diff = Path(gm.write_current_diff("task-001")).read_text(encoding="utf-8")
+    assert "new_module.py" in diff
+    assert "return 1" in diff
+    # The bracket restored the pre-existing untracked state — no persistent index mutation.
+    entries = gm.changed_code_entries()
+    assert any(e.status == "??" and e.path == "new_module.py" for e in entries)
+
+
+def test_write_current_diff_renders_nul_content_as_text(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # F20: a NUL-delimited file trips Git's binary heuristic ("Binary files differ"), hiding the
+    # actual change; `--text` forces the real diff content to appear instead.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    nul_path = git_repo.clone / "fixture.dat"
+    nul_path.write_bytes(b"before\x00marker\n")
+    git_run(["add", "fixture.dat"], git_repo.clone)
+    git_run(["commit", "-m", "add nul fixture"], git_repo.clone)
+    nul_path.write_bytes(b"after\x00marker\n")
+    diff = Path(gm.write_current_diff("task-001")).read_text(encoding="utf-8")
+    assert "Binary files differ" not in diff
+    assert "after" in diff
+
+
 def test_push_to_base_branch_is_refused(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:

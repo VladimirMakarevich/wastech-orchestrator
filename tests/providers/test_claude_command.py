@@ -41,11 +41,16 @@ def test_workspace_write_maps_to_accept_edits(
     assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
 
 
-def test_read_only_maps_to_plan(
+def test_read_only_maps_to_default_with_readonly_allowlist(
     claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
+    # F21: `default` mode (not `plan`) so a clarification goes through the role's structured
+    # `human_input` field, not the CLI's plan-mode UX; Edit/Write absent from the allowlist is the
+    # actual mutation gate.
     argv = _argv(claude_config, make_request(permission_profile="read-only"))
-    assert argv[argv.index("--permission-mode") + 1] == "plan"
+    assert argv[argv.index("--permission-mode") + 1] == "default"
+    allowed = argv[argv.index("--allowedTools") + 1]
+    assert "Edit" not in allowed and "Write" not in allowed
 
 
 def test_map_permission_rejects_full_access_and_unknown() -> None:
@@ -164,7 +169,7 @@ def test_permission_mode_override_inline_form_builds_argv(
     # The inline (flag=value) form also passes through now (gated by strict_isolation, not banned).
     cfg = replace(claude_config, extra_args=("--permission-mode=bypassPermissions",))
     argv = _argv(cfg, make_request(permission_profile="read-only"))
-    assert argv[argv.index("--permission-mode") + 1] == "plan"  # orchestrator's own, first
+    assert argv[argv.index("--permission-mode") + 1] == "default"  # orchestrator's own, first
     assert argv[-1] == "--permission-mode=bypassPermissions"
 
 

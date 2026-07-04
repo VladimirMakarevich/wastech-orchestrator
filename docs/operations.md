@@ -110,12 +110,17 @@ The distinction matters:
 
 ## Upgrading the orchestrator
 
-The orchestrator is a CLI, not a daemon — "updating the implementation" means upgrading the package and restarting any `watch` loop:
+The orchestrator is a CLI, not a daemon — "updating the implementation" means upgrading the package and restarting any `watch` loop. Because the package is installed **from a pinned git tag** (not from a version index), the reliable recipe is a clean uninstall + reinstall at the new tag:
 
 ```bash
-pipx upgrade wastech-orchestrator        # or: pipx install --force "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git"
+pipx uninstall wastech-orchestrator
+pipx install "wastech-orchestrator[shell] @ git+https://github.com/VladimirMakarevich/wastech-orchestrator.git@vX.Y.Z"
 wastech-orchestrator --version           # confirm the new version
 ```
+
+> **Why not `pipx upgrade` / `--force`?** With a pinned git tag, `pipx upgrade wastech-orchestrator` treats the pinned ref as "already at latest" and does nothing (it reports the old version as current — even with `--pip-args="--pre"`, which only applies to a PyPI index, not a git ref). And `pipx install --force` fails on the uv backend ("A virtual environment already exists … not created in this session"). The `uninstall` + `install` pair sidesteps both. This friction is tracked in [Install and upgrade flow](backlog/install-and-upgrade-flow.md) (the durable fix is publishing to PyPI). Drop the `@vX.Y.Z` suffix to track the branch head; append it to pin a specific (pre)release tag (see the tag note below).
+>
+> **The `[shell]` extra** (for `worc shell`) must be carried in the PEP 508 spec as shown — `"wastech-orchestrator[shell] @ git+…"`. Always quote it: `zsh` globs the bare `[shell]` (`no matches found`), and `pip install wastech-orchestrator[shell]` targets PyPI rather than the installed git package. On PowerShell the same quoted form works.
 
 Do it **between tasks**, not mid-run: an in-flight task holds the single processing slot and a live working branch, and its state lives in `state.db`. Wait until `status` shows no active task, then upgrade and re-run `preflight` / `watch`.
 

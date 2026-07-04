@@ -84,6 +84,8 @@ Node kinds:
 | `hitl` | a bare durable human gate | approve/deny, or done |
 | `publish` | the orchestrator-owned git publish for the flow's publishing policy | `done` |
 
+An evaluator's verdict is schema-enforced: the router requests a structured `findings` array (`severity`/`path`/`what`/`fix`) from the provider, and a run whose result does not carry a parseable one never accepts — it fails closed to `manual_action_required` (preserving the branch) instead of being read as "no findings". A well-formed empty `findings` array is a genuinely clean, accepting verdict.
+
 ### 4.3 CodingAgent — provider abstraction + node-based routing
 
 ```python

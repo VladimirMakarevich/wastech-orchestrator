@@ -243,6 +243,10 @@ class _FakeProvider:
                 "decompose": False,
                 "subtasks": [],
             }
+        elif request.node_id == "review":
+            # F19: the review evaluator requires a well-formed findings array; a well-formed empty
+            # one is a clean, accepting verdict.
+            structured = {"findings": []}
         return AgentRunResult(
             status=RunStatus.SUCCEEDED,
             provider=self.id,

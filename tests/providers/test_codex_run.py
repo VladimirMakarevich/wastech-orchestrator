@@ -130,6 +130,32 @@ def test_successful_run(
         assert (attempt / name).exists(), name
 
 
+def test_schema_requested_structured_output_from_last_message(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # F19 (codex-cli 0.139.0 smoke-tested behavior): a schema-constrained run's terminal
+    # `turn.completed` event carries only `{type, usage}` — no `output` field — so the schema
+    # result must come from the `--output-last-message` file instead.
+    stream = "\n".join(
+        json.dumps(e)
+        for e in (
+            {"type": "session", "session_id": "sess-99"},
+            {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}},
+        )
+    )
+    fake = FakeRun(stdout=stream, last_message='{"findings": []}')
+    provider = _provider(codex_config, security_config, tmp_path, fake)
+    schema = {"type": "object", "properties": {"findings": {"type": "array"}}}
+    result = provider.run(make_request(output_schema=schema))
+
+    assert result.status is RunStatus.SUCCEEDED
+    assert result.structured_output == {"findings": []}
+    assert result.usage == {"input_tokens": 10, "output_tokens": 5}
+
+
 def test_clean_run_with_failure_status_returns_failed_not_raised(
     codex_config: ProviderConfig,
     security_config: SecurityConfig,

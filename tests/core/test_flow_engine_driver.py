@@ -63,6 +63,9 @@ class _FakeRouter:
         self, request: Any, route: ResolvedRoute, *, snapshot: Any = None
     ) -> StageOutcome:
         self.requests[request.node_id] = request
+        # F19: the review evaluator requires a well-formed findings array; a well-formed empty one
+        # is a clean, accepting verdict.
+        structured = {"findings": []} if request.node_id == "review" else None
         result = AgentRunResult(
             status=RunStatus.SUCCEEDED,
             provider="codex",
@@ -71,6 +74,7 @@ class _FakeRouter:
             exit_code=0,
             started_at="t0",
             finished_at="t1",
+            structured_output=structured,
         )
         return StageOutcome(
             route=route,

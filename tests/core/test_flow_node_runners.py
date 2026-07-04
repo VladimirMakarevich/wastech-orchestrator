@@ -1504,6 +1504,73 @@ def test_review_is_ordinary_evaluator(tmp_path: Path) -> None:
     assert store.evaluations[0].verdict == "rework" and store.evaluations[0].node_id == "review"
 
 
+def test_evaluator_requests_the_mandatory_findings_schema(tmp_path: Path) -> None:
+    # F19: the shared runner requests the findings schema for every evaluator role (not just
+    # review) — this is what makes ``structured_output`` reliably parseable on a real provider.
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    node = _evaluator("review")
+    router = FakeRouter(_result({"findings": []}))
+    services = _services(
+        router,
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    schema = router.requests[0].output_schema
+    assert schema is not None
+    assert schema["required"] == ["findings"]
+
+
+def test_evaluator_missing_structured_output_fails_closed(tmp_path: Path) -> None:
+    # F19: a provider that ignored `output_schema` entirely (structured_output=None) must never be
+    # read as "no findings, accept" — it fails closed exactly like an evaluator that could not run
+    # at all (EvaluatorInfraError -> the orchestrator degrades to manual, preserving the diff).
+    from wastech_orchestrator.core.flow.nodes.base import EvaluatorInfraError
+
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    node = _evaluator("review")
+    services = _services(
+        FakeRouter(_result()),  # structured_output=None
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    with pytest.raises(EvaluatorInfraError):
+        EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+
+def test_evaluator_findings_key_missing_fails_closed(tmp_path: Path) -> None:
+    # Same fail-closed contract violation when structured_output is present but malformed (no
+    # parseable `findings` array) — a provider that answered the wrong shape, not "no issues".
+    from wastech_orchestrator.core.flow.nodes.base import EvaluatorInfraError
+
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    node = _evaluator("review")
+    services = _services(
+        FakeRouter(_result({"summary": "looks fine"})),  # no "findings" key
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    with pytest.raises(EvaluatorInfraError):
+        EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+
+def test_evaluator_empty_findings_array_still_accepts(tmp_path: Path) -> None:
+    # A well-formed, empty findings array is a genuinely clean verdict, not a fail-closed one.
+    node = _evaluator("review")
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    services = _services(
+        FakeRouter(_result({"findings": []})),
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    result = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "accept"
+
+
 # -- checks -------------------------------------------------------------------
 
 

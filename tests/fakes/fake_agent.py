@@ -68,6 +68,10 @@ def _schema_output(cli_name: str, cli_args: list[str]) -> dict[str, object]:
             "decompose": False,
             "subtasks": [],
         }
+    # F19: every in-flow evaluator (review/verifier/critic) requests the mandatory findings
+    # schema — a well-formed empty array is a clean, accepting verdict.
+    if isinstance(required, list) and "findings" in required:
+        return {"findings": []}
     return {"content": "Fake refinement result.", "human_input": None}
 
 
