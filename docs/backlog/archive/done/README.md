@@ -28,3 +28,4 @@ This folder contains backlog documents for product work that has already shipped
 | [Generic node-output prompt variables](node-output-prompt-variables.md) | implemented (2026-07-02) |
 | [Sub-task context handoff (intra-task decompose)](subtask-context-handoff.md) | implemented (2026-07-02) |
 | [Autonomous run — open questions & decisions](autonomous-run-open-questions.md) | implementation log (2026-07-02) |
+| [Trust levels / danger-approval policy](trust-levels-danger-approval.md) | implemented (config v25, 2026-07-03) |
