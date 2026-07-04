@@ -29,13 +29,14 @@ This file is for Codex. The full set of rules matches [CLAUDE.md](CLAUDE.md) and
 ```bash
 pip install -e ".[dev]"
 ruff check .
+ruff format --check .   # CI runs this; use `ruff format .` to fix
 mypy src
 pytest
 ```
 
 ## Definition of Done for a change
 
-- the code passes `ruff`, `mypy`, `pytest`;
+- the code passes `ruff check .`, `ruff format --check .`, `mypy src`, `pytest`;
 - tests are added/updated when behavior changes;
 - docs are updated in the same change when behavior/CLI/config/architecture change (use `/sync-docs`), and deferred work is recorded in [docs/backlog/follow_ups.md](docs/backlog/follow_ups.md) — the Stop docs-sync gate enforces this;
 - the invariants above are not violated.
