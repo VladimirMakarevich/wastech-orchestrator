@@ -48,7 +48,7 @@ This cannot loop forever. There is a safety limit on how many fix attempts are a
 A few things can pause a run for a person:
 
 - During **planning** (and, more rarely, refinement), if a genuinely material decision cannot be settled from the repository, the agent can pause to ask one clarifying question — and planning can also ask for an approval — before continuing. A well-specified task avoids this.
-- If a change does something **risky** — like deleting tracked files or changing dependencies — the orchestrator asks a human to approve it before continuing.
+- If a change touches a path the operator marked **protected** (and, on the stricter setting, if it deletes tracked files or changes dependencies), the orchestrator asks a human to approve it before continuing. By default routine in-repo changes are not gated — they are Git-reversible and the pull request is still the review backstop — but an operator can raise the bar per repository or per task.
 - If something genuinely cannot be launched (for example a test command whose program is missing), that is treated as a setup problem, not something the agent can fix by editing code.
 
 ## Splitting a big task into smaller pieces (decomposition)

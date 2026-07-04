@@ -34,6 +34,7 @@ Fill in the repository identity first:
 - `local_path` — the repo path the orchestrator should operate in.
 - `base_branch` — the branch to refresh before work and return to after cleanup.
 - `branch_prefix` — usually leave the default `worc`.
+- `branch_mode` — leave the default `new` (fork a fresh task branch from base). Only change it if most tasks on this repo should work in an existing or current branch; individual tasks can override it per-task.
 
 If the target project needs customer-specific branch names, keep `branch_prefix` default and let individual tasks set `branch_name`.
 
@@ -54,6 +55,8 @@ Treat this block as a guardrail, not a convenience area:
 - Pass only names in `allowed_environment`; secret **values** never belong in the file.
 - Keep `denied_commands` complete; it replaces the default list rather than extending it.
 - Do not add `extra_args` that disable sandboxing, approvals, or rule enforcement.
+- `trust_level` sets the approval threshold for the mid-task dangerous-diff gate: `auto` (default) lets routine in-repo deletions/edits proceed; `strict` gates every deletion or dependency-manifest edit. It never lowers the hard ceiling — only which diffs raise the gate.
+- `protected_paths` is the always-ask floor: repo-relative globs (same dialect as `checks.command_sets[].paths`) that require approval on **any** change regardless of `trust_level`. Default `[]` (no floor); add sensitive surfaces here (e.g. `.github/workflows/**`, `src/security/**`).
 
 ### 4. `checks`
 

@@ -380,9 +380,7 @@ class GitManager:
             # Only a remote ref exists → create a local branch tracking it (no reset of anything).
             self._git_checked("checkout", "-b", branch_ref, f"origin/{branch_ref}")
         else:  # defensive: the pre-branch preflight already verified existence
-            raise GitCommandError(
-                f"branch_ref {branch_ref!r} does not exist locally or on origin"
-            )
+            raise GitCommandError(f"branch_ref {branch_ref!r} does not exist locally or on origin")
         return branch_ref
 
     def _prepare_current(self, task_id: str, slug: str) -> str:

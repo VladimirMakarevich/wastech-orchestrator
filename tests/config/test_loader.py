@@ -537,7 +537,7 @@ def test_unknown_retry_subkey_is_rejected() -> None:
 
 _REPO_WITH_MODE = (
     'repo:\n  url: "git@example.com:o/r.git"\n  branch_mode: {mode}\n'
-    "agents:\n  allowed: [codex]\n  providers:\n    codex:\n      command: \"codex\"\n"
+    'agents:\n  allowed: [codex]\n  providers:\n    codex:\n      command: "codex"\n'
 )
 
 

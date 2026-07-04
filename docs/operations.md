@@ -416,7 +416,7 @@ After the completed-task ledger record is written, the orchestrator sends one be
 
 `refinement` and `planning` may emit one typed free-form question or yes/no approval. Questions use ForceReply; approvals use inline buttons. Only the configured chat and exact prompt/callback are accepted. The answer is persisted as redacted JSON and passed to the repeated stage through `human_input_path`, never CLI argv.
 
-After `implementation` and `fixing`, tracked-file deletions and dependency manifest/lock changes require approval before tests unless an exact planning approval already covers the same risk and normalized paths. Ordinary diffs and routine commit/push/PR do not ask.
+After `implementation` and `fixing`, the dangerous-diff gate can require approval before tests. Which diffs raise it is set by [`security.trust_level`](configuration.md#trust_level-approval-policy) (overridable per task): `strict` gates every tracked-file deletion/rename or dependency manifest/lock change; `auto` (the fresh-install default) gates none of those — only a [`security.protected_paths`](configuration.md#protected_paths-always-ask-floor) match asks. An exact planning approval already covering the same risk and normalized paths skips a repeat prompt. Ordinary diffs and routine commit/push/PR do not ask.
 
 Timeout, transport failure, ambiguous approval, or a repeated stage request moves the task to `manual_action_required`. Waiting is stored in `logs/<task-id>/hitl/*.json`; restart resumes the existing Telegram message/deadline without adding a state-machine status.
 

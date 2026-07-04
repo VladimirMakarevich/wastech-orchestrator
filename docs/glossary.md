@@ -54,6 +54,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`branch_mode`** (task field) - Where the task's git operations point: `new` (fork a fresh branch, the owned default), `existing` (work in `branch_ref`), or `current` (work in the working tree's current branch as-is). Wins over `repo.branch_mode`. A branch is orchestrator-owned only in `new`.
 - **`branch_ref`** - The existing branch a task works in; required iff `branch_mode` is `existing` (a validation error otherwise) and must already exist locally or on the remote.
 - **`publish`** (task field) - Downgrade-only cap on the `publish` node: `commit` (stop after commits), `push` (stop before the PR), or `pull_request` (full). Effective scope is `min(flow_policy, publish)`; a no-op on a flow with no PR-publishing node.
+- **`trust_level`** (task field) - Per-task override of `security.trust_level`, the approval threshold for the dangerous-diff gate: `strict` gates every deletion/dependency-manifest edit, `auto` gates only a `protected_paths` match. Task value wins; never lowers the hard ceiling and cannot touch `protected_paths`.
 - **`slug`** - Lowercase branch fragment derived from the task title. It is part of the default branch name, not a separate task field.
 - **`auto_merge`** - Per-task publish override. `true` requests auto-merge, `false` opts out, and omission falls back to the config default.
 - **`prompt_audit`** - Per-task prompt logging override. It wins over the global config value in both directions.
@@ -103,6 +104,8 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`security.allowed_environment`** - Environment variable names that are allowed to reach child processes.
 - **`security.denied_read_paths`** - Paths that the orchestrator will not read as secrets or task context.
 - **`security.denied_commands`** - Commands that are refused even if they are otherwise present in config or flow arguments.
+- **`security.trust_level`** - Approval policy for the mid-task dangerous-diff gate: `strict` gates every deletion/dependency-manifest edit, `auto` (fresh-install default) gates only a `protected_paths` match. A per-task `trust_level` overrides it; it never lowers the hard security ceiling. Replaced the removed `deletion_approval_exempt_paths` (config v25).
+- **`security.protected_paths`** - Repo-relative globs (same dialect as `checks.command_sets[].paths`) whose files always require approval on any change regardless of `trust_level` — the always-ask floor no level can lower. `config.yaml`-only; default `[]`.
 - **`validation`** - The task input hardening block. It rejects malformed or suspicious task files before branch creation.
 - **`validation.max_task_bytes`**, **`validation.max_task_lines`**, **`validation.max_line_bytes`**, **`validation.max_control_ratio`** - Size and content ceilings for task input.
 - **`validation.required_fields`** - Required task metadata fields.
@@ -303,4 +306,5 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`decompose`** - A removed task flag for decomposition.
 - **`footprint.location`**, **`footprint.tracking`**, **`footprint.external_root`** - Removed footprint keys from older config shapes.
 - **`min_size_signal`** and **`commit_per_subtask`** - Removed decorative decomposition keys that are no longer read.
+- **`security.deletion_approval_exempt_paths`** - Removed skip-list (config v25). Replaced by the inverse model — `security.trust_level` (which deletions ask at all) plus `security.protected_paths` (the always-ask floor). `upgrade-config` strips the old key; there is no automatic conversion.
 - **`summary stage`** - The old name for the idea that is now handled by the constant supervisor layer and the final `summary.md` artifact.

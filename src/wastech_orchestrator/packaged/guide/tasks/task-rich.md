@@ -7,7 +7,11 @@
 id: task-webhook-retry-budget
 title: "Add a bounded retry budget to webhook delivery"
 task_type: implementation # selects the FLOW. Omit ⇒ implementation (default). Built-ins: implementation, deep_research, security_audit; or a custom operator flow at .worc/flows/<task_type>.yaml. The task only names the flow — never edits it.
-branch_name: "feature/ABC-123-webhook-retry-budget" # full branch override; omit for repo.branch_prefix/id/title slug.
+branch_name: "feature/ABC-123-webhook-retry-budget" # full branch override; omit for repo.branch_prefix/id/title slug. Ignored when branch_mode is existing/current.
+branch_mode: new # new (default; fork a fresh branch from base) | existing (work in branch_ref) | current (use the current checkout as-is). Overrides repo.branch_mode.
+# branch_ref: "feature/big-feature" # REQUIRED iff branch_mode: existing (the already-existing branch to check out); omit for new/current.
+publish: pull_request # downgrade-only cap on where the publish node stops: commit | push | pull_request. Effective = min(flow_policy, publish); omit ⇒ flow policy; no-op if the flow has no publish node.
+trust_level: auto # per-task override of the dangerous-diff approval gate: strict (gate every deletion/manifest edit) | auto (default; gate only operator protected_paths). Never lowers the hard ceiling.
 auto_merge: false # true = auto-merge (DANGER: skips human review; the task author owns this call) / false = opt out / omit = config default. The task value wins outright.
 priority: high # scheduling order under `watch`: eligible tasks run high → mid → low (ties by filename). low|mid|high; omit/unrecognised ⇒ mid (fail-open). depends_on is always stronger.
 contacts: # handles surfaced for human-in-the-loop prompts and approvals

@@ -36,7 +36,49 @@ title: "Add a bounded retry budget to webhook delivery"
 branch_name: "feature/ABC-123-webhook-retry-budget"
 ```
 
-Omit it to use the default. The value is the full branch name, not a suffix. It must be a valid Git branch name, must not equal the base branch, and is validated before any branch/provider side effect. It changes only the branch/head used for push and PR creation; the PR title still comes from `title`.
+Omit it to use the default. The value is the full branch name, not a suffix. It must be a valid Git branch name, must not equal the base branch, and is validated before any branch/provider side effect. It changes only the branch/head used for push and PR creation; the PR title still comes from `title`. In `existing`/`current` branch mode (below) `branch_name` is ignored (there is nothing to name) — setting it there is a validation warning.
+
+## `branch_mode` — run in an existing or current branch
+
+By default the orchestrator creates a fresh task branch from the base branch (`branch_mode: new`). Two other modes let a task target a branch you already care about:
+
+```yaml
+branch_mode: existing # work in an already-existing branch
+branch_ref: "feature/big-feature" # required for `existing`; the branch to check out
+```
+
+- `new` _(default)_ — create `<repo.branch_prefix>/<id>-<slug>` from the base branch (today's behavior).
+- `existing` — check out and work in the branch named by `branch_ref` (required). It must already exist locally or on the remote — the orchestrator never auto-creates it. Use this to continue/refine a branch or chain several tasks onto one feature branch (they converge on a single reused PR).
+- `current` — work in whatever branch the working tree is on, without creating, switching, requiring a clean tree, or pulling. A low-ceremony local experiment; a detached HEAD is rejected. Poor fit for unattended `watch` (it depends on your live checkout) — it warns there.
+
+The per-task value overrides the global `repo.branch_mode` default. **Safety:** in `existing`/`current` the branch belongs to you, so the orchestrator never deletes, resets, or force-checkouts away from it; a fresh (non-`--continue`) rerun in these modes is refused (use `rerun --continue`). Branch mode only governs _where_ git operations point; whether a `publish` node runs at all is still the flow's decision.
+
+## `publish` — cap where a task stops (commit / push / PR)
+
+`publish` is a **downgrade-only** cap on the flow's publish node, for a single task that should stop short of a PR without switching flows:
+
+```yaml
+publish: commit # stop after the local commit (no push, no PR)
+```
+
+- `commit` — commit locally, no push, no PR.
+- `push` — commit and push the branch, no PR.
+- `pull_request` — full publish (commit → push → PR).
+
+It is a **cap, never an escalation**: the effective scope is `min(flow_policy, publish)`. On a flow whose graph has no publish node it is a no-op — it cannot manufacture publishing. Omit it to use the flow's own policy. (Edge case: when the working branch resolves to the PR base — e.g. `current` on `main` — the push runs but the PR is skipped, since a `main→main` PR is impossible.)
+
+## `trust_level` — approval policy for the dangerous-diff gate
+
+`trust_level` moves the threshold at which the mid-task dangerous-diff gate asks for approval. It is a per-task override of the global `security.trust_level`:
+
+```yaml
+trust_level: strict # gate on every deletion / dependency-manifest edit
+```
+
+- `strict` — gate on **any** tracked-file deletion/rename or dependency manifest/lock edit (ask before continuing).
+- `auto` _(default)_ — routine in-repo deletions/renames/edits do **not** gate; only a `security.protected_paths` match asks.
+
+It never lowers the hard ceiling (env-allowlist, the `--dangerously-*`/bypass ban, `cwd` containment) — it only changes _which_ diffs raise the gate. `protected_paths` is an operator-only config floor that always asks regardless of `trust_level`; there is no per-task equivalent. Leave `trust_level` unset unless a task genuinely needs a stricter (or looser) bar than the instance default.
 
 ## Disabling nodes — `nodes.<node-id>.enabled: false`
 

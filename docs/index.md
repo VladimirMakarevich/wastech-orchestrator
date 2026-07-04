@@ -42,4 +42,4 @@ A lean orchestrator that turns Markdown tasks into reviewed Pull Requests — dr
 - **Security policy is a config-level invariant.** No task or `extra_args` can weaken the sandbox or the environment allowlist; flow-wide ceilings (`permission_ceiling`/`output_policy`/`network_policy`) are validated fail-closed before any task runs.
 - **Crash-safe and idempotent.** SQLite checkpoints at every step; a restart resumes in-flight work without double-commits or duplicate PRs.
 - **Tasks and results live in the repo.** The task file and its summary are committed to `tasks/`; orchestration state, config, and logs live in the gitignored `.worc/` home and never enter Git history.
-- **Optional Telegram HITL.** Planning can request a single correlated question or approval (refinement, a question only); deletions and dependency changes are fail-closed before tests.
+- **Optional Telegram HITL.** Planning can request a single correlated question or approval (refinement, a question only); a `trust_level`-gated dangerous-diff approval (deletions / dependency changes, or operator-marked `protected_paths`) is fail-closed before tests.

@@ -57,6 +57,8 @@ worc/<epoch>-<task-id>-<slug>
 
 `<epoch>` is the unix timestamp captured when the branch is prepared, so re-submitting the same task never collides with a leftover branch. The full auto-generated name is capped at 50 characters: the slug is truncated to whatever fits (or dropped entirely if the prefix already fills the budget). A task may set `branch_name` to override the full branch name when a project or customer requires a different convention; an override longer than 50 characters logs a warning and falls back to the auto-generated name.
 
+This fresh-branch behavior is `branch_mode: new` — the default, and the only mode in which the orchestrator owns (and may reset/delete) the branch. Set `repo.branch_mode` (or a per-task `branch_mode`) to `existing` to work in a named already-existing branch (`branch_ref`), or `current` to work in the current checkout as-is — see [task-authoring.md](task-authoring.md#branch_mode). A per-task `publish: commit|push|pull_request` caps how far publishing goes for one task (e.g. stop at a local commit) without switching flows.
+
 Credentials are configured outside the orchestrator:
 
 - authenticate git and `gh` in the shell environment that runs the orchestrator;

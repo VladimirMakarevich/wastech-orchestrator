@@ -59,6 +59,7 @@ Allowed fields:
 | `branch_mode` | no | `new` \| `existing` \| `current` | Where this task's git operations point. Omitted ⇒ the instance default `repo.branch_mode`. `new` forks a fresh task branch; `existing` works in `branch_ref`; `current` works in the working tree's current branch as-is. The task value wins. See [`branch_mode`](#branch_mode). |
 | `branch_ref` | no | string | The existing branch to work in — **required iff** the resolved mode is `existing`, and a validation error otherwise. Must already exist locally or on the remote (no auto-create; checked at preflight). See [`branch_mode`](#branch_mode). |
 | `publish` | no | `commit` \| `push` \| `pull_request` | Downgrade-only cap on how far the `publish` node goes: `commit` stops after the commits, `push` stops before the PR, `pull_request` is the full sequence. Omitted ⇒ the flow's publishing policy. A cap, never an escalation (`min(flow_policy, publish)`); a no-op on a flow with no PR-publishing node. See [`publish`](#publish). |
+| `trust_level` | no | `strict` \| `auto` | Per-task override of the mid-task dangerous-diff approval gate: `strict` gates every tracked-file deletion/rename or dependency-manifest edit, `auto` gates only a `security.protected_paths` match. Omitted ⇒ the instance default `security.trust_level`. The task value wins; it never lowers the hard security ceiling and cannot touch `protected_paths`. See [`trust_level`](#trust_level). |
 | `auto_merge` | no | boolean | `true` requests auto-merge, `false` always opts out, omitted uses the instance default. A set per-task value wins outright over `git.auto_merge`. See [`auto_merge`](#auto_merge). |
 | `prompt_audit` | no | boolean | `true` records each step's prompt + who for this task, `false` disables it, omitted uses config. Always overrides the global. See [`prompt_audit`](#prompt_audit). |
 | `decomposition` | no | boolean | `true` permits a split for this task, `false` forbids one, omitted uses the instance default `agents.decomposition.enabled`. The task value wins; it only flips the gate (the flow + planning still decide whether a split happens). See [`decomposition`](#decomposition). |
@@ -168,6 +169,21 @@ publish: pull_request # the full sequence (same as omitting it on a PR flow)
 ```
 
 The effective scope is `min(flow_policy, publish)` over `commit < push < pull_request`, so it can only **narrow** what the flow already does — it can never manufacture publishing. On a flow whose graph has no PR-publishing node it is a no-op. This is the low-ceremony way to run a task and stop at a local commit (or a pushed branch) for inspection; it composes with `branch_mode: current` for a local experiment.
+
+## `trust_level`
+
+`trust_level` sets the approval threshold for the mid-task **dangerous-diff gate** — the guard that can pause after a `workspace-write` edit when the agent's diff deletes/renames a tracked file or touches a dependency manifest/lock. It defaults to the instance-wide `security.trust_level` (whose fresh-install default is `auto`), so unless you set it, nothing changes:
+
+```yaml
+trust_level: strict # ask before continuing on any deletion / dependency-manifest edit
+```
+
+| Value | Behavior |
+| --- | --- |
+| `strict` | Gate on **any** tracked-file deletion/rename or dependency-manifest/lock edit. |
+| `auto` (default) | Routine in-repo deletions/renames/edits do **not** gate; only a `security.protected_paths` match asks. |
+
+The per-task value **wins** over the global default (there is no operator gate, mirroring [`auto_merge`](#auto_merge)). It changes only _which_ diffs raise the gate — it **never lowers the hard security ceiling** (the environment allowlist, the `bypassPermissions`/`--dangerously-*` ban, and `cwd` containment hold at every level). A raised gate is fail-closed: a denial, timeout, or missing notifier stops the task in `manual_action_required`. `trust_level` cannot touch `security.protected_paths` — that always-ask floor is `config.yaml`-only and asks at every level (see [configuration.md](configuration.md#trust_level-approval-policy)).
 
 ## Refinement (automatic)
 
