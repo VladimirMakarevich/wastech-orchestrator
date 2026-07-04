@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from wastech_orchestrator.config.schema import MergeStrategy
+from wastech_orchestrator.config.schema import BranchMode, MergeStrategy
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import (
     _PUSH_RETRY_BACKOFF_SECONDS,
@@ -661,6 +661,10 @@ def test_create_pr_with_fake_gh(
 
     def fake_gh(argv: Sequence[str]) -> GitResult:
         gh_calls.append(list(argv))
+        if list(argv[:2]) == ["pr", "list"]:  # the reuse probe: no open PR to reuse
+            return GitResult(
+                exit_code=0, stdout="[]\n", stderr="", timed_out=False, launch_error=None
+            )
         return GitResult(
             exit_code=0,
             stdout="https://github.com/o/r/pull/1\n",
@@ -675,11 +679,12 @@ def test_create_pr_with_fake_gh(
     body.write_text("# summary\n", encoding="utf-8")
     url = gm.create_pr("task-001", branch, title="My PR", body_path=str(body))
     assert url == "https://github.com/o/r/pull/1"
-    assert gh_calls[0][:2] == ["pr", "create"]
-    assert "--body-file" in gh_calls[0]
+    # A reuse probe (`pr list`) then the create; the create carries the body file.
+    assert [c[:2] for c in gh_calls] == [["pr", "list"], ["pr", "create"]]
+    assert "--body-file" in gh_calls[1]
     url2 = gm.create_pr("task-001", branch, title="My PR", body_path=str(body))
     assert url2 == url
-    assert len(gh_calls) == 1  # idempotent: gh not invoked again
+    assert len(gh_calls) == 2  # idempotent: gh not invoked again (publish-op short-circuits)
 
 
 def test_create_pr_real_runner_adds_gh_executable_once(
@@ -695,6 +700,10 @@ def test_create_pr_real_runner_adds_gh_executable_once(
 
     def fake_run(argv: Sequence[str]) -> GitResult:
         calls.append(list(argv))
+        if list(argv[1:3]) == ["pr", "list"]:  # the reuse probe: no open PR to reuse
+            return GitResult(
+                exit_code=0, stdout="[]\n", stderr="", timed_out=False, launch_error=None
+            )
         return GitResult(
             exit_code=0,
             stdout="https://github.com/o/r/pull/1\n",
@@ -709,8 +718,9 @@ def test_create_pr_real_runner_adds_gh_executable_once(
 
     gm.create_pr("task-001", "worc/task-001-x", title="My PR", body_path=str(body))
 
-    assert calls[0][:3] == ["gh", "pr", "create"]
-    assert calls[0].count("gh") == 1
+    create = next(c for c in calls if c[1:3] == ["pr", "create"])
+    assert create[:3] == ["gh", "pr", "create"]  # `gh` executable added exactly once
+    assert create.count("gh") == 1
 
 
 def test_create_pr_disabled_returns_none(
@@ -881,6 +891,172 @@ def test_push_to_base_branch_is_refused(
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
     with pytest.raises(GitCommandError):
         gm.push("task-001", "main")
+
+
+# --- branch-mode: existing / current (branch-mode ADR) -----------------------------------
+
+
+def test_prepare_branch_existing_checks_out_local_ref(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # `existing` mode works in an operator-owned local branch: plain checkout, no fresh branch.
+    git_run(["branch", "feature/keep"], git_repo.clone)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    branch = gm.prepare_branch(
+        "task-001", "x", epoch=_EPOCH, mode=BranchMode.EXISTING, branch_ref="feature/keep"
+    )
+    assert branch == "feature/keep"
+    assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "feature/keep"
+
+
+def test_prepare_branch_existing_creates_local_tracking_from_remote(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # Only a remote ref exists → create a local branch tracking origin/<ref> (never a reset).
+    git_run(["checkout", "-b", "feature/remote-only"], git_repo.clone)
+    (git_repo.clone / "r.txt").write_text("x\n", encoding="utf-8")
+    git_run(["add", "r.txt"], git_repo.clone)
+    git_run(["commit", "-m", "remote work"], git_repo.clone)
+    git_run(["push", "-u", "origin", "feature/remote-only"], git_repo.clone)
+    git_run(["checkout", "main"], git_repo.clone)
+    git_run(["branch", "-D", "feature/remote-only"], git_repo.clone)  # local ref gone; remote stays
+
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    branch = gm.prepare_branch(
+        "task-001", "x", epoch=_EPOCH, mode=BranchMode.EXISTING, branch_ref="feature/remote-only"
+    )
+    assert branch == "feature/remote-only"
+    assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "feature/remote-only"
+    assert (git_repo.clone / "r.txt").exists()  # the remote work is present
+
+
+def test_prepare_branch_current_uses_head_without_switch_or_pull(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # `current` mode uses HEAD as-is: no switch, no pull, and a dirty tree is left untouched.
+    git_run(["checkout", "-b", "operator/wip"], git_repo.clone)
+    (git_repo.clone / "unrelated.txt").write_text("operator work\n", encoding="utf-8")  # dirty
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    branch = gm.prepare_branch("task-001", "x", epoch=_EPOCH, mode=BranchMode.CURRENT)
+    assert branch == "operator/wip"
+    assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "operator/wip"
+    assert (git_repo.clone / "unrelated.txt").read_text(encoding="utf-8") == "operator work\n"
+
+
+def test_push_to_base_allowed_in_current_mode(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # In `current`/`existing` mode pushing the working branch — even when it is the base — is the
+    # legitimate head==base publish path, not a corrupted-state signal.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    (git_repo.clone / "src.py").write_text("x\n", encoding="utf-8")
+    gm.commit_code("task-001", "feat")
+    assert gm.push("task-001", "main", mode=BranchMode.CURRENT) is True
+    # the commit reached origin/main
+    remote_log = git_run(["log", "--oneline", "origin/main"], git_repo.clone)
+    assert "feat" in remote_log
+
+
+def test_current_branch_none_when_detached(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    assert gm.current_branch() == "main"
+    git_run(["checkout", "--detach", "HEAD"], git_repo.clone)
+    assert gm.current_branch() is None
+
+
+def test_local_or_remote_branch_exists(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    assert gm.local_or_remote_branch_exists("main") is True
+    assert gm.local_or_remote_branch_exists("no-such-branch") is False
+    git_run(["branch", "local-only"], git_repo.clone)
+    assert gm.local_or_remote_branch_exists("local-only") is True
+
+
+def test_terminal_cleanup_current_leaves_working_branch(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # `current` owns the operator's (possibly dirty) tree — cleanup must not force-checkout base.
+    _task(store)
+    git_run(["checkout", "-b", "operator/wip"], git_repo.clone)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH, mode=BranchMode.CURRENT)
+    (git_repo.clone / "dirty.txt").write_text("keep me\n", encoding="utf-8")
+    outcome = gm.terminal_cleanup("task-001", mode=BranchMode.CURRENT)
+    assert outcome.safe is True
+    assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "operator/wip"
+    assert (git_repo.clone / "dirty.txt").exists()  # operator state preserved
+
+
+def _reuse_gh(
+    calls: list[list[str]], *, list_stdout: str, create_url: str = "https://x/pull/9"
+) -> Callable[[Sequence[str]], GitResult]:
+    def gh(argv: Sequence[str]) -> GitResult:
+        calls.append(list(argv))
+        stdout = list_stdout if list(argv[:2]) == ["pr", "list"] else f"{create_url}\n"
+        return GitResult(exit_code=0, stdout=stdout, stderr="", timed_out=False, launch_error=None)
+
+    return gh
+
+
+def test_create_pr_skips_when_head_equals_base(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # head == pr_base: a PR is impossible, so create_pr skips (returns None), never touching gh.
+    _task(store)
+    calls: list[list[str]] = []
+    gh = _reuse_gh(calls, list_stdout="[]")
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+    assert gm.create_pr("task-001", "main", title="t", body_path="x") is None
+    assert calls == []  # neither the reuse probe nor create runs
+    assert store.get_publish_op("task-001", "pr") is None
+
+
+def test_create_pr_reuses_open_pr(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # A chain of tasks on one branch converges on one PR: an already-open head→base PR is reused.
+    _task(store)
+    calls: list[list[str]] = []
+    gh = _reuse_gh(calls, list_stdout='[{"url": "https://x/pull/7", "updatedAt": "2026-01-01"}]')
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+    url = gm.create_pr("task-001", "feature/shared", title="t", body_path="x")
+    assert url == "https://x/pull/7"
+    assert [c[:2] for c in calls] == [["pr", "list"]]  # reused; no `pr create`
+    op = store.get_publish_op("task-001", "pr")
+    assert op is not None and op.result_ref == "https://x/pull/7"
+
+
+def test_create_pr_reuse_picks_most_recent_of_multiple(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    _task(store)
+    calls: list[list[str]] = []
+    rows = (
+        '[{"url": "https://x/pull/3", "updatedAt": "2026-01-01"},'
+        ' {"url": "https://x/pull/8", "updatedAt": "2026-02-01"}]'
+    )
+    gh = _reuse_gh(calls, list_stdout=rows)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+    url = gm.create_pr("task-001", "feature/shared", title="t", body_path="x")
+    assert url == "https://x/pull/8"  # most recent by updatedAt
+
+
+def test_create_pr_creates_new_when_no_open_pr(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # No open PR (closed/merged are filtered by `--state open`) → proceed to create a fresh one.
+    _task(store)
+    calls: list[list[str]] = []
+    gh = _reuse_gh(calls, list_stdout="[]")
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+    url = gm.create_pr("task-001", "feature/x", title="t", body_path="x")
+    assert url == "https://x/pull/9"
+    assert [c[:2] for c in calls] == [["pr", "list"], ["pr", "create"]]
 
 
 def test_current_diff_is_redacted(

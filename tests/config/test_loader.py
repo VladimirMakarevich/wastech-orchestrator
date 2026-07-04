@@ -7,6 +7,7 @@ import pytest
 from wastech_orchestrator.config.loader import ConfigError, loads_config
 from wastech_orchestrator.config.schema import (
     AuditBranch,
+    BranchMode,
     MergeStrategy,
 )
 from wastech_orchestrator.providers.base import ProviderId
@@ -530,3 +531,27 @@ def test_unknown_retry_subkey_is_rejected() -> None:
     with pytest.raises(ConfigError) as exc:
         loads_config(_agents("  retry:\n    nonsense: 1\n"))
     assert any("agents.retry" in i and "nonsense" in i for i in exc.value.issues)
+
+
+# --- repo.branch_mode (branch-mode ADR) ---
+
+_REPO_WITH_MODE = (
+    'repo:\n  url: "git@example.com:o/r.git"\n  branch_mode: {mode}\n'
+    "agents:\n  allowed: [codex]\n  providers:\n    codex:\n      command: \"codex\"\n"
+)
+
+
+def test_repo_branch_mode_defaults_to_new() -> None:
+    cfg = loads_config(_LEGACY).config
+    assert cfg.repo.branch_mode is BranchMode.NEW
+
+
+def test_repo_branch_mode_is_read_when_present() -> None:
+    cfg = loads_config(_REPO_WITH_MODE.format(mode="current")).config
+    assert cfg.repo.branch_mode is BranchMode.CURRENT
+
+
+def test_repo_branch_mode_invalid_is_rejected() -> None:
+    with pytest.raises(ConfigError) as exc:
+        loads_config(_REPO_WITH_MODE.format(mode="sideways"))
+    assert any("branch_mode" in issue for issue in exc.value.issues)

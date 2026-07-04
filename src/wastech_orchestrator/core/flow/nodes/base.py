@@ -19,6 +19,7 @@ from typing import Protocol
 
 from wastech_orchestrator.check_runner import CheckOutcome
 from wastech_orchestrator.checks.model import ResolvedCheckSet
+from wastech_orchestrator.config.schema import BranchMode, PublishScope
 from wastech_orchestrator.git_manager import ChangedPath
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult
 from wastech_orchestrator.providers.base import AgentRunRequest, ErrorClass, ProviderId
@@ -214,7 +215,7 @@ class GitPort(Protocol):
 
     def commit_audit(self, task_id: str) -> str | None: ...
 
-    def push(self, task_id: str, branch: str) -> bool: ...
+    def push(self, task_id: str, branch: str, *, mode: BranchMode = BranchMode.NEW) -> bool: ...
 
     def create_pr(self, task_id: str, branch: str, *, title: str, body_path: str) -> str | None: ...
 
@@ -312,6 +313,12 @@ class NodeInputs:
     check_sets: tuple[ResolvedCheckSet, ...] = ()
     #: publish inputs (set for the unit that reaches a publish node).
     branch: str | None = None
+    #: the task's effective branch mode — governs whether ``push`` may target the base branch
+    #: (branch-mode ADR). Defaults to ``new`` (an orchestrator-owned branch).
+    branch_mode: BranchMode = BranchMode.NEW
+    #: the per-task downgrade-only publish cap (``commit``/``push``/``pull_request``), or ``None``
+    #: to defer to the flow's ``PublishingPolicy``. A downgrade cap (:class:`PublishScope`).
+    publish_scope: PublishScope | None = None
     pull_request_title: str | None = None
     summary_body_path: str | None = None
     commit_message: str | None = None

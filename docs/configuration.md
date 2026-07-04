@@ -34,10 +34,10 @@ Exactly one configured provider must set `primary: true` — the **global primar
 ## `schema_version`
 
 ```yaml
-schema_version: 23
+schema_version: 26
 ```
 
-Optional top-level integer marking the `config.yaml` **format** version (current: `24`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
+Optional top-level integer marking the `config.yaml` **format** version (current: `26`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
 
 ## Config Discovery
 
@@ -104,6 +104,7 @@ repo:
   local_path: "./workspace/repo"
   base_branch: "main"
   branch_prefix: "worc"
+  branch_mode: "new"
 ```
 
 | Field | Type | Default | Meaning |
@@ -112,6 +113,7 @@ repo:
 | `local_path` | string | `"./workspace/repo"` | Dedicated clone/worktree used for agent runs. |
 | `base_branch` | string | `"main"` | Branch checked out before task branches and after terminal cleanup. |
 | `branch_prefix` | string | `"worc"` | Prefix for default task branches: `worc/<epoch>-<task-id>-<slug>` (`<epoch>` is the unix timestamp at branch-prep time, so a re-run never collides). The full auto-generated name is capped at 50 chars — the slug is truncated to fit, or dropped entirely if the prefix already fills the budget. A task-level `branch_name` overrides the full name; an override longer than 50 chars logs a warning and falls back to the auto-generated name. |
+| `branch_mode` | `new` \| `existing` \| `current` | `"new"` | Instance default for **where task git operations point** (added in `schema_version` 26). `new` creates a fresh task branch from `base_branch` (today's behavior). `existing` works in a named, already-existing branch (the task supplies `branch_ref`). `current` works in whatever branch the working tree is on — no create, switch, pull, or clean-tree requirement. A per-task `branch_mode` overrides this. A branch is **orchestrator-owned only in `new`** — destructive git ops (reset-to-base, force-checkout-away, branch delete) run only there, and a fresh `rerun` in `existing`/`current` is refused (use `rerun --continue`). See [task authoring](task-authoring.md#branch_mode). |
 
 Git credentials are not stored in this file. Configure SSH, a credential helper, or `gh auth login` outside the orchestrator.
 

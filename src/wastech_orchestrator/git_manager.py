@@ -30,6 +30,7 @@ from pathlib import Path
 
 from wastech_orchestrator.config.schema import (
     AuditBranch,
+    BranchMode,
     MergeStrategy,
     OrchestratorConfig,
 )
@@ -327,9 +328,27 @@ class GitManager:
         return f"{fixed}-{bounded}" if bounded else fixed
 
     def prepare_branch(
-        self, task_id: str, slug: str, *, epoch: int, branch_name: str | None = None
+        self,
+        task_id: str,
+        slug: str,
+        *,
+        epoch: int,
+        branch_name: str | None = None,
+        mode: BranchMode = BranchMode.NEW,
+        branch_ref: str | None = None,
     ) -> str:
-        """Fetch, sync ``base_branch``, and create (or reuse) the task branch. Returns its name."""
+        """Attach the task's working branch per :class:`BranchMode`. Returns its name.
+
+        ``new`` (owned): fetch, checkout ``base_branch``, ``pull --ff-only``, create (or reuse on
+        restart) the auto-named task branch. ``existing`` / ``current`` are operator-owned — this
+        never fast-forwards, resets, or aborts a merge on them; it only performs a plain checkout
+        (``existing``) or nothing at all (``current``), so the operator's local state is preserved.
+        """
+        if mode is BranchMode.EXISTING:
+            return self._prepare_existing(task_id, slug, branch_ref)
+        if mode is BranchMode.CURRENT:
+            return self._prepare_current(task_id, slug)
+
         base = self._config.repo.base_branch
         branch = self.branch_name(task_id, slug, epoch=epoch, override=branch_name)
         self._active = _ActiveTask(task_id=task_id, slug=slug, branch=branch)
@@ -347,6 +366,46 @@ class GitManager:
         else:
             self._git_checked("checkout", "-b", branch)
         return branch
+
+    def _prepare_existing(self, task_id: str, slug: str, branch_ref: str | None) -> str:
+        """``existing`` mode: check out an operator-owned branch (creating a local tracking branch
+        from ``origin/<ref>`` when only the remote exists). Never ff/reset — a plain checkout."""
+        if not branch_ref:  # defensive: the gate requires branch_ref for `existing`
+            raise GitCommandError("branch_mode 'existing' requires branch_ref")
+        self._active = _ActiveTask(task_id=task_id, slug=slug, branch=branch_ref)
+        self._git("fetch", "origin")
+        if self._branch_exists(branch_ref):
+            self._git_checked("checkout", branch_ref)
+        elif self._remote_branch_exists(branch_ref):
+            # Only a remote ref exists → create a local branch tracking it (no reset of anything).
+            self._git_checked("checkout", "-b", branch_ref, f"origin/{branch_ref}")
+        else:  # defensive: the pre-branch preflight already verified existence
+            raise GitCommandError(
+                f"branch_ref {branch_ref!r} does not exist locally or on origin"
+            )
+        return branch_ref
+
+    def _prepare_current(self, task_id: str, slug: str) -> str:
+        """``current`` mode: use the working tree's current branch as-is — no switch, no fetch, no
+        ``pull``, no clean-tree requirement. A detached HEAD has no branch and is rejected."""
+        branch = self.current_branch()
+        if branch is None:  # defensive: the preflight rejects a detached HEAD for `current`
+            raise GitCommandError("branch_mode 'current' requires a branch (HEAD is detached)")
+        self._active = _ActiveTask(task_id=task_id, slug=slug, branch=branch)
+        return branch
+
+    def current_branch(self) -> str | None:
+        """The working tree's symbolic branch name, or ``None`` when HEAD is detached."""
+        name = self._git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        if not name or name == "HEAD":  # empty (no commits) or detached HEAD → no branch
+            return None
+        return name
+
+    def local_or_remote_branch_exists(self, branch: str) -> bool:
+        """Whether ``branch`` exists locally or on ``origin`` (fetch first). The ``existing``-mode
+        preflight probe: fetch is best-effort so an offline repo still checks the local ref."""
+        self._git("fetch", "origin")
+        return self._branch_exists(branch) or self._remote_branch_exists(branch)
 
     def reset_branch_to_base(
         self,
@@ -895,22 +954,28 @@ class GitManager:
 
     # --- publish (idempotent) --------------------------------------------------------
 
-    def push(self, task_id: str, branch: str) -> bool:
+    def push(self, task_id: str, branch: str, *, mode: BranchMode = BranchMode.NEW) -> bool:
         """Push the task branch to ``origin``. Idempotent via the publish op + remote check.
 
-        Refuses to push directly to ``base_branch``: publishing is PR-only, and the task
-        branch must not be ``base_branch``, so a push targeting the base branch signals a
-        corrupted branch state rather than a normal publish.
+        In ``new`` mode the task branch must never be ``base_branch`` — a push targeting the base
+        signals a corrupted branch state (publishing is PR-only), so it is refused. In
+        ``existing``/``current`` mode the operator chose the branch, so pushing to it — even one
+        that happens to be the base — is legitimate (the head==base publish path, where
+        ``create_pr`` then skips the PR). Branch protection on the remote, if any, is the real gate.
         """
         base = self._config.repo.base_branch
-        if branch == base:
+        if branch == base and mode is BranchMode.NEW:
             raise GitCommandError(
                 f"refusing to push directly to base branch {base!r}; publishing is PR-only"
             )
         existing = self._store.get_publish_op(task_id, KIND_PUSH, None)
         if existing is not None and existing.status == _STATUS_COMPLETED:
             return True
-        if self._remote_branch_exists(branch):
+        # The remote-existence shortcut is a ``new``-mode restart optimisation: a fresh unique task
+        # branch is on the remote only if a prior attempt pushed it. In ``existing``/``current`` the
+        # branch pre-exists on the remote regardless of our commit, so its presence proves nothing —
+        # push for real (``git push`` is itself a no-op when already up to date).
+        if mode is BranchMode.NEW and self._remote_branch_exists(branch):
             self._record_completed(task_id, KIND_PUSH, branch, branch)
             return True
         self._store.record_publish_op(
@@ -927,12 +992,29 @@ class GitManager:
         return result.ok and bool(result.stdout.strip())
 
     def create_pr(self, task_id: str, branch: str, *, title: str, body_path: str) -> str | None:
-        """Open a PR with ``summary.md`` as the body. Idempotent. None when PRs are disabled."""
+        """Open a PR with ``summary.md`` as the body. Idempotent. None when PRs are disabled.
+
+        Two branch-mode short-circuits (both return ``None`` — no PR, auto-merge then no-ops):
+        head==base — when the working branch is the PR base (e.g. ``current`` on ``main``), a PR is
+        impossible, so the commit+push already stand and the PR step is skipped; and PR reuse — a
+        chain of tasks on one branch converges on one PR, so an already-open ``head→base`` PR is
+        reused rather than re-created (``gh pr create`` would otherwise fail on the duplicate).
+        """
         if not self._config.git.create_pull_request:
+            return None
+        pr_base = self._config.git.pr_base
+        if branch == pr_base:
+            self._log_pr(task_id).info(
+                "PR skipped: head equals base (%r); the commit/push stands, no PR to open", branch
+            )
             return None
         existing = self._store.get_publish_op(task_id, KIND_PR, None)
         if existing is not None and existing.status == _STATUS_COMPLETED:
             return existing.result_ref
+        reused = self._find_open_pr(task_id, branch, pr_base)
+        if reused is not None:
+            self._record_completed(task_id, KIND_PR, branch, reused)
+            return reused
 
         self._store.record_publish_op(
             PublishOpRow(task_id=task_id, kind=KIND_PR, fingerprint=branch, status=_STATUS_STARTED)
@@ -942,7 +1024,7 @@ class GitManager:
                 "pr",
                 "create",
                 "--base",
-                self._config.git.pr_base,
+                pr_base,
                 "--head",
                 branch,
                 "--title",
@@ -956,6 +1038,48 @@ class GitManager:
         pr_url = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
         self._record_completed(task_id, KIND_PR, branch, pr_url)
         return pr_url
+
+    def _find_open_pr(self, task_id: str, branch: str, pr_base: str) -> str | None:
+        """The URL of an already-open ``branch→pr_base`` PR to reuse, or ``None`` (create a new PR).
+
+        Only an **open** PR (a ``draft`` counts as open) is reusable; a ``closed``/``merged`` PR is
+        not (``gh pr list --state open`` filters them out for us). Multiple open matches → reuse the
+        most recent and warn (the operator likely opened an extra by hand). Best-effort: a ``gh``
+        error / offline / unparseable response returns ``None`` so publishing falls through to
+        ``gh pr create`` (which surfaces a real duplicate-PR error rather than masking it).
+        """
+        result = self._gh(
+            [
+                "pr",
+                "list",
+                "--head",
+                branch,
+                "--base",
+                pr_base,
+                "--state",
+                "open",
+                "--json",
+                "url,updatedAt",
+            ]
+        )
+        if not result.ok:
+            return None
+        try:
+            rows = json.loads(result.stdout or "[]")
+        except ValueError:
+            return None
+        if not isinstance(rows, list) or not rows:
+            return None
+        rows = sorted(rows, key=lambda r: str(r.get("updatedAt") or ""), reverse=True)
+        if len(rows) > 1:
+            self._log_pr(task_id).warning(
+                "multiple open PRs for %s→%s; reusing the most recent", branch, pr_base
+            )
+        url = rows[0].get("url")
+        return str(url) if url else None
+
+    def _log_pr(self, task_id: str) -> logging.LoggerAdapter[logging.Logger]:
+        return bind(_LOG, task_id=task_id, component="gh")
 
     def merge_pr(
         self, task_id: str, pr_url: str, *, strategy: MergeStrategy, wait_for_checks: bool
@@ -1082,8 +1206,23 @@ class GitManager:
 
     # --- terminal cleanup ----------------------------------------------------------
 
-    def terminal_cleanup(self, task_id: str) -> CleanupOutcome:
-        """Safely checkout ``base_branch`` after a terminal outcome, or report why it is unsafe."""
+    def terminal_cleanup(
+        self, task_id: str, *, mode: BranchMode = BranchMode.NEW
+    ) -> CleanupOutcome:
+        """Free the single processing slot after a terminal outcome, or report why it is unsafe.
+
+        ``new`` / ``existing``: check out ``base_branch`` when the tree is clean (both were a clean
+        checkout of a ref we may leave; deletion never happens here). ``current``: the operator owns
+        the branch and its (possibly dirty) tree, so this must **not** force-checkout away — it
+        leaves HEAD on the working branch as-is and reports safe. The next task's ``new``-mode prep
+        checks out base anyway, so the slot is still freed without destroying operator state.
+        """
+        if mode is BranchMode.CURRENT:
+            branch = self.current_branch() or self._config.repo.base_branch
+            outcome = CleanupOutcome(safe=True, target_branch=branch)
+            self._write_cleanup_artifact(task_id, outcome, completed=True)
+            self._active = None
+            return outcome
         base = self._config.repo.base_branch
         dirty = self._unaccounted_dirty_paths()
         if dirty:

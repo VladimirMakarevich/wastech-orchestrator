@@ -96,7 +96,7 @@ class _FakeGit:
     def commit_audit(self, task_id: str) -> str | None:
         return "sha-audit"
 
-    def push(self, task_id: str, branch: str) -> bool:
+    def push(self, task_id: str, branch: str, **_: object) -> bool:
         return True
 
     def create_pr(self, task_id: str, branch: str, *, title: str, body_path: str) -> str | None:

@@ -24,7 +24,7 @@ from typing import Any
 from wastech_orchestrator.check_runner import CheckRunner
 from wastech_orchestrator.checks.model import ResolvedCheckSet
 from wastech_orchestrator.checks.resolver import CheckResolver
-from wastech_orchestrator.config.schema import MergeStrategy, OrchestratorConfig
+from wastech_orchestrator.config.schema import BranchMode, MergeStrategy, OrchestratorConfig
 from wastech_orchestrator.core.decomposition import (
     REASON_N_OUT_OF_RANGE,
     DecompositionDecision,
@@ -505,6 +505,12 @@ class Orchestrator:
         if operator_reject is not None:
             return self._reject(task_file, operator_reject)
 
+        # The IO-bearing branch-mode checks (ref existence for `existing`, detached-HEAD for
+        # `current`) — pre-slot, so a bad target is quarantined before any branch is taken.
+        branch_mode_reject = self._validate_branch_mode(task)
+        if branch_mode_reject is not None:
+            return self._reject(task_file, branch_mode_reject)
+
         if not self.acquire_slot(task.id):
             raise SlotBusyError(f"another task is active; {task.id} must wait")
 
@@ -648,6 +654,38 @@ class Orchestrator:
     @staticmethod
     def _operator_reject(reason: ValidationReason, detail: str) -> tuple[ValidationResult, None]:
         return ValidationResult(passed=False, reason=reason, detail=detail), None
+
+    def _validate_branch_mode(self, task: NormalizedTask) -> ValidationResult | None:
+        """The IO-bearing branch-mode checks the IO-free gate cannot do (branch-mode ADR).
+
+        Runs after the gate but **before** the slot/branch, so a bad target is quarantined with a
+        report and never reaches a branch. ``existing``: ``branch_ref`` must already exist locally
+        or on the remote (no auto-create). ``current``: HEAD must be on a branch (a detached HEAD
+        has nothing to commit on) — and, because it rides the operator's live checkout, it emits a
+        warning (a poor fit for unattended ``watch``, though not forbidden). Returns a reject or
+        ``None`` (ok).
+        """
+        mode = self._branch_mode(task)
+        if mode is BranchMode.EXISTING:
+            ref = task.branch_ref or ""  # the gate guarantees a non-empty ref for `existing`
+            if not self._git.local_or_remote_branch_exists(ref):
+                return ValidationResult(
+                    passed=False,
+                    reason=ValidationReason.INVALID_BRANCH_MODE,
+                    detail=f"branch_ref {ref!r} not found locally or on origin (no auto-create)",
+                )
+        elif mode is BranchMode.CURRENT:
+            if self._git.current_branch() is None:
+                return ValidationResult(
+                    passed=False,
+                    reason=ValidationReason.INVALID_BRANCH_MODE,
+                    detail="branch_mode 'current' needs a branch, but HEAD is detached",
+                )
+            self._log(task.id).warning(
+                "branch_mode 'current' rides the working tree's live checkout — a poor fit for "
+                "unattended watch; the task commits on whatever branch HEAD is on"
+            )
+        return None
 
     # --- task dependencies (``depends_on`` merge-gated scheduling) -------------------------
 
@@ -875,6 +913,16 @@ class Orchestrator:
                 "resolve them before rerun"
             )
         if not continue_mode:
+            # A fresh rerun resets the branch to base (delete + recreate) — safe only on a branch
+            # the orchestrator owns (``new`` mode). In ``existing``/``current`` the branch is the
+            # operator's, so refuse and direct them to resume in place instead of destroying it.
+            rerun_mode = self._persisted_branch_mode(task_id)
+            if rerun_mode is not BranchMode.NEW:
+                refusals.append(
+                    f"task '{task_id}' runs in branch_mode '{rerun_mode.value}' (operator-owned); "
+                    "a fresh rerun would reset a branch the orchestrator does not own. Use "
+                    "`rerun --continue` to resume in place, or clean up the branch manually"
+                )
             pr_url = self._git.recorded_pr_url(task_id)
             has_remote = bool(row.branch) and self._git.remote_branch_exists(row.branch or "")
             if (has_remote or pr_url) and not force_reset_remote:
@@ -912,6 +960,15 @@ class Orchestrator:
         row = self._store.get_task(task_id)
         if row is None:
             raise PipelineFailed(f"unknown task id '{task_id}'")
+        # Defense-in-depth over ``plan_rerun``'s refusal: never reset a branch the orchestrator does
+        # not own (``existing``/``current``). The CLI already gates on the refusal; this guards the
+        # public API path too.
+        rerun_mode = self._persisted_branch_mode(task_id)
+        if rerun_mode is not BranchMode.NEW:
+            raise PipelineFailed(
+                f"cannot fresh-rerun '{task_id}' in branch_mode '{rerun_mode.value}' (operator-"
+                "owned branch); use `rerun --continue` to resume in place"
+            )
         slug = row.slug or slugify(row.title)
         prior = _ledger_attempt_count(self._ledger, task_id)
         archive_task_artifacts(self._artifacts_root, task_id, prior)
@@ -1630,6 +1687,8 @@ class Orchestrator:
             pull_request_title=p.task.title,
             commit_message=f"feat({p.task.id}): {p.task.title}",
             summary_body_path=self._fallback_summary_path(p),
+            branch_mode=self._branch_mode(p.task),
+            publish_scope=p.task.publish,
         )
         if resume:
             self._restore_engine_inputs(p, inputs)  # diff/checks/review/plan paths from disk
@@ -2327,12 +2386,13 @@ class Orchestrator:
         p.check_sets = self._resolver.resolve()
 
     def _prepare_branch(self, p: _Pipeline) -> None:
-        """Complete the persisted ``preparing`` checkpoint and attach the task branch."""
+        """Complete the persisted ``preparing`` checkpoint and attach the task branch (per mode)."""
         # Guarantee the `.worc/` runtime home is gitignored in this clone, regardless of how it was
         # scaffolded, so it never leaks into the operator's git status (no branch exists yet).
         self._git.ensure_runtime_excludes()
         p.slug = slugify(p.task.title)
         epoch = int(time.time())  # makes a fresh attempt's branch unique (re-run never collides)
+        mode = self._branch_mode(p.task)
         p.branch = self._observe(
             p,
             "branch preparation",
@@ -2341,6 +2401,8 @@ class Orchestrator:
                 p.slug,
                 epoch=epoch,
                 branch_name=p.task.branch_name,
+                mode=mode,
+                branch_ref=p.task.branch_ref,
             ),
         )
         self._store.update_task(p.task.id, branch=p.branch, slug=p.slug)
@@ -2543,7 +2605,9 @@ class Orchestrator:
         """
         final = status
         cleanup = self._observe(
-            p, "terminal cleanup", lambda: self._git.terminal_cleanup(p.task.id)
+            p,
+            "terminal cleanup",
+            lambda: self._git.terminal_cleanup(p.task.id, mode=self._branch_mode(p.task)),
         )
         if not cleanup.safe and status is Status.DONE:
             # Publishing finished but the working copy could not be safely restored → manual.
@@ -2790,6 +2854,25 @@ class Orchestrator:
         if task.auto_merge is not None:
             return task.auto_merge
         return self._config.git.auto_merge
+
+    def _branch_mode(self, task: NormalizedTask) -> BranchMode:
+        """The effective branch mode: the task value wins, else the instance ``repo.branch_mode``.
+
+        Governs where the task's git operations point (branch-mode ADR). A branch is
+        orchestrator-owned — and destructive git ops (reset-to-base, force-checkout-away, delete)
+        permitted — only in ``new`` mode.
+        """
+        return task.branch_mode or self._config.repo.branch_mode
+
+    def _persisted_branch_mode(self, task_id: str) -> BranchMode:
+        """The task's effective branch mode read from its persisted normalized manifest — the rerun
+        path, where the live :class:`NormalizedTask` isn't in hand. Falls back to the instance
+        default if the manifest can't be read (a terminal task reliably has one)."""
+        try:
+            task = load_normalized(self._artifacts_root, task_id)
+        except (json.JSONDecodeError, OSError, KeyError, ValueError):
+            return self._config.repo.branch_mode
+        return self._branch_mode(task)
 
     def _transition(self, p: _Pipeline, dst: Status, **fields: object) -> None:
         src = p.status

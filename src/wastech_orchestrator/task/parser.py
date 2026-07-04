@@ -16,11 +16,13 @@ import json
 import re
 from collections.abc import Hashable
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from wastech_orchestrator.config.schema import BranchMode, PublishScope
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.task.model import (
     DEFAULT_QUEUE,
@@ -225,6 +227,9 @@ def write_normalized(task: NormalizedTask, artifacts_root: str | Path) -> str:
         "description": task.description,
         "task_type": task.task_type,
         "branch_name": task.branch_name,
+        "branch_mode": task.branch_mode.value if task.branch_mode is not None else None,
+        "branch_ref": task.branch_ref,
+        "publish": task.publish.value if task.publish is not None else None,
         "auto_merge": task.auto_merge,
         "prompt_audit": task.prompt_audit,
         "decomposition": task.decomposition,
@@ -237,6 +242,16 @@ def write_normalized(task: NormalizedTask, artifacts_root: str | Path) -> str:
     }
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return str(path)
+
+
+def _opt_enum[E: StrEnum](value: Any, enum_cls: type[E]) -> E | None:
+    """Read a persisted enum value back, tolerating ``None``/unknown (→ ``None`` = defer)."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return enum_cls(value)
+    except ValueError:
+        return None
 
 
 def _node_override_json(ov: NodeOverride) -> dict[str, Any]:
@@ -272,6 +287,9 @@ def load_normalized(artifacts_root: str | Path, task_id: str) -> NormalizedTask:
         description=data.get("description", ""),
         task_type=data.get("task_type"),
         branch_name=data.get("branch_name"),
+        branch_mode=_opt_enum(data.get("branch_mode"), BranchMode),
+        branch_ref=data.get("branch_ref"),
+        publish=_opt_enum(data.get("publish"), PublishScope),
         auto_merge=data.get("auto_merge"),
         prompt_audit=data.get("prompt_audit"),
         decomposition=data.get("decomposition"),

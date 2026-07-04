@@ -113,7 +113,7 @@ class _Git:
         self.calls.append("commit_audit")
         return "sha"
 
-    def push(self, task_id: str, branch: str) -> bool:
+    def push(self, task_id: str, branch: str, **_: object) -> bool:
         self.calls.append("push")
         return True
 

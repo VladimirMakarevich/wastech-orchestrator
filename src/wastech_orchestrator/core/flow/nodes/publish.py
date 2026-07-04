@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 
+from wastech_orchestrator.config.schema import PublishScope
 from wastech_orchestrator.core.flow.contracts import PublishingPolicy
 from wastech_orchestrator.core.flow.engine import NodeContext, NodeOutcome, NodeResult
 from wastech_orchestrator.core.flow.nodes.base import (
@@ -141,8 +142,16 @@ class PublishNodeRunner:
         # both land in it (legacy ordering); the committed summary.md is the PR body, falling back
         # to the logs/ summary slot.
         committed_summary = self._s.finalize() if self._s.finalize is not None else None
+        # Per-task downgrade-only cap (branch-mode ADR): stop after the commits (`commit`) or before
+        # the PR (`push`). This branch IS ``min(flow_policy, task.publish)`` — a PR flow's implicit
+        # scope is ``pull_request``, so capping here caps it. Full sequence when unset (``None``).
+        scope = self._in.publish_scope
+        # The PR body is required only when a PR will actually be opened (unset or the full
+        # `pull_request` scope). A `commit`/`push` cap needs no body — and, as before, the guard
+        # fires *before* any commit so a missing body refuses cleanly with no side effects.
+        will_open_pr = scope is None or scope is PublishScope.PULL_REQUEST
         body_path = committed_summary or self._in.summary_body_path
-        if body_path is None:
+        if will_open_pr and body_path is None:
             raise PublishConfigError(
                 f"publish node {node.id!r} ({node.policy.value}) has no PR body: wire a finalize "
                 "hook or set summary_body_path (refusing to open a PR with an empty body)"
@@ -150,12 +159,16 @@ class PublishNodeRunner:
         message = self._in.commit_message or f"feat({ctx.task_id}): publish"
         git.commit_code(ctx.task_id, message)
         git.commit_audit(ctx.task_id)
-        git.push(ctx.task_id, self._in.branch)
+        if scope is PublishScope.COMMIT:
+            return None
+        git.push(ctx.task_id, self._in.branch, mode=self._in.branch_mode)
+        if scope is PublishScope.PUSH:
+            return None
         return git.create_pr(
             ctx.task_id,
             self._in.branch,
             title=self._in.pull_request_title or ctx.task_id,
-            body_path=body_path,
+            body_path=body_path or "",
         )
 
     def _store_private_report(self, ctx: NodeContext) -> str | None:
