@@ -120,6 +120,7 @@ from wastech_orchestrator.providers.artifacts import (
     archive_task_artifacts,
     sha256_file,
     task_artifact_dir,
+    task_artifact_relpath,
 )
 from wastech_orchestrator.providers.base import (
     TRANSIENT_RETRYABLE,
@@ -2114,7 +2115,13 @@ class Orchestrator:
             created_at=now,
             trust_level=TrustLevel.ARTIFACT_BACKED,
             stage_outcomes=outcomes or {},
-            artifact_paths=(Path(task_artifact_dir(self._artifacts_root, p.task.id)).as_posix(),),
+            # F36: repo-relative POSIX (``.worc/logs/<task-id>``), never the absolute host path — no
+            # ``/Users/…`` prefix to leak or to collide with a run-harvested redaction literal.
+            artifact_paths=(
+                task_artifact_relpath(
+                    self._artifacts_root, p.task.id, self._config.repo.local_path
+                ),
+            ),
         )
         audit = AuditContext(timestamp=now, actor=AuditActor.FINALIZER, task_id=p.task.id)
         try:
