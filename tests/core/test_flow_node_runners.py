@@ -1375,6 +1375,45 @@ def test_evaluator_maps_blocking_findings(
     assert result.outcome.kind == expected
 
 
+def test_evaluator_builds_memory_packet_when_role_references_it(tmp_path: Path) -> None:
+    # F31: an evaluator (review) whose role references {memory_path} now gets a per-node packet
+    # built and its PATH injected — the block was dead because the evaluator runner never wired it.
+    role = "Review. {?memory_path}mem: {memory_path}{/memory_path}"
+    (tmp_path / "r.md").write_text(role, "utf-8")
+    node = _evaluator("review")
+    router = FakeRouter(_result({"findings": []}))
+    store, builder = FakeStore(), FakePacketBuilder()
+    services = _services(
+        router,
+        store,
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+        packet_builder=builder,
+    )
+    inputs = _inputs(tmp_path, task_type="implementation")
+    EvaluatorNodeRunner(services, inputs).run(node, _ctx(node))
+    assert [c["node_id"] for c in builder.calls] == ["review"]
+    dest = tmp_path / "logs" / "task-1" / "memory" / "review.md"
+    assert router.requests[0].prompt == f"Review. mem: {dest}"
+
+
+def test_evaluator_skips_memory_when_role_does_not_reference_it(tmp_path: Path) -> None:
+    # An evaluator role not referencing {memory_path} triggers no build (mirrors the agent runner).
+    (tmp_path / "r.md").write_text("review {diff_path}", "utf-8")
+    node = _evaluator("review")
+    router = FakeRouter(_result({"findings": []}))
+    store, builder = FakeStore(), FakePacketBuilder()
+    services = _services(
+        router,
+        store,
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+        packet_builder=builder,
+    )
+    EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert builder.calls == []
+
+
 def test_evaluator_medium_finding_is_non_blocking_and_carried(tmp_path: Path) -> None:
     # #8: a medium finding accepts (non-blocking routing) yet is still carried for the audit trail
     # with severity "medium" and Finding.blocking False — the carried flag and routing now agree.

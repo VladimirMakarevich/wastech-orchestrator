@@ -35,7 +35,7 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NodeServices,
 )
 from wastech_orchestrator.core.flow.observability import record_run_observability
-from wastech_orchestrator.core.flow.prompt import render_role_prompt
+from wastech_orchestrator.core.flow.prompt import RoleFileError, read_role_file, render_role_prompt
 from wastech_orchestrator.core.flow.schema import EvaluatorNode, FlowNode
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.providers.base import AgentRunRequest
@@ -302,7 +302,33 @@ class EvaluatorNodeRunner:
             "diff_path": self._in.diff_path,
             "checks_path": self._in.checks_path,
             "review_path": self._in.review_path,
+            "memory_path": self._memory_path(node, ctx),
         }
+
+    def _memory_path(self, node: EvaluatorNode, ctx: NodeContext) -> str | None:
+        """Build this evaluator's memory packet and return its path — node-driven (F31).
+
+        Mirrors the agent runner: the per-node packet path is returned only when memory is enabled
+        AND the node's (operator-editable) role prompt references ``{memory_path}``; otherwise
+        ``None`` (the conditional block drops). ``review``/``fixing`` are the reviewer-preference
+        nodes in ``packet.py``, so review most wants recurring reviewer expectations — but the
+        evaluator runner never wired the packet, leaving ``review.md``'s ``{?memory_path}`` block
+        dead. Best-effort: any memory failure degrades to no packet (AC-R4)."""
+        builder = self._s.packet_builder
+        if builder is None:  # memory disabled (Q10) — no store, empty variable, today's behavior
+            return None
+        try:
+            template = read_role_file(self._in.flow_dir, node.role_file)
+        except RoleFileError:
+            return None  # render_role_prompt surfaces the real read error
+        if "{memory_path}" not in template and "{?memory_path}" not in template:
+            return None
+        touched = self._s.git.changed_code_paths_since_base() if self._s.git is not None else []
+        dest = task_artifact_dir(self._s.artifacts_root, ctx.task_id) / "memory" / f"{node.id}.md"
+        written = builder.write_packet(
+            node_id=node.id, task_type=self._in.task_type, touched_paths=touched, dest=dest
+        )
+        return str(written) if written is not None else None
 
     def _record_completion(self, run_id: int, outcome: StageOutcome, kind: str) -> None:
         result = outcome.result
