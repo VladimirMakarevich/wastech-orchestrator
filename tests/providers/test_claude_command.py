@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -88,6 +89,42 @@ def test_denied_commands_become_disallowed_tools(
     assert "Bash(git commit:*)" in disallowed
     assert "Bash(git push:*)" in disallowed
     assert "Bash(gh pr create:*)" in disallowed
+
+
+def _native_memory_glob(config_dir: Path) -> str:
+    # Mirrors claude._native_memory_deny_tools: //-anchored, symlink-canonicalized, POSIX slashes.
+    return "//" + config_dir.resolve().as_posix().lstrip("/") + "/**"
+
+
+def test_native_memory_paths_denied_for_custom_config_dir(
+    claude_config: ProviderConfig,
+    make_request: Callable[..., AgentRunRequest],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # F37: the spawned agent must not read/inject/leak Claude Code's native project memory, which
+    # lives under the config dir OUTSIDE the target working tree. Write/Edit/Read are denied there,
+    # honoring a custom CLAUDE_CONFIG_DIR. No denied_commands passed — the deny is unconditional.
+    config_dir = tmp_path / "isolated-claude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    argv = _argv(claude_config, make_request())
+    disallowed = argv[argv.index("--disallowedTools") + 1]
+    glob = _native_memory_glob(config_dir)
+    assert f"Write({glob})" in disallowed
+    assert f"Edit({glob})" in disallowed
+    assert f"Read({glob})" in disallowed
+
+
+def test_native_memory_deny_defaults_to_home_claude(
+    claude_config: ProviderConfig,
+    make_request: Callable[..., AgentRunRequest],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Absent CLAUDE_CONFIG_DIR, the deny covers the ~/.claude default.
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    argv = _argv(claude_config, make_request())
+    disallowed = argv[argv.index("--disallowedTools") + 1]
+    assert f"Write({_native_memory_glob(Path.home() / '.claude')})" in disallowed
 
 
 def test_no_prompt_text_is_interpolated_into_argv(
