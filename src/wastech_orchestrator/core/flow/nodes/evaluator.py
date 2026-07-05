@@ -56,11 +56,16 @@ _MEDIUM_SEVERITIES = frozenset({"medium", "moderate"})
 #: provider did not honor the schema and fails **closed** (see ``_findings_or_none``/``run``).
 _FINDINGS_SCHEMA: dict[str, Any] = {
     "type": "object",
+    # F24: OpenAI Structured Outputs (how codex CLI enforces ``--output-schema``) rejects a schema
+    # with a 400 unless every object node carries ``additionalProperties: false`` — the same
+    # convention already followed in ``hitl.py``/``supervisor.py``/``memory/delta.py``.
+    "additionalProperties": False,
     "properties": {
         "findings": {
             "type": "array",
             "items": {
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "severity": {
                         "type": "string",
