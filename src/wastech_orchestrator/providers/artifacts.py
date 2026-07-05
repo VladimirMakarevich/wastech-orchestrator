@@ -61,6 +61,22 @@ def task_artifact_dir(artifacts_root: str | Path, task_id: str) -> Path:
     return Path(artifacts_root) / "logs" / task_id
 
 
+def task_artifact_relpath(artifacts_root: str | Path, task_id: str, repo_root: str | Path) -> str:
+    """The task artifact dir as a **repo-relative POSIX** string (e.g. ``.worc/logs/<task-id>``).
+
+    Memory episodes store this instead of the absolute host path so a memory record carries no
+    ``/Users/<name>/…`` prefix (F36): the absolute prefix was both a privacy leak and the source of
+    non-deterministic redaction (a run-harvested secret literal occasionally matched the prefix of
+    an otherwise-harmless path). Falls back to the absolute POSIX form only when the artifact dir is
+    not under ``repo_root`` (unusual). Both sides are resolved so symlinks match consistently.
+    """
+    artifact_dir = task_artifact_dir(artifacts_root, task_id).resolve()
+    try:
+        return artifact_dir.relative_to(Path(repo_root).resolve()).as_posix()
+    except ValueError:
+        return artifact_dir.as_posix()
+
+
 def archive_task_artifacts(artifacts_root: str | Path, task_id: str, attempt: int) -> Path | None:
     """Move a prior attempt's artifacts into ``logs/<task-id>/attempt-<N>/`` for a fresh ``rerun``.
 

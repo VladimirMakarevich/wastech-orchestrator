@@ -24,8 +24,12 @@ from wastech_orchestrator.memory.trust import DURABLE_TRUST_LEVELS, TrustLevel
 _EXTERNAL: frozenset[str] = frozenset({"web", "mcp", "url", "external", "api"})
 _OPERATOR: frozenset[str] = frozenset({"operator", "human", "hitl"})
 _REVIEW: frozenset[str] = frozenset({"review", "fixing"})
-_REPO: frozenset[str] = frozenset({"repo", "repo_doc", "code", "config", "doc"})
-_ARTIFACT: frozenset[str] = frozenset({"artifact", "check", "diff", "test", "plan"})
+# F29: ``file`` is the token the supervisor naturally writes for a repo file pointer (a code/doc
+# reference verifiable in the tree), and ``commit`` for a git artifact. Both ground the durable
+# classes semantically but fell through to ``agent-inferred`` because they were absent here — which
+# is why every repo-grounded lesson quarantined and ``long_term/`` stayed empty.
+_REPO: frozenset[str] = frozenset({"repo", "repo_doc", "code", "config", "doc", "file"})
+_ARTIFACT: frozenset[str] = frozenset({"artifact", "check", "diff", "test", "plan", "commit"})
 
 # Trust levels that auto-promote (no recurrence required) — design §5 / Q3.
 _AUTO_PROMOTE: frozenset[TrustLevel] = frozenset(

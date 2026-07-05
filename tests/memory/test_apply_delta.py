@@ -18,6 +18,7 @@ from wastech_orchestrator.memory import (
     LongTermKind,
     MemoryLayout,
     MemoryService,
+    Scope,
     TrustLevel,
 )
 from wastech_orchestrator.memory.service import WriteSource
@@ -94,6 +95,36 @@ def test_artifact_backed_promotes_only_after_recurrence(service: MemoryService) 
     _apply(service, delta, task_id="t2")
     assert len(service.read_long_term(LongTermKind.SEMANTIC)) == 1  # recurred -> promoted
     assert service.read_quarantine() == []  # cleared from pending
+
+
+def test_recurrence_dedups_across_drifting_subject_by_scope(service: MemoryService) -> None:
+    # F30: the same lesson recurring under DIFFERENT subject wording but the SAME scope.paths must
+    # accumulate recurrence (one memory_id), so a real repeat promotes — the prettier-baseline-drift
+    # lesson recurred in 3 tasks under 3 subjects and never promoted because ids diverged.
+    def lesson(subject: str) -> CandidateLesson:
+        return CandidateLesson(
+            kind=LongTermKind.SEMANTIC,
+            subject=subject,
+            statement="prettier baseline drift",
+            evidence=(Evidence("check", "ci"),),
+            scope=Scope(paths=("packages/core/a.ts",)),
+        )
+
+    _apply(service, CandidateDelta(lessons=(lesson("npm run format baseline"),)), task_id="t1")
+    assert service.read_long_term(LongTermKind.SEMANTIC) == []  # 1/2, held short-term
+    _apply(service, CandidateDelta(lessons=(lesson("repo-wide Prettier drift"),)), task_id="t2")
+    rows = service.read_long_term(LongTermKind.SEMANTIC)
+    assert len(rows) == 1  # different subject, shared scope -> recurred -> promoted (not 3 ids)
+    assert sorted(rows[0]["seen_task_ids"]) == ["t1", "t2"]
+
+
+def test_pathless_lesson_still_keys_on_subject(service: MemoryService) -> None:
+    # A path-less lesson keeps the pre-F30 subject key: distinct subjects stay distinct.
+    _apply(service, CandidateDelta(lessons=(_lesson(subject="alpha"),)), task_id="t1")
+    _apply(service, CandidateDelta(lessons=(_lesson(subject="beta"),)), task_id="t2")
+    # Two different lessons, each 1/2 -> both held, nothing promoted by spurious recurrence.
+    assert service.read_long_term(LongTermKind.SEMANTIC) == []
+    assert len(service.read_quarantine()) == 2
 
 
 def test_merge_keeps_oldest_id_and_unions_evidence(service: MemoryService) -> None:

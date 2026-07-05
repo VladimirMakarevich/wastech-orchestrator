@@ -191,6 +191,12 @@ class _ActiveTask:
     slug: str
     branch: str
     partial_counter: int = 0
+    # F32: the commit the working branch sat at when THIS task started. Set only for
+    # ``existing``/``current`` (chain-continuation) modes, where the branch already carries prior
+    # tasks' commits; ``None`` for ``new`` (the branch is cut fresh from ``base_branch``, so the
+    # config base is exactly the task's start). Diffs use it so review/docs see only this task's
+    # change, not the whole unmerged chain.
+    base_ref: str | None = None
 
 
 class GitManager:
@@ -381,6 +387,7 @@ class GitManager:
             self._git_checked("checkout", "-b", branch_ref, f"origin/{branch_ref}")
         else:  # defensive: the pre-branch preflight already verified existence
             raise GitCommandError(f"branch_ref {branch_ref!r} does not exist locally or on origin")
+        self._active.base_ref = self._head_sha()  # F32: chain start = this branch's current tip
         return branch_ref
 
     def _prepare_current(self, task_id: str, slug: str) -> str:
@@ -390,7 +397,21 @@ class GitManager:
         if branch is None:  # defensive: the preflight rejects a detached HEAD for `current`
             raise GitCommandError("branch_mode 'current' requires a branch (HEAD is detached)")
         self._active = _ActiveTask(task_id=task_id, slug=slug, branch=branch)
+        self._active.base_ref = self._head_sha()  # F32: chain start = this branch's current tip
         return branch
+
+    def _head_sha(self) -> str | None:
+        """The current ``HEAD`` commit SHA, or ``None`` when it cannot be resolved (empty repo)."""
+        return self._git("rev-parse", "HEAD").stdout.strip() or None
+
+    def _diff_base(self) -> str:
+        """The ref the task's change is diffed against: the per-task chain start (F32) when set,
+        else the config ``base_branch``. Equal to ``base_branch`` for ``new`` mode, so a
+        non-chained run's diffs are unchanged; for ``existing``/``current`` it is the branch tip at
+        task start, so review/docs/PR body see only this task's change, not the whole chain."""
+        if self._active is not None and self._active.base_ref:
+            return self._active.base_ref
+        return self._config.repo.base_branch
 
     def current_branch(self) -> str | None:
         """The working tree's symbolic branch name, or ``None`` when HEAD is detached."""
@@ -1011,6 +1032,7 @@ class GitManager:
             return existing.result_ref
         reused = self._find_open_pr(task_id, branch, pr_base)
         if reused is not None:
+            self._append_reused_pr_body(task_id, reused, title=title, body_path=body_path)
             self._record_completed(task_id, KIND_PR, branch, reused)
             return reused
 
@@ -1036,6 +1058,43 @@ class GitManager:
         pr_url = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
         self._record_completed(task_id, KIND_PR, branch, pr_url)
         return pr_url
+
+    def _append_reused_pr_body(
+        self, task_id: str, pr_url: str, *, title: str, body_path: str
+    ) -> None:
+        """Append this task's section to a reused chain PR's body, keyed by task id (F27).
+
+        A chain of tasks on one branch converges on a single reused PR, which otherwise keeps the
+        FIRST task's title/body — a reviewer reading a 7-task chain PR sees only task 1's scope.
+        Append ``## <title>`` (with the task's summary) under the existing body, guarded by a
+        ``<!-- worc-task:<id> -->`` marker so re-running the same task never duplicates its section.
+        Best-effort: the reuse already succeeded, so any ``gh`` failure is logged and swallowed —
+        never block publish for a cosmetic body update. Redaction rides ``body_path`` (already the
+        redacted summary the create path uses)."""
+        marker = f"<!-- worc-task:{task_id} -->"
+        current = self._pr_body(pr_url)
+        if current is None or marker in current:
+            return  # unreadable body, or this task's section is already present (idempotent)
+        try:
+            summary = Path(body_path).read_text(encoding="utf-8").strip()
+        except OSError:
+            summary = ""
+        section = f"{current.rstrip()}\n\n---\n\n{marker}\n\n## {title}\n\n{summary}\n"
+        body_file = task_artifact_dir(self._artifacts_root, task_id) / "pr_body_appended.md"
+        body_file.parent.mkdir(parents=True, exist_ok=True)
+        body_file.write_text(section, encoding="utf-8")
+        result = self._gh(["pr", "edit", pr_url, "--body-file", str(body_file)])
+        if not result.ok:
+            self._log_pr(task_id).warning(
+                "could not append task section to reused PR body: %s", result.stderr.strip()
+            )
+
+    def _pr_body(self, pr_url: str) -> str | None:
+        """The current PR body text, or ``None`` when ``gh`` cannot read it (best-effort)."""
+        result = self._gh(["pr", "view", pr_url, "--json", "body", "-q", ".body"])
+        if not result.ok:
+            return None
+        return result.stdout.rstrip("\n")
 
     def _find_open_pr(self, task_id: str, branch: str, pr_base: str) -> str | None:
         """The URL of an already-open ``branch→pr_base`` PR to reuse, or ``None`` (create a new PR).
@@ -1154,18 +1213,20 @@ class GitManager:
     # --- diffs ----------------------------------------------------------------------------
 
     def write_current_diff(self, task_id: str) -> str:
-        """Write ``logs/<task-id>/current.diff`` (the task change vs ``base_branch``) and return it.
+        """Write ``logs/<task-id>/current.diff`` (this task's change vs its base) and return it.
 
-        Diffs ``base_branch`` against the **working tree** (``git diff <base>``, not ``git diff
+        Diffs :meth:`_diff_base` against the **working tree** (``git diff <base>``, not ``git diff
         HEAD``), so it captures the task's net change whether or not it is committed yet — the same
         base-vs-worktree coverage as :meth:`diff_stat`. ``git diff HEAD`` only showed uncommitted
         working-tree edits, so in a decomposed run (where each subtask is committed) it collapsed to
         just the trailing uncommitted hunk and badly understated the change in ``current.diff`` /
-        ``{diff_path}`` / the PR body / the failure report. The task branch is cut from
-        ``base_branch`` and ``base_branch`` does not advance during a task, so in a non-decomposed
-        run (nothing committed until publish) this equals ``git diff HEAD``. The dangerous-diff
-        guard classifies from :meth:`changed_code_entries` (HEAD-relative), not this artifact, so
-        widening the base here does not change what the guard gates.
+        ``{diff_path}`` / the PR body / the failure report. For ``new`` mode the base is
+        ``base_branch`` (the branch is cut from it and it does not advance), so a non-decomposed run
+        equals ``git diff HEAD``; for a ``existing``/``current`` chain branch the base is the branch
+        tip at task start (F32), so review/docs see only this task's change, not the whole unmerged
+        chain (which previously showed every prior task — e.g. 35 files for ~5 changed). The
+        dangerous-diff guard classifies from :meth:`changed_code_entries` (HEAD-relative), not this
+        artifact, so the base here does not change what the guard gates.
 
         Two completeness fixes (F20): plain ``git diff`` never reports untracked files, so a brand
         new file was silently missing from the artifact — bracket the diff with a transient
@@ -1183,7 +1244,7 @@ class GitManager:
         if untracked_paths:
             self._git("add", "--intent-to-add", "--", *untracked_paths)
         try:
-            diff = self._git("diff", "--text", self._config.repo.base_branch).stdout
+            diff = self._git("diff", "--text", self._diff_base()).stdout
         finally:
             if untracked_paths:
                 self._git("reset", "--", *untracked_paths)
@@ -1191,15 +1252,44 @@ class GitManager:
         task_dir.mkdir(parents=True, exist_ok=True)
         path = task_dir / "current.diff"
         path.write_text(redact_text(diff, extra_secrets=self._diff_secrets()), encoding="utf-8")
+        offenders = self.control_byte_paths()
+        if offenders:
+            bind(_LOG, task_id=task_id, component="diff").warning(
+                "committed control bytes (NUL) in %d file(s) — invisible to git diff/review even "
+                "with --text (F35): %s",
+                len(offenders),
+                ", ".join(offenders),
+            )
         return str(path)
+
+    def control_byte_paths(self) -> list[str]:
+        """Repo-relative POSIX paths of this task's changed files that contain a NUL byte (F35).
+
+        A committed NUL delimiter makes a file git-**binary** — invisible in ``git diff``/GitHub
+        review even with ``--text`` (F20) — so a NUL that slips into source escapes human review.
+        Best-effort scan of the task's changed files (committed-since-base + uncommitted); a file
+        that cannot be read (e.g. deleted) is skipped. Returns ``[]`` when clean. Orchestrator-side
+        and repo-agnostic, so the F23→F35 recurrence surfaces in the run logs instead of only via a
+        manual ``git show``."""
+        offenders: list[str] = []
+        for rel in self.changed_code_paths_since_base():
+            try:
+                if b"\x00" in (Path(self._clone) / rel).read_bytes():
+                    offenders.append(rel)
+            except OSError:
+                continue
+        return sorted(offenders)
 
     def _diff_secrets(self) -> tuple[str, ...]:
         """Denied-file secret values present in the clone, to redact from written diffs."""
         return read_denied_secrets(self._clone, self._config.security.denied_read_paths)
 
     def cumulative_committed_diff(self) -> str:
-        """The diff of all task-branch commits vs ``base_branch`` (decomposed context)."""
-        base = self._config.repo.base_branch
+        """The diff of this task's committed work vs its base (``base...HEAD``, decomposed context).
+
+        The base is the per-task chain start when set (F32), else ``base_branch`` — so on a shared
+        chain branch this is only the current task's commits, not the whole unmerged chain."""
+        base = self._diff_base()
         result = self._git("diff", f"{base}...HEAD")
         return result.stdout
 
@@ -1215,8 +1305,7 @@ class GitManager:
         redacted ``current.diff``). ``--stat`` carries only file paths and counts (never patch
         content), so unlike :meth:`cumulative_committed_diff` there is nothing secret to redact.
         """
-        base = self._config.repo.base_branch
-        return self._git("diff", "--stat", base).stdout
+        return self._git("diff", "--stat", self._diff_base()).stdout
 
     # --- terminal cleanup ----------------------------------------------------------
 

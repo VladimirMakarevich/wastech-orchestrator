@@ -20,6 +20,7 @@ selects an isolation-weakening mode.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -156,6 +157,27 @@ def _deny_read_tools_for(denied_read_paths: Sequence[str]) -> list[str]:
     return patterns
 
 
+def _native_memory_deny_tools() -> list[str]:
+    """Deny ``Write``/``Edit``/``Read`` on the Claude Code config dir so the spawned agent cannot
+    read, inject, or leak **native project memory** outside the target working tree (F37).
+
+    Claude Code keeps per-project memory at ``<config_dir>/projects/<cwd-slug>/memory/*.md`` — a
+    durable store OUTSIDE the repo, so anything written there escapes ``current.diff``, the commit,
+    the redaction net, and the orchestrator's own audit (an unredacted ``originSessionId`` was
+    observed leaking). We block it with tool-level path denial rather than isolating
+    ``CLAUDE_CONFIG_DIR``: the config dir also holds credentials (file-based on Linux/Windows), so
+    redirecting it would break subscription auth there — a deny is auth-safe and cross-platform.
+
+    The config dir is ``CLAUDE_CONFIG_DIR`` (resolved from the same env the child inherits) or the
+    ``~/.claude`` default. Emitted as Claude's ``//``-anchored absolute-path glob with POSIX slashes
+    (the Node CLI normalizes them), which covers both the default and a custom absolute config dir.
+    """
+    raw = os.environ.get("CLAUDE_CONFIG_DIR")
+    config_dir = Path(raw) if raw else Path.home() / ".claude"
+    glob = "//" + config_dir.resolve().as_posix().lstrip("/") + "/**"
+    return [f"Write({glob})", f"Edit({glob})", f"Read({glob})"]
+
+
 def map_permission(profile: str) -> tuple[str, tuple[str, ...]]:
     """Map a request permission profile to a Claude ``(permission_mode, allowed_tools)`` pair.
 
@@ -249,7 +271,11 @@ def build_claude_argv(
     ]
     if allowed_tools:
         argv += ["--allowedTools", ",".join(allowed_tools)]
-    denied_tools = _deny_tools_for(denied_commands) + _deny_read_tools_for(denied_read_paths)
+    denied_tools = (
+        _deny_tools_for(denied_commands)
+        + _deny_read_tools_for(denied_read_paths)
+        + _native_memory_deny_tools()  # F37: confine native project memory out of the spawn
+    )
     if denied_tools:
         argv += ["--disallowedTools", ",".join(denied_tools)]
     model = request.model or config.model

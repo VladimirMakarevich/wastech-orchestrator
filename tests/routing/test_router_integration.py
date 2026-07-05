@@ -21,6 +21,7 @@ from wastech_orchestrator.config.schema import (
     RetryConfig,
     SecurityConfig,
 )
+from wastech_orchestrator.core.flow.nodes.evaluator import _FINDINGS_SCHEMA
 from wastech_orchestrator.providers.base import (
     AgentProvider,
     AgentRunRequest,
@@ -91,6 +92,40 @@ def test_successful_infra_fallback(
     # Both attempts are recorded for the audit, with the primary's infra class.
     assert [a.provider for a in outcome.attempts] == [ProviderId.CODEX, ProviderId.CLAUDE]
     assert outcome.attempts[0].error_class is ErrorClass.RATE_LIMITED
+
+
+def test_codex_review_succeeds_under_findings_schema_no_fallback(
+    config: OrchestratorConfig,
+    integration_security: SecurityConfig,
+    fake_cli: Callable[..., str],
+    make_request: Callable[..., AgentRunRequest],
+    tmp_path: Path,
+) -> None:
+    # F24/F28: with _FINDINGS_SCHEMA now strict, the real codex adapter runs the review under
+    # --output-schema and returns findings — the router accepts it on attempt 1 and never falls back
+    # to claude. Before A1 the schema 400-crashed every codex review (process_crashed) and the
+    # same-vendor claude fallback silently reviewed instead, so cross-provider review never ran.
+    codex = _build_provider("codex", fake_cli("success", "codex"), integration_security, tmp_path)
+    claude = _build_provider(
+        "claude", fake_cli("success", "claude"), integration_security, tmp_path
+    )
+    router = AgentRouter(config, {ProviderId.CODEX: codex, ProviderId.CLAUDE: claude})
+    route = router.resolve_route("review", ProviderId.CODEX)
+
+    outcome = router.run_stage(
+        make_request(
+            node_id="review",
+            working_directory=str(tmp_path / "clone"),
+            output_schema=_FINDINGS_SCHEMA,
+        ),
+        route,
+    )
+
+    assert outcome.provider_used is ProviderId.CODEX  # codex ran and was accepted
+    assert outcome.stage_attempts == 1  # no fallback hop
+    assert outcome.result is not None and outcome.result.status is RunStatus.SUCCEEDED
+    assert outcome.result.structured_output == {"findings": []}  # honored the strict schema
+    assert not (tmp_path / "logs" / "task-001" / "stages" / "review" / "2-claude").exists()
 
 
 def test_fallback_denied_on_quality_failure(

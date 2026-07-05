@@ -22,6 +22,10 @@ from wastech_orchestrator.memory.lifecycle import (
         ("review", TrustLevel.REVIEW_VERIFIED),
         ("repo_doc", TrustLevel.REPO_OBSERVED),
         ("check", TrustLevel.ARTIFACT_BACKED),
+        # F29: the tokens the supervisor actually emits for a repo file / a git commit must ground
+        # durable classes, not fall through to agent-inferred (which quarantined every repo lesson).
+        ("file", TrustLevel.REPO_OBSERVED),
+        ("commit", TrustLevel.ARTIFACT_BACKED),
         ("mystery", TrustLevel.AGENT_INFERRED),
     ],
 )

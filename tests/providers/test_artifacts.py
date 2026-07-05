@@ -11,6 +11,8 @@ from wastech_orchestrator.providers.artifacts import (
     ArtifactPaths,
     create_attempt_dir,
     prune_attempt_artifacts,
+    task_artifact_dir,
+    task_artifact_relpath,
     write_request_artifact,
     write_result_artifact,
 )
@@ -133,3 +135,21 @@ def test_prune_full_and_unknown_keep_everything(tmp_path: Path, level: str) -> N
     prune_attempt_artifacts(paths, level)
     survivors = {entry.name for entry in Path(paths.attempt_dir).iterdir()}
     assert survivors == set(_FULL_FILE_SET)
+
+
+def test_task_artifact_relpath_is_repo_relative_posix(tmp_path: Path) -> None:
+    # F36: a memory episode stores .worc/logs/<task-id>, not the absolute host path — no /Users/…
+    # prefix to leak or to collide with a run-harvested redaction literal.
+    repo = tmp_path / "repo"
+    artifacts_root = repo / ".worc"
+    rel = task_artifact_relpath(artifacts_root, "t-42", repo)
+    assert rel == ".worc/logs/t-42"
+    assert not Path(rel).is_absolute()
+
+
+def test_task_artifact_relpath_falls_back_to_absolute_when_outside_repo(tmp_path: Path) -> None:
+    # An artifact root outside the repo (unusual) degrades to the absolute POSIX form, not a crash.
+    repo = tmp_path / "repo"
+    artifacts_root = tmp_path / "elsewhere"
+    rel = task_artifact_relpath(artifacts_root, "t-1", repo)
+    assert rel == task_artifact_dir(artifacts_root, "t-1").resolve().as_posix()

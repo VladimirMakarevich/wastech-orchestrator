@@ -918,6 +918,27 @@ def test_write_current_diff_renders_nul_content_as_text(
     assert "after" in diff
 
 
+def test_control_byte_paths_flags_only_nul_files(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # F35: a NUL byte makes a file git-binary (invisible to diff/review even with --text). The
+    # detector surfaces the offending file so the recurrence is visible at the orchestrator level.
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    (git_repo.clone / "clean.ts").write_text("const k = `${a} ${b}`;\n", encoding="utf-8")
+    (git_repo.clone / "withnul.ts").write_bytes(b"const k = `${a}\x00${b}`;\n")
+    assert gm.control_byte_paths() == ["withnul.ts"]
+
+
+def test_control_byte_paths_clean_returns_empty(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    (git_repo.clone / "ok.py").write_text("x = 1\n", encoding="utf-8")
+    assert gm.control_byte_paths() == []
+
+
 def test_push_to_base_branch_is_refused(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:
@@ -963,6 +984,36 @@ def test_prepare_branch_existing_creates_local_tracking_from_remote(
     assert branch == "feature/remote-only"
     assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "feature/remote-only"
     assert (git_repo.clone / "r.txt").exists()  # the remote work is present
+
+
+def test_current_diff_on_chain_branch_excludes_prior_task(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # F32: on a shared chain branch (existing mode) the diff must show only THIS task's change, not
+    # the prior task's commits already on the branch — review saw the whole cumulative chain before.
+    git_run(["checkout", "-b", "feature/chain"], git_repo.clone)
+    (git_repo.clone / "prior_task.py").write_text("prior = 1\n", encoding="utf-8")
+    git_run(["add", "prior_task.py"], git_repo.clone)
+    git_run(["commit", "-m", "feat(p1): prior task"], git_repo.clone)
+    git_run(["checkout", "main"], git_repo.clone)
+
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch(
+        "task-002", "x", epoch=_EPOCH, mode=BranchMode.EXISTING, branch_ref="feature/chain"
+    )
+    (git_repo.clone / "this_task.py").write_text("this = 2\n", encoding="utf-8")
+    diff = Path(gm.write_current_diff("task-002")).read_text(encoding="utf-8")
+    assert "this_task.py" in diff  # this task's change is present
+    assert "prior_task.py" not in diff  # the prior chain task is NOT (base = branch tip at start)
+
+
+def test_current_diff_new_mode_unchanged_uses_base_branch(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # new mode leaves base_ref None -> diffs vs base_branch exactly as before (no chain semantics).
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    assert gm._diff_base() == "main"
 
 
 def test_prepare_branch_current_uses_head_without_switch_or_pull(
@@ -1028,11 +1079,23 @@ def test_terminal_cleanup_current_leaves_working_branch(
 
 
 def _reuse_gh(
-    calls: list[list[str]], *, list_stdout: str, create_url: str = "https://x/pull/9"
+    calls: list[list[str]],
+    *,
+    list_stdout: str,
+    create_url: str = "https://x/pull/9",
+    body_stdout: str = "",
 ) -> Callable[[Sequence[str]], GitResult]:
     def gh(argv: Sequence[str]) -> GitResult:
         calls.append(list(argv))
-        stdout = list_stdout if list(argv[:2]) == ["pr", "list"] else f"{create_url}\n"
+        verb = list(argv[:2])
+        if verb == ["pr", "list"]:
+            stdout = list_stdout
+        elif verb == ["pr", "view"]:  # reused-PR body probe (F27 append)
+            stdout = body_stdout
+        elif verb == ["pr", "edit"]:  # reused-PR body append (F27)
+            stdout = ""
+        else:
+            stdout = f"{create_url}\n"
         return GitResult(exit_code=0, stdout=stdout, stderr="", timed_out=False, launch_error=None)
 
     return gh
@@ -1061,9 +1124,52 @@ def test_create_pr_reuses_open_pr(
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
     url = gm.create_pr("task-001", "feature/shared", title="t", body_path="x")
     assert url == "https://x/pull/7"
-    assert [c[:2] for c in calls] == [["pr", "list"]]  # reused; no `pr create`
+    # reused; no `pr create` — but the body probe + append run (F27).
+    assert [c[:2] for c in calls] == [["pr", "list"], ["pr", "view"], ["pr", "edit"]]
     op = store.get_publish_op("task-001", "pr")
     assert op is not None and op.result_ref == "https://x/pull/7"
+
+
+def test_create_pr_reuse_appends_task_keyed_section(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # F27: a reused chain PR keeps task 1's title/body; append this task's section under it, keyed
+    # by a task-id marker, so the PR reflects the whole chain instead of only its first task.
+    _task(store)
+    calls: list[list[str]] = []
+    body = tmp_path / "summary.md"
+    body.write_text("This task added the query layer.\n", encoding="utf-8")
+    gh = _reuse_gh(
+        calls,
+        list_stdout='[{"url": "https://x/pull/9", "updatedAt": "2026-01-01"}]',
+        body_stdout="Original body (task 1).",
+    )
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+    gm.create_pr("task-001", "feature/shared", title="P4.02 — Query", body_path=str(body))
+
+    edits = [c for c in calls if c[:2] == ["pr", "edit"]]
+    assert len(edits) == 1
+    written = Path(edits[0][edits[0].index("--body-file") + 1]).read_text(encoding="utf-8")
+    assert "Original body (task 1)." in written  # prior content preserved, not overwritten
+    assert "<!-- worc-task:task-001 -->" in written  # keyed for idempotency
+    assert "## P4.02 — Query" in written
+    assert "This task added the query layer." in written
+
+
+def test_create_pr_reuse_append_is_idempotent(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # A rerun whose section marker is already in the body must not append a second copy.
+    _task(store)
+    calls: list[list[str]] = []
+    gh = _reuse_gh(
+        calls,
+        list_stdout='[{"url": "https://x/pull/9", "updatedAt": "2026-01-01"}]',
+        body_stdout="Body\n\n<!-- worc-task:task-001 -->\n\n## P4.02\n\nalready here",
+    )
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+    gm.create_pr("task-001", "feature/shared", title="P4.02", body_path="x")
+    assert not any(c[:2] == ["pr", "edit"] for c in calls)  # marker present → no re-append
 
 
 def test_create_pr_reuse_picks_most_recent_of_multiple(
