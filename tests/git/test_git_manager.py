@@ -1058,11 +1058,23 @@ def test_terminal_cleanup_current_leaves_working_branch(
 
 
 def _reuse_gh(
-    calls: list[list[str]], *, list_stdout: str, create_url: str = "https://x/pull/9"
+    calls: list[list[str]],
+    *,
+    list_stdout: str,
+    create_url: str = "https://x/pull/9",
+    body_stdout: str = "",
 ) -> Callable[[Sequence[str]], GitResult]:
     def gh(argv: Sequence[str]) -> GitResult:
         calls.append(list(argv))
-        stdout = list_stdout if list(argv[:2]) == ["pr", "list"] else f"{create_url}\n"
+        verb = list(argv[:2])
+        if verb == ["pr", "list"]:
+            stdout = list_stdout
+        elif verb == ["pr", "view"]:  # reused-PR body probe (F27 append)
+            stdout = body_stdout
+        elif verb == ["pr", "edit"]:  # reused-PR body append (F27)
+            stdout = ""
+        else:
+            stdout = f"{create_url}\n"
         return GitResult(exit_code=0, stdout=stdout, stderr="", timed_out=False, launch_error=None)
 
     return gh
@@ -1091,9 +1103,52 @@ def test_create_pr_reuses_open_pr(
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
     url = gm.create_pr("task-001", "feature/shared", title="t", body_path="x")
     assert url == "https://x/pull/7"
-    assert [c[:2] for c in calls] == [["pr", "list"]]  # reused; no `pr create`
+    # reused; no `pr create` — but the body probe + append run (F27).
+    assert [c[:2] for c in calls] == [["pr", "list"], ["pr", "view"], ["pr", "edit"]]
     op = store.get_publish_op("task-001", "pr")
     assert op is not None and op.result_ref == "https://x/pull/7"
+
+
+def test_create_pr_reuse_appends_task_keyed_section(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # F27: a reused chain PR keeps task 1's title/body; append this task's section under it, keyed
+    # by a task-id marker, so the PR reflects the whole chain instead of only its first task.
+    _task(store)
+    calls: list[list[str]] = []
+    body = tmp_path / "summary.md"
+    body.write_text("This task added the query layer.\n", encoding="utf-8")
+    gh = _reuse_gh(
+        calls,
+        list_stdout='[{"url": "https://x/pull/9", "updatedAt": "2026-01-01"}]',
+        body_stdout="Original body (task 1).",
+    )
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+    gm.create_pr("task-001", "feature/shared", title="P4.02 — Query", body_path=str(body))
+
+    edits = [c for c in calls if c[:2] == ["pr", "edit"]]
+    assert len(edits) == 1
+    written = Path(edits[0][edits[0].index("--body-file") + 1]).read_text(encoding="utf-8")
+    assert "Original body (task 1)." in written  # prior content preserved, not overwritten
+    assert "<!-- worc-task:task-001 -->" in written  # keyed for idempotency
+    assert "## P4.02 — Query" in written
+    assert "This task added the query layer." in written
+
+
+def test_create_pr_reuse_append_is_idempotent(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # A rerun whose section marker is already in the body must not append a second copy.
+    _task(store)
+    calls: list[list[str]] = []
+    gh = _reuse_gh(
+        calls,
+        list_stdout='[{"url": "https://x/pull/9", "updatedAt": "2026-01-01"}]',
+        body_stdout="Body\n\n<!-- worc-task:task-001 -->\n\n## P4.02\n\nalready here",
+    )
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+    gm.create_pr("task-001", "feature/shared", title="P4.02", body_path="x")
+    assert not any(c[:2] == ["pr", "edit"] for c in calls)  # marker present → no re-append
 
 
 def test_create_pr_reuse_picks_most_recent_of_multiple(

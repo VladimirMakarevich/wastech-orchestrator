@@ -1032,6 +1032,7 @@ class GitManager:
             return existing.result_ref
         reused = self._find_open_pr(task_id, branch, pr_base)
         if reused is not None:
+            self._append_reused_pr_body(task_id, reused, title=title, body_path=body_path)
             self._record_completed(task_id, KIND_PR, branch, reused)
             return reused
 
@@ -1057,6 +1058,43 @@ class GitManager:
         pr_url = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
         self._record_completed(task_id, KIND_PR, branch, pr_url)
         return pr_url
+
+    def _append_reused_pr_body(
+        self, task_id: str, pr_url: str, *, title: str, body_path: str
+    ) -> None:
+        """Append this task's section to a reused chain PR's body, keyed by task id (F27).
+
+        A chain of tasks on one branch converges on a single reused PR, which otherwise keeps the
+        FIRST task's title/body — a reviewer reading a 7-task chain PR sees only task 1's scope.
+        Append ``## <title>`` (with the task's summary) under the existing body, guarded by a
+        ``<!-- worc-task:<id> -->`` marker so re-running the same task never duplicates its section.
+        Best-effort: the reuse already succeeded, so any ``gh`` failure is logged and swallowed —
+        never block publish for a cosmetic body update. Redaction rides ``body_path`` (already the
+        redacted summary the create path uses)."""
+        marker = f"<!-- worc-task:{task_id} -->"
+        current = self._pr_body(pr_url)
+        if current is None or marker in current:
+            return  # unreadable body, or this task's section is already present (idempotent)
+        try:
+            summary = Path(body_path).read_text(encoding="utf-8").strip()
+        except OSError:
+            summary = ""
+        section = f"{current.rstrip()}\n\n---\n\n{marker}\n\n## {title}\n\n{summary}\n"
+        body_file = task_artifact_dir(self._artifacts_root, task_id) / "pr_body_appended.md"
+        body_file.parent.mkdir(parents=True, exist_ok=True)
+        body_file.write_text(section, encoding="utf-8")
+        result = self._gh(["pr", "edit", pr_url, "--body-file", str(body_file)])
+        if not result.ok:
+            self._log_pr(task_id).warning(
+                "could not append task section to reused PR body: %s", result.stderr.strip()
+            )
+
+    def _pr_body(self, pr_url: str) -> str | None:
+        """The current PR body text, or ``None`` when ``gh`` cannot read it (best-effort)."""
+        result = self._gh(["pr", "view", pr_url, "--json", "body", "-q", ".body"])
+        if not result.ok:
+            return None
+        return result.stdout.rstrip("\n")
 
     def _find_open_pr(self, task_id: str, branch: str, pr_base: str) -> str | None:
         """The URL of an already-open ``branch→pr_base`` PR to reuse, or ``None`` (create a new PR).
