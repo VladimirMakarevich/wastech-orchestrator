@@ -84,6 +84,26 @@
 
 `p4-08-graph-tests` (7-й и последний шаг, `branch_mode: current` — оператор вручную `git checkout feat/p4-graph-chain` до `worc run`) → `done`, PR **#9 закрыл всю цепочку** (7 коммитов p4-02..p4-08, 47 файлов, +2645/−110, всё ещё открыт). Подтверждены оба safety-инварианта `current`-режима (см. §24 выше: no-op checkout + no-force-cleanup-на-base). Codex упал 9/9 (F24, финально детерминирован). Отчёт: [docs/analysis/p4-08-graph-tests-run-analysis.md](docs/analysis/p4-08-graph-tests-run-analysis.md). Без новых F-номеров — **вся ADR branch-mode функциональность (new/existing/current/publish-cap/PR-reuse) протестирована и работает как задокументировано**, кроме нескольких явно неиспробованных негативных веток (см. непроставленные пункты §24: `branch_ref` not-exists, detached HEAD, `reset` refuse в existing, closed/merged non-reuse, head==base guard, `publish: commit`).
 
+## Проход 14 — cross-run синтез всей фазы P4 (2026-07-05, только анализ)
+
+Не прогон, а сквозной разбор всех 8 задач кампании под тремя призмами. Три отчёта: [синтез фазы](docs/analysis/p4-phase-synthesis.md) (A), [качество промптов по узлам](docs/analysis/p4-prompt-quality-per-node.md) (B), [аудит памяти](docs/analysis/p4-memory-subsystem-audit.md) (C). Находки — [TEST-FINDINGS.md](TEST-FINDINGS.md) F28–F37. Ничего не запускалось/не менялось.
+
+**Подтверждено анализом (`[x]` — доказано данными/кодом):**
+
+- [x] **Инфраструктура детерминированно чистая через 8 задач**: 32 agent/publish-прогона `succeeded` с 1-й попытки (`provider_attempts`), 0 неожиданных фоллбэков/крахов кроме codex-review; модель не утекала между провайдерами.
+- [x] **Checks-гейт железный**: 32/32 `check_runs` passed, 0 timeout; тест-сьют рос монотонно 146→242 без регрессий.
+- [x] **Per-node override на каждом узле** (opus/high planning, sonnet-5/xhigh impl+fixing, gpt-5.4/xhigh review-declared, sonnet-5/medium doc) — сверено `timeline.jsonl` каждой задачи.
+- [x] **Все AC 8 фаз закрыты фактическим кодом** ветки (независимая проверка против спеков, не по галочкам doc-узла); **3 бага F19 исправлены человеком до мержа PR #8** (авто-гейт дал false-green).
+- [x] **Fix-loop механика** (p4-05, единственный blocking кампании — readingOrder): `rework`→`fixing`(1 итерация)→re-review→`accept`, end-to-end как задокументировано.
+- [x] **Fallback-механизм** штатно спасал codex-review-краш 9/9 (F24) — предсказуемо, не хрупко.
+- [x] **Фикс F20 (`--text`) подтверждён рабочим на живом NUL-файле** (`current.diff` p4-02/p4-08 рендерит binary-класс файлы как текст).
+- [x] **Промпт-аудит 6 типов узлов** (planning/implementation/review/fixing/documentation/supervisor): поведение агентов в основном соответствует промптам; проблемы локализованы (review-вход/схема/мёртвый memory-блок + finalize→память словарь).
+- [x] **Аудит памяти**: 4 непустых jsonl прочитаны целиком; hash-цепочка аудита цела (37/37), rationale заполнен (F9 закрыт), poisoning не пробит; entity-карточки фактически корректны.
+
+**Новые находки (F28–F37):** 🔴 **F37** теневая нативная память Claude Code пишет в `~/.claude/…` вне изоляции (HIGH); **F29** словарь `evidence.type` (`file`/`commit` не распознаны) топит 18/21 уроков в `agent-inferred`; **F28** кросс-вендорное ревью не исполнилось 0/9 (фактически claude ревьюит claude); **F30** рекуррентность по дословному `subject` не промоутит реально повторившийся урок; **F32** review судит по кумулятивному/pre-doc диффу → ложная находка (p4-06) + шум «phase-doc»; **F31** review без пакета памяти; **F33** «sort every output array» без оговорки; **F34** planning-промпт с несуществующими primitive-путями; **F35** рецидив NUL-делимитеров; **F36** абсолютный host-путь + невоспроизводимая редакция в эпизодах.
+
+**Не покрыто / открытые ветки:** [ ] режим single-provider=codex (был бы `manual_action_required` на КАЖДОЙ задаче из-за F24 — не прогонялся); [ ] фактический промоушен памяти (`long_term/` пуст by F29/F30 — накопление durable-знания не наблюдалось ни разу); [ ] реальный eval-baseline памяти (синтетический, greenfield); [ ] исполнение codex-ревью по существу (падало 9/9 до генерации).
+
 ---
 
 ## 1. Branch name: epoch-префикс + ограничение длины

@@ -177,3 +177,121 @@
 **Рекомендация (не решение — обсуждение).** Вариант 2 (append, keyed по task id) — дешёвый, идемпотентный, не рискует затереть оператора. Общий трейд-офф любого варианта — лишний `gh pr edit` вызов на каждую задачу цепочки (мелкий доп. API-write). Ждём решения, прежде чем трогать код.
 
 ---
+
+## Проход 14 — cross-run синтез всей фазы P4 (2026-07-05, read-only)
+
+Сквозной разбор всех 8 задач кампании (`p4-01-v2` + `p4-02..p4-08`) — не по одной, а трендами/паттернами. Три отчёта: [синтез фазы](docs/analysis/p4-phase-synthesis.md) (Часть A), [качество промптов по узлам](docs/analysis/p4-prompt-quality-per-node.md) (Часть B), [аудит памяти](docs/analysis/p4-memory-subsystem-audit.md) (Часть C). Ничего не запускалось и не менялось. Находки F28–F37. Итог инфраструктуры: 32 agent/publish-прогона зелёные с 1-й попытки; единственная нестабильность — детерминированный codex-review-краш (F24, 9/9); весь код фазы закрыт (все AC реализованы+покрыты, 3 бага F19 исправлены человеком до мержа PR #8).
+
+---
+
+### F28 · Кросс-вендорное ревью не исполнилось НИ РАЗУ: фактический ревьюер всей кампании — claude (тот же вендор, что имплементер) · **MEDIUM** · уверенность HIGH · зона **orchestrator** · статус **OPEN**
+
+**Доказательство.** `.worc/flows/implementation.yaml:93` пиннит review на codex явным комментарием «cross-provider review». Но `provider_attempts`: во всех 8 задачах codex-attempt-1 = `process_crashed` (F24), attempt-2 = claude `succeeded`. `prompt-audit/timeline.jsonl` + review-2 `request.json` argv: фоллбэк идёт на `--model claude-opus-4-8 --effort high` (собственный дефолт claude, НЕ declared `gpt-5.4`). Имплементер — `claude-sonnet-5`. То есть каждое ревью кампании = opus-4-8 ревьюит sonnet-5, один вендор. (Исключение — p4-01-v2, где codex отработал, но это был no-op F19: `findings=[]`.)
+
+**Корневая причина.** Прямое следствие F24 (codex детерминированно крашится) + штатного фоллбэка: declared `gpt-5.4` неприменима к claude, поэтому фоллбэк берёт claude-конфиг-дефолт. Механизм фоллбэка отрабатывает корректно — но задекларированная кросс-**вендорная** независимость ревью (ради которой codex и пиннили) достигается 0/9.
+
+**Рычаг.** Первично — починить F24 ([core/flow/nodes/evaluator.py:57-78](src/wastech_orchestrator/core/flow/nodes/evaluator.py#L57), `additionalProperties:false`), чтобы codex-ревью реально бежало. Пока F24 открыт, «cross-provider review»-комментарий в flow вводит в заблуждение — стоит либо чинить F24, либо честно задокументировать, что фоллбэк-ревью — same-vendor.
+
+**Влияние.** Ревью не бесполезно (opus > sonnet по классу, находит реальные баги — см. p4-05), но задекларированная и оплачиваемая (провайдер-пин + сожжённый codex-attempt каждый прогон) независимость ревью — фикция на всей кампании.
+
+---
+
+### F29 · Рассинхрон словаря `evidence.type`: `file`/`commit` не распознаются trust-классификатором → 18/21 уроков навсегда `agent-inferred` · **MEDIUM-HIGH** · уверенность HIGH · зона **orchestrator** · статус **OPEN**
+
+**Доказательство.** Фактические типы доказательств во всех карантинных уроках `.worc/memory/quarantine/pending.jsonl`: **`file`: 32, `check`: 3, `commit`: 1**. `assign_trust` ([memory/lifecycle.py:24-54](src/wastech_orchestrator/memory/lifecycle.py#L24)) распознаёт только `_REPO={repo,repo_doc,code,config,doc}` и `_ARTIFACT={artifact,check,diff,test,plan}` — токены `file` и `commit` не входят ни в один класс → грунтуют «ничего» → `agent-inferred`. Результат: 18 уроков (все с `file`/`commit`-доказательствами) → `agent-inferred` (недурабельный) → карантин навсегда, `long_term/` пуст.
+
+**Корневая причина.** `DELTA_OUTPUT_SCHEMA` ([memory/delta.py:119](src/wastech_orchestrator/memory/delta.py#L119)) оставляет `evidence.type` свободной строкой, роль-промпт `summary.md` не задаёт словарь → супервайзер естественно пишет `file`/`commit`, а детерминированный классификатор их молча топит. Урок с доказательством `{"type":"file","ref":"…/query.ts"}` — репо-обоснованный по смыслу — деградирует до недурабельного только из-за токена.
+
+**Рычаг.** [memory/lifecycle.py:24-28](src/wastech_orchestrator/memory/lifecycle.py#L24) — добавить `file→_REPO`, `commit→_ARTIFACT` (или нормализовать); и/или enum-ограничить `evidence.type` в [memory/delta.py:119](src/wastech_orchestrator/memory/delta.py#L119) + задать словарь в `summary.md`. Код-фикс первичен.
+
+**Влияние.** Управляемая память не может накопить НИ ОДНОГО durable-урока из репо-обоснованных находок — это главная причина пустоты `long_term/` (а не «V1 не промоутит»). V2-промоушен, гейтящийся на измеренном lift, будет измерять пустоту.
+
+---
+
+### F30 · Рекуррентность ключуется по дословному `subject` → реально повторившийся урок не промоутится · **MEDIUM** · уверенность HIGH · зона **orchestrator** · статус **OPEN**
+
+**Доказательство.** Урок про prettier-baseline-drift записан в 3 задачах (p4-01, p4-06, p4-07) — реальный 3× повтор. Но `subject` каждый раз иной: `"npm run format baseline"` / `"repo-wide Prettier drift"` / `"prettier baseline drift"`. `_derive_id(kind, subject)` = `ltm_`+hash(`kind:normalize_subject(subject)`) ([memory/service.py:562](src/wastech_orchestrator/memory/service.py#L562)), `normalize_subject` = только lower+trim ([lifecycle.py:79](src/wastech_orchestrator/memory/lifecycle.py#L79)) → 3 разных `memory_id` (`ltm_7ef2a85afddd`/`ltm_b13f8fdfeeb2`/`ltm_6019dbb25218`), `seen_task_ids` не накапливается → `recurrence=1 < promote_min_tasks=2` каждый раз, аудит-`rationale` «held short-term: awaiting recurrence (1/2 tasks)». Эти 3 — `artifact-backed` (durable), совпади `subject` — 2-я задача дала бы `recurrence=2` → промоушен.
+
+**Корневая причина.** Ключ дедупа/рекуррентности предполагает стабильный `subject`, но его пишет LLM-супервайзер, и формулировка дрейфует. `should_promote` ([lifecycle.py:84-107](src/wastech_orchestrator/memory/lifecycle.py#L84)) корректен — до него просто не доходит накопленный повтор.
+
+**Рычаг.** [memory/service.py:562](src/wastech_orchestrator/memory/service.py#L562) / [lifecycle.py:79](src/wastech_orchestrator/memory/lifecycle.py#L79) — более устойчивый ключ (напр. `kind`+нормализованные `scope.paths`, или fuzzy-match subject), чтобы семантически один урок дедуплицировался.
+
+**Влияние.** Единственный класс промоутируемых уроков (`artifact-backed` с рекуррентностью) не промоутится даже при реальном повторе — второй замок на пустой `long_term/` (вместе с F29).
+
+---
+
+### F31 · Узел `review` не получает пакет памяти; блок `{memory_path}` в `review.md` мёртв · **LOW-MEDIUM** · уверенность HIGH · зона **orchestrator** · статус **OPEN**
+
+**Доказательство.** `grep` по `request.json`: у planning/implementation/fixing в промпте есть memory-бриф, у review — нет. Evaluator-раннер `_prompt_variables` ([core/flow/nodes/evaluator.py:289-300](src/wastech_orchestrator/core/flow/nodes/evaluator.py#L289)) не содержит ключа `memory_path` и не строит пакет, тогда как agent-раннер это делает ([nodes/agent.py:534,596-600](src/wastech_orchestrator/core/flow/nodes/agent.py#L534)). Поэтому `{?memory_path}`-блок в `review.md:48` всегда пуст, а reviewer-preference-ранжирование `packet.py` (`_REVIEWER_PREF_NODES={review,fixing}`, [memory/packet.py:41](src/wastech_orchestrator/memory/packet.py#L41)) для review не срабатывает.
+
+**Корневая причина / рычаг.** Пакет памяти прокидывает только agent-раннер; evaluator-раннер не был подключён, хотя `packet.py` спроектирован обслуживать review. [evaluator.py:289](src/wastech_orchestrator/core/flow/nodes/evaluator.py#L289) — прокинуть `memory_path`+build_packet, либо убрать мёртвый блок из `review.md`.
+
+**Влияние.** Ревью — узел, которому «recurring reviewer expectations» пригодились бы больше всего (в карантине есть reviewer-kind уроки), но он памяти не видит. Наблюдаемый эффект сегодня мал (память всё равно пуста, F29/F30), но при их починке review останется единственным узлом без пакета.
+
+---
+
+### F32 · Вход ревью (`{diff_path}`) не отражает изменение задачи: кумулятивный (chain) + pre-documentation дифф → ложные находки и нерезолвимые line-refs · **MEDIUM** · уверенность HIGH · зона **orchestrator** · статус **OPEN**
+
+**Доказательство.** `write_current_diff = git diff <base_branch>` ([git_manager.py:1173](src/wastech_orchestrator/git_manager.py#L1173)). На общей ветке цепочки `base=main`, поэтому review получает КУМУЛЯТИВНЫЙ дифф всех предыдущих задач: p4-07 review видел 35 файлов при ~5 изменённых задачей; в p4-07-диффе файлы p4-03/04/05 помечены `new file mode`. Три следствия наблюдались: (1) **ложная находка** — p4-06 review: «index.ts newly exports the full P4.02–P4.05 surface … broader than the P4.06 plan step», тогда как `git show 276b9cb -- index.ts` = ровно 2 строки (шаг плана); остальные экспорты добавлены p4-02..05. (2) **повторяющийся ложный «phase-doc не обновлён»** (p4-04 medium, p4-05 low) — review бежит ДО documentation, который phase-doc и обновляет; при идентичной ситуации p4-06 review это НЕ флагнул (тот же opus/high) → доказанная непоследовательность/шум. (3) **line-refs не резолвятся** — p4-06 находки цитируют `coverage.ts:529-539` при файле в 97 строк (реальная логика — стр. 79-86); это ни исходные строки, ни чистые diff-офсеты.
+
+**Корневая причина.** Ревью в свежей сессии (без памяти о том, что изменила ИМЕННО эта задача) судит по диффу `<base>..worktree`, который в chain-режиме кумулятивен, а всегда — pre-documentation. Роль-промпт не оговаривает ни то, ни другое.
+
+**Рычаг.** Кодовый — [git_manager.py:1173](src/wastech_orchestrator/git_manager.py#L1173): давать ревью/документации ИНКРЕМЕНТАЛЬНЫЙ дифф задачи (набор изменённых задачей файлов / диапазон коммитов задачи), а не `<base>..worktree`. Промпт — `.worc/flows/implementation/review.md`: «дифф может быть кумулятивным/pre-doc — суди по плану задачи, не флагай prior-task код как scope drift и doc-обновления; цитируй source-path+symbol».
+
+**Влияние.** Ревью тратит внимание на чужой код, выдаёт фактически ложные находки (уже случилось) и нерезолвимые line-refs — снижает и качество гейта, и полезность находок для fixing-агента.
+
+---
+
+### F33 · Инвариант «sort every output array» без исключения для упорядоченных последовательностей — вероятный источник единственного blocking-бага кампании · **LOW-MEDIUM** · уверенность MEDIUM · зона **orchestrator** · статус **OPEN**
+
+**Доказательство.** `implementation.md` (## Hard Invariants): «**Determinism**: sort every output array before returning or rendering it». Единственный `blocking` кампании (p4-05, verdict=`rework`) — переприменение: агент написал `readingOrder.map(relativize).sort(byPath)`, а `readingOrder` — топологический порядок. Ревью: «the extra `.sort(byPath)` silently overwrites the topological order with an alphabetical one». `review.md:23` зеркалит абсолютное правило в blocking-списке.
+
+**Корневая причина.** Промпт-инвариант сформулирован абсолютно, без различения path-keyed массивов (сортировать) и осмысленных последовательностей (не сортировать). Агент честно применил его ко всему.
+
+**Рычаг.** target [.worc/flows/implementation/implementation.md:15](/Users/a1234/Documents/GitHub/wastech-mdlint/.worc/flows/implementation/implementation.md) + [review.md:23](/Users/a1234/Documents/GitHub/wastech-mdlint/.worc/flows/implementation/review.md) — локальный дрифт (блок Hard Invariants — target-кастомизация). Добавить оговорку про topological/reading/ranked order.
+
+**Влияние.** Один реальный high-баг (пойман и починен fix-циклом), но паттерн систематичен: абсолютное правило провоцирует over-sorting осмысленных последовательностей.
+
+---
+
+### F34 · planning-промпт ссылается на несуществующие «core primitives» (`graph/build.ts`, `markdown/parse.ts`, `llm/budget.ts`) · **LOW** · уверенность HIGH · зона **orchestrator** · статус **OPEN**
+
+**Доказательство.** target `planning.md` (секция Roadmap And Architecture) перечисляет к переиспользованию `packages/core/src/{markdown/parse.ts, graph/build.ts, llm/budget.ts}`. Проверка репо: 3 из 4 путей не существуют (фактически `parse-document.ts`, `build-context-graph.ts`; директории `llm/` нет), корректен только `discovery/`. opus не обманулся (нашёл верные модули + пакет памяти нёс правильный `build-context-graph.ts` — память де-факто исправила промпт).
+
+**Корневая причина / рычаг.** Локальный дрифт: project-специфичный список вписан в target-копию `planning.md` и устарел относительно фактического v2-монорепо. Packaged `planning.md` — generic, этих путей не содержит. Рычаг: [.worc/flows/implementation/planning.md](/Users/a1234/Documents/GitHub/wastech-mdlint/.worc/flows/implementation/planning.md) — заменить на реальные пути или сделать generic.
+
+**Влияние.** Слабый планировщик был бы уведён на несуществующие файлы; сейчас opus+память компенсируют, но это латентный misdirect и симптом отсутствия проверки актуальности кастомизированных промптов.
+
+---
+
+### F35 · Рецидив NUL-делимитеров: `graph-algorithms.ts` и `graph.e2e.test.ts` в PR #9 — git-binary, ревью не видит · **LOW** · уверенность HIGH · зона **target (+ orchestrator observability)** · статус **OPEN**
+
+**Доказательство.** `git show feat/p4-graph-chain:packages/core/src/graph/graph-algorithms.ts` содержит NUL в ключе `` `${edge.from}\x00${edge.to}` `` (стр. 42); `graph.e2e.test.ts` — NUL в `edgeSortKey`. git видит оба файла как binary. Это рецидив анти-паттерна F23 (пре-существующий NUL в P3). Фикс F20 (`--text`) **подтверждён рабочим** — `current.diff` p4-02/p4-08 рендерит эти файлы как ТЕКСТ, но NUL невидим даже в текстовом диффе, поэтому ревью (claude-fallback) их не поймало.
+
+**Корневая причина / рычаг.** target-код использует NUL как join-делимитер (в отличие от `query.ts:62`, где пробел). Оркестраторный угол: нет гейта на committed control-байты, а ревью не видит NUL даже с `--text`. Рычаг: target-код (заменить NUL на пробел) + опционально preflight/`checks`-проверка на control-байты в диффе.
+
+**Влияние.** 2 из 47 файлов PR #9 (включая весь e2e-тест p4-08) не ревьюятся через `git diff`/GitHub. Функционально безвредно (ключи самосогласованы), но подрывает человеко-ревью и merge/diff-инструменты.
+
+---
+
+### F36 · Абсолютные host-пути в эпизодах памяти + невоспроизводимая редакция (2 из 8) · **LOW** · уверенность HIGH · зона **orchestrator** · статус **OPEN**
+
+**Доказательство.** `.worc/memory/short_term/recent.jsonl`: `artifact_paths` эпизодов `ep_p4-02..ep_p4-07` = буквально `/Users/a1234/Documents/GitHub/wastech-mdlint/.worc/logs/...`, а `ep_p4-01-v2`/`ep_p4-08` = `[REDACTED]/.worc/logs/...`. Один и тот же безобидный путь: в 6 записан как есть, в 2 — отредактирован.
+
+**Корневая причина.** Эпизод строится с абсолютным путём ([core/orchestrator.py:2117](src/wastech_orchestrator/core/orchestrator.py#L2117)), не relativized (хотя `records.py` декларирует POSIX repo-relative). Набор redaction-литералов харвестится в рантайме (`_memory_extra_secrets`, [orchestrator.py:2047](src/wastech_orchestrator/core/orchestrator.py#L2047)) из env-секретов + `.env`/`secrets/**`, поэтому зависит от преходящего состояния процесса — в 2 прогонах какой-то литерал совпал с префиксом пути и вычистил его.
+
+**Рычаг.** [core/orchestrator.py:2117](src/wastech_orchestrator/core/orchestrator.py#L2117) — хранить `.worc`-относительный путь. Влияние низкое (локальный путь, не credential), но редакция невоспроизводима для идентичных данных — сигнал для security-чокпоинта.
+
+---
+
+### F37 · Теневая нативная память Claude Code: спаунящиеся агенты читают/пишут `~/.claude/projects/<target>/memory/` вне изоляции, редакции и аудита · **HIGH** · уверенность HIGH · зона **orchestrator** · статус **OPEN**
+
+**Доказательство (firsthand).** Директория `~/.claude/projects/-Users-a1234-Documents-GitHub-wastech-mdlint/memory/` существует и содержит карточки с фазы P0 по p4-06: `MEMORY.md` (индекс, 3 записи), `p0-04-tsconfig-src-cleanup.md`, `p0-complete-config-deferrals.md`, `p4-06-grp-coverage-idref.md` (создан 5 июля 00:19 — во время прогона p4-06). `stages/implementation/run-000089/1-claude/events.jsonl` p4-06 (строки 393-399) буквально: `Read` `…/memory/MEMORY.md` → `Write` `…/memory/p4-06-grp-coverage-idref.md` («File created successfully at: /Users/a1234/.claude/projects/…») → `Edit` `…/memory/MEMORY.md` («has been updated»). Нативная память читается/инъектируется во ВСЕХ 8 задачах (10-15 упоминаний `.claude/projects/-Users…` в `events.jsonl` каждой); запись — в p4-06 (и ранее в P0), т.е. недетерминированно. Карточка `p4-06-…md` несёт в frontmatter нередактированный `originSessionId: c99cbf29-95b9-4a51-a420-1b6325ab5d21`.
+
+**Корневая причина.** Оркестратор спаунит `claude` с активной нативной памятью Claude Code (нативный memory-system-prompt инъектируется, memory-директория авто-подхватывается по `cwd`) и не конфайнит `Write`/`Edit` рабочим деревом: `implementation`-узел идёт с `--allowedTools Read,Glob,Grep,Edit,Write,Bash`, а `--disallowedTools` запрещает лишь чтение `.env`/`secrets/**` и git/gh — ничто не мешает `Write` в `/Users/a1234/.claude/…`. `CLAUDE_CONFIG_DIR` в allowlist `security.allowed_environment` прокидывается в домашний конфиг оператора.
+
+**Рычаг.** [providers/claude.py](src/wastech_orchestrator/providers/claude.py) (конфигурация спауна) — отключить нативную память для спаунящихся агентов (изолированный `CLAUDE_CONFIG_DIR`/settings) и/или конфайнить `Write`/`Edit` рабочим деревом (`--disallowedTools` на путях вне репо / `--add-dir`-контур).
+
+**Влияние.** (1) Пробой изоляции: агент пишет durable-файлы в `~/.claude/` оператора, вне рабочего дерева, `current.diff`, commit и знания оркестратора; накапливается через все задачи всех кампаний (уже с P0). (2) Вне редакции/аудита — наблюдается утечка session-id; в общем случае туда уедет что угодно. (3) Параллельно управляемой `.worc/memory/` работает вторая, неуправляемая — все её poisoning-защиты бессмысленны рядом с сырой нативной. По иронии именно нативная память захватила корректный, детальный урок P4.06, который управляемая подсистема застряла квартинировать (F29/F30). Полный разбор — Часть C.
+
+---
