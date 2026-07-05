@@ -48,6 +48,44 @@
 
 ---
 
+## Проход 7 — что проверено (2026-07-04)
+
+Источник: первая задача **branch-mode chain-теста** — `worc run` задачи `p4-02-graph-algorithms` с `branch_mode: new` + кастомный `branch_name: feat/p4-graph-chain` (общая ветка для цепочки p4-02..p4-08) → `done` + PR [#9](https://github.com/VladimirMakarevich/wastech-mdlint/pull/9) (НЕ смержен) + `/analyze-task-run`. Отчёт: [docs/analysis/p4-02-graph-algorithms-run-analysis.md](docs/analysis/p4-02-graph-algorithms-run-analysis.md). Находки — [TEST-FINDINGS.md](TEST-FINDINGS.md) F24–F25. Галочки — только реально наблюдённое.
+
+**Покрыто:** §24 branch-mode `new` + кастомный `branch_name` (см. ниже); §12 повторное подтверждение per-node override на codex-evaluator (review→gpt-5.4/xhigh); §13 explicit `worc run` refuse на unmerged/abandoned `depends_on` (новый вариант — abandoned-статус, не только «PR OPEN»). **Регресс от сегодняшнего F19-фикса:** codex-evaluator крашится 100% детерминированно (`_FINDINGS_SCHEMA` без `additionalProperties:false` → OpenAI 400 `invalid_json_schema`), см. F24 — замаскировано claude-фоллбэком, но фатально при single-provider=codex.
+
+**Не наблюдалось:** `branch_mode: existing`/`current`, `branch_ref`, PR-reuse, per-task `publish`-cap — запланированы на следующие задачи цепочки (p4-03..p4-08).
+
+## Проход 8 — что проверено (2026-07-04)
+
+Источник: `p4-03-query-layer`, второй шаг chain-теста — `branch_mode: existing` + `branch_ref: feat/p4-graph-chain` → `done`, PR **переиспользован** ([#9](https://github.com/VladimirMakarevich/wastech-mdlint/pull/9), не новый). Отчёт: [docs/analysis/p4-03-query-layer-run-analysis.md](docs/analysis/p4-03-query-layer-run-analysis.md). Находка — [TEST-FINDINGS.md](TEST-FINDINGS.md) F27.
+
+**Покрыто:** §24 `existing`-mode checkout + multi-task accumulation + PR-reuse (см. ниже, галочки в разделе 24). **F24 повторно подтверждён** (2/2): codex review падает идентично p4-02 (`process_crashed`, ~5с) → claude fallback → `accept` — детерминированность зафиксирована, дальше не перепроверяется на каждой задаче отдельно.
+
+**Также перед запуском:** живой демо-отказ на p4-03 с исходным `depends_on: [p4-02-graph-algorithms]` (PR #9 открыт, не смержен) → `error: refusing to run p4-03-query-layer: dependency 'p4-02-graph-algorithms' PR is OPEN (unmerged)`, exit 2 — см. **F26** (депендс-он-merge-gate не интегрирован с branch-mode chain).
+
+## Проход 9 — что проверено (2026-07-04)
+
+`p4-04-search-index-slice` (3-й шаг chain-теста, `existing`) → `done`, PR **#9 переиспользован 3-й раз подряд** (накопил p4-02+p4-03+p4-04). Codex review упал 3/3 идентично F24 (не перепроверяется дальше — детерминированность подтверждена). Новое: claude-review нашёл `medium`-находку (phase-doc P4.04 не обновлён) — корректно классифицирована как advisory, не блокирует. Лёгкий отчёт: [docs/analysis/p4-04-search-index-slice-run-analysis.md](docs/analysis/p4-04-search-index-slice-run-analysis.md). Без новых F-номеров.
+
+## Проход 10 — что проверено (2026-07-04)
+
+`p4-05-impact-analysis` (4-й шаг chain-теста, `existing` + `publish: push` + намеренно невалидный `provider: gemini`) → `done`, `pr_url=null` (push-only, без PR). Три независимых механизма подтверждены живьём одновременно: §12 invalid-override fallback (см. выше), §24 `publish: push` (см. выше), и **первый в кампании настоящий fix-цикл** — review нашёл реальный HIGH-баг (`relativizeImpact` портит топологический `readingOrder` лишней алфавитной сортировкой, `impact-analysis.ts:486`), `fixing` исправил за 1 итерацию с объясняющим комментарием, повторный review дал `accept`. Codex упал 5-е/6-е подряд (F24, детерминированность окончательно подтверждена, дальше не отслеживается). Отчёт: [docs/analysis/p4-05-impact-analysis-run-analysis.md](docs/analysis/p4-05-impact-analysis-run-analysis.md). Без новых F-номеров — все механики сработали как задокументировано.
+
+## Проход 11 — что проверено (2026-07-05)
+
+`p4-06-grp-refactor-coverage` (5-й шаг chain-теста, `existing`, без спецтвиков) → `done`, PR **#9 переиспользован 5-й раз подряд**. Codex упал 7/7 (F24, не отслеживается дальше). Review — 4 LOW, все non-blocking (одна интересная: implementer расширил экспорт `index.ts` шире плана P4.06, безвредно). Лёгкий отчёт: [docs/analysis/p4-06-grp-refactor-coverage-run-analysis.md](docs/analysis/p4-06-grp-refactor-coverage-run-analysis.md). Без новых F-номеров.
+
+## Проход 12 — что проверено (2026-07-05)
+
+`p4-07-cli-graph-slice-impact` (6-й шаг chain-теста, `existing`, зависел от p4-04+p4-05 без `depends_on` — только порядком ручного запуска) → `done`, PR **#9 переиспользован 6-й раз подряд**. Codex упал 8/8 (F24). Review — 2 LOW, обе явно by-design. Лёгкий отчёт: [docs/analysis/p4-07-cli-graph-slice-impact-run-analysis.md](docs/analysis/p4-07-cli-graph-slice-impact-run-analysis.md). Без новых F-номеров.
+
+## Проход 13 — что проверено (2026-07-05), финал branch-mode chain-теста
+
+`p4-08-graph-tests` (7-й и последний шаг, `branch_mode: current` — оператор вручную `git checkout feat/p4-graph-chain` до `worc run`) → `done`, PR **#9 закрыл всю цепочку** (7 коммитов p4-02..p4-08, 47 файлов, +2645/−110, всё ещё открыт). Подтверждены оба safety-инварианта `current`-режима (см. §24 выше: no-op checkout + no-force-cleanup-на-base). Codex упал 9/9 (F24, финально детерминирован). Отчёт: [docs/analysis/p4-08-graph-tests-run-analysis.md](docs/analysis/p4-08-graph-tests-run-analysis.md). Без новых F-номеров — **вся ADR branch-mode функциональность (new/existing/current/publish-cap/PR-reuse) протестирована и работает как задокументировано**, кроме нескольких явно неиспробованных негативных веток (см. непроставленные пункты §24: `branch_ref` not-exists, detached HEAD, `reset` refuse в existing, closed/merged non-reuse, head==base guard, `publish: commit`).
+
+---
+
 ## 1. Branch name: epoch-префикс + ограничение длины
 
 **Файл:** `archive/done/branch-name-epoch-and-slug-limit.md` · **Статус:** implemented 2026-06-26
@@ -430,7 +468,7 @@ HITL-раунд-трип теперь ВОЗОБНОВЛЯЕТ ту же сес�
 - [ ] `core.node_overrides.resolve_node_overrides` — best-effort config-validated overlay (warn + skip невалидных полей; БЕЗ model ceiling — accepted simplification)
 - [~] Override chain: Task node override (best-effort) → Flow node declaration (flow YAML) → Provider config default — прогон 4 (p0-04): **Flow-node-declaration → Provider-default уровень НАБЛЮДЁН** — flow YAML пинит planning=opus-4-8/high, impl/review/fixing=sonnet-5/xhigh, documentation=sonnet-5/medium, и глобальный конфиг-дефолт `claude-opus-4-8` перекрыт per-node; **task-front-matter уровень (`nodes.<id>.model`) ещё НЕ проверен** (задачи P0 его не задают); прогон 6 (p4-01-v2): flow-уровень повторно подтверждён на **codex-evaluator** — review перекрыл глобальный codex `gpt-5.5/high` → `gpt-5.4/xhigh` (`stages/review/…/request.json`)
 - [x] Применяется на единственном node-fetch seam движка (`core/flow/engine_driver.py`), покрывая agent- И evaluator-узлы — прогон 4: override дошёл и до agent-узлов (planning/implementation/documentation), и до **evaluator-узла review** (sonnet-5/xhigh применился на review-verdict), т.е. seam покрыл оба класса
-- [ ] Fallback на невалидный override (provider не в конфиге, нераспознанный reasoning, невалидная model): структурный warning в node artifact log, skip поля, откат на flow-declared значение — задача НЕ аборится
+- [x] Fallback на невалидный override (provider не в конфиге, нераспознанный reasoning, невалидная model): структурный warning в node artifact log, skip поля, откат на flow-declared значение — задача НЕ аборится — прогон 10 (p4-05): `nodes.implementation.provider: gemini` (невалиден на конфиге claude/codex) → `level=warning detail="node 'implementation': provider 'gemini' not in agents.allowed ['claude', 'codex']; using the flow's provider" msg="task node override skipped"`, задача продолжилась и дошла до `done`
 - [ ] Reasoning-валидация переиспользует `is_reasoning_supported`/`agents.allowed` (не новая «ceiling clamp» машинерия)
 - [x] Эффективные (post-override) model/reasoning/provider записаны в prompt audit — прогон 4: `prompt-audit/timeline.jsonl` фиксирует ФАКТИЧЕСКИЕ per-node model/reasoning (opus/high, sonnet/xhigh×2, sonnet/medium), а не flow-declared/глобальные дефолты; `state.db node_lineage` отдельно не сверял
 - [ ] Watch-mode compat: невалидный override деградирует мягко (не preflight-fatal, не блокирует очередь)
@@ -837,3 +875,54 @@ Zero-config канал: вывод каждого agent-узла персист�
 - [ ] F4: restore prune
 - [ ] F5: частичные AC-S3/S4 добиты
 - [ ] F6: annotations
+
+---
+
+## 24. Branch mode: run a task in an existing or current branch
+
+**Файл:** `archive/done/branch-mode.md` · **Статус:** implemented (config v26, 2026-07-04)
+
+Per-task `branch_mode: new|existing|current` (+ `branch_ref`) плюс downgrade-only per-task `publish: commit|push|pull_request`. Цель: продолжить/зациклить работу на существующей ветке (цепочка задач → одна ветка → один PR) без форка новой ветки на каждую задачу, и без обязательного открытия PR на каждом шаге.
+
+### `new` (дефолт, create-from-base)
+
+- [x] `branch_mode: new` явно в task front matter ведёт себя как дефолтное create-from-base поведение (fetch/checkout base/pull --ff-only/create) — прогон 7: p4-02 с `branch_mode: new` создал ветку от обновлённого `main` (после мержа PR #8)
+- [x] Кастомный `branch_name` в `new`-режиме используется буквально (не auto-паттерн `{prefix}/{epoch}-...`) — прогон 7: `branch_name: "feat/p4-graph-chain"` → реальная ветка и PR #9 head именно `feat/p4-graph-chain`
+- [ ] `task.normalized.json` отражает резолвнутые `branch_mode`/`branch_ref`/`publish` (проверено косвенно — прогон 7: `task.normalized.json` содержит `"branch_mode": "new", "branch_ref": null, "publish": null`)
+
+### `existing` (продолжить именованную ветку)
+
+- [ ] `branch_ref` должен существовать локально или на remote — иначе отказ на валидации (no auto-create)
+- [x] `prepare_branch()`: fetch, затем checkout `branch_ref` — прогон 8: p4-03 (`branch_mode: existing, branch_ref: feat/p4-graph-chain`) отработал на этой ветке (`state.db node_runs`/ledger `branch=feat/p4-graph-chain`), без ошибок checkout
+- [x] Множественные задачи подряд на одной `existing`-ветке накапливают коммиты без форка новой ветки — прогон 8: `git log origin/feat/p4-graph-chain` содержит ОБА коммита (`feat(p4-02-graph-algorithms)` + `feat(p4-03-query-layer)`) на одной ветке
+- [ ] `reset_branch_to_base()`/фреш-rerun ЗАПРЕЩЁН в `existing` (только `rerun --continue`)
+- [x] `terminal_cleanup()` в `existing` не удаляет ветку — прогон 8: ветка `feat/p4-graph-chain` и PR #9 живы после завершения p4-03 (не откачены/не удалены)
+- [ ] Per-task `branch_name` в `existing`-режиме игнорируется + validation warning
+
+### `current` (использовать текущий checkout как есть)
+
+- [x] `current` — no-op относительно переключения: не чекаутит base, не делает `pull --ff-only`, не требует чистого дерева — прогон 13 (p4-08): оператор вручную сделал `git checkout feat/p4-graph-chain` до `worc run`; задача выполнилась на этой ветке без вмешательства оркестратора в checkout
+- [x] `terminal_cleanup()` в `current` НЕ форсит checkout на base (дерево остаётся на рабочей ветке) — прогон 13: после `done` рабочее дерево target ОСТАЛОСЬ на `feat/p4-graph-chain` (`git branch --show-current` подтверждает), НЕ откачено на `main`
+- [ ] Detached HEAD в `current` — отказ на валидации (нужен символьный branch ref), не тихая деградация
+- [x] `current` под `watch`/autonomous — не запрещён, но выдаёт warning — прогон 13: warning появился и на ПРЯМОМ `worc run` (не только watch): `msg="branch_mode 'current' rides the working tree's live checkout — a poor fit for unattended watch; the task commits on whatever branch HEAD is on"`; задача не аборчена
+
+### PR-reuse rules
+
+- [x] `create_pr` переиспользует уже ОТКРЫТЫЙ (включая draft) PR для той же пары (head, base) вместо второго PR — прогон 8: p4-03 опубликовался в тот же PR **#9** (не #10); `gh pr view 9` показывает оба коммита p4-02+p4-03. Нюанс — **F27**: title/body PR НЕ обновляются при reuse, остаются от первой задачи цепочки
+- [ ] `closed`/`merged` PR — НЕ переиспользуется, создаётся новый
+- [ ] Множественные открытые матчи — переиспользуется самый новый + warning (не failure)
+
+### Guard: working branch == base branch
+
+- [ ] `head == pr_base` при PR-like policy → push проходит, `create_pr` пропускается (задокументированная причина в артефакте/логе), `auto_merge` становится no-op
+- [ ] Отказ push (branch protection) на этом пути деградирует в обычный `NodeManualRequired` (существующий graceful-degrade, без нового кода)
+
+### Publish downgrade-only cap
+
+- [ ] Per-task `publish: commit` — останавливается после `commit_code`+`commit_audit` (без push, без PR)
+- [x] Per-task `publish: push` — коммитит + пушит, но пропускает `create_pr` — прогон 10 (p4-05): `state.db publish_operations` содержит только `code_commit`+`audit_commit`+`push` (нет `pr`-op), ledger `pr_url: null`; PR #9 всё равно показывает новый коммит (динамический вид той же ветки, не действие оркестратора)
+- [ ] `publish` — ТОЛЬКО downgrade (`min(flow_policy, task.publish)`); на flow без `publish`-узла (`publishing: none`) — no-op, не создаёт публикацию из ничего
+
+### Safety invariant
+
+- [ ] Деструктивные git-операции (`branch -D`, remote delete, reset-to-base, force-checkout-away) выполняются ТОЛЬКО при `branch_mode == new` — в `existing`/`current` ветка принадлежит оператору

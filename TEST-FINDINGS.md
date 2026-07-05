@@ -94,3 +94,86 @@
 **Доказательство.** Базовый blob `58dbb7f` (из PR #7, P3): 3 NUL-байта в строковом ключе `` `${document.path}\x00${target}` ``. Задача p4-01-v2 сняла старый `(from,to)`-dedup → новый файл NUL-free. То есть проблема пре-существующая (не вина прогона) и **попутно устранена** этой задачей; после мержа #8 будущие диффы файла станут текстовыми. Связано с F20 (следствие для артефакта диффа). Отдельного действия по оркестратору не требует; отмечено как контекст к F20.
 
 ---
+
+## Проход 7 — задача `p4-02-graph-algorithms` (2026-07-04), первая задача branch-mode chain-теста
+
+Прогон: `worc run` → `done`, ветка `feat/p4-graph-chain` (общая ветка цепочки p4-02..p4-08, `branch_mode: new` + кастомный `branch_name`), PR [#9](https://github.com/VladimirMakarevich/wastech-mdlint/pull/9) (не смержен). Флоу `implementation`: planning (claude opus-4-8/high, 180s) → implementation (claude, 195s) → testing (checks, 7s, 160/160 green) → review (**codex gpt-5.4/xhigh crashed на attempt 1 → fallback claude**, 76s) → documentation (claude, 77s) → publish (55s). `fix_iterations=0`. Отчёт: [docs/analysis/p4-02-graph-algorithms-run-analysis.md](docs/analysis/p4-02-graph-algorithms-run-analysis.md).
+
+---
+
+### F24 · Регресс от сегодняшнего фикса F19: `_FINDINGS_SCHEMA` без `additionalProperties:false` — 100%-детерминированный краш codex на ЛЮБОМ evaluator-узле (review/verifier/critic/testing_quality) · **HIGH** · уверенность HIGH · зона **orchestrator** · статус **OPEN**
+
+**Доказательство.**
+
+- `state.db provider_attempts`: `node_run_id=60 (review), provider=codex, attempt=1, status=NULL, error_class=process_crashed, exit_code=NULL`; следом `attempt=2, provider=claude, status=succeeded, exit_code=0`. `node_runs.review: stage_attempts=2, route_fallback=claude`.
+- `stages/review/run-000060/1-codex/stdout.log` (и `events.jsonl`, идентично): `{"type":"turn.failed","error":{"message":"{\n  \"type\": \"error\",\n  \"error\": {\n    \"type\": \"invalid_request_error\",\n    \"code\": \"invalid_json_schema\",\n    \"message\": \"Invalid schema for response_format 'codex_output_schema': In context=(), 'additionalProperties' is required to be supplied and to be false.\",\n    \"param\": \"text.format.schema\"\n  },\n  \"status\": 400\n}"}}` — codex CLI 0.139.0 передаёт `--output-schema` в OpenAI Responses API как strict `response_format`, а тот **требует** `additionalProperties: false` на КАЖДОМ object-узле схемы (включая вложенные).
+- `stages/review/run-000060/1-codex/output-schema.json` (буквально записанный на диск оркестратором файл, который codex получил через `--output-schema`): `{"type": "object", "properties": {"findings": {"type": "array", "items": {"type": "object", "properties": {...}, "required": [...]}}}, "required": ["findings"]}` — **ни на верхнем уровне, ни на вложенном `items`-объекте нет `additionalProperties`**.
+- Источник этого литерала — [core/flow/nodes/evaluator.py:57-78](src/wastech_orchestrator/core/flow/nodes/evaluator.py#L57) (`_FINDINGS_SCHEMA`), добавленный СЕГОДНЯ как фикс **F19** (см. проход 6 выше, статус `RESOLVED (2026-07-04)`) — до этого evaluator вообще не передавал `output_schema`, поэтому баг не мог проявиться.
+- Контрастная проверка: `core/hitl.py` (`_HUMAN_INPUT_SCHEMA`:35, `typed_output_schema`:108/118, `_SUBTASK_SCHEMA`:55) — везде и на верхнем, и на вложенных object-уровнях стоит `"additionalProperties": False`. Т.е. паттерн в кодовой базе известен и соблюдается везде, КРОМЕ нового `_FINDINGS_SCHEMA`.
+- Второстепенная деталь в том же `stderr.log` (не причина краша, но шум): `ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when AuthRequired(...mcp.figma.com...)` — codex CLI на этой машине пытается поднять локально сконфигурированный Figma-MCP без авторизации; не влияет на исход (turn уже упал раньше по schema-ошибке), но добавляет ~1-2с шума в каждый codex-вызов.
+
+**Корневая причина.** `_FINDINGS_SCHEMA` (введён сегодняшним фиксом F19, обязателен для ЛЮБОГО evaluator-узла) не следует уже установленной в `hitl.py` конвенции — не проставляет `"additionalProperties": false` ни на верхнем object, ни на вложенном `items`-object. OpenAI Structured Outputs (через которые codex CLI реализует `--output-schema`) отвергает такую схему 400-кой ДО начала turn — это не флуктуация модели и не проблема качества, а гарантированный краш на каждом вызове.
+
+**Рычаг.** [core/flow/nodes/evaluator.py:57-78](src/wastech_orchestrator/core/flow/nodes/evaluator.py#L57) — добавить `"additionalProperties": False` на оба object-уровня `_FINDINGS_SCHEMA` (верхний и `items`), по образцу `hitl.py`. Стоит также добавить регрессионный юнит-тест, который валидирует КАЖДУЮ константу-схему в кодовой базе (`_FINDINGS_SCHEMA`, `_HUMAN_INPUT_SCHEMA`, `_SUBTASK_SCHEMA`, `typed_output_schema(...)`) на наличие `additionalProperties: false` на каждом object-узле рекурсивно — smoke-тест из ADR `run-quality-gating-hardening.md`, валидировавший фикс F19, использовал СВОЙ упрощённый пример-схему (`cat sample.md` с `command_execution` tools), а не буквально `_FINDINGS_SCHEMA` — поэтому не поймал этот регресс.
+
+**Влияние.** Сегодня замаскировано fallback'ом на claude (review всё равно доехал до `accept` за 2 попытки, +5.5с и один сожжённый provider-attempt из `agents.retry.max_attempts=2`). Но: (1) в конфигурации с ЕДИНСТВЕННЫМ разрешённым провайдером = codex (`agents.allowed: [codex]`) это будет `manual_action_required` на КАЖДОЙ задаче с evaluator-узлом — полная неработоспособность; (2) в этом целевом репо review принудительно запиннен на codex (`.worc/flows/implementation.yaml:93-96`, «per-node override: review runs on Codex»), значит на ВСЕХ p4-02..p4-08 в текущей цепочке review будет крашиться и падать на fallback идентично — систематическая, а не разовая находка; (3) даже с фоллбэком — это тихая деградация стоимости/латентности на каждом прогоне с codex-evaluator, которую легко не заметить.
+
+---
+
+### F25 · `depends_on` не переживает переименование зависимости при abandon+retry-под-новым-id — постоянная блокировка без диагностики · **MEDIUM** · уверенность HIGH · зона **orchestrator** · статус **OPEN**
+
+**Доказательство.**
+
+- Живой отказ (до правки): `worc run tasks/pending/p4-02-graph-algorithms.md` (с исходным `depends_on: [p4-01-context-graph-model]`) → `error: refusing to run p4-02-graph-algorithms: dependency 'p4-01-context-graph-model' is manual_action_required (unmerged)`, exit 2, ДО каких-либо git/branch-операций.
+- `logs/completed.jsonl`: `p4-01-context-graph-model` → `final_status=manual_action_required, outcome=abandoned` (первая попытка, брошена оператором); `p4-01-context-graph-model-v2` → `final_status=done, pr_url=.../pull/8` (ретрай **под другим task id**, реально смёржен). Задача `p4-02` в исходном task-файле ссылалась на первый (заброшенный) id.
+- После правки `depends_on` на верный id (`p4-01-context-graph-model-v2`) запуск прошёл штатно (гейт `ELIGIBLE`).
+
+**Корневая причина.** [core/orchestrator.py:722-743](src/wastech_orchestrator/core/orchestrator.py#L722) `_resolve_dependency` резолвит **буквально** по строке id из `depends_on`; когда оператор абандонит задачу и перезапускает её под НОВЫМ id (а не через `rerun` того же id — единственный путь, которым движок сам восстановил бы связь), ничто не переносит/не предупреждает о том, что старый id — «мёртвый конец», а новый id — его фактическая замена. Любой другой pending-task, который ссылается на старый id, застревает в `WAITING`/явном `refuse` НАВСЕГДА, без специфичной диагностики «этот id заброшен, возможно вы имели в виду `<related-id>-v2`».
+
+**Рычаг.** Вариантов фикса несколько, ни один не применён: (1) `task-authoring`/операторская дисциплина — документировать явно, что abandon+retry-под-новым-id требует ручной правки `depends_on` у ВСЕХ зависимых pending-задач (самый дешёвый фикс, но не защищает от забывчивости); (2) `_resolve_dependency` при обнаружении `abandoned`-статуса зависимости могла бы поискать в ledger более позднюю запись с тем же `title` и статусом `done`/PR merged и хотя бы предупредить (не автосвязывать — слишком неявно, но подсказать) — рычаг [core/orchestrator.py:722-743](src/wastech_orchestrator/core/orchestrator.py#L722); (3) `worc list`/`worc status` могли бы поверхностно показывать «N pending задач ссылаются на заброшенный id X» как advisory-предупреждение при `abandoned`.
+
+**Влияние.** Не крашит и не портит данные — но тихо и НАВСЕГДА блокирует зависимые задачи после ЛЮБОГО abandon+retry-под-новым-id, если оператор не помнит вручную обновить каждый `depends_on`. В этой кампании поймано только потому, что мы явно ждали живой отказ на следующем шаге цепочки; в автономном `watch`-режиме это осело бы как тихий вечный `WAITING` без чёткого «почему» на поверхности (сообщение в логе есть, но диагностировать первопричину «id переименован при ретрае» пришлось вручную по ledger).
+
+---
+
+### F26 · `depends_on`-merge-gate не интегрирован с `branch_mode: existing/current` chain-continuation — цепочка задач на одной неслитой ветке структурно несовместима с межзадачным `depends_on` · **MEDIUM** · уверенность HIGH · зона **orchestrator** · статус **OPEN (design gap, by-design workaround: убрать depends_on-на-соседей в chain-задачах)**
+
+**Доказательство.** Живой, предсказанный ДО запуска отказ: `worc run tasks/pending/p4-03-query-layer.md` (исходный `depends_on: [p4-02-graph-algorithms]`, `p4-02` — `done`, PR #9 **открыт**, не смержен) → `error: refusing to run p4-03-query-layer: dependency 'p4-02-graph-algorithms' PR is OPEN (unmerged)`, exit 2, ДО каких-либо git/branch-операций. Код `p4-02` физически уже присутствует в ветке `feat/p4-graph-chain`, которую `p4-03` собирается продолжить через `branch_mode: existing` — зависимость на самом деле удовлетворена «по конструкции» (общая ветка), но гейт этого не видит.
+
+**Корневая причина.** `depends_on` ([core/orchestrator.py:745-763](src/wastech_orchestrator/core/orchestrator.py#L745) `_dependency_merged`) считает `done`-зависимость готовой ТОЛЬКО если её записанный PR смёржен (или PR не открывался вовсе — «local-commit mode»). Это предположение верно для модели «каждая задача = своя ветка = свой PR», но не для новой ADR-функциональности branch-mode (`archive/done/branch-mode.md`, «Chain of tasks on one branch»): если несколько задач умышленно копят коммиты на ОДНОЙ неслитой ветке (через `existing`/`current` + PR-reuse), их взаимный `depends_on` навсегда виснет в `WAITING`, потому что общий PR по определению остаётся открытым до конца цепочки. Два механизма выражения «B зависит от A» (merge-gate для раздельных PR vs физическое продолжение ветки) не знают друг о друге.
+
+**Рычаг.** Не чинили (осознанно, см. ниже) — варианты на будущее: (1) документировать явно в `branch-mode.md`/`task-authoring.md`, что задачи внутри одной branch-mode-цепочки должны выражать порядок ЛИБО через `depends_on` (тогда без chain — раздельные PR/мержи), ЛИБО через `branch_mode: existing/current` (тогда `depends_on` на chain-соседей нужно убрать — порядок гарантирует оператор/scheduler своей последовательностью запуска), но не оба одновременно; (2) `_dependency_merged` могла бы дополнительно резолвить ELIGIBLE, если у зависимости и у текущей задачи совпадает эффективный working branch (значит код уже физически доступен независимо от merge-статуса общего PR) — рычаг [core/orchestrator.py:745-763](src/wastech_orchestrator/core/orchestrator.py#L745).
+
+**Workaround, применённый в этой кампании.** `depends_on`-на-соседей-по-цепочке убран из `p4-03..p4-08` (оставлен только уже-смёрженный внешний `p4-01-context-graph-model-v2` там, где он был) — порядок гарантируется тем, что задачи запускаются оператором строго по очереди. Задокументировано здесь, чтобы находка не терялась за самим воркараундом.
+
+**Влияние.** Без этой находки chain-тест был бы структурно невозможен «из коробки» — любая вторая задача цепочки с интра-chain `depends_on` отказывала бы навечно, пока цепочка не закончится и PR не смёржен (что противоречит самой идее «копить на одной ветке без промежуточных мержей»). Не баг в смысле «неверное поведение» — оба механизма работают каждый сам по себе корректно; проблема на стыке двух ADR.
+
+---
+
+## Проход 8 — задача `p4-03-query-layer` (2026-07-04), второй шаг branch-mode chain-теста
+
+Прогон: `worc run` → `done`, `branch_mode: existing` + `branch_ref: feat/p4-graph-chain`, PR **переиспользован** — [#9](https://github.com/VladimirMakarevich/wastech-mdlint/pull/9) (тот же, не новый), теперь содержит коммиты и p4-02, и p4-03. Флоу идентичен p4-02: review на codex снова упал (2/2, см. F24) → fallback claude → `accept`. `fix_iterations=0`. Отчёт: [docs/analysis/p4-03-query-layer-run-analysis.md](docs/analysis/p4-03-query-layer-run-analysis.md).
+
+---
+
+### F27 · PR-reuse не обновляет title/body — переиспользованный PR остаётся с метаданными ПЕРВОЙ задачи цепочки · **LOW** · уверенность HIGH · зона **orchestrator** · статус **OPEN**
+
+**Доказательство.** `gh pr view 9`: `title="P4.02 — Graph algorithms (topo-sort, components, cycles)"`, `body` = буквально summary p4-02 (никаких следов p4-03). Но `commits`: обе — `feat(p4-02-graph-algorithms): …` И `feat(p4-03-query-layer): …`; `git log origin/feat/p4-graph-chain` показывает оба коммита на общей ветке. Т.е. PR физически содержит работу двух задач, но заголовок/описание рассказывают только про первую.
+
+**Корневая причина.** [git_manager.py:992-1015](src/wastech_orchestrator/git_manager.py#L992) `create_pr`: при найденном открытом PR (`_find_open_pr`) метод просто возвращает его URL (`reused`) и записывает `pr`-op — не вызывает `gh pr edit` для обновления title/body под новую задачу. Это соответствует ADR (PR-reuse rules описывают только «reuse the URL», не обновление метаданных), но для оператора-ревьюера это создаёт риск: PR с заголовком «P4.02» на самом деле может нести 6 задач цепочки (`p4-02..p4-07`) — заголовок вводит в заблуждение о реальном объёме.
+
+**Рычаг.** [git_manager.py:1012-1015](src/wastech_orchestrator/git_manager.py#L1012) — на пути `reused is not None` можно (не обязательно) добавить best-effort `gh pr edit <url> --body <аккумулированное summary>` или хотя бы дописывать в body секцию «также включает: <task_id>» на каждый reuse. Не блокирующий фикс — chain и без этого работает корректно, только описание неполное.
+
+**Влияние.** Косметическое/наблюдаемость, не функциональный баг — PR-reuse, коммиты, диффы и чек-гейты работают верно. Риск — человеческий ревью PR по заголовку недооценит объём изменений на длинной цепочке.
+
+**Подтверждено на всей цепочке (2026-07-05).** До конца прогона (p4-02..p4-08, 7 задач в одном PR #9) title/body остались от p4-02 на всём протяжении — не только промежуточное наблюдение на 2 задачах.
+
+**Обсуждённые варианты фикса (design discussion, 2026-07-05, ничего не применено):**
+
+1. **Полная перегенерация title/body из summary последней задачи.** Проще всего технически (один `gh pr edit --title --body` на пути `reused is not None`), но каждый reuse ЗАТИРАЕТ описание предыдущих задач цепочки — итоговый PR всё равно расскажет только про последнюю задачу, а не про весь накопленный диапазон.
+2. **Append-секция на каждый reuse** (`## <task_id> — <title>` дописывается под уже существующим body, по аналогии с changelog). Сохраняет полную историю цепочки без потерь. Требует идемпотентности — секцию нужно keyed'ить по `task_id`, чтобы `rerun` той же задачи не дублировал запись.
+3. **Полная регенерация body из ВСЕХ task-summary этой ветки** (запрос в ledger/`state.db` по `branch`, не по одной задаче) — самое честное отражение состояния PR на любой момент, но требует агрегатора и решения конфликта: если оператор сам вручную правил PR-описание между задачами, полная регенерация это стирает, append (вариант 2) — нет.
+
+**Рекомендация (не решение — обсуждение).** Вариант 2 (append, keyed по task id) — дешёвый, идемпотентный, не рискует затереть оператора. Общий трейд-офф любого варианта — лишний `gh pr edit` вызов на каждую задачу цепочки (мелкий доп. API-write). Ждём решения, прежде чем трогать код.
+
+---
