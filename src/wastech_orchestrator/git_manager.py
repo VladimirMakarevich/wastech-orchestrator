@@ -1252,7 +1252,33 @@ class GitManager:
         task_dir.mkdir(parents=True, exist_ok=True)
         path = task_dir / "current.diff"
         path.write_text(redact_text(diff, extra_secrets=self._diff_secrets()), encoding="utf-8")
+        offenders = self.control_byte_paths()
+        if offenders:
+            bind(_LOG, task_id=task_id, component="diff").warning(
+                "committed control bytes (NUL) in %d file(s) — invisible to git diff/review even "
+                "with --text (F35): %s",
+                len(offenders),
+                ", ".join(offenders),
+            )
         return str(path)
+
+    def control_byte_paths(self) -> list[str]:
+        """Repo-relative POSIX paths of this task's changed files that contain a NUL byte (F35).
+
+        A committed NUL delimiter makes a file git-**binary** — invisible in ``git diff``/GitHub
+        review even with ``--text`` (F20) — so a NUL that slips into source escapes human review.
+        Best-effort scan of the task's changed files (committed-since-base + uncommitted); a file
+        that cannot be read (e.g. deleted) is skipped. Returns ``[]`` when clean. Orchestrator-side
+        and repo-agnostic, so the F23→F35 recurrence surfaces in the run logs instead of only via a
+        manual ``git show``."""
+        offenders: list[str] = []
+        for rel in self.changed_code_paths_since_base():
+            try:
+                if b"\x00" in (Path(self._clone) / rel).read_bytes():
+                    offenders.append(rel)
+            except OSError:
+                continue
+        return sorted(offenders)
 
     def _diff_secrets(self) -> tuple[str, ...]:
         """Denied-file secret values present in the clone, to redact from written diffs."""

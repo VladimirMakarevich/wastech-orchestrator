@@ -918,6 +918,27 @@ def test_write_current_diff_renders_nul_content_as_text(
     assert "after" in diff
 
 
+def test_control_byte_paths_flags_only_nul_files(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # F35: a NUL byte makes a file git-binary (invisible to diff/review even with --text). The
+    # detector surfaces the offending file so the recurrence is visible at the orchestrator level.
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    (git_repo.clone / "clean.ts").write_text("const k = `${a} ${b}`;\n", encoding="utf-8")
+    (git_repo.clone / "withnul.ts").write_bytes(b"const k = `${a}\x00${b}`;\n")
+    assert gm.control_byte_paths() == ["withnul.ts"]
+
+
+def test_control_byte_paths_clean_returns_empty(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    (git_repo.clone / "ok.py").write_text("x = 1\n", encoding="utf-8")
+    assert gm.control_byte_paths() == []
+
+
 def test_push_to_base_branch_is_refused(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:
