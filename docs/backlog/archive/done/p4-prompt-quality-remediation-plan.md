@@ -1,8 +1,21 @@
 # P4 — план исправления качества ролевых промптов по узлам
 
-План устранения всех находок из [p4-prompt-quality-per-node.md](../analysis/p4-prompt-quality-per-node.md) (Часть B сквозного разбора P4-кампании). Это **промпт-слой**: точные правки текста ролевых промптов + системная проблема расхождения target-копий и packaged-дефолтов. Кодовые рычаги тех же находок (F24/F28/F32/F31/F29/F33/F34) уже расписаны в [p4-findings-remediation-plan.md](p4-findings-remediation-plan.md) — здесь они **не дублируются**, а помечены «см. код: A1/A3/A4/B1/F1/F2»; данный план отвечает только на вопрос «какой текст в каком промпт-файле поменять и как этот фикс доходит до всех инсталляций».
+План устранения всех находок из [p4-prompt-quality-per-node.md](../../../analysis/p4-prompt-quality-per-node.md) (Часть B сквозного разбора P4-кампании). Это **промпт-слой**: точные правки текста ролевых промптов + системная проблема расхождения target-копий и packaged-дефолтов. Кодовые рычаги тех же находок (F24/F28/F32/F31/F29/F33/F34) уже расписаны в [p4-findings-remediation-plan.md](p4-findings-remediation-plan.md) — здесь они **не дублируются**, а помечены «см. код: A1/A3/A4/B1/F1/F2»; данный план отвечает только на вопрос «какой текст в каком промпт-файле поменять и как этот фикс доходит до всех инсталляций».
 
 Формат пункта: **Цель · Файл-рычаг · Было → Стало (точная формулировка) · Delivery (target / packaged / оба) · Тест · Связь с кодовым планом**.
+
+> **Статус реализации (2026-07-05).** План выполнен. Итог по пунктам:
+>
+> - **T1** (review.md → пустой `findings`-массив вместо прозы) — ✅ сделано (target).
+> - **T2** (review.md → защита от кумулятивного / pre-documentation диффа) — ✅ сделано: недостающий пункт про кумулятивный дифф добавлен в target `review.md`, а generic-версия всех трёх guardrail'ов — в **packaged** `review.md` (P2); два других пункта (source-path+symbol, «doc — позже») в target уже были.
+> - **T3** (implementation.md + review.md → carve-out для упорядоченных последовательностей) — ✅ уже было применено ранее (target); не переприменялось.
+> - **T4** (documentation.md → шаг «flip phase-doc → Done») — ✅ сделано (target).
+> - **T5** (planning.md → реальные пути core-примитивов) — ✅ уже было применено ранее (target); пути сверены с репо 2026-07-05 (`parse-document.ts` / `build-context-graph.ts` / `discovery/` / `engine/tokens.ts` существуют, `llm/` нет).
+> - **T6 / F31** (мёртвый `{memory_path}`-блок) — ✅ снят кодом: код-план A4 выбрал «прокинуть пакет» (`evaluator.py._memory_path` строит packet как agent-раннер), блок живой — правок промпта ноль, ни в target, ни в packaged.
+> - **P1 / F29-prompt** (summary.md → словарь `evidence.type`) — ⏭️ намеренно пропущено (решение оператора): код B1 уже распознаёт токены `file`/`commit`, которые супервайзер фактически пишет (~99% указателей кампании), поэтому жёсткий список токенов в общем промпте был бы избыточен и склонен к дрифту (та самая болезнь, против которой этот план). `evidence.type` остаётся свободной строкой (не enum).
+> - **Системное (§0)** — в [follow_ups.md](../../follow_ups.md) заведён отдельный candidate (lightweight preflight-проверка существования project-путей в `.worc/flows/*.md`, ловит F34-класс); T1 помечен acceptance-кейсом будущего `upgrade-flows`.
+>
+> **Расхождение с планом:** «Было»-цитаты местами устарели — часть правок (T3, T5, два из трёх пунктов T2) уже была применена предыдущей сессией к target-копиям `.worc/flows/` (они gitignored, поэтому история недоступна). Эти пункты не переприменялись; применены только реально отсутствовавшие (T1, кумулятивный-дифф-пункт T2, T4) + packaged-эхо (P2).
 
 ## Ключевая рамка: target-копия ≠ packaged-дефолт (и в какую сторону дрифт)
 
@@ -24,7 +37,7 @@
 
 Все 7 находок — симптом одного: **посеянная в `.worc/flows/` копия живёт своей жизнью и никак не сверяется ни с кодом репо, ни с packaged-дефолтом.** Отсюда обе беды сразу — target дрифтует ВПЕРЁД (planning-пути протухли относительно v2-монорепо) и ОТСТАЁТ назад (review не получил F19-фикс). Точечные правки ниже чинят конкретные случаи, но не механизм.
 
-**Рычаг (уже в бэклоге, не заводить дубль).** `upgrade-flows` — умный ре-синк посеянных `.worc/flows/` к packaged (обновлять неотредактированные built-in-файлы, репортить дрифт на отредактированных, не трогать кастомные флоу) — запланирован в [follow_ups.md](follow_ups.md) (строка `2026-06-23 upgrade-flows`). Сегодня единственный путь обновления — `install --reconfigure`, который бэкапит и перезатирает **все** packaged-именованные файлы, теряя операторские правки.
+**Рычаг (уже в бэклоге, не заводить дубль).** `upgrade-flows` — умный ре-синк посеянных `.worc/flows/` к packaged (обновлять неотредактированные built-in-файлы, репортить дрифт на отредактированных, не трогать кастомные флоу) — запланирован в [follow_ups.md](../../follow_ups.md) (строка `2026-06-23 upgrade-flows`). Сегодня единственный путь обновления — `install --reconfigure`, который бэкапит и перезатирает **все** packaged-именованные файлы, теряя операторские правки.
 
 **Рекомендация.** Правки этого плана выполнить точечно сейчас, но два из них (F28-re-sync, F31-block) — это ровно то, что должен был бы сделать `upgrade-flows`; пометить их как **acceptance-кейсы для `upgrade-flows`** (когда его будут строить, эти два должны воспроизводиться автоматически: «packaged ушёл вперёд → предложить обновить неотредактированный блок»). Дополнительно — самое дешёвое усиление, не дожидаясь `upgrade-flows`: **lightweight preflight-проверка актуальности кастом-промптов**, которая грепает project-пути, упомянутые в `.worc/flows/*.md`, и предупреждает о несуществующих (ловит F34-класс). Это отдельный кандидат — вынести в follow_ups, не раздувать данный план.
 
@@ -36,7 +49,7 @@
 
 ### T1 · F28/F24-prompt (MEDIUM) — review.md «## Output» отстал от packaged F19-фикса
 
-**Цель.** Убрать расхождение текста с контрактом evaluator'а: `output_schema=_FINDINGS_SCHEMA`, fail-**closed** при отсутствии `{"findings": …}` ([evaluator.py:134-142](../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L134)). Инструкция «сказать одной строкой прозой» формально ведёт к `manual`; claude-фоллбэк не попался только потому, что схема принудительна.
+**Цель.** Убрать расхождение текста с контрактом evaluator'а: `output_schema=_FINDINGS_SCHEMA`, fail-**closed** при отсутствии `{"findings": …}` ([evaluator.py:134-142](../../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L134)). Инструкция «сказать одной строкой прозой» формально ведёт к `manual`; claude-фоллбэк не попался только потому, что схема принудительна.
 
 **Файл-рычаг.** target [.worc/flows/implementation/review.md:11](/Users/a1234/Documents/GitHub/wastech-mdlint/.worc/flows/implementation/review.md).
 
@@ -78,7 +91,7 @@
 
 **Тест.** См. код A3 (интеграция на инкрементальный дифф). Промпт-часть — кампанийная: нет рецидива ложного scope-drift / «doc не обновлён».
 
-**Связь с кодом.** Корневой рычаг — **A3** (F32): `write_current_diff` должен давать инкрементальный дифф задачи ([git_manager.py:1173](../../src/wastech_orchestrator/git_manager.py#L1173)). Промпт-оговорка — belt-and-suspenders: полезна и после код-фикса (branch-mode всё равно может дать кумулятив).
+**Связь с кодом.** Корневой рычаг — **A3** (F32): `write_current_diff` должен давать инкрементальный дифф задачи ([git_manager.py:1173](../../../../src/wastech_orchestrator/git_manager.py#L1173)). Промпт-оговорка — belt-and-suspenders: полезна и после код-фикса (branch-mode всё равно может дать кумулятив).
 
 ### T3 · F33 (LOW-MEDIUM) — «sort every output array» без исключения для упорядоченных последовательностей
 
@@ -183,9 +196,9 @@ Reuse the existing core primitives rather than rewriting them — look under `pa
 
 ### T6 · F31 (LOW-MEDIUM) — мёртвый `{memory_path}`-блок в review.md — см. решение в коде
 
-**Цель.** Устранить мёртвый блок `{?memory_path}…{/memory_path}` (target стр. 48 **и** packaged стр. 3): evaluator-раннер не прокидывает `memory_path` ([evaluator.py:289-300](../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L289)), в отличие от agent-раннера ([agent.py:534](../../src/wastech_orchestrator/core/flow/nodes/agent.py#L534)) — блок всегда схлопывается в пусто, а reviewer-preference-ранжирование `packet.py` (`_REVIEWER_PREF_NODES={review,fixing}`) инертно.
+**Цель.** Устранить мёртвый блок `{?memory_path}…{/memory_path}` (target стр. 48 **и** packaged стр. 3): evaluator-раннер не прокидывает `memory_path` ([evaluator.py:289-300](../../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L289)), в отличие от agent-раннера ([agent.py:534](../../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L534)) — блок всегда схлопывается в пусто, а reviewer-preference-ранжирование `packet.py` (`_REVIEWER_PREF_NODES={review,fixing}`) инертно.
 
-**Файлы-рычаги.** код [evaluator.py:289](../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L289) (первично); промпт — target review.md:48 **и** packaged review.md:3.
+**Файлы-рычаги.** код [evaluator.py:289](../../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L289) (первично); промпт — target review.md:48 **и** packaged review.md:3.
 
 **Решение — двухвариантное, зависит от код-плана A4:**
 
@@ -208,7 +221,7 @@ Reuse the existing core primitives rather than rewriting them — look under `pa
 
 **Цель.** Промпт-паллиатив к F29: финализирующий turn (по `summary.md`) эмитит `memory_delta` с `evidence`, и супервайзер естественно помечает `type:"file"` (32/36 указателей) и `"commit"` (1). Детерминированный `assign_trust` таких токенов не знает → 18/21 репо-обоснованных урока навсегда деградируют до `agent-inferred` и застревают в карантине. Задать в промпте словарь допустимых типов, чтобы модель писала только распознаваемые токены.
 
-**Файл-рычаг.** [packaged/flows/implementation/summary.md](../../src/wastech_orchestrator/packaged/flows/implementation/summary.md) (**идентичен** target — дефект дефолта). Кодовые рычаги — [memory/lifecycle.py:24](../../src/wastech_orchestrator/memory/lifecycle.py#L24) (`assign_trust`, классы `_REPO`/`_ARTIFACT`) и/или enum-констрейнт `evidence.type` в [memory/delta.py:119](../../src/wastech_orchestrator/memory/delta.py#L119).
+**Файл-рычаг.** [packaged/flows/implementation/summary.md](../../../../src/wastech_orchestrator/packaged/flows/implementation/summary.md) (**идентичен** target — дефект дефолта). Кодовые рычаги — [memory/lifecycle.py:24](../../../../src/wastech_orchestrator/memory/lifecycle.py#L24) (`assign_trust`, классы `_REPO`/`_ARTIFACT`) и/или enum-констрейнт `evidence.type` в [memory/delta.py:119](../../../../src/wastech_orchestrator/memory/delta.py#L119).
 
 **Стало (добавить к абзацу про memory/lessons в summary.md, стр. 5):**
 
@@ -220,7 +233,7 @@ For each memory `evidence` pointer set `type` to one of the recognized tokens: `
 
 **Тест.** См. код B1 (юнит `assign_trust`: `{"type":"file"}`/`{"type":"commit"}` → durable-класс). Промпт-часть: после N задач `evidence.type` в дельтах — только из словаря; `long_term/` накапливает уроки.
 
-**Связь с кодом.** **B1** (F29) — первичен. Также B2 (F30, рекуррентность по `subject`) — второй «замок» на пустой `long_term/`, чисто кодовый ([service.py:562](../../src/wastech_orchestrator/memory/service.py#L562)), промпт-компонента не имеет (стабильный canonical subject хрупок).
+**Связь с кодом.** **B1** (F29) — первичен. Также B2 (F30, рекуррентность по `subject`) — второй «замок» на пустой `long_term/`, чисто кодовый ([service.py:562](../../../../src/wastech_orchestrator/memory/service.py#L562)), промпт-компонента не имеет (стабильный canonical subject хрупок).
 
 ### P2 · packaged-эхо T2 и T6 (при выборе «удалить»)
 
@@ -256,7 +269,7 @@ For each memory `evidence` pointer set `type` to one of the recognized tokens: `
 6. **P1 (F29-prompt)** — packaged+target; вторичен к код-B1 (код первичен).
 7. **T6 (F31)** — определяется код-A4; выполнять после A4 и B1/B2.
 
-**Системно (не блокирует точечные правки):** пометить T1 и T6 как acceptance-кейсы будущего `upgrade-flows` (Секция 0); завести отдельным кандидатом в [follow_ups.md](follow_ups.md) lightweight preflight-проверку существования project-путей, упомянутых в `.worc/flows/*.md` (ловит F34-класс на будущее).
+**Системно (не блокирует точечные правки):** пометить T1 и T6 как acceptance-кейсы будущего `upgrade-flows` (Секция 0); завести отдельным кандидатом в [follow_ups.md](../../follow_ups.md) lightweight preflight-проверку существования project-путей, упомянутых в `.worc/flows/*.md` (ловит F34-класс на будущее).
 
 ## Явный позитив (не трогать)
 

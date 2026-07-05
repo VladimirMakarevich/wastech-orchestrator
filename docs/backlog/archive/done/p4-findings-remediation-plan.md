@@ -1,6 +1,6 @@
 # P4 — план исправления открытых находок (F24–F37)
 
-План устранения всех **OPEN**-находок из [TEST-FINDINGS.md](../../TEST-FINDINGS.md), выявленных в свежих проходах 6, 7, 8 и cross-run-синтезе (проход 14). Закрытые находки (F19, F20, F22 — RESOLVED; F23 — RESOLVED-BY-TASK; F21 — RESOLVED с остаточным live-follow-up) в план не входят; F21-follow-up вынесен в аппендикс.
+План устранения всех **OPEN**-находок из [TEST-FINDINGS.md](../../../../TEST-FINDINGS.md), выявленных в свежих проходах 6, 7, 8 и cross-run-синтезе (проход 14). Закрытые находки (F19, F20, F22 — RESOLVED; F23 — RESOLVED-BY-TASK; F21 — RESOLVED с остаточным live-follow-up) в план не входят; F21-follow-up вынесен в аппендикс.
 
 Формат пункта: **Цель · Рычаг (file:line) · Шаги · Тест · Зависимость/порядок**. Порядок секций = рекомендованная последовательность выполнения. Приоритеты определяются связкой «серьёзность + разблокировка других находок + риск».
 
@@ -22,11 +22,11 @@
 
 **Цель.** Убрать 100%-детерминированный краш codex на любом evaluator-узле (review/verifier/critic/testing_quality) и вернуть в строй кросс-провайдерное ревью.
 
-**Рычаг.** [evaluator.py:57-78](../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L57) (`_FINDINGS_SCHEMA`).
+**Рычаг.** [evaluator.py:57-78](../../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L57) (`_FINDINGS_SCHEMA`).
 
 **Шаги.**
 
-1. Проставить `"additionalProperties": false` на **обоих** object-уровнях `_FINDINGS_SCHEMA` — верхний object и вложенный `items`-object — по образцу уже соблюдённого паттерна в [hitl.py:35](../../src/wastech_orchestrator/core/hitl.py#L35).
+1. Проставить `"additionalProperties": false` на **обоих** object-уровнях `_FINDINGS_SCHEMA` — верхний object и вложенный `items`-object — по образцу уже соблюдённого паттерна в [hitl.py:35](../../../../src/wastech_orchestrator/core/hitl.py#L35).
 2. После правки убедиться, что итоговый JSON, реально пишущийся в `stages/<node>/run-*/1-codex/output-schema.json`, содержит `additionalProperties:false` на каждом уровне.
 
 **Тест.** Регрессионный юнит-тест, который **рекурсивно** обходит каждую константу-схему в кодовой базе (`_FINDINGS_SCHEMA`, `_HUMAN_INPUT_SCHEMA`, `_SUBTASK_SCHEMA` и результат `typed_output_schema(...)`) и падает, если на любом `type:object`-узле отсутствует `additionalProperties:false`. Smoke-тест ADR F19 использовал упрощённую схему-пример и не поймал этот регресс — новый тест должен валидировать буквально боевые константы.
@@ -39,7 +39,7 @@
 
 **Цель.** Подтвердить, что после A1 codex-ревью реально бежит (gpt-5.4), а не молча уходит в claude-fallback того же вендора, что имплементер; устранить рассинхрон «декларация ↔ факт».
 
-**Рычаг.** Первично — A1 ([evaluator.py:57-78](../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L57)); флоу-пин `review` на codex в target [.worc/flows/implementation.yaml:93](/Users/a1234/Documents/GitHub/wastech-mdlint/.worc/flows/implementation.yaml).
+**Рычаг.** Первично — A1 ([evaluator.py:57-78](../../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L57)); флоу-пин `review` на codex в target [.worc/flows/implementation.yaml:93](/Users/a1234/Documents/GitHub/wastech-mdlint/.worc/flows/implementation.yaml).
 
 **Шаги.**
 
@@ -57,7 +57,7 @@
 
 **Цель.** Давать ревью (и документации) инкрементальный дифф именно текущей задачи, а не `<base>..worktree`; убрать ложные scope-находки, повторяющийся ложный «phase-doc не обновлён» и нерезолвимые line-refs.
 
-**Рычаг.** Код — [git_manager.py:1173](../../src/wastech_orchestrator/git_manager.py#L1173) (`write_current_diff`); промпт — target [.worc/flows/implementation/review.md](/Users/a1234/Documents/GitHub/wastech-mdlint/.worc/flows/implementation/review.md).
+**Рычаг.** Код — [git_manager.py:1173](../../../../src/wastech_orchestrator/git_manager.py#L1173) (`write_current_diff`); промпт — target [.worc/flows/implementation/review.md](/Users/a1234/Documents/GitHub/wastech-mdlint/.worc/flows/implementation/review.md).
 
 **Шаги.**
 
@@ -74,7 +74,7 @@
 
 **Цель.** Прокинуть пакет памяти в evaluator-раннер, чтобы reviewer-preference-ранжирование `packet.py` (`_REVIEWER_PREF_NODES={review,fixing}`) работало и блок `{?memory_path}` в `review.md` не был мёртвым.
 
-**Рычаг.** [evaluator.py:289-300](../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L289) (`_prompt_variables`); образец — agent-раннер [nodes/agent.py:534,596-600](../../src/wastech_orchestrator/core/flow/nodes/agent.py#L534); [memory/packet.py:41](../../src/wastech_orchestrator/memory/packet.py#L41).
+**Рычаг.** [evaluator.py:289-300](../../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L289) (`_prompt_variables`); образец — agent-раннер [nodes/agent.py:534,596-600](../../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L534); [memory/packet.py:41](../../../../src/wastech_orchestrator/memory/packet.py#L41).
 
 **Шаги.**
 
@@ -93,7 +93,7 @@
 
 **Цель.** Устранить главную причину пустоты `long_term/`: 18/21 репо-обоснованных уроков навсегда деградируют до `agent-inferred` только из-за нераспознанных токенов `file`/`commit`.
 
-**Рычаг.** [memory/lifecycle.py:24-54](../../src/wastech_orchestrator/memory/lifecycle.py#L24) (`assign_trust`, классы `_REPO`/`_ARTIFACT`); [memory/delta.py:119](../../src/wastech_orchestrator/memory/delta.py#L119) (`DELTA_OUTPUT_SCHEMA`, свободная строка `evidence.type`); роль-промпт target `summary.md`.
+**Рычаг.** [memory/lifecycle.py:24-54](../../../../src/wastech_orchestrator/memory/lifecycle.py#L24) (`assign_trust`, классы `_REPO`/`_ARTIFACT`); [memory/delta.py:119](../../../../src/wastech_orchestrator/memory/delta.py#L119) (`DELTA_OUTPUT_SCHEMA`, свободная строка `evidence.type`); роль-промпт target `summary.md`.
 
 **Шаги.**
 
@@ -110,7 +110,7 @@
 
 **Цель.** Дедуплицировать семантически один урок при дрейфе формулировки `subject`, чтобы реальный 3× повтор (prettier-baseline-drift в p4-01/06/07) накапливал `recurrence` и промоутился.
 
-**Рычаг.** [memory/service.py:562](../../src/wastech_orchestrator/memory/service.py#L562) (`_derive_id`); [memory/lifecycle.py:79](../../src/wastech_orchestrator/memory/lifecycle.py#L79) (`normalize_subject` = только lower+trim); `should_promote` [lifecycle.py:84-107](../../src/wastech_orchestrator/memory/lifecycle.py#L84) корректен — до него не доходит накопленный повтор.
+**Рычаг.** [memory/service.py:562](../../../../src/wastech_orchestrator/memory/service.py#L562) (`_derive_id`); [memory/lifecycle.py:79](../../../../src/wastech_orchestrator/memory/lifecycle.py#L79) (`normalize_subject` = только lower+trim); `should_promote` [lifecycle.py:84-107](../../../../src/wastech_orchestrator/memory/lifecycle.py#L84) корректен — до него не доходит накопленный повтор.
 
 **Шаги.**
 
@@ -127,7 +127,7 @@
 
 **Цель.** Хранить в эпизодах `.worc`-относительный POSIX-путь (как декларирует `records.py`), устранить недетерминизм редакции host-путей (в 6 из 8 записан как есть, в 2 — `[REDACTED]`).
 
-**Рычаг.** [core/orchestrator.py:2117](../../src/wastech_orchestrator/core/orchestrator.py#L2117) (построение эпизода с абсолютным путём); харвест redaction-литералов [orchestrator.py:2047](../../src/wastech_orchestrator/core/orchestrator.py#L2047) (`_memory_extra_secrets`).
+**Рычаг.** [core/orchestrator.py:2117](../../../../src/wastech_orchestrator/core/orchestrator.py#L2117) (построение эпизода с абсолютным путём); харвест redaction-литералов [orchestrator.py:2047](../../../../src/wastech_orchestrator/core/orchestrator.py#L2047) (`_memory_extra_secrets`).
 
 **Шаги.**
 
@@ -146,7 +146,7 @@
 
 **Цель.** Закрыть пробой изоляции: спаунящийся `claude` пишет durable-файлы в `~/.claude/` оператора (вне рабочего дерева, `current.diff`, коммита и аудита оркестратора), утекает нередактированный `originSessionId`, и рядом с управляемой `.worc/memory/` работает вторая, неуправляемая память со снятыми poisoning-защитами.
 
-**Рычаг.** [providers/claude.py](../../src/wastech_orchestrator/providers/claude.py) (конфигурация спауна; `--allowedTools Read,Glob,Grep,Edit,Write,Bash`, `--disallowedTools` запрещает только `.env`/`secrets/**` и git/gh); `CLAUDE_CONFIG_DIR` в `security.allowed_environment` прокидывается в домашний конфиг.
+**Рычаг.** [providers/claude.py](../../../../src/wastech_orchestrator/providers/claude.py) (конфигурация спауна; `--allowedTools Read,Glob,Grep,Edit,Write,Bash`, `--disallowedTools` запрещает только `.env`/`secrets/**` и git/gh); `CLAUDE_CONFIG_DIR` в `security.allowed_environment` прокидывается в домашний конфиг.
 
 **Шаги.**
 
@@ -166,7 +166,7 @@
 
 **Цель.** Не оставлять зависимые pending-задачи в вечном `WAITING`/`refuse` без внятной диагностики, когда зависимость заброшена и перезапущена под новым task id.
 
-**Рычаг.** [core/orchestrator.py:722-743](../../src/wastech_orchestrator/core/orchestrator.py#L722) (`_resolve_dependency` резолвит буквально по строке id); опц. `worc list`/`worc status`.
+**Рычаг.** [core/orchestrator.py:722-743](../../../../src/wastech_orchestrator/core/orchestrator.py#L722) (`_resolve_dependency` резолвит буквально по строке id); опц. `worc list`/`worc status`.
 
 **Шаги.** Выбрать один-два из вариантов (не автосвязывать — слишком неявно):
 
@@ -184,7 +184,7 @@
 
 **Цель.** Разрешить конфликт двух механизмов выражения порядка: merge-gate (раздельные PR) vs физическое продолжение одной неслитой ветки. Сейчас интра-chain `depends_on` виснет навсегда, т.к. общий PR по определению открыт до конца цепочки.
 
-**Рычаг.** [core/orchestrator.py:745-763](../../src/wastech_orchestrator/core/orchestrator.py#L745) (`_dependency_merged`); ADR `archive/done/branch-mode.md`.
+**Рычаг.** [core/orchestrator.py:745-763](../../../../src/wastech_orchestrator/core/orchestrator.py#L745) (`_dependency_merged`); ADR `archive/done/branch-mode.md`.
 
 **Шаги.** Осознанно не чинили в кампании (workaround: убрали `depends_on`-на-соседей из p4-03..p4-08). Варианты:
 
@@ -201,7 +201,7 @@
 
 **Цель.** Чтобы заголовок/описание PR не вводили ревьюера в заблуждение об объёме (PR #9 весь прогон p4-02..p4-08 имел title/body от p4-02).
 
-**Рычаг.** [git_manager.py:992-1015](../../src/wastech_orchestrator/git_manager.py#L992) (`create_pr`, путь `reused is not None` возвращает URL без `gh pr edit`); [git_manager.py:1012-1015](../../src/wastech_orchestrator/git_manager.py#L1012).
+**Рычаг.** [git_manager.py:992-1015](../../../../src/wastech_orchestrator/git_manager.py#L992) (`create_pr`, путь `reused is not None` возвращает URL без `gh pr edit`); [git_manager.py:1012-1015](../../../../src/wastech_orchestrator/git_manager.py#L1012).
 
 **Шаги.** Рекомендация из обсуждения 2026-07-05 — **вариант 2 (append-секция, keyed по task id)**: дешёвый, идемпотентный, не рискует затереть ручные правки оператора.
 
@@ -284,4 +284,4 @@
 
 ### F21-follow-up (RESOLVED, остаток) — live-подтверждение allowlist-гейта planning под `default`-режимом
 
-F21 закрыта: `providers/claude.py` переведён `read-only → ("default", ("Read","Glob","Grep"))`, юнит-тест подтверждает отсутствие Edit/Write в `--allowedTools`. Остаётся живая проверка, что реальный `claude`-процесс под этим режимом действительно отказывает в записи (см. [follow_ups.md](follow_ups.md) 2026-07-04). Не блокирует статус находки; выполнить при ближайшем живом прогоне planning.
+F21 закрыта: `providers/claude.py` переведён `read-only → ("default", ("Read","Glob","Grep"))`, юнит-тест подтверждает отсутствие Edit/Write в `--allowedTools`. Остаётся живая проверка, что реальный `claude`-процесс под этим режимом действительно отказывает в записи (см. [follow_ups.md](../../follow_ups.md) 2026-07-04). Не блокирует статус находки; выполнить при ближайшем живом прогоне planning.
