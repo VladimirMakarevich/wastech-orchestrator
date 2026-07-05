@@ -231,7 +231,7 @@ class MemoryService:
         r: ApplyResult,
     ) -> ApplyResult:
         trust = assign_trust(evidence)
-        memory_id = _derive_id(kind, subject)
+        memory_id = _derive_id(kind, subject, scope)
         pending = self._read_pending()
         prior = _find(pending, "memory_id", memory_id)
         seen = _distinct([*_as_str_list(prior.get("seen_task_ids") if prior else None), task_id])
@@ -266,9 +266,10 @@ class MemoryService:
             )
             return _bump(r, quarantined=1)
 
-        # Merge into an existing active record with the same kind + normalized subject (design §5).
+        # Merge into an existing active record with the same stable id (kind + scope, F30) — the
+        # same key that groups recurrence in pending, so subject drift can't spawn a duplicate row.
         active = self.read_long_term(kind)
-        match_at = _index_by_subject(active, normalize_subject(subject))
+        match_at = _index_by(active, "memory_id", memory_id)
         if match_at is not None:
             rows = list(active)
             rows[match_at] = _merge_long_term(active[match_at], statement, evidence, now, task_id)
@@ -559,9 +560,19 @@ class MemoryService:
 # --- module-level pure helpers ------------------------------------------------
 
 
-def _derive_id(kind: LongTermKind, subject: str) -> str:
-    """Deterministic content-derived long-term id; stable across recurrences of a subject."""
-    digest = content_hash(f"{kind.value}:{normalize_subject(subject)}".encode())[:12]
+def _scope_key(paths: Sequence[str]) -> str:
+    """An order-independent structural key from a lesson's scope paths (POSIX slashes, deduped,
+    sorted). Empty when the lesson names no paths."""
+    return "\n".join(sorted({p.strip().replace("\\", "/") for p in paths if p.strip()}))
+
+
+def _derive_id(kind: LongTermKind, subject: str, scope: Scope) -> str:
+    """Deterministic content-derived long-term id, stable across recurrences of the SAME lesson even
+    when the LLM-authored ``subject`` drifts in wording (F30). Keys on ``kind`` + the normalized
+    ``scope.paths`` (the structural anchor a real repeat shares) when the lesson names paths; falls
+    back to the normalized ``subject`` for a path-less lesson (the pre-F30 behavior)."""
+    basis = _scope_key(scope.paths) or normalize_subject(subject)
+    digest = content_hash(f"{kind.value}:{basis}".encode())[:12]
     return f"ltm_{digest}"
 
 
@@ -600,14 +611,6 @@ def _find(rows: Sequence[Mapping[str, Any]], key: str, value: str) -> dict[str, 
 def _index_by(rows: Sequence[Mapping[str, Any]], key: str, value: str) -> int | None:
     for index, row in enumerate(rows):
         if row.get(key) == value:
-            return index
-    return None
-
-
-def _index_by_subject(rows: Sequence[Mapping[str, Any]], normalized: str) -> int | None:
-    for index, row in enumerate(rows):
-        subject = row.get("subject")
-        if isinstance(subject, str) and normalize_subject(subject) == normalized:
             return index
     return None
 
