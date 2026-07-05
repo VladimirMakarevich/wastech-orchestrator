@@ -729,19 +729,47 @@ class Orchestrator:
             if row.status is Status.DONE:
                 return self._dependency_merged(dep)
             if row.status in (Status.FAILED, Status.MANUAL_ACTION_REQUIRED):
-                return Eligibility.WAITING, f"dependency '{dep}' is {row.status.value} (unmerged)"
+                hint = self._replacement_hint(dep, row.title)
+                detail = f"dependency '{dep}' is {row.status.value} (unmerged){hint}"
+                return Eligibility.WAITING, detail
             return Eligibility.WAITING, f"dependency '{dep}' is in flight ({row.status.value})"
         if dep in pending:
             return Eligibility.WAITING, f"dependency '{dep}' is pending (not yet run)"
         if self._ledger.has_task_id(dep):
+            records = self._ledger.records()
             done = any(
                 rec.get("id") == dep and rec.get("final_status") == Status.DONE.value
-                for rec in self._ledger.records()
+                for rec in records
             )
             if done:
                 return self._dependency_merged(dep)
-            return Eligibility.WAITING, f"dependency '{dep}' terminated unmerged"
+            dep_title = next((rec.get("title") for rec in records if rec.get("id") == dep), None)
+            hint = self._replacement_hint(dep, dep_title, records=records)
+            return Eligibility.WAITING, f"dependency '{dep}' terminated unmerged{hint}"
         return Eligibility.BROKEN, f"depends on unknown task '{dep}'"
+
+    def _replacement_hint(
+        self, dep: str, dep_title: str | None, *, records: Sequence[Mapping[str, Any]] | None = None
+    ) -> str:
+        """A 'did you mean X?' hint when an abandoned dependency was retried under a NEW id (F25).
+
+        abandon+retry-under-a-new-id leaves every dependent pointing at the dead id forever with no
+        clue that a done replacement exists. Scan the ledger for a later ``done`` record sharing the
+        dead dep's title and name it — advisory only (never auto-relink; too implicit). Returns an
+        empty string when there is no confident same-title match."""
+        if not dep_title:
+            return ""
+        norm = " ".join(dep_title.lower().split())
+        rows = records if records is not None else self._ledger.records()
+        for rec in rows:
+            other_id = rec.get("id")
+            if (
+                other_id != dep
+                and rec.get("final_status") == Status.DONE.value
+                and " ".join(str(rec.get("title", "")).lower().split()) == norm
+            ):
+                return f" — '{dep}' looks abandoned; did you mean '{other_id}' (same title, done)?"
+        return ""
 
     def _dependency_merged(self, dep: str) -> tuple[Eligibility, str]:
         """A terminal-``DONE`` dependency: satisfied iff its PR is merged (or local-commit mode)."""

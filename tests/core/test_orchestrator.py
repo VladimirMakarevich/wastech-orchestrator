@@ -26,7 +26,7 @@ from wastech_orchestrator.git_manager import (
     GitManager,
     GitResult,
 )
-from wastech_orchestrator.ledger import Ledger
+from wastech_orchestrator.ledger import Ledger, LedgerRecord
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult, Notifier
 from wastech_orchestrator.providers.artifacts import create_attempt_dir, task_artifact_dir
 from wastech_orchestrator.providers.base import (
@@ -3126,6 +3126,47 @@ def test_dependency_eligibility_dep_failed_waits_forever(
     assert (
         orch.dependency_eligibility("task-001", ("dep",), pending={}).state is Eligibility.WAITING
     )
+
+
+def test_dependency_eligibility_abandoned_dep_hints_replacement(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # F25: abandon+retry-under-a-new-id leaves the dependent WAITING forever with no clue. The
+    # detail must point at the done same-title replacement so the operator can fix depends_on.
+    orch, store, ledger, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    store.insert_task(
+        TaskRow(
+            task_id="dep-old",
+            title="Context graph model",
+            status=Status.MANUAL_ACTION_REQUIRED,
+        )
+    )
+    ledger.append(
+        LedgerRecord(
+            id="dep-new",
+            title="Context graph model",  # same title, retried under a new id
+            final_status=Status.DONE.value,
+            finished_at="2026-07-04T00:00:00Z",
+        )
+    )
+    verdict = orch.dependency_eligibility("task-001", ("dep-old",), pending={})
+    assert verdict.state is Eligibility.WAITING
+    assert "dep-new" in verdict.detail and "abandoned" in verdict.detail
+
+
+def test_dependency_eligibility_failed_dep_without_replacement_has_no_hint(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # No same-title done record → the message stays the plain one (the hint only fires on a match).
+    orch, store, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    store.insert_task(TaskRow(task_id="dep", title="Solo task", status=Status.FAILED))
+    verdict = orch.dependency_eligibility("task-001", ("dep",), pending={})
+    assert verdict.state is Eligibility.WAITING
+    assert "did you mean" not in verdict.detail
 
 
 def test_dependency_eligibility_local_commit_done_is_eligible(
