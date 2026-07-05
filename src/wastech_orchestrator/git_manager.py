@@ -191,6 +191,12 @@ class _ActiveTask:
     slug: str
     branch: str
     partial_counter: int = 0
+    # F32: the commit the working branch sat at when THIS task started. Set only for
+    # ``existing``/``current`` (chain-continuation) modes, where the branch already carries prior
+    # tasks' commits; ``None`` for ``new`` (the branch is cut fresh from ``base_branch``, so the
+    # config base is exactly the task's start). Diffs use it so review/docs see only this task's
+    # change, not the whole unmerged chain.
+    base_ref: str | None = None
 
 
 class GitManager:
@@ -381,6 +387,7 @@ class GitManager:
             self._git_checked("checkout", "-b", branch_ref, f"origin/{branch_ref}")
         else:  # defensive: the pre-branch preflight already verified existence
             raise GitCommandError(f"branch_ref {branch_ref!r} does not exist locally or on origin")
+        self._active.base_ref = self._head_sha()  # F32: chain start = this branch's current tip
         return branch_ref
 
     def _prepare_current(self, task_id: str, slug: str) -> str:
@@ -390,7 +397,21 @@ class GitManager:
         if branch is None:  # defensive: the preflight rejects a detached HEAD for `current`
             raise GitCommandError("branch_mode 'current' requires a branch (HEAD is detached)")
         self._active = _ActiveTask(task_id=task_id, slug=slug, branch=branch)
+        self._active.base_ref = self._head_sha()  # F32: chain start = this branch's current tip
         return branch
+
+    def _head_sha(self) -> str | None:
+        """The current ``HEAD`` commit SHA, or ``None`` when it cannot be resolved (empty repo)."""
+        return self._git("rev-parse", "HEAD").stdout.strip() or None
+
+    def _diff_base(self) -> str:
+        """The ref the task's change is diffed against: the per-task chain start (F32) when set,
+        else the config ``base_branch``. Equal to ``base_branch`` for ``new`` mode, so a
+        non-chained run's diffs are unchanged; for ``existing``/``current`` it is the branch tip at
+        task start, so review/docs/PR body see only this task's change, not the whole chain."""
+        if self._active is not None and self._active.base_ref:
+            return self._active.base_ref
+        return self._config.repo.base_branch
 
     def current_branch(self) -> str | None:
         """The working tree's symbolic branch name, or ``None`` when HEAD is detached."""
@@ -1154,18 +1175,20 @@ class GitManager:
     # --- diffs ----------------------------------------------------------------------------
 
     def write_current_diff(self, task_id: str) -> str:
-        """Write ``logs/<task-id>/current.diff`` (the task change vs ``base_branch``) and return it.
+        """Write ``logs/<task-id>/current.diff`` (this task's change vs its base) and return it.
 
-        Diffs ``base_branch`` against the **working tree** (``git diff <base>``, not ``git diff
+        Diffs :meth:`_diff_base` against the **working tree** (``git diff <base>``, not ``git diff
         HEAD``), so it captures the task's net change whether or not it is committed yet — the same
         base-vs-worktree coverage as :meth:`diff_stat`. ``git diff HEAD`` only showed uncommitted
         working-tree edits, so in a decomposed run (where each subtask is committed) it collapsed to
         just the trailing uncommitted hunk and badly understated the change in ``current.diff`` /
-        ``{diff_path}`` / the PR body / the failure report. The task branch is cut from
-        ``base_branch`` and ``base_branch`` does not advance during a task, so in a non-decomposed
-        run (nothing committed until publish) this equals ``git diff HEAD``. The dangerous-diff
-        guard classifies from :meth:`changed_code_entries` (HEAD-relative), not this artifact, so
-        widening the base here does not change what the guard gates.
+        ``{diff_path}`` / the PR body / the failure report. For ``new`` mode the base is
+        ``base_branch`` (the branch is cut from it and it does not advance), so a non-decomposed run
+        equals ``git diff HEAD``; for a ``existing``/``current`` chain branch the base is the branch
+        tip at task start (F32), so review/docs see only this task's change, not the whole unmerged
+        chain (which previously showed every prior task — e.g. 35 files for ~5 changed). The
+        dangerous-diff guard classifies from :meth:`changed_code_entries` (HEAD-relative), not this
+        artifact, so the base here does not change what the guard gates.
 
         Two completeness fixes (F20): plain ``git diff`` never reports untracked files, so a brand
         new file was silently missing from the artifact — bracket the diff with a transient
@@ -1183,7 +1206,7 @@ class GitManager:
         if untracked_paths:
             self._git("add", "--intent-to-add", "--", *untracked_paths)
         try:
-            diff = self._git("diff", "--text", self._config.repo.base_branch).stdout
+            diff = self._git("diff", "--text", self._diff_base()).stdout
         finally:
             if untracked_paths:
                 self._git("reset", "--", *untracked_paths)
@@ -1198,8 +1221,11 @@ class GitManager:
         return read_denied_secrets(self._clone, self._config.security.denied_read_paths)
 
     def cumulative_committed_diff(self) -> str:
-        """The diff of all task-branch commits vs ``base_branch`` (decomposed context)."""
-        base = self._config.repo.base_branch
+        """The diff of this task's committed work vs its base (``base...HEAD``, decomposed context).
+
+        The base is the per-task chain start when set (F32), else ``base_branch`` — so on a shared
+        chain branch this is only the current task's commits, not the whole unmerged chain."""
+        base = self._diff_base()
         result = self._git("diff", f"{base}...HEAD")
         return result.stdout
 
@@ -1215,8 +1241,7 @@ class GitManager:
         redacted ``current.diff``). ``--stat`` carries only file paths and counts (never patch
         content), so unlike :meth:`cumulative_committed_diff` there is nothing secret to redact.
         """
-        base = self._config.repo.base_branch
-        return self._git("diff", "--stat", base).stdout
+        return self._git("diff", "--stat", self._diff_base()).stdout
 
     # --- terminal cleanup ----------------------------------------------------------
 

@@ -965,6 +965,36 @@ def test_prepare_branch_existing_creates_local_tracking_from_remote(
     assert (git_repo.clone / "r.txt").exists()  # the remote work is present
 
 
+def test_current_diff_on_chain_branch_excludes_prior_task(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # F32: on a shared chain branch (existing mode) the diff must show only THIS task's change, not
+    # the prior task's commits already on the branch — review saw the whole cumulative chain before.
+    git_run(["checkout", "-b", "feature/chain"], git_repo.clone)
+    (git_repo.clone / "prior_task.py").write_text("prior = 1\n", encoding="utf-8")
+    git_run(["add", "prior_task.py"], git_repo.clone)
+    git_run(["commit", "-m", "feat(p1): prior task"], git_repo.clone)
+    git_run(["checkout", "main"], git_repo.clone)
+
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch(
+        "task-002", "x", epoch=_EPOCH, mode=BranchMode.EXISTING, branch_ref="feature/chain"
+    )
+    (git_repo.clone / "this_task.py").write_text("this = 2\n", encoding="utf-8")
+    diff = Path(gm.write_current_diff("task-002")).read_text(encoding="utf-8")
+    assert "this_task.py" in diff  # this task's change is present
+    assert "prior_task.py" not in diff  # the prior chain task is NOT (base = branch tip at start)
+
+
+def test_current_diff_new_mode_unchanged_uses_base_branch(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # new mode leaves base_ref None -> diffs vs base_branch exactly as before (no chain semantics).
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    assert gm._diff_base() == "main"
+
+
 def test_prepare_branch_current_uses_head_without_switch_or_pull(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
 ) -> None:
