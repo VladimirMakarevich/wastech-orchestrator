@@ -85,7 +85,7 @@ Implement the task at {task_path} in the repository {repo_path}. Follow the plan
 ## Node kinds
 
 - **`agent`** — launches a coding-agent CLI (Codex or Claude Code) with the node's `role_file` as its prompt. Fields: `role_file` (required), `session_scope` (`fresh_disposable` | `editing_lineage` | `resume_own_lineage`), `permission_profile` (≤ the flow ceiling), optional `output_artifact`, `hitl`, `when`, `lineage_affinity`, and the per-node overrides below.
-- **`evaluator`** — a read-only judge that returns `accept` / `rework`. Fields: `role` (e.g. `review`), `role_file`, `blocking` (a failing verdict blocks vs is advisory), `max_rework_per_stage`. Evaluators are forced `read-only`.
+- **`evaluator`** — a read-only judge that returns `accept` / `rework`. Fields: `role` (e.g. `review`), `role_file`, `blocking` (a failing verdict blocks vs is advisory), `max_rework_per_stage`. Evaluators are forced `read-only`. An evaluator returns a structured **findings** verdict and is **fail-closed** — see [What a node returns](#what-a-node-returns-output-contracts-schemas-and-slots).
 - **`checks`** — runs deterministic repository commands, no agent. `checker: command_profile` runs the configured check command sets; other checkers exist (`citation`, `dependency_scan`). Outcomes: `pass` / `fail`.
 - **`publish`** — the terminal. `policy: pull_request` / `documentation_pull_request` opens a PR; `policy: none` is a graph terminal that performs no Git action (the orchestrator still owns any real commit/push/PR).
 
@@ -104,6 +104,52 @@ A node's prompt is the content of its `role_file`. Role files render only an all
 ## Per-node overrides
 
 Every `agent`/`evaluator` node may pin its own `provider` (`codex` | `claude`), `model`, and `reasoning`; omit any and the node inherits the `config.yaml` provider defaults (`provider` ⇒ the global primary). A node may also set `network_access: true|false` to override the flow-wide network default for that node alone. Spend more reasoning where rework is decided (review), less on mechanical steps. See [configuration.md → Per-node overrides in flows](configuration.md#per-node-overrides-in-flows).
+
+## What a node returns (output contracts, schemas, and slots)
+
+Every `agent` and `evaluator` node returns a **typed structured result**, not free text — but you almost never write the shape yourself. The node's kind and role select a built-in output contract automatically:
+
+| Node | Built-in contract | The agent is required to return |
+| --- | --- | --- |
+| `agent`, plain author | none | its final message (no schema enforced) |
+| `agent` with `hitl:` declared | `human_input` | `content` + an optional question/approval object |
+| `agent` named by `decomposition.proposed_by` | `planning` | `content` + optional `human_input` + `decompose` + `subtasks` |
+| `evaluator` | findings | `{ findings: [ { severity, path, what, fix } ] }` |
+
+Two properties of these contracts change how you write the role prompts:
+
+- **The evaluator contract is fail-closed.** An empty `findings` array is a real clean pass, but a _missing or malformed_ one means the agent ignored the schema — the orchestrator refuses to guess and sends the task to `manual_action_required` instead of a silent `accept`. So an `evaluator` role prompt must actually produce the findings result; a prose-only "looks good to me" review will hard-stop the task.
+- **The core re-validates every typed result itself**, independently of the provider. A malformed `planning` / `human_input` / findings result fails the node rather than being trusted — you cannot loosen this from a flow.
+
+### Where a node's output goes
+
+A node's output is written to a file and passed to later nodes **as a path variable** — never inlined as text (the same rule as all [prompt variables](#role-files-prompts)). Two mechanisms:
+
+- **Named slots** — set `output_artifact: <slot>` on an agent node to land its `content` in a well-known file that downstream nodes read by variable:
+
+  | `output_artifact` | File | Downstream variable | Typical filler |
+  | --- | --- | --- | --- |
+  | `enriched_spec` | `task.enriched.md` | — (audit only) | a refinement node |
+  | `plan` | `plan.md` | `{plan_path}` | a planning node |
+  | `summary` | `summary.md` | `{summary_body_path}` | usually the supervisor layer, not a flow node |
+
+  The slot vocabulary is fixed to these three; a flow only chooses _which_ node fills each, and one node fills at most one slot.
+
+- **Generic channel** — every other agent node's output is written to `<node_id>.out.md` and exposed automatically as `{<node_id>_path}`, so a later node can consume an earlier node's output by naming that variable in its prompt.
+
+### Overriding a node's `output_schema` (the one real foot-gun)
+
+An `agent` node may set an inline `output_schema:` (a JSON Schema) to override the built-in contract when a custom node must return data of your own shape. One rule dominates:
+
+> **Every object in the schema — the top level and every nested object — must set `additionalProperties: false`.**
+
+Codex enforces `--output-schema` through OpenAI Structured Outputs, which rejects any non-strict schema with a hard **400**, failing the node on _every_ run (this exact mistake once broke the built-in review node). Claude tolerates a loose schema, but write it strict so the same flow runs on both providers. Also:
+
+- Keep the schema flat and fully typed. Deeply nested or loosely typed schemas make structured output fragile and slower to produce.
+- If your schema omits the `content` key, the named slots have nothing to persist — keep a string `content` field when the node also fills `plan` / `summary` / `enriched_spec`.
+- No extra flow or config is needed for Codex to hand the JSON back — the adapter reads it from the run's last-message file for you. Your only job is a strict schema.
+
+The **supervisor** summary/follow-ups and the **memory** delta are produced by the constant orchestrator layer _above_ the flow, not by nodes you author — you never define their schemas (you only toggle them via `supervisor.emit_follow_ups` and the `memory` config block).
 
 ## Registering and running the flow
 
@@ -146,6 +192,8 @@ wastech-orchestrator --config ./.worc/config.yaml preflight
 - **Network is off by default.** Declare `network_policy` for a flow-wide grant, or `network_access: true` on the single node that needs it. Codex `workspace-write` + network is rejected — split external fetches into a `read-only` node.
 - **One entry, all reachable.** Design the graph so exactly one node has no incoming edge and every node can reach a `publish` terminal.
 - **Prompt variables are paths only.** Never expect task bodies, diffs, or secrets in a prompt — only the allowlisted path/metadata variables are substituted.
+- **Strict `output_schema` or none at all.** If you override a node's `output_schema`, put `additionalProperties: false` on every object in it — Codex rejects a non-strict schema with a 400 and the node fails every run. Prefer the built-in contract unless you genuinely need a custom shape ([What a node returns](#what-a-node-returns-output-contracts-schemas-and-slots)).
+- **Evaluators must emit findings, not prose.** A `review`/`verifier`/`critic` role prompt has to return the structured findings result; a prose-only verdict is treated as "schema not honored" and fail-closes the task to manual review.
 - **Validate before you rely on it.** Run `preflight` after every flow edit; it fails closed with a one-line reason.
 
 ## See also

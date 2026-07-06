@@ -85,6 +85,31 @@ Implement the change.{?analyze_path} Follow the analysis at {analyze_path}.{/ana
 
 One node exposes exactly one output — to publish several results, split into several nodes. A node id may not collide with a reserved core-variable prefix (`task`, `plan`, `diff`, `checks`, `review`, `repo`, `skills`, `memory`, `stage`, `subtask*`); that is a fatal load error.
 
+## What a node returns (contracts, slots, and custom schemas)
+
+Every `agent` and `evaluator` node returns a **typed structured result**, not free text — and for the built-in node kinds you do not write the schema; it is selected automatically:
+
+- **plain `agent`** — no schema; the output is its final message (still exposed as `{<id>_path}` above).
+- **`agent` with `hitl:`** — must return `content` plus an optional question/approval object.
+- **`agent` named by `decomposition.proposed_by`** (the planning node) — `content` + optional `human_input` + `decompose` + `subtasks`.
+- **`evaluator`** — a findings verdict `{ findings: [ { severity, path, what, fix } ] }`, and it is **fail-closed**: a missing or malformed findings result routes the task to `manual_action_required` instead of a silent `accept`. So an evaluator `role_file` must actually emit the findings result — a prose-only "looks good" review hard-stops the task.
+
+The core re-validates every typed result itself, so a malformed result fails the node; you cannot loosen this from a flow.
+
+### Named output slots (`output_artifact`)
+
+Besides the generic `{<id>_path}` channel above, an agent node can fill one of three fixed slots with `output_artifact:`, landing its `content` in a well-known file that later nodes read by a stable variable:
+
+- `output_artifact: enriched_spec` → writes `task.enriched.md` (audit only; no downstream variable).
+- `output_artifact: plan` → writes `plan.md`, read downstream as `{plan_path}`.
+- `output_artifact: summary` → writes `summary.md` as `{summary_body_path}` (normally the supervisor layer fills this, not a flow node).
+
+The slot vocabulary is fixed to these three; a flow only chooses which node fills each, and one node fills at most one slot.
+
+### Overriding the schema (the one real foot-gun)
+
+An `agent` node may set an inline `output_schema:` to return data of your own shape. If you do, **every object in the schema — the top level and every nested object — must set `additionalProperties: false`.** Codex enforces `--output-schema` through OpenAI Structured Outputs, which rejects a non-strict schema with a hard **400** and fails the node on every run (this exact mistake once broke the built-in review node). Claude tolerates a loose schema, but write it strict so the same flow runs on both providers. Keep a string `content` field if the node also fills a slot, and prefer the built-in contract unless you genuinely need a custom shape.
+
 ## Flow-local supervisor prompts
 
 The supervisor is a constant read-only layer above the flow — it observes each step and writes the final summary (the PR body). A flow can reshape **its wording** (never the machine contract) with an optional `supervisor:` block:
@@ -115,5 +140,6 @@ supervisor:
 - Put every node `role_file` inside the flow's own `<task_type>/` folder; relative paths only (no `..`). `roles/supervisor.md` is the shared **global** supervisor default; to give this flow its own supervisor wording, use the `supervisor:` block (above) pointing into your own folder, not a node `role_file`.
 - Bound every `fail`/`rework` loop with a `budget`; exactly one entry node (no incoming edges); every node must reach a terminal.
 - Network is off by default; declare `network_policy` for a flow-wide grant or `network_access: true` on one node. A Codex `workspace-write` node with network is rejected — split external fetches into a `read-only` node.
+- If you set a custom `output_schema`, make every object in it `additionalProperties: false` — Codex rejects a non-strict schema with a 400 and the node fails every run. Prefer the built-in contract; an `evaluator` prompt must emit the findings result or the task fail-closes to manual.
 
 For the complete contract (node fields, per-node provider/model/reasoning overrides, the prompt-variable allowlist, and the validation layers), see `docs/flow-authoring.md` and `docs/configuration.md`.
