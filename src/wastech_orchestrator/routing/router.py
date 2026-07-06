@@ -149,11 +149,15 @@ class AgentRouter:
         *,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        is_cancelled: Callable[[], bool] = lambda: False,
     ) -> None:
         self._config = config
         self._providers = providers
         self._monotonic = monotonic
         self._sleep = sleep
+        # Set only by the watch daemon: True once an operator stop was requested. Checked before any
+        # fallback/retry so a stop-killed agent is never respawned on another provider.
+        self._is_cancelled = is_cancelled
         self._global_primary = _resolve_global_primary(config)
 
     def resolve_route(
@@ -283,6 +287,17 @@ class AgentRouter:
                         "duration_seconds": duration,
                     },
                 )
+                # Reliable stop: an operator stop killed this agent (SIGKILL → an abnormal exit
+                # that classifies as PROCESS_CRASHED, which is fallback-eligible). A cancellation is
+                # NOT a crash — refuse every retry/fallback here so no fresh agent is ever respawned
+                # after a stop; the Core parks the task resumable. Checked before the fallback path.
+                if self._is_cancelled():
+                    last_error = NormalizedError(
+                        error_class=ErrorClass.CANCELLED,
+                        message="stop requested; agent cancelled, not falling back",
+                    )
+                    log.info("cancelled; not falling back", extra={"provider": pid.value})
+                    break
                 # Resume safety net (durable sessions, P2.2): the requested session is gone
                 # (``session_unavailable``) → retry the SAME provider once with a fresh session.
                 # This is infrastructure, not a quality failure: it never falls back to another

@@ -62,6 +62,7 @@ class FakeRun:
         stdout_path: Any,
         stdin_text: str | None = None,
         monotonic: Any = None,
+        recorder: Any = None,
     ) -> ProcessResult:
         self.calls += 1
         self.captured = {"argv": list(argv), "stdin_text": stdin_text, "env": dict(env)}

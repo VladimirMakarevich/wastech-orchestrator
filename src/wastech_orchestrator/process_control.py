@@ -38,6 +38,12 @@ SignalFn = Callable[[int, SignalHandler], SignalHandler]
 
 PID_FILENAME = "orchestrator.pid"
 STOP_FILENAME = "orchestrator.stop"
+CHILDREN_FILENAME = "orchestrator.children"
+
+# Kill the whole subtree of an agent recorded as (pid, pgid): killpg + a descendant sweep (POSIX) or
+# ``taskkill /F /T`` (Windows). Injected as a seam so this module never shells out, exactly as
+# ``hard_kill_fn`` is — the walk/taskkill live in ``providers.process``.
+SubtreeKillFn = Callable[[int, int], None]  # (pid, pgid) -> None
 
 
 def _can_signal() -> bool:
@@ -78,6 +84,24 @@ class ProcessIdentity:
     """
 
     pid: int
+    start_time: str | None
+
+
+@dataclass(frozen=True)
+class ChildHandle:
+    """A recorded active-agent handle: its ``(pid, pgid)`` plus the recycling-guard start-time.
+
+    Written by the daemon the instant it launches an agent (see the recorder wired in ``cmd_watch``)
+    and cleared on the agent's return, so a hard stop — from the daemon's own shutdown or from a
+    ``worc stop --force-full`` in another shell — can reap the agent's whole subtree by group + a
+    descendant sweep. Carries only integers and the opaque ``start_time`` token: no argv/env/prompt,
+    the same no-secrets discipline as the PID file. ``pgid`` equals ``pid`` because the agent leads
+    its own session/group (``start_new_session``); it is stored explicitly so the killer never has
+    to call ``os.getpgid`` on a possibly-already-exited pid.
+    """
+
+    pid: int
+    pgid: int
     start_time: str | None
 
 
@@ -205,6 +229,63 @@ def read_pid(path: Path) -> int | None:
     return record.pid if record is not None else None
 
 
+def children_file_path(artifacts_root: str | os.PathLike[str]) -> Path:
+    """The canonical active-agent-handle location under an artifacts root
+    (``<root>/orchestrator.children``)."""
+    return Path(artifacts_root) / CHILDREN_FILENAME
+
+
+def write_children_file(
+    path: Path,
+    *,
+    pid: int,
+    pgid: int,
+    start_time_fn: StartTimeFn = _read_proc_start_time,
+) -> None:
+    """Atomically record the active agent's ``(pid, pgid)`` + its start-time token to ``path``.
+
+    Small JSON (``{"pid", "pgid", "start_time"}``), written temp-file + :func:`os.replace` so a
+    concurrent ``stop`` never observes a half-write — symmetric to :func:`write_pid_file`. The
+    start-time is the recycling guard (Linux ``/proc`` only; ``None`` elsewhere).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    payload = {"pid": pid, "pgid": pgid, "start_time": start_time_fn(pid)}
+    tmp.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def read_children_record(path: Path) -> ChildHandle | None:
+    """Return the :class:`ChildHandle` recorded in ``path``, or ``None`` if absent/malformed.
+
+    Tolerant like :func:`read_pid_record`: a missing/corrupt file (or one written before ``pgid``
+    was recorded) is "no active agent", which keeps a hard stop idempotent.
+    """
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    pid = data.get("pid")
+    pgid = data.get("pgid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
+    if not isinstance(pgid, int) or isinstance(pgid, bool) or pgid <= 0:
+        return None
+    start = data.get("start_time")
+    return ChildHandle(pid=pid, pgid=pgid, start_time=start if isinstance(start, str) else None)
+
+
+def clear_children_file(path: Path) -> None:
+    """Remove the active-agent-handle file (idempotent); called when an agent returns/is reaped."""
+    path.unlink(missing_ok=True)
+
+
 def _is_no_such_process(exc: OSError) -> bool:
     """True when an ``os.kill`` error means the target PID does not exist.
 
@@ -313,6 +394,8 @@ def stop_process(
     getpgid_fn: GetpgidFn = _DEFAULT_GETPGID,
     killpg_fn: KillpgFn = _DEFAULT_KILLPG,
     hard_kill_fn: HardKillFn | None = None,
+    subtree_kill_fn: SubtreeKillFn | None = None,
+    children_file: Path | None = None,
     can_signal: bool | None = None,
 ) -> StopOutcome:
     """Ask the daemon recorded in ``path`` to stop, confirming shutdown within ``timeout``.
@@ -324,15 +407,18 @@ def stop_process(
       ``kill_sig`` (SIGKILL) only if the daemon outlives the timeout. **Windows**: ``os.kill`` can't
       reach an unrelated process, so write ``stop_file`` and wait for the daemon to remove its own
       PID file; if it does not vanish within the timeout, clear it and report ``timed_out``.
-    * ``"full"`` — hard stop. **POSIX**: SIGKILL the daemon's whole process group at once (daemon +
-      active agent + any checks child — they share a group because the daemon leads it and the agent
-      inherits it), so nothing is orphaned; recovery is the next ``resume()``. **Windows**: there is
-      no cross-process group kill, so if ``hard_kill_fn`` is supplied it tree-kills the daemon
-      (``taskkill /F /T``, reaching the agent as a descendant) and sets ``tree_killed``; with no
-      ``hard_kill_fn`` it **degrades to the soft path** and sets ``degraded_to_soft``.
+    * ``"full"`` — hard stop. **POSIX**: SIGKILL the daemon's own process group (daemon + any checks
+      child), **and** reap the recorded active agent's whole subtree via ``subtree_kill_fn`` (the
+      agent leads its own group, so the daemon-group kill no longer reaches it — the recorded
+      ``children_file`` handle is now the route). Nothing is orphaned; recovery is the next
+      ``resume()``. **Windows**: there is no cross-process group kill, so if ``hard_kill_fn`` is
+      supplied it tree-kills the daemon (``taskkill /F /T``, reaching the agent as a descendant) and
+      the recorded agent for good measure, and sets ``tree_killed``; with no ``hard_kill_fn`` it
+      **degrades to the soft path** and sets ``degraded_to_soft``.
 
-    A recorded start-time guards every probe so a recycled PID is never signaled. The PID file and
-    stop-file are removed in every terminal branch. Pure under test via the injectable seams.
+    A recorded start-time guards every probe so a recycled PID is never signaled. The PID file,
+    stop-file, and children-file are removed in every terminal branch. Pure under test via the
+    injectable seams.
     """
     if can_signal is None:
         can_signal = _can_signal()
@@ -340,6 +426,8 @@ def stop_process(
     if record is None:
         if stop_file is not None:
             stop_file.unlink(missing_ok=True)  # reap a stray sentinel; nothing is recorded
+        if children_file is not None:
+            clear_children_file(children_file)  # reap a stray agent handle too
         return StopOutcome(found=False, pid=None, signaled=False, killed=False, already_dead=False)
     if level == "full" and can_signal:
         return _stop_via_group_kill(
@@ -347,10 +435,12 @@ def stop_process(
             record,
             kill_sig=kill_sig,
             stop_file=stop_file,
+            children_file=children_file,
             kill_fn=kill_fn,
             start_time_fn=start_time_fn,
             getpgid_fn=getpgid_fn,
             killpg_fn=killpg_fn,
+            subtree_kill_fn=subtree_kill_fn,
         )
     if can_signal:
         return _stop_via_signal(
@@ -369,7 +459,13 @@ def stop_process(
     # Windows: no cross-process signal. A "full" request tree-kills via the injected seam if one is
     # supplied; otherwise it degrades to the soft PID-file wait.
     if level == "full" and hard_kill_fn is not None:
-        return _stop_via_tree_kill(path, record, stop_file=stop_file, hard_kill_fn=hard_kill_fn)
+        return _stop_via_tree_kill(
+            path,
+            record,
+            stop_file=stop_file,
+            children_file=children_file,
+            hard_kill_fn=hard_kill_fn,
+        )
     outcome = _stop_via_pid_file(
         path,
         record,
@@ -388,43 +484,61 @@ def _stop_via_group_kill(
     *,
     kill_sig: int,
     stop_file: Path | None,
+    children_file: Path | None,
     kill_fn: KillFn,
     start_time_fn: StartTimeFn,
     getpgid_fn: GetpgidFn,
     killpg_fn: KillpgFn,
+    subtree_kill_fn: SubtreeKillFn | None,
 ) -> StopOutcome:
-    """POSIX hard stop: SIGKILL the daemon's whole process group at once (no graceful wait).
+    """POSIX hard stop: SIGKILL the daemon's group **and** reap the recorded agent's subtree.
 
-    Guards recycling with the recorded start-time before killing, so a recycled PID's unrelated
-    group is never destroyed. A "no such process" race (daemon exited first) reads as already-dead.
+    Ordering matters against a fallback-respawn race: (1) write the stop sentinel first, so if the
+    daemon is momentarily still inside its Router loop it reads "cancelled" and refuses to launch a
+    fallback agent; (2) SIGKILL the **daemon's own** group first (daemon + any checks child), so a
+    surviving daemon cannot spawn anything; (3) reap the **agent's** own subtree via the injected
+    ``subtree_kill_fn`` — the agent leads its own group now, so the daemon-group kill does not reach
+    it. The agent reap is best-effort even when the daemon is already dead (a crashed daemon may
+    have orphaned the agent — the exact incident this fixes). The recorded start-time guards
+    recycling so
+    an unrelated group is never destroyed; a "no such process" race reads as already-dead.
     """
     pid = record.pid
+    if stop_file is not None:
+        _write_stop_file(stop_file)  # cancellation marker first (see docstring / the Router seam)
+    handle = read_children_record(children_file) if children_file is not None else None
+
+    already_dead = False
+    group_killed = False
     if not is_running(
         pid, expected_start=record.start_time, kill_fn=kill_fn, start_time_fn=start_time_fn
     ):
-        path.unlink(missing_ok=True)  # reap the stale (or recycled) file
-        if stop_file is not None:
-            stop_file.unlink(missing_ok=True)
-        return StopOutcome(found=True, pid=pid, signaled=False, killed=False, already_dead=True)
-    try:
-        killpg_fn(getpgid_fn(pid), kill_sig)
-    except OSError as exc:  # raced to exit between probe and kill (ESRCH from getpgid/killpg)
-        if not _is_no_such_process(exc):
-            raise
-        path.unlink(missing_ok=True)
-        if stop_file is not None:
-            stop_file.unlink(missing_ok=True)
-        return StopOutcome(found=True, pid=pid, signaled=False, killed=False, already_dead=True)
+        already_dead = True  # stale (or recycled) PID file
+    else:
+        try:
+            killpg_fn(getpgid_fn(pid), kill_sig)
+            group_killed = True
+        except OSError as exc:  # raced to exit between probe and kill (ESRCH from getpgid/killpg)
+            if not _is_no_such_process(exc):
+                raise
+            already_dead = True
+
+    # Reap the agent's own subtree (its group + a descendant sweep for anything that broke away),
+    # best-effort even when the daemon is already dead — a crashed daemon may have orphaned it.
+    if handle is not None and subtree_kill_fn is not None:
+        subtree_kill_fn(handle.pid, handle.pgid)
     path.unlink(missing_ok=True)
     if stop_file is not None:
         stop_file.unlink(missing_ok=True)
+    if children_file is not None:
+        clear_children_file(children_file)
     return StopOutcome(
         found=True,
         pid=pid,
-        signaled=True,
-        killed=True,
-        already_dead=False,
-        group_killed=True,
+        signaled=not already_dead,
+        killed=group_killed,
+        already_dead=already_dead,
+        group_killed=group_killed,
     )
 
 
@@ -433,20 +547,28 @@ def _stop_via_tree_kill(
     record: ProcessIdentity,
     *,
     stop_file: Path | None,
+    children_file: Path | None,
     hard_kill_fn: HardKillFn,
 ) -> StopOutcome:
     """Windows hard stop: tree-kill the daemon (and its agent/checks descendants) via the seam.
 
     No liveness probe — ``os.kill`` cannot reach an unrelated process on Windows and there is no
     start-time recycling guard off Linux, so we call the injected killer on the recorded PID (it
-    swallows a "no such process" exit) and reap the PID/stop files. Recovery is the next
-    ``resume()``.
+    swallows a "no such process" exit). ``taskkill /F /T`` on the daemon already reaches the agent
+    as a descendant (no ``setsid`` on Windows), but we also tree-kill the recorded agent for
+    robustness against a process that re-parented away, then reap the PID/stop/children files.
+    Recovery is the next ``resume()``.
     """
     pid = record.pid
     hard_kill_fn(pid)
+    handle = read_children_record(children_file) if children_file is not None else None
+    if handle is not None:
+        hard_kill_fn(handle.pid)
     path.unlink(missing_ok=True)
     if stop_file is not None:
         stop_file.unlink(missing_ok=True)
+    if children_file is not None:
+        clear_children_file(children_file)
     return StopOutcome(
         found=True,
         pid=pid,

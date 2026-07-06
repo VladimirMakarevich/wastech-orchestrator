@@ -33,6 +33,7 @@ _MESSAGES: dict[ErrorClass, str] = {
     ErrorClass.PERMISSION_DENIED: "the provider reported a sandbox/permission denial",
     ErrorClass.CONFIGURATION_ERROR: "the provider invocation was rejected by the security policy",
     ErrorClass.TASK_FAILURE: "the provider completed without satisfying the task",
+    ErrorClass.CANCELLED: "the agent was cancelled by an operator stop",
 }
 
 

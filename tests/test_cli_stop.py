@@ -67,6 +67,20 @@ def test_busy_interactive_yes_is_soft(
     assert decision.level == "soft"  # typed YES never escalates to a hard kill
 
 
+def test_busy_interactive_prompt_names_force_full_as_interrupt_now(
+    monkeypatch: pytest.MonkeyPatch, make_git_config: _ConfigFactory, tmp_path
+) -> None:
+    # The busy prompt must point the operator at --force-full to interrupt the running agent NOW
+    # (soft only finishes the current step) — the discoverability gap the ADR closes.
+    captured: list[str] = []
+    monkeypatch.setattr(cli, "has_active_task", lambda _c: True)
+    monkeypatch.setattr(cli, "_confirm_yes", lambda prompt: captured.append(prompt) or False)
+    cli._resolve_stop_level(
+        make_git_config(tmp_path / "clone"), force=False, force_full=False, interactive=True
+    )
+    assert captured and "--force-full" in captured[0]
+
+
 def test_busy_interactive_declined_aborts_zero(
     monkeypatch: pytest.MonkeyPatch, make_git_config: _ConfigFactory, tmp_path
 ) -> None:
