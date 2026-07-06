@@ -173,12 +173,15 @@ worc stop               stop a running watch daemon (stop ladder: idle stops, bu
                           --timeout SECONDS           graceful-shutdown wait before SIGKILL (default: 30)
                           --force                     stop a busy daemon softly (finish the current step)
                           --force-full                hard-stop now: kill the daemon + agent (POSIX group / Windows tree)
+                          --non-interactive           never prompt; refuse a busy daemon unless --force/--force-full
 worc restart            stop the running watch daemon (same stop ladder), then start a fresh one
-                          --timeout SECONDS  --poll-seconds N  --queue NAME  --force  --force-full
+                          --timeout SECONDS  --poll-seconds N  --queue NAME  --force  --force-full  --non-interactive
 worc status [task-id]   show the active/latest persisted task (no work performed)
 worc top                live read-only monitor: active task + node, queue, recent, daemon log (q quits)
                           --poll-seconds N  --queue NAME  --log-file PATH  --recent N
 worc shell              interactive operator console over the watch daemon (needs the [shell] extra)
+                          attaches to a live daemon or opens idle; 'up'/'watch' starts serving (verified),
+                          'enqueue <file>' queues, 'down' stops, 'quit' detaches (daemon keeps running)
                           --queue NAME  --log-file PATH
 worc list               enumerate active + pending + recent tasks (read-only)
                           --pending | --recent [N] | --all   focus one section

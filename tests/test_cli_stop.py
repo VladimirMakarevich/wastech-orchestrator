@@ -183,6 +183,22 @@ def test_cmd_stop_busy_no_flag_non_tty_refuses(
     assert "called" not in captured  # never reached stop_process
 
 
+def test_cmd_stop_non_interactive_refuses_busy_without_prompting_even_on_a_tty(
+    monkeypatch: pytest.MonkeyPatch, make_git_config: _ConfigFactory, tmp_path
+) -> None:
+    # H1: even with a TTY (the console's stdin), --non-interactive forces the refuse-with-flags path
+    # instead of _confirm_yes()/input() — the console passes it so a busy `down` never blocks on
+    # input() inside the prompt_toolkit REPL.
+    config = make_git_config(tmp_path / "clone")
+    captured = _patch_stop(monkeypatch, config, active=True, tty=True)
+    monkeypatch.setattr(
+        cli, "_confirm_yes", lambda _p: (_ for _ in ()).throw(AssertionError("must not prompt"))
+    )
+    rc = cli.cmd_stop(cli.build_parser().parse_args(["stop", "--non-interactive"]))
+    assert rc == 1
+    assert "called" not in captured  # refused; never reached stop_process
+
+
 def test_cmd_stop_reports_group_kill(
     monkeypatch: pytest.MonkeyPatch, make_git_config: _ConfigFactory, tmp_path, capsys
 ) -> None:

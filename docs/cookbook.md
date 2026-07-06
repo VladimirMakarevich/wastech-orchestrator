@@ -297,11 +297,11 @@ worc watch --log-file ./logs/daemon.jsonl &      # daemon writes its log here
 worc top --log-file ./logs/daemon.jsonl          # live monitor; q (then Enter) to quit
 ```
 
-`worc top` is stdlib-only (no extra). For an interactive console that also drives commands — `enqueue` a task, `ps`, `logs`, `down` the daemon — install the `[shell]` extra and run `worc shell`; it spawns or attaches to the daemon and streams its log above a prompt:
+`worc top` is stdlib-only (no extra). For an interactive console that also drives commands — `enqueue` a task, `ps`, `logs`, `down` the daemon — install the `[shell]` extra and run `worc shell`. Entry is passive: it attaches to a live daemon or opens idle (the queue is not served until you type `up`). `up` spawns the daemon and verifies it came up (surfacing the real error if it does not); `quit` detaches and leaves the daemon running:
 
 ```bash
 pip install wastech-orchestrator[shell]
-worc shell                                       # spawns/attaches the daemon; enqueue / ps / down / quit
+worc shell                                       # attach-or-idle; up / enqueue / ps / down / quit
 ```
 
 ## 7. Choose Which Provider Runs a Node

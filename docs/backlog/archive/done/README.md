@@ -27,6 +27,7 @@ This folder contains backlog documents for product work that has already shipped
 | [Prompt & supervisor authoring contract](prompt-and-supervisor-authoring-contract.md) | implemented (2026-07-02) |
 | [Generic node-output prompt variables](node-output-prompt-variables.md) | implemented (2026-07-02) |
 | [Sub-task context handoff (intra-task decompose)](subtask-context-handoff.md) | implemented (2026-07-02) |
+| [worc shell reliable control surface](worc-shell-reliable-control-surface.md) | implemented (2026-07-06); POSIX verified, Windows real-smoke pending |
 | [Autonomous run — open questions & decisions](autonomous-run-open-questions.md) | implementation log (2026-07-02) |
 | [Trust levels / danger-approval policy](trust-levels-danger-approval.md) | implemented (config v25, 2026-07-03) |
 | [Branch mode (existing / current branch) + per-task publish cap](branch-mode.md) | implemented (config v26, 2026-07-04) |

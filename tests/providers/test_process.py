@@ -309,9 +309,40 @@ def test_spawn_detached_uses_argv_list_shell_false_and_devnull_stdin(
     assert isinstance(kwargs, dict)
     assert kwargs["shell"] is False
     assert kwargs["stdin"] is subprocess.DEVNULL
+    # No capture_path → stdout/stderr are discarded (the daemon is observed via its --log-file).
+    assert kwargs["stdout"] is subprocess.DEVNULL
+    assert kwargs["stderr"] is subprocess.DEVNULL
     # The spawned daemon leads its own process group on POSIX (so `stop --force-full` can group-kill
     # it + its agents without touching the console); a no-op on Windows.
     assert kwargs["start_new_session"] is (os.name != "nt")
+
+
+def test_spawn_detached_capture_path_redirects_stdout_and_stderr(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    """``capture_path`` redirects the child's stdout/stderr to a startup log (crash recovery), with
+    stderr merged into stdout; stdin stays ``DEVNULL`` and the file is created in a fresh dir."""
+    import subprocess
+    from pathlib import Path
+
+    from wastech_orchestrator.providers import process as proc_mod
+
+    captured: dict[str, object] = {}
+
+    class _Popen:
+        def __init__(self, argv: object, **kwargs: object) -> None:
+            captured["kwargs"] = kwargs
+            self.pid = 7
+
+    monkeypatch.setattr(subprocess, "Popen", _Popen)
+    log = Path(tmp_path) / "logs" / "daemon-startup.log"  # type: ignore[arg-type]
+    proc_mod.spawn_detached(["worc", "watch"], capture_path=log)
+    assert log.is_file()  # parent dir created + truncated open
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs["stderr"] is subprocess.STDOUT  # stderr merged into the captured stdout stream
+    assert kwargs["stdout"] is not subprocess.DEVNULL  # a real file handle
 
 
 def test_hard_kill_tree_builds_taskkill_argv_and_swallows_missing_process(

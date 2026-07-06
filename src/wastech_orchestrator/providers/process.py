@@ -179,15 +179,24 @@ def spawn_detached(
     *,
     cwd: str | Path | None = None,
     env: Mapping[str, str] | None = None,
+    capture_path: str | Path | None = None,
 ) -> subprocess.Popen[bytes]:
     """Launch a long-running child (the ``watch`` daemon the console supervises); return its handle.
 
     The detached counterpart to :func:`run_process`: it neither waits nor captures — the caller
     supervises/stops the child itself. Same safety invariants: an **argv list**, ``shell=False``,
-    and the child's stdin is ``DEVNULL`` (the parent's stdin is never inherited). Its stdout/stderr
-    are discarded — a supervised daemon is observed through its ``--log-file``, not the console's
-    terminal (which the prompt owns). ``env``/``cwd`` default to the parent's (the daemon is the
-    orchestrator itself and needs its normal environment), unlike the allowlisted-env agent runner.
+    and the child's stdin is ``DEVNULL`` (the parent's stdin is never inherited). ``env``/``cwd``
+    default to the parent's (the daemon is the orchestrator itself and needs its normal
+    environment), unlike the allowlisted-env agent runner.
+
+    ``capture_path`` names a *startup log*: the child's stdout/stderr are redirected there (created
+    /truncated) so a startup crash — an argparse error, an import failure, a preflight abort, all of
+    which land on raw stderr **before** the daemon configures its ``--log-file`` — is recoverable
+    instead of vanishing into ``DEVNULL``. The console reads this file's tail when its liveness
+    probe fails, to surface the real error rather than a false "started". With ``capture_path=None``
+    (every other caller / test) stdout/stderr stay ``DEVNULL`` — the daemon is then observed through
+    its own rotating ``--log-file``, not this stream. The startup log holds only the daemon's own
+    output (no secrets beyond what the daemon already logs, which passes the same redaction filter).
 
     On POSIX the daemon launches with ``start_new_session=True`` so it **leads its own process
     group**: a ``stop --force-full`` can ``killpg`` that group (daemon + any checks child) without
@@ -196,18 +205,30 @@ def spawn_detached(
     the daemon-group kill. On Windows the hard stop is a ``taskkill /T`` tree-kill (by parent→child,
     no group flag needed), so no ``creationflags`` are set here.
     """
-    return subprocess.Popen(
-        list(argv),
-        cwd=os.fspath(cwd) if cwd is not None else None,
-        env=dict(env) if env is not None else None,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        shell=False,
-        # POSIX only: lead a new session/group so the daemon's agents are killable as one group.
-        # A documented no-op on Windows (``start_new_session`` is ignored there).
-        start_new_session=os.name != "nt",
-    )
+    sink: Any = subprocess.DEVNULL
+    if capture_path is not None:
+        Path(capture_path).parent.mkdir(parents=True, exist_ok=True)
+        # Truncate per spawn so the file holds only the current daemon's stream (never grows across
+        # restarts). Handed to the child; the parent keeps no reference — the child owns/closes it.
+        sink = open(capture_path, "wb")  # noqa: SIM115 — owned by the spawned child, not this frame
+    try:
+        return subprocess.Popen(
+            list(argv),
+            cwd=os.fspath(cwd) if cwd is not None else None,
+            env=dict(env) if env is not None else None,
+            stdin=subprocess.DEVNULL,
+            stdout=sink,
+            stderr=subprocess.STDOUT if capture_path is not None else subprocess.DEVNULL,
+            shell=False,
+            # POSIX only: lead a new session/group so the daemon's agents are killable as one group.
+            # A documented no-op on Windows (``start_new_session`` is ignored there).
+            start_new_session=os.name != "nt",
+        )
+    finally:
+        # Popen dup'd the fd into the child; close our copy so only the child holds it (a leaked
+        # write handle here would keep the file open for this process's lifetime).
+        if capture_path is not None:
+            sink.close()
 
 
 def hard_kill_tree(pid: int) -> None:

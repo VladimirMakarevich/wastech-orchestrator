@@ -160,6 +160,13 @@ def _add_stop_force_flags(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="hard stop: kill the active agent's process group now (POSIX; Windows: soft)",
     )
+    parser.add_argument(
+        "--non-interactive",
+        dest="non_interactive",
+        action="store_true",
+        help="never prompt: a busy daemon with no --force/--force-full is refused (exit 1), not "
+        "confirmed. Used by scripts/CI and by 'worc shell' (a prompt would fight the REPL's stdin)",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2199,7 +2206,10 @@ def _gated_stop(
         config,
         force=getattr(args, "force", False),
         force_full=getattr(args, "force_full", False),
-        interactive=sys.stdin.isatty(),
+        # --non-interactive forces the refuse-with-instructions path (no _confirm_yes/input()). The
+        # console always passes it so a busy 'down'/'restart' never blocks on input() inside the
+        # prompt_toolkit REPL (H1: the single-stdin-reader rule).
+        interactive=sys.stdin.isatty() and not getattr(args, "non_interactive", False),
     )
     if not decision.proceed:
         print(decision.message)
