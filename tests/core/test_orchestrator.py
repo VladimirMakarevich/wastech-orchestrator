@@ -292,6 +292,7 @@ def _build(
     notifier: Notifier | None = None,
     gh: Callable[[Sequence[str]], GitResult] | None = None,
     clock: Callable[[], str] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
 ) -> tuple[Orchestrator, StateStore, Ledger, Path]:
     from wastech_orchestrator.checks.resolver import CheckResolver
     from wastech_orchestrator.routing.router import AgentRouter
@@ -301,7 +302,8 @@ def _build(
     store = StateStore.open(art / "state.db")
     ledger = Ledger(art / "logs")
     # A no-op sleep so the Router's transient backoff never actually waits in tests.
-    router = AgentRouter(config, providers, sleep=lambda _d: None)  # type: ignore[arg-type]
+    cancel_kwargs = {"is_cancelled": is_cancelled} if is_cancelled is not None else {}
+    router = AgentRouter(config, providers, sleep=lambda _d: None, **cancel_kwargs)  # type: ignore[arg-type]
     git = GitManager(config, store=store, artifacts_root=str(art), gh_runner=gh or _fake_gh())
     checks = CheckRunner(config, run_process=_fake_proc(check_verdicts))  # type: ignore[arg-type]
     gate = ValidationGate(
@@ -1000,6 +1002,40 @@ def test_transient_exhaustion_parks_task_resumable(
     assert ledger.records() == []  # no terminal ledger record yet
     assert not (art / "logs" / "task-park" / "failure_report.json").exists()
     assert "publish" not in _ran_nodes(store, "task-park")
+
+
+def test_stop_cancellation_parks_task_resumable(git_repo, make_git_config, tmp_path: Path) -> None:
+    # Reliable-stop: an operator stop kills the implementation agent (surfaces as PROCESS_CRASHED),
+    # the Router reclassifies it as CANCELLED (is_cancelled True) instead of falling back, and the
+    # Core parks the task resumable — never a fallback respawn, never a terminal FAILED report.
+    providers = _both(infra_fail={"implementation"}, infra_error_class=ErrorClass.PROCESS_CRASHED)
+    orch, store, ledger, art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        is_cancelled=lambda: True,  # an operator stop is in flight
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-cancel"))
+
+    assert result.final_status is Status.RUNNING  # parked, not terminal FAILED
+    task = store.get_task("task-cancel")
+    assert task is not None
+    assert task.status is Status.RUNNING
+    assert task.blocked_since is not None
+    assert ledger.records() == []  # no terminal ledger record
+    assert not (art / "logs" / "task-cancel" / "failure_report.json").exists()
+    # No fallback respawn after the stop: the second provider never ran the implementation node.
+    impl_runs = [
+        r
+        for provider in providers.values()
+        for r in provider.requests
+        if r.node_id == "implementation"
+    ]
+    assert len(impl_runs) == 1
 
 
 def test_parked_task_resumes_when_provider_recovers(

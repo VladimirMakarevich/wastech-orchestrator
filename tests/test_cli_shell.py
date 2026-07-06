@@ -34,6 +34,7 @@ def _ctx(
     return cli_shell.ShellContext(
         config=config,
         selector="default",
+        log_path=cli_shell.daemon_log_path(config, None),
         config_path="/cfg.yaml",
         daemon=daemon,
         spawn_fn=lambda *_a, **_k: _FakeProc(4321),
@@ -81,6 +82,79 @@ def test_enqueue_missing_file(make_git_config: _ConfigFactory, tmp_path: Path) -
     assert "no such file" in _out(ctx)
 
 
+def test_run_verb_no_longer_aliases_enqueue(
+    make_git_config: _ConfigFactory, tmp_path: Path
+) -> None:
+    # `run` was an enqueue alias; the new vocabulary frees it for a future one-shot, so it is now an
+    # unknown command (the operator uses `enqueue <file>` + `up`).
+    ctx = _ctx(make_git_config(tmp_path / "clone"))
+    src = tmp_path / "task.md"
+    src.write_text("---\nid: t1\ntitle: T\n---\nx\n", encoding="utf-8")
+    cli_shell.dispatch(f"run {src}", ctx)
+    assert "unknown command 'run'" in _out(ctx)
+    assert not (cli.pending_dir(ctx.config) / "task.md").exists()
+
+
+def test_enqueue_path_with_spaces_is_not_split(
+    make_git_config: _ConfigFactory, tmp_path: Path
+) -> None:
+    # M1: the raw remainder (not POSIX-tokenized) keeps a path with an embedded space intact.
+    config = make_git_config(tmp_path / "clone")
+    spaced = tmp_path / "a dir" / "my task.md"
+    spaced.parent.mkdir(parents=True)
+    spaced.write_text("---\nid: t1\ntitle: T\n---\nx\n", encoding="utf-8")
+    ctx = _ctx(config)
+    cli_shell.dispatch(f"enqueue {spaced}", ctx)
+    assert (cli.pending_dir(config) / "my task.md").is_file()
+    assert "enqueued my task.md" in _out(ctx)
+
+
+def test_enqueue_quoted_path_is_unquoted(make_git_config: _ConfigFactory, tmp_path: Path) -> None:
+    config = make_git_config(tmp_path / "clone")
+    spaced = tmp_path / "a dir" / "t.md"
+    spaced.parent.mkdir(parents=True)
+    spaced.write_text("---\nid: t1\ntitle: T\n---\nx\n", encoding="utf-8")
+    ctx = _ctx(config)
+    cli_shell.dispatch(f'enqueue "{spaced}"', ctx)
+    assert (cli.pending_dir(config) / "t.md").is_file()
+
+
+def test_split_verb_keeps_backslash_path_raw() -> None:
+    # A Windows-style absolute path survives verb-splitting (POSIX shlex would strip the backslashes
+    # and split on the embedded space).
+    verb, remainder = cli_shell._split_verb(r"enqueue C:\Users\x y\task.md")
+    assert verb == "enqueue"
+    assert remainder == r"C:\Users\x y\task.md"
+
+
+def test_unquote_strips_one_matching_layer() -> None:
+    assert cli_shell._unquote('"C:\\a b\\t.md"') == "C:\\a b\\t.md"
+    assert cli_shell._unquote("'x y'") == "x y"
+    assert cli_shell._unquote("plain") == "plain"
+
+
+def test_up_and_watch_short_circuit_when_daemon_running(
+    make_git_config: _ConfigFactory, tmp_path: Path
+) -> None:
+    config = make_git_config(tmp_path / "clone")
+    pid_path = process_control.pid_file_path(cli.worc_home_for(config))
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    process_control.write_pid_file(pid_path, pid=os.getpid())  # our own pid → "live"
+    spawned = {"v": False}
+    ctx = cli_shell.ShellContext(
+        config=config,
+        selector="default",
+        log_path=cli_shell.daemon_log_path(config, None),
+        spawn_fn=lambda *_a, **_k: spawned.__setitem__("v", True) or _FakeProc(1),
+        run_cli=lambda _argv: 0,
+        out=io.StringIO(),
+    )
+    cli_shell.dispatch("up", ctx)
+    cli_shell.dispatch("watch", ctx)  # alias of up
+    assert spawned["v"] is False  # already running → no second spawn
+    assert ctx.out.getvalue().count("already running") == 2
+
+
 def test_cancel_moves_pending_to_rejected(make_git_config: _ConfigFactory, tmp_path: Path) -> None:
     config = make_git_config(tmp_path / "clone")
     ctx = _ctx(config)
@@ -117,13 +191,13 @@ def test_forward_verbs_call_run_cli_with_config(
     ctx = _ctx(make_git_config(tmp_path / "clone"), run_cli=lambda argv: calls.append(argv) or 0)
     cli_shell.dispatch("status t1", ctx)
     cli_shell.dispatch("merge-task t1", ctx)
-    cli_shell.dispatch("down --force", ctx)  # down maps to stop
+    cli_shell.dispatch("down --force", ctx)  # down maps to stop; console forces --non-interactive
     cli_shell.dispatch("restart", ctx)
     assert calls == [
         ["--config", "/cfg.yaml", "status", "t1"],
         ["--config", "/cfg.yaml", "merge-task", "t1"],
-        ["--config", "/cfg.yaml", "stop", "--force"],
-        ["--config", "/cfg.yaml", "restart"],
+        ["--config", "/cfg.yaml", "stop", "--non-interactive", "--force"],
+        ["--config", "/cfg.yaml", "restart", "--non-interactive"],
     ]
 
 
@@ -136,10 +210,12 @@ def test_forward_surfaces_the_guard_exit_code(
     assert cli_shell.dispatch("finalize t1 --as done", ctx).exit_code == 1
 
 
-# --- spawn / attach ---------------------------------------------------------------------
+# --- reliable spawn (start_watch) + attach ----------------------------------------------
 
 
-def test_spawn_watch_builds_argv(make_git_config: _ConfigFactory, tmp_path: Path) -> None:
+def test_start_watch_builds_argv_with_parent_flags_before_subcommand(
+    make_git_config: _ConfigFactory, tmp_path: Path
+) -> None:
     config = make_git_config(tmp_path / "clone")
     captured: dict[str, object] = {}
 
@@ -148,74 +224,143 @@ def test_spawn_watch_builds_argv(make_git_config: _ConfigFactory, tmp_path: Path
         captured["kwargs"] = kwargs
         return _FakeProc(999)
 
-    handle = cli_shell.spawn_or_attach_watch(
+    handle = cli_shell.start_watch(
         config,
         selector="backend",
         log_file=None,
         spawn_fn=fake_spawn,
         config_path="/cfg.yaml",
         out=io.StringIO(),
+        ready_probe=lambda: 999,  # daemon "came up" → skip the real PID-file poll
     )
+    assert handle is not None
     assert handle.attached is False
     assert handle.pid == 999
     argv = captured["argv"]
     assert isinstance(argv, list)
-    assert argv[:3] == [sys.executable, "-m", "wastech_orchestrator.cli"]
+    watch_at = argv.index("watch")
+    # The argparse fix: --config/--log-file are PARENT flags and must precede the subcommand (the
+    # old code appended --log-file after `watch`, so the daemon died on 'unrecognized arguments').
+    assert argv.index("--config") < watch_at
+    assert argv.index("--log-file") < watch_at
+    assert argv.index("--queue") > watch_at
     assert argv[argv.index("--config") + 1] == "/cfg.yaml"
     assert argv[argv.index("--queue") + 1] == "backend"
     assert argv[argv.index("--log-file") + 1].endswith("daemon.log")
-    assert "watch" in argv
-    # The shell-false / stdin-DEVNULL guarantee now lives in process.spawn_detached (tested there).
+    # The child's stdout/stderr are captured for crash recovery (not DEVNULL'd).
+    assert str(captured["kwargs"]).find("capture_path") != -1
 
 
-def test_attach_to_live_daemon_does_not_spawn(
+def test_watch_launcher_prefers_console_script(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        cli_shell.shutil, "which", lambda name: "/usr/local/bin/worc" if name == "worc" else None
+    )
+    assert cli_shell._watch_launcher() == ["/usr/local/bin/worc"]
+
+
+def test_watch_launcher_falls_back_to_module(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli_shell.shutil, "which", lambda _name: None)
+    assert cli_shell._watch_launcher() == [sys.executable, "-m", "wastech_orchestrator.cli"]
+
+
+def test_start_watch_surfaces_startup_error_when_daemon_dies(
+    make_git_config: _ConfigFactory, tmp_path: Path
+) -> None:
+    config = make_git_config(tmp_path / "clone")
+
+    class _DeadProc:
+        pid = 555
+
+        def poll(self) -> int:
+            return 2  # already exited (argparse-style failure) → fast-fail, no timeout wait
+
+    def fake_spawn(argv: list[str], *, capture_path: str, **_k: object) -> _DeadProc:
+        # Emulate the daemon writing an argparse error to its captured stderr before dying.
+        Path(capture_path).write_text(
+            "wastech-orchestrator: error: unrecognized arguments: --oops\n", encoding="utf-8"
+        )
+        return _DeadProc()
+
+    out = io.StringIO()
+    handle = cli_shell.start_watch(
+        config,
+        selector="default",
+        log_file=None,
+        spawn_fn=fake_spawn,
+        out=out,
+        ready_probe=lambda: None,  # PID file never appears
+    )
+    assert handle is None  # verified-dead → shell stays idle, no false "started"
+    text = out.getvalue()
+    assert "failed to start" in text
+    assert "unrecognized arguments: --oops" in text  # the REAL error is surfaced
+
+
+def test_wait_until_alive_times_out_without_pid_file() -> None:
+    clock = {"t": 0.0}
+    handle = cli_shell._wait_until_alive(
+        Path("/nope/orchestrator.pid"),
+        _FakeProc(1),  # no poll() → treated as still running
+        timeout=1.0,
+        poll=0.5,
+        ready_probe=lambda: None,
+        sleep_fn=lambda s: clock.__setitem__("t", clock["t"] + s),
+        now_fn=lambda: clock["t"],
+    )
+    assert handle is None
+
+
+def test_attach_watch_attaches_to_live_daemon_without_spawning(
     make_git_config: _ConfigFactory, tmp_path: Path
 ) -> None:
     config = make_git_config(tmp_path / "clone")
     pid_path = process_control.pid_file_path(cli.worc_home_for(config))
     pid_path.parent.mkdir(parents=True, exist_ok=True)
     process_control.write_pid_file(pid_path, pid=os.getpid())  # our own pid → "live"
-    spawned = {"v": False}
-
-    def fake_spawn(*_a: object, **_k: object) -> _FakeProc:
-        spawned["v"] = True
-        return _FakeProc(1)
 
     out = io.StringIO()
-    handle = cli_shell.spawn_or_attach_watch(
-        config, selector="default", log_file="d.log", spawn_fn=fake_spawn, out=out
-    )
+    handle = cli_shell.attach_watch(config, log_file="d.log", out=out)
+    assert handle is not None
     assert handle.attached is True
     assert handle.pid == os.getpid()
-    assert spawned["v"] is False
     assert "attached to running daemon" in out.getvalue()
+
+
+def test_attach_watch_returns_none_when_idle(
+    make_git_config: _ConfigFactory, tmp_path: Path
+) -> None:
+    config = make_git_config(tmp_path / "clone")
+    assert cli_shell.attach_watch(config, log_file=None, out=io.StringIO()) is None
 
 
 # --- scripted run + shutdown ------------------------------------------------------------
 
 
-def test_run_shell_scripted_enqueue_then_quit(
+def test_run_shell_passive_entry_idle_and_enqueue_then_quit(
     make_git_config: _ConfigFactory, tmp_path: Path
 ) -> None:
     config = make_git_config(tmp_path / "clone")
     src = tmp_path / "task.md"
     src.write_text("---\nid: t1\ntitle: T\n---\nx\n", encoding="utf-8")
     calls: list[list[str]] = []
+    spawned = {"v": False}
+    out = io.StringIO()
     rc = cli_shell.run_shell(
         config,
         config_path=None,
-        spawn_fn=lambda *_a, **_k: _FakeProc(123),
+        spawn_fn=lambda *_a, **_k: spawned.__setitem__("v", True) or _FakeProc(123),
         run_cli=lambda argv: calls.append(argv) or 0,
         lines=[f"enqueue {src}", "ps", "quit"],
-        out=io.StringIO(),
+        out=out,
     )
     assert rc == 0
     assert (cli.pending_dir(config) / "task.md").is_file()
-    # Spawned (no PID file) + idle (no state.db) → shutdown soft-stops via run_cli(["stop"]).
-    assert ["stop"] in calls
+    assert spawned["v"] is False  # passive entry: never auto-spawns
+    assert calls == []  # quit detaches; idle → nothing to stop
+    assert "NOT being served" in out.getvalue()  # idle banner
 
 
-def test_run_shell_scripted_leaves_attached_daemon_running(
+def test_run_shell_detaches_attached_daemon_on_quit(
     make_git_config: _ConfigFactory, tmp_path: Path
 ) -> None:
     config = make_git_config(tmp_path / "clone")
@@ -232,7 +377,7 @@ def test_run_shell_scripted_leaves_attached_daemon_running(
         out=out,
     )
     assert rc == 0
-    assert calls == []  # attached → never stopped
+    assert calls == []  # detach-on-quit → never stopped
     assert "left running" in out.getvalue()
 
 
@@ -326,9 +471,15 @@ def test_spawned_child_log_is_tailable_then_reaped(
         )
         return subprocess.Popen([sys.executable, "-c", script])
 
-    handle = cli_shell.spawn_or_attach_watch(
-        config, selector="default", log_file=str(log), spawn_fn=spawn_fn, out=io.StringIO()
+    handle = cli_shell.start_watch(
+        config,
+        selector="default",
+        log_file=str(log),
+        spawn_fn=spawn_fn,
+        out=io.StringIO(),
+        ready_probe=lambda: 4321,  # the real daemon writes a PID file; the tiny child does not
     )
+    assert handle is not None
     assert isinstance(handle.process, subprocess.Popen)
     try:
         tailer = cli_shell._LogTailer(handle.log_path)

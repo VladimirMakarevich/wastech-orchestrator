@@ -6,13 +6,17 @@ Windows and POSIX with no real Codex/Claude binary.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import signal
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from wastech_orchestrator.providers.process import run_process
+import wastech_orchestrator.providers.process as process_mod
+from wastech_orchestrator.providers.process import AgentHandleRecorder, run_process
 
 
 def _py(code: str) -> list[str]:
@@ -157,30 +161,127 @@ def test_duration_uses_injected_monotonic(tmp_path: Path) -> None:
     assert result.duration_seconds == 42.5
 
 
-def test_agent_stays_in_the_daemon_process_group(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The agent must NOT ``setsid`` — it stays in the daemon's process group so ``stop
-    --force-full`` (POSIX ``killpg`` on the daemon's group) reaches it instead of orphaning it. A
-    ``start_new_session``-ed agent would break away into its own group and survive the kill."""
-    import subprocess
-
+def test_agent_leads_its_own_session_group(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The agent leads its OWN session/group (``start_new_session`` on POSIX), reversing the R1
+    shared-group topology: its whole subtree is now reaped via the recorded handle on every stop
+    route rather than by shared group membership a descendant can break away from."""
     captured: dict[str, object] = {}
 
-    class _Done:
+    class _FakeProc:
+        pid = 4321
         returncode = 0
-        stderr = ""
 
-    def fake_run(argv: object, **kwargs: object) -> _Done:
+        def communicate(self, input: object = None, timeout: object = None) -> tuple[None, str]:
+            return (None, "")
+
+    def fake_popen(argv: object, **kwargs: object) -> _FakeProc:
         captured.update(kwargs)
-        return _Done()
+        return _FakeProc()
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
     run_process(
         _py("pass"), cwd=tmp_path, env={}, timeout_seconds=30, stdout_path=tmp_path / "o.log"
     )
-    assert not captured.get("start_new_session")  # inherits the daemon's group, does not lead a new
+    assert captured.get("start_new_session") == (os.name != "nt")  # leads its own group on POSIX
     assert captured.get("shell") is False
+
+
+def test_recorder_records_the_child_then_clears_on_reap(tmp_path: Path) -> None:
+    """A supplied recorder sees the child's ``(pid, pgid)`` on spawn (pgid == pid, a group leader)
+    then a reap on return — the handle a hard stop uses to find the subtree."""
+    events: list[tuple[object, ...]] = []
+    recorder = AgentHandleRecorder(
+        on_spawn=lambda pid, pgid: events.append(("spawn", pid, pgid)),
+        on_reap=lambda: events.append(("reap",)),
+    )
+    run_process(
+        _py("pass"),
+        cwd=tmp_path,
+        env={},
+        timeout_seconds=30,
+        stdout_path=tmp_path / "o.log",
+        recorder=recorder,
+    )
+    assert [e[0] for e in events] == ["spawn", "reap"]
+    _, pid, pgid = events[0]
+    assert isinstance(pid, int) and pid > 0
+    assert pgid == pid  # recorded as its own group leader
+
+
+def test_recorder_untouched_when_launch_fails(tmp_path: Path) -> None:
+    """A failed launch spawns no child, so neither callback fires — there is no handle to record
+    or clear (the recorder only tracks a process that actually launched)."""
+    events: list[str] = []
+    recorder = AgentHandleRecorder(
+        on_spawn=lambda pid, pgid: events.append("spawn"),
+        on_reap=lambda: events.append("reap"),
+    )
+    result = run_process(
+        [str(tmp_path / "definitely-not-a-real-binary")],
+        cwd=tmp_path,
+        env={},
+        timeout_seconds=30,
+        stdout_path=tmp_path / "o.log",
+        recorder=recorder,
+    )
+    assert result.launch_error is not None
+    assert events == []  # no child launched → neither spawn nor reap fired
+
+
+def test_timeout_kills_the_whole_subtree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """On timeout the runner reaps the child's subtree via ``kill_agent_subtree`` (pid == pgid),
+    not just the direct child, and still reports ``timed_out``."""
+    killed: list[tuple[int, int]] = []
+
+    def fake_kill(pid: int, pgid: int) -> None:
+        killed.append((pid, pgid))
+        # Actually reap the real child so the post-timeout drain returns instead of blocking.
+        with contextlib.suppress(OSError):
+            os.killpg(pgid, signal.SIGKILL) if os.name != "nt" else os.kill(pid, signal.SIGTERM)
+
+    monkeypatch.setattr(process_mod, "kill_agent_subtree", fake_kill)
+    result = run_process(
+        _py("import time; time.sleep(10)"),
+        cwd=tmp_path,
+        env={},
+        timeout_seconds=1,
+        stdout_path=tmp_path / "o.log",
+    )
+    assert result.timed_out is True
+    assert result.exit_code is None
+    assert len(killed) == 1
+    assert killed[0][0] == killed[0][1]  # pid == pgid (its own group)
+
+
+def test_keyboard_interrupt_kills_the_subtree_and_reraises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A propagating interrupt reaps the subtree before re-raising, so a foreground ``worc run``
+    (no daemon finally) never orphans the agent."""
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        process_mod, "kill_agent_subtree", lambda pid, pgid: killed.append((pid, pgid))
+    )
+
+    class _FakeProc:
+        pid = 5555
+        returncode = None
+
+        def __init__(self) -> None:
+            self._calls = 0
+
+        def communicate(self, input: object = None, timeout: object = None) -> tuple[None, str]:
+            self._calls += 1
+            if self._calls == 1:
+                raise KeyboardInterrupt
+            return (None, "")  # the post-kill drain returns cleanly
+
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kw: _FakeProc())
+    with pytest.raises(KeyboardInterrupt):
+        run_process(
+            _py("pass"), cwd=tmp_path, env={}, timeout_seconds=30, stdout_path=tmp_path / "o.log"
+        )
+    assert killed == [(5555, 5555)]
 
 
 def test_spawn_detached_uses_argv_list_shell_false_and_devnull_stdin(
@@ -208,9 +309,40 @@ def test_spawn_detached_uses_argv_list_shell_false_and_devnull_stdin(
     assert isinstance(kwargs, dict)
     assert kwargs["shell"] is False
     assert kwargs["stdin"] is subprocess.DEVNULL
+    # No capture_path → stdout/stderr are discarded (the daemon is observed via its --log-file).
+    assert kwargs["stdout"] is subprocess.DEVNULL
+    assert kwargs["stderr"] is subprocess.DEVNULL
     # The spawned daemon leads its own process group on POSIX (so `stop --force-full` can group-kill
     # it + its agents without touching the console); a no-op on Windows.
     assert kwargs["start_new_session"] is (os.name != "nt")
+
+
+def test_spawn_detached_capture_path_redirects_stdout_and_stderr(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    """``capture_path`` redirects the child's stdout/stderr to a startup log (crash recovery), with
+    stderr merged into stdout; stdin stays ``DEVNULL`` and the file is created in a fresh dir."""
+    import subprocess
+    from pathlib import Path
+
+    from wastech_orchestrator.providers import process as proc_mod
+
+    captured: dict[str, object] = {}
+
+    class _Popen:
+        def __init__(self, argv: object, **kwargs: object) -> None:
+            captured["kwargs"] = kwargs
+            self.pid = 7
+
+    monkeypatch.setattr(subprocess, "Popen", _Popen)
+    log = Path(tmp_path) / "logs" / "daemon-startup.log"  # type: ignore[arg-type]
+    proc_mod.spawn_detached(["worc", "watch"], capture_path=log)
+    assert log.is_file()  # parent dir created + truncated open
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs["stderr"] is subprocess.STDOUT  # stderr merged into the captured stdout stream
+    assert kwargs["stdout"] is not subprocess.DEVNULL  # a real file handle
 
 
 def test_hard_kill_tree_builds_taskkill_argv_and_swallows_missing_process(

@@ -40,6 +40,11 @@ class ErrorClass(StrEnum):
     # P2.2), never a quality failure, so it never falls back to another provider and never charges a
     # fix iteration. Deliberately NOT in FALLBACK_ELIGIBLE.
     SESSION_UNAVAILABLE = "session_unavailable"
+    # An operator stop killed the agent mid-run (reliable-stop). Produced only by the Router when a
+    # cancellation was requested, never inferred from an exit code — this is what makes a stop-kill
+    # distinguishable from a genuine PROCESS_CRASHED. Deliberately NOT in FALLBACK_ELIGIBLE (never
+    # respawn a fresh agent after a stop) nor TRANSIENT_RETRYABLE; the Core parks the task instead.
+    CANCELLED = "cancelled"
 
 
 # Error classes that unconditionally allow fallback.

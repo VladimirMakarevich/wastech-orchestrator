@@ -46,7 +46,11 @@ from wastech_orchestrator.providers.base import (
     RunStatus,
 )
 from wastech_orchestrator.providers.errors import StderrSignature, classify, message_for
-from wastech_orchestrator.providers.process import ProcessResult, run_process
+from wastech_orchestrator.providers.process import (
+    AgentHandleRecorder,
+    ProcessResult,
+    run_process,
+)
 from wastech_orchestrator.providers.redaction import (
     REDACTED,
     normalized_session_id,
@@ -153,6 +157,7 @@ class BaseCliProvider:
         run_process: RunProcess = run_process,
         heartbeat_seconds: float = 30.0,
         artifact_level: str = "full",
+        agent_handle_recorder: AgentHandleRecorder | None = None,
     ) -> None:
         self._config = config
         self._security = security
@@ -161,6 +166,10 @@ class BaseCliProvider:
         self._monotonic = monotonic
         self._run_process = run_process
         self._heartbeat_seconds = heartbeat_seconds
+        # Set only by the watch daemon: records the launched agent's (pid, pgid) so a hard stop can
+        # reap its whole subtree. None everywhere else (one-shot CLI, tests) and never for the
+        # short preflight/probe launches below — only the real agent run in ``run()`` records.
+        self._agent_handle_recorder = agent_handle_recorder
         # logging.artifacts level (minimal|standard|full): which per-attempt files survive a run.
         # The constructor default is a no-op (keep everything); the real policy is the operator's
         # `logging.artifacts` (default "standard"), threaded in by build_providers.
@@ -322,6 +331,7 @@ class BaseCliProvider:
                 stdout_path=paths.stdout_path,
                 stdin_text=build_effective_prompt(request),
                 monotonic=self._monotonic,
+                recorder=self._agent_handle_recorder,
             ),
             logger=log,
             message="provider heartbeat",

@@ -1,8 +1,10 @@
 # Install and upgrade flow (git-tag friction → documented recipe → PyPI)
 
-Status: **proposed** (2026-07-04) Date: 2026-07-04 Owner: Vladimir Makarevich
+Status: **partially implemented** (2026-07-06) — short term (git-tag recipe) done; medium/optional deferred to backlog. Date: 2026-07-04 Owner: Vladimir Makarevich
 
 This is a design record for how operators install and upgrade the orchestrator CLI. It captures the friction found while testing `v0.8.6a3` on the `wastech-mdlint` target repo, and lays out a phased path: document the correct git-tag recipe now, move to PyPI publication as the real fix, and optionally add a `worc self-update` helper. It is a stake-in-the-ground for the install story, not an implementation spec.
+
+**Implementation status (2026-07-06):** only the **short-term** decision below is implemented — the git-tag install/upgrade recipe is documented in [operations.md](../operations.md#upgrading-the-orchestrator) (the uninstall+reinstall commands, the `pipx upgrade`/`--force`+uv caveats, and the per-shell zsh/bash/PowerShell quoting note for the `[shell]` extra). The **medium-term** (PyPI) and **optional** (`worc self-update`) phases remain in the backlog — PyPI is tracked in [follow_ups.md](follow_ups.md) (publish to (Test)PyPI, verify the `worc` name), and `worc self-update` is likewise a follow-up. See the Decision section for the per-phase state.
 
 ## The problem
 
@@ -34,9 +36,9 @@ The net effect: there is no reliable, documented one-liner to upgrade the CLI, a
 
 Adopt all three, phased, because each unblocks the next and none alone is sufficient:
 
-- **Short term — document the git-tag recipe.** Add an install/upgrade section to the docs with the working commands: `pipx uninstall wastech-orchestrator` then `pipx install "wastech-orchestrator[shell] @ git+https://github.com/VladimirMakarevich/wastech-orchestrator.git@vX.Y.Z"`. Explicitly explain _why_ `pipx upgrade` and `--force` don't work with a pinned git tag + uv backend, and give the zsh/bash/PowerShell quoting note for extras. This removes the daily friction immediately at near-zero cost.
-- **Medium term — publish to PyPI (the real fix).** Once the package is on a real index, `pipx upgrade` and `--pre` work as designed, extras install as `pkg[shell]`, and the pinned-git-ref trap disappears. This becomes the recommended install path and demotes the git recipe to a "from source" fallback.
-- **Optional — `worc self-update`.** A thin helper that runs the correct `pipx uninstall`+`install` (argv list, no shell interpolation) for a requested tag/version with extras. Worth it only if git-tag installs remain the norm after PyPI lands; if PyPI covers the common case, this stays optional.
+- **Short term — document the git-tag recipe. ✅ DONE (2026-07-06).** Added the install/upgrade recipe to [operations.md](../operations.md#upgrading-the-orchestrator) with the working commands: `pipx uninstall wastech-orchestrator` then `pipx install "wastech-orchestrator[shell] @ git+https://github.com/VladimirMakarevich/wastech-orchestrator.git@vX.Y.Z"`. It explains _why_ `pipx upgrade` and `--force` don't work with a pinned git tag + uv backend, and gives the zsh/bash/PowerShell quoting note for the `[shell]` extra. This removes the daily friction immediately at near-zero cost.
+- **Medium term — publish to PyPI (the real fix). ⏳ BACKLOG.** Once the package is on a real index, `pipx upgrade` and `--pre` work as designed, extras install as `pkg[shell]`, and the pinned-git-ref trap disappears. This becomes the recommended install path and demotes the git recipe to a "from source" fallback. Tracked in [follow_ups.md](follow_ups.md) ("Publish to (Test)PyPI" + "Verify `worc` is free on PyPI").
+- **Optional — `worc self-update`. ⏳ BACKLOG.** A thin helper that runs the correct `pipx uninstall`+`install` (argv list, no shell interpolation) for a requested tag/version with extras. Worth it only if git-tag installs remain the norm after PyPI lands; if PyPI covers the common case, this stays optional. Tracked in [follow_ups.md](follow_ups.md).
 
 The cost of not picking PyPI immediately is that the medium-term fix is deferred behind a release process; the cost of not doing the docs first is continued operator friction on every upgrade in the meantime.
 

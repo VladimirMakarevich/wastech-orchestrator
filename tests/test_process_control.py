@@ -499,6 +499,131 @@ def test_stop_full_tree_kills_on_windows_with_hard_kill_fn(tmp_path: Path) -> No
     assert not stop_path.exists()
 
 
+# --- children handle file + agent-subtree reap (reliable-stop) ------------------------------------
+
+
+def test_children_file_round_trips(tmp_path: Path) -> None:
+    path = pc.children_file_path(tmp_path / "does-not-exist-yet")
+    pc.write_children_file(path, pid=321, pgid=321, start_time_fn=_start)
+    expected = pc.ChildHandle(pid=321, pgid=321, start_time="start-token")
+    assert pc.read_children_record(path) == expected
+
+
+def test_children_file_tolerates_missing_and_malformed(tmp_path: Path) -> None:
+    path = pc.children_file_path(tmp_path)
+    assert pc.read_children_record(path) is None  # absent
+    path.write_text("{ not json", encoding="utf-8")
+    assert pc.read_children_record(path) is None  # corrupt
+    path.write_text('{"pid": 5}', encoding="utf-8")
+    assert pc.read_children_record(path) is None  # missing pgid (pre-reliable-stop shape)
+
+
+def test_clear_children_file_is_idempotent(tmp_path: Path) -> None:
+    path = pc.children_file_path(tmp_path)
+    pc.write_children_file(path, pid=1, pgid=1, start_time_fn=_start)
+    pc.clear_children_file(path)
+    assert not path.exists()
+    pc.clear_children_file(path)  # a second clear is a no-op, not an error
+
+
+def test_stop_full_reaps_daemon_group_and_agent_subtree(tmp_path: Path) -> None:
+    path = tmp_path / "orchestrator.pid"
+    stop_path = tmp_path / "orchestrator.stop"
+    children_path = tmp_path / "orchestrator.children"
+    pc.write_pid_file(path, pid=4242, start_time_fn=_start)
+    pc.write_children_file(children_path, pid=777, pgid=777, start_time_fn=_start)
+    killpg_calls: list[tuple[int, int]] = []
+    subtree_calls: list[tuple[int, int]] = []
+    sentinel_at_kill: list[bool] = []
+
+    def record_subtree(pid: int, pgid: int) -> None:
+        sentinel_at_kill.append(stop_path.exists())  # the marker must exist before the reap
+        subtree_calls.append((pid, pgid))
+
+    outcome = pc.stop_process(
+        path,
+        level="full",
+        can_signal=True,
+        kill_fn=FakeProcess(alive=True),
+        start_time_fn=_start,
+        getpgid_fn=lambda _pid: 9000,
+        killpg_fn=lambda pgid, sig: killpg_calls.append((pgid, sig)),
+        subtree_kill_fn=record_subtree,
+        children_file=children_path,
+        stop_file=stop_path,
+        kill_sig=KILL,
+    )
+    assert killpg_calls == [(9000, KILL)]  # daemon group SIGKILLed
+    assert subtree_calls == [(777, 777)]  # recorded agent's own subtree reaped separately
+    assert sentinel_at_kill == [True]  # cancellation marker written first
+    assert outcome.group_killed is True
+    assert not path.exists()
+    assert not stop_path.exists()
+    assert not children_path.exists()
+
+
+def test_stop_full_with_no_recorded_agent_kills_only_the_daemon_group(tmp_path: Path) -> None:
+    path = tmp_path / "orchestrator.pid"
+    children_path = tmp_path / "orchestrator.children"  # no handle written
+    pc.write_pid_file(path, pid=4242, start_time_fn=_start)
+    killpg_calls: list[tuple[int, int]] = []
+    subtree_calls: list[object] = []
+    outcome = pc.stop_process(
+        path,
+        level="full",
+        can_signal=True,
+        kill_fn=FakeProcess(alive=True),
+        start_time_fn=_start,
+        getpgid_fn=lambda _pid: 9000,
+        killpg_fn=lambda pgid, sig: killpg_calls.append((pgid, sig)),
+        subtree_kill_fn=lambda *a: subtree_calls.append(a),
+        children_file=children_path,
+        kill_sig=KILL,
+    )
+    assert killpg_calls == [(9000, KILL)]
+    assert subtree_calls == []  # nothing recorded → no agent kill
+    assert outcome.group_killed is True
+
+
+def test_stop_full_reaps_orphaned_agent_even_when_daemon_already_dead(tmp_path: Path) -> None:
+    path = tmp_path / "orchestrator.pid"
+    children_path = tmp_path / "orchestrator.children"
+    pc.write_pid_file(path, pid=4242, start_time_fn=_start)
+    pc.write_children_file(children_path, pid=777, pgid=777, start_time_fn=_start)
+    subtree_calls: list[tuple[int, int]] = []
+    outcome = pc.stop_process(
+        path,
+        level="full",
+        can_signal=True,
+        kill_fn=FakeProcess(alive=False),  # a crashed daemon that never ran its finally
+        start_time_fn=_start,
+        killpg_fn=lambda *a: None,
+        subtree_kill_fn=lambda pid, pgid: subtree_calls.append((pid, pgid)),
+        children_file=children_path,
+    )
+    assert outcome.already_dead is True
+    assert subtree_calls == [(777, 777)]  # the orphaned agent is still reaped
+    assert not children_path.exists()
+
+
+def test_stop_full_windows_tree_kills_daemon_and_recorded_agent(tmp_path: Path) -> None:
+    path = tmp_path / "orchestrator.pid"
+    children_path = tmp_path / "orchestrator.children"
+    pc.write_pid_file(path, pid=4242, start_time_fn=_start)
+    pc.write_children_file(children_path, pid=777, pgid=777, start_time_fn=_start)
+    killed: list[int] = []
+    outcome = pc.stop_process(
+        path,
+        level="full",
+        can_signal=False,  # Windows: no cross-process group kill
+        hard_kill_fn=lambda pid: killed.append(pid),
+        children_file=children_path,
+    )
+    assert killed == [4242, 777]  # daemon tree AND the recorded agent tree
+    assert outcome.tree_killed is True
+    assert not children_path.exists()
+
+
 def test_ensure_own_process_group_skips_when_already_leader() -> None:
     calls: list[object] = []
     # getpgrp == getpid → already a group leader (foreground job control / spawned with setsid).

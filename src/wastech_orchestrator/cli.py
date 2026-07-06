@@ -160,6 +160,13 @@ def _add_stop_force_flags(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="hard stop: kill the active agent's process group now (POSIX; Windows: soft)",
     )
+    parser.add_argument(
+        "--non-interactive",
+        dest="non_interactive",
+        action="store_true",
+        help="never prompt: a busy daemon with no --force/--force-full is refused (exit 1), not "
+        "confirmed. Used by scripts/CI and by 'worc shell' (a prompt would fight the REPL's stdin)",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2054,28 +2061,18 @@ def cmd_watch(args: argparse.Namespace) -> int:
     folder = pending_dir(config)
     pid_path = process_control.pid_file_path(worc_home_for(config))
     stop_path = process_control.stop_file_path(worc_home_for(config))
-
-    # Only the looping mode is a daemon; refuse a second watcher for the same artifact root. A stale
-    # PID file (process gone) is overwritten on start.
-    if poll > 0:
-        existing = process_control.running_daemon_pid(pid_path)
-        if existing is not None:
-            print(
-                f"watch: already running (pid {existing}); stop it first with "
-                f"'wastech-orchestrator stop', or use 'restart' ({pid_path})"
-            )
-            return 1
-
-    orchestrator = build_orchestrator(
-        config,
-        artifacts_root=worc_home_for(config),
-        heartbeat_seconds=args.heartbeat_seconds,
-    )
-
+    children_path = process_control.children_file_path(worc_home_for(config))
     cleanup_hook = _build_cleanup_hook(config)  # None when memory is disabled (Q10)
 
-    # Single pass: no PID file, no signal handler.
+    # Single pass: no PID file, no signal handler, no stop wiring — and NO agent-handle recorder, so
+    # it never clobbers a concurrent daemon's children file. A hung single-pass agent is still
+    # reaped by run_process's own timeout/Ctrl-C subtree-kill.
     if poll <= 0:
+        orchestrator = build_orchestrator(
+            config,
+            artifacts_root=worc_home_for(config),
+            heartbeat_seconds=args.heartbeat_seconds,
+        )
         return _summarize_watch(
             watch_loop(
                 orchestrator,
@@ -2087,17 +2084,46 @@ def cmd_watch(args: argparse.Namespace) -> int:
             )
         )
 
+    # Daemon: refuse a second watcher for the same artifact root. A stale PID file (process gone) is
+    # overwritten on start.
+    existing = process_control.running_daemon_pid(pid_path)
+    if existing is not None:
+        print(
+            f"watch: already running (pid {existing}); stop it first with "
+            f"'wastech-orchestrator stop', or use 'restart' ({pid_path})"
+        )
+        return 1
+
+    controller = process_control.StopController()  # SIGTERM -> event, restored on exit
+    # Record each launched agent's (pid, pgid) so a hard stop can reap its whole subtree, and tell
+    # the Router a raised provider error is a stop-kill (never fall back to a fresh agent).
+    recorder = agent_process.AgentHandleRecorder(
+        on_spawn=lambda pid, pgid: process_control.write_children_file(
+            children_path, pid=pid, pgid=pgid
+        ),
+        on_reap=lambda: process_control.clear_children_file(children_path),
+    )
+    orchestrator = build_orchestrator(
+        config,
+        artifacts_root=worc_home_for(config),
+        heartbeat_seconds=args.heartbeat_seconds,
+        agent_handle_recorder=recorder,
+        is_cancelled=lambda: (
+            controller.event.is_set() or process_control.stop_file_requested(stop_path)
+        ),
+    )
+
     print(f"watch: polling every {poll}s for git-pushed tasks (Ctrl-C or 'stop' to exit)")
     results: list[PipelineResult] = []
     stopped = False
-    controller = process_control.StopController()  # SIGTERM -> event, restored on exit
     try:
         with controller:
             # Lead our own process group (POSIX, best-effort) so `stop --force-full` can group-kill
-            # the daemon + its agents without reaching an unrelated group. No-op if we already lead
-            # one (foreground job control / console spawn) or on Windows.
+            # the daemon without reaching an unrelated group. No-op if we already lead one
+            # (foreground job control / console spawn) or on Windows.
             process_control.ensure_own_process_group()
             stop_path.unlink(missing_ok=True)  # clear a stale sentinel so it can't stop us on start
+            process_control.clear_children_file(children_path)  # clear a stale handle from a crash
             process_control.write_pid_file(pid_path)
             results = watch_loop(
                 orchestrator,
@@ -2115,6 +2141,14 @@ def cmd_watch(args: argparse.Namespace) -> int:
         print("watch: stopped")
         return 0
     finally:
+        # Reap the active agent's whole subtree before dropping the PID file — closes the main
+        # orphan route (Ctrl-C / crash / clean exit). A soft stop lets the stage finish, so on_reap
+        # already cleared the handle and this is a no-op; a --force-full from another shell already
+        # reaped it.
+        handle = process_control.read_children_record(children_path)
+        if handle is not None:
+            agent_process.kill_agent_subtree(handle.pid, handle.pgid)
+        process_control.clear_children_file(children_path)
         pid_path.unlink(missing_ok=True)  # clean exit, Ctrl-C, SIGKILL-survivor, or error
         stop_path.unlink(missing_ok=True)  # reap our own sentinel
     if stopped:
@@ -2148,12 +2182,18 @@ def _resolve_stop_level(
     if force:
         return _StopDecision(proceed=True, level="soft")
     if interactive:
-        if _confirm_yes("a task is active — type YES to stop it (soft, finishes the step): "):
+        if _confirm_yes(
+            "a task is active. YES = soft stop (lets the current step finish, then exits); "
+            "to interrupt the running agent NOW use --force-full: "
+        ):
             return _StopDecision(proceed=True, level="soft")
         return _StopDecision(proceed=False, message="stop: aborted", exit_code=0)
     return _StopDecision(
         proceed=False,
-        message="stop: a task is active; pass --force (soft) or --force-full (hard, POSIX)",
+        message=(
+            "stop: a task is active; pass --force (soft: finishes the current step) or "
+            "--force-full (hard: interrupts the running agent now and reaps its subtree)"
+        ),
         exit_code=1,
     )
 
@@ -2166,21 +2206,28 @@ def _gated_stop(
         config,
         force=getattr(args, "force", False),
         force_full=getattr(args, "force_full", False),
-        interactive=sys.stdin.isatty(),
+        # --non-interactive forces the refuse-with-instructions path (no _confirm_yes/input()). The
+        # console always passes it so a busy 'down'/'restart' never blocks on input() inside the
+        # prompt_toolkit REPL (H1: the single-stdin-reader rule).
+        interactive=sys.stdin.isatty() and not getattr(args, "non_interactive", False),
     )
     if not decision.proceed:
         print(decision.message)
         return decision.exit_code, None
     pid_path = process_control.pid_file_path(worc_home_for(config))
     stop_path = process_control.stop_file_path(worc_home_for(config))
+    children_path = process_control.children_file_path(worc_home_for(config))
     outcome = process_control.stop_process(
         pid_path,
         timeout=args.timeout,
         stop_file=stop_path,
+        children_file=children_path,
         level=decision.level,
-        # Windows hard rung: tree-kill the daemon (and its agent/checks descendants) via taskkill.
-        # POSIX ignores this and uses the process-group kill; the injected seam keeps the
-        # process_control module free of any direct child-process launch (its no-shell-out rule).
+        # POSIX hard rung: SIGKILL the daemon's group and reap the recorded agent's own subtree via
+        # this seam (killpg + a descendant sweep). Windows: tree-kill the daemon (and the recorded
+        # agent) via taskkill. Both injected seams keep process_control free of any direct
+        # child-process launch (its no-shell-out rule).
+        subtree_kill_fn=agent_process.kill_agent_subtree,
         hard_kill_fn=agent_process.hard_kill_tree,
     )
     return 0, outcome
@@ -2190,7 +2237,9 @@ def cmd_stop(args: argparse.Namespace) -> int:
     """Stop a running ``watch`` daemon via the stop ladder (idle: no prompt; busy: confirm/force).
 
     Soft (default / ``--force`` / typed ``YES``) finishes the current step, then exits;
-    ``--force-full`` hard-kills the agent's group now (POSIX; Windows: soft). Idempotent.
+    ``--force-full`` interrupts the running agent now and reaps its whole subtree (POSIX: daemon
+    group-kill + the recorded agent's group + a descendant sweep; Windows: ``taskkill /F /T``).
+    Idempotent.
     """
     _configure_runtime_logging(args)
     config = load_config_for(args)

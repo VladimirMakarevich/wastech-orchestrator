@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import signal
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -42,6 +43,21 @@ class ProcessResult:
     stderr_text: str  # captured stderr, NOT yet redacted — the caller redacts before writing it
 
 
+@dataclass(frozen=True)
+class AgentHandleRecorder:
+    """Callbacks that let :func:`run_process` record the agent it just launched, so a hard stop can
+    reap the whole subtree even while the daemon is blocked waiting on it.
+
+    ``on_spawn(pid, pgid)`` fires the instant the child launches; ``on_reap()`` fires when it is
+    reaped (normal exit, post-timeout kill, or a propagating interrupt). The daemon (``cmd_watch``)
+    wires these to the ``process_control`` children-file writers; every other caller passes ``None``
+    (no recording), so one-shot CLI runs and the preflight/probe launches are unchanged.
+    """
+
+    on_spawn: Callable[[int, int], None]
+    on_reap: Callable[[], None]
+
+
 def run_process(
     argv: Sequence[str],
     *,
@@ -51,19 +67,29 @@ def run_process(
     stdout_path: str | Path,
     stdin_text: str | None = None,
     monotonic: Callable[[], float] = time.monotonic,
+    recorder: AgentHandleRecorder | None = None,
 ) -> ProcessResult:
     """Launch ``argv`` safely and return a raw :class:`ProcessResult`.
 
     :param argv: the command and its arguments as a list (never a shell string).
     :param cwd: working directory for the child (the clone).
     :param env: the **entire** child environment (already allowlisted); not merged with the parent.
-    :param timeout_seconds: mandatory wall-clock timeout; on expiry the child is killed and
-        ``timed_out`` is set with ``exit_code=None``.
+    :param timeout_seconds: mandatory wall-clock timeout; on expiry the child's whole subtree is
+        killed and ``timed_out`` is set with ``exit_code=None``.
     :param stdout_path: file the child's stdout is streamed to (created/overwritten).
     :param stdin_text: text fed to the child's stdin; ``None`` means ``DEVNULL`` (no parent stdin).
     :param monotonic: monotonic clock seam for the measured duration (injected in tests).
+    :param recorder: optional :class:`AgentHandleRecorder`; when set, the launched child's
+        ``(pid, pgid)`` is recorded on spawn and cleared on reap so a hard stop can find it.
     :returns: a :class:`ProcessResult`. A failed launch (missing/!executable binary) is reported via
         ``launch_error`` rather than raised; a timeout via ``timed_out``.
+
+    The child launches with ``start_new_session`` on POSIX so it **leads its own process group** —
+    a modern agent CLI's descendants are reaped as one subtree (via the recorded handle) on every
+    stop route, rather than relying on shared group membership a descendant can break away from. On
+    a timeout the subtree is killed here (classification stays ``timed_out``); on a propagating
+    interrupt (``KeyboardInterrupt``) the subtree is killed before re-raising, so a foreground
+    ``worc run`` never orphans the agent even though it has no daemon ``finally`` backstop.
     """
     start = monotonic()
     timed_out = False
@@ -71,11 +97,14 @@ def run_process(
     exit_code: int | None = None
     stderr_text = ""
 
-    # ``input`` and ``stdin`` are mutually exclusive: feed the prompt via ``input``, or send EOF
-    # immediately via DEVNULL so a prompt-less child can never hang on inherited stdin.
-    stdin_kwargs: dict[str, Any] = (
-        {"stdin": subprocess.DEVNULL} if stdin_text is None else {"input": stdin_text}
-    )
+    # ``input`` and ``stdin`` are mutually exclusive: feed the prompt via PIPE + communicate(input),
+    # or send EOF immediately via DEVNULL so a prompt-less child can never hang on inherited stdin.
+    if stdin_text is None:
+        stdin_arg: Any = subprocess.DEVNULL
+        input_arg: str | None = None
+    else:
+        stdin_arg = subprocess.PIPE
+        input_arg = stdin_text
 
     try:
         stdout_file = open(stdout_path, "wb")  # noqa: SIM115 — closed in the inner `with`
@@ -84,37 +113,55 @@ def run_process(
         # raise, and name the *path* — not argv[0], which launched fine and is not the culprit.
         launch_error = f"could not open stdout path {os.fspath(stdout_path)!r}: {_reason(exc)}"
     else:
-        try:
-            with stdout_file:
-                completed = subprocess.run(
+        with stdout_file:
+            try:
+                proc = subprocess.Popen(
                     list(argv),
                     cwd=os.fspath(cwd),
                     env=dict(env),
+                    stdin=stdin_arg,
                     stdout=stdout_file,
                     stderr=subprocess.PIPE,
                     text=True,
                     encoding="utf-8",
                     errors="replace",
-                    timeout=timeout_seconds,
                     shell=False,
-                    # Deliberately NOT start_new_session: the agent stays in the daemon's process
-                    # group so `stop --force-full` (POSIX killpg on that group) reaches it, not
-                    # orphans it. The daemon leads the group (see spawn_detached / cmd_watch); a
-                    # setsid-ed child would break away and survive the kill. On Windows the hard
-                    # stop is a `taskkill /T` tree-kill, which reaches this child as a descendant.
-                    **stdin_kwargs,
+                    # POSIX: lead a new session/group so the agent's whole subtree is killable via
+                    # the recorded (pid == pgid) handle on every stop route. A documented no-op on
+                    # Windows, where the hard stop is a `taskkill /F /T` tree-kill by parent→child.
+                    start_new_session=os.name != "nt",
                 )
-            exit_code = completed.returncode
-            stderr_text = completed.stderr or ""
-        except subprocess.TimeoutExpired as exc:
-            timed_out = True
-            stderr_text = _coerce_stderr(exc.stderr)
-        except OSError as exc:
-            # The binary could not be launched (missing / not executable / bad cwd). argv[0] comes
-            # from config (no secret); safe to name. FileNotFoundError/PermissionError/
-            # NotADirectoryError are all OSError, so one clause covers them.
-            command = argv[0] if argv else "<empty argv>"
-            launch_error = f"could not launch {command!r}: {_reason(exc)}"
+            except OSError as exc:
+                # The binary could not be launched (missing / not executable / bad cwd). argv[0]
+                # comes from config (no secret); safe to name. FileNotFoundError / PermissionError /
+                # NotADirectoryError are all OSError, so one clause covers them.
+                command = argv[0] if argv else "<empty argv>"
+                launch_error = f"could not launch {command!r}: {_reason(exc)}"
+            else:
+                # The child leads its own group, so its pgid equals its pid; record the pid directly
+                # rather than calling os.getpgid (which would race an instant-exit child to ESRCH).
+                if recorder is not None:
+                    recorder.on_spawn(proc.pid, proc.pid)
+                try:
+                    _, stderr_out = proc.communicate(input=input_arg, timeout=timeout_seconds)
+                    exit_code = proc.returncode
+                    stderr_text = stderr_out or ""
+                except subprocess.TimeoutExpired:
+                    kill_agent_subtree(proc.pid, proc.pid)
+                    _, drained = proc.communicate()  # reap the zombie; collect any tail stderr
+                    timed_out = True
+                    stderr_text = drained or ""
+                except BaseException:
+                    # KeyboardInterrupt (and any other propagating exception): reap the subtree now
+                    # so the agent can't outlive the daemon/foreground process, then re-raise. This
+                    # bypasses the Router's `except ProviderError`, so it never triggers a fallback.
+                    kill_agent_subtree(proc.pid, proc.pid)
+                    with contextlib.suppress(Exception):
+                        proc.communicate()
+                    raise
+                finally:
+                    if recorder is not None:
+                        recorder.on_reap()
 
     duration_seconds = monotonic() - start
     return ProcessResult(
@@ -132,34 +179,56 @@ def spawn_detached(
     *,
     cwd: str | Path | None = None,
     env: Mapping[str, str] | None = None,
+    capture_path: str | Path | None = None,
 ) -> subprocess.Popen[bytes]:
     """Launch a long-running child (the ``watch`` daemon the console supervises); return its handle.
 
     The detached counterpart to :func:`run_process`: it neither waits nor captures — the caller
     supervises/stops the child itself. Same safety invariants: an **argv list**, ``shell=False``,
-    and the child's stdin is ``DEVNULL`` (the parent's stdin is never inherited). Its stdout/stderr
-    are discarded — a supervised daemon is observed through its ``--log-file``, not the console's
-    terminal (which the prompt owns). ``env``/``cwd`` default to the parent's (the daemon is the
-    orchestrator itself and needs its normal environment), unlike the allowlisted-env agent runner.
+    and the child's stdin is ``DEVNULL`` (the parent's stdin is never inherited). ``env``/``cwd``
+    default to the parent's (the daemon is the orchestrator itself and needs its normal
+    environment), unlike the allowlisted-env agent runner.
+
+    ``capture_path`` names a *startup log*: the child's stdout/stderr are redirected there (created
+    /truncated) so a startup crash — an argparse error, an import failure, a preflight abort, all of
+    which land on raw stderr **before** the daemon configures its ``--log-file`` — is recoverable
+    instead of vanishing into ``DEVNULL``. The console reads this file's tail when its liveness
+    probe fails, to surface the real error rather than a false "started". With ``capture_path=None``
+    (every other caller / test) stdout/stderr stay ``DEVNULL`` — the daemon is then observed through
+    its own rotating ``--log-file``, not this stream. The startup log holds only the daemon's own
+    output (no secrets beyond what the daemon already logs, which passes the same redaction filter).
 
     On POSIX the daemon launches with ``start_new_session=True`` so it **leads its own process
-    group**: the agents it spawns (without ``setsid``) inherit that group, so ``stop --force-full``
-    can ``killpg`` the whole group without touching the console that spawned the daemon. On Windows
-    the hard stop is a ``taskkill /T`` tree-kill (by parent→child, no group flag needed), so no
-    ``creationflags`` are set here.
+    group**: a ``stop --force-full`` can ``killpg`` that group (daemon + any checks child) without
+    touching the console that spawned it. The agent runs in its **own** session/group (see
+    :func:`run_process`) and is reaped separately via its recorded handle, so it is not orphaned by
+    the daemon-group kill. On Windows the hard stop is a ``taskkill /T`` tree-kill (by parent→child,
+    no group flag needed), so no ``creationflags`` are set here.
     """
-    return subprocess.Popen(
-        list(argv),
-        cwd=os.fspath(cwd) if cwd is not None else None,
-        env=dict(env) if env is not None else None,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        shell=False,
-        # POSIX only: lead a new session/group so the daemon's agents are killable as one group.
-        # A documented no-op on Windows (``start_new_session`` is ignored there).
-        start_new_session=os.name != "nt",
-    )
+    sink: Any = subprocess.DEVNULL
+    if capture_path is not None:
+        Path(capture_path).parent.mkdir(parents=True, exist_ok=True)
+        # Truncate per spawn so the file holds only the current daemon's stream (never grows across
+        # restarts). Handed to the child; the parent keeps no reference — the child owns/closes it.
+        sink = open(capture_path, "wb")  # noqa: SIM115 — owned by the spawned child, not this frame
+    try:
+        return subprocess.Popen(
+            list(argv),
+            cwd=os.fspath(cwd) if cwd is not None else None,
+            env=dict(env) if env is not None else None,
+            stdin=subprocess.DEVNULL,
+            stdout=sink,
+            stderr=subprocess.STDOUT if capture_path is not None else subprocess.DEVNULL,
+            shell=False,
+            # POSIX only: lead a new session/group so the daemon's agents are killable as one group.
+            # A documented no-op on Windows (``start_new_session`` is ignored there).
+            start_new_session=os.name != "nt",
+        )
+    finally:
+        # Popen dup'd the fd into the child; close our copy so only the child holds it (a leaked
+        # write handle here would keep the file open for this process's lifetime).
+        if capture_path is not None:
+            sink.close()
 
 
 def hard_kill_tree(pid: int) -> None:
@@ -179,6 +248,68 @@ def hard_kill_tree(pid: int) -> None:
             capture_output=True,
             check=False,
         )
+
+
+def kill_agent_subtree(pid: int, pgid: int) -> None:
+    """Reap an agent and its **whole** descendant subtree; idempotent and shell-free.
+
+    Called by every stop route (the ``run_process`` timeout / interrupt, the ``cmd_watch`` daemon
+    ``finally``, and ``stop --force-full`` via the ``process_control`` seam). POSIX: SIGKILL the
+    agent's own process group (the fast path — it leads its session, so this reaches in-group
+    descendants at once), **plus** SIGKILL every descendant pid individually as a backstop for a
+    process that broke away into its own session/group (the field failure this fixes). The
+    descendant set is snapshotted **before** the group kill so a child that re-parents to init once
+    its parent dies is still targeted. Windows: ``taskkill /F /T`` walks the tree by parent→child.
+    """
+    if os.name == "nt":
+        hard_kill_tree(pid)
+        return
+    descendants = _posix_descendants(pid)  # snapshot before killing anything
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(pgid, signal.SIGKILL)
+    for child_pid in descendants:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(child_pid, signal.SIGKILL)
+
+
+def _posix_descendants(root: int) -> list[int]:
+    """The full descendant pid set of ``root`` (all generations), from one ``ps`` snapshot.
+
+    Uses ``ps -axo pid=,ppid=`` (the trailing ``=`` suppresses the column headers) — one argv-list
+    subprocess, ``shell=False``, no pid/path ever interpolated into a shell string. Builds the
+    ppid→children map and DFS-walks it from ``root``. Defensive: an unreadable/absent ``ps`` or a
+    malformed row yields no descendants rather than raising (the group kill remains the fast path).
+    """
+    try:
+        completed = subprocess.run(
+            ["ps", "-axo", "pid=,ppid="],
+            shell=False,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    children: dict[int, list[int]] = {}
+    for line in completed.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            cpid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        children.setdefault(ppid, []).append(cpid)
+    seen: list[int] = []
+    stack = list(children.get(root, []))
+    while stack:
+        cpid = stack.pop()
+        if cpid == root or cpid in seen:
+            continue
+        seen.append(cpid)
+        stack.extend(children.get(cpid, []))
+    return seen
 
 
 def _reason(exc: OSError) -> str:

@@ -125,8 +125,10 @@ from wastech_orchestrator.providers.artifacts import (
 from wastech_orchestrator.providers.base import (
     TRANSIENT_RETRYABLE,
     AgentProvider,
+    ErrorClass,
     ProviderId,
 )
+from wastech_orchestrator.providers.process import AgentHandleRecorder
 from wastech_orchestrator.providers.redaction import (
     read_denied_secrets,
     redact_text,
@@ -1757,17 +1759,20 @@ class Orchestrator:
             )
         except NodeInfraError as exc:
             self._sync_counters_from_run_state(p, run_state)
-            if exc.error_class in TRANSIENT_RETRYABLE:
-                # Every allowed provider is transiently unavailable (retries + fallback exhausted).
-                # Don't discard the task: park it as resumable (B-lite). The checkpoint is already
-                # persisted; the next watch tick / process start resumes from current_node.
+            if exc.error_class in TRANSIENT_RETRYABLE or exc.error_class is ErrorClass.CANCELLED:
+                # Park (resumable, B-lite), don't discard the task, when either: every allowed
+                # provider is transiently unavailable (retries + fallback exhausted), or an operator
+                # stop cancelled the agent (reliable-stop) — a cancellation must never read as a
+                # terminal failure. The checkpoint is already persisted; the next watch tick /
+                # process start resumes from current_node.
                 return self._park(p, run_state, exc)
             return self._fail(p, str(exc), node_id=run_state.current_node, run_state=run_state)
         self._sync_counters_from_run_state(p, run_state)
         return self._finish_engine_run(p, result)
 
     def _park(self, p: _Pipeline, run_state: FlowRunState, exc: NodeInfraError) -> PipelineResult:
-        """Soft, resumable pause on transient infra exhaustion (B-lite). NOT a terminal transition.
+        """Soft, resumable pause on transient infra exhaustion or an operator stop (B-lite). NOT a
+        terminal transition.
 
         The task stays ``RUNNING`` (active) so :meth:`resume` picks it up via the reconciler next
         tick / next start; the flow checkpoint is already saved (``current_node``). Records the
@@ -1779,7 +1784,7 @@ class Orchestrator:
             self._store.update_task(p.task.id, blocked_since=self._clock())
         log = bind(_LOG, task_id=p.task.id)
         log.info(
-            "task parked (resumable): every provider transiently unavailable",
+            "task parked (resumable)",  # transient-infra exhaustion or an operator-stop cancel
             extra={
                 "node_id": run_state.current_node,
                 "error_class": exc.error_class.value if exc.error_class else None,
@@ -3025,8 +3030,13 @@ def build_providers(
     *,
     artifacts_root: str | Path,
     heartbeat_seconds: float = 30.0,
+    agent_handle_recorder: AgentHandleRecorder | None = None,
 ) -> dict[ProviderId, AgentProvider]:
-    """Construct the real provider adapters for the configured providers (Core + CLI use this)."""
+    """Construct the real provider adapters for the configured providers (Core + CLI use this).
+
+    ``agent_handle_recorder`` is set only by the ``watch`` daemon so a hard stop can reap a running
+    agent's whole subtree; it is ``None`` for one-shot CLI runs and tests.
+    """
     from wastech_orchestrator.providers.claude import ClaudeCodeProvider
     from wastech_orchestrator.providers.codex import CodexProvider
 
@@ -3041,6 +3051,7 @@ def build_providers(
                 artifacts_root=root,
                 heartbeat_seconds=heartbeat_seconds,
                 artifact_level=artifact_level,
+                agent_handle_recorder=agent_handle_recorder,
             )
         elif pid is ProviderId.CODEX:
             providers[pid] = CodexProvider(
@@ -3049,6 +3060,7 @@ def build_providers(
                 artifacts_root=root,
                 heartbeat_seconds=heartbeat_seconds,
                 artifact_level=artifact_level,
+                agent_handle_recorder=agent_handle_recorder,
             )
     return providers
 
@@ -3060,6 +3072,8 @@ def build_orchestrator(
     gh_runner: Callable[..., Any] | None = None,
     heartbeat_seconds: float = 30.0,
     is_recovery_rerun: Callable[[str], bool] = lambda _id: False,
+    agent_handle_recorder: AgentHandleRecorder | None = None,
+    is_cancelled: Callable[[], bool] = lambda: False,
 ) -> Orchestrator:
     """Wire the full dependency graph from a validated config (used by the CLI and e2e tests).
 
@@ -3069,13 +3083,22 @@ def build_orchestrator(
 
     ``is_recovery_rerun`` is threaded into the gate so the ``rerun`` command can admit exactly
     the re-run id past the duplicate-id check (scoped to one id; every other gate check still runs).
+
+    ``agent_handle_recorder`` and ``is_cancelled`` are set only by the ``watch`` daemon: the
+    recorder lets a hard stop reap a running agent's subtree, and ``is_cancelled`` tells the Router
+    a raised provider error is a stop-kill (not a crash) so it never falls back to a fresh agent.
     """
     root = Path(artifacts_root)
-    providers = build_providers(config, artifacts_root=root, heartbeat_seconds=heartbeat_seconds)
+    providers = build_providers(
+        config,
+        artifacts_root=root,
+        heartbeat_seconds=heartbeat_seconds,
+        agent_handle_recorder=agent_handle_recorder,
+    )
 
     store = StateStore.open(root / "state.db")
     ledger = Ledger(root / "logs")
-    router = AgentRouter(config, providers)
+    router = AgentRouter(config, providers, is_cancelled=is_cancelled)
     git = GitManager(
         config,
         store=store,

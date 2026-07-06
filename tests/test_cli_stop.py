@@ -67,6 +67,20 @@ def test_busy_interactive_yes_is_soft(
     assert decision.level == "soft"  # typed YES never escalates to a hard kill
 
 
+def test_busy_interactive_prompt_names_force_full_as_interrupt_now(
+    monkeypatch: pytest.MonkeyPatch, make_git_config: _ConfigFactory, tmp_path
+) -> None:
+    # The busy prompt must point the operator at --force-full to interrupt the running agent NOW
+    # (soft only finishes the current step) — the discoverability gap the ADR closes.
+    captured: list[str] = []
+    monkeypatch.setattr(cli, "has_active_task", lambda _c: True)
+    monkeypatch.setattr(cli, "_confirm_yes", lambda prompt: captured.append(prompt) or False)
+    cli._resolve_stop_level(
+        make_git_config(tmp_path / "clone"), force=False, force_full=False, interactive=True
+    )
+    assert captured and "--force-full" in captured[0]
+
+
 def test_busy_interactive_declined_aborts_zero(
     monkeypatch: pytest.MonkeyPatch, make_git_config: _ConfigFactory, tmp_path
 ) -> None:
@@ -167,6 +181,22 @@ def test_cmd_stop_busy_no_flag_non_tty_refuses(
     rc = cli.cmd_stop(cli.build_parser().parse_args(["stop"]))
     assert rc == 1
     assert "called" not in captured  # never reached stop_process
+
+
+def test_cmd_stop_non_interactive_refuses_busy_without_prompting_even_on_a_tty(
+    monkeypatch: pytest.MonkeyPatch, make_git_config: _ConfigFactory, tmp_path
+) -> None:
+    # H1: even with a TTY (the console's stdin), --non-interactive forces the refuse-with-flags path
+    # instead of _confirm_yes()/input() — the console passes it so a busy `down` never blocks on
+    # input() inside the prompt_toolkit REPL.
+    config = make_git_config(tmp_path / "clone")
+    captured = _patch_stop(monkeypatch, config, active=True, tty=True)
+    monkeypatch.setattr(
+        cli, "_confirm_yes", lambda _p: (_ for _ in ()).throw(AssertionError("must not prompt"))
+    )
+    rc = cli.cmd_stop(cli.build_parser().parse_args(["stop", "--non-interactive"]))
+    assert rc == 1
+    assert "called" not in captured  # refused; never reached stop_process
 
 
 def test_cmd_stop_reports_group_kill(
