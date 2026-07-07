@@ -76,6 +76,51 @@ def test_multiple_global_primaries_are_rejected(base_config: OrchestratorConfig)
     assert any("exactly one provider must set primary" in issue for issue in exc.value.issues)
 
 
+def _codex_primary(config: OrchestratorConfig) -> OrchestratorConfig:
+    """Flip the packaged global primary claude->codex (allowed stays [claude, codex])."""
+    providers = {
+        ProviderId.CODEX: replace(config.agents.providers[ProviderId.CODEX], primary=True),
+        ProviderId.CLAUDE: replace(config.agents.providers[ProviderId.CLAUDE], primary=False),
+    }
+    return _with_agents(config, providers=providers)
+
+
+def test_supervisor_provider_not_in_allowed_is_rejected(base_config: OrchestratorConfig) -> None:
+    # F39: an explicit supervisor.provider is validated ∈ agents.allowed, symmetric with flow nodes.
+    cfg = replace(
+        _with_agents(base_config, allowed=(ProviderId.CLAUDE,)),
+        supervisor=replace(base_config.supervisor, provider=ProviderId.CODEX),
+    )
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("supervisor.provider" in issue for issue in exc.value.issues)
+
+
+def test_supervisor_reasoning_valid_for_pinned_provider(base_config: OrchestratorConfig) -> None:
+    # F39: reasoning is checked against the pinned provider (codex), not the primary (claude).
+    # `minimal` is codex-only, so it is valid here even though the primary is claude.
+    cfg = replace(
+        base_config,
+        supervisor=replace(base_config.supervisor, provider=ProviderId.CODEX, reasoning="minimal"),
+    )
+    assert validate_config(cfg) == []
+
+
+def test_supervisor_reasoning_rejected_against_pinned_provider(
+    base_config: OrchestratorConfig,
+) -> None:
+    # F39: primary=codex but the supervisor is pinned to claude; `minimal` is codex-only, so it is
+    # rejected against the RESOLVED supervisor provider (claude) — proving reasoning no longer
+    # resolves through the global primary (which would have accepted it).
+    cfg = replace(
+        _codex_primary(base_config),
+        supervisor=replace(base_config.supervisor, provider=ProviderId.CLAUDE, reasoning="minimal"),
+    )
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("supervisor.reasoning" in issue for issue in exc.value.issues)
+
+
 def test_max_total_below_max_fix_cycles_is_rejected(base_config: OrchestratorConfig) -> None:
     bad = _with_agents(base_config, max_fix_cycles=5, max_total_fix_iterations=3)
     with pytest.raises(ConfigError) as exc:

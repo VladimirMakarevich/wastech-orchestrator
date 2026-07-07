@@ -188,14 +188,17 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "dynamic": False,
             "strict": False,
         },
-        # F2: resolve concrete, visible supervisor model/reasoning rather than an implicit "inherit
-        # from primary" (null). The oversight layer writes summary / follow-ups / memory-delta, so
-        # its model+effort should be transparent. `reasoning` is deliberately NOT a max tier — xhigh
-        # makes the structured finalize turn fragile (F7b).
+        # F2: resolve concrete, visible supervisor model/reasoning/provider rather than an implicit
+        # "inherit from primary" (null). The oversight layer writes summary / follow-ups /
+        # memory-delta, so its model+effort should be transparent. `reasoning` is deliberately NOT a
+        # max tier — xhigh makes the structured finalize turn fragile (F7b). `provider` is pinned to
+        # the primary so it stays aligned with `model` (also the primary's default) by construction
+        # (F39) — an operator flipping the primary keeps a self-consistent supervisor.
         "supervisor": {
             "role_file": "roles/supervisor.md",
             "model": _PROVIDER_DEFAULTS[primary_pid][0],
             "reasoning": "high",
+            "provider": primary_pid.value,
         },
         "logging": {
             "level": "info",

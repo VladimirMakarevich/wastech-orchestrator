@@ -187,16 +187,21 @@ def _validate_paths(config: OrchestratorConfig, issues: list[str]) -> None:
 def _validate_supervisor(config: OrchestratorConfig, issues: list[str]) -> None:
     """The supervisor layer is validated under the same ceiling as a flow node (P2.1).
 
-    ``permission_profile`` is forced ``read-only`` in code (the layer never writes), and
-    ``reasoning`` resolves through the global primary provider; here we also enforce that
-    ``role_file`` contains no path traversal (``..`` or an absolute path) — the same containment
-    rule the flow validator applies to a node ``role_file``.
+    ``permission_profile`` is forced ``read-only`` in code (the layer never writes). ``provider``
+    (when set) must be in ``agents.allowed`` and ``reasoning`` must be supported by the resolved
+    provider (the explicit ``supervisor.provider``, or the global primary when absent) — symmetric
+    with flow-node validation. Model is passed through unverified, as everywhere. We also enforce
+    that ``role_file`` has no path traversal (``..`` or an absolute path) — the flow validator's
+    containment rule for a node ``role_file``.
     """
-    primary = _global_primary(config)
-    if primary is not None:
+    provider = config.supervisor.provider
+    if provider is not None and provider not in frozenset(config.agents.allowed):
+        issues.append(f"supervisor.provider {provider.value!r} is not in agents.allowed")
+    resolved = provider or _global_primary(config)
+    if resolved is not None:
         _check_reasoning(
             where="supervisor.reasoning",
-            provider=primary,
+            provider=resolved,
             reasoning=config.supervisor.reasoning,
             issues=issues,
         )

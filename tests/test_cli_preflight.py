@@ -35,9 +35,16 @@ def _reset_package_logger() -> Iterator[None]:
 
 
 class _FakeHealthProvider:
-    def __init__(self, provider_id: str, *, healthy: bool = True) -> None:
+    def __init__(
+        self,
+        provider_id: str,
+        *,
+        healthy: bool = True,
+        degraded_reasons: tuple[str, ...] = (),
+    ) -> None:
         self.id = provider_id
         self._healthy = healthy
+        self._degraded_reasons = degraded_reasons
 
     def preflight(self) -> ProviderHealth:
         return ProviderHealth(
@@ -47,6 +54,7 @@ class _FakeHealthProvider:
             authenticated=self._healthy,
             supports_required_features=self._healthy,
             message="available" if self._healthy else "executable not found",
+            degraded_reasons=self._degraded_reasons,
         )
 
     def run(self, request: AgentRunRequest) -> object:  # pragma: no cover - never called
@@ -62,12 +70,20 @@ def _patch_providers(
     config: object,
     *,
     gh_result: tuple[bool, str] = (True, "gh: OK"),
+    degraded: dict[str, tuple[str, ...]] | None = None,
     **healthy: bool,
 ) -> None:
     monkeypatch.setattr(cli, "_load_config", lambda _path: config)
+    degraded = degraded or {}
     providers = {
-        ProviderId.CLAUDE: _FakeHealthProvider("claude", healthy=healthy.get("claude", True)),
-        ProviderId.CODEX: _FakeHealthProvider("codex", healthy=healthy.get("codex", True)),
+        ProviderId.CLAUDE: _FakeHealthProvider(
+            "claude",
+            healthy=healthy.get("claude", True),
+            degraded_reasons=degraded.get("claude", ()),
+        ),
+        ProviderId.CODEX: _FakeHealthProvider(
+            "codex", healthy=healthy.get("codex", True), degraded_reasons=degraded.get("codex", ())
+        ),
     }
     monkeypatch.setattr(cli, "build_providers", lambda _c, *, artifacts_root: providers)
     monkeypatch.setattr(cli, "preflight_gh", lambda: gh_result)
@@ -94,6 +110,49 @@ def test_preflight_not_ready_when_a_binary_is_missing(
     out = capsys.readouterr().out
     assert rc == 1
     assert "codex: FAIL" in out
+    assert "preflight: NOT ready" in out
+
+
+def test_preflight_degraded_warns_when_fallback_exists(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # F38: an advisory degradation (e.g. codex resume-grammar drift) is a WARNING, not fatal, when a
+    # fallback provider is allowed — the fallback covers the degraded nodes. Preflight stays ready.
+    _patch_providers(
+        monkeypatch,
+        make_git_config(git_repo.clone),  # allowed: [claude, codex]
+        degraded={"codex": ("codex exec resume grammar drift",)},
+    )
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "codex: WARN — codex exec resume grammar drift (a fallback provider will cover)" in out
+    assert "preflight: ready" in out
+
+
+def test_preflight_degraded_fails_without_fallback(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # F38: the same degradation is FATAL when codex is the sole allowed provider — no fallback to
+    # cover the degraded resume nodes, so preflight is NOT ready.
+    base = make_git_config(git_repo.clone)
+    codex_only = replace(
+        base,
+        agents=replace(
+            base.agents,
+            allowed=(ProviderId.CODEX,),
+            providers={
+                ProviderId.CODEX: replace(base.agents.providers[ProviderId.CODEX], primary=True),
+            },
+        ),
+    )
+    _patch_providers(
+        monkeypatch, codex_only, degraded={"codex": ("codex exec resume grammar drift",)}
+    )
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "codex: FAIL — codex exec resume grammar drift (no fallback provider)" in out
     assert "preflight: NOT ready" in out
 
 

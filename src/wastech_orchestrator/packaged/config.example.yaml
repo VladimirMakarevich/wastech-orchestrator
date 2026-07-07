@@ -3,7 +3,7 @@
 # This is the packaged copy used by `wastech-orchestrator init`; keep it in sync with the
 # repo-root config.example.yaml
 
-schema_version: 26                  # config format version; the orchestrator refuses newer configs
+schema_version: 27                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -226,6 +226,7 @@ supervisor:                          # constant oversight layer above any flow â
   role_file: "roles/supervisor.md"  # role prompt for the supervisor; path-contained under roles/
   model: "claude-opus-4-8"          # null = use the global primary provider's default model
   reasoning: medium                 # null = use the global primary provider's default reasoning
+  provider: claude                  # null = inherit the global primary; pin (âˆˆ agents.allowed) to keep aligned with model's vendor
 
 logging:                            # operator log verbosity + on-disk artifact retention (optional)
   level: info                       # debug | info | warning | error. Persists the structured operator

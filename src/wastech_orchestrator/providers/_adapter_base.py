@@ -261,6 +261,7 @@ class BaseCliProvider:
             authenticated=True,
             supports_required_features=version is not None,
             message=f"{label} {version or 'unknown version'} available",
+            degraded_reasons=self._preflight_degraded_reasons(env),
         )
 
     def _preflight_capability_error(self, env: Mapping[str, str]) -> str | None:
@@ -272,6 +273,16 @@ class BaseCliProvider:
         probe (via :meth:`_probe`). Default: no extra checks.
         """
         return None
+
+    def _preflight_degraded_reasons(self, env: Mapping[str, str]) -> tuple[str, ...]:
+        """Subclass hook: provider-specific degradations that depend on a fallback to be non-fatal.
+
+        Unlike :meth:`_preflight_capability_error` (an unconditional block), these are advisory: a
+        warning when a fallback provider exists, fatal only when this is the sole allowed provider.
+        ``run_preflight`` applies that fallback-aware verdict — the adapter only detects (it knows
+        CLI syntax; it does not know ``agents.allowed``). Default: none.
+        """
+        return ()
 
     def _probe(self, argv: list[str], env: Mapping[str, str]) -> tuple[bool, str]:
         """Run a short, read-only probe command (e.g. ``<cli> … --help``) for a capability check.

@@ -225,14 +225,26 @@ def test_no_reasoning_means_no_reasoning_effort_flag(
 def test_session_id_builds_exec_resume(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # Durable sessions (P2.2): a session id builds ``codex exec resume <SESSION_ID>`` (verified on
-    # codex-cli 0.139.0) — resume right after exec, the id positional, the prompt still on stdin,
-    # and the global security flags preserved.
-    argv = _argv(codex_config, make_request(session_id="sess-123"))
-    assert argv[argv.index("exec") + 1] == "resume"
-    assert argv[argv.index("resume") + 1] == "sess-123"
+    # Durable sessions (P2.2): a session id builds ``codex exec [exec-options] resume <ID>``.
+    # codex 0.142.x grammar (F38): exec-level options (--cd/--sandbox/--json/--output-last-message/
+    # --output-schema, network -c) MUST precede the ``resume`` subcommand; only -m/--model and
+    # -c/--config (model_reasoning_effort) follow it. The id is positional; the prompt is on stdin.
+    argv = _argv(
+        codex_config,
+        make_request(session_id="sess-123", model="gpt-5.4", reasoning="high", network_access=True),
+        schema="/logs/schema.json",
+    )
+    resume = argv.index("resume")
+    assert argv[resume + 1] == "sess-123"  # id positional right after resume
+    # exec-level options precede resume (the F38 fix: `--cd` before `resume`, not after).
+    for flag in ("--cd", "--sandbox", "--json", "--output-last-message", "--output-schema"):
+        assert argv.index(flag) < resume, f"{flag} must precede resume"
+    assert argv.index("sandbox_workspace_write.network_access=true") < resume  # network -c is exec
+    # resume-compatible options follow the subcommand.
+    assert argv.index("--model") > resume
+    assert argv.index('model_reasoning_effort="high"') > resume  # reasoning -c is resume-compatible
     assert argv[-1] == "-"  # prompt still comes from stdin
-    assert "--sandbox" in argv and "--ask-for-approval" in argv  # security flags preserved
+    assert "--ask-for-approval" in argv  # security flags preserved
     assert argv[argv.index("--output-last-message") + 1] == LAST_MSG
 
 

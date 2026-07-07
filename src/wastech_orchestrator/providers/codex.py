@@ -143,11 +143,11 @@ def build_codex_argv(
         "never",
         "exec",
     ]
-    # Durable session resume (P2.2; verified on codex-cli 0.139.0): ``codex exec resume <ID>``
-    # continues the prior session and accepts the same global security flags + exec options. The
-    # SESSION_ID is positional, right after ``resume``; the follow-up prompt is read from stdin (-).
-    if request.session_id:
-        argv += ["resume", request.session_id]
+    # Exec-level options belong to parent ``codex exec`` and MUST precede the optional ``resume``
+    # subcommand (codex 0.142.x grammar: ``codex exec [OPTIONS] resume [SESSION_ID] [PROMPT]``).
+    # --cd / --sandbox / --json / --output-last-message / --output-schema and the network -c are
+    # exec options; placing any after ``resume`` is rejected (unexpected argument '--cd', exit 2).
+    # Only -m/--model and -c/--config are accepted by ``resume`` itself, so those go after it below.
     argv += [
         "--cd",
         request.working_directory,
@@ -164,10 +164,15 @@ def build_codex_argv(
         argv += ["-c", "sandbox_workspace_write.network_access=true"]
     if output_schema_path is not None:
         argv += ["--output-schema", output_schema_path]
+    # Durable session resume (P2.2): ``codex exec [exec-options] resume <SESSION_ID>`` continues the
+    # prior session. SESSION_ID is positional right after ``resume``; the prompt is read from stdin
+    # (-). --model and model_reasoning_effort (-c) are resume-compatible, so they follow the
+    # subcommand; on the fresh path (no subcommand) they follow the exec options.
+    if request.session_id:
+        argv += ["resume", request.session_id]
     model = request.model or config.model
     if model:
         argv += ["--model", model]
-    # Session resume is handled above via ``exec resume <SESSION_ID>`` (durable sessions, P2.2).
     reasoning = request.reasoning or config.reasoning
     if reasoning:
         effort = normalize_codex_reasoning(reasoning)
@@ -311,6 +316,31 @@ class CodexProvider(BaseCliProvider):
                 "Codex reasoning/network overrides"
             )
         return None
+
+    def _preflight_degraded_reasons(self, env: Mapping[str, str]) -> tuple[str, ...]:
+        """Confirm ``codex exec resume`` still accepts the options this adapter places after it.
+
+        The resume argv is ``codex exec [exec-options] resume <SESSION_ID> --model .. -c ..`` — only
+        ``-m/--model`` and ``-c/--config`` are valid after the ``resume`` subcommand. A future Codex
+        that drops ``resume`` or those options would silently break every resume node (supervisor,
+        documentation, rework, fixing). Probe ``codex exec resume --help`` and flag the drift so
+        preflight surfaces it — fatal only when codex has no fallback provider (decided upstream),
+        else a warning. Light grep contract (like the ``-c/--config`` probe): empty output is
+        inconclusive (no flag); passes on the current 0.142.x grammar.
+        """
+        ok, help_text = self._probe([self._config.command, "exec", "resume", "--help"], env)
+        if not help_text.strip():
+            return ()  # inconclusive — the probe produced nothing to grep
+        has_model = "--model" in help_text or "-m" in help_text
+        has_config = "--config" in help_text or "-c" in help_text
+        if ok and has_model and has_config:
+            return ()
+        return (
+            "codex exec resume no longer accepts the -m/--model and -c/--config options this "
+            "adapter places after `resume <SESSION_ID>` (Codex CLI grammar drift); resume nodes "
+            "(supervisor, documentation, rework, fixing) will fail on codex — pin a compatible "
+            "Codex CLI or route these nodes to another provider",
+        )
 
     def _signatures(self) -> Sequence[StderrSignature]:
         return _CODEX_SIGNATURES

@@ -399,10 +399,13 @@ def test_preflight_missing_binary(
 
 
 class _ProbingFakeRun:
-    """A fake runner answering ``--version`` and ``exec --help`` probes differently (by argv)."""
+    """A fake runner answering ``--version``, ``exec --help`` and ``exec resume --help`` by argv."""
 
-    def __init__(self, *, help_has_config: bool) -> None:
+    def __init__(self, *, help_has_config: bool, resume_help: str | None = None) -> None:
         self._help_has_config = help_has_config
+        # Canned ``codex exec resume --help`` text; None => the healthy 0.142.x form advertising the
+        # -m/--model and -c/--config options this adapter places after ``resume`` (F38 probe).
+        self._resume_help = resume_help
         self.argvs: list[list[str]] = []
 
     def __call__(
@@ -419,6 +422,15 @@ class _ProbingFakeRun:
         self.argvs.append(list(argv))
         if "--version" in argv:
             out = "codex-cli 0.139.0\n"
+        elif "exec" in argv and "resume" in argv and "--help" in argv:
+            # Must be checked before the plain ``exec --help`` branch (that also matches).
+            if self._resume_help is None:
+                out = (
+                    "Usage: codex exec resume [SESSION_ID] [PROMPT]\n"
+                    "  -m, --model <M>\n  -c, --config <key=value>\n"
+                )
+            else:
+                out = self._resume_help
         elif "exec" in argv and "--help" in argv:
             out = "Usage: codex exec [OPTIONS]\n  --model <M>\n"
             if self._help_has_config:
@@ -497,3 +509,44 @@ def test_preflight_probes_config_support_when_reasoning_unset(
     health = provider.preflight()
     assert health.supports_required_features is True
     assert any("--help" in argv for argv in fake.argvs)
+
+
+def test_preflight_no_resume_grammar_drift_on_current_codex(
+    codex_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # F38: `codex exec resume --help` advertising -m/--model and -c/--config (the 0.142.x form)
+    # yields no degradation — the resume argv this adapter builds is valid.
+    fake = _ProbingFakeRun(help_has_config=True)
+    provider = CodexProvider(
+        codex_config,
+        security=security_config,
+        artifacts_root=tmp_path,
+        clock=lambda: FIXED_TIME,
+        run_process=fake,
+    )
+    health = provider.preflight()
+    assert health.supports_required_features is True
+    assert health.degraded_reasons == ()
+    assert any("resume" in argv and "--help" in argv for argv in fake.argvs)
+
+
+def test_preflight_flags_resume_grammar_drift(
+    codex_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # F38: a future `codex exec resume --help` that no longer advertises -m/-c means the options the
+    # adapter places after `resume` would be rejected — surfaced as an advisory degradation (fatal
+    # only without a fallback; `run_preflight` decides). It is NOT a hard capability block.
+    fake = _ProbingFakeRun(
+        help_has_config=True, resume_help="Usage: codex exec resume [SESSION_ID]\n"
+    )
+    provider = CodexProvider(
+        codex_config,
+        security=security_config,
+        artifacts_root=tmp_path,
+        clock=lambda: FIXED_TIME,
+        run_process=fake,
+    )
+    health = provider.preflight()
+    assert health.supports_required_features is True  # not a hard block on its own
+    assert health.degraded_reasons
+    assert "resume" in health.degraded_reasons[0]

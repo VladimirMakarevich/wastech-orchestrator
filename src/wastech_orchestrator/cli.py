@@ -1927,6 +1927,15 @@ def run_preflight(config: OrchestratorConfig) -> tuple[bool, list[str]]:
             f"{pid.value}: {'OK' if healthy else 'FAIL'} — {health.message} "
             f"(version={health.version or 'unknown'}, authenticated={health.authenticated})"
         )
+        # Advisory degradations are fatal only when this provider has no fallback (it is the sole
+        # allowed provider), else a warning — a fallback provider will cover the degraded nodes.
+        has_fallback = any(other != pid for other in config.agents.allowed)
+        for reason in health.degraded_reasons:
+            if has_fallback:
+                lines.append(f"{pid.value}: WARN — {reason} (a fallback provider will cover)")
+            else:
+                ok = False
+                lines.append(f"{pid.value}: FAIL — {reason} (no fallback provider)")
 
     reasons = check_isolation(config)
     if reasons:

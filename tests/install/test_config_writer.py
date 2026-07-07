@@ -154,6 +154,8 @@ def test_generated_config_includes_optional_sections(tmp_path: Path) -> None:
     assert cfg.supervisor.model == "claude-sonnet-4-6"
     assert cfg.supervisor.reasoning == "high"
     assert cfg.supervisor.reasoning not in ("xhigh", "max")  # F7b: default must not be fragile
+    # F39: provider is pinned to the primary so it stays aligned with `model` (also the primary's).
+    assert cfg.supervisor.provider == ProviderId.CLAUDE
     # F1: the dynamic skill layer is off out of the box (opt-in).
     assert cfg.skills.dynamic is False
     assert cfg.skills.strict is False
@@ -173,6 +175,8 @@ def test_supervisor_model_tracks_the_global_primary(tmp_path: Path) -> None:
     cfg = loads_config(build_and_validate(_spec(tmp_path, (ProviderId.CODEX,)))).config
     assert cfg.supervisor.model == "gpt-5.5"
     assert cfg.supervisor.reasoning == "high"
+    # F39: a codex-primary install pins supervisor.provider to codex, aligned with the codex model.
+    assert cfg.supervisor.provider == ProviderId.CODEX
 
 
 @pytest.mark.parametrize(

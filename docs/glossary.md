@@ -139,6 +139,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`supervisor.role_file`** - Role prompt file used by the supervisor.
 - **`supervisor.model`** - Provider model used by the supervisor, when set.
 - **`supervisor.reasoning`** - Reasoning level used by the supervisor, when set.
+- **`supervisor.provider`** - Provider the supervisor layer runs on (`codex`/`claude`); absent → the global primary. Validated ∈ `agents.allowed`, symmetric with flow nodes.
 - **`prompt_audit`** - Global default for prompt recording. A per-task value can override it.
 
 ## Flow vocabulary
