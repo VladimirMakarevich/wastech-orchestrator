@@ -677,7 +677,7 @@ def _build_supervisor(raw: Any, issues: list[str]) -> SupervisorConfig:
     if raw is None:
         return SupervisorConfig()
     m = _mapping(raw, where, issues)
-    _check_keys(m, {"role_file", "model", "reasoning"}, where, issues)
+    _check_keys(m, {"role_file", "model", "reasoning", "provider"}, where, issues)
     reasoning = _opt_str(m, "reasoning", where, issues)
     if reasoning is not None and reasoning not in _REASONING_LEVELS:
         issues.append(
@@ -685,10 +685,18 @@ def _build_supervisor(raw: Any, issues: list[str]) -> SupervisorConfig:
             f"expected one of {sorted(_REASONING_LEVELS)}"
         )
         reasoning = None
+    provider_raw = _opt_str(m, "provider", where, issues)
+    provider: ProviderId | None = None
+    if provider_raw is not None:
+        try:
+            provider = ProviderId(provider_raw)
+        except ValueError:
+            issues.append(f"{where}.provider: unknown provider {provider_raw!r}")
     return SupervisorConfig(
         role_file=_str(m, "role_file", "roles/supervisor.md", where, issues),
         model=_opt_str(m, "model", where, issues),
         reasoning=reasoning,
+        provider=provider,
     )
 
 

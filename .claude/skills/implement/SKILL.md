@@ -40,7 +40,7 @@ Run these phases in order. Skip a phase only when it plainly doesn't apply, and 
 - **`/simplify-task`** — find the simplest sound approach for the agreed task; strip speculative generality, premature config/abstraction, and back-compat scaffolding before writing anything.
 - Land on a short plan: the modules/seams touched, the config/schema keys involved (and version bumps if config/state.db change), and the tests you'll add or change. For a non-trivial or multi-part task, use `TodoWrite` to track the steps.
 
-### 3. Branch (see [git-workflow.md](../../../.agents/rules/git-workflow.md))
+### 3. Branch (see [git-workflow.md](../../../.agents/rules/git-workflow.md)) (OPTIONAL)
 
 - Develop the orchestrator itself on a branch off `main`: `feat/<slug>`, `fix/<slug>`, `docs/<slug>`, or `chore/<slug>`. **Never commit to `main` directly** unless the user explicitly asks and it's already the working branch.
 - If the task is a phase of an existing epic branch (check memory / the user), land the phase there instead — one squashed commit per phase.

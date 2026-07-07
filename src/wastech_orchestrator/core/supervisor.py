@@ -700,7 +700,7 @@ class Supervisor:
         it reseeds from the recorded observations instead (the digest rides in the prompt).
         """
         try:
-            route = self._router.resolve_route(_SUPERVISOR_IDENTITY, None)
+            route = self._router.resolve_route(_SUPERVISOR_IDENTITY, self._settings.provider)
             request = AgentRunRequest(
                 task_id=task_id,
                 node_id=_SUPERVISOR_IDENTITY,

@@ -136,7 +136,12 @@ from wastech_orchestrator.providers.base import ProviderId
 # `new`) — the instance default for where task git operations point. Absent => `new` (today's
 # create-from-base behavior exactly); a per-task `branch_mode` overrides it. Old configs load
 # fail-open with the default and `upgrade-config` adds it from the template.
-CONFIG_SCHEMA_VERSION = 26
+# v27 (2026-07-07, supervisor-provider): adds the optional `supervisor.provider` (codex|claude,
+# default null = inherit the global primary). Lets the supervisor layer pin its own provider so its
+# `model` reaches a provider that accepts it (fixes claude-model-on-codex under a codex primary);
+# validated ∈ `agents.allowed` and for reasoning support, symmetric with flow nodes. Absent =>
+# inherit primary (today's behavior exactly). Old configs load fail-open; `upgrade-config` adds it.
+CONFIG_SCHEMA_VERSION = 27
 
 
 class AuditBranch(StrEnum):
@@ -437,12 +442,15 @@ class SupervisorConfig:
     ceiling as flow nodes: ``permission_profile`` is forced ``read-only`` in code, ``reasoning`` ∈
     the allowlist (loader), and ``role_file`` is path-contained (validator). The own session is
     in-memory in P2.1; durable ``resume_own_lineage`` is P2.2. ``model``/``reasoning`` empty → the
-    provider default; the layer runs on the global primary provider.
+    provider default. ``provider`` empty → the global primary; set it (validated in
+    ``agents.allowed``) to pin the layer to a provider — e.g. keep the supervisor on claude while
+    the primary is codex, so its ``model`` reaches a provider that accepts it.
     """
 
     role_file: str = "roles/supervisor.md"
     model: str | None = None
     reasoning: str | None = None
+    provider: ProviderId | None = None
 
 
 @dataclass(frozen=True)

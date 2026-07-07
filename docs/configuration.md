@@ -34,10 +34,10 @@ Exactly one configured provider must set `primary: true` — the **global primar
 ## `schema_version`
 
 ```yaml
-schema_version: 26
+schema_version: 27
 ```
 
-Optional top-level integer marking the `config.yaml` **format** version (current: `26`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
+Optional top-level integer marking the `config.yaml` **format** version (current: `27`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
 
 ## Config Discovery
 
@@ -682,13 +682,14 @@ A skill is addressed by its globally-unique frontmatter `name`, or — on a name
 
 ## `supervisor`
 
-Configures the **constant supervisor layer** — a per-task oversight layer that lives _above_ any flow. It is **not a node and not a stage**: there is no `summary` node in any packaged flow because the supervisor owns the summary. The block is optional; when omitted it takes the defaults below. `worc install` **writes the block with concrete values** — `model` resolved to the global primary provider's model and `reasoning: high` — so the oversight layer's cost/effort is visible rather than an implicit inherit-from-primary; the reasoning is deliberately not a max tier (`xhigh`/`max` makes the structured finalize turn fragile, so the delivered default stays `high`).
+Configures the **constant supervisor layer** — a per-task oversight layer that lives _above_ any flow. It is **not a node and not a stage**: there is no `summary` node in any packaged flow because the supervisor owns the summary. The block is optional; when omitted it takes the defaults below. `worc install` **writes the block with concrete values** — `model` resolved to the global primary provider's model, `reasoning: high`, and `provider` pinned to the global primary — so the oversight layer's provider/cost/effort is visible rather than an implicit inherit-from-primary; the reasoning is deliberately not a max tier (`xhigh`/`max` makes the structured finalize turn fragile, so the delivered default stays `high`).
 
 ```yaml
 supervisor:
   role_file: "roles/supervisor.md"
   model: "claude-sonnet-4-6" # install writes the primary provider's model; null → provider default
   reasoning: high # install writes a non-max tier; null → provider default
+  provider: claude # install pins the global primary; null → inherit the global primary
 ```
 
 | Field | Type | Default | Meaning |
@@ -696,6 +697,7 @@ supervisor:
 | `role_file` | string | `"roles/supervisor.md"` | Role file (resolved inside the active flow's directory) rendering the supervisor's read-only prompt; a missing/unreadable file falls back to a minimal built-in instruction. |
 | `model` | string or null | `null` (absent block) / primary model (install) | Model for the supervisor's calls; empty/null uses the provider default. A fresh `worc install` resolves it to the global primary provider's model so it is explicit. |
 | `reasoning` | string or null | `null` (absent block) / `high` (install) | Reasoning level (`low`/`medium`/`high`/`xhigh`/`max`); must be a known level. The delivered default is `high`, never a max tier — structured finalize turns are capped to `high` in code, so a max tier would only cost more without effect. |
+| `provider` | `codex` \| `claude` or null | `null` (absent block) / primary (install) | Which provider runs the supervisor layer; empty/null inherits the global primary. Validated ∈ `agents.allowed` and for reasoning support against the **resolved** provider, symmetric with flow nodes. Set it (e.g. `claude`) to keep the layer's `model` on a provider that accepts it when the global primary is the other provider. Model itself is passed through unverified, as everywhere. |
 
 What the layer does (see the [Functional Map](functional/blocks/B31-supervisor.md)):
 
@@ -703,7 +705,7 @@ What the layer does (see the [Functional Map](functional/blocks/B31-supervisor.m
 - After each completed (non-skipped) step it runs **one read-only** observation on its own continuing session (~1 call/step) and records an immutable advisory `supervisor_step` row. Observation is **best-effort**: a failure is logged and swallowed.
 - At whole-task **close** (before `publish` in the `implementation` flow) it synthesizes the plain-language `summary.md` (the PR body) plus advisory caveats and records `supervisor_final`. If the synthesis call cannot run, the orchestrator's **minimal-summary fallback** writes `summary.md` instead — the summary is _always_ produced, by one path or the other. `summary.md` carries **only human prose**: it is prefixed with a deterministic `# {task_title}` H1 (so the PR body is never a headless slab) and the evidence-gated follow-ups render as their own section; a leaked structured dump (a model that emits `<summary>…</summary><follow_ups>…<memory_delta>…` text instead of a clean tool call) is sanitized — cut at the first machine tag — so raw `follow_ups`/`memory_delta`/`lessons` never reach the PR body. A finalize turn that fails on a rerun does not overwrite an existing non-empty `summary.json` with a blank one. Structured finalize turns cap reasoning at `high` (a max tier makes the structured output fragile), independent of the configured `reasoning`.
 
-The layer is **advisory by construction**: it never reworks, reopens, or routes — blocking is the job of the in-flow `review`/evaluator nodes. It runs on the **global primary** provider, and its `permission_profile` is **forced `read-only`** in code (it can never edit), validated under the same ceiling as flow nodes (`reasoning` in the allowlist, `role_file` path-contained).
+The layer is **advisory by construction**: it never reworks, reopens, or routes — blocking is the job of the in-flow `review`/evaluator nodes. It runs on its configured `provider` (the **global primary** unless pinned), and its `permission_profile` is **forced `read-only`** in code (it can never edit), validated under the same ceiling as flow nodes (`provider` ∈ `agents.allowed`, `reasoning` in the allowlist against the resolved provider, `role_file` path-contained).
 
 ## `logging`
 

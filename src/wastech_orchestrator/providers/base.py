@@ -88,6 +88,10 @@ class ProviderHealth:
     authenticated: bool
     supports_required_features: bool
     message: str  # diagnostics without secrets
+    # Advisory degradations that are FATAL only when this provider has no fallback (the sole allowed
+    # provider), else a warning. The adapter detects them (it knows CLI syntax); ``run_preflight``
+    # applies the fallback-aware verdict (it knows ``agents.allowed``). Secret-free by contract.
+    degraded_reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

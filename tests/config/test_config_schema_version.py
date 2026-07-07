@@ -30,5 +30,7 @@ def test_non_integer_schema_version_is_rejected() -> None:
 
 
 def test_packaged_example_declares_and_loads_schema_version(packaged_config_text: str) -> None:
-    assert "schema_version:" in packaged_config_text
+    assert (
+        f"schema_version: {CONFIG_SCHEMA_VERSION}" in packaged_config_text
+    )  # declared == constant
     loads_config(packaged_config_text)  # loads clean with the version present

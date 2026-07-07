@@ -170,6 +170,22 @@ def test_adds_memory_block_from_packaged_template() -> None:
     assert "memory" in added
 
 
+def test_adds_supervisor_provider_from_packaged_template() -> None:
+    # v27 add: an operator supervisor block predating `provider` gains it from the packaged template
+    # (added under the existing block), while keeping its own model/reasoning.
+    template = packaged_template_mapping()
+    operator = {
+        "schema_version": 26,
+        "supervisor": {"role_file": "roles/supervisor.md", "model": "sonnet", "reasoning": "high"},
+    }
+    merged, added, _ = upgrade_config_mapping(template, operator)
+    assert (
+        merged["supervisor"]["provider"] == "claude"
+    )  # from template (packaged primary is claude)
+    assert merged["supervisor"]["model"] == "sonnet"  # operator value preserved
+    assert "supervisor.provider" in added
+
+
 def test_strips_legacy_prompts_block() -> None:
     # config v9 removed the whole `prompts` block; upgrade-config drops it from an operator config.
     template = {"schema_version": CONFIG_SCHEMA_VERSION}

@@ -55,9 +55,11 @@ class FakeRouter:
 
     def __init__(self, results: list[AgentRunResult | None] | None = None) -> None:
         self.requests: list[Any] = []
+        self.route_providers: list[Any] = []  # the provider arg passed to resolve_route per call
         self._results = list(results) if results is not None else None
 
     def resolve_route(self, node_id: str, provider: Any = None) -> ResolvedRoute:
+        self.route_providers.append(provider)
         return ResolvedRoute(
             node_id=node_id, primary=ProviderId.CLAUDE, fallback=None, source=RouteSource.CONFIG
         )
@@ -93,13 +95,14 @@ def _supervisor(
     *,
     model: str | None = None,
     reasoning: str | None = None,
+    provider: ProviderId | None = None,
     flow_supervisor: SupervisorBlock | None = None,
 ) -> Supervisor:
     (tmp_path / "roles").mkdir(exist_ok=True)
     (tmp_path / "roles" / "supervisor.md").write_text("Observe {task_id} in {repo}.", "utf-8")
     return Supervisor(
         settings=SupervisorConfig(
-            role_file="roles/supervisor.md", model=model, reasoning=reasoning
+            role_file="roles/supervisor.md", model=model, reasoning=reasoning, provider=provider
         ),
         router=router,
         store=store,
@@ -132,6 +135,23 @@ def test_supervisor_observes_each_completed_step(tmp_path: Path) -> None:
     assert [e.kind for e in evals] == ["supervisor_step", "supervisor_step"]
     assert [e.source_node_run_id for e in evals] == [5, 7]
     assert all(e.verdict == "advisory" and e.node_id is None for e in evals)
+
+
+def test_supervisor_pins_its_provider_at_route(tmp_path: Path) -> None:
+    # F39: the supervisor resolves the route with its own `provider` (here claude), not an implicit
+    # None-inherits-primary — so its claude model reaches claude even under a codex primary.
+    router, store = FakeRouter(), _store(tmp_path)
+    sup = _supervisor(tmp_path, router, store, provider=ProviderId.CLAUDE)
+    sup.observe(task_id=_TASK, node_id="implementation", node_run_id=5, outcome_kind="done")
+    assert router.route_providers == [ProviderId.CLAUDE]
+
+
+def test_supervisor_inherits_primary_when_provider_unset(tmp_path: Path) -> None:
+    # Default (no supervisor.provider) still passes None -> router falls back to the global primary.
+    router, store = FakeRouter(), _store(tmp_path)
+    sup = _supervisor(tmp_path, router, store)
+    sup.observe(task_id=_TASK, node_id="implementation", node_run_id=5, outcome_kind="done")
+    assert router.route_providers == [None]
 
 
 def test_supervisor_session_is_durable_across_restart(tmp_path: Path) -> None:
@@ -797,7 +817,19 @@ def test_supervisor_config_from_config_yaml(packaged_config_text: str) -> None:
     assert config.supervisor.model == "sonnet"
     assert config.supervisor.reasoning == "high"
     assert config.supervisor.role_file == "roles/supervisor.md"
+    assert config.supervisor.provider is None  # absent key => inherit the global primary
     validate_config(config)  # passes the ceiling (read-only forced in code, allowlist, containment)
+
+
+def test_supervisor_config_provider_parsed(packaged_config_text: str) -> None:
+    block = "supervisor:\n  provider: codex\n  model: gpt-5.5\n  reasoning: high\n"
+    config = _config_with_supervisor(packaged_config_text, block)
+    assert config.supervisor.provider == ProviderId.CODEX
+
+
+def test_supervisor_unknown_provider_rejected(packaged_config_text: str) -> None:
+    with pytest.raises(ConfigError, match="provider"):
+        _config_with_supervisor(packaged_config_text, "supervisor:\n  provider: gemini\n")
 
 
 def test_supervisor_absent_section_defaults(packaged_config_text: str) -> None:

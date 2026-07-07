@@ -106,6 +106,25 @@
 
 ---
 
+## Проход 15 — что проверено (2026-07-07), первый прогон с codex-primary
+
+Задача `p5-01-classify-nodes` → `done`, PR [#11](https://github.com/VladimirMakarevich/wastech-mdlint/pull/11), `fix_iterations=0`. Перед прогоном (по команде оператора) конфиг переключён: глобальный `primary` claude→**codex `gpt-5.4`/`xhigh`**, рабочие узлы флоу перепинены на codex, review перевёрнут на **claude `opus-4-8`/high**. Находки — [TEST-FINDINGS.md](TEST-FINDINGS.md) **F38–F39**. Отчёт: [docs/analysis/p5-01-classify-nodes-run-analysis.md](docs/analysis/p5-01-classify-nodes-run-analysis.md).
+
+**Подтверждено этим прогоном (`[x]` — наблюдалось в артефактах):**
+
+- [x] **Глобальный primary=codex реально маршрутизирует незапиненные + codex-пинненные узлы на codex**: `route resolved primary=codex fallback=claude` на planning/implementation/documentation (`p5-01-run.log`); codex **fresh**-сессии planning (356s) и implementation (255s) — `provider_attempts` `succeeded` exit 0.
+- [x] **§12 per-node override в ОБЕ стороны на flow-уровне**: review перевёрнут на claude (`route resolved node_id=review primary=claude fallback=codex source=flow_node`; `stages/review/run-000112/1-claude` `succeeded`), рабочие узлы — на codex. Task-front-matter уровень по-прежнему НЕ проверялся.
+- [x] **§15 симметричный fallback codex→claude на ГЛОБАЛЬНОМ primary** (не только на запиненном evaluator, как в F24): documentation codex `unsupported_version` → claude `succeeded` (`state.db provider_attempts`; `p5-01-run.log` `msg="falling back" from=codex to=claude`).
+- [x] **Кросс-провайдерный fallback сбрасывает и модель, и сессию**: documentation-fallback `request.json` — `session_id: None` (свежая сессия, argv без `resume`), `--model claude-opus-4-8` (НЕ утёкший codex `gpt-5.4`); контекст «что зашипано» подан через `plan_path`+`diff_path` в промпте. Подтверждает фикс cross-provider-model-leak в направлении codex→claude.
+- [x] **Checks-гейт**: 4/4 `check_runs` passed (typecheck/lint/test/build, exit 0, 0 timeout).
+- [x] **review-evaluator на claude дал `accept` с 0 findings** (`review/findings.json` = `{"findings": []}`, `state.db evaluations` `in_flow_verdict=accept`); diff чистый и в скоупе (4 файла, +257/−3).
+
+**Вскрытые дефекты (F38–F39):** 🔴 **F38** codex `exec resume` строится с `--cd`/`--sandbox`/`--model`, которые codex 0.142.5 отвергает → ВСЕ resume-узлы (supervisor ×6, documentation) падают на codex и уходят в fallback (HIGH); **F39** `supervisor` имеет `model` без `provider` → под codex-primary уводит `--model claude-opus-4-8` на codex (MEDIUM).
+
+**Не наблюдалось в этом прогоне:** codex resume-путь успешно (F38 — падал 100%); fix-loop (`fixing`/`review_fix_cycles`>0 — review принял с первого раза); HITL-пауза; decomposition; MANUAL_ACTION_REQUIRED; single-provider=codex.
+
+---
+
 ## 1. Branch name: epoch-префикс + ограничение длины
 
 **Файл:** `archive/done/branch-name-epoch-and-slug-limit.md` · **Статус:** implemented 2026-06-26
