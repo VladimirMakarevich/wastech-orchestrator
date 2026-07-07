@@ -125,6 +125,44 @@
 
 ---
 
+## Проход 16 — что проверено (2026-07-07), codex-primary на 0.8.9a3 (фикс F38/F39)
+
+Задача `p5-02-doc-profile` → `done`, PR [#11](https://github.com/VladimirMakarevich/wastech-mdlint/pull/11) reuse (2-й коммит), `fix_iterations=0`, на ветке `feat/p5-compile` (`branch_mode: existing`). Версия **0.8.9a3** (доставлен фикс ADR codex-primary-correctness). Находки — [TEST-FINDINGS.md](TEST-FINDINGS.md): **F38 VERIFIED FIXED**, **F39 CONFIRMED (не закрыт в конфиге)**, новая **F40**. Отчёт: [docs/analysis/p5-02-doc-profile-run-analysis.md](docs/analysis/p5-02-doc-profile-run-analysis.md).
+
+**Подтверждено этим прогоном (`[x]` — наблюдалось в артефактах):**
+
+- [x] **F38 VERIFIED FIXED**: codex resume-путь рабочий. `stages/documentation/run-000120/1-codex/request.json` argv — exec-опции (`--cd`/`--sandbox`/`--json`/`--output-last-message`) **до** `resume [SESSION_ID]`, `--model gpt-5.4`/`-c` после; documentation `provider_attempts codex attempt=1 succeeded exit 0` (77s), **без fallback** (в Проходе 15 падал `unsupported_version`).
+- [x] **§24 `branch_mode: existing` + PR reuse (повторно)**: p5-02 на `feat/p5-compile` добавил 2-й коммит (`git log`: `feat(p5-02-doc-profile)` над `feat(p5-01-classify-nodes)`), PR #11 переиспользован (ledger `pr_url` тот же, не #12).
+- [x] **§13 `worc run` refuse на unmerged `depends_on`** (новое наблюдение, F40): первый запуск p5-02 отказан `dependency 'p5-01' PR is OPEN (unmerged)`, exit 2, задача осталась `pending` — гейт `depends_on` реально срабатывает на PR-OPEN.
+- [x] **Кросс-провайдерный fallback codex→claude** повторно штатно спасал supervisor ×6 (F39): `provider=codex process_crashed` → `provider=claude succeeded` на каждом шаге.
+- [x] **Checks-гейт**: 4/4 passed; коммит p5-02 в скоупе (4 файла, +386/−4).
+- [x] **review-claude accept** с первого раза (`node_runs review outcome=accept`), rework-цикла нет.
+
+**Вскрытые/подтверждённые дефекты:** **F39** — supervisor всё ещё крашит codex (`400: "The 'claude-opus-4-8' model is not supported when using Codex with a ChatGPT account"`, `stdout.log`), т.к. target-конфиг без `supervisor.provider` + preflight не ловит унаследованный мисматч; **F40** — `depends_on` × `branch_mode: existing` конфликт.
+
+**Не наблюдалось:** fix-loop; HITL; decomposition; single-provider=codex; успешный supervisor на codex (F39 не закрыт в конфиге).
+
+---
+
+## Проход 17 — что проверено (2026-07-07), чистый codex-primary (supervisor тоже codex)
+
+Задача `p5-03-describe-rules` → `done`, PR [#11](https://github.com/VladimirMakarevich/wastech-mdlint/pull/11) reuse (3-й коммит), `fix_iterations=0`, ветка `feat/p5-compile`. Конфиг: supervisor зафиксирован на codex (`provider: codex`/`gpt-5.4`/`xhigh`, вариант B). Находки — [TEST-FINDINGS.md](TEST-FINDINGS.md): **F39 закрыт для per-step** (вариант B), новая **F41** (finalize-схема). Отчёт: [docs/analysis/p5-03-describe-rules-run-analysis.md](docs/analysis/p5-03-describe-rules-run-analysis.md).
+
+**Подтверждено этим прогоном (`[x]` — наблюдалось в артефактах):**
+
+- [x] **F39 закрыт согласованной codex-конфигурацией supervisor** (вариант B): 5 per-step supervisor-наблюдений (planning/impl/testing/review/documentation) — codex attempt=1 succeeded, 0 фоллбэков (лог `p5-03-run.log`). Явный `supervisor.provider: codex` + валидная `gpt-5.4` устранили `400 model not supported`.
+- [x] **durable-сессия supervisor на codex** (`resume_own_lineage`): codex создавал/возобновлял thread штатно на каждом per-step шаге — нюанс «раньше сессия была claude'овская» не помешал.
+- [x] **§12 per-node override**: supervisor-слой уважает свой `provider`/`model`/`reasoning` (codex/gpt-5.4/xhigh) — `route resolved node_id=supervisor primary=codex source=flow_node` + успешные codex-attempt.
+- [x] **F38 повторно** (Проход 17): documentation resume на codex succeeded (80s), без fallback.
+- [x] **§24 branch_mode: existing + PR reuse (3-й раз подряд)**: p5-03 добавил 3-й коммит на `feat/p5-compile`, PR #11 переиспользован (`533ba7c feat(p5-03-describe-rules)` над p5-02/p5-01).
+- [x] **Checks 4/4**, review-claude accept с первого раза; коммит в скоупе (4 файла, +598/−29).
+
+**Вскрытые дефекты:** **F41** — finalize supervisor-summary крашит codex (`invalid_json_schema`: `memory_delta.lessons.items.scope` без `required`-всех-ключей, `DELTA_OUTPUT_SCHEMA`/`_FOLLOW_UPS_SCHEMA` не OpenAI-strict) → fallback claude; класс F24.
+
+**Не наблюдалось:** fix-loop; HITL; decomposition; single-provider=codex; успешный supervisor-**finalize** на codex (F41).
+
+---
+
 ## 1. Branch name: epoch-префикс + ограничение длины
 
 **Файл:** `archive/done/branch-name-epoch-and-slug-limit.md` · **Статус:** implemented 2026-06-26

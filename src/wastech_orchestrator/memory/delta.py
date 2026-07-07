@@ -92,13 +92,23 @@ _EVIDENCE_SCHEMA: dict[str, Any] = {
     },
     "required": ["type", "ref"],
 }
-_STR_ARRAY: dict[str, Any] = {"type": "array", "items": {"type": "string", "minLength": 1}}
+# Nullable so a strict-required optional field can be omitted by emitting ``null`` (F41): OpenAI
+# strict mode forces every ``properties`` key into ``required``, so optionality is expressed by the
+# type union, not by absence. Every use below is an optional field; the tolerant readers treat
+# ``null`` identically to an absent key.
+_OPT_STR_ARRAY: dict[str, Any] = {
+    "type": ["array", "null"],
+    "items": {"type": "string", "minLength": 1},
+}
+_OPT_EVIDENCE_ARRAY: dict[str, Any] = {"type": ["array", "null"], "items": _EVIDENCE_SCHEMA}
 DELTA_OUTPUT_SCHEMA: dict[str, Any] = {
-    "type": "object",
+    # Nullable root (``["object", "null"]``): nested as the finalize turn's ``memory_delta``, so a
+    # step with nothing to record emits ``memory_delta: null`` rather than a hollow object.
+    "type": ["object", "null"],
     "additionalProperties": False,
     "properties": {
         "lessons": {
-            "type": "array",
+            "type": ["array", "null"],
             "items": {
                 "type": "object",
                 "additionalProperties": False,
@@ -106,49 +116,58 @@ DELTA_OUTPUT_SCHEMA: dict[str, Any] = {
                     "kind": {"type": "string", "enum": ["semantic", "procedural", "reviewer"]},
                     "subject": {"type": "string", "minLength": 1},
                     "statement": {"type": "string", "minLength": 1},
-                    "rationale": {"type": "string"},
+                    "rationale": {"type": ["string", "null"]},
                     "scope": {
-                        "type": "object",
+                        "type": ["object", "null"],
                         "additionalProperties": False,
                         "properties": {
-                            "paths": _STR_ARRAY,
-                            "symbols": _STR_ARRAY,
-                            "nodes": _STR_ARRAY,
+                            "paths": _OPT_STR_ARRAY,
+                            "symbols": _OPT_STR_ARRAY,
+                            "nodes": _OPT_STR_ARRAY,
                         },
+                        "required": ["paths", "symbols", "nodes"],
                     },
-                    "evidence": {"type": "array", "items": _EVIDENCE_SCHEMA},
-                    "trust_hint": {"type": "string"},
+                    "evidence": _OPT_EVIDENCE_ARRAY,
+                    "trust_hint": {"type": ["string", "null"]},
                 },
-                "required": ["kind", "subject", "statement"],
+                "required": [
+                    "kind",
+                    "subject",
+                    "statement",
+                    "rationale",
+                    "scope",
+                    "evidence",
+                    "trust_hint",
+                ],
             },
         },
         "failures": {
-            "type": "array",
+            "type": ["array", "null"],
             "items": {
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
                     "signature": {"type": "string", "minLength": 1},
-                    "paths": _STR_ARRAY,
-                    "remedy": {"type": "string"},
-                    "evidence": {"type": "array", "items": _EVIDENCE_SCHEMA},
+                    "paths": _OPT_STR_ARRAY,
+                    "remedy": {"type": ["string", "null"]},
+                    "evidence": _OPT_EVIDENCE_ARRAY,
                 },
-                "required": ["signature"],
+                "required": ["signature", "paths", "remedy", "evidence"],
             },
         },
         "entities": {
-            "type": "array",
+            "type": ["array", "null"],
             "items": {
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
                     "entity_id": {"type": "string", "minLength": 1},
                     "type": {"type": "string", "minLength": 1},
-                    "paths": _STR_ARRAY,
-                    "symbols": _STR_ARRAY,
-                    "summary": {"type": "string"},
+                    "paths": _OPT_STR_ARRAY,
+                    "symbols": _OPT_STR_ARRAY,
+                    "summary": {"type": ["string", "null"]},
                     "relationships": {
-                        "type": "array",
+                        "type": ["array", "null"],
                         "items": {
                             "type": "object",
                             "additionalProperties": False,
@@ -159,12 +178,21 @@ DELTA_OUTPUT_SCHEMA: dict[str, Any] = {
                             "required": ["type", "target"],
                         },
                     },
-                    "risk_notes": _STR_ARRAY,
+                    "risk_notes": _OPT_STR_ARRAY,
                 },
-                "required": ["entity_id", "type"],
+                "required": [
+                    "entity_id",
+                    "type",
+                    "paths",
+                    "symbols",
+                    "summary",
+                    "relationships",
+                    "risk_notes",
+                ],
             },
         },
     },
+    "required": ["lessons", "failures", "entities"],
 }
 
 
