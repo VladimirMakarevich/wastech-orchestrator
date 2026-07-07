@@ -95,35 +95,42 @@ _SKILL_MAP_SCHEMA: dict[str, Any] = {
 # supervisor's *wording* via its prompt files, but never the machine contract the orchestrator
 # parses. Each record is minimal and grounded: an unsupported "refactor idea" carries no evidence
 # and is dropped by :func:`parse_follow_ups`.
+# Nullable array root (``["array", "null"]``) + full ``required`` so this validates under OpenAI
+# strict mode when nested as the finalize turn's ``follow_ups`` (F41): no follow-ups → ``null``.
+# Formerly-optional ``paths``/``action_hint`` are nullable so the model may still omit them;
+# :func:`parse_follow_ups` treats ``null`` identically to an absent key.
 _FOLLOW_UPS_SCHEMA: dict[str, Any] = {
-    "type": "array",
+    "type": ["array", "null"],
     "items": {
         "type": "object",
         "additionalProperties": False,
         "properties": {
             "title": {"type": "string", "minLength": 1},
             "rationale": {"type": "string"},
-            "paths": {"type": "array", "items": {"type": "string"}},
+            "paths": {"type": ["array", "null"], "items": {"type": "string"}},
             "evidence": {"type": "array", "items": {"type": "string"}},
             "severity": {"type": "string", "enum": ["low", "medium", "high"]},
-            "action_hint": {"type": "string"},
+            "action_hint": {"type": ["string", "null"]},
         },
-        "required": ["title", "rationale", "evidence", "severity"],
+        "required": ["title", "rationale", "paths", "evidence", "severity", "action_hint"],
     },
 }
 
 # The intra-task subtask handoff brief's structured schema (subtask-context-handoff ADR). Three
 # sections; hardcoded in code (a flow reshapes wording via ``handoff_role_file``, never the
 # contract). All optional — a thin boundary may yield only one useful section.
+# OpenAI strict mode requires every ``properties`` key in ``required`` (F41); the three sections
+# stay optional by being nullable, so a thin boundary can yield ``null`` for the empty ones.
+# :func:`_render_handoff_brief` skips a ``null``/empty section exactly as before.
 _HANDOFF_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "new_surface_area": {"type": "string"},
-        "locked_decisions": {"type": "string"},
-        "open_edges": {"type": "string"},
+        "new_surface_area": {"type": ["string", "null"]},
+        "locked_decisions": {"type": ["string", "null"]},
+        "open_edges": {"type": ["string", "null"]},
     },
-    "required": [],
+    "required": ["new_surface_area", "locked_decisions", "open_edges"],
 }
 
 # Built-in supervisor prompt text — the last fallback in each chain, so a flow with no prompt files
@@ -192,7 +199,10 @@ def _finalize_schema(*, with_delta: bool, with_follow_ups: bool) -> dict[str, An
         "type": "object",
         "additionalProperties": False,
         "properties": properties,
-        "required": ["summary"],
+        # OpenAI strict mode (F41): ``required`` must list every present key. ``memory_delta`` and
+        # ``follow_ups`` are nullable at their roots, so requiring them still lets the model emit
+        # ``null`` when there is nothing to record.
+        "required": list(properties),
     }
 
 
