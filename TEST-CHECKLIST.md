@@ -163,6 +163,59 @@
 
 ---
 
+## Проход 18 — что проверено (2026-07-07), F41/F24 на 0.8.9a4, глубокий codex-review fix-loop
+
+Задача `p5-04-synthesize` → `done`, PR [#11](https://github.com/VladimirMakarevich/wastech-mdlint/pull/11) reuse (4-й коммит), **`fix_iterations=7`**, ~2ч40м. Конфиг: узлы claude/sonnet-5/xhigh, review codex/gpt-5.4/xhigh, supervisor codex, primary=claude. Находки — [TEST-FINDINGS.md](TEST-FINDINGS.md): **F41 VERIFIED FIXED**, **F24 не воспроизводится**, новая **F42**. Отчёт: [docs/analysis/p5-04-synthesize-run-analysis.md](docs/analysis/p5-04-synthesize-run-analysis.md).
+
+**Подтверждено этим прогоном (`[x]` — наблюдалось в артефактах):**
+
+- [x] **F41 VERIFIED FIXED**: finalize supervisor на codex — `stages/supervisor/run-000000/1-codex/result.json` `succeeded exit 0` (90s), нет `2-claude/` (без fallback); `"task finalize: supervisor summary written"`. memory_delta записан codex-супервизором (`supervisor_final` `memory_delta:true`; `memory_write` append `ep_p5-04-synthesize` + entities `core-synthesize`/`core-compile-context`/`core-skill-frontmatter`/`llm001-rule`).
+- [x] **F24 не воспроизводится**: codex-evaluator (review) 8 попыток подряд `succeeded` (`provider_attempts` review/codex ×8), 0 `process_crashed`/`invalid_json_schema` (в p4 было 9/9 crash). codex-ревью исполняется и даёт содержательные вердикты.
+- [x] **Полноценный review-fix-loop end-to-end** (первый глубокий в кампании): 7×`rework`→`accept`, `node_runs` чередует review(codex)/fixing(claude)/testing; `fix_iterations=7`, все чеки зелёные. Кросс-провайдерный цикл (codex судит → claude чинит) работает.
+- [x] **§12 раскладка применилась**: planning/impl/fixing/documentation на claude (`provider_used=claude`), review на codex (`provider_used=codex`), supervisor на codex — по `node_runs`/`route resolved`.
+- [x] **F38** повторно: documentation resume на codex? (в этом прогоне documentation шёл на **claude** — узел перепинен; resume-путь codex наблюдался на supervisor per-step ×многие, все succeeded).
+- [x] **§24 PR reuse (4-й коммит)** на `feat/p5-compile` (`f02b6b0 feat(p5-04-synthesize)`).
+
+**Вскрытые дефекты:** **F42** — codex-review чрезмерно дотошен (7 rework, дрейф корректность→тест-полировка, ~2ч40м, тесты +802); мелочь — `tasks.review_fix_cycles=0` при 7 реворках (не персистится; `fix_iterations` корректен).
+
+**Не наблюдалось:** HITL; decomposition; single-provider=codex; test_fix-цикл (чеки ни разу не падали — все fix'ы review-driven).
+
+---
+
+## Проход 19 — что проверено (2026-07-07), стабильность F41/F24 + review reasoning=high
+
+Задача `p5-05-compile-config-cli` → `done`, PR [#11](https://github.com/VladimirMakarevich/wastech-mdlint/pull/11) reuse (5-й коммит), **`fix_iterations=1`**. Конфиг как в Проходе 18, но review = **codex/gpt-5.4/high** (снижен reasoning). Без новых F. Отчёт: [docs/analysis/p5-05-compile-config-cli-run-analysis.md](docs/analysis/p5-05-compile-config-cli-run-analysis.md).
+
+**Подтверждено этим прогоном (`[x]` — наблюдалось в артефактах):**
+
+- [x] **F41 стабилен**: finalize supervisor на codex `succeeded exit 0` (`run-000000/1-codex`, без `2-claude/`), memory_delta записан codex-супервизором.
+- [x] **F24 стабилен**: codex-review 2/2 succeeded (rework→accept), 0 крашей; **0 фоллбэков во всём прогоне** (`provider_attempts`: planning/impl/fixing/documentation=claude, review=codex — все succeeded).
+- [x] **Короткий review-fix-loop**: 1 rework (реальный `--cwd`-баг, `compile` не учитывал `--cwd` для относительного `--config`) → fixing (claude) → accept. `fix_iterations=1`.
+- [x] **§24 PR reuse (5-й коммит)** на `feat/p5-compile`; коммит в скоупе (config-schema strict `compile`, CLI compile, тесты; 13 файлов +420/−166).
+- [x] **F42 — review reasoning как регулятор**: review на `high` → loop 1 цикл / проходы 171–223s (против 7 циклов / 300–800s у p5-04 на xhigh). Направление согласуется с рычагом F42 (не чистый A/B — задача меньше).
+
+**Не наблюдалось:** HITL; decomposition; single-provider=codex; test_fix; supervisor-фоллбэк (весь оверсайт на codex чисто).
+
+---
+
+## Проход 20 — что проверено (2026-07-07), ФИНАЛ фазы P5
+
+Задача `p5-06-compile-tests` → `done`, PR [#11](https://github.com/VladimirMakarevich/wastech-mdlint/pull/11) reuse (6-й/последний коммит фазы), **`fix_iterations=1`**. Конфиг как в Проходе 19. Без новых F. Отчёт: [docs/analysis/p5-06-compile-tests-run-analysis.md](docs/analysis/p5-06-compile-tests-run-analysis.md).
+
+**Подтверждено этим прогоном (`[x]`):**
+
+- [x] **F41 стабилен** (3-й прогон подряд): finalize supervisor на codex `succeeded exit 0` (`run-000000/1-codex`, без `2-claude/`).
+- [x] **F24 стабилен**: codex-review 2/2 succeeded (rework про тавтологичный CJK-budget тест → accept), 0 крашей; **0 фоллбэков во всём прогоне**.
+- [x] **Короткий review-fix-loop** (как p5-05, review=high): 1 rework → fixing (claude) → accept; `fix_iterations=1`.
+- [x] **§24 PR reuse — вся фаза P5 в одном PR #11**: `git log main..feat/p5-compile` = 6 коммитов (p5-01…p5-06); коммит p5-06 в скоупе (5 файлов, +96/−8, тесты+фикстуры+docs).
+- [x] **Ревью по существу на тест-задаче**: поймало тавтологичный ассерт (`expected` через тот же `estimateTokens`, что и SUT) — качественная тест-находка.
+
+**Итог кампании codex-primary (проходы 15–20):** F38/F39/F41/F24 закрыты и подтверждены; codex — полноценный primary во всех ролях. Открыто (не блокеры): F42, review_fix_cycles counter, F39-preflight, F40.
+
+**Не наблюдалось за кампанию:** HITL-пауза оператора; decomposition; single-provider=codex (only-codex режим); MANUAL_ACTION_REQUIRED; test_fix-цикл (чеки ни разу не падали).
+
+---
+
 ## 1. Branch name: epoch-префикс + ограничение длины
 
 **Файл:** `archive/done/branch-name-epoch-and-slug-limit.md` · **Статус:** implemented 2026-06-26
