@@ -2,7 +2,7 @@
 
 ## STATUS
 
-**Задача:** `p5-02-doc-profile` — «P5.02 extractDocProfile» **Итог:** `done` · ветка `feat/p5-compile` (`branch_mode: existing`) · PR [#11](https://github.com/VladimirMakarevich/wastech-mdlint/pull/11) **reuse** (2-й коммит, не смержен) · `fix_iterations=0` · attempt 1 · без декомпозиции **finished_at:** 2026-07-07T11:33:22Z **Версия оркестратора:** **0.8.9a3** (доставлен фикс ADR [codex-primary-correctness.md](../backlog/codex-primary-correctness.md)). Конфиг — codex-primary (`gpt-5.4`/`xhigh`), claude=fallback+review (с прошлого прогона, не менялся).
+**Задача:** `p5-02-doc-profile` — «P5.02 extractDocProfile» **Итог:** `done` · ветка `feat/p5-compile` (`branch_mode: existing`) · PR [#11](https://github.com/VladimirMakarevich/wastech-mdlint/pull/11) **reuse** (2-й коммит, не смержен) · `fix_iterations=0` · attempt 1 · без декомпозиции **finished_at:** 2026-07-07T11:33:22Z **Версия оркестратора:** **0.8.9a3** (доставлен фикс ADR [codex-primary-correctness.md](../backlog/archive/done/codex-primary-correctness.md)). Конфиг — codex-primary (`gpt-5.4`/`xhigh`), claude=fallback+review (с прошлого прогона, не менялся).
 
 ## Короткий вывод
 
