@@ -1,7 +1,6 @@
 # Example configuration for wastech-orchestrator.
 # Copy to config.yaml and fill it in for your project. config.yaml is NOT committed to git.
-# This is the packaged copy used by `wastech-orchestrator init`; keep it in sync with the
-# repo-root config.example.yaml
+# This is the packaged copy used by `wastech-orchestrator init` (the only example config; nothing else to sync).
 
 schema_version: 27                  # config format version; the orchestrator refuses newer configs
 
@@ -19,7 +18,7 @@ orchestrator:
 repo:
   url: "git@github.com:OWNER/REPO.git"
   local_path: "./workspace/repo"
-  base_branch: "main"
+  base_branch: "main"               # branch tasks fork from and PRs target by default
   branch_prefix: "worc"             # task branches: worc/<task-id>-<slug>
   branch_mode: "new"                # default target for task git ops: new | existing | current
                                     #   (a per-task `branch_mode` overrides this)
@@ -33,12 +32,13 @@ paths:                              # where the task lifecycle lives (optional; 
                                     # the default tasks/; for another name, create its subfolders.
 
 agents:
-  allowed:
+  allowed:                            # providers this instance may launch; must include the primary
     - claude
     - codex
 
-  max_stage_attempts: 3
-  max_fix_cycles: 15
+  max_stage_attempts: 3             # provider attempts for ONE node before the stage fails, counting
+                                    #   the cross-provider fallback hop (separate from agents.retry below)
+  max_fix_cycles: 15                # max iterations of ONE fix loop (e.g. review/test -> fixing -> back)
   max_total_fix_iterations: 30      # hard global cap across all fix loops (and all subtasks); >= max_fix_cycles
 
   decomposition:                    # optional task decomposition (§5.1); OFF by default
@@ -59,27 +59,34 @@ agents:
   # in `extra_args` — is operator-selectable but rejected at preflight unless `strict_isolation: false`.
   providers:
     claude:
-      command: "claude"
+      command: "claude"       # executable name (found on PATH) or an absolute path to the CLI
       model: "claude-sonnet-4-6"   # "" = use the Claude CLI/account default
       reasoning: high          # low | medium | high | xhigh | max
-      timeout_seconds: 7200
+      timeout_seconds: 7200    # per-attempt CLI wall-clock ceiling (seconds)
       max_turns: 400           # Claude turn cap (positive int); "none" or "max" = no cap (unlimited)
       max_turns_gate: false    # when true, hitting max_turns pauses for a Telegram continue/stop
                                # prompt (requires telegram); a low cap (~50–100) is then safe
-      permission_profile: "workspace-write"
-      extra_args: []
+      permission_profile: "workspace-write"   # read-only | workspace-write (a flow node's ceiling may lower it)
+      extra_args: []           # raw CLI flags appended verbatim; forbidden ones fail preflight
       primary: true            # the global primary (exactly one provider; must be in `allowed`)
     codex:
-      command: "codex"
+      command: "codex"        # executable name (found on PATH) or an absolute path to the CLI
       model: "gpt-5.5"         # "" = use the Codex CLI/account default
       reasoning: high          # minimal | low | medium | high | xhigh | max->xhigh
-      timeout_seconds: 7200
+      timeout_seconds: 7200    # per-attempt CLI wall-clock ceiling (seconds)
       sandbox: "workspace-write"   # workspace-write | read-only | danger-full-access (needs strict_isolation: false)
-      permission_profile: "workspace-write"
-      extra_args: []
+      permission_profile: "workspace-write"   # access level; codex's real isolation knob is `sandbox` above
+      extra_args: []           # raw CLI flags appended verbatim; forbidden ones fail preflight
 
 security:
-  strict_isolation: true
+  strict_isolation: true              # fail-closed sandbox (default). Full-access provider modes —
+                                      #   Codex `sandbox: danger-full-access`, Claude `--permission-mode
+                                      #   bypassPermissions` in extra_args — are REJECTED at preflight,
+                                      #   and any provider whose required isolation can't be enabled
+                                      #   fails preflight (no silent downgrade). Set false ONLY to
+                                      #   consciously opt into full access (you then own the risk); the
+                                      #   absolutely-forbidden flags (--dangerously-skip-permissions,
+                                      #   --yolo, --ignore-rules) stay banned regardless.
   allowed_environment:                  # REPLACES (does not extend) the default — keep the OS-launch
                                         # essentials for YOUR OS or the spawned CLI may fail to start.
                                         # A name absent from the host OS is simply skipped, so this
@@ -110,7 +117,9 @@ security:
     - "TMPDIR"
     - "LD_LIBRARY_PATH"
     - "DYLD_LIBRARY_PATH"
-  denied_read_paths:
+  denied_read_paths:                  # REPLACES (does not extend) the default (.env, secrets/**). Globs
+                                      #   the agent CLI may never read — enforced as --disallowedTools so
+                                      #   a task can't exfiltrate secrets. Same glob dialect as protected_paths.
     - ".env"
     - "secrets/**"
   denied_commands:                    # REPLACES (does not extend) the default list — keep every entry you need
@@ -132,13 +141,13 @@ security:
                                       # ".github/workflows/**"). Default [] = no floor.
 
 validation:                         # input hardening gate (§19); rejects broken tasks before any branch
-  max_task_bytes: 262144
-  max_task_lines: 5000
-  max_line_bytes: 8192
-  max_control_ratio: 0.01
-  required_fields: ["id", "title"]
-  reject_unknown_fields: true
-  quarantine_folder: "./.worc/tasks/rejected"
+  max_task_bytes: 262144            # reject a task file larger than this (bytes)
+  max_task_lines: 5000              # reject a task file with more lines than this
+  max_line_bytes: 8192              # reject any single line longer than this (bytes)
+  max_control_ratio: 0.01           # reject if control/binary chars exceed this fraction (0.01 = 1%)
+  required_fields: ["id", "title"]  # front-matter keys every task must define
+  reject_unknown_fields: true       # true = reject a task carrying front-matter keys the schema doesn't know
+  quarantine_folder: "./.worc/tasks/rejected"   # rejected task files are moved here
 
 checks:
   # Named per-project command sets (monorepo-ready). Empty / omitted = NO quality gate (every task
@@ -179,8 +188,8 @@ checks:
   timeout_seconds: 7200             # global per-command timeout (argv, no shell); per-set overrides
 
 git:
-  create_pull_request: true
-  pr_base: "main"
+  create_pull_request: true         # false = commit + push the task branch only, open no PR
+  pr_base: "main"                   # branch the published PR targets (usually base_branch)
   # ⚠️  DANGER: auto-merge bypasses the human review gate — the last defence against shipping a wrong
   #     or malicious agent diff. All four keys default to the safe value; enable only with protected
   #     branches + required CI status checks already enforcing your quality gate. The mid-pipeline
