@@ -45,12 +45,18 @@ from wastech_orchestrator.memory.records import (
     LongTermKind,
     LongTermRecord,
     MemoryRecord,
+    MemoryTier,
     Relationship,
     Scope,
     as_row,
     record_id,
 )
-from wastech_orchestrator.memory.service import ApplyResult, MemoryService, WriteSource
+from wastech_orchestrator.memory.service import (
+    ApplyResult,
+    ClearReport,
+    MemoryService,
+    WriteSource,
+)
 from wastech_orchestrator.memory.trust import (
     DURABLE_TRUST_LEVELS,
     TrustLevel,
@@ -70,6 +76,7 @@ __all__ = [
     "CandidateEntity",
     "CandidateFailure",
     "CandidateLesson",
+    "ClearReport",
     "CleanupJob",
     "CleanupReport",
     "DerivedIndex",
@@ -81,6 +88,7 @@ __all__ = [
     "MemoryLayout",
     "MemoryRecord",
     "MemoryService",
+    "MemoryTier",
     "PacketBuilder",
     "PacketContext",
     "Relationship",

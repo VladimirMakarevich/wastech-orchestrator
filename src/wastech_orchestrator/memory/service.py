@@ -58,6 +58,7 @@ from wastech_orchestrator.memory.records import (
     LongTermKind,
     LongTermRecord,
     MemoryRecord,
+    MemoryTier,
     Scope,
     as_row,
     record_id,
@@ -93,6 +94,16 @@ class ApplyResult:
     quarantined: int = 0
     merged: int = 0
     entities: int = 0
+
+
+@dataclass(frozen=True)
+class ClearReport:
+    """The outcome of :meth:`MemoryService.clear` — the pre-clear snapshot and per-tier row counts
+    removed. ``snapshot`` is ``None`` when nothing needed clearing (every selected tier was
+    empty)."""
+
+    snapshot: Path | None
+    cleared: dict[MemoryTier, int]
 
 
 class MemoryService:
@@ -472,6 +483,54 @@ class MemoryService:
             context=audit,
         )
         return restored
+
+    # --- clear (worc memory clear) --------------------------------------------
+
+    def tier_counts(self, tiers: Iterable[MemoryTier]) -> dict[MemoryTier, int]:
+        """Current row count for each requested tier (``long`` sums its four kind files)."""
+        return {tier: self._tier_row_count(tier) for tier in tiers}
+
+    def clear(self, *, tiers: Iterable[MemoryTier], audit: AuditContext) -> ClearReport:
+        """Empty each requested record tier to zero rows (reversible; audited ``PRUNE``).
+
+        Snapshot-first: the tier files that exist are copied to ``audit/snapshots/clear-<ts>/``
+        before anything is emptied, so the wipe is reversible via :meth:`restore`. Only tiers that
+        actually hold rows are rewritten (no empty files or audit noise for absent/empty tiers). The
+        append-only audit log and the snapshots themselves are never touched — a full store teardown
+        (audit + snapshots included) is the CLI's ``--purge`` path, not this method.
+        """
+        cleared = {
+            tier: count for tier in dict.fromkeys(tiers) if (count := self._tier_row_count(tier))
+        }
+        if not cleared:
+            return ClearReport(snapshot=None, cleared={})
+        snapshot = self.snapshot(self.tier_files(), label=f"clear-{audit.timestamp}")
+        for tier in cleared:
+            self._clear_tier(tier, audit=audit)
+        return ClearReport(snapshot=snapshot, cleared=cleared)
+
+    def _tier_row_count(self, tier: MemoryTier) -> int:
+        if tier is MemoryTier.SHORT:
+            return len(self.read_episodes())
+        if tier is MemoryTier.LONG:
+            return sum(len(self.read_long_term(kind)) for kind in LongTermKind)
+        if tier is MemoryTier.ENTITY:
+            return len(self.read_entities())
+        return len(self.read_quarantine())
+
+    def _clear_tier(self, tier: MemoryTier, *, audit: AuditContext) -> None:
+        """Rewrite the tier's file(s) to empty through the audited replace seam (one ``PRUNE`` row
+        per touched file). For ``long`` only the non-empty kind files are rewritten."""
+        if tier is MemoryTier.SHORT:
+            self.replace_episodes([], action=AuditAction.PRUNE, audit=audit)
+        elif tier is MemoryTier.LONG:
+            for kind in LongTermKind:
+                if self.read_long_term(kind):
+                    self.replace_long_term(kind, [], action=AuditAction.PRUNE, audit=audit)
+        elif tier is MemoryTier.ENTITY:
+            self.replace_entities([], action=AuditAction.PRUNE, audit=audit)
+        else:
+            self.replace_quarantine([], action=AuditAction.PRUNE, audit=audit)
 
     # --- reads (for the PacketBuilder, later) ---------------------------------
 

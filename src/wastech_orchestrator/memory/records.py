@@ -33,6 +33,21 @@ class LongTermKind(StrEnum):
     FAILURE = "failure"  # failure signatures + canonical remedy
 
 
+class MemoryTier(StrEnum):
+    """A selectable top-level tier for ``worc memory clear`` — the storage families a wipe targets.
+
+    Each maps to whole tier file(s): ``short`` → ``recent.jsonl``; ``long`` → the four
+    ``long_term/*.jsonl`` (one per :class:`LongTermKind`); ``entity`` → ``entities.jsonl``;
+    ``quarantine`` → ``pending.jsonl`` (mixed-kind holding area). Clearing every tier is a true
+    zero.
+    """
+
+    SHORT = "short"
+    LONG = "long"
+    ENTITY = "entity"
+    QUARANTINE = "quarantine"
+
+
 @dataclass(frozen=True)
 class Evidence:
     """A provenance pointer backing a record (blueprint §5.3).

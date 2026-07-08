@@ -65,6 +65,7 @@ from wastech_orchestrator.memory import (
     LongTermKind,
     MemoryLayout,
     MemoryService,
+    MemoryTier,
 )
 from wastech_orchestrator.notify import build_notifier
 from wastech_orchestrator.notify.telegram import check_telegram_preflight
@@ -581,6 +582,28 @@ def build_parser() -> argparse.ArgumentParser:
     mem_restore.add_argument(
         "--dry-run", action="store_true", help="print the plan without writing anything"
     )
+    mem_clear = memory_sub.add_parser(
+        "clear",
+        help="empty the store to zero: clear record tiers (reversible) or --purge the whole store",
+    )
+    mem_clear_scope = mem_clear.add_mutually_exclusive_group()
+    mem_clear_scope.add_argument(
+        "--kind",
+        choices=[tier.value for tier in MemoryTier],
+        metavar="TIER",
+        help="clear only this record tier (default: all tiers): "
+        + ", ".join(tier.value for tier in MemoryTier),
+    )
+    mem_clear_scope.add_argument(
+        "--purge",
+        action="store_true",
+        help="hard reset: remove the entire .worc/memory/ store including the audit log and "
+        "snapshots (irreversible)",
+    )
+    mem_clear.add_argument(
+        "--dry-run", action="store_true", help="print what would be cleared, write nothing"
+    )
+    mem_clear.add_argument("-y", "--yes", action="store_true", help="skip the confirmation prompt")
 
     return parser
 
@@ -1789,6 +1812,10 @@ def cmd_memory(args: argparse.Namespace) -> int:
         return _cmd_memory_compact(config, layout, dry_run=args.dry_run)
     if action == "restore":
         return _cmd_memory_restore(config, layout, snapshot=args.snapshot, dry_run=args.dry_run)
+    if action == "clear":
+        return _cmd_memory_clear(
+            config, layout, kind=args.kind, purge=args.purge, dry_run=args.dry_run, yes=args.yes
+        )
     raise SystemExit(f"Unknown memory action '{args.memory_action}'.")
 
 
@@ -1901,6 +1928,77 @@ def _cmd_memory_restore(
     service = MemoryService(layout, config=config.memory)
     restored = service.restore(target, audit=_memory_audit_context(AuditActor.OPERATOR))
     print(f"memory restore: restored {len(restored)} file(s) from {chosen}")
+    return 0
+
+
+def _cmd_memory_clear(
+    config: OrchestratorConfig,
+    layout: MemoryLayout,
+    *,
+    kind: str | None,
+    purge: bool,
+    dry_run: bool,
+    yes: bool,
+) -> int:
+    """Empty the store to zero — refused while a task is active.
+
+    Default (or ``--kind TIER``): a reversible content-clear — snapshot first, then empty the
+    record tier(s) through the audited seam, so it is restore-able via ``worc memory restore``.
+    ``--purge``: remove the whole ``.worc/memory/`` store, audit log and snapshots included
+    (irreversible). ``--kind`` and ``--purge`` are mutually exclusive (enforced by argparse)."""
+    if has_active_task(config):
+        print("memory clear: a task is active — refusing; run when the orchestrator is idle")
+        return 1
+    if not layout.root.exists():
+        print("memory clear: no store yet — nothing to clear")
+        return 0
+
+    if purge:
+        if dry_run:
+            print(
+                f"memory clear (dry-run): would remove the entire store at {layout.as_posix()} "
+                "(audit log and snapshots included)"
+            )
+            return 0
+        if not yes and not _confirm_yes(
+            f"PURGE the entire memory store at {layout.as_posix()} — audit log and snapshots "
+            "included? This cannot be undone. Type YES to confirm: "
+        ):
+            print("memory clear: aborted")
+            return 0
+        shutil.rmtree(layout.root, ignore_errors=True)
+        print(f"memory clear: purged the store at {layout.as_posix()}")
+        return 0
+
+    tiers = list(MemoryTier) if kind is None else [MemoryTier(kind)]
+    scope = "all tiers" if kind is None else f"the {kind} tier"
+    service = MemoryService(layout, config=config.memory)
+    counts = service.tier_counts(tiers)
+    total = sum(counts.values())
+    if total == 0:
+        print(f"memory clear: {scope} already empty — nothing to clear")
+        return 0
+    detail = _counts_line({tier.value: n for tier, n in counts.items()})
+    if dry_run:
+        print(
+            f"memory clear (dry-run): would clear {total} record(s) from {scope} [{detail}]; "
+            "a snapshot would be taken first (restore-able)"
+        )
+        return 0
+    if not yes and not _confirm(
+        f"Clear {total} record(s) from {scope} under {layout.as_posix()}? A snapshot is taken "
+        "first, so this is reversible with 'worc memory restore'. [y/N] "
+    ):
+        print("memory clear: aborted")
+        return 0
+    report = service.clear(tiers=tiers, audit=_memory_audit_context(AuditActor.OPERATOR))
+    cleared_detail = _counts_line({tier.value: n for tier, n in report.cleared.items()})
+    print(f"memory clear: cleared {sum(report.cleared.values())} record(s) [{cleared_detail}]")
+    if report.snapshot is not None:
+        print(
+            f"  snapshot: {report.snapshot.as_posix()} "
+            f"(restore with: worc memory restore --snapshot {report.snapshot.name})"
+        )
     return 0
 
 
