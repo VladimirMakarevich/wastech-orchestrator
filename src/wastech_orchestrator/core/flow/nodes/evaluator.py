@@ -200,6 +200,7 @@ class EvaluatorNodeRunner:
         if node.blocking:
             # A blocking evaluator gates every time it finds a blocking issue; the engine's
             # named-loop budget bounds the rework cycles (exhaustion → manual).
+            # `max_rework_per_stage` is a non-blocking-only knob, intentionally NOT consulted here.
             return "rework"
         # A non-blocking evaluator (e.g. test_quality) self-caps: rework until its own per-instance
         # budget (max_rework_per_stage) is spent — counted from the immutable in_flow_verdict rows,
@@ -325,7 +326,11 @@ class EvaluatorNodeRunner:
             return None  # render_role_prompt surfaces the real read error
         if "{memory_path}" not in template and "{?memory_path}" not in template:
             return None
-        touched = self._s.git.changed_code_paths_since_base() if self._s.git is not None else []
+        # F48: this task's changed paths (per-task chain base), not the whole shared branch's, so
+        # the packet's path-overlap ranking stays relevant on a chain branch.
+        touched = (
+            self._s.git.changed_code_paths_since_task_base() if self._s.git is not None else []
+        )
         dest = task_artifact_dir(self._s.artifacts_root, ctx.task_id) / "memory" / f"{node.id}.md"
         written = builder.write_packet(
             node_id=node.id, task_type=self._in.task_type, touched_paths=touched, dest=dest

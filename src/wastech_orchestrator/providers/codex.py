@@ -90,9 +90,14 @@ _CODEX_SIGNATURES = make_signatures(
             ErrorClass.PROVIDER_UNAVAILABLE,
             r"service unavailable|\b50[023]\b|bad gateway|internal server error",
         ),
+        (ErrorClass.UNSUPPORTED_VERSION, r"unsupported version"),
         (
-            ErrorClass.UNSUPPORTED_VERSION,
-            r"unsupported version|unknown option|unrecognized option|unexpected argument",
+            # argparse/usage rejection of OUR argv (codex exit 2) — a bad-argv bug on our side, not
+            # a version gate. A separate class so it surfaces loudly instead of silently failing
+            # over (F38 was masked as unsupported_version). A stale CLI that emits "unknown option"
+            # for a newer flag is caught by the preflight version check first.
+            ErrorClass.INVALID_INVOCATION,
+            r"unknown option|unrecognized option|unexpected argument",
         ),
         (
             ErrorClass.PERMISSION_DENIED,

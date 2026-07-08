@@ -6,6 +6,8 @@
 
 Формат пункта: **Цель · Рычаг (file:line) · Шаги · Тест · Зависимость/порядок**. Приоритет = «серьёзность + разблокировка других находок + доля стоимости фазы». Зоны: **orchestrator** (пакетный код — задевает каждый репо) и **target** (`.worc/flows/` `wastech-mdlint`, gitignored, install-seeded).
 
+**Статус реализации (2026-07-08).** Все orchestrator-пункты РЕАЛИЗОВАНЫ на ветке `feat/p5-findings-remediation` (гейт зелёный: ruff/format/mypy/pytest): A1 (де-инерция кноба `max_rework_per_stage` — только doc/packaged, без правки движка по решению владельца), A2/F49 (кумулятивные `test_fix_total`/`review_fix_total`, state.db v13→v14), A3/F50 (observe-reasoning cap → `high`), B1/F43 (пакет читает durable-карантин + правка финализатор-промпта), B2/F48 (`changed_code_paths_since_task_base()`), B3/F44 (дедуп entity по `canonical_name` + `last_seen_task_ids`), B4/F45 (редакция по границам слова + floor 8), B5/F47 (эпизоды с `touched_paths`/`stage_outcomes`), B6/F46 (rationale `kind+scope.paths`), C1/F39 (warn на inherited mismatch), C2 (`ErrorClass.INVALID_INVOCATION`), D1/F40 (warn на `depends_on`×`branch_ref`). **SKIPPED (target-repo / owner):** A1-substantive (target `review.md`), D1-шаг 1 (target task-authoring), E1/F37 (owner live-smoke). **Отложено в этом репо:** A3 delta-observe, C2 400-split. Детали — в [follow_ups.md](follow_ups.md) (строки 2026-07-08).
+
 ## Рекомендованный сквозной порядок
 
 1. **A1 (F42)** — единственный крупный рычаг фазы: одна задача `p5-04` дала 7 rework-циклов и в одиночку — ~57% wall-времени и ~64% выходных токенов всей фазы. Дешёвая правка target-промпта + кноба, максимальный ROI. Делать первым.

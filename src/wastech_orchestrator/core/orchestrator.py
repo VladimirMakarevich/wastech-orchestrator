@@ -1829,6 +1829,10 @@ class Orchestrator:
             fix_iterations=run_state.fix_iterations,
             test_fix_cycles=run_state.counter("test_fix"),
             review_fix_cycles=run_state.counter("review_fix"),
+            # Cumulative totals for the audit trail — unlike the consecutive counters above, they
+            # are not zeroed on convergence, so a task that succeeded after N reworks records N.
+            test_fix_total=run_state.total("test_fix"),
+            review_fix_total=run_state.total("review_fix"),
         )
 
     def _run_phases(
@@ -2034,7 +2038,14 @@ class Orchestrator:
                 task_id=p.task.id, task_title=p.task.title, emit_delta=memory_on
             )
             if memory_on:
-                self._write_memory(p, finalized.candidate_delta, WriteSource.SUCCESS)
+                # F47: a terminal-status outcome so the success episode renders content, mirroring
+                # the failure path's ``{"task": final.value}`` (this hook runs on the accept path).
+                self._write_memory(
+                    p,
+                    finalized.candidate_delta,
+                    WriteSource.SUCCESS,
+                    outcomes={"task": Status.DONE.value},
+                )
             log.info(
                 "task finalize: supervisor summary written",
                 extra={"elapsed_seconds": round(time.monotonic() - started, 1)},
@@ -2142,12 +2153,20 @@ class Orchestrator:
         if service is None:
             return
         now = self._clock()
+        # F47: give the episode real signal instead of a bare bullet — this task's changed paths
+        # (per-task chain base, matching the packet's relevance, F48). Best-effort: a git hiccup
+        # must never block the episode.
+        try:
+            touched = tuple(self._git.changed_code_paths_since_task_base())
+        except GitCommandError:
+            touched = ()
         episode = EpisodeRecord(
             id=f"ep_{p.task.id}",
             task_id=p.task.id,
             created_at=now,
             trust_level=TrustLevel.ARTIFACT_BACKED,
             stage_outcomes=outcomes or {},
+            touched_paths=touched,
             # F36: repo-relative POSIX (``.worc/logs/<task-id>``), never the absolute host path — no
             # ``/Users/…`` prefix to leak or to collide with a run-harvested redaction literal.
             artifact_paths=(

@@ -451,7 +451,10 @@ class Supervisor:
         does not duplicate observations.
         """
         prompt = self._step_prompt(task_id, node_id, outcome_kind, final_message)
-        note = self._run(task_id, prompt, node_run_id=node_run_id)
+        # F50: observation is advisory and runs once per node-run, so a deep fix loop drives many
+        # observe turns; it never needs a max reasoning tier, so cap it to `high` (the whole-task
+        # finalize keeps the configured tier).
+        note = self._run(task_id, prompt, node_run_id=node_run_id, cap_reasoning=True)
         self._record(
             task_id,
             kind="supervisor_step",
@@ -676,11 +679,21 @@ class Supervisor:
     # -- internals -------------------------------------------------------------
 
     def _run(
-        self, task_id: str, prompt: str, *, node_run_id: int, resume_session: bool = True
+        self,
+        task_id: str,
+        prompt: str,
+        *,
+        node_run_id: int,
+        resume_session: bool = True,
+        cap_reasoning: bool = False,
     ) -> str | None:
         """Run one read-only supervisor turn and return its final message (``None`` on failure)."""
         result = self._run_result(
-            task_id, prompt, node_run_id=node_run_id, resume_session=resume_session
+            task_id,
+            prompt,
+            node_run_id=node_run_id,
+            resume_session=resume_session,
+            cap_reasoning=cap_reasoning,
         )
         return result.final_message if result is not None else None
 
@@ -692,6 +705,7 @@ class Supervisor:
         node_run_id: int,
         output_schema: dict[str, Any] | None = None,
         resume_session: bool = True,
+        cap_reasoning: bool = False,
     ) -> AgentRunResult | None:
         """Run one read-only supervisor LLM turn on its own session; return the full result.
 
@@ -711,6 +725,11 @@ class Supervisor:
         """
         try:
             route = self._router.resolve_route(_SUPERVISOR_IDENTITY, self._settings.provider)
+            # Cap to `high` for a schema turn (F7b, fragile at max) OR an advisory observe turn
+            # (F50, cost-heavy in a deep loop); a free-text finalize keeps the configured tier.
+            reasoning = _schema_safe_reasoning(self._settings.reasoning, output_schema)
+            if cap_reasoning and reasoning in _MAX_REASONING_TIERS:
+                reasoning = _SCHEMA_REASONING_CAP
             request = AgentRunRequest(
                 task_id=task_id,
                 node_id=_SUPERVISOR_IDENTITY,
@@ -721,7 +740,7 @@ class Supervisor:
                 attempt=1,
                 node_run_id=node_run_id,  # not a graph node; audit lives in ``evaluations``
                 model=self._settings.model,
-                reasoning=_schema_safe_reasoning(self._settings.reasoning, output_schema),
+                reasoning=reasoning,
                 output_schema=output_schema,
                 session_id=self._resume_session(task_id, route) if resume_session else None,
             )
@@ -865,13 +884,16 @@ class Supervisor:
             prompt += (
                 "\n## Candidate memory delta\n"
                 "Also propose what is worth REMEMBERING for future tasks on this repo, as the "
-                "structured `memory_delta`: durable `lessons` (stable facts/commands/conventions, "
-                "fragile areas, recurring reviewer expectations — each with `kind`, `subject`, "
-                "`statement`, and `evidence` pointers to repo files/commits/checks), recurring "
-                "`failures` (signature + remedy), and important `entities` (files/modules with "
-                "their paths). Propose only what repeats, stays true, or saves rediscovery — never "
-                "secrets, raw diffs, or one-off details; every lesson needs evidence. Leave a list "
-                "empty when nothing qualifies.\n"
+                "structured `memory_delta`: durable `lessons` — repeatable PATTERNS worth "
+                "internalizing (recurring reviewer expectations, procedural gotchas, stable "
+                "conventions/commands, fragile areas), each with `kind`, `subject`, `statement`, "
+                "and `evidence` pointers to repo files/commits/checks; recurring `failures` "
+                "(signature + remedy); and important `entities` (files/modules with their paths). "
+                "Put WHAT a file or module is or does in an `entity` card (with `risk_notes`), NOT "
+                "in a lesson — a lesson captures a repeatable practice, not a description. Propose "
+                "only what repeats, stays true, or saves rediscovery — never secrets, raw diffs, "
+                "or one-off details; every lesson needs evidence. Leave a list empty when nothing "
+                "qualifies.\n"
             )
         return prompt
 

@@ -157,7 +157,9 @@ class MemoryService:
                 failure, source=source, audit=audit, now=now, task_id=task_id, r=result
             )
         for entity in delta.entities:
-            result = self._ingest_entity(entity, source=source, audit=audit, r=result)
+            result = self._ingest_entity(
+                entity, source=source, audit=audit, task_id=task_id, r=result
+            )
         return result
 
     def _ingest_lesson(
@@ -276,9 +278,13 @@ class MemoryService:
             self._replace_rows(
                 self._long_term_path(kind),
                 rows,
-                ids=_ids(rows),
+                # F46: only the merged record is affected; the whole-file rewrite is an
+                # implementation detail, so the audit names just this id, not every row.
+                ids=[memory_id],
                 action=AuditAction.MERGE,
-                audit=_reason(audit, f"merged into existing {kind.value} record (same subject)"),
+                audit=_reason(
+                    audit, f"merged into existing {kind.value} record (same kind+scope.paths)"
+                ),
             )
             return _bump(r, merged=1)
 
@@ -307,22 +313,32 @@ class MemoryService:
         return _bump(r, quarantined=1)
 
     def _ingest_entity(
-        self, cand: CandidateEntity, *, source: WriteSource, audit: AuditContext, r: ApplyResult
+        self,
+        cand: CandidateEntity,
+        *,
+        source: WriteSource,
+        audit: AuditContext,
+        task_id: str,
+        r: ApplyResult,
     ) -> ApplyResult:
         # Validate the card's paths against the live repo (NFR2): a card whose target is gone is
         # downgraded off repo-observed → it falls into the non-durable quarantine branch below.
         path_exists = self._index.path_exists if self._index is not None else None
         trust = assign_entity_trust(cand.paths, path_exists=path_exists)
+        # F44: key a card by its canonical path/name, not the LLM-authored `entity_id` (which drifts
+        # in wording across runs and spawns a duplicate card for the same file).
+        canonical = cand.paths[0] if cand.paths else cand.entity_id
         record = EntityRecord(
             entity_id=cand.entity_id,
             entity_type=cand.entity_type,
-            canonical_name=cand.paths[0] if cand.paths else cand.entity_id,
+            canonical_name=canonical,
             paths=cand.paths,
             symbols=cand.symbols,
             summary=cand.summary,
             relationships=cand.relationships,
             risk_notes=cand.risk_notes,
             trust_level=trust,
+            last_seen_task_ids=(task_id,),
             status="active",
         )
         if source is WriteSource.FAILURE or trust not in DURABLE_TRUST_LEVELS:
@@ -333,16 +349,19 @@ class MemoryService:
             )
             return _bump(r, quarantined=1)
         entities = self.read_entities()
-        at = _index_by(entities, "entity_id", cand.entity_id)
-        if at is not None:  # upsert: the latest card wins (field-union merge is a later refinement)
+        at = _index_by(entities, "canonical_name", canonical)
+        if at is not None:  # upsert by canonical path/name — latest card wins, provenance grows
+            prior = entities[at].get("last_seen_task_ids")
+            prior_ids = tuple(str(x) for x in prior) if isinstance(prior, list) else ()
+            seen = prior_ids if task_id in prior_ids else (*prior_ids, task_id)
             rows = list(entities)
-            rows[at] = as_row(record)
+            rows[at] = as_row(replace(record, last_seen_task_ids=seen))
             self._replace_rows(
                 self._entities_path(),
                 rows,
                 ids=_ids(rows),
                 action=AuditAction.MERGE,
-                audit=_reason(audit, "upserted entity card (latest card wins)"),
+                audit=_reason(audit, "upserted entity card by path (latest wins; task appended)"),
             )
             return _bump(r, merged=1)
         self.append(record, audit=_reason(audit, f"appended entity card ({trust.value} trust)"))

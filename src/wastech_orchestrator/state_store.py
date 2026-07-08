@@ -79,7 +79,14 @@ def _utc_now_iso() -> str:
 # failed only after it stays parked longer than ``agents.retry.max_blocked_s``. Additive, so
 # ``_migrate`` adds it on a brand-new (``0``) database; an older versioned DB is still refused
 # fail-closed and recreated (greenfield).
-DB_SCHEMA_VERSION = 13
+# v14 (2026-07-08, F49): added the **additive** ``tasks.test_fix_total`` /
+# ``tasks.review_fix_total`` columns — the cumulative per-loop rework totals for the whole task.
+# Unlike the consecutive
+# ``*_fix_cycles`` columns (zeroed when the loop converges), these are never reset, so a task that
+# succeeded after N reworks records N (the consecutive columns legitimately read 0 at that point).
+# Additive, so ``_migrate`` adds them on a brand-new (``0``) database; an older versioned DB is
+# refused fail-closed and recreated (greenfield).
+DB_SCHEMA_VERSION = 14
 
 
 class IncompatibleStateError(Exception):
@@ -103,6 +110,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # v13: the B-lite soft-pause timestamp (transient-provider-failure-recovery).
     if "blocked_since" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN blocked_since TEXT")
+    # v14: cumulative per-loop rework totals (F49).
+    if "test_fix_total" not in task_cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN test_fix_total INTEGER NOT NULL DEFAULT 0")
+    if "review_fix_total" not in task_cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN review_fix_total INTEGER NOT NULL DEFAULT 0")
 
 
 def _enforce_schema_version(conn: sqlite3.Connection, *, writable: bool) -> None:
@@ -157,6 +169,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     refinement_skip_reason TEXT,
     test_fix_cycles INTEGER NOT NULL DEFAULT 0,
     review_fix_cycles INTEGER NOT NULL DEFAULT 0,
+    test_fix_total INTEGER NOT NULL DEFAULT 0,
+    review_fix_total INTEGER NOT NULL DEFAULT 0,
     fix_iterations INTEGER NOT NULL DEFAULT 0,
     decomposition_enabled INTEGER,
     decomposition_accepted INTEGER,
@@ -311,6 +325,8 @@ class TaskRow:
     refinement_skip_reason: str | None = None
     test_fix_cycles: int = 0
     review_fix_cycles: int = 0
+    test_fix_total: int = 0
+    review_fix_total: int = 0
     fix_iterations: int = 0
     decomposition_enabled: bool | None = None
     decomposition_accepted: bool | None = None
@@ -565,12 +581,13 @@ class StateStore:
                     task_id, title, status, source_path, branch, slug,
                     created_at, updated_at, validation_passed, validation_reason,
                     refinement_ran, refinement_skip_reason,
-                    test_fix_cycles, review_fix_cycles, fix_iterations,
+                    test_fix_cycles, review_fix_cycles,
+                    test_fix_total, review_fix_total, fix_iterations,
                     decomposition_enabled, decomposition_accepted, decomposition_reason,
                     subtask_count, active_subtask, subtasks_completed,
                     failure_report_path, cleanup_target_branch, cleanup_completed,
                     cleanup_completed_at, cleanup_last_error, finished_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(task_id) DO UPDATE SET
                     title = excluded.title,
                     status = excluded.status,
@@ -593,6 +610,8 @@ class StateStore:
                     row.refinement_skip_reason,
                     row.test_fix_cycles,
                     row.review_fix_cycles,
+                    row.test_fix_total,
+                    row.review_fix_total,
                     row.fix_iterations,
                     _b(row.decomposition_enabled),
                     _b(row.decomposition_accepted),
@@ -724,6 +743,8 @@ class StateStore:
                 refinement_skip_reason=None,
                 test_fix_cycles=0,
                 review_fix_cycles=0,
+                test_fix_total=0,
+                review_fix_total=0,
                 fix_iterations=0,
                 decomposition_enabled=None,
                 decomposition_accepted=None,
@@ -772,8 +793,8 @@ class StateStore:
 
     def get_counters(self, task_id: str) -> LoopCounters:
         cur = self._conn.execute(
-            "SELECT test_fix_cycles, review_fix_cycles, fix_iterations "
-            "FROM tasks WHERE task_id = ?",
+            "SELECT test_fix_cycles, review_fix_cycles, test_fix_total, review_fix_total, "
+            "fix_iterations FROM tasks WHERE task_id = ?",
             (task_id,),
         )
         row = cur.fetchone()
@@ -782,6 +803,8 @@ class StateStore:
         return LoopCounters(
             test_fix_cycles=row["test_fix_cycles"],
             review_fix_cycles=row["review_fix_cycles"],
+            test_fix_total=row["test_fix_total"],
+            review_fix_total=row["review_fix_total"],
             fix_iterations=row["fix_iterations"],
         )
 
@@ -793,6 +816,8 @@ class StateStore:
             conn,
             test_fix_cycles=counters.test_fix_cycles,
             review_fix_cycles=counters.review_fix_cycles,
+            test_fix_total=counters.test_fix_total,
+            review_fix_total=counters.review_fix_total,
             fix_iterations=counters.fix_iterations,
         )
 
@@ -1382,6 +1407,8 @@ def _task_from_row(row: sqlite3.Row) -> TaskRow:
         refinement_skip_reason=row["refinement_skip_reason"],
         test_fix_cycles=row["test_fix_cycles"],
         review_fix_cycles=row["review_fix_cycles"],
+        test_fix_total=row["test_fix_total"],
+        review_fix_total=row["review_fix_total"],
         fix_iterations=row["fix_iterations"],
         decomposition_enabled=_ob(row["decomposition_enabled"]),
         decomposition_accepted=_ob(row["decomposition_accepted"]),

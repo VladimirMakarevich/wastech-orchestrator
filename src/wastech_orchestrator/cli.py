@@ -706,9 +706,10 @@ def _install_write_config_example(worc_home: Path, *, overwrite: bool) -> bool:
 
 
 def _load_config(path: str) -> OrchestratorConfig:
-    """Load and semantically validate the config (fail-closed)."""
+    """Load and semantically validate the config (fail-closed; non-fatal findings are logged)."""
     config = load_config(path).config
-    validate_config(config)
+    for warning in validate_config(config):
+        _LOG.warning("config warning: %s", warning)
     return config
 
 

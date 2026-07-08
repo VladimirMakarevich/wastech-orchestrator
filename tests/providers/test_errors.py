@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from wastech_orchestrator.providers.base import ErrorClass
+from wastech_orchestrator.providers.base import FALLBACK_ELIGIBLE, ErrorClass
+from wastech_orchestrator.providers.codex import _CODEX_SIGNATURES
 from wastech_orchestrator.providers.errors import classify, make_signatures, message_for
 
 SIGNATURES = make_signatures(
@@ -69,6 +70,36 @@ def test_unrecognized_nonzero_exit_is_process_crashed() -> None:
 def test_signal_exit_is_process_crashed() -> None:
     err = classify(exit_code=-11, stderr_text="", timed_out=False, launch_error=None)
     assert err.error_class is ErrorClass.PROCESS_CRASHED
+
+
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    [
+        ("error: unexpected argument '--cd' found", ErrorClass.INVALID_INVOCATION),
+        ("unknown option '--foo'", ErrorClass.INVALID_INVOCATION),
+        ("unrecognized option: --bar", ErrorClass.INVALID_INVOCATION),
+        ("this codex build reports an unsupported version", ErrorClass.UNSUPPORTED_VERSION),
+    ],
+)
+def test_codex_argparse_error_is_invalid_invocation_not_version(
+    stderr: str, expected: ErrorClass
+) -> None:
+    # C2/F38: an argparse/exit-2 rejection of OUR argv must classify as INVALID_INVOCATION (surfaced
+    # loudly), distinct from a genuine unsupported-version gate — never silently masked as version.
+    err = classify(
+        exit_code=2,
+        stderr_text=stderr,
+        timed_out=False,
+        launch_error=None,
+        signatures=_CODEX_SIGNATURES,
+    )
+    assert err.error_class is expected
+
+
+def test_invalid_invocation_is_not_fallback_eligible() -> None:
+    # A bad argv we generated must surface, not silently fail over to the other provider (F38).
+    assert ErrorClass.INVALID_INVOCATION not in FALLBACK_ELIGIBLE
+    assert message_for(ErrorClass.INVALID_INVOCATION)  # has a secret-free category message
 
 
 def test_message_never_echoes_stderr_secret() -> None:

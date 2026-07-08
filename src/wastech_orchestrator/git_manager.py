@@ -731,7 +731,23 @@ class GitManager:
         earlier subtasks' committed paths, so a later subtask re-runs their sets too — redundant but
         fail-safe, matching ``checks.selection``'s bias toward running more, never fewer.
         """
-        base = self._config.repo.base_branch
+        return self._changed_code_paths_from(self._config.repo.base_branch)
+
+    def changed_code_paths_since_task_base(self) -> list[str]:
+        """Code paths changed vs the per-task chain base — this task's files only (F48).
+
+        Same shape as :meth:`changed_code_paths_since_base`, but diffs against :meth:`_diff_base`
+        (the branch tip at task start, F32) instead of the coarse ``base_branch``. On a shared/chain
+        branch (``existing``/``current`` mode) that means it returns only THIS task's changed paths,
+        not the whole chain's — so the memory packet's path-overlap ranking stays relevant to the
+        current task instead of saturating on every prior task's files. Equals
+        :meth:`changed_code_paths_since_base` in ``new`` mode (base == chain start).
+        """
+        return self._changed_code_paths_from(self._diff_base())
+
+    def _changed_code_paths_from(self, base: str) -> list[str]:
+        """Deduped, artifact-filtered code paths changed vs ``base`` (committed + uncommitted +
+        untracked). Shared by the ``base_branch`` (check-set) and per-task (packet) variants."""
         paths: list[str] = []
         seen: set[str] = set()
         tracked = self._git("diff", "--name-only", base, "--").stdout

@@ -659,7 +659,7 @@ The full set of optional per-node fields (all default to the value shown):
 | `permission_profile` | agent | flow `permission_ceiling` | May only be **≤** the ceiling; evaluators are forced `read-only`. |
 | `best_effort` | agent | `false` | Tolerate an infra failure (engine continues) instead of failing the task. |
 | `blocking` | evaluator | `true` | A failing verdict blocks (`true`) vs is advisory (`false`). |
-| `max_rework_per_stage` | evaluator | `1` | Rework loops this evaluator may trigger per stage. |
+| `max_rework_per_stage` | evaluator | `1` | Rework loops a **non-blocking** evaluator (e.g. `test_quality`) may trigger before it accepts. **Ignored for a blocking evaluator** (the default): a blocking loop is bounded by the flow's named-loop budget (e.g. `budgets.review_fix`), then parks to `manual`. |
 
 Note: **disabling** a node is not a flow field — it is a per-task override (`nodes.<id>.enabled: false` in the task file; see [operations.md](operations.md#disabling-flow-nodes-per-task)).
 
@@ -696,8 +696,8 @@ supervisor:
 | --- | --- | --- | --- |
 | `role_file` | string | `"roles/supervisor.md"` | Role file (resolved inside the active flow's directory) rendering the supervisor's read-only prompt; a missing/unreadable file falls back to a minimal built-in instruction. |
 | `model` | string or null | `null` (absent block) / primary model (install) | Model for the supervisor's calls; empty/null uses the provider default. A fresh `worc install` resolves it to the global primary provider's model so it is explicit. |
-| `reasoning` | string or null | `null` (absent block) / `high` (install) | Reasoning level (`low`/`medium`/`high`/`xhigh`/`max`); must be a known level. The delivered default is `high`, never a max tier — structured finalize turns are capped to `high` in code, so a max tier would only cost more without effect. |
-| `provider` | `codex` \| `claude` or null | `null` (absent block) / primary (install) | Which provider runs the supervisor layer; empty/null inherits the global primary. Validated ∈ `agents.allowed` and for reasoning support against the **resolved** provider, symmetric with flow nodes. Set it (e.g. `claude`) to keep the layer's `model` on a provider that accepts it when the global primary is the other provider. Model itself is passed through unverified, as everywhere. |
+| `reasoning` | string or null | `null` (absent block) / `high` (install) | Reasoning level (`low`/`medium`/`high`/`xhigh`/`max`); must be a known level. The delivered default is `high`, never a max tier — structured finalize turns **and** per-step observe turns are capped to `high` in code (observe is advisory and runs once per node-run, so a deep fix loop would otherwise pay a max tier many times over), so a max tier would only cost more without effect. |
+| `provider` | `codex` \| `claude` or null | `null` (absent block) / primary (install) | Which provider runs the supervisor layer; empty/null inherits the global primary. Validated ∈ `agents.allowed` and for reasoning support against the **resolved** provider, symmetric with flow nodes. Set it (e.g. `claude`) to keep the layer's `model` on a provider that accepts it when the global primary is the other provider. Model itself is passed through unverified — but when `provider` is unset and `model` plainly looks like the other vendor's (a `claude-*` model under a `codex` primary, say), config validation emits a **warning** (not fatal — the run degrades via fallback), so the mismatch is not silent. |
 
 What the layer does (see the [Functional Map](functional/blocks/B31-supervisor.md)):
 

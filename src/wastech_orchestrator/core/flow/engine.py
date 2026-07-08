@@ -404,6 +404,9 @@ class FlowEngine:
         glob = record_rework(self._run_state)
         if edge.loop is not None:
             cycles = self._run_state.bump(edge.loop)
+            # Cumulative per-loop total for the audit trail (F49): bumped on every rework of this
+            # loop, never reset on a forward edge, so a converged loop is not attributed 0.
+            self._run_state.bump(FlowRunState.total_key(edge.loop))
             if cycles >= self._loop_cap(edge.loop):
                 return _Stuck(loop=edge.loop, limit_name="max_fix_cycles")
         elif edge.budget is not None:

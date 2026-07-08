@@ -100,7 +100,9 @@ flow:
       # reasoning: high
       # network_access: false
       # blocking: true
-      # max_rework_per_stage: 1
+      # NOTE: `max_rework_per_stage` is a NON-blocking-only knob (e.g. test_quality) — it has no
+      # effect on this blocking review node. To cap the review->fixing loop deterministically, lower
+      # `budgets.review_fix` below; exhausting it parks the task to `manual`.
     - id: fixing
       kind: agent
       role_file: implementation/fixing.md

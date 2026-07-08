@@ -86,6 +86,10 @@ class EvaluatorNode:
     #: the flow's ``network_policy`` default. Toggles only the network dimension.
     network_access: bool | None = None
     blocking: bool = True
+    #: Per-instance rework ceiling for a NON-blocking evaluator (e.g. ``test_quality``): after this
+    #: many rework verdicts it accepts (→ continue) instead of looping. Ignored when ``blocking`` is
+    #: true — a blocking evaluator reworks until the flow's named-loop budget (e.g. ``review_fix``)
+    #: is spent, then parks to ``manual`` (see ``EvaluatorRunner._verdict``).
     max_rework_per_stage: int = 1
     #: which provider runs this evaluator; None → the config's global primary (PRE.1).
     provider: ProviderId | None = None

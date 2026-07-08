@@ -34,6 +34,11 @@ class ErrorClass(StrEnum):
     INVALID_OUTPUT = "invalid_output"
     PERMISSION_DENIED = "permission_denied"
     CONFIGURATION_ERROR = "configuration_error"
+    # The provider CLI rejected OUR invocation with an argparse/usage error (bad flags/args we
+    # built; codex uses exit 2) — distinct from a genuine UNSUPPORTED_VERSION. Deliberately NOT in
+    # FALLBACK_ELIGIBLE: a bad argv we generate must surface loudly and never silently fail over to
+    # the other provider (F38 was masked exactly this way, classified as an unsupported version).
+    INVALID_INVOCATION = "invalid_invocation"
     TASK_FAILURE = "task_failure"
     # The provider could not resume the requested session (lost transcript / provider reset it). The
     # Router retries the SAME provider once with a fresh session — it is infra (durable sessions,

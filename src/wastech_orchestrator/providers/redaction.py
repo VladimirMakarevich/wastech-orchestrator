@@ -38,9 +38,11 @@ def normalized_session_id(raw_session_id: str) -> str:
     return f"session:{digest}"
 
 
-# Literal secrets shorter than this are ignored: redacting a 1-3 char value would mangle ordinary
-# text without protecting anything meaningful (real tokens are long).
-_MIN_LITERAL_LEN = 4
+# Literal secrets shorter than this are ignored: redacting a very short value would mangle ordinary
+# text without protecting anything meaningful (real tokens are long). Aligned with
+# ``_MIN_DENIED_SECRET_LEN`` below — every harvest source already floors literals at 8, so this
+# loses no real secret while adding defense-in-depth against a short literal slipping in (F45).
+_MIN_LITERAL_LEN = 8
 
 # Threshold for a token harvested from a denied_read_paths file. Higher than _MIN_LITERAL_LEN so
 # scanning a ``.env`` does not turn common short values (``true``, ``1234``) into redaction literals
@@ -125,13 +127,19 @@ def secret_env_values(allowed_environment: Iterable[str]) -> tuple[str, ...]:
 
 
 def redact_text(text: str, *, extra_secrets: Iterable[str] = ()) -> str:
-    """Return ``text`` with known secrets replaced by :data:`REDACTED`. Pure."""
+    r"""Return ``text`` with known secrets replaced by :data:`REDACTED`. Pure.
+
+    Literal ``extra_secrets`` are replaced only on word boundaries (``(?<!\w)…(?!\w)``), never as a
+    substring inside a larger token. An unbounded substring replace corrupted benign text — F45: a
+    short harvested value rewrote the middle of an ordinary word in a lesson ``subject``, which also
+    broke the subject-derived dedup key. Deterministic (F36): the same input always redacts alike.
+    """
     redacted = text
     literals = sorted(
         {s for s in extra_secrets if len(s) >= _MIN_LITERAL_LEN}, key=len, reverse=True
     )
     for secret in literals:
-        redacted = redacted.replace(secret, REDACTED)
+        redacted = re.sub(rf"(?<!\w){re.escape(secret)}(?!\w)", REDACTED, redacted)
     redacted = _ASSIGNMENT.sub(rf"\1\2{REDACTED}", redacted)
     for pattern in _TOKEN_PATTERNS:
         redacted = pattern.sub(REDACTED, redacted)
