@@ -176,7 +176,7 @@ Every flow file — packaged and operator — is loaded and validated at `instal
 Run it explicitly with:
 
 ```bash
-wastech-orchestrator --config ./.worc/config.yaml preflight
+worc --config ./.worc/config.yaml preflight
 ```
 
 ## Inspecting rendered prompts and artifacts

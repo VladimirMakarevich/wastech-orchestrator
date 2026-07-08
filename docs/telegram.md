@@ -121,7 +121,7 @@ Do not set `drop_pending_updates=True` unless intentionally discarding unprocess
 Run:
 
 ```bash
-wastech-orchestrator --config ./config.yaml preflight
+worc --config ./config.yaml preflight
 ```
 
 Telegram preflight checks:
@@ -140,7 +140,7 @@ telegram: OK (bot=@project_bot, chat=project-chat, polling ready)
 ## 7. Run the live reply smoke test
 
 ```bash
-wastech-orchestrator --config ./config.yaml telegram-test --timeout-seconds 60
+worc --config ./config.yaml telegram-test --timeout-seconds 60
 ```
 
 The bot sends a ForceReply message. Reply directly to that message in the configured chat. Success means the reply matched the configured chat and exact Telegram message before the deadline.

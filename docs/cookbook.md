@@ -25,12 +25,12 @@ On Windows PowerShell, activate the environment with:
 ```powershell
 pipx install "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git"
 cd C:\projects\my-repo
-wastech-orchestrator install .                 # interactive wizard (same on macOS)
+worc install .                 # interactive wizard (same on macOS)
 ```
 
 ```bash
 # non-interactive, e.g. for CI/automation:
-wastech-orchestrator install . --non-interactive --provider codex --no-create-pr
+worc install . --non-interactive --provider codex --no-create-pr
 ```
 
 Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home: `config.yaml`, the agent task-authoring `guide/` (the packaged `worc/` docs copied to `.worc/guide/`), the editable `flows/` copies (built-in flows + their per-flow prompt dirs), SQLite `state.db` (with `-wal`/`-shm`), `orchestrator.pid`, `logs/`, and `workspace/`, plus the `tasks/rejected` quarantine. (Check logs are not a top-level directory — they live under `logs/<task-id>/checks/`.) `install` appends a single `.worc/` line to the repo's tracked `.gitignore`. The only things kept outside `.worc/` are the `tasks/` lifecycle dirs (`pending/`/`done/`/`failed/`) at the repo root — they are intentionally git-tracked, and the task file plus its `<id>.summary.md` (in `done/` or `failed/`) are the audit trail the orchestrator commits.

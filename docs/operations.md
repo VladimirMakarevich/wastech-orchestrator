@@ -41,12 +41,12 @@ The wizard detects the Git root, `origin`, base branch, and cleanliness; finds `
 Subsequent commands need no `--config` — they walk up from the current directory to the Git root and use `<root>/.worc/config.yaml`, run from anywhere inside the repo:
 
 ```text
-wastech-orchestrator preflight
-wastech-orchestrator watch
-wastech-orchestrator status
+worc preflight
+worc watch
+worc status
 ```
 
-Config discovery order: explicit `--config` > `<repo-root>/.worc/config.yaml` (walk up to the Git root) > a hint to run `install .`. Re-running `install` is idempotent; `--reconfigure` writes a timestamped backup and atomically replaces the config. For automation: `wastech-orchestrator install . --non-interactive --provider codex --no-create-pr` (`--non-interactive` replaces scripted setup). `--no-create-pr` disables the PR but not commit/push.
+Config discovery order: explicit `--config` > `<repo-root>/.worc/config.yaml` (walk up to the Git root) > a hint to run `install .`. Re-running `install` is idempotent; `--reconfigure` writes a timestamped backup and atomically replaces the config. For automation: `worc install . --non-interactive --provider codex --no-create-pr` (`--non-interactive` replaces scripted setup). `--no-create-pr` disables the PR but not commit/push.
 
 ### Windows 10 and 11 / PowerShell
 
@@ -115,7 +115,7 @@ The orchestrator is a CLI, not a daemon — "updating the implementation" means 
 ```bash
 pipx uninstall wastech-orchestrator
 pipx install "wastech-orchestrator[shell] @ git+https://github.com/VladimirMakarevich/wastech-orchestrator.git@vX.Y.Z"
-wastech-orchestrator --version           # confirm the new version
+worc --version           # confirm the new version
 ```
 
 > **Why not `pipx upgrade` / `--force`?** With a pinned git tag, `pipx upgrade wastech-orchestrator` treats the pinned ref as "already at latest" and does nothing (it reports the old version as current — even with `--pip-args="--pre"`, which only applies to a PyPI index, not a git ref). And `pipx install --force` fails on the uv backend ("A virtual environment already exists … not created in this session"). The `uninstall` + `install` pair sidesteps both. This friction is tracked in [Install and upgrade flow](backlog/install-and-upgrade-flow.md) (the durable fix is publishing to PyPI). Drop the `@vX.Y.Z` suffix to track the branch head; append it to pin a specific (pre)release tag (see the tag note below).
@@ -134,8 +134,8 @@ The current schema versions are `state.db` **v14** and `config.yaml` `schema_ver
 To bring the rest of your deployment current after a package upgrade, run **`upgrade-config`** (and **`upgrade-docs`**):
 
 ```bash
-wastech-orchestrator upgrade-config              # uses the discovered/bound config
-wastech-orchestrator --config path/to/config.yaml upgrade-config --dry-run   # preview only
+worc upgrade-config              # uses the discovered/bound config
+worc --config path/to/config.yaml upgrade-config --dry-run   # preview only
 ```
 
 It adds any keys the current format introduced (from the packaged template's defaults), **keeps every existing value**, stamps the current `schema_version`, and backs up the original to `config.yaml.bak-<UTC>` before writing. It is idempotent (an already-current config is left untouched) and fail-closed (it refuses a config that is unparsable or already newer than this version, and never writes a config that would fail validation). **Caveat:** when it does rewrite the file it re-emits via YAML and drops inline comments — see `config.example.yaml` / [configuration.md](configuration.md) for field docs. `--dry-run` lists what would be added without writing.
@@ -143,8 +143,8 @@ It adds any keys the current format introduced (from the packaged template's def
 The installed guide bundle also ships with the package (packaged source dir `worc/`, copied to `.worc/guide/`), so an upgrade brings newer docs than your already-installed copy. That bundle includes the task docs, the copy-ready task skills under `.worc/guide/tasks/skills/`, and the config-helper subtree under `.worc/guide/config/`. Refresh the installed copy (under `.worc/guide/`) with **`upgrade-docs`**:
 
 ```bash
-wastech-orchestrator upgrade-docs                # uses the discovered/bound config location
-wastech-orchestrator upgrade-docs --dry-run      # preview added/updated/removed files only
+worc upgrade-docs                # uses the discovered/bound config location
+worc upgrade-docs --dry-run      # preview added/updated/removed files only
 ```
 
 Unlike `config.yaml`, the `worc/` docs are generated content with **no operator edits to preserve**, so this is a straight overwrite to the packaged version: it writes missing or changed files, removes files no longer shipped, and makes no backup. It is idempotent (an already-current copy is a no-op), `--dry-run` writes nothing, and it fails closed (exit 2 with the same hint as `upgrade-config`) when no install location can be resolved.
@@ -355,7 +355,7 @@ worc restart --poll-seconds 10   # stop the running watcher, then start a fresh 
 
 Shutdown is **graceful** and works on Linux, macOS, and Windows: the stop is observed _between ticks_, so an in-flight task finishes its current stage rather than being interrupted mid-run. On POSIX, `stop` sends `SIGTERM` (escalating to `SIGKILL` after `--timeout`, the hard backstop) and also writes an `orchestrator.stop` sentinel the loop polls. On Windows, `os.kill` cannot reach a process started in another shell, so `stop` uses the sentinel alone: the watcher notices it at the next tick, exits, and removes its own PID file — whose disappearance is how `stop` confirms shutdown. A Windows watcher that is genuinely wedged (no longer polling) is not stopped by this graceful path; use `stop --force-full` to `taskkill /F /T` its process tree, or, failing that, after `--timeout` the graceful path clears the PID file (so a fresh `watch` can start) and you stop the survivor via Task Manager. `stop` is idempotent — it prints a notice and exits `0` when nothing is running or the PID file is stale. Starting a second `watch` for the same artifact root is refused while one is already live (on Windows, where liveness cannot be probed, a leftover PID file from a crashed watcher reads as "running" until cleared by `stop` or by hand).
 
-> Every command is also available under the short alias **`worc`** (`worc watch`, `worc status`, …); `wastech-orchestrator` remains the canonical long form used throughout this guide.
+> Every command works under either name: this guide uses the short **`worc`** (`worc watch`, `worc status`, …); `wastech-orchestrator` is the equivalent canonical long form.
 
 ### Structured logs
 
@@ -428,8 +428,8 @@ Timeout, transport failure, ambiguous approval, or a repeated stage request move
 Verify setup:
 
 ```bash
-wastech-orchestrator --config ./config.yaml preflight
-wastech-orchestrator --config ./config.yaml telegram-test --timeout-seconds 60
+worc --config ./config.yaml preflight
+worc --config ./config.yaml telegram-test --timeout-seconds 60
 ```
 
 Full BotFather/chat-id setup and troubleshooting: [telegram.md](telegram.md).
