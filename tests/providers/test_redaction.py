@@ -54,6 +54,30 @@ def test_short_literal_secret_is_not_redacted() -> None:
     assert out == "a cat sat on a mat"
 
 
+def test_sub_floor_literal_is_ignored() -> None:
+    # F45: the literal floor is aligned with the harvest floor (8); a shorter value is not treated
+    # as a redaction literal (it would mangle ordinary text without protecting a real secret).
+    out = redact_text("run the code path now", extra_secrets=["code"])  # len 4 < 8
+    assert out == "run the code path now"
+
+
+def test_literal_secret_redacted_only_on_word_boundary() -> None:
+    # F45: an unbounded substring replace corrupted benign text (a short harvested value was cut
+    # from the middle of an ordinary word, e.g. a lesson subject). Redact only standalone tokens.
+    out = redact_text("the taskflow runs but subtaskflows stay", extra_secrets=["taskflow"])
+    assert "subtaskflows" in out  # substring inside a larger word is left intact
+    assert f"the {REDACTED} runs" in out  # the standalone occurrence is redacted
+
+
+def test_literal_redaction_is_deterministic() -> None:
+    # F36: identical input redacts identically (no order/randomness dependence).
+    secret = "repeatable-secret-token"
+    text = f"see {secret} here and {secret} there"
+    first = redact_text(text, extra_secrets=[secret])
+    assert first == redact_text(text, extra_secrets=[secret])
+    assert secret not in first
+
+
 def test_mapping_sensitive_key_value_fully_redacted() -> None:
     out = redact_mapping({"api_key": "anything-at-all", "model": "gpt-x"})
     assert out == {"api_key": REDACTED, "model": "gpt-x"}

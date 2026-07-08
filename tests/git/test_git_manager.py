@@ -1007,6 +1007,31 @@ def test_current_diff_on_chain_branch_excludes_prior_task(
     assert "prior_task.py" not in diff  # the prior chain task is NOT (base = branch tip at start)
 
 
+def test_changed_code_paths_since_task_base_excludes_prior_task_on_chain(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # F48: the memory packet's path relevance uses the per-task chain base, so on a shared chain
+    # branch it returns only THIS task's files. The coarse base_branch variant still sees the whole
+    # chain (right for check-set selection, wrong for packet ranking).
+    git_run(["checkout", "-b", "feature/chain"], git_repo.clone)
+    (git_repo.clone / "prior_task.py").write_text("prior = 1\n", encoding="utf-8")
+    git_run(["add", "prior_task.py"], git_repo.clone)
+    git_run(["commit", "-m", "feat(p1): prior task"], git_repo.clone)
+    git_run(["checkout", "main"], git_repo.clone)
+
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch(
+        "task-002", "x", epoch=_EPOCH, mode=BranchMode.EXISTING, branch_ref="feature/chain"
+    )
+    (git_repo.clone / "this_task.py").write_text("this = 2\n", encoding="utf-8")
+
+    task_scoped = gm.changed_code_paths_since_task_base()
+    assert "this_task.py" in task_scoped  # this task's (untracked) change
+    assert "prior_task.py" not in task_scoped  # committed before the chain base -> excluded
+    # The coarse base_branch variant still sees the whole chain (unchanged behavior).
+    assert set(gm.changed_code_paths_since_base()) >= {"this_task.py", "prior_task.py"}
+
+
 def test_current_diff_new_mode_unchanged_uses_base_branch(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:

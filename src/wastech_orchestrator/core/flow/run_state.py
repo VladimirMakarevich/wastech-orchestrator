@@ -36,6 +36,14 @@ class FlowRunState:
     #: loops are operator-chosen, so this reserved name cannot collide with either.
     GLOBAL_FIX_KEY: ClassVar[str] = "global_fix_iterations"
 
+    #: Reserved prefix for a named loop's **cumulative** rework total (``total_fix:<loop>``). Unlike
+    #: the consecutive counter under the bare loop name — which ``reset()`` zeroes on a forward
+    #: edge — a total is bumped on every rework of that loop and never reset, so it survives loop
+    #: convergence and (like the global counter) accumulates across subtasks. It lives in this same
+    #: dict, so the recorder persists/rehydrates it for free (F49). The ``:`` cannot appear in an
+    #: operator-chosen loop name, so this cannot collide with a real loop key.
+    TOTAL_PREFIX: ClassVar[str] = "total_fix:"
+
     flow_fingerprint: str
     current_node: str | None = None
     #: Ordered trace of node executions (a node re-appears each time a loop re-enters it). P1.2
@@ -52,6 +60,15 @@ class FlowRunState:
         """Current value of a loop/budget counter (0 if never incremented)."""
         return self.loop_counters.get(key, 0)
 
+    @classmethod
+    def total_key(cls, loop: str) -> str:
+        """The reserved ``loop_counters`` key holding ``loop``'s cumulative rework total."""
+        return f"{cls.TOTAL_PREFIX}{loop}"
+
+    def total(self, loop: str) -> int:
+        """Cumulative rework total for a named ``loop`` (survives forward resets; 0 if none)."""
+        return self.loop_counters.get(self.total_key(loop), 0)
+
     def bump(self, key: str) -> int:
         """Increment ``key`` by one and return the new value."""
         new = self.loop_counters.get(key, 0) + 1
@@ -67,13 +84,18 @@ class FlowRunState:
         self.completed_nodes.append(node_id)
 
     def reset_for_next_subtask(self) -> None:
-        """Drop every loop/inline-budget counter EXCEPT the global fix counter (decomposition).
+        """Drop every loop/inline-budget counter EXCEPT the global fix counter and the cumulative
+        per-loop totals (decomposition).
 
-        Each subtask gets fresh per-loop / per-edge budgets, but the global ``fix_iterations``
-        accumulates across the whole decomposed task (the ``shared_budget`` hard stop). Generic —
-        covers named loops + inline supervisor budgets without naming them.
+        Each subtask gets fresh per-loop / per-edge budgets, but the global ``fix_iterations`` and
+        the ``total_fix:<loop>`` totals accumulate across the whole decomposed task (the
+        ``shared_budget`` hard stop / whole-task audit). Generic — covers named loops + inline
+        supervisor budgets without naming them.
         """
-        glob = self.loop_counters.get(self.GLOBAL_FIX_KEY)
+        preserved = {
+            key: value
+            for key, value in self.loop_counters.items()
+            if key == self.GLOBAL_FIX_KEY or key.startswith(self.TOTAL_PREFIX)
+        }
         self.loop_counters.clear()
-        if glob is not None:
-            self.loop_counters[self.GLOBAL_FIX_KEY] = glob
+        self.loop_counters.update(preserved)

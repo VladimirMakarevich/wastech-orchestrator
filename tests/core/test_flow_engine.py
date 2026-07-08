@@ -392,6 +392,27 @@ def test_engine_inline_budget_resets_after_forward_edge() -> None:
     assert result.status is Status.DONE
 
 
+def test_named_loop_cumulative_total_survives_forward_edge_reset() -> None:
+    # F49: the consecutive `review_fix` counter resets to 0 on accept, but the cumulative total
+    # keeps every rework — so a converged loop is attributed N reworks in the audit trail, not 0.
+    snap = _snapshot(
+        [_agent("s"), _evaluator("ev"), _agent("fix"), _publish("done")],
+        [
+            Edge("s", "ev"),
+            Edge("ev", "done", outcome="accept"),
+            Edge("ev", "fix", outcome="rework", loop="review_fix"),
+            Edge("fix", "ev"),
+        ],
+        budgets={"review_fix": 99, FlowRunState.GLOBAL_FIX_KEY: 99},
+    )
+    runner = StubRunner({"ev": ["rework", "rework", "accept"]})
+    engine = _engine(snap, runner, RecordingRecorder())
+    assert engine.run().status is Status.DONE
+    assert engine.run_state.counter("review_fix") == 0  # consecutive: zeroed on the accept edge
+    assert engine.run_state.total("review_fix") == 2  # cumulative: both reworks retained
+    assert engine.run_state.fix_iterations == 2  # global equals the single loop's total here
+
+
 # -- per-node field overrides (task nodes.<id>.{model,reasoning,provider}) -----
 
 

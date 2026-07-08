@@ -925,6 +925,37 @@ def test_branch_ref_invalid_name_rejected(config: OrchestratorConfig) -> None:
     assert result.reason is ValidationReason.INVALID_BRANCH_MODE
 
 
+def test_depends_on_with_existing_branch_ref_warns_but_passes(
+    config: OrchestratorConfig,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # F40: combining depends_on with a pinned pre-existing branch can deadlock when that branch is a
+    # dependency's own unmerged PR branch — an advisory warning, not a reject (can be legitimate).
+    monkeypatch.setattr(logging.getLogger(LOGGER_NAME), "propagate", True)  # so caplog sees it
+    with caplog.at_level(logging.WARNING):
+        result = _fm(
+            config,
+            depends_on='["task-000"]',
+            branch_mode="existing",
+            branch_ref="feat/shared",
+        )
+    assert result.passed is True
+    assert "depends_on" in caplog.text and "branch_ref" in caplog.text
+
+
+def test_depends_on_alone_does_not_warn_about_branch(
+    config: OrchestratorConfig,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(logging.getLogger(LOGGER_NAME), "propagate", True)
+    with caplog.at_level(logging.WARNING):
+        result = _fm(config, depends_on='["task-000"]')
+    assert result.passed is True
+    assert "branch_ref" not in caplog.text
+
+
 def test_publish_valid_parses(config: OrchestratorConfig) -> None:
     result = _fm(config, publish="push")
     assert result.passed is True

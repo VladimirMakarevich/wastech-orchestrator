@@ -32,6 +32,11 @@ _MESSAGES: dict[ErrorClass, str] = {
     ErrorClass.INVALID_OUTPUT: "the provider produced unparseable structured output",
     ErrorClass.PERMISSION_DENIED: "the provider reported a sandbox/permission denial",
     ErrorClass.CONFIGURATION_ERROR: "the provider invocation was rejected by the security policy",
+    ErrorClass.SESSION_UNAVAILABLE: "the provider could not resume the requested session",
+    ErrorClass.INVALID_INVOCATION: "the provider CLI rejected the invocation (bad arguments)",
+    ErrorClass.MODEL_REQUEST_INVALID: (
+        "the provider rejected the model request (bad request / unsupported schema)"
+    ),
     ErrorClass.TASK_FAILURE: "the provider completed without satisfying the task",
     ErrorClass.CANCELLED: "the agent was cancelled by an operator stop",
 }

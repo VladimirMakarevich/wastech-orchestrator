@@ -272,6 +272,21 @@ class ValidationGate:
         if branch_mode_reject is not None:
             return branch_mode_reject, None
         branch_mode, branch_ref, publish, branch_name = branch_fields
+        # F40: a task that both merge-gates on a dependency (`depends_on`) and pins itself to a
+        # pre-existing branch (`branch_ref` ⟹ branch_mode 'existing') can deadlock when that branch
+        # IS a dependency's own still-open PR branch — the dependency never merges because this task
+        # builds on it (this stalled all of P5 at step 2). The gate cannot resolve a dependency's
+        # branch (that is live scheduler state), so this is an advisory warning, not a reject: an
+        # independent shared branch alongside a dependency is legitimate.
+        if depends_on and branch_ref is not None:
+            logger.warning(
+                "task %r combines depends_on=%s with branch_ref=%r (branch_mode 'existing'); if "
+                "that branch is a dependency's own unmerged PR branch the task can never become "
+                "eligible — verify the shared branch is independent of the dependencies",
+                id_value,
+                list(depends_on),
+                branch_ref,
+            )
         raw_task_type = frontmatter.get("task_type")
         task_type = (str(raw_task_type).strip() or None) if isinstance(raw_task_type, str) else None
         # _check_field_types already enforced a non-empty string when present; absent ⇒ default.

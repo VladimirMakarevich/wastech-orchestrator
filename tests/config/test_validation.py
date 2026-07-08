@@ -121,6 +121,32 @@ def test_supervisor_reasoning_rejected_against_pinned_provider(
     assert any("supervisor.reasoning" in issue for issue in exc.value.issues)
 
 
+def test_inherited_supervisor_model_vendor_mismatch_warns(base_config: OrchestratorConfig) -> None:
+    # F39: a claude-looking supervisor.model with provider unset under a codex primary 400s at
+    # runtime (masked by fallback). validate_config WARNS (fallback exists → not fatal), catching
+    # the silent mismatch that a `ready` preflight otherwise missed.
+    cfg = replace(
+        _codex_primary(base_config),
+        supervisor=replace(
+            base_config.supervisor, provider=None, model="claude-opus-4-8", reasoning=None
+        ),
+    )
+    warnings = validate_config(cfg)
+    assert any("supervisor.model" in w and "codex" in w for w in warnings)
+
+
+def test_inherited_supervisor_unknown_model_does_not_warn(base_config: OrchestratorConfig) -> None:
+    # A model with no recognized vendor prefix stays silent — no false positive (models are
+    # otherwise passed through unverified).
+    cfg = replace(
+        _codex_primary(base_config),
+        supervisor=replace(
+            base_config.supervisor, provider=None, model="custom-inhouse-1", reasoning=None
+        ),
+    )
+    assert validate_config(cfg) == []
+
+
 def test_max_total_below_max_fix_cycles_is_rejected(base_config: OrchestratorConfig) -> None:
     bad = _with_agents(base_config, max_fix_cycles=5, max_total_fix_iterations=3)
     with pytest.raises(ConfigError) as exc:

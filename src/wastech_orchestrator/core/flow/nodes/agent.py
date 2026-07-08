@@ -595,7 +595,11 @@ class AgentNodeRunner:
             return None  # render_role_prompt surfaces the real read error
         if "{memory_path}" not in template and "{?memory_path}" not in template:
             return None
-        touched = self._s.git.changed_code_paths_since_base() if self._s.git is not None else []
+        # F48: this task's changed paths (per-task chain base), not the whole shared branch's, so
+        # the packet's path-overlap ranking stays relevant on a chain branch.
+        touched = (
+            self._s.git.changed_code_paths_since_task_base() if self._s.git is not None else []
+        )
         dest = task_artifact_dir(self._s.artifacts_root, ctx.task_id) / "memory" / f"{node.id}.md"
         written = builder.write_packet(
             node_id=node.id, task_type=self._in.task_type, touched_paths=touched, dest=dest

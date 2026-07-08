@@ -13,6 +13,8 @@ import pytest
 from wastech_orchestrator.config.schema import MemoryConfig
 from wastech_orchestrator.memory import (
     AuditContext,
+    CandidateDelta,
+    CandidateLesson,
     EntityRecord,
     EpisodeRecord,
     Evidence,
@@ -25,6 +27,7 @@ from wastech_orchestrator.memory import (
     Scope,
     TrustLevel,
 )
+from wastech_orchestrator.memory.service import WriteSource
 
 _AUDIT = AuditContext(timestamp="2026-06-30T00:00:00Z")
 _NO_SCOPE = Scope()  # module-level singleton (avoids a call in a default argument)
@@ -90,6 +93,67 @@ def test_ranking_prefers_path_overlap(service: MemoryService) -> None:
         PacketContext(node_id="implementation", touched_paths=("src/core/x.py",))
     )
     assert packet.long_term[0]["memory_id"] == "scoped"
+
+
+def _hold_lesson(service: MemoryService, *, subject: str, ev_type: str) -> None:
+    """Apply one lesson so it lands 'held' in quarantine (durable at 1/2, or non-durable)."""
+    service.apply_delta(
+        CandidateDelta(
+            lessons=(
+                CandidateLesson(
+                    kind=LongTermKind.REVIEWER,
+                    subject=subject,
+                    statement="expect X",
+                    evidence=(Evidence(type=ev_type, ref="ref"),),
+                ),
+            )
+        ),
+        episode=EpisodeRecord(
+            id="ep_t1",
+            task_id="t1",
+            created_at=_AUDIT.timestamp,
+            trust_level=TrustLevel.ARTIFACT_BACKED,
+        ),
+        source=WriteSource.SUCCESS,
+        audit=_AUDIT,
+    )
+
+
+def test_durable_held_quarantine_lesson_is_surfaced(service: MemoryService) -> None:
+    # F43: a durable lesson still held in quarantine (awaiting recurrence) is real repo knowledge —
+    # the packet surfaces it instead of leaving it write-only.
+    _hold_lesson(service, subject="rv", ev_type="check")  # artifact-backed → durable, held 1/2
+    assert service.read_long_term(LongTermKind.REVIEWER) == []  # held, not promoted
+    assert len(service.read_quarantine()) == 1
+    packet = _builder(service).build(PacketContext(node_id="review"))
+    assert [row["subject"] for row in packet.long_term] == ["rv"]
+
+
+def test_agent_inferred_quarantine_is_not_surfaced(service: MemoryService) -> None:
+    # F43: only DURABLE-trust held lessons are surfaced; external/agent-inferred stays invisible.
+    _hold_lesson(service, subject="ai", ev_type="web")  # external-untrusted
+    assert len(service.read_quarantine()) == 1
+    packet = _builder(service).build(PacketContext(node_id="review"))
+    assert packet.long_term == ()
+
+
+def test_episode_with_content_renders_a_nonempty_bullet(service: MemoryService) -> None:
+    # F47: an episode carrying touched_paths + stage_outcomes renders content, not a bare bullet.
+    service.append(
+        EpisodeRecord(
+            id="ep_t1",
+            task_id="t1",
+            created_at=_AUDIT.timestamp,
+            trust_level=TrustLevel.ARTIFACT_BACKED,
+            stage_outcomes={"task": "done"},
+            touched_paths=("src/mod.py",),
+        ),
+        audit=_AUDIT,
+    )
+    builder = _builder(service)
+    rendered = builder.render(builder.build(PacketContext(node_id="planning")))
+    assert "task=done" in rendered
+    assert "src/mod.py" in rendered
 
 
 def test_lesson_node_scope_is_honored(service: MemoryService) -> None:

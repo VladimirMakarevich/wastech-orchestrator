@@ -24,7 +24,7 @@ from wastech_orchestrator.config.schema import MemoryConfig
 from wastech_orchestrator.memory._io import atomic_write_text
 from wastech_orchestrator.memory.records import LongTermKind
 from wastech_orchestrator.memory.service import MemoryService
-from wastech_orchestrator.memory.trust import TrustLevel
+from wastech_orchestrator.memory.trust import DURABLE_TRUST_LEVELS, TrustLevel
 
 # Ranking weight per trust level (precision-first / trust-weighted). Higher = preferred. Keyed by
 # the serialized value, since records carry ``trust_level`` as a string on disk.
@@ -36,6 +36,13 @@ _TRUST_RANK: dict[str, int] = {
     TrustLevel.AGENT_INFERRED.value: 1,
     TrustLevel.EXTERNAL_UNTRUSTED.value: 0,
 }
+
+# Serialized trust/kind values used to surface still-"held" durable lessons from quarantine (F43): a
+# durable repo-observed/reviewer lesson that has not yet recurred waits in quarantine, which the
+# packet otherwise never reads — so it is write-only noise. Only DURABLE-trust, lesson-kind held
+# records are surfaced (never agent-inferred / external-untrusted, which stay quarantined).
+_DURABLE_TRUST_VALUES: frozenset[str] = frozenset(t.value for t in DURABLE_TRUST_LEVELS)
+_LONG_TERM_KIND_VALUES: frozenset[str] = frozenset(k.value for k in LongTermKind)
 
 # Nodes whose role naturally prefers reviewer-kind lessons (design §6: "review → more reviewer").
 _REVIEWER_PREF_NODES: frozenset[str] = frozenset({"review", "fixing"})
@@ -131,6 +138,10 @@ class PacketBuilder:
 
     def _select_long_term(self, ctx: PacketContext) -> list[dict[str, Any]]:
         rows = [row for row in self._all_long_term() if _is_active(row) and _node_ok(row, ctx)]
+        # F43: also surface durable lessons still "held" in quarantine (awaiting recurrence) — the
+        # packet is otherwise their only, never-taken read path. Durable trust only; the ranking and
+        # per-node caps below bound them exactly like promoted long-term records.
+        rows += [row for row in self._durable_quarantine() if _node_ok(row, ctx)]
         # Stable sorts, least-significant first → final order (most→least significant): trust,
         # path overlap, reviewer-preference (for the review/fixing nodes), recency, id.
         rows.sort(key=lambda r: str(_id_of(r)))
@@ -165,6 +176,21 @@ class PacketBuilder:
         for kind in LongTermKind:
             rows.extend(self._service.read_long_term(kind))
         return rows
+
+    def _durable_quarantine(self) -> list[dict[str, Any]]:
+        """Durable, lesson-kind records still held in quarantine (F43).
+
+        A durable long-term lesson that has not yet recurred waits in ``quarantine/pending.jsonl``;
+        the promotion gate keeps it there, but it is real repo knowledge, so the packet surfaces the
+        DURABLE-trust, lesson-kind held records. Agent-inferred / external-untrusted quarantine
+        stays invisible by design.
+        """
+        return [
+            row
+            for row in self._service.read_quarantine()
+            if str(row.get("trust_level") or "") in _DURABLE_TRUST_VALUES
+            and str(row.get("kind") or "") in _LONG_TERM_KIND_VALUES
+        ]
 
     # --- caps + line backstop (Q5 / NFR4, design §6) ---------------------------
 

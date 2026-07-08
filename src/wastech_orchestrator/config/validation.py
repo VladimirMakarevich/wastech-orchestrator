@@ -67,6 +67,26 @@ def _global_primary(config: OrchestratorConfig) -> ProviderId | None:
     return primaries[0] if len(primaries) == 1 else None
 
 
+# Recognized model-name prefixes per vendor, for the F39 advisory model↔provider warning ONLY. A
+# deliberately conservative heuristic: an unrecognized model yields no vendor (no false positive),
+# matching the codebase's stance that model ids are otherwise passed through unverified.
+_MODEL_VENDOR_PREFIXES: tuple[tuple[ProviderId, tuple[str, ...]], ...] = (
+    (ProviderId.CLAUDE, ("claude", "sonnet", "opus", "haiku", "fable")),
+    (ProviderId.CODEX, ("gpt", "o1", "o3", "o4", "codex")),
+)
+
+
+def _infer_model_vendor(model: str | None) -> ProviderId | None:
+    """Best-effort vendor of a model id from its name prefix; ``None`` when unrecognized."""
+    if not model:
+        return None
+    lowered = model.strip().lower()
+    for vendor, prefixes in _MODEL_VENDOR_PREFIXES:
+        if lowered.startswith(prefixes):
+            return vendor
+    return None
+
+
 def _check_reasoning(
     *,
     where: str,
@@ -151,7 +171,7 @@ def validate_config(config: OrchestratorConfig) -> list[str]:
     _validate_checks(config, issues, warnings)
     _validate_telegram(config, issues)
     _validate_confirmation_gates(config, issues)
-    _validate_supervisor(config, issues)
+    _validate_supervisor(config, issues, warnings)
     _validate_security(config, issues)
     _validate_paths(config, issues)
 
@@ -184,7 +204,9 @@ def _validate_paths(config: OrchestratorConfig, issues: list[str]) -> None:
         )
 
 
-def _validate_supervisor(config: OrchestratorConfig, issues: list[str]) -> None:
+def _validate_supervisor(
+    config: OrchestratorConfig, issues: list[str], warnings: list[str]
+) -> None:
     """The supervisor layer is validated under the same ceiling as a flow node (P2.1).
 
     ``permission_profile`` is forced ``read-only`` in code (the layer never writes). ``provider``
@@ -193,6 +215,14 @@ def _validate_supervisor(config: OrchestratorConfig, issues: list[str]) -> None:
     with flow-node validation. Model is passed through unverified, as everywhere. We also enforce
     that ``role_file`` has no path traversal (``..`` or an absolute path) — the flow validator's
     containment rule for a node ``role_file``.
+
+    F39: when ``provider`` is unset, ``supervisor.model`` is sent to the inherited global primary. A
+    model whose vendor plainly clashes with that primary (a ``claude-*`` model under a ``codex``
+    primary, say) 400s on every supervisor turn at runtime, silently masked by the cross-provider
+    fallback. We can't verify a model in general, but a recognized cross-vendor prefix is a strong
+    signal — surfaced as a WARNING, not fatal (the run still degrades via fallback; "fatal only when
+    no runtime fallback"). The check fires only on the inherited path; an explicit provider is the
+    operator's call and is validated for ``agents.allowed`` membership above.
     """
     provider = config.supervisor.provider
     if provider is not None and provider not in frozenset(config.agents.allowed):
@@ -205,6 +235,15 @@ def _validate_supervisor(config: OrchestratorConfig, issues: list[str]) -> None:
             reasoning=config.supervisor.reasoning,
             issues=issues,
         )
+        if provider is None:
+            vendor = _infer_model_vendor(config.supervisor.model)
+            if vendor is not None and vendor != resolved:
+                warnings.append(
+                    f"supervisor.model {config.supervisor.model!r} looks like a {vendor.value} "
+                    f"model, but supervisor.provider is unset so it inherits the global primary "
+                    f"{resolved.value!r}; this will fail at runtime and fall back. Pin "
+                    f"supervisor.provider to {vendor.value!r} or set a {resolved.value} model."
+                )
     role_file = config.supervisor.role_file
     parts = role_file.replace("\\", "/").split("/")
     if ".." in parts or role_file.startswith("/"):

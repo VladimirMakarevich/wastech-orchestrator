@@ -91,8 +91,21 @@ _CODEX_SIGNATURES = make_signatures(
             r"service unavailable|\b50[023]\b|bad gateway|internal server error",
         ),
         (
-            ErrorClass.UNSUPPORTED_VERSION,
-            r"unsupported version|unknown option|unrecognized option|unexpected argument",
+            # A model/schema HTTP 400 the provider rejected (a request WE built) — split from a
+            # generic PROCESS_CRASHED so it surfaces loudly instead of wastefully falling over to
+            # the other provider, which 400s the same request. Disjoint from the 401/403/429/50x
+            # word-boundary numeric signatures above.
+            ErrorClass.MODEL_REQUEST_INVALID,
+            r"\b400\b|bad request|invalid[_ ]?(json[_ ]?)?schema|unsupported parameter",
+        ),
+        (ErrorClass.UNSUPPORTED_VERSION, r"unsupported version"),
+        (
+            # argparse/usage rejection of OUR argv (codex exit 2) — a bad-argv bug on our side, not
+            # a version gate. A separate class so it surfaces loudly instead of silently failing
+            # over (F38 was masked as unsupported_version). A stale CLI that emits "unknown option"
+            # for a newer flag is caught by the preflight version check first.
+            ErrorClass.INVALID_INVOCATION,
+            r"unknown option|unrecognized option|unexpected argument",
         ),
         (
             ErrorClass.PERMISSION_DENIED,

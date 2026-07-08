@@ -494,6 +494,16 @@ def test_schema_turn_caps_max_reasoning_but_free_text_keeps_it(tmp_path: Path) -
     assert free_router.requests[0].reasoning == "xhigh"
 
 
+def test_observe_turn_caps_max_reasoning(tmp_path: Path) -> None:
+    # F50: per-step observation is advisory and runs once per node-run, so a deep fix loop drives
+    # many observe turns; it never needs a max tier — cap it to `high` (like a schema turn), while
+    # the free-text finalize above keeps the configured tier.
+    router, store = FakeRouter(), _store(tmp_path)
+    sup = _supervisor(tmp_path, router, store, reasoning="xhigh")
+    sup.observe(task_id=_TASK, node_id="implementation", node_run_id=1, outcome_kind="done")
+    assert router.requests[0].reasoning == "high"
+
+
 def _structured(summary: str, memory_delta: dict[str, Any]) -> AgentRunResult:
     return AgentRunResult(
         status=RunStatus.SUCCEEDED,

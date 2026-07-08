@@ -11,9 +11,14 @@ integer — audit remediation #17.)
 
 * ``test_fix_cycles`` / ``review_fix_cycles`` — the length of the *current consecutive* fix loop,
   counted separately for the test-driven and review-driven loops; each bounded by
-  ``agents.max_fix_cycles``.
+  ``agents.max_fix_cycles``. They reset to 0 when the loop converges (a forward edge is taken), so
+  a task that *succeeded* after N reworks persists 0 here — a live figure, not an audit total.
+* ``test_fix_total`` / ``review_fix_total`` — the *cumulative* per-loop rework total for the whole
+  task, never reset on convergence (F49). Use these, not the consecutive counters, to attribute how
+  many reworks a completed task actually took to a given loop.
 * ``fix_iterations`` — a single global per-task counter, incremented on every entry into ``fixing``;
-  bounded by ``agents.max_total_fix_iterations`` (the hard stop guaranteeing termination).
+  bounded by ``agents.max_total_fix_iterations`` (the hard stop guaranteeing termination). Equals
+  ``test_fix_total + review_fix_total`` for the default flow (every rework belongs to one loop).
 """
 
 from __future__ import annotations
@@ -31,6 +36,9 @@ class LoopCounters:
 
     test_fix_cycles: int = 0
     review_fix_cycles: int = 0
+    #: Cumulative per-loop rework totals for the whole task (never reset on convergence — F49).
+    test_fix_total: int = 0
+    review_fix_total: int = 0
     fix_iterations: int = 0
 
 

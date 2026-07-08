@@ -32,3 +32,7 @@ This folder contains backlog documents for product work that has already shipped
 | [Trust levels / danger-approval policy](trust-levels-danger-approval.md) | implemented (config v25, 2026-07-03) |
 | [Branch mode (existing / current branch) + per-task publish cap](branch-mode.md) | implemented (config v26, 2026-07-04) |
 | [Run-quality & gating hardening (evaluator fail-closed, complete diff, planning HITL, codex usage)](run-quality-gating-hardening.md) | implemented (F19–F22, 2026-07-04) |
+| [Codex-primary correctness (resume-argv + supervisor provider/model)](codex-primary-correctness.md) | implemented (2026-07-07, F38/F39) |
+| [Supervisor finalize output-schemas OpenAI-strict (F41)](supervisor-output-schema-codex-strict.md) | implemented (2026-07-07); codex re-run verified Проход 18 |
+| [P5 findings remediation plan (A1–D1, F42–F50)](p5-findings-remediation-plan.md) | orchestrator items implemented (2026-07-08); target/owner residue → [p5-remediation-skipped-items.md](p5-remediation-skipped-items.md) |
+| [P5 remediation — SKIPPED / deferred items (final disposition)](p5-remediation-skipped-items.md) | closed 2026-07-08 — A1 (target `review.md`) + C2 (model/schema-400 error class) shipped, D1 already satisfied; A3 delta-observe stays deferred and E1/F37 stays an owner live-smoke, both carried in [follow_ups.md](../../follow_ups.md) |

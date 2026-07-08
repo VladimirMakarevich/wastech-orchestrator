@@ -1,10 +1,12 @@
 # P5 — план исправления открытых находок кампании (проходы 15–20)
 
-Единый план работ по всем **OPEN**-находкам фазы P5 (6 задач `p5-01`…`p5-06` на `wastech-mdlint`, PR [#11](https://github.com/VladimirMakarevich/wastech-mdlint/pull/11)). Сводит воедино три источника: [синтез фазы](../analysis/p5-phase-synthesis.md) (F42/F49/F50 + вторичные), [качество промптов по узлам](../analysis/p5-prompt-quality-per-node.md) (калибровка review), [аудит памяти](../analysis/p5-memory-subsystem-audit.md) (F43–F48) и открытые пункты из [follow_ups.md](follow_ups.md) по этим прогонам. Первоисточник каждой находки — [TEST-FINDINGS.md](../../TEST-FINDINGS.md).
+Единый план работ по всем **OPEN**-находкам фазы P5 (6 задач `p5-01`…`p5-06` на `wastech-mdlint`, PR [#11](https://github.com/VladimirMakarevich/wastech-mdlint/pull/11)). Сводит воедино три источника: [синтез фазы](../../../analysis/p5-phase-synthesis.md) (F42/F49/F50 + вторичные), [качество промптов по узлам](../../../analysis/p5-prompt-quality-per-node.md) (калибровка review), [аудит памяти](../../../analysis/p5-memory-subsystem-audit.md) (F43–F48) и открытые пункты из [follow_ups.md](../../follow_ups.md) по этим прогонам. Первоисточник каждой находки — [TEST-FINDINGS.md](../../../../TEST-FINDINGS.md).
 
 **Контекст: фаза здорова, блокеров нет.** 6/6 задач `done` с 1-й попытки, чеки всегда зелёные, все codex-primary баги закрыты в бою (F38 VERIFIED, F39 per-step закрыт вариантом B, F41 VERIFIED, F24 не воспроизводится — в план **не входят**). Это план **тюнинга и харденинга**, а не аварийного ремонта: приоритеты — стоимость/латентность (F42/F50), наблюдаемость (F49), полезность памяти (F43/F48) и защита от граничных конфигураций (F39-preflight/F40). Две находки — P5-резидуалы уже частично закрытых p4-находок: **F48** — сиблинг F32 (инкрементальный дифф), **F45** — сиблинг F36 (недетерминированная редакция).
 
 Формат пункта: **Цель · Рычаг (file:line) · Шаги · Тест · Зависимость/порядок**. Приоритет = «серьёзность + разблокировка других находок + доля стоимости фазы». Зоны: **orchestrator** (пакетный код — задевает каждый репо) и **target** (`.worc/flows/` `wastech-mdlint`, gitignored, install-seeded).
+
+**Статус реализации (2026-07-08).** Все orchestrator-пункты РЕАЛИЗОВАНЫ на ветке `feat/p5-findings-remediation` (гейт зелёный: ruff/format/mypy/pytest): A1 (де-инерция кноба `max_rework_per_stage` — только doc/packaged, без правки движка по решению владельца), A2/F49 (кумулятивные `test_fix_total`/`review_fix_total`, state.db v13→v14), A3/F50 (observe-reasoning cap → `high`), B1/F43 (пакет читает durable-карантин + правка финализатор-промпта), B2/F48 (`changed_code_paths_since_task_base()`), B3/F44 (дедуп entity по `canonical_name` + `last_seen_task_ids`), B4/F45 (редакция по границам слова + floor 8), B5/F47 (эпизоды с `touched_paths`/`stage_outcomes`), B6/F46 (rationale `kind+scope.paths`), C1/F39 (warn на inherited mismatch), C2 (`ErrorClass.INVALID_INVOCATION`), D1/F40 (warn на `depends_on`×`branch_ref`). **SKIPPED (target-repo / owner):** A1-substantive (target `review.md`), D1-шаг 1 (target task-authoring), E1/F37 (owner live-smoke). **Отложено в этом репо:** A3 delta-observe, C2 400-split. Детали — в [follow_ups.md](../../follow_ups.md) (строки 2026-07-08).
 
 ## Рекомендованный сквозной порядок
 
@@ -25,7 +27,7 @@
 
 **Цель.** Снизить глубину/стоимость блокирующего review-loop-а на крупных кодовых узлах, не теряя корректностный сигнал. Наблюдение подтверждено на трёх задачах: `p5-04` (review=`xhigh`) — 7 циклов; `p5-05`/`p5-06` (review=`high`) — 1 цикл. Итерации 1–4 на `p5-04` — реальные корректностные HIGH (G6-honesty пустого `readingOrder`; all-or-nothing `resolveCompileSettings.safeParse`; per-field leniency; `contentHash` без provenance); итерации 5–7 дрейфовали в полноту тест-покрытия и валидацию границ. Loop прогрессировал и сошёлся в бюджете — это вопрос дефолтной дотошности, не баг.
 
-**Рычаг.** Прежде всего **target-дрифт** (не packaged): [.worc/flows/implementation/review.md:26,42-46](/Users/a1234/Documents/GitHub/wastech-mdlint/.worc/flows/implementation/review.md) — раздел `## Blocking Invariant Violations` объявляет «Missing test coverage for user-visible behavior» блокирующим + раздел `## Test Coverage`. Packaged [review.md](../../src/wastech_orchestrator/packaged/flows/implementation/review.md) — 6 строк, покрытие блокирующим НЕ объявляет. Кнобы: target [.worc/flows/implementation/implementation.yaml:96,99](/Users/a1234/Documents/GitHub/wastech-mdlint/.worc/flows/implementation/implementation.yaml) (reasoning review-узла; закомментированный `# max_rework_per_stage: 1`); схема кноба — [core/flow/schema.py](../../src/wastech_orchestrator/core/flow/schema.py) (`max_rework_per_stage`).
+**Рычаг.** Прежде всего **target-дрифт** (не packaged): [.worc/flows/implementation/review.md:26,42-46](/Users/a1234/Documents/GitHub/wastech-mdlint/.worc/flows/implementation/review.md) — раздел `## Blocking Invariant Violations` объявляет «Missing test coverage for user-visible behavior» блокирующим + раздел `## Test Coverage`. Packaged [review.md](../../../../src/wastech_orchestrator/packaged/flows/implementation/review.md) — 6 строк, покрытие блокирующим НЕ объявляет. Кнобы: target [.worc/flows/implementation/implementation.yaml:96,99](/Users/a1234/Documents/GitHub/wastech-mdlint/.worc/flows/implementation/implementation.yaml) (reasoning review-узла; закомментированный `# max_rework_per_stage: 1`); схема кноба — [core/flow/schema.py](../../../../src/wastech_orchestrator/core/flow/schema.py) (`max_rework_per_stage`).
 
 **Шаги** (по убыванию эффекта; выбрать 1–2, не всё сразу):
 
@@ -47,11 +49,11 @@
 
 **Цель.** Дать audit-трейлу отличать review-реворки от test-реворков (важно для калибровки F42 и будущей аналитики). Сейчас `state.db tasks.review_fix_cycles = 0` во всех 6 задачах, включая `p5-04`, где `fix_iterations=7` корректен.
 
-**Рычаг (с оговоркой — фикс не тот, что в исходной follow-up-строке).** Персист-точка УЖЕ существует: [core/orchestrator.py:1818-1832](../../src/wastech_orchestrator/core/orchestrator.py#L1818) `_sync_counters_from_run_state` зеркалит `run_state.counter("review_fix")` в `p.counters.review_fix_cycles`. Причина нуля глубже: [core/flow/engine.py:418-430](../../src/wastech_orchestrator/core/flow/engine.py#L418) `_reset_loops_at` **сбрасывает** именованный consecutive-cycle счётчик, когда back-edge удовлетворён — т.е. когда review наконец возвращает `accept`, `review_fix` обнуляется ДО терминального sync. По контракту [core/loop_control.py:12](../../src/wastech_orchestrator/core/loop_control.py#L12) `review_fix_cycles` = «длина _текущей последовательной_ fix-петли», а сошедшаяся петля законно = 0. Значит это не «счётчик не персистится», а **семантический мисматч**: поле хранит consecutive-длину, а для атрибуции нужен кумулятивный total (как `fix_iterations`).
+**Рычаг (с оговоркой — фикс не тот, что в исходной follow-up-строке).** Персист-точка УЖЕ существует: [core/orchestrator.py:1818-1832](../../../../src/wastech_orchestrator/core/orchestrator.py#L1818) `_sync_counters_from_run_state` зеркалит `run_state.counter("review_fix")` в `p.counters.review_fix_cycles`. Причина нуля глубже: [core/flow/engine.py:418-430](../../../../src/wastech_orchestrator/core/flow/engine.py#L418) `_reset_loops_at` **сбрасывает** именованный consecutive-cycle счётчик, когда back-edge удовлетворён — т.е. когда review наконец возвращает `accept`, `review_fix` обнуляется ДО терминального sync. По контракту [core/loop_control.py:12](../../../../src/wastech_orchestrator/core/loop_control.py#L12) `review_fix_cycles` = «длина _текущей последовательной_ fix-петли», а сошедшаяся петля законно = 0. Значит это не «счётчик не персистится», а **семантический мисматч**: поле хранит consecutive-длину, а для атрибуции нужен кумулятивный total (как `fix_iterations`).
 
 **Шаги.**
 
-1. Ввести кумулятивный per-loop-kind счётчик (например `review_fix_total` в [core/loop_control.py](../../src/wastech_orchestrator/core/loop_control.py) `LoopCounters`), инкрементируемый на каждом review-driven rework-edge рядом с `record_rework` ([engine.py:404-413](../../src/wastech_orchestrator/core/flow/engine.py#L404)) и НЕ обнуляемый `_reset_loops_at`; либо сохранять пик consecutive-петли перед сбросом.
+1. Ввести кумулятивный per-loop-kind счётчик (например `review_fix_total` в [core/loop_control.py](../../../../src/wastech_orchestrator/core/loop_control.py) `LoopCounters`), инкрементируемый на каждом review-driven rework-edge рядом с `record_rework` ([engine.py:404-413](../../../../src/wastech_orchestrator/core/flow/engine.py#L404)) и НЕ обнуляемый `_reset_loops_at`; либо сохранять пик consecutive-петли перед сбросом.
 2. Прокинуть его в терминальный sync и на `tasks`-строку (там же, где `fix_iterations`). Решить: хранить оба (consecutive для live-прогресса + total для audit) или переопределить `review_fix_cycles` на кумулятивный (последнее меняет смысл существующего поля — предпочтителен отдельный total, чтобы не ломать live-surfaces `worc status`).
 
 **Тест.** Юнит на engine/loop_control: сценарий N review-реворков → accept даёт `review_fix_total=N` (не 0) на `tasks`-строке; `test_fix` не задевается. Регресс: `fix_iterations` остаётся корректным.
@@ -64,7 +66,7 @@
 
 **Цель.** Убрать доминирование супервайзера в токенах на больших задачах с глубоким loop-ом. На `p5-04` supervisor out=**693k** при 26 наблюдениях (7 loop-ов × шаги, каждый шаг — codex-resume с полным own-lineage контекстом); для сравнения `p5-05`=105k / `p5-06`=95k (8 шагов). Supervisor-стоимость растёт с числом node-run-ов, а те — с глубиной loop-а: длинное ревью удорожает не только review+fixing, но и supervisor.
 
-**Рычаг.** Цикл наблюдения супервайзера в [core/supervisor.py](../../src/wastech_orchestrator/core/supervisor.py) (per-step observe через `resume_own_lineage`). Финализатор-промпт — [core/supervisor.py:868](../../src/wastech_orchestrator/core/supervisor.py#L868).
+**Рычаг.** Цикл наблюдения супервайзера в [core/supervisor.py](../../../../src/wastech_orchestrator/core/supervisor.py) (per-step observe через `resume_own_lineage`). Финализатор-промпт — [core/supervisor.py:868](../../../../src/wastech_orchestrator/core/supervisor.py#L868).
 
 **Шаги** (идеи; supervisor остаётся advisory-слоем — контракт не менять):
 
@@ -86,7 +88,7 @@
 
 **Цель.** Убрать основной источник write-only-шума: 15 P5-уроков получили durable-trust `repo-observed`, но осели в `quarantine/pending.jsonl` («held awaiting recurrence 1/2»), а `PacketBuilder` карантин не читает вообще — при этом они дублируют entity-карточки, которые читаются. Растёт линейно по задачам, никогда не деградирует.
 
-**Рычаг.** Маршрут «held»: [memory/service.py:305](../../src/wastech_orchestrator/memory/service.py#L305). Промоушен только `kind=failure` через `explained_failure`: [memory/lifecycle.py:88-109](../../src/wastech_orchestrator/memory/lifecycle.py#L88) (`repo-observed` НЕ в `_AUTO_PROMOTE` — [lifecycle.py:35](../../src/wastech_orchestrator/memory/lifecycle.py#L35)). Пакет читает только long_term/entities/episodes — [memory/packet.py:144-166](../../src/wastech_orchestrator/memory/packet.py#L144); `read_quarantine` существует ([service.py:468](../../src/wastech_orchestrator/memory/service.py#L468)), но не вызывается на чтении. Финализатор-промпт — [core/supervisor.py:868](../../src/wastech_orchestrator/core/supervisor.py#L868).
+**Рычаг.** Маршрут «held»: [memory/service.py:305](../../../../src/wastech_orchestrator/memory/service.py#L305). Промоушен только `kind=failure` через `explained_failure`: [memory/lifecycle.py:88-109](../../../../src/wastech_orchestrator/memory/lifecycle.py#L88) (`repo-observed` НЕ в `_AUTO_PROMOTE` — [lifecycle.py:35](../../../../src/wastech_orchestrator/memory/lifecycle.py#L35)). Пакет читает только long_term/entities/episodes — [memory/packet.py:144-166](../../../../src/wastech_orchestrator/memory/packet.py#L144); `read_quarantine` существует ([service.py:468](../../../../src/wastech_orchestrator/memory/service.py#L468)), но не вызывается на чтении. Финализатор-промпт — [core/supervisor.py:868](../../../../src/wastech_orchestrator/core/supervisor.py#L868).
 
 **Шаги** (в порядке предпочтения; выбрать 1, возможно + 2):
 
@@ -104,12 +106,12 @@
 
 **Цель.** Вернуть ранжированию пакета релевантность к файлам ТЕКУЩЕЙ задачи. На общей ветке цепочки path-overlap насыщается → пакет показывает алфавитно-первые entity (`p5-04` review synthesize видел карточки `build-context-graph.ts`, `doc-profile.ts` и др., а самого `synthesize.ts` в топ-5 нет). Семейство F32.
 
-**Рычаг.** `touched_paths` для пакета берётся из `changed_code_paths_since_base()` — [core/flow/nodes/agent.py:598](../../src/wastech_orchestrator/core/flow/nodes/agent.py#L598) и [core/flow/nodes/evaluator.py:328](../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L328); реализация [git_manager.py:717](../../src/wastech_orchestrator/git_manager.py#L717). **Важно:** F32-фикс (2026-07-05) уже перевёл `write_current_diff`/`diff_stat`/`cumulative_committed_diff` на per-task chain-базу `_diff_base`, но `changed_code_paths_since_base()` (питающий memory-пакет) всё ещё диффит от `base_branch` — это незакрытый хвост того же фикса.
+**Рычаг.** `touched_paths` для пакета берётся из `changed_code_paths_since_base()` — [core/flow/nodes/agent.py:598](../../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L598) и [core/flow/nodes/evaluator.py:328](../../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L328); реализация [git_manager.py:717](../../../../src/wastech_orchestrator/git_manager.py#L717). **Важно:** F32-фикс (2026-07-05) уже перевёл `write_current_diff`/`diff_stat`/`cumulative_committed_diff` на per-task chain-базу `_diff_base`, но `changed_code_paths_since_base()` (питающий memory-пакет) всё ещё диффит от `base_branch` — это незакрытый хвост того же фикса.
 
 **Шаги.**
 
 1. Перевести `changed_code_paths_since_base()` (или его вызовы в пакет-раннерах) на ту же per-task базу `_diff_base`, что уже используется `write_current_diff` — диапазон коммитов/файлы именно этой задачи, а не `<base>..worktree`.
-2. Убедиться, что `checks`-узел ([nodes/checks.py:85](../../src/wastech_orchestrator/core/flow/nodes/checks.py#L85)), тоже вызывающий этот метод для command-set selection, не регрессирует (для selection кумулятивность как раз может быть желательна — возможно нужен отдельный per-task вариант метода, а не смена семантики существующего).
+2. Убедиться, что `checks`-узел ([nodes/checks.py:85](../../../../src/wastech_orchestrator/core/flow/nodes/checks.py#L85)), тоже вызывающий этот метод для command-set selection, не регрессирует (для selection кумулятивность как раз может быть желательна — возможно нужен отдельный per-task вариант метода, а не смена семантики существующего).
 
 **Тест.** Юнит/интеграция: две задачи на одной ветке — `touched_paths` пакета второй содержит только её файлы; ранжирование entity ставит карточку изменённого задачей файла в топ.
 
@@ -121,7 +123,7 @@
 
 **Цель.** Не плодить две карточки на один путь (`compile-context.ts` получил `core-compile-context` от `p5-04` и `compile-context` от `p5-05` — разные `entity_id`, идентичный `paths[0]`); заполнять провенанс-метадату.
 
-**Рычаг.** Upsert entity по LLM-`entity_id`: [memory/service.py:317-336](../../src/wastech_orchestrator/memory/service.py#L317) (`_index_by(entities, "entity_id", ...)`). `last_seen_task_ids: []` во всех 23 карточках (поле в [records.py](../../src/wastech_orchestrator/memory/records.py), нигде не заполняется).
+**Рычаг.** Upsert entity по LLM-`entity_id`: [memory/service.py:317-336](../../../../src/wastech_orchestrator/memory/service.py#L317) (`_index_by(entities, "entity_id", ...)`). `last_seen_task_ids: []` во всех 23 карточках (поле в [records.py](../../../../src/wastech_orchestrator/memory/records.py), нигде не заполняется).
 
 **Шаги.**
 
@@ -138,7 +140,7 @@
 
 **Цель.** Не портить durable-записи ложной редакцией: `ltm_5bbeeaf38f00` имеет `subject: "ta[REDACTED].compileContext-sync-vs-async"` — литерал `[REDACTED]` вкраплён в осмысленный subject. Сиблинг F36 (там пути эпизодов уже relativized, а редакция-оверфайр — нет).
 
-**Рычаг.** Безграничный подстрочный `.replace` без границ слова, литералы ≥4 симв.: [providers/redaction.py:127-134](../../src/wastech_orchestrator/providers/redaction.py#L127) (`_MIN_LITERAL_LEN`). Харвест секрет-литералов из преходящего состояния процесса: [core/orchestrator.py:2081](../../src/wastech_orchestrator/core/orchestrator.py#L2081) (`_memory_extra_secrets`).
+**Рычаг.** Безграничный подстрочный `.replace` без границ слова, литералы ≥4 симв.: [providers/redaction.py:127-134](../../../../src/wastech_orchestrator/providers/redaction.py#L127) (`_MIN_LITERAL_LEN`). Харвест секрет-литералов из преходящего состояния процесса: [core/orchestrator.py:2081](../../../../src/wastech_orchestrator/core/orchestrator.py#L2081) (`_memory_extra_secrets`).
 
 **Шаги.**
 
@@ -156,7 +158,7 @@
 
 **Цель.** Либо наполнить эпизод сигналом, либо не рендерить пустой. Сейчас каждый эпизод несёт только id/task/trust/artifact-dir; `stage_outcomes={}`, `touched_paths=[]`, `touched_symbols=[]` → рендер даёт голый буллет `- task p5-04-synthesize`.
 
-**Рычаг.** Построение эпизода без прокидывания touched/outcomes: [core/orchestrator.py:2145-2158](../../src/wastech_orchestrator/core/orchestrator.py#L2145). Рендер эпизода — [memory/packet.py](../../src/wastech_orchestrator/memory/packet.py) (буллет по эпизоду).
+**Рычаг.** Построение эпизода без прокидывания touched/outcomes: [core/orchestrator.py:2145-2158](../../../../src/wastech_orchestrator/core/orchestrator.py#L2145). Рендер эпизода — [memory/packet.py](../../../../src/wastech_orchestrator/memory/packet.py) (буллет по эпизоду).
 
 **Шаги.**
 
@@ -173,7 +175,7 @@
 
 **Цель.** Убрать неверную формулировку в audit-логе: rationale «merged … (same subject)» при том, что дедуп теперь по `kind+scope.paths` (F30), плюс `affected_ids` шумит (перечисляет все строки).
 
-**Рычаг.** [memory/service.py:281](../../src/wastech_orchestrator/memory/service.py#L281) (rationale «same subject»; `affected_ids`).
+**Рычаг.** [memory/service.py:281](../../../../src/wastech_orchestrator/memory/service.py#L281) (rationale «same subject»; `affected_ids`).
 
 **Шаги.** Привести rationale к фактическому ключу дедупа (`kind+scope.paths`); сузить `affected_ids` до реально затронутой записи.
 
@@ -189,7 +191,7 @@
 
 **Цель.** Закрыть остаточный пробел F39: код-фикс (`SupervisorConfig.provider` + валидация model↔provider) есть, но preflight прошёл `ready`, не поймав случай «`supervisor.provider` не задан → наследуется `primary=codex`, а `supervisor.model` — claude-специфичный» (на `p5-02` это дало 400 на каждом supervisor-шаге, замаскировано claude-fallback). Валидация срабатывает только на ЯВНО заданный provider.
 
-**Рычаг.** [config/schema.py](../../src/wastech_orchestrator/config/schema.py) (`SupervisorConfig`) + точка резолвинга/валидации supervisor-провайдера в preflight.
+**Рычаг.** [config/schema.py](../../../../src/wastech_orchestrator/config/schema.py) (`SupervisorConfig`) + точка резолвинга/валидации supervisor-провайдера в preflight.
 
 **Шаги.**
 
@@ -205,7 +207,7 @@
 
 **Цель.** Не маскировать корневую причину: сигнатура stderr адаптера мапит argparse/exit-2 отказ нашего же argv в `unsupported_version` (скрыла F38 — bad-argv — за version-подобной ошибкой); тот же класс: 400-ответ модели/схемы писался `process_crashed` (F39/F41). Затрудняет триаж.
 
-**Рычаг.** [providers/codex.py](../../src/wastech_orchestrator/providers/codex.py) `_CODEX_SIGNATURES` (regex `unknown option`/`unrecognized option`/`unexpected argument`).
+**Рычаг.** [providers/codex.py](../../../../src/wastech_orchestrator/providers/codex.py) `_CODEX_SIGNATURES` (regex `unknown option`/`unrecognized option`/`unexpected argument`).
 
 **Шаги.**
 
@@ -224,7 +226,7 @@
 
 **Цель.** Ловить противоречивую конфигурацию цепочки до отказа в середине фазы. Вся P5 заблокировалась на шаге 2, т.к. каждая задача совмещала `depends_on: [предшественник]` (merge-гейт — «PR is OPEN (unmerged)») с `branch_mode: existing` + `branch_ref: feat/p5-compile` (shared-branch, PR открыт до конца фазы). Это взаимоисключающие механизмы; p4-кампания использовала shared-branch БЕЗ `depends_on`.
 
-**Рычаг.** [core/flow/validator.py](../../src/wastech_orchestrator/core/flow/validator.py) / задачный validation-gate; `depends_on`-гейт в [core/orchestrator.py](../../src/wastech_orchestrator/core/orchestrator.py).
+**Рычаг.** [core/flow/validator.py](../../../../src/wastech_orchestrator/core/flow/validator.py) / задачный validation-gate; `depends_on`-гейт в [core/orchestrator.py](../../../../src/wastech_orchestrator/core/orchestrator.py).
 
 **Шаги.**
 
@@ -243,7 +245,7 @@
 
 **Цель.** Доказать, что защита структурна, а не «инцидентна». За всю P5 — 0 новых карточек в `~/.claude/projects/<target>/memory/` (фикс `--disallowedTools` на config-dir держит по результату), НО путь всё ещё анонсируется спаунящемуся агенту (по 1 упоминанию на узел в `events.jsonl`, без tool_use по нему). Значит агент пока просто не выбрал писать — не жёсткий enforcement.
 
-**Рычаг.** [providers/claude.py](../../src/wastech_orchestrator/providers/claude.py) (изолированный `CLAUDE_CONFIG_DIR`/settings — auth-safe вариант, либо конфайн `Write`/`Edit` рабочим деревом).
+**Рычаг.** [providers/claude.py](../../../../src/wastech_orchestrator/providers/claude.py) (изолированный `CLAUDE_CONFIG_DIR`/settings — auth-safe вариант, либо конфайн `Write`/`Edit` рабочим деревом).
 
 **Шаги.**
 
@@ -274,4 +276,4 @@
 | D1 | F40 — `depends_on` × own `branch_ref` противоречие | MED | orchestrator (+ target) | `core/flow/validator.py`; `orchestrator.py` depends_on-гейт | P2 |
 | E1 | F37-остаток — структурная изоляция нативной памяти не доказана | HIGH (класс) | orchestrator | `providers/claude.py`; live-smoke (owner) | P2 (verify) |
 
-**Не входят в план (закрыты в бою фазой P5):** F38 (resume-argv, VERIFIED Проход 16), F39 per-step (вариант B, Проход 17), F41 (finalize strict-схемы, VERIFIED Проход 18), F24 (codex-evaluator strict — не воспроизводится с Прохода 18). См. [TEST-FINDINGS.md](../../TEST-FINDINGS.md) проходы 15–20.
+**Не входят в план (закрыты в бою фазой P5):** F38 (resume-argv, VERIFIED Проход 16), F39 per-step (вариант B, Проход 17), F41 (finalize strict-схемы, VERIFIED Проход 18), F24 (codex-evaluator strict — не воспроизводится с Прохода 18). См. [TEST-FINDINGS.md](../../../../TEST-FINDINGS.md) проходы 15–20.

@@ -186,11 +186,20 @@ def test_counters_round_trip(store: StateStore) -> None:
     store.insert_task(_new_task())
     store.save_counters(
         "task-001",
-        LoopCounters(test_fix_cycles=2, review_fix_cycles=1, fix_iterations=3),
+        LoopCounters(
+            test_fix_cycles=2,
+            review_fix_cycles=1,
+            test_fix_total=4,
+            review_fix_total=7,
+            fix_iterations=3,
+        ),
     )
     counters = store.get_counters("task-001")
     assert counters.test_fix_cycles == 2
     assert counters.review_fix_cycles == 1
+    # F49: the cumulative totals round-trip alongside the consecutive counters.
+    assert counters.test_fix_total == 4
+    assert counters.review_fix_total == 7
     assert counters.fix_iterations == 3
 
 

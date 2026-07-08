@@ -32,7 +32,12 @@ def test_infra_classes_always_fall_back(error_class: ErrorClass) -> None:
 
 @pytest.mark.parametrize(
     "error_class",
-    [ErrorClass.CONFIGURATION_ERROR, ErrorClass.TASK_FAILURE],
+    [
+        ErrorClass.CONFIGURATION_ERROR,
+        ErrorClass.TASK_FAILURE,
+        ErrorClass.INVALID_INVOCATION,
+        ErrorClass.MODEL_REQUEST_INVALID,
+    ],
 )
 def test_non_fallback_classes_never_fall_back(error_class: ErrorClass) -> None:
     # Even with an equal/stricter profile, a non-infra class is never eligible.

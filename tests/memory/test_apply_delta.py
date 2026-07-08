@@ -200,6 +200,54 @@ def test_entity_verified_path_stored_missing_or_pathless_quarantined(tmp_path: P
     assert quarantined == {"module:gone", "ctx:b"}
 
 
+def test_entity_cards_dedupe_by_path_and_accumulate_task_ids(tmp_path: Path) -> None:
+    # F44: two cards for the same file — with different LLM-authored entity_ids (wording drift) —
+    # merge into ONE card keyed by canonical path, and last_seen_task_ids accumulates every task.
+    service = _indexed_service(tmp_path, tracked={"src/mod.py"})
+    _apply(
+        service,
+        CandidateDelta(
+            entities=(
+                CandidateEntity(entity_id="core-mod", entity_type="module", paths=("src/mod.py",)),
+            )
+        ),
+        task_id="t1",
+    )
+    _apply(
+        service,
+        CandidateDelta(
+            entities=(
+                CandidateEntity(entity_id="mod", entity_type="module", paths=("src/mod.py",)),
+            )
+        ),
+        task_id="t2",
+    )
+    entities = service.read_entities()
+    assert len(entities) == 1
+    assert entities[0]["canonical_name"] == "src/mod.py"
+    assert list(entities[0]["last_seen_task_ids"]) == ["t1", "t2"]
+
+
+def test_merge_audit_names_scope_key_and_single_id(service: MemoryService) -> None:
+    # F46: merging into an existing active record names the real dedup key (kind+scope.paths), not
+    # "same subject", and scopes affected_ids to just the merged record (not every row in the file).
+    lesson = CandidateLesson(
+        kind=LongTermKind.SEMANTIC,
+        subject="cfg",
+        statement="x",
+        evidence=(Evidence(type="operator", ref="op"),),  # human-curated -> auto-promotes to active
+        scope=Scope(paths=("src/a.py",)),
+    )
+    _apply(service, CandidateDelta(lessons=(lesson,)), task_id="t1")  # promote
+    _apply(service, CandidateDelta(lessons=(lesson,)), task_id="t2")  # merge into the active record
+    merge_rows = [r for r in service.audit.rows() if r.get("action") == "merge"]
+    assert merge_rows
+    row = merge_rows[-1]
+    assert "same kind+scope.paths" in row.get("rationale", "")
+    assert "same subject" not in row.get("rationale", "")
+    assert len(row.get("affected_ids") or []) == 1
+
+
 def test_entity_without_index_stores_any_named_path(service: MemoryService) -> None:
     # Back-compat: a service built with no DerivedIndex (read-only/legacy callers) skips the
     # existence check — a card naming >= 1 path is still stored, a path-less card quarantined.
