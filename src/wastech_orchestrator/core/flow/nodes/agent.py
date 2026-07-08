@@ -28,6 +28,7 @@ from wastech_orchestrator.core.dangerous_diff import (
     DangerousDiff,
     evaluate_diff_gate,
 )
+from wastech_orchestrator.core.flow.context_paths import build_path_context
 from wastech_orchestrator.core.flow.contracts import (
     PermissionProfile,
     SessionScope,
@@ -45,7 +46,7 @@ from wastech_orchestrator.core.flow.observability import record_run_observabilit
 from wastech_orchestrator.core.flow.output_policy import resolve_output_policy, within_subdir
 from wastech_orchestrator.core.flow.prompt import RoleFileError, read_role_file, render_role_prompt
 from wastech_orchestrator.core.flow.prompt_vars import valid_prompt_vars
-from wastech_orchestrator.core.flow.schema import AgentNode, FlowNode
+from wastech_orchestrator.core.flow.schema import AgentNode, FlowNode, ToolNode
 from wastech_orchestrator.core.hitl import (
     HumanInputSignal,
     OutputContract,
@@ -62,7 +63,11 @@ from wastech_orchestrator.core.hitl import (
     typed_output_schema,
 )
 from wastech_orchestrator.notify import AskKind, AskResult
-from wastech_orchestrator.providers.artifacts import task_artifact_dir
+from wastech_orchestrator.providers.artifacts import (
+    TOOL_STDOUT_FILENAME,
+    task_artifact_dir,
+    tool_node_dir,
+)
 from wastech_orchestrator.providers.base import MAX_TURNS_SUBTYPE, AgentRunRequest, ProviderId
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import EditingLineageRow, NodeRunRow
@@ -520,16 +525,14 @@ class AgentNodeRunner:
         )
 
     def _prompt_variables(self, ctx: NodeContext, node: AgentNode) -> dict[str, object | None]:
+        # The allowlisted artifact paths come from the shared collector (seam #4) so the agent
+        # prompt and the tool-node stdin never drift; the rest (ids, skills, memory) is prompt-only.
+        paths = build_path_context(self._in, self._s.repo_dir)
         variables: dict[str, object | None] = {
             "task_id": ctx.task_id,
             "stage": node.id,
-            "repo_path": self._s.repo_dir,
-            "repo": self._s.repo_dir,
-            "task_path": self._in.task_path,
-            "plan_path": self._in.plan_path,
-            "diff_path": self._in.diff_path,
-            "checks_path": self._in.checks_path,
-            "review_path": self._in.review_path,
+            "repo_path": paths["repo"],
+            **paths,
             "skills_path": "\n".join(self._in.skills_for(node.id)) or None,
             "memory_path": self._memory_path(node, ctx),
         }
@@ -562,19 +565,27 @@ class AgentNodeRunner:
         return path
 
     def _node_output_paths(self, ctx: NodeContext) -> dict[str, object | None]:
-        """The generic ``{<node_id>_path}`` variables for every agent node in the flow.
+        """The generic ``{<node_id>_path}`` variables for every agent + tool node in the flow.
 
-        A value resolves to the persisted ``<node_id>.out.md`` **only when that node has already
-        run** (the file exists on disk) — so a not-yet-run or special-slot node's variable is empty
-        and a ``{?<id>_path}…{/<id>_path}`` block drops cleanly. Fan-in is free: a node names each
-        upstream output it wants (``{scan_path}``, ``{analyze_path}``). The stored value is a POSIX
-        path string (cross-platform). Only agent nodes get this channel (node-output ADR)."""
+        A value resolves to the node's persisted output **only when that node has already run** (the
+        file exists on disk) — an agent's ``<node_id>.out.md`` or a tool's redacted
+        ``tools/<node_id>/stdout.txt`` (P5) — so a not-yet-run or special-slot node's variable is
+        empty and a ``{?<id>_path}…{/<id>_path}`` block drops cleanly. Fan-in is free: a node names
+        each upstream output it wants (``{scan_path}``, ``{md-check_path}``). The stored value is a
+        POSIX path string (cross-platform). Only agent and tool nodes get this channel (node-output
+        ADR + P5)."""
         task_dir = task_artifact_dir(self._s.artifacts_root, ctx.task_id)
         paths: dict[str, object | None] = {}
         for other in ctx.snapshot.doc.nodes:
-            if not isinstance(other, AgentNode):
+            if isinstance(other, AgentNode):
+                candidate = task_dir / f"{other.id}.out.md"
+            elif isinstance(other, ToolNode):
+                candidate = (
+                    tool_node_dir(self._s.artifacts_root, ctx.task_id, other.id)
+                    / TOOL_STDOUT_FILENAME
+                )
+            else:
                 continue
-            candidate = task_dir / f"{other.id}.out.md"
             paths[f"{other.id}_path"] = candidate.as_posix() if candidate.exists() else None
         return paths
 

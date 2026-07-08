@@ -17,21 +17,22 @@ further change.
 
 from __future__ import annotations
 
-from wastech_orchestrator.core.flow.schema import AgentNode
+from wastech_orchestrator.core.flow.schema import AgentNode, ToolNode
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
 from wastech_orchestrator.core.prompts import ALLOWED_PROMPT_VARS
 
 
 def node_output_vars(snapshot: FlowSnapshot) -> frozenset[str]:
-    """The ``{<node_id>_path}`` names the active flow's agent nodes expose (node-output channel).
+    """The ``{<node_id>_path}`` names the flow's agent + tool nodes expose (node-output channel).
 
-    Every **agent** node's output is persisted to ``<node_id>.out.md`` and addressable downstream as
-    ``{<node_id>_path}`` (a path to a Core-written artifact, never inlined content). Only agent
-    nodes get this generic channel — evaluator / checks / human nodes keep their dedicated variables
-    (``review_path`` / ``checks_path``).
+    Every **agent** node's output is persisted to ``<node_id>.out.md`` and every **tool** node's
+    stdout to ``tools/<node_id>/stdout.txt`` (P5); both are addressable downstream as
+    ``{<node_id>_path}`` (a path to a Core-written, redacted artifact, never inlined content). Only
+    these two kinds get the generic channel — evaluator / checks / human nodes keep their dedicated
+    variables (``review_path`` / ``checks_path``).
     """
     return frozenset(
-        f"{node.id}_path" for node in snapshot.doc.nodes if isinstance(node, AgentNode)
+        f"{node.id}_path" for node in snapshot.doc.nodes if isinstance(node, (AgentNode, ToolNode))
     )
 
 

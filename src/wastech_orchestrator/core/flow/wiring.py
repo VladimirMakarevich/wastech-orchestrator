@@ -19,7 +19,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from wastech_orchestrator.checks.model import ResolvedCheckSet
-from wastech_orchestrator.config.schema import BranchMode, PublishScope
+from wastech_orchestrator.config.schema import (
+    DEFAULT_TOOL_TIMEOUT_SECONDS,
+    BranchMode,
+    PublishScope,
+)
 from wastech_orchestrator.core.flow.nodes.base import (
     CheckRunnerPort,
     GitPort,
@@ -31,6 +35,7 @@ from wastech_orchestrator.core.flow.nodes.base import (
     RegisterArtifact,
     RouterPort,
     RunProcess,
+    ToolResolverPort,
 )
 from wastech_orchestrator.providers.process import run_process as _default_run_process
 from wastech_orchestrator.routing.snapshots import SnapshotHook
@@ -64,6 +69,8 @@ def build_node_services(
     trust_level: str = "strict",
     protected_paths: tuple[str, ...] = (),
     packet_builder: PacketBuilderPort | None = None,
+    tool_registry: ToolResolverPort | None = None,
+    tools_default_timeout_seconds: int = DEFAULT_TOOL_TIMEOUT_SECONDS,
 ) -> NodeServices:
     """Assemble the unit-shared :class:`NodeServices` (collaborators + the routing map).
 
@@ -96,6 +103,8 @@ def build_node_services(
         trust_level=trust_level,
         protected_paths=protected_paths,
         packet_builder=packet_builder,
+        tool_registry=tool_registry,
+        tools_default_timeout_seconds=tools_default_timeout_seconds,
     )
 
 

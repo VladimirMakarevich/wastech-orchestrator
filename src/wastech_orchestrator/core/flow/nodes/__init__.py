@@ -22,6 +22,7 @@ from wastech_orchestrator.core.flow.nodes.checks import ChecksNodeRunner
 from wastech_orchestrator.core.flow.nodes.evaluator import EvaluatorNodeRunner
 from wastech_orchestrator.core.flow.nodes.hitl import HitlNodeRunner
 from wastech_orchestrator.core.flow.nodes.publish import PublishConfigError, PublishNodeRunner
+from wastech_orchestrator.core.flow.nodes.tool import ToolNodeRunner
 
 __all__ = [
     "AgentNodeRunner",
@@ -32,4 +33,5 @@ __all__ = [
     "NodeServices",
     "PublishConfigError",
     "PublishNodeRunner",
+    "ToolNodeRunner",
 ]

@@ -92,6 +92,7 @@ Only enable these when the operator asked for them:
 - `skills` — repo-local `.claude/skills` inventory for planning.
 - `supervisor` — non-default model/reasoning for the read-only oversight layer.
 - `prompt_audit` — prompt recording for debugging or compliance.
+- `tools` — only its `default_timeout_seconds` (default `3600`), the flow-wide timeout for custom `tool` nodes. The tool feature itself is enabled per-flow (a `kind: tool` node reading `.worc/tools/`), not here — see `flows/README.md`. Set this only to change the default timeout.
 
 ## Questions worth asking
 

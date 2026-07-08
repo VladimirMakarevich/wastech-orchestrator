@@ -37,6 +37,7 @@ from wastech_orchestrator.core.flow.nodes import (
     NodeInputs,
     NodeServices,
     PublishNodeRunner,
+    ToolNodeRunner,
 )
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
@@ -117,6 +118,7 @@ def build_node_runners(services: NodeServices, inputs: NodeInputs) -> dict[str, 
         "agent": AgentNodeRunner(services, inputs),
         "evaluator": EvaluatorNodeRunner(services, inputs),
         "checks": ChecksNodeRunner(services, inputs),
+        "tool": ToolNodeRunner(services, inputs),
         "hitl": HitlNodeRunner(services, inputs),
         "publish": PublishNodeRunner(services, inputs),
     }

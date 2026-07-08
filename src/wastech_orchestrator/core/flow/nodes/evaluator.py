@@ -27,6 +27,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from wastech_orchestrator.core.flow.context_paths import build_path_context
 from wastech_orchestrator.core.flow.contracts import SessionScope, resolve_network_access
 from wastech_orchestrator.core.flow.engine import Finding, NodeContext, NodeOutcome, NodeResult
 from wastech_orchestrator.core.flow.nodes.base import (
@@ -295,16 +296,12 @@ class EvaluatorNodeRunner:
         )
 
     def _prompt_variables(self, ctx: NodeContext, node: EvaluatorNode) -> dict[str, object | None]:
+        paths = build_path_context(self._in, self._s.repo_dir)
         return {
             "task_id": ctx.task_id,
             "stage": node.id,
-            "repo_path": self._s.repo_dir,
-            "repo": self._s.repo_dir,
-            "task_path": self._in.task_path,
-            "plan_path": self._in.plan_path,
-            "diff_path": self._in.diff_path,
-            "checks_path": self._in.checks_path,
-            "review_path": self._in.review_path,
+            "repo_path": paths["repo"],
+            **paths,
             "memory_path": self._memory_path(node, ctx),
         }
 

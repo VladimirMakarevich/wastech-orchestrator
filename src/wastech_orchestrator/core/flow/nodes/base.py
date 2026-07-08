@@ -19,7 +19,11 @@ from typing import Protocol
 
 from wastech_orchestrator.check_runner import CheckOutcome
 from wastech_orchestrator.checks.model import ResolvedCheckSet
-from wastech_orchestrator.config.schema import BranchMode, PublishScope
+from wastech_orchestrator.config.schema import (
+    DEFAULT_TOOL_TIMEOUT_SECONDS,
+    BranchMode,
+    PublishScope,
+)
 from wastech_orchestrator.git_manager import ChangedPath
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult
 from wastech_orchestrator.providers.base import AgentRunRequest, ErrorClass, ProviderId
@@ -200,6 +204,20 @@ class PacketBuilderPort(Protocol):
     ) -> Path | None: ...
 
 
+class ToolResolverPort(Protocol):
+    """Resolve an operator ``tool`` name → its executable path (P5).
+
+    The concrete :class:`~wastech_orchestrator.core.flow.tools_registry.ToolRegistry` satisfies it
+    structurally; a test passes a fake. ``None`` on :class:`NodeServices` means no operator tool
+    layer is wired — a flow with a ``tool`` node then fails closed at run time (the fatal
+    install/preflight gate already rejects an unregistered tool, so this is defense in depth).
+    ``resolve`` raises :class:`~wastech_orchestrator.core.flow.tools_registry.ToolResolutionError`
+    when the name is unknown / uncontained / not executable.
+    """
+
+    def resolve(self, name: str) -> Path: ...
+
+
 class GitPort(Protocol):
     """The slice of :class:`~wastech_orchestrator.git_manager.GitManager` the node runners use.
 
@@ -284,6 +302,13 @@ class NodeServices:
     #: prompt references ``{memory_path}``. ``None`` when memory is disabled (the default) — then no
     #: packet is built and ``{memory_path}`` renders empty (today's behavior).
     packet_builder: PacketBuilderPort | None = None
+    #: operator tool registry (P5): resolves a ``tool`` node's name → its executable under
+    #: ``<repo>/.worc/tools/``. ``None`` = no operator tool layer wired (a unit harness or a
+    #: tool-less setup); a ``tool`` node then fails closed to manual at run time.
+    tool_registry: ToolResolverPort | None = None
+    #: flow-wide default wall-clock timeout (s) for a ``tool`` node whose own ``timeout_seconds`` is
+    #: unset (``config.tools.default_timeout_seconds``; 3600 = 1h by default).
+    tools_default_timeout_seconds: int = DEFAULT_TOOL_TIMEOUT_SECONDS
 
 
 @dataclass

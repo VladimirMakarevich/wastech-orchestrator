@@ -28,6 +28,7 @@ from pathlib import Path
 
 from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.core.flow.snapshot import FlowLoadError, FlowSnapshot, load_flow
+from wastech_orchestrator.core.flow.tools_registry import ToolRegistry
 from wastech_orchestrator.core.flow.validator import (
     FlowValidationError,
     lint_prompt_variables,
@@ -63,6 +64,15 @@ class FlowRegistry:
     ) -> None:
         self._operator_dir = operator_flows_dir
         self._config = config
+        # Operator tools live in the sibling ``<worc-home>/tools/`` of the flows dir (both under
+        # ``.worc/``). Built here so config-aware resolution validates a ``tool`` node's name
+        # fail-closed; ``None`` (packaged-only, no operator layer) leaves tool nodes unresolvable —
+        # a flow that uses one is rejected, and no packaged flow has a tool node.
+        self._tools = (
+            ToolRegistry(operator_flows_dir.parent / "tools")
+            if operator_flows_dir is not None
+            else None
+        )
 
     def resolve(self, task_type: str | None = None) -> FlowSnapshot:
         """Return the validated snapshot for *task_type*.
@@ -90,7 +100,7 @@ class FlowRegistry:
             )
         validate_flow(snap)
         if self._config is not None:
-            validate_flow_against_config(snap, self._config)
+            validate_flow_against_config(snap, self._config, self._tools)
         return snap
 
     def validate_all(self) -> list[tuple[str, str | None]]:

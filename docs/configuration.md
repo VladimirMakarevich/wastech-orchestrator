@@ -771,6 +771,21 @@ memory:
 
 The subsystem is built phase by phase ([plan](backlog/memory/plan/index.md)). When enabled, the **write path** is active: memory is written once per task at finalization — the supervisor proposes a candidate delta on its existing summary turn (zero extra LLM calls), and the deterministic `MemoryService` redacts, validates, assigns trust, merges, and promotes-or-quarantines it; a terminal failure writes a deterministic short-term record (never long-term). The **read path** is also active: before a node runs, a deterministic, model-free `PacketBuilder` assembles a small per-node retrieval packet (precision-first filter + ranking, within the `packet_max_*` caps) and writes it under the gitignored `logs/<task-id>/memory/<node>.md`; the node prompt receives only that packet's path via the `{memory_path}` variable, never the store root. The packet is **node-driven**: it is built for any node whose role prompt references `{memory_path}` (the packaged `planning` / `implementation` / `review` / `fixing` prompts do by default, and a custom node opts in with no code change), and a node with no relevant memory gets no packet (the variable renders empty). The **curation path** is also active: a bounded, model-free `CleanupJob` runs in the `watch` daemon's idle gap (only when no task is active, rate-limited by `cleanup_min_interval_s`, within the `cleanup_max_*` budget) and expires episodes past their TTL, remaps moved entity files (same basename) or quarantines stale ones, and merges duplicate lessons — it **never** creates a long-term lesson and **never** edits code/docs (it snapshots first, so a bad pass is reversible). Operators inspect and repair the store with [`worc memory`](operations.md#managing-the-memory-store) (`show` / `validate` / `compact` / `restore`). The canonical store lives under the gitignored `<repo>/.worc/memory/` home and is never committed.
 
+## `tools`
+
+Optional block (`schema_version` **28**) configuring [custom `tool` nodes](flow-authoring.md#custom-tool-nodes) — operator executables a flow runs out-of-process from `.worc/tools/`. Omit the block for the same default.
+
+```yaml
+tools:
+  default_timeout_seconds: 3600 # 1h; per-node `timeout_seconds` overrides it
+```
+
+| Field | Type | Default | Meaning |
+| --- | --- | --: | --- |
+| `default_timeout_seconds` | int | `3600` | Flow-wide default wall-clock timeout for a `tool` node whose own `timeout_seconds` is unset. |
+
+A tool node's effective timeout resolves `node.timeout_seconds` → `tools.default_timeout_seconds` → the built-in `3600`s. A timeout (like a launch error) is an **infrastructure** failure: the task parks at `manual_action_required` — it is never a quality `fail` and never spends a fix iteration. The tool itself is registered by dropping an executable at `.worc/tools/<name>` (file-trusted, like your flows and `config.yaml`); the flow references it by name and the registry rejects a missing / uncontained / non-executable tool fatally at preflight. There is **no** global on/off switch — a tool is enabled by adding a `kind: tool` node to a flow. See [flow-authoring.md → Custom tool nodes](flow-authoring.md#custom-tool-nodes) for the stdin/exit-code/JSON contract, `{<node_id>_path}` composition, and the honest v1 security boundary (file trust + env-allowlist + redaction; **not** OS-sandboxed, so `network_policy` is not forced on a tool).
+
 ## `prompt_audit`
 
 Optional top-level boolean (default `false`). Added in `config.yaml` `schema_version` **8**. When enabled, every agent-routed stage run records **who** received **what prompt** — a self-contained, redacted record per stage execution — under `logs/<task-id>/prompt-audit/`, in chronological order, plus a combined `timeline.jsonl`.

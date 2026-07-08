@@ -2,7 +2,7 @@
 # Copy to config.yaml and fill it in for your project. config.yaml is NOT committed to git.
 # This is the packaged copy used by `wastech-orchestrator init` (the only example config; nothing else to sync).
 
-schema_version: 27                  # config format version; the orchestrator refuses newer configs
+schema_version: 28                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -266,6 +266,12 @@ memory:                             # persistent, repo-scoped memory (optional; 
   cleanup_max_wall_clock_s: 5.0     # per-pass wall-clock ceiling (seconds)
   cleanup_promotions_per_pass: 0    # 0 = cleanup NEVER creates a long-term lesson (only demote /
                                     #   expire / quarantine / merge)
+
+tools:                              # custom tool nodes (optional; docs/backlog/archive/done/p5-custom-tool-nodes.md)
+  default_timeout_seconds: 3600     # flow-wide default wall-clock timeout (s) for a `tool` node whose
+                                    #   own `timeout_seconds` is unset (3600 = 1h). Omit the block for
+                                    #   the same default. A tool that exceeds it is an infra failure →
+                                    #   the task parks at manual_action_required (not a quality fail).
 
 prompt_audit: false                 # record each step's prompt + who (provider/model/attempt/fallback/
                                     # status) under logs/<task-id>/prompt-audit/, in chronological order.

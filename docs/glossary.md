@@ -141,6 +141,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`supervisor.reasoning`** - Reasoning level used by the supervisor, when set.
 - **`supervisor.provider`** - Provider the supervisor layer runs on (`codex`/`claude`); absent → the global primary. Validated ∈ `agents.allowed`, symmetric with flow nodes.
 - **`prompt_audit`** - Global default for prompt recording. A per-task value can override it.
+- **`tools.default_timeout_seconds`** - Flow-wide default wall-clock timeout for a `tool` node whose own `timeout_seconds` is unset (default `3600`). Optional block; absent → the same default.
 
 ## Flow vocabulary
 
@@ -151,7 +152,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`deep_research`** - The research flow that produces a documentation-oriented output.
 - **`security_audit`** - The audit flow that produces a private control-workspace report.
 - **`merge`** - The conflict-resolution flow `worc merge-task` runs (only) when pulling `base_branch` into a task branch conflicts: `conflict_resolution` (agent) → `testing` (checks) with a bounded fix loop, terminating at a no-op `publish` (`policy: none`). It performs no git itself — the orchestrator commits the merge and merges the PR after the flow returns a clean, green tree. Not dispatched for incoming tasks; selected by `git.merge_flow`.
-- **Flow node kinds** - `agent` runs an editing or authoring step, `evaluator` reads an artifact and returns a verdict, `checks` runs the quality gate, `hitl` asks the human in the loop, and `publish` performs the orchestrator-owned publish step.
+- **Flow node kinds** - `agent` runs an editing or authoring step, `evaluator` reads an artifact and returns a verdict, `checks` runs the quality gate, `tool` runs an operator executable from `.worc/tools/` out-of-process (exit-code / optional-JSON gate), `hitl` asks the human in the loop, and `publish` performs the orchestrator-owned publish step.
 - **Run vocabulary** - `RunKind` is the top-level run discriminator (`stage` or `evaluator`); `EvaluatorRole` names the shipped evaluator roles (`review`, `critic`, `verifier`, `test_quality`).
 - **Typed node output** - `OutputContract` selects the strict structured-output parser for agent nodes (`none`, `human_input`, `planning`); `HumanInputSignal` is the validated question/approval payload; `TypedStageOutput` is the parsed structured result.
 - **Route result** - `RouteSource` says whether a node's provider came from config or an explicit flow-node override; `ResolvedRoute`, `ProviderAttempt`, and `StageOutcome` are the router's resolved pair, per-attempt record, and final result bundle.

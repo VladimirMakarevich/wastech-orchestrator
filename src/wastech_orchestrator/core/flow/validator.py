@@ -54,8 +54,9 @@ from wastech_orchestrator.core.flow.contracts import (
 from wastech_orchestrator.core.flow.engine import _REWORK_OUTCOMES, skip_outcome
 from wastech_orchestrator.core.flow.prompt import RoleFileError, read_role_file
 from wastech_orchestrator.core.flow.prompt_vars import valid_prompt_vars
-from wastech_orchestrator.core.flow.schema import AgentNode, EvaluatorNode
+from wastech_orchestrator.core.flow.schema import AgentNode, EvaluatorNode, ToolNode
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
+from wastech_orchestrator.core.flow.tools_registry import ToolRegistry, ToolResolutionError
 from wastech_orchestrator.core.prompts import ALLOWED_PROMPT_VARS, referenced_variables
 from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.providers.capabilities import (
@@ -100,23 +101,33 @@ def validate_flow(snapshot: FlowSnapshot) -> None:
         raise FlowValidationError(violations)
 
 
-def validate_flow_against_config(snapshot: FlowSnapshot, config: OrchestratorConfig) -> None:
+def validate_flow_against_config(
+    snapshot: FlowSnapshot,
+    config: OrchestratorConfig,
+    tools: ToolRegistry | None = None,
+) -> None:
     """Validate a flow against the operator's :class:`OrchestratorConfig` (P4.2).
 
     The config-aware third layer, run by the :class:`~.registry.FlowRegistry` after
     :func:`validate_flow`. It rejects a flow that is structurally valid but cannot be safely or
     usefully run under *this* config: a node pinned to a disallowed provider, a reasoning level the
     resolved provider does not support, a Codex write+network request, a ``permission_ceiling`` no
-    configured provider can reach, or — under
+    configured provider can reach, a ``tool`` node naming an unregistered executable (when a
+    :class:`~.tools_registry.ToolRegistry` is supplied), or — under
     ``security.strict_isolation`` — a node whose ``extra_args`` select a provider full-access mode
     (the flow-side half of the isolation gate; the operator opts in via ``strict_isolation:
     false``). Security can only ever *narrow* here.
     (Flow ``budgets`` and ``publishing`` are handled by graceful runtime degradation, not here — see
     the module docstring.)
 
+    ``tools`` is the operator :class:`~.tools_registry.ToolRegistry` (``<repo>/.worc/tools/``); the
+    :class:`~.registry.FlowRegistry` supplies it so a ``tool`` node's free-string name is resolved
+    fail-closed before any launch. ``None`` (a config-free unit path) skips the tool-name check —
+    the same "check only what this layer has" separation as the provider/reasoning checks.
+
     :raises FlowValidationError: if any config-consistency violation is found.
     """
-    violations = _check_config_consistency(snapshot, config)
+    violations = _check_config_consistency(snapshot, config, tools)
     if violations:
         raise FlowValidationError(violations)
 
@@ -184,6 +195,7 @@ def validate_disabled_nodes(snapshot: FlowSnapshot, disabled: frozenset[str]) ->
 
 _EVAL_STAGE_OUTCOMES: frozenset[str | None] = frozenset({"accept", "rework"})
 _CHECKS_OUTCOMES: frozenset[str | None] = frozenset({"pass", "fail"})
+_TOOL_OUTCOMES: frozenset[str | None] = frozenset({"pass", "fail"})
 _UNCONDITIONAL: frozenset[str | None] = frozenset({None})
 
 
@@ -215,6 +227,8 @@ def _check_graph(snap: FlowSnapshot) -> list[Violation]:
             allowed: frozenset[str | None] = _EVAL_STAGE_OUTCOMES
         elif node.kind == "checks":
             allowed = _CHECKS_OUTCOMES
+        elif node.kind == "tool":
+            allowed = _TOOL_OUTCOMES
         else:
             allowed = _UNCONDITIONAL
         for edge in edges:
@@ -448,7 +462,9 @@ def _check_path(node_id: str, path: str, errs: list[Violation]) -> None:
 # -- config consistency (P4.2) ------------------------------------------------
 
 
-def _check_config_consistency(snap: FlowSnapshot, config: OrchestratorConfig) -> list[Violation]:
+def _check_config_consistency(
+    snap: FlowSnapshot, config: OrchestratorConfig, tools: ToolRegistry | None = None
+) -> list[Violation]:
     def cfg(msg: str) -> Violation:
         return Violation("config", msg)
 
@@ -537,6 +553,19 @@ def _check_config_consistency(snap: FlowSnapshot, config: OrchestratorConfig) ->
                         "security.strict_isolation (set strict_isolation: false to opt in)"
                     )
                 )
+
+    # 4. Every ``tool`` node names a registered, contained, executable operator tool (P5). The name
+    #    is a free operator string (like a flow name), so — like the provider check — it is resolved
+    #    here, fail-closed, before any launch. Skipped when no registry is wired (config-free unit
+    #    path); the fatal install/preflight gate always supplies one.
+    if tools is not None:
+        for node in doc.nodes:
+            if not isinstance(node, ToolNode):
+                continue
+            try:
+                tools.resolve(node.tool)
+            except ToolResolutionError as exc:
+                errs.append(cfg(f"node {node.id!r}: {exc}"))
 
     return errs
 

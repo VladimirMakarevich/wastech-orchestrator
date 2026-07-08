@@ -17,7 +17,10 @@ from typing import Any
 import yaml
 
 from wastech_orchestrator.config.loader import loads_config
-from wastech_orchestrator.config.schema import CONFIG_SCHEMA_VERSION
+from wastech_orchestrator.config.schema import (
+    CONFIG_SCHEMA_VERSION,
+    DEFAULT_TOOL_TIMEOUT_SECONDS,
+)
 from wastech_orchestrator.config.validation import validate_config
 from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.security.env import default_allowed_environment
@@ -208,6 +211,9 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
         # for the pre-memory behavior. The tunable knobs default per the schema — see the annotated
         # config.example.yaml / docs/configuration.md#memory to adjust them.
         "memory": {"enabled": True},
+        # Custom tool-node default timeout (P5). Written at the schema default for discoverability;
+        # a per-node `timeout_seconds` in a flow overrides it. Omit the block for the same 3600s.
+        "tools": {"default_timeout_seconds": DEFAULT_TOOL_TIMEOUT_SECONDS},
         "prompt_audit": False,
     }
 
