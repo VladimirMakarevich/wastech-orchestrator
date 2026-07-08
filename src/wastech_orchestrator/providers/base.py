@@ -39,6 +39,12 @@ class ErrorClass(StrEnum):
     # FALLBACK_ELIGIBLE: a bad argv we generate must surface loudly and never silently fail over to
     # the other provider (F38 was masked exactly this way, classified as an unsupported version).
     INVALID_INVOCATION = "invalid_invocation"
+    # The provider rejected OUR model request with a model/schema HTTP 400 (bad request /
+    # unsupported schema / unsupported parameter) — a different layer from INVALID_INVOCATION (the
+    # CLI argv). Deliberately NOT in FALLBACK_ELIGIBLE: a 400 must surface loudly and never silently
+    # fail over to the other provider, which typically 400s the same request (it would just be
+    # misread as a generic PROCESS_CRASHED and burn the fallback provider).
+    MODEL_REQUEST_INVALID = "model_request_invalid"
     TASK_FAILURE = "task_failure"
     # The provider could not resume the requested session (lost transcript / provider reset it). The
     # Router retries the SAME provider once with a fresh session — it is infra (durable sessions,

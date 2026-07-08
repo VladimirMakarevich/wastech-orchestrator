@@ -115,6 +115,14 @@ _CLAUDE_SIGNATURES = make_signatures(
             ErrorClass.PROVIDER_UNAVAILABLE,
             r"service unavailable|\b50[023]\b|bad gateway|internal server error",
         ),
+        (
+            # A model/schema HTTP 400 the provider rejected (a request WE built) — split from a
+            # generic PROCESS_CRASHED so it surfaces loudly instead of wastefully falling over to
+            # the other provider, which 400s the same request. Disjoint from the 401/403/429/50x
+            # word-boundary numeric signatures above.
+            ErrorClass.MODEL_REQUEST_INVALID,
+            r"\b400\b|bad request|invalid[_ ]?(json[_ ]?)?schema|unsupported parameter",
+        ),
         (ErrorClass.UNSUPPORTED_VERSION, r"unsupported version"),
         (
             # argparse/usage rejection of OUR argv — a bad-argv bug on our side, not a version gate.
