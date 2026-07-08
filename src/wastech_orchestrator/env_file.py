@@ -22,7 +22,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 
 def load_env_file(path: Path) -> int:
@@ -34,3 +34,14 @@ def load_env_file(path: Path) -> int:
     before = set(os.environ)
     load_dotenv(dotenv_path=path, override=False)
     return sum(1 for key in os.environ if key not in before)
+
+
+def count_env_file(path: Path) -> int:
+    """Count the variables ``path`` defines, without loading them or returning any value.
+
+    Used by the ``preflight`` health report to show the ``.env`` status. Parses keys only (values
+    are never read into the environment, returned, or logged), so it preserves this module's
+    no-values-logged invariant and is independent of what is already in ``os.environ``. The caller
+    guarantees ``path`` exists.
+    """
+    return len(dotenv_values(dotenv_path=path))

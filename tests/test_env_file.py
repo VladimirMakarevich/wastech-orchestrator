@@ -114,16 +114,45 @@ def test_missing_explicit_env_file_exits_2(
     assert "env-file not found" in capsys.readouterr().out
 
 
-def test_load_notice_reports_count_only_never_values(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_load_env_file_is_silent(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text("WASTECH_NOTICE_SECRET=topsecretvalue\n", encoding="utf-8")
     os.environ.pop("WASTECH_NOTICE_SECRET", None)
+
     cli._load_env_file_for(_ns(env_file=str(env_file)))
-    err = capsys.readouterr().err
-    assert "loaded 1 variable" in err
-    assert "topsecretvalue" not in err  # the secret value is never printed
+
+    captured = capsys.readouterr()
+    # Loading is silent now — the .env status is reported by preflight, not on every command.
+    assert "loaded" not in captured.out
+    assert "loaded" not in captured.err
+    assert "topsecretvalue" not in captured.out + captured.err
+    # ...but the variable is still loaded so downstream commands see it.
+    assert os.environ["WASTECH_NOTICE_SECRET"] == "topsecretvalue"
+
+
+# --- preflight .env health line (count + path only, never values) ------------------------------
+
+
+def test_preflight_env_line_reports_count_and_path_never_values(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("A=1\nWASTECH_NOTICE_SECRET=topsecretvalue\n", encoding="utf-8")
+
+    line = cli._env_preflight_line(env_file)
+
+    assert "loaded 2 variable(s)" in line
+    assert env_file.as_posix() in line
+    assert "topsecretvalue" not in line  # the secret value is never printed
+
+
+def test_preflight_env_line_when_no_file(tmp_path: Path) -> None:
+    assert "no .env file" in cli._env_preflight_line(None)
+    assert "no .env file" in cli._env_preflight_line(tmp_path / "absent.env")
+
+
+def test_preflight_env_line_empty_file(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("# only a comment\n", encoding="utf-8")
+    assert "defines no variables" in cli._env_preflight_line(env_file)
 
 
 # --- integration: .env -> os.environ -> Telegram ----------------------------------------------

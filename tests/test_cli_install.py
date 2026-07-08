@@ -181,7 +181,7 @@ def test_explicit_provider_missing_writes_config_but_preflight_fails(
 ) -> None:
     _present(monkeypatch)  # codex not on PATH
     failing = (False, ["codex: FAIL — not found", "preflight: NOT ready"])
-    monkeypatch.setattr(cli, "run_preflight", lambda _c: failing)
+    monkeypatch.setattr(cli, "run_preflight", lambda _c, **_kw: failing)
     assert cli.main(_ni(git_repo.clone, "--provider", "codex")) == 1
     out = capsys.readouterr().out
     assert "not on PATH" in out
@@ -193,7 +193,9 @@ def test_successful_preflight_exits_zero(
     git_repo: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _present(monkeypatch, "codex")
-    monkeypatch.setattr(cli, "run_preflight", lambda _c: (True, ["codex: OK", "preflight: ready"]))
+    monkeypatch.setattr(
+        cli, "run_preflight", lambda _c, **_kw: (True, ["codex: OK", "preflight: ready"])
+    )
     assert cli.main(_ni(git_repo.clone, "--provider", "codex")) == 0
     assert "preflight: ready" in capsys.readouterr().out
 

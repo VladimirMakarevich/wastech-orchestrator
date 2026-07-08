@@ -48,7 +48,7 @@ from wastech_orchestrator.core.orchestrator import (
     build_providers,
 )
 from wastech_orchestrator.core.state_machine import TERMINAL, Status
-from wastech_orchestrator.env_file import load_env_file
+from wastech_orchestrator.env_file import count_env_file, load_env_file
 from wastech_orchestrator.git_manager import (
     KIND_PR,
     GitCommandError,
@@ -756,9 +756,9 @@ def resolve_env_file_path(args: argparse.Namespace) -> tuple[Path | None, bool]:
 def _load_env_file_for(args: argparse.Namespace) -> None:
     """Auto-load the orchestrator's ``.env`` before any command runs (real env vars always win).
 
-    Emits a single secret-free notice (count + path) to stderr when it loads anything. A missing
-    *explicit* ``--env-file`` is a fail-closed :class:`ConfigError` (exit 2); a missing
-    auto-discovered ``.env`` is a silent no-op.
+    Loads **silently**: the ``.env`` status (path + variable count) is reported by ``preflight`` as
+    a health line, not echoed on every command. A missing *explicit* ``--env-file`` is a
+    fail-closed :class:`ConfigError` (exit 2); a missing auto-discovered ``.env`` is a silent no-op.
     """
     path, required = resolve_env_file_path(args)
     if path is None:
@@ -767,9 +767,21 @@ def _load_env_file_for(args: argparse.Namespace) -> None:
         if required:
             raise ConfigError([f"--env-file not found: {path}"])
         return
-    count = load_env_file(path)
-    if count:
-        print(f"env: loaded {count} variable(s) from {path}", file=sys.stderr)
+    load_env_file(path)
+
+
+def _env_preflight_line(env_file: Path | None) -> str:
+    """One secret-free ``preflight`` health line describing the auto-loaded ``.env`` (path + count).
+
+    Reports the same information the old per-command notice carried, but only where it belongs — as
+    a health indicator. Never prints variable names or values.
+    """
+    if env_file is not None and env_file.is_file():
+        count = count_env_file(env_file)
+        if count:
+            return f"env: OK — loaded {count} variable(s) from {env_file.as_posix()}"
+        return f"env: OK — {env_file.as_posix()} defines no variables"
+    return "env: OK — no .env file (using the process environment)"
 
 
 def cmd_upgrade_config(args: argparse.Namespace) -> int:
@@ -1904,15 +1916,19 @@ def _snapshot_labels(layout: MemoryLayout) -> list[str]:
     return sorted(p.name for p in snaps.iterdir() if p.is_dir())
 
 
-def run_preflight(config: OrchestratorConfig) -> tuple[bool, list[str]]:
+def run_preflight(
+    config: OrchestratorConfig, *, env_file: Path | None = None
+) -> tuple[bool, list[str]]:
     """Compute the read-only preflight verdict + report lines; no task is processed.
 
     Runs every allowed provider's ``preflight()`` (``<cli> --version``) and the deterministic
     ``check_isolation`` policy check. Returns ``(ready, lines)`` where ``ready`` is true iff every
     provider is healthy and the required isolation can be enabled. Lines are secret-free by
     contract. Shared by ``cmd_preflight`` and the installer's post-write auto-preflight.
+    ``env_file`` is the resolved ``.env`` path (already loaded at startup); its status is reported
+    as a health line here — the only place the ``.env`` notice appears.
     """
-    lines: list[str] = []
+    lines: list[str] = [_env_preflight_line(env_file)]
     providers = build_providers(config, artifacts_root=worc_home_for(config))
     ok = True
     for pid in config.agents.allowed:
@@ -1987,7 +2003,8 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     config = load_config_for(args)
     if config is None:
         return 2
-    ok, lines = run_preflight(config)
+    env_file, _ = resolve_env_file_path(args)
+    ok, lines = run_preflight(config, env_file=env_file)
     for line in lines:
         print(line)
     return 0 if ok else 1
@@ -3069,7 +3086,7 @@ def _install_run_preflight(config_path: Path, *, skip: bool) -> int:
     """Auto-run preflight after writing config; on failure keep config but exit non-zero."""
     if skip:
         return 0
-    ok, lines = run_preflight(_load_config(str(config_path)))
+    ok, lines = run_preflight(_load_config(str(config_path)), env_file=config_path.parent / ".env")
     for line in lines:
         print(line)
     if not ok:
