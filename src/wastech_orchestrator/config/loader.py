@@ -21,6 +21,7 @@ import yaml
 
 from wastech_orchestrator.config.schema import (
     CONFIG_SCHEMA_VERSION,
+    DEFAULT_TOOL_TIMEOUT_SECONDS,
     TRUST_LEVELS,
     AgentsConfig,
     AuditBranch,
@@ -45,6 +46,7 @@ from wastech_orchestrator.config.schema import (
     SkillsConfig,
     SupervisorConfig,
     TelegramConfig,
+    ToolsConfig,
     ValidationConfig,
 )
 from wastech_orchestrator.providers.base import ProviderId
@@ -768,6 +770,19 @@ def _build_memory(raw: Any, issues: list[str]) -> MemoryConfig:
     )
 
 
+def _build_tools(raw: Any, issues: list[str]) -> ToolsConfig:
+    where = "tools"
+    if raw is None:
+        return ToolsConfig()  # absent => the built-in 3600s default (P5)
+    m = _mapping(raw, where, issues)
+    _check_keys(m, {"default_timeout_seconds"}, where, issues)
+    return ToolsConfig(
+        default_timeout_seconds=_int(
+            m, "default_timeout_seconds", DEFAULT_TOOL_TIMEOUT_SECONDS, where, issues
+        ),
+    )
+
+
 _TOP_LEVEL_KEYS = {
     "schema_version",
     "orchestrator",
@@ -783,6 +798,7 @@ _TOP_LEVEL_KEYS = {
     "paths",
     "logging",
     "memory",
+    "tools",
     "prompt_audit",
 }
 
@@ -826,6 +842,7 @@ def _parse(raw: Mapping[str, Any], issues: list[str], warnings: list[str]) -> Or
         paths=_build_paths(raw.get("paths"), issues),
         logging=_build_logging(raw.get("logging"), issues),
         memory=_build_memory(raw.get("memory"), issues),
+        tools=_build_tools(raw.get("tools"), issues),
         prompt_audit=_bool(raw, "prompt_audit", False, "<root>", issues),
     )
 

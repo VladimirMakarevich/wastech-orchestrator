@@ -30,6 +30,11 @@ STDERR_FILENAME = "stderr.log"
 EVENTS_FILENAME = "events.jsonl"
 RESULT_FILENAME = "result.json"
 
+# Custom tool-node (P5) artifact filenames under ``<task_dir>/tools/<node_id>/``. The stdout file is
+# the one exposed downstream as ``{<node_id>_path}`` (both redacted before they are written).
+TOOL_STDOUT_FILENAME = "stdout.txt"
+TOOL_STDERR_FILENAME = "stderr.txt"
+
 # Which per-attempt files survive at each ``logging.artifacts`` level. ``full`` (or any unknown
 # level) keeps everything. ``result.json`` is always kept — it is the machine-readable outcome and
 # carries the exit code + normalized error class even on failure.
@@ -59,6 +64,17 @@ def task_artifact_dir(artifacts_root: str | Path, task_id: str) -> Path:
     …) join onto this directory rather than reconstructing the layout.
     """
     return Path(artifacts_root) / "logs" / task_id
+
+
+def tool_node_dir(artifacts_root: str | Path, task_id: str, node_id: str) -> Path:
+    """Return ``<task_dir>/tools/<node_id>/`` — a custom tool node's artifact directory (P5).
+
+    The single source of truth for a ``tool`` node's stdout/stderr artifact location, shared by the
+    tool runner (which writes the redacted streams there) and the ``{<node_id>_path}`` resolver
+    (which points downstream nodes at the stdout file). Both join onto this rather than
+    reconstructing the layout.
+    """
+    return task_artifact_dir(artifacts_root, task_id) / "tools" / node_id
 
 
 def task_artifact_relpath(artifacts_root: str | Path, task_id: str, repo_root: str | Path) -> str:

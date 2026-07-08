@@ -43,6 +43,7 @@ from wastech_orchestrator.core.flow.schema import (
     Edge,
     EvaluatorNode,
     FlowNode,
+    ToolNode,
 )
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
 from wastech_orchestrator.core.loop_control import record_rework
@@ -102,7 +103,7 @@ def skip_outcome(node: FlowNode) -> NodeOutcome:
     """
     if isinstance(node, EvaluatorNode):
         return NodeOutcome("accept")
-    if isinstance(node, ChecksNode):
+    if isinstance(node, (ChecksNode, ToolNode)):
         return NodeOutcome("pass")
     return NodeOutcome("done")
 

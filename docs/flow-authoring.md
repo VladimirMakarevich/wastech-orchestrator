@@ -1,6 +1,6 @@
 # Flow authoring
 
-A **flow** is the pipeline a task runs through, expressed as data: a validated graph of typed nodes (`agent`, `evaluator`, `checks`, `publish`) connected by outcome-labelled edges. A task's `task_type` selects its flow. The orchestrator ships three built-in flows — `implementation` (the default), `deep_research`, and `security_audit` — and an operator can add or override flows without touching Python. This guide shows how to author, register, validate, and debug a custom flow from scratch.
+A **flow** is the pipeline a task runs through, expressed as data: a validated graph of typed nodes (`agent`, `evaluator`, `checks`, `tool`, `publish`) connected by outcome-labelled edges. A task's `task_type` selects its flow. The orchestrator ships three built-in flows — `implementation` (the default), `deep_research`, and `security_audit` — and an operator can add or override flows without touching Python. This guide shows how to author, register, validate, and debug a custom flow from scratch.
 
 If you only want to change _what a step says_ (not the graph), you do not need a new flow — edit the node's `role_file` prompt in the delivered copy (see [Customize a node's prompt](cookbook.md#7a-customize-a-nodes-prompt)). Author a new flow only when you need a different set of steps, a different output kind, or a different route.
 
@@ -87,13 +87,14 @@ Implement the task at {task_path} in the repository {repo_path}. Follow the plan
 - **`agent`** — launches a coding-agent CLI (Codex or Claude Code) with the node's `role_file` as its prompt. Fields: `role_file` (required), `session_scope` (`fresh_disposable` | `editing_lineage` | `resume_own_lineage`), `permission_profile` (≤ the flow ceiling), optional `output_artifact`, `hitl`, `when`, `lineage_affinity`, and the per-node overrides below.
 - **`evaluator`** — a read-only judge that returns `accept` / `rework`. Fields: `role` (e.g. `review`), `role_file`, `blocking` (a failing verdict blocks vs is advisory), `max_rework_per_stage`. Evaluators are forced `read-only`. An evaluator returns a structured **findings** verdict and is **fail-closed** — see [What a node returns](#what-a-node-returns-output-contracts-schemas-and-slots).
 - **`checks`** — runs deterministic repository commands, no agent. `checker: command_profile` runs the configured check command sets; other checkers exist (`citation`, `dependency_scan`). Outcomes: `pass` / `fail`.
+- **`tool`** — runs **your own** executable from `.worc/tools/` out-of-process (any language), under the same launch ceiling as an agent. Fields: `tool` (the registered executable name), optional flat-scalar `args`, optional `timeout_seconds`, `when`. Outcomes: `pass` / `fail` / `route:*` (by exit code or an optional JSON object on stdout). Use it for deterministic logic that is neither an LLM step (`agent`) nor a built-in gate (`checks`). See [Custom tool nodes](#custom-tool-nodes).
 - **`publish`** — the terminal. `policy: pull_request` / `documentation_pull_request` opens a PR; `policy: none` is a graph terminal that performs no Git action (the orchestrator still owns any real commit/push/PR).
 
 Nodes never pick the next node or commit anything — the engine routes on edge outcomes, and only the orchestrator does Git.
 
 ## Edges, outcomes, and loops
 
-Each edge is `{ from, to, outcome? }`. A `checks` node emits `pass`/`fail`; an `evaluator` emits `accept`/`rework`; a plain `agent` edge needs no `outcome`. Any `fail`/`rework` edge that loops back must carry a `loop:` name (or a `budget:`) and be bounded in `budgets:`. Exactly **one** entry node (no incoming edges) is allowed, and every node must be able to reach a terminal — the validator enforces both.
+Each edge is `{ from, to, outcome? }`. A `checks` or `tool` node emits `pass`/`fail` (a `tool` may also emit `route:*`); an `evaluator` emits `accept`/`rework`; a plain `agent` edge needs no `outcome`. Any `fail`/`rework` edge that loops back must carry a `loop:` name (or a `budget:`) and be bounded in `budgets:`. Exactly **one** entry node (no incoming edges) is allowed, and every node must be able to reach a terminal — the validator enforces both.
 
 ## Role files (prompts)
 
@@ -154,7 +155,7 @@ A node's output is written to a file and passed to later nodes **as a path varia
 
   The slot vocabulary is fixed to these three; a flow only chooses _which_ node fills each, and one node fills at most one slot.
 
-- **Generic channel** — every other agent node's output is written to `<node_id>.out.md` and exposed automatically as `{<node_id>_path}`, so a later node can consume an earlier node's output by naming that variable in its prompt.
+- **Generic channel** — every other agent node's output is written to `<node_id>.out.md`, and every `tool` node's redacted stdout to `tools/<node_id>/stdout.txt`, each exposed automatically as `{<node_id>_path}`, so a later node can consume an earlier node's output by naming that variable in its prompt.
 
 ### Overriding a node's `output_schema` (the one real foot-gun)
 
@@ -169,6 +170,61 @@ Codex enforces `--output-schema` through OpenAI Structured Outputs, which reject
 - No extra flow or config is needed for Codex to hand the JSON back — the adapter reads it from the run's last-message file for you. Your only job is a strict schema.
 
 The **supervisor** summary/follow-ups and the **memory** delta are produced by the constant orchestrator layer _above_ the flow, not by nodes you author — you never define their schemas (you only toggle them via `supervisor.emit_follow_ups` and the `memory` config block).
+
+## Custom tool nodes
+
+A `tool` node runs **your own** program instead of an LLM — any language, by contract, not by interpreter. Use it for deterministic logic that is neither "smart" work (`agent`) nor a built-in gate (`checks`): a bespoke `.md` linter, a data producer for the next node, a router.
+
+**Where a tool lives.** Put the executable at `.worc/tools/<name>` (on POSIX, `chmod +x`; on Windows, use a launchable suffix such as `.bat`). A flow references it by name, never by path — the registry resolves the name to a contained, executable file and rejects anything else (a missing tool, a traversal, a symlink out of `.worc/tools/`) **fatally at preflight**, before any task starts.
+
+**The contract (like a Claude Code hook).** The orchestrator runs the tool through the same launch ceiling as an agent — an argv list (never a shell string), a mandatory timeout, and exactly the allowlisted `security.allowed_environment` (the parent environment is never inherited). It feeds a small JSON **context on stdin** — only allowlisted paths + your `args`, never secrets, the full environment, or a session id:
+
+```json
+{
+  "task_id": "…",
+  "node_id": "…",
+  "subtask_order": null,
+  "paths": {
+    "repo": "…",
+    "task_path": "…",
+    "plan_path": "…",
+    "diff_path": "…",
+    "checks_path": "…",
+    "review_path": "…"
+  },
+  "args": { "…": "…" }
+}
+```
+
+The tool reports back through its **exit code** and an **optional** JSON object on stdout:
+
+- **Linter style** — just `exit 0` (→ `pass`) or non-zero (→ `fail`); stdout is ignored as the outcome but saved as an artifact. Minimum effort.
+- **Rich style** — print `{"outcome": "pass" | "fail" | "route:<label>", "findings": [...], "data": {...}}`. A JSON `outcome` is authoritative (an invalid value fails closed to `manual_action_required`); `route:*` drives an explicit edge. `findings` and `data` are **recorded** (shown to the human / supervisor) but **never auto-applied** — the core never turns a returned value into a Git or state write.
+
+**Composition.** A tool's redacted stdout is exposed downstream as `{<node_id>_path}`, exactly like an agent's output. That is how a tool-as-check hands its report to a fixer agent — the fixer's role prompt reads `{md-check_path}` — and how a tool-as-producer feeds the next node. No magic: findings reach the agent as a path variable, not through the engine.
+
+**Args** are a flat scalar mapping (`str`/`int`/`float`/`bool`) declared in the flow — allowlisted static config, not secrets. **Timeout** resolves `node.timeout_seconds` → `config.tools.default_timeout_seconds` → the built-in `3600`s; a timeout is an infrastructure failure (→ `manual_action_required`, not a quality `fail`, and it never spends a fix iteration), as is a launch error.
+
+**The honest v1 boundary (do not over-trust).** A `tool` is **not** OS-sandboxed the way `codex`/`claude` sandbox themselves — its real ceiling is **file trust** (you own `.worc/tools/`, exactly as you own your flows and `config.yaml`) plus the env-allowlist (no secrets reach it), artifact redaction, the mandatory timeout, and the absence of any core path that applies its output to Git/state. Consequently `network_policy` is **not** forced on a `tool` in v1 (an arbitrary binary can open a socket); if you need hard network/filesystem isolation, that is an OS/container concern (a deferred follow-up). Treat a tool with the same trust you treat a role prompt you author.
+
+### Example — a tool check that routes back to a fixer
+
+```yaml
+nodes:
+  - id: md-check
+    kind: tool
+    tool: md-check # → .worc/tools/md-check
+    args: { min_chars: 500, max_chars: 4000 }
+  - id: fix
+    kind: agent
+    role_file: roles/fix.md # its prompt references {md-check_path}
+edges:
+  - { from: md-check, to: publish, outcome: pass }
+  - { from: md-check, to: fix, outcome: fail }
+  - { from: fix, to: md-check } # unconditional — back for a re-check
+```
+
+`roles/fix.md` shows the agent exactly the findings, via one path line: `Report: {md-check_path}`.
 
 ## Registering and running the flow
 

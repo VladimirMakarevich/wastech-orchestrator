@@ -1,6 +1,6 @@
 # Authoring custom flows for wastech-orchestrator
 
-**You are an operator (or an agent helping one) authoring a flow for wastech-orchestrator.** A _flow_ is the pipeline a task runs through, written as data: a validated graph of typed nodes (`agent`, `evaluator`, `checks`, `publish`) joined by outcome-labelled edges. A task's `task_type` selects its flow. This folder is a self-contained quickstart; the full reference is `docs/flow-authoring.md` and `docs/configuration.md` in the orchestrator's repository.
+**You are an operator (or an agent helping one) authoring a flow for wastech-orchestrator.** A _flow_ is the pipeline a task runs through, written as data: a validated graph of typed nodes (`agent`, `evaluator`, `checks`, `tool`, `publish`) joined by outcome-labelled edges. A task's `task_type` selects its flow. This folder is a self-contained quickstart; the full reference is `docs/flow-authoring.md` and `docs/configuration.md` in the orchestrator's repository.
 
 If you only want to change _what a step says_, you do not need a new flow — edit that node's `role_file` prompt in the delivered copy under `.worc/flows/`. Author a flow only when you need different steps, a different output kind, or a different route.
 
@@ -57,7 +57,7 @@ flow:
 
 ## Chaining node outputs (`{<node_id>_path}`)
 
-Every **agent** node's output is persisted and exposed to later nodes as `{<node_id>_path}` — a path to that node's `<id>.out.md`, never the inlined content. That is how a multi-step flow hands one node's result to the next by name, with no extra config:
+Every **agent** node's output is persisted and exposed to later nodes as `{<node_id>_path}` — a path to that node's `<id>.out.md`, never the inlined content. A **`tool`** node exposes the same variable (its redacted stdout at `tools/<id>/stdout.txt`). That is how a multi-step flow hands one node's result to the next by name, with no extra config:
 
 ```yaml
 nodes:
@@ -83,7 +83,24 @@ In `my_flow/build.md`:
 Implement the change.{?analyze_path} Follow the analysis at {analyze_path}.{/analyze_path}{?scan_path} The raw scan is at {scan_path}.{/scan_path}
 ```
 
-One node exposes exactly one output — to publish several results, split into several nodes. A node id may not collide with a reserved core-variable prefix (`task`, `plan`, `diff`, `checks`, `review`, `repo`, `skills`, `memory`, `stage`, `subtask*`); that is a fatal load error.
+One node exposes exactly one output — to publish several results, split into several nodes. A node id (agent or tool — both expose `{<id>_path}`) may not collide with a reserved core-variable prefix (`task`, `plan`, `diff`, `checks`, `review`, `repo`, `skills`, `memory`, `stage`, `subtask*`); that is a fatal load error.
+
+## Custom tool nodes (`kind: tool`)
+
+A `tool` node runs **your own** executable (any language) from `.worc/tools/` instead of an LLM — for deterministic logic that is neither "smart" work (`agent`) nor a built-in gate (`checks`). Drop the program at `.worc/tools/<name>` (on POSIX, `chmod +x`), then reference it by name:
+
+```yaml
+nodes:
+  - id: md-check
+    kind: tool
+    tool: md-check # → .worc/tools/md-check
+    args: { min_chars: 500 } # flat scalars only, no secrets
+edges:
+  - { from: md-check, to: publish, outcome: pass }
+  - { from: md-check, to: fix, outcome: fail } # fail → a fixer agent that reads {md-check_path}
+```
+
+The orchestrator runs it under the same ceiling as an agent (argv-no-shell, mandatory timeout, allowlisted env — never secrets or the full environment) and feeds a small JSON context on **stdin** (`task_id`, `node_id`, allowlisted `paths`, your `args`). The tool gates the graph by its **exit code** (`0` → `pass`, non-zero → `fail`) or, for `route:*` / structured findings, by printing `{"outcome": "...", "findings": [...], "data": {...}}` on stdout (a JSON `outcome` wins; an invalid one fails closed to manual). `findings`/`data` are recorded, never auto-applied. Its redacted stdout is exposed downstream as `{<id>_path}`. Timeout resolves node → `config.tools.default_timeout_seconds` → `3600`s; a timeout/launch error parks the task at `manual_action_required` (not a quality fail). A `tool` is **file-trusted** (you own `.worc/tools/`, as you own your flows) and is **not** OS-sandboxed — see `docs/flow-authoring.md → Custom tool nodes` for the full contract and the honest v1 boundary.
 
 ## What a node returns (contracts, slots, and custom schemas)
 

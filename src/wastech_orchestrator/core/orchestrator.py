@@ -59,6 +59,7 @@ from wastech_orchestrator.core.flow.registry import FlowRegistry, FlowResolution
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import AgentNode, FlowNode
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
+from wastech_orchestrator.core.flow.tools_registry import ToolRegistry
 from wastech_orchestrator.core.flow.validator import (
     FlowValidationError,
     validate_disabled_nodes,
@@ -459,6 +460,10 @@ class Orchestrator:
             operator_flows_dir=Path(config.repo.local_path) / _WORC_HOME / "flows",
             config=config,
         )
+        # Operator tool registry (P5): resolves a ``tool`` node's name → its executable under
+        # ``<repo>/.worc/tools/`` at run time. Stateless (just the dir), built once and shared by
+        # every unit's NodeServices; the FlowRegistry above validates the same tools at resolve.
+        self._tool_registry = ToolRegistry(Path(config.repo.local_path) / _WORC_HOME / "tools")
         # The constant supervisor layer (P2.1) — rebuilt per task in ``_engine_run`` (it carries the
         # task's own resume_own_lineage session). Single-slot, so one live instance at a time.
         self._supervisor: Supervisor | None = None
@@ -1617,6 +1622,9 @@ class Orchestrator:
             trust_level=(p.task.trust_level or self._config.security.trust_level),
             protected_paths=self._config.security.protected_paths,
             packet_builder=self._packet_builder(),
+            # Custom tool nodes (P5): the operator tool registry + the flow-wide default timeout.
+            tool_registry=self._tool_registry,
+            tools_default_timeout_seconds=self._config.tools.default_timeout_seconds,
         )
 
     def _resolve_merge_flow(self) -> FlowSnapshot:

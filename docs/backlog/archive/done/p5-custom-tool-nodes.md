@@ -1,6 +1,6 @@
 # P5 — Кастомные tool-узлы (операторский исполняемый файл через subprocess)
 
-Статус: **accepted — готово к реализации.** Предусловие (P1–P4 зелены и стабильны + подсистема памяти в `main`) выполнено на 2026-07-08. Спека была заложена 2026-06-17 (отложена до стабилизации палитры) и доведена до accepted 2026-07-08. Владелец: Vladimir Makarevich.
+Статус: **IMPLEMENTED 2026-07-08** (ветка `feat/p5-custom-tool-nodes`; полный гейт зелёный, +28 новых тестов). Все четыре подфазы P5.1–P5.4 выполнены как заявлено. Отложенные follow-ups — в [follow_ups.md](../../follow_ups.md) (подпись/хеш-реестр, авто-вброс findings в fix-loop, OS-песочница). Предусловие (P1–P4 зелены и стабильны + подсистема памяти в `main`) было выполнено на 2026-07-08. Спека была заложена 2026-06-17 (отложена до стабилизации палитры), доведена до accepted и реализована 2026-07-08. Владелец: Vladimir Makarevich.
 
 Цель: дать оператору объявлять во Flow **кастомный узел**, вызывающий его собственную программу (любой исполняемый файл — Python частый случай, но не требование), встроенную в пайплайн конкретного Flow — по аналогии с hooks в Claude Code (внешняя программа: контекст на stdin → результат через exit-код и/или JSON на stdout). tool исполняется **out-of-process под тем же потолком доверия, что и агенты** (через `run_process`), а не привилегированным in-process кодом. Это осознанно **вариант B** из обсуждения (in-process-вариант A не строим — CPython нельзя засендбоксить в процессе ядра).
 
@@ -24,7 +24,7 @@
 
 Гейт ведёт **exit-код** (как `command_profile`), JSON на stdout **необязателен**. Точный приоритет:
 
-1. **launch-error / timeout** → инфра-путь → `NodeManualRequired`. exit_code при этом `None` (см. [`providers/errors.py`](../../src/wastech_orchestrator/providers/errors.py) `classify`). Наивысший приоритет.
+1. **launch-error / timeout** → инфра-путь → `NodeManualRequired`. exit_code при этом `None` (см. [`providers/errors.py`](../../../../src/wastech_orchestrator/providers/errors.py) `classify`). Наивысший приоритет.
 2. Иначе, если stdout парсится как JSON-объект с ключом `outcome` → он **авторитетен**; значение ∈ `{pass, fail, route:<label>}`, иначе **fail-closed** (ошибка узла → объявленное `fail`-ребро/manual). `findings`/`data` из того же объекта читаются.
 3. Иначе (нет JSON-`outcome`) → решает **exit-код**: `0` → `pass`, `≠0` → `fail`. Если stdout всё же распарсился в объект — `findings`/`data` берутся для обогащения (но исход уже определён кодом).
 
@@ -37,7 +37,7 @@
 
 index.md §1 и security-ceiling.md §1 отвергают **узел = произвольный код в процессе ядра / inline** (crewAI-дыра: RCE через `allow_code_execution`). P5 **не вводит** такой узел. `tool`-узел — типизированный узел, чья «механика» = запуск внешней программы **out-of-process**, ровно как `agent`-узел запускает CLI-провайдера. Инвариант удерживают:
 
-- запуск через [`providers/process.py`](../../src/wastech_orchestrator/providers/process.py) `run_process`: **argv-без-shell**, **обязательный timeout**, `env` = ровно переданная allowlist-карта (родительское окружение не наследуется);
+- запуск через [`providers/process.py`](../../../../src/wastech_orchestrator/providers/process.py) `run_process`: **argv-без-shell**, **обязательный timeout**, `env` = ровно переданная allowlist-карта (родительское окружение не наследуется);
 - **git/state пишет только ядро**: tool **возвращает** outcome/findings/data, а commit/push/PR/запись в `state.db` делает исключительно оркестратор (инвариант «git только оркестратор»);
 - tool получает на stdin **только allowlisted-контекст** (пути/метаданные), **никогда** секреты/сырой session-id;
 - tool **объявлен под валидатором** (allowlist зарегистрированных имён из `ToolRegistry`, разрешён набор `outcome`); неизвестный tool → fail-closed **до** запуска.
@@ -55,11 +55,11 @@ index.md §1 и security-ceiling.md §1 отвергают **узел = прои
 
 ### Touchpoints
 
-- [`core/flow/schema.py`](../../src/wastech_orchestrator/core/flow/schema.py) — новый `ToolNode` (frozen/slots dataclass); добавить в Union `FlowNode` (schema.py:126).
-- [`core/flow/snapshot.py`](../../src/wastech_orchestrator/core/flow/snapshot.py) — `_parse_tool_node` + `_TOOL_FIELDS` allowlist; новая ветка `elif kind == "tool"` в `_parse_node` (snapshot.py:428). `args` парсится как плоский scalar-mapping (не-скаляр → `FlowLoadError`).
-- [`core/flow/validator.py`](../../src/wastech_orchestrator/core/flow/validator.py) — новая таблица `_TOOL_OUTCOMES = frozenset({"pass", "fail"})` + ветка `tool` в kind-диспетче `_check_graph` (validator.py:213); `route:*` уже всегда разрешён (validator.py:220). Проверка `node.tool ∈ ToolRegistry` — в config-aware `validate_flow_against_config` (validator.py:103), рядом с проверками provider/reasoning (это шов P4.2).
-- [`core/flow/engine.py`](../../src/wastech_orchestrator/core/flow/engine.py) — ветка `tool → "pass"` в `skip_outcome` (engine.py:97), чтобы пропущенный по `when` tool-узел давал корректный skip-исход. Диспетч рантайма (`_runners.get(node.kind)`, engine.py:328) уже kind-агностичен — правки не требует.
-- [`config/schema.py`](../../src/wastech_orchestrator/config/schema.py) — новый опциональный блок `tools` с полем `default_timeout_seconds: int = 3600` (1 час). Блок необязателен: при его отсутствии применяется дефолт. Требует bump версии config-схемы + правку `config_writer` (`build_config_mapping`) и shipped-доков (`config.example.yaml`, `guide/`).
+- [`core/flow/schema.py`](../../../../src/wastech_orchestrator/core/flow/schema.py) — новый `ToolNode` (frozen/slots dataclass); добавить в Union `FlowNode` (schema.py:126).
+- [`core/flow/snapshot.py`](../../../../src/wastech_orchestrator/core/flow/snapshot.py) — `_parse_tool_node` + `_TOOL_FIELDS` allowlist; новая ветка `elif kind == "tool"` в `_parse_node` (snapshot.py:428). `args` парсится как плоский scalar-mapping (не-скаляр → `FlowLoadError`).
+- [`core/flow/validator.py`](../../../../src/wastech_orchestrator/core/flow/validator.py) — новая таблица `_TOOL_OUTCOMES = frozenset({"pass", "fail"})` + ветка `tool` в kind-диспетче `_check_graph` (validator.py:213); `route:*` уже всегда разрешён (validator.py:220). Проверка `node.tool ∈ ToolRegistry` — в config-aware `validate_flow_against_config` (validator.py:103), рядом с проверками provider/reasoning (это шов P4.2).
+- [`core/flow/engine.py`](../../../../src/wastech_orchestrator/core/flow/engine.py) — ветка `tool → "pass"` в `skip_outcome` (engine.py:97), чтобы пропущенный по `when` tool-узел давал корректный skip-исход. Диспетч рантайма (`_runners.get(node.kind)`, engine.py:328) уже kind-агностичен — правки не требует.
+- [`config/schema.py`](../../../../src/wastech_orchestrator/config/schema.py) — новый опциональный блок `tools` с полем `default_timeout_seconds: int = 3600` (1 час). Блок необязателен: при его отсутствии применяется дефолт. Требует bump версии config-схемы + правку `config_writer` (`build_config_mapping`) и shipped-доков (`config.example.yaml`, `guide/`).
 
 ### Новый тип
 
@@ -97,7 +97,7 @@ class ToolNode:
 
 ### Touchpoints
 
-- **Новый** `core/flow/tools_registry.py` — `ToolRegistry(tools_dir)` **по образцу [`FlowRegistry`](../../src/wastech_orchestrator/core/flow/registry.py)** (не по образцу checker-механизма — реестра checker-ов не существует, это закрытый Literal + хардкод). Операторский слой `<repo>/.worc/tools/`. Резолвит `tool`-имя → путь к исполняемому файлу; fail-closed если не найден / не исполняемый / вне `tools_dir`.
+- **Новый** `core/flow/tools_registry.py` — `ToolRegistry(tools_dir)` **по образцу [`FlowRegistry`](../../../../src/wastech_orchestrator/core/flow/registry.py)** (не по образцу checker-механизма — реестра checker-ов не существует, это закрытый Literal + хардкод). Операторский слой `<repo>/.worc/tools/`. Резолвит `tool`-имя → путь к исполняемому файлу; fail-closed если не найден / не исполняемый / вне `tools_dir`.
 - `install`/`preflight` — валидирует реестр tools вместе с flow-файлами (всё фатально до запуска, как сейчас валидируются flow через `validate_all`).
 
 ### Поведение
@@ -123,9 +123,9 @@ class ToolNode:
 
 ### Touchpoints
 
-- **Новый** `core/flow/nodes/tool.py` — реализует `NodeRunner` (протокол `run(node, ctx) -> NodeResult`, engine.py:130). Регистрируется новым ключом `"tool"` в `build_node_runners` ([engine_driver.py:114](../../src/wastech_orchestrator/core/flow/engine_driver.py#L114)). Ближайший образец — `ChecksNodeRunner`.
+- **Новый** `core/flow/nodes/tool.py` — реализует `NodeRunner` (протокол `run(node, ctx) -> NodeResult`, engine.py:130). Регистрируется новым ключом `"tool"` в `build_node_runners` ([engine_driver.py:114](../../../../src/wastech_orchestrator/core/flow/engine_driver.py#L114)). Ближайший образец — `ChecksNodeRunner`.
 - **Новый** `core/flow/context_paths.py` (шов #4) — вынести сбор allowlisted-путей из приватного `AgentNode._prompt_variables` в чистую standalone-функцию `build_path_context(inputs, repo_dir, node_id, ...) -> dict[str, str | None]`, которую переиспользуют **и** `_prompt_variables` (рефактор, поведение агента не меняется), **и** tool-runner для сборки stdin. Не дублировать allowlist путей.
-- Переиспользует: `run_process` (argv-без-shell, mandatory timeout, `stdin_text`, `stdout_path`); [`security/env.py`](../../src/wastech_orchestrator/security/env.py) `build_child_env`; [`security/isolation.py`](../../src/wastech_orchestrator/security/isolation.py) (preflight-гейт, как у всех); [`providers/redaction.py`](../../src/wastech_orchestrator/providers/redaction.py) `redact_text`; [`providers/errors.py`](../../src/wastech_orchestrator/providers/errors.py) `classify`.
+- Переиспользует: `run_process` (argv-без-shell, mandatory timeout, `stdin_text`, `stdout_path`); [`security/env.py`](../../../../src/wastech_orchestrator/security/env.py) `build_child_env`; [`security/isolation.py`](../../../../src/wastech_orchestrator/security/isolation.py) (preflight-гейт, как у всех); [`providers/redaction.py`](../../../../src/wastech_orchestrator/providers/redaction.py) `redact_text`; [`providers/errors.py`](../../../../src/wastech_orchestrator/providers/errors.py) `classify`.
 
 ### JSON-контракт (как у CC-hooks)
 
@@ -165,7 +165,7 @@ class ToolNode:
 - иначе исход по приоритету exit-код / JSON-`outcome` (см. выше); неизвестное значение `outcome` → fail-closed;
 - `findings` → `NodeOutcome.findings`; `data` → `NodeOutcome.structured_output`; **ядро их не применяет** (никакого git/FS-сайд-эффекта вне политики) — только записывает;
 - stdout/stderr → артефакты `tools/<node_id>/` **после redaction**; чекпоинт `node_run` (как у любого узла, P1.2);
-- stdout-артефакт регистрируется как `{<node_id>_path}` (Q3) — расширить `node_output_vars`/`valid_prompt_vars` ([core/flow/prompt_vars.py](../../src/wastech_orchestrator/core/flow/prompt_vars.py)) так, чтобы tool-узлы (наравне с agent) отдавали выходной путь downstream-узлам.
+- stdout-артефакт регистрируется как `{<node_id>_path}` (Q3) — расширить `node_output_vars`/`valid_prompt_vars` ([core/flow/prompt_vars.py](../../../../src/wastech_orchestrator/core/flow/prompt_vars.py)) так, чтобы tool-узлы (наравне с agent) отдавали выходной путь downstream-узлам.
 
 ### Тесты (контракт + угрозы)
 

@@ -8,7 +8,8 @@ Pure: no IO, no YAML parsing, no fingerprinting — only types.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Literal
 
@@ -107,6 +108,33 @@ class ChecksNode:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolNode:
+    """A custom operator tool node (P5): runs an operator executable out-of-process.
+
+    Unlike :class:`ChecksNode` (whose ``checker`` is a closed core-owned ``Literal``), ``tool`` is a
+    **free string** naming an operator executable registered under ``<repo>/.worc/tools/`` — the
+    open operator set, exactly like a flow name. It is validated against the ``ToolRegistry`` in the
+    config-aware validator (never a string ``..`` check): the registry owns path-containment
+    (name → a file inside ``tools_dir``). The node runs the tool via the same ``run_process``
+    ceiling as an agent (argv-without-shell, mandatory timeout, allowlisted env), gates the graph on
+    exit-code/optional-JSON (``pass`` / ``fail`` / ``route:*``), and — like an agent node — exposes
+    its stdout artifact downstream as ``{<id>_path}``.
+    """
+
+    id: str
+    kind: Literal["tool"]
+    #: registered tool name (``.worc/tools/<tool>``) — NOT a path; resolved by the ``ToolRegistry``.
+    tool: str
+    #: flat allowlisted scalar args from the flow (str/int/float/bool), no secrets. Passed to the
+    #: tool on stdin verbatim; a non-scalar/nested value is a fatal load error.
+    args: Mapping[str, str | int | float | bool] = field(default_factory=dict)
+    #: ``None`` → the config ``tools.default_timeout_seconds`` (default 3600s / 1h). Resolved once
+    #: in the runner and passed to ``run_process`` as the mandatory ``int`` timeout.
+    timeout_seconds: int | None = None
+    when: WhenPredicate | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class HitlNode:
     id: str
     kind: Literal["hitl"]
@@ -123,7 +151,7 @@ class PublishNode:
     when: WhenPredicate | None = None
 
 
-FlowNode = AgentNode | EvaluatorNode | ChecksNode | HitlNode | PublishNode
+FlowNode = AgentNode | EvaluatorNode | ChecksNode | ToolNode | HitlNode | PublishNode
 
 
 @dataclass(frozen=True, slots=True)

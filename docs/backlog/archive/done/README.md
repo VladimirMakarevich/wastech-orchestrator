@@ -17,6 +17,7 @@ This folder contains backlog documents for product work that has already shipped
 | [Task queue tags for multiple worc instances](multi-instance-task-queues.md) | implemented |
 | [Operator confirmation gates in autonomous mode](operator-confirmation-gates.md) | implemented |
 | [Orchestrator-driven PR merge](orchestrator-driven-pr-merge.md) | implemented |
+| [Custom `tool` nodes (P5)](p5-custom-tool-nodes.md) | implemented 2026-07-08 |
 | [Skills selection rework](skills-selection-rework.md) | implemented |
 | [Per-node model/reasoning/provider in task front matter](task-node-model-override.md) | implemented |
 | [Task priority field](task-priority.md) | accepted (implemented) |

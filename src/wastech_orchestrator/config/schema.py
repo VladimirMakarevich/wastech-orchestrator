@@ -141,7 +141,12 @@ from wastech_orchestrator.providers.base import ProviderId
 # `model` reaches a provider that accepts it (fixes claude-model-on-codex under a codex primary);
 # validated ∈ `agents.allowed` and for reasoning support, symmetric with flow nodes. Absent =>
 # inherit primary (today's behavior exactly). Old configs load fail-open; `upgrade-config` adds it.
-CONFIG_SCHEMA_VERSION = 27
+# v28 (2026-07-08, P5 custom tool-nodes): adds the optional `tools` block with
+# `default_timeout_seconds` (default 3600 = 1h) — the flow-wide default wall-clock timeout for a
+# `tool` node whose own `timeout_seconds` is unset. Absent block => 3600s exactly; a per-node
+# `timeout_seconds` overrides it. Old configs load fail-open with the default; `config_writer`
+# writes the block on a fresh install (discoverability, like `logging`).
+CONFIG_SCHEMA_VERSION = 28
 
 
 class AuditBranch(StrEnum):
@@ -509,6 +514,26 @@ class MemoryConfig:
     cleanup_promotions_per_pass: int = 0
 
 
+# The built-in fallback timeout for a tool node (P5) when neither the node's ``timeout_seconds`` nor
+# ``tools.default_timeout_seconds`` is set. One hour — long enough for a heavy operator scan, short
+# enough to bound a hung binary. The ``ToolsConfig`` default equals this, so an absent ``tools``
+# block resolves to the same 3600s.
+DEFAULT_TOOL_TIMEOUT_SECONDS = 3600
+
+
+@dataclass(frozen=True)
+class ToolsConfig:
+    """Custom tool-node settings (P5): the flow-wide default timeout for ``tool`` nodes.
+
+    Absent block => ``default_timeout_seconds=3600`` (1h). Resolution precedence for a tool node is
+    ``node.timeout_seconds`` → ``tools.default_timeout_seconds`` → the built-in
+    :data:`DEFAULT_TOOL_TIMEOUT_SECONDS`. The value is a bounded, runtime-resolved default — never a
+    fatal config error (an odd value has a safe fallback), consistent with the flow-engine rule.
+    """
+
+    default_timeout_seconds: int = DEFAULT_TOOL_TIMEOUT_SECONDS
+
+
 @dataclass(frozen=True)
 class OrchestratorConfig:
     orchestrator: OrchestratorRuntimeConfig
@@ -524,6 +549,7 @@ class OrchestratorConfig:
     paths: PathsConfig = field(default_factory=PathsConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    tools: ToolsConfig = field(default_factory=ToolsConfig)
     # When true, every task records each step's prompt + who-metadata (provider/model/attempt/
     # fallback/status) under `logs/<task-id>/prompt-audit/`. A per-task `prompt_audit` always
     # overrides this (task wins); recording a prompt is not a privilege escalation, so there is no

@@ -39,6 +39,7 @@ from wastech_orchestrator.core.flow.schema import (
     HitlSettings,
     PublishNode,
     SupervisorBlock,
+    ToolNode,
     WhenPredicate,
 )
 from wastech_orchestrator.providers.base import ProviderId
@@ -111,6 +112,7 @@ _EVALUATOR_FIELDS = frozenset(
     }
 )
 _CHECKS_FIELDS = frozenset({"id", "kind", "checker", "when"})
+_TOOL_FIELDS = frozenset({"id", "kind", "tool", "args", "timeout_seconds", "when"})
 _HITL_NODE_FIELDS = frozenset({"id", "kind", "signal", "timeout_s", "when"})
 _PUBLISH_FIELDS = frozenset({"id", "kind", "policy", "when"})
 _EDGE_FIELDS = frozenset({"from", "to", "outcome", "budget", "loop"})
@@ -147,12 +149,11 @@ _CHECKER_KINDS = frozenset({"command_profile", "citation", "dependency_scan"})
 # slot vocabulary is core-fixed (a flow may not invent a slot — fail-closed at load).
 _OUTPUT_ARTIFACT_SLOTS = frozenset({"enriched_spec", "plan", "summary"})
 
-# Reserved core-variable prefixes an **agent** node id may not collide with (node-output ADR): every
-# agent node exposes ``{<id>_path}``, so an id equal to one of these — or starting with ``subtask``
-# — would shadow a fixed core variable (``{plan_path}``, ``{review_path}``, ``{subtask_spec_path}``,
-# …). A collision is a fatal load error. Only agent ids are checked: evaluator/checks/human nodes do
-# not get ``{<id>_path}`` (so the packaged ``review`` evaluator and ``testing`` checks node are
-# fine).
+# Reserved core-variable prefixes an **agent or tool** node id may not collide with (node-output
+# ADR + P5): both node kinds expose ``{<id>_path}``, so an id equal to one of these — or starting
+# with ``subtask`` — would shadow a fixed core variable (``{plan_path}``, ``{review_path}``,
+# ``{subtask_spec_path}``, …). A collision is a fatal load error. Evaluator/checks/human nodes do
+# not get ``{<id>_path}`` (so the packaged ``review`` evaluator and ``testing`` checks node are ok).
 _RESERVED_NODE_ID_NAMES = frozenset(
     {"task", "plan", "diff", "checks", "review", "repo", "skills", "memory", "stage"}
 )
@@ -294,17 +295,26 @@ def _parse_hitl_settings(raw: Any) -> HitlSettings | None:
     )
 
 
-def _parse_agent_node(raw: dict[str, Any]) -> AgentNode:
-    nid = str(_require(raw, "id", "agent node"))
-    ctx = f"agent node '{nid}'"
-    _reject_unknown(raw, _AGENT_FIELDS, ctx)
+def _check_reserved_node_id(nid: str, kind: str) -> None:
+    """Fail-closed: a kind that exposes ``{<id>_path}`` (agent, tool) may not shadow a core var.
+
+    Shared by the agent and tool parsers — both node kinds get the generic ``{<id>_path}`` channel,
+    so an id equal to a reserved core-variable name (or starting with ``subtask``) is fatal.
+    """
     if nid in _RESERVED_NODE_ID_NAMES or nid.startswith(_RESERVED_NODE_ID_PREFIX):
         raise FlowLoadError(
-            f"agent node id {nid!r} collides with a reserved core-variable prefix "
+            f"{kind} node id {nid!r} collides with a reserved core-variable prefix "
             f"(its {{{nid}_path}} would shadow a fixed core variable); reserved: "
             f"{sorted(_RESERVED_NODE_ID_NAMES)} and any id starting with "
             f"{_RESERVED_NODE_ID_PREFIX!r}"
         )
+
+
+def _parse_agent_node(raw: dict[str, Any]) -> AgentNode:
+    nid = str(_require(raw, "id", "agent node"))
+    ctx = f"agent node '{nid}'"
+    _reject_unknown(raw, _AGENT_FIELDS, ctx)
+    _check_reserved_node_id(nid, "agent")
     role_file = str(_require(raw, "role_file", ctx))
 
     pp_raw = raw.get("permission_profile")
@@ -394,6 +404,46 @@ def _parse_checks_node(raw: dict[str, Any]) -> ChecksNode:
     )
 
 
+_SCALAR_TYPES = (str, int, float, bool)
+
+
+def _parse_tool_args(raw: Any, ctx: str) -> dict[str, str | int | float | bool]:
+    """Parse a tool node's ``args`` as a flat allowlisted scalar mapping (no nesting, no secrets).
+
+    A nested mapping / list / ``None`` / any non-scalar value is a fatal load error — the tool
+    contract passes only flat scalars on stdin (P5). ``bool`` is accepted (an ``int`` subclass,
+    already covered by the scalar tuple).
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise FlowLoadError(f"'args' must be a mapping in {ctx}, got {type(raw).__name__}")
+    out: dict[str, str | int | float | bool] = {}
+    for key, value in raw.items():
+        if not isinstance(value, _SCALAR_TYPES):
+            raise FlowLoadError(
+                f"'args.{key}' in {ctx} must be a scalar (str/int/float/bool), "
+                f"got {type(value).__name__}"
+            )
+        out[str(key)] = value
+    return out
+
+
+def _parse_tool_node(raw: dict[str, Any]) -> ToolNode:
+    nid = str(_require(raw, "id", "tool node"))
+    ctx = f"tool node '{nid}'"
+    _reject_unknown(raw, _TOOL_FIELDS, ctx)
+    _check_reserved_node_id(nid, "tool")
+    return ToolNode(
+        id=nid,
+        kind="tool",
+        tool=str(_require(raw, "tool", ctx)),
+        args=_parse_tool_args(raw.get("args"), ctx),
+        timeout_seconds=raw.get("timeout_seconds"),
+        when=_parse_when(raw.get("when")),
+    )
+
+
 def _parse_hitl_node(raw: dict[str, Any]) -> HitlNode:
     nid = str(_require(raw, "id", "hitl node"))
     ctx = f"hitl node '{nid}'"
@@ -434,6 +484,8 @@ def _parse_node(raw: dict[str, Any], defaults: FlowDefaults) -> FlowNode:
         return _parse_evaluator_node(raw, ev_defaults)
     elif kind == "checks":
         return _parse_checks_node(raw)
+    elif kind == "tool":
+        return _parse_tool_node(raw)
     elif kind == "hitl":
         return _parse_hitl_node(raw)
     elif kind == "publish":
