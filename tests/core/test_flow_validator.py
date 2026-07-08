@@ -435,6 +435,44 @@ flow:
     assert _has(vs, "graph", "across providers")
 
 
+def test_lineage_affinity_chain_rejected(tmp_path: Path) -> None:
+    # multiple-editing-lineages: a lineage_affinity target must itself be a lineage owner (no
+    # affinity of its own). A chain (fixing → implementation → base) is rejected — one hop only.
+    yaml = """\
+flow:
+  name: t
+  task_type: t
+  permission_ceiling: workspace-write
+  output_policy: code_change
+  publishing: pull_request
+  nodes:
+    - id: base
+      kind: agent
+      role_file: roles/base.md
+      session_scope: editing_lineage
+    - id: implementation
+      kind: agent
+      role_file: roles/impl.md
+      session_scope: editing_lineage
+      lineage_affinity: base
+    - id: fixing
+      kind: agent
+      role_file: roles/fix.md
+      session_scope: editing_lineage
+      lineage_affinity: implementation
+    - id: out
+      kind: publish
+      policy: pull_request
+  edges:
+    - { from: base, to: implementation }
+    - { from: implementation, to: fixing }
+    - { from: fixing, to: out }
+"""
+    vs = _violations(yaml, tmp_path)
+    assert _has(vs, "graph", "lineage owner")
+    assert _has(vs, "graph", "chains are not allowed")
+
+
 def test_decomposition_proposed_by_unknown(tmp_path: Path) -> None:
     yaml = """\
 flow:

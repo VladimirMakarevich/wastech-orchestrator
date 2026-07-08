@@ -631,26 +631,28 @@ class AgentNodeRunner:
     ) -> str | None:
         """The durable editing session to resume for this node (durable sessions, P2.2).
 
-        Only an ``editing_lineage`` node resumes the execution unit's editing session, and only when
-        the stored lineage was produced by the same provider it resolves to (you cannot resume a
-        Claude session on Codex). ``fresh_disposable`` always starts clean; ``resume_own_lineage``
-        (a node's own multi-round session) is not used by the implementation flow's author nodes.
-        ``lineage_affinity`` is realized here: every editing node on the unit shares this one
-        session, so ``fixing`` (affinity → ``implementation``) continues the session that
-        ``implementation`` established."""
+        Only an ``editing_lineage`` node resumes an editing session, keyed by its lineage
+        (:func:`_lineage_key`), and only when the stored lineage was produced by the same provider
+        it resolves to (you cannot resume a Claude session on Codex). ``fresh_disposable`` always
+        starts clean; ``resume_own_lineage`` (a node's own multi-round session) is not used by the
+        implementation flow's author nodes. ``lineage_affinity`` is realized here: a node with
+        ``lineage_affinity: X`` resumes lineage ``X`` (so ``fixing`` continues the session
+        ``implementation`` established), while an affinity-less editing node keys its own lineage
+        and stays isolated from the others on the unit."""
         if node.session_scope is not SessionScope.EDITING_LINEAGE:
             return None
-        row = self._s.store.get_editing_lineage(ctx.task_id, ctx.subtask_order)
+        row = self._s.store.get_editing_lineage(ctx.task_id, _lineage_key(node), ctx.subtask_order)
         if row is None or row.provider != route.primary.value:
             return None  # no editing session yet, or it belongs to a different provider → fresh
         return row.raw_session_id
 
     def _persist_session(self, node: AgentNode, ctx: NodeContext, outcome: StageOutcome) -> None:
-        """Persist the unit's editing session after a successful editing-lineage run (durable).
+        """Persist this node's editing lineage after a successful editing-lineage run (durable).
 
         A ``fresh_disposable`` / ``resume_own_lineage`` node never writes the editing lineage, so it
         cannot leak its session into a later author node (validator-enforced read-only evaluators
-        never reach here). The raw session id is stored ONLY in ``state.db``."""
+        never reach here). The lineage is keyed by :func:`_lineage_key`, so a node that joins
+        another lineage writes back to it. The raw session id is stored ONLY in ``state.db``."""
         if node.session_scope is not SessionScope.EDITING_LINEAGE:
             return
         result = outcome.result
@@ -659,12 +661,23 @@ class AgentNodeRunner:
         self._s.store.upsert_editing_lineage(
             EditingLineageRow(
                 task_id=ctx.task_id,
+                lineage_key=_lineage_key(node),
                 subtask_order=ctx.subtask_order,
                 provider=outcome.provider_used.value,
                 raw_session_id=result.session_id,
                 updated_at=self._s.clock(),
             )
         )
+
+
+def _lineage_key(node: AgentNode) -> str:
+    """The editing-lineage key for a node: its ``lineage_affinity`` target, else its own id.
+
+    An affinity-less ``editing_lineage`` node owns a lineage named after itself; a node with
+    ``lineage_affinity: X`` joins lineage ``X``. Resume and persist MUST compute the same key, so
+    they share this one helper. The validator forbids affinity chains (rule 7), so the target is
+    always a lineage owner and one hop is enough — no transitive resolution here."""
+    return node.lineage_affinity or node.id
 
 
 def _agent_outcome(outcome: StageOutcome) -> NodeOutcome:

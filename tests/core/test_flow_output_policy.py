@@ -88,7 +88,9 @@ class _Store:
     def complete_node_run(self, run_id: int, **kwargs: Any) -> None:
         pass
 
-    def get_editing_lineage(self, task_id: str, subtask_order: int | None = None) -> None:
+    def get_editing_lineage(
+        self, task_id: str, lineage_key: str, subtask_order: int | None = None
+    ) -> None:
         return None
 
 
