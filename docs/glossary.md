@@ -169,6 +169,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`publishing`** - The terminal publication policy for a flow, such as PR publishing, documentation PRs, local artifacts, or no publish.
 - **`network_policy`** - The flow-wide network grant. Absence means no network by default.
 - **`session_scope`** - The provider session intent for a node, such as fresh disposable, editing lineage, or resumable own lineage.
+- **`lineage_affinity`** - An `editing_lineage` node's declaration that it joins another node's editing session instead of owning its own. The lineage key is `lineage_affinity or <node id>`, so an affinity-less node owns a lineage named after itself and a node with `lineage_affinity: X` shares lineage `X`. Chains are forbidden — the target must be a lineage owner.
 - **`FlowEngine`** - The execution spine that traverses the graph, routes outcomes, owns budgets, and updates checkpoints.
 - **`budget`** and **`loop`** - The repeat counters on rework edges. They bound fix cycles and other repeated regions.
 - **`sub_flow`** - The decomposition region that is repeated for each accepted subtask.
@@ -265,7 +266,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`check_runs`** - The persisted records for quality-gate execution.
 - **`evaluations`** - The immutable advisory verdict table written by evaluators and the supervisor.
 - **`publish_operations`** - The idempotency ledger for commit / push / PR operations, so reruns do not duplicate them.
-- **`editing_lineage`** - The durable per-execution-unit session table for workspace-writing agent nodes.
+- **`editing_lineage`** - The durable session table for workspace-writing agent nodes, keyed `(task_id, subtask_order, lineage_key)` so one execution unit can hold more than one editing session (one per lineage).
 - **`node_lineage`** - The durable own-session table for evaluators and the supervisor.
 - **`flow_fingerprint`** - The hash of the resolved flow snapshot used to detect resume drift.
 - **`ExecutionUnit`** - The `(task_id, subtask_order)` identity for a root task or decomposed subtask.

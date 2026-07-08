@@ -86,7 +86,14 @@ def _utc_now_iso() -> str:
 # succeeded after N reworks records N (the consecutive columns legitimately read 0 at that point).
 # Additive, so ``_migrate`` adds them on a brand-new (``0``) database; an older versioned DB is
 # refused fail-closed and recreated (greenfield).
-DB_SCHEMA_VERSION = 14
+# v15 (2026-07-08, multiple editing lineages): added ``editing_lineage.lineage_key`` and widened the
+# primary key to ``(task_id, subtask_order, lineage_key)`` so one execution unit can hold more than
+# one durable editing session. The lineage key is derived from the flow graph
+# (``node.lineage_affinity or node.id``), so an affinity-less ``editing_lineage`` node owns a
+# lineage named after itself and a node with ``lineage_affinity: X`` joins lineage ``X``. A widened
+# primary key is a destructive change (not an additive column), so an older versioned DB is refused
+# fail-closed and recreated (greenfield — no production data to migrate).
+DB_SCHEMA_VERSION = 15
 
 
 class IncompatibleStateError(Exception):
@@ -290,10 +297,11 @@ CREATE TABLE IF NOT EXISTS evaluations (
 CREATE TABLE IF NOT EXISTS editing_lineage (
     task_id TEXT NOT NULL REFERENCES tasks(task_id),
     subtask_order INTEGER NOT NULL DEFAULT -1,
+    lineage_key TEXT NOT NULL,
     provider TEXT NOT NULL,
     raw_session_id TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    PRIMARY KEY (task_id, subtask_order)
+    PRIMARY KEY (task_id, subtask_order, lineage_key)
 );
 
 CREATE TABLE IF NOT EXISTS node_lineage (
@@ -468,16 +476,21 @@ class EvaluationRow:
 
 @dataclass(frozen=True)
 class EditingLineageRow:
-    """The durable editing session for one execution unit (flow-engine P2.2).
+    """A durable editing session for one execution unit (flow-engine P2.2).
 
-    ``execution_unit = (task_id, subtask_order)`` (``contracts.ExecutionUnit``); there is exactly
-    one active editing session per unit. ``raw_session_id`` is the provider's real session id — it
-    **never** leaves ``state.db`` (it is redacted in every artifact/log/argv). ``provider`` binds
-    the lineage to the provider that produced it: a node resumes it only when its resolved provider
-    matches (you cannot resume a Claude session on Codex).
+    Keyed ``(task_id, subtask_order, lineage_key)`` — one execution unit
+    (``contracts.ExecutionUnit`` = ``(task_id, subtask_order)``) can hold more than one durable
+    editing session, one per ``lineage_key``. The key is derived from the flow graph
+    (``node.lineage_affinity or node.id``): an affinity-less ``editing_lineage`` node owns a lineage
+    named after itself, and a node with ``lineage_affinity: X`` joins lineage ``X``.
+    ``raw_session_id`` is the provider's real session id — it **never** leaves ``state.db`` (it is
+    redacted in every artifact/log/argv). ``provider`` binds the lineage to the provider that
+    produced it: a node resumes it only when its resolved provider matches (you cannot resume a
+    Claude session on Codex).
     """
 
     task_id: str
+    lineage_key: str
     provider: str  # claude | codex
     raw_session_id: str
     subtask_order: int | None = None
@@ -1228,20 +1241,21 @@ class StateStore:
     # --- editing_lineage (durable sessions) -----------------------------------------------
 
     def get_editing_lineage(
-        self, task_id: str, subtask_order: int | None = None
+        self, task_id: str, lineage_key: str, subtask_order: int | None = None
     ) -> EditingLineageRow | None:
-        """The active editing session for an execution unit, or ``None`` if none yet (P2.2)."""
+        """The active editing session for one lineage of an execution unit, or ``None`` (P2.2)."""
         subtask = _NO_SUBTASK if subtask_order is None else subtask_order
         cur = self._conn.execute(
             "SELECT provider, raw_session_id, updated_at FROM editing_lineage "
-            "WHERE task_id = ? AND subtask_order = ?",
-            (task_id, subtask),
+            "WHERE task_id = ? AND subtask_order = ? AND lineage_key = ?",
+            (task_id, subtask, lineage_key),
         )
         row = cur.fetchone()
         if row is None:
             return None
         return EditingLineageRow(
             task_id=task_id,
+            lineage_key=lineage_key,
             provider=row["provider"],
             raw_session_id=row["raw_session_id"],
             subtask_order=subtask_order,
@@ -1251,25 +1265,33 @@ class StateStore:
     def upsert_editing_lineage(
         self, row: EditingLineageRow, conn: sqlite3.Connection | None = None
     ) -> None:
-        """Insert or replace the active editing session for an execution unit (one per unit)."""
+        """Insert or replace one editing session (one per ``(unit, lineage_key)``)."""
         now = self._clock()
         subtask = _NO_SUBTASK if row.subtask_order is None else row.subtask_order
         with self._writer(conn) as c:
             c.execute(
                 """
                 INSERT INTO editing_lineage (
-                    task_id, subtask_order, provider, raw_session_id, updated_at
-                ) VALUES (?,?,?,?,?)
-                ON CONFLICT(task_id, subtask_order) DO UPDATE SET
+                    task_id, subtask_order, lineage_key, provider, raw_session_id, updated_at
+                ) VALUES (?,?,?,?,?,?)
+                ON CONFLICT(task_id, subtask_order, lineage_key) DO UPDATE SET
                     provider = excluded.provider,
                     raw_session_id = excluded.raw_session_id,
                     updated_at = excluded.updated_at
                 """,
-                (row.task_id, subtask, row.provider, row.raw_session_id, row.updated_at or now),
+                (
+                    row.task_id,
+                    subtask,
+                    row.lineage_key,
+                    row.provider,
+                    row.raw_session_id,
+                    row.updated_at or now,
+                ),
             )
 
     def clear_editing_lineage(self, task_id: str, conn: sqlite3.Connection | None = None) -> None:
-        """Delete a task's editing sessions so a fresh ``rerun`` starts new provider sessions."""
+        """Delete all of a task's editing sessions so a fresh ``rerun`` starts new provider
+        sessions (clears every lineage of the task, keyed by ``task_id`` alone)."""
         with self._writer(conn) as c:
             c.execute("DELETE FROM editing_lineage WHERE task_id = ?", (task_id,))
             c.execute("DELETE FROM node_lineage WHERE task_id = ?", (task_id,))

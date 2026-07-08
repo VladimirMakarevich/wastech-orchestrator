@@ -100,7 +100,7 @@ class FakeStore:
         self.check_runs: list[Any] = []
         self.provider_attempts: list[Any] = []
         self.evaluations: list[Any] = []
-        self.editing_lineage: dict[tuple[str, int | None], EditingLineageRow] = {}
+        self.editing_lineage: dict[tuple[str, int | None, str], EditingLineageRow] = {}
         self._next = 1
 
     def record_node_run(self, run: Any, conn: Any = None) -> int:
@@ -134,12 +134,12 @@ class FakeStore:
         )
 
     def get_editing_lineage(
-        self, task_id: str, subtask_order: int | None = None
+        self, task_id: str, lineage_key: str, subtask_order: int | None = None
     ) -> EditingLineageRow | None:
-        return self.editing_lineage.get((task_id, subtask_order))
+        return self.editing_lineage.get((task_id, subtask_order, lineage_key))
 
     def upsert_editing_lineage(self, row: EditingLineageRow, conn: Any = None) -> None:
-        self.editing_lineage[(row.task_id, row.subtask_order)] = row
+        self.editing_lineage[(row.task_id, row.subtask_order, row.lineage_key)] = row
 
 
 def _result(structured: dict[str, Any] | None = None) -> AgentRunResult:
@@ -506,7 +506,12 @@ def test_fresh_disposable_node_does_not_inherit_or_leak_session(tmp_path: Path) 
     )
     router, store = FakeRouter(replace(_result(), session_id="fresh-sess")), FakeStore()
     store.upsert_editing_lineage(  # left by a prior editing node on the same provider
-        EditingLineageRow(task_id="task-1", provider="codex", raw_session_id="editing-sess")
+        EditingLineageRow(
+            task_id="task-1",
+            lineage_key="implementation",
+            provider="codex",
+            raw_session_id="editing-sess",
+        )
     )
     services = _services(
         router,
@@ -516,7 +521,7 @@ def test_fresh_disposable_node_does_not_inherit_or_leak_session(tmp_path: Path) 
     AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert router.requests[0].session_id is None  # did not resume the editing lineage
     # did not overwrite the editing lineage with its own session
-    assert store.get_editing_lineage("task-1").raw_session_id == "editing-sess"  # type: ignore[union-attr]
+    assert store.get_editing_lineage("task-1", "implementation").raw_session_id == "editing-sess"  # type: ignore[union-attr]
 
 
 def test_editing_lineage_node_continues_and_persists_session(tmp_path: Path) -> None:
@@ -534,8 +539,10 @@ def test_editing_lineage_node_continues_and_persists_session(tmp_path: Path) -> 
         permission_profile=PermissionProfile.WORKSPACE_WRITE,
     )
     router, store = FakeRouter(replace(_result(), session_id="impl-sess-2")), FakeStore()
-    store.upsert_editing_lineage(
-        EditingLineageRow(task_id="task-1", provider="codex", raw_session_id="impl-sess-1")
+    store.upsert_editing_lineage(  # keyed by the node's own id (affinity-less owner)
+        EditingLineageRow(
+            task_id="task-1", lineage_key="impl", provider="codex", raw_session_id="impl-sess-1"
+        )
     )
     services = _services(
         router,
@@ -544,7 +551,7 @@ def test_editing_lineage_node_continues_and_persists_session(tmp_path: Path) -> 
     )
     AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert router.requests[0].session_id == "impl-sess-1"  # resumed the editing session
-    row = store.get_editing_lineage("task-1")
+    row = store.get_editing_lineage("task-1", "impl")
     assert row is not None and row.raw_session_id == "impl-sess-2"  # persisted the new session
 
 
@@ -585,8 +592,46 @@ def test_affinity_resumes_declared_node_session(tmp_path: Path) -> None:
         fixing, _ctx(fixing)
     )
     assert router_fix.requests[0].session_id == "impl-session"  # resumed implementation's session
-    row = store.get_editing_lineage("task-1")
+    row = store.get_editing_lineage("task-1", "implementation")
     assert row is not None and row.raw_session_id == "fix-session"  # fixing updated the lineage
+
+
+def test_two_affinity_less_editing_nodes_keep_isolated_lineages(tmp_path: Path) -> None:
+    # multiple-editing-lineages: two editing_lineage nodes without lineage_affinity own distinct
+    # lineages (each keyed by its own id), so the second track does NOT inherit the first's session
+    # and each persists into its own lineage.
+    from dataclasses import replace
+
+    (tmp_path / "code.md").write_text("code", "utf-8")
+    (tmp_path / "spec.md").write_text("spec", "utf-8")
+    store = FakeStore()
+    check = FakeCheckRunner(CheckOutcome(passed=True, runs=()))
+
+    code = AgentNode(
+        id="code_edit",
+        kind="agent",
+        role_file="code.md",
+        session_scope=SessionScope.EDITING_LINEAGE,
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+    )
+    router_code = FakeRouter(replace(_result(), session_id="code-session"))
+    AgentNodeRunner(_services(router_code, store, check), _inputs(tmp_path)).run(code, _ctx(code))
+    assert router_code.requests[0].session_id is None  # its own lineage is empty → fresh
+
+    spec = AgentNode(
+        id="spec_edit",
+        kind="agent",
+        role_file="spec.md",
+        session_scope=SessionScope.EDITING_LINEAGE,
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+    )
+    router_spec = FakeRouter(replace(_result(), session_id="spec-session"))
+    AgentNodeRunner(_services(router_spec, store, check), _inputs(tmp_path)).run(spec, _ctx(spec))
+    # spec_edit does NOT inherit code_edit's session — its own lineage is still empty → fresh.
+    assert router_spec.requests[0].session_id is None
+    # Two isolated lineages persisted, one per node id.
+    assert store.get_editing_lineage("task-1", "code_edit").raw_session_id == "code-session"  # type: ignore[union-attr]
+    assert store.get_editing_lineage("task-1", "spec_edit").raw_session_id == "spec-session"  # type: ignore[union-attr]
 
 
 def test_evaluator_fresh_disposable_does_not_touch_lineage(tmp_path: Path) -> None:
@@ -595,7 +640,12 @@ def test_evaluator_fresh_disposable_does_not_touch_lineage(tmp_path: Path) -> No
     (tmp_path / "r.md").write_text("review", "utf-8")
     store = FakeStore()
     store.upsert_editing_lineage(
-        EditingLineageRow(task_id="task-1", provider="codex", raw_session_id="author-session")
+        EditingLineageRow(
+            task_id="task-1",
+            lineage_key="implementation",
+            provider="codex",
+            raw_session_id="author-session",
+        )
     )
     router = FakeRouter(_result({"findings": []}))
     services = _services(
@@ -607,7 +657,7 @@ def test_evaluator_fresh_disposable_does_not_touch_lineage(tmp_path: Path) -> No
     node = _evaluator("review")
     EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert router.requests[0].session_id is None  # evaluator never resumes the author lineage
-    row = store.get_editing_lineage("task-1")
+    row = store.get_editing_lineage("task-1", "implementation")
     assert row is not None and row.raw_session_id == "author-session"  # left untouched
 
 

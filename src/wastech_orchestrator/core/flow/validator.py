@@ -293,9 +293,11 @@ def _check_graph(snap: FlowSnapshot) -> list[Violation]:
         if trapped:
             errs.append(g(f"nodes cannot reach any terminal: {sorted(trapped)}"))
 
-    # 7. lineage_affinity must reference an agent with editing_lineage session scope, and the two
+    # 7. lineage_affinity must reference an agent with editing_lineage session scope that is itself
+    #    a lineage owner (no affinity of its own — chains are forbidden, one hop only), and the two
     #    nodes must not declare conflicting explicit providers (you cannot resume one provider's
-    #    editing session on another — durable sessions, P2.2).
+    #    editing session on another — durable sessions, P2.2). The lineage key routed at runtime is
+    #    ``node.lineage_affinity or node.id`` (multiple-editing-lineages ADR).
     for node in doc.nodes:
         if not isinstance(node, AgentNode) or node.lineage_affinity is None:
             continue
@@ -312,6 +314,14 @@ def _check_graph(snap: FlowSnapshot) -> list[Violation]:
                 g(
                     f"node {node.id!r}: lineage_affinity {node.lineage_affinity!r} must be "
                     "an agent with session_scope=editing_lineage"
+                )
+            )
+        elif target.lineage_affinity is not None:
+            errs.append(
+                g(
+                    f"node {node.id!r}: lineage_affinity {node.lineage_affinity!r} must be a "
+                    "lineage owner (a node that does not itself declare lineage_affinity); "
+                    "affinity chains are not allowed"
                 )
             )
         elif (

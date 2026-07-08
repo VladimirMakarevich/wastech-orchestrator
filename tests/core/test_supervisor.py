@@ -294,7 +294,12 @@ def test_supervisor_own_session_not_editing_lineage(tmp_path: Path) -> None:
     router, store = FakeRouter(), _store(tmp_path)
     # An author editing session already exists for the task; the supervisor must not touch it.
     store.upsert_editing_lineage(
-        EditingLineageRow(task_id=_TASK, provider="claude", raw_session_id="author-session")
+        EditingLineageRow(
+            task_id=_TASK,
+            lineage_key="implementation",
+            provider="claude",
+            raw_session_id="author-session",
+        )
     )
     sup = _supervisor(tmp_path, router, store)
 
@@ -306,7 +311,7 @@ def test_supervisor_own_session_not_editing_lineage(tmp_path: Path) -> None:
     assert router.requests[1].session_id == "sess-super"  # resumes its OWN session, not an author's
     assert all(r.permission_profile == "read-only" for r in router.requests)
     # The author's editing lineage is never read into the supervisor's session nor overwritten.
-    row = store.get_editing_lineage(_TASK)
+    row = store.get_editing_lineage(_TASK, "implementation")
     assert row is not None and row.raw_session_id == "author-session"
 
 

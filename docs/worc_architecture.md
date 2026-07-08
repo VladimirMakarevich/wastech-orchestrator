@@ -115,7 +115,7 @@ The **only** component that runs commit / push / PR. Before a task it prepares t
 
 ### 4.7 State Store with checkpoints
 
-SQLite (`state.db`, schema **v13**). It holds the task status, the flow checkpoint (`current_node` + counters + fingerprint), the B-lite soft-pause marker (`blocked_since`), per-node audit (`node_runs`, `provider_attempts`), checks, artifacts (each with a sha256), publish idempotency, subtasks, advisory `evaluations`, and the durable editing/own sessions (`editing_lineage` / `node_lineage` — the only place a raw session id is ever stored). Because the orchestrator is **greenfield**, the store does not migrate across destructive versions: a brand-new database is created at the current shape, and an older-versioned one is refused fail-closed (recreate it). A newer one is also refused.
+SQLite (`state.db`, schema **v15**). It holds the task status, the flow checkpoint (`current_node` + counters + fingerprint), the B-lite soft-pause marker (`blocked_since`), per-node audit (`node_runs`, `provider_attempts`), checks, artifacts (each with a sha256), publish idempotency, subtasks, advisory `evaluations`, and the durable editing/own sessions (`editing_lineage` / `node_lineage` — the only place a raw session id is ever stored). `editing_lineage` is keyed `(task_id, subtask_order, lineage_key)`, so one execution unit can carry more than one durable editing session — one per lineage, keyed `lineage_affinity or <node id>`. Because the orchestrator is **greenfield**, the store does not migrate across destructive versions: a brand-new database is created at the current shape, and an older-versioned one is refused fail-closed (recreate it). A newer one is also refused.
 
 ### 4.8 Human-in-the-Loop via Telegram
 

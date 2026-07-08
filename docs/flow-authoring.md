@@ -105,6 +105,25 @@ A node's prompt is the content of its `role_file`. Role files render only an all
 
 Every `agent`/`evaluator` node may pin its own `provider` (`codex` | `claude`), `model`, and `reasoning`; omit any and the node inherits the `config.yaml` provider defaults (`provider` ⇒ the global primary). A node may also set `network_access: true|false` to override the flow-wide network default for that node alone. Spend more reasoning where rework is decided (review), less on mechanical steps. See [configuration.md → Per-node overrides in flows](configuration.md#per-node-overrides-in-flows).
 
+## Editing sessions and lineages
+
+`session_scope` decides how a node reuses the provider's LLM session (its accumulated conversation context):
+
+- **`fresh_disposable`** — a cold session every visit; nothing is carried forward. The default, and the only sound choice for a read-only evaluator (it must never inherit an author's context).
+- **`editing_lineage`** — a durable session shared across a group of editing nodes so they keep continuous context. This is what an edit → fix loop uses.
+- **`resume_own_lineage`** — a node's **private** durable session across its own rework rounds (e.g. a critic that must remember what it already flagged); not shared with any other node.
+
+A flow can carry **more than one** durable editing session per execution unit — one per **lineage**. The lineage key is derived from the graph, `lineage_affinity or <node id>`:
+
+- An `editing_lineage` node with **no** `lineage_affinity` **owns** a lineage named after itself.
+- A node with `lineage_affinity: X` **joins** the lineage owned by `X`, resuming and updating that same session.
+
+So in the example above, `fixing` (`lineage_affinity: implement`) continues the session `implement` established. To run two isolated tracks in one flow — say a code track and a separate spec track — give each track its own affinity-less `editing_lineage` owner node and point that track's fix node at it; the two sessions never leak context into each other. (Both tracks still edit the same working tree and join the same committed diff — a lineage is about session context, never filesystem isolation.)
+
+Two rules the validator enforces: a session cannot resume **across providers** (an `editing_lineage` node and its affinity target must not pin conflicting providers), and **affinity chains are forbidden** — a `lineage_affinity` target must itself be a lineage owner (a node with no affinity of its own), so affinity is one hop only.
+
+> Note: two `editing_lineage` nodes that both omit `lineage_affinity` are now **two separate lineages** (each keyed by its own id), not one shared session — read operator flows with the `lineage_affinity or <node id>` rule in mind.
+
 ## What a node returns (output contracts, schemas, and slots)
 
 Every `agent` and `evaluator` node returns a **typed structured result**, not free text — but you almost never write the shape yourself. The node's kind and role select a built-in output contract automatically:
@@ -169,7 +188,7 @@ An unknown `task_type` (no matching flow file) fails the task at flow resolution
 
 Every flow file — packaged and operator — is loaded and validated at `install` and at `preflight`; any failure makes `preflight` report `NOT ready` and blocks the run. Three layers run:
 
-- **Graph integrity** — edges resolve, outcomes are valid per node kind, every `fail`/`rework` edge is bounded, exactly one entry node, every node reaches a terminal.
+- **Graph integrity** — edges resolve, outcomes are valid per node kind, every `fail`/`rework` edge is bounded, exactly one entry node, every node reaches a terminal, and every `lineage_affinity` target is an `editing_lineage` owner with no affinity of its own (no chains).
 - **Security ceiling** — no node's `permission_profile` exceeds the flow `permission_ceiling`; evaluators are forced read-only; `role_file` paths contain no traversal; unknown fields fail closed.
 - **Config consistency** — a pinned `provider` is in `agents.allowed`, its `reasoning` is supported by that provider, and (under `security.strict_isolation`) no `extra_args` selects a full-access sandbox mode.
 

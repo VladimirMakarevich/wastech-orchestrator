@@ -547,19 +547,29 @@ def test_insert_task_upsert_refreshes_registration_fields(store: StateStore) -> 
 # --- editing_lineage (durable sessions, P2.2) ---------------------------------------------
 
 
-def test_editing_lineage_roundtrip_and_one_per_unit(store: StateStore) -> None:
+def test_editing_lineage_roundtrip_and_one_per_lineage(store: StateStore) -> None:
     store.insert_task(_new_task())
-    assert store.get_editing_lineage("task-001") is None  # none yet
+    assert store.get_editing_lineage("task-001", "implementation") is None  # none yet
     store.upsert_editing_lineage(
-        EditingLineageRow(task_id="task-001", provider="claude", raw_session_id="sess-a")
+        EditingLineageRow(
+            task_id="task-001",
+            lineage_key="implementation",
+            provider="claude",
+            raw_session_id="sess-a",
+        )
     )
-    row = store.get_editing_lineage("task-001")
+    row = store.get_editing_lineage("task-001", "implementation")
     assert row is not None and row.provider == "claude" and row.raw_session_id == "sess-a"
-    # Upsert replaces in place — exactly one active editing session per execution unit.
+    # Upsert replaces in place — exactly one active editing session per (unit, lineage_key).
     store.upsert_editing_lineage(
-        EditingLineageRow(task_id="task-001", provider="claude", raw_session_id="sess-b")
+        EditingLineageRow(
+            task_id="task-001",
+            lineage_key="implementation",
+            provider="claude",
+            raw_session_id="sess-b",
+        )
     )
-    row = store.get_editing_lineage("task-001")
+    row = store.get_editing_lineage("task-001", "implementation")
     assert row is not None and row.raw_session_id == "sess-b"
     count = store._conn.execute(  # noqa: SLF001
         "SELECT COUNT(*) FROM editing_lineage WHERE task_id = ?", ("task-001",)
@@ -567,17 +577,44 @@ def test_editing_lineage_roundtrip_and_one_per_unit(store: StateStore) -> None:
     assert count == 1
 
 
+def test_editing_lineage_multiple_lineages_per_unit_are_isolated(store: StateStore) -> None:
+    # One execution unit can hold more than one durable editing session, one per lineage_key; the
+    # two tracks (e.g. a code track and a spec track) never leak session context into each other.
+    store.insert_task(_new_task())
+    store.upsert_editing_lineage(
+        EditingLineageRow(
+            task_id="task-001", lineage_key="code", provider="claude", raw_session_id="code-sess"
+        )
+    )
+    store.upsert_editing_lineage(
+        EditingLineageRow(
+            task_id="task-001", lineage_key="spec", provider="claude", raw_session_id="spec-sess"
+        )
+    )
+    assert store.get_editing_lineage("task-001", "code").raw_session_id == "code-sess"  # type: ignore[union-attr]
+    assert store.get_editing_lineage("task-001", "spec").raw_session_id == "spec-sess"  # type: ignore[union-attr]
+    count = store._conn.execute(  # noqa: SLF001
+        "SELECT COUNT(*) FROM editing_lineage WHERE task_id = ?", ("task-001",)
+    ).fetchone()[0]
+    assert count == 2
+
+
 def test_editing_lineage_survives_restart(tmp_path: Path) -> None:
     db = tmp_path / "state.db"
     store = StateStore.open(db)
     store.insert_task(_new_task())
     store.upsert_editing_lineage(
-        EditingLineageRow(task_id="task-001", provider="codex", raw_session_id="sess-durable")
+        EditingLineageRow(
+            task_id="task-001",
+            lineage_key="implementation",
+            provider="codex",
+            raw_session_id="sess-durable",
+        )
     )
     store.close()
     # A restart (a fresh store on the same file) rehydrates the editing session.
     store2 = StateStore.open(db)
-    row = store2.get_editing_lineage("task-001")
+    row = store2.get_editing_lineage("task-001", "implementation")
     assert row is not None and row.provider == "codex" and row.raw_session_id == "sess-durable"
     store2.close()
 
@@ -585,24 +622,39 @@ def test_editing_lineage_survives_restart(tmp_path: Path) -> None:
 def test_editing_lineage_root_and_subtask_are_distinct(store: StateStore) -> None:
     store.insert_task(_new_task())
     store.upsert_editing_lineage(
-        EditingLineageRow(task_id="task-001", provider="claude", raw_session_id="root")
+        EditingLineageRow(
+            task_id="task-001",
+            lineage_key="implementation",
+            provider="claude",
+            raw_session_id="root",
+        )
     )
     store.upsert_editing_lineage(
         EditingLineageRow(
-            task_id="task-001", subtask_order=2, provider="claude", raw_session_id="sub-2"
+            task_id="task-001",
+            lineage_key="implementation",
+            subtask_order=2,
+            provider="claude",
+            raw_session_id="sub-2",
         )
     )
-    assert store.get_editing_lineage("task-001").raw_session_id == "root"  # type: ignore[union-attr]
-    assert store.get_editing_lineage("task-001", 2).raw_session_id == "sub-2"  # type: ignore[union-attr]
+    assert store.get_editing_lineage("task-001", "implementation").raw_session_id == "root"  # type: ignore[union-attr]
+    assert store.get_editing_lineage("task-001", "implementation", 2).raw_session_id == "sub-2"  # type: ignore[union-attr]
 
 
 def test_reset_for_rerun_clears_editing_lineage(store: StateStore) -> None:
     store.insert_task(_new_task())
     store.upsert_editing_lineage(
-        EditingLineageRow(task_id="task-001", provider="claude", raw_session_id="sess")
+        EditingLineageRow(
+            task_id="task-001",
+            lineage_key="implementation",
+            provider="claude",
+            raw_session_id="sess",
+        )
     )
     store.reset_task_for_rerun("task-001")
-    assert store.get_editing_lineage("task-001") is None  # a fresh rerun starts new sessions
+    # A fresh rerun clears every lineage of the task.
+    assert store.get_editing_lineage("task-001", "implementation") is None
 
 
 def test_evaluations_append_only_and_counted(store: StateStore) -> None:
