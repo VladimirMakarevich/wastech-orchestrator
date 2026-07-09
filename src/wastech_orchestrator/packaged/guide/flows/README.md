@@ -10,7 +10,7 @@ If you only want to change _what a step says_, you do not need a new flow — ed
 - **Prompts:** each flow **owns its prompts** in a sibling folder named after the `task_type` — `.worc/flows/<task_type>/*.md`. `role_file` values in the YAML are relative to `.worc/flows/` and point into that folder (e.g. `role_file: my_flow/implement.md`).
 - **Supervisor prompts:** the supervisor is a constant layer above all flows (not a node). Its global default observe lens is `.worc/flows/roles/supervisor.md`, but a flow may own its supervisor wording with a `supervisor:` block (see "Flow-local supervisor prompts" below); a flow with no such block uses the shared `roles/supervisor.md`.
 
-`install` seeds editable, active copies of the three built-ins (`implementation`, `deep_research`, `security_audit`); the operator layer shadows the packaged one, so those copies are already yours to edit.
+`install` seeds editable, active copies of the built-in flows — `implementation`, `deep_research`, `security_audit`, `merge`, and the content-authoring flows `content_chapter` / `content_book` / `content_translate` — plus the executables their `tool` nodes resolve against (e.g. the `check_journey` prose gate) under `.worc/tools/`. The operator layer shadows the packaged one, so those copies are already yours to edit.
 
 ## Minimal custom flow
 
@@ -87,7 +87,7 @@ One node exposes exactly one output — to publish several results, split into s
 
 ## Custom tool nodes (`kind: tool`)
 
-A `tool` node runs **your own** executable (any language) from `.worc/tools/` instead of an LLM — for deterministic logic that is neither "smart" work (`agent`) nor a built-in gate (`checks`). Drop the program at `.worc/tools/<name>` (on POSIX, `chmod +x`), then reference it by name:
+A `tool` node runs **your own** executable (any language) from `.worc/tools/` instead of an LLM — for deterministic logic that is neither "smart" work (`agent`) nor a built-in gate (`checks`). Drop the program at `.worc/tools/<name>` (on POSIX, `chmod +x`; on Windows add a `.cmd`/`.exe` — the resolver finds `<name>.cmd` from the same flow name), or use a built-in tool `install` already delivered (e.g. `check_journey`), then reference it by name:
 
 ```yaml
 nodes:

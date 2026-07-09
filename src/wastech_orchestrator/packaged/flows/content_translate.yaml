@@ -1,0 +1,59 @@
+# Packaged built-in flow: content_translate — adapt an approved RU block into an EN production file.
+#
+# EN is a separate flow (not a branch of content_chapter): it adapts rather than edits, and it adds
+# the hard EN limits (per-page 500–800 chars, ≤3 paragraphs) that RU deliberately omits. adapt_en
+# rewrites the approved RU chapter into idiomatic English; the deterministic `check_journey` gate
+# (mode: en) enforces the structural + length rules; an EN critic blocks on whether it reads as an
+# adaptation (not a literal translation) with meaning and tone preserved and no AI patterns. Every
+# gate/rework routes through `fixing`, which re-enters the gate (`fixing → constraints_en`).
+#
+# output_policy: code_change; publishing: pull_request is the ceiling (run with
+# `git.create_pull_request: false` for local commit, no PR). The supervisor is a constant layer above
+# the flow; `emit_follow_ups` is omitted.
+flow:
+  name: content_translate
+  task_type: content_translate
+  permission_ceiling: workspace-write
+  output_policy: code_change
+  publishing: pull_request
+
+  nodes:
+    - id: adapt_en
+      kind: agent
+      role_file: content_translate/adapt_en.md
+      session_scope: editing_lineage
+      permission_profile: workspace-write
+    - id: constraints_en
+      kind: tool
+      tool: check_journey
+      args: { mode: en }
+    - id: en_critic
+      kind: evaluator
+      role: critic
+      role_file: content_translate/en_critic.md
+      blocking: true
+    - id: fixing
+      kind: agent
+      role_file: content_translate/fixing.md
+      session_scope: editing_lineage
+      lineage_affinity: adapt_en
+      permission_profile: workspace-write
+    - id: publish
+      kind: publish
+      policy: pull_request
+
+  edges:
+    - { from: adapt_en, to: constraints_en }
+    - { from: constraints_en, to: en_critic, outcome: pass }
+    - { from: constraints_en, to: fixing, outcome: fail, loop: constraint_fix }
+    - { from: en_critic, to: publish, outcome: accept }
+    - { from: en_critic, to: fixing, outcome: rework, loop: critic_fix }
+    - { from: fixing, to: constraints_en } # every fix re-enters the deterministic gate
+
+  budgets:
+    constraint_fix: 8
+    critic_fix: 3
+
+  supervisor:
+    role_file: content_translate/supervisor.md
+    finalize_role_file: content_translate/summary.md

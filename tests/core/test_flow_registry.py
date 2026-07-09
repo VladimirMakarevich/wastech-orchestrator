@@ -263,6 +263,9 @@ def test_validate_all_reports_each_packaged_flow() -> None:
         "deep_research": None,
         "security_audit": None,
         "merge": None,
+        "content_chapter": None,
+        "content_book": None,
+        "content_translate": None,
     }
 
 

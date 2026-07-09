@@ -87,6 +87,7 @@ The list of steps above is the **default** flow, used for ordinary coding tasks.
 - **implementation** (the default) — the coding pipeline that ends in a pull request.
 - **deep_research** — researches a question and produces a documentation pull request, with a citation gate and permission to reach the network.
 - **security_audit** — an advisory audit that writes a private report instead of changing code.
+- **content_chapter / content_book / content_translate** — the Wastime Journey content-authoring flows: edit a chapter, assemble the book, or adapt a chapter into English, each gated by the deterministic `check_journey` prose tool (delivered to `.worc/tools/` by `install`).
 
 All flows use the same machinery — the same gates, the same fix loops, the same read-only supervisor. They differ only in the steps and the kind of output. An operator can also drop a flow file into the project to add a new task type or override a built-in one — see [Flow authoring](flow-authoring.md).
 
