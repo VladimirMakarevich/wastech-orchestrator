@@ -9,6 +9,7 @@ the compose seam (stdout exposed as ``{<node_id>_path}`` and findings/data recor
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -23,7 +24,7 @@ from wastech_orchestrator.core.flow.contracts import (
 from wastech_orchestrator.core.flow.engine import NodeContext
 from wastech_orchestrator.core.flow.nodes import AgentNodeRunner, NodeInputs, NodeServices
 from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
-from wastech_orchestrator.core.flow.nodes.tool import ToolNodeRunner
+from wastech_orchestrator.core.flow.nodes.tool import ToolNodeRunner, _launch_argv
 from wastech_orchestrator.core.flow.prompt_vars import node_output_vars
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import AgentNode, FlowDoc, FlowNode, ToolNode
@@ -187,6 +188,31 @@ def _run(tmp_path: Path, run_process: FakeRunProcess, store: FakeStore, **svc_kw
     snap = _snapshot(node)
     services = _services(tmp_path, run_process, store, **svc_kw)
     return ToolNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(snap, node))
+
+
+# -- launch argv (both os.name branches) --------------------------------------
+
+
+def test_launch_argv_posix_runs_the_tool_directly(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(os, "name", "posix")
+    path = Path("/repo/.worc/tools/check_journey")
+    assert _launch_argv(path) == [str(path)]
+
+
+def test_launch_argv_windows_batch_runs_through_comspec(monkeypatch: pytest.MonkeyPatch) -> None:
+    # CreateProcess cannot start a .cmd/.bat directly under shell=False; it must go through the
+    # interpreter — else every content-flow run would park to manual on Windows.
+    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setenv("COMSPEC", r"C:\Windows\System32\cmd.exe")
+    path = Path(r"C:\repo\.worc\tools\check_journey.cmd")
+    assert _launch_argv(path) == [r"C:\Windows\System32\cmd.exe", "/c", str(path)]
+
+
+def test_launch_argv_windows_exe_runs_directly(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A PE image (.exe) is launchable by CreateProcess directly — no interpreter wrapper needed.
+    monkeypatch.setattr(os, "name", "nt")
+    path = Path(r"C:\repo\.worc\tools\tool.exe")
+    assert _launch_argv(path) == [str(path)]
 
 
 # -- ceiling ------------------------------------------------------------------

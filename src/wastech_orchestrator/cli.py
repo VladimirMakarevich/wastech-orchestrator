@@ -703,6 +703,63 @@ def _backup_flows_dir(worc_home: Path) -> Path | None:
     return backup
 
 
+def _tools_root() -> Traversable:
+    """The packaged operator tools delivered into ``.worc/tools/`` (works from a source tree or a
+    wheel).
+
+    ``install`` copies this tree so a packaged flow's ``tool`` node resolves against a real
+    executable on the install host: the shipped ``check_journey`` prose gate arrives as an
+    extensionless ``+x`` script (POSIX) plus a ``.cmd`` wrapper (Windows). Like ``flows/`` these are
+    delivered per machine (never committed — ``.worc/`` is gitignored), so the launcher always
+    matches the install OS.
+    """
+    return resources.files("wastech_orchestrator").joinpath("packaged", "tools")
+
+
+def _copy_packaged_tools(
+    dest_root: Path, *, overwrite: bool, dry: bool
+) -> tuple[list[str], list[str]]:
+    """Copy the packaged operator tools into ``dest_root/tools`` (mirror of _copy_packaged_flows).
+
+    Existing files are skipped unless ``overwrite`` (a plain re-run preserves operator edits);
+    ``dry`` writes nothing. On POSIX every written file gets the ``+x`` bit: a wheel (and
+    ``write_bytes``) drops the executable bit, yet the tool registry requires ``os.X_OK`` there — so
+    without it the delivered tool would resolve as "not executable". On Windows executability is by
+    suffix, so the chmod is skipped. Returns ``(written, skipped)`` as ``tools/...`` relative paths.
+    """
+    written: list[str] = []
+    skipped: list[str] = []
+    with resources.as_file(_tools_root()) as troot:
+        for rel in _iter_template_files(Path(troot)):
+            label = str(Path("tools") / rel)
+            dest = dest_root / "tools" / rel
+            if dest.exists() and not overwrite:
+                skipped.append(label)
+                continue
+            written.append(label)
+            if not dry:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes((Path(troot) / rel).read_bytes())
+                if os.name != "nt":
+                    dest.chmod(dest.stat().st_mode | 0o111)
+    return written, skipped
+
+
+def _backup_tools_dir(worc_home: Path) -> Path | None:
+    """Snapshot an existing ``.worc/tools/`` to a timestamped sibling before ``--reconfigure``
+    refreshes it (mirror of _backup_flows_dir), so any operator-added tools stay recoverable. The
+    backup lives under the gitignored ``.worc/`` home. Returns the backup path, or ``None`` when
+    there is nothing to back up.
+    """
+    tools = worc_home / "tools"
+    if not tools.is_dir() or not any(tools.iterdir()):
+        return None
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    backup = tools.with_name(f"tools.bak-{stamp}")
+    shutil.copytree(tools, backup)
+    return backup
+
+
 def _config_example_root() -> Traversable:
     """The packaged commented ``config.example.yaml`` (works from a source tree or a wheel).
 
@@ -3252,6 +3309,16 @@ def cmd_install(args: argparse.Namespace) -> int:
     flows_written, _ = _copy_packaged_flows(worc_home, overwrite=args.reconfigure, dry=False)
     if flows_written:
         print(f"install: wrote built-in flows + node prompts to {worc_home / 'flows'}")
+    # The executables that packaged `tool` nodes resolve against (e.g. the content-flow prose gate
+    # `check_journey`) land in .worc/tools/, delivered per machine so the launcher matches the OS.
+    # --reconfigure snapshots the existing dir first; a plain re-run only fills in missing files.
+    if args.reconfigure:
+        tools_backup = _backup_tools_dir(worc_home)
+        if tools_backup is not None:
+            print(f"install: backed up existing tools to {tools_backup}")
+    tools_written, _ = _copy_packaged_tools(worc_home, overwrite=args.reconfigure, dry=False)
+    if tools_written:
+        print(f"install: wrote packaged tools to {worc_home / 'tools'}")
     # A commented reference copy beside the executable config.yaml — never read at runtime.
     # --reconfigure refreshes it; a plain re-run leaves an existing copy in place.
     if _install_write_config_example(worc_home, overwrite=args.reconfigure):

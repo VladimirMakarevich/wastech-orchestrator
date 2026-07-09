@@ -1,0 +1,350 @@
+#!/usr/bin/env python3
+"""check_journey — deterministic prose-constraint gate for the Wastime Journey content flows.
+
+This is a **delivered operator tool**, not orchestrator code: `worc install` copies it into
+`<repo>/.worc/tools/`, and the packaged content flows reference it as a `tool` node
+(`tool: check_journey`). It runs out-of-process under the tool-node ceiling — it receives only an
+allowlisted path context + the flow's `args` on **stdin (JSON)**, never secrets or the environment,
+and it writes nothing to the repository. It reports back through its **exit code** (0 = pass, non-0
+= fail) and a JSON object on stdout whose `outcome` is authoritative.
+
+Because it is a self-contained script (any interpreter, no third-party imports) it stays portable:
+POSIX runs it via its shebang + `+x` bit; Windows runs the sibling `check_journey.cmd` wrapper.
+
+Scope = only changed chapters: the changed `.md` files are read from the run's diff artifact
+(`paths.diff_path`); if that is absent, from the `.md` files named in the task file
+(`paths.task_path`); if neither yields a chapter, the run is a vacuous pass (nothing to validate) —
+so the gate never fails on pre-existing violations in untouched chapters.
+
+Modes (`args.mode`):
+  * `ru`   — structural rules only (no character limit; RU pages are legitimately longer).
+  * `en`   — the RU rules plus per-page length 500–800 chars (hard max 800) and ≤3 paragraphs.
+  * `book` — the same length-bearing ruleset as `en`, applied across every assembled page.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+
+# -- domain constants (tunable) ----------------------------------------------------------------
+
+# Level-2 headings that are author-facing metadata, never user pages — excluded from the page and
+# hierarchy checks and never scanned for prose clichés.
+_SERVICE_SECTIONS = frozenset({"purpose", "emotional point", "notes"})
+
+# Headings must be alive and flow from the page content, never naming which of the three voices the
+# page belongs to. These literal service labels (and anything starting with them) are banned in
+# `###`/`####` titles. Lowercased for case-insensitive comparison.
+_BANNED_HEADING_LABELS = (
+    "что это",
+    "философия",
+    "как это",
+    "использование",
+    "комментарии автора",
+)
+
+# The explicit AI-tell antithesis "не X, а Y" (a rhetorical construction the drafts overuse). The
+# span forbids sentence-ending punctuation and newlines so a match stays inside ONE clause — else
+# an unrelated "не …" and a later ", а …" in the next sentence would false-positive. The subtler,
+# semantic clichés are the story_critic evaluator's job — this deterministic list stays small.
+_ANTITHESIS_RE = re.compile(r"\bне\s+[^.!?\n]{1,80}?,\s*а\s+", re.IGNORECASE)
+_AI_CLICHES = (
+    "в мире, где",
+    "давайте разберёмся",
+    "давайте разберемся",
+    "стоит отметить",
+)
+
+# EN/book per-page length band (characters) and paragraph ceiling.
+_EN_MIN_CHARS = 500
+_EN_MAX_CHARS = 800
+_EN_MAX_PARAGRAPHS = 3
+
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
+_NUMERIC_PREFIX_RE = re.compile(r"^\d+(?:\.\d+)*\.?\s*")
+_MODES_WITH_LENGTH = frozenset({"en", "book"})
+
+
+class Heading:
+    """One markdown heading: its level, raw title, and the line index it starts at."""
+
+    __slots__ = ("level", "title", "line")
+
+    def __init__(self, level: int, title: str, line: int) -> None:
+        self.level = level
+        self.title = title
+        self.line = line
+
+    @property
+    def content_title(self) -> str:
+        """The title with any leading `N.k.m` numbering stripped (for label comparison)."""
+        return _NUMERIC_PREFIX_RE.sub("", self.title).strip()
+
+
+def _headings(lines: list[str]) -> list[Heading]:
+    out: list[Heading] = []
+    for i, raw in enumerate(lines):
+        m = _HEADING_RE.match(raw)
+        if m is not None:
+            out.append(Heading(len(m.group(1)), m.group(2).strip(), i))
+    return out
+
+
+def _is_chapter(lines: list[str], headings: list[Heading]) -> bool:
+    """A file is a chapter iff it carries the chapter skeleton — a `Purpose`/`Pages` heading or any
+    mobile page (`####`). Anything else in scope (a README, notes) is skipped, not failed."""
+    for h in headings:
+        low = h.title.lower()
+        if h.level == 2 and low == "purpose":
+            return True
+        if h.level == 1 and low.startswith("pages"):
+            return True
+        if h.level == 4:
+            return True
+    return False
+
+
+def _pages_start(headings: list[Heading]) -> int:
+    """The line index where the `# Pages ...` section begins, or 0 to scan the whole file."""
+    for h in headings:
+        if h.level == 1 and h.title.lower().startswith("pages"):
+            return h.line
+    return 0
+
+
+def _content_headings(headings: list[Heading], pages_start: int) -> list[Heading]:
+    """The `##`/`###`/`####` headings inside the pages section, minus service sections and the
+    `# Pages` divider — the headings the structural and page rules actually apply to."""
+    out: list[Heading] = []
+    for h in headings:
+        if h.line < pages_start or h.level < 2:
+            continue
+        if h.level == 2 and h.title.lower() in _SERVICE_SECTIONS:
+            continue
+        out.append(h)
+    return out
+
+
+def _page_bodies(
+    lines: list[str], all_headings: list[Heading], content: list[Heading]
+) -> list[tuple[Heading, list[str], list[str]]]:
+    """For every `####` page, return (heading, prose_lines, extra_heading_titles).
+
+    A page body runs from its `####` heading to the next heading of level ≤ 4 — a new page, block,
+    part, or a service section such as `## Notes` all close it, so trailing metadata never leaks
+    into the last page. A `#####`/`######` inside the body is an extra title (violates "≤1 Title per
+    page"); everything else is prose.
+    """
+    heading_level = {h.line: h.level for h in all_headings}
+    out: list[tuple[Heading, list[str], list[str]]] = []
+    for h in content:
+        if h.level != 4:
+            continue
+        end = len(lines)
+        for later in all_headings:
+            if later.line > h.line and later.level <= 4:
+                end = later.line
+                break
+        prose: list[str] = []
+        extras: list[str] = []
+        for i in range(h.line + 1, end):
+            level = heading_level.get(i)
+            if level is None:
+                prose.append(lines[i])
+            elif level >= 5:
+                m = _HEADING_RE.match(lines[i])
+                extras.append(m.group(2).strip() if m is not None else lines[i].strip())
+        out.append((h, prose, extras))
+    return out
+
+
+def _paragraphs(prose_lines: list[str]) -> list[str]:
+    """Split a page body into paragraphs on blank-line boundaries; drop empty blocks."""
+    blocks: list[str] = []
+    current: list[str] = []
+    for line in prose_lines:
+        if line.strip():
+            current.append(line.strip())
+        elif current:
+            blocks.append(" ".join(current))
+            current = []
+    if current:
+        blocks.append(" ".join(current))
+    return blocks
+
+
+def _scan_prose_for_ai(text: str) -> list[str]:
+    issues: list[str] = []
+    if _ANTITHESIS_RE.search(text):
+        issues.append('AI antithesis pattern "не …, а …" — rephrase without the cliché')
+    low = text.lower()
+    for cliche in _AI_CLICHES:
+        if cliche in low:
+            issues.append(f'AI cliché "{cliche}" — remove or rewrite')
+    return issues
+
+
+def evaluate_chapter(text: str, mode: str) -> list[str]:
+    """Return the ordered list of violation messages for one chapter's markdown (empty = clean)."""
+    lines = text.splitlines()
+    headings = _headings(lines)
+    if not _is_chapter(lines, headings):
+        return []
+
+    violations: list[str] = []
+    lowered = {h.title.lower() for h in headings if h.level == 2}
+    if "purpose" not in lowered:
+        violations.append("missing required `## Purpose` section")
+    if "emotional point" not in lowered:
+        violations.append("missing required `## Emotional point` section")
+
+    content = _content_headings(headings, _pages_start(headings))
+    if content and content[0].level != 2:
+        violations.append("pages must open with a Part heading (`## Part N: …`)")
+    prev = None
+    for h in content:
+        if prev is not None and h.level > prev + 1:
+            violations.append(
+                f"heading level jumps from H{prev} to H{h.level} at {h.title!r} "
+                "(hierarchy must be ## → ### → ####, no skipped level)"
+            )
+        prev = h.level
+        if h.level in (3, 4):
+            label = h.content_title.lower()
+            if any(label == b or label.startswith(b) for b in _BANNED_HEADING_LABELS):
+                violations.append(f"service-label heading {h.title!r} — headings must not name a voice")
+
+    for page, prose_lines, extras in _page_bodies(lines, headings, content):
+        for extra in extras:
+            violations.append(
+                f"page {page.title!r} has an extra title {extra!r} (≤1 Title per page)"
+            )
+        prose = "\n".join(prose_lines).strip()
+        for issue in _scan_prose_for_ai(prose):
+            violations.append(f"page {page.title!r}: {issue}")
+        if mode in _MODES_WITH_LENGTH:
+            length = len(prose)
+            if length > _EN_MAX_CHARS:
+                violations.append(
+                    f"page {page.title!r} is {length} chars — exceeds the hard maximum "
+                    f"{_EN_MAX_CHARS}"
+                )
+            elif length < _EN_MIN_CHARS:
+                violations.append(
+                    f"page {page.title!r} is {length} chars — below the {_EN_MIN_CHARS} minimum"
+                )
+            paras = _paragraphs(prose_lines)
+            if len(paras) > _EN_MAX_PARAGRAPHS:
+                violations.append(
+                    f"page {page.title!r} has {len(paras)} paragraphs — the maximum is "
+                    f"{_EN_MAX_PARAGRAPHS}"
+                )
+    return violations
+
+
+# -- scope resolution --------------------------------------------------------------------------
+
+_DIFF_NEW_PATH_RE = re.compile(r"^\+\+\+ b/(.*)$")
+# Allow single spaces between path segments — the roadmap directory name legitimately contains them
+# (`roadmap (raw and working data)`). A leading stray word ("Edit foo.md") is trimmed at resolution.
+_MD_TOKEN_RE = re.compile(r"[\w./()\-]+(?: [\w./()\-]+)*\.md")
+
+
+def _changed_from_diff(diff_text: str) -> list[str]:
+    """Repo-relative `.md` paths added/modified in a unified diff (`+++ b/…`; `/dev/null` skipped).
+
+    The `+++ b/` line carries the path literally (spaces included), which the roadmap directory name
+    needs, so it is preferred over the ambiguous `diff --git` line.
+    """
+    paths: list[str] = []
+    for line in diff_text.splitlines():
+        m = _DIFF_NEW_PATH_RE.match(line)
+        if m is None:
+            continue
+        path = m.group(1).strip()
+        if path and path != "/dev/null" and path.endswith(".md") and path not in paths:
+            paths.append(path)
+    return paths
+
+
+def _named_in_task(task_text: str, repo: Path) -> list[str]:
+    """Best-effort fallback: repo-relative `.md` files referenced in the task text.
+
+    A reference may sit mid-sentence, so each `.md`-terminated token is resolved by trimming leading
+    whitespace-separated words until the remaining suffix is an existing file — which both drops a
+    stray leading word ("Edit foo.md") and keeps a legitimately space-containing path.
+    """
+    seen: list[str] = []
+    for m in _MD_TOKEN_RE.finditer(task_text):
+        parts = m.group(0).split(" ")
+        for i in range(len(parts)):
+            candidate = " ".join(parts[i:]).strip()
+            if candidate and candidate not in seen and (repo / candidate).is_file():
+                seen.append(candidate)
+                break
+    return seen
+
+
+def _read(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _resolve_scope(paths: dict[str, object]) -> tuple[Path, list[str]]:
+    """(repo_dir, list of repo-relative chapter paths to check), diff-first then task fallback."""
+    repo = Path(str(paths.get("repo") or "."))
+    diff_path = paths.get("diff_path")
+    if isinstance(diff_path, str) and diff_path:
+        diff_text = _read(Path(diff_path))
+        if diff_text is not None:
+            changed = _changed_from_diff(diff_text)
+            if changed:
+                return repo, changed
+    task_path = paths.get("task_path")
+    if isinstance(task_path, str) and task_path:
+        task_text = _read(Path(task_path))
+        if task_text is not None:
+            named = _named_in_task(task_text, repo)
+            if named:
+                return repo, named
+    return repo, []
+
+
+def main() -> int:
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+    except (json.JSONDecodeError, ValueError) as exc:
+        print(json.dumps({"outcome": "fail", "data": {"error": f"invalid stdin JSON: {exc}"}}))
+        return 1
+
+    args = payload.get("args") or {}
+    mode = str(args.get("mode", "ru")).lower()
+    if mode not in ("ru", "en", "book"):
+        print(json.dumps({"outcome": "fail", "data": {"error": f"unknown mode {mode!r}"}}))
+        return 1
+
+    repo, rel_paths = _resolve_scope(payload.get("paths") or {})
+    checked: list[str] = []
+    violations: dict[str, list[str]] = {}
+    for rel in rel_paths:
+        text = _read(repo / rel)
+        if text is None:
+            continue  # deleted or unreadable — nothing to validate
+        checked.append(rel)
+        issues = evaluate_chapter(text, mode)
+        if issues:
+            violations[rel] = issues
+
+    outcome = "fail" if violations else "pass"
+    data = {"mode": mode, "checked": checked, "violations": violations}
+    print(json.dumps({"outcome": outcome, "data": data}, ensure_ascii=False))
+    return 1 if violations else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

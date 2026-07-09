@@ -150,6 +150,61 @@ def test_tool_registry_rejects_symlink_escape(tmp_path: Path) -> None:
         ToolRegistry(tools).resolve("link")
 
 
+# -- cross-platform name resolution (both os.name branches) ------------------
+
+
+def test_resolve_posix_finds_bare_extensionless_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # POSIX: one fixed flow name resolves to the extensionless +x script (as delivered).
+    monkeypatch.setattr(os, "name", "posix")
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    script = tools / "check_journey"
+    script.write_text("#!/usr/bin/env python3\nprint('ok')\n", encoding="utf-8")
+    script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    resolved = ToolRegistry(tools).resolve("check_journey")
+    assert resolved.name == "check_journey"
+
+
+def test_resolve_windows_finds_cmd_wrapper_for_bare_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Windows: the same bare flow name resolves to the launchable `.cmd` sibling. The extensionless
+    # file (delivered too) is inert on Windows, so the suffix iteration is what makes one packaged
+    # flow work on both OSes.
+    monkeypatch.setattr(os, "name", "nt")
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "check_journey").write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    (tools / "check_journey.cmd").write_text('@python "%~dp0check_journey" %*\n', encoding="utf-8")
+    resolved = ToolRegistry(tools).resolve("check_journey")
+    assert resolved.name == "check_journey.cmd"
+
+
+def test_resolve_windows_without_wrapper_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Only the inert extensionless file is present → no launchable candidate → fail-closed.
+    monkeypatch.setattr(os, "name", "nt")
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "check_journey").write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    with pytest.raises(ToolResolutionError, match="not executable"):
+        ToolRegistry(tools).resolve("check_journey")
+
+
+def test_resolve_windows_traversal_still_fatal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The suffix iteration never weakens containment: a name traversal is fatal on Windows too.
+    monkeypatch.setattr(os, "name", "nt")
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    with pytest.raises(ToolResolutionError, match="outside the tools directory"):
+        ToolRegistry(tools).resolve("../escape")
+
+
 # -- config-aware flow validation --------------------------------------------
 
 
