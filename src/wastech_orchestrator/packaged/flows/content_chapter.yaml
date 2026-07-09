@@ -1,0 +1,88 @@
+# Packaged built-in flow: content_chapter — the Wastime Journey chapter editor (the workhorse).
+#
+# Reworks one RU chapter of the content repo in place: a read-only scout builds a brief, an editor
+# revises the chapter, a deterministic prose gate (the `check_journey` tool) enforces the hard
+# structural constraints, a product-accuracy verifier and a story critic each block on quality, and a
+# style pass polishes the language before publish. Every gate/rework routes through `fixing`, which
+# re-enters the deterministic gate (`fixing → constraints`) so a fix can never break the limits.
+#
+# output_policy: code_change — the chapter `.md` files are edited in place; the diff IS the
+# deliverable. publishing: pull_request is the ceiling; run the content repo with
+# `git.create_pull_request: false` (install `--no-create-pr`) to land edits as a local commit with no
+# PR. The deterministic gate is `check_journey` (delivered to `.worc/tools/` by `worc install`); see
+# docs/flow-authoring.md → "The check_journey prose gate".
+#
+# The supervisor is a constant layer above the flow (not a node); `emit_follow_ups` is deliberately
+# omitted (a code-oriented capability). Blocking evaluators are capped by their named-loop budgets
+# (`accuracy_fix` / `critic_fix`), not by `max_rework_per_stage` (a non-blocking-only knob).
+flow:
+  name: content_chapter
+  task_type: content_chapter
+  permission_ceiling: workspace-write
+  output_policy: code_change
+  publishing: pull_request
+
+  nodes:
+    - id: context
+      kind: agent
+      role_file: content_chapter/context.md
+      session_scope: fresh_disposable
+      permission_profile: read-only
+    - id: revise
+      kind: agent
+      role_file: content_chapter/revise.md
+      session_scope: editing_lineage
+      permission_profile: workspace-write
+    - id: constraints
+      kind: tool
+      tool: check_journey
+      args: { mode: ru }
+    - id: product_accuracy
+      kind: evaluator
+      role: verifier
+      role_file: content_chapter/product_accuracy.md
+      blocking: true
+    - id: story_critic
+      kind: evaluator
+      role: critic
+      role_file: content_chapter/story_critic.md
+      blocking: true
+    - id: style
+      kind: agent
+      role_file: content_chapter/style.md
+      session_scope: editing_lineage
+      lineage_affinity: revise
+      permission_profile: workspace-write
+      # Language polish is a bounded pass, not fresh reasoning, so it runs at medium regardless of
+      # the flow-wide default — less wall-time on the tail, no quality loss.
+      reasoning: medium
+    - id: fixing
+      kind: agent
+      role_file: content_chapter/fixing.md
+      session_scope: editing_lineage
+      lineage_affinity: revise
+      permission_profile: workspace-write
+    - id: publish
+      kind: publish
+      policy: pull_request
+
+  edges:
+    - { from: context, to: revise }
+    - { from: revise, to: constraints }
+    - { from: constraints, to: product_accuracy, outcome: pass }
+    - { from: constraints, to: fixing, outcome: fail, loop: constraint_fix }
+    - { from: product_accuracy, to: story_critic, outcome: accept }
+    - { from: product_accuracy, to: fixing, outcome: rework, loop: accuracy_fix }
+    - { from: story_critic, to: style, outcome: accept }
+    - { from: story_critic, to: fixing, outcome: rework, loop: critic_fix }
+    - { from: fixing, to: constraints } # every fix re-enters the deterministic gate
+    - { from: style, to: publish }
+
+  budgets:
+    constraint_fix: 8
+    accuracy_fix: 3
+    critic_fix: 3
+
+  supervisor:
+    role_file: content_chapter/supervisor.md
+    finalize_role_file: content_chapter/summary.md

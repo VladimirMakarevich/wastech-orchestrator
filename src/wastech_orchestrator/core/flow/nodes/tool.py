@@ -27,6 +27,7 @@ under ``tools/<node_id>/``, and the redacted stdout is exposed downstream as ``{
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,6 +56,12 @@ from wastech_orchestrator.state_store import NodeRunRow
 # them to route a tool node (its outcome kind does), so the mapping is deliberately generous.
 _HIGH_SEVERITIES = frozenset({"error", "critical", "blocking", "high"})
 _MEDIUM_SEVERITIES = frozenset({"warning", "medium", "moderate"})
+
+# Windows batch wrappers (`.bat`/`.cmd`) are the portable way to ship a script tool cross-platform
+# (the resolver finds `<tool>.cmd` where POSIX finds an extensionless `+x` file), but CreateProcess
+# cannot launch a batch file directly with ``shell=False`` — it must run through the command
+# interpreter. `.exe`/`.com` are PE images CreateProcess starts directly, so they are NOT here.
+_BATCH_SUFFIXES = frozenset({".bat", ".cmd"})
 
 
 class ToolContractError(Exception):
@@ -103,7 +110,7 @@ class ToolNodeRunner:
         stdout_path = node_dir / TOOL_STDOUT_FILENAME
 
         result = self._s.run_process(
-            [str(tool_path)],
+            _launch_argv(tool_path),
             cwd=self._s.repo_dir,
             env=dict(self._s.process_env),  # exactly the allowlisted child env — no secrets
             timeout_seconds=node.timeout_seconds or self._s.tools_default_timeout_seconds,
@@ -201,6 +208,20 @@ class ToolNodeRunner:
         self._s.store.complete_node_run(
             run_id, status=status, outcome=outcome, finished_at=self._s.clock()
         )
+
+
+def _launch_argv(tool_path: Path) -> list[str]:
+    """The argv used to launch a resolved tool — always a list, never a shell string.
+
+    A Windows ``.bat``/``.cmd`` cannot be started directly by CreateProcess under ``shell=False``,
+    so such a tool is launched through the command interpreter as ``[COMSPEC, "/c", <path>]``
+    (``COMSPEC`` is read only to locate the interpreter binary, never passed as child env — the
+    child still gets exactly the allowlisted env). Everything else — a POSIX ``+x`` script, a
+    Windows ``.exe`` — launches directly. Keeping it a list means no user string is shell-parsed.
+    """
+    if os.name == "nt" and tool_path.suffix.lower() in _BATCH_SUFFIXES:
+        return [os.environ.get("COMSPEC", "cmd.exe"), "/c", str(tool_path)]
+    return [str(tool_path)]
 
 
 def parse_tool_output(exit_code: int | None, stdout: str) -> ToolContract:

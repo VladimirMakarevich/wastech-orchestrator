@@ -22,7 +22,7 @@ python -m venv .venv
 pip install -e ".[dev]"             # or: pip install wastech-orchestrator
 ```
 
-`install` is the single setup command. It sets up `<repo>/.worc/` in the current repository — a single gitignored home for everything the orchestrator generates: `config.yaml` (plus a commented `config.example.yaml` reference copy), a `guide/` (the installed docs bundle: task docs, copy-ready task skills, plus a config helper and copy-ready config skill), the editable `flows/` copies (built-in flows + their `roles/` prompts), `state.db`, `logs/`, and `workspace/`. There is no sibling workspace and no separate clone requirement — the orchestrator branches/commits/pushes in the repo you run it in.
+`install` is the single setup command. It sets up `<repo>/.worc/` in the current repository — a single gitignored home for everything the orchestrator generates: `config.yaml` (plus a commented `config.example.yaml` reference copy), a `guide/` (the installed docs bundle: task docs, copy-ready task skills, plus a config helper and copy-ready config skill), the editable `flows/` copies (built-in flows + their `roles/` prompts), the `tools/` copies (executables that packaged `tool` nodes resolve against, e.g. `check_journey`), `state.db`, `logs/`, and `workspace/`. There is no sibling workspace and no separate clone requirement — the orchestrator branches/commits/pushes in the repo you run it in.
 
 ### Bind the repository (`install`)
 
@@ -456,7 +456,7 @@ python -m wastech_orchestrator --config ./config.yaml status task-001
 
 ## 5. Git footprint and the audit commit
 
-There is one canonical layout. Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home — `config.yaml` (plus the commented `config.example.yaml` reference), `guide/` (task docs + config helper), `flows/` (editable flow + role-prompt copies), `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `workspace/`, and the `tasks/rejected` quarantine. The **only** things not under `.worc/` are the `tasks/` lifecycle dirs (`pending`/`done`/`failed`), which live at the **repo root** and are **git-tracked**: the task file and its `<id>.summary.md` (in `done/` or `failed/`) are the audit trail. `install` appends a single line `.worc/` to the repo's tracked `.gitignore`; `tasks/` is intentionally not ignored.
+There is one canonical layout. Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home — `config.yaml` (plus the commented `config.example.yaml` reference), `guide/` (task docs + config helper), `flows/` (editable flow + role-prompt copies), `tools/` (delivered `tool`-node executables, e.g. `check_journey`), `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `workspace/`, and the `tasks/rejected` quarantine. The **only** things not under `.worc/` are the `tasks/` lifecycle dirs (`pending`/`done`/`failed`), which live at the **repo root** and are **git-tracked**: the task file and its `<id>.summary.md` (in `done/` or `failed/`) are the audit trail. `install` appends a single line `.worc/` to the repo's tracked `.gitignore`; `tasks/` is intentionally not ignored.
 
 Two fields under `git.footprint` shape the audit commit:
 

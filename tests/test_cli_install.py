@@ -10,6 +10,7 @@ wiring.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ from wastech_orchestrator import cli
 from wastech_orchestrator.config.loader import load_config
 from wastech_orchestrator.config.schema import AuditBranch
 from wastech_orchestrator.core.flow.registry import _PACKAGED_DIR, FlowRegistry
+from wastech_orchestrator.core.flow.tools_registry import ToolRegistry
 from wastech_orchestrator.observability import logging as obslog
 from wastech_orchestrator.providers.base import ProviderId
 
@@ -309,6 +311,41 @@ def test_reconfigure_backs_up_and_refreshes_flows(
     assert (backups[0] / "implementation" / "implementation.md").read_text(
         encoding="utf-8"
     ) == "# stale operator prompt\n"
+
+
+def test_install_delivers_packaged_tools(git_repo: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    _present(monkeypatch, "codex")
+    assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
+    tools = git_repo.clone / ".worc" / "tools"
+    packaged_tools = _PACKAGED_DIR.parent / "tools"
+    # The prose-gate executable + its Windows launcher are delivered, byte-for-byte from source.
+    for name in ("check_journey", "check_journey.cmd"):
+        assert (tools / name).read_bytes() == (packaged_tools / name).read_bytes()
+    # On POSIX the delivered script must carry +x (a wheel / write_bytes drops the bit) so the
+    # registry resolves it; on Windows executability is by suffix (the .cmd), so the bit is moot.
+    if os.name != "nt":
+        assert os.access(tools / "check_journey", os.X_OK)
+    # And it resolves through the very registry the runtime + preflight use, on this OS.
+    expected = "check_journey.cmd" if os.name == "nt" else "check_journey"
+    assert ToolRegistry(tools).resolve("check_journey").name == expected
+
+
+def test_reconfigure_backs_up_and_refreshes_tools(
+    git_repo: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _present(monkeypatch, "codex")
+    assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
+    worc = git_repo.clone / ".worc"
+    tool = worc / "tools" / "check_journey"
+    tool.write_text("# stale operator tool\n", encoding="utf-8")
+    redo = _ni(git_repo.clone, "--provider", "codex", "--reconfigure", "--skip-preflight")
+    assert cli.main(redo) == 0
+    # Refreshed back to the packaged version...
+    assert tool.read_text(encoding="utf-8") != "# stale operator tool\n"
+    # ...but the operator's edit stays recoverable from the timestamped backup dir under .worc/.
+    backups = list(worc.glob("tools.bak-*"))
+    assert len(backups) == 1
+    assert (backups[0] / "check_journey").read_text(encoding="utf-8") == "# stale operator tool\n"
 
 
 def test_install_gitignore_append_is_idempotent(

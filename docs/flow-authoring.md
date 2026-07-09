@@ -175,7 +175,9 @@ The **supervisor** summary/follow-ups and the **memory** delta are produced by t
 
 A `tool` node runs **your own** program instead of an LLM — any language, by contract, not by interpreter. Use it for deterministic logic that is neither "smart" work (`agent`) nor a built-in gate (`checks`): a bespoke `.md` linter, a data producer for the next node, a router.
 
-**Where a tool lives.** Put the executable at `.worc/tools/<name>` (on POSIX, `chmod +x`; on Windows, use a launchable suffix such as `.bat`). A flow references it by name, never by path — the registry resolves the name to a contained, executable file and rejects anything else (a missing tool, a traversal, a symlink out of `.worc/tools/`) **fatally at preflight**, before any task starts.
+**Where a tool lives.** Put the executable at `.worc/tools/<name>` and reference it from a flow by that **one name**, never a path. Resolution is cross-platform from the single name: on POSIX the bare `<name>` must be `chmod +x`; on Windows the resolver also tries launcher suffixes, so the same flow name finds `<name>.cmd`/`.exe` (and a `.cmd`/`.bat` is launched through the command interpreter, since Windows cannot start a batch file directly). The registry resolves the name to a contained, executable file and rejects anything else (a missing tool, a traversal, a symlink out of `.worc/tools/`) **fatally at preflight**, before any task starts.
+
+**Built-in tools ship with the orchestrator.** `worc install` delivers packaged tools into `.worc/tools/` (per machine, so the launcher always matches the OS), exactly as it delivers the built-in flows — a plain re-run fills in missing files, `--reconfigure` snapshots the existing dir first. The content flows' `check_journey` prose gate is one such tool (see [`check_journey`](#the-check_journey-prose-gate) below). Because a packaged `tool` node is validated in every repo at preflight, its executable must be delivered everywhere — which the installer guarantees.
 
 **The contract (like a Claude Code hook).** The orchestrator runs the tool through the same launch ceiling as an agent — an argv list (never a shell string), a mandatory timeout, and exactly the allowlisted `security.allowed_environment` (the parent environment is never inherited). It feeds a small JSON **context on stdin** — only allowlisted paths + your `args`, never secrets, the full environment, or a session id:
 
@@ -225,6 +227,18 @@ edges:
 ```
 
 `roles/fix.md` shows the agent exactly the findings, via one path line: `Report: {md-check_path}`.
+
+### The check_journey prose gate
+
+`check_journey` is the built-in `tool` shipped for the content-authoring flows — one parametrized validator selected by `args.mode`. It is a self-contained script (no third-party dependencies), delivered on install as an extensionless `+x` file plus a `check_journey.cmd` Windows launcher.
+
+It reports through the standard tool contract above (JSON `{"outcome", "data"}` on stdout, exit `0`/non-zero). **Scope is only the changed chapters**: it reads the changed `.md` paths from the run's `diff_path`, falls back to `.md` files named in `task_path`, and if neither yields a chapter it is a vacuous `pass` — so the gate never fails on pre-existing issues in untouched chapters. Rules per mode:
+
+| `mode` | Enforces |
+| --- | --- |
+| `ru` | ≤1 title per page; `## → ### → ####` hierarchy (no skipped level); `Purpose` + `Emotional point` present; the `не …, а …` AI-antithesis pattern (+ a small cliché list); no service-label headings (`Что это`, `Философия`, …). **No character limit.** |
+| `en` | all `ru` rules **plus** per-page length 500–800 chars (hard max 800) and ≤3 paragraphs. |
+| `book` | the length-bearing `en` ruleset applied across every assembled page. |
 
 ## Registering and running the flow
 

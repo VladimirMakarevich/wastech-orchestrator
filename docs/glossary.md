@@ -49,7 +49,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **Front matter** - The YAML block at the top of a Markdown task file. It carries the task metadata that the validation gate allows.
 - **`id`** - Stable normalized task identifier. It is used in task storage, branch naming, artifacts, and reports.
 - **`title`** - Human-readable task name. It is used in branch slugs, PR titles, and summaries.
-- **`task_type`** - Dispatch key that selects the flow. Built-ins are `implementation`, `deep_research`, and `security_audit`; operator flows can add more.
+- **`task_type`** - Dispatch key that selects the flow. Built-ins are `implementation`, `deep_research`, `security_audit`, `merge`, and the content-authoring flows `content_chapter` / `content_book` / `content_translate`; operator flows can add more.
 - **`branch_name`** - Full task-branch override (only in `new` branch mode). When omitted, the orchestrator derives a branch from `repo.branch_prefix`, `id`, and a slug of `title`.
 - **`branch_mode`** (task field) - Where the task's git operations point: `new` (fork a fresh branch, the owned default), `existing` (work in `branch_ref`), or `current` (work in the working tree's current branch as-is). Wins over `repo.branch_mode`. A branch is orchestrator-owned only in `new`.
 - **`branch_ref`** - The existing branch a task works in; required iff `branch_mode` is `existing` (a validation error otherwise) and must already exist locally or on the remote.
@@ -152,6 +152,9 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`deep_research`** - The research flow that produces a documentation-oriented output.
 - **`security_audit`** - The audit flow that produces a private control-workspace report.
 - **`merge`** - The conflict-resolution flow `worc merge-task` runs (only) when pulling `base_branch` into a task branch conflicts: `conflict_resolution` (agent) → `testing` (checks) with a bounded fix loop, terminating at a no-op `publish` (`policy: none`). It performs no git itself — the orchestrator commits the merge and merges the PR after the flow returns a clean, green tree. Not dispatched for incoming tasks; selected by `git.merge_flow`.
+- **`content_chapter`** - The Wastime Journey chapter editor: a read-only scout → editor → the deterministic `check_journey` prose gate (mode `ru`) → a blocking product-accuracy verifier and story critic → a style pass → publish, all rework routed through `fixing`.
+- **`content_book`** - Assembles the approved chapters into one book (unified voice, TOC, transitions), gated by a book critic and `check_journey` (mode `book`); run once at the end.
+- **`content_translate`** - Adapts an approved RU chapter into an English production file, gated by `check_journey` (mode `en`, the 500–800-char per-page limits) and an adaptation critic.
 - **Flow node kinds** - `agent` runs an editing or authoring step, `evaluator` reads an artifact and returns a verdict, `checks` runs the quality gate, `tool` runs an operator executable from `.worc/tools/` out-of-process (exit-code / optional-JSON gate), `hitl` asks the human in the loop, and `publish` performs the orchestrator-owned publish step.
 - **Run vocabulary** - `RunKind` is the top-level run discriminator (`stage` or `evaluator`); `EvaluatorRole` names the shipped evaluator roles (`review`, `critic`, `verifier`, `test_quality`).
 - **Typed node output** - `OutputContract` selects the strict structured-output parser for agent nodes (`none`, `human_input`, `planning`); `HumanInputSignal` is the validated question/approval payload; `TypedStageOutput` is the parsed structured result.

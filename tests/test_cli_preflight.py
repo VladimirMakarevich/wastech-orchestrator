@@ -34,6 +34,15 @@ def _reset_package_logger() -> Iterator[None]:
     obslog._configured = False
 
 
+@pytest.fixture(autouse=True)
+def _deliver_packaged_tools(git_repo) -> None:
+    # Preflight validates every packaged flow config-aware, which resolves the content flows'
+    # `check_journey` tool against <repo>/.worc/tools/ — the dir `worc install` fills. These tests
+    # drive cmd_preflight directly on a bare clone (no install step), so deliver the tool here
+    # exactly as install does, reusing the real copy function.
+    cli._copy_packaged_tools((git_repo.clone / ".worc").resolve(), overwrite=True, dry=False)
+
+
 class _FakeHealthProvider:
     def __init__(
         self,
