@@ -1,7 +1,10 @@
 """Unit tests for the flow registry (flow-engine P0.4).
 
-Covers: built-in resolution, default task_type, unknown raises, operator priority,
-fallback to packaged, task_type mismatch, and validate_flow integration.
+Covers: built-in resolution (from a delivered ``.worc/flows/``), default task_type, unknown/missing
+raises (no packaged fallback), operator custom flows, task_type mismatch, and validate_flow
+integration. Built-ins are resolved by pointing ``operator_flows_dir`` at the packaged flows tree —
+what ``worc install`` copies into ``.worc/flows/`` — since the registry never reads the packaged
+tree itself.
 """
 
 from __future__ import annotations
@@ -9,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from tests.conftest import BUILTIN_FLOWS_DIR
 
 from wastech_orchestrator.core.flow.registry import (
     DEFAULT_TASK_TYPE,
@@ -18,32 +22,39 @@ from wastech_orchestrator.core.flow.registry import (
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
 from wastech_orchestrator.core.flow.validator import FlowValidationError
 
-# -- built-in resolution ------------------------------------------------------
+# -- built-in resolution (from a delivered .worc/flows/) ----------------------
+
+
+def _builtin_registry() -> FlowRegistry:
+    # A registry pointed at the packaged flows tree — what `worc install` delivers into
+    # `.worc/flows/`. The registry itself has no packaged fallback, so built-ins resolve only
+    # because they are present in the operator dir here.
+    return FlowRegistry(operator_flows_dir=BUILTIN_FLOWS_DIR)
 
 
 def test_resolve_none_defaults_to_implementation() -> None:
-    snap = FlowRegistry().resolve(None)
+    snap = _builtin_registry().resolve(None)
     assert snap.doc.task_type == "implementation"
 
 
 def test_resolve_implementation_explicit() -> None:
-    snap = FlowRegistry().resolve("implementation")
+    snap = _builtin_registry().resolve("implementation")
     assert snap.doc.name == "implementation"
     assert snap.doc.task_type == "implementation"
 
 
 def test_resolve_deep_research() -> None:
-    snap = FlowRegistry().resolve("deep_research")
+    snap = _builtin_registry().resolve("deep_research")
     assert snap.doc.task_type == "deep_research"
 
 
 def test_resolve_security_audit() -> None:
-    snap = FlowRegistry().resolve("security_audit")
+    snap = _builtin_registry().resolve("security_audit")
     assert snap.doc.task_type == "security_audit"
 
 
 def test_resolve_all_builtins_produce_snapshots() -> None:
-    registry = FlowRegistry()
+    registry = _builtin_registry()
     for name in ("implementation", "deep_research", "security_audit"):
         snap = registry.resolve(name)
         assert isinstance(snap, FlowSnapshot)
@@ -59,39 +70,46 @@ def test_default_task_type_constant() -> None:
 
 def test_resolve_unknown_raises_resolution_error() -> None:
     with pytest.raises(FlowResolutionError) as exc_info:
-        FlowRegistry().resolve("no_such_flow")
+        _builtin_registry().resolve("no_such_flow")
     assert "no_such_flow" in str(exc_info.value)
 
 
-def test_resolution_error_message_lists_builtins() -> None:
+def test_resolution_error_message_lists_operator_flows(tmp_path: Path) -> None:
+    # The "unknown task_type" hint lists the operator's own .worc/flows/ names (not packaged stems)
+    # and points at the missing file + the fix.
+    flows_dir = tmp_path / "flows"
+    flows_dir.mkdir()
+    (flows_dir / "custom.yaml").write_text(_MINIMAL_YAML.replace("implementation", "custom"))
     with pytest.raises(FlowResolutionError) as exc_info:
-        FlowRegistry().resolve("unknown")
+        FlowRegistry(operator_flows_dir=flows_dir).resolve("unknown")
     msg = str(exc_info.value)
-    assert "implementation" in msg
+    assert "unknown.yaml" in msg  # names the missing file
+    assert "custom" in msg  # lists the operator's flows
+    assert "worc install" in msg  # points at the fix
 
 
 # -- snapshot properties ------------------------------------------------------
 
 
 def test_returned_snapshot_has_fingerprint() -> None:
-    snap = FlowRegistry().resolve("implementation")
+    snap = _builtin_registry().resolve("implementation")
     assert len(snap.flow_fingerprint) == 64
     assert all(c in "0123456789abcdef" for c in snap.flow_fingerprint)
 
 
 def test_returned_snapshot_is_immutable() -> None:
-    snap = FlowRegistry().resolve("implementation")
+    snap = _builtin_registry().resolve("implementation")
     with pytest.raises(AttributeError):
         snap.flow_fingerprint = "changed"  # type: ignore[misc]
 
 
 def test_returned_snapshot_source_path_set() -> None:
-    snap = FlowRegistry().resolve("implementation")
+    snap = _builtin_registry().resolve("implementation")
     assert snap.source_path is not None
     assert snap.source_path.name == "implementation.yaml"
 
 
-# -- operator flow priority ---------------------------------------------------
+# -- operator flow resolution -------------------------------------------------
 
 _MINIMAL_YAML = """\
 flow:
@@ -112,29 +130,30 @@ flow:
 """
 
 
-def test_operator_flow_takes_priority_over_builtin(tmp_path: Path) -> None:
+def test_operator_flow_resolves_from_worc_flows(tmp_path: Path) -> None:
+    # The operator's own .worc/flows/implementation.yaml is the sole source: its 2-node shape wins
+    # (there is no packaged fallback to a different built-in shape).
     flows_dir = tmp_path / "flows"
     flows_dir.mkdir()
     (flows_dir / "implementation.yaml").write_text(_MINIMAL_YAML)
     snap = FlowRegistry(operator_flows_dir=flows_dir).resolve("implementation")
-    # Operator flow has 2 nodes; packaged implementation (P1 parity) has 8.
     assert len(snap.doc.nodes) == 2
 
 
-def test_operator_dir_no_matching_file_falls_back_to_packaged(tmp_path: Path) -> None:
-    # Operator dir exists but has no implementation.yaml → falls back to packaged.
+def test_operator_dir_missing_flow_raises(tmp_path: Path) -> None:
+    # Operator dir exists but has no implementation.yaml → hard error, NOT a silent packaged
+    # fallback. `.worc/` is the whole truth; a missing flow is a real "not found".
     flows_dir = tmp_path / "flows"
     flows_dir.mkdir()
-    snap = FlowRegistry(operator_flows_dir=flows_dir).resolve("implementation")
-    # packaged implementation: refinement, planning, implementation, testing, review, fixing,
-    # documentation, publish — the summary node is gone (the constant supervisor layer writes the
-    # summary); documentation updates the target project's docs after review accepts.
-    assert len(snap.doc.nodes) == 8
+    with pytest.raises(FlowResolutionError) as exc_info:
+        FlowRegistry(operator_flows_dir=flows_dir).resolve("implementation")
+    assert "implementation.yaml" in str(exc_info.value)
 
 
-def test_no_operator_dir_uses_packaged_only() -> None:
-    snap = FlowRegistry(operator_flows_dir=None).resolve("implementation")
-    assert snap.doc.task_type == "implementation"
+def test_no_operator_dir_raises() -> None:
+    # No operator layer at all → nothing resolves (the packaged tree is delivery-only, never read).
+    with pytest.raises(FlowResolutionError):
+        FlowRegistry(operator_flows_dir=None).resolve("implementation")
 
 
 def test_operator_custom_task_type_resolved(tmp_path: Path) -> None:
@@ -244,21 +263,12 @@ def test_operator_flow_resolves_and_executes(tmp_path: Path) -> None:
     assert {n.id for n in snap.doc.nodes} == {"work", "out"}
 
 
-def test_operator_flow_overrides_builtin(tmp_path: Path) -> None:
-    flows_dir = tmp_path / "flows"
-    flows_dir.mkdir()
-    (flows_dir / "implementation.yaml").write_text(_MINIMAL_YAML)
-    snap = FlowRegistry(operator_flows_dir=flows_dir).resolve("implementation")
-    # The 2-node operator flow wins over the 8-node packaged implementation.
-    assert len(snap.doc.nodes) == 2
-
-
 # -- validate-flow: operator_flow_names + check_flows -------------------------
 
 
 def test_operator_flow_names_lists_only_operator_flows(tmp_path: Path) -> None:
-    # Discovery scope for `worc validate-flow`: only the operator's own `.worc/flows/`, never the
-    # packaged built-ins (which resolve() can still fall back to, but validate-flow does not touch).
+    # Discovery scope for `worc validate-flow`: only the operator's own `.worc/flows/`. Built-ins
+    # are covered by the orchestrator's own test suite, not against a target repo's config.
     flows_dir = tmp_path / "flows"
     flows_dir.mkdir()
     (flows_dir / "custom.yaml").write_text(_MINIMAL_YAML.replace("implementation", "custom"))

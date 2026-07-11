@@ -277,6 +277,8 @@ def _build_orchestrator(
     verdicts,
     notifier: Notifier | None = None,
 ):
+    from tests.conftest import seed_builtin_flows
+
     from wastech_orchestrator.check_runner import CheckRunner
     from wastech_orchestrator.core.orchestrator import Orchestrator
     from wastech_orchestrator.git_manager import GitManager
@@ -287,6 +289,7 @@ def _build_orchestrator(
 
     art = tmp_path / "art"
     config = make_git_config(git_repo.clone, checks=["pytest"], decomposition=True)
+    seed_builtin_flows(git_repo.clone)  # deliver the built-in flows as `worc install` would
     store = StateStore.open(art / "state.db")
     ledger = Ledger(art / "logs")
 
@@ -417,9 +420,12 @@ def test_resume_interrupted_cleanup_notifies_after_ledger(
 
 
 def _impl_fingerprint() -> str:
+    from tests.conftest import BUILTIN_FLOWS_DIR
+
     from wastech_orchestrator.core.flow.registry import FlowRegistry
 
-    return FlowRegistry().resolve("implementation").flow_fingerprint
+    registry = FlowRegistry(operator_flows_dir=BUILTIN_FLOWS_DIR)
+    return registry.resolve("implementation").flow_fingerprint
 
 
 @pytest.mark.parametrize(

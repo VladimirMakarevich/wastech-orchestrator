@@ -1,16 +1,17 @@
 """Flow registry — resolves task_type → validated FlowSnapshot (P0.4).
 
-Two lookup layers, in priority order:
-
-  1. **Operator flows**: ``<operator_flows_dir>/<task_type>.yaml`` — allows operators to
-     override or extend built-ins by placing YAML files in ``<repo>/.worc/flows/``.
-  2. **Packaged built-ins**: shipped with the wheel under ``packaged/flows/`` (``implementation``,
-     ``deep_research``, ``security_audit``).
+Flows resolve from exactly one place: the operator's ``<repo>/.worc/flows/<task_type>.yaml``. The
+bundled ``packaged/flows/`` tree is **delivery-only** — ``worc install`` copies it into ``.worc/``
+so the operator gets editable, active copies — and is never read at task-execution time. A requested
+``task_type`` with no file in ``.worc/flows/`` is an explicit :class:`FlowResolutionError`, not a
+silent fall-back to the bundled copy: what the operator sees in their repo is exactly what the
+orchestrator runs.
 
 Resolution rules:
 
 - ``task_type=None`` defaults to :data:`DEFAULT_TASK_TYPE` (``"implementation"``).
-- Unknown ``task_type`` raises :class:`FlowResolutionError` before any side-effects.
+- Unknown ``task_type`` (no ``.worc/flows/<task_type>.yaml``) raises :class:`FlowResolutionError`
+  before any side-effects, naming the missing file and how to deliver the built-ins.
 - The ``task_type`` field inside the YAML must match the lookup key; mismatch raises
   :class:`FlowResolutionError` (prevents a misconfigured operator file being used under
   the wrong dispatch key).
@@ -40,11 +41,6 @@ from wastech_orchestrator.core.flow.validator import (
 
 DEFAULT_TASK_TYPE: str = "implementation"
 
-# Built-in flow YAML + role prompts ship as package data under the aggregated
-# ``wastech_orchestrator/packaged/flows/`` tree (the single home for everything shipped/seeded);
-# the flow-engine code lives here in ``core/flow/``.
-_PACKAGED_DIR: Path = Path(__file__).resolve().parents[2] / "packaged" / "flows"
-
 
 class FlowResolutionError(Exception):
     """Raised when task_type cannot be mapped to a known flow."""
@@ -67,8 +63,9 @@ class FlowCheck:
 class FlowRegistry:
     """Resolve ``task_type`` → validated :class:`~.snapshot.FlowSnapshot`.
 
-    Built-in flows ship in ``packaged/``; operator flows live in ``<repo>/.worc/flows/`` and take
-    priority when present. When constructed with a *config*, every resolved snapshot also passes the
+    Flows live in the operator's ``<repo>/.worc/flows/`` — the sole resolution source. The bundled
+    ``packaged/`` tree is delivery-only (``worc install`` copies it into ``.worc/``) and is never
+    read here. When constructed with a *config*, every resolved snapshot also passes the
     config-aware validator (P4.2); without one, only the config-free graph + ceiling layers run
     (used by unit tests that have no config).
     """
@@ -82,8 +79,8 @@ class FlowRegistry:
         self._config = config
         # Operator tools live in the sibling ``<worc-home>/tools/`` of the flows dir (both under
         # ``.worc/``). Built here so config-aware resolution validates a ``tool`` node's name
-        # fail-closed; ``None`` (packaged-only, no operator layer) leaves tool nodes unresolvable —
-        # a flow that uses one is rejected, and no packaged flow has a tool node.
+        # fail-closed; ``None`` (no operator layer, e.g. a bare unit test) has no flows dir, so
+        # nothing resolves and tool nodes are unresolvable — a flow that uses one is rejected.
         self._tools = (
             ToolRegistry(operator_flows_dir.parent / "tools")
             if operator_flows_dir is not None
@@ -104,9 +101,14 @@ class FlowRegistry:
         effective = task_type or DEFAULT_TASK_TYPE
         path = self._find(effective)
         if path is None:
+            op_dir = self._operator_dir
+            where = op_dir.as_posix() if op_dir is not None else ".worc/flows"
+            available = self.operator_flow_names()
+            hint = ", ".join(available) if available else "none"
             raise FlowResolutionError(
-                f"unknown task_type {effective!r}: no flow file found "
-                f"(packaged built-ins: {self._builtin_names()})"
+                f"unknown task_type {effective!r}: no flow file {effective}.yaml in {where} "
+                f"(available: {hint}). Run `worc install` to deliver the built-in flows into "
+                f".worc/flows/, or add {effective}.yaml there."
             )
         snap = load_flow(path)
         if snap.doc.task_type != effective:
@@ -155,15 +157,12 @@ class FlowRegistry:
         return sorted(p.stem for p in self._operator_dir.glob("*.yaml"))
 
     def _find(self, task_type: str) -> Path | None:
-        if self._operator_dir is not None:
-            candidate = self._operator_dir / f"{task_type}.yaml"
-            if candidate.is_file():
-                return candidate
-        candidate = _PACKAGED_DIR / f"{task_type}.yaml"
-        if candidate.is_file():
-            return candidate
-        return None
+        """The operator flow file for *task_type*, or ``None`` when absent.
 
-    @staticmethod
-    def _builtin_names() -> list[str]:
-        return sorted(p.stem for p in _PACKAGED_DIR.glob("*.yaml"))
+        Resolves only under the operator's ``.worc/flows/`` — the bundled ``packaged/`` tree is
+        delivery-only and is never consulted at run time.
+        """
+        if self._operator_dir is None:
+            return None
+        candidate = self._operator_dir / f"{task_type}.yaml"
+        return candidate if candidate.is_file() else None

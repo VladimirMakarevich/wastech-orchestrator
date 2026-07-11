@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -18,6 +19,28 @@ from wastech_orchestrator.config.loader import loads_config
 from wastech_orchestrator.config.schema import OrchestratorConfig
 
 _FAKE_AGENT = Path(__file__).resolve().parent / "fakes" / "fake_agent.py"
+
+# The packaged built-in flows tree (source-tree/wheel path). ``worc install`` copies this into an
+# operator's ``.worc/flows/``; since the registry no longer falls back to the packaged tree at run
+# time, a test that resolves a built-in flow points a FlowRegistry's ``operator_flows_dir`` here, or
+# seeds a clone's ``.worc/flows/`` from it via ``seed_builtin_flows`` — mirroring real install.
+BUILTIN_FLOWS_DIR: Path = Path(str(resources.files("wastech_orchestrator"))) / "packaged" / "flows"
+
+
+def seed_builtin_flows(clone: Path) -> None:
+    """Deliver the packaged built-in flows into ``clone/.worc/flows/``, mirroring ``worc install``.
+
+    The registry reads flows only from ``.worc/flows/`` (no packaged fallback), so any test
+    that runs the orchestrator against a clone needs them physically present — call this in the
+    harness that builds a task-running orchestrator (not in the pure config builder, so
+    flow-content tests like
+    ``validate-flow`` keep full control of ``.worc/flows/``). ``.worc/`` is excluded from the
+    dirty-tree gate and from staging, so seeding never dirties git. Idempotent.
+    """
+    worc_flows = clone / ".worc" / "flows"
+    if not worc_flows.exists():
+        shutil.copytree(BUILTIN_FLOWS_DIR, worc_flows)
+
 
 # A broad-but-explicit env allowlist so git runs under the orchestrator's allowlisted environment on
 # both POSIX and Windows CI (git may need SYSTEMROOT/TEMP on Windows). Production tunes this per-OS.

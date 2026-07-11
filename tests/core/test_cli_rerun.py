@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from tests.conftest import seed_builtin_flows
 
 from wastech_orchestrator import cli
 from wastech_orchestrator.core.orchestrator import Orchestrator, PipelineResult
@@ -53,6 +54,9 @@ git:
 """,
         encoding="utf-8",
     )
+    # The orchestrator resolves flows only from the clone's ``.worc/flows/`` (no packaged fallback),
+    # so deliver the built-ins there as ``worc install`` would.
+    seed_builtin_flows(clone)
     return config
 
 
@@ -206,9 +210,12 @@ def _seed(
             )
         )
     if checkpoint_node is not None:  # an interrupted engine task: a flow checkpoint to resume from
+        from tests.conftest import BUILTIN_FLOWS_DIR
+
         from wastech_orchestrator.core.flow.registry import FlowRegistry
 
-        fingerprint = flow_fingerprint or FlowRegistry().resolve("implementation").flow_fingerprint
+        registry = FlowRegistry(operator_flows_dir=BUILTIN_FLOWS_DIR)
+        fingerprint = flow_fingerprint or registry.resolve("implementation").flow_fingerprint
         store.save_flow_checkpoint(
             row.task_id,
             current_node=checkpoint_node,

@@ -117,9 +117,14 @@ def _setup_branch(git_run: GitRunner, clone: Path, *, conflict: bool) -> None:
 
 
 def _build(git_repo, fake_cli, tmp_path: Path, *, scenario: str, gh: FakeGh):
+    from tests.conftest import seed_builtin_flows
+
     claude = fake_cli(scenario, "claude")
     codex = fake_cli(scenario, "codex")
     config = _config(git_repo.clone, claude, codex)
+    seed_builtin_flows(
+        git_repo.clone
+    )  # deliver the built-in flows (incl. `merge`) as install would
     return build_orchestrator(config, artifacts_root=tmp_path / "art", gh_runner=gh)
 
 

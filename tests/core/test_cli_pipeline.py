@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from tests.conftest import seed_builtin_flows
 
 from wastech_orchestrator import cli
 from wastech_orchestrator.core.orchestrator import (
@@ -480,6 +481,9 @@ git:
 """,
         encoding="utf-8",
     )
+    # The orchestrator resolves flows only from the clone's ``.worc/flows/`` (no packaged fallback),
+    # so deliver the built-ins there as ``worc install`` would.
+    seed_builtin_flows(clone)
     return config
 
 

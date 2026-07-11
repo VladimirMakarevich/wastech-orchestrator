@@ -6,7 +6,7 @@ A **flow** is the pipeline expressed as data: a YAML document defining a graph o
 
 ## How a flow is selected and validated
 
-`FlowRegistry.resolve(task_type)` ([registry.py:66](../../../src/wastech_orchestrator/core/flow/registry.py#L66)) maps the task's `task_type` (default `implementation`) to a validated `FlowSnapshot`, preferring an operator flow at `<repo>/.worc/flows/<task_type>.yaml` over the packaged built-in. Every flow passes the fatal three-layer validator (graph integrity, security ceiling, config-aware) before any task runs — see [B29](../blocks/B29-flow-definition-and-validation.md). At install/preflight, `validate_all` checks every resolvable flow.
+`FlowRegistry.resolve(task_type)` ([registry.py:90](../../../src/wastech_orchestrator/core/flow/registry.py#L90)) maps the task's `task_type` (default `implementation`) to a validated `FlowSnapshot` from the operator's `<repo>/.worc/flows/<task_type>.yaml` — the sole resolution source (the packaged tree is delivery-only, seeded into `.worc/flows/` by install). A resolved flow passes the fatal three-layer validator (graph integrity, security ceiling, config-aware) at dispatch — see [B29](../blocks/B29-flow-definition-and-validation.md); `worc validate-flow` runs the same validation on demand over `.worc/flows/`.
 
 ## Node kinds
 
