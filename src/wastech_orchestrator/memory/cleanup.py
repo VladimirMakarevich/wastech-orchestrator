@@ -29,7 +29,7 @@ from wastech_orchestrator.memory.audit import AuditAction, AuditContext
 from wastech_orchestrator.memory.derived import DerivedIndex
 from wastech_orchestrator.memory.lifecycle import normalize_subject
 from wastech_orchestrator.memory.records import LongTermKind
-from wastech_orchestrator.memory.service import MemoryService
+from wastech_orchestrator.memory.service import MemoryService, derive_long_term_id
 
 _QUARANTINED = "quarantined"
 
@@ -41,7 +41,7 @@ class CleanupReport:
     ran: bool
     scanned: int = 0
     expired: int = 0  # episodes pruned past TTL
-    remapped: int = 0  # entities whose moved file was remapped by basename
+    remapped: int = 0  # entities/lessons whose moved file was remapped by basename
     quarantined: int = 0  # stale entities + lessons moved to quarantine (never deleted)
     merged: int = 0  # duplicate long-term lessons collapsed
     promoted: int = 0  # always 0 — cleanup never creates a long-term lesson
@@ -85,7 +85,11 @@ class CleanupJob:
 
         expired = self._expire_episodes(audit, budget, dry_run=dry_run)
         remapped, quarantined = self._reconcile_entities(audit, budget, dry_run=dry_run)
-        quarantined += self._reconcile_lessons(audit, budget, dry_run=dry_run)
+        lesson_remapped, lesson_quarantined = self._reconcile_lessons(
+            audit, budget, dry_run=dry_run
+        )
+        remapped += lesson_remapped
+        quarantined += lesson_quarantined
         merged = self._merge_long_term_duplicates(audit, budget, dry_run=dry_run)
         return CleanupReport(
             ran=True,
@@ -152,7 +156,11 @@ class CleanupJob:
         if not remapped and not quarantined:
             return 0, 0
         if not dry_run:
-            self._service.replace_entities(kept, action=AuditAction.MERGE, audit=audit)
+            # A remap can rewrite a moved card's key onto a path another card already holds (e.g.
+            # the new-path card the supervisor proposed before this pass ran) — collapse the dupe.
+            self._service.replace_entities(
+                _collapse_entities(kept), action=AuditAction.MERGE, audit=audit
+            )
             if newly_quarantined:
                 pending = [*self._service.read_quarantine(), *newly_quarantined]
                 self._service.replace_quarantine(
@@ -164,8 +172,11 @@ class CleanupJob:
         """Classify one entity card: ``None`` (fresh), a remapped copy, or a quarantined copy.
 
         An entity is stale when any of its paths no longer exists. A missing path with exactly one
-        same-basename tracked candidate is remapped (the file moved); any unresolved missing path
-        sends the whole card to quarantine — never a silent delete (Q2).
+        same-basename tracked candidate is remapped (the file moved) — the remap rewrites both the
+        ``paths`` and the ``canonical_name`` key (F44 keys a card on ``paths[0]``), so a later
+        re-proposal at the new path merges into it instead of spawning a duplicate (memory V2 ADR,
+        move 3). Any unresolved missing path sends the whole card to quarantine — never a silent
+        delete (Q2).
         """
         paths = _str_list(row.get("paths"))
         if not paths:
@@ -183,21 +194,25 @@ class CleanupJob:
             else:
                 return ("quarantine", {**row, "status": _QUARANTINED})
         if moved:
-            return ("remap", {**row, "paths": remapped_paths})
+            return ("remap", {**row, "paths": remapped_paths, "canonical_name": remapped_paths[0]})
         return None
 
-    # --- lesson staleness: a lesson scoped to a vanished path is quarantined (F2; never deleted) --
+    # --- lesson staleness: remap a moved scope path, else quarantine (F2; never deleted) ---------
 
-    def _reconcile_lessons(self, audit: AuditContext, budget: _Budget, *, dry_run: bool) -> int:
-        """Quarantine an **active** long-term lesson whose ``scope.paths`` names a vanished target.
+    def _reconcile_lessons(
+        self, audit: AuditContext, budget: _Budget, *, dry_run: bool
+    ) -> tuple[int, int]:
+        """Remap or quarantine an **active** long-term lesson whose ``scope.paths`` names a vanished
+        target.
 
-        Mirrors :meth:`_reconcile_entities` but quarantine-only (no basename remap — a lesson's path
-        scope is advisory metadata, so a missing target moves the whole lesson to quarantine, never
-        a silent delete (Q2) and never a judgment-based drop). A path-less lesson has no existence
-        signal and is left fully intact. The design §5 "contradicted twice" drop stays a V2 item
-        (no contradiction ledger in V1). Honors the same scan/edit budget as the other passes.
+        Mirrors :meth:`_reconcile_entities`: a missing scope path with exactly one same-basename
+        candidate is remapped in place (memory V2 ADR, move 3 — a refactor no longer quarantines a
+        durable lesson); any unresolved missing path moves the whole lesson to quarantine, never a
+        silent delete (Q2) and never a judgment-based drop. A path-less lesson has no existence
+        signal and is left fully intact. The design §5 "contradicted twice" drop stays a later item
+        (no contradiction ledger yet). Honors the same scan/edit budget as the other passes.
         """
-        quarantined_total = 0
+        remapped_total = quarantined_total = 0
         for kind in LongTermKind:
             if not budget.can_scan() or not budget.can_edit():
                 break
@@ -206,39 +221,77 @@ class CleanupJob:
                 continue
             kept: list[dict[str, Any]] = []
             newly_quarantined: list[dict[str, Any]] = []
+            remapped_here = quarantined_here = 0
             for row in rows:
                 if not budget.can_scan() or not budget.can_edit() or not _record_active(row):
                     kept.append(row)
                     continue
                 budget.scan(1)
-                if self._lesson_path_gone(row):
-                    newly_quarantined.append({**row, "status": _QUARANTINED})
-                    budget.spend_edits(1)
-                else:
+                verdict = self._classify_lesson(kind, row)
+                if verdict is None:  # fresh — all scope paths present (or path-less)
                     kept.append(row)
-            if not newly_quarantined:
+                    continue
+                outcome, payload = verdict
+                if outcome == "remap":
+                    kept.append(payload)
+                    remapped_here += 1
+                else:
+                    newly_quarantined.append(payload)
+                    quarantined_here += 1
+                budget.spend_edits(1)
+            if not remapped_here and not quarantined_here:
                 continue
-            quarantined_total += len(newly_quarantined)
+            remapped_total += remapped_here
+            quarantined_total += quarantined_here
             if not dry_run:
+                # A remap re-derives the moved lesson's id (F30 keys it on scope.paths), which can
+                # collide with a row already at the new id — collapse by id before writing.
+                action = AuditAction.MERGE if remapped_here else AuditAction.QUARANTINE
                 self._service.replace_long_term(
-                    kind, kept, action=AuditAction.QUARANTINE, audit=audit
+                    kind, _collapse_by_memory_id(kept), action=action, audit=audit
                 )
-                pending = [*self._service.read_quarantine(), *newly_quarantined]
-                self._service.replace_quarantine(
-                    pending, action=AuditAction.QUARANTINE, audit=audit
-                )
-        return quarantined_total
+                if newly_quarantined:
+                    pending = [*self._service.read_quarantine(), *newly_quarantined]
+                    self._service.replace_quarantine(
+                        pending, action=AuditAction.QUARANTINE, audit=audit
+                    )
+        return remapped_total, quarantined_total
 
-    def _lesson_path_gone(self, row: Mapping[str, Any]) -> bool:
-        """Whether a lesson is scoped to a path that no longer exists (any missing scope path).
+    def _classify_lesson(
+        self, kind: LongTermKind, row: Mapping[str, Any]
+    ) -> tuple[str, dict[str, Any]] | None:
+        """Classify one active lesson: ``None`` (fresh), a remapped copy, or a quarantined copy.
 
-        A lesson with no ``scope.paths`` returns ``False`` — there is no existence signal, so it is
-        never dropped on judgment (preserves the long-term auto-drop boundary)."""
+        A lesson is stale when a ``scope.paths`` entry no longer exists. A missing path with exactly
+        one same-basename tracked candidate is remapped (the file moved) — the remap rewrites the
+        scope paths AND re-derives the ``memory_id`` (F30 keys it on scope paths), so a later
+        re-proposal at the new path merges into it instead of spawning a duplicate (memory V2 ADR,
+        move 3). Any unresolved missing path quarantines the whole lesson — never a silent delete
+        (Q2). A path-less lesson has no existence signal and is always fresh.
+        """
         scope = row.get("scope")
-        paths = _str_list(scope.get("paths")) if isinstance(scope, Mapping) else []
+        if not isinstance(scope, Mapping):
+            return None  # no (or malformed) scope → no existence signal, always fresh
+        paths = _str_list(scope.get("paths"))
         if not paths:
-            return False
-        return any(not self._index.path_exists(path) for path in paths)
+            return None
+        remapped_paths: list[str] = []
+        moved = False
+        for path in paths:
+            if self._index.path_exists(path):
+                remapped_paths.append(path)
+                continue
+            candidates = self._index.find_by_basename(path)
+            if len(candidates) == 1:
+                remapped_paths.append(candidates[0])
+                moved = True
+            else:
+                return ("quarantine", {**row, "status": _QUARANTINED})
+        if not moved:
+            return None
+        subject = str(row.get("subject") or "")
+        new_id = derive_long_term_id(kind, subject, remapped_paths)
+        return ("remap", {**row, "scope": {**scope, "paths": remapped_paths}, "memory_id": new_id})
 
     # --- duplicate long-term merge (design §5: keep oldest id, union evidence) -------------
 
@@ -377,3 +430,41 @@ def _absorb(keeper: dict[str, Any], other: Mapping[str, Any]) -> None:
     )
     keeper["seen_task_ids"] = seen
     keeper["usage_count"] = max(int(keeper.get("usage_count") or 0), len(seen))
+
+
+def _collapse_by_memory_id(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse long-term rows sharing a ``memory_id`` — created when a lesson remap re-derives a
+    moved lesson's id onto one another row already holds (memory V2 ADR, move 3). Keeps the first,
+    unions evidence + seen tasks onto it (:func:`_absorb`), preserves order (deterministic). The
+    subject-keyed pass handles same-subject dupes; this handles the remap collision regardless of
+    subject drift. Rows without a ``memory_id`` (never expected for long-term) stay distinct."""
+    by_id: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for index, row in enumerate(rows):
+        key = str(row.get("memory_id") or f"\0{index}")
+        if key in by_id:
+            _absorb(by_id[key], row)
+            continue
+        by_id[key] = dict(row)
+        order.append(key)
+    return [by_id[key] for key in order]
+
+
+def _collapse_entities(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse entity cards sharing a ``canonical_name`` — created when an entity remap rewrites a
+    moved card's key onto a path another card already holds (memory V2 ADR, move 3). Latest content
+    wins (mirrors the ``_ingest_entity`` upsert) while ``last_seen_task_ids`` is unioned; first
+    appearance fixes the order (deterministic). Cards without a ``canonical_name`` stay distinct."""
+    by_key: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for index, row in enumerate(rows):
+        key = str(row.get("canonical_name") or f"\0{index}")
+        seen = _str_list(row.get("last_seen_task_ids"))
+        if key in by_key:
+            seen = list(dict.fromkeys([*_str_list(by_key[key].get("last_seen_task_ids")), *seen]))
+        else:
+            order.append(key)
+        merged = dict(row)  # latest content wins
+        merged["last_seen_task_ids"] = seen
+        by_key[key] = merged
+    return [by_key[key] for key in order]

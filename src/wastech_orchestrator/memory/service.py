@@ -244,7 +244,7 @@ class MemoryService:
         r: ApplyResult,
     ) -> ApplyResult:
         trust = assign_trust(evidence)
-        memory_id = _derive_id(kind, subject, scope)
+        memory_id = derive_long_term_id(kind, subject, scope.paths)
         pending = self._read_pending()
         prior = _find(pending, "memory_id", memory_id)
         seen = _distinct([*_as_str_list(prior.get("seen_task_ids") if prior else None), task_id])
@@ -644,12 +644,14 @@ def _scope_key(paths: Sequence[str]) -> str:
     return "\n".join(sorted({p.strip().replace("\\", "/") for p in paths if p.strip()}))
 
 
-def _derive_id(kind: LongTermKind, subject: str, scope: Scope) -> str:
+def derive_long_term_id(kind: LongTermKind, subject: str, paths: Sequence[str]) -> str:
     """Deterministic content-derived long-term id, stable across recurrences of the SAME lesson even
     when the LLM-authored ``subject`` drifts in wording (F30). Keys on ``kind`` + the normalized
-    ``scope.paths`` (the structural anchor a real repeat shares) when the lesson names paths; falls
-    back to the normalized ``subject`` for a path-less lesson (the pre-F30 behavior)."""
-    basis = _scope_key(scope.paths) or normalize_subject(subject)
+    ``paths`` (the structural anchor a real repeat shares) when the lesson names paths; else the
+    normalized ``subject`` for a path-less lesson (the pre-F30 behavior). Shared with
+    ``CleanupJob``, which re-derives the id when it remaps a moved lesson's scope so a later
+    re-proposal at the new path merges into the remapped row (memory V2 ADR, move 3)."""
+    basis = _scope_key(paths) or normalize_subject(subject)
     digest = content_hash(f"{kind.value}:{basis}".encode())[:12]
     return f"ltm_{digest}"
 

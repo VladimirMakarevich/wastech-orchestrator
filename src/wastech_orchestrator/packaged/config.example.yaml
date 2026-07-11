@@ -256,9 +256,10 @@ memory:                             # persistent, repo-scoped memory (optional; 
   packet_max_lines: 120             # hard line backstop for a per-node memory brief
   packet_max_long_term: 3           # max long-term lessons in one packet
   packet_max_entity: 5              # max entity cards in one packet
-  packet_max_episodic: 3            # max recent-episode notes in one packet
+  packet_max_episodic: 3            # inert since V2 — episodes are a write-only tier, never injected
   # Promotion to long-term — a candidate lesson must clear this gate, else it stays short-term:
-  promote_min_tasks: 2              # recurred in >= this many tasks ...
+  promote_min_tasks: 2              # recurred in >= this many tasks (now only gates artifact-backed;
+                                    #   repo-verified / human / review lessons promote on first sight)
   promote_window_days: 60           # ... within this many days
   # Background-cleanup budget — bounded autonomy; runs only between tasks, never delays a pickup:
   cleanup_min_interval_s: 300       # minimum seconds between cleanup passes

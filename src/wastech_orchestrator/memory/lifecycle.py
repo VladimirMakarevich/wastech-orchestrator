@@ -31,9 +31,14 @@ _REVIEW: frozenset[str] = frozenset({"review", "fixing"})
 _REPO: frozenset[str] = frozenset({"repo", "repo_doc", "code", "config", "doc", "file"})
 _ARTIFACT: frozenset[str] = frozenset({"artifact", "check", "diff", "test", "plan", "commit"})
 
-# Trust levels that auto-promote (no recurrence required) — design §5 / Q3.
+# Trust levels that auto-promote on first sight (no recurrence required) — design §5 / Q3, widened
+# by the memory V2 ADR (move 3): ``repo-observed`` joins because the card/lesson is verified against
+# the live repo at write time (its paths exist — ``assign_entity_trust`` / NFR2), so waiting for it
+# to recur only starves durable knowledge the operator wants. ``artifact-backed`` deliberately stays
+# out — it keeps the recurrence gate as the interim stand-in for its unbuilt validator pass — and
+# ``agent-inferred`` / ``external-untrusted`` are non-durable and never promote at all.
 _AUTO_PROMOTE: frozenset[TrustLevel] = frozenset(
-    {TrustLevel.HUMAN_CURATED, TrustLevel.REVIEW_VERIFIED}
+    {TrustLevel.REPO_OBSERVED, TrustLevel.HUMAN_CURATED, TrustLevel.REVIEW_VERIFIED}
 )
 
 

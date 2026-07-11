@@ -80,17 +80,23 @@ def test_promotion_requires_durable_trust_and_evidence_and_no_contradiction() ->
     assert _promote(TrustLevel.HUMAN_CURATED, recur=5, has_contradiction=True) is False
 
 
-def test_human_and_review_trust_auto_promote() -> None:
+def test_repo_human_and_review_trust_auto_promote() -> None:
+    # Memory V2 (move 3): repo-observed joins human/review as first-sight promotable — repo-verified
+    # durable knowledge no longer starves in quarantine waiting to recur.
+    assert _promote(TrustLevel.REPO_OBSERVED, recur=1) is True
     assert _promote(TrustLevel.HUMAN_CURATED, recur=1) is True
     assert _promote(TrustLevel.REVIEW_VERIFIED, recur=1) is True
 
 
 def test_artifact_backed_needs_recurrence() -> None:
-    # Durable but not auto-promote: one short of recurrence stays short-term (Q3).
+    # Durable but NOT auto-promote (memory V2 keeps its recurrence gate as the interim stand-in for
+    # its unbuilt validator): one short of recurrence stays short-term (Q3).
     assert _promote(TrustLevel.ARTIFACT_BACKED, recur=1, mn=2) is False
     assert _promote(TrustLevel.ARTIFACT_BACKED, recur=2, mn=2) is True
 
 
 def test_explained_failure_and_hotspot_gates() -> None:
     assert _promote(TrustLevel.ARTIFACT_BACKED, recur=1, explained_failure=True) is True
-    assert _promote(TrustLevel.REPO_OBSERVED, recur=1, stable_hotspot=True) is True
+    # A non-auto-promote trust so the hotspot gate is what carries it (repo-observed would pass on
+    # its own now).
+    assert _promote(TrustLevel.ARTIFACT_BACKED, recur=1, stable_hotspot=True) is True
