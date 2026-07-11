@@ -20,8 +20,10 @@ from wastech_orchestrator.memory import (
     LongTermRecord,
     MemoryLayout,
     MemoryService,
+    Scope,
     TrustLevel,
 )
+from wastech_orchestrator.memory.service import derive_long_term_id
 
 _AUDIT = AuditContext(timestamp="2026-06-30T00:00:00Z")
 
@@ -117,6 +119,24 @@ def test_moved_entity_is_remapped_by_basename(tmp_path: Path) -> None:
     assert report.remapped == 1 and report.quarantined == 0
     entities = service.read_entities()
     assert entities[0]["paths"] == ["src/new/foo.py"]  # remapped, stays active
+    # Memory V2 (move 3): the remap rewrites the canonical_name key too, so a re-proposal at the new
+    # path merges instead of spawning a duplicate.
+    assert entities[0]["canonical_name"] == "src/new/foo.py"
+    assert service.read_quarantine() == []
+
+
+def test_moved_entity_merges_into_existing_new_path_card(tmp_path: Path) -> None:
+    # The supervisor may propose a fresh card at the new path before cleanup runs; the remap then
+    # rewrites the moved card's key onto that path — collapse to one card (memory V2 ADR, move 3).
+    layout = MemoryLayout.for_repo(tmp_path)
+    service = _service(layout)
+    _entity(service, "old", ("src/old/foo.py",))  # canonical=src/old/foo.py (the moved file)
+    _entity(service, "new", ("src/new/foo.py",))  # already re-proposed at the new path
+    report = _job(service, _index(tmp_path, {"src/new/foo.py"})).run_once(audit=_AUDIT)
+    assert report.remapped == 1
+    entities = service.read_entities()
+    assert len(entities) == 1  # collapsed to a single card at the new path
+    assert entities[0]["canonical_name"] == "src/new/foo.py"
     assert service.read_quarantine() == []
 
 
@@ -139,6 +159,66 @@ def test_duplicate_long_term_lessons_are_merged(layout: MemoryLayout) -> None:
     report = _job(service, _index(layout.root.parent.parent, set())).run_once(audit=_AUDIT)
     assert report.merged == 1
     assert len(service.read_long_term(LongTermKind.SEMANTIC)) == 1
+
+
+# -- lesson staleness: remap a moved scope path, else quarantine (memory V2, move 3) ----------
+
+
+def _scoped_lesson(service: MemoryService, subject: str, path: str) -> str:
+    memory_id = derive_long_term_id(LongTermKind.SEMANTIC, subject, (path,))
+    service.append(
+        LongTermRecord(
+            memory_id=memory_id,
+            kind=LongTermKind.SEMANTIC,
+            subject=subject,
+            statement="s",
+            trust_level=TrustLevel.REPO_OBSERVED,
+            scope=Scope(paths=(path,)),
+        ),
+        audit=_AUDIT,
+    )
+    return memory_id
+
+
+def test_moved_lesson_is_remapped_not_quarantined(tmp_path: Path) -> None:
+    # A lesson scoped to a moved file is remapped in place (scope + re-derived id), not quarantined
+    # — a refactor no longer loses durable knowledge (memory V2 ADR, move 3).
+    layout = MemoryLayout.for_repo(tmp_path)
+    service = _service(layout)
+    _scoped_lesson(service, "keep pathlib", "src/old/foo.py")
+    report = _job(service, _index(tmp_path, {"src/new/foo.py"})).run_once(audit=_AUDIT)
+    assert report.remapped == 1 and report.quarantined == 0
+    rows = service.read_long_term(LongTermKind.SEMANTIC)
+    assert len(rows) == 1 and service.read_quarantine() == []
+    assert rows[0]["scope"]["paths"] == ["src/new/foo.py"]  # scope remapped
+    new_id = derive_long_term_id(LongTermKind.SEMANTIC, "keep pathlib", ("src/new/foo.py",))
+    assert rows[0]["memory_id"] == new_id  # id re-derived so a re-proposal merges, not duplicates
+
+
+def test_stale_lesson_with_ambiguous_path_is_quarantined(tmp_path: Path) -> None:
+    # No unique basename candidate (deleted, or two matches) → the whole lesson quarantines, never a
+    # silent delete (Q2).
+    layout = MemoryLayout.for_repo(tmp_path)
+    service = _service(layout)
+    _scoped_lesson(service, "gone lesson", "src/gone.py")
+    report = _job(service, _index(tmp_path, set())).run_once(audit=_AUDIT)
+    assert report.remapped == 0 and report.quarantined == 1
+    assert service.read_long_term(LongTermKind.SEMANTIC) == []
+    pending = service.read_quarantine()
+    assert len(pending) == 1 and pending[0]["status"] == "quarantined"
+
+
+def test_moved_lesson_merges_into_existing_new_id(tmp_path: Path) -> None:
+    # A lesson re-proposed at the new path (different wording, same path-derived id) before cleanup
+    # collides on that id when the moved lesson is remapped — collapse by id, never two rows.
+    # Distinct subjects prove it is the id collapse, not the subject-keyed pass (memory V2, move 3).
+    layout = MemoryLayout.for_repo(tmp_path)
+    service = _service(layout)
+    _scoped_lesson(service, "old wording", "src/old/foo.py")
+    new_id = _scoped_lesson(service, "new wording", "src/new/foo.py")
+    _job(service, _index(tmp_path, {"src/new/foo.py"})).run_once(audit=_AUDIT)
+    rows = service.read_long_term(LongTermKind.SEMANTIC)
+    assert len(rows) == 1 and rows[0]["memory_id"] == new_id
 
 
 # -- bounded autonomy (AC-C3, §7) ---------------------------------------------

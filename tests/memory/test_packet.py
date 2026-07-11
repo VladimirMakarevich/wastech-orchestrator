@@ -137,8 +137,9 @@ def test_agent_inferred_quarantine_is_not_surfaced(service: MemoryService) -> No
     assert packet.long_term == ()
 
 
-def test_episode_with_content_renders_a_nonempty_bullet(service: MemoryService) -> None:
-    # F47: an episode carrying touched_paths + stage_outcomes renders content, not a bare bullet.
+def test_episodes_are_never_rendered(service: MemoryService) -> None:
+    # Memory V2 (move 1): the episodic tier is a write-only shell — an episode in the store is never
+    # selected into a packet (even with content) and never on its own produces one.
     service.append(
         EpisodeRecord(
             id="ep_t1",
@@ -151,9 +152,69 @@ def test_episode_with_content_renders_a_nonempty_bullet(service: MemoryService) 
         audit=_AUDIT,
     )
     builder = _builder(service)
+    packet = builder.build(PacketContext(node_id="planning"))
+    assert packet.is_empty  # an episode alone yields no packet
+    rendered = builder.render(packet)
+    assert "Recent episodes" not in rendered
+    assert "ep_t1" not in rendered and "task=done" not in rendered
+
+
+def test_render_shows_durable_evidence_ref(service: MemoryService) -> None:
+    # A resolvable evidence ref (repo file/doc/check) is shown as a "see …" pointer.
+    service.append(_lesson("m1", statement="use pathlib"), audit=_AUDIT)  # evidence: repo_doc
+    builder = _builder(service)
     rendered = builder.render(builder.build(PacketContext(node_id="planning")))
-    assert "task=done" in rendered
-    assert "src/mod.py" in rendered
+    assert "see README.md" in rendered
+
+
+def test_render_drops_rotting_evidence_ref(service: MemoryService) -> None:
+    # A lesson whose only evidence is a rotting pointer (commit SHA / task id / .worc/logs dir) has
+    # no "see …" link — the ref stays in the store as provenance but is filtered at render (V2 Q2).
+    rotting = (
+        Evidence(type="commit", ref="a1b2c3d4e5f6"),
+        Evidence(type="task", ref="t-42"),
+        Evidence(type="artifact", ref=".worc/logs/t1"),
+    )
+    for i, ev in enumerate(rotting):
+        service.append(
+            LongTermRecord(
+                memory_id=f"rot{i}",
+                kind=LongTermKind.SEMANTIC,
+                subject=f"rot{i}",
+                statement=f"lesson {i}",
+                trust_level=TrustLevel.REPO_OBSERVED,
+                evidence=(ev,),
+                last_verified_at=_AUDIT.timestamp,
+            ),
+            audit=_AUDIT,
+        )
+    builder = _builder(service)
+    rendered = builder.render(builder.build(PacketContext(node_id="planning")))
+    assert "see " not in rendered
+    assert "a1b2c3d4e5f6" not in rendered
+
+
+def test_render_skips_rotting_to_first_durable_evidence(service: MemoryService) -> None:
+    # The filter skips a rotting ref and shows the next durable one on the same record.
+    service.append(
+        LongTermRecord(
+            memory_id="mixed",
+            kind=LongTermKind.SEMANTIC,
+            subject="mixed",
+            statement="mixed evidence",
+            trust_level=TrustLevel.REPO_OBSERVED,
+            evidence=(
+                Evidence(type="commit", ref="a1b2c3d4e5f6"),
+                Evidence(type="repo_doc", ref="docs/x.md"),
+            ),
+            last_verified_at=_AUDIT.timestamp,
+        ),
+        audit=_AUDIT,
+    )
+    builder = _builder(service)
+    rendered = builder.render(builder.build(PacketContext(node_id="planning")))
+    assert "see docs/x.md" in rendered
+    assert "a1b2c3d4e5f6" not in rendered
 
 
 def test_lesson_node_scope_is_honored(service: MemoryService) -> None:
@@ -207,25 +268,25 @@ def test_implementation_gets_more_entity_cards(service: MemoryService) -> None:
 
 
 def test_line_backstop_drops_whole_records_never_partial(service: MemoryService) -> None:
-    # AC-R2 / NFR4: over the line backstop, whole lowest-ranked records are dropped (episode first),
+    # AC-R2 / NFR4: over the line backstop, whole lowest-ranked records are dropped (entity first),
     # never a truncated record. A tiny cap forces the drop; what survives renders in full.
     service.append(_lesson("keep", statement="durable lesson"), audit=_AUDIT)
     service.append(
-        EpisodeRecord(
-            id="ep1",
-            task_id="t1",
-            created_at="2026-06-30T00:00:00Z",
-            trust_level=TrustLevel.ARTIFACT_BACKED,
-            touched_paths=("src/a.py",),
+        EntityRecord(
+            entity_id="e1",
+            entity_type="module",
+            canonical_name="src/a.py",
+            trust_level=TrustLevel.REPO_OBSERVED,
+            paths=("src/a.py",),
         ),
         audit=_AUDIT,
     )
-    # Header + blank + "## Lessons" + 1 bullet = 4 lines for the lesson alone; the episode section
-    # would push it past 5, so the episode (lowest tier) is dropped whole.
+    # Header + blank + "## Lessons" + 1 bullet = 4 lines for the lesson alone; the entity section
+    # would push it past 5, so the entity (lowest tier) is dropped whole.
     builder = _builder(service, packet_max_lines=5)
     rendered = builder.render(builder.build(PacketContext(node_id="planning")))
     assert "durable lesson" in rendered  # the surviving lesson is rendered in full
-    assert "## Recent episodes" not in rendered  # the episode was dropped whole, not truncated
+    assert "## Entities" not in rendered  # the entity was dropped whole, not truncated
     assert len(rendered.splitlines()) <= 5
 
 

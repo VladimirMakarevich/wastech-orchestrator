@@ -495,13 +495,18 @@ class MemoryConfig:
     # Short-term episodic TTL in days (design §4: 14–45d window). Long-term has no TTL.
     short_term_ttl_days: int = 30
     # Per-node retrieval packet caps (Q5) — deliberately small (precision over recall); the
-    # PacketBuilder enforces them (a later phase).
+    # PacketBuilder enforces them.
     packet_max_lines: int = 120
     packet_max_long_term: int = 3
     packet_max_entity: int = 5
+    # Inert since the memory V2 ADR: the episodic tier is write-only (never injected into a packet),
+    # so this cap is no longer read; kept as the absent-block default to avoid a schema churn for a
+    # dead knob (mirrors ``cleanup_promotions_per_pass``).
     packet_max_episodic: int = 3
-    # Promotion-to-long-term thresholds (Q3): a lesson clears the gate if it recurred in
-    # >= ``promote_min_tasks`` tasks within ``promote_window_days`` (or other gates added later).
+    # Promotion-to-long-term thresholds (Q3). Since the memory V2 ADR (move 3) the recurrence gate
+    # applies only to ``artifact-backed`` lessons — repo-verified / human-curated / review-verified
+    # lessons promote on first sight. A gated lesson clears it when it recurred in
+    # >= ``promote_min_tasks`` tasks within ``promote_window_days``.
     promote_min_tasks: int = 2
     promote_window_days: int = 60
     # Background-cleanup budget (Q1) — bounded autonomy; the CleanupJob honors it (a later phase).

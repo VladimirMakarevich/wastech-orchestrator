@@ -15,6 +15,7 @@ capped brief, and writes it to the per-task packet file. Defining invariants:
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -50,6 +51,11 @@ _REVIEWER_PREF_NODES: frozenset[str] = frozenset({"review", "fixing"})
 _ENTITY_HEAVY_NODES: frozenset[str] = frozenset({"implementation"})
 _ENTITY_CAP_BUMP = 2
 
+# Evidence whose ``ref`` rots and so is never rendered as a "see …" pointer (memory V2 ADR, move 2):
+# a task id / commit SHA is gone after a squash-merge, a ``.worc/logs/<task>`` dir is cleaned up.
+_EPHEMERAL_EVIDENCE_TYPES: frozenset[str] = frozenset({"task", "commit", "diff"})
+_COMMIT_SHA = re.compile(r"[0-9a-f]{7,40}$")
+
 
 @dataclass(frozen=True)
 class PacketContext:
@@ -57,7 +63,9 @@ class PacketContext:
 
     ``node_id`` is the flow node about to run; ``touched_paths`` / ``touched_symbols`` are POSIX
     repo-relative and drive path-scoped retrieval (empty when nothing is touched yet, e.g. at
-    planning before any edit).
+    planning before any edit). ``task_type`` is the flow dispatch key, carried as a retrieval signal
+    (not a ranking input today — the episodic tier it ranked was de-injected in V2; reserved for the
+    V3 semantic rerank).
     """
 
     node_id: str
@@ -68,15 +76,18 @@ class PacketContext:
 
 @dataclass(frozen=True)
 class SelectedPacket:
-    """The records chosen for one packet (already filtered, ranked, and count-capped)."""
+    """The records chosen for one packet (already filtered, ranked, and count-capped).
+
+    Episodes are deliberately absent: the episodic tier is a write-only shell in V2 and is never
+    rendered into an agent's context (memory V2 ADR, move 1).
+    """
 
     long_term: tuple[dict[str, Any], ...] = ()
     entities: tuple[dict[str, Any], ...] = ()
-    episodes: tuple[dict[str, Any], ...] = ()
 
     @property
     def is_empty(self) -> bool:
-        return not (self.long_term or self.entities or self.episodes)
+        return not (self.long_term or self.entities)
 
 
 class PacketBuilder:
@@ -98,13 +109,10 @@ class PacketBuilder:
         Empty store / no matches → an empty :class:`SelectedPacket` (AC-R4). The line backstop is
         applied later, at render time, so this stays a pure selection step.
         """
-        lt_cap, entity_cap, episodic_cap = self._caps(context.node_id)
+        lt_cap, entity_cap = self._caps(context.node_id)
         long_term = self._select_long_term(context)[:lt_cap]
         entities = self._select_entities(context)[:entity_cap]
-        episodes = self._select_episodes(context)[:episodic_cap]
-        return SelectedPacket(
-            long_term=tuple(long_term), entities=tuple(entities), episodes=tuple(episodes)
-        )
+        return SelectedPacket(long_term=tuple(long_term), entities=tuple(entities))
 
     def render(self, packet: SelectedPacket) -> str:
         """Render ``packet`` to the brief markdown within the line backstop (whole-record drops)."""
@@ -160,17 +168,6 @@ class PacketBuilder:
         rows.sort(key=lambda r: -_path_overlap(_as_str_list(r.get("paths")), ctx.touched_paths))
         return rows
 
-    def _select_episodes(self, ctx: PacketContext) -> list[dict[str, Any]]:
-        rows = list(self._service.read_episodes())
-        # Most→least significant: task-type match, path overlap, recency, id (stable tiebreak).
-        rows.sort(key=lambda r: str(r.get("id") or ""))
-        rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
-        rows.sort(
-            key=lambda r: -_path_overlap(_as_str_list(r.get("touched_paths")), ctx.touched_paths)
-        )
-        rows.sort(key=lambda r: 0 if _task_type_match(r, ctx.task_type) else 1)
-        return rows
-
     def _all_long_term(self) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for kind in LongTermKind:
@@ -194,17 +191,17 @@ class PacketBuilder:
 
     # --- caps + line backstop (Q5 / NFR4, design §6) ---------------------------
 
-    def _caps(self, node_id: str) -> tuple[int, int, int]:
+    def _caps(self, node_id: str) -> tuple[int, int]:
         entity = self._config.packet_max_entity
         if node_id in _ENTITY_HEAVY_NODES:
             entity += _ENTITY_CAP_BUMP
-        return self._config.packet_max_long_term, entity, self._config.packet_max_episodic
+        return self._config.packet_max_long_term, entity
 
     def _fit(self, packet: SelectedPacket) -> SelectedPacket:
         """Drop whole lowest-ranked records until the brief is within the line backstop (NFR4).
 
         Never truncates a record (that would strip its provenance) — it drops the lowest-value tier
-        first (episode → entity → lesson) and, within a tier, the lowest-ranked (last) record.
+        first (entity → lesson) and, within a tier, the lowest-ranked (last) record.
         """
         working = packet
         while not working.is_empty and len(_render_lines(working)) > self._config.packet_max_lines:
@@ -227,10 +224,6 @@ def _node_ok(row: dict[str, Any], ctx: PacketContext) -> bool:
 
 def _reviewer_pref(row: dict[str, Any], node_id: str) -> bool:
     return node_id in _REVIEWER_PREF_NODES and str(row.get("kind") or "") == LongTermKind.REVIEWER
-
-
-def _task_type_match(row: dict[str, Any], task_type: str | None) -> bool:
-    return task_type is not None and row.get("task_type") == task_type
 
 
 def _trust_rank(row: dict[str, Any]) -> int:
@@ -276,9 +269,7 @@ def _as_str_list(value: Any) -> list[str]:
 
 
 def _drop_lowest(packet: SelectedPacket) -> SelectedPacket:
-    """Drop the single lowest-value record: an episode, else an entity, else a long-term lesson."""
-    if packet.episodes:
-        return replace(packet, episodes=packet.episodes[:-1])
+    """Drop the single lowest-value record: an entity, else a long-term lesson."""
     if packet.entities:
         return replace(packet, entities=packet.entities[:-1])
     if packet.long_term:
@@ -299,10 +290,6 @@ def _render_lines(packet: SelectedPacket) -> list[str]:
         lines.append("")
         lines.append("## Entities")
         lines.extend(_entity_bullet(row) for row in packet.entities)
-    if packet.episodes:
-        lines.append("")
-        lines.append("## Recent episodes")
-        lines.extend(_episode_bullet(row) for row in packet.episodes)
     return lines
 
 
@@ -318,7 +305,7 @@ def _lesson_bullet(row: dict[str, Any]) -> str:
     remedy = _one_line(row.get("remedy") or "")
     if remedy and remedy != statement:
         bullet += f" — remedy: {remedy}"
-    evidence = _first_evidence_ref(row.get("evidence"))
+    evidence = _first_durable_evidence_ref(row.get("evidence"))
     if evidence:
         bullet += f" — see {evidence}"
     return bullet
@@ -337,28 +324,29 @@ def _entity_bullet(row: dict[str, Any]) -> str:
     return bullet
 
 
-def _episode_bullet(row: dict[str, Any]) -> str:
-    task_id = str(row.get("task_id") or row.get("id") or "")
-    outcomes = row.get("stage_outcomes")
-    summary = ""
-    if isinstance(outcomes, dict) and outcomes:
-        summary = ", ".join(f"{key}={value}" for key, value in sorted(outcomes.items()))
-    paths = _as_str_list(row.get("touched_paths"))
-    bullet = f"- task {task_id}"
-    if summary:
-        bullet += f" — {summary}"
-    if paths:
-        bullet += f" (touched: {', '.join(paths)})"
-    return bullet
+def _first_durable_evidence_ref(evidence: Any) -> str | None:
+    """The first evidence ref safe to render — a resolvable pointer (repo file, doc, named check).
 
-
-def _first_evidence_ref(evidence: Any) -> str | None:
+    Rotting pointers are never shown as a "see …" link (memory V2 ADR, move 2 / question 2): a task
+    id, a commit SHA (squash-merge deletes it), or a ``.worc/logs/<task>`` dir is a dead reference.
+    Such refs stay in the store as internal provenance and still feed the deterministic trust
+    classifier — the filter is render-time only.
+    """
     if not isinstance(evidence, list):
         return None
     for item in evidence:
-        if isinstance(item, dict) and isinstance(item.get("ref"), str):
-            return _one_line(item["ref"])
+        if isinstance(item, dict) and _is_durable_evidence_ref(item):
+            return _one_line(item.get("ref"))
     return None
+
+
+def _is_durable_evidence_ref(item: dict[str, Any]) -> bool:
+    if str(item.get("type") or "").strip().lower() in _EPHEMERAL_EVIDENCE_TYPES:
+        return False
+    ref = _one_line(item.get("ref"))
+    if not ref:
+        return False
+    return ".worc/logs/" not in ref and _COMMIT_SHA.match(ref) is None
 
 
 def _one_line(text: Any) -> str:

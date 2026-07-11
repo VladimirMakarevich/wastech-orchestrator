@@ -883,17 +883,21 @@ class Supervisor:
         if with_delta:
             prompt += (
                 "\n## Candidate memory delta\n"
-                "Also propose what is worth REMEMBERING for future tasks on this repo, as the "
-                "structured `memory_delta`: durable `lessons` — repeatable PATTERNS worth "
-                "internalizing (recurring reviewer expectations, procedural gotchas, stable "
-                "conventions/commands, fragile areas), each with `kind`, `subject`, `statement`, "
-                "and `evidence` pointers to repo files/commits/checks; recurring `failures` "
-                "(signature + remedy); and important `entities` (files/modules with their paths). "
-                "Put WHAT a file or module is or does in an `entity` card (with `risk_notes`), NOT "
-                "in a lesson — a lesson captures a repeatable practice, not a description. Propose "
-                "only what repeats, stays true, or saves rediscovery — never secrets, raw diffs, "
-                "or one-off details; every lesson needs evidence. Leave a list empty when nothing "
-                "qualifies.\n"
+                "Also propose what is worth REMEMBERING for future tasks on this repo, as "
+                "the structured `memory_delta`: durable `lessons` — repeatable PATTERNS and "
+                "PRINCIPLES worth internalizing (recurring reviewer expectations, procedural "
+                "gotchas, stable conventions/commands, architecture invariants, fragile "
+                "areas), each with `kind`, `subject`, `statement`, and `evidence` pointers to "
+                "repo files, docs, or named checks; recurring `failures` (signature + remedy); "
+                "and important `entities` (files/modules with their paths). Put WHAT a file or "
+                "module is or does in an `entity` card (with `risk_notes`), NOT in a lesson — a "
+                "lesson captures a repeatable practice or principle, not a description. Anchor "
+                "every `evidence` ref on something durable and resolvable — a repo path, a doc, "
+                "a named check — NOT a commit SHA or a task id, which rot after merge. Do NOT "
+                "narrate which task did what; capture durable knowledge, not this run's "
+                "history. Propose only what repeats, stays true, or saves rediscovery — never "
+                "secrets, raw diffs, or one-off details; every lesson needs evidence. Leave a "
+                "list empty when nothing qualifies.\n"
             )
         return prompt
 

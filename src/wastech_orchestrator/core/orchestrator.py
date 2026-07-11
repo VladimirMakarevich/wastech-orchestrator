@@ -128,7 +128,6 @@ from wastech_orchestrator.providers.artifacts import (
     node_run_dir,
     sha256_file,
     task_artifact_dir,
-    task_artifact_relpath,
 )
 from wastech_orchestrator.providers.base import (
     PARK_ELIGIBLE,
@@ -2191,14 +2190,7 @@ class Orchestrator:
                 task_id=p.task.id, task_title=p.task.title, emit_delta=memory_on
             )
             if memory_on:
-                # F47: a terminal-status outcome so the success episode renders content, mirroring
-                # the failure path's ``{"task": final.value}`` (this hook runs on the accept path).
-                self._write_memory(
-                    p,
-                    finalized.candidate_delta,
-                    WriteSource.SUCCESS,
-                    outcomes={"task": Status.DONE.value},
-                )
+                self._write_memory(p, finalized.candidate_delta, WriteSource.SUCCESS)
             log.info(
                 "task finalize: supervisor summary written",
                 extra={"elapsed_seconds": round(time.monotonic() - started, 1)},
@@ -2284,31 +2276,32 @@ class Orchestrator:
             )
         )
 
-    def _record_failure_memory(self, p: _Pipeline, final: Status) -> None:
+    def _record_failure_memory(self, p: _Pipeline) -> None:
         """Deterministic short-term failure episode (no LLM); never long-term (AC-W3)."""
-        self._write_memory(p, None, WriteSource.FAILURE, outcomes={"task": final.value})
+        self._write_memory(p, None, WriteSource.FAILURE)
 
     def _write_memory(
         self,
         p: _Pipeline,
         delta: CandidateDelta | None,
         source: WriteSource,
-        *,
-        outcomes: dict[str, str] | None = None,
     ) -> None:
         """Write the per-task episode (+ a SUCCESS candidate delta) through ``apply_delta``.
 
         Best-effort: a memory write must never block publish or a terminal transition, so every
         failure is logged and swallowed. The store is built lazily, so a disabled config touches
-        nothing (Q10).
+        nothing (Q10). The episode is a write-only shell in V2 — never injected into an agent's
+        context (memory V2 ADR, move 1) — so it carries no rotting pointer: the log-dir
+        ``artifact_paths`` and the terminal-status ``stage_outcomes`` are dropped; only ``task_id``
+        and this task's changed ``touched_paths`` (real, non-rotting signal for a future consumer)
+        remain.
         """
         service = self._memory_service()
         if service is None:
             return
         now = self._clock()
-        # F47: give the episode real signal instead of a bare bullet — this task's changed paths
-        # (per-task chain base, matching the packet's relevance, F48). Best-effort: a git hiccup
-        # must never block the episode.
+        # This task's changed paths (per-task chain base). Best-effort: a git hiccup must never
+        # block the episode.
         try:
             touched = tuple(self._git.changed_code_paths_since_task_base())
         except GitCommandError:
@@ -2318,15 +2311,7 @@ class Orchestrator:
             task_id=p.task.id,
             created_at=now,
             trust_level=TrustLevel.ARTIFACT_BACKED,
-            stage_outcomes=outcomes or {},
             touched_paths=touched,
-            # F36: repo-relative POSIX (``.worc/logs/<task-id>``), never the absolute host path — no
-            # ``/Users/…`` prefix to leak or to collide with a run-harvested redaction literal.
-            artifact_paths=(
-                task_artifact_relpath(
-                    self._artifacts_root, p.task.id, self._config.repo.local_path
-                ),
-            ),
         )
         audit = AuditContext(timestamp=now, actor=AuditActor.FINALIZER, task_id=p.task.id)
         try:
@@ -2850,7 +2835,7 @@ class Orchestrator:
             final = Status.MANUAL_ACTION_REQUIRED
         if status is not Status.DONE:
             # Deterministic short-term failure episode (no LLM); never long-term (AC-W3).
-            self._record_failure_memory(p, final)
+            self._record_failure_memory(p)
         # Record the terminal-cleanup outcome and the reason this task stopped (when applicable).
         last_error = cleanup.error or manual_reason
         self._store.update_task(
