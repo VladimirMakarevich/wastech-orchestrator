@@ -231,7 +231,7 @@ agents:
       extra_args: []
     codex:
       command: "codex"
-      model: "gpt-5.5" # "" = use the Codex CLI/account default
+      model: "gpt-5.4" # "" = use the Codex CLI/account default
       reasoning: high # minimal | low | medium | high | xhigh | max→xhigh
       timeout_seconds: 7200
       sandbox: "workspace-write"
@@ -245,7 +245,7 @@ Common fields:
 | --- | --- | --- | --- |
 | `command` | string | provider id (`"claude"` or `"codex"`) | Executable name or path. |
 | `primary` | boolean | `false` | Marks the **global primary**. Exactly one configured provider must set it; that provider runs any flow node with no explicit `provider` and is the sole infrastructure-fallback target. It must also be in `agents.allowed`. |
-| `model` | string | `claude-sonnet-4-6` (claude), `gpt-5.5` (codex) | Provider model setting. The packaged template ships an explicit default per provider; set `""` to fall back to the CLI/account default. (A flow node may override it per node.) |
+| `model` | string | `claude-sonnet-4-6` (claude), `gpt-5.4` (codex) | Provider model setting. The packaged template ships an explicit default per provider; set `""` to fall back to the CLI/account default. (A flow node may override it per node.) |
 | `reasoning` | string or null | `high` (both, in the packaged template) | Provider-specific reasoning effort level. Claude accepts `low`, `medium`, `high`, `xhigh`, `max` and maps it to `--effort`. Codex accepts `minimal`, `low`, `medium`, `high`, `xhigh`, plus legacy `max` mapped to `xhigh`, and passes it as `-c model_reasoning_effort="..."`. Set `null` to omit the override and use the CLI/account default. (A flow node may override it per node.) |
 | `timeout_seconds` | integer | `7200` | Timeout for a stage run. |
 | `permission_profile` | string | `"workspace-write"` | Orchestrator permission profile passed into the adapter. |

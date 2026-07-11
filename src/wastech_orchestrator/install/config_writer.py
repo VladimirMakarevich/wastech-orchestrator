@@ -57,7 +57,7 @@ def _ordered_providers(providers: tuple[ProviderId, ...]) -> tuple[ProviderId, .
 # installed Codex CLI's accepted ``--model`` values.
 _PROVIDER_DEFAULTS: dict[ProviderId, tuple[str, str]] = {
     ProviderId.CLAUDE: ("claude-sonnet-4-6", "high"),
-    ProviderId.CODEX: ("gpt-5.5", "high"),
+    ProviderId.CODEX: ("gpt-5.4", "high"),
 }
 
 

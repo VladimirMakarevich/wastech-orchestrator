@@ -71,7 +71,7 @@ agents:
       primary: true            # the global primary (exactly one provider; must be in `allowed`)
     codex:
       command: "codex"        # executable name (found on PATH) or an absolute path to the CLI
-      model: "gpt-5.5"         # "" = use the Codex CLI/account default
+      model: "gpt-5.4"         # "" = use the Codex CLI/account default
       reasoning: high          # minimal | low | medium | high | xhigh | max->xhigh
       timeout_seconds: 7200    # per-attempt CLI wall-clock ceiling (seconds)
       sandbox: "workspace-write"   # workspace-write | read-only | danger-full-access (needs strict_isolation: false)

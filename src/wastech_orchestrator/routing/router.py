@@ -555,7 +555,7 @@ class AgentRouter:
 
         A ``cross_provider`` fallback attempt (the substitute provider is a *different* CLI) drops
         provider-specific request fields: ``model``, most ``reasoning`` values, ``extra_args``,
-        and ``session_id``. A model id is provider-specific (codex ``gpt-5.5`` is not a Claude
+        and ``session_id``. A model id is provider-specific (codex ``gpt-5.4`` is not a Claude
         model), provider CLI flags in ``extra_args`` are not portable, and a durable session id
         belongs to one provider. Cleared values make the substitute re-resolve its own
         config/defaults while preserving portable context (prompt, paths, schema, permissions,

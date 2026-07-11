@@ -216,6 +216,69 @@
 
 ---
 
+## Проход 21 — фаза 6, что проверено (2026-07-09), первый прогон init (claude-primary; review/supervisor codex)
+
+Задача `p6-01-repo-scan-detection` → `done`, PR [#12](https://github.com/VladimirMakarevich/wastech-mdlint/pull/12) (**новый**, ветка `feat/p6-init`, 1 коммит, не смержен), **`fix_iterations=6`**. Версия main (все мержи, вкл. content-flows PR #25; `DB_SCHEMA_VERSION=15`). Новые F43-F46, рецидив F42. Отчёт: [docs/analysis/p6-01-repo-scan-detection-run-analysis.md](docs/analysis/p6-01-repo-scan-detection-run-analysis.md).
+
+**Подтверждено этим прогоном (`[x]`):**
+
+- [x] **Полный флоу `implementation` end-to-end** (claude-primary): planning→implementation→[testing→review→fixing]×6→testing→review=accept→documentation→publish→`done` — `state.db node_runs` (24 узло-прогона, все status=succeeded/passed).
+- [x] **§12 per-node override отработал в рантайме (новые комбо)**: review=`codex/gpt-5.4/high`, fixing=`claude/sonnet-5/xhigh` перекрыли глобальный дефолт `claude-opus-4-8` — `.worc/flows/implementation.yaml` node-декларации + `stages/review|fixing/.../request.json`.
+- [x] **Блокирующий review сходится в бюджете**: 6 rework → 7-й review `accept` (`evaluations` id 28 `findings_json=[]`), потолок `max_fix_cycles:15` не достигнут (**рецидив F42** при review=high; 13+ реальных edge-case багов).
+- [x] **`review_fix_total` персистит глубину петли** (закрывает аудит-пробел F42): `tasks.review_fix_total=6`, `review_fix_cycles=0` (обнулён при сходе), `test_fix_total=0`.
+- [x] **Checks 28/28 passed, 0 timeouts** (7 раундов × 4: typecheck/lint/test/build) — `check_runs` `passed=1` для всех 28; test_fix-цикл ни разу.
+- [x] **0 фоллбэков/ретраев/крашей** за 40 вызовов провайдера: `provider_attempts` все succeeded, `node_runs.error_class` пуст, `route_fallback` = сконфигурированный резерв (не срабатывал).
+- [x] **Supervisor constant-layer на каждом шаге** (24 вызова) + `supervisor_final` + **11 `memory_write`** (память включена, писала) — `evaluations`; **F46**: supervisor = 88% input-токенов (codex/xhigh).
+- [x] **documentation-узел после accept** (ранее в фазах не акцентировался): claude 236s, правки docs (glossary + spec-doc) в diff.
+- [x] **greenfield-сброс `state.db` перед прогоном** (v13→v15, деструктивный bump v15 «multiple editing lineages» a31e0fd): первый прогон упал на гейте `_enforce_schema_version`, разблокирован бэкапом `.pre-p6.bak` (не баг, [[greenfield-mvp-no-migration]]).
+- [x] **§preflight гейтит только не-выбранные packaged content-флоу, а `worc run` — нет** (**F44**): `validate_all` фатален в preflight/install ([cli.py:2126](src/wastech_orchestrator/cli.py#L2126)), `cmd_run` его не вызывает → p6-01 (`implementation`, валиден) прошёл в обход красного preflight.
+- [x] **Untracked task-файл исчезает из base-дерева после прогона** (рецидив известного): `tasks/pending/p6-01-...md` был untracked, перемещён на ветке (коммит `b1f8cad`), checkout назад на `main` его не восстановил; дерево «чистое» (git не трекал). Восстановление — с ветки `feat/p6-init`.
+- [x] **Новый PR (не reuse) для первой задачи новой ветки**: `feat/p6-init` не имел открытого PR → создан #12 (ср. F27 — reuse проявляется со 2-й задачи цепочки).
+
+**Не наблюдалось в этом прогоне (`[ ]`):** HITL-пауза; decomposition; test_fix-цикл (чеки зелёные); MANUAL_ACTION_REQUIRED/FAILED; PR merge; task-front-matter override уровня `nodes.<id>` (задача без `nodes:`); refinement-узел (пропущен — задача хорошо специфицирована).
+
+---
+
+## Проход 22 — фаза 6, что проверено (2026-07-09), вторая задача (branch existing + PR reuse; supervisor→claude)
+
+Задача `p6-02-rule-inference` → `done`, PR [#12](https://github.com/VladimirMakarevich/wastech-mdlint/pull/12) **reuse** (+1 коммит), **`fix_iterations=3`** (чище p6-01). Новый **F47**; **F43 не воспроизвёлся**, **F46 закрыт** сменой конфига. Отчёт: [docs/analysis/p6-02-rule-inference-run-analysis.md](docs/analysis/p6-02-rule-inference-run-analysis.md).
+
+**Подтверждено этим прогоном (`[x]`):**
+
+- [x] **`branch_mode: existing` + `branch_ref` строит поверх предыдущей задачи**: branch prep 0.8s, коммит p6-02 лёг на `feat/p6-init` поверх `b1f8cad` (p6-01) — `git log`/reflog.
+- [x] **PR reuse (F27) для 2-й задачи цепочки**: p6-02 добавлен в открытый **#12** (тот же head/base `feat/p6-init`→`main`), второго PR нет; title/body остались от p6-01.
+- [x] **`depends_on` не задан → dependency-гейт не срабатывает**, зависимость от p6-01 удовлетворена через общую ветку (код скана уже там); задача стартовала без отказа несмотря на открытый PR p6-01.
+- [x] **§F47 codex vs claude resume-стоимость**: supervisor input 38.75M (p6-01, codex) → **2 922** (p6-02, claude) при одной durable-сессии resume=True — codex ре-ингестит контекст (per-call до 3.6M), claude шлёт дельту (~1 токен). `stages/supervisor/*/{1-codex,1-claude}/result.json`.
+- [x] **§F46 supervisor-конфиг сменён и валидирован**: `.worc/config.yaml` supervisor `codex/gpt-5.4/xhigh` → `claude/opus-4-8/medium` (внешнее изменение, не тест-дорожка); стоимость supervisor обвалилась.
+- [x] **Блокирующий review сходится чисто за 3 цикла, findings прогрессивные** (`evaluations` id 46/50/54 rework → 58 accept `[]`): tallyPatterns→detectAdrSections/GRP→cluster.include; **без thrash (F43 не повторился)**.
+- [x] **Checks 16/16 passed, 0 фоллбэков/крашей** (4 раунда × 4); `route_fallback` не срабатывал, `error_class` пуст.
+- [x] **finalize + память отработали**: `supervisor_final=1`, summary.md 6.8K написан (65.5s), **memory_write=6** (`evaluations` by `kind`).
+- [x] **`review_fix_total=3`** персистит глубину; `review_fix_cycles=0` (обнулён); `test_fix_total=0`; refinement пропущен.
+
+**Не наблюдалось (`[ ]`):** HITL; decomposition; test_fix; MANUAL/FAILED; PR merge; task-front-matter `nodes.<id>` override; фоллбэк/краш.
+
+---
+
+## Проход 23 — фаза 6, что проверено (2026-07-09), третья задача — ПЕРВЫЙ оператор-driven HITL
+
+Задача `p6-03-interactive-prompts` → `done`, PR [#12](https://github.com/VladimirMakarevich/wastech-mdlint/pull/12) **reuse** (+1 коммит), **`fix_iterations=5`**, ~2ч12м. Без новых F; веха — HITL round-trip. Отчёт: [docs/analysis/p6-03-interactive-prompts-run-analysis.md](docs/analysis/p6-03-interactive-prompts-run-analysis.md).
+
+**Подтверждено этим прогоном (`[x]`):**
+
+- [x] **ПЕРВЫЙ оператор-driven HITL за кампанию (`kind=question`)**: planning-агент задал уточняющий вопрос (неопределённый промпт `language`), `hitl/planning.json` `kind=question risk=clarification status=consumed`; лог `awaiting human input` → `status=answered` (не timeout) через ~9.5 мин.
+- [x] **HITL session-resume на re-entry (§4 #1)**: planning#1 и planning#2 имеют ОДИН `result.session_id=session:7cf6f793c227`; второй запуск 75s vs 807s (продолжил диалог с ответом, не переплан). `stages/planning/run-000040|000041/1-claude/result.json`.
+- [x] **HITL провайдер-консистентность (§4)**: оба planning-запуска на claude (resume того же провайдера).
+- [x] **Telegram round-trip вопроса+ответа (§14)**: `hitl/planning.json` `telegram_message_id=250`, `handle.delivered=true`; ответ оператора принят и `consumed`.
+- [x] **planning autonomy — агент уточняет, а не гадает**: поймал реальное противоречие спеки (`language` не определён в glossary/P6.05-фикстурах/P8.02) и вынес развилку (a/b/c), а не построил наугад.
+- [x] **8h-timeout HITL с 60s-heartbeat**: `timeout_seconds=28800`, heartbeat'ы каждые 60s до ответа.
+- [x] **Блокирующий review сходится за 5 циклов, findings прогрессивные** (`evaluations` id 71/75/79/83/87 rework → 91 accept `[]`); горячая зона — existing-config overwrite/merge/skip + prompter; **без thrash (F43 снова не повторился)**.
+- [x] **§F47/F46 3-е подтверждение**: supervisor на claude/medium = 5 460 input / 21 вызов (дёшев).
+- [x] **Checks 24/24 passed, 0 фоллбэков/крашей**; `@inquirer/prompts` добавлен как declared-зависимость (задача авторизовала → review не блокировал как «undeclared dep»).
+
+**Не наблюдалось (`[ ]`):** decomposition; test_fix (чеки зелёные); MANUAL/FAILED; PR merge; task-front-matter `nodes.<id>` override; HITL `kind=approval` с оператором (был только question); HITL timeout/deny-путь.
+
+---
+
 ## 1. Branch name: epoch-префикс + ограничение длины
 
 **Файл:** `archive/done/branch-name-epoch-and-slug-limit.md` · **Статус:** implemented 2026-06-26
@@ -318,7 +381,7 @@ HITL-раунд-трип теперь ВОЗОБНОВЛЯЕТ ту же сес�
 - [ ] `_invoke` / `_build_request` принимают `resume_session_id`, который побеждает editing-lineage lookup
 - [ ] Resume работает для ЛЮБОГО `session_scope` и ЛЮБОГО узла (не только `editing_lineage`) — обходит ограничение `_resume_session_id`
 - [ ] Провайдерный гейт: нельзя возобновить Claude-сессию на Codex (и наоборот)
-- [ ] Второй запуск узла имеет `result.session_id` РАВНЫЙ id первого запуска (регресс `test_agent_hitl_round_trip_resumes_first_run_session`)
+- [x] Второй запуск узла имеет `result.session_id` РАВНЫЙ id первого запуска (регресс `test_agent_hitl_round_trip_resumes_first_run_session`) — прогон 23 (p6-03): planning#1 и planning#2 после HITL-ответа оба `session:7cf6f793c227`, второй запуск 75s vs 807s (продолжил, не переплан); `stages/planning/run-000040|000041/1-claude/result.json`
 - [ ] В `request.json` второго вызова присутствует `--resume`-style session id; агент продолжает диалог, не перечитывая всё заново
 - [ ] Across-restart fallback: session id первого запуска потерян (`fresh_disposable` без durable-слота) → честный откат на свежую сессию + файл контекста ответа; без новой persistence, без bump `state.db` (`test_agent_hitl_round_trip_no_resume_when_first_run_used_fallback`)
 - [ ] `_reconsider` (re-run при отказе по опасному диффу) возобновляет `editing_lineage` через существующий `_resume_session_id` — изменений не требовал (`test_dangerous_diff_reconsider_resumes_editing_lineage`)
@@ -1056,3 +1119,39 @@ Per-task `branch_mode: new|existing|current` (+ `branch_ref`) плюс downgrade
 ### Safety invariant
 
 - [ ] Деструктивные git-операции (`branch -D`, remote delete, reset-to-base, force-checkout-away) выполняются ТОЛЬКО при `branch_mode == new` — в `existing`/`current` ветка принадлежит оператору
+
+---
+
+## Проход 24 — `p6-04-config-writer-schema` (2026-07-09), фаза 6, четвёртая задача — ПЕРВЫЙ терминал НЕ-`done`
+
+Истинный итог: **`manual_action_required`** (узел `review`, петля `review_fix`, `limit_exhausted=max_fix_cycles`, `fix_iterations=15`, `finished_at=2026-07-09T22:55:15Z`); фоновый `worc run` вернул exit 2 — итог подтверждён через `status` + ledger, exit-code не показатель. Ветка `feat/p6-init`, **PR не создан**. Новые находки: **F48** (session-limit → `task_failure` вместо `RATE_LIMITED`, рецидив content-rework F1), **F49** (провалившийся fixing протекает как `done`, дожигает петлю), **F50** (stuck-артефакт прячет findings/diff). Отчёт: [docs/analysis/p6-04-config-writer-schema-run-analysis.md](docs/analysis/p6-04-config-writer-schema-run-analysis.md).
+
+### Терминал `manual_action_required` (fix-loop exhaustion) — наблюдаемость
+
+- [x] Фоновый `worc run` exit 2 НЕ равен «FAILED»: истинный итог = `manual_action_required` — проход 24: `worc status` (`status=manual_action_required, node=review`) + ledger (`final_status: "manual_action_required", pr_url: null, fix_iterations: 15`) сошлись
+- [x] `review_fix`-петля исчерпывает `max_fix_cycles` → терминал `manual_action_required` с `failure_report.json`/`stuck.md` — проход 24: `failure_report.json` `limit_exhausted=max_fix_cycles`, `counters.review_fix=15`; `state.db tasks.fix_iterations=15` = target-конфиг `agents.max_fix_cycles:15`
+- [x] `max_total_fix_iterations:30` НЕ был связывающим лимитом — проход 24: связал `max_fix_cycles=15` (одна консекутивная review_fix-петля), не глобальный потолок 30
+- [ ] `failure_report.json` содержит РЕАЛЬНЫЕ последние findings + diff — проход 24: **ПРОВАЛ (F50)** — `last_review_findings: []`, `final_diff: ""`, хотя review#107 вернул 3 findings и staged diff = 929 вставок
+
+### Rate-limit / session-limit классификация (F48)
+
+- [ ] Claude session-limit (HTTP 429 / `five_hour` / `out_of_credits`) классифицируется как `RATE_LIMITED` — проход 24: **ПРОВАЛ (F48)** — `result.json error_class=task_failure, failure_subtype=success`; парсер `parse_stream_json` игнорирует `api_error_status:429`/`rate_limit_event` (stderr пустой → stderr-сигнатура не срабатывает)
+- [ ] `RATE_LIMITED` на primary-провайдере узла → fallback на второго провайдера (codex не rate-limited) — проход 24: **НЕ сработал (следствие F48)** — мисклассификация в `task_failure` (не `FALLBACK_ELIGIBLE`) погасила fallback; codex на fixing не пробовался
+- [ ] `RATE_LIMITED` → park задачи / defer до `resetsAt` (F5/F6 content-rework) — проход 24: **НЕ сработал (следствие F48)** — петля продолжилась вместо park
+
+### Fix-узел при терминальном провале провайдера (F49)
+
+- [ ] Провалившийся `fixing`-узел НЕ засчитывается как productive `done`-цикл — проход 24: **ПРОВАЛ (F49)** — `node_runs` fixing#72..#105 `status=failed, outcome=done`; 12 no-op фикс-циклов (~2-3с каждый) дожгли потолок
+- [x] agent-узел поднимает `NodeInfraError`→park ТОЛЬКО при `outcome.result is None` (инфра-исчерпание) — проход 24: подтверждено кодом ([agent.py:333-337](src/wastech_orchestrator/core/flow/nodes/agent.py#L333-L337)); session-limit вернул НЕ-None result → park не взведён (корень F49)
+
+### Terminal cleanup при `manual_action_required`
+
+- [x] `terminal_cleanup` блокируется при «unaccounted changes» в рабочем дереве (не авто-коммитит непроверенную работу) — проход 24: `terminal_cleanup=blocked`, `last_error="working tree has unaccounted changes: ..."`; работа p6-04 (12 файлов / 929 вставок) осталась **staged, не закоммичена** на `feat/p6-init`
+- [x] Task-файл остаётся в `tasks/pending/` при заблокированном cleanup — проход 24: `p6-04-config-writer-schema.md` по-прежнему в `tasks/pending/` (не удалён)
+- [x] HEAD ветки не сдвинут, PR не тронут при fix-loop exhaustion — проход 24: `git log feat/p6-init` HEAD на p6-03 (`788e9f2`), PR #12 без нового коммита
+- [ ] ⚠️ Грязное staged-дерево блокирует следующую задачу (p6-05) — требует разрешения оператором до продолжения (не автоматизировано)
+
+### Стоимость / провайдеры (континуитет F46/F47)
+
+- [x] supervisor claude/opus-4-8/medium остаётся дёшев на длинной петле — проход 24: 46 вызовов / **2 786 input** (F46/F47 подтверждены 4-й раз)
+- [x] review (codex) — доминирующая стоимость при петлевом прогоне — проход 24: 15 вызовов / **14.39M fresh input** + 12.9M cached; ~13/15 прогонов — сожжённый re-work поверх no-op fixing (следствие F49)

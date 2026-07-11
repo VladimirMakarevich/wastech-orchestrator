@@ -124,7 +124,7 @@ def test_explicit_model_and_reasoning_defaults_are_written(tmp_path: Path) -> No
     codex = cfg.agents.providers[ProviderId.CODEX]
     # provider-config-cleanup #3: fresh installs ship explicit model/reasoning, not "" / null.
     assert (claude.model, claude.reasoning) == ("claude-sonnet-4-6", "high")
-    assert (codex.model, codex.reasoning) == ("gpt-5.5", "high")
+    assert (codex.model, codex.reasoning) == ("gpt-5.4", "high")
     # provider-config-cleanup #2: the unused max_budget_usd field is gone from the generated config.
     assert "max_budget_usd" not in text
     assert not hasattr(claude, "max_budget_usd")
@@ -173,7 +173,7 @@ def test_generated_config_includes_optional_sections(tmp_path: Path) -> None:
 def test_supervisor_model_tracks_the_global_primary(tmp_path: Path) -> None:
     # F2: a Codex-primary install resolves the supervisor model to Codex's model, not Claude's.
     cfg = loads_config(build_and_validate(_spec(tmp_path, (ProviderId.CODEX,)))).config
-    assert cfg.supervisor.model == "gpt-5.5"
+    assert cfg.supervisor.model == "gpt-5.4"
     assert cfg.supervisor.reasoning == "high"
     # F39: a codex-primary install pins supervisor.provider to codex, aligned with the codex model.
     assert cfg.supervisor.provider == ProviderId.CODEX

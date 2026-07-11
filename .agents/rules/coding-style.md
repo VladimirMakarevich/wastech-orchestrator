@@ -15,6 +15,7 @@
 - Comment the non-obvious parts: rationale, invariants, tradeoffs, external-system constraints, race conditions, portability traps, and bug-prevention context.
 - Do not add comments that merely restate names, types, assignments, loops, or conditionals.
 - When behavior is non-obvious, surprising, or constrained by a real limitation, capture that reason next to the relevant code path.
+- Comments must be self-contained and independent. Never reference project documents, tickets, ADRs, PRs, backlog items, or other files in a comment (no "see docs/...", "per the ADR", "as described in ...") — those move, get renamed, or are deleted, leaving the comment dangling. State the actual `why` inline so the comment stands on its own without any external artifact.
 - Historical narrative in comments is forbidden. Comments document the current design and intent only; do not leave "used to be", "changed from", or compatibility-tombstone commentary behind after a rewrite.
 - If a block is hard to justify with a short why-comment, simplify or restructure it until the intent and rationale are clear.
 

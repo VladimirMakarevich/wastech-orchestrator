@@ -1,0 +1,66 @@
+# A no-work agent run is an infrastructure failure, not a task outcome
+
+Status: **proposed** (2026-07-10) Date: 2026-07-10 Owner: Vladimir Makarevich
+
+This ADR reframes the residual core findings from the content-rework post-mortem ([AUDIT-content-rework-run-2026-07-10.md](../../AUDIT-content-rework-run-2026-07-10.md): F3, F4, F7) into **one principle** instead of three node-local patches: a returned `task_failure` must mean **only** "the agent did real work but the result was unsatisfactory" (a reviewer's rejection, `max_turns`, a non-empty refusal); an agent run that **did no work at all** is an infrastructure failure and must be **raised at the single provider→core boundary**, so the flow never routes a dead provider through the review/fix machinery. The rate-limit ADR ([reliable-rate-limit-handling.md](reliable-rate-limit-handling.md)) already makes this move for the sharpest signal (a subscription limit); this ADR generalizes it to _any_ no-work run and, in doing so, subsumes the previous F3 patch and narrows F4 to a small core-side guard.
+
+## The problem
+
+The orchestrator overloads one value — a returned `AgentRunResult(status=failed)` — with two meanings it cannot tell apart:
+
+- **"The agent did its job and the result is legitimately not-success"** — a reviewer found blocking issues, a fixer's edit did not fully satisfy the checker, an agent hit `max_turns`. Here the flow **must keep going**: routing to `fixing` and re-checking is the entire point of the review/fix loops. If the orchestrator hard-stopped on this, no task with a single review finding would ever complete.
+- **"The agent never actually ran"** — a dead provider (subscription/rate limit), a clean-but-empty exit. Here continuing is pointless: there is nothing to fix, and every subsequent node just re-hits the same wall.
+
+Because both surface as `status=failed`, the second is fed into the machinery built for the first. In the content-rework batch this was the whole cascade: a session-limited `product_accuracy` (zero tokens, no output) was reported as `"schema not honored"` (F3 — the evaluator blamed the JSON format for an agent that never ran); a session-limited `fixing` was counted as a productive cycle and ground `constraint_fix` to its budget of 12 (F4 — ch09 needed one sentence rewritten and instead spun 12 empty rounds); and the task ended `manual_action_required` with an **empty** diff, implying a change to review that did not exist (F7).
+
+The previous version of this ADR fixed those three at three separate seams (evaluator, fix loop, terminal message). That is exactly the "solve particular cases, not the root" smell: each node re-derives the same missing fact — _did the agent actually do any work?_ — instead of the boundary deciding it once.
+
+## Constraints
+
+The decision lives at the boundary the abstraction already defines. The **"no output at all" test reads only normalized fields** (`succeeded`, `usage.output_tokens`, `structured_output`, `failure_subtype`) — no CLI syntax — so it belongs at the `_adapter_base` **finalize** seam, the same single place the rate-limit raise lands, and must **raise** a `ProviderError` (not return one): [router.py:17](../../src/wastech_orchestrator/routing/router.py#L17) fires fallback only on a _raised_ error. The **"no file change" complement is inherently core-side** (the working-tree diff is computed by the core, not the adapter), so the fix-loop stall guard stays in the flow engine — the one piece that cannot move to the boundary.
+
+The rule must stay **conservative**, because the failure mode of getting it wrong is masking a real task problem as infra (and triggering pointless fallback). The test fires only when the run produced **zero** productive output; a single output token, or a `max_turns` subtype, means the agent worked and the result is a genuine quality outcome that must still flow on. This preserves the intentional design: `task_failure` remains a first-class flow outcome, `max_turns` still reaches its continue-gate, an evaluator that _ran_ but returned malformed findings still fails **closed** as "schema not honored" (that case was always correct — only the never-ran case was mislabeled).
+
+Non-duplication with [reliable-rate-limit-handling.md](reliable-rate-limit-handling.md): that ADR detects the **specific** rate-limit signal (HTTP 429 / `session limit` / `five_hour`) and raises `RATE_LIMITED` with its reset-time handling; this ADR is the **generic** net for no-work runs that match no specific infra signature. They compose at the same seam — specific signatures first, the generic no-work test last, before the old `task_failure` fallthrough. Greenfield MVP: no back-compat shim. F8 (operational batch-sizing) and F9 (task-file placement — not a code path; `manual_action_required` stays put by design, [orchestrator.py:2731](../../src/wastech_orchestrator/core/orchestrator.py#L2731)) remain out of scope.
+
+## Alternatives considered
+
+| Option | Why rejected |
+| --- | --- |
+| Three node-local patches (the prior draft of this ADR) | Each of the evaluator, fix loop, and terminal re-derives "did the agent do work?" independently; the diagnostics stay scattered and a fourth node that consumes an agent result would need its own copy. The boundary should decide it once. |
+| "Any `status=failed` → hard-stop the task" | Breaks the review/fix loops: `task_failure` is a legitimate, must-continue signal (reviewer rejection, `max_turns`). It would also **fail** (discard) tasks that a transient limit makes fully recoverable — for the transient case, park-and-resume beats fail-and-die. |
+| Widen only the rate-limit signal | Insufficient: a no-work run that matches no recognized signature (a clean-but-empty exit, a returned `task_failure` with 0 tokens) still leaks into the quality path. The rate-limit fix is a special case of this general rule. |
+| Detect it in the core after the result returns (not at the adapter) | Then fallback never fires — the Router reacts only to a **raised** `ProviderError`, and the core sees an already-returned result. The adapter finalize is the one seam that both produces the normalized result and can raise. |
+| **Chosen: one boundary rule ("no work ⇒ raise infra") + a small core-side "no file change for N cycles" stall guard** | The boundary rule routes a dead provider into the machinery that already does fallback → park → fail; "don't grind through the flow" falls out for free. The core guard covers the one signal the boundary cannot see (the agent produced tokens but changed nothing). |
+
+## Decision
+
+Reserve the returned `task_failure` for its true meaning — the agent did real work and the result was unsatisfactory. At the `_adapter_base` finalize step, a terminal result that **is not success, produced zero output tokens, carries no structured output, and is not `error_max_turns`** is classified as a no-progress **infrastructure** failure and **raised** as a `ProviderError` (fallback-eligible), instead of being returned as a `task_failure`. The existing machinery then decides the terminal shape with no new logic: fallback to the other provider → resumable `_park` if the exhaustion is transient → `_fail` if it is permanent. "The flow does not keep grinding through nodes" is a consequence of the correct classification, not a new stop.
+
+Two smaller pieces complete it. **Core-side stall guard (the narrowed F4):** in the fix loop, if the working tree does not change across **N = 2** consecutive fixing cycles, abort the loop as an infra stall rather than charging rework to `max_fix_cycles` — this is the file-level "no effective work" signal the adapter cannot observe (e.g. a fixer that emits tokens but never edits). **Honest terminal (F7):** because no-work failures now route to the infra terminal (park/fail) instead of `manual_action_required` with an empty diff, the misleading empty-diff-manual case largely disappears on its own; wherever an evaluator-infra→manual path still fires, the reason states the real cause (per the owner's earlier choice: keep the status, fix the message).
+
+We do this because a single misclassification at the boundary is what turned one dead-provider event into a cascade of mislabeled, budget-burning, misleadingly-terminal tasks; fixing the classification once — rather than teaching each node to recognize a dead agent — is the difference between a root fix and three symptom patches. The cost is a conservative test on the normalized result plus one core-side counter; the risk it must not incur is reclassifying a genuine quality failure as infra, which the zero-output guard is designed to prevent.
+
+## Open questions
+
+`ErrorClass` choice: a new `AGENT_NO_PROGRESS` (distinct, self-documenting) vs. reusing `INVALID_OUTPUT` (which today means "no terminal event at all" — a terminal-but-no-work result is arguably a different thing). Whichever, it must be `FALLBACK_ELIGIBLE`.
+
+Same-provider retry: should a no-work raise fall back immediately, or retry the same provider once first? Leaning immediate fallback with no same-provider retry (a same-provider retry of a dead provider just repeats).
+
+Test precision: is "zero output tokens + no structured output + not `max_turns`" the right conservative predicate, or should it also require `is_error`/non-zero exit? Too loose masks a real refusal as infra; too strict misses a genuine no-work run — the fixture matrix should pin both edges.
+
+F4 residual necessity: once no-output is raised at the boundary, is the "no file change for N cycles" guard still worth it, or vanishingly rare? It covers the "agent produced tokens but no edit" stall the boundary rule cannot catch — likely keep, but confirm it earns its keep.
+
+Ordering at the shared seam: confirm the generic no-work test runs **after** the rate-limit ADR's specific signatures, so a limit keeps its precise class, message, and reset-time handling.
+
+## Implementation notes
+
+Boundary — [`parse_stream_json` (claude.py:364-390)](../../src/wastech_orchestrator/providers/claude.py#L364-L390) and the finalize step in [`_adapter_base.py:411-421`](../../src/wastech_orchestrator/providers/_adapter_base.py#L411-L421): after the specific infra signatures (including the rate-limit raise owned by the other ADR), add the generic no-work predicate on the normalized fields and raise instead of returning `TASK_FAILURE`. Mirror in [codex.py](../../src/wastech_orchestrator/providers/codex.py) once the codex CLI's no-work shape is probed (use `/fake-cli`).
+
+Evaluator — [`evaluator.py:135-152`](../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L135-L152): the never-ran case is now caught upstream (arrives as `outcome.result is None` / a raised infra error), so no separate F3 check is needed; the surviving "ran but returned no valid findings JSON" path stays fail-closed as today. Verify there is no double-handling.
+
+Fix-loop stall guard — [`engine.py:282-299`](../../src/wastech_orchestrator/core/flow/engine.py#L282-L299) (`_charge_rework`) plus the per-cycle `current.diff`: thread a consecutive-no-change counter; abort to the stuck/infra terminal at N = 2; a cycle that changes the tree resets it.
+
+Terminal message — [`orchestrator.py:1757-1766`](../../src/wastech_orchestrator/core/orchestrator.py#L1757-L1766): the manual reason already uses `str(exc)`, so the raised cause flows through; add the empty-diff annotation where the reason is assembled.
+
+Tests — `/fake-cli` fixtures: a zero-token non-success terminal → assert a no-progress infra error is **raised** (not a returned `task_failure`) and fallback is attempted; a `max_turns` result → assert it **still** returns `task_failure` (not reclassified); an evaluator fed a no-work run → assert the infra path, not "schema not honored"; a fix loop with no file change for two cycles → assert abort, not `max_fix_cycles`.

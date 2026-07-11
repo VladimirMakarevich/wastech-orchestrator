@@ -2,6 +2,15 @@
 
 The source of truth is the code (`src/wastech_orchestrator/`); the [Functional Map](../../docs/functional/index.md) is the code-derived reference. These invariants must not be violated.
 
+## Domain-agnostic and data-driven (no hardcoding)
+
+- The orchestrator hosts an **unbounded number of operator-authored flows across arbitrary domains** — not only software tasks, but content authoring, book writing, research, audits, and subject matter not yet imagined. The core is **domain-agnostic**: it knows flow _shape_ and node _kind_, never the topic. Adding a new flow on a new topic must require **zero** core/engine code changes.
+- Because the set of flows and their topics is open-ended, **nothing may be hardcoded or nailed down to a specific flow, topic, task type, node id, or count**. No magic strings, no `if node.id == "…"`, no per-topic branches, no fixed "flows we support" list, no assumption about how many flows exist, baked into core/engine logic. Every such decision is driven by flow/config **data**. (This generalizes the node-id rule below to topics and task types, not just ids.)
+
+## Design values
+
+- **Flexibility and ease of use come first — in both implementation and documentation.** Operators must _want_ to use the orchestrator: prefer the simplest, most flexible design that keeps these invariants, expose configuration and flow authoring as data (not code changes), and write docs that make the common path obvious and the powerful path discoverable. A feature is not done until it is both flexible to configure and pleasant to operate. This never overrides the security envelope or the invariants above — flexibility means arbitrary safe flows, not an escape hatch.
+
 ## Layers and dependencies
 
 - **Orchestrator Core** is a thin wrapper around the FlowEngine: it owns the validation gate, the single processing slot, the isolation/check preamble, node wiring, state-machine transitions, and terminal handling — the pipeline **body** is a data-driven flow graph driven by the engine, **not** a hardcoded stage loop. Core calls **only** the Router (agent nodes), the Check Runner (checks nodes), and the Git Manager (publish); it **does not build** provider-specific commands.
@@ -68,6 +77,7 @@ Dependency direction: `core → router → provider(interface)`. Providers do no
 - Performing fallback on a quality error.
 - Changing the provider route retroactively for a node that has already begun.
 - Hardcoding or special-casing a specific flow node **id** in the core/engine, or making any packaged node id mandatory — behavior attaches to a node **kind** or a declared fact, never to an id. A custom operator flow must remain fully supported no matter which nodes it uses, renames, drops, or adds.
+- Hardcoding or nailing anything to a specific flow, **topic/domain**, or task type — a fixed list of supported flows/topics, a per-topic code branch, or any assumption about how many flows exist. The domain is open-ended and driven by flow/config data (see "Domain-agnostic and data-driven").
 - Continuing work when an inconsistent branch state is detected (→ `manual_action_required`).
 - Running the `fixing` loop without a global per-task bound (→ must stop in `manual_action_required` with a failure report).
 - Processing more than one task at a time in v1 (concurrency and worktrees are v2).

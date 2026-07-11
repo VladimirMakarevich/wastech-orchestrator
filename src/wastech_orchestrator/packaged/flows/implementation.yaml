@@ -79,7 +79,7 @@ flow:
       permission_profile: workspace-write
       # optional overrides (uncomment to pin this node):
       # provider: codex
-      # model: gpt-5.5
+      # model: gpt-5.4
       # reasoning: high
       # timeout_seconds: 7200
       # network_access: false
@@ -111,7 +111,7 @@ flow:
       permission_profile: workspace-write
       # optional overrides (uncomment to pin this node):
       # provider: codex
-      # model: gpt-5.5
+      # model: gpt-5.4
       # reasoning: high
       # timeout_seconds: 7200
       # network_access: false
