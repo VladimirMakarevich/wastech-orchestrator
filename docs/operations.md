@@ -173,7 +173,7 @@ If a credential must reach a child process, add **only its variable name** to `s
 
 ## 3. Preflight (both CLIs)
 
-Before processing tasks, verify the environment with the read-only diagnostics command. It runs each allowed provider's `preflight()` (`<cli> --version` — no task is processed) and the deterministic `strict_isolation` policy check, then prints a secret-free verdict:
+Before processing tasks, verify the environment with the read-only diagnostics command. It runs each allowed provider's `preflight()` (`<cli> --version` — no task is processed) and the deterministic `strict_isolation` policy check, then prints a secret-free verdict. Preflight is a **run-surface health gate** — it does **not** validate flows; flow correctness is an on-demand concern handled by [`validate-flow`](#validating-flows-validate-flow) (and enforced fatally at task dispatch regardless).
 
 ```bash
 python -m wastech_orchestrator preflight
@@ -208,6 +208,25 @@ checks: 2 command sets configured
 
 - `status` prints the same read-only summary (it never runs anything). An empty `command_sets` shows `checks: no command sets configured (no gate)` — a valid configuration in which every task passes the checks node.
 - At task time the runner runs the **union** of the sets whose `paths` match the task diff (a set with no `paths` always runs; an empty diff runs nothing; a changed path claimed by no set runs no set on its account — cover shared/root files with a no-`paths` catch-all set). All selected checks run and the verdict is aggregated: a **required toolchain absent** (a non-`skip_if_unavailable` set whose binary cannot launch) or every check skipped leaves the gate **incomplete** → the task goes to **manual** (the agent cannot install host toolchains); otherwise a quality failure → `fixing`, else pass. A skipped `skip_if_unavailable` set is recorded loudly in `check_runs` and **blocks `git.auto_merge`** even when the node passes.
+
+### Validating flows (validate-flow)
+
+Flow validation is separate from preflight and on demand. Validate the flows you author in `.worc/flows/` config-aware, exactly as the engine sees them at dispatch:
+
+```bash
+worc validate-flow implementation   # one flow (bare stem, or implementation.yaml)
+worc validate-flow --all             # every *.yaml in .worc/flows/
+```
+
+- Scope is your own `.worc/flows/` only — packaged built-ins are excluded (they ship validated with the orchestrator; a built-in not copied into `.worc/flows/` is reported "not found"). Passing neither a name nor `--all` is a usage error.
+- It runs the full fatal validator (graph + security ceiling + the config-aware layer, including the `.worc/tools/` tool-name check), so it catches a disallowed provider/model/reasoning, an over-ceiling node, or a `tool:` node naming a tool you have not delivered — the same failures a task would hit at dispatch. It also emits a non-fatal `WARN` when a role prompt references an unknown `{token}` (which would render verbatim to the agent).
+- Exit `0` when every checked flow is valid, `1` when any is invalid, `2` when the named flow is not found, on a usage error, or when no config can be loaded. `WARN` lines never change the exit code.
+
+```text
+flow content_chapter: OK
+flow my_flow: FAIL — node 'review': provider 'gpt-5.5' not in agents.allowed
+flow my_flow: WARN — roles/review.md references unknown {plann_path} (renders verbatim to the agent)
+```
 
 ### Verify the executable seen by the runtime
 

@@ -24,6 +24,8 @@ Resolution rules:
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 
 from wastech_orchestrator.config.schema import OrchestratorConfig
@@ -46,6 +48,20 @@ _PACKAGED_DIR: Path = Path(__file__).resolve().parents[2] / "packaged" / "flows"
 
 class FlowResolutionError(Exception):
     """Raised when task_type cannot be mapped to a known flow."""
+
+
+@dataclass(frozen=True)
+class FlowCheck:
+    """Result of validating one flow for ``worc validate-flow``: fatal error + non-fatal warnings.
+
+    *error* is ``None`` when the flow passes the full validator, else a one-line message. *warnings*
+    are the prompt-variable lint messages (empty for a clean or an unresolved flow — a broken flow's
+    fatal error is the signal, not its lint).
+    """
+
+    name: str
+    error: str | None
+    warnings: tuple[str, ...]
 
 
 class FlowRegistry:
@@ -103,47 +119,40 @@ class FlowRegistry:
             validate_flow_against_config(snap, self._config, self._tools)
         return snap
 
-    def validate_all(self) -> list[tuple[str, str | None]]:
-        """Load + validate **every** resolvable flow (packaged + operator) for a preflight gate.
+    def check_flows(self, names: Iterable[str]) -> list[FlowCheck]:
+        """Resolve + prompt-lint each named flow, config-aware, no-raise (``validate-flow`` seam).
 
-        Returns ``(name, error)`` per flow, where *name* is the file stem and *error* is ``None`` on
-        success or a one-line message on failure. Operator files shadow a packaged file of the same
-        name (only the operator one is reported, mirroring :meth:`resolve`). Does not raise — the
-        caller decides how to surface failures (``install``/``preflight`` treat any as fatal).
+        Per name: resolve through the full fatal validator (graph + ceiling + the config-aware layer
+        when a config is set, incl. the ``.worc/tools/`` tool check) — exactly what the engine sees
+        at dispatch; on success also lint the role prompts for unknown ``{name}`` tokens. Returns a
+        :class:`FlowCheck` per name (``error`` set on failure, ``warnings`` the non-fatal lint).
+        Does not raise — the caller decides how to surface failures and the exit code.
         """
-        results: list[tuple[str, str | None]] = []
-        for name in self._all_flow_names():
-            try:
-                self.resolve(name)
-                results.append((name, None))
-            except (FlowResolutionError, FlowLoadError, FlowValidationError) as exc:
-                results.append((name, str(exc)))
-        return results
-
-    def lint_all(self) -> list[tuple[str, list[str]]]:
-        """Lint every resolvable flow's role prompts for unknown ``{name}`` tokens (non-fatal).
-
-        Returns ``(name, messages)`` per flow that produced at least one warning; a clean flow (or
-        one that fails to resolve — that is :meth:`validate_all`'s fatal job, not this) is omitted.
-        Each message names the role file and the token that would render verbatim. Does not raise —
-        the preflight surfaces the warnings without failing the gate (verbatim render is the safe
-        fallback the renderer guarantees).
-        """
-        results: list[tuple[str, list[str]]] = []
-        for name in self._all_flow_names():
+        results: list[FlowCheck] = []
+        for name in names:
             try:
                 snap = self.resolve(name)
-            except (FlowResolutionError, FlowLoadError, FlowValidationError):
-                continue  # a broken flow is reported (fatally) by validate_all, not linted here
-            warnings = lint_prompt_variables(snap)
-            if warnings:
-                results.append(
-                    (
-                        name,
-                        [f"{w.role_file} references unknown {{{w.token}}}" for w in warnings],
-                    )
-                )
+            except (FlowResolutionError, FlowLoadError, FlowValidationError) as exc:
+                results.append(FlowCheck(name=name, error=str(exc), warnings=()))
+                continue
+            warnings = tuple(
+                f"{w.role_file} references unknown {{{w.token}}}"
+                for w in lint_prompt_variables(snap)
+            )
+            results.append(FlowCheck(name=name, error=None, warnings=warnings))
         return results
+
+    def operator_flow_names(self) -> list[str]:
+        """Flow file stems in the operator's ``.worc/flows/`` only (packaged built-ins excluded).
+
+        The discovery scope for ``worc validate-flow``: operator-authored flows are the only ones
+        validated on demand — packaged built-ins are covered by the orchestrator's own test suite,
+        not by validating them against an arbitrary target repo's config. Empty when there is no
+        operator dir or it holds no ``*.yaml``.
+        """
+        if self._operator_dir is None or not self._operator_dir.is_dir():
+            return []
+        return sorted(p.stem for p in self._operator_dir.glob("*.yaml"))
 
     def _find(self, task_type: str) -> Path | None:
         if self._operator_dir is not None:
@@ -154,13 +163,6 @@ class FlowRegistry:
         if candidate.is_file():
             return candidate
         return None
-
-    def _all_flow_names(self) -> list[str]:
-        """Every flow file stem across packaged + operator dirs (operator shadows packaged)."""
-        names = set(self._builtin_names())
-        if self._operator_dir is not None and self._operator_dir.is_dir():
-            names.update(p.stem for p in self._operator_dir.glob("*.yaml"))
-        return sorted(names)
 
     @staticmethod
     def _builtin_names() -> list[str]:

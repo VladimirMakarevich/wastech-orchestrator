@@ -38,3 +38,4 @@ This folder contains backlog documents for product work that has already shipped
 | [P5 findings remediation plan (A1–D1, F42–F50)](p5-findings-remediation-plan.md) | orchestrator items implemented (2026-07-08); target/owner residue → [p5-remediation-skipped-items.md](p5-remediation-skipped-items.md) |
 | [P5 remediation — SKIPPED / deferred items (final disposition)](p5-remediation-skipped-items.md) | closed 2026-07-08 — A1 (target `review.md`) + C2 (model/schema-400 error class) shipped, D1 already satisfied; A3 delta-observe stays deferred and E1/F37 stays an owner live-smoke, both carried in [follow_ups.md](../../follow_ups.md) |
 | [Multiple named editing lineages in one flow](multiple-editing-lineages.md) | accepted (implemented 2026-07-08) |
+| [Flow validation → dedicated `worc validate-flow`](flow-validation-cli-command.md) | implemented (2026-07-11) — preflight is flow-free; `worc validate-flow [NAME] [--all]` is on-demand, operator-scoped, config-aware |
