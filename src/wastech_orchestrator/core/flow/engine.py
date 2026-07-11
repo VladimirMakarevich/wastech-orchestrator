@@ -52,6 +52,15 @@ from wastech_orchestrator.core.state_machine import Status
 #: Resolves a ``when.fact`` (``derived.*`` / ``config.*``) to a boolean. Injected so the engine
 #: carries no knowledge of where facts come from (P1.3/P1.4 wire the real resolver).
 FactResolver = Callable[[str], bool]
+#: EXPERIMENTAL(no-work-infra) — the no-effective-work stall guard is a trial feature; grep the tag
+#: ``no-work-infra`` to find every site (alias, constant, constructor state, ``_check_stall``, its
+#: call in ``run()``, and the ``_reset_loops_at`` cleanup) and revert as one unit if we drop it.
+#: See docs/backlog/no-work-agent-run-is-infra.md.
+#: Returns an opaque fingerprint of the current working tree (the ``current.diff`` text, hashed or
+#: raw). The engine only compares consecutive fingerprints for equality — it never learns what a
+#: diff is (same domain-free contract as :data:`FactResolver`). Injected by the driver; ``None``
+#: leaves the no-effective-work stall guard inert.
+DiffFingerprint = Callable[[], str]
 
 
 class EngineInternalError(Exception):
@@ -175,6 +184,10 @@ class _Stuck:
 
 _REWORK_OUTCOMES: frozenset[str] = frozenset({"rework", "fail"})
 _LARGE = 1 << 60  # absent flow budget => only the config cap clamps
+#: EXPERIMENTAL(no-work-infra). Consecutive fixing cycles with an unchanged working tree that abort
+#: a fix loop as a no-effective-work stall (the "agent emits tokens but never edits" case the
+#: provider boundary cannot observe).
+_STALL_NO_CHANGE_LIMIT = 2
 _NO_OVERRIDES: Mapping[str, Mapping[str, object]] = MappingProxyType({})
 
 
@@ -223,6 +236,7 @@ class FlowEngine:
         task_id: str,
         subtask_order: int | None = None,
         post_node: PostNodeHook | None = None,
+        diff_fingerprint: DiffFingerprint | None = None,
         region: frozenset[str] | None = None,
         disabled_nodes: frozenset[str] = frozenset(),
         node_overrides: Mapping[str, Mapping[str, object]] = _NO_OVERRIDES,
@@ -236,6 +250,13 @@ class FlowEngine:
         self._task_id = task_id
         self._subtask_order = subtask_order
         self._post_node = post_node
+        # EXPERIMENTAL(no-work-infra). No-effective-work stall guard (transient, never persisted — a
+        # reset on resume is desired). ``_stall_fp`` holds the last working-tree fingerprint seen
+        # when charging a rework for each loop; ``_stall_streak`` counts consecutive unchanged
+        # cycles. ``None`` callable => inert.
+        self._diff_fingerprint = diff_fingerprint
+        self._stall_fp: dict[str, str] = {}
+        self._stall_streak: dict[str, int] = {}
         # Flow node ids the task disabled (``nodes.<id>.enabled: false``); each is skipped exactly
         # like a ``when``-false node — its pass-through outcome takes the forward edge. Re-derived
         # from front-matter every run/resume (not persisted). Existence + routing soundness were
@@ -280,7 +301,12 @@ class FlowEngine:
 
             edge = self._select_edge(node, edges, outcome)
             if edge.outcome in _REWORK_OUTCOMES:
-                stuck = self._charge_rework(edge)
+                # EXPERIMENTAL(no-work-infra): abort a no-effective-work stall BEFORE charging
+                # rework, so a frozen fix loop is not counted toward its fix budget (it is not real
+                # work); else the budget cap. Drop the `_check_stall` line to disable the guard.
+                stuck = self._check_stall(edge.loop) if edge.loop is not None else None
+                if stuck is None:
+                    stuck = self._charge_rework(edge)
                 if stuck is not None:
                     report = self._recorder.write_failure_report(
                         node_id=node.id,
@@ -390,6 +416,27 @@ class FlowEngine:
 
     # -- budget bookkeeping ----------------------------------------------------
 
+    def _check_stall(self, loop: str) -> _Stuck | None:
+        """EXPERIMENTAL(no-work-infra). No-effective-work guard: abort ``loop`` when unchanged
+        across :data:`_STALL_NO_CHANGE_LIMIT` consecutive rework charges — the "agent emits tokens
+        but never edits" stall the provider boundary cannot see (it produced output, just no edit).
+
+        Reads an opaque fingerprint via the injected callable and only compares it for equality, so
+        the engine stays domain-free. A cycle that changes the tree resets the streak. No callable
+        (e.g. the merge flow / a test that omits it) leaves the guard inert.
+        """
+        if self._diff_fingerprint is None:
+            return None
+        fingerprint = self._diff_fingerprint()
+        if self._stall_fp.get(loop) == fingerprint:
+            self._stall_streak[loop] = self._stall_streak.get(loop, 0) + 1
+        else:
+            self._stall_streak[loop] = 0
+            self._stall_fp[loop] = fingerprint
+        if self._stall_streak[loop] >= _STALL_NO_CHANGE_LIMIT:
+            return _Stuck(loop=loop, limit_name="no_file_change")
+        return None
+
     def _charge_rework(self, edge: Edge) -> _Stuck | None:
         """Charge a rework/fail edge against the global counter plus its loop/inline budget.
 
@@ -430,6 +477,11 @@ class FlowEngine:
                 continue
             if edge.loop is not None:
                 self._run_state.reset(edge.loop)
+                # EXPERIMENTAL(no-work-infra): the no-change stall streak/fingerprint are per-loop
+                # and transient — clear them too so a re-entered loop starts its consecutive-cycle
+                # count fresh.
+                self._stall_streak.pop(edge.loop, None)
+                self._stall_fp.pop(edge.loop, None)
             elif edge.budget is not None:
                 self._run_state.reset(edge_key(edge))
 

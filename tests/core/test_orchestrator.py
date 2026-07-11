@@ -962,6 +962,26 @@ def test_review_infra_failure_degrades_to_manual_not_failed(
     assert "review" in ran and "publish" not in ran
 
 
+def test_review_infra_empty_diff_annotates_reason(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # EXPERIMENTAL(no-work-infra) — remove with the feature.
+    # F7 (honest terminal): when the evaluator-infra degrade-to-manual fires with NO working-tree
+    # change, the reason must say so plainly, so the manual terminal never implies a diff to review
+    # that does not exist. Here implementation makes no edit (no _patch_impl_edit), so the diff is
+    # empty when review infra-fails.
+    providers = _both(infra_fail={"review"})
+    orch, store, _ledger, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+
+    result = orch.run_task(_complete_task(tmp_path, "task-rev-empty"))
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
+    task = store.get_task("task-rev-empty")
+    assert task is not None and task.cleanup_last_error is not None
+    assert "no changes were produced to review" in task.cleanup_last_error
+
+
 # --- B-lite: transient-infra exhaustion parks the task as resumable -----------------------------
 
 
@@ -1128,6 +1148,26 @@ def test_non_transient_infra_still_fails_immediately(
     task = store.get_task("task-hard")
     assert task is not None and task.blocked_since is None
     assert (art / "logs" / "task-hard" / "failure_report.json").exists()
+
+
+def test_no_work_exhaustion_fails_task(git_repo, make_git_config, tmp_path: Path) -> None:
+    # EXPERIMENTAL(no-work-infra) — remove with the feature.
+    # A no-work run that exhausts every provider (AGENT_NO_PROGRESS — fallback-eligible but NOT
+    # park-eligible) goes terminal FAILED with a failure report, never a park (the single queue slot
+    # must not be held for a possibly-permanent dead run) and never fed into the review/fix loop.
+    providers = _both(infra_fail={"implementation"}, infra_error_class=ErrorClass.AGENT_NO_PROGRESS)
+    orch, store, ledger, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-nowork"))
+
+    assert result.final_status is Status.FAILED
+    task = store.get_task("task-nowork")
+    assert task is not None and task.blocked_since is None
+    assert (art / "logs" / "task-nowork" / "failure_report.json").exists()
+    assert ledger.records()[0]["final_status"] == "failed"
 
 
 _MINIMAL_FLOW = """
@@ -2731,11 +2771,14 @@ def test_skip_fixing_routes_to_manual_on_failure(git_repo, make_git_config, tmp_
     result = orch.run_task(_task_with_nodes(tmp_path, block))
     # Fixing disabled → the failure still ends at manual review (the preserved capability). The
     # engine is domain-agnostic, so it does NOT special-case "no fixing → straight to manual": it
-    # runs the declared test-fix loop (the skipped fixing node is a no-op each cycle) until the cap,
-    # then exhausts → manual. So fix_iterations honestly reflects the bounded loop, not 0 — F6 made
-    # this visible (it was masked by the stale-0 counter before); see Verification Additional #7.
+    # runs the declared test-fix loop (the skipped fixing node is a no-op each cycle). Because that
+    # loop can never change the working tree, the no-effective-work stall guard aborts it after N=2
+    # unchanged cycles → manual, instead of burning the full max_fix_cycles budget. fix_iterations
+    # is therefore a small, honest count (the reworks charged before the stall), well below the cap.
+    # EXPERIMENTAL(no-work-infra): the guard changed this expectation — if the feature is reverted,
+    # restore the old assertion `fix_iterations == orch._config.agents.max_fix_cycles`.
     assert result.final_status is Status.MANUAL_ACTION_REQUIRED
-    assert store.get_counters("task-001").fix_iterations == orch._config.agents.max_fix_cycles
+    assert 0 < store.get_counters("task-001").fix_iterations < orch._config.agents.max_fix_cycles
     assert "fixing" in _skipped_nodes(store)
 
 

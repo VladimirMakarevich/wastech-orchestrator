@@ -38,6 +38,8 @@ _MESSAGES: dict[ErrorClass, str] = {
         "the provider rejected the model request (bad request / unsupported schema)"
     ),
     ErrorClass.TASK_FAILURE: "the provider completed without satisfying the task",
+    # EXPERIMENTAL(no-work-infra) — remove with the ErrorClass member.
+    ErrorClass.AGENT_NO_PROGRESS: "the provider returned a terminal result with no work",
     ErrorClass.CANCELLED: "the agent was cancelled by an operator stop",
 }
 

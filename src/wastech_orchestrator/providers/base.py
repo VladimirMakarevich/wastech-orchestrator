@@ -46,6 +46,17 @@ class ErrorClass(StrEnum):
     # misread as a generic PROCESS_CRASHED and burn the fallback provider).
     MODEL_REQUEST_INVALID = "model_request_invalid"
     TASK_FAILURE = "task_failure"
+    # EXPERIMENTAL(no-work-infra): trial behavior — see docs/backlog/no-work-agent-run-is-infra.md.
+    # Grep the tag ``no-work-infra`` to find every site and revert as one unit if we drop it.
+    # The provider emitted a parseable terminal event but did NO work: zero output tokens, no
+    # structured output, and not an ``error_max_turns`` stop. This is the GENERIC no-work net (the
+    # specific rate-limit signature is caught first as RATE_LIMITED) — a dead run masquerading as a
+    # quality ``task_failure``. Distinct from INVALID_OUTPUT (no terminal event AT ALL): here a
+    # terminal event arrived, it just carried nothing. RAISED (never returned) so the Router falls
+    # over to the other provider; deliberately in FALLBACK_ELIGIBLE but NOT PARK_ELIGIBLE — a
+    # possibly-permanent no-work must fail (not hold the single queue slot for a park window); a
+    # recognized transient limit keeps its own RATE_LIMITED park.
+    AGENT_NO_PROGRESS = "agent_no_progress"
     # The provider could not resume the requested session (lost transcript / provider reset it). The
     # Router retries the SAME provider once with a fresh session — it is infra (durable sessions,
     # P2.2), never a quality failure, so it never falls back to another provider and never charges a
@@ -72,6 +83,7 @@ FALLBACK_ELIGIBLE: frozenset[ErrorClass] = frozenset(
         ErrorClass.TIMEOUT,
         ErrorClass.PROCESS_CRASHED,
         ErrorClass.INVALID_OUTPUT,
+        ErrorClass.AGENT_NO_PROGRESS,  # EXPERIMENTAL(no-work-infra) — remove with the class
     }
 )
 

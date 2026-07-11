@@ -104,6 +104,20 @@ def _run_codex(scenario: str, cli_args: list[str]) -> int:
         _emit([{"type": "result", "status": "failed", "output": {"reason": "incomplete"}}])
         return 0
 
+    if scenario == "no_work":
+        # EXPERIMENTAL(no-work-infra) scenario — remove with the feature.
+        # A terminal event that is NOT success and produced ZERO work: status failed, a usage event
+        # reporting output_tokens 0, and NO ``output`` (no structured output). Distinct from
+        # ``task_failure`` above (which carries an ``output`` payload) — the adapter must RAISE the
+        # generic AGENT_NO_PROGRESS net (never return task_failure). No stderr / rate-limit signal.
+        _emit(
+            [
+                {"type": "usage", "input_tokens": 8, "output_tokens": 0},
+                {"type": "result", "status": "failed"},
+            ]
+        )
+        return 0
+
     if scenario == "auth_failed":
         sys.stderr.write("Error: not logged in. Run `codex login` to authenticate.\n")
         return 1
@@ -176,6 +190,27 @@ def _run_claude(scenario: str, cli_args: list[str]) -> int:
             ]
         )
         return 0
+
+    if scenario == "no_work":
+        # EXPERIMENTAL(no-work-infra) scenario — remove with the feature.
+        # A terminal ``result`` that is NOT success and produced ZERO work: is_error with a plain
+        # (non-max-turns) subtype, usage reporting output_tokens 0, NO structured_output, and NO
+        # rate-limit signature (no 429 / banner / rate_limit_event). Distinct from ``task_failure``
+        # above (which reports no usage) — the adapter must RAISE the generic AGENT_NO_PROGRESS net.
+        _emit(
+            [
+                {"type": "system", "subtype": "init", "session_id": _SESSION_ID},
+                {
+                    "type": "result",
+                    "subtype": "error_during_execution",
+                    "is_error": True,
+                    "result": "",
+                    "session_id": _SESSION_ID,
+                    "usage": {"input_tokens": 8, "output_tokens": 0},
+                },
+            ]
+        )
+        return 1
 
     if scenario == "error_max_turns":
         # A clean run that exhausted its turn cap: a terminal result event with the CLI's own

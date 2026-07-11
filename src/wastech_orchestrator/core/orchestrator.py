@@ -1762,10 +1762,17 @@ class Orchestrator:
         except EvaluatorInfraError as exc:
             # An evaluator that could not *run* (infra/misconfig) must not discard an already-green
             # diff: degrade to manual (branch preserved, operator reviews/publishes), not failed.
+            # ``str(exc)`` already carries the real cause (e.g. ``agent_no_progress``); when the
+            # branch has no diff, say so plainly so the manual terminal never implies a change to
+            # review that does not exist (F7 — honest terminal).
             self._sync_counters_from_run_state(p, run_state)
+            reason = str(exc)
+            # EXPERIMENTAL(no-work-infra): empty-diff annotation on the degrade-to-manual reason.
+            if not read_final_diff(self._artifacts_root, p.task.id).strip():
+                reason = f"{reason} (no changes were produced to review)"
             return self._fail(
                 p,
-                str(exc),
+                reason,
                 status=Status.MANUAL_ACTION_REQUIRED,
                 node_id=run_state.current_node,
                 run_state=run_state,
@@ -1889,6 +1896,11 @@ class Orchestrator:
                 agents=self._config.agents,
                 task_id=p.task.id,
                 post_node=post_node,
+                # EXPERIMENTAL(no-work-infra): feeds the engine's no-effective-work stall guard — an
+                # opaque fingerprint of the working tree read from the last-written ``current.diff``
+                # (refreshed by every agent edit-node). The engine only compares it for equality
+                # across rework charges — stays domain-free. Drop this kwarg to disable the guard.
+                diff_fingerprint=lambda: read_final_diff(self._artifacts_root, p.task.id),
                 subtask_order=subtask,
                 region=region,
                 disabled_nodes=p.skip,

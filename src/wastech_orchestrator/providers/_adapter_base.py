@@ -37,6 +37,7 @@ from wastech_orchestrator.providers.artifacts import (
     write_result_artifact,
 )
 from wastech_orchestrator.providers.base import (
+    MAX_TURNS_SUBTYPE,
     AgentRunRequest,
     AgentRunResult,
     ErrorClass,
@@ -90,6 +91,25 @@ class ParsedEvents:
     # ``task_failure`` but a transient infra event: the finalize step RAISES ``RATE_LIMITED`` (so
     # the Router falls over / the orchestrator parks) instead of returning a quality failure.
     rate_limited: bool = False
+
+
+def _produced_no_work(parsed: ParsedEvents) -> bool:
+    """EXPERIMENTAL(no-work-infra) — trial behavior; grep the tag ``no-work-infra`` to revert as one
+    unit (see docs/backlog/no-work-agent-run-is-infra.md).
+
+    Conservative "the agent did no work at all" test on normalized fields only (no CLI syntax).
+
+    Fires only when a non-success terminal produced ZERO output tokens, carries no structured
+    output, and is not an ``error_max_turns`` stop (which IS work — a quality outcome). Absent usage
+    (or an absent ``output_tokens`` key) does NOT fire: a genuine quality ``task_failure`` must
+    still flow on, so the net stays deliberately narrow — a masked real failure is worse than a
+    missed no-work run. The caller gates this on ``not parsed.succeeded``.
+    """
+    if parsed.failure_subtype == MAX_TURNS_SUBTYPE:
+        return False
+    if parsed.structured_output:
+        return False
+    return (parsed.usage or {}).get("output_tokens") == 0
 
 
 def build_context_footer(request: AgentRunRequest) -> str:
@@ -419,6 +439,21 @@ class BaseCliProvider:
             # exhaustion, the orchestrator parks the task (resumable) instead of burning the queue /
             # a fix budget. Persist the failed-attempt artifact first, like the other raise paths.
             error = NormalizedError(ErrorClass.RATE_LIMITED, message_for(ErrorClass.RATE_LIMITED))
+            self._finalize_failure(paths, request, started_at, finished_at, proc, error)
+            raise ProviderError(error.error_class, error.message)
+
+        if not parsed.succeeded and _produced_no_work(parsed):
+            # EXPERIMENTAL(no-work-infra) — trial block; revert this whole `if` to fall back to the
+            # plain TASK_FAILURE return below if we drop the ADR.
+            # The GENERIC no-work net: a parseable terminal event that did NOTHING (zero output
+            # tokens, no structured output, not error_max_turns) is a no-progress INFRA failure,
+            # not a quality task_failure. RAISE ``AGENT_NO_PROGRESS`` (fallback-eligible) so the
+            # Router tries the other provider and, on exhaustion, the orchestrator fails the task —
+            # instead of feeding a dead run into the review/fix machinery. Runs AFTER the specific
+            # rate-limit signature above, so a recognized limit keeps its RATE_LIMITED (and park).
+            error = NormalizedError(
+                ErrorClass.AGENT_NO_PROGRESS, message_for(ErrorClass.AGENT_NO_PROGRESS)
+            )
             self._finalize_failure(paths, request, started_at, finished_at, proc, error)
             raise ProviderError(error.error_class, error.message)
 

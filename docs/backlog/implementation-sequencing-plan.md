@@ -35,17 +35,24 @@ This file is meant to be kept alive as the eight items land. **After finishing e
 
 ### Completed-ADR notes
 
-_(none yet — append one subsection per ADR as it lands)_
+#### 2 — no-work-agent-run-is-infra (implemented 2026-07-11)
+
+- **No schema bump** (the stall state is transient on the engine; N=2 is a constant).
+- **`_adapter_base` finalize seam**: a new generic block sits **after** the rate-limit block (`if not parsed.succeeded and parsed.rate_limited:`) and **before** `if parsed.succeeded:`, calling module-level `_produced_no_work(parsed)` (normalized fields only) and raising `ProviderError(AGENT_NO_PROGRESS)`. Any later ADR adding a signature keeps the "specific before generic" order — new specific signatures go **above** the no-work block.
+- **`providers/base.py`**: `ErrorClass.AGENT_NO_PROGRESS` added to `FALLBACK_ELIGIBLE` only (not `PARK_ELIGIBLE`/`TRANSIENT_RETRYABLE`). Message in `errors.py:_MESSAGES` (the `test_errors.py` all-members loop enforces it).
+- **`_charge_rework` region ([engine.py](../../src/wastech_orchestrator/core/flow/engine.py))** — **important for #3 (grant-cycles)**: #1 (rate-limit) added **no** code here (a parked `RATE_LIMITED` never reaches the charge point), so **#2 is the first actual code in this region**. The new shape: in `run()`, the rework branch now calls `self._check_stall(edge.loop)` **before** `self._charge_rework(edge)` and returns the first non-`None` `_Stuck`. `_check_stall` is a sibling method using transient per-loop state (`self._stall_fp`, `self._stall_streak`) fed by an injected `diff_fingerprint: DiffFingerprint | None` callable (threaded through `drive_flow`; `None` ⇒ inert), and `_reset_loops_at` now also clears that per-loop stall state on a forward edge. #3 (grant-cycles) must layer its fresh-budget logic **below** this stall check so a grant cannot bypass the no-effective-work guard.
+- **Terminals**: a no-work boundary raise → non-evaluator node `_fail` (FAILED), evaluator node degrades to `MANUAL_ACTION_REQUIRED` (unchanged) now with an empty-diff annotation on the reason; a fix-loop stall → the existing stuck → `MANUAL_ACTION_REQUIRED` path with `limit_name="no_file_change"`.
+- **Follow-up left open**: probe the **real** codex CLI's usage/`output_tokens` shape (the shared predicate degrades conservatively — no-fire → `task_failure` — if the real key differs).
 
 ## Status tracking
 
-| Order | ADR                                  | Status   |
-| ----- | ------------------------------------ | -------- |
-| 1     | reliable-rate-limit-handling         | proposed |
-| 2     | no-work-agent-run-is-infra           | proposed |
-| 3     | universal-resume-recovery            | proposed |
-| 4     | preserve-node-run-artifact-history   | proposed |
-| 5     | flow-validation-cli-command          | proposed |
-| 6     | packaged-delivery-only               | proposed |
-| 7     | memory-concepts-over-episodic-ledger | proposed |
-| 8     | agent-native-memory-opt-in           | proposed |
+| Order | ADR                                  | Status                   |
+| ----- | ------------------------------------ | ------------------------ |
+| 1     | reliable-rate-limit-handling         | proposed                 |
+| 2     | no-work-agent-run-is-infra           | implemented (2026-07-11) |
+| 3     | universal-resume-recovery            | proposed                 |
+| 4     | preserve-node-run-artifact-history   | proposed                 |
+| 5     | flow-validation-cli-command          | proposed                 |
+| 6     | packaged-delivery-only               | proposed                 |
+| 7     | memory-concepts-over-episodic-ledger | proposed                 |
+| 8     | agent-native-memory-opt-in           | proposed                 |

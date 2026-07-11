@@ -183,6 +183,27 @@ def test_session_limit_raises_rate_limited(
 
 
 @pytest.mark.parametrize("provider_name", PROVIDERS)
+def test_no_work_raises_agent_no_progress(
+    provider_name: str,
+    fake_cli: Callable[..., str],
+    integration_security: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # EXPERIMENTAL(no-work-infra) — remove with the feature.
+    # A parseable terminal event that did ZERO work (non-success, output_tokens 0, no structured
+    # output, not max_turns, no rate-limit signature) is the GENERIC no-work net: it must be RAISED
+    # as AGENT_NO_PROGRESS (so the Router falls over / the orchestrator fails it), NOT returned as a
+    # quality TASK_FAILURE. Both dialects classify identically off the normalized fields.
+    provider = _build(
+        provider_name, fake_cli("no_work", provider_name), integration_security, tmp_path
+    )
+    with pytest.raises(ProviderError) as exc:
+        provider.run(make_request())
+    assert exc.value.error_class is ErrorClass.AGENT_NO_PROGRESS
+
+
+@pytest.mark.parametrize("provider_name", PROVIDERS)
 def test_process_crashed(
     provider_name: str,
     fake_cli: Callable[..., str],

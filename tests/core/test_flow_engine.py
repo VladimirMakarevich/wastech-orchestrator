@@ -7,6 +7,7 @@ the schema dataclasses so each test crafts an exact graph shape.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from types import MappingProxyType
 
 import pytest
@@ -142,6 +143,7 @@ def _engine(
     *,
     facts: dict[str, bool] | None = None,
     agents: AgentsConfig | None = None,
+    diff_fingerprint: Callable[[], str] | None = None,  # EXPERIMENTAL(no-work-infra)
 ) -> FlowEngine:
     facts = facts or {}
     registry = dict.fromkeys(("agent", "evaluator", "checks", "hitl", "publish"), runner)
@@ -153,6 +155,7 @@ def _engine(
         facts=lambda fact: facts.get(fact, False),
         agents=agents or _agents(),
         task_id="task-1",
+        diff_fingerprint=diff_fingerprint,
     )
 
 
@@ -332,6 +335,57 @@ def test_engine_budget_exhaustion_goes_manual() -> None:
     assert result.stuck_loop == "test_fix"
     assert result.limit_name == "max_fix_cycles"
     assert recorder.failure_reports == [("t", "test_fix", "max_fix_cycles")]
+
+
+# EXPERIMENTAL(no-work-infra): the three stall-guard tests below + this helper — remove as a unit.
+def _fix_loop_snapshot() -> FlowSnapshot:
+    return _snapshot(
+        [_agent("s"), _checks("t"), _publish("done"), _agent("fix")],
+        [
+            Edge("s", "t"),
+            Edge("t", "done", outcome="pass"),
+            Edge("t", "fix", outcome="fail", loop="test_fix"),
+            Edge("fix", "t"),
+        ],
+        budgets={"test_fix": 99, FlowRunState.GLOBAL_FIX_KEY: 99},
+    )
+
+
+def test_engine_stall_guard_aborts_on_frozen_tree() -> None:
+    # A fix loop whose working tree never changes across consecutive cycles is aborted as a
+    # no-effective-work stall at N=2 — BEFORE the (much larger) fix budget could be exhausted.
+    runner = StubRunner({"t": ["fail", "fail", "fail", "fail"]})
+    recorder = RecordingRecorder()
+    result = _engine(
+        _fix_loop_snapshot(), runner, recorder, diff_fingerprint=lambda: "frozen"
+    ).run()
+    assert result.status is Status.MANUAL_ACTION_REQUIRED
+    assert result.stuck_loop == "test_fix"
+    assert result.limit_name == "no_file_change"
+    assert recorder.failure_reports == [("t", "test_fix", "no_file_change")]
+
+
+def test_engine_stall_guard_resets_when_tree_changes() -> None:
+    # A cycle that changes the tree resets the streak, so a productive loop is never mislabeled a
+    # stall — here it runs normally to convergence on the third check.
+    runner = StubRunner({"t": ["fail", "fail", "pass"]})
+    recorder = RecordingRecorder()
+    seq = iter(["d1", "d2", "d3", "d4"])
+    result = _engine(
+        _fix_loop_snapshot(), runner, recorder, diff_fingerprint=lambda: next(seq)
+    ).run()
+    assert result.status is Status.DONE
+    assert recorder.failure_reports == []
+
+
+def test_engine_stall_guard_inert_without_fingerprint() -> None:
+    # No fingerprint callable => the stall guard is off (opt-in): the same frozen loop falls through
+    # to normal budget accounting (max_fix_cycles), not the no_file_change abort.
+    runner = StubRunner({"t": ["fail", "fail", "fail"]})
+    recorder = RecordingRecorder()
+    result = _engine(_fix_loop_snapshot(), runner, recorder, agents=_agents(max_fix_cycles=2)).run()
+    assert result.status is Status.MANUAL_ACTION_REQUIRED
+    assert result.limit_name == "max_fix_cycles"
 
 
 def test_engine_global_cap_is_hard_stop() -> None:

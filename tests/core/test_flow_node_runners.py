@@ -718,6 +718,45 @@ def test_evaluator_node_infra_exhaustion_raises_evaluator_infra_error(tmp_path: 
         EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
 
 
+def test_evaluator_no_work_surfaces_infra_class_not_schema(tmp_path: Path) -> None:
+    # EXPERIMENTAL(no-work-infra) — remove with the feature.
+    # A no-work evaluator run now arrives as an EXHAUSTED route (result None) carrying the boundary
+    # AGENT_NO_PROGRESS class. The never-ran branch fires FIRST and re-surfaces it — a dead run is
+    # never mislabeled "schema not honored" (F3). This confirms there is no double-handling:
+    # the schema-not-honored path is reachable only when a run actually produced a result.
+    from wastech_orchestrator.core.flow.nodes.base import EvaluatorInfraError
+    from wastech_orchestrator.providers.base import ErrorClass, NormalizedError
+    from wastech_orchestrator.providers.errors import message_for
+
+    (tmp_path / "r.md").write_text("review", "utf-8")
+
+    class _ExhaustedRouter(FakeRouter):
+        def run_stage(self, request: Any, route: ResolvedRoute, *, snapshot: Any = None) -> Any:
+            self.requests.append(request)
+            return StageOutcome(
+                route=route,
+                result=None,
+                provider_used=None,
+                stage_attempts=2,
+                terminal_error=NormalizedError(
+                    ErrorClass.AGENT_NO_PROGRESS, message_for(ErrorClass.AGENT_NO_PROGRESS)
+                ),
+                attempts=(),
+            )
+
+    services = _services(
+        _ExhaustedRouter(None),
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    node = _evaluator("review")
+    with pytest.raises(EvaluatorInfraError) as exc:
+        EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert exc.value.error_class is ErrorClass.AGENT_NO_PROGRESS
+    assert "schema not honored" not in str(exc.value)
+
+
 def test_agent_workspace_write_writes_diff(tmp_path: Path) -> None:
     (tmp_path / "r.md").write_text("go", "utf-8")
     node = AgentNode(

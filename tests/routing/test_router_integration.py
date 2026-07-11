@@ -431,3 +431,57 @@ def test_session_limit_both_providers_terminal(
     assert outcome.terminal_error.error_class is ErrorClass.RATE_LIMITED
     # One attempt per provider — no tight same-provider retry for a rate limit.
     assert [a.provider for a in outcome.attempts] == [ProviderId.CLAUDE, ProviderId.CODEX]
+
+
+def test_no_work_falls_back(
+    config: OrchestratorConfig,
+    integration_security: SecurityConfig,
+    fake_cli: Callable[..., str],
+    make_request: Callable[..., AgentRunRequest],
+    tmp_path: Path,
+) -> None:
+    # EXPERIMENTAL(no-work-infra) — remove with the feature.
+    # A no-work run (raised AGENT_NO_PROGRESS, fallback-eligible) must make the Router fall over to
+    # the other provider — the same escape the review/fix machinery never gave it before.
+    claude = _build_provider(
+        "claude", fake_cli("no_work", "claude"), integration_security, tmp_path
+    )
+    codex = _build_provider("codex", fake_cli("success", "codex"), integration_security, tmp_path)
+    router = AgentRouter(config, {ProviderId.CLAUDE: claude, ProviderId.CODEX: codex})
+    route = router.resolve_route("implementation")
+
+    outcome = router.run_stage(
+        make_request(node_id="implementation", working_directory=str(tmp_path / "clone")), route
+    )
+
+    assert outcome.result is not None and outcome.result.status is RunStatus.SUCCEEDED
+    assert outcome.provider_used is ProviderId.CODEX
+    assert [a.provider for a in outcome.attempts] == [ProviderId.CLAUDE, ProviderId.CODEX]
+    assert outcome.attempts[0].error_class is ErrorClass.AGENT_NO_PROGRESS
+
+
+def test_no_work_both_providers_terminal(
+    config: OrchestratorConfig,
+    integration_security: SecurityConfig,
+    fake_cli: Callable[..., str],
+    make_request: Callable[..., AgentRunRequest],
+    tmp_path: Path,
+) -> None:
+    # EXPERIMENTAL(no-work-infra) — remove with the feature.
+    # Both providers do no work: the route exhausts and surfaces a terminal AGENT_NO_PROGRESS
+    # (result=None) — which the orchestrator turns into a _fail (not park; it is not park-eligible).
+    claude = _build_provider(
+        "claude", fake_cli("no_work", "claude"), integration_security, tmp_path
+    )
+    codex = _build_provider("codex", fake_cli("no_work", "codex"), integration_security, tmp_path)
+    router = AgentRouter(config, {ProviderId.CLAUDE: claude, ProviderId.CODEX: codex})
+    route = router.resolve_route("implementation")
+
+    outcome = router.run_stage(
+        make_request(node_id="implementation", working_directory=str(tmp_path / "clone")), route
+    )
+
+    assert outcome.result is None
+    assert outcome.terminal_error is not None
+    assert outcome.terminal_error.error_class is ErrorClass.AGENT_NO_PROGRESS
+    assert [a.provider for a in outcome.attempts] == [ProviderId.CLAUDE, ProviderId.CODEX]

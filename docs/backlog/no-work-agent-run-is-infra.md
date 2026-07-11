@@ -1,6 +1,10 @@
 # A no-work agent run is an infrastructure failure, not a task outcome
 
-Status: **proposed** (2026-07-10) Date: 2026-07-10 Owner: Vladimir Makarevich
+Status: **implemented** (2026-07-11) Date: 2026-07-10 Owner: Vladimir Makarevich
+
+Implemented 2026-07-11 (subsumes content-rework F3/F4/F7). New `ErrorClass.AGENT_NO_PROGRESS` (fallback-eligible, **not** park-eligible) raised at the `_adapter_base` finalize seam by a normalized-fields-only predicate `_produced_no_work` (zero `output_tokens`, no `structured_output`, not `error_max_turns`), ordered after the rate-limit signature; a transient-on-the-engine stall guard (`FlowEngine._check_stall`, `_STALL_NO_CHANGE_LIMIT = 2`) fed an opaque `diff_fingerprint` callable via the driver, aborting a frozen fix loop to the existing stuck → `MANUAL_ACTION_REQUIRED` path with `limit_name="no_file_change"`; and an empty-diff annotation on the evaluator-infra → manual reason. Two owner decisions locked: **boundary no-work fails** (not parks — the single queue slot must not hold a possibly-permanent dead run; recognized transient limits already park via `RATE_LIMITED`) and **the fix-stall terminal is manual** (reuse the stuck path, not a new infra raise — preserves partial work, matches budget-exhaustion). No schema bump. Evaluator (F3) needed no code change — the never-ran branch already fires before schema-not-honored; a confirming test was added.
+
+**Experimental / how to revert:** this behavior is a trial. Every code, test, and fixture site carries the grep tag **`EXPERIMENTAL(no-work-infra)`** — `rg "no-work-infra"` surfaces the whole change (the `AGENT_NO_PROGRESS` class + `FALLBACK_ELIGIBLE` membership + message, the `_produced_no_work` predicate and its raise block in `_adapter_base`, the engine stall guard `_check_stall`/`DiffFingerprint`/`_STALL_NO_CHANGE_LIMIT` and its driver/orchestrator wiring, the F7 empty-diff annotation, the `no_work` fake scenario, and the tests). It is designed to remove cleanly as one unit if we decide against it — note the one modified pre-existing test (`test_skip_fixing_routes_to_manual_on_failure`) whose assertion must be restored to `== max_fix_cycles` on revert.
 
 This ADR reframes the residual core findings from the content-rework post-mortem ([AUDIT-content-rework-run-2026-07-10.md](../../AUDIT-content-rework-run-2026-07-10.md): F3, F4, F7) into **one principle** instead of three node-local patches: a returned `task_failure` must mean **only** "the agent did real work but the result was unsatisfactory" (a reviewer's rejection, `max_turns`, a non-empty refusal); an agent run that **did no work at all** is an infrastructure failure and must be **raised at the single provider→core boundary**, so the flow never routes a dead provider through the review/fix machinery. The rate-limit ADR ([reliable-rate-limit-handling.md](reliable-rate-limit-handling.md)) already makes this move for the sharpest signal (a subscription limit); this ADR generalizes it to _any_ no-work run and, in doing so, subsumes the previous F3 patch and narrows F4 to a small core-side guard.
 
@@ -41,17 +45,17 @@ Two smaller pieces complete it. **Core-side stall guard (the narrowed F4):** in 
 
 We do this because a single misclassification at the boundary is what turned one dead-provider event into a cascade of mislabeled, budget-burning, misleadingly-terminal tasks; fixing the classification once — rather than teaching each node to recognize a dead agent — is the difference between a root fix and three symptom patches. The cost is a conservative test on the normalized result plus one core-side counter; the risk it must not incur is reclassifying a genuine quality failure as infra, which the zero-output guard is designed to prevent.
 
-## Open questions
+## Open questions (resolved at implementation, 2026-07-11)
 
-`ErrorClass` choice: a new `AGENT_NO_PROGRESS` (distinct, self-documenting) vs. reusing `INVALID_OUTPUT` (which today means "no terminal event at all" — a terminal-but-no-work result is arguably a different thing). Whichever, it must be `FALLBACK_ELIGIBLE`.
+`ErrorClass` choice → **new `AGENT_NO_PROGRESS`** (distinct, self-documenting), in `FALLBACK_ELIGIBLE` only. Deliberately NOT `PARK_ELIGIBLE` (owner decision): the queue is single-slot, so a possibly-permanent no-work must fail rather than hold the slot for a park window — the recognized transient limit already parks via `RATE_LIMITED`. This is the sibling of `INVALID_OUTPUT` ("no terminal event at all") — here a terminal event arrived but carried nothing.
 
-Same-provider retry: should a no-work raise fall back immediately, or retry the same provider once first? Leaning immediate fallback with no same-provider retry (a same-provider retry of a dead provider just repeats).
+Same-provider retry → **immediate fallback, no same-provider retry** (it is not in `TRANSIENT_RETRYABLE`): re-running a dead provider just repeats.
 
-Test precision: is "zero output tokens + no structured output + not `max_turns`" the right conservative predicate, or should it also require `is_error`/non-zero exit? Too loose masks a real refusal as infra; too strict misses a genuine no-work run — the fixture matrix should pin both edges.
+Test precision → predicate is **`not succeeded` + explicit `output_tokens == 0` + no `structured_output` + not `error_max_turns`** (`_produced_no_work`). It stays narrow: absent usage / absent `output_tokens` key does NOT fire (a genuine quality `task_failure` must still flow on). Verified against the fakes — `task_failure` (no usage / structured `output`), `error_max_turns` (subtype), and `session_limit` (rate-limit block first) are all left untouched.
 
-F4 residual necessity: once no-output is raised at the boundary, is the "no file change for N cycles" guard still worth it, or vanishingly rare? It covers the "agent produced tokens but no edit" stall the boundary rule cannot catch — likely keep, but confirm it earns its keep.
+F4 residual necessity → **kept**. The boundary catches "zero output tokens"; the core stall guard catches the distinct "agent emits tokens but never edits" case (a frozen working tree across N=2 consecutive fixing cycles), which the boundary cannot observe. Terminal is manual (owner decision), not the infra raise — it preserves partial work and matches today's budget-exhaustion terminal.
 
-Ordering at the shared seam: confirm the generic no-work test runs **after** the rate-limit ADR's specific signatures, so a limit keeps its precise class, message, and reset-time handling.
+Ordering at the shared seam → **confirmed**: the generic no-work block runs after the rate-limit block in `_adapter_base.run()` finalize, so a recognized limit keeps its precise `RATE_LIMITED` class and park.
 
 ## Implementation notes
 

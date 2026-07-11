@@ -21,6 +21,7 @@ from types import MappingProxyType
 from wastech_orchestrator.config.schema import AgentsConfig
 from wastech_orchestrator.core.flow.engine import (
     _REWORK_OUTCOMES,
+    DiffFingerprint,
     EngineInternalError,
     FactResolver,
     FlowEngine,
@@ -136,6 +137,8 @@ def drive_flow(
     task_id: str,
     subtask_order: int | None = None,
     post_node: PostNodeHook | None = None,
+    # EXPERIMENTAL(no-work-infra): feeds the engine's no-effective-work stall guard; None => inert.
+    diff_fingerprint: DiffFingerprint | None = None,
     region: frozenset[str] | None = None,
     disabled_nodes: frozenset[str] = frozenset(),
     node_overrides: Mapping[str, Mapping[str, object]] = MappingProxyType({}),
@@ -158,6 +161,7 @@ def drive_flow(
         task_id=task_id,
         subtask_order=subtask_order,
         post_node=post_node,
+        diff_fingerprint=diff_fingerprint,
         region=region,
         disabled_nodes=disabled_nodes,
         node_overrides=node_overrides,
