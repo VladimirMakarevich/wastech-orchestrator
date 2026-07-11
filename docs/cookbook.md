@@ -324,7 +324,7 @@ A node's declared `provider`/`model`/`reasoning` are the **defaults**; a **task*
 
 ## 7a. Customize a Node's Prompt
 
-To add repository-specific engineering rules or a review rubric to a stage without editing Python, edit that node's **`role_file`** (see [configuration.md](configuration.md#prompt-templates-no-longer-a-config-block)). `install` delivers the built-in flows + their role files under `.worc/flows/` (each flow's prompts in its own `<task_type>/` subdir), and those copies override the packaged built-ins, so edit the delivered role file (a custom operator flow likewise keeps its role files under its own `.worc/flows/<task_type>/` subdir). The role file's content **is** the prompt template — edit it and the change takes effect on the next run.
+To add repository-specific engineering rules or a review rubric to a stage without editing Python, edit that node's **`role_file`** (see [configuration.md](configuration.md#prompt-templates-no-longer-a-config-block)). `install` delivers the built-in flows + their role files under `.worc/flows/` (each flow's prompts in its own `<task_type>/` subdir), and `.worc/flows/` is the only copy the orchestrator reads, so edit the delivered role file (a custom operator flow likewise keeps its role files under its own `.worc/flows/<task_type>/` subdir). The role file's content **is** the prompt template — edit it and the change takes effect on the next run.
 
 For example, a review node's role file replaced with a security rubric:
 

@@ -17,10 +17,11 @@ from typing import Any
 
 import pytest
 
+from tests.conftest import BUILTIN_FLOWS_DIR
 from wastech_orchestrator import cli
 from wastech_orchestrator.config.loader import load_config
 from wastech_orchestrator.config.schema import AuditBranch
-from wastech_orchestrator.core.flow.registry import _PACKAGED_DIR, FlowRegistry
+from wastech_orchestrator.core.flow.registry import FlowRegistry
 from wastech_orchestrator.core.flow.tools_registry import ToolRegistry
 from wastech_orchestrator.observability import logging as obslog
 from wastech_orchestrator.providers.base import ProviderId
@@ -256,7 +257,7 @@ def test_install_delivers_config_example_reference(
     _present(monkeypatch, "codex")
     assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
     example = git_repo.clone / ".worc" / "config.example.yaml"
-    packaged = _PACKAGED_DIR.parent / "config.example.yaml"
+    packaged = BUILTIN_FLOWS_DIR.parent / "config.example.yaml"
     # The commented reference lands beside the generated executable config.yaml, byte-for-byte.
     assert example.read_bytes() == packaged.read_bytes()
     assert (git_repo.clone / ".worc" / "config.yaml").is_file()  # the executable one is separate
@@ -284,7 +285,7 @@ def test_install_delivers_builtin_flows_and_node_prompts(
         assert (flows / rel).is_file()
     # Delivered byte-for-byte from the packaged source (not regenerated or rewritten).
     assert (flows / "implementation.yaml").read_bytes() == (
-        _PACKAGED_DIR / "implementation.yaml"
+        BUILTIN_FLOWS_DIR / "implementation.yaml"
     ).read_bytes()
     # And the copies are *active*: pointed at .worc/flows/, the registry resolves every built-in
     # (operator flows shadow the packaged ones), proving the delivered files validate and run.
@@ -317,7 +318,7 @@ def test_install_delivers_packaged_tools(git_repo: Any, monkeypatch: pytest.Monk
     _present(monkeypatch, "codex")
     assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
     tools = git_repo.clone / ".worc" / "tools"
-    packaged_tools = _PACKAGED_DIR.parent / "tools"
+    packaged_tools = BUILTIN_FLOWS_DIR.parent / "tools"
     # The prose-gate executable + its Windows launcher are delivered, byte-for-byte from source.
     for name in ("check_journey", "check_journey.cmd"):
         assert (tools / name).read_bytes() == (packaged_tools / name).read_bytes()

@@ -9,10 +9,12 @@ that names an unregistered tool is fatal *before* a task starts, never mid-run.
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 from pathlib import Path
 
 import pytest
+from tests.conftest import BUILTIN_FLOWS_DIR
 
 from wastech_orchestrator.config.loader import loads_config
 from wastech_orchestrator.config.schema import OrchestratorConfig
@@ -257,7 +259,9 @@ def test_packaged_content_flows_require_delivered_check_journey(tmp_path: Path) 
     # by `resolve` (and on demand by `worc validate-flow` for operator copies).
     worc = tmp_path / ".worc"
     flows = worc / "flows"
-    flows.mkdir(parents=True)
+    # Deliver the built-in flows into .worc/flows/ as `worc install` would (the registry resolves
+    # only from there now); the content flows carry the `tool: check_journey` node under test.
+    shutil.copytree(BUILTIN_FLOWS_DIR, flows)
     config = _config(tmp_path)
     content = ("content_chapter", "content_book", "content_translate")
 

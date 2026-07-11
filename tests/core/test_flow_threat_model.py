@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from tests.conftest import BUILTIN_FLOWS_DIR
 
 from wastech_orchestrator.config.loader import loads_config
 from wastech_orchestrator.config.schema import OrchestratorConfig
@@ -389,14 +390,16 @@ def test_packaged_implementation_passes_config_aware(tmp_path: Path) -> None:
     # The registry runs validate_flow + validate_flow_against_config on resolve; a sane config that
     # allows the flow's providers, reaches its ceiling, and enables PRs must pass.
     config = _config(tmp_path)
-    snap = FlowRegistry(config=config).resolve("implementation")
+    registry = FlowRegistry(operator_flows_dir=BUILTIN_FLOWS_DIR, config=config)
+    snap = registry.resolve("implementation")
     assert snap.doc.task_type == "implementation"
 
 
 def test_packaged_security_audit_resolves_config_aware(tmp_path: Path) -> None:
     # A non-implementation packaged flow also passes the config-aware layer under a sane config.
     config = _config(tmp_path)
-    snap = FlowRegistry(config=config).resolve("security_audit")
+    registry = FlowRegistry(operator_flows_dir=BUILTIN_FLOWS_DIR, config=config)
+    snap = registry.resolve("security_audit")
     assert snap.doc.publishing.value == "none"
 
 

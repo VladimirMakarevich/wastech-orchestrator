@@ -298,11 +298,14 @@ def _build(
     clock: Callable[[], str] | None = None,
     is_cancelled: Callable[[], bool] | None = None,
 ) -> tuple[Orchestrator, StateStore, Ledger, Path]:
+    from tests.conftest import seed_builtin_flows
+
     from wastech_orchestrator.checks.resolver import CheckResolver
     from wastech_orchestrator.routing.router import AgentRouter
 
     art = tmp_path / "art"
     config = make_git_config(git_repo.clone, checks=["pytest"], **(config_kwargs or {}))
+    seed_builtin_flows(git_repo.clone)  # deliver the built-in flows as `worc install` would
     store = StateStore.open(art / "state.db")
     ledger = Ledger(art / "logs")
     # A no-op sleep so the Router's transient backoff never actually waits in tests.

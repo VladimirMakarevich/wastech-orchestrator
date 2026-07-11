@@ -11,7 +11,7 @@ A build-order plan for the eight currently-proposed backlog ADRs, chosen to avoi
 3. [universal-resume-recovery](universal-resume-recovery.md) — the ADR states automatic infra recovery is "owned by the rate-limit ADR and assumed here". Its grant-cycles / WIP-tolerance controls touch `_charge_rework` and the park path and must sit on top of correct classification + guards. Phase 0 (fresh fix budget + WIP tolerance) is enough to close the p6-04 catch-22.
 4. [preserve-node-run-artifact-history](preserve-node-run-artifact-history.md) — largely standalone (its own writers in `artifacts.py`, `observability.py`, `postprocess.py`, `checks.py`, `tool.py`); the only overlap is `evaluator.py` in a different region than #2. Placed right after the infra group so better per-run history helps debug exactly the failures that group classifies.
 5. [flow-validation-cli-command](flow-validation-cli-command.md) — small, low-risk: removes flow validation from preflight (kills the false `NOT ready` on mdlint) and adds `worc validate-flow` plus an operator-only registry seam. First of the two registry ADRs.
-6. [packaged-delivery-only](packaged-delivery-only.md) — the heavier architectural change to the same `registry.py`. Easier after #5: preflight no longer walks packaged flows and #5's operator-only seam becomes automatic, so #6 just deletes the now-redundant runtime fallback.
+6. [packaged-delivery-only](archive/done/packaged-delivery-only.md) — the heavier architectural change to the same `registry.py`. Easier after #5: preflight no longer walks packaged flows and #5's operator-only seam becomes automatic, so #6 just deletes the now-redundant runtime fallback. **Implemented 2026-07-11.**
 7. [memory-concepts-over-episodic-ledger](memory-concepts-over-episodic-ledger.md) — separate domain (`memory/`, supervisor, episode-write); independent of #1–#6. Substantial refactor, done before the small #8 so the memory hub is already in its V2 shape.
 8. [agent-native-memory-opt-in](agent-native-memory-opt-in.md) — smallest and most exploratory (default-off flag gating the F37 deny in `providers/claude.py`); nothing depends on it and its doc cross-link lands cleanly on the already-updated memory hub.
 
@@ -53,6 +53,6 @@ This file is meant to be kept alive as the eight items land. **After finishing e
 | 3     | universal-resume-recovery            | proposed                 |
 | 4     | preserve-node-run-artifact-history   | proposed                 |
 | 5     | flow-validation-cli-command          | proposed                 |
-| 6     | packaged-delivery-only               | proposed                 |
+| 6     | packaged-delivery-only               | implemented (2026-07-11) |
 | 7     | memory-concepts-over-episodic-ledger | proposed                 |
 | 8     | agent-native-memory-opt-in           | proposed                 |

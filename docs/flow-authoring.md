@@ -6,10 +6,9 @@ If you only want to change _what a step says_ (not the graph), you do not need a
 
 ## Where flows live
 
-Flows resolve in two layers, **operator-first**:
+Flows resolve from **one place**: the operator's `<repo>/.worc/flows/<task_type>.yaml`. Drop a YAML file here to add a new `task_type` or to replace a built-in of the same name. Each flow **owns its prompts** in a sibling folder named after the `task_type`: `.worc/flows/<task_type>/*.md`. So `role_file` paths in the YAML are written relative to `.worc/flows/` and point into that folder (e.g. `role_file: my_flow/implement.md`).
 
-1. **Operator flows** — `<repo>/.worc/flows/<task_type>.yaml`. Drop a YAML file here to add a new `task_type` or to **override** a packaged flow of the same name. Each flow **owns its prompts** in a sibling folder named after the `task_type`: `.worc/flows/<task_type>/*.md`. So `role_file` paths in the YAML are written relative to `.worc/flows/` and point into that folder (e.g. `role_file: my_flow/implement.md`).
-2. **Packaged built-ins** — shipped inside the package and copied into `.worc/flows/` by `install` as editable, active copies. The operator layer shadows the packaged layer, so the seeded copies of `implementation`/`deep_research`/`security_audit` are already operator flows you can edit.
+The built-ins ship inside the package under `packaged/flows/`, but that tree is **delivery-only**: `install` copies it into `.worc/flows/` as editable, active copies, and the orchestrator never reads the packaged tree at run time. So the seeded copies of `implementation`/`deep_research`/`security_audit` are already your operator flows to edit — and a `task_type` with no file in `.worc/flows/` is a hard "flow not found" (run `install` to deliver the built-ins), not a silent fall-back to a bundled copy. What you see in `.worc/flows/` is exactly what runs.
 
 The dispatch file stays flat (`.worc/flows/<task_type>.yaml`) so the registry finds it by name; only the prompts live in the per-flow subfolder. The shared supervisor prompt is the one exception — it stays at `.worc/flows/roles/supervisor.md` because the supervisor is a constant layer above _every_ flow, not a node of any one flow.
 

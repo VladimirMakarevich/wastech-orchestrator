@@ -12,6 +12,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from tests.conftest import BUILTIN_FLOWS_DIR
+
 from wastech_orchestrator.config.schema import AgentsConfig, DecompositionConfig
 from wastech_orchestrator.core.flow.engine import FlowEngine, NodeContext, NodeOutcome, NodeResult
 from wastech_orchestrator.core.flow.nodes import NodeInputs, NodeServices
@@ -26,7 +28,9 @@ from wastech_orchestrator.providers.base import AgentRunResult, ProviderId, RunS
 from wastech_orchestrator.providers.process import ProcessResult
 from wastech_orchestrator.routing.router import ResolvedRoute, RouteSource, StageOutcome
 
-_REGISTRY = FlowRegistry()
+# Built-ins resolve only from a delivered `.worc/flows/` (no packaged fallback); point the registry
+# at the packaged flows tree, which is what `worc install` copies there.
+_REGISTRY = FlowRegistry(operator_flows_dir=BUILTIN_FLOWS_DIR)
 SECURITY_AUDIT = _REGISTRY.resolve("security_audit")
 
 

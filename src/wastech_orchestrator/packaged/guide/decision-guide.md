@@ -19,7 +19,7 @@ A live task belongs in the repo's own `tasks/pending/` directory (committed and 
 task_type: deep_research # or: security_audit, implementation (default), or a custom operator flow
 ```
 
-Built-in flows: `implementation` (default coding pipeline), `deep_research`, `security_audit`. An operator can add more by dropping a `<task_type>.yaml` in the repo's `<repo>/.worc/flows/` directory (the file's own `flow.task_type` must match its name); an operator flow there takes priority over a built-in of the same name. A `task_type` that resolves to no flow fails the task at flow resolution, before any branch is created.
+Built-in flows: `implementation` (default coding pipeline), `deep_research`, `security_audit` — `install` seeds editable copies into `<repo>/.worc/flows/`. An operator can add more by dropping a `<task_type>.yaml` there (the file's own `flow.task_type` must match its name), or replace a built-in by editing its seeded copy. `.worc/flows/` is the only place flows resolve from, so a `task_type` with no file there fails the task at flow resolution, before any branch is created.
 
 The task only **names** the flow — it never edits the graph, its nodes, or their providers/models. Picking a different built-in is the one task-side choice. To change _which_ stages run for a single task, the only per-task knob is disabling a node (see below); to reshape the pipeline or retune a stage's provider/model, edit the flow YAML under `.worc/flows/` (an operator/flow-authoring change, not a task field).
 

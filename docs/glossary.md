@@ -146,7 +146,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 ## Flow vocabulary
 
 - **Flow** - A validated YAML graph of typed nodes selected by `task_type`. The pipeline is data, not a hardcoded stage loop.
-- **Packaged flow** - A built-in flow shipped with the package.
+- **Packaged flow** - A built-in flow shipped with the package under `packaged/flows/`. Delivery-only: `install` copies it into `.worc/flows/`, and the orchestrator resolves flows only from there — never from the packaged tree at run time.
 - **Operator flow** - A repository-local override under `.worc/flows/<task_type>.yaml`.
 - **`implementation`** - The default coding flow that produces a reviewed Pull Request.
 - **`deep_research`** - The research flow that produces a documentation-oriented output.
