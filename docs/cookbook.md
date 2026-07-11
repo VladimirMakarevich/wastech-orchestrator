@@ -202,9 +202,11 @@ A terminal task is frozen — `watch`/`resume` never pick it up again. `rerun` r
 worc rerun task-001 --dry-run        # show the plan; write nothing
 worc rerun task-001 --yes            # fresh attempt from the current base_branch
 worc rerun task-001 --continue --yes # infra failure you fixed: reuse the branch, re-enter at the failed stage
+worc rerun task-001 --continue --reset-fix-budget --yes   # fix loop exhausted: grant a fresh fix budget
+worc rerun task-001 --continue --from implementation --yes # re-enter at a chosen node
 ```
 
-Use **fresh** (default) for a quality failure or a clean redo (the branch is reset to base and prior `.worc/logs/<id>/` is archived to `.worc/logs/<id>/attempt-<N>/`); use **`--continue`** when you fixed an environment/infra problem by hand (a missing tool, `PATH`, a dropped Telegram approval) and want to pick up where it stopped. Each re-attempt appends a ledger record linked to the prior one. See [operations.md](operations.md) "Re-attempting a terminal task" for the full rules.
+Use **fresh** (default) for a quality failure or a clean redo (the branch is reset to base and prior `.worc/logs/<id>/` is archived to `.worc/logs/<id>/attempt-<N>/`); use **`--continue`** when you fixed an environment/infra problem by hand (a missing tool, `PATH`, a dropped Telegram approval) and want to pick up where it stopped — on `--continue` the task's own uncommitted work is tolerated once it reached review/fixing/publish. Add **`--reset-fix-budget`** when the fix loop was exhausted (`max_fix_cycles`) — it resets the consecutive fix counters while keeping the global `max_total_fix_iterations` backstop, so termination stays bounded. Add **`--from <node>`** to re-enter at a chosen node of the checkpoint's flow. Each re-attempt appends a ledger record linked to the prior one. See [operations.md](operations.md) "Re-attempting a terminal task" for the full rules.
 
 ### Record a task you handled by hand (`finalize`)
 

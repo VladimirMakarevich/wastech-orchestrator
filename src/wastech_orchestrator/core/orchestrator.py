@@ -208,6 +208,9 @@ class RerunPlan:
     dirty_paths: tuple[str, ...] = ()
     has_remote_branch: bool = False
     pr_url: str | None = None
+    reset_fix_budget: bool = False  # --reset-fix-budget: grant a fresh consecutive fix budget
+    from_node: str | None = None  # --from <node>: re-enter here instead of the checkpoint
+    notes: tuple[str, ...] = ()  # non-fatal advisories surfaced in --dry-run / the confirm prompt
     refusals: tuple[str, ...] = ()
 
 
@@ -876,15 +879,19 @@ class Orchestrator:
             return None, tuple(sorted(matches))
         return None, ()
 
-    def _checkpoint_node_publishes(self, task_id: str, node_id: str) -> bool:
-        """Whether the flow checkpoint ``node_id`` is a publish node (F14).
+    def _worktree_is_task_output(self, task_id: str) -> bool:
+        """Whether a dirty working tree is the task's own uncommitted work rather than foreign.
 
-        Reads it off the recorded ``node_runs`` (``node_kind == "publish"``) rather than re-loading
-        the flow: the publish node that failed recorded exactly that row, so this needs no
-        ``task_type`` and stays correct even if the flow file drifted since the interrupted run.
+        True once the task has reached a stage that operates on *produced* code — any
+        ``evaluator`` / ``checks`` / ``publish`` node has run — which means implementation already
+        wrote to the tree, so the dirty state is the legitimate input to a ``--continue`` re-entry
+        at review / fixing / publish. Before that (planning / refinement) a dirty tree is almost
+        certainly foreign and stays refused. Read off the recorded ``node_runs`` (``node_kind``)
+        rather than re-loading the flow, so it needs no ``task_type`` and stays correct even if the
+        flow file drifted since the interrupted run.
         """
         return any(
-            r.node_id == node_id and r.node_kind == "publish"
+            r.node_kind in ("evaluator", "checks", "publish")
             for r in self._store.get_node_runs(task_id)
         )
 
@@ -894,6 +901,8 @@ class Orchestrator:
         *,
         continue_mode: bool = False,
         force_reset_remote: bool = False,
+        reset_fix_budget: bool = False,
+        from_node: str | None = None,
     ) -> RerunPlan:
         """Gather the facts + refusal reasons for a ``rerun`` (read-only; mutates nothing)."""
         row = self._store.get_task(task_id)
@@ -928,11 +937,15 @@ class Orchestrator:
         interrupted_node: str | None = None
         has_remote = False
         pr_url: str | None = None
-        resume_in_publish = False
+        notes: list[str] = []
+        current_node: str | None = None
+        counters_json: str | None = None
+        fingerprint: str | None = None
+        resume_tolerates_wip = False
         if continue_mode:
             # --continue re-enters at the flow checkpoint (current_node); the node id is surfaced
             # in the dry-run view.
-            current_node, _counters, _fingerprint = self._store.get_flow_checkpoint(task_id)
+            current_node, counters_json, fingerprint = self._store.get_flow_checkpoint(task_id)
             interrupted_node = current_node
             if not current_node:
                 refusals.append(
@@ -940,19 +953,42 @@ class Orchestrator:
                     "(without --continue)"
                 )
             else:
-                resume_in_publish = self._checkpoint_node_publishes(task_id, current_node)
-        # F14: a publish node's own ``commit_code`` failing leaves the agent's code uncommitted in
-        # the working tree — that dirty state is the *expected* input to a ``--continue`` that
-        # re-enters publish (commit_code is idempotent and docommits it), so it must not be rejected
-        # as "unaccounted". Outside the publish region (or a fresh rerun) a dirty tree is still
-        # unexpected work and is refused as before. Artifact dirs (`.worc/`, tasks/) stay excluded
-        # by ``unaccounted_dirty_paths`` in every mode.
+                resume_tolerates_wip = self._worktree_is_task_output(task_id)
+        # F14 + capability #3: a fresh rerun resets the branch to base, so a dirty tree would be
+        # destroyed and is always refused. On ``--continue`` the branch is reused (never reset) and
+        # the task's own uncommitted work is the legitimate input to a review / fixing / publish
+        # re-entry — tolerated once ``resume_tolerates_wip`` holds (the task reached a
+        # code-operating stage). Before that a dirty tree is still unexpected and refused. Artifact
+        # dirs (`.worc/`, tasks/) stay excluded by ``unaccounted_dirty_paths`` in every mode.
         dirty = self._git.unaccounted_dirty_paths()
-        if dirty and not resume_in_publish:
+        if dirty and not resume_tolerates_wip:
             refusals.append(
                 f"the working tree has unaccounted changes ({', '.join(sorted(dirty))}); "
                 "resolve them before rerun"
             )
+        elif dirty:
+            # Known limitation: commit_code stages ALL non-artifact dirty paths, so any foreign WIP
+            # on the branch is swept into the task's commit (own-vs-foreign discrimination is a
+            # deferred follow-up). Warn the operator rather than silently committing it.
+            notes.append(
+                f"uncommitted changes ({', '.join(sorted(dirty))}) will be committed into the task"
+            )
+        # --reset-fix-budget and --from are continue-only controls.
+        if reset_fix_budget and not continue_mode:
+            refusals.append("--reset-fix-budget requires --continue")
+        if from_node is not None and not continue_mode:
+            refusals.append("--from requires --continue")
+        if continue_mode and current_node:
+            if reset_fix_budget:
+                counters = json.loads(counters_json) if counters_json else {}
+                global_fixes = counters.get(FlowRunState.GLOBAL_FIX_KEY, 0)
+                if self._config.agents.max_total_fix_iterations - global_fixes <= 0:
+                    notes.append(
+                        "the global max_total_fix_iterations backstop is already exhausted; "
+                        "--reset-fix-budget will run one more fix cycle, then stop again"
+                    )
+            if from_node is not None:
+                refusals.extend(self._from_node_refusals(task_id, from_node, fingerprint))
         if not continue_mode:
             # A fresh rerun resets the branch to base (delete + recreate) — safe only on a branch
             # the orchestrator owns (``new`` mode). In ``existing``/``current`` the branch is the
@@ -985,6 +1021,9 @@ class Orchestrator:
             dirty_paths=tuple(sorted(dirty)),
             has_remote_branch=has_remote,
             pr_url=pr_url,
+            reset_fix_budget=reset_fix_budget,
+            from_node=from_node,
+            notes=tuple(notes),
             refusals=tuple(refusals),
         )
 
@@ -1024,36 +1063,106 @@ class Orchestrator:
         self._log(task_id).info("rerun: fresh attempt", extra={"attempt": prior + 1})
         return self.run_task(source_path)
 
-    def continue_task(self, task_id: str) -> PipelineResult:
+    def continue_task(
+        self,
+        task_id: str,
+        *,
+        reset_fix_budget: bool = False,
+        from_node: str | None = None,
+    ) -> PipelineResult:
         """Fix-and-continue: revive a terminal task at the stage it failed and resume it.
 
         Reuses the existing branch and all prior work; only the terminal markers are cleared and
         any un-answered HITL prompt is reset so the re-entered stage asks fresh. The whole pipeline
         re-run is delegated to the resume engine (``resume`` → ``_resume_task``), which
-        idempotently re-enters at the recovered stage.
+        idempotently re-enters at the recovered stage. Two optional operator controls patch the
+        checkpoint first: ``reset_fix_budget`` grants a fresh consecutive fix budget (the global
+        backstop is untouched) and ``from_node`` re-enters at a chosen node instead of the recorded
+        one.
         """
         row = self._store.get_task(task_id)
         if row is None:
             raise PipelineFailed(f"unknown task id '{task_id}'")
-        current_node, _counters, _fingerprint = self._store.get_flow_checkpoint(task_id)
+        current_node, counters_json, fingerprint = self._store.get_flow_checkpoint(task_id)
         if not current_node:
             raise PipelineFailed(
                 f"cannot continue '{task_id}': no recoverable stage recorded; use a fresh rerun"
             )
         self._rerun_attempt[task_id] = _ledger_attempt_count(self._ledger, task_id) + 1
+        self._apply_continue_controls(
+            task_id,
+            current_node=current_node,
+            counters_json=counters_json,
+            fingerprint=fingerprint,
+            reset_fix_budget=reset_fix_budget,
+            from_node=from_node,
+        )
         reset = reset_pending_interactions(self._artifacts_root, task_id)
         if reset:
             self._log(task_id).info(
                 "rerun --continue: reset pending HITL", extra={"reset": len(reset)}
             )
         # Revive the terminal task as active; the resume engine re-enters at the persisted
-        # ``current_node`` (the flow checkpoint), reusing the branch + prior work.
+        # ``current_node`` (the flow checkpoint, possibly overridden above), reusing branch + work.
         self._store.revive_task_for_continue(task_id, Status.RUNNING)
-        self._log(task_id).info("rerun --continue: revived", extra={"node": current_node})
+        self._log(task_id).info(
+            "rerun --continue: revived", extra={"node": from_node or current_node}
+        )
         result = self.resume()
         if result is None:
             raise PipelineFailed(f"continue '{task_id}' did not resume (no active task found)")
         return result
+
+    def _apply_continue_controls(
+        self,
+        task_id: str,
+        *,
+        current_node: str,
+        counters_json: str | None,
+        fingerprint: str | None,
+        reset_fix_budget: bool,
+        from_node: str | None,
+    ) -> None:
+        """Patch the persisted flow checkpoint with the operator's ``--reset-fix-budget`` /
+        ``--from`` controls before ``resume()`` hydrates it — the one-shot seam.
+
+        Deliberately here and not in ``hydrate``/``_resume_via_engine``: that path is shared by
+        ordinary crash-recovery, so applying a budget grant there would re-grant on every restart
+        and escape ``max_fix_cycles``. Here it is applied exactly once per ``--continue``. A budget
+        grant preserves the global ``fix_iterations`` / ``total_fix:*`` counters, so the
+        ``max_total_fix_iterations`` backstop is never weakened, even across repeated grants.
+        """
+        if not reset_fix_budget and from_node is None:
+            return
+        run_state = FlowRunState(
+            flow_fingerprint=fingerprint or "",
+            current_node=from_node or current_node,
+            loop_counters=json.loads(counters_json) if counters_json else {},
+        )
+        if reset_fix_budget:
+            run_state.reset_consecutive_fix_budget()
+        self._store.save_flow_checkpoint(
+            task_id,
+            current_node=run_state.current_node,
+            counters_json=json.dumps(run_state.loop_counters, sort_keys=True),
+            flow_fingerprint=run_state.flow_fingerprint,
+            fix_iterations=run_state.fix_iterations,
+        )
+        if reset_fix_budget:
+            # Keep the operator-facing scalar mirror consistent right away (the authoritative run
+            # state re-syncs it at the terminal transition too).
+            counters = self._store.get_counters(task_id)
+            self._store.save_counters(
+                task_id, replace(counters, test_fix_cycles=0, review_fix_cycles=0)
+            )
+        self._log(task_id).info(
+            "rerun --continue: applied controls",
+            extra={
+                "reset_fix_budget": reset_fix_budget,
+                "from_node": from_node,
+                "fix_iterations": run_state.fix_iterations,
+            },
+        )
 
     # --- finalize (operator records + tidies a task they handled out-of-band) -------------
 
@@ -1963,7 +2072,7 @@ class Orchestrator:
                 return sub
             self._commit_subtask(p, unit)
             if index != len(units) - 1:
-                run_state.reset_for_next_subtask()  # fresh per-loop budgets; global accumulates
+                run_state.reset_consecutive_fix_budget()  # fresh per-loop budgets; global accrues
                 self._store.update_task(p.task.id, active_subtask=unit.order + 1)
         inputs.subtask_spec_path = None  # post-region phase is whole-task, not subtask-scoped
         inputs.predecessor_context_path = None
@@ -2959,6 +3068,51 @@ class Orchestrator:
         except (json.JSONDecodeError, OSError, KeyError, ValueError):
             return self._config.repo.branch_mode
         return self._branch_mode(task)
+
+    def _persisted_flow_snapshot(self, task_id: str) -> FlowSnapshot | None:
+        """Resolve the task's flow from its persisted manifest — the rerun path, used only to
+        validate a ``--from`` node and compare the flow fingerprint against the checkpoint. Returns
+        ``None`` if the manifest can't be read or the flow can't be resolved/validated (the caller
+        turns that into a ``--from`` refusal). Not on the default rerun path, so no flow is loaded
+        unless ``--from`` is actually requested."""
+        try:
+            task = load_normalized(self._artifacts_root, task_id)
+            return self._flow_registry.resolve(task.task_type)
+        except (
+            json.JSONDecodeError,
+            OSError,
+            KeyError,
+            ValueError,
+            FlowResolutionError,
+            FlowValidationError,
+        ):
+            return None
+
+    def _from_node_refusals(
+        self, task_id: str, from_node: str, checkpoint_fingerprint: str | None
+    ) -> list[str]:
+        """Validate a ``--from`` target against the task's resolved flow (empty list => valid).
+
+        Refuses an unknown node (bounded to the flow's nodes) and a flow that drifted since the
+        checkpoint — because ``--from`` takes effect only when the stored fingerprint still matches
+        (otherwise resume restarts from the top and silently ignores the override), so a mismatch
+        must be an explicit refusal, not a no-op.
+        """
+        snapshot = self._persisted_flow_snapshot(task_id)
+        if snapshot is None:
+            return ["could not resolve the task's flow to validate --from; use plain --continue"]
+        if from_node not in snapshot.nodes_by_id:
+            known = ", ".join(sorted(snapshot.nodes_by_id))
+            return [f"--from node '{from_node}' is not in the flow (nodes: {known})"]
+        if (
+            checkpoint_fingerprint is not None
+            and checkpoint_fingerprint != snapshot.flow_fingerprint
+        ):
+            return [
+                "the flow changed since the checkpoint; --from cannot target the recorded graph. "
+                "Resolve the drift or use plain --continue (which restarts from the top)"
+            ]
+        return []
 
     def _transition(self, p: _Pipeline, dst: Status, **fields: object) -> None:
         src = p.status

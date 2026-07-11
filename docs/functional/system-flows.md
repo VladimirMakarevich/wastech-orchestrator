@@ -36,7 +36,7 @@ On startup [B10](./blocks/B10-recovery-and-resume.md) reconciles: >1 active → 
 
 ## `rerun` / `rerun --continue`
 
-[B06](./blocks/B06-orchestrator-pipeline.md): `rerun` archives prior artifacts, resets the branch to base, clears per-attempt state ([B07](./blocks/B07-state-machine-and-store.md)), and re-runs from scratch; `rerun --continue` revives the terminal task and resumes at the persisted flow checkpoint node, reusing the branch and prior work.
+[B06](./blocks/B06-orchestrator-pipeline.md): `rerun` archives prior artifacts, resets the branch to base, clears per-attempt state ([B07](./blocks/B07-state-machine-and-store.md)), and re-runs from scratch; `rerun --continue` revives the terminal task and resumes at the persisted flow checkpoint node, reusing the branch and prior work. `--continue` tolerates the task's own uncommitted working tree once it has reached a code-operating stage, and takes two recovery controls: `--reset-fix-budget` (grant a fresh fix budget for an exhausted `max_fix_cycles`, keeping the global backstop) and `--from <node>` (re-enter at a chosen node of the checkpoint's flow).
 
 ## `finalize`
 

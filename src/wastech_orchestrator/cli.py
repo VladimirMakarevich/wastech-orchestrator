@@ -438,6 +438,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="fix-and-continue: reuse the existing branch and re-enter at the stage it failed",
     )
     rerun_cmd.add_argument(
+        "--reset-fix-budget",
+        dest="reset_fix_budget",
+        action="store_true",
+        help="(--continue only) reset the consecutive fix-loop counters so an exhausted fix "
+        "budget runs again; the global max_total_fix_iterations backstop is unchanged",
+    )
+    rerun_cmd.add_argument(
+        "--from",
+        dest="from_node",
+        metavar="NODE",
+        help="(--continue only) re-enter at NODE instead of the recorded checkpoint (must be a "
+        "node in the checkpoint's flow)",
+    )
+    rerun_cmd.add_argument(
         "--force-reset-remote",
         action="store_true",
         help="(fresh mode) delete the prior attempt's remote branch, closing any open PR",
@@ -1399,9 +1413,18 @@ def _report_rerun_plan(plan: RerunPlan) -> None:
     if plan.continue_mode:
         node = plan.interrupted_node or "unknown"
         print(f"  branch:    reuse {plan.branch or '(none)'}")
-        print(f"  re-enter:  {node}")
+        if plan.from_node:
+            print(f"  re-enter:  {plan.from_node} (override; checkpoint was {node})")
+        else:
+            print(f"  re-enter:  {node}")
         print("  artifacts: kept; pending HITL prompt reset so the node re-asks")
-        print("  state:     terminal markers cleared; counters/subtasks/publish-ops kept")
+        if plan.reset_fix_budget:
+            print(
+                "  state:     terminal markers cleared; consecutive fix budget reset "
+                "(global backstop kept); subtasks/publish-ops kept"
+            )
+        else:
+            print("  state:     terminal markers cleared; counters/subtasks/publish-ops kept")
     else:
         target = plan.branch or "worc/<id>-<slug>"
         archive = f"attempt-{max(plan.attempt - 1, 0)}"
@@ -1415,6 +1438,8 @@ def _report_rerun_plan(plan: RerunPlan) -> None:
         f"  ledger:         append a record (attempt={plan.attempt}, rerun_of={rerun_of}); "
         "prior records kept"
     )
+    for note in plan.notes:
+        print(f"  note:      {note}")
 
 
 def cmd_rerun(args: argparse.Namespace) -> int:
@@ -1449,6 +1474,8 @@ def cmd_rerun(args: argparse.Namespace) -> int:
         args.task_id,
         continue_mode=args.continue_,
         force_reset_remote=args.force_reset_remote,
+        reset_fix_budget=args.reset_fix_budget,
+        from_node=args.from_node,
     )
     if plan.refusals:
         for reason in plan.refusals:
@@ -1463,6 +1490,8 @@ def cmd_rerun(args: argparse.Namespace) -> int:
         preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish
         preflight.warn_if_gh_logged_out()  # non-blocking advisory if gh is present but logged out
 
+    for note in plan.notes:
+        print(f"rerun: note: {note}")
     mode = "continue" if args.continue_ else "fresh"
     if not args.yes and not _confirm(
         f"Rerun {args.task_id} [{mode}] from base '{plan.base_branch}'? [y/N] "
@@ -1471,7 +1500,11 @@ def cmd_rerun(args: argparse.Namespace) -> int:
         return 0
 
     if args.continue_:
-        result = orchestrator.continue_task(args.task_id)
+        result = orchestrator.continue_task(
+            args.task_id,
+            reset_fix_budget=args.reset_fix_budget,
+            from_node=args.from_node,
+        )
         label = "rerun/continue"
     else:
         assert plan.source_path is not None  # guarded by plan_rerun refusals

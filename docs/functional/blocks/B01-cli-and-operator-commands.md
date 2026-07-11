@@ -43,7 +43,7 @@ It also fixes two repo-layout roots used pervasively downstream: the gitignored 
 - **completion** ([cli.py:304](../../../src/wastech_orchestrator/cli.py#L304)) — print a `bash`/`zsh` completion script to stdout (no config needed); positional `shell` ∈ {bash, zsh}.
 - **upgrade-config** ([cli.py:227](../../../src/wastech_orchestrator/cli.py#L227)) — add config keys introduced by this version, preserving existing values; `--dry-run`.
 - **upgrade-docs** ([cli.py:235](../../../src/wastech_orchestrator/cli.py#L235)) — overwrite the installed `.worc/guide/` authoring docs with the packaged version; `--dry-run`.
-- **rerun** ([cli.py:243](../../../src/wastech_orchestrator/cli.py#L243)) — re-attempt a terminal task; `task_id`, `--continue` (reuse branch, re-enter the failed node), `--force-reset-remote`, `--dry-run`, `-y/--yes`.
+- **rerun** ([cli.py:243](../../../src/wastech_orchestrator/cli.py#L243)) — re-attempt a terminal task; `task_id`, `--continue` (reuse branch, re-enter the failed node), `--reset-fix-budget` (continue-only: reset the consecutive fix-loop counters so an exhausted fix budget runs again, leaving the global `max_total_fix_iterations` backstop intact), `--from <node>` (continue-only: re-enter at a chosen node in the checkpoint's flow instead of the recorded one), `--force-reset-remote`, `--dry-run`, `-y/--yes`.
 - **finalize** ([cli.py:268](../../../src/wastech_orchestrator/cli.py#L268)) — record + tidy a task handled by hand; `task_id`, required `--as {done,failed,abandoned}`, `--pr-url`, `--note`, `--delete-branch` (keep is the default), `--no-verify-pr`, `--dry-run`, `-y/--yes`.
 
 ### Global flags

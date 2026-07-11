@@ -14,7 +14,7 @@ The actual bounding — comparing a counter against a cap and ending the run whe
 
 - `LoopCounters` ([loop_control.py:27](../../../src/wastech_orchestrator/core/loop_control.py#L27)) — dataclass: `test_fix_cycles`, `review_fix_cycles`, `fix_iterations` (all default `0`); the per-task counters persisted on the `tasks` row. (`stage_attempts` was removed — audit #17: it is a per-node quantity, owned by the Router and persisted on `node_runs`, never a task-level integer.)
 - `record_rework(run_state) -> int` ([loop_control.py:37](../../../src/wastech_orchestrator/core/loop_control.py#L37)) — the single global accounting path; bumps `FlowRunState.loop_counters["global_fix_iterations"]` and returns the new value.
-- `FlowRunState` ([run_state.py:30](../../../src/wastech_orchestrator/core/flow/run_state.py#L30)) — the mutable per-traversal checkpoint holding `loop_counters` (`dict[str, int]`), with `bump` / `counter` / `reset` / `reset_for_next_subtask` and the `fix_iterations` convenience property.
+- `FlowRunState` ([run_state.py:30](../../../src/wastech_orchestrator/core/flow/run_state.py#L30)) — the mutable per-traversal checkpoint holding `loop_counters` (`dict[str, int]`), with `bump` / `counter` / `reset` / `reset_consecutive_fix_budget` and the `fix_iterations` convenience property.
 - `FlowRunState.GLOBAL_FIX_KEY` ([run_state.py:37](../../../src/wastech_orchestrator/core/flow/run_state.py#L37)) — the reserved counter key `"global_fix_iterations"`.
 
 ## Behavior
@@ -32,7 +32,7 @@ The actual bounding — comparing a counter against a cap and ending the run whe
 
 (`stage_attempts` — attempts of a single stage run including provider fallback — is owned and counted by the Router (`StageOutcome.stage_attempts`) and persisted on `node_runs`, never on the `tasks` row; it is not a `LoopCounters` field.)
 
-`FlowRunState.loop_counters` is a single `dict[str, int]` carrying three key flavours without per-flow special cases ([run_state.py:13](../../../src/wastech_orchestrator/core/flow/run_state.py#L13)): a named loop's name, a synthetic inline-budget edge key, and the reserved `GLOBAL_FIX_KEY`. `reset_for_next_subtask` drops every per-loop / per-edge counter but **preserves** the global one, so the global fix budget accumulates across a decomposed task while each subtask gets fresh per-loop budgets ([run_state.py:69](../../../src/wastech_orchestrator/core/flow/run_state.py#L69)).
+`FlowRunState.loop_counters` is a single `dict[str, int]` carrying three key flavours without per-flow special cases ([run_state.py:13](../../../src/wastech_orchestrator/core/flow/run_state.py#L13)): a named loop's name, a synthetic inline-budget edge key, and the reserved `GLOBAL_FIX_KEY`. `reset_consecutive_fix_budget` drops every per-loop / per-edge counter but **preserves** the global one and the `total_fix:*` cumulative totals — so the global fix budget accumulates across a decomposed task while each subtask gets fresh per-loop budgets, and an operator `rerun --continue --reset-fix-budget` grants a fresh consecutive budget without ever weakening the `max_total_fix_iterations` backstop ([run_state.py:86](../../../src/wastech_orchestrator/core/flow/run_state.py#L86)).
 
 ### How the engine bounds it (B28 — framing only, not this block)
 

@@ -183,6 +183,8 @@ def _seed(
     *,
     checkpoint_node: str | None = None,
     node_run: tuple[str, str] | None = None,
+    counters_json: str = "{}",
+    flow_fingerprint: str | None = None,
 ) -> Path:
     config = _write_config(project, clone, claude="claude", codex="codex")
     db = clone / ".worc" / "state.db"
@@ -206,15 +208,27 @@ def _seed(
     if checkpoint_node is not None:  # an interrupted engine task: a flow checkpoint to resume from
         from wastech_orchestrator.core.flow.registry import FlowRegistry
 
+        fingerprint = flow_fingerprint or FlowRegistry().resolve("implementation").flow_fingerprint
         store.save_flow_checkpoint(
             row.task_id,
             current_node=checkpoint_node,
-            counters_json="{}",
-            flow_fingerprint=FlowRegistry().resolve("implementation").flow_fingerprint,
+            counters_json=counters_json,
+            flow_fingerprint=fingerprint,
             fix_iterations=row.fix_iterations,  # checkpoint mirrors the seeded task's fix counter
         )
     store.close()
     return config
+
+
+def _seed_manifest(clone: Path, task_id: str, *, task_type: str | None = None) -> None:
+    """Write the persisted normalized manifest a ``--from`` rerun reads to resolve the flow."""
+    from wastech_orchestrator.task.model import NormalizedTask
+    from wastech_orchestrator.task.parser import write_normalized
+
+    write_normalized(
+        NormalizedTask(id=task_id, title="T", description="x", task_type=task_type),
+        clone / ".worc",
+    )
 
 
 def test_rerun_refuses_unknown_id(
@@ -420,11 +434,13 @@ def test_rerun_continue_in_publish_allows_uncommitted_code(
     assert code == 0  # not refused for a dirty tree; --continue proceeds into publish
 
 
-def test_rerun_continue_outside_publish_still_refuses_dirty_tree(
-    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def test_rerun_continue_at_review_tolerates_task_wip(
+    git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """F14 regression: outside the publish region a dirty working tree is still unexpected work and
-    is refused, so relaxing the gate for publish does not weaken it elsewhere.
+    """Capability #3: re-entering review/fixing on ``--continue`` tolerates the task's own
+    uncommitted work — the staged implementation is the legitimate input to those nodes (an
+    evaluator has already run, so a dirty tree is the task's output, not foreign). It is not
+    refused, and the operator is warned that the WIP will be committed into the task.
     """
     project = tmp_path / "project"
     project.mkdir()
@@ -442,6 +458,42 @@ def test_rerun_continue_outside_publish_still_refuses_dirty_tree(
         ),
         checkpoint_node="review",
         node_run=("review", "evaluator"),
+    )
+    (git_repo.clone / "feature.py").write_text("print('wip')\n", encoding="utf-8")
+
+    def fake_resume(self: Orchestrator) -> PipelineResult:
+        return PipelineResult(task_id="task-1", final_status=Status.DONE)
+
+    monkeypatch.setattr(Orchestrator, "resume", fake_resume)
+    code = cli.main(["--config", str(config), "rerun", "task-1", "--continue", "--yes"])
+    out = capsys.readouterr().out
+    assert code == 0  # not refused for a dirty tree; --continue proceeds into review
+    assert "will be committed into the task" in out
+
+
+def test_rerun_continue_pre_edit_node_still_refuses_dirty_tree(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regression: before the task has produced code (only a pre-edit agent node ran; no
+    evaluator/checks/publish), a dirty tree is almost certainly foreign and is still refused — the
+    WIP tolerance does not blanket-accept every ``--continue``.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "failed" / "task-1.md"
+    _complete_task_file(source, "task-1")
+    config = _seed(
+        project,
+        git_repo.clone,
+        TaskRow(
+            "task-1",
+            "T",
+            Status.FAILED,
+            source_path=str(source),
+            branch="worc/task-1-t",
+        ),
+        checkpoint_node="planning",
+        node_run=("planning", "agent"),
     )
     (git_repo.clone / "stray.py").write_text("x = 1\n", encoding="utf-8")
     code = cli.main(["--config", str(config), "rerun", "task-1", "--continue", "--yes"])
@@ -491,3 +543,248 @@ def test_rerun_continue_revives_then_delegates_to_resume(
     assert row.status is Status.RUNNING  # revived as active; resume re-enters at the checkpoint
     assert row.finished_at is None and row.cleanup_completed is None
     assert row.branch == "worc/task-1-t" and row.fix_iterations == 2
+
+
+# --- Phase 0 #2: fresh fix budget on continue (--reset-fix-budget) -----------------------
+
+
+def test_reset_fix_budget_requires_continue(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--reset-fix-budget is a continue-only control; on a fresh rerun it is refused."""
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "failed" / "task-1.md"
+    _complete_task_file(source, "task-1")
+    config = _seed(
+        project,
+        git_repo.clone,
+        TaskRow("task-1", "T", Status.FAILED, source_path=str(source), branch="worc/task-1-t"),
+    )
+    code = cli.main(["--config", str(config), "rerun", "task-1", "--reset-fix-budget", "--yes"])
+    assert code == 1
+    assert "--reset-fix-budget requires --continue" in capsys.readouterr().out
+
+
+def test_reset_fix_budget_resets_consecutive_keeps_global(
+    git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A max_fix_cycles-saturated task gets fresh consecutive budget: the bare loop counter is
+    dropped, but the global fix counter and the cumulative total are preserved so the
+    max_total_fix_iterations backstop is never weakened.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "failed" / "task-1.md"
+    _complete_task_file(source, "task-1")
+    counters = json.dumps(
+        {"review_fix": 15, "total_fix:review_fix": 15, "global_fix_iterations": 15}
+    )
+    config = _seed(
+        project,
+        git_repo.clone,
+        TaskRow(
+            "task-1",
+            "T",
+            Status.MANUAL_ACTION_REQUIRED,
+            source_path=str(source),
+            branch="worc/task-1-t",
+            fix_iterations=15,
+            review_fix_cycles=15,
+        ),
+        checkpoint_node="review",
+        node_run=("review", "evaluator"),
+        counters_json=counters,
+    )
+
+    def fake_resume(self: Orchestrator) -> PipelineResult:  # isolate the checkpoint transformation
+        return PipelineResult(task_id="task-1", final_status=Status.DONE)
+
+    monkeypatch.setattr(Orchestrator, "resume", fake_resume)
+    code = cli.main(
+        ["--config", str(config), "rerun", "task-1", "--continue", "--reset-fix-budget", "--yes"]
+    )
+    assert code == 0
+
+    store = StateStore.open_readonly(git_repo.clone / ".worc" / "state.db")
+    _node, counters_json, _fp = store.get_flow_checkpoint("task-1")
+    persisted = json.loads(counters_json or "{}")
+    row = store.get_task("task-1")
+    store.close()
+    assert "review_fix" not in persisted  # consecutive counter reset (below the cap again)
+    assert persisted["total_fix:review_fix"] == 15  # cumulative audit total preserved
+    assert persisted["global_fix_iterations"] == 15  # global backstop untouched
+    assert row is not None
+    assert row.fix_iterations == 15  # mirror keeps the global; only *_cycles zeroed
+    assert row.review_fix_cycles == 0
+
+
+def test_reset_fix_budget_warns_when_global_backstop_exhausted(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """If the global max_total_fix_iterations backstop is already spent, the dry-run warns rather
+    than silently running one cycle and re-failing.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "failed" / "task-1.md"
+    _complete_task_file(source, "task-1")
+    counters = json.dumps({"review_fix": 30, "global_fix_iterations": 30})
+    config = _seed(
+        project,
+        git_repo.clone,
+        TaskRow(
+            "task-1",
+            "T",
+            Status.MANUAL_ACTION_REQUIRED,
+            source_path=str(source),
+            branch="worc/task-1-t",
+            fix_iterations=30,
+        ),
+        checkpoint_node="review",
+        node_run=("review", "evaluator"),
+        counters_json=counters,
+    )
+    code = cli.main(
+        [
+            "--config",
+            str(config),
+            "rerun",
+            "task-1",
+            "--continue",
+            "--reset-fix-budget",
+            "--dry-run",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert code == 0  # dry-run, no refusal
+    assert "max_total_fix_iterations backstop is already exhausted" in out
+
+
+# --- Phase 1 #4: re-enter at a chosen node (--from <node>) --------------------------------
+
+
+def test_rerun_from_requires_continue(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--from is a continue-only control; on a fresh rerun it is refused."""
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "failed" / "task-1.md"
+    _complete_task_file(source, "task-1")
+    config = _seed(
+        project,
+        git_repo.clone,
+        TaskRow("task-1", "T", Status.FAILED, source_path=str(source), branch="worc/task-1-t"),
+    )
+    code = cli.main(["--config", str(config), "rerun", "task-1", "--from", "review", "--yes"])
+    assert code == 1
+    assert "--from requires --continue" in capsys.readouterr().out
+
+
+def test_rerun_from_unknown_node_refuses(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--from must name a node in the checkpoint's flow; an unknown node is refused w/ the list."""
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "failed" / "task-1.md"
+    _complete_task_file(source, "task-1")
+    config = _seed(
+        project,
+        git_repo.clone,
+        TaskRow("task-1", "T", Status.FAILED, source_path=str(source), branch="worc/task-1-t"),
+        checkpoint_node="review",
+        node_run=("review", "evaluator"),
+    )
+    _seed_manifest(git_repo.clone, "task-1")
+    code = cli.main(
+        [
+            "--config",
+            str(config),
+            "rerun",
+            "task-1",
+            "--continue",
+            "--from",
+            "nonesuch",
+            "--dry-run",
+        ]
+    )
+    assert code == 1
+    assert "is not in the flow" in capsys.readouterr().out
+
+
+def test_rerun_from_fingerprint_drift_refuses(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """If the flow changed since the checkpoint, --from cannot target the recorded graph — it is
+    refused (rather than a silent no-op, since resume would restart from the top on a mismatch).
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "failed" / "task-1.md"
+    _complete_task_file(source, "task-1")
+    config = _seed(
+        project,
+        git_repo.clone,
+        TaskRow("task-1", "T", Status.FAILED, source_path=str(source), branch="worc/task-1-t"),
+        checkpoint_node="review",
+        node_run=("review", "evaluator"),
+        flow_fingerprint="stale-fingerprint",
+    )
+    _seed_manifest(git_repo.clone, "task-1")
+    code = cli.main(
+        [
+            "--config",
+            str(config),
+            "rerun",
+            "task-1",
+            "--continue",
+            "--from",
+            "implementation",
+            "--dry-run",
+        ]
+    )
+    assert code == 1
+    assert "flow changed since the checkpoint" in capsys.readouterr().out
+
+
+def test_rerun_from_valid_node_overrides_checkpoint(
+    git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--from a valid node rewrites the persisted checkpoint so resume re-enters there."""
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "failed" / "task-1.md"
+    _complete_task_file(source, "task-1")
+    config = _seed(
+        project,
+        git_repo.clone,
+        TaskRow("task-1", "T", Status.FAILED, source_path=str(source), branch="worc/task-1-t"),
+        checkpoint_node="review",
+        node_run=("review", "evaluator"),
+    )
+    _seed_manifest(git_repo.clone, "task-1")
+
+    def fake_resume(self: Orchestrator) -> PipelineResult:
+        return PipelineResult(task_id="task-1", final_status=Status.DONE)
+
+    monkeypatch.setattr(Orchestrator, "resume", fake_resume)
+    code = cli.main(
+        [
+            "--config",
+            str(config),
+            "rerun",
+            "task-1",
+            "--continue",
+            "--from",
+            "implementation",
+            "--yes",
+        ]
+    )
+    assert code == 0
+
+    store = StateStore.open_readonly(git_repo.clone / ".worc" / "state.db")
+    current_node, _counters, _fp = store.get_flow_checkpoint("task-1")
+    store.close()
+    assert current_node == "implementation"  # checkpoint re-pointed at the --from node

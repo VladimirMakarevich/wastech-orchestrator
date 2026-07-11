@@ -83,14 +83,15 @@ class FlowRunState:
         """Append ``node_id`` to the execution trace."""
         self.completed_nodes.append(node_id)
 
-    def reset_for_next_subtask(self) -> None:
-        """Drop every loop/inline-budget counter EXCEPT the global fix counter and the cumulative
-        per-loop totals (decomposition).
+    def reset_consecutive_fix_budget(self) -> None:
+        """Drop every consecutive loop / inline-budget counter EXCEPT the global fix counter and the
+        cumulative per-loop totals.
 
-        Each subtask gets fresh per-loop / per-edge budgets, but the global ``fix_iterations`` and
-        the ``total_fix:<loop>`` totals accumulate across the whole decomposed task (the
-        ``shared_budget`` hard stop / whole-task audit). Generic — covers named loops + inline
-        supervisor budgets without naming them.
+        The consecutive per-loop / per-edge budgets start fresh, but the global ``fix_iterations``
+        and the ``total_fix:<loop>`` totals are preserved (the ``shared_budget`` hard stop /
+        whole-task audit). Generic — covers named loops + inline supervisor budgets without naming
+        them. Used both when decomposition advances to the next subtask and when the operator grants
+        a `rerun --continue --reset-fix-budget` (the global backstop is never weakened).
         """
         preserved = {
             key: value
