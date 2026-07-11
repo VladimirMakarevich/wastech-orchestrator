@@ -34,15 +34,6 @@ def _reset_package_logger() -> Iterator[None]:
     obslog._configured = False
 
 
-@pytest.fixture(autouse=True)
-def _deliver_packaged_tools(git_repo) -> None:
-    # Preflight validates every packaged flow config-aware, which resolves the content flows'
-    # `check_journey` tool against <repo>/.worc/tools/ — the dir `worc install` fills. These tests
-    # drive cmd_preflight directly on a bare clone (no install step), so deliver the tool here
-    # exactly as install does, reusing the real copy function.
-    cli._copy_packaged_tools((git_repo.clone / ".worc").resolve(), overwrite=True, dry=False)
-
-
 class _FakeHealthProvider:
     def __init__(
         self,
@@ -165,31 +156,21 @@ def test_preflight_degraded_fails_without_fallback(
     assert "preflight: NOT ready" in out
 
 
-def test_preflight_validates_all_flows(
+def test_preflight_does_not_validate_flows(
     monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # Every packaged flow is loaded + validated at preflight, reported OK under a healthy config.
-    _patch_providers(monkeypatch, make_git_config(git_repo.clone))
-    rc = cli.cmd_preflight(_args())
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "flow implementation: OK" in out
-    assert "preflight: ready" in out
-
-
-def test_preflight_validates_all_flows_fatally(
-    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
-) -> None:
-    # A broken operator flow in <repo>/.worc/flows/ fails preflight before any task runs (P4.1).
+    # Preflight is a run-surface health gate — it no longer touches flows. Even a malformed operator
+    # flow in <repo>/.worc/flows/ does not appear in the output or flip the verdict (flow validation
+    # moved to `worc validate-flow`; dispatch-time resolve() is the safety net).
     flows_dir = git_repo.clone / ".worc" / "flows"
     flows_dir.mkdir(parents=True)
     (flows_dir / "rogue.yaml").write_text("flow:\n  name: rogue\n")  # malformed → load error
     _patch_providers(monkeypatch, make_git_config(git_repo.clone))
     rc = cli.cmd_preflight(_args())
     out = capsys.readouterr().out
-    assert rc == 1
-    assert "flow rogue: FAIL" in out
-    assert "preflight: NOT ready" in out
+    assert rc == 0
+    assert "flow" not in out
+    assert "preflight: ready" in out
 
 
 def test_preflight_fails_on_isolation(

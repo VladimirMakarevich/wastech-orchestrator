@@ -75,8 +75,7 @@ That matters because `upgrade-config` preserves values but re-emits the file and
 
 - provider binaries missing from `PATH`;
 - invalid or unsafe provider settings;
-- broken flow files;
 - Telegram misconfiguration;
 - inconsistent check-set definitions.
 
-Do not treat config editing as done until preflight is green.
+Preflight does **not** validate flow files — run `worc validate-flow --all` for that (it is config-aware, so it also catches flows made invalid by a config edit, e.g. a node pinned to a provider you just removed from `agents.allowed`). Do not treat config editing as done until both preflight and `validate-flow --all` are green.

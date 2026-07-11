@@ -53,7 +53,7 @@ The resulting `FlowSnapshot` ([snapshot.py:118](../../../src/wastech_orchestrato
 1. **Operator flows** — `<repo>/.worc/flows/<task_type>.yaml`, if present (operators override/extend built-ins);
 2. **Packaged built-ins** — shipped under `packaged/flows/`: `implementation`, `deep_research`, `security_audit`.
 
-`task_type=None` defaults to `implementation` ([registry.py:40](../../../src/wastech_orchestrator/core/flow/registry.py#L40)); an unknown `task_type`, or a YAML whose `flow.task_type` field does not match the lookup key, raises `FlowResolutionError` before any side effect ([registry.py:79-89](../../../src/wastech_orchestrator/core/flow/registry.py#L79)). Every resolved snapshot passes `validate_flow`, plus `validate_flow_against_config` when the registry was constructed with a config ([registry.py:90-93](../../../src/wastech_orchestrator/core/flow/registry.py#L90)). `validate_all()` ([registry.py:95](../../../src/wastech_orchestrator/core/flow/registry.py#L95)) loads + validates **every** resolvable flow (packaged + operator) for the install/preflight gate, returning `(name, error)` per flow without raising — the caller (`install`/`preflight`, [B01](B01-cli-and-operator-commands.md)/[B03](B03-installer-and-scaffolding.md)) treats any error as fatal.
+`task_type=None` defaults to `implementation` ([registry.py:40](../../../src/wastech_orchestrator/core/flow/registry.py#L40)); an unknown `task_type`, or a YAML whose `flow.task_type` field does not match the lookup key, raises `FlowResolutionError` before any side effect ([registry.py:79-89](../../../src/wastech_orchestrator/core/flow/registry.py#L79)). Every resolved snapshot passes `validate_flow`, plus `validate_flow_against_config` when the registry was constructed with a config ([registry.py:90-93](../../../src/wastech_orchestrator/core/flow/registry.py#L90)). This dispatch-time `resolve` is the fatal safety net: a broken or unsafe flow that a task actually requests fails that task (→ failed/quarantine), not on a global gate. For on-demand diagnostics, `operator_flow_names()` enumerates only the operator's `.worc/flows/*.yaml` (packaged built-ins excluded) and `check_flows(names)` resolves + prompt-lints each without raising, returning a `FlowCheck(name, error, warnings)` per flow — the seam behind `worc validate-flow` ([B01](B01-cli-and-operator-commands.md)). Preflight no longer validates flows.
 
 ### Validation: three fail-closed layers
 
@@ -74,15 +74,15 @@ The config-aware layer validates **only the cases with no safe runtime fallback*
 ## Invariants & guarantees
 
 - **Fail-closed parsing** — unknown YAML keys, checker kinds, output-artifact slots, and un-namespaced facts are fatal at load ([snapshot.py:111-116](../../../src/wastech_orchestrator/core/flow/snapshot.py#L111)).
-- **Validate before side effects** — `resolve` validates before returning; `validate_all` gates install/preflight; a flow never reaches the engine unvalidated.
+- **Validate before side effects** — `resolve` validates before returning, so a flow never reaches the engine unvalidated; `check_flows` (behind `worc validate-flow`) runs the same validator on demand over operator flows.
 - **Security only narrows** — the config-aware layer can only reject a flow that exceeds the configured ceiling; it never relaxes it ([validator.py:95-98](../../../src/wastech_orchestrator/core/flow/validator.py#L95)).
 - **Deterministic identity** — `flow_fingerprint` is order-independent, so resume trusts the stored fingerprint rather than re-resolving from live config ([B10](B10-recovery-and-resume.md)).
 
 ## Dependencies
 
 - **Uses:** [B25](B25-security-policy.md) (`find_forbidden_args`, `is_same_or_stricter`), [B05](B05-configuration.md) (`OrchestratorConfig` for the config-aware layer), [B18](B18-agent-providers.md) (`ProviderId`).
-- **Used by:** [B28](B28-flow-engine.md) (consumes the snapshot), [B06](B06-orchestrator-pipeline.md) (resolves the flow per task; runs `validate_all` at preflight).
+- **Used by:** [B28](B28-flow-engine.md) (consumes the snapshot), [B06](B06-orchestrator-pipeline.md) (resolves the flow per task), [B01](B01-cli-and-operator-commands.md) (`validate-flow` calls `check_flows`/`operator_flow_names`).
 
 ## Tests
 
-- `tests/core/flow/` — loader allowlist/fail-closed cases, registry resolution + operator override, the three validation layers, packaged-flow validity, `validate_all` preflight behavior.
+- `tests/core/flow/` — loader allowlist/fail-closed cases, registry resolution + operator override, the three validation layers, packaged-flow validity, and `operator_flow_names`/`check_flows` (the `validate-flow` seam).

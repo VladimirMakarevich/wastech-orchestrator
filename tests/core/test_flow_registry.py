@@ -253,35 +253,41 @@ def test_operator_flow_overrides_builtin(tmp_path: Path) -> None:
     assert len(snap.doc.nodes) == 2
 
 
-# -- P4.1: validate_all (preflight gate) --------------------------------------
+# -- validate-flow: operator_flow_names + check_flows -------------------------
 
 
-def test_validate_all_reports_each_packaged_flow() -> None:
-    results = dict(FlowRegistry().validate_all())
-    assert results == {
-        "implementation": None,
-        "deep_research": None,
-        "security_audit": None,
-        "merge": None,
-        "content_chapter": None,
-        "content_book": None,
-        "content_translate": None,
-    }
-
-
-def test_validate_all_includes_operator_flows(tmp_path: Path) -> None:
+def test_operator_flow_names_lists_only_operator_flows(tmp_path: Path) -> None:
+    # Discovery scope for `worc validate-flow`: only the operator's own `.worc/flows/`, never the
+    # packaged built-ins (which resolve() can still fall back to, but validate-flow does not touch).
     flows_dir = tmp_path / "flows"
     flows_dir.mkdir()
     (flows_dir / "custom.yaml").write_text(_MINIMAL_YAML.replace("implementation", "custom"))
-    results = dict(FlowRegistry(operator_flows_dir=flows_dir).validate_all())
-    assert results["custom"] is None
-    assert results["implementation"] is None  # packaged still enumerated
+    (flows_dir / "other.yaml").write_text(_MINIMAL_YAML.replace("implementation", "other"))
+    names = FlowRegistry(operator_flows_dir=flows_dir).operator_flow_names()
+    assert names == ["custom", "other"]  # sorted, no packaged built-ins
+    assert "implementation" not in names
 
 
-def test_validate_all_flags_broken_operator_flow_without_raising(tmp_path: Path) -> None:
+def test_operator_flow_names_empty_without_operator_dir() -> None:
+    assert FlowRegistry().operator_flow_names() == []
+
+
+def test_check_flows_reports_ok_for_valid_operator_flow(tmp_path: Path) -> None:
+    flows_dir = tmp_path / "flows"
+    flows_dir.mkdir()
+    (flows_dir / "custom.yaml").write_text(_MINIMAL_YAML.replace("implementation", "custom"))
+    checks = FlowRegistry(operator_flows_dir=flows_dir).check_flows(["custom"])
+    assert len(checks) == 1
+    assert checks[0].name == "custom"
+    assert checks[0].error is None
+
+
+def test_check_flows_flags_broken_flow_without_raising(tmp_path: Path) -> None:
     flows_dir = tmp_path / "flows"
     flows_dir.mkdir()
     (flows_dir / "broken.yaml").write_text("flow:\n  name: broken\n")  # malformed
-    results = dict(FlowRegistry(operator_flows_dir=flows_dir).validate_all())
-    assert results["broken"] is not None  # an error string, not None
-    assert results["implementation"] is None  # other flows unaffected
+    (flows_dir / "custom.yaml").write_text(_MINIMAL_YAML.replace("implementation", "custom"))
+    results = FlowRegistry(operator_flows_dir=flows_dir).check_flows(["broken", "custom"])
+    checks = {c.name: c for c in results}
+    assert checks["broken"].error is not None  # an error string, not None (no raise)
+    assert checks["custom"].error is None  # other flows unaffected

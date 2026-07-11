@@ -310,6 +310,22 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "preflight", help="check both CLIs' health and the strict_isolation policy (read-only)"
     )
+    validate_flow_cmd = sub.add_parser(
+        "validate-flow",
+        help="validate operator flow(s) in .worc/flows/ (config-aware, read-only)",
+    )
+    validate_flow_cmd.add_argument(
+        "name",
+        nargs="?",
+        help="flow to validate — a bare stem or NAME.yaml resolved within .worc/flows/ "
+        "(omit and pass --all to validate every flow)",
+    )
+    validate_flow_cmd.add_argument(
+        "--all",
+        dest="all_flows",
+        action="store_true",
+        help="validate every *.yaml in .worc/flows/",
+    )
     telegram_test = sub.add_parser(
         "telegram-test",
         help="send a correlated Telegram prompt and wait for a reply",
@@ -2153,22 +2169,10 @@ def run_preflight(
 
     lines.extend(_summarize_command_sets(config))
 
-    # Every flow file — packaged built-ins and operator flows in ``.worc/flows/`` — must load and
-    # pass the full fatal validator (graph + ceiling + config-consistency) before any task runs, so
-    # a broken or unsafe operator flow is caught at install/preflight, not mid-run (P4.1).
-    flow_registry = FlowRegistry(operator_flows_dir=worc_home_for(config) / "flows", config=config)
-    for name, error in flow_registry.validate_all():
-        if error is None:
-            lines.append(f"flow {name}: OK")
-        else:
-            ok = False
-            lines.append(f"flow {name}: FAIL — {error.splitlines()[0]}")
-    # Non-fatal anti-drift lint: role prompts referencing an unknown ``{name}`` (a typo, or a
-    # variable outside the flow-derived valid-set) render verbatim to the agent. Warn, never fail —
-    # a verbatim render is the safe-renderer fallback (code/JSON braces must pass through).
-    for name, messages in flow_registry.lint_all():
-        for message in messages:
-            lines.append(f"flow {name}: WARN — {message} (renders verbatim to the agent)")
+    # Preflight is a run-surface health gate — it deliberately does not validate flows. Flow
+    # correctness is an on-demand, operator-scoped concern handled by ``worc validate-flow`` over
+    # ``.worc/flows/``, and every dispatched flow is validated fatally at task time by
+    # ``FlowRegistry.resolve`` regardless (a broken flow fails that task, not the whole gate).
 
     if config.git.create_pull_request:
         gh_ok, gh_line = preflight_gh()
@@ -2195,6 +2199,52 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     ok, lines = run_preflight(config, env_file=env_file)
     for line in lines:
         print(line)
+    return 0 if ok else 1
+
+
+def cmd_validate_flow(args: argparse.Namespace) -> int:
+    """Validate operator flow(s) in ``.worc/flows/`` config-aware, on demand (read-only).
+
+    Scoped to the operator's own flows — packaged built-ins are excluded (they are covered by the
+    orchestrator's test suite, not by validating them against this repo's config). Runs the full
+    fatal validator (graph + ceiling + the config-aware layer, incl. the ``.worc/tools/`` tool
+    check) so it catches exactly what the engine sees at dispatch, plus the non-fatal prompt-var
+    lint (WARN). Exit ``0`` = every checked flow valid, ``1`` = any invalid, ``2`` = name not found,
+    usage error, or config load error.
+    """
+    _configure_runtime_logging(args)
+    config = load_config_for(args)
+    if config is None:
+        return 2
+    registry = FlowRegistry(operator_flows_dir=worc_home_for(config) / "flows", config=config)
+    available = registry.operator_flow_names()
+    if args.all_flows and args.name is not None:
+        print("validate-flow: pass a flow NAME or --all, not both")
+        return 2
+    if args.all_flows:
+        names = available
+        if not names:
+            print("validate-flow: no operator flows in .worc/flows/")
+            return 0
+    elif args.name is not None:
+        stem = args.name[:-5] if args.name.endswith(".yaml") else args.name
+        if stem not in available:
+            print(f"validate-flow: flow {stem!r} not found in .worc/flows/")
+            return 2
+        names = [stem]
+    else:
+        print("validate-flow: specify a flow NAME or --all")
+        return 2
+
+    ok = True
+    for check in registry.check_flows(names):
+        if check.error is None:
+            print(f"flow {check.name}: OK")
+        else:
+            ok = False
+            print(f"flow {check.name}: FAIL — {check.error.splitlines()[0]}")
+        for warning in check.warnings:
+            print(f"flow {check.name}: WARN — {warning} (renders verbatim to the agent)")
     return 0 if ok else 1
 
 
@@ -3394,6 +3444,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_restart(args)
         if args.command == "preflight":
             return cmd_preflight(args)
+        if args.command == "validate-flow":
+            return cmd_validate_flow(args)
         if args.command == "telegram-test":
             return cmd_telegram_test(args)
         if args.command == "status":

@@ -229,41 +229,44 @@ def test_registered_tool_passes_config_validation(tmp_path: Path) -> None:
     validate_flow_against_config(snap, _config(tmp_path), ToolRegistry(tools))  # no raise
 
 
-# -- preflight (FlowRegistry.validate_all) ------------------------------------
+# -- validate-flow (FlowRegistry.check_flows) ---------------------------------
 
 
-def test_preflight_validates_tools(tmp_path: Path) -> None:
-    # The FlowRegistry derives the tools dir from the sibling of the flows dir; validate_all reports
-    # a flow referencing a missing tool as FAIL and a registered one as OK — the preflight gate.
+def test_check_flows_validates_tools(tmp_path: Path) -> None:
+    # The FlowRegistry derives the tools dir from the sibling of the flows dir; check_flows reports
+    # an operator flow referencing a missing tool as FAIL and a registered one as OK — the
+    # config-aware layer `worc validate-flow` runs.
     worc = tmp_path / ".worc"
     flows = worc / "flows"
     flows.mkdir(parents=True)
     (flows / "custom.yaml").write_text(_tool_flow("custom", "md-check"))
     config = _config(tmp_path)
 
-    missing = dict(FlowRegistry(operator_flows_dir=flows, config=config).validate_all())
-    assert missing["custom"] is not None and "md-check" in missing["custom"]
+    missing = FlowRegistry(operator_flows_dir=flows, config=config).check_flows(["custom"])[0]
+    assert missing.error is not None and "md-check" in missing.error
 
     _install_tool(worc / "tools")  # register the tool in the sibling .worc/tools/
-    present = dict(FlowRegistry(operator_flows_dir=flows, config=config).validate_all())
-    assert present["custom"] is None  # now OK
+    present = FlowRegistry(operator_flows_dir=flows, config=config).check_flows(["custom"])[0]
+    assert present.error is None  # now OK
 
 
 def test_packaged_content_flows_require_delivered_check_journey(tmp_path: Path) -> None:
-    # The §5 coupling: because the content flows are packaged, preflight validates them config-aware
-    # in EVERY repo, so their `check_journey` tool must be delivered — which `worc install` does. An
-    # empty operator flows dir still points the registry at the sibling `.worc/tools/`.
+    # The §5 coupling: the packaged content flows contain a `tool: check_journey` node, so a task
+    # dispatching one resolves config-aware and needs that tool in `.worc/tools/` — which `worc
+    # install` delivers. Preflight no longer validates flows; the coupling is enforced at dispatch
+    # by `resolve` (and on demand by `worc validate-flow` for operator copies).
     worc = tmp_path / ".worc"
     flows = worc / "flows"
     flows.mkdir(parents=True)
     config = _config(tmp_path)
     content = ("content_chapter", "content_book", "content_translate")
 
-    missing = dict(FlowRegistry(operator_flows_dir=flows, config=config).validate_all())
+    missing = FlowRegistry(operator_flows_dir=flows, config=config)
     for name in content:
-        assert missing[name] is not None and "check_journey" in missing[name]
+        with pytest.raises(FlowValidationError, match="check_journey"):
+            missing.resolve(name)
 
     _install_tool(worc / "tools", base="check_journey")  # as `worc install` delivers it
-    present = dict(FlowRegistry(operator_flows_dir=flows, config=config).validate_all())
+    present = FlowRegistry(operator_flows_dir=flows, config=config)
     for name in content:
-        assert present[name] is None
+        present.resolve(name)  # no raise

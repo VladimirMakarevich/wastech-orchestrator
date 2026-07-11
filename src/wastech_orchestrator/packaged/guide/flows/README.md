@@ -140,7 +140,7 @@ supervisor:
 ```
 
 - All three prompt files are resolved inside the flow dir (relative paths, no `..`); a traversing path fails validation.
-- Supervisor prompts receive only `{task_id}`, `{repo}` / `{repo_path}` — no node/path variables. The `preflight` anti-drift lint scans them too, so a mistaken `{plan_path}` (or any other `{name}` the supervisor never fills) is flagged as rendering verbatim.
+- Supervisor prompts receive only `{task_id}`, `{repo}` / `{repo_path}` — no node/path variables. The `validate-flow` anti-drift lint scans them too, so a mistaken `{plan_path}` (or any other `{name}` the supervisor never fills) is flagged as rendering verbatim.
 - **`handoff_role_file`** is only used by decompose flows: at each subtask boundary the supervisor writes an interpretive handoff brief for the next subtask, injected as `{predecessor_context}` into the region's `implementation` node (see `prompt-variables.md`). A deterministic factual floor (changed files, commit, acceptance criteria, spec pointer) is always present; the interpretive brief rides the supervisor's warm session (no extra turn budget) and is best-effort.
 - **`emit_follow_ups`** (default `false`) is a **code-oriented** capability: when on, the supervisor's existing finalize turn (no extra LLM call) also emits an **evidence-gated** `follow_ups` array — technical debt / refactor candidates it saw, each with `title` / `rationale` / `paths` / `evidence` / `severity` / `action_hint` — written into `summary.json` and a "Technical debt / follow-ups" section of `summary.md`. Set it on a code flow (the packaged `implementation` flow does); leave it off for research / prose flows (never ask them to invent "refactor candidates").
 - Only the **wording** moves into files. The structured-output schemas (`follow_ups`, and the memory delta) stay in the orchestrator, so your prompt can change tone and emphasis but can never break what the orchestrator parses.
@@ -148,7 +148,7 @@ supervisor:
 ## Register, run, validate
 
 - **Register:** the file _is_ the registration. A task selects it with front matter `task_type: my_flow`. An unknown `task_type` fails the task before any branch is created.
-- **Validate:** run `wastech-orchestrator --config ./.worc/config.yaml preflight`. Every flow is loaded and validated (graph integrity, security ceiling, config consistency); a failure reports `NOT ready` with a one-line reason and blocks the run.
+- **Validate:** run `wastech-orchestrator --config ./.worc/config.yaml validate-flow <name>` (or `--all`). The flow is loaded and validated config-aware (graph integrity, security ceiling, config consistency, `.worc/tools/` tool names) — exactly what the engine checks at dispatch; a failure prints `flow <name>: FAIL — <reason>` and exits non-zero. Preflight does **not** validate flows. (A broken flow that a task requests also fails safely at dispatch, before any branch is created.)
 - **Debug:** set `prompt_audit: true` to record the exact rendered prompt per node under `logs/<task-id>/prompt-audit/`; per-run artifacts live under `.worc/logs/<task-id>/`.
 
 ## Foot-guns
