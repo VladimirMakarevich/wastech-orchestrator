@@ -2,7 +2,7 @@
 # Copy to config.yaml and fill it in for your project. config.yaml is NOT committed to git.
 # This is the packaged copy used by `wastech-orchestrator init` (the only example config; nothing else to sync).
 
-schema_version: 28                  # config format version; the orchestrator refuses newer configs
+schema_version: 29                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -67,6 +67,10 @@ agents:
       max_turns: 400           # Claude turn cap (positive int); "none" or "max" = no cap (unlimited)
       max_turns_gate: false    # when true, hitting max_turns pauses for a Telegram continue/stop
                                # prompt (requires telegram); a low cap (~50–100) is then safe
+      # allow_native_memory: false  # OPT-IN RISK — when true, drops the deny that confines Claude
+                               # Code's own auto-memory (~/.claude/projects/<repo>/memory/), letting
+                               # it persist across tasks. That store is OUTSIDE the orchestrator's
+                               # redaction net and audit; leave off unless you accept that. Claude-only.
       permission_profile: "workspace-write"   # read-only | workspace-write (a flow node's ceiling may lower it)
       extra_args: []           # raw CLI flags appended verbatim; forbidden ones fail preflight
       primary: true            # the global primary (exactly one provider; must be in `allowed`)

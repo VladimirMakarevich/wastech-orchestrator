@@ -34,10 +34,10 @@ Exactly one configured provider must set `primary: true` — the **global primar
 ## `schema_version`
 
 ```yaml
-schema_version: 27
+schema_version: 29
 ```
 
-Optional top-level integer marking the `config.yaml` **format** version (current: `27`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
+Optional top-level integer marking the `config.yaml` **format** version (current: `29`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
 
 ## Config Discovery
 
@@ -227,6 +227,7 @@ agents:
       timeout_seconds: 7200
       max_turns: 400 # positive int = turn cap; "none" or "max" = no cap (unlimited)
       max_turns_gate: false # on: hitting max_turns prompts continue/stop (needs telegram)
+      # allow_native_memory: false # OPT-IN RISK: on drops the deny confining Claude's own auto-memory
       permission_profile: "workspace-write"
       extra_args: []
     codex:
@@ -258,6 +259,7 @@ Provider-specific fields:
 | `codex` | `sandbox` | string or null | `null` if omitted | Codex sandbox mode (`workspace-write`, `read-only`, or `danger-full-access`). The example sets `workspace-write`. `danger-full-access` is operator-selectable but rejected at preflight unless `strict_isolation: false` (see `extra_args` / `security` below). |
 | `claude` | `max_turns` | integer or `none`/`max` | `400` if omitted | Claude turn cap. A positive integer caps agentic turns; `none` or `max` (case-insensitive), or YAML `null`, means **no cap** — the orchestrator omits `--max-turns` so the CLI runs without a turn limit. A non-positive integer or any other string is rejected (falls back to the default 400). |
 | `claude` | `max_turns_gate` | boolean | `false` | When `true`, a run that exhausts `max_turns` (`error_max_turns`) pauses for a durable Telegram **continue/stop** prompt instead of failing immediately. Continue resumes the same agent session with a fresh turn grant; deny / timeout / no answer stops (terminal, as without the gate). Each continue needs a fresh approval, and timeout → STOP bounds an unattended loop (no separate resume cap in v1). With this on, a low `max_turns` (~50–100) is safe — short by default, extendable on demand. Requires `telegram.enabled` (preflight). Claude-only (Codex has no turn cap). |
+| `claude` | `allow_native_memory` | boolean | `false` | **Opt-in that relaxes a security control.** When `true`, the adapter drops the deny (F37) that confines Claude Code's **own** native auto-memory, letting it persist across tasks at `~/.claude/projects/<repo>/memory/` (honoring `CLAUDE_CONFIG_DIR`). Off (default) keeps the deny in place — today's behavior. **Risk:** that store is repo-keyed and never committed (so commit contamination / cross-repo bleed don't apply), but it is **outside the orchestrator's redaction net and audit** — an unredacted `originSessionId` was once observed leaking there. Turn it on only as a deliberate, operator-owned risk acceptance; it composes with `memory.enabled` (the orchestrator's own store) so you can run either, both, or neither memory source. `install` does **not** write it (conscious opt-in); add it by hand. Claude-only (Codex's native memory is unmanaged today). |
 
 #### `extra_args`
 

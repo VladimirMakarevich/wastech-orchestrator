@@ -146,7 +146,15 @@ from wastech_orchestrator.providers.base import ProviderId
 # `tool` node whose own `timeout_seconds` is unset. Absent block => 3600s exactly; a per-node
 # `timeout_seconds` overrides it. Old configs load fail-open with the default; `config_writer`
 # writes the block on a fresh install (discoverability, like `logging`).
-CONFIG_SCHEMA_VERSION = 28
+# v29 (2026-07-11, agent-native-memory-opt-in): adds the optional Claude-only
+# `agents.providers.claude.allow_native_memory` bool (default false) — an operator opt-in that, when
+# true, drops the F37 native-memory deny so Claude Code's own auto-memory (`~/.claude/projects/
+# <repo>/memory/`) persists across tasks. Off (default/absent) => the deny stays in place (today's
+# behavior exactly). It relaxes a security control (that store is unaudited, no redaction
+# guarantee), so it is a conscious opt-in: `config_writer` does NOT write it on a fresh install and
+# `upgrade-config` does not add it — documented in `config.example.yaml` only. Old configs load
+# fail-open with the safe default. Inert on Codex (no deny to gate there).
+CONFIG_SCHEMA_VERSION = 29
 
 
 class AuditBranch(StrEnum):
@@ -278,6 +286,12 @@ class ProviderConfig:
     # resumes the same agent session with a fresh turn grant. Requires ``telegram.enabled``
     # (preflight). With this on, a low ``max_turns`` (~50–100) is safe — extendable on demand.
     max_turns_gate: bool = False
+    # Claude-only opt-in (agent-native-memory-opt-in): when true, the adapter DROPS the F37
+    # native-memory deny so Claude Code's own auto-memory (``<config_dir>/projects/<repo>/memory/``)
+    # persists across tasks on this repo. Default false keeps the deny in place. RISK: that store is
+    # outside the orchestrator's redaction net and audit (an unredacted ``originSessionId`` was once
+    # observed leaking there) — a deliberate, operator-owned risk acceptance. Inert on Codex.
+    allow_native_memory: bool = False
 
 
 @dataclass(frozen=True)

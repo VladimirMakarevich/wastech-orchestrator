@@ -6,6 +6,8 @@ This is the root for the **persistent, repo-scoped memory subsystem** task — t
 
 One-line shape: a **files-first, supervisor-distilled, deterministically-managed, evidence-backed** memory layer under `.worc/memory/`, with three tiers, written once at finalization, read as small per-stage packets, and curated by bounded background jobs. Full rationale: [research/memory-architecture-blueprint.md](research/memory-architecture-blueprint.md).
 
+**Two selectable memory sources.** This subsystem is the orchestrator's **own** audited store (the "orchestrator-memory" source). The other source is the coding agent's **own native memory** — for Claude, its built-in auto-memory under `~/.claude/projects/<repo>/memory/`, which the orchestrator confines by default (F37) but an operator may opt into via `agents.providers.claude.allow_native_memory` ([../archive/done/agent-native-memory-opt-in.md](../archive/done/agent-native-memory-opt-in.md)). The two are independent knobs: disable this store (`memory.enabled: false`) and use native memory, run both, or neither. Unlike this store, native memory is unaudited and outside the redaction net — the accepted cost of that opt-in.
+
 ## Documents
 
 | File | Purpose |

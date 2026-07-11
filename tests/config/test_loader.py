@@ -410,6 +410,24 @@ def test_reasoning_null_parses_to_none() -> None:
     assert result.config.agents.providers[ProviderId.CLAUDE].reasoning is None
 
 
+def test_allow_native_memory_absent_defaults_to_false() -> None:
+    from wastech_orchestrator.providers.base import ProviderId
+
+    cfg = loads_config(_PROVIDER_BASE).config
+    assert cfg.agents.providers[ProviderId.CLAUDE].allow_native_memory is False
+
+
+def test_allow_native_memory_true_parses() -> None:
+    text = _PROVIDER_BASE.replace(
+        '    claude:\n      command: "claude"',
+        '    claude:\n      command: "claude"\n      allow_native_memory: true',
+    )
+    from wastech_orchestrator.providers.base import ProviderId
+
+    cfg = loads_config(text).config
+    assert cfg.agents.providers[ProviderId.CLAUDE].allow_native_memory is True
+
+
 # --- auto-merge bypass (git.auto_merge*) ---
 
 

@@ -46,6 +46,7 @@ Do not use it to paper over a broken default developer environment. If a check i
 - Secret values belong in environment variables or `.worc/.env`, never in YAML.
 - `allowed_environment` should name variables, not embed their contents.
 - Avoid host-specific absolute paths unless the orchestrator really runs on a single fixed machine.
+- Leave `agents.providers.claude.allow_native_memory` off (its default) unless you deliberately accept the risk: turning it on lets Claude's own auto-memory write to a HOME store that is **outside** the orchestrator's redaction net and audit trail. It is off by default and `install` never writes it — enable it only as a conscious choice.
 
 If several operators share the same repo, a config with fewer machine assumptions survives longer.
 

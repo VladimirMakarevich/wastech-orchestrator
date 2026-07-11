@@ -19,6 +19,7 @@ This folder contains backlog documents for product work that has already shipped
 | [Orchestrator-driven PR merge](orchestrator-driven-pr-merge.md) | implemented |
 | [Custom `tool` nodes (P5)](p5-custom-tool-nodes.md) | implemented 2026-07-08 |
 | [Memory: durable concepts, not an episodic task ledger (V2)](memory-concepts-over-episodic-ledger.md) | implemented 2026-07-11 |
+| [Opt-in: agent-native memory (relax the F37 deny)](agent-native-memory-opt-in.md) | implemented 2026-07-12 |
 | [Skills selection rework](skills-selection-rework.md) | implemented |
 | [Per-node model/reasoning/provider in task front matter](task-node-model-override.md) | implemented |
 | [Task priority field](task-priority.md) | accepted (implemented) |
