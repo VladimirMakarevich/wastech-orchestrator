@@ -65,8 +65,8 @@ from wastech_orchestrator.core.hitl import (
 from wastech_orchestrator.notify import AskKind, AskResult
 from wastech_orchestrator.providers.artifacts import (
     TOOL_STDOUT_FILENAME,
+    latest_run_file,
     task_artifact_dir,
-    tool_node_dir,
 )
 from wastech_orchestrator.providers.base import MAX_TURNS_SUBTYPE, AgentRunRequest, ProviderId
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
@@ -567,26 +567,24 @@ class AgentNodeRunner:
     def _node_output_paths(self, ctx: NodeContext) -> dict[str, object | None]:
         """The generic ``{<node_id>_path}`` variables for every agent + tool node in the flow.
 
-        A value resolves to the node's persisted output **only when that node has already run** (the
-        file exists on disk) — an agent's ``<node_id>.out.md`` or a tool's redacted
-        ``tools/<node_id>/stdout.txt`` (P5) — so a not-yet-run or special-slot node's variable is
-        empty and a ``{?<id>_path}…{/<id>_path}`` block drops cleanly. Fan-in is free: a node names
-        each upstream output it wants (``{scan_path}``, ``{md-check_path}``). The stored value is a
-        POSIX path string (cross-platform). Only agent and tool nodes get this channel (node-output
-        ADR + P5)."""
-        task_dir = task_artifact_dir(self._s.artifacts_root, ctx.task_id)
+        A value resolves to the node's **latest** persisted output (an agent's ``<node_id>.out.md``
+        or a tool's redacted ``stdout.txt``) — now kept per-run under
+        ``stages/<node_id>/run-<id>/`` — so a re-running upstream node exposes its most recent pass
+        while every earlier pass stays on disk. A not-yet-run or special-slot node's variable is
+        empty (``None``) and a ``{?<id>_path}…{/<id>_path}`` block drops cleanly. Fan-in is free: a
+        node names each upstream output it wants (``{scan_path}``, ``{md-check_path}``). The stored
+        value is a POSIX path string (cross-platform). Only agent and tool nodes get this channel
+        (node-output ADR + P5)."""
         paths: dict[str, object | None] = {}
         for other in ctx.snapshot.doc.nodes:
             if isinstance(other, AgentNode):
-                candidate = task_dir / f"{other.id}.out.md"
+                filename = f"{other.id}.out.md"
             elif isinstance(other, ToolNode):
-                candidate = (
-                    tool_node_dir(self._s.artifacts_root, ctx.task_id, other.id)
-                    / TOOL_STDOUT_FILENAME
-                )
+                filename = TOOL_STDOUT_FILENAME
             else:
                 continue
-            paths[f"{other.id}_path"] = candidate.as_posix() if candidate.exists() else None
+            found = latest_run_file(self._s.artifacts_root, ctx.task_id, other.id, filename)
+            paths[f"{other.id}_path"] = found.as_posix() if found is not None else None
         return paths
 
     def _memory_path(self, node: AgentNode, ctx: NodeContext) -> str | None:

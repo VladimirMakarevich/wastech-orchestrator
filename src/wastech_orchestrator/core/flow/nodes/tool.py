@@ -20,7 +20,8 @@ The core **records** ``findings`` (→ ``NodeOutcome.findings``) and ``data`` (�
 ``NodeOutcome.structured_output``) but never *applies* them: the orchestrator hands a tool no git
 credentials (env-allowlist) and has no code path where a returned value triggers a git / state write
 (the "git only the orchestrator" invariant). stdout / stderr are redacted before they are written
-under ``tools/<node_id>/``, and the redacted stdout is exposed downstream as ``{<node_id>_path}``
+under the tool run's per-run dir (``stages/<node_id>/run-<id>/``), and the redacted stdout is
+exposed downstream as ``{<node_id>_path}``
 (symmetric with an agent node's output), so a tool → agent hand-off is pure flow wiring.
 """
 
@@ -45,7 +46,7 @@ from wastech_orchestrator.core.flow.tools_registry import ToolResolutionError
 from wastech_orchestrator.providers.artifacts import (
     TOOL_STDERR_FILENAME,
     TOOL_STDOUT_FILENAME,
-    tool_node_dir,
+    node_run_dir,
 )
 from wastech_orchestrator.providers.process import ProcessResult
 from wastech_orchestrator.providers.redaction import redact_text
@@ -105,7 +106,9 @@ class ToolNodeRunner:
         )
         tool_path = self._resolve(node, run_id)
 
-        node_dir = tool_node_dir(self._s.artifacts_root, ctx.task_id, node.id)
+        # Per-run dir keyed by node.id + run_id (mirrors agent/evaluator runs): a tool node that
+        # re-runs in a loop keeps every pass's streams; {<node_id>_path} resolves the latest run.
+        node_dir = node_run_dir(self._s.artifacts_root, ctx.task_id, node.id, run_id)
         node_dir.mkdir(parents=True, exist_ok=True)
         stdout_path = node_dir / TOOL_STDOUT_FILENAME
 

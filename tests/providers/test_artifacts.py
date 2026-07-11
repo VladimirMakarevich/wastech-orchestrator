@@ -9,7 +9,11 @@ import pytest
 
 from wastech_orchestrator.providers.artifacts import (
     ArtifactPaths,
+    append_node_history,
     create_attempt_dir,
+    latest_run_file,
+    node_history_path,
+    node_run_dir,
     prune_attempt_artifacts,
     task_artifact_dir,
     task_artifact_relpath,
@@ -135,6 +139,58 @@ def test_prune_full_and_unknown_keep_everything(tmp_path: Path, level: str) -> N
     prune_attempt_artifacts(paths, level)
     survivors = {entry.name for entry in Path(paths.attempt_dir).iterdir()}
     assert survivors == set(_FULL_FILE_SET)
+
+
+# -- per-run history helpers (preserve-node-run-artifact-history) -------------
+
+
+def test_node_run_dir_is_parent_of_attempt_dirs(tmp_path: Path) -> None:
+    # The per-run payload dir is exactly the parent of create_attempt_dir's <attempt>-<provider>/,
+    # so a run's findings/prompt/output sit next to its provider attempts. Pure path (no mkdir).
+    run_dir = node_run_dir(tmp_path, "t", "review", 42)
+    assert run_dir == tmp_path / "logs" / "t" / "stages" / "review" / "run-000042"
+    assert not run_dir.exists()  # builder does not create the directory
+    attempt = create_attempt_dir(tmp_path, "t", "review", 1, "codex", node_run_id=42)
+    assert Path(attempt.attempt_dir).parent == run_dir
+
+
+def test_per_run_payloads_survive_minimal_pruning(tmp_path: Path) -> None:
+    # Retention-by-placement: payloads live at the run-<id>/ level, outside the leaf
+    # <attempt>-<provider>/ dir that prune_attempt_artifacts iterates — so minimal never deletes
+    # run history. This is why the ADR needs no change to prune_attempt_artifacts.
+    paths = _seed_attempt(tmp_path)  # creates .../run-000001/1-codex/ with the full file set
+    run_dir = Path(paths.attempt_dir).parent
+    findings = run_dir / "findings.json"
+    findings.write_text("{}", encoding="utf-8")
+    prune_attempt_artifacts(paths, "minimal")
+    assert findings.is_file()  # the per-run payload is untouched
+    assert {e.name for e in Path(paths.attempt_dir).iterdir()} == {"result.json"}
+
+
+def test_append_node_history_appends_one_line_per_call(tmp_path: Path) -> None:
+    append_node_history(tmp_path, "t", "review", {"run_id": 1, "outcome": "rework"})
+    append_node_history(tmp_path, "t", "review", {"run_id": 2, "outcome": "accept"})
+    lines = node_history_path(tmp_path, "t", "review").read_text("utf-8").splitlines()
+    assert [json.loads(line)["run_id"] for line in lines] == [1, 2]
+    assert json.loads(lines[1])["outcome"] == "accept"
+
+
+def test_latest_run_file_picks_newest_run_containing_the_file(tmp_path: Path) -> None:
+    # Content-aware: an empty newer run (a provider attempt made run-000003/ but no payload) must
+    # NOT shadow an older run's real output — the resolver returns the newest run WITH the file.
+    for run_id, body in ((1, "OLD"), (2, "NEW")):
+        d = node_run_dir(tmp_path, "t", "scan", run_id)
+        d.mkdir(parents=True)
+        (d / "scan.out.md").write_text(body, "utf-8")
+    node_run_dir(tmp_path, "t", "scan", 3).mkdir(parents=True)  # empty newest run, no payload
+    found = latest_run_file(tmp_path, "t", "scan", "scan.out.md")
+    assert found is not None and found.read_text("utf-8") == "NEW"
+
+
+def test_latest_run_file_none_when_absent(tmp_path: Path) -> None:
+    assert latest_run_file(tmp_path, "t", "scan", "scan.out.md") is None  # no stages/scan/ at all
+    node_run_dir(tmp_path, "t", "scan", 1).mkdir(parents=True)  # run dir but no payload file
+    assert latest_run_file(tmp_path, "t", "scan", "scan.out.md") is None
 
 
 def test_task_artifact_relpath_is_repo_relative_posix(tmp_path: Path) -> None:

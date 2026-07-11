@@ -29,6 +29,7 @@ from wastech_orchestrator.core.flow.nodes import ChecksNodeRunner, NodeInputs, N
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import ChecksNode, FlowDoc
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
+from wastech_orchestrator.providers.artifacts import node_run_dir
 from wastech_orchestrator.providers.process import ProcessResult
 
 # -- fakes / helpers ----------------------------------------------------------
@@ -205,7 +206,8 @@ def test_citation_node_passes_for_verified_manifest(tmp_path: Path) -> None:
         node, repo_dir=repo, artifacts_root=art, output_policy=OutputPolicy.REPOSITORY_DOCUMENT
     )
     assert result.outcome.kind == "pass"
-    assert (art / "logs" / "t" / "checks" / "citation.json").is_file()
+    # Per-run: report under stages/<node>/run-<id>/ (node ran first → node_run_id 1).
+    assert (node_run_dir(art, "t", "citation_check", 1) / "citation.json").is_file()
     assert store.completed[-1]["outcome"] == "pass"
 
 
@@ -287,4 +289,4 @@ def test_dependency_scan_node_passes_and_records_evidence(tmp_path: Path) -> Non
     )
     assert result.outcome.kind == "pass"
     assert len(store.check_runs) == len(DEFAULT_DEPENDENCY_SCANNERS)  # one row per scanner
-    assert (art / "logs" / "t" / "checks" / "dependency_scan.json").is_file()
+    assert (node_run_dir(art, "t", "dependency_scan", 1) / "dependency_scan.json").is_file()

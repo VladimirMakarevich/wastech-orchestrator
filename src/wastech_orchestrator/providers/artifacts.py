@@ -1,13 +1,16 @@
 """Artifact writer.
 
 Writes the per-attempt artifacts under
-``<artifacts_root>/logs/<task-id>/stages/<stage>/run-<stage-run-id>/<attempt>-<provider>/`` (with a
-``sub-<NN>/`` level for a decomposed subtask). The directory layout and the **never overwrite**
-rule live here; the *content* (already redacted) is supplied by the caller — this module imports
-neither :mod:`~wastech_orchestrator.providers.redaction` nor any provider syntax.
+``<artifacts_root>/logs/<task-id>/stages/<node_id>/run-<node_run_id:06d>/<attempt>-<provider>/``
+(with a ``sub-<NN>/`` level for a decomposed subtask). The directory layout and the **never
+overwrite** rule live here; the *content* (already redacted) is supplied by the caller — this module
+imports neither :mod:`~wastech_orchestrator.providers.redaction` nor any provider syntax.
 
-Artifacts: ``request.json`` (redacted), ``stdout.log``, ``stderr.log``, ``events.jsonl``,
-``result.json``. ``before.diff`` / ``after.diff`` are stamped by the pipeline in P5.
+Per-attempt artifacts: ``request.json`` (redacted), ``stdout.log``, ``stderr.log``,
+``events.jsonl``, ``result.json``. The node's operator-facing per-run artifacts (review findings,
+rendered prompt, generic ``<node_id>.out.md``, checks reports, tool streams) are written by the flow
+nodes one level up, under :func:`node_run_dir` — the same never-overwrite, ``node_run_id``-keyed
+rule, so a re-running node keeps every pass; :func:`append_node_history` indexes them per node.
 """
 
 from __future__ import annotations
@@ -30,8 +33,8 @@ STDERR_FILENAME = "stderr.log"
 EVENTS_FILENAME = "events.jsonl"
 RESULT_FILENAME = "result.json"
 
-# Custom tool-node (P5) artifact filenames under ``<task_dir>/tools/<node_id>/``. The stdout file is
-# the one exposed downstream as ``{<node_id>_path}`` (both redacted before they are written).
+# Custom tool-node (P5) artifact filenames, written under the tool run's :func:`node_run_dir`. The
+# stdout file is the one exposed downstream as ``{<node_id>_path}`` (both redacted before writing).
 TOOL_STDOUT_FILENAME = "stdout.txt"
 TOOL_STDERR_FILENAME = "stderr.txt"
 
@@ -66,15 +69,79 @@ def task_artifact_dir(artifacts_root: str | Path, task_id: str) -> Path:
     return Path(artifacts_root) / "logs" / task_id
 
 
-def tool_node_dir(artifacts_root: str | Path, task_id: str, node_id: str) -> Path:
-    """Return ``<task_dir>/tools/<node_id>/`` — a custom tool node's artifact directory (P5).
+def node_run_dir(artifacts_root: str | Path, task_id: str, node_id: str, node_run_id: int) -> Path:
+    """Return ``<task_dir>/stages/<node_id>/run-<node_run_id:06d>/`` — one node run's per-run dir.
 
-    The single source of truth for a ``tool`` node's stdout/stderr artifact location, shared by the
-    tool runner (which writes the redacted streams there) and the ``{<node_id>_path}`` resolver
-    (which points downstream nodes at the stdout file). Both join onto this rather than
-    reconstructing the layout.
+    The single source of truth for the operator-facing, human-readable artifacts a node produces
+    each run (review ``findings.json``/``summary.md``, the ``rendered-prompt.md``, the generic
+    ``<node_id>.out.md``, the ``checks`` reports, a ``tool`` node's redacted streams). It is the
+    **parent** of the per-attempt ``<attempt>-<provider>/`` provider dirs
+    (:func:`create_attempt_dir`), so a run's prompt/findings/output sit next to its provider
+    attempts. Keyed by the reserved ``node_run_id`` so a repeated fixing/review cycle keeps every
+    pass instead of clobbering the last (the same never-overwrite rule the attempt dirs follow).
+
+    A **pure** path builder — it does not create the directory. Callers ``mkdir(parents=True,
+    exist_ok=True)`` before writing: ``checks``/``tool`` nodes never reach the provider adapter, so
+    (unlike agent/evaluator runs) their run dir is not pre-created by :func:`create_attempt_dir`.
     """
-    return task_artifact_dir(artifacts_root, task_id) / "tools" / node_id
+    return (
+        task_artifact_dir(artifacts_root, task_id) / "stages" / node_id / f"run-{node_run_id:06d}"
+    )
+
+
+def node_history_path(artifacts_root: str | Path, task_id: str, node_id: str) -> Path:
+    """Return ``<task_dir>/stages/<node_id>/history.jsonl`` — a node's per-run index (one line/run).
+
+    A chronological, append-only index so an operator can read the sequence of a re-running node's
+    passes without listing ``run-*/`` directories. Mirrors the prompt-audit ``timeline.jsonl``.
+    """
+    return task_artifact_dir(artifacts_root, task_id) / "stages" / node_id / "history.jsonl"
+
+
+def append_node_history(
+    artifacts_root: str | Path, task_id: str, node_id: str, entry: Mapping[str, Any]
+) -> None:
+    """Append one compact JSON line to a node's :func:`node_history_path` (``newline="\\n"``).
+
+    **Best-effort**: an advisory index must never break a task, so any :class:`OSError` while
+    creating the directory or writing is swallowed (the authoritative record lives in ``state.db``).
+    """
+    path = node_history_path(artifacts_root, task_id, node_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(dict(entry), ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def latest_run_file(
+    artifacts_root: str | Path, task_id: str, node_id: str, filename: str
+) -> Path | None:
+    """The newest ``run-*/<filename>`` under ``stages/<node_id>/`` that exists, or ``None``.
+
+    Resolves a node's most-recent output for the downstream ``{<node_id>_path}`` fan-in channel.
+    Runs are scanned in descending ``node_run_id`` order (parsed as an int, not lexically) and the
+    first run **containing** ``filename`` wins — so an empty or infra-failed newest run (whose
+    ``run-*/`` dir a provider attempt created but which wrote no payload) does not shadow a prior
+    run's real output. This preserves the pre-per-run last-writer-wins-with-content behavior.
+    """
+    stage_dir = task_artifact_dir(artifacts_root, task_id) / "stages" / node_id
+    if not stage_dir.exists():
+        return None
+
+    def _run_no(path: Path) -> int:
+        try:
+            return int(path.name[len("run-") :])
+        except ValueError:
+            return -1
+
+    runs = sorted((p for p in stage_dir.glob("run-*") if p.is_dir()), key=_run_no, reverse=True)
+    for run in runs:
+        candidate = run / filename
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def task_artifact_relpath(artifacts_root: str | Path, task_id: str, repo_root: str | Path) -> str:

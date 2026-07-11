@@ -28,7 +28,11 @@ from wastech_orchestrator.git_manager import (
 )
 from wastech_orchestrator.ledger import Ledger, LedgerRecord
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult, Notifier
-from wastech_orchestrator.providers.artifacts import create_attempt_dir, task_artifact_dir
+from wastech_orchestrator.providers.artifacts import (
+    create_attempt_dir,
+    node_run_dir,
+    task_artifact_dir,
+)
 from wastech_orchestrator.providers.base import (
     AgentRunRequest,
     AgentRunResult,
@@ -865,6 +869,57 @@ def test_two_fix_cycles_use_distinct_stage_run_artifacts(
     ]
     assert all(path.is_dir() for path in expected)
     assert expected[0] != expected[1]
+    # preserve-node-run-artifact-history: the per-node history.jsonl indexes every run of a
+    # re-running node, one line per pass, in order — so an operator reads the sequence without
+    # listing run-*/ dirs. fixing ran twice, so its index has both runs.
+    history = art / "logs" / "task-two-fixes" / "stages" / "fixing" / "history.jsonl"
+    entries = [json.loads(line) for line in history.read_text("utf-8").splitlines()]
+    assert [e["run_id"] for e in entries] == [row["id"] for row in rows]
+    assert all(e["node_id"] == "fixing" and e["kind"] == "agent" for e in entries)
+
+
+def test_resume_restores_review_path_from_latest_verdict_run(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # preserve-node-run-artifact-history: on resume, review_path is rebuilt from the store's latest
+    # in_flow_verdict run dir — NOT the last evaluations row, which is a supervisor_step carrying no
+    # node_id/run_id (that would yield a bogus stages/None/ path and silently lose the input).
+    from types import SimpleNamespace
+
+    from wastech_orchestrator.core.flow.nodes import NodeInputs
+    from wastech_orchestrator.state_store import EvaluationRow
+
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    tid = "task-resume-review"
+    store.insert_task(TaskRow(task_id=tid, title="t", status=Status.RUNNING))
+    store.record_evaluation(
+        EvaluationRow(
+            task_id=tid,
+            kind="in_flow_verdict",
+            verdict="rework",
+            node_id="review",
+            source_node_run_id=5,
+        )
+    )
+    store.record_evaluation(
+        EvaluationRow(
+            task_id=tid,
+            kind="in_flow_verdict",
+            verdict="accept",
+            node_id="review",
+            source_node_run_id=9,
+        )
+    )  # newest verdict
+    store.record_evaluation(EvaluationRow(task_id=tid, kind="supervisor_step", verdict="advisory"))
+    findings = node_run_dir(art, tid, "review", 9) / "findings.json"
+    findings.parent.mkdir(parents=True, exist_ok=True)
+    findings.write_text('{"findings": []}', encoding="utf-8")
+
+    inputs = NodeInputs(flow_dir=str(tmp_path))
+    orch._restore_engine_inputs(SimpleNamespace(task=SimpleNamespace(id=tid)), inputs)  # noqa: SLF001
+    assert inputs.review_path == str(findings)
 
 
 def test_fix_budget_exhausted_is_manual(git_repo, make_git_config, tmp_path: Path) -> None:

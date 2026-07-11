@@ -24,7 +24,7 @@ from wastech_orchestrator.core.decomposition import DecompositionDecision, decid
 from wastech_orchestrator.core.flow.engine import NodeOutcome
 from wastech_orchestrator.core.flow.nodes.base import NodeInputs, RegisterArtifact
 from wastech_orchestrator.core.flow.schema import AgentNode
-from wastech_orchestrator.providers.artifacts import task_artifact_dir
+from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
 from wastech_orchestrator.providers.redaction import redact_text
 
 
@@ -86,6 +86,7 @@ def write_node_output(
     *,
     artifacts_root: str | Path,
     task_id: str,
+    node_run_id: int,
     register: RegisterArtifact,
     extra_secrets: Iterable[str] = (),
 ) -> str | None:
@@ -110,9 +111,11 @@ def write_node_output(
     content = _slot_content(outcome)
     if not content:
         return None
-    task_dir = task_artifact_dir(artifacts_root, task_id)
-    task_dir.mkdir(parents=True, exist_ok=True)
-    path = task_dir / f"{node.id}.out.md"
+    # Per-run dir keyed by the reserved node_run_id: a node that re-runs in a loop keeps every
+    # pass's output on disk. The downstream {<node_id>_path} channel resolves the latest run.
+    run_dir = node_run_dir(artifacts_root, task_id, node.id, node_run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path = run_dir / f"{node.id}.out.md"
     path.write_text(redact_text(content, extra_secrets=extra_secrets), encoding="utf-8")
     register(task_id, "node_output", str(path))
     return str(path)

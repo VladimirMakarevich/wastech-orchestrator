@@ -1,6 +1,8 @@
 # Preserve per-run history of operator-facing node artifacts
 
-Status: **proposed** (2026-07-10) Date: 2026-07-10 Owner: Vladimir Makarevich
+Status: **implemented** (2026-07-11) Date: 2026-07-10 Owner: Vladimir Makarevich
+
+> **Implemented 2026-07-11.** Per-run operator artifacts now live under `stages/<node_id>/run-<node_run_id:06d>/` (via the new `artifacts.node_run_dir`), with a per-node `stages/<node_id>/history.jsonl` index written centrally in the orchestrator's `post_node` hook (one line per executed node run of every kind — an improvement over the per-writer sketch below). Three refinements surfaced during build: (1) resume rebuilds `review_path` from the store's latest **`in_flow_verdict`** row (supervisor rows carry no `node_id`/`run_id`); (2) `node_run_dir` is a pure path and callers mkdir — `checks`/`tool` run dirs are not pre-created by the provider adapter; (3) the downstream `{<node_id>_path}` resolver (`latest_run_file`) picks the newest run **containing** the file, so an empty/infra-failed newest run doesn't shadow a real one. Retention needed **no** `prune_attempt_artifacts` change — payloads sit above the pruned leaf `<attempt>-<provider>/` dir — and the "total wipe" is the existing `worc logs clean`, not a new command.
 
 A concrete observability fix (not exploratory): make the human-readable, on-disk artifacts a node produces keep their per-run history instead of being overwritten on every re-run. Today only the machine tiers (per-attempt provider logs, the SQLite audit tables) preserve history; the operator-facing files an engineer actually opens to debug a run keep only the last pass. The reported symptom is the `review` node — in a fix→review loop its `findings.json`/`summary.md` are clobbered each cycle — but the root cause is one keying rule applied inconsistently, so the fix is systematic across every task-level surface a re-running node writes.
 

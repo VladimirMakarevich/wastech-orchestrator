@@ -36,10 +36,12 @@ def test_node_output_written_redacted_and_registered(tmp_path: Path) -> None:
     calls, register = _recorder()
 
     path = write_node_output(
-        node, outcome, artifacts_root=tmp_path, task_id="task-1", register=register
+        node, outcome, artifacts_root=tmp_path, task_id="task-1", node_run_id=1, register=register
     )
 
     assert path is not None and path.endswith("scan.out.md")
+    # Per-run: under stages/<node>/run-<id>/ (keyed by the reserved node_run_id).
+    assert "stages/scan/run-000001/scan.out.md" in Path(path).as_posix()
     body = Path(path).read_text("utf-8")
     assert "ghp_" not in body and "[REDACTED]" in body  # structured output is redaction-scrubbed
     assert calls == [("task-1", "node_output", path)]
@@ -55,6 +57,7 @@ def test_node_output_extra_secret_scrubbed(tmp_path: Path) -> None:
         outcome,
         artifacts_root=tmp_path,
         task_id="t",
+        node_run_id=1,
         register=register,
         extra_secrets=("s3cr3t-value-here",),
     )
@@ -69,7 +72,9 @@ def test_node_output_skipped_for_special_slot_node(tmp_path: Path) -> None:
     calls, register = _recorder()
 
     assert (
-        write_node_output(node, outcome, artifacts_root=tmp_path, task_id="t", register=register)
+        write_node_output(
+            node, outcome, artifacts_root=tmp_path, task_id="t", node_run_id=1, register=register
+        )
         is None
     )
     assert calls == []
@@ -81,7 +86,9 @@ def test_node_output_noop_when_empty(tmp_path: Path) -> None:
     outcome = NodeOutcome("done", structured_output=None, final_message=None)
     calls, register = _recorder()
     assert (
-        write_node_output(node, outcome, artifacts_root=tmp_path, task_id="t", register=register)
+        write_node_output(
+            node, outcome, artifacts_root=tmp_path, task_id="t", node_run_id=1, register=register
+        )
         is None
     )
     assert calls == []

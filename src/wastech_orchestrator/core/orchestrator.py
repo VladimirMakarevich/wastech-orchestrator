@@ -123,7 +123,9 @@ from wastech_orchestrator.notify import (
 )
 from wastech_orchestrator.observability.logging import bind
 from wastech_orchestrator.providers.artifacts import (
+    append_node_history,
     archive_task_artifacts,
+    node_run_dir,
     sha256_file,
     task_artifact_dir,
     task_artifact_relpath,
@@ -1630,9 +1632,24 @@ class Orchestrator:
         plan = task_dir / "plan.md"
         if plan.exists():
             inputs.plan_path = str(plan)
-        review = task_dir / "review" / "findings.json"
-        if review.exists():
-            inputs.review_path = str(review)
+        # Review findings are now per-run under stages/<node>/run-<id>/findings.json (history
+        # preserved across fix→review cycles). The store's evaluations table is the source of truth
+        # for which run produced the latest verdict: take the last in_flow_verdict row (skip the
+        # supervisor_step/final rows, which carry no node_id/run_id) and rebuild its findings path.
+        verdicts = [
+            e for e in self._store.get_evaluations(p.task.id) if e.kind == "in_flow_verdict"
+        ]
+        if verdicts:
+            last = verdicts[-1]  # get_evaluations is ORDER BY id ASC → last == most recent
+            if last.node_id is not None and last.source_node_run_id is not None:
+                review = (
+                    node_run_dir(
+                        self._artifacts_root, p.task.id, last.node_id, last.source_node_run_id
+                    )
+                    / "findings.json"
+                )
+                if review.exists():
+                    inputs.review_path = str(review)
         # The per-node skill map is restored separately by ``_resolve_skill_layers`` (from
         # ``skill_map.json``), since it must be in place for a fresh run too — not only on resume.
         # P1: the fixing-resume check log is task-scoped — a decomposed subtask re-runs its region
@@ -2373,6 +2390,29 @@ class Orchestrator:
             # and this is a no-op. Carries only node id + outcome (no secrets); never raises.
             if self._config.telegram.trace:
                 self._notifier.send_trace(task_id=p.task.id, node_id=node.id, outcome=outcome.kind)
+            # Chronological per-run index: one line per executed node run of every kind, so an
+            # operator can read a re-running node's sequence without listing run-*/ dirs. Runs that
+            # raise before returning (evaluator schema-fail, checks/tool manual) are absent — they
+            # produce no complete payload to index and are recorded in node_runs anyway. The dir
+            # relpath is computed purely (no mkdir), so a payload-less node leaves no empty run dir.
+            run_rel = (
+                node_run_dir(self._artifacts_root, p.task.id, node.id, node_run_id)
+                .relative_to(task_artifact_dir(self._artifacts_root, p.task.id))
+                .as_posix()
+            )
+            append_node_history(
+                self._artifacts_root,
+                p.task.id,
+                node.id,
+                {
+                    "run_id": node_run_id,
+                    "node_id": node.id,
+                    "kind": node.kind,
+                    "outcome": outcome.kind,
+                    "findings": len(outcome.findings),
+                    "dir": run_rel,
+                },
+            )
             if not isinstance(node, AgentNode):
                 return
             apply_output_artifact(
@@ -2391,6 +2431,7 @@ class Orchestrator:
                 outcome,
                 artifacts_root=self._artifacts_root,
                 task_id=p.task.id,
+                node_run_id=node_run_id,
                 register=self._register_artifact,
                 extra_secrets=node_output_secrets,
             )

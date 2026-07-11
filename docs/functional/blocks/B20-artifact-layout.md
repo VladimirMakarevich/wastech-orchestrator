@@ -15,6 +15,9 @@ The module is deliberately content-blind and provider-agnostic: it imports neith
 - `ArtifactPaths` ([artifacts.py:34](../../../src/wastech_orchestrator/providers/artifacts.py#L34)) — frozen dataclass of six absolute paths: `attempt_dir`, `request_path`, `stdout_path`, `stderr_path`, `events_path`, `result_path`. The directory exists; the files may not yet.
 - `task_artifact_dir(artifacts_root, task_id)` ([artifacts.py:46](../../../src/wastech_orchestrator/providers/artifacts.py#L46)) — returns `<artifacts_root>/logs/<task-id>/`, the per-task root that task-level writers (plan, summary, subtasks, checks, validation reports) join onto.
 - `create_attempt_dir(artifacts_root, task_id, node_id, attempt, provider, *, node_run_id, subtask=None)` ([artifacts.py:80](../../../src/wastech_orchestrator/providers/artifacts.py#L80)) — creates the attempt directory (`exist_ok=False`) and returns its `ArtifactPaths`.
+- `node_run_dir(artifacts_root, task_id, node_id, node_run_id)` — **pure path** (no mkdir) to `stages/<node_id>/run-<node_run_id:06d>/`, the **parent** of the `<attempt>-<provider>/` dirs. The single owner of where a node run's operator-facing per-run artifacts land (review findings/summary, rendered prompt, generic `<node_id>.out.md`, checks reports, tool streams). Callers `mkdir(parents=True, exist_ok=True)` themselves — `checks`/`tool` nodes never reach the provider adapter, so their run dir is not pre-created by `create_attempt_dir`.
+- `node_history_path(artifacts_root, task_id, node_id)` / `append_node_history(artifacts_root, task_id, node_id, entry)` — the per-node `stages/<node_id>/history.jsonl` chronological index and its append-only, **best-effort** (swallows `OSError`) writer (`newline="\n"`, one compact JSON line per run).
+- `latest_run_file(artifacts_root, task_id, node_id, filename)` — the newest `run-*/<filename>` that **exists**, scanning runs in descending int-parsed `node_run_id` order; the content-aware resolver behind the downstream `{<node_id>_path}` fan-in channel (an empty/infra-failed newest run does not shadow a prior run's real output).
 - `archive_task_artifacts(artifacts_root, task_id, attempt)` ([artifacts.py:56](../../../src/wastech_orchestrator/providers/artifacts.py#L56)) — moves a prior attempt's artifacts into `attempt-<N>/` on rerun; returns the archive dir or `None`.
 - `write_request_artifact(paths, redacted_request)` ([artifacts.py:112](../../../src/wastech_orchestrator/providers/artifacts.py#L112)) — writes the already-redacted request mapping to `request.json`.
 - `write_result_artifact(paths, result)` ([artifacts.py:117](../../../src/wastech_orchestrator/providers/artifacts.py#L117)) — writes `dataclasses.asdict(result)` to `result.json`.
@@ -47,6 +50,24 @@ The files inside one attempt directory:
 
 `ArtifactPaths` names only the five fixed paths ([artifacts.py:38-43](../../../src/wastech_orchestrator/providers/artifacts.py#L38)). `output-schema.json` is **not** an `ArtifactPaths` field — the provider writes it (when `request.output_schema` is present) by joining the filename onto `paths.attempt_dir` ([codex.py:520](../../../src/wastech_orchestrator/providers/codex.py#L520)); Codex also joins a `last-message.txt` onto `attempt_dir` the same way ([codex.py:388](../../../src/wastech_orchestrator/providers/codex.py#L388)).
 
+### Per-run operator-facing artifacts
+
+The human-readable artifacts a node produces each run live **beside** its provider attempts, under `node_run_dir(...)` = `stages/<node_id>/run-<node_run_id:06d>/` (the parent of the `<attempt>-<provider>/` leaves):
+
+```text
+stages/<node_id>/
+  history.jsonl                      # one line per run: {run_id, node_id, kind, outcome, findings, dir}
+  run-<node_run_id:06d>/
+    rendered-prompt.md               # B27 write_rendered_prompt
+    findings.json / summary.md       # evaluator (review / test_quality) findings + summary
+    <node_id>.out.md                 # generic node-output channel → {<node_id>_path}
+    citation.json / dependency_scan.json  # checks-node reports
+    stdout.txt / stderr.txt          # tool-node redacted streams
+    <attempt>-<provider>/            # provider attempts (create_attempt_dir)
+```
+
+This extends the never-overwrite rule from the per-attempt provider dirs to every task-level artifact a re-running node writes: keyed by the reserved `node_run_id`, a `review → fixing → testing → review` loop keeps each pass's findings instead of clobbering the last. The **once-only** contract slots (`plan.md`, the enriched spec, the finalize `summary.md`) stay flat at the task root — they run once and are read back by fixed name in resume/finalize/PR-body. `history.jsonl` is written once per executed node run by the orchestrator's `post_node` hook (B06), so it covers every node kind with no duplication (a run that raises before returning — evaluator schema-fail, checks/tool manual — is absent, having produced no complete payload). Downstream fan-in resolves `{<node_id>_path}` to the latest run's output via `latest_run_file`; resume rebuilds `review_path` from the store's latest `in_flow_verdict` run.
+
 ### Never-overwrite rule
 
 `create_attempt_dir` calls `mkdir(parents=True, exist_ok=False)` ([artifacts.py:101](../../../src/wastech_orchestrator/providers/artifacts.py#L101)). If the directory already exists the standard library raises `FileExistsError` — logs are never silently overwritten ([test_artifacts.py:50-53](../../../tests/providers/test_artifacts.py#L50)). Uniqueness is carried by `node_run_id`, which is reserved in SQLite (B07) before the provider starts, so a repeated fixing cycle or a recovery run lands in a distinct `run-<id>` directory even though the provider's per-stage `attempt` counter restarts at 1 ([test_artifacts.py:62-65](../../../tests/providers/test_artifacts.py#L62)). Distinct `attempt` values within one run also produce distinct leaves ([test_artifacts.py:56-59](../../../tests/providers/test_artifacts.py#L56)).
@@ -70,6 +91,7 @@ Both writers funnel through `_write_json`, which dumps `indent=2, ensure_ascii=F
 - **No state is held** — every path is recomputed from arguments; the layout's single source of truth is the path-construction code itself.
 - **Provider/redaction-agnostic** — imports only `providers/base` ([artifacts.py:23](../../../src/wastech_orchestrator/providers/artifacts.py#L23)); content arrives already redacted.
 - **Archiving is non-destructive and idempotent** — `rename` (move) not delete; existing archive entries are preserved ([artifacts.py:73-76](../../../src/wastech_orchestrator/providers/artifacts.py#L73)).
+- **Per-run history survives `logging.artifacts` pruning by placement** — `prune_attempt_artifacts` iterates only the leaf `<attempt>-<provider>/` dir it is handed, so the operator-facing payloads written at the `run-<id>/` level (one dir up) are never touched by a `minimal`/`standard` level. The only thing that removes this history is an explicit `worc logs clean` of the whole task tree; no code change to pruning is needed.
 
 ## Dependencies
 

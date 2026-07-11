@@ -567,14 +567,20 @@ logs/
     hitl/*.json                   # durable redacted question/approval + recovery handles
     summary.md / summary.json     # the what/how/integration/why handoff → PR body
     failure_report.json / stuck.md# written iff the task ended manual_action_required
-    review/findings.json          # review findings (severity → blocking)
     checks/<NNN>.log              # each check command's output (redacted)
-    stages/<node-id>/rendered-prompt.md  # the exact node prompt sent (redacted; rendered from the node's role_file)
-    stages/<node-id>/run-<node-run-id>/<attempt>-<provider>/
-      request.json                # redacted request (argv, no secrets)
-      stdout.log / stderr.log     # redacted process output
-      events.jsonl                # redacted provider event stream
-      result.json                 # normalized AgentRunResult
+    stages/<node-id>/
+      history.jsonl               # one line per run of this node (run_id, outcome, findings, dir)
+      run-<node-run-id>/          # one dir per node run — every re-run kept, never clobbered
+        rendered-prompt.md        # the exact node prompt sent (redacted; from the node's role_file)
+        findings.json / summary.md# review/evaluator findings + summary (this pass)
+        <node-id>.out.md          # the node's output, exposed downstream as {<node-id>_path}
+        citation.json / dependency_scan.json  # checks-node reports (this pass)
+        stdout.txt / stderr.txt   # tool-node redacted streams
+        <attempt>-<provider>/     # provider attempts for this run
+          request.json            # redacted request (argv, no secrets)
+          stdout.log / stderr.log # redacted process output
+          events.jsonl            # redacted provider event stream
+          result.json             # normalized AgentRunResult
     publish/{commit,push,pull-request,terminal-cleanup}.json
 ```
 
@@ -582,9 +588,10 @@ logs/
 - **Why a task is stuck**: open `stuck.md` (human-readable) / `failure_report.json` (machine). They record which fix loop and which limit was exhausted, all counter values, the last failing check output, the last blocking review findings, and the final diff — plus, for a decomposed task, the failing subtask `k` of `n` and the SHAs already committed.
 - **Audit completeness**: SQLite records every `node_runs` and `provider_attempts` row (primary **and** any fallback), each artifact is registered with a **sha256 checksum**, and every commit/push/PR carries an idempotency fingerprint so a restart never double-publishes.
 - **Node run vs. attempt**: `run-<node-run-id>` is reserved in SQLite before the provider starts and changes for every repeated node invocation, including each fixing cycle and recovery run. `<attempt>` starts at `1` inside that run and increments only for provider fallback.
+- **Per-run history is preserved, never overwritten**: every operator-facing artifact a node produces (the rendered prompt, review `findings.json`/`summary.md`, the generic `<node-id>.out.md`, checks reports, tool streams) is written under that run's `stages/<node-id>/run-<node-run-id>/` dir, next to its provider attempts — so a `review → fixing → testing → review` loop keeps each pass's findings instead of clobbering the last. Read `stages/<node-id>/history.jsonl` for the chronological index of a node's runs (one line per run: `run_id`, `outcome`, `findings` count, `dir`). This history is exempt from `logging.artifacts` pruning and is removed only by an explicit [`worc logs clean`](operations.md) of the whole task tree.
 - **No secrets anywhere**: `request.json`, the stdout/stderr/events logs, diffs, SQLite rows, the ledger, and the failure report are all redacted; `denied_read_paths` (`.env`, `secrets/**`) are excluded from agent reads and their values are scrubbed from any sink.
 
-- **Rendered node prompts**: `stages/<node-id>/rendered-prompt.md` is the exact (redacted) instruction the agent received for that node — read it first to confirm a `role_file` edit took effect and rendered as intended.
+- **Rendered node prompts**: `stages/<node-id>/run-<node-run-id>/rendered-prompt.md` is the exact (redacted) instruction the agent received for that run — read it first to confirm a `role_file` edit took effect and rendered as intended (a re-running node keeps one per run).
 
 Use the operator log for live monitoring. Provider `stdout.log` and `stderr.log` are finalized and redacted after the subprocess exits, so do not tail them while an attempt is still running.
 

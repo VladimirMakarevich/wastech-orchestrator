@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from wastech_orchestrator.providers.artifacts import task_artifact_dir
+from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
 from wastech_orchestrator.providers.redaction import redact_text
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import ProviderAttemptRow
@@ -51,7 +51,7 @@ def record_run_observability(
         artifacts_root=services.artifacts_root,
         task_id=task_id,
         node_id=node_id,
-        subtask=subtask,
+        run_id=run_id,
         prompt=prompt,
         secrets=services.prompt_secrets,
         register=register,
@@ -105,21 +105,20 @@ def write_rendered_prompt(
     artifacts_root: str,
     task_id: str,
     node_id: str,
-    subtask: int | None,
+    run_id: int,
     prompt: str,
     secrets: tuple[str, ...],
     register: RegisterArtifact,
 ) -> None:
     """Persist the rendered (redacted) node prompt for audit, once per node run.
 
-    Keyed by the flow ``node_id`` so distinct nodes (even same-capability ones in a research/audit
-    flow) each get their own ``stages/<node_id>/`` directory and never overwrite each other.
+    Keyed by the flow ``node_id`` **and** the reserved ``run_id`` (via :func:`node_run_dir`), so it
+    sits next to that run's provider attempts and a re-running node keeps every pass's prompt on
+    disk instead of clobbering the last. ``run_id`` uniqueness subsumes the old ``sub-NN/`` level.
     """
-    node_dir = task_artifact_dir(artifacts_root, task_id) / "stages" / node_id
-    if subtask is not None:
-        node_dir = node_dir / f"sub-{subtask:02d}"
-    node_dir.mkdir(parents=True, exist_ok=True)
-    path = node_dir / "rendered-prompt.md"
+    run_dir = node_run_dir(artifacts_root, task_id, node_id, run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path = run_dir / "rendered-prompt.md"
     path.write_text(redact_text(prompt, extra_secrets=secrets), encoding="utf-8")
     register(task_id, "rendered_prompt", str(path))
 

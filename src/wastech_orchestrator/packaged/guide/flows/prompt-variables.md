@@ -46,7 +46,7 @@ A block whose name is not an allowlisted variable, or an unbalanced `{?a}…{/b}
 
 ## Node outputs: `{<node_id>_path}`
 
-Every **agent** node's output is automatically persisted to `<node_id>.out.md`, and every **`tool`** node's redacted stdout to `tools/<node_id>/stdout.txt`, each exposed to later nodes as `{<node_id>_path}` — a **path** to that file (never the inlined content). This is how you chain your own nodes: a node reads what an upstream node produced by naming it. No declaration, no config — the channel is derived from the node id.
+Every **agent** node's output is automatically persisted (as `<node_id>.out.md`), and every **`tool`** node's redacted stdout too, under that run's `logs/<task-id>/stages/<node_id>/run-<run-id>/` directory. Each is exposed to later nodes as `{<node_id>_path}` — a **path** to that file (never the inlined content). This is how you chain your own nodes: a node reads what an upstream node produced by naming it. No declaration, no config — the channel is derived from the node id. When a node re-runs (a fix loop), every pass is kept and `{<node_id>_path}` resolves to the **latest** run.
 
 ```text
 {?analyze_path}Base the implementation on the analysis at {analyze_path}.{/analyze_path}

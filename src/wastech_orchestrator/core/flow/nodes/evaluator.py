@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any
 
 from wastech_orchestrator.core.flow.context_paths import build_path_context
@@ -38,7 +37,7 @@ from wastech_orchestrator.core.flow.nodes.base import (
 from wastech_orchestrator.core.flow.observability import record_run_observability
 from wastech_orchestrator.core.flow.prompt import RoleFileError, read_role_file, render_role_prompt
 from wastech_orchestrator.core.flow.schema import EvaluatorNode, FlowNode
-from wastech_orchestrator.providers.artifacts import task_artifact_dir
+from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
 from wastech_orchestrator.providers.base import AgentRunRequest
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import EvaluationRow, NodeLineageRow, NodeRunRow
@@ -151,7 +150,7 @@ class EvaluatorNodeRunner:
         self._persist_own_lineage(node, ctx, outcome)
         findings = tuple(_to_finding(f) for f in raw_findings)
         # Persist the findings artifact and expose it to downstream fixing as {review_path}.
-        self._write_findings(ctx, raw_findings, outcome.result.final_message)
+        self._write_findings(node, ctx, run_id, raw_findings, outcome.result.final_message)
         # Immutable in-flow verdict (append-only, namespaced by the source node_run id). The
         # per-instance rework limit derives from COUNT(rework) — there is no mutable counter.
         self._s.store.record_evaluation(
@@ -172,18 +171,26 @@ class EvaluatorNodeRunner:
         )
 
     def _write_findings(
-        self, ctx: NodeContext, findings: list[dict[str, Any]], summary: str | None
+        self,
+        node: FlowNode,
+        ctx: NodeContext,
+        run_id: int,
+        findings: list[dict[str, Any]],
+        summary: str | None,
     ) -> None:
-        review_dir = Path(task_artifact_dir(self._s.artifacts_root, ctx.task_id)) / "review"
-        review_dir.mkdir(parents=True, exist_ok=True)
-        (review_dir / "findings.json").write_text(
+        # Per-run dir keyed by node.id + run_id: a second evaluator (e.g. test_quality) no longer
+        # clobbers review, and every pass of a fix→review loop keeps its own findings on disk.
+        run_dir = node_run_dir(self._s.artifacts_root, ctx.task_id, node.id, run_id)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        findings_path = run_dir / "findings.json"
+        findings_path.write_text(
             json.dumps({"findings": findings}, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
-        (review_dir / "summary.md").write_text(
+        (run_dir / "summary.md").write_text(
             (summary or "(no review summary)") + "\n", encoding="utf-8"
         )
-        self._in.review_path = str(review_dir / "findings.json")
+        self._in.review_path = str(findings_path)
 
     def _verdict(
         self,

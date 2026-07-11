@@ -32,7 +32,7 @@ from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
 from wastech_orchestrator.providers.artifacts import (
     TOOL_STDERR_FILENAME,
     TOOL_STDOUT_FILENAME,
-    tool_node_dir,
+    node_run_dir,
 )
 from wastech_orchestrator.providers.process import ProcessResult
 
@@ -341,9 +341,10 @@ def test_tool_output_exposed_as_node_path_var(tmp_path: Path) -> None:
     ToolNodeRunner(services, _inputs(tmp_path)).run(tool, _ctx(snap, tool))
 
     # {md-check_path} is a valid prompt var and resolves to the redacted stdout artifact downstream.
+    # The tool ran as the first node → node_run_id 1 (per-run dir under stages/<node>/run-<id>/).
     assert "md-check_path" in node_output_vars(snap)
     stdout_artifact = (
-        tool_node_dir(services.artifacts_root, "task-1", "md-check") / TOOL_STDOUT_FILENAME
+        node_run_dir(services.artifacts_root, "task-1", "md-check", 1) / TOOL_STDOUT_FILENAME
     )
     assert stdout_artifact.is_file()
     resolved = AgentNodeRunner(services, _inputs(tmp_path))._node_output_paths(
@@ -360,7 +361,7 @@ def test_tool_artifacts_redacted(tmp_path: Path) -> None:
     services = _services(tmp_path, fake, store)
     ToolNodeRunner(services, _inputs(tmp_path)).run(_TOOL, _ctx(_snapshot(_TOOL), _TOOL))
 
-    node_dir = tool_node_dir(services.artifacts_root, "task-1", "md-check")
+    node_dir = node_run_dir(services.artifacts_root, "task-1", "md-check", 1)
     stdout_text = (node_dir / TOOL_STDOUT_FILENAME).read_text(encoding="utf-8")
     stderr_text = (node_dir / TOOL_STDERR_FILENAME).read_text(encoding="utf-8")
     assert secret not in stdout_text and "[REDACTED]" in stdout_text

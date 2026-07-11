@@ -44,7 +44,7 @@ from wastech_orchestrator.core.flow.nodes.base import (
 )
 from wastech_orchestrator.core.flow.output_policy import resolve_output_policy
 from wastech_orchestrator.core.flow.schema import ChecksNode, FlowNode
-from wastech_orchestrator.providers.artifacts import task_artifact_dir
+from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
 from wastech_orchestrator.routing.snapshots import WorkingTreeSnapshot
 from wastech_orchestrator.state_store import CheckRunRow, NodeRunRow
 
@@ -125,7 +125,8 @@ class ChecksNodeRunner:
         # A missing manifest (no report dir, or sources.json absent) → uncheckable, never a crash.
         manifest = (report_dir or checks_dir) / "sources.json"
         report = validate_citations(self._s.repo_dir, manifest)
-        artifact = checks_dir / "citation.json"
+        run_dir = self._run_dir(ctx.task_id, node.id, run_id)
+        artifact = run_dir / "citation.json"
         artifact.write_text(_citation_json(report), encoding="utf-8")
         self._record_check_run(
             ctx,
@@ -142,15 +143,15 @@ class ChecksNodeRunner:
 
     def _run_dependency_scan(self, node: ChecksNode, ctx: NodeContext, run_id: int) -> NodeResult:
         """Run the core-owned advisory scanners as evidence; always ``pass`` (the scan ran)."""
-        checks_dir = self._checks_dir(ctx.task_id)
+        run_dir = self._run_dir(ctx.task_id, node.id, run_id)
         report = run_dependency_scan(
             repo_dir=self._s.repo_dir,
-            logs_dir=checks_dir / "dependency_scan",
+            logs_dir=run_dir / "dependency_scan",
             env=self._s.process_env,
             timeout_seconds=self._s.scan_timeout_s,
             run_process=self._s.run_process,
         )
-        artifact = checks_dir / "dependency_scan.json"
+        artifact = run_dir / "dependency_scan.json"
         artifact.write_text(_dependency_scan_json(report), encoding="utf-8")
         for scan in report.runs:
             self._record_check_run(
@@ -182,6 +183,12 @@ class ChecksNodeRunner:
         checks_dir = Path(task_artifact_dir(self._s.artifacts_root, task_id)) / "checks"
         checks_dir.mkdir(parents=True, exist_ok=True)
         return checks_dir
+
+    def _run_dir(self, task_id: str, node_id: str, run_id: int) -> Path:
+        """The per-run dir for this checks node's reports (keyed by node.id + run_id), created."""
+        run_dir = node_run_dir(self._s.artifacts_root, task_id, node_id, run_id)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        return run_dir
 
     def _record_check_run(
         self,

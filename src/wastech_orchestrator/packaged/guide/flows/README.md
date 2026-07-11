@@ -57,7 +57,7 @@ flow:
 
 ## Chaining node outputs (`{<node_id>_path}`)
 
-Every **agent** node's output is persisted and exposed to later nodes as `{<node_id>_path}` — a path to that node's `<id>.out.md`, never the inlined content. A **`tool`** node exposes the same variable (its redacted stdout at `tools/<id>/stdout.txt`). That is how a multi-step flow hands one node's result to the next by name, with no extra config:
+Every **agent** node's output is persisted and exposed to later nodes as `{<node_id>_path}` — a path to that node's `<id>.out.md`, never the inlined content. A **`tool`** node exposes the same variable (its redacted stdout). Both live under that run's `logs/<task-id>/stages/<id>/run-<run-id>/` directory, so a node that re-runs in a loop keeps every pass and `{<node_id>_path}` resolves to the latest. That is how a multi-step flow hands one node's result to the next by name, with no extra config:
 
 ```yaml
 nodes:

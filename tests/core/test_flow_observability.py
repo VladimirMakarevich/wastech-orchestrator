@@ -15,7 +15,7 @@ from wastech_orchestrator.core.flow.observability import (
     write_prompt_audit,
     write_rendered_prompt,
 )
-from wastech_orchestrator.providers.artifacts import task_artifact_dir
+from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
 from wastech_orchestrator.providers.base import (
     AgentRunResult,
     ErrorClass,
@@ -133,13 +133,14 @@ def test_write_rendered_prompt_redacts_and_registers(tmp_path: Path) -> None:
         artifacts_root=str(tmp_path),
         task_id="task-1",
         node_id="implementation",
-        subtask=None,
+        run_id=42,
         prompt="prompt with SECRET_XYZ inside",
         secrets=("SECRET_XYZ",),
         register=_register(calls),
     )
-    stages = task_artifact_dir(tmp_path, "task-1") / "stages" / "implementation"
-    path = stages / "rendered-prompt.md"
+    # Per-run: co-located under stages/<node>/run-<id>/ next to the run's provider attempts.
+    run_dir = node_run_dir(tmp_path, "task-1", "implementation", 42)
+    path = run_dir / "rendered-prompt.md"
     assert "SECRET_XYZ" not in path.read_text("utf-8")
     assert calls == [("task-1", "rendered_prompt", str(path))]
 

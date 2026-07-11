@@ -46,6 +46,7 @@ from wastech_orchestrator.core.flow.schema import (
     PublishNode,
 )
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
+from wastech_orchestrator.providers.artifacts import node_run_dir
 from wastech_orchestrator.providers.base import (
     AgentRunResult,
     ProviderId,
@@ -294,7 +295,8 @@ def test_node_output_path_variable_resolves_downstream(tmp_path: Path) -> None:
         adjacency=MappingProxyType({}),
         flow_fingerprint="fp",
     )
-    scan_out = tmp_path / "logs" / "task-1" / "scan.out.md"
+    # The generic channel is now per-run: place scan's output under stages/scan/run-<id>/.
+    scan_out = tmp_path / "logs" / "task-1" / "stages" / "scan" / "run-000001" / "scan.out.md"
     scan_out.parent.mkdir(parents=True, exist_ok=True)
     scan_out.write_text("SCAN RESULT", "utf-8")
 
@@ -1607,9 +1609,34 @@ def test_evaluator_review_writes_findings_artifact(tmp_path: Path) -> None:
     EvaluatorNodeRunner(services, inputs).run(node, _ctx(node))
     findings_file = Path(inputs.review_path)  # type: ignore[arg-type]
     assert findings_file.name == "findings.json"
+    # Per-run: under stages/<node>/run-<id>/ (node ran first → node_run_id 1).
+    assert findings_file == node_run_dir(str(tmp_path), "task-1", "review", 1) / "findings.json"
     assert json.loads(findings_file.read_text("utf-8")) == {
         "findings": [{"title": "x", "severity": "low"}]
     }
+
+
+def test_evaluator_reruns_preserve_each_passs_findings(tmp_path: Path) -> None:
+    # preserve-node-run-artifact-history: a re-running evaluator (fix→review loop) keeps every
+    # pass's findings.json on disk instead of clobbering the last; review_path tracks the newest.
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    node = _evaluator("review")
+    store = FakeStore()  # shared across both passes → node_run_id 1 then 2
+    inputs = _inputs(tmp_path)
+    services = _services(
+        FakeRouter(_result({"findings": [{"severity": "low"}]})),
+        store,
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    EvaluatorNodeRunner(services, inputs).run(node, _ctx(node))
+    first = Path(inputs.review_path)  # type: ignore[arg-type]
+    EvaluatorNodeRunner(services, inputs).run(node, _ctx(node))
+    second = Path(inputs.review_path)  # type: ignore[arg-type]
+
+    assert first == node_run_dir(str(tmp_path), "task-1", "review", 1) / "findings.json"
+    assert second == node_run_dir(str(tmp_path), "task-1", "review", 2) / "findings.json"
+    assert first != second and first.is_file() and second.is_file()  # both passes preserved
 
 
 def test_review_is_ordinary_evaluator(tmp_path: Path) -> None:
