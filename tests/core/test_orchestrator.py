@@ -1004,6 +1004,29 @@ def test_transient_exhaustion_parks_task_resumable(
     assert "publish" not in _ran_nodes(store, "task-park")
 
 
+def test_rate_limited_exhaustion_parks_task_resumable(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # A subscription/session limit that exhausts every provider (RATE_LIMITED) must NOT go terminal
+    # (the bug both post-mortems hit): it parks as resumable (RUNNING, blocked_since stamped) and
+    # waits out the reset — no failure report, no ledger record, no burned queue / fix budget.
+    providers = _both(infra_fail={"implementation"}, infra_error_class=ErrorClass.RATE_LIMITED)
+    orch, store, ledger, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-limit"))
+
+    assert result.final_status is Status.RUNNING  # parked, not terminal FAILED
+    task = store.get_task("task-limit")
+    assert task is not None
+    assert task.status is Status.RUNNING
+    assert task.blocked_since is not None
+    assert ledger.records() == []
+    assert not (art / "logs" / "task-limit" / "failure_report.json").exists()
+
+
 def test_stop_cancellation_parks_task_resumable(git_repo, make_git_config, tmp_path: Path) -> None:
     # Reliable-stop: an operator stop kills the implementation agent (surfaces as PROCESS_CRASHED),
     # the Router reclassifies it as CANCELLED (is_cancelled True) instead of falling back, and the
@@ -1066,7 +1089,7 @@ def test_parked_task_resumes_when_provider_recovers(
 
 
 def test_parked_task_fails_after_max_blocked(git_repo, make_git_config, tmp_path: Path) -> None:
-    # A sustained outage: the task stays parked past agents.retry.max_blocked_s (default 3600s) →
+    # A sustained outage: the task stays parked past agents.retry.max_blocked_s (default 6h) →
     # on the next resume it goes terminal FAILED (nothing hangs forever).
     clock = _Clock()
     providers = _both(
@@ -1080,7 +1103,7 @@ def test_parked_task_fails_after_max_blocked(git_repo, make_git_config, tmp_path
     first = orch.run_task(_complete_task(tmp_path, "task-ceiling"))
     assert first.final_status is Status.RUNNING
 
-    clock.advance(3600 + 60)  # past the default max_blocked_s
+    clock.advance(21600 + 60)  # past the default max_blocked_s
     result = orch.resume()
 
     assert result is not None and result.final_status is Status.FAILED

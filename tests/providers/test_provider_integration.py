@@ -163,6 +163,26 @@ def test_rate_limited(
 
 
 @pytest.mark.parametrize("provider_name", PROVIDERS)
+def test_session_limit_raises_rate_limited(
+    provider_name: str,
+    fake_cli: Callable[..., str],
+    integration_security: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # The subscription/session-limit terminal must be RAISED as RATE_LIMITED (so the Router can fall
+    # over / the orchestrator can park), NOT returned as a quality TASK_FAILURE. Claude surfaces it
+    # structurally on stdout (HTTP 429 / rate_limit_event / banner, empty stderr); codex only on
+    # stderr. Both must classify identically — the exact failure that both post-mortems mis-labeled.
+    provider = _build(
+        provider_name, fake_cli("session_limit", provider_name), integration_security, tmp_path
+    )
+    with pytest.raises(ProviderError) as exc:
+        provider.run(make_request())
+    assert exc.value.error_class is ErrorClass.RATE_LIMITED
+
+
+@pytest.mark.parametrize("provider_name", PROVIDERS)
 def test_process_crashed(
     provider_name: str,
     fake_cli: Callable[..., str],

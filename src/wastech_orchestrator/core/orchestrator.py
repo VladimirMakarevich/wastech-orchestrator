@@ -54,7 +54,12 @@ from wastech_orchestrator.core.flow.postprocess import (
     read_decomposition,
     write_node_output,
 )
-from wastech_orchestrator.core.flow.recorder import StateStoreRunRecorder, hydrate_run_state
+from wastech_orchestrator.core.flow.recorder import (
+    StateStoreRunRecorder,
+    hydrate_run_state,
+    read_final_diff,
+    read_last_findings,
+)
 from wastech_orchestrator.core.flow.registry import FlowRegistry, FlowResolutionError
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import AgentNode, FlowNode
@@ -124,7 +129,7 @@ from wastech_orchestrator.providers.artifacts import (
     task_artifact_relpath,
 )
 from wastech_orchestrator.providers.base import (
-    TRANSIENT_RETRYABLE,
+    PARK_ELIGIBLE,
     AgentProvider,
     ErrorClass,
     ProviderId,
@@ -1767,12 +1772,14 @@ class Orchestrator:
             )
         except NodeInfraError as exc:
             self._sync_counters_from_run_state(p, run_state)
-            if exc.error_class in TRANSIENT_RETRYABLE or exc.error_class is ErrorClass.CANCELLED:
+            if exc.error_class in PARK_ELIGIBLE or exc.error_class is ErrorClass.CANCELLED:
                 # Park (resumable, B-lite), don't discard the task, when either: every allowed
-                # provider is transiently unavailable (retries + fallback exhausted), or an operator
-                # stop cancelled the agent (reliable-stop) — a cancellation must never read as a
-                # terminal failure. The checkpoint is already persisted; the next watch tick /
-                # process start resumes from current_node.
+                # provider is transiently unavailable or rate-limited (retries + fallback done),
+                # or an operator stop cancelled the agent (reliable-stop) — a cancel must never
+                # read as terminal. A subscription/session limit parks too: it resets on its own
+                # window, so the task waits it out and resumes rather than failing / burning the
+                # queue. The checkpoint is already persisted; the next watch tick / process start
+                # resumes from current_node (or fails it past agents.retry.max_blocked_s).
                 return self._park(p, run_state, exc)
             return self._fail(p, str(exc), node_id=run_state.current_node, run_state=run_state)
         self._sync_counters_from_run_state(p, run_state)
@@ -2646,8 +2653,8 @@ class Orchestrator:
                 limit_name=error,
                 counters=dict(run_state.loop_counters) if run_state is not None else {},
                 last_check_log=None,
-                last_review_findings=None,
-                final_diff="",
+                last_review_findings=read_last_findings(self._store, p.task.id),
+                final_diff=read_final_diff(self._artifacts_root, p.task.id),
                 node_id=node_id,
             )
             self._store.update_task(p.task.id, failure_report_path=report_path)

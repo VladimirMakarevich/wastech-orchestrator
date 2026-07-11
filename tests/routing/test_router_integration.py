@@ -371,3 +371,63 @@ def test_transient_500_exhaustion_terminal_when_single_provider(
     assert outcome.terminal_error is not None
     assert outcome.terminal_error.error_class is ErrorClass.PROVIDER_UNAVAILABLE
     assert len(outcome.attempts) == 3  # 1 + max_attempts retries
+
+
+def test_session_limit_stdout_falls_back(
+    config: OrchestratorConfig,
+    integration_security: SecurityConfig,
+    fake_cli: Callable[..., str],
+    make_request: Callable[..., AgentRunRequest],
+    tmp_path: Path,
+) -> None:
+    # Claude's STRUCTURAL stdout session-limit (429 / rate_limit_event / banner, empty stderr) is
+    # RAISED as RATE_LIMITED, so the Router falls over to codex (a separate quota) and finishes.
+    # This is the path both post-mortems needed: a *raised* limit, not a returned task_failure.
+    claude = _build_provider(
+        "claude", fake_cli("session_limit", "claude"), integration_security, tmp_path
+    )
+    codex = _build_provider("codex", fake_cli("success", "codex"), integration_security, tmp_path)
+    router = AgentRouter(config, {ProviderId.CLAUDE: claude, ProviderId.CODEX: codex})
+    route = router.resolve_route("implementation")
+    assert (route.primary, route.fallback) == (ProviderId.CLAUDE, ProviderId.CODEX)
+
+    outcome = router.run_stage(
+        make_request(node_id="implementation", working_directory=str(tmp_path / "clone")), route
+    )
+
+    assert outcome.result is not None and outcome.result.status is RunStatus.SUCCEEDED
+    assert outcome.provider_used is ProviderId.CODEX
+    assert outcome.stage_attempts == 2
+    # No same-provider retry for a rate limit (RATE_LIMITED ∉ TRANSIENT_RETRYABLE): straight to
+    # fallback — exactly one claude attempt, then codex.
+    assert [a.provider for a in outcome.attempts] == [ProviderId.CLAUDE, ProviderId.CODEX]
+    assert outcome.attempts[0].error_class is ErrorClass.RATE_LIMITED
+
+
+def test_session_limit_both_providers_terminal(
+    config: OrchestratorConfig,
+    integration_security: SecurityConfig,
+    fake_cli: Callable[..., str],
+    make_request: Callable[..., AgentRunRequest],
+    tmp_path: Path,
+) -> None:
+    # Both providers rate-limited: the route exhausts and the router surfaces a terminal
+    # RATE_LIMITED (result=None) — which the orchestrator turns into a resumable park, not a fail.
+    claude = _build_provider(
+        "claude", fake_cli("session_limit", "claude"), integration_security, tmp_path
+    )
+    codex = _build_provider(
+        "codex", fake_cli("session_limit", "codex"), integration_security, tmp_path
+    )
+    router = AgentRouter(config, {ProviderId.CLAUDE: claude, ProviderId.CODEX: codex})
+    route = router.resolve_route("implementation")
+
+    outcome = router.run_stage(
+        make_request(node_id="implementation", working_directory=str(tmp_path / "clone")), route
+    )
+
+    assert outcome.result is None
+    assert outcome.terminal_error is not None
+    assert outcome.terminal_error.error_class is ErrorClass.RATE_LIMITED
+    # One attempt per provider — no tight same-provider retry for a rate limit.
+    assert [a.provider for a in outcome.attempts] == [ProviderId.CLAUDE, ProviderId.CODEX]

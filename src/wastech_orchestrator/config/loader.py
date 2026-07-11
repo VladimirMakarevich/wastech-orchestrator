@@ -450,7 +450,7 @@ def _build_retry(raw: Any, issues: list[str]) -> RetryConfig:
         max_attempts=_int(m, "max_attempts", 2, where, issues),
         base_delay_s=_float(m, "base_delay_s", 2.0, where, issues),
         max_delay_s=_float(m, "max_delay_s", 30.0, where, issues),
-        max_blocked_s=_float(m, "max_blocked_s", 3600.0, where, issues),
+        max_blocked_s=_float(m, "max_blocked_s", 21600.0, where, issues),
     )
 
 

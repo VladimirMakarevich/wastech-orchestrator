@@ -49,7 +49,8 @@ agents:
     max_attempts: 2                 # same-provider retries AFTER the first attempt (per provider); 0 disables
     base_delay_s: 2.0               # exponential backoff: min(base * 2**k, max_delay_s), no jitter
     max_delay_s: 30.0               # cap per-retry delay (total retry window stays well under a minute)
-    max_blocked_s: 3600.0           # both providers down -> park as resumable; fail only after this much parked time
+    max_blocked_s: 21600.0          # every provider down OR rate-limited -> park as resumable; fail only after
+                                    #   this much total parked time (6h > a provider's ~5h usage window)
 
   # Provider routing is node-based: a flow node declares its own `provider` (else the global
   # primary below). Exactly one configured provider must set `primary: true` — it runs every node

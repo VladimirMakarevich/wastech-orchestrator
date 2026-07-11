@@ -500,7 +500,7 @@ def test_retry_defaults_when_block_absent() -> None:
         2,
         2.0,
         30.0,
-        3600.0,
+        21600.0,
     )
 
 

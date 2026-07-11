@@ -76,7 +76,11 @@ _CODEX_SIGNATURES = make_signatures(
             r"session not found|no such session|unknown session|conversation not found"
             r"|no conversation with|thread not found|cannot resume",
         ),
-        (ErrorClass.RATE_LIMITED, r"rate limit|\b429\b|too many requests|quota exceeded"),
+        (
+            ErrorClass.RATE_LIMITED,
+            r"rate limit|\b429\b|too many requests|quota exceeded"
+            r"|session limit|usage limit|hit your (session|usage) limit|limit .* resets",
+        ),
         (
             ErrorClass.AUTHENTICATION_FAILED,
             r"not logged in|codex login|authentication|unauthorized|\b401\b",

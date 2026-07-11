@@ -85,6 +85,11 @@ class ParsedEvents:
     # else ``None``. Lets the adapter classify a parseable terminal failure as a task outcome (never
     # a crash) and surface a precise message.
     failure_subtype: str | None = None
+    # True when the terminal event reports a subscription/usage rate-limit (HTTP 429 / a
+    # ``rate_limit_event`` / a "session limit … resets" banner). Such a terminal is NOT a quality
+    # ``task_failure`` but a transient infra event: the finalize step RAISES ``RATE_LIMITED`` (so
+    # the Router falls over / the orchestrator parks) instead of returning a quality failure.
+    rate_limited: bool = False
 
 
 def build_context_footer(request: AgentRunRequest) -> str:
@@ -408,6 +413,15 @@ class BaseCliProvider:
             else None
         )
         usage = redact_mapping(parsed.usage, extra_secrets=extra_secrets) if parsed.usage else None
+        if not parsed.succeeded and parsed.rate_limited:
+            # A subscription/usage rate-limit terminal is a TRANSIENT INFRA event, not a quality
+            # failure: RAISE ``RATE_LIMITED`` so the Router falls over to the other provider and, on
+            # exhaustion, the orchestrator parks the task (resumable) instead of burning the queue /
+            # a fix budget. Persist the failed-attempt artifact first, like the other raise paths.
+            error = NormalizedError(ErrorClass.RATE_LIMITED, message_for(ErrorClass.RATE_LIMITED))
+            self._finalize_failure(paths, request, started_at, finished_at, proc, error)
+            raise ProviderError(error.error_class, error.message)
+
         if parsed.succeeded:
             status, error_obj = RunStatus.SUCCEEDED, None
         else:

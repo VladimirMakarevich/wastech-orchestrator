@@ -123,6 +123,38 @@ def test_watch_resume_parked_blocks_continuation(make_git_config, git_repo, tmp_
     assert orch.run_calls == []  # the parked active task blocks picking pending
 
 
+def test_watch_rate_limit_park_pauses_queue(make_git_config, git_repo, tmp_path: Path) -> None:
+    # F5 queue circuit-breaker: when the first task parks on a rate limit (run_task → RUNNING), the
+    # parked task holds the single slot, so acquire_slot() denies the next pending task and
+    # watch_once stops the chain — no separate breaker; it falls out of the single-slot park.
+    config = make_git_config(git_repo.clone, auto_mode=True)
+
+    class _ParkingOrch(_FakeOrch):
+        def __init__(self) -> None:
+            super().__init__(
+                runs=[
+                    PipelineResult(task_id="a", final_status=Status.RUNNING),  # parked on the limit
+                    _done("b"),
+                ]
+            )
+            self._parked = False
+
+        def acquire_slot(self, task_id: str) -> bool:
+            return not self._parked  # a parked (RUNNING) task keeps owning the single slot
+
+        def run_task(self, task_file: str):
+            result = super().run_task(task_file)
+            if result.final_status is Status.RUNNING:
+                self._parked = True
+            return result
+
+    orch = _ParkingOrch()
+    folder = _pending(tmp_path, "a.md", "b.md")
+    results = cli.watch_once(orch, config, folder)  # type: ignore[arg-type]
+    assert [r.final_status for r in results] == [Status.RUNNING]  # only the parked task
+    assert len(orch.run_calls) == 1  # the second pending task is never picked up
+
+
 def test_summarize_watch_labels_parked_and_exit_code() -> None:
     # A parked RUNNING result gets a distinct, non-failure exit code and a "paused" summary line.
     parked = PipelineResult(task_id="r", final_status=Status.RUNNING)

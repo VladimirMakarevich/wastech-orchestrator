@@ -9,7 +9,7 @@ from wastech_orchestrator.core.flow.recorder import StateStoreRunRecorder, hydra
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import AgentNode
 from wastech_orchestrator.core.state_machine import Status
-from wastech_orchestrator.state_store import NodeRunRow, StateStore, TaskRow
+from wastech_orchestrator.state_store import EvaluationRow, NodeRunRow, StateStore, TaskRow
 
 
 def _store(tmp_path: Path) -> StateStore:
@@ -62,6 +62,39 @@ def test_recorder_writes_flow_neutral_failure_report(tmp_path: Path) -> None:
     assert report["last_check_log"] is None
     assert report["last_review_findings"] == []
     assert store.get_task("t1").failure_report_path == path  # type: ignore[union-attr]
+
+
+def test_recorder_failure_report_carries_findings_and_diff(tmp_path: Path) -> None:
+    # F50: the stuck report must carry the REAL last in-flow review findings and working-tree diff,
+    # not the old hardcoded (none)/(empty) — so a terminal is diagnosable without hand-recovery.
+    store = _store(tmp_path)
+    store.record_evaluation(
+        EvaluationRow(
+            task_id="t1",
+            kind="in_flow_verdict",
+            verdict="rework",
+            findings_json=json.dumps(
+                [{"severity": "blocking", "reason": "schema drift", "paths": ["a.ts"]}]
+            ),
+            node_id="review",
+        )
+    )
+    diff_dir = tmp_path / "logs" / "t1"
+    diff_dir.mkdir(parents=True)
+    (diff_dir / "current.diff").write_text("diff --git a/a.ts b/a.ts\n+changed\n", encoding="utf-8")
+
+    recorder = StateStoreRunRecorder(store, "t1", artifacts_root=tmp_path)
+    state = FlowRunState(flow_fingerprint="fp", current_node="review", loop_counters={})
+    path = recorder.write_failure_report(
+        node_id="review", loop="review_fix", limit_name="max_fix_cycles", run_state=state
+    )
+    report = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert report["last_review_findings"] == [
+        {"severity": "blocking", "reason": "schema drift", "paths": ["a.ts"]}
+    ]
+    assert "changed" in report["final_diff"]
+    stuck = (Path(path).parent / "stuck.md").read_text(encoding="utf-8")
+    assert "schema drift" in stuck
 
 
 def test_hydrate_returns_none_when_flow_never_ran(tmp_path: Path) -> None:

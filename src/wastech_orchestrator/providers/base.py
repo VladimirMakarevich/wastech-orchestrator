@@ -87,6 +87,13 @@ TRANSIENT_RETRYABLE: frozenset[ErrorClass] = frozenset(
     }
 )
 
+# Infra classes that, once every provider is exhausted, the orchestrator defers into a resumable
+# park (B-lite) rather than failing terminally. A SUPERSET of TRANSIENT_RETRYABLE: it adds
+# RATE_LIMITED, which is NOT a tight same-provider retry (it stays out of TRANSIENT_RETRYABLE) but
+# IS a long, resumable defer — a subscription/session limit resets on its own window, so the task
+# waits it out and resumes instead of burning the queue or a fix budget.
+PARK_ELIGIBLE: frozenset[ErrorClass] = TRANSIENT_RETRYABLE | frozenset({ErrorClass.RATE_LIMITED})
+
 
 # --- Contract data structures ---
 

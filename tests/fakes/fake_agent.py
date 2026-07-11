@@ -112,6 +112,12 @@ def _run_codex(scenario: str, cli_args: list[str]) -> int:
         sys.stderr.write("Error: rate limit exceeded (429 Too Many Requests)\n")
         return 1
 
+    if scenario == "session_limit":
+        # Codex has no structured stdout limit event (verified) — a subscription/session limit can
+        # only surface on stderr, caught by the extended RATE_LIMITED signature and raised.
+        sys.stderr.write("You've hit your session limit · resets 6:30am (Europe/Warsaw)\n")
+        return 1
+
     if scenario == "invalid_output":
         sys.stdout.write("this is not valid jsonl output\n")
         return 0
@@ -195,6 +201,35 @@ def _run_claude(scenario: str, cli_args: list[str]) -> int:
 
     if scenario == "rate_limited":
         sys.stderr.write("Error: rate limit exceeded (429 Too Many Requests)\n")
+        return 1
+
+    if scenario == "session_limit":
+        # A subscription/session limit surfaced STRUCTURALLY on stdout (the real Claude CLI shape):
+        # a terminal ``result`` with ``is_error`` + ``api_error_status: 429`` + a rejected
+        # ``rate_limit_event`` + the "session limit … resets" banner, and EMPTY stderr. The adapter
+        # must RAISE this as RATE_LIMITED (never return task_failure). The exit code is irrelevant —
+        # the adapter classifies from the parsed terminal event, not the code.
+        _emit(
+            [
+                {"type": "system", "subtype": "init", "session_id": _SESSION_ID},
+                {
+                    "type": "rate_limit_event",
+                    "status": "rejected",
+                    "rateLimitType": "five_hour",
+                    "overageDisabledReason": "out_of_credits",
+                    "resetsAt": 1783639800,
+                },
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": True,
+                    "api_error_status": 429,
+                    "result": "You've hit your session limit · resets 6:30am (Europe/Warsaw)",
+                    "session_id": _SESSION_ID,
+                    "usage": {"input_tokens": 0, "output_tokens": 0},
+                },
+            ]
+        )
         return 1
 
     if scenario == "invalid_output":

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -90,6 +91,24 @@ _NETWORK_TOOLS: tuple[str, ...] = ("WebFetch", "WebSearch")
 # review/checks, not by the adapter.
 _SUCCESS_SUBTYPE = "success"
 
+# A subscription/usage-limit banner Claude surfaces inside the terminal ``result`` message (with
+# empty stderr) — e.g. "You've hit your session limit · resets 6:30am". Mirrors the extra limit
+# patterns added to the stderr RATE_LIMITED signature below.
+_LIMIT_BANNER = re.compile(
+    r"session limit|usage limit|hit your (session|usage) limit|limit .* resets",
+    re.IGNORECASE,
+)
+
+
+def _is_limit_event(payload: object) -> bool:
+    """True when a ``rate_limit_event`` payload marks a rejected / capped request."""
+    return isinstance(payload, dict) and (
+        str(payload.get("status", "")).lower() == "rejected"
+        or bool(payload.get("rateLimitType"))
+        or bool(payload.get("overageDisabledReason"))
+    )
+
+
 # Claude stderr signatures → normalized error classes (most specific first).
 _CLAUDE_SIGNATURES = make_signatures(
     [
@@ -100,7 +119,8 @@ _CLAUDE_SIGNATURES = make_signatures(
         ),
         (
             ErrorClass.RATE_LIMITED,
-            r"rate limit|\b429\b|too many requests|quota exceeded|overloaded",
+            r"rate limit|\b429\b|too many requests|quota exceeded|overloaded"
+            r"|session limit|usage limit|hit your (session|usage) limit|limit .* resets",
         ),
         (
             ErrorClass.AUTHENTICATION_FAILED,
@@ -347,6 +367,8 @@ def parse_stream_json(stdout_text: str) -> ParsedEvents:
     terminal_seen = False
     succeeded = False
     failure_subtype: str | None = None
+    rate_limited = False
+    rate_limit_event: dict[str, Any] | None = None
 
     for line in stdout_text.splitlines():
         stripped = line.strip()
@@ -361,6 +383,13 @@ def parse_stream_json(stdout_text: str) -> ParsedEvents:
         event_type = str(event.get("type", ""))
         if "session_id" in event:
             session_id = event.get("session_id", session_id)
+        # A ``rate_limit_event`` may arrive as its own line or nested on another event — capture it
+        # wherever it appears so the terminal ``result`` check below can see it.
+        if event_type == "rate_limit_event":
+            rate_limit_event = event
+        nested_rle = event.get("rate_limit_event")
+        if isinstance(nested_rle, dict):
+            rate_limit_event = nested_rle
         if event_type == "result":
             terminal_seen = True
             subtype = str(event.get("subtype", _SUCCESS_SUBTYPE)).lower()
@@ -376,6 +405,16 @@ def parse_stream_json(stdout_text: str) -> ParsedEvents:
             run_usage = event.get("usage")
             if isinstance(run_usage, dict):
                 usage = run_usage
+            # A subscription/usage rate-limit terminal: HTTP 429, a rejected ``rate_limit_event``,
+            # or a "session limit … resets" banner. Recognized only on an error terminal so a
+            # normal run is never misread. The adapter RAISES it as RATE_LIMITED.
+            limit_signal = (
+                str(event.get("api_error_status")) == "429"
+                or _is_limit_event(rate_limit_event)
+                or (isinstance(text, str) and bool(_LIMIT_BANNER.search(text)))
+            )
+            if is_error and limit_signal:
+                rate_limited = True
 
     if not terminal_seen:
         raise ProviderError(ErrorClass.INVALID_OUTPUT, message_for(ErrorClass.INVALID_OUTPUT))
@@ -387,6 +426,7 @@ def parse_stream_json(stdout_text: str) -> ParsedEvents:
         session_id=session_id,
         succeeded=succeeded,
         failure_subtype=failure_subtype,
+        rate_limited=rate_limited,
     )
 
 

@@ -178,7 +178,7 @@ agents:
 
 ### `agents.retry`
 
-Optional (added in `schema_version` 20); absent → the defaults below. Bounds the orchestrator's recovery from a **transient** provider failure — a 5xx / network blip classified `provider_unavailable` or `network_unavailable` (never a quality failure, never a `timeout` or `rate_limited`, which are excluded by design). The flow is: retry the **same** provider with exponential backoff → switch to the other allowed provider (symmetric Claude↔Codex) → if **both** are unavailable, **park** the task as resumable instead of failing it, until `max_blocked_s` elapses.
+Optional (added in `schema_version` 20); absent → the defaults below. Bounds the orchestrator's recovery from a **transient** provider failure — a 5xx / network blip classified `provider_unavailable` or `network_unavailable` (never a quality failure, never a `timeout`). The flow is: retry the **same** provider with exponential backoff → switch to the other allowed provider (symmetric Claude↔Codex) → if **both** are unavailable, **park** the task as resumable instead of failing it, until `max_blocked_s` elapses. A subscription/session **`rate_limited`** is treated the same way at the park stage — it is _not_ tight-retried on the same provider (a rate limit wants a long defer, not a hot loop), but it _is_ fallback-eligible and, if **every** provider is rate-limited, it **parks** (resumable) and waits out the reset window rather than failing or burning the queue.
 
 ```yaml
 agents:
@@ -186,7 +186,7 @@ agents:
     max_attempts: 2
     base_delay_s: 2.0
     max_delay_s: 30.0
-    max_blocked_s: 3600.0
+    max_blocked_s: 21600.0
 ```
 
 | Field | Type | Default | Meaning |
@@ -194,7 +194,7 @@ agents:
 | `max_attempts` | integer | `2` | Same-provider retries **after** the first failed attempt (so `2` ⇒ up to 3 invocations). Applied **per provider** in the `[primary, fallback]` sequence; counted separately from `max_stage_attempts`. `0` disables transient retry. |
 | `base_delay_s` | number | `2.0` | Backoff base. Each retry waits `min(base_delay_s * 2**k, max_delay_s)` (deterministic, no jitter). |
 | `max_delay_s` | number | `30.0` | Per-retry delay cap. Must be `>= base_delay_s`. |
-| `max_blocked_s` | number | `3600.0` | Soft-pause ceiling: a task parked because **both** providers were transiently unavailable is failed only after it has stayed parked this long (total wall-clock). |
+| `max_blocked_s` | number | `21600.0` | Soft-pause ceiling (total parked wall-clock): a task parked because **every** provider was transiently unavailable **or** rate-limited is failed only after it has stayed parked this long. Default 6h comfortably outlasts a provider's ~5h usage window so a rate-limited task waits out the reset and resumes. |
 
 Validation rejects negative values and `max_delay_s < base_delay_s`. Each attempt (including every retry) is recorded in the `provider_attempts` audit trail. See [operations.md](operations.md#provider-outage-behavior) for the operator-facing behavior.
 

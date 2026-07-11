@@ -125,7 +125,7 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
                 "max_attempts": 2,
                 "base_delay_s": 2.0,
                 "max_delay_s": 30.0,
-                "max_blocked_s": 3600.0,
+                "max_blocked_s": 21600.0,
             },
             "providers": {
                 pid.value: _provider_block(pid, primary=(pid is primary_pid)) for pid in providers

@@ -16,11 +16,43 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import FlowNode
 from wastech_orchestrator.ledger import DecomposedFailureInfo, write_failure_report
+from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.state_store import StateStore
+
+
+def read_last_findings(store: StateStore, task_id: str) -> list[Any] | None:
+    """The most recent in-flow evaluator verdict's findings for the failure report (F50).
+
+    Returns ``None`` when the run recorded no in-flow verdict (so the report reads "(none)" only
+    when that is the truth) or the stored JSON is unusable.
+    """
+    verdicts = [e for e in store.get_evaluations(task_id) if e.kind == "in_flow_verdict"]
+    if not verdicts:
+        return None
+    try:
+        findings = json.loads(verdicts[-1].findings_json)
+    except json.JSONDecodeError:
+        return None
+    return findings if isinstance(findings, list) else None
+
+
+def read_final_diff(artifacts_root: str | Path, task_id: str) -> str:
+    """The task's working-tree diff artifact (already written + redacted) for the report (F50).
+
+    Reads back ``<task-dir>/current.diff`` written by ``GitManager.write_current_diff`` during the
+    agent nodes; ``""`` when absent (e.g. no edit node ran) — an honest empty, not a masked one.
+    """
+    try:
+        return (task_artifact_dir(artifacts_root, task_id) / "current.diff").read_text(
+            encoding="utf-8"
+        )
+    except OSError:
+        return ""
 
 
 class StateStoreRunRecorder:
@@ -61,8 +93,8 @@ class StateStoreRunRecorder:
             limit_name=limit_name,
             counters=dict(run_state.loop_counters),
             last_check_log=None,
-            last_review_findings=None,
-            final_diff="",
+            last_review_findings=read_last_findings(self._store, self._task_id),
+            final_diff=read_final_diff(self._artifacts_root, self._task_id),
             decomposed=self._decomposed_failure(subtask_order),
             node_id=node_id,
         )

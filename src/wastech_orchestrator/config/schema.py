@@ -246,13 +246,15 @@ class RetryConfig:
     stage hop). Only the ``TRANSIENT_RETRYABLE`` classes (PROVIDER_UNAVAILABLE / NETWORK_UNAVAIL)
     are retried. Backoff is deterministic exponential ``min(base_delay_s * 2**k, max_delay_s)`` with
     no jitter — a single-slot orchestrator has no thundering-herd. ``max_blocked_s`` is the B-lite
-    ceiling: once both providers are exhausted a task parks as resumable (not terminal) and is only
-    failed if it stays parked longer than this (total parked wall-clock)."""
+    ceiling: once every provider is exhausted a task parks as resumable (not terminal) and is only
+    failed if it stays parked longer than this (total parked wall-clock). It bounds BOTH a transient
+    outage and a subscription/session rate-limit park — the default (6h) comfortably outlasts a
+    provider's ~5h usage window so a rate-limited task waits out the reset and resumes."""
 
     max_attempts: int = 2
     base_delay_s: float = 2.0
     max_delay_s: float = 30.0
-    max_blocked_s: float = 3600.0
+    max_blocked_s: float = 21600.0
 
 
 @dataclass(frozen=True)
