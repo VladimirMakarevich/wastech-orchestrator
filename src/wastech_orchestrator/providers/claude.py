@@ -275,7 +275,10 @@ def build_claude_argv(
     and appended after the orchestrator's own ``--permission-mode`` so the CLI's last-wins
     resolution applies. The prompt is delivered on stdin, never on the command line; context reaches
     Claude only as file paths. ``denied_commands`` and ``denied_read_paths`` (the ``security.*``
-    lists) are enforced as ``--disallowedTools`` so the agent can never publish or read secrets.
+    lists) are enforced as ``--disallowedTools`` so the agent can never publish or read secrets. The
+    native-memory deny (F37, :func:`_native_memory_deny_tools`) is also appended there, unless
+    ``config.allow_native_memory`` is set — the default-off operator opt-in that lets Claude use its
+    own native auto-memory (see :class:`ProviderConfig`), accepting an unaudited HOME store.
     """
     combined_extra = tuple(config.extra_args) + tuple(request.extra_args)
     reasons = find_forbidden_args(combined_extra)
@@ -303,11 +306,12 @@ def build_claude_argv(
     ]
     if allowed_tools:
         argv += ["--allowedTools", ",".join(allowed_tools)]
-    denied_tools = (
-        _deny_tools_for(denied_commands)
-        + _deny_read_tools_for(denied_read_paths)
-        + _native_memory_deny_tools()  # F37: confine native project memory out of the spawn
-    )
+    denied_tools = _deny_tools_for(denied_commands) + _deny_read_tools_for(denied_read_paths)
+    # F37: confine native project memory out of the spawn — unless the operator has opted in to the
+    # agent's own native memory (agents.providers.claude.allow_native_memory), a deliberate,
+    # default-off risk acceptance (that store is unaudited and outside the redaction net).
+    if not config.allow_native_memory:
+        denied_tools += _native_memory_deny_tools()
     if denied_tools:
         argv += ["--disallowedTools", ",".join(denied_tools)]
     model = request.model or config.model

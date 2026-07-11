@@ -104,7 +104,8 @@ def test_native_memory_paths_denied_for_custom_config_dir(
 ) -> None:
     # F37: the spawned agent must not read/inject/leak Claude Code's native project memory, which
     # lives under the config dir OUTSIDE the target working tree. Write/Edit/Read are denied there,
-    # honoring a custom CLAUDE_CONFIG_DIR. No denied_commands passed — the deny is unconditional.
+    # honoring a custom CLAUDE_CONFIG_DIR. No denied_commands passed — the deny applies on its own,
+    # by default (allow_native_memory off).
     config_dir = tmp_path / "isolated-claude"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
     argv = _argv(claude_config, make_request())
@@ -125,6 +126,38 @@ def test_native_memory_deny_defaults_to_home_claude(
     argv = _argv(claude_config, make_request())
     disallowed = argv[argv.index("--disallowedTools") + 1]
     assert f"Write({_native_memory_glob(Path.home() / '.claude')})" in disallowed
+
+
+def test_allow_native_memory_drops_the_deny_but_keeps_command_denies(
+    claude_config: ProviderConfig,
+    make_request: Callable[..., AgentRunRequest],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # agent-native-memory-opt-in: with the Claude-only opt-in on, the F37 native-memory deny is
+    # dropped so the agent may use its own auto-memory — but the command/read denies are untouched.
+    config_dir = tmp_path / "isolated-claude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    opted_in = replace(claude_config, allow_native_memory=True)
+    argv = _argv(opted_in, make_request(), denied=DENIED)
+    disallowed = argv[argv.index("--disallowedTools") + 1]
+    glob = _native_memory_glob(config_dir)
+    assert f"Write({glob})" not in disallowed
+    assert f"Edit({glob})" not in disallowed
+    assert f"Read({glob})" not in disallowed
+    # The publish blacklist is unaffected by the memory opt-in.
+    assert "Bash(git commit:*)" in disallowed
+
+
+def test_allow_native_memory_with_no_other_denies_omits_disallowed_flag(
+    claude_config: ProviderConfig,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # With the opt-in on and no command/read denies passed, there is nothing left to deny, so the
+    # flag is omitted entirely (rather than emitted empty).
+    opted_in = replace(claude_config, allow_native_memory=True)
+    argv = build_claude_argv(opted_in, make_request())
+    assert "--disallowedTools" not in argv
 
 
 def test_no_prompt_text_is_interpolated_into_argv(
