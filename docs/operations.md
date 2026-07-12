@@ -315,7 +315,7 @@ worc top --log-file ./logs/daemon.jsonl            # match --queue to the daemon
 
 ### Re-attempting a terminal task (`rerun`)
 
-A task that ended `failed` or `manual_action_required` is terminal — `watch`/`resume` never pick it up again. `rerun` re-attempts it without hand-editing `state.db`, the ledger, or git. It needs an **idle slot** (no other active task) and the **watch daemon stopped**, since it drives the pipeline in the shared clone; it records a new ledger entry linked to the prior attempt (`attempt`, `rerun_of`).
+A task that ended `failed` or `manual_action_required` is terminal — `watch`/`resume` never pick it up again. `rerun` re-attempts it without hand-editing `state.db`, the ledger, or git. It needs an **idle slot** (no other active task) and the **watch daemon stopped**, since it drives the pipeline in the shared clone; it records a new ledger entry linked to the prior attempt (`attempt`, `rerun_of`). From `worc shell` the console forwards `rerun` with `--non-interactive` too (the same reasoning as the stop ladder above): pass `--yes` on the command line, since an unanswered confirmation prompt would otherwise fight the REPL's own stdin reader instead of asking `[y/N]`.
 
 ```bash
 worc rerun task-001 --dry-run        # show the planned reconciliation; write nothing

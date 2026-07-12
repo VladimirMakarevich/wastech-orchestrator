@@ -193,11 +193,13 @@ def test_forward_verbs_call_run_cli_with_config(
     cli_shell.dispatch("merge-task t1", ctx)
     cli_shell.dispatch("down --force", ctx)  # down maps to stop; console forces --non-interactive
     cli_shell.dispatch("restart", ctx)
+    cli_shell.dispatch("rerun t1 --continue", ctx)  # console forces --non-interactive (H1)
     assert calls == [
         ["--config", "/cfg.yaml", "status", "t1"],
         ["--config", "/cfg.yaml", "merge-task", "t1"],
         ["--config", "/cfg.yaml", "stop", "--non-interactive", "--force"],
         ["--config", "/cfg.yaml", "restart", "--non-interactive"],
+        ["--config", "/cfg.yaml", "rerun", "--non-interactive", "t1", "--continue"],
     ]
 
 

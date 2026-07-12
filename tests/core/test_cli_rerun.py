@@ -480,6 +480,62 @@ def test_rerun_continue_at_review_tolerates_task_wip(
     assert "will be committed into the task" in out
 
 
+def test_rerun_continue_at_review_survives_real_resume_with_dirty_tree(
+    git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git_run
+) -> None:
+    """Regression (RERUN-BUG-REPORT): resuming ``--continue`` at review on a task branch with
+    legitimate uncommitted WIP must not detour through ``base_branch`` — ``git checkout main``
+    refuses over a dirty tree, which used to crash the resume with a raw git error. Only
+    ``_engine_run`` is stubbed (past the point that used to crash); ``prepare_branch`` runs for
+    real against the repo, so this exercises the exact path the mocked-``resume`` tests above skip.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "failed" / "task-1.md"
+    _complete_task_file(source, "task-1")
+    branch = "worc/task-1-t"
+    git_run(["checkout", "-b", branch], git_repo.clone)
+    # The task branch must actually diverge from main on a tracked path — an uncommitted change to
+    # a brand-new (untracked) file never conflicts with `git checkout main` (nothing to overwrite),
+    # which is exactly why that detour silently "worked" for such files in the bug report. Commit a
+    # real change to the already-tracked README.md first, then leave a further edit uncommitted
+    # (the WIP) — now switching to main really would clobber it.
+    (git_repo.clone / "README.md").write_text("# project\n\nimplemented.\n", encoding="utf-8")
+    git_run(["commit", "-am", "feat(task-1): implement the thing"], git_repo.clone)
+    config = _seed(
+        project,
+        git_repo.clone,
+        TaskRow("task-1", "T", Status.FAILED, source_path=str(source), branch=branch),
+        checkpoint_node="review",
+        node_run=("review", "evaluator"),
+    )
+    # The real resume path loads the normalized manifest (unlike the mocked-``resume`` tests above,
+    # which never reach that code): without it, `load_normalized` fails and the task degrades to
+    # manual_action_required before ever reaching `prepare_branch`.
+    _seed_manifest(git_repo.clone, "task-1")
+    (git_repo.clone / "README.md").write_text(
+        "# project\n\nimplemented and reviewed.\n", encoding="utf-8"
+    )
+
+    def fake_engine_run(
+        self: Orchestrator,
+        p: object,
+        completeness: object,
+        *,
+        resume: bool,
+        run_state: object = None,
+    ) -> PipelineResult:
+        return PipelineResult(task_id="task-1", final_status=Status.DONE)
+
+    monkeypatch.setattr(Orchestrator, "_engine_run", fake_engine_run)
+    code = cli.main(["--config", str(config), "rerun", "task-1", "--continue", "--yes"])
+    assert code == 0  # prepare_branch must not attempt `git checkout main` over the dirty tree
+    assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == branch
+    assert (git_repo.clone / "README.md").read_text(
+        encoding="utf-8"
+    ) == "# project\n\nimplemented and reviewed.\n"
+
+
 def test_rerun_continue_pre_edit_node_still_refuses_dirty_tree(
     git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -953,7 +1009,7 @@ def test_exhausted_budget_non_interactive_without_flag_refuses(
     code = cli.main(["--config", str(config), "rerun", "task-1", "--continue", "--yes"])
     assert code == 1
     out = capsys.readouterr().out
-    assert "non-interactive shell" in out
+    assert "non-interactive" in out
     assert "--reset-fix-budget" in out and "--no-reset-fix-budget" in out
 
 
@@ -1020,7 +1076,7 @@ def test_yes_flag_does_not_satisfy_budget_prompt(
     monkeypatch.setattr(Orchestrator, "continue_task", _forbid_continue_task)
     code = cli.main(["--config", str(config), "rerun", "task-1", "--continue", "--yes"])
     assert code == 1
-    assert "non-interactive shell" in capsys.readouterr().out
+    assert "non-interactive" in capsys.readouterr().out
 
 
 def test_futile_reset_when_global_backstop_exhausted_errors(

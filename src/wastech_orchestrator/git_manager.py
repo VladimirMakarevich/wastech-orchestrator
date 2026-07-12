@@ -345,32 +345,39 @@ class GitManager:
     ) -> str:
         """Attach the task's working branch per :class:`BranchMode`. Returns its name.
 
-        ``new`` (owned): fetch, checkout ``base_branch``, ``pull --ff-only``, create (or reuse on
-        restart) the auto-named task branch. ``existing`` / ``current`` are operator-owned — this
-        never fast-forwards, resets, or aborts a merge on them; it only performs a plain checkout
-        (``existing``) or nothing at all (``current``), so the operator's local state is preserved.
+        ``new`` (owned): once the auto-named task branch already exists (a restart or a
+        ``--continue`` resume), this reattaches to it directly — never by way of ``base_branch`` —
+        so a legitimate in-progress WIP on it is never at risk of a checkout conflict; already being
+        on it is a no-op. Only the first creation (branch does not exist yet) fetches, checks out
+        ``base_branch``, ``pull --ff-only``s, then branches off it. ``existing`` / ``current`` are
+        operator-owned — this never fast-forwards, resets, or aborts a merge on them; it only
+        performs a plain checkout (``existing``) or nothing at all (``current``), so the operator's
+        local state is preserved.
         """
         if mode is BranchMode.EXISTING:
             return self._prepare_existing(task_id, slug, branch_ref)
         if mode is BranchMode.CURRENT:
             return self._prepare_current(task_id, slug)
 
-        base = self._config.repo.base_branch
         branch = self.branch_name(task_id, slug, epoch=epoch, override=branch_name)
         self._active = _ActiveTask(task_id=task_id, slug=slug, branch=branch)
 
-        # Clear a stale in-progress merge (e.g. a killed ``merge-task``) so the base checkout below
-        # cannot wedge on "you need to resolve your current index first". No-op in the normal case.
+        # Clear a stale in-progress merge (e.g. a killed ``merge-task``) so a checkout below cannot
+        # wedge on "you need to resolve your current index first". No-op in the normal case.
         self.merge_abort()
+        if self._branch_exists(branch):
+            # Reuse on restart/continue, never recreate — and never by way of base_branch, so any
+            # uncommitted WIP already on the branch is left untouched. Already there is a no-op.
+            if self.current_branch() != branch:
+                self._git_checked("checkout", branch)
+            return branch
+
+        base = self._config.repo.base_branch
         # Fetch is best-effort: a repo without a remote (some tests) still proceeds locally.
         self._git("fetch", "origin")
         self._git_checked("checkout", base)
         self._git("pull", "--ff-only")
-
-        if self._branch_exists(branch):
-            self._git_checked("checkout", branch)  # reuse on restart, never recreate
-        else:
-            self._git_checked("checkout", "-b", branch)
+        self._git_checked("checkout", "-b", branch)
         return branch
 
     def _prepare_existing(self, task_id: str, slug: str, branch_ref: str | None) -> str:

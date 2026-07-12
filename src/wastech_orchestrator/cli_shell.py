@@ -66,7 +66,7 @@ commands:
 """
 
 # Verbs forwarded verbatim to the existing CLI dispatch; their own slot/daemon guards apply.
-_FORWARD_VERBS = frozenset({"status", "tasks", "prs", "merge-task", "finalize", "rerun", "list"})
+_FORWARD_VERBS = frozenset({"status", "tasks", "prs", "merge-task", "finalize", "list"})
 
 
 @dataclass
@@ -337,6 +337,11 @@ def dispatch(line: str, ctx: ShellContext) -> ShellResult:
         return ShellResult(
             exit_code=ctx.run_cli(_argv(ctx, "restart", ["--non-interactive", *rest]))
         )
+    if command == "rerun":
+        # rerun's confirmation prompt fights the REPL's own stdin reader exactly like down/restart
+        # (H1); forward --non-interactive so it refuses-with-instructions (pass --yes) instead of
+        # blocking inside input().
+        return ShellResult(exit_code=ctx.run_cli(_argv(ctx, "rerun", ["--non-interactive", *rest])))
     if command in _FORWARD_VERBS:
         return ShellResult(exit_code=ctx.run_cli(_argv(ctx, command, rest)))
     print(f"shell: unknown command {command!r} (try 'help')", file=ctx.out)

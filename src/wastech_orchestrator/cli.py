@@ -491,6 +491,14 @@ def build_parser() -> argparse.ArgumentParser:
     rerun_cmd.add_argument(
         "-y", "--yes", action="store_true", help="skip the interactive confirmation prompt"
     )
+    rerun_cmd.add_argument(
+        "--non-interactive",
+        dest="non_interactive",
+        action="store_true",
+        help="never prompt: any confirmation that isn't already resolved by --yes/"
+        "--reset-fix-budget/--no-reset-fix-budget is refused (exit 1) instead of asked. Used by "
+        "scripts/CI and by 'worc shell' (a prompt would fight the REPL's stdin, H1)",
+    )
 
     finalize_cmd = sub.add_parser(
         "finalize",
@@ -1486,7 +1494,9 @@ def _report_rerun_plan(plan: RerunPlan) -> None:
         print(f"  note:      {note}")
 
 
-def _resolve_reset_fix_budget(args: argparse.Namespace, plan: RerunPlan) -> tuple[bool, int | None]:
+def _resolve_reset_fix_budget(
+    args: argparse.Namespace, plan: RerunPlan, *, non_interactive: bool
+) -> tuple[bool, int | None]:
     """Resolve the effective reset-fix-budget decision for a ``--continue`` resume.
 
     Returns ``(resolved, abort_code)``; a non-``None`` ``abort_code`` means the caller should return
@@ -1503,9 +1513,9 @@ def _resolve_reset_fix_budget(args: argparse.Namespace, plan: RerunPlan) -> tupl
         if args.reset_fix_budget is True:
             resolved = True
         else:
-            if not sys.stdin.isatty():
+            if non_interactive:
                 print(
-                    f"rerun: {names} exhausted; non-interactive shell — pass "
+                    f"rerun: {names} exhausted; non-interactive — pass "
                     "--reset-fix-budget or --no-reset-fix-budget"
                 )
                 return False, 1
@@ -1573,15 +1583,23 @@ def cmd_rerun(args: argparse.Namespace) -> int:
 
     for note in plan.notes:
         print(f"rerun: note: {note}")
+    # --non-interactive (also forced by a non-TTY stdin) never calls input(): a nested blocking
+    # input() fights 'worc shell's own stdin reader (H1: the single-stdin-reader rule) — the same
+    # class of bug already fixed for 'stop'/'restart'. Refuse-with-instructions instead of hanging.
+    non_interactive = getattr(args, "non_interactive", False) or not sys.stdin.isatty()
     mode = "continue" if args.continue_ else "fresh"
-    if not args.yes and not _confirm(
-        f"Rerun {args.task_id} [{mode}] from base '{plan.base_branch}'? [y/N] "
-    ):
-        print("rerun: aborted")
-        return 0
+    if not args.yes:
+        if non_interactive:
+            print("rerun: refusing without confirmation (non-interactive); pass --yes to proceed")
+            return 1
+        if not _confirm(f"Rerun {args.task_id} [{mode}] from base '{plan.base_branch}'? [y/N] "):
+            print("rerun: aborted")
+            return 0
 
     if args.continue_:
-        resolved_reset, abort_code = _resolve_reset_fix_budget(args, plan)
+        resolved_reset, abort_code = _resolve_reset_fix_budget(
+            args, plan, non_interactive=non_interactive
+        )
         if abort_code is not None:
             return abort_code
         result = orchestrator.continue_task(
