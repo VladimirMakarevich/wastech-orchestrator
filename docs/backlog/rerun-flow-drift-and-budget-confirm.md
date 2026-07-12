@@ -1,0 +1,40 @@
+# Rerun flow-drift reconciliation and fix-budget confirmation
+
+Status: **proposed** (2026-07-12) Date: 2026-07-12 Owner: Vladimir Makarevich
+
+`worc rerun --continue --from NODE` refuses outright whenever the checkpoint's flow-fingerprint no longer byte-matches the current flow file, forcing operators into either an unsupported manual `state.db` edit or a full graph restart that redoes already-completed work; separately, resuming into a node whose fix-loop budget is already exhausted silently re-parks the task on the very next rework verdict unless `--reset-fix-budget` was passed up front. Both gaps surfaced together on a real stuck task (`p6-04-config-writer-schema` in `wastech-mdlint`, parked at `manual_action_required`, `current_node=review`, `review_fix_cycles=15/15`, flow edited locally after the checkpoint). This ADR proposes closing both, recorded together because both gate the same `rerun --continue` moment and were found in the same incident.
+
+## The problem
+
+`_from_node_refusals` (`core/orchestrator.py:3117-3141`) and `_resume_via_engine` (`core/orchestrator.py:1606`) both gate on whole-file SHA-256 fingerprint equality (`fingerprint()`, `core/flow/contracts.py:128-137`) between the checkpoint's recorded flow and the currently loaded one. Any edit anywhere in the file — including nodes strictly upstream of, or unrelated to, the target `NODE` — trips the refusal, even though those upstream nodes already ran and will not run again. The only fallback today is plain `--continue` (no `--from`), which does not skip completed work: the engine always enters at the graph's zero-incoming-edge node (`core/flow/engine.py:206-220,287-288`) and re-invokes every node from there as a live agent run on top of the already-committed branch, risking duplicate or conflicting edits. There is no sanctioned way for `--from` to resume through drift that doesn't actually affect the node being targeted — the only present workaround is a raw `UPDATE tasks SET flow_fingerprint=...`, which `docs/operations.md:318` explicitly says `rerun` exists to avoid.
+
+Separately: `--reset-fix-budget` (`cli.py:456-462`) is the only thing that clears `FlowRunState.loop_counters` (`core/flow/run_state.py:86-102`). If an operator resumes (with or without `--from`) into a node whose relevant loop (`review_fix`, `test_fix`) is already at its configured cap and does not pass the flag, the very next `rework` verdict trips `_charge_rework`'s cap check (`core/flow/engine.py:439-466`) before the fixing node ever runs, and the task silently re-parks to `manual_action_required` — no explanation, no chance to reconsider, and easy to mistake for the resume never having happened at all.
+
+## Constraints
+
+Only the orchestrator drives state transitions; a provider/agent must never decide to reset a budget or accept a flow change (core owns the state machine, providers stay dumb). No secrets or diff/prompt content in the confirmation prompt — same posture as the existing Telegram gates, no longer tracked in git but still on disk): task id, node id, and the numeric budget state are enough. The confirmation prompt is a synchronous local CLI interaction (`rerun` is not a daemon command, unlike the Telegram gates), so a plain blocking stdin prompt is appropriate, but it must behave identically on Windows/macOS/Linux and must not assume a POSIX TTY. `state.db` remains the sole authoritative state (`docs/operations.md:575`); any drift-acceptance must persist through the existing `save_flow_checkpoint` code path (`orchestrator.py:1145`, `flow/recorder.py:72`), never a hand SQL edit. Resetting a budget must not silently paper over some other unrelated blocker — if the reset alone doesn't leave the resume actually able to proceed, that must surface as its own clear error, not a second confusing re-park.
+
+## Decision
+
+Two changes, shipped together.
+
+### 1. `--from` resumes through drift automatically, scoped to the reachable subgraph
+
+When `--from NODE` hits a fingerprint mismatch, check structural compatibility of only the subgraph reachable forward from `NODE` (does `NODE` itself still exist; are the loop names, budgets, and edges reachable from `NODE` unchanged) instead of the whole file. Nodes/edges strictly upstream of `NODE` are irrelevant — they already ran and will not run again. If the forward subgraph is compatible, `--from` just proceeds: the orchestrator accepts the new flow as the checkpoint's baseline by updating `flow_fingerprint` through the existing `save_flow_checkpoint` path (never a manual SQL edit), recorded like any other checkpoint write — no extra flag, no separate confirmation step; the compatibility check itself is the safety mechanism, not an operator opt-in. If it is not compatible (`NODE` missing, or its reachable edges/budgets changed), `--from` refuses, naming what specifically is incompatible, replacing today's flat "flow changed" message.
+
+### 2. Interactive confirmation when resuming into an exhausted fix budget
+
+Whenever a `--continue` resume (with or without `--from`) targets a node whose relevant loop budget is already at or over cap, and the operator did not pass `--reset-fix-budget`/`--no-reset-fix-budget` explicitly, `rerun` prompts interactively before proceeding, e.g. `review_fix budget is exhausted (15/15). Reset it to allow further review→fixing rounds? [y/N]`. No (or explicit `--no-reset-fix-budget`) refuses cleanly, naming the exhausted budget, before attempting the resume. Yes (or explicit `--reset-fix-budget`) resets the budget and proceeds with the resume with no further blocker in the way — the implementation must ensure the resume actually runs end-to-end from this state; a reset that still leaves some other reason the task can't proceed has to surface as its own clear error, not fail a second time confusingly. This prompt is not skipped by `--yes` — `--yes` covers the other existing `rerun` confirmations, but a budget reset is exactly the kind of consequential decision this ADR exists to stop from happening silently, so it always needs its own explicit answer, interactively or via the two explicit flags in a non-interactive/scripted invocation. Because point 1 resumes through drift automatically, this check always runs against whichever flow's budget values are currently active for the resumed loop, so a drifted flow that changed a cap and an already-exhausted budget both surface in the same pass, not two successive reruns.
+
+## Open questions
+
+- Exact wording/format of the "incompatible subgraph" refusal message (diff-style vs. prose) — implementation detail, not blocking.
+- Whether the automatic drift-resume in point 1 should also cover decomposition sub-flows (per-subtask region) — out of scope here; `--from` under decomposition is already tracked as its own deferred item in `follow_ups.md:9`.
+- Whether other loop-adjacent decisions (e.g. the `global_fix_iterations` backstop) should ever be interactively resettable the same way, or stay a hard, non-negotiable ceiling — leaning toward "hard ceiling, never prompted," but not settled here.
+
+## Implementation notes
+
+- `core/orchestrator.py`: `_from_node_refusals` (~3117-3141) needs the reachable-forward-subgraph compatibility check in place of whole-fingerprint equality, and on a compatible mismatch must accept the new fingerprint via `save_flow_checkpoint` before proceeding; `_resume_via_engine` (~1606) and `_apply_continue_controls` (~1117-1166) are the seam for the new interactive prompt ahead of `reset_consecutive_fix_budget()`.
+- `cli.py`: `cmd_rerun` needs the stdin y/N prompt for the exhausted-budget case, gated on neither `--reset-fix-budget` nor `--no-reset-fix-budget` being given — no new flag for the drift path itself, since point 1 is transparent to the operator.
+- `core/flow/contracts.py` / `core/flow/snapshot.py`: a new "reachable subgraph fingerprint" alongside (or instead of) the current whole-file `fingerprint()`.
+- `save_flow_checkpoint` (`orchestrator.py:1145`, `flow/recorder.py:72`) is the only sanctioned write path for accepting a new `flow_fingerprint` on a compatible drift — never raw SQL.

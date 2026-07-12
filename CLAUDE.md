@@ -1,6 +1,6 @@
 # CLAUDE.md — instructions for Claude Code in this repository
 
-You are working on **wastech-orchestrator** — an orchestrator that launches coding agents (Codex / Claude Code) to carry out development tasks and publish the result to Git.
+You are working on **wastech-orchestrator** — an orchestrator that launches coding agents (Codex / Claude Code) to carry out development (or any other) tasks and publish (optional) the result to Git.
 
 ## Before writing code
 
@@ -45,5 +45,6 @@ There is a skill for running all checks: `/run-checks`.
 - When you change behavior/CLI/config/architecture — update the affected docs **in the same change** (use `/sync-docs`), and record deferred work in [docs/backlog/follow_ups.md](docs/backlog/follow_ups.md). The Stop docs-sync gate enforces this. **Doc-sync includes the shipped, operator-facing docs under `src/wastech_orchestrator/packaged/`** — the `guide/` quickstarts, `config.example.yaml`, and the built-in flows / role prompts — not just `docs/`; these live under `src/` and are the copy the operator reads after `install`, so they are the most-often-forgotten half of a doc change.
 - **Markdown docs are not hard-wrapped.** Write prose as one paragraph per line (rely on editor soft-wrap); never insert manual mid-paragraph line breaks. Formatting is enforced by Prettier (`proseWrap: never`, `.prettierrc.json`) — run `npx prettier@3 --write "**/*.md"` after editing docs. `logs/`, `tasks/`, `src/`, and `packaged/guide/` are excluded (`.prettierignore`); don't reformat them.
 - Before committing, run `ruff check .`, `ruff format --check .`, `mypy src`, `pytest` (CI enforces `ruff format --check`).
+- **Ignore any `.md` file that lives under a gitignored path** (e.g. `.archive/`) when researching, citing, or treating something as current project documentation — verify with `git ls-files`/`git check-ignore -v` before citing a doc as authoritative. Such files may still exist on disk (readable by file-search tools regardless of git status) but are not part of the tracked, current source of truth; a doc getting gitignored/removed from tracking is itself a signal it was deliberately retired. See [git-workflow.md](.agents/rules/git-workflow.md).
 
 @RTK.md
