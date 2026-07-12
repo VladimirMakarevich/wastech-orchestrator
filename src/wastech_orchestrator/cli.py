@@ -1588,11 +1588,15 @@ def cmd_rerun(args: argparse.Namespace) -> int:
     # class of bug already fixed for 'stop'/'restart'. Refuse-with-instructions instead of hanging.
     non_interactive = getattr(args, "non_interactive", False) or not sys.stdin.isatty()
     mode = "continue" if args.continue_ else "fresh"
+    # --continue reuses the existing branch in place (base_branch is never touched); only a fresh
+    # rerun resets the branch to base. The prompt names what actually happens in each mode — saying
+    # "from base" on a --continue wrongly implies a checkout to base_branch, which never happens.
+    target = f"on branch '{plan.branch}'" if args.continue_ else f"from base '{plan.base_branch}'"
     if not args.yes:
         if non_interactive:
             print("rerun: refusing without confirmation (non-interactive); pass --yes to proceed")
             return 1
-        if not _confirm(f"Rerun {args.task_id} [{mode}] from base '{plan.base_branch}'? [y/N] "):
+        if not _confirm(f"Rerun {args.task_id} [{mode}] {target}? [y/N] "):
             print("rerun: aborted")
             return 0
 

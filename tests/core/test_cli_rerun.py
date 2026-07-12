@@ -536,6 +536,65 @@ def test_rerun_continue_at_review_survives_real_resume_with_dirty_tree(
     ) == "# project\n\nimplemented and reviewed.\n"
 
 
+def test_rerun_continue_confirm_names_the_branch_not_base(
+    git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The --continue confirmation must name the branch it resumes on, not base_branch — saying
+    "from base" wrongly implies a checkout there, which --continue never does (operator-reported
+    confusion in RERUN-BUG-REPORT.md follow-up)."""
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "failed" / "task-1.md"
+    _complete_task_file(source, "task-1")
+    config = _seed(
+        project,
+        git_repo.clone,
+        TaskRow("task-1", "T", Status.FAILED, source_path=str(source), branch="feat/p6-init"),
+        checkpoint_node="review",
+        node_run=("review", "evaluator"),
+    )
+    prompts: list[str] = []
+    monkeypatch.setattr(sys, "stdin", _TTY())
+
+    def _capture_confirm(prompt: str) -> bool:
+        prompts.append(prompt)
+        return True
+
+    monkeypatch.setattr(cli, "_confirm", _capture_confirm)
+
+    def fake_resume(self: Orchestrator) -> PipelineResult:
+        return PipelineResult(task_id="task-1", final_status=Status.DONE)
+
+    monkeypatch.setattr(Orchestrator, "resume", fake_resume)
+    code = cli.main(["--config", str(config), "rerun", "task-1", "--continue"])
+    assert code == 0
+    assert prompts == ["Rerun task-1 [continue] on branch 'feat/p6-init'? [y/N] "]
+
+
+def test_rerun_fresh_confirm_still_names_base(
+    git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fresh rerun really does reset the branch to base_branch, so naming it there is accurate."""
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "failed" / "task-1.md"
+    _complete_task_file(source, "task-1")
+    config = _seed(
+        project, git_repo.clone, TaskRow("task-1", "T", Status.FAILED, source_path=str(source))
+    )
+    prompts: list[str] = []
+    monkeypatch.setattr(sys, "stdin", _TTY())
+
+    def _capture_confirm(prompt: str) -> bool:
+        prompts.append(prompt)
+        return False  # abort right after capturing the prompt text; nothing else needs to run
+
+    monkeypatch.setattr(cli, "_confirm", _capture_confirm)
+    code = cli.main(["--config", str(config), "rerun", "task-1"])
+    assert code == 0  # aborted
+    assert prompts == ["Rerun task-1 [fresh] from base 'main'? [y/N] "]
+
+
 def test_rerun_continue_pre_edit_node_still_refuses_dirty_tree(
     git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
