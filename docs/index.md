@@ -13,6 +13,7 @@ A lean orchestrator that turns Markdown tasks into reviewed Pull Requests — dr
 | [How it works](how-it-works.md) | The pipeline from a task file to a Pull Request: stages, routing, and recovery |
 | [Operations](operations.md) | Install, authorization, upgrades, running, recovery, and diagnostics |
 | [Cookbook](cookbook.md) | Practical recipes: workspace setup, repo config, routing, artifacts, and recovery |
+| [How-To](how-to.md) | Problem-first troubleshooting recipes for situations you run into operating the orchestrator |
 
 ## Reference
 

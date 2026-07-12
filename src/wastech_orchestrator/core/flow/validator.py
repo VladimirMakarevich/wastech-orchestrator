@@ -51,10 +51,15 @@ from wastech_orchestrator.core.flow.contracts import (
     SessionScope,
     resolve_network_access,
 )
-from wastech_orchestrator.core.flow.engine import _REWORK_OUTCOMES, skip_outcome
+from wastech_orchestrator.core.flow.engine import skip_outcome
 from wastech_orchestrator.core.flow.prompt import RoleFileError, read_role_file
 from wastech_orchestrator.core.flow.prompt_vars import valid_prompt_vars
-from wastech_orchestrator.core.flow.schema import AgentNode, EvaluatorNode, ToolNode
+from wastech_orchestrator.core.flow.schema import (
+    REWORK_OUTCOMES,
+    AgentNode,
+    EvaluatorNode,
+    ToolNode,
+)
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
 from wastech_orchestrator.core.flow.tools_registry import ToolRegistry, ToolResolutionError
 from wastech_orchestrator.core.prompts import ALLOWED_PROMPT_VARS, referenced_variables
@@ -378,7 +383,7 @@ def _check_graph(snap: FlowSnapshot) -> list[Violation]:
                     )
                 )
             has_exit = any(
-                e.to not in region and e.outcome not in _REWORK_OUTCOMES
+                e.to not in region and e.outcome not in REWORK_OUTCOMES
                 for nid in region
                 for e in snap.adjacency.get(nid, ())
             )

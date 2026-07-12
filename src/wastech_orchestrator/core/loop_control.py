@@ -23,11 +23,15 @@ integer — audit remediation #17.)
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from wastech_orchestrator.core.flow.run_state import FlowRunState
+from wastech_orchestrator.core.flow.run_state import FlowRunState
+from wastech_orchestrator.core.flow.schema import REWORK_OUTCOMES
+from wastech_orchestrator.core.flow.snapshot import FlowSnapshot, reachable_nodes
+
+#: Absent flow budget => only the config cap clamps (mirrors the engine's own ``_LARGE``).
+_LARGE = 1 << 60
 
 
 @dataclass
@@ -56,3 +60,58 @@ def record_rework(run_state: FlowRunState) -> int:
     by the evaluator node — recording a verdict never touches this counter.
     """
     return run_state.bump(run_state.GLOBAL_FIX_KEY)
+
+
+def loop_cap(budgets: Mapping[str, int], max_fix_cycles: int, loop: str) -> int:
+    """The effective cap for a named loop: ``min(flow-declared budget, config ceiling)``."""
+    return min(budgets.get(loop, _LARGE), max_fix_cycles)
+
+
+def global_cap(budgets: Mapping[str, int], max_total_fix_iterations: int) -> int:
+    """The effective cap for the global fix counter: ``min(flow budget, config ceiling)``."""
+    return min(budgets.get(FlowRunState.GLOBAL_FIX_KEY, _LARGE), max_total_fix_iterations)
+
+
+@dataclass(frozen=True, slots=True)
+class ExhaustedLoop:
+    """A named fix loop whose consecutive-cycle counter is already at or over its cap."""
+
+    loop: str
+    node: str  # the node whose outgoing edge carries this loop
+    counter: int
+    cap: int
+
+
+def exhausted_fix_loops(
+    snapshot: FlowSnapshot,
+    counters: Mapping[str, int],
+    max_fix_cycles: int,
+    start: str,
+) -> list[ExhaustedLoop]:
+    """Every named rework/fail loop reachable forward from ``start`` that is already at/over cap.
+
+    Mirrors the engine's own ``_charge_rework``/``_loop_cap`` check (a park always persists the
+    counter already at the cap value — the check bumps, then compares — so "already at or over cap"
+    is a plain current-state comparison, no bump simulation needed) but runs *before* a resume, from
+    outside the engine, over the whole path a resumed run could retake — not just the resume node's
+    own edge — so a downstream-already-exhausted loop is caught even when ``--from`` re-enters
+    upstream of it.
+    """
+    out = []
+    for node_id in reachable_nodes(snapshot, start):
+        for edge in snapshot.adjacency.get(node_id, ()):
+            if edge.loop is None or edge.outcome not in REWORK_OUTCOMES:
+                continue
+            cap = loop_cap(snapshot.doc.budgets, max_fix_cycles, edge.loop)
+            counter = counters.get(edge.loop, 0)
+            if counter >= cap:
+                out.append(ExhaustedLoop(loop=edge.loop, node=node_id, counter=counter, cap=cap))
+    return out
+
+
+def global_backstop_exhausted(
+    budgets: Mapping[str, int], max_total_fix_iterations: int, counters: Mapping[str, int]
+) -> bool:
+    """Whether the hard global fix-iteration ceiling is already at/over cap."""
+    counter = counters.get(FlowRunState.GLOBAL_FIX_KEY, 0)
+    return counter >= global_cap(budgets, max_total_fix_iterations)

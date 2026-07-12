@@ -39,6 +39,7 @@ from typing import Literal, Protocol
 from wastech_orchestrator.config.schema import AgentsConfig
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import (
+    REWORK_OUTCOMES,
     ChecksNode,
     Edge,
     EvaluatorNode,
@@ -46,7 +47,7 @@ from wastech_orchestrator.core.flow.schema import (
     ToolNode,
 )
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
-from wastech_orchestrator.core.loop_control import record_rework
+from wastech_orchestrator.core.loop_control import global_cap, loop_cap, record_rework
 from wastech_orchestrator.core.state_machine import Status
 
 #: Resolves a ``when.fact`` (``derived.*`` / ``config.*``) to a boolean. Injected so the engine
@@ -181,8 +182,6 @@ class _Stuck:
     limit_name: str
 
 
-_REWORK_OUTCOMES: frozenset[str] = frozenset({"rework", "fail"})
-_LARGE = 1 << 60  # absent flow budget => only the config cap clamps
 #: EXPERIMENTAL(no-work-infra). Consecutive fixing cycles with an unchanged working tree that abort
 #: a fix loop as a no-effective-work stall (the "agent emits tokens but never edits" case the
 #: provider boundary cannot observe).
@@ -299,7 +298,7 @@ class FlowEngine:
                 return FlowRunResult(status=Status.DONE, final_node=node.id)
 
             edge = self._select_edge(node, edges, outcome)
-            if edge.outcome in _REWORK_OUTCOMES:
+            if edge.outcome in REWORK_OUTCOMES:
                 # EXPERIMENTAL(no-work-infra): abort a no-effective-work stall BEFORE charging
                 # rework, so a frozen fix loop is not counted toward its fix budget (it is not real
                 # work); else the budget cap. Drop the `_check_stall` line to disable the guard.
@@ -472,7 +471,7 @@ class FlowEngine:
         count starts over).
         """
         for edge in self._snapshot.adjacency.get(node_id, ()):
-            if edge.outcome not in _REWORK_OUTCOMES:
+            if edge.outcome not in REWORK_OUTCOMES:
                 continue
             if edge.loop is not None:
                 self._run_state.reset(edge.loop)
@@ -485,8 +484,7 @@ class FlowEngine:
                 self._run_state.reset(edge_key(edge))
 
     def _loop_cap(self, loop: str) -> int:
-        return min(self._snapshot.doc.budgets.get(loop, _LARGE), self._agents.max_fix_cycles)
+        return loop_cap(self._snapshot.doc.budgets, self._agents.max_fix_cycles, loop)
 
     def _global_cap(self) -> int:
-        flow_cap = self._snapshot.doc.budgets.get(FlowRunState.GLOBAL_FIX_KEY, _LARGE)
-        return min(flow_cap, self._agents.max_total_fix_iterations)
+        return global_cap(self._snapshot.doc.budgets, self._agents.max_total_fix_iterations)

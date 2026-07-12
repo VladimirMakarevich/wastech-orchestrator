@@ -165,6 +165,11 @@ class Edge:
     loop: str | None = None
 
 
+#: Outcomes that charge a rework/fail edge's loop or inline budget (shared by the engine's
+#: bookkeeping and any code that needs to reason about fix-loop budgets without the engine).
+REWORK_OUTCOMES: frozenset[str] = frozenset({"rework", "fail"})
+
+
 @dataclass(frozen=True, slots=True)
 class DecompositionConfig:
     proposed_by: str

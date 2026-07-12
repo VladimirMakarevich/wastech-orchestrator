@@ -74,7 +74,12 @@ from wastech_orchestrator.core.hitl import (
     consume_pending_interactions,
     reset_pending_interactions,
 )
-from wastech_orchestrator.core.loop_control import LoopCounters
+from wastech_orchestrator.core.loop_control import (
+    ExhaustedLoop,
+    LoopCounters,
+    exhausted_fix_loops,
+    global_backstop_exhausted,
+)
 from wastech_orchestrator.core.node_overrides import resolve_node_overrides
 from wastech_orchestrator.core.recovery import (
     RecoveryAction,
@@ -213,6 +218,10 @@ class RerunPlan:
     from_node: str | None = None  # --from <node>: re-enter here instead of the checkpoint
     notes: tuple[str, ...] = ()  # non-fatal advisories surfaced in --dry-run / the confirm prompt
     refusals: tuple[str, ...] = ()
+    # Already-exhausted named fix loops reachable forward from the resume node, using the live
+    # flow's budgets — empty unless the resume will actually land in place with counters preserved.
+    exhausted_fix_loops: tuple[ExhaustedLoop, ...] = ()
+    global_backstop_exhausted: bool = False  # the hard max_total_fix_iterations ceiling is spent
 
 
 @dataclass(frozen=True)
@@ -902,7 +911,7 @@ class Orchestrator:
         *,
         continue_mode: bool = False,
         force_reset_remote: bool = False,
-        reset_fix_budget: bool = False,
+        reset_fix_budget: bool | None = None,
         from_node: str | None = None,
     ) -> RerunPlan:
         """Gather the facts + refusal reasons for a ``rerun`` (read-only; mutates nothing)."""
@@ -975,21 +984,48 @@ class Orchestrator:
                 f"uncommitted changes ({', '.join(sorted(dirty))}) will be committed into the task"
             )
         # --reset-fix-budget and --from are continue-only controls.
-        if reset_fix_budget and not continue_mode:
+        if reset_fix_budget is not None and not continue_mode:
             refusals.append("--reset-fix-budget requires --continue")
         if from_node is not None and not continue_mode:
             refusals.append("--from requires --continue")
+        exhausted: tuple[ExhaustedLoop, ...] = ()
+        backstop_exhausted = False
         if continue_mode and current_node:
-            if reset_fix_budget:
-                counters = json.loads(counters_json) if counters_json else {}
-                global_fixes = counters.get(FlowRunState.GLOBAL_FIX_KEY, 0)
-                if self._config.agents.max_total_fix_iterations - global_fixes <= 0:
-                    notes.append(
-                        "the global max_total_fix_iterations backstop is already exhausted; "
-                        "--reset-fix-budget will run one more fix cycle, then stop again"
-                    )
+            live = self._persisted_flow_snapshot(task_id)
             if from_node is not None:
-                refusals.extend(self._from_node_refusals(task_id, from_node, fingerprint))
+                from_refusals = self._from_node_refusals(task_id, from_node)
+                refusals.extend(from_refusals)
+                resumes_in_place = not from_refusals
+                if (
+                    resumes_in_place
+                    and live is not None
+                    and fingerprint is not None
+                    and fingerprint != live.flow_fingerprint
+                ):
+                    notes.append(
+                        f"the flow changed since the checkpoint; --from '{from_node}' will "
+                        "resume using the current on-disk flow"
+                    )
+            else:
+                resumes_in_place = (
+                    live is not None
+                    and fingerprint is not None
+                    and fingerprint == live.flow_fingerprint
+                )
+            # Only meaningful when the resume will actually land in place with its counters
+            # preserved — a plain --continue under drift restarts the whole graph from the top with
+            # a fresh run state, so "exhausted" would be a false alarm there.
+            if resumes_in_place and live is not None:
+                counters = json.loads(counters_json) if counters_json else {}
+                resume_node = from_node or current_node
+                exhausted = tuple(
+                    exhausted_fix_loops(
+                        live, counters, self._config.agents.max_fix_cycles, resume_node
+                    )
+                )
+                backstop_exhausted = global_backstop_exhausted(
+                    live.doc.budgets, self._config.agents.max_total_fix_iterations, counters
+                )
         if not continue_mode:
             # A fresh rerun resets the branch to base (delete + recreate) — safe only on a branch
             # the orchestrator owns (``new`` mode). In ``existing``/``current`` the branch is the
@@ -1022,10 +1058,12 @@ class Orchestrator:
             dirty_paths=tuple(sorted(dirty)),
             has_remote_branch=has_remote,
             pr_url=pr_url,
-            reset_fix_budget=reset_fix_budget,
+            reset_fix_budget=reset_fix_budget is True,
             from_node=from_node,
             notes=tuple(notes),
             refusals=tuple(refusals),
+            exhausted_fix_loops=exhausted,
+            global_backstop_exhausted=backstop_exhausted,
         )
 
     def rerun_task(
@@ -1132,11 +1170,21 @@ class Orchestrator:
         and escape ``max_fix_cycles``. Here it is applied exactly once per ``--continue``. A budget
         grant preserves the global ``fix_iterations`` / ``total_fix:*`` counters, so the
         ``max_total_fix_iterations`` backstop is never weakened, even across repeated grants.
+
+        On ``--from``, the checkpoint's fingerprint is rebaselined to the *live* flow's: otherwise
+        ``_resume_via_engine``'s own equality gate would still see the checkpoint's old fingerprint
+        mismatch the live one and silently top-restart from the graph's entry node, completely
+        ignoring the ``--from`` override with no error.
         """
         if not reset_fix_budget and from_node is None:
             return
+        baseline_fingerprint = fingerprint or ""
+        if from_node is not None:
+            live = self._persisted_flow_snapshot(task_id)
+            if live is not None:  # defensive: plan_rerun already required this to resolve
+                baseline_fingerprint = live.flow_fingerprint
         run_state = FlowRunState(
-            flow_fingerprint=fingerprint or "",
+            flow_fingerprint=baseline_fingerprint,
             current_node=from_node or current_node,
             loop_counters=json.loads(counters_json) if counters_json else {},
         )
@@ -3096,11 +3144,12 @@ class Orchestrator:
         return self._branch_mode(task)
 
     def _persisted_flow_snapshot(self, task_id: str) -> FlowSnapshot | None:
-        """Resolve the task's flow from its persisted manifest — the rerun path, used only to
-        validate a ``--from`` node and compare the flow fingerprint against the checkpoint. Returns
-        ``None`` if the manifest can't be read or the flow can't be resolved/validated (the caller
-        turns that into a ``--from`` refusal). Not on the default rerun path, so no flow is loaded
-        unless ``--from`` is actually requested."""
+        """Resolve the task's flow from its persisted manifest — the rerun path.
+
+        Used to validate a ``--from`` node, rebaseline the checkpoint's fingerprint on a compatible
+        ``--from``, and (for any ``--continue``) evaluate live fix-loop budgets. Returns ``None`` if
+        the manifest can't be read or the flow can't be resolved/validated (callers degrade
+        gracefully: a ``--from`` refusal, or simply skipping the budget-exhaustion check)."""
         try:
             task = load_normalized(self._artifacts_root, task_id)
             return self._flow_registry.resolve(task.task_type)
@@ -3114,30 +3163,21 @@ class Orchestrator:
         ):
             return None
 
-    def _from_node_refusals(
-        self, task_id: str, from_node: str, checkpoint_fingerprint: str | None
-    ) -> list[str]:
-        """Validate a ``--from`` target against the task's resolved flow (empty list => valid).
+    def _from_node_refusals(self, task_id: str, from_node: str) -> list[str]:
+        """Validate a ``--from`` target against the flow currently on disk (empty list => valid).
 
-        Refuses an unknown node (bounded to the flow's nodes) and a flow that drifted since the
-        checkpoint — because ``--from`` takes effect only when the stored fingerprint still matches
-        (otherwise resume restarts from the top and silently ignores the override), so a mismatch
-        must be an explicit refusal, not a no-op.
+        Only checks that ``from_node`` exists — ``--from`` is an explicit, operator-driven override,
+        trusted to know what it's targeting even if the flow drifted since the checkpoint. The
+        checkpoint's fingerprint is rebaselined to the live flow's by ``_apply_continue_controls``
+        once this passes, so the resume actually lands at ``from_node`` instead of the engine's own
+        resume gate silently top-restarting (see there for why that matters).
         """
         snapshot = self._persisted_flow_snapshot(task_id)
         if snapshot is None:
             return ["could not resolve the task's flow to validate --from; use plain --continue"]
         if from_node not in snapshot.nodes_by_id:
             known = ", ".join(sorted(snapshot.nodes_by_id))
-            return [f"--from node '{from_node}' is not in the flow (nodes: {known})"]
-        if (
-            checkpoint_fingerprint is not None
-            and checkpoint_fingerprint != snapshot.flow_fingerprint
-        ):
-            return [
-                "the flow changed since the checkpoint; --from cannot target the recorded graph. "
-                "Resolve the drift or use plain --continue (which restarts from the top)"
-            ]
+            return [f"--from node '{from_node}' is not in the current flow (nodes: {known})"]
         return []
 
     def _transition(self, p: _Pipeline, dst: Status, **fields: object) -> None:

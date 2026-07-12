@@ -261,6 +261,19 @@ def load_flow(path: Path) -> FlowSnapshot:
     )
 
 
+def reachable_nodes(snapshot: FlowSnapshot, start: str) -> frozenset[str]:
+    """Every node reachable forward from ``start`` (inclusive), walking ``snapshot.adjacency``."""
+    seen: set[str] = set()
+    stack = [start]
+    while stack:
+        node_id = stack.pop()
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        stack.extend(e.to for e in snapshot.adjacency.get(node_id, ()))
+    return frozenset(seen)
+
+
 # -- internal parsing helpers -------------------------------------------------
 
 

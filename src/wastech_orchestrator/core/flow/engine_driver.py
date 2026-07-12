@@ -20,7 +20,6 @@ from types import MappingProxyType
 
 from wastech_orchestrator.config.schema import AgentsConfig
 from wastech_orchestrator.core.flow.engine import (
-    _REWORK_OUTCOMES,
     DiffFingerprint,
     EngineInternalError,
     FactResolver,
@@ -41,7 +40,8 @@ from wastech_orchestrator.core.flow.nodes import (
     ToolNodeRunner,
 )
 from wastech_orchestrator.core.flow.run_state import FlowRunState
-from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
+from wastech_orchestrator.core.flow.schema import REWORK_OUTCOMES
+from wastech_orchestrator.core.flow.snapshot import FlowSnapshot, reachable_nodes
 
 
 @dataclass(frozen=True)
@@ -85,7 +85,7 @@ def partition_decomposition(snapshot: FlowSnapshot) -> DecompositionRegions:
             e.to
             for node_id in region
             for e in snapshot.adjacency.get(node_id, ())
-            if e.to not in region and e.outcome not in _REWORK_OUTCOMES
+            if e.to not in region and e.outcome not in REWORK_OUTCOMES
         ),
         None,
     )
@@ -94,23 +94,11 @@ def partition_decomposition(snapshot: FlowSnapshot) -> DecompositionRegions:
             "decomposition region has no forward exit edge "
             "(validator should have rejected this flow)"
         )
-    post = _reachable(snapshot, post_entry)
+    post = reachable_nodes(snapshot, post_entry)
     pre = frozenset(snapshot.nodes_by_id) - region - post
     return DecompositionRegions(
         pre=pre, region=region, region_entry=region_entry, post_entry=post_entry
     )
-
-
-def _reachable(snapshot: FlowSnapshot, start: str) -> frozenset[str]:
-    seen: set[str] = set()
-    stack = [start]
-    while stack:
-        node_id = stack.pop()
-        if node_id in seen:
-            continue
-        seen.add(node_id)
-        stack.extend(e.to for e in snapshot.adjacency.get(node_id, ()))
-    return frozenset(seen)
 
 
 def build_node_runners(services: NodeServices, inputs: NodeInputs) -> dict[str, NodeRunner]:

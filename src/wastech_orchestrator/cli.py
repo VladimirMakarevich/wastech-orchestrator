@@ -36,6 +36,7 @@ from wastech_orchestrator.config.schema import (
 from wastech_orchestrator.config.validation import validate_config
 from wastech_orchestrator.core.flow.registry import FlowRegistry
 from wastech_orchestrator.core.hitl import iter_task_interactions
+from wastech_orchestrator.core.loop_control import ExhaustedLoop
 from wastech_orchestrator.core.orchestrator import (
     Eligibility,
     FinalizePlan,
@@ -453,12 +454,24 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="fix-and-continue: reuse the existing branch and re-enter at the stage it failed",
     )
-    rerun_cmd.add_argument(
+    reset_fix_budget_group = rerun_cmd.add_mutually_exclusive_group()
+    reset_fix_budget_group.add_argument(
         "--reset-fix-budget",
         dest="reset_fix_budget",
-        action="store_true",
+        action="store_const",
+        const=True,
+        default=None,
         help="(--continue only) reset the consecutive fix-loop counters so an exhausted fix "
-        "budget runs again; the global max_total_fix_iterations backstop is unchanged",
+        "budget runs again; the global max_total_fix_iterations backstop is unchanged. Also "
+        "answers the exhausted-fix-budget confirmation prompt with yes, non-interactively",
+    )
+    reset_fix_budget_group.add_argument(
+        "--no-reset-fix-budget",
+        dest="reset_fix_budget",
+        action="store_const",
+        const=False,
+        help="(--continue only) decline to reset an exhausted fix budget; refuses the resume "
+        "instead of prompting, non-interactively",
     )
     rerun_cmd.add_argument(
         "--from",
@@ -1420,6 +1433,11 @@ def _confirm_yes(prompt: str) -> bool:
         return False
 
 
+def _format_exhausted(loops: tuple[ExhaustedLoop, ...]) -> str:
+    """Human-readable ``name (counter/cap)`` list for the exhausted-fix-budget prompt/messages."""
+    return "; ".join(f"{loop.loop} ({loop.counter}/{loop.cap})" for loop in loops)
+
+
 def _report_rerun_plan(plan: RerunPlan) -> None:
     """Print the planned reconciliation for ``rerun --dry-run``; writes nothing."""
     mode = "continue" if plan.continue_mode else "fresh"
@@ -1441,6 +1459,16 @@ def _report_rerun_plan(plan: RerunPlan) -> None:
             )
         else:
             print("  state:     terminal markers cleared; counters/subtasks/publish-ops kept")
+        if plan.exhausted_fix_loops:
+            print(
+                f"  budget:    exhausted: {_format_exhausted(plan.exhausted_fix_loops)} — "
+                "resuming would re-park immediately unless reset"
+            )
+        if plan.global_backstop_exhausted:
+            print(
+                "  budget:    the global max_total_fix_iterations backstop is exhausted; it is a "
+                "hard ceiling and cannot be reset"
+            )
     else:
         target = plan.branch or "worc/<id>-<slug>"
         archive = f"attempt-{max(plan.attempt - 1, 0)}"
@@ -1456,6 +1484,43 @@ def _report_rerun_plan(plan: RerunPlan) -> None:
     )
     for note in plan.notes:
         print(f"  note:      {note}")
+
+
+def _resolve_reset_fix_budget(args: argparse.Namespace, plan: RerunPlan) -> tuple[bool, int | None]:
+    """Resolve the effective reset-fix-budget decision for a ``--continue`` resume.
+
+    Returns ``(resolved, abort_code)``; a non-``None`` ``abort_code`` means the caller should return
+    it immediately (the refusal message is already printed). Never gated by ``--yes`` — a budget
+    reset is exactly the consequential decision this prompt exists to surface, so it always needs
+    its own explicit answer, interactively or via ``--reset-fix-budget``/``--no-reset-fix-budget``.
+    """
+    resolved = bool(args.reset_fix_budget)
+    if plan.exhausted_fix_loops:
+        names = _format_exhausted(plan.exhausted_fix_loops)
+        if args.reset_fix_budget is False:
+            print(f"rerun: refusing to resume — fix budget exhausted: {names}")
+            return False, 1
+        if args.reset_fix_budget is True:
+            resolved = True
+        else:
+            if not sys.stdin.isatty():
+                print(
+                    f"rerun: {names} exhausted; non-interactive shell — pass "
+                    "--reset-fix-budget or --no-reset-fix-budget"
+                )
+                return False, 1
+            if not _confirm(f"{names} exhausted. Reset it to allow further fix rounds? [y/N] "):
+                print(f"rerun: refusing to resume — fix budget exhausted: {names}")
+                return False, 1
+            resolved = True
+    if resolved and plan.global_backstop_exhausted:
+        print(
+            "rerun: resetting the fix budget will not unblock this task — the global "
+            "max_total_fix_iterations backstop is a hard ceiling and cannot be reset; nothing "
+            "further can run automatically"
+        )
+        return False, 1
+    return resolved, None
 
 
 def cmd_rerun(args: argparse.Namespace) -> int:
@@ -1516,9 +1581,12 @@ def cmd_rerun(args: argparse.Namespace) -> int:
         return 0
 
     if args.continue_:
+        resolved_reset, abort_code = _resolve_reset_fix_budget(args, plan)
+        if abort_code is not None:
+            return abort_code
         result = orchestrator.continue_task(
             args.task_id,
-            reset_fix_budget=args.reset_fix_budget,
+            reset_fix_budget=resolved_reset,
             from_node=args.from_node,
         )
         label = "rerun/continue"

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -652,6 +654,7 @@ def test_reset_fix_budget_warns_when_global_backstop_exhausted(
         node_run=("review", "evaluator"),
         counters_json=counters,
     )
+    _seed_manifest(git_repo.clone, "task-1")
     code = cli.main(
         [
             "--config",
@@ -665,7 +668,7 @@ def test_reset_fix_budget_warns_when_global_backstop_exhausted(
     )
     out = capsys.readouterr().out
     assert code == 0  # dry-run, no refusal
-    assert "max_total_fix_iterations backstop is already exhausted" in out
+    assert "the global max_total_fix_iterations backstop is exhausted" in out
 
 
 # --- Phase 1 #4: re-enter at a chosen node (--from <node>) --------------------------------
@@ -718,14 +721,15 @@ def test_rerun_from_unknown_node_refuses(
         ]
     )
     assert code == 1
-    assert "is not in the flow" in capsys.readouterr().out
+    assert "is not in the current flow" in capsys.readouterr().out
 
 
-def test_rerun_from_fingerprint_drift_refuses(
+def test_rerun_from_drift_note_surfaced_in_dry_run(
     git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """If the flow changed since the checkpoint, --from cannot target the recorded graph — it is
-    refused (rather than a silent no-op, since resume would restart from the top on a mismatch).
+    """--from proceeds through drift as long as the target node still exists — no refusal, just a
+    transparency note (the node existing is the only thing --from checks; the operator invoking it
+    is trusted to know what they changed).
     """
     project = tmp_path / "project"
     project.mkdir()
@@ -752,8 +756,64 @@ def test_rerun_from_fingerprint_drift_refuses(
             "--dry-run",
         ]
     )
-    assert code == 1
-    assert "flow changed since the checkpoint" in capsys.readouterr().out
+    assert code == 0  # no refusal — the node exists; drift alone never blocks --from
+    out = capsys.readouterr().out
+    assert "the flow changed since the checkpoint" in out
+    assert "will resume using the current on-disk flow" in out
+
+
+def test_rerun_from_drift_actually_resumes_at_node_and_rebaselines_fingerprint(
+    git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for the fingerprint-rebaseline fix: --from under drift must actually resume
+    at the target node instead of the engine's own resume gate silently top-restarting (which would
+    happen if the checkpoint's stale fingerprint were left untouched), and the persisted fingerprint
+    is updated to the live flow's.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "failed" / "task-1.md"
+    _complete_task_file(source, "task-1")
+    config = _seed(
+        project,
+        git_repo.clone,
+        TaskRow("task-1", "T", Status.FAILED, source_path=str(source), branch="worc/task-1-t"),
+        checkpoint_node="review",
+        node_run=("review", "evaluator"),
+        flow_fingerprint="stale-fingerprint",
+    )
+    _seed_manifest(git_repo.clone, "task-1")
+
+    def fake_resume(self: Orchestrator) -> PipelineResult:
+        return PipelineResult(task_id="task-1", final_status=Status.DONE)
+
+    monkeypatch.setattr(Orchestrator, "resume", fake_resume)
+    code = cli.main(
+        [
+            "--config",
+            str(config),
+            "rerun",
+            "task-1",
+            "--continue",
+            "--from",
+            "implementation",
+            "--yes",
+        ]
+    )
+    assert code == 0
+
+    store = StateStore.open_readonly(git_repo.clone / ".worc" / "state.db")
+    current_node, _counters, fingerprint = store.get_flow_checkpoint("task-1")
+    store.close()
+    assert current_node == "implementation"  # checkpoint re-pointed at the --from node
+    assert fingerprint != "stale-fingerprint"  # rebaselined, not round-tripped
+
+    from tests.conftest import BUILTIN_FLOWS_DIR
+
+    from wastech_orchestrator.core.flow.registry import FlowRegistry
+
+    registry = FlowRegistry(operator_flows_dir=BUILTIN_FLOWS_DIR)
+    assert fingerprint == registry.resolve("implementation").flow_fingerprint
 
 
 def test_rerun_from_valid_node_overrides_checkpoint(
@@ -795,3 +855,235 @@ def test_rerun_from_valid_node_overrides_checkpoint(
     current_node, _counters, _fp = store.get_flow_checkpoint("task-1")
     store.close()
     assert current_node == "implementation"  # checkpoint re-pointed at the --from node
+
+
+# --- exhausted fix-budget interactive confirmation ----------------------------------------
+
+
+def _seed_exhausted_task(
+    project: Path, clone: Path, *, review_fix: int = 15, global_fix: int = 0
+) -> Path:
+    """A manual_action_required task parked at 'review' with the given loop/global counters."""
+    source = project / "failed" / "task-1.md"
+    _complete_task_file(source, "task-1")
+    counters = json.dumps({"review_fix": review_fix, "global_fix_iterations": global_fix})
+    config = _seed(
+        project,
+        clone,
+        TaskRow(
+            "task-1",
+            "T",
+            Status.MANUAL_ACTION_REQUIRED,
+            source_path=str(source),
+            branch="worc/task-1-t",
+            fix_iterations=global_fix,
+            review_fix_cycles=review_fix,
+        ),
+        checkpoint_node="review",
+        node_run=("review", "evaluator"),
+        counters_json=counters,
+    )
+    _seed_manifest(clone, "task-1")
+    return config
+
+
+class _TTY(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+def _forbid_continue_task(*_args: object, **_kwargs: object) -> PipelineResult:
+    raise AssertionError("continue_task should not be called when the budget decision refuses")
+
+
+def test_exhausted_budget_prompt_yes_resets_and_resumes(
+    git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resuming into an exhausted review_fix loop prompts; answering yes resets it and resumes."""
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _seed_exhausted_task(project, git_repo.clone, review_fix=15)
+    monkeypatch.setattr(sys, "stdin", _TTY())
+    monkeypatch.setattr(cli, "_confirm", lambda _prompt: True)
+
+    def fake_resume(self: Orchestrator) -> PipelineResult:
+        return PipelineResult(task_id="task-1", final_status=Status.DONE)
+
+    monkeypatch.setattr(Orchestrator, "resume", fake_resume)
+    code = cli.main(["--config", str(config), "rerun", "task-1", "--continue", "--yes"])
+    assert code == 0
+
+    store = StateStore.open_readonly(git_repo.clone / ".worc" / "state.db")
+    _node, counters_json, _fp = store.get_flow_checkpoint("task-1")
+    store.close()
+    persisted = json.loads(counters_json or "{}")
+    assert "review_fix" not in persisted  # the exhausted loop's consecutive counter was reset
+
+
+def test_exhausted_budget_prompt_no_refuses(
+    git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Declining the prompt refuses cleanly, naming the exhausted budget, before any resume."""
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _seed_exhausted_task(project, git_repo.clone, review_fix=15)
+    monkeypatch.setattr(sys, "stdin", _TTY())
+    monkeypatch.setattr(cli, "_confirm", lambda _prompt: False)
+    monkeypatch.setattr(Orchestrator, "continue_task", _forbid_continue_task)
+    code = cli.main(["--config", str(config), "rerun", "task-1", "--continue", "--yes"])
+    assert code == 1
+    assert "review_fix" in capsys.readouterr().out
+
+
+def test_exhausted_budget_non_interactive_without_flag_refuses(
+    git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A non-TTY stdin with neither flag fails closed, naming the flags to pass instead of hanging
+    on an interactive prompt that could never be answered."""
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _seed_exhausted_task(project, git_repo.clone, review_fix=15)
+    monkeypatch.setattr(sys, "stdin", io.StringIO())  # not a TTY
+
+    def _forbid_confirm(_prompt: str) -> bool:
+        raise AssertionError("_confirm should not be called on a non-interactive stdin")
+
+    monkeypatch.setattr(cli, "_confirm", _forbid_confirm)
+    monkeypatch.setattr(Orchestrator, "continue_task", _forbid_continue_task)
+    code = cli.main(["--config", str(config), "rerun", "task-1", "--continue", "--yes"])
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "non-interactive shell" in out
+    assert "--reset-fix-budget" in out and "--no-reset-fix-budget" in out
+
+
+def test_reset_fix_budget_flag_skips_prompt_when_exhausted(
+    git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--reset-fix-budget answers the exhausted-budget question non-interactively; no prompt."""
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _seed_exhausted_task(project, git_repo.clone, review_fix=15)
+
+    def _forbid_confirm(_prompt: str) -> bool:
+        raise AssertionError("--reset-fix-budget must not prompt")
+
+    monkeypatch.setattr(cli, "_confirm", _forbid_confirm)
+
+    def fake_resume(self: Orchestrator) -> PipelineResult:
+        return PipelineResult(task_id="task-1", final_status=Status.DONE)
+
+    monkeypatch.setattr(Orchestrator, "resume", fake_resume)
+    code = cli.main(
+        ["--config", str(config), "rerun", "task-1", "--continue", "--reset-fix-budget", "--yes"]
+    )
+    assert code == 0
+
+
+def test_no_reset_fix_budget_flag_refuses_without_prompt(
+    git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--no-reset-fix-budget answers the question non-interactively too: refuse, no prompt."""
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _seed_exhausted_task(project, git_repo.clone, review_fix=15)
+
+    def _forbid_confirm(_prompt: str) -> bool:
+        raise AssertionError("--no-reset-fix-budget must not prompt")
+
+    monkeypatch.setattr(cli, "_confirm", _forbid_confirm)
+    monkeypatch.setattr(Orchestrator, "continue_task", _forbid_continue_task)
+    code = cli.main(
+        [
+            "--config",
+            str(config),
+            "rerun",
+            "task-1",
+            "--continue",
+            "--no-reset-fix-budget",
+            "--yes",
+        ]
+    )
+    assert code == 1
+    assert "review_fix" in capsys.readouterr().out
+
+
+def test_yes_flag_does_not_satisfy_budget_prompt(
+    git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--yes alone (no reset flag) never substitutes for the budget decision — a non-interactive
+    shell with only --yes still refuses and asks for an explicit flag."""
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _seed_exhausted_task(project, git_repo.clone, review_fix=15)
+    monkeypatch.setattr(sys, "stdin", io.StringIO())  # not a TTY
+    monkeypatch.setattr(Orchestrator, "continue_task", _forbid_continue_task)
+    code = cli.main(["--config", str(config), "rerun", "task-1", "--continue", "--yes"])
+    assert code == 1
+    assert "non-interactive shell" in capsys.readouterr().out
+
+
+def test_futile_reset_when_global_backstop_exhausted_errors(
+    git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A reset that would not actually unblock the task (the global backstop is itself exhausted)
+    surfaces its own clear error instead of silently resetting and re-parking a second time — even
+    when no *named* loop is individually over cap.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _seed_exhausted_task(project, git_repo.clone, review_fix=3, global_fix=30)
+    monkeypatch.setattr(Orchestrator, "continue_task", _forbid_continue_task)
+    code = cli.main(
+        ["--config", str(config), "rerun", "task-1", "--continue", "--reset-fix-budget", "--yes"]
+    )
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "global max_total_fix_iterations backstop is a hard ceiling" in out
+
+
+def test_reset_and_no_reset_flags_mutually_exclusive(git_repo, tmp_path: Path) -> None:
+    """--reset-fix-budget and --no-reset-fix-budget together is an argparse usage error."""
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _seed_exhausted_task(project, git_repo.clone, review_fix=15)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(
+            [
+                "--config",
+                str(config),
+                "rerun",
+                "task-1",
+                "--continue",
+                "--reset-fix-budget",
+                "--no-reset-fix-budget",
+                "--yes",
+            ]
+        )
+    assert exc.value.code == 2
+
+
+def test_exhausted_loop_downstream_of_from_target_is_caught(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--from an upstream node still surfaces a loop already exhausted further down the resume
+    path (the broad forward-reachable scope), not just the target node's own edge.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _seed_exhausted_task(project, git_repo.clone, review_fix=15)
+    code = cli.main(
+        [
+            "--config",
+            str(config),
+            "rerun",
+            "task-1",
+            "--continue",
+            "--from",
+            "implementation",
+            "--dry-run",
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "review_fix" in out and "exhausted" in out
