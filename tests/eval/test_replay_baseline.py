@@ -3,8 +3,7 @@
 The orchestrator is greenfield — there is no corpus of historical production tasks to replay yet —
 so these fixtures are **synthetic** recorded runs that exercise the harness's aggregation, the
 AC-O verdicts, and the report renderer. The real baseline replaces these numbers once real runs
-accrue; the approach (and the thresholds) are what is locked here. See the recorded report at
-docs/backlog/memory/research/eval-baseline.md.
+accrue; the approach (and the thresholds) are what is locked here.
 """
 
 from __future__ import annotations

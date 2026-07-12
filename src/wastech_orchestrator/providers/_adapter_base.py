@@ -95,7 +95,6 @@ class ParsedEvents:
 
 def _produced_no_work(parsed: ParsedEvents) -> bool:
     """EXPERIMENTAL(no-work-infra) — trial behavior; grep the tag ``no-work-infra`` to revert as one
-    unit (see docs/backlog/no-work-agent-run-is-infra.md).
 
     Conservative "the agent did no work at all" test on normalized fields only (no CLI syntax).
 

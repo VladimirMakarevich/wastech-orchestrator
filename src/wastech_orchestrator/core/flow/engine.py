@@ -55,7 +55,6 @@ FactResolver = Callable[[str], bool]
 #: EXPERIMENTAL(no-work-infra) — the no-effective-work stall guard is a trial feature; grep the tag
 #: ``no-work-infra`` to find every site (alias, constant, constructor state, ``_check_stall``, its
 #: call in ``run()``, and the ``_reset_loops_at`` cleanup) and revert as one unit if we drop it.
-#: See docs/backlog/no-work-agent-run-is-infra.md.
 #: Returns an opaque fingerprint of the current working tree (the ``current.diff`` text, hashed or
 #: raw). The engine only compares consecutive fingerprints for equality — it never learns what a
 #: diff is (same domain-free contract as :data:`FactResolver`). Injected by the driver; ``None``

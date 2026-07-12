@@ -67,8 +67,8 @@ DEFAULT_QUEUE = "default"
 # Scheduling priority for the eligibility queue. Unlike the other constrained task fields (which
 # reject on a bad value), priority is **fail-open**: an unrecognised string, a wrong type, or a
 # missing value all fold to ``DEFAULT_PRIORITY`` so a typo in a scheduling hint never blocks an
-# otherwise-valid task (see docs/backlog/task-priority.md). This is the one source of truth the
-# gate, the parser, and the cli scheduler all share.
+# otherwise-valid task. This is the one source of truth the gate, the parser, and the cli
+# scheduler all share.
 TaskPriority = Literal["low", "mid", "high"]
 DEFAULT_PRIORITY: TaskPriority = "mid"
 _PRIORITY_RANK: dict[TaskPriority, int] = {"high": 0, "mid": 1, "low": 2}

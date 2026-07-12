@@ -561,9 +561,9 @@ def test_task_branch_name_override_controls_published_head(
 def test_documentation_node_edit_is_committed(
     git_repo, make_git_config, git_run, tmp_path: Path
 ) -> None:
-    # docs/backlog/documentation-node.md: the packaged implementation flow runs the documentation
-    # node after review accepts; its workspace-write edit (here a docs file) joins the same diff the
-    # orchestrator commits/publishes, using the same prompt/lineage/commit machinery as the others.
+    # The packaged implementation flow runs the documentation node after review accepts; its
+    # workspace-write edit (here a docs file) joins the same diff the orchestrator commits/
+    # publishes, using the same prompt/lineage/commit machinery as the others.
     providers = _both()
     orch, store, _, _ = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
@@ -2632,7 +2632,8 @@ def test_no_auto_merge_leaves_pr_open(git_repo, make_git_config, tmp_path: Path)
 
 def test_per_task_true_wins_over_global_false(git_repo, make_git_config, tmp_path: Path) -> None:
     # PRE.2: a per-task ``auto_merge: true`` wins outright over the instance default ``false``;
-    # there is no operator gate. The task author owns the decision (see docs/operations.md).
+    # there is no operator gate — auto-merge is a publishing-policy call owned by the task author,
+    # the same trusted party as the config, not something the orchestrator second-guesses.
     providers = _both()
     calls: list[list[str]] = []
     orch, _, _, _ = _build(

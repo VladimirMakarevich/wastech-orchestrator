@@ -13,7 +13,6 @@
 #   agent nodes also: timeout_seconds, extra_args, best_effort, permission_profile (≤ flow ceiling), when
 #   evaluator nodes also: blocking, max_rework_per_stage
 #   Disabling a node is PER-TASK: set `nodes.<id>.enabled: false` in the task file.
-#   Full reference: docs/configuration.md → "Per-node overrides in flows".
 # ----------------------------------------------------------------------------------------------------
 flow:
   name: deep_research

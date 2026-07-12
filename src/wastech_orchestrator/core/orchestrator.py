@@ -3069,8 +3069,8 @@ class Orchestrator:
         The task value wins outright (PRE.2): an explicit per-task ``True``/``False`` is honored
         verbatim; absent (``None``) defers to the instance default ``git.auto_merge``. Auto-merge
         is a publishing-policy choice owned by the operator (the same trusted author as the config),
-        not a sandbox/approvals ceiling, so there is no separate operator gate. See
-        ``docs/operations.md``: skipping the human PR review is the operator's call.
+        not a sandbox/approvals ceiling, so there is no separate operator gate: skipping the human
+        PR review is the operator's call to make, not the orchestrator's to police.
         """
         if task.auto_merge is not None:
             return task.auto_merge

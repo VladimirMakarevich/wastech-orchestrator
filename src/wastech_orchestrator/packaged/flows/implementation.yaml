@@ -33,7 +33,6 @@
 #                     permission_profile (≤ flow permission_ceiling), when
 #   evaluator nodes also: blocking (failing verdict blocks vs advisory), max_rework_per_stage
 #   Disabling a node is PER-TASK, not here: set `nodes.<id>.enabled: false` in the task file.
-#   Full reference: docs/configuration.md → "Per-node overrides in flows".
 # ----------------------------------------------------------------------------------------------------
 flow:
   name: implementation
@@ -134,7 +133,7 @@ flow:
       # only under Codex (OS-sandbox blocks Bash network); under Claude it only disables
       # WebFetch/WebSearch, so it is defense-in-depth (the role prompt also forbids installs/builds)
       # — pin `provider: codex` on this node when you need the hard "no dependency installs"
-      # guarantee. See docs/configuration.md (network access) for the enforcement asymmetry.
+      # guarantee.
       network_access: false
       # other optional overrides (uncomment to pin this node):
       # provider: claude

@@ -46,7 +46,6 @@ class ErrorClass(StrEnum):
     # misread as a generic PROCESS_CRASHED and burn the fallback provider).
     MODEL_REQUEST_INVALID = "model_request_invalid"
     TASK_FAILURE = "task_failure"
-    # EXPERIMENTAL(no-work-infra): trial behavior — see docs/backlog/no-work-agent-run-is-infra.md.
     # Grep the tag ``no-work-infra`` to find every site and revert as one unit if we drop it.
     # The provider emitted a parseable terminal event but did NO work: zero output tokens, no
     # structured output, and not an ``error_max_turns`` stop. This is the GENERIC no-work net (the

@@ -120,8 +120,8 @@ from wastech_orchestrator.providers.base import ProviderId
 # configs load fail-open and `upgrade-config` adds it from the template.
 # v24 (2026-06-30, memory-subsystem foundations): a *format* add of the optional `memory` block — a
 # global enable/disable plus bounded knobs (short-term TTL, per-node packet caps, promotion
-# thresholds, background-cleanup budget) for the persistent repo-scoped memory subsystem
-# (docs/backlog/memory/). Absent block => disabled (today's behavior exactly: no store, no delta,
+# thresholds, background-cleanup budget) for the persistent repo-scoped memory subsystem.
+# Absent block => disabled (today's behavior exactly: no store, no delta,
 # empty packets, CLI no-op, no cleanup); the packaged template ships `enabled: true` for a fresh
 # install. Old configs load fail-open with defaults and `upgrade-config` adds it from the template.
 # No behavior consumes the knobs yet (phase 01 wires the shape only).
@@ -493,7 +493,7 @@ class LoggingConfig:
 
 @dataclass(frozen=True)
 class MemoryConfig:
-    """Repo-scoped persistent memory (docs/backlog/memory/): global toggle + bounded knobs.
+    """Repo-scoped persistent memory: global toggle + bounded knobs.
 
     Absent block => ``enabled=False`` — the pre-memory behavior (no store, no candidate delta, empty
     memory packets, ``worc memory`` is a no-op, no background cleanup; Q10). This dataclass default

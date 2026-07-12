@@ -1,7 +1,7 @@
 """Threat model as tests (flow-engine P4.2).
 
-One test per row of the operator-flow threat model (``docs/backlog/flows/security-ceiling.md``):
-each proves the attack vector is closed **independently of the flow YAML / task content**. Rows
+One test per row of the operator-flow threat model — this file **is** the catalogue: each test
+proves one attack vector is closed **independently of the flow YAML / task content**. Rows
 already proven structurally in P0.3/P0.5 assert against :func:`validate_flow` / :func:`load_flow`;
 the config-aware rows (P4.2) assert against :func:`validate_flow_against_config`. Keeping the whole
 catalogue in one file makes "is every ceiling threat covered?" answerable at a glance.

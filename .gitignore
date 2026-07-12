@@ -34,3 +34,4 @@ Thumbs.db
 
 # Obsidian Vault (if using Obsidian for notes)
 .obsidian/
+.archive/

@@ -1,4 +1,4 @@
-"""Persistent, repo-scoped memory subsystem (docs/backlog/memory/).
+"""Persistent, repo-scoped memory subsystem.
 
 A files-first, supervisor-distilled, deterministically-managed, evidence-backed memory layer under
 the gitignored ``<repo>/.worc/memory/`` home. This package owns the **deterministic, model-free**

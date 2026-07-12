@@ -1,4 +1,4 @@
-"""The packaged `implementation` flow's `documentation` node (docs/backlog/documentation-node.md).
+"""The packaged `implementation` flow's `documentation` node.
 
 A whole-task docs-update agent inserted on the `review --accept-->` exit, before `publish`. These
 tests pin its graph shape: it loads/validates, routes soundly, resumes the implementation editing

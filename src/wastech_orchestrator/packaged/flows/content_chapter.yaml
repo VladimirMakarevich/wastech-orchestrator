@@ -9,8 +9,10 @@
 # output_policy: code_change — the chapter `.md` files are edited in place; the diff IS the
 # deliverable. publishing: pull_request is the ceiling; run the content repo with
 # `git.create_pull_request: false` (install `--no-create-pr`) to land edits as a local commit with no
-# PR. The deterministic gate is `check_journey` (delivered to `.worc/tools/` by `worc install`); see
-# docs/flow-authoring.md → "The check_journey prose gate".
+# PR. The deterministic gate is `check_journey` (delivered to `.worc/tools/` by `worc install`); it
+# reads only the changed chapter paths from the diff and enforces the mode-specific prose rules
+# (heading hierarchy, required Purpose/Emotional-point sections, the "не …, а …" AI-antithesis
+# pattern, and for `en`/`book` a hard per-page length cap) — never pre-existing issues elsewhere.
 #
 # The supervisor is a constant layer above the flow (not a node); `emit_follow_ups` is deliberately
 # omitted (a code-oriented capability). Blocking evaluators are capped by their named-loop budgets

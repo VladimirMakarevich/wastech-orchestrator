@@ -203,7 +203,8 @@ git:
   auto_merge_strategy: squash       # merge | squash | rebase  (used when a merge fires)
   auto_merge_wait_for_checks: false # true: arm GitHub-native auto-merge (--auto) — merge only after required checks pass
   # NOTE: a per-task `auto_merge: true|false` wins outright over this default (PRE.2). Auto-merge
-  # skips the human PR review — the operator (the task author) owns that call; see docs/operations.md.
+  # skips the human PR review — the operator (the task author) owns that call, not the orchestrator's
+  # to police.
   merge_flow: merge                 # flow `worc merge-task` runs to resolve base-merge conflicts
                                     #   (seeded editable at .worc/flows/merge.yaml). Clean merges are
                                     #   mechanical (no flow); only a conflicting base-merge runs it.
@@ -252,7 +253,7 @@ logging:                            # operator log verbosity + on-disk artifact 
                                     # Prompt-audit is independent (see prompt_audit). Reclaim disk with
                                     # `worc logs clean [--keep N | --all]`.
 
-memory:                             # persistent, repo-scoped memory (optional; docs/backlog/memory/)
+memory:                             # persistent, repo-scoped memory (optional)
   enabled: true                     # false / omit the whole block = today's behavior: no store, no
                                     #   candidate delta, empty memory packets, CLI no-op, no cleanup
   short_term_ttl_days: 30           # episodic entries expire after N days (long-term has no TTL)
@@ -273,7 +274,7 @@ memory:                             # persistent, repo-scoped memory (optional; 
   cleanup_promotions_per_pass: 0    # 0 = cleanup NEVER creates a long-term lesson (only demote /
                                     #   expire / quarantine / merge)
 
-tools:                              # custom tool nodes (optional; docs/backlog/archive/done/p5-custom-tool-nodes.md)
+tools:                              # custom tool nodes (optional)
   default_timeout_seconds: 3600     # flow-wide default wall-clock timeout (s) for a `tool` node whose
                                     #   own `timeout_seconds` is unset (3600 = 1h). Omit the block for
                                     #   the same default. A tool that exceeds it is an infra failure →
