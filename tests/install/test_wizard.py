@@ -27,16 +27,16 @@ class _ScriptedPrompter:
         self.confirms = list(confirms or [])
         self.lists = list(lists or [])
 
-    def info(self, message: str) -> None:  # noqa: D102
+    def info(self, message: str) -> None:
         pass
 
-    def ask(self, prompt: str, *, default: str) -> str:  # noqa: D102
+    def ask(self, prompt: str, *, default: str) -> str:
         return self.answers.pop(0) if self.answers else default
 
-    def confirm(self, prompt: str, *, default: bool) -> bool:  # noqa: D102
+    def confirm(self, prompt: str, *, default: bool) -> bool:
         return self.confirms.pop(0) if self.confirms else default
 
-    def ask_list(self, prompt: str) -> list[str]:  # noqa: D102
+    def ask_list(self, prompt: str) -> list[str]:
         return self.lists.pop(0) if self.lists else []
 
 

@@ -310,8 +310,7 @@ def _sanitize_summary(summary_text: str) -> str:
     (the PR body). Clean prose (the common case) passes through unchanged.
     """
     text = summary_text.strip()
-    if text.startswith(_SUMMARY_OPEN_TAG):
-        text = text[len(_SUMMARY_OPEN_TAG) :]
+    text = text.removeprefix(_SUMMARY_OPEN_TAG)
     cut = len(text)
     for tag in _SUMMARY_CUT_TAGS:
         idx = text.find(tag)
@@ -761,7 +760,7 @@ class Supervisor:
                 session_id=self._resume_session(task_id, route) if resume_session else None,
             )
             outcome = self._router.run_stage(request, route)
-        except Exception as exc:  # noqa: BLE001 — advisory layer must never break the task
+        except Exception as exc:
             _LOG.warning(
                 "supervisor turn failed (advisory, ignored)",
                 extra={"task_id": task_id, "error_type": type(exc).__name__},
@@ -835,7 +834,7 @@ class Supervisor:
                     secrets=self._prompt_secrets,
                     register=self._register_artifact,
                 )
-        except Exception as exc:  # noqa: BLE001 — audit write is advisory; must never break the turn
+        except Exception as exc:
             _LOG.warning(
                 "supervisor prompt-audit write failed (advisory, ignored)",
                 extra={

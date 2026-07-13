@@ -594,7 +594,7 @@ def test_documentation_node_edit_is_committed(
 
 
 def _evaluations(store: StateStore, task_id: str) -> list:
-    return store._conn.execute(  # noqa: SLF001
+    return store._conn.execute(
         "SELECT node_id, kind, verdict FROM evaluations WHERE task_id = ? ORDER BY id", (task_id,)
     ).fetchall()
 
@@ -892,7 +892,7 @@ def test_two_fix_cycles_use_distinct_stage_run_artifacts(
     result = orch.run_task(task_file)
 
     assert result.final_status is Status.DONE
-    rows = store._conn.execute(  # noqa: SLF001 - cross-checking SQLite against artifact paths
+    rows = store._conn.execute(
         "SELECT id FROM node_runs WHERE task_id = ? AND node_id = ? AND skipped = 0 ORDER BY id",
         ("task-two-fixes", "fixing"),
     ).fetchall()
@@ -952,7 +952,7 @@ def test_resume_restores_review_path_from_latest_verdict_run(
     findings.write_text('{"findings": []}', encoding="utf-8")
 
     inputs = NodeInputs(flow_dir=str(tmp_path))
-    orch._restore_engine_inputs(SimpleNamespace(task=SimpleNamespace(id=tid)), inputs)  # noqa: SLF001
+    orch._restore_engine_inputs(SimpleNamespace(task=SimpleNamespace(id=tid)), inputs)
     assert inputs.review_path == str(findings)
 
 
@@ -1294,7 +1294,7 @@ def test_minimal_flow_implement_only(git_repo, make_git_config, tmp_path: Path) 
     orch, store, _, art = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
     )
-    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)  # noqa: SLF001
+    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)
     _patch_impl_edit(providers, git_repo)
 
     result = orch.run_task(_complete_task(tmp_path, "task-min"))
@@ -1950,7 +1950,9 @@ def test_strict_isolation_preflight_fails_without_branch(
     )
     monkeypatch.setattr(
         "wastech_orchestrator.core.orchestrator.check_isolation",
-        lambda _config: ["codex: sandbox 'danger-full-access' grants full filesystem access"],
+        lambda _config, _checks: [
+            "codex: sandbox 'danger-full-access' grants full filesystem access"
+        ],
     )
     result = orch.run_task(_complete_task(tmp_path, "task-iso"))
 
@@ -2062,7 +2064,7 @@ def test_artifacts_registered_with_checksums(git_repo, make_git_config, tmp_path
     providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
     orch.run_task(_complete_task(tmp_path, "task-art"))
 
-    rows = store._conn.execute(  # noqa: SLF001
+    rows = store._conn.execute(
         "SELECT kind, checksum FROM artifacts WHERE task_id = ?", ("task-art",)
     ).fetchall()
     kinds = {r["kind"] for r in rows}
@@ -2822,9 +2824,7 @@ def test_skip_testing_bypasses_checks(git_repo, make_git_config, tmp_path: Path)
     block = "nodes:\n  testing:\n    enabled: false\n"
     result = orch.run_task(_task_with_nodes(tmp_path, block))
     assert result.final_status is Status.DONE
-    n_checks = store._conn.execute(  # noqa: SLF001
-        "SELECT COUNT(*) AS n FROM check_runs"
-    ).fetchone()["n"]
+    n_checks = store._conn.execute("SELECT COUNT(*) AS n FROM check_runs").fetchone()["n"]
     assert n_checks == 0  # the check runner never ran
     assert "testing" in _skipped_nodes(store)
 
@@ -2947,7 +2947,7 @@ def test_supervisor_proposed_skills_reach_downstream_stages(
 
     from wastech_orchestrator.config.schema import SkillsConfig
 
-    orch._config = replace(orch._config, skills=SkillsConfig(dynamic=True))  # noqa: SLF001
+    orch._config = replace(orch._config, skills=SkillsConfig(dynamic=True))
 
     result = orch.run_task(_complete_task(tmp_path, "task-skills"))
     assert result.final_status is Status.DONE
@@ -3004,7 +3004,7 @@ def test_operator_pinned_skill_reaches_node(
     orch, store, _, art = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
     )
-    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)  # noqa: SLF001
+    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)
     _patch_impl_edit(providers, git_repo)
 
     result = orch.run_task(_complete_task(tmp_path, "task-pin"))
@@ -3027,8 +3027,8 @@ def test_strict_unresolved_pin_stops_task(git_repo, make_git_config, tmp_path: P
     orch, store, _, _ = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
     )
-    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)  # noqa: SLF001
-    orch._config = replace(orch._config, skills=SkillsConfig(dynamic=False, strict=True))  # noqa: SLF001
+    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)
+    orch._config = replace(orch._config, skills=SkillsConfig(dynamic=False, strict=True))
 
     result = orch.run_task(_complete_task(tmp_path, "task-strict"))
     assert result.final_status is Status.MANUAL_ACTION_REQUIRED
@@ -3152,7 +3152,7 @@ def test_prompt_audit_records_steps_in_order(git_repo, make_git_config, tmp_path
     assert review["agents"][0]["is_fallback"] is False
 
     # Both artifact kinds are registered in SQLite.
-    rows = store._conn.execute(  # noqa: SLF001
+    rows = store._conn.execute(
         "SELECT kind FROM artifacts WHERE task_id = ?", ("task-001",)
     ).fetchall()
     kinds = {r["kind"] for r in rows}
@@ -3176,7 +3176,7 @@ def test_prompt_audit_absent_when_disabled(git_repo, make_git_config, tmp_path: 
     assert result.final_status is Status.DONE
 
     assert not _audit_dir(art, "task-001").exists()
-    rows = store._conn.execute(  # noqa: SLF001
+    rows = store._conn.execute(
         "SELECT kind FROM artifacts WHERE task_id = ?", ("task-001",)
     ).fetchall()
     kinds = {r["kind"] for r in rows}

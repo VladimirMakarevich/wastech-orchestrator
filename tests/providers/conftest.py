@@ -71,8 +71,8 @@ def integration_security() -> SecurityConfig:
             "USERPROFILE",
             "CODEX_HOME",
             "CLAUDE_CONFIG_DIR",
-        )
-        + os_essentials,
+            *os_essentials,
+        ),
         denied_read_paths=(".env", "secrets/**"),
         denied_commands=("git commit", "git push", "gh pr create"),
     )

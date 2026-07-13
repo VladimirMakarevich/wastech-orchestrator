@@ -1,0 +1,62 @@
+# Local quality gate — mirrors CI. Per commit: ruff, ruff format, mypy, import-linter. Per push (the
+# heavier gates): interrogate, vulture, deptry, pytest. Install once with:
+#   pre-commit install && pre-commit install --hook-type pre-push
+#
+# All hooks run through the dev virtualenv (`language: system`) instead of pre-commit-managed envs, so
+# they use the exact ruff / mypy / import-linter the repo pins in the `dev` extra — no second version to
+# keep in sync, and import-linter/mypy can import the installed package. Requires `pip install -e ".[dev]"`.
+repos:
+  - repo: local
+    hooks:
+      # Run ruff over the tree (no explicit filenames) so pre-commit mirrors CI's `ruff check .` /
+      # `ruff format .` exactly — same .py/.pyi walk and excludes. Passing filenames would drag in
+      # extension-less Python scripts (e.g. packaged/tools/*) that CI's directory walk never lints.
+      - id: ruff-check
+        name: ruff check
+        entry: ruff check
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false
+      - id: ruff-format
+        name: ruff format
+        entry: ruff format
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false
+      - id: mypy
+        name: mypy src
+        entry: mypy src
+        language: system
+        pass_filenames: false
+        files: ^src/.*\.py$
+      - id: import-linter
+        name: import-linter
+        entry: lint-imports
+        language: system
+        pass_filenames: false
+        files: (\.py$|^\.importlinter$)
+      # Heavier gates on push (not every commit): the maintainability ratchets + full test suite.
+      - id: interrogate
+        name: interrogate (docstring coverage)
+        entry: interrogate src
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+      - id: vulture
+        name: vulture (dead code)
+        entry: vulture
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+      - id: deptry
+        name: deptry (dependency hygiene)
+        entry: deptry src
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+      - id: pytest
+        name: pytest
+        entry: pytest -q
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

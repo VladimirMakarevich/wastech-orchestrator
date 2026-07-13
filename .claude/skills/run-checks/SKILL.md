@@ -1,6 +1,6 @@
 ---
 name: run-checks
-description: Run all quality checks for wastech-orchestrator (ruff, mypy, pytest) and report briefly. Use before a commit, before a PR, and before moving to the next implementation stage.
+description: Run all quality checks for wastech-orchestrator (ruff, mypy, import-linter, interrogate, vulture, deptry, pytest) and report briefly. Use before a commit, before a PR, and before moving to the next implementation stage.
 ---
 
 # run-checks
@@ -15,6 +15,10 @@ Run the full set of checks for the wastech-orchestrator repository.
    ruff check .
    ruff format --check .
    mypy src
+   lint-imports        # architectural import-boundary contracts (.importlinter)
+   interrogate src     # docstring-coverage floor
+   vulture             # dead code
+   deptry src          # dependency hygiene
    pytest
    ```
 3. If something fails:

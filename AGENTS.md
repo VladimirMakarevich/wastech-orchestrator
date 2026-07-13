@@ -28,15 +28,18 @@ This file is for Codex. The full set of rules matches [CLAUDE.md](CLAUDE.md) and
 
 ```bash
 pip install -e ".[dev]"
+pre-commit install      # local gate; + `pre-commit install --hook-type pre-push`
 ruff check .
 ruff format --check .   # CI runs this; use `ruff format .` to fix
 mypy src
+lint-imports            # architectural import contracts (.importlinter)
 pytest
+# further CI gates: interrogate src · vulture · deptry src
 ```
 
 ## Definition of Done for a change
 
-- the code passes `ruff check .`, `ruff format --check .`, `mypy src`, `pytest`;
+- the code passes `ruff check .`, `ruff format --check .`, `mypy src`, `lint-imports`, and `pytest` (plus the `interrogate`/`vulture`/`deptry` CI gates);
 - tests are added/updated when behavior changes;
 - docs are updated in the same change when behavior/CLI/config/architecture change (use `/sync-docs`), and deferred work is recorded in [docs/backlog/follow_ups.md](docs/backlog/follow_ups.md) — the Stop docs-sync gate enforces this;
 - the invariants above are not violated.

@@ -49,9 +49,7 @@ def _changed_paths() -> list[str]:
 def _should_block(paths: list[str]) -> bool:
     """True when code under ``src/`` changed but no docs/README did (pure, testable)."""
     code_changed = any(p.startswith("src/") for p in paths)
-    docs_changed = any(
-        p.startswith("docs/") or p.startswith(".agents/") or p in _DOC_FILES for p in paths
-    )
+    docs_changed = any(p.startswith(("docs/", ".agents/")) or p in _DOC_FILES for p in paths)
     return code_changed and not docs_changed
 
 

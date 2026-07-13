@@ -12,9 +12,10 @@ from pathlib import Path
 
 import pytest
 
+from wastech_orchestrator.composition import build_orchestrator
 from wastech_orchestrator.config.loader import loads_config
 from wastech_orchestrator.config.schema import MergeStrategy
-from wastech_orchestrator.core.orchestrator import PipelineFailed, build_orchestrator
+from wastech_orchestrator.core.orchestrator import PipelineFailed
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import KIND_PR, KIND_PR_MERGE, GitResult
 from wastech_orchestrator.state_store import PublishOpRow, StateStore, TaskRow

@@ -53,7 +53,7 @@ The directory layout these two roots describe is created by `install`, not by B0
 
 ### Home as the artifacts root
 
-`worc_home_for(config)` is what the CLI passes as `artifacts_root` when constructing the orchestrator — for `run` ([cli.py:621-623](../../../src/wastech_orchestrator/cli.py#L621)), `watch` ([cli.py:785-786](../../../src/wastech_orchestrator/cli.py#L785)), recovery ([cli.py:690-692](../../../src/wastech_orchestrator/cli.py#L690), [cli.py:972-974](../../../src/wastech_orchestrator/cli.py#L972)) — and to `build_providers`, the PID-file path, the state DB, and the operator-flows dir. So `<artifacts_root>` (B20) and the `.worc/` home are the same directory: `build_orchestrator` opens `StateStore.open(<artifacts_root>/state.db)` and the ledger at `<artifacts_root>/logs/completed.jsonl` ([orchestrator.py:1984-1994](../../../src/wastech_orchestrator/core/orchestrator.py#L1984)).
+`worc_home_for(config)` is what the CLI passes as `artifacts_root` when constructing the orchestrator — for `run` ([cli.py:621-623](../../../src/wastech_orchestrator/cli.py#L621)), `watch` ([cli.py:785-786](../../../src/wastech_orchestrator/cli.py#L785)), recovery ([cli.py:690-692](../../../src/wastech_orchestrator/cli.py#L690), [cli.py:972-974](../../../src/wastech_orchestrator/cli.py#L972)) — and to `build_providers`, the PID-file path, the state DB, and the operator-flows dir. So `<artifacts_root>` (B20) and the `.worc/` home are the same directory: `build_orchestrator` opens `StateStore.open(<artifacts_root>/state.db)` and the ledger at `<artifacts_root>/logs/completed.jsonl` ([composition.py:78](../../../src/wastech_orchestrator/composition.py#L78)).
 
 ## Invariants & guarantees
 

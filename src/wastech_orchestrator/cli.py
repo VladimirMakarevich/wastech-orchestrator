@@ -26,6 +26,11 @@ from pathlib import Path
 from typing import NamedTuple, TextIO
 
 from wastech_orchestrator import __version__, preflight, process_control
+from wastech_orchestrator.composition import (
+    ISOLATION_CHECKS,
+    build_orchestrator,
+    build_providers,
+)
 from wastech_orchestrator.config import upgrade as config_upgrade
 from wastech_orchestrator.config.loader import ConfigError, load_config, loads_config
 from wastech_orchestrator.config.schema import (
@@ -45,8 +50,6 @@ from wastech_orchestrator.core.orchestrator import (
     PipelineFailed,
     PipelineResult,
     RerunPlan,
-    build_orchestrator,
-    build_providers,
 )
 from wastech_orchestrator.core.state_machine import TERMINAL, Status
 from wastech_orchestrator.env_file import count_env_file, load_env_file
@@ -1320,7 +1323,7 @@ def _build_cleanup_hook(config: OrchestratorConfig) -> Callable[[], None] | None
                     report.quarantined,
                     report.merged,
                 )
-        except Exception as exc:  # noqa: BLE001 — best-effort; never crash the watcher
+        except Exception as exc:
             _LOG.warning("memory cleanup failed (best-effort, ignored): %s", type(exc).__name__)
 
     return _run
@@ -2255,7 +2258,7 @@ def run_preflight(
                 ok = False
                 lines.append(f"{pid.value}: FAIL — {reason} (no fallback provider)")
 
-    reasons = check_isolation(config)
+    reasons = check_isolation(config, ISOLATION_CHECKS)
     if reasons:
         ok = False
         lines.append("isolation: FAIL")
@@ -2324,7 +2327,7 @@ def cmd_validate_flow(args: argparse.Namespace) -> int:
             print("validate-flow: no operator flows in .worc/flows/")
             return 0
     elif args.name is not None:
-        stem = args.name[:-5] if args.name.endswith(".yaml") else args.name
+        stem = args.name.removesuffix(".yaml")
         if stem not in available:
             print(f"validate-flow: flow {stem!r} not found in .worc/flows/")
             return 2
@@ -3353,7 +3356,7 @@ def _install_atomic_write(path: Path, text: str) -> None:
         # (the packaged sources are LF; otherwise Windows would rewrite them with CRLF).
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)
-        os.replace(tmp, path)
+        Path(tmp).replace(path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise

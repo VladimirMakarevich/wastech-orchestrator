@@ -39,7 +39,6 @@ REASON_OPERATOR_AUTHORED = "operator_authored"
 
 # Subtask lifecycle status persisted in ``subtasks/index.json`` and the State Store.
 SUBTASK_PENDING = "pending"
-SUBTASK_IN_PROGRESS = "in_progress"
 SUBTASK_COMMITTED = "committed"
 
 INDEX_FILENAME = "index.json"

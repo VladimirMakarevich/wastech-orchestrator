@@ -11,20 +11,26 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Proprietary" }
 dependencies = [
-    "watchdog>=4.0",
     "PyYAML>=6.0",
-    "platformdirs>=4.0",
     "python-telegram-bot>=21.0",
     "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "ruff>=0.5",
+    # The extended lint set (FURB, PERF, PTH, T20, RUF, …) needs a recent ruff; older ruff aborts on
+    # unknown rule selectors. Keep this floor at/above the version whose rules we select below.
+    "ruff>=0.15",
     "mypy>=1.10",
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "types-PyYAML",
+    # Quality tooling (see docs/analysis/linting-and-code-quality-investigation.md):
+    "import-linter>=2.0",  # architectural import-boundary contracts (.importlinter)
+    "pre-commit>=3.7",     # local quality gate mirroring CI (.pre-commit-config.yaml)
+    "interrogate>=1.7",    # docstring-coverage threshold
+    "vulture>=2.11",       # dead-code detection
+    "deptry>=0.20",        # dependency hygiene
 ]
 docs = [
     "mkdocs>=1.6",
@@ -58,7 +64,74 @@ line-length = 100
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
+select = [
+    "E", "F", "I", "UP", "B", "SIM", "C4",       # existing
+    "FA", "TID", "ISC", "ICN", "PIE", "RSE",     # structural correctness / readability
+    "LOG", "G",                                   # logging discipline
+    "DTZ",                                        # tz-aware datetime (locks in existing good behavior)
+    "PTH",                                        # pathlib over os.path — cross-platform (coding-style.md)
+    "PERF", "FURB",                               # perf + modern idioms
+    "YTT", "ASYNC", "INP",                        # correctness
+    "T20",                                        # no stray print() outside the presentation layer
+    "RUF",                                        # ruff-specific (unused noqa, sorted __all__, …)
+    # Phase-2 maintainability ratchets (thresholds below; current god-module offenders are baselined
+    # in per-file-ignores as a burn-down backlog — see docs/backlog/follow_ups.md).
+    "C901",                                       # cyclomatic complexity (mccabe)
+    "PLR0911", "PLR0912", "PLR0913", "PLR0915",   # too many returns / branches / args / statements
+]
+ignore = [
+    # Intentional typographic/mathematical characters (en-dash "–", union "∪") in the Russian
+    # comments and docstrings — not typos.
+    "RUF001", "RUF002", "RUF003",
+    "ISC001",  # conflicts with the formatter (Astral's recommendation when ruff format is used)
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The CLI / shell / install wizard legitimately write to stdout via print() — that is user-facing
+# output, not logging. T20 stays on everywhere else (guards the core against a stray print).
+# (cli.py / cli_shell.py also carry Phase-2 ratchet codes — see the backlog block below.)
+"src/wastech_orchestrator/cli.py" = ["T20", "C901", "PLR0911", "PLR0912", "PLR0915"]
+"src/wastech_orchestrator/cli_shell.py" = ["T20", "PLR0911", "PLR0913"]
+"src/wastech_orchestrator/install/**" = ["T20"]
+# Claude Code hook scripts print to stdout/stderr — that is how they talk to the harness, not logging.
+".claude/**" = ["T20"]
+# Tests: assert is the point; docstrings / magic values / private access / implicit namespace are
+# test idioms. RUF059 (tuple-unpack where not every name is used) and PERF (runtime efficiency) are
+# noise in test code, and the size/complexity ratchets target production maintainability, not tests.
+"tests/**" = [
+    "S101", "PLR2004", "SLF001", "INP001", "ARG", "D", "T20", "RUF059", "PERF",
+    "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915",
+]
+# --- Phase-2 ratchet baseline (burn-down backlog: docs/backlog/follow_ups.md) -----------------------
+# Each entry silences ONLY the size/complexity codes the file trips today, so new violations anywhere
+# else are still caught. Remove a code as its function is refactored under the threshold.
+"src/wastech_orchestrator/config/loader.py" = ["PLR0911"]
+"src/wastech_orchestrator/core/decomposition.py" = ["PLR0911"]
+"src/wastech_orchestrator/core/flow/checkers/citation.py" = ["PLR0911"]
+"src/wastech_orchestrator/core/flow/engine.py" = ["PLR0913"]
+"src/wastech_orchestrator/core/flow/engine_driver.py" = ["PLR0913"]
+"src/wastech_orchestrator/core/flow/observability.py" = ["PLR0913"]
+"src/wastech_orchestrator/core/flow/validator.py" = ["C901", "PLR0912", "PLR0915"]
+"src/wastech_orchestrator/core/flow/wiring.py" = ["PLR0913"]
+"src/wastech_orchestrator/core/orchestrator.py" = ["C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915"]
+"src/wastech_orchestrator/core/supervisor.py" = ["PLR0913"]
+"src/wastech_orchestrator/memory/service.py" = ["PLR0913"]
+"src/wastech_orchestrator/process_control.py" = ["PLR0913"]
+"src/wastech_orchestrator/providers/_adapter_base.py" = ["PLR0915"]
+"src/wastech_orchestrator/providers/codex.py" = ["C901", "PLR0912"]
+"src/wastech_orchestrator/routing/router.py" = ["PLR0915"]
+"src/wastech_orchestrator/security/injection.py" = ["PLR0911"]
+"src/wastech_orchestrator/task/model.py" = ["PLR0911"]
+"src/wastech_orchestrator/task/validation_gate.py" = ["C901", "PLR0911", "PLR0912"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15  # Phase-2 ratchet start; tighten toward 10 as the backlog burns down
+
+[tool.ruff.lint.pylint]
+max-args = 10        # Phase-2 ratchet start; tighten toward 5
+max-branches = 15
+max-returns = 6      # PLR0911 default
+max-statements = 50  # PLR0915 default
 
 [tool.mypy]
 python_version = "3.12"
@@ -75,3 +148,29 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+# Docstring-coverage ratchet (run `interrogate src`). Floor set just below the current measured
+# coverage (~70.8% with the ignores below); raise it as under-documented packages (notify, config,
+# install) are filled in. Self-documenting Pydantic/dataclass models keep the target below 100.
+[tool.interrogate]
+fail-under = 70
+ignore-init-method = true
+ignore-magic = true
+ignore-nested-functions = true
+ignore-private = true
+
+# Dead-code gate (run `vulture`). Kept at high confidence: at 60% vulture floods with false positives
+# on this Pydantic/enum/Protocol-heavy code (model fields, enum members, interface methods read
+# dynamically). ignore_names covers params an external contract mandates (signal handlers, __exit__)
+# that the body doesn't touch. The real ~60%-confidence dead-code candidates are tracked as a
+# follow-up (docs/backlog/follow_ups.md), not deleted blindly here.
+[tool.vulture]
+paths = ["src"]
+min_confidence = 80
+ignore_names = ["signum", "frame", "exc_type", "exc_val", "exc_tb", "tb"]
+
+# Dependency hygiene (run `deptry src`). The dev/docs extras are tooling that src never imports, so
+# they are declared dev-only rather than flagged unused; the `shell` extra (prompt_toolkit) is a real
+# lazily-imported optional runtime dep and stays a normal optional dependency.
+[tool.deptry]
+optional_dependencies_dev_groups = ["dev", "docs"]

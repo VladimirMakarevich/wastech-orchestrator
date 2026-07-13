@@ -21,7 +21,7 @@ The source of truth is the code (`src/wastech_orchestrator/`); the [Functional M
 - **Git Manager / Check Runner / State Store / Artifact Store** are separate components with narrow responsibilities.
 - **Memory** (optional, off by default) is a cross-cutting layer with its own hard invariants: redacted atomic writes, an append-only hash-chained audit, and never passing unredacted content into a prompt.
 
-Dependency direction: `core → router → provider(interface)`. Providers do not depend on core.
+Dependency direction: `core → router → provider(interface)`. Providers do not depend on core. This is **machine-enforced** by `import-linter` (`.importlinter`, run as `lint-imports` in CI): `core` may import only the provider **interface** cluster (`providers.base/artifacts/capabilities/process/redaction/errors`), never a concrete adapter (`providers.claude`/`codex`/`_adapter_base`). The factories that bind the concrete adapters — `build_providers`, `build_orchestrator`, and the `strict_isolation` `ISOLATION_CHECKS` table — live in the composition root [`composition.py`](../../src/wastech_orchestrator/composition.py), not in `core`.
 
 ## Contracts (see spec §4.3)
 

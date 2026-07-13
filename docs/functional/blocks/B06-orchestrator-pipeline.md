@@ -17,7 +17,7 @@ The orchestrator is the single-slot pipeline spine, but it is **no longer** a ha
 - `plan_rerun` / `rerun_task` / `continue_task` ([orchestrator.py:383-508](../../../src/wastech_orchestrator/core/orchestrator.py#L383)) — operator re-attempt (fresh or `--continue`).
 - `plan_finalize` / `finalize_task` ([orchestrator.py:512-632](../../../src/wastech_orchestrator/core/orchestrator.py#L512)) — operator records an out-of-band outcome.
 - `refresh_repo()` ([orchestrator.py:634](../../../src/wastech_orchestrator/core/orchestrator.py#L634)) — between-tick base-branch fetch/pull for `watch`.
-- `build_orchestrator(config, ...)` ([orchestrator.py:1974](../../../src/wastech_orchestrator/core/orchestrator.py#L1974)) and `build_providers` ([orchestrator.py:1944](../../../src/wastech_orchestrator/core/orchestrator.py#L1944)) — the dependency-injection assembly.
+- `build_orchestrator(config, ...)` and `build_providers` — the dependency-injection assembly, in the composition root [`composition.py`](../../../src/wastech_orchestrator/composition.py) (moved out of `core` so the `import-linter` `core-not-concrete-adapters` contract holds; `core` never imports a concrete adapter).
 - `PipelineResult` ([orchestrator.py:229](../../../src/wastech_orchestrator/core/orchestrator.py#L229)), `_Pipeline` ([orchestrator.py:251](../../../src/wastech_orchestrator/core/orchestrator.py#L251)) (the mutable per-run context), `SlotBusyError` / `PipelineFailed` ([orchestrator.py:239-248](../../../src/wastech_orchestrator/core/orchestrator.py#L239)).
 
 ## Behavior
@@ -72,7 +72,7 @@ flowchart TD
 
 ### Dependency injection
 
-`build_orchestrator` ([orchestrator.py:2105](../../../src/wastech_orchestrator/core/orchestrator.py#L2105)) wires the full graph from a validated config: the provider adapters ([B18](B18-agent-providers.md)), `AgentRouter` ([B17](B17-agent-router-and-fallback.md)), `StateStore` at `<artifacts_root>/state.db` ([B07](B07-state-machine-and-store.md)), `Ledger` ([B08](B08-ledger-and-failure-reports.md)), `GitManager` ([B22](B22-git-manager.md)), `CheckRunner` ([B24](B24-check-execution.md)), `CheckResolver` (just normalizes `checks.command_sets`, no discovery; [B23](B23-check-discovery.md)), `ValidationGate` ([B16](B16-task-parsing-and-validation-gate.md)), and the notifier ([B26](B26-notifications-telegram.md)). The `FlowRegistry` ([B29](B29-flow-definition-and-validation.md)) is constructed in `__init__` with the operator flows dir (`<repo>/.worc/flows/`) and the config (turning on the config-aware validation layer).
+`build_orchestrator` ([composition.py:78](../../../src/wastech_orchestrator/composition.py#L78)) wires the full graph from a validated config: the provider adapters ([B18](B18-agent-providers.md)), `AgentRouter` ([B17](B17-agent-router-and-fallback.md)), `StateStore` at `<artifacts_root>/state.db` ([B07](B07-state-machine-and-store.md)), `Ledger` ([B08](B08-ledger-and-failure-reports.md)), `GitManager` ([B22](B22-git-manager.md)), `CheckRunner` ([B24](B24-check-execution.md)), `CheckResolver` (just normalizes `checks.command_sets`, no discovery; [B23](B23-check-discovery.md)), `ValidationGate` ([B16](B16-task-parsing-and-validation-gate.md)), and the notifier ([B26](B26-notifications-telegram.md)). The `FlowRegistry` ([B29](B29-flow-definition-and-validation.md)) is constructed in `__init__` with the operator flows dir (`<repo>/.worc/flows/`) and the config (turning on the config-aware validation layer).
 
 ## Invariants & guarantees
 

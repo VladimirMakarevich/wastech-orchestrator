@@ -107,7 +107,7 @@ def run_process(
         input_arg = stdin_text
 
     try:
-        stdout_file = open(stdout_path, "wb")  # noqa: SIM115 — closed in the inner `with`
+        stdout_file = Path(stdout_path).open("wb")  # noqa: SIM115 — closed in the inner `with`
     except OSError as exc:
         # The stdout sink itself could not be opened (unwritable dir, bad path). Degrade rather than
         # raise, and name the *path* — not argv[0], which launched fine and is not the culprit.
@@ -210,7 +210,7 @@ def spawn_detached(
         Path(capture_path).parent.mkdir(parents=True, exist_ok=True)
         # Truncate per spawn so the file holds only the current daemon's stream (never grows across
         # restarts). Handed to the child; the parent keeps no reference — the child owns/closes it.
-        sink = open(capture_path, "wb")  # noqa: SIM115 — owned by the spawned child, not this frame
+        sink = Path(capture_path).open("wb")  # noqa: SIM115 — owned by the spawned child, not this frame
     try:
         return subprocess.Popen(
             list(argv),

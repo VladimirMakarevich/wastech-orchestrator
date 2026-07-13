@@ -30,13 +30,15 @@ You are working on **wastech-orchestrator** — an orchestrator that launches co
 
 ```bash
 pip install -e ".[dev]"   # install
-ruff check .              # lint
+pre-commit install        # local gate; + `pre-commit install --hook-type pre-push`
+ruff check .              # lint (+ Phase-2 complexity/size ratchets)
 ruff format --check .     # formatting (CI runs this — `ruff format .` to fix)
 mypy src                  # types
+lint-imports              # architectural import-boundary contracts (.importlinter)
 pytest                    # tests
 ```
 
-There is a skill for running all checks: `/run-checks`.
+CI also runs `interrogate src` (docstring coverage), `vulture` (dead code), and `deptry src` (dependency hygiene). There is a skill for running all checks: `/run-checks`.
 
 ## Working style
 

@@ -181,8 +181,14 @@ def integration_security() -> SecurityConfig:
     )
     return SecurityConfig(
         strict_isolation=True,
-        allowed_environment=("PATH", "HOME", "USERPROFILE", "CODEX_HOME", "CLAUDE_CONFIG_DIR")
-        + os_essentials,
+        allowed_environment=(
+            "PATH",
+            "HOME",
+            "USERPROFILE",
+            "CODEX_HOME",
+            "CLAUDE_CONFIG_DIR",
+            *os_essentials,
+        ),
         denied_read_paths=(".env", "secrets/**"),
         denied_commands=("git commit", "git push", "gh pr create"),
     )

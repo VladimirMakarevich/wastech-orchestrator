@@ -110,8 +110,7 @@ def _check_keys(
     # ``tolerated`` keys (e.g. removed-but-legacy config keys) are neither accepted into the schema
     # nor reported as errors — the caller handles them (typically a deprecation warning).
     ignore = allowed | (tolerated or set())
-    for key in sorted(set(m) - ignore):
-        issues.append(f"{where}: unknown key {key!r}")
+    issues.extend(f"{where}: unknown key {key!r}" for key in sorted(set(m) - ignore))
 
 
 def _str(m: Mapping[str, Any], key: str, default: str, where: str, issues: list[str]) -> str:

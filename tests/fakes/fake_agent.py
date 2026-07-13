@@ -47,7 +47,7 @@ def _schema_output(cli_name: str, cli_args: list[str]) -> dict[str, object]:
     if cli_name == "codex":
         path = _arg_value(cli_args, "--output-schema")
         if path:
-            with open(path, encoding="utf-8") as handle:
+            with Path(path).open(encoding="utf-8") as handle:
                 loaded = json.load(handle)
             if isinstance(loaded, dict):
                 schema = loaded
@@ -92,7 +92,7 @@ def _run_codex(scenario: str, cli_args: list[str]) -> int:
         )
         last_message = _arg_value(cli_args, "--output-last-message")
         if last_message:
-            with open(last_message, "w", encoding="utf-8") as handle:
+            with Path(last_message).open("w", encoding="utf-8") as handle:
                 handle.write(_FINAL_MESSAGE)
         return 0
 
@@ -335,7 +335,10 @@ def main() -> int:
     # ``success_edit`` behaves like ``success`` but also makes a deterministic code change in the
     # working directory (the clone), so a pipeline run has something to commit (phases 4–5 e2e).
     if scenario == "success_edit":
-        with contextlib.suppress(OSError), open("agent_change.py", "w", encoding="utf-8") as handle:
+        with (
+            contextlib.suppress(OSError),
+            Path("agent_change.py").open("w", encoding="utf-8") as handle,
+        ):
             handle.write("# change made by the fake agent\nVALUE = 1\n")
         scenario = "success"
 

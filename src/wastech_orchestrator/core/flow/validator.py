@@ -250,19 +250,21 @@ def _check_graph(snap: FlowSnapshot) -> list[Violation]:
                 )
 
     # 3. Bounded loops: every rework/fail edge must carry budget or loop.
-    for edge in doc.edges:
-        if edge.outcome in ("rework", "fail") and edge.budget is None and edge.loop is None:
-            errs.append(
-                g(
-                    f"edge {edge.from_node!r}->{edge.to!r} (outcome={edge.outcome!r}): "
-                    "unbounded; must declare budget or loop"
-                )
-            )
+    errs.extend(
+        g(
+            f"edge {edge.from_node!r}->{edge.to!r} (outcome={edge.outcome!r}): "
+            "unbounded; must declare budget or loop"
+        )
+        for edge in doc.edges
+        if edge.outcome in ("rework", "fail") and edge.budget is None and edge.loop is None
+    )
 
     # 4. Named loops must be declared in budgets.
-    for edge in doc.edges:
-        if edge.loop is not None and edge.loop not in doc.budgets:
-            errs.append(g(f"edge loop {edge.loop!r} not declared in budgets"))
+    errs.extend(
+        g(f"edge loop {edge.loop!r} not declared in budgets")
+        for edge in doc.edges
+        if edge.loop is not None and edge.loop not in doc.budgets
+    )
 
     # 5. Exactly one entry node (zero incoming edges) + full reachability from it.
     incoming: dict[str, int] = {n.id: 0 for n in doc.nodes}
@@ -437,8 +439,10 @@ def _check_ceiling(snap: FlowSnapshot) -> list[Violation]:
                     )
                 )
             if node.extra_args:
-                for reason in find_forbidden_args(list(node.extra_args)):
-                    errs.append(c(f"agent {node.id!r}: extra_args {reason}"))
+                errs.extend(
+                    c(f"agent {node.id!r}: extra_args {reason}")
+                    for reason in find_forbidden_args(list(node.extra_args))
+                )
             _check_path(node.id, node.role_file, errs)
 
     # Flow-local supervisor prompt files are flow-dir-contained, exactly like a node role_file: a
@@ -551,13 +555,13 @@ def _check_config_consistency(
         for node in doc.nodes:
             if not isinstance(node, AgentNode):
                 continue
-            for reason in find_full_access_args(node.extra_args):
-                errs.append(
-                    cfg(
-                        f"node {node.id!r}: extra_args {reason} — not permitted under "
-                        "security.strict_isolation (set strict_isolation: false to opt in)"
-                    )
+            errs.extend(
+                cfg(
+                    f"node {node.id!r}: extra_args {reason} — not permitted under "
+                    "security.strict_isolation (set strict_isolation: false to opt in)"
                 )
+                for reason in find_full_access_args(node.extra_args)
+            )
 
     # 4. Every ``tool`` node names a registered, contained, executable operator tool (P5). The name
     #    is a free operator string (like a flow name), so — like the provider check — it is resolved

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -120,11 +119,8 @@ from wastech_orchestrator.memory import (
     ensure_store,
 )
 from wastech_orchestrator.notify import (
-    AskKind,
-    AskResult,
     Notifier,
     NullNotifier,
-    build_notifier,
 )
 from wastech_orchestrator.observability.logging import bind
 from wastech_orchestrator.providers.artifacts import (
@@ -136,11 +132,9 @@ from wastech_orchestrator.providers.artifacts import (
 )
 from wastech_orchestrator.providers.base import (
     PARK_ELIGIBLE,
-    AgentProvider,
     ErrorClass,
     ProviderId,
 )
-from wastech_orchestrator.providers.process import AgentHandleRecorder
 from wastech_orchestrator.providers.redaction import (
     read_denied_secrets,
     redact_text,
@@ -148,7 +142,7 @@ from wastech_orchestrator.providers.redaction import (
 )
 from wastech_orchestrator.routing.router import AgentRouter
 from wastech_orchestrator.security.env import build_child_env
-from wastech_orchestrator.security.isolation import check_isolation
+from wastech_orchestrator.security.isolation import IsolationCheck, check_isolation
 from wastech_orchestrator.state_store import (
     ArtifactRow,
     EvaluationRow,
@@ -186,16 +180,6 @@ _LIFECYCLE_FOLDERS = ("pending", "done", "failed")
 
 def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
-
-
-# Map a task-level artifact filename to its registry ``kind``. Unknown names fall back to the
-# filename so registration is always meaningful even if a new artifact is added.
-_ARTIFACT_KINDS: dict[str, str] = {
-    "task.enriched.md": "enriched",
-    "plan.md": "plan",
-    "fixing-context.json": "fixing_context",
-    "rendered-prompt.md": "rendered_prompt",
-}
 
 
 @dataclass(frozen=True)
@@ -298,17 +282,6 @@ def _format_predecessor_floor(
         f"- Acceptance criteria:\n{criteria}\n"
         f"- Changed files:\n{files}"
     )
-
-
-_SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
-
-
-def _validate_session_id(raw: str) -> str | None:
-    return raw if _SESSION_ID_RE.fullmatch(raw) else None
-
-
-def _artifact_kind(name: str) -> str:
-    return _ARTIFACT_KINDS.get(name, name)
 
 
 def effective_skip(task: NormalizedTask) -> frozenset[str]:
@@ -449,6 +422,7 @@ class Orchestrator:
         resolver: CheckResolver | None = None,
         skill_scanner: SkillInventoryScanner | None = None,
         heartbeat_seconds: float = 30.0,
+        isolation_checks: Mapping[ProviderId, IsolationCheck] | None = None,
     ) -> None:
         self._config = config
         self._router = router
@@ -467,6 +441,9 @@ class Orchestrator:
         # The check resolver normalizes ``checks.command_sets`` at preflight (before any branch).
         # ``None`` skips it — the Check Runner then normalizes the config itself.
         self._resolver = resolver
+        # Composition-root-injected ProviderId→isolation-check table for the strict_isolation
+        # preflight; empty for a directly-constructed Orchestrator (binds no concrete adapter).
+        self._isolation_checks: Mapping[ProviderId, IsolationCheck] = isolation_checks or {}
         # Repo skill inventory scanner. Defaults to the target repo clone's `.claude/skills`.
         self._skill_scanner = skill_scanner or self._default_skill_scanner()
         # Per-id attempt number stamped onto the next ledger record, set by ``rerun``/``continue``.
@@ -1866,7 +1843,7 @@ class Orchestrator:
             # disabled planning node never fires the post-hook). Validated already at preflight.
             self._persist_decomposition(p, p.operator_decomposition, gate_on=True)
         if self._config.security.strict_isolation:
-            reasons = check_isolation(self._config)
+            reasons = check_isolation(self._config, self._isolation_checks)
             if reasons:
                 joined = "; ".join(reasons)
                 self._log(p.task.id).warning(
@@ -2369,7 +2346,7 @@ class Orchestrator:
         audit = AuditContext(timestamp=now, actor=AuditActor.FINALIZER, task_id=p.task.id)
         try:
             service.apply_delta(delta, episode=episode, source=source, audit=audit)
-        except Exception as exc:  # noqa: BLE001 — memory is best-effort; never block the task
+        except Exception as exc:
             self._log(p.task.id).warning(
                 "memory write failed (best-effort, ignored)",
                 extra={"error_type": type(exc).__name__, "source": source.value},
@@ -3001,38 +2978,6 @@ class Orchestrator:
         except OSError:
             return None
 
-    # --- human-input guards (check-command approval) --------------------------------------
-
-    def _require_human_result(
-        self,
-        p: _Pipeline,
-        label: str,
-        kind: AskKind,
-        result: AskResult,
-    ) -> None:
-        failure = result.failure
-        if failure is None and result.answered:
-            if kind == "approval" and isinstance(result.approved, bool):
-                return
-            if kind == "question" and isinstance(result.text, str) and result.text.strip():
-                return
-            failure = "invalid_response"
-        elif failure is None:
-            failure = "invalid_response"
-        self._raise_human_failure(p, label, failure)
-
-    def _raise_human_failure(
-        self,
-        p: _Pipeline,
-        label: str,
-        failure: str,
-    ) -> None:
-        self._log(p.task.id).warning(
-            "human input failed",
-            extra={"label": label, "failure": failure},
-        )
-        raise ManualActionRequired(f"{label} human input failed: {failure}")
-
     def _check_sets(self, p: _Pipeline) -> tuple[ResolvedCheckSet, ...]:
         """The normalized command sets; recompute from config if not resolved yet (e.g. on resume).
 
@@ -3203,9 +3148,6 @@ class Orchestrator:
             assert_transition(src, dst)
             self._store.set_status(task_id, dst, conn)
 
-    def _save_counters(self, p: _Pipeline) -> None:
-        self._store.save_counters(p.task.id, p.counters)
-
     def _observe[T](
         self,
         p: _Pipeline,
@@ -3218,12 +3160,13 @@ class Orchestrator:
         log = self._log(p.task.id)
         safe_fields = dict(fields or {})
         started = self._monotonic()
-        log.info(f"{operation_name} started", extra=safe_fields)
+        log.info("%s started", operation_name, extra=safe_fields)
         try:
             result = operation()
         except Exception as exc:
             log.error(
-                f"{operation_name} failed",
+                "%s failed",
+                operation_name,
                 extra={
                     **safe_fields,
                     "duration_seconds": round(self._monotonic() - started, 3),
@@ -3232,7 +3175,8 @@ class Orchestrator:
             )
             raise
         log.info(
-            f"{operation_name} completed",
+            "%s completed",
+            operation_name,
             extra={
                 **safe_fields,
                 "duration_seconds": round(self._monotonic() - started, 3),
@@ -3258,7 +3202,7 @@ class Orchestrator:
                 reason=reason,
                 contacts=contacts,
             )
-        except Exception as exc:  # noqa: BLE001 — notifier is best-effort by contract
+        except Exception as exc:
             self._log(task_id).warning(
                 "terminal notification failed", extra={"error_type": type(exc).__name__}
             )
@@ -3294,110 +3238,3 @@ class Orchestrator:
                 rerun_of=p.task.id if attempt > 1 else None,
             )
         )
-
-
-def build_providers(
-    config: OrchestratorConfig,
-    *,
-    artifacts_root: str | Path,
-    heartbeat_seconds: float = 30.0,
-    agent_handle_recorder: AgentHandleRecorder | None = None,
-) -> dict[ProviderId, AgentProvider]:
-    """Construct the real provider adapters for the configured providers (Core + CLI use this).
-
-    ``agent_handle_recorder`` is set only by the ``watch`` daemon so a hard stop can reap a running
-    agent's whole subtree; it is ``None`` for one-shot CLI runs and tests.
-    """
-    from wastech_orchestrator.providers.claude import ClaudeCodeProvider
-    from wastech_orchestrator.providers.codex import CodexProvider
-
-    root = str(Path(artifacts_root))
-    artifact_level = config.logging.artifacts
-    providers: dict[ProviderId, AgentProvider] = {}
-    for pid, provider_cfg in config.agents.providers.items():
-        if pid is ProviderId.CLAUDE:
-            providers[pid] = ClaudeCodeProvider(
-                provider_cfg,
-                security=config.security,
-                artifacts_root=root,
-                heartbeat_seconds=heartbeat_seconds,
-                artifact_level=artifact_level,
-                agent_handle_recorder=agent_handle_recorder,
-            )
-        elif pid is ProviderId.CODEX:
-            providers[pid] = CodexProvider(
-                provider_cfg,
-                security=config.security,
-                artifacts_root=root,
-                heartbeat_seconds=heartbeat_seconds,
-                artifact_level=artifact_level,
-                agent_handle_recorder=agent_handle_recorder,
-            )
-    return providers
-
-
-def build_orchestrator(
-    config: OrchestratorConfig,
-    *,
-    artifacts_root: str | Path,
-    gh_runner: Callable[..., Any] | None = None,
-    heartbeat_seconds: float = 30.0,
-    is_recovery_rerun: Callable[[str], bool] = lambda _id: False,
-    agent_handle_recorder: AgentHandleRecorder | None = None,
-    is_cancelled: Callable[[], bool] = lambda: False,
-) -> Orchestrator:
-    """Wire the full dependency graph from a validated config (used by the CLI and e2e tests).
-
-    Constructs the real provider adapters, Router, State Store (``<artifacts_root>/state.db``),
-    ledger (``<artifacts_root>/logs/completed.jsonl``), Git Manager, Check Runner, loop controller,
-    and validation gate. The Core depends only on these interfaces — never on a provider directly.
-
-    ``is_recovery_rerun`` is threaded into the gate so the ``rerun`` command can admit exactly
-    the re-run id past the duplicate-id check (scoped to one id; every other gate check still runs).
-
-    ``agent_handle_recorder`` and ``is_cancelled`` are set only by the ``watch`` daemon: the
-    recorder lets a hard stop reap a running agent's subtree, and ``is_cancelled`` tells the Router
-    a raised provider error is a stop-kill (not a crash) so it never falls back to a fresh agent.
-    """
-    root = Path(artifacts_root)
-    providers = build_providers(
-        config,
-        artifacts_root=root,
-        heartbeat_seconds=heartbeat_seconds,
-        agent_handle_recorder=agent_handle_recorder,
-    )
-
-    store = StateStore.open(root / "state.db")
-    ledger = Ledger(root / "logs")
-    router = AgentRouter(config, providers, is_cancelled=is_cancelled)
-    git = GitManager(
-        config,
-        store=store,
-        artifacts_root=str(root),
-        gh_runner=gh_runner,
-        heartbeat_seconds=heartbeat_seconds,
-    )
-    checks = CheckRunner(config, heartbeat_seconds=heartbeat_seconds)
-    # The resolver just normalizes the operator's ``checks.command_sets`` (no discovery).
-    resolver = CheckResolver(config)
-    gate = ValidationGate(
-        config,
-        store_has_task_id=store.task_id_exists,
-        ledger_has_task_id=ledger.has_task_id,
-        is_recovery_rerun=is_recovery_rerun,
-        ledger_only_validation_rejects=ledger.only_validation_rejects,
-    )
-    notifier = build_notifier(config.telegram)
-    return Orchestrator(
-        config,
-        router=router,
-        git=git,
-        checks=checks,
-        store=store,
-        ledger=ledger,
-        gate=gate,
-        artifacts_root=str(root),
-        notifier=notifier,
-        resolver=resolver,
-        heartbeat_seconds=heartbeat_seconds,
-    )

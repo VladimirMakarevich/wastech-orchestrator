@@ -1,0 +1,53 @@
+[importlinter]
+root_package = wastech_orchestrator
+
+[importlinter:contract:providers-are-leaf]
+name = Providers do not depend on core/orchestration
+type = forbidden
+source_modules =
+    wastech_orchestrator.providers
+forbidden_modules =
+    wastech_orchestrator.core
+    wastech_orchestrator.routing
+    wastech_orchestrator.cli
+    wastech_orchestrator.git_manager
+    wastech_orchestrator.state_store
+    wastech_orchestrator.task
+    wastech_orchestrator.checks
+    wastech_orchestrator.memory
+    wastech_orchestrator.notify
+    wastech_orchestrator.install
+
+[importlinter:contract:routing-not-core]
+name = Routing does not depend on core
+type = forbidden
+source_modules =
+    wastech_orchestrator.routing
+forbidden_modules =
+    wastech_orchestrator.core
+
+[importlinter:contract:core-not-concrete-adapters]
+name = Core does not import concrete CLI adapters
+type = forbidden
+source_modules =
+    wastech_orchestrator.core
+forbidden_modules =
+    wastech_orchestrator.providers.claude
+    wastech_orchestrator.providers.codex
+    wastech_orchestrator.providers._adapter_base
+
+[importlinter:contract:adapters-independent]
+name = The Claude and Codex adapters are independent
+type = independence
+modules =
+    wastech_orchestrator.providers.claude
+    wastech_orchestrator.providers.codex
+
+[importlinter:contract:config-not-orchestration]
+name = Config does not depend on orchestration
+type = forbidden
+source_modules =
+    wastech_orchestrator.config
+forbidden_modules =
+    wastech_orchestrator.core
+    wastech_orchestrator.routing

@@ -47,5 +47,17 @@ jobs:
       - name: Types (mypy)
         run: mypy src
 
+      - name: Import contracts (import-linter)
+        run: lint-imports
+
+      - name: Docstring coverage (interrogate)
+        run: interrogate src
+
+      - name: Dead code (vulture)
+        run: vulture
+
+      - name: Dependency hygiene (deptry)
+        run: deptry src
+
       - name: Tests (pytest)
         run: pytest -q

@@ -147,7 +147,7 @@ class AuditLog:
             return
         try:
             self._marker(row)
-        except Exception as exc:  # noqa: BLE001 — best-effort; the primary jsonl row already landed
+        except Exception as exc:
             _LOG.warning(
                 "memory audit marker failed (best-effort, ignored)",
                 extra={"error_type": type(exc).__name__},

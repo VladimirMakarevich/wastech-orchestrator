@@ -159,9 +159,7 @@ def test_engine_loop_cap_delegates_to_loop_control() -> None:
         agents=agents,
         task_id="task-1",
     )
-    assert engine._loop_cap("review_fix") == loop_cap(  # noqa: SLF001
+    assert engine._loop_cap("review_fix") == loop_cap(
         snapshot.doc.budgets, agents.max_fix_cycles, "review_fix"
     )
-    assert engine._global_cap() == global_cap(  # noqa: SLF001
-        snapshot.doc.budgets, agents.max_total_fix_iterations
-    )
+    assert engine._global_cap() == global_cap(snapshot.doc.budgets, agents.max_total_fix_iterations)

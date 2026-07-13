@@ -16,7 +16,6 @@ value — that is the inviolable boundary the per-provider subclasses sit on the
 from __future__ import annotations
 
 import logging
-import os
 import re
 import tempfile
 import time
@@ -208,7 +207,7 @@ class BaseCliProvider:
         label = self._executable_label()
         env = build_child_env(self._security.allowed_environment)
         with tempfile.TemporaryDirectory() as scratch:
-            stdout_path = os.path.join(scratch, "version.out")
+            stdout_path = str(Path(scratch) / "version.out")
             proc = self._run_process(
                 [self._config.command, "--version"],
                 cwd=scratch,
@@ -286,7 +285,7 @@ class BaseCliProvider:
         model.
         """
         with tempfile.TemporaryDirectory() as scratch:
-            out = os.path.join(scratch, "probe.out")
+            out = str(Path(scratch) / "probe.out")
             proc = self._run_process(
                 argv,
                 cwd=scratch,

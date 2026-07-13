@@ -437,7 +437,7 @@ def _do_logs(ctx: ShellContext, arg: str) -> ShellResult:
             file=ctx.out,
         )
         return ShellResult()
-    task_id = arg if arg else _active_task_id(ctx.config)
+    task_id = arg or _active_task_id(ctx.config)
     if task_id is None:
         print("shell: no task id given and none active", file=ctx.out)
         return ShellResult()

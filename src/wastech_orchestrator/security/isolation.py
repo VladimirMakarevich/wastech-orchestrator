@@ -16,29 +16,30 @@ configured-but-unused provider block never bricks an otherwise-valid run.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from wastech_orchestrator.config.schema import OrchestratorConfig, ProviderConfig
 from wastech_orchestrator.providers.base import ProviderId
-from wastech_orchestrator.providers.claude import isolation_reasons as _claude_isolation_reasons
-from wastech_orchestrator.providers.codex import isolation_reasons as _codex_isolation_reasons
 
-_ISOLATION_CHECKS: dict[ProviderId, Callable[[ProviderConfig], list[str]]] = {
-    ProviderId.CLAUDE: _claude_isolation_reasons,
-    ProviderId.CODEX: _codex_isolation_reasons,
-}
+# A provider's offline "can your required isolation be enabled?" check, keyed by provider id. The
+# concrete implementations live in the adapters (Codex's sandbox / Claude's permission mode); the
+# composition root binds them and injects the table so this module imports no concrete adapter.
+IsolationCheck = Callable[[ProviderConfig], list[str]]
 
 
-def check_isolation(config: OrchestratorConfig) -> list[str]:
+def check_isolation(
+    config: OrchestratorConfig, checks: Mapping[ProviderId, IsolationCheck]
+) -> list[str]:
     """Return a reason per provider whose required isolation cannot be enabled; ``[]`` means all OK.
 
-    Pure and deterministic (no CLI launched). Each reason is prefixed with the provider id so the
-    caller can surface a single combined message.
+    Pure and deterministic (no CLI launched). ``checks`` is the ProviderId→isolation-check table
+    injected by the composition root (so this module imports no concrete adapter). Each reason is
+    prefixed with the provider id so the caller can surface a single combined message.
     """
     reasons: list[str] = []
     for provider_id in _providers_in_use(config):
         provider_cfg = config.agents.providers.get(provider_id)
-        check = _ISOLATION_CHECKS.get(provider_id)
+        check = checks.get(provider_id)
         if provider_cfg is None or check is None:
             continue
         reasons.extend(f"{provider_id.value}: {reason}" for reason in check(provider_cfg))

@@ -137,9 +137,7 @@ def _merge(
             result[key] = tval
             added.append(path)
     # Preserve anything the operator set that the template does not mention.
-    for key, oval in operator.items():
-        if key not in template:
-            result[key] = oval
+    result.update({key: oval for key, oval in operator.items() if key not in template})
     return result
 
 
