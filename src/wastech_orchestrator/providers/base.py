@@ -157,6 +157,37 @@ class AgentRunRequest:
     network_access: bool = False
 
 
+def build_context_footer(request: AgentRunRequest) -> str:
+    """Render the non-``None`` context file paths as a deterministic footer (paths only)."""
+    fields = (
+        ("task", request.task_path),
+        ("plan", request.plan_path),
+        ("diff", request.diff_path),
+        ("checks", request.check_artifacts_path),
+        ("review", request.review_artifacts_path),
+        ("human_input", request.human_input_path),
+    )
+    present = [(label, path) for label, path in fields if path]
+    skill_lines = [
+        f"- skill (read-only reference; advisory, do not execute): {path}"
+        for path in request.skill_reference_paths
+    ]
+    if not present and not skill_lines:
+        return ""
+    lines = ["Context files (read them as needed; do not assume their contents):"]
+    lines += [f"- {label}: {path}" for label, path in present]
+    lines += skill_lines
+    return "\n".join(lines)
+
+
+def build_effective_prompt(request: AgentRunRequest) -> str:
+    """Combine the Core-assembled prompt with the context-files footer."""
+    footer = build_context_footer(request)
+    if not footer:
+        return request.prompt
+    return f"{request.prompt}\n\n{footer}"
+
+
 # The Claude CLI's terminal ``result`` subtype when a run exhausts its ``--max-turns`` cap. A clean
 # (quality) ``task_failure``, never an infrastructure crash — surfaced structurally on
 # ``NormalizedError.failure_subtype`` so the flow layer can offer the operator a continue/stop gate

@@ -23,6 +23,7 @@ from wastech_orchestrator.providers.base import (
     ErrorClass,
     ProviderError,
     RunStatus,
+    build_effective_prompt,
 )
 from wastech_orchestrator.providers.codex import CodexProvider
 from wastech_orchestrator.providers.process import ProcessResult
@@ -317,6 +318,44 @@ def test_prompt_is_delivered_via_stdin_not_argv(
     provider.run(make_request(prompt=sentinel))
     assert sentinel in fake.captured["stdin_text"]
     assert all(sentinel not in token for token in fake.captured["argv"])
+
+
+def test_request_json_prompt_includes_context_footer(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    """``request.json``'s ``"prompt"`` must match what was actually piped to stdin — the
+    context-files footer, not just the bare Core-rendered template (audit-trail parity)."""
+    fake = FakeRun(stdout=_success_stream(), last_message="done")
+    provider = _provider(codex_config, security_config, tmp_path, fake)
+    request = make_request(
+        prompt="Do the thing.",
+        task_path="/t/task.md",
+        plan_path="/t/plan.md",
+    )
+    provider.run(request)
+    request_json = json.loads((_attempt_dir(tmp_path) / "request.json").read_text())
+
+    effective_prompt = build_effective_prompt(request)
+    assert "Context files (read them as needed" in effective_prompt
+    assert request_json["prompt"] == effective_prompt
+    assert request_json["prompt"] == fake.captured["stdin_text"]
+
+
+def test_request_json_context_paths_includes_skill_reference_paths(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    fake = FakeRun(stdout=_success_stream(), last_message="done")
+    provider = _provider(codex_config, security_config, tmp_path, fake)
+    provider.run(make_request(skill_reference_paths=("/skills/foo/SKILL.md",)))
+    request_json = json.loads((_attempt_dir(tmp_path) / "request.json").read_text())
+    assert request_json["context_paths"]["skill_reference_paths"] == ["/skills/foo/SKILL.md"]
+    assert "/skills/foo/SKILL.md" in request_json["prompt"]
 
 
 def test_stderr_is_redacted_in_artifact(

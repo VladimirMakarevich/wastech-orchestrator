@@ -38,7 +38,7 @@ from wastech_orchestrator.core.flow.observability import record_run_observabilit
 from wastech_orchestrator.core.flow.prompt import RoleFileError, read_role_file, render_role_prompt
 from wastech_orchestrator.core.flow.schema import EvaluatorNode, FlowNode
 from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
-from wastech_orchestrator.providers.base import AgentRunRequest
+from wastech_orchestrator.providers.base import AgentRunRequest, build_effective_prompt
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import EvaluationRow, NodeLineageRow, NodeRunRow
 
@@ -124,7 +124,7 @@ class EvaluatorNodeRunner:
             node_id=node.id,
             subtask=ctx.subtask_order,
             run_id=run_id,
-            prompt=request.prompt,
+            prompt=build_effective_prompt(request),
             route=route,
             outcome=outcome,
             model=node.model,

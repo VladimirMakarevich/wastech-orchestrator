@@ -632,6 +632,37 @@ def test_supervisor_layer_observes_each_step_and_writes_one_summary(
     assert "summary" not in _ran_nodes(store, "task-sup")
 
 
+def test_supervisor_turns_write_rendered_prompt_and_prompt_audit(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    """The supervisor's own turns are now part of the audit trail: previously rendered-prompt.md
+    and the prompt-audit JSON/timeline were never written for observe/finalize turns at all."""
+    providers = _both()
+    orch, _, _, art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"prompt_audit": True},
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-sup-audit"))
+    assert result.final_status is Status.DONE
+
+    supervisor_runs = list(
+        (task_artifact_dir(art, "task-sup-audit") / "stages" / "supervisor").glob("run-*")
+    )
+    assert supervisor_runs, "supervisor turns now have their own stages/supervisor/run-* dirs"
+    assert all((run_dir / "rendered-prompt.md").exists() for run_dir in supervisor_runs)
+
+    timeline = (_audit_dir(art, "task-sup-audit") / "timeline.jsonl").read_text().splitlines()
+    supervisor_entries = [json.loads(line) for line in timeline if '"supervisor"' in line]
+    assert supervisor_entries
+    assert all(r["node_id"] == "supervisor" and r["prompt"] for r in supervisor_entries)
+
+
 def test_finalize_tail_is_logged(git_repo, make_git_config, tmp_path: Path) -> None:
     # P2.1: the end-of-run tail (whole-task summary → publish prep) emits transition log lines so a
     # long silent window (context assembly + the summary LLM call) is observable, not a hang.
@@ -3081,17 +3112,34 @@ def test_prompt_audit_records_steps_in_order(git_repo, make_git_config, tmp_path
     # Filenames are zero-padded node_run_id → lexical sort is chronological.
     ids = [int(p.name.split("-")[0]) for p in step_files]
     assert ids == sorted(ids)
+    records = [json.loads(p.read_text()) for p in step_files]
+    node_records = [r for r in records if r["node_id"] != "supervisor"]
+    supervisor_records = [r for r in records if r["node_id"] == "supervisor"]
     # complete task → refinement skipped; planning/implementation/review/documentation run agents.
-    # The summary is written by the supervisor layer now (not a graph node), so no summary step is
-    # audited.
-    stages = [json.loads(p.read_text())["node_id"] for p in step_files]
+    node_ids = [r["node_run_id"] for r in node_records]
+    assert node_ids == sorted(node_ids)
+    stages = [r["node_id"] for r in node_records]
     assert stages == ["planning", "implementation", "review", "documentation"]
 
-    # The combined timeline has one line per step, in the same chronological order.
+    # The constant supervisor layer (P2.1) is itself part of the audit trail now: it observes
+    # every completed step (reusing that step's node_run_id — including non-agent steps like
+    # checks, which write no prompt-audit record of their own) and writes the once-per-task
+    # finalize turn under the reserved node_run_id=0 sentinel (it runs last but is namespaced
+    # first, since it is not a graph node).
+    assert supervisor_records, "supervisor turns are part of the prompt-audit trail"
+    supervisor_ids = {r["node_run_id"] for r in supervisor_records}
+    assert 0 in supervisor_ids
+    assert set(node_ids) <= supervisor_ids
+
+    # The combined timeline has one line per step, in the same chronological order. Real
+    # graph-node entries stay chronological by node_run_id; the supervisor's synthetic ids (a
+    # per-step observe reusing that step's id, and finalize's reserved 0 — written last despite
+    # sorting first) do not participate in that invariant.
     lines = (audit_dir / "timeline.jsonl").read_text().splitlines()
     assert len(lines) == len(step_files)
     timeline = [json.loads(line) for line in lines]
-    assert [r["node_run_id"] for r in timeline] == sorted(r["node_run_id"] for r in timeline)
+    timeline_node_ids = [r["node_run_id"] for r in timeline if r["node_id"] != "supervisor"]
+    assert timeline_node_ids == sorted(timeline_node_ids)
     for rec in timeline:
         assert rec["prompt"]
         assert rec["agents"] and rec["agents"][0]["status"] == "succeeded"

@@ -972,6 +972,53 @@ def test_agent_node_no_prompt_audit_when_disabled(tmp_path: Path) -> None:
     assert "prompt_audit" not in kinds
 
 
+def test_agent_node_rendered_prompt_includes_context_footer(tmp_path: Path) -> None:
+    """rendered-prompt.md must carry the context-files footer, not just the bare template — it
+    is written from the same effective prompt the provider actually receives on stdin."""
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(
+        id="implementation",
+        kind="agent",
+        role_file="r.md",
+        permission_profile=PermissionProfile.READ_ONLY,
+    )
+    registered: list[Any] = []
+    inputs = _inputs(tmp_path, task_path="/t/task.md", plan_path="/t/plan.md")
+    AgentNodeRunner(
+        _audit_services(tmp_path, prompt_audit=True, registered=registered), inputs
+    ).run(node, _ctx(node))
+    rendered = (
+        node_run_dir(str(tmp_path), "task-1", "implementation", 1) / "rendered-prompt.md"
+    ).read_text()
+    assert "Context files (read them as needed" in rendered
+    assert "/t/task.md" in rendered
+    assert "/t/plan.md" in rendered
+
+
+def test_evaluator_rendered_prompt_includes_context_footer(tmp_path: Path) -> None:
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    node = _evaluator("review")
+    registered: list[Any] = []
+    services = NodeServices(
+        router=FakeRouter(_result({"findings": []})),
+        check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        store=FakeStore(),
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path),
+        clock=lambda: "ts",
+        prompt_audit=True,
+        register_artifact=lambda t, k, p: registered.append((t, k, p)),
+    )
+    inputs = _inputs(tmp_path, task_path="/t/task.md", plan_path="/t/plan.md")
+    EvaluatorNodeRunner(services, inputs).run(node, _ctx(node))
+    rendered = (
+        node_run_dir(str(tmp_path), "task-1", "review", 1) / "rendered-prompt.md"
+    ).read_text()
+    assert "Context files (read them as needed" in rendered
+    assert "/t/task.md" in rendered
+    assert "/t/plan.md" in rendered
+
+
 # -- embedded HITL (refinement / planning) ------------------------------------
 
 

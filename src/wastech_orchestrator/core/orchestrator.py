@@ -1896,7 +1896,7 @@ class Orchestrator:
             run_state = FlowRunState(flow_fingerprint=snapshot.flow_fingerprint)
         # The constant supervisor layer starts at task start and lives the whole cycle (P2.1); it
         # carries this task's own resume_own_lineage session.
-        self._supervisor = self._build_supervisor(snapshot)
+        self._supervisor = self._build_supervisor(p, snapshot)
         inputs = build_node_inputs(
             p,
             flow_dir=snapshot.source_path.parent,
@@ -2195,7 +2195,7 @@ class Orchestrator:
         self._store.set_subtask_commit(p.task.id, unit.order, sha, "committed")
         self._store.update_task(p.task.id, subtasks_completed=unit.order)
 
-    def _build_supervisor(self, snapshot: FlowSnapshot) -> Supervisor:
+    def _build_supervisor(self, p: _Pipeline, snapshot: FlowSnapshot) -> Supervisor:
         """Construct the per-task supervisor layer from ``config.yaml: supervisor`` (P2.1).
 
         It runs read-only on the global primary; ``role_file`` is resolved inside the packaged flow
@@ -2214,6 +2214,11 @@ class Orchestrator:
             # ``None`` when the flow declares no ``supervisor:`` block (global config + built-ins).
             flow_supervisor=snapshot.doc.supervisor,
             register_artifact=self._register_artifact,
+            # Same per-task gate/secrets the engine's own NodeServices uses
+            # (_build_engine_services), so a supervisor turn's audit artifacts honor the same
+            # prompt_audit opt-in and redaction.
+            prompt_audit=self._prompt_audit_on(p.task),
+            prompt_secrets=self._prompt_secrets(),
         )
 
     def _engine_finalize(self, p: _Pipeline) -> str | None:

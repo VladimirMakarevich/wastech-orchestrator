@@ -22,8 +22,12 @@ from wastech_orchestrator.core.flow.schema import SupervisorBlock
 from wastech_orchestrator.core.loop_control import record_rework
 from wastech_orchestrator.core.skills import SkillInventory, SkillRef
 from wastech_orchestrator.core.state_machine import Status
-from wastech_orchestrator.core.supervisor import Supervisor, parse_follow_ups
-from wastech_orchestrator.providers.artifacts import task_artifact_dir
+from wastech_orchestrator.core.supervisor import (
+    _HANDOFF_RUN_ID_BASE,
+    Supervisor,
+    parse_follow_ups,
+)
+from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
 from wastech_orchestrator.providers.base import AgentRunResult, ProviderId, RunStatus
 from wastech_orchestrator.routing.router import ResolvedRoute, RouteSource, StageOutcome
 from wastech_orchestrator.state_store import (
@@ -97,6 +101,9 @@ def _supervisor(
     reasoning: str | None = None,
     provider: ProviderId | None = None,
     flow_supervisor: SupervisorBlock | None = None,
+    register_artifact: Any = None,
+    prompt_audit: bool = False,
+    prompt_secrets: tuple[str, ...] = (),
 ) -> Supervisor:
     (tmp_path / "roles").mkdir(exist_ok=True)
     (tmp_path / "roles" / "supervisor.md").write_text("Observe {task_id} in {repo}.", "utf-8")
@@ -110,6 +117,9 @@ def _supervisor(
         artifacts_root=str(tmp_path / "art"),
         flow_dir=tmp_path,
         flow_supervisor=flow_supervisor,
+        register_artifact=register_artifact,
+        prompt_audit=prompt_audit,
+        prompt_secrets=prompt_secrets,
     )
 
 
@@ -135,6 +145,41 @@ def test_supervisor_observes_each_completed_step(tmp_path: Path) -> None:
     assert [e.kind for e in evals] == ["supervisor_step", "supervisor_step"]
     assert [e.source_node_run_id for e in evals] == [5, 7]
     assert all(e.verdict == "advisory" and e.node_id is None for e in evals)
+
+
+def test_supervisor_observe_writes_rendered_prompt_when_registered(tmp_path: Path) -> None:
+    # A supervisor turn is now part of the audit trail: previously rendered-prompt.md / the
+    # prompt-audit JSON were never written for observe/finalize/handoff turns at all.
+    registered: list[Any] = []
+    router, store = FakeRouter(), _store(tmp_path)
+    sup = _supervisor(
+        tmp_path, router, store, register_artifact=lambda t, k, p: registered.append((t, k, p))
+    )
+    sup.observe(task_id=_TASK, node_id="implementation", node_run_id=5, outcome_kind="done")
+
+    rendered = (
+        node_run_dir(str(tmp_path / "art"), _TASK, "supervisor", 5) / "rendered-prompt.md"
+    ).read_text("utf-8")
+    assert rendered  # the observe turn's prompt was persisted
+    kinds = {k for _, k, _ in registered}
+    assert "rendered_prompt" in kinds
+    assert "prompt_audit" not in kinds  # prompt_audit gate defaults to False
+
+
+def test_supervisor_observability_write_failure_does_not_break_turn(tmp_path: Path) -> None:
+    # The audit write is advisory: a failing register_artifact must not affect the turn's own
+    # result or its evaluations/session bookkeeping (the layer's "never breaks the task" contract).
+    def _raising_register(task_id: str, kind: str, path: str | None) -> None:
+        raise RuntimeError("disk full")
+
+    router, store = FakeRouter(), _store(tmp_path)
+    sup = _supervisor(tmp_path, router, store, register_artifact=_raising_register)
+    sup.observe(task_id=_TASK, node_id="implementation", node_run_id=5, outcome_kind="done")
+
+    evals = store.get_evaluations(_TASK)
+    assert [e.kind for e in evals] == ["supervisor_step"]
+    payload = json.loads(evals[0].findings_json)
+    assert payload["observation_failed"] is False  # the LLM turn itself still succeeded
 
 
 def test_supervisor_pins_its_provider_at_route(tmp_path: Path) -> None:
@@ -367,6 +412,29 @@ def test_finalize_sanitizes_leaked_structured_dump(tmp_path: Path) -> None:
     for tag in ("<follow_ups>", "<memory_delta>", "<lessons>", "</summary>", "<summary>"):
         assert tag not in body
     assert "lessons" not in body and "title" not in body  # no machine JSON leaked
+
+
+def test_finalize_writes_prompt_audit_when_enabled(tmp_path: Path) -> None:
+    registered: list[Any] = []
+    router, store = FakeRouter([_ok("s1", "Synthesized summary.")]), _store(tmp_path)
+    sup = _supervisor(
+        tmp_path,
+        router,
+        store,
+        register_artifact=lambda t, k, p: registered.append((t, k, p)),
+        prompt_audit=True,
+    )
+    sup.finalize(task_id=_TASK, task_title="T")
+
+    audit_dir = task_artifact_dir(str(tmp_path / "art"), _TASK) / "prompt-audit"
+    # finalize's node_run_id is the reserved ``0`` sentinel (not a node_runs id).
+    step_path = audit_dir / "000000-supervisor.json"
+    assert step_path.exists()
+    record = json.loads(step_path.read_text("utf-8"))
+    assert record["node_id"] == "supervisor"
+    assert record["prompt"]  # the finalize turn's input prompt was persisted
+    timeline = (audit_dir / "timeline.jsonl").read_text("utf-8").splitlines()
+    assert any(json.loads(line)["node_id"] == "supervisor" for line in timeline)
 
 
 def test_finalize_prefixes_h1_when_missing(tmp_path: Path) -> None:
@@ -773,6 +841,25 @@ def test_handoff_uses_distinct_run_id_per_subtask(tmp_path: Path) -> None:
     sup.handoff(task_id=_TASK, subtask_order=3, floor_context="F")
     run_ids = [r.node_run_id for r in router.requests]
     assert run_ids[0] != run_ids[1]  # distinct dirs → no create_attempt_dir collision
+
+
+def test_handoff_records_subtask_in_prompt_audit(tmp_path: Path) -> None:
+    registered: list[Any] = []
+    router = FakeRouter([_structured_handoff({"new_surface_area": "a"})])
+    sup = _supervisor(
+        tmp_path,
+        router,
+        _store(tmp_path),
+        register_artifact=lambda t, k, p: registered.append((t, k, p)),
+        prompt_audit=True,
+    )
+    sup.handoff(task_id=_TASK, subtask_order=2, floor_context="F")
+
+    audit_dir = task_artifact_dir(str(tmp_path / "art"), _TASK) / "prompt-audit"
+    step_path = audit_dir / f"{_HANDOFF_RUN_ID_BASE + 2:06d}-supervisor-sub02.json"
+    assert step_path.exists()
+    record = json.loads(step_path.read_text("utf-8"))
+    assert record["subtask"] == 2
 
 
 def test_handoff_uses_flow_handoff_role_file(tmp_path: Path) -> None:

@@ -30,8 +30,6 @@ from wastech_orchestrator.config.schema import ProviderConfig
 from wastech_orchestrator.providers._adapter_base import (
     BaseCliProvider,
     ParsedEvents,
-    build_context_footer,
-    build_effective_prompt,
 )
 from wastech_orchestrator.providers.artifacts import ArtifactPaths
 from wastech_orchestrator.providers.base import (
@@ -39,6 +37,8 @@ from wastech_orchestrator.providers.base import (
     ErrorClass,
     ProviderError,
     ProviderId,
+    build_context_footer,
+    build_effective_prompt,
 )
 from wastech_orchestrator.providers.errors import (
     StderrSignature,

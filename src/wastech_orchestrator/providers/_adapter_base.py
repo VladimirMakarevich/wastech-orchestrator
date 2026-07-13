@@ -45,6 +45,7 @@ from wastech_orchestrator.providers.base import (
     ProviderError,
     ProviderHealth,
     RunStatus,
+    build_effective_prompt,
 )
 from wastech_orchestrator.providers.errors import StderrSignature, classify, message_for
 from wastech_orchestrator.providers.process import (
@@ -109,37 +110,6 @@ def _produced_no_work(parsed: ParsedEvents) -> bool:
     if parsed.structured_output:
         return False
     return (parsed.usage or {}).get("output_tokens") == 0
-
-
-def build_context_footer(request: AgentRunRequest) -> str:
-    """Render the non-``None`` context file paths as a deterministic footer (paths only)."""
-    fields = (
-        ("task", request.task_path),
-        ("plan", request.plan_path),
-        ("diff", request.diff_path),
-        ("checks", request.check_artifacts_path),
-        ("review", request.review_artifacts_path),
-        ("human_input", request.human_input_path),
-    )
-    present = [(label, path) for label, path in fields if path]
-    skill_lines = [
-        f"- skill (read-only reference; advisory, do not execute): {path}"
-        for path in request.skill_reference_paths
-    ]
-    if not present and not skill_lines:
-        return ""
-    lines = ["Context files (read them as needed; do not assume their contents):"]
-    lines += [f"- {label}: {path}" for label, path in present]
-    lines += skill_lines
-    return "\n".join(lines)
-
-
-def build_effective_prompt(request: AgentRunRequest) -> str:
-    """Combine the Core-assembled prompt with the context-files footer."""
-    footer = build_context_footer(request)
-    if not footer:
-        return request.prompt
-    return f"{request.prompt}\n\n{footer}"
 
 
 def read_text(path: str) -> str:
@@ -511,13 +481,14 @@ class BaseCliProvider:
     def _request_representation(
         self, request: AgentRunRequest, argv: list[str] | None
     ) -> dict[str, Any]:
-        context_paths = {
+        context_paths: dict[str, str | list[str] | None] = {
             "task_path": request.task_path,
             "plan_path": request.plan_path,
             "diff_path": request.diff_path,
             "check_artifacts_path": request.check_artifacts_path,
             "review_artifacts_path": request.review_artifacts_path,
             "human_input_path": request.human_input_path,
+            "skill_reference_paths": list(request.skill_reference_paths) or None,
         }
         representation: dict[str, Any] = {
             "provider": self.id,
@@ -529,7 +500,7 @@ class BaseCliProvider:
             "permission_profile": request.permission_profile,
             "timeout_seconds": request.timeout_seconds,
             "model": request.model or self._config.model or None,
-            "prompt": request.prompt,
+            "prompt": build_effective_prompt(request),
             "context_paths": {k: v for k, v in context_paths.items() if v},
             "extra_args": list(request.extra_args),
             "config_extra_args": list(self._config.extra_args),

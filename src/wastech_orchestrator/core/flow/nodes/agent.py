@@ -68,7 +68,12 @@ from wastech_orchestrator.providers.artifacts import (
     latest_run_file,
     task_artifact_dir,
 )
-from wastech_orchestrator.providers.base import MAX_TURNS_SUBTYPE, AgentRunRequest, ProviderId
+from wastech_orchestrator.providers.base import (
+    MAX_TURNS_SUBTYPE,
+    AgentRunRequest,
+    ProviderId,
+    build_effective_prompt,
+)
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import EditingLineageRow, NodeRunRow
 
@@ -322,7 +327,7 @@ class AgentNodeRunner:
             node_id=node.id,
             subtask=ctx.subtask_order,
             run_id=run_id,
-            prompt=request.prompt,
+            prompt=build_effective_prompt(request),
             route=route,
             outcome=outcome,
             model=node.model,

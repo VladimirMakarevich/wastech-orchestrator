@@ -31,13 +31,19 @@ from typing import Any, Protocol
 
 from wastech_orchestrator.config.schema import SupervisorConfig
 from wastech_orchestrator.core.flow.nodes.base import RegisterArtifact, RouterPort
+from wastech_orchestrator.core.flow.observability import write_prompt_audit, write_rendered_prompt
 from wastech_orchestrator.core.flow.prompt import RoleFileError, render_role_prompt
 from wastech_orchestrator.core.flow.schema import SupervisorBlock
 from wastech_orchestrator.core.skills import SkillInventory
 from wastech_orchestrator.memory.delta import DELTA_OUTPUT_SCHEMA, CandidateDelta, parse_delta
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
-from wastech_orchestrator.providers.base import AgentRunRequest, AgentRunResult, ProviderId
-from wastech_orchestrator.routing.router import ResolvedRoute
+from wastech_orchestrator.providers.base import (
+    AgentRunRequest,
+    AgentRunResult,
+    ProviderId,
+    build_effective_prompt,
+)
+from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import EvaluationRow, NodeLineageRow
 
 _LOG = logging.getLogger(__name__)
@@ -401,6 +407,8 @@ class Supervisor:
         flow_dir: Path,
         flow_supervisor: SupervisorBlock | None = None,
         register_artifact: RegisterArtifact | None = None,
+        prompt_audit: bool = False,
+        prompt_secrets: tuple[str, ...] = (),
         default_timeout_seconds: int = 7200,
     ) -> None:
         self._settings = settings
@@ -420,6 +428,8 @@ class Supervisor:
         )
         self._emit_follow_ups = flow_supervisor.emit_follow_ups if flow_supervisor else False
         self._register_artifact = register_artifact
+        self._prompt_audit = prompt_audit
+        self._prompt_secrets = prompt_secrets
         self._default_timeout_seconds = default_timeout_seconds
         # The supervisor's own session (resume_own_lineage). Held in-memory within a process run and
         # persisted to / hydrated from ``node_lineage`` so it survives a restart (independent of the
@@ -454,7 +464,9 @@ class Supervisor:
         # F50: observation is advisory and runs once per node-run, so a deep fix loop drives many
         # observe turns; it never needs a max reasoning tier, so cap it to `high` (the whole-task
         # finalize keeps the configured tier).
-        note = self._run(task_id, prompt, node_run_id=node_run_id, cap_reasoning=True)
+        note = self._run(
+            task_id, prompt, node_run_id=node_run_id, subtask=subtask_order, cap_reasoning=True
+        )
         self._record(
             task_id,
             kind="supervisor_step",
@@ -632,6 +644,7 @@ class Supervisor:
             task_id,
             self._handoff_prompt(task_id, subtask_order, floor_context),
             node_run_id=_HANDOFF_RUN_ID_BASE + subtask_order,
+            subtask=subtask_order,
             output_schema=_HANDOFF_SCHEMA,
         )
         if result is None or result.structured_output is None:
@@ -684,6 +697,7 @@ class Supervisor:
         prompt: str,
         *,
         node_run_id: int,
+        subtask: int | None = None,
         resume_session: bool = True,
         cap_reasoning: bool = False,
     ) -> str | None:
@@ -692,6 +706,7 @@ class Supervisor:
             task_id,
             prompt,
             node_run_id=node_run_id,
+            subtask=subtask,
             resume_session=resume_session,
             cap_reasoning=cap_reasoning,
         )
@@ -703,6 +718,7 @@ class Supervisor:
         prompt: str,
         *,
         node_run_id: int,
+        subtask: int | None = None,
         output_schema: dict[str, Any] | None = None,
         resume_session: bool = True,
         cap_reasoning: bool = False,
@@ -758,7 +774,76 @@ class Supervisor:
             self._own_session_id = result.session_id  # resume_own_lineage continuity (in-memory)
             self._session_live = True  # a turn succeeded this process — the session is usable
             self._persist_session(task_id, result.session_id, outcome.provider_used)
+        self._record_turn_observability(
+            task_id=task_id,
+            node_run_id=node_run_id,
+            subtask=subtask,
+            request=request,
+            route=route,
+            outcome=outcome,
+            reasoning=reasoning,
+        )
         return result
+
+    def _record_turn_observability(
+        self,
+        *,
+        task_id: str,
+        node_run_id: int,
+        subtask: int | None,
+        request: AgentRunRequest,
+        route: ResolvedRoute,
+        outcome: StageOutcome,
+        reasoning: str | None,
+    ) -> None:
+        """Best-effort: persist rendered-prompt + (gated) prompt-audit for one supervisor turn.
+
+        Calls the standalone artifact writers directly — never ``record_run_observability`` /
+        ``record_provider_attempts``: the supervisor's ``node_run_id`` is a synthetic per-call-site
+        namespacing sentinel (``0`` / ``_PROPOSAL_RUN_ID`` / ``_HANDOFF_RUN_ID_BASE + n`` / a reused
+        real step id), not a ``node_runs`` foreign key — writing a ``provider_attempts`` row under
+        it would misattribute that row. Wrapped in its own try/except (distinct from the caller's,
+        which does not cover this code) so an audit-write failure can never surface as a broken
+        turn — this layer is advisory by contract.
+        """
+        if self._register_artifact is None or outcome.result is None:
+            return
+        effective_prompt = build_effective_prompt(request)
+        try:
+            write_rendered_prompt(
+                artifacts_root=str(self._artifacts_root),
+                task_id=task_id,
+                node_id=_SUPERVISOR_IDENTITY,
+                run_id=node_run_id,
+                prompt=effective_prompt,
+                secrets=self._prompt_secrets,
+                register=self._register_artifact,
+            )
+            if self._prompt_audit:
+                write_prompt_audit(
+                    artifacts_root=str(self._artifacts_root),
+                    task_id=task_id,
+                    node_id=_SUPERVISOR_IDENTITY,
+                    subtask=subtask,
+                    run_id=node_run_id,
+                    prompt=effective_prompt,
+                    route=route,
+                    outcome=outcome,
+                    model=self._settings.model,
+                    reasoning=reasoning,
+                    started_at=outcome.result.started_at,
+                    secrets=self._prompt_secrets,
+                    register=self._register_artifact,
+                )
+        except Exception as exc:  # noqa: BLE001 — audit write is advisory; must never break the turn
+            _LOG.warning(
+                "supervisor prompt-audit write failed (advisory, ignored)",
+                extra={
+                    "task_id": task_id,
+                    "node_run_id": node_run_id,
+                    "error_type": type(exc).__name__,
+                },
+            )
 
     def _resume_session(self, task_id: str, route: ResolvedRoute) -> str | None:
         """The own session to resume: the in-memory id if a turn already ran this process, else the
