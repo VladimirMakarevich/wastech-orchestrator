@@ -23,8 +23,8 @@ __all__ = [
     "AskHandle",
     "AskKind",
     "AskResult",
-    "NullNotifier",
     "Notifier",
+    "NullNotifier",
     "TelegramNotifier",
     "build_notifier",
 ]

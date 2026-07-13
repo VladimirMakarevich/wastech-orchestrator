@@ -128,7 +128,7 @@ def _split_md(text: str) -> FrontmatterParse:
     fm_text = "".join(lines[1:closing_index])
     body = "".join(lines[closing_index + 1 :])
     try:
-        loaded = yaml.load(fm_text, Loader=_UniqueKeyLoader)  # noqa: S506 - hardened loader
+        loaded = yaml.load(fm_text, Loader=_UniqueKeyLoader)
     except yaml.YAMLError as exc:
         return FrontmatterParse(
             present=True,

@@ -35,6 +35,10 @@ jobs:
           ruff check .
           ruff format --check .
           mypy src
+          lint-imports
+          interrogate src
+          vulture
+          deptry src
           pytest -q
 
       - name: Build sdist + wheel

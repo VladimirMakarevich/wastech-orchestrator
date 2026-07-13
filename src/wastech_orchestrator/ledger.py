@@ -110,11 +110,11 @@ class Ledger:
         """Read all records (skipping blank lines). Used for recovery/inspection and tests."""
         if not self._path.exists():
             return []
-        out: list[dict[str, Any]] = []
-        for line in self._path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                out.append(json.loads(line))
-        return out
+        return [
+            json.loads(line)
+            for line in self._path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
 
     def has_task_id(self, task_id: str) -> bool:
         """True iff ``task_id`` appears in the ledger (the duplicate-id ledger half)."""

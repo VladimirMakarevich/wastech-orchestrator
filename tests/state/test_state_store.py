@@ -243,7 +243,7 @@ def test_provider_attempts_round_trip(store: StateStore) -> None:
     store.record_provider_attempt(
         ProviderAttemptRow(node_run_id=run_id, provider="claude", attempt=1, status="succeeded")
     )
-    cur = store._conn.execute(  # noqa: SLF001 - inspecting persisted rows in a unit test
+    cur = store._conn.execute(
         "SELECT provider FROM provider_attempts WHERE node_run_id = ?", (run_id,)
     )
     assert [r["provider"] for r in cur.fetchall()] == ["claude"]
@@ -265,9 +265,9 @@ def test_check_run_and_artifact(store: StateStore) -> None:
             task_id="task-001", kind="plan", path="logs/task-001/plan.md", checksum="deadbeef"
         )
     )
-    checks = store._conn.execute("SELECT passed FROM check_runs").fetchall()  # noqa: SLF001
+    checks = store._conn.execute("SELECT passed FROM check_runs").fetchall()
     assert checks[0]["passed"] == 0
-    arts = store._conn.execute("SELECT kind, checksum FROM artifacts").fetchall()  # noqa: SLF001
+    arts = store._conn.execute("SELECT kind, checksum FROM artifacts").fetchall()
     assert arts[0]["kind"] == "plan"
 
 
@@ -312,9 +312,7 @@ def test_artifact_registration_is_idempotent(store: StateStore) -> None:
     path = "logs/task-001/plan.md"
     store.register_artifact(ArtifactRow(task_id="task-001", kind="plan", path=path, checksum="aaa"))
     store.register_artifact(ArtifactRow(task_id="task-001", kind="plan", path=path, checksum="bbb"))
-    rows = store._conn.execute(  # noqa: SLF001
-        "SELECT checksum FROM artifacts WHERE kind='plan'"
-    ).fetchall()
+    rows = store._conn.execute("SELECT checksum FROM artifacts WHERE kind='plan'").fetchall()
     assert len(rows) == 1
     assert rows[0]["checksum"] == "bbb"
 
@@ -334,9 +332,7 @@ def test_publish_op_idempotent_upsert(store: StateStore) -> None:
     assert op.status == "completed"
     assert op.result_ref == "ok"
     # A single row, not two (idempotency via the UNIQUE constraint).
-    count = store._conn.execute(  # noqa: SLF001
-        "SELECT COUNT(*) AS n FROM publish_operations"
-    ).fetchone()["n"]
+    count = store._conn.execute("SELECT COUNT(*) AS n FROM publish_operations").fetchone()["n"]
     assert count == 1
 
 
@@ -419,14 +415,12 @@ def test_subtask_planning_insert_is_idempotent_without_reopening_committed_work(
 
 def test_no_secret_columns_in_schema(store: StateStore) -> None:
     #: no secret/token/env columns anywhere in the schema.
-    cur = store._conn.execute(  # noqa: SLF001
-        "SELECT name FROM sqlite_master WHERE type='table'"
-    )
+    cur = store._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     forbidden = ("token", "secret", "password", "env", "credential", "api_key")
     for table in [r["name"] for r in cur.fetchall()]:
         cols = [
             c["name"].lower()
-            for c in store._conn.execute(f'PRAGMA table_info("{table}")').fetchall()  # noqa: SLF001
+            for c in store._conn.execute(f'PRAGMA table_info("{table}")').fetchall()
         ]
         for col in cols:
             assert not any(bad in col for bad in forbidden), f"{table}.{col}"
@@ -571,7 +565,7 @@ def test_editing_lineage_roundtrip_and_one_per_lineage(store: StateStore) -> Non
     )
     row = store.get_editing_lineage("task-001", "implementation")
     assert row is not None and row.raw_session_id == "sess-b"
-    count = store._conn.execute(  # noqa: SLF001
+    count = store._conn.execute(
         "SELECT COUNT(*) FROM editing_lineage WHERE task_id = ?", ("task-001",)
     ).fetchone()[0]
     assert count == 1
@@ -593,7 +587,7 @@ def test_editing_lineage_multiple_lineages_per_unit_are_isolated(store: StateSto
     )
     assert store.get_editing_lineage("task-001", "code").raw_session_id == "code-sess"  # type: ignore[union-attr]
     assert store.get_editing_lineage("task-001", "spec").raw_session_id == "spec-sess"  # type: ignore[union-attr]
-    count = store._conn.execute(  # noqa: SLF001
+    count = store._conn.execute(
         "SELECT COUNT(*) FROM editing_lineage WHERE task_id = ?", ("task-001",)
     ).fetchone()[0]
     assert count == 2

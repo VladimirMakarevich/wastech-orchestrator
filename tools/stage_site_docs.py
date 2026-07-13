@@ -61,12 +61,7 @@ def destination_for(source: Path, root: Path) -> Path:
 
 
 def is_remote_or_anchor(target: str) -> bool:
-    return (
-        target.startswith("#")
-        or target.startswith("http://")
-        or target.startswith("https://")
-        or target.startswith("mailto:")
-    )
+    return target.startswith(("#", "http://", "https://", "mailto:"))
 
 
 def split_target(target: str) -> tuple[str, str]:

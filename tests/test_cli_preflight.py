@@ -177,7 +177,9 @@ def test_preflight_fails_on_isolation(
     monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _patch_providers(monkeypatch, make_git_config(git_repo.clone))
-    monkeypatch.setattr(cli, "check_isolation", lambda _config: ["codex: sandbox is forbidden"])
+    monkeypatch.setattr(
+        cli, "check_isolation", lambda _config, _checks: ["codex: sandbox is forbidden"]
+    )
     rc = cli.cmd_preflight(_args())
     out = capsys.readouterr().out
     assert rc == 1

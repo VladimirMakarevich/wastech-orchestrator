@@ -210,10 +210,12 @@ cd wastech-orchestrator
 python -m venv .venv
 source .venv/bin/activate            # Windows: .\.venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
+pre-commit install                   # local gate; also: pre-commit install --hook-type pre-push
 
 ruff check .
 ruff format --check .
 mypy src
+lint-imports                         # architectural import-boundary contracts (.importlinter)
 pytest
 ```
 

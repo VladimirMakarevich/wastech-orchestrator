@@ -716,9 +716,11 @@ class GitManager:
             entries.append(ChangedPath(status=status, path=path, previous_path=previous))
 
         untracked = self._git("ls-files", "--others", "--exclude-standard", "-z").stdout
-        for path in (item for item in untracked.split("\0") if item):
-            if not self._is_artifact_path(path):
-                entries.append(ChangedPath(status="??", path=path))
+        entries.extend(
+            ChangedPath(status="??", path=path)
+            for path in (item for item in untracked.split("\0") if item)
+            if not self._is_artifact_path(path)
+        )
         return tuple(entries)
 
     def changed_code_paths_since_base(self) -> list[str]:

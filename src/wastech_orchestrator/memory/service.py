@@ -727,8 +727,8 @@ def _within_window(first_seen_at: str | None, now: str, days: int) -> bool:
     if first_seen_at is None:
         return True
     try:
-        start = datetime.fromisoformat(first_seen_at.replace("Z", "+00:00"))
-        end = datetime.fromisoformat(now.replace("Z", "+00:00"))
+        start = datetime.fromisoformat(first_seen_at)
+        end = datetime.fromisoformat(now)
     except ValueError:
         return True
     return end - start <= timedelta(days=days)

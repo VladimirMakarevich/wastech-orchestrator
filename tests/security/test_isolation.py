@@ -11,6 +11,7 @@ from dataclasses import replace
 
 import pytest
 
+from wastech_orchestrator.composition import ISOLATION_CHECKS
 from wastech_orchestrator.config.loader import loads_config
 from wastech_orchestrator.config.schema import OrchestratorConfig, ProviderConfig
 from wastech_orchestrator.providers import claude as claude_mod
@@ -104,18 +105,18 @@ def test_codex_bypass_extra_arg_is_flagged(codex_config: ProviderConfig) -> None
 
 
 def test_default_config_passes(base_config: OrchestratorConfig) -> None:
-    assert check_isolation(base_config) == []
+    assert check_isolation(base_config, ISOLATION_CHECKS) == []
 
 
 def test_codex_full_access_fails_with_provider_prefix(base_config: OrchestratorConfig) -> None:
     cfg = _with_provider(base_config, ProviderId.CODEX, sandbox="danger-full-access")
-    reasons = check_isolation(cfg)
+    reasons = check_isolation(cfg, ISOLATION_CHECKS)
     assert reasons and reasons[0].startswith("codex:")
 
 
 def test_claude_full_access_fails_with_provider_prefix(base_config: OrchestratorConfig) -> None:
     cfg = _with_provider(base_config, ProviderId.CLAUDE, permission_profile="danger-full-access")
-    reasons = check_isolation(cfg)
+    reasons = check_isolation(cfg, ISOLATION_CHECKS)
     assert any(r.startswith("claude:") for r in reasons)
 
 
@@ -126,11 +127,11 @@ def test_unallowed_provider_is_not_checked(base_config: OrchestratorConfig) -> N
     cfg = _with_provider(
         replace(base_config, agents=agents), ProviderId.CODEX, sandbox="danger-full-access"
     )
-    assert check_isolation(cfg) == []
+    assert check_isolation(cfg, ISOLATION_CHECKS) == []
 
 
 def test_allowed_provider_is_checked(base_config: OrchestratorConfig) -> None:
     # codex is in agents.allowed (default), so its bad sandbox must still be flagged.
     assert ProviderId.CODEX in base_config.agents.allowed
     cfg = _with_provider(base_config, ProviderId.CODEX, sandbox="danger-full-access")
-    assert any(r.startswith("codex:") for r in check_isolation(cfg))
+    assert any(r.startswith("codex:") for r in check_isolation(cfg, ISOLATION_CHECKS))

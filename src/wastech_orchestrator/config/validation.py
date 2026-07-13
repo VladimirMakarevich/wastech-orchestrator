@@ -36,8 +36,7 @@ def _check_extra_args(pid: ProviderId, args: tuple[str, ...], issues: list[str])
     by the provider command builders) and frames each finding as a config issue.
     """
     where = f"agents.providers.{pid.value}.extra_args"
-    for reason in find_forbidden_args(args):
-        issues.append(f"{where}: {reason}")
+    issues.extend(f"{where}: {reason}" for reason in find_forbidden_args(args))
 
 
 def _check_global_primary(
@@ -327,8 +326,7 @@ def _validate_checks(config: OrchestratorConfig, issues: list[str], warnings: li
             bad = shell_metachars(check.argv)
             if bad is not None:
                 issues.append(f"{where}: argv token {bad!r} contains a shell metacharacter")
-            for reason in find_forbidden_args(check.argv):
-                issues.append(f"{where}: {reason}")
+            issues.extend(f"{where}: {reason}" for reason in find_forbidden_args(check.argv))
             matched = argv_matches_denied(check.argv, denied)
             if matched is not None:
                 issues.append(f"{where}: matches denied command {matched!r}")

@@ -196,7 +196,7 @@ class TelegramNotifier:
                 kind=kind,
                 interaction_id=interaction_id,
             )
-        except Exception as exc:  # noqa: BLE001 - transport errors are returned, never raised
+        except Exception as exc:
             self._warn("ask_human send failed", task_id=task_id, error=str(exc))
             return AskHandle(
                 interaction_id=interaction_id,
@@ -231,7 +231,7 @@ class TelegramNotifier:
                 kind=handle.kind,
                 deadline_monotonic=deadline,
             )
-        except Exception as exc:  # noqa: BLE001 - transport errors are returned, never raised
+        except Exception as exc:
             self._warn(
                 "ask_human poll failed",
                 interaction_id=handle.interaction_id,
@@ -271,7 +271,7 @@ class TelegramNotifier:
         try:
             self._client.send_message(chat_id=self._secrets.chat_id, text=self._outgoing(body))
             return True
-        except Exception as exc:  # noqa: BLE001 — Telegram/network failure must not propagate
+        except Exception as exc:
             self._warn(f"{op} send failed", task_id=task_id, error=str(exc))
             return False
 
@@ -388,7 +388,7 @@ def check_telegram_preflight(
             )
         client.check_polling()
         return True, f"telegram: OK (bot=@{username}, chat={chat}, polling ready)"
-    except Exception as exc:  # noqa: BLE001 — surface a safe summary, never re-raise
+    except Exception as exc:
         safe = str(exc)
         for secret in (bot_token, chat_id):
             safe = safe.replace(secret, REDACTED)
@@ -610,7 +610,7 @@ class _HttpTelegramClient:
         """
         try:
             await bot.answer_callback_query(query_id, text=text, show_alert=alert)
-        except Exception:  # noqa: BLE001 — button feedback is best-effort, never fatal
+        except Exception:
             _LOG.debug("telegram answer_callback_query failed", exc_info=True)
 
     def poll_reply(

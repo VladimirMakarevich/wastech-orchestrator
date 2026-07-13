@@ -195,7 +195,7 @@ def write_pid_file(
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     payload = {"pid": pid, "start_time": start_time_fn(pid)}
     tmp.write_text(json.dumps(payload) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    tmp.replace(path)
 
 
 def read_pid_record(path: Path) -> ProcessIdentity | None:
@@ -252,7 +252,7 @@ def write_children_file(
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     payload = {"pid": pid, "pgid": pgid, "start_time": start_time_fn(pid)}
     tmp.write_text(json.dumps(payload) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    tmp.replace(path)
 
 
 def read_children_record(path: Path) -> ChildHandle | None:
