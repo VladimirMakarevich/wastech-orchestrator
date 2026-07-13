@@ -6,7 +6,7 @@ A decision guide for the optional knobs. Defaults are almost always right — re
 
 You usually do not choose this — the operator does — but it affects where your task file goes:
 
-- **`run <task-file>`** processes exactly one task file, end to end.
+- **`run <task-file>`** processes exactly one task file, end to end. The argument is a **path** to the file (e.g. `tasks/pending/my-task.md`), not a task id.
 - **`watch`** polls the `tasks/pending/` folder and processes tasks dropped there, looping with periodic git sync.
 
 A live task belongs in the repo's own `tasks/pending/` directory (committed and pushed there) — that is how a teammate hands work to a watching orchestrator.

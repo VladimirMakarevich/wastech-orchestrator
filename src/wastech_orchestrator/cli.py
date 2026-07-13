@@ -253,8 +253,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     install_cmd.add_argument("--dry-run", action="store_true", help="print the plan; write nothing")
 
-    run_cmd = sub.add_parser("run", help="run a single task from a file")
-    run_cmd.add_argument("task_file", help="path to the task file (.md or .json)")
+    run_cmd = sub.add_parser(
+        "run", help="run one task from its file (give a path to the .md/.json, NOT a task id)"
+    )
+    run_cmd.add_argument(
+        "task_file",
+        metavar="PATH",
+        help="filesystem path to the task file (.md or .json), e.g. tasks/pending/my-task.md — "
+        "not a task id (unlike `rerun`/`status`/`finalize`, which take an id)",
+    )
 
     watch_cmd = sub.add_parser("watch", help="watch the tasks folder and run the tasks in it")
     watch_cmd.add_argument(

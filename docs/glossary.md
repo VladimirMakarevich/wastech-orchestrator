@@ -20,7 +20,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 
 - **`wastech-orchestrator` / `worc`** - The CLI entry point. Both names expose the same commands, so the short alias is just a convenience, not a different interface.
 - **`install`** - Binds the current repository into `<repo>/.worc/`, writes or refreshes `config.yaml`, seeds the packaged guide and flow copies, and can run preflight after setup.
-- **`run`** - Processes one task file end to end through the orchestrator.
+- **`run`** - Processes one task file end to end through the orchestrator. Takes the **path** to the task file (e.g. `tasks/pending/my-task.md`), not a task id — it starts a new task from the file. (Lifecycle commands like `rerun`/`status`/`finalize` take the task **id** instead.)
 - **`watch`** - Watches the task queue, resumes in-flight work first, then picks pending tasks one at a time. `--queue NAME` serves only that queue.
 - **`stop`** - Stops a running `watch` daemon via the **stop ladder**: idle stops with no prompt; a busy daemon is refused unless confirmed (`YES`) or forced — `--force` (soft: finish the current step) or `--force-full` (hard: kill the agent's process group now; POSIX only, Windows degrades to soft). `--non-interactive` skips the `YES` prompt and refuses a busy daemon (exit non-zero) unless a force flag is given — used by CI and by the console (so `down` never blocks the REPL's stdin).
 - **`restart`** - Stops the running watcher (same stop ladder, same `--force`/`--force-full`/`--non-interactive` flags) and starts a fresh one with new flags.

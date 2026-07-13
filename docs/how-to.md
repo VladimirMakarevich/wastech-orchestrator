@@ -68,3 +68,39 @@ up                                 # optional: resume serving the queue
 - **Run it from the target repo** (the one holding `.worc/`), not from the orchestrator repo. `worc` is the short alias for `wastech-orchestrator` — the commands are identical.
 - Get the exact id with `worc list --format ids --scope rerun` (lists only the `failed` / `manual_action_required` ids a rerun accepts).
 - **Avoid the cause:** don't edit `.worc/flows/` while the daemon is serving the queue — stop it (`down` / `worc stop`), change the flows, then start again, so a task can't be picked up mid-edit.
+
+## 3. A task was stopped but `status` still shows `running` — free the stuck slot
+
+**Problem:** You stopped a run mid-task (a `down` in `worc shell`, a `worc stop`, a `--force-full`, or the process just died), and now `worc status` keeps showing the task as `running` even though nothing is executing. `worc stop --force-full` says _"no running watcher (no PID file)"_, and starting anything else fails with _"a task is active"_. The queue is jammed on a task that isn't actually running.
+
+**Why this happens:** `stop`/`down`/`--force-full` stop the **daemon**, not the task. By the recovery model, the single unfinished task is deliberately left `running` at its checkpoint so the _next_ `up`/`watch` can resume it — so a `running` row after a stop means "parked, awaiting resume", not "executing now". That parked row still holds the one processing slot, which is why a new task is refused. `stop` has no authority over a task row, so it can never clear that `running` — it's the wrong tool, even though the message makes it look like the right one.
+
+**Solution — first confirm nothing is actually running, then pick one of three:**
+
+```bash
+# 1. Confirm there's no live daemon and no agent process (from the target repo):
+worc status                                   # note the stuck task id + node
+ls .worc/*.pid 2>/dev/null                     # no output = no daemon
+ps aux | grep -iE "wastech|worc|codex|claude" | grep -v grep   # empty = no agent running
+```
+
+Then, depending on what you want the task to do:
+
+```bash
+# A. Close it (you're done with this task / it's superseded):
+worc finalize <task-id> --as failed -y         # records terminal, checks out base, frees the slot
+
+# B. Continue it from where it stopped (you still want it finished):
+worc rerun <task-id> --continue                 # resumes in place at the checkpoint
+
+# C. Just let it finish (restart the daemon — resume() picks it up first):
+worc watch                                      # or `up` in the shell
+```
+
+**Details / caveats:**
+
+- **Verify "nothing is running" before finalizing.** If a `worc run`/daemon really is still alive in another terminal, don't finalize under it — stop that first (`worc stop`). The `ls .worc/*.pid` + `ps` checks above are the tell: no PID file **and** no `worc`/`codex`/`claude` process means the `running` is stale.
+- **`finalize` needs an idle slot and no live daemon** — it runs terminal cleanup (`git checkout base`) in the shared clone. With the daemon already stopped this is satisfied. `--as failed` keeps the task rerun-eligible; `--as abandoned` records it as manually abandoned.
+- **Preview first if unsure:** `worc finalize <task-id> --as failed --dry-run` prints exactly what it will do (status transition, base checkout, ledger record) and writes nothing.
+- **`finalize` leaves an operator-owned branch alone** — it only checks out the base branch; it does not delete or reset `branch_mode: existing`/`current` branches shared across tasks.
+- **The fix is `finalize`/`rerun`/restart — never `stop`.** `stop` only manages the daemon; reaching for it here is the natural mistake this recipe exists to correct.

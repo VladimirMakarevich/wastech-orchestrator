@@ -249,9 +249,11 @@ On Windows use `where <command>`. WSL, PowerShell, a global npm install, and the
 ```bash
 python -m wastech_orchestrator run tasks/pending/task-001.md   # one task, end to end
 python -m wastech_orchestrator watch                           # resume + process pending tasks
-python -m wastech_orchestrator --log-level debug run <task>    # more verbose operator trace
+python -m wastech_orchestrator --log-level debug run PATH/TO/task.md  # more verbose operator trace
 python -m wastech_orchestrator status                          # active/latest persisted task
 ```
+
+`run` takes a **path to a task file** (`.md`/`.json`), not a task id — `run p7-04-compile-tool` fails with `No such file or directory`. This is the one command keyed by path: it starts a brand-new task from the file, so no id exists to look it up by yet. Everything that acts on an already-registered task — `rerun`, `status`, `finalize` — takes the task **id** instead.
 
 `watch` respects `orchestrator.auto_mode.enabled`: off (default) it processes/resumes one task and returns the working copy to `repo.base_branch`; on, it processes pending tasks sequentially, checking out the base branch between them. A `manual_action_required` outcome always blocks automatic continuation. Exit code: `0` done, `1` failed, `2` manual_action_required, `3` paused (a task soft-parked on a provider outage — see [provider outage behavior](#provider-outage-behavior)).
 

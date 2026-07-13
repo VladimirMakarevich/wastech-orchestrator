@@ -302,8 +302,8 @@ A **failed** task with a branch is finalized the same way (moved to `tasks/faile
 install      set up <repo>/.worc/ (config + guide), gitignore .worc/, run preflight
 preflight    check each allowed provider, the isolation policy, summarize the configured command sets, and validate every flow
 telegram-test send a real correlated Telegram prompt and wait for a reply
-run          process exactly one task end to end
-rerun        re-attempt a terminal task (fresh from base, or --continue from the flow checkpoint)
+run          process exactly one task end to end — arg is a PATH to the task file, not a task id
+rerun        re-attempt a terminal task by id (fresh from base, or --continue from the flow checkpoint)
 finalize     record + tidy a task you handled by hand (no pipeline / commit / PR)
 prs          list open, un-merged orchestrator PRs awaiting merge (read-only)
 merge-task   go-ahead to merge a reviewed PR (update branch w/ base, resolve conflicts, merge)
