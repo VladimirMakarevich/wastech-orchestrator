@@ -235,7 +235,7 @@ Key: [B28 FlowEngine](./blocks/B28-flow-engine.md) is the execution spine driven
 
 ### Top-Level Relationships (confirmed by code)
 
-- [B06 Orchestrator](./blocks/B06-orchestrator-pipeline.md) — wraps the engine: resolves the flow ([B29](./blocks/B29-flow-definition-and-validation.md)), builds the node services/inputs + supervisor, and calls `drive_flow`. Dependency assembly — `build_orchestrator` ([orchestrator.py:1974](../../src/wastech_orchestrator/core/orchestrator.py#L1974)).
+- [B06 Orchestrator](./blocks/B06-orchestrator-pipeline.md) — wraps the engine: resolves the flow ([B29](./blocks/B29-flow-definition-and-validation.md)), builds the node services/inputs + supervisor, and calls `drive_flow`. Dependency assembly — `build_orchestrator` ([composition.py:78](../../src/wastech_orchestrator/composition.py#L78)).
 - [B28 FlowEngine](./blocks/B28-flow-engine.md) — drives the node graph; [B30](./blocks/B30-flow-node-runners.md) runners are its only executors; transitions are engine-owned.
 - [B17 Router](./blocks/B17-agent-router-and-fallback.md) — sole caller of [B18 Providers](./blocks/B18-agent-providers.md).
 - [B18](./blocks/B18-agent-providers.md), [B22](./blocks/B22-git-manager.md), [B24](./blocks/B24-check-execution.md), [B32](./blocks/B32-flow-checkers.md) — all launch external processes through [B19](./blocks/B19-subprocess-runner.md).

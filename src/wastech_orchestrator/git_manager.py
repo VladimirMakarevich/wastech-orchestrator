@@ -1309,15 +1309,6 @@ class GitManager:
         """Denied-file secret values present in the clone, to redact from written diffs."""
         return read_denied_secrets(self._clone, self._config.security.denied_read_paths)
 
-    def cumulative_committed_diff(self) -> str:
-        """The diff of this task's committed work vs its base (``base...HEAD``, decomposed context).
-
-        The base is the per-task chain start when set (F32), else ``base_branch`` — so on a shared
-        chain branch this is only the current task's commits, not the whole unmerged chain."""
-        base = self._diff_base()
-        result = self._git("diff", f"{base}...HEAD")
-        return result.stdout
-
     def diff_stat(self) -> str:
         """``git diff --stat`` of the task change vs ``base_branch`` — files + line counts only.
 
@@ -1328,7 +1319,7 @@ class GitManager:
         changes)". The task branch is cut from ``base_branch`` and ``base_branch`` does not advance
         during a task, so this equals the task's net change (tracked files; same coverage as the
         redacted ``current.diff``). ``--stat`` carries only file paths and counts (never patch
-        content), so unlike :meth:`cumulative_committed_diff` there is nothing secret to redact.
+        content), so there is nothing secret to redact.
         """
         return self._git("diff", "--stat", self._diff_base()).stdout
 

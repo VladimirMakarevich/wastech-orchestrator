@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -120,8 +119,6 @@ from wastech_orchestrator.memory import (
     ensure_store,
 )
 from wastech_orchestrator.notify import (
-    AskKind,
-    AskResult,
     Notifier,
     NullNotifier,
 )
@@ -183,16 +180,6 @@ _LIFECYCLE_FOLDERS = ("pending", "done", "failed")
 
 def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
-
-
-# Map a task-level artifact filename to its registry ``kind``. Unknown names fall back to the
-# filename so registration is always meaningful even if a new artifact is added.
-_ARTIFACT_KINDS: dict[str, str] = {
-    "task.enriched.md": "enriched",
-    "plan.md": "plan",
-    "fixing-context.json": "fixing_context",
-    "rendered-prompt.md": "rendered_prompt",
-}
 
 
 @dataclass(frozen=True)
@@ -295,17 +282,6 @@ def _format_predecessor_floor(
         f"- Acceptance criteria:\n{criteria}\n"
         f"- Changed files:\n{files}"
     )
-
-
-_SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
-
-
-def _validate_session_id(raw: str) -> str | None:
-    return raw if _SESSION_ID_RE.fullmatch(raw) else None
-
-
-def _artifact_kind(name: str) -> str:
-    return _ARTIFACT_KINDS.get(name, name)
 
 
 def effective_skip(task: NormalizedTask) -> frozenset[str]:
@@ -3002,38 +2978,6 @@ class Orchestrator:
         except OSError:
             return None
 
-    # --- human-input guards (check-command approval) --------------------------------------
-
-    def _require_human_result(
-        self,
-        p: _Pipeline,
-        label: str,
-        kind: AskKind,
-        result: AskResult,
-    ) -> None:
-        failure = result.failure
-        if failure is None and result.answered:
-            if kind == "approval" and isinstance(result.approved, bool):
-                return
-            if kind == "question" and isinstance(result.text, str) and result.text.strip():
-                return
-            failure = "invalid_response"
-        elif failure is None:
-            failure = "invalid_response"
-        self._raise_human_failure(p, label, failure)
-
-    def _raise_human_failure(
-        self,
-        p: _Pipeline,
-        label: str,
-        failure: str,
-    ) -> None:
-        self._log(p.task.id).warning(
-            "human input failed",
-            extra={"label": label, "failure": failure},
-        )
-        raise ManualActionRequired(f"{label} human input failed: {failure}")
-
     def _check_sets(self, p: _Pipeline) -> tuple[ResolvedCheckSet, ...]:
         """The normalized command sets; recompute from config if not resolved yet (e.g. on resume).
 
@@ -3203,9 +3147,6 @@ class Orchestrator:
         with self._store.transaction() as conn:
             assert_transition(src, dst)
             self._store.set_status(task_id, dst, conn)
-
-    def _save_counters(self, p: _Pipeline) -> None:
-        self._store.save_counters(p.task.id, p.counters)
 
     def _observe[T](
         self,

@@ -48,7 +48,7 @@ All 32 functional blocks (B01–B32) carry the status `documented`, (re)built fr
 ### B06 — Orchestrator Pipeline
 
 - **Purpose:** the single-slot wrapper around the flow engine: gate → slot → flow resolution → isolation/check preflight (normalize command sets) → branch → drive the engine in phases → terminal handling (cleanup, ledger, auto-merge — skipped on an incomplete check gate); `rerun`/`finalize`/`resume`.
-- **Entry points:** `orchestrator.py` `Orchestrator`, `run_task` ([:342](../../src/wastech_orchestrator/core/orchestrator.py#L342)), `_drive_via_engine`/`_engine_run`/`_run_phases`, `resume`, `build_orchestrator` ([:1974](../../src/wastech_orchestrator/core/orchestrator.py#L1974)).
+- **Entry points:** `orchestrator.py` `Orchestrator`, `run_task` ([:342](../../src/wastech_orchestrator/core/orchestrator.py#L342)), `_drive_via_engine`/`_engine_run`/`_run_phases`, `resume`, `build_orchestrator` ([composition.py:78](../../src/wastech_orchestrator/composition.py#L78)).
 - **Dependencies:** B28/B30/B31 (engine, runners, supervisor), B16, B07, B08–B15, B17, B22, B23/B24, B26.
 - **Status:** `documented` · [file](./blocks/B06-orchestrator-pipeline.md)
 

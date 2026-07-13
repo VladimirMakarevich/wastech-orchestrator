@@ -112,7 +112,7 @@ A subscription/session limit does **not** always reach stderr, though: the Claud
 ## Dependencies
 
 - **Uses:** [B19](B19-subprocess-runner.md) (`run_process` — the safe launcher), [B20](B20-artifact-layout.md) (`create_attempt_dir` / `write_request_artifact` / `write_result_artifact`), [B21](B21-secret-redaction.md) (`redact_text` / `redact_mapping` / `read_denied_secrets` / `normalized_session_id`), [B25](B25-security-policy.md) (`build_child_env`, `find_forbidden_args`, `FORBIDDEN_SANDBOX_VALUE`), [B27](B27-observability.md) (`run_with_heartbeat`, `bind`), [B05](B05-configuration.md) (`ProviderConfig`, `SecurityConfig`).
-- **Used by:** [B17](B17-agent-router-and-fallback.md) (the sole caller of `run`, via the `AgentProvider` map it holds), [B25](B25-security-policy.md) (imports `isolation_reasons` for the isolation preflight), [B23](B23-check-discovery.md) and [B01](B01-cli-and-operator-commands.md) (`preflight`). Instances are constructed by `build_providers` ([orchestrator.py:1944-1971](../../../src/wastech_orchestrator/core/orchestrator.py#L1944)). The raw `session_id` returned in-memory is persisted by [B07](B07-state-machine-and-store.md) into `editing_lineage`.
+- **Used by:** [B17](B17-agent-router-and-fallback.md) (the sole caller of `run`, via the `AgentProvider` map it holds), [B25](B25-security-policy.md) (imports `isolation_reasons` for the isolation preflight), [B23](B23-check-discovery.md) and [B01](B01-cli-and-operator-commands.md) (`preflight`). Instances are constructed by `build_providers` ([composition.py:40](../../../src/wastech_orchestrator/composition.py#L40)). The raw `session_id` returned in-memory is persisted by [B07](B07-state-machine-and-store.md) into `editing_lineage`.
 
 ## Tests
 
