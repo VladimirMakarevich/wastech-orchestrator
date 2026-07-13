@@ -9,6 +9,8 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
+import pytest
+
 from wastech_orchestrator import cli
 from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.core.state_machine import Status
@@ -107,10 +109,13 @@ def test_build_top_snapshot_empty_without_store(
 
 
 def test_build_top_snapshot_active_parked_gate_queue_recent(
-    make_git_config: Callable[..., OrchestratorConfig], tmp_path: Path
+    make_git_config: Callable[..., OrchestratorConfig],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clone = tmp_path / "clone"
     config = make_git_config(clone)
+    monkeypatch.setattr(cli, "_daemon_alive", lambda _c: True)  # live daemon → B-lite "(paused)"
     store = _seed_store(config)
     # An active RUNNING task that is parked (blocked_since) at a flow checkpoint node.
     store.insert_task(TaskRow(task_id="t-active", title="Active", status=Status.RUNNING))
@@ -152,10 +157,13 @@ def test_build_top_snapshot_active_parked_gate_queue_recent(
 
 
 def test_build_top_snapshot_unparked_active_has_no_gate(
-    make_git_config: Callable[..., OrchestratorConfig], tmp_path: Path
+    make_git_config: Callable[..., OrchestratorConfig],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clone = tmp_path / "clone"
     config = make_git_config(clone)
+    monkeypatch.setattr(cli, "_daemon_alive", lambda _c: True)  # live daemon → plain "running"
     store = _seed_store(config)
     store.insert_task(TaskRow(task_id="t1", title="Plain", status=Status.RUNNING))
     snap = cli.build_top_snapshot(
@@ -166,6 +174,26 @@ def test_build_top_snapshot_unparked_active_has_no_gate(
     assert snap.active[0].parked_since is None
     assert snap.active[0].gate_pending is False
     assert snap.active[0].status_label == "running"
+
+
+def test_build_top_snapshot_running_no_daemon_is_parked(
+    make_git_config: Callable[..., OrchestratorConfig],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A RUNNING row with no live daemon reads as "parked (no daemon)" — dominating the (paused)
+    # marker, since a task cannot be actively paused by a daemon that is not running.
+    clone = tmp_path / "clone"
+    config = make_git_config(clone)
+    monkeypatch.setattr(cli, "_daemon_alive", lambda _c: False)
+    store = _seed_store(config)
+    store.insert_task(TaskRow(task_id="t1", title="Plain", status=Status.RUNNING))
+    store.update_task("t1", blocked_since="2026-06-28T00:00:00+00:00")  # even a B-lite park...
+    snap = cli.build_top_snapshot(
+        config, store, selector="default", log_path=None, log_tail_lines=5, recent_limit=5
+    )
+    store.close()
+    assert snap.active[0].status_label == "parked (no daemon)"  # ...loses to "no daemon"
 
 
 # --- render_top (pure) ------------------------------------------------------------------

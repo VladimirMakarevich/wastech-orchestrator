@@ -1101,6 +1101,58 @@ def has_active_task(config: OrchestratorConfig) -> bool:
         store.close()
 
 
+def _daemon_alive(config: OrchestratorConfig) -> bool:
+    """Read-only: is a live ``watch`` daemon recorded for this worc home (PID file present + alive)?
+
+    Wraps the standard liveness idiom used across the mutating commands. On Windows an unrelated PID
+    cannot be probed, so a present PID file counts as alive; a clean ``stop`` clears it either way.
+    """
+    return (
+        process_control.running_daemon_pid(process_control.pid_file_path(worc_home_for(config)))
+        is not None
+    )
+
+
+def _display_status(row: TaskRow, *, daemon_alive: bool) -> str:
+    """The human status label for a task row (the single source of truth for all read-only views).
+
+    A ``running`` row with no live daemon is parked at its checkpoint, awaiting resume — not
+    executing — so it reads as ``parked (no daemon)``. This dominates the B-lite ``(paused)``
+    marker, which only makes sense while the daemon is alive and waiting out a provider outage.
+    """
+    if row.status is Status.RUNNING and not daemon_alive:
+        return "parked (no daemon)"
+    if row.status is Status.RUNNING and row.blocked_since:
+        return f"{row.status.value} (paused)"
+    return row.status.value
+
+
+def _parked_slot_note(config: OrchestratorConfig) -> str | None:
+    """Actionable note when a ``running`` task still holds the slot after a stop (else ``None``).
+
+    Read-only, reopening ``state.db`` like :func:`has_active_task`. The task is parked at its
+    checkpoint (the recovery invariant), not executing — so point the operator at the levers that
+    actually clear or continue it, rather than leaving a silent, queue-blocking ``running`` row.
+    """
+    db_path = Path(worc_home_for(config)) / "state.db"
+    if not db_path.is_file():
+        return None
+    store = StateStore.open_readonly(db_path)
+    try:
+        parked = next((t for t in store.find_active_tasks() if t.status is Status.RUNNING), None)
+        node = store.get_flow_checkpoint(parked.task_id)[0] if parked is not None else None
+    finally:
+        store.close()
+    if parked is None:
+        return None
+    where = f" (parked at node {node})" if node else " (parked)"
+    return (
+        f"stop: note: task {parked.task_id} is still running{where}, holding the processing slot; "
+        f"it resumes on the next `up`/`watch`. To continue it now: `rerun {parked.task_id} "
+        f"--continue`; to close it: `finalize {parked.task_id} --as failed`"
+    )
+
+
 def _configure_runtime_logging(args: argparse.Namespace) -> None:
     # The flag wins; absent (default None) we set up at INFO and let load_config_for re-apply the
     # persisted logging.level once the config is known.
@@ -2638,6 +2690,9 @@ def cmd_stop(args: argparse.Namespace) -> int:
         )
     else:
         print(f"stop: watcher {outcome.pid} stopped")
+    note = _parked_slot_note(config)
+    if note:
+        print(note)
     return 0
 
 
@@ -2724,12 +2779,13 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 1 if args.task_id else 0
 
     now = datetime.now(UTC)
+    daemon_alive = _daemon_alive(config)
     for index, task in enumerate(tasks):
         if index:
             print()
         print(f"task_id={task.task_id}")
         print(f"title={task.title}")
-        print(f"status={task.status.value}")
+        print(f"status={_display_status(task, daemon_alive=daemon_alive)}")
         node = current_nodes.get(task.task_id)
         if node:
             print(f"node={node}")  # the flow checkpoint: where the engine will resume
@@ -2753,17 +2809,13 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def _task_entry(row: TaskRow) -> dict[str, str | None]:
-    # A RUNNING task with a blocked_since marker is parked on a provider outage (B-lite), not
-    # actively executing — surface that so it does not read as a stuck/hung run.
-    status = (
-        f"{row.status.value} (paused)"
-        if row.status is Status.RUNNING and row.blocked_since
-        else row.status.value
-    )
+def _task_entry(row: TaskRow, *, daemon_alive: bool = True) -> dict[str, str | None]:
+    # Status label via the shared renderer: a RUNNING row shows "parked (no daemon)" with no live
+    # daemon, else "(paused)" on a B-lite provider-outage park, else the plain status. The
+    # daemon_alive default keeps terminal rows (recent/all) and any direct caller unchanged.
     return {
         "task_id": row.task_id,
-        "status": status,
+        "status": _display_status(row, daemon_alive=daemon_alive),
         "title": row.title,
         "branch": row.branch,
     }
@@ -2818,7 +2870,7 @@ class _ActiveView(NamedTuple):
     """One active (slot-owning) task, as the read-only monitor shows it."""
 
     task_id: str
-    status_label: str  # "running" or "running (paused)" (B-lite park)
+    status_label: str  # "running", "running (paused)" (B-lite park), or "parked (no daemon)"
     title: str | None
     branch: str | None
     current_node: str | None  # flow checkpoint: where the engine will resume
@@ -2886,6 +2938,7 @@ def build_top_snapshot(
     ``store`` is ``None`` when no database exists yet (fresh install), yielding empty task sections.
     """
     worc_home = worc_home_for(config)
+    daemon_alive = _daemon_alive(config)
     active: list[_ActiveView] = []
     for row in store.find_active_tasks() if store is not None else []:
         try:
@@ -2901,7 +2954,8 @@ def build_top_snapshot(
         active.append(
             _ActiveView(
                 task_id=row.task_id,
-                status_label=_task_entry(row)["status"] or row.status.value,
+                status_label=_task_entry(row, daemon_alive=daemon_alive)["status"]
+                or row.status.value,
                 title=row.title,
                 branch=row.branch,
                 current_node=current_node,
@@ -3122,9 +3176,12 @@ def _list_sections(
         _pending_entry(path, _scan_pending_meta(path).task_id)
         for path in select_pending(pending_dir(config))
     ]
+    # Only RUNNING rows are relabelled by daemon liveness; probe once and pass it to the sections
+    # that can contain a RUNNING row (active/all). recent/pending are terminal/file-only.
+    daemon_alive = _daemon_alive(config)
     if args.all:
         rows = store.all_tasks() if store else []
-        return [("all", [_task_entry(r) for r in rows])]
+        return [("all", [_task_entry(r, daemon_alive=daemon_alive) for r in rows])]
     if args.pending:
         return [("pending", pending)]
     if args.recent is not None:
@@ -3133,7 +3190,7 @@ def _list_sections(
     active = store.find_active_tasks() if store else []
     recent = store.recent_tasks(_LIST_RECENT_DEFAULT) if store else []
     return [
-        ("active", [_task_entry(r) for r in active]),
+        ("active", [_task_entry(r, daemon_alive=daemon_alive) for r in active]),
         ("pending", pending),
         ("recent", [_task_entry(r) for r in recent]),
     ]

@@ -1,6 +1,6 @@
 # A stopped task stays `running` and silently blocks the slot — no operator signal, `stop` can't clear it
 
-Status: **proposed** Date: 2026-07-13 Owner: Vladimir Makarevich
+Status: **implemented** (A + B + C) Date: 2026-07-13 Owner: Vladimir Makarevich
 
 This is a design record for an operator-visibility gap found in a live `wastech-mdlint` session. The operator ran `worc shell` → `up` → the daemon reached the `planning` node of `p7-05-integration-tests-docs-2`, then **stopped it cleanly with `down`**. They then tried to start a different task and hit _"a task is active"_; `worc stop --force-full` reported _"no running watcher (no PID file)"_, yet `worc status` still showed the task as `running` (`node=planning`, `elapsed_since_update ≈ 6 min`). Nothing was actually running — no daemon, no agent process — but the task row held the single processing slot and no command surfaced why or how to clear it. The reconciliation tool exists (`finalize` cleared it in one shot), but the operator had no way to know that from the messages they saw.
 
@@ -27,13 +27,13 @@ This is adjacent to but distinct from the two open items it sits between: [shell
 
 ## Decision
 
-_To be decided — options below; recommendation first. They are independent and composable._
+**Implemented A + B + C** (all three, independent and composable). A prints the recovery note at stop time (`cmd_stop`), B labels a running-but-no-daemon task `parked (no daemon)` in `status`/`top`/`list`, and C names the blocking task (id + node) in the `SlotBusyError` refusal. PID-file absence is the "no daemon" signal (first cut); one A message covers soft and `--force-full`; A attaches to `stop`/`down` only (not `restart`, which resumes). See the recovery recipe in [how-to.md](../how-to.md) §3.
+
+_Original options below (recommendation first)._
 
 **Option A (recommended): make stop tell the operator the slot is still held.** When `down`/`stop`/`restart` stops the daemon (or finds none) **and** a task is still active (`has_active_task`), print an explicit, actionable line — e.g. _"note: task `<id>` is still `running` (parked at `<node>`), holding the processing slot. It will resume on the next `up`/`watch`; to continue it now run `rerun <id> --continue`, or to close it run `finalize <id> --as failed`."_ This is the single highest-value fix: it turns the dead-end into a signposted decision at the exact moment the operator stops.
 
 **Option B: label a parked task distinctly in the read-only views.** In `status`/`top`/`list`, when a row is `running` but there is no live daemon PID (and, where cheap, no recorded agent process), show `parked (no daemon)` (or `running (no daemon — resumes on next watch)`) instead of a bare `running`. Removes the "it says running but nothing runs" confusion at a glance. Pairs naturally with A.
-
-**Option C: surface the blocker in the `SlotBusyError` message.** When `run`/the scheduler refuses because the slot is held, name the holder and its state — _"a task is active: `<id>` (parked at `<node>`, no daemon). Resume it (`up`/`rerun --continue`) or close it (`finalize`) before starting another."_ — instead of today's bare _"a task is active"_.
 
 Recommendation: **A + B** — A signposts the recovery at stop time, B keeps the state honest in every monitor afterward. C is a cheap bonus wherever the refusal is raised.
 

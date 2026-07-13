@@ -12,8 +12,23 @@ import pytest
 
 from wastech_orchestrator import cli, process_control
 from wastech_orchestrator.config.schema import OrchestratorConfig
+from wastech_orchestrator.core.state_machine import Status
+from wastech_orchestrator.state_store import StateStore, TaskRow
 
 _ConfigFactory = Callable[..., OrchestratorConfig]
+
+
+def _seed_running(config: OrchestratorConfig, task_id: str, node: str | None) -> None:
+    """Seed a real state.db with a single RUNNING task parked at ``node`` (what `stop` leaves)."""
+    db = cli.worc_home_for(config) / "state.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    store = StateStore.open(db)
+    store.insert_task(TaskRow(task_id=task_id, title="t", status=Status.RUNNING))
+    if node is not None:
+        store.save_flow_checkpoint(
+            task_id, current_node=node, counters_json="{}", flow_fingerprint="fp", fix_iterations=0
+        )
+    store.close()
 
 
 def _resolve(
@@ -259,3 +274,33 @@ def test_cmd_stop_reports_windows_degrade(
     monkeypatch.setattr(cli.process_control, "stop_process", lambda _p, **_k: degraded)
     cli.cmd_stop(cli.build_parser().parse_args(["stop", "--force-full"]))
     assert "unavailable on Windows" in capsys.readouterr().out
+
+
+# --- the parked-slot note (ADR: signpost the recovery at stop time) ---------------------
+
+
+def test_cmd_stop_notes_parked_slot_after_stopping_daemon(
+    monkeypatch: pytest.MonkeyPatch, make_git_config: _ConfigFactory, tmp_path, capsys
+) -> None:
+    # After the daemon stops, a still-RUNNING task holds the slot (parked at its checkpoint). The
+    # note must name it and the recovery levers, turning the dead-end into a signposted choice.
+    config = make_git_config(tmp_path / "clone")
+    _seed_running(config, "task-parked", node="planning")
+    _patch_stop(monkeypatch, config, active=True, tty=False)
+    rc = cli.cmd_stop(cli.build_parser().parse_args(["stop", "--force"]))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "task-parked is still running (parked at node planning)" in out
+    assert "rerun task-parked --continue" in out
+    assert "finalize task-parked --as failed" in out
+
+
+def test_cmd_stop_no_note_when_no_active_task(
+    monkeypatch: pytest.MonkeyPatch, make_git_config: _ConfigFactory, tmp_path, capsys
+) -> None:
+    # No DB / no RUNNING task → nothing holds the slot → no note (the common idle stop).
+    config = make_git_config(tmp_path / "clone")
+    _patch_stop(monkeypatch, config, active=False, tty=False)
+    rc = cli.cmd_stop(cli.build_parser().parse_args(["stop"]))
+    assert rc == 0
+    assert "holding the processing slot" not in capsys.readouterr().out

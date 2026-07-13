@@ -515,6 +515,17 @@ class Orchestrator:
             return self._reject(task_file, branch_mode_reject)
 
         if not self.acquire_slot(task.id):
+            # Name the blocker (id + checkpoint node) so the refusal points at a resumable task, not
+            # a live run — the operator can then finalize/continue it instead of guessing.
+            blocking = next(
+                (t for t in self._store.find_active_tasks() if t.task_id != task.id), None
+            )
+            if blocking is not None:
+                node = self._store.get_flow_checkpoint(blocking.task_id)[0]
+                where = f" at node {node}" if node else ""
+                raise SlotBusyError(
+                    f"another task is active: {blocking.task_id}{where}; {task.id} must wait"
+                )
             raise SlotBusyError(f"another task is active; {task.id} must wait")
 
         self._register_task(task, task_file, result)

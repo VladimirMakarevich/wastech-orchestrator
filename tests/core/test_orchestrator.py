@@ -1799,9 +1799,17 @@ def test_single_active_slot_blocks(git_repo, make_git_config, tmp_path: Path) ->
     orch, store, _, _ = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
     )
-    # Pre-seed another active task occupying the slot.
+    # Pre-seed another active task occupying the slot, parked at a checkpoint node.
     store.insert_task(TaskRow(task_id="other", title="o", status=Status.RUNNING))
-    with pytest.raises(SlotBusyError):
+    store.save_flow_checkpoint(
+        "other",
+        current_node="planning",
+        counters_json="{}",
+        flow_fingerprint="fp",
+        fix_iterations=0,
+    )
+    # The refusal names the blocker (id + node) so it reads as "resumable task", not "live run".
+    with pytest.raises(SlotBusyError, match=r"another task is active: other at node planning"):
         orch.run_task(_complete_task(tmp_path, "task-008"))
 
 

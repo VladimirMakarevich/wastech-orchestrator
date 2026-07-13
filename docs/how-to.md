@@ -69,17 +69,17 @@ up                                 # optional: resume serving the queue
 - Get the exact id with `worc list --format ids --scope rerun` (lists only the `failed` / `manual_action_required` ids a rerun accepts).
 - **Avoid the cause:** don't edit `.worc/flows/` while the daemon is serving the queue — stop it (`down` / `worc stop`), change the flows, then start again, so a task can't be picked up mid-edit.
 
-## 3. A task was stopped but `status` still shows `running` — free the stuck slot
+## 3. A task was stopped but still holds the slot (`parked (no daemon)`) — free the stuck slot
 
-**Problem:** You stopped a run mid-task (a `down` in `worc shell`, a `worc stop`, a `--force-full`, or the process just died), and now `worc status` keeps showing the task as `running` even though nothing is executing. `worc stop --force-full` says _"no running watcher (no PID file)"_, and starting anything else fails with _"a task is active"_. The queue is jammed on a task that isn't actually running.
+**Problem:** You stopped a run mid-task (a `down` in `worc shell`, a `worc stop`, a `--force-full`, or the process just died), and now the task still owns the one processing slot even though nothing is executing, so starting anything else fails with _"a task is active"_. `worc stop`/`down` prints a note about this and points at the fix; `worc status`/`top`/`list` show the task as **`parked (no daemon)`**; and a new `worc run` names the blocking task in its refusal. If the process simply died (no clean `stop`), you may not have seen the note — the `parked (no daemon)` label is the tell.
 
-**Why this happens:** `stop`/`down`/`--force-full` stop the **daemon**, not the task. By the recovery model, the single unfinished task is deliberately left `running` at its checkpoint so the _next_ `up`/`watch` can resume it — so a `running` row after a stop means "parked, awaiting resume", not "executing now". That parked row still holds the one processing slot, which is why a new task is refused. `stop` has no authority over a task row, so it can never clear that `running` — it's the wrong tool, even though the message makes it look like the right one.
+**Why this happens:** `stop`/`down`/`--force-full` stop the **daemon**, not the task. By the recovery model, the single unfinished task is deliberately left `running` at its checkpoint so the _next_ `up`/`watch` can resume it — so a running row with no live daemon means "parked, awaiting resume", not "executing now" (which is exactly what `parked (no daemon)` reports). That parked row still holds the one processing slot, which is why a new task is refused. `stop` has no authority over a task row, so it can never clear it — it's the wrong tool for that, even though it now tells you which tool is right.
 
 **Solution — first confirm nothing is actually running, then pick one of three:**
 
 ```bash
 # 1. Confirm there's no live daemon and no agent process (from the target repo):
-worc status                                   # note the stuck task id + node
+worc status                                   # shows `parked (no daemon)` + the stuck task id + node
 ls .worc/*.pid 2>/dev/null                     # no output = no daemon
 ps aux | grep -iE "wastech|worc|codex|claude" | grep -v grep   # empty = no agent running
 ```

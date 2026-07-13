@@ -595,19 +595,8 @@ def test_in_repo_commit_stores_task_and_summary_not_logs(
     assert (git_repo.clone / ".worc" / "logs" / "task-300" / "summary.json").exists()
 
 
-def test_cmd_status_reports_active_task(
-    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    project = tmp_path / "project"
-    project.mkdir()
-    config = _write_cli_config(
-        project,
-        git_repo.clone,
-        claude_cmd="claude",
-        codex_cmd="codex",
-    )
-    db_path = git_repo.clone / ".worc" / "state.db"
-    store = StateStore.open(db_path)
+def _seed_active_status_db(clone: Path) -> None:
+    store = StateStore.open(clone / ".worc" / "state.db")
     store.insert_task(
         TaskRow(
             task_id="task-active",
@@ -628,6 +617,21 @@ def test_cmd_status_reports_active_task(
     )
     store.close()
 
+
+def test_cmd_status_reports_active_task(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(
+        project,
+        git_repo.clone,
+        claude_cmd="claude",
+        codex_cmd="codex",
+    )
+    _seed_active_status_db(git_repo.clone)
+    monkeypatch.setattr(cli, "_daemon_alive", lambda _c: True)  # daemon live → plain "running"
+
     code = cli.main(["--config", str(config), "status"])
 
     assert code == 0
@@ -637,6 +641,25 @@ def test_cmd_status_reports_active_task(
     assert "node=implementation" in output
     assert "branch=worc/task-active-active-task" in output
     assert "fix_iterations=2" in output
+
+
+def test_cmd_status_running_without_daemon_shows_parked(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A RUNNING row with no live daemon is parked at its checkpoint, awaiting resume — status must
+    # say so instead of a bare "running" that reads as "executing now" (the ADR's core gap).
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    _seed_active_status_db(git_repo.clone)
+    monkeypatch.setattr(cli, "_daemon_alive", lambda _c: False)
+
+    code = cli.main(["--config", str(config), "status"])
+
+    assert code == 0
+    output = capsys.readouterr().out
+    assert "status=parked (no daemon)" in output
+    assert "node=implementation" in output  # the resume checkpoint still shows
 
 
 def _seed_list_db(clone: Path, rows: list[TaskRow]) -> None:
