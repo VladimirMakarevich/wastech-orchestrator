@@ -32,3 +32,39 @@ worc rerun <task-id> --continue --dry-run
 - Each `--continue` attempt appends a new ledger record linked to the failed one, so the retry history stays visible.
 
 See [Operations → Re-attempting a terminal task](operations.md#re-attempting-a-terminal-task-rerun) for the full set of `rerun` options, including the fresh, from-scratch mode.
+
+## 2. A task failed with an error — how to re-run it
+
+**Problem:** `worc status`/`worc list` shows a task as `failed` (or `manual_action_required`), and you want to re-run it. The cause can be anything — a crashed provider, a rate limit, a missing tool, a real quality issue, or an **environmental/transient** problem (for example, you edited the flows while the daemon was serving the queue, so the flow file was momentarily absent when the daemon picked the task up: `reason=unknown task_type 'implementation': no flow file implementation.yaml … Run `worc install` …`). Once the underlying cause is fixed, you re-run — no need to recreate the task file.
+
+**First, decide which mode you need — fresh vs. `--continue`:**
+
+- **Fresh** (default, `worc rerun <task-id>`): re-attempts the task **from base** as if new — resets the branch to base and runs the whole flow again. Use this when the run **never produced usable work** — it died at pickup/flow-load or in an early stage (`refinement`/`planning`), or you simply want a clean attempt. A transient failure like the flow-drift case above is a fresh rerun: nothing was built, and the flow is back on disk now.
+- **`--continue`**: resumes **in place** — reuses the existing branch and re-enters at the stage that failed. Use this when the run **already produced code** you don't want to lose. This is section 1 above; see it for the dirty-tree and fix-budget details.
+
+Not sure which? Preview without touching anything: `worc rerun <task-id> --dry-run` (add `--continue` to preview that mode).
+
+**Solution (normal, non-shell mode):**
+
+```bash
+worc stop                          # rerun refuses while the watch daemon owns the clone; stop it first (a no-op if none runs)
+worc rerun <task-id> --dry-run     # optional: preview the planned reconciliation, writes nothing
+worc rerun <task-id>               # fresh re-attempt; prompts y/N interactively (add -y to skip)
+```
+
+**Solution (inside `worc shell`):**
+
+```
+down                               # stop the daemon — rerun is slot-guarded and refuses while it is up
+rerun <task-id> --yes              # --yes is REQUIRED here: shell always runs rerun non-interactively, so an unconfirmed rerun is refused
+up                                 # optional: resume serving the queue
+```
+
+**Details / caveats:**
+
+- **Stop the daemon first.** `rerun` drives the pipeline directly in the shared clone, so it refuses while a live `watch` daemon owns it (`rerun: the watch daemon is running (pid …); stop it first`). Use `worc stop` (non-shell) or `down` (shell).
+- **In `worc shell`, always pass `--yes`.** The console runs `rerun` non-interactively (a confirmation prompt would fight the REPL's own stdin reader), so a bare `rerun <task-id>` is refused with _"refusing without confirmation (non-interactive)"_. The `finalize` and `merge-task` verbs are slot-guarded the same way.
+- **You don't move the task file.** `rerun` finds it automatically wherever it currently lives (`tasks/pending/`, `tasks/done/`, or `tasks/failed/`); leave the failed file in `tasks/failed/`.
+- **Run it from the target repo** (the one holding `.worc/`), not from the orchestrator repo. `worc` is the short alias for `wastech-orchestrator` — the commands are identical.
+- Get the exact id with `worc list --format ids --scope rerun` (lists only the `failed` / `manual_action_required` ids a rerun accepts).
+- **Avoid the cause:** don't edit `.worc/flows/` while the daemon is serving the queue — stop it (`down` / `worc stop`), change the flows, then start again, so a task can't be picked up mid-edit.
