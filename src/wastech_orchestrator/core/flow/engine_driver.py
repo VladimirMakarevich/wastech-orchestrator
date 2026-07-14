@@ -20,6 +20,7 @@ from types import MappingProxyType
 
 from wastech_orchestrator.config.schema import AgentsConfig
 from wastech_orchestrator.core.flow.engine import (
+    CancellationCheck,
     DiffFingerprint,
     EngineInternalError,
     FactResolver,
@@ -123,6 +124,7 @@ def drive_flow(
     facts: FactResolver,
     agents: AgentsConfig,
     task_id: str,
+    is_cancelled: CancellationCheck = lambda: False,
     subtask_order: int | None = None,
     post_node: PostNodeHook | None = None,
     # EXPERIMENTAL(no-work-infra): feeds the engine's no-effective-work stall guard; None => inert.
@@ -147,6 +149,7 @@ def drive_flow(
         facts=facts,
         agents=agents,
         task_id=task_id,
+        is_cancelled=is_cancelled,
         subtask_order=subtask_order,
         post_node=post_node,
         diff_fingerprint=diff_fingerprint,

@@ -153,20 +153,21 @@ def _add_stop_force_flags(parser: argparse.ArgumentParser) -> None:
     """The stop-ladder force flags shared by ``stop`` and ``restart`` (mutually exclusive).
 
     No flag → idle stops with no prompt; a busy daemon refuses (interactive: confirm ``YES``).
-    ``--force`` → soft stop (finish the current step). ``--force-full`` → hard stop: kill the active
-    agent's process group now (POSIX; Windows degrades to soft). See ``_resolve_stop_level``.
+    ``--force`` → soft stop at the next flow-node boundary (with timeout escalation).
+    ``--force-full`` → hard stop: kill the active process tree/group now. See
+    ``_resolve_stop_level``.
     """
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
         "--force",
         action="store_true",
-        help="stop even while a task is active: soft (finish the current step, then exit)",
+        help="stop even while a task is active: soft (finish the current flow node, then exit)",
     )
     group.add_argument(
         "--force-full",
         dest="force_full",
         action="store_true",
-        help="hard stop: kill the active agent's process group now (POSIX; Windows: soft)",
+        help="hard stop now: kill the daemon and active agent (POSIX groups / Windows tree)",
     )
     parser.add_argument(
         "--non-interactive",
@@ -1578,12 +1579,11 @@ def watch_loop(
     ``poll_interval <= 0`` runs exactly one tick (single pass, no sleep). ``max_iterations`` bounds
     the loop for tests; in production the loop runs until interrupted.
 
-    A stop is honored only *between* ticks, so an in-flight task run finishes its current stage
-    rather than being interrupted. Two channels are checked: a ``stop_event`` (set by a ``SIGTERM``
-    handler — POSIX) cuts the poll sleep short for a prompt shutdown, and a ``stop_file`` (the
-    cross-platform sentinel ``stop`` writes) is polled at each tick so the daemon stops even where
-    ``SIGTERM`` is undeliverable (Windows). The ``sleep_fn`` path is kept for callers without an
-    event (existing tests).
+    Two stop channels are checked around ticks and during idle sleep: a ``stop_event`` (set by a
+    POSIX ``SIGTERM`` handler) and the cross-platform ``stop_file`` sentinel. During an active tick,
+    ``cmd_watch`` injects the same predicate into the FlowEngine, which parks before the next node;
+    this loop then sees the still-present channel and exits. The ``sleep_fn`` path is kept for
+    callers without an event (existing tests).
     """
 
     def _stop_requested() -> bool:
@@ -2661,11 +2661,11 @@ def cmd_watch(args: argparse.Namespace) -> int:
     processes pending, then sleeps. ``0`` is a single pass. Stop the daemon with Ctrl-C, or from
     another shell with ``stop`` / ``restart``.
 
-    The looping daemon writes ``<artifacts_root>/orchestrator.pid`` and shuts down gracefully
-    between ticks when ``stop``/``restart`` ask it to: via a ``SIGTERM`` handler on POSIX and via an
-    ``orchestrator.stop`` sentinel file it polls each tick (the cross-platform channel — ``SIGTERM``
-    is undeliverable cross-process on Windows). It refuses to start when another watcher is already
-    live for the same artifact root, and removes its PID file on exit (how ``stop`` confirms it).
+    The looping daemon writes ``<artifacts_root>/orchestrator.pid`` and shuts down cooperatively at
+    the next flow-node boundary when ``stop``/``restart`` ask it to: via a ``SIGTERM``-set event on
+    POSIX and an ``orchestrator.stop`` sentinel everywhere. It refuses to start when another
+    watcher is recorded for the same artifact root, and removes its PID file on exit (how ``stop``
+    confirms it).
     """
     _configure_runtime_logging(args)
     config = load_config_for(args)
@@ -2804,7 +2804,7 @@ def _resolve_stop_level(
         return _StopDecision(proceed=True, level="soft")
     if interactive:
         if _confirm_yes(
-            "a task is active. YES = soft stop (lets the current step finish, then exits); "
+            "a task is active. YES = soft stop (lets the current flow node finish, then exits); "
             "to interrupt the running agent NOW use --force-full: "
         ):
             return _StopDecision(proceed=True, level="soft")
@@ -2812,7 +2812,7 @@ def _resolve_stop_level(
     return _StopDecision(
         proceed=False,
         message=(
-            "stop: a task is active; pass --force (soft: finishes the current step) or "
+            "stop: a task is active; pass --force (soft: finishes the current flow node) or "
             "--force-full (hard: interrupts the running agent now and reaps its subtree)"
         ),
         exit_code=1,
@@ -2857,24 +2857,39 @@ def _gated_stop(
 def _timed_out_stop_message(pid: int | None, timeout: float, *, is_windows: bool) -> str:
     """Operator message for a soft stop that did not confirm shutdown within ``timeout``.
 
-    Only reachable on Windows in practice (POSIX escalates to SIGKILL → the ``killed`` branch). The
-    stop-file is now left in place, so a merely-busy daemon still stops on its next tick; on Windows
-    we also print the concrete ``taskkill`` command for a truly-wedged process (its PID file is
-    already cleared, so the CLI can no longer target it).
+    Only reachable when no hard-kill seam was available: normal CLI wiring escalates POSIX to
+    SIGKILL and Windows to ``taskkill /F /T``. The PID and stop-file remain intact, so the operator
+    can retry the hard rung without losing the target and a second watcher cannot start.
     """
-    base = f"stop: watcher {pid} did not confirm shutdown in {timeout:g}s; cleared its PID file"
+    base = f"stop: watcher {pid} did not confirm shutdown in {timeout:g}s; kept its PID file"
     if is_windows:
-        return (
-            f"{base}. It will stop after its current tick; if it is still running, "
-            f"stop it now with: taskkill /F /PID {pid}"
-        )
+        return f"{base}; retry with --force-full to kill its process tree"
     return base
+
+
+def _has_unconfirmed_runtime_handles(
+    config: OrchestratorConfig, outcome: process_control.StopOutcome
+) -> bool:
+    """Whether a PID-less stop preserved handles that make shutdown ambiguous.
+
+    POSIX reaps stale handles when no PID is recorded. On Windows they deliberately survive because
+    the missing PID may be the residue of an older timed-out stop while the watcher is still alive.
+    Treat either handle as unconfirmed so ``restart`` never clears the sentinel by starting a second
+    watcher.
+    """
+    if outcome.found:
+        return False
+    root = worc_home_for(config)
+    return (
+        process_control.stop_file_path(root).exists()
+        or process_control.children_file_path(root).exists()
+    )
 
 
 def cmd_stop(args: argparse.Namespace) -> int:
     """Stop a running ``watch`` daemon via the stop ladder (idle: no prompt; busy: confirm/force).
 
-    Soft (default / ``--force`` / typed ``YES``) finishes the current step, then exits;
+    Soft (default / ``--force`` / typed ``YES``) finishes the current flow node, then exits;
     ``--force-full`` interrupts the running agent now and reaps its whole subtree (POSIX: daemon
     group-kill + the recorded agent's group + a descendant sweep; Windows: ``taskkill /F /T``).
     Idempotent.
@@ -2888,7 +2903,12 @@ def cmd_stop(args: argparse.Namespace) -> int:
         return code
     if outcome.degraded_to_soft:
         print("stop: hard stop (--force-full) is unavailable on Windows; doing a soft stop")
-    if not outcome.found:
+    if _has_unconfirmed_runtime_handles(config, outcome):
+        print(
+            "stop: no watcher PID; preserved pending stop/child handles because shutdown is "
+            "unconfirmed"
+        )
+    elif not outcome.found:
         print("stop: no running watcher (no PID file)")
     elif outcome.already_dead:
         print(f"stop: no running watcher (cleared stale PID {outcome.pid})")
@@ -2898,8 +2918,9 @@ def cmd_stop(args: argparse.Namespace) -> int:
             "it resumes from its checkpoint on next start"
         )
     elif outcome.tree_killed:
+        reason = " after the graceful timeout" if outcome.timed_out else ""
         print(
-            f"stop: watcher {outcome.pid} hard-stopped (killed its process tree); "
+            f"stop: watcher {outcome.pid} hard-stopped{reason} (killed its process tree); "
             "it resumes from its checkpoint on next start"
         )
     elif outcome.killed:
@@ -2947,6 +2968,12 @@ def cmd_restart(args: argparse.Namespace) -> int:
     code, outcome = _gated_stop(config, args)
     if outcome is None:
         return code  # refused (busy, no go-ahead) → do not start a new daemon
+    if _has_unconfirmed_runtime_handles(config, outcome):
+        print(
+            "restart: no watcher PID but pending stop/child handles remain; shutdown is "
+            "unconfirmed and no replacement was started"
+        )
+        return 1
     if outcome.degraded_to_soft:
         print("restart: hard stop (--force-full) is unavailable on Windows; doing a soft stop")
     if not outcome.found or outcome.already_dead:
@@ -2954,9 +2981,14 @@ def cmd_restart(args: argparse.Namespace) -> int:
     elif outcome.group_killed:
         print(f"restart: hard-stopped previous watcher {outcome.pid} (process group)")
     elif outcome.tree_killed:
-        print(f"restart: hard-stopped previous watcher {outcome.pid} (process tree)")
+        reason = " after the graceful timeout" if outcome.timed_out else ""
+        print(f"restart: hard-stopped previous watcher {outcome.pid}{reason} (process tree)")
     elif outcome.timed_out:
-        print(f"restart: previous watcher {outcome.pid} did not confirm shutdown; starting anyway")
+        print(
+            f"restart: previous watcher {outcome.pid} did not confirm shutdown; "
+            "kept its PID file and did not start a replacement"
+        )
+        return 1
     else:
         suffix = " (SIGKILL)" if outcome.killed else ""
         print(f"restart: stopped previous watcher {outcome.pid}{suffix}")

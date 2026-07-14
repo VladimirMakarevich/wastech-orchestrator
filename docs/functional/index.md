@@ -74,7 +74,7 @@ A navigable version of these relationships as **architecture-as-code** (C4 model
 Internal triggers (not user commands), confirmed by code:
 
 - **`watch` loop** periodically scans the `tasks/pending` folder and submits tasks to the orchestrator one at a time ([cli.py watch_loop/watch_once](../../src/wastech_orchestrator/cli.py)).
-- **`SIGTERM` handler** of the `watch` daemon (graceful stop between ticks) — [process_control.py](../../src/wastech_orchestrator/process_control.py).
+- **`SIGTERM` handler** of the `watch` daemon (sets the cooperative node-boundary stop event) — [process_control.py](../../src/wastech_orchestrator/process_control.py).
 - **Telegram polling** while waiting for a human response (`wait_for_answer`) — [notify/telegram.py](../../src/wastech_orchestrator/notify/telegram.py).
 - **Heartbeat threads** during long-running operations (provider/checks/git) — [observability/progress.py](../../src/wastech_orchestrator/observability/progress.py).
 - **Supervisor observations** — the post-node hook calls the supervisor after each completed step ([orchestrator.py:1120](../../src/wastech_orchestrator/core/orchestrator.py#L1120)).

@@ -20,6 +20,7 @@ from wastech_orchestrator.core.flow.contracts import (
 )
 from wastech_orchestrator.core.flow.engine import (
     EngineInternalError,
+    FlowCancelled,
     FlowEngine,
     FlowRunResult,
     NodeContext,
@@ -144,6 +145,7 @@ def _engine(
     facts: dict[str, bool] | None = None,
     agents: AgentsConfig | None = None,
     diff_fingerprint: Callable[[], str] | None = None,  # EXPERIMENTAL(no-work-infra)
+    is_cancelled: Callable[[], bool] = lambda: False,
 ) -> FlowEngine:
     facts = facts or {}
     registry = dict.fromkeys(("agent", "evaluator", "checks", "hitl", "publish"), runner)
@@ -156,6 +158,7 @@ def _engine(
         agents=agents or _agents(),
         task_id="task-1",
         diff_fingerprint=diff_fingerprint,
+        is_cancelled=is_cancelled,
     )
 
 
@@ -193,6 +196,25 @@ def test_engine_resumes_at_current_node() -> None:
     result = engine.run()
     assert result.final_node == "c"
     assert runner.calls == ["b", "c"]  # 'a' (already completed before the interruption) is skipped
+
+
+def test_engine_cancellation_stops_before_next_node_and_checkpoints_resume_point() -> None:
+    snap = _snapshot(
+        [_agent("a"), _agent("b"), _publish("c")],
+        [Edge("a", "b"), Edge("b", "c")],
+    )
+    runner, recorder = StubRunner(), RecordingRecorder()
+    checks = iter((False, True))  # let a finish; stop at the next clean node boundary
+    engine = _engine(snap, runner, recorder, is_cancelled=lambda: next(checks))
+
+    with pytest.raises(FlowCancelled) as raised:
+        engine.run()
+
+    assert raised.value.node_id == "b"
+    assert runner.calls == ["a"]
+    assert engine.run_state.current_node == "b"
+    assert engine.run_state.completed_nodes == ["a"]
+    assert recorder.checkpoints == 2  # a→b transition, then the idempotent cancellation save
 
 
 def test_engine_outcome_not_in_edges_is_internal_error() -> None:

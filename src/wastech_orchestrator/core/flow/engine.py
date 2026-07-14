@@ -53,6 +53,9 @@ from wastech_orchestrator.core.state_machine import Status
 #: Resolves a ``when.fact`` (``derived.*`` / ``config.*``) to a boolean. Injected so the engine
 #: carries no knowledge of where facts come from (P1.3/P1.4 wire the real resolver).
 FactResolver = Callable[[str], bool]
+#: Reports whether the operator requested a cooperative stop. Injected by the watch daemon; the
+#: engine treats it as a generic boundary interrupt and stays ignorant of stop files and signals.
+CancellationCheck = Callable[[], bool]
 #: EXPERIMENTAL(no-work-infra) — the no-effective-work stall guard is a trial feature; grep the tag
 #: ``no-work-infra`` to find every site (alias, constant, constructor state, ``_check_stall``, its
 #: call in ``run()``, and the ``_reset_loops_at`` cleanup) and revert as one unit if we drop it.
@@ -65,6 +68,23 @@ DiffFingerprint = Callable[[], str]
 
 class EngineInternalError(Exception):
     """A runtime invariant the validator should have prevented was broken (a bug, not bad YAML)."""
+
+
+class FlowCancelled(Exception):
+    """Cooperative stop observed before the checkpointed node started.
+
+    ``node_id`` is the untouched resume point. The orchestrator maps this generic engine interrupt
+    to its existing resumable ``ErrorClass.CANCELLED`` parking path.
+    """
+
+    def __init__(self, node_id: str) -> None:
+        super().__init__(f"stop requested before flow node {node_id!r}")
+        self.node_id = node_id
+
+
+def _never_cancelled() -> bool:
+    """Default cancellation seam for one-shot runs and isolated engine tests."""
+    return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,6 +252,7 @@ class FlowEngine:
         facts: FactResolver,
         agents: AgentsConfig,
         task_id: str,
+        is_cancelled: CancellationCheck = _never_cancelled,
         subtask_order: int | None = None,
         post_node: PostNodeHook | None = None,
         diff_fingerprint: DiffFingerprint | None = None,
@@ -246,6 +267,7 @@ class FlowEngine:
         self._facts = facts
         self._agents = agents
         self._task_id = task_id
+        self._is_cancelled = is_cancelled
         self._subtask_order = subtask_order
         self._post_node = post_node
         # EXPERIMENTAL(no-work-infra). No-effective-work stall guard (transient, never persisted — a
@@ -287,6 +309,11 @@ class FlowEngine:
             self._run_state.current_node = self._entry_node_id()
         while True:
             assert self._run_state.current_node is not None
+            if self._is_cancelled():
+                # Persist even on a fresh direct engine run. After a completed node the transition
+                # already saved this same next-node checkpoint, so this remains idempotent.
+                self._recorder.save_checkpoint(self._run_state)
+                raise FlowCancelled(self._run_state.current_node)
             node = self._apply_overrides(self._snapshot.nodes_by_id[self._run_state.current_node])
             outcome = self._execute_node(node)
             self._run_state.mark_completed(node.id)

@@ -307,6 +307,51 @@ def test_restart_stops_previous_then_delegates_to_watch(
     assert captured["poll"] == 7
 
 
+def test_restart_does_not_start_replacement_after_unconfirmed_stop(
+    monkeypatch: pytest.MonkeyPatch,
+    in_repo_config: OrchestratorConfig,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cli, "load_config_for", lambda args: in_repo_config)
+    outcome = process_control.StopOutcome(
+        found=True,
+        pid=4242,
+        signaled=True,
+        killed=False,
+        already_dead=False,
+        timed_out=True,
+    )
+    monkeypatch.setattr(process_control, "stop_process", lambda path, **kw: outcome)
+    called: list[object] = []
+    monkeypatch.setattr(cli, "cmd_watch", called.append)
+
+    assert cli.main(["restart", "--poll-seconds", "7"]) == 1
+    assert called == []
+    assert "did not start a replacement" in capsys.readouterr().out
+
+
+def test_restart_does_not_start_replacement_when_pid_is_missing_but_stop_handle_remains(
+    monkeypatch: pytest.MonkeyPatch,
+    in_repo_config: OrchestratorConfig,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cli, "load_config_for", lambda args: in_repo_config)
+    stop_file = process_control.stop_file_path(cli.worc_home_for(in_repo_config))
+    stop_file.parent.mkdir(parents=True, exist_ok=True)
+    stop_file.write_text("stop\n", encoding="utf-8")
+    outcome = process_control.StopOutcome(
+        found=False, pid=None, signaled=False, killed=False, already_dead=False
+    )
+    monkeypatch.setattr(process_control, "stop_process", lambda path, **kw: outcome)
+    called: list[object] = []
+    monkeypatch.setattr(cli, "cmd_watch", called.append)
+
+    assert cli.main(["restart", "--force", "--poll-seconds", "7"]) == 1
+    assert called == []
+    assert stop_file.exists()
+    assert "no replacement was started" in capsys.readouterr().out
+
+
 def test_watch_fails_fast_when_gh_missing_and_pr_enabled(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

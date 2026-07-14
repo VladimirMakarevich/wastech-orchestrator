@@ -27,11 +27,13 @@ The engine is deliberately **domain-free**: it knows nothing about `test_fix` / 
 
 ### The traversal loop
 
-`FlowEngine.run()` ([engine.py:231](../../../src/wastech_orchestrator/core/flow/engine.py#L231)) loops: a fresh run starts at the entry node; a resumed run (a hydrated `run_state` whose `current_node` is set) continues from there. For each node:
+`FlowEngine.run()` ([engine.py](../../../src/wastech_orchestrator/core/flow/engine.py)) loops: a fresh run starts at the entry node; a resumed run (a hydrated `run_state` whose `current_node` is set) continues from there. Before each node it consults the injected `CancellationCheck`; a requested stop saves the current checkpoint and raises `FlowCancelled` before that node starts. For each node:
 
 ```mermaid
 flowchart TD
-    start([current_node]) --> exec["_execute_node()"]
+    start([current_node]) --> cancel{cancel<br/>requested?}
+    cancel -->|yes| parked["save checkpoint → FlowCancelled"]
+    cancel -->|no| exec["_execute_node()"]
     exec --> skip{when-predicate<br/>skip?}
     skip -->|yes| pass["record_skip → pass-through outcome"]
     skip -->|no| run["runner.run() → NodeOutcome<br/>then PostNodeHook"]
@@ -53,6 +55,7 @@ flowchart TD
 
 - A node with **no outgoing edge** is terminal → the run ends `DONE` ([engine.py:247-250](../../../src/wastech_orchestrator/core/flow/engine.py#L247)).
 - The checkpoint is saved after **every** transition ([engine.py:275](../../../src/wastech_orchestrator/core/flow/engine.py#L275)), so a crash resumes at `current_node` and `publish_operations` deduplicates side effects.
+- Cooperative cancellation never marks a node completed: the preceding node and post-node hook finish, the transition to the next node is saved, and `FlowCancelled.node_id` names that untouched resume point.
 
 ### Node execution and deterministic skip
 
@@ -86,6 +89,7 @@ When the engine is constructed with a `region` (a frozenset of node ids), the ru
 - **Bounded termination** — every rework/fail edge is charged; exhausting any limit ends at `MANUAL_ACTION_REQUIRED` ([engine.py:15-18](../../../src/wastech_orchestrator/core/flow/engine.py#L15)).
 - **Engine owns transitions** — node runners return outcomes only; the task status moves through the [B07](B07-state-machine-and-store.md) state machine, never inside a runner.
 - **Resume-safe** — the checkpoint after every transition plus `publish_operations` idempotency means a resumed run never repeats a commit/push/PR ([engine.py:234-237](../../../src/wastech_orchestrator/core/flow/engine.py#L234)).
+- **Boundary cancellation** — a soft stop completes at most the already-running node; the next node remains untouched and resumable. Immediate interruption remains the hard-stop layer's responsibility.
 
 ## Dependencies
 
@@ -94,4 +98,4 @@ When the engine is constructed with a `region` (a frozenset of node ids), the ru
 
 ## Tests
 
-- `tests/core/flow/` — engine traversal, budget/fix-loop scenarios (`test_record_rework_single_increment`, the P3 abstraction test that forbids domain knowledge in the engine), region/decomposition driving, resume from checkpoint.
+- `tests/core/flow/` — engine traversal, boundary cancellation and checkpoint preservation, budget/fix-loop scenarios (`test_record_rework_single_increment`, the P3 abstraction test that forbids domain knowledge in the engine), region/decomposition driving, resume from checkpoint.

@@ -31,6 +31,17 @@ from pathlib import Path
 from typing import Any
 
 
+def _unavailable_killpg(pgid: int, sig: int) -> None:  # pragma: no cover - Windows-only guard
+    raise OSError("os.killpg is unavailable on this platform")
+
+
+# ``os.killpg``/``signal.SIGKILL`` are POSIX-only; resolve via getattr so a Windows ``mypy``/import
+# does not choke on the missing attribute (the reap path that uses them is guarded by
+# ``os.name != "nt"``). Mirrors ``process_control._DEFAULT_KILLPG``.
+_KILLPG: Callable[[int, int], None] = getattr(os, "killpg", _unavailable_killpg)
+_SIGKILL: int = getattr(signal, "SIGKILL", signal.SIGTERM)
+
+
 @dataclass(frozen=True)
 class ProcessResult:
     """Raw outcome of a single subprocess launch, before any provider-specific normalization."""
@@ -239,8 +250,8 @@ def hard_kill_tree(pid: int) -> None:
     agents are its child processes, so ``/T`` (whole tree) reaches them while the daemon's parent
     (the console) is untouched. An argv list, ``shell=False``; ``check=False`` ignores a non-zero
     exit (dead / recycled PID — no start-time guard on Windows), and an unlaunchable ``taskkill``
-    is suppressed so the stop stays idempotent (the CLI already prints `taskkill /F /PID` as the
-    operator backstop on a soft-stop timeout).
+    is suppressed so the stop stays idempotent. The same seam serves both explicit
+    ``--force-full`` and automatic escalation after a Windows soft-stop grace timeout.
     """
     with contextlib.suppress(OSError):
         subprocess.run(
@@ -267,10 +278,10 @@ def kill_agent_subtree(pid: int, pgid: int) -> None:
         return
     descendants = _posix_descendants(pid)  # snapshot before killing anything
     with contextlib.suppress(ProcessLookupError):
-        os.killpg(pgid, signal.SIGKILL)
+        _KILLPG(pgid, _SIGKILL)
     for child_pid in descendants:
         with contextlib.suppress(ProcessLookupError):
-            os.kill(child_pid, signal.SIGKILL)
+            os.kill(child_pid, _SIGKILL)
 
 
 def _posix_descendants(root: int) -> list[int]:

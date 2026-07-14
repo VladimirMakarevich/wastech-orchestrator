@@ -193,6 +193,41 @@ def test_stop_process_absent_pid_is_idempotent_noop(tmp_path: Path) -> None:
     assert fake.signals == []
 
 
+def test_absent_pid_preserves_windows_stop_and_child_handles(tmp_path: Path) -> None:
+    stop_file = pc.stop_file_path(tmp_path)
+    stop_file.write_text("stop\n", encoding="utf-8")
+    children_file = pc.children_file_path(tmp_path)
+    pc.write_children_file(children_file, pid=777, pgid=777, start_time_fn=_start)
+
+    outcome = pc.stop_process(
+        tmp_path / "orchestrator.pid",
+        stop_file=stop_file,
+        children_file=children_file,
+        can_signal=False,
+    )
+
+    assert outcome.found is False
+    assert stop_file.exists()
+    assert children_file.exists()
+
+
+def test_absent_pid_reaps_posix_stop_and_child_handles(tmp_path: Path) -> None:
+    stop_file = pc.stop_file_path(tmp_path)
+    stop_file.write_text("stop\n", encoding="utf-8")
+    children_file = pc.children_file_path(tmp_path)
+    pc.write_children_file(children_file, pid=777, pgid=777, start_time_fn=_start)
+
+    pc.stop_process(
+        tmp_path / "orchestrator.pid",
+        stop_file=stop_file,
+        children_file=children_file,
+        can_signal=True,
+    )
+
+    assert not stop_file.exists()
+    assert not children_file.exists()
+
+
 def test_stop_process_stale_file_is_reaped(tmp_path: Path) -> None:
     path = tmp_path / "orchestrator.pid"
     pc.write_pid_file(path, pid=4242, start_time_fn=_start)
@@ -332,9 +367,8 @@ def test_stop_via_pid_file_graceful_waits_for_pid_file_removal(tmp_path: Path) -
 
 
 def test_stop_via_pid_file_times_out_when_pid_file_persists(tmp_path: Path) -> None:
-    # A wedged daemon (or a stale PID file from a crash) never removes the PID file → timeout. We
-    # cannot force-kill an unrelated process on Windows, so clear the PID file (unblocks a fresh
-    # 'watch') but KEEP the stop-file so a merely-busy daemon still stops on its next tick.
+    # Without a tree-kill seam, retain every handle: a duplicate watcher stays blocked and a later
+    # --force-full can still target the original daemon.
     path = tmp_path / "orchestrator.pid"
     pc.write_pid_file(path, pid=4242, start_time_fn=_start)
     stop_file = pc.stop_file_path(tmp_path)
@@ -348,8 +382,65 @@ def test_stop_via_pid_file_times_out_when_pid_file_persists(tmp_path: Path) -> N
     )
     assert outcome.timed_out is True
     assert outcome.killed is False  # no hard kill on Windows
-    assert not path.exists()  # cleared so a fresh 'watch' can start
-    assert stop_file.exists()  # left in place so a busy-but-alive daemon stops itself next tick
+    assert path.exists()
+    assert stop_file.exists()
+
+
+def test_windows_soft_timeout_escalates_to_tree_kill_and_reaps_handles(tmp_path: Path) -> None:
+    path = tmp_path / "orchestrator.pid"
+    stop_file = pc.stop_file_path(tmp_path)
+    children_file = pc.children_file_path(tmp_path)
+    pc.write_pid_file(path, pid=4242, start_time_fn=_start)
+    pc.write_children_file(children_file, pid=777, pgid=777, start_time_fn=_start)
+    killed: list[int] = []
+
+    outcome = pc.stop_process(
+        path,
+        timeout=0.0,
+        stop_file=stop_file,
+        children_file=children_file,
+        hard_kill_fn=killed.append,
+        sleep_fn=lambda _s: None,
+        now_fn=lambda: 0.0,
+        can_signal=False,
+    )
+
+    assert killed == [4242, 777]
+    assert outcome.timed_out is True
+    assert outcome.killed is True
+    assert outcome.tree_killed is True
+    assert not path.exists()
+    assert not stop_file.exists()
+    assert not children_file.exists()
+
+
+def test_windows_full_stop_can_escalate_after_unconfirmed_soft_timeout(tmp_path: Path) -> None:
+    path = tmp_path / "orchestrator.pid"
+    stop_file = pc.stop_file_path(tmp_path)
+    pc.write_pid_file(path, pid=4242, start_time_fn=_start)
+    first = pc.stop_process(
+        path,
+        timeout=0.0,
+        stop_file=stop_file,
+        sleep_fn=lambda _s: None,
+        now_fn=lambda: 0.0,
+        can_signal=False,
+    )
+    killed: list[int] = []
+
+    second = pc.stop_process(
+        path,
+        level="full",
+        stop_file=stop_file,
+        hard_kill_fn=killed.append,
+        can_signal=False,
+    )
+
+    assert first.timed_out is True
+    assert not path.exists()  # the later full stop reaped it
+    assert killed == [4242]
+    assert second.tree_killed is True
+    assert not stop_file.exists()
 
 
 # --- StopController -------------------------------------------------------------------------------

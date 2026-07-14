@@ -2,13 +2,13 @@
 
 Pure and print-free by design: the CLI owns all operator output and exit codes; this module only
 reads/writes the PID file, probes liveness, signals a process, and bridges ``SIGTERM`` to a
-``threading.Event`` the watch loop polls between ticks. Every OS seam (:func:`os.kill`,
+``threading.Event`` the watch loop and FlowEngine cancellation predicate observe. Every OS seam
+(:func:`os.kill`,
 :func:`signal.signal`, sleeping, the clock) is injectable so the whole module is unit-testable
 without real processes or signals.
 
-The handler **sets an event rather than raising**, so a ``SIGTERM`` that arrives mid-tick lets the
-in-flight task finish its current stage; the loop then exits cleanly at the next top-of-loop check.
-This is the same idiom as :func:`wastech_orchestrator.observability.progress.run_with_heartbeat`.
+The handler **sets an event rather than raising**, so a ``SIGTERM`` that arrives mid-node lets that
+node finish; the engine parks before the next node and the loop exits cleanly.
 """
 
 from __future__ import annotations
@@ -136,8 +136,9 @@ def pid_file_path(artifacts_root: str | os.PathLike[str]) -> Path:
 def stop_file_path(artifacts_root: str | os.PathLike[str]) -> Path:
     """The canonical stop-sentinel location under an artifacts root (``<root>/orchestrator.stop``).
 
-    The cross-platform graceful-stop channel: ``stop`` writes this file and the watch loop polls it
-    between ticks, so a daemon shuts down cleanly even where ``SIGTERM`` is undeliverable (Windows).
+    The cross-platform graceful-stop channel: ``stop`` writes this file; the watch loop polls it
+    while idle and FlowEngine checks the same predicate between nodes, including on Windows where
+    ``SIGTERM`` is undeliverable cross-process.
     """
     return Path(artifacts_root) / STOP_FILENAME
 
@@ -370,7 +371,7 @@ class StopOutcome:
     found: bool  # was a PID recorded at all?
     pid: int | None
     signaled: bool  # was a graceful stop requested (POSIX signal and/or the stop-file)?
-    killed: bool  # did we escalate to a hard kill after the timeout (POSIX only)?
+    killed: bool  # did we hard-kill the daemon, either explicitly or after the grace timeout?
     already_dead: bool  # PID file present but the process was not running (stale; POSIX probe)
     timed_out: bool = False  # shutdown was not confirmed within ``timeout``
     group_killed: bool = False  # ``level="full"``: the daemon's process group was SIGKILLed (POSIX)
@@ -402,11 +403,13 @@ def stop_process(
 
     Idempotent: an absent PID file is a no-op. ``level`` is the stop ladder's hardness:
 
-    * ``"soft"`` (default) — graceful, between-ticks stop. **POSIX**: write ``stop_file``, probe
+    * ``"soft"`` (default) — cooperative node-boundary stop. **POSIX**: write ``stop_file``, probe
       liveness, send ``term_sig`` (SIGTERM) for an immediate wakeup, poll, and escalate to
       ``kill_sig`` (SIGKILL) only if the daemon outlives the timeout. **Windows**: ``os.kill`` can't
       reach an unrelated process, so write ``stop_file`` and wait for the daemon to remove its own
-      PID file; if it does not vanish within the timeout, clear it and report ``timed_out``.
+      PID file. If it does not vanish within the timeout, use ``hard_kill_fn`` as the tree-kill
+      backstop; without that seam, retain every handle and report ``timed_out`` so a later full stop
+      can still target the daemon.
     * ``"full"`` — hard stop. **POSIX**: SIGKILL the daemon's own process group (daemon + any checks
       child), **and** reap the recorded active agent's whole subtree via ``subtree_kill_fn`` (the
       agent leads its own group, so the daemon-group kill no longer reaches it — the recorded
@@ -416,18 +419,21 @@ def stop_process(
       the recorded agent for good measure, and sets ``tree_killed``; with no ``hard_kill_fn`` it
       **degrades to the soft path** and sets ``degraded_to_soft``.
 
-    A recorded start-time guards every probe so a recycled PID is never signaled. The PID file,
-    stop-file, and children-file are removed in every terminal branch. Pure under test via the
-    injectable seams.
+    A recorded start-time guards every POSIX probe so a recycled PID is never signaled. Confirmed
+    terminal branches remove the PID, stop, and children files; an unconfirmed Windows soft timeout
+    deliberately retains them. Pure under test via the injectable seams.
     """
     if can_signal is None:
         can_signal = _can_signal()
     record = read_pid_record(path)
     if record is None:
-        if stop_file is not None:
-            stop_file.unlink(missing_ok=True)  # reap a stray sentinel; nothing is recorded
-        if children_file is not None:
-            clear_children_file(children_file)  # reap a stray agent handle too
+        if can_signal:
+            # POSIX can prove that no recorded daemon exists. Windows cannot: an older soft-stop
+            # may have dropped the PID while its live watcher still owes the sentinel a shutdown.
+            if stop_file is not None:
+                stop_file.unlink(missing_ok=True)
+            if children_file is not None:
+                clear_children_file(children_file)
         return StopOutcome(found=False, pid=None, signaled=False, killed=False, already_dead=False)
     if level == "full" and can_signal:
         return _stop_via_group_kill(
@@ -472,6 +478,8 @@ def stop_process(
         timeout=timeout,
         poll=poll,
         stop_file=stop_file,
+        children_file=children_file,
+        hard_kill_fn=hard_kill_fn,
         sleep_fn=sleep_fn,
         now_fn=now_fn,
     )
@@ -645,18 +653,19 @@ def _stop_via_pid_file(
     timeout: float,
     poll: float,
     stop_file: Path | None,
+    children_file: Path | None,
+    hard_kill_fn: HardKillFn | None,
     sleep_fn: SleepFn,
     now_fn: NowFn,
 ) -> StopOutcome:
     """Windows stop: request via the stop-file, then wait for the daemon to remove its own PID file.
 
     No ``os.kill`` — it cannot reach an unrelated process. The daemon removes its own PID file on
-    a clean exit, so the file's disappearance confirms shutdown. If it persists past the timeout
-    (wedged inside a tick, or a stale file from a crash), drop the PID file so ``up``/``restart`` is
-    not blocked, but **leave the stop-file in place** and report ``timed_out``: a daemon that is
-    merely busy (not dead) then stops itself the moment it finishes the current tick and re-checks
-    the sentinel. The leftover stop-file is harmless — a fresh ``watch`` clears it on start, and the
-    daemon reaps it in its own exit path.
+    a clean exit, so the file's disappearance confirms shutdown. If it persists past the timeout,
+    the grace period has expired: use the injected Windows tree-kill when available, then reap all
+    runtime handles. Without that seam the shutdown is unconfirmed, so keep the PID, stop sentinel,
+    and active-child handle intact; this honestly blocks a duplicate watcher and leaves a later
+    ``--force-full`` able to target the original process.
     """
     pid = record.pid
     if stop_file is not None:
@@ -664,7 +673,17 @@ def _stop_via_pid_file(
     deadline = now_fn() + timeout
     while path.exists():
         if now_fn() >= deadline:
-            path.unlink(missing_ok=True)  # drop the PID file; keep the stop-file (see docstring)
+            if hard_kill_fn is not None:
+                return replace(
+                    _stop_via_tree_kill(
+                        path,
+                        record,
+                        stop_file=stop_file,
+                        children_file=children_file,
+                        hard_kill_fn=hard_kill_fn,
+                    ),
+                    timed_out=True,
+                )
             return StopOutcome(
                 found=True, pid=pid, signaled=True, killed=False, already_dead=False, timed_out=True
             )
@@ -677,7 +696,7 @@ def _stop_via_pid_file(
 
 
 class StopController:
-    """Bridge ``SIGTERM`` to a :class:`threading.Event` the watch loop polls between ticks.
+    """Bridge ``SIGTERM`` to the event used by the watch loop and FlowEngine cancellation seam.
 
     Use as a context manager so the previous signal disposition is always restored on exit — a
     leaked handler corrupts later pytest tests. ``signal.signal`` only works on the main thread, so

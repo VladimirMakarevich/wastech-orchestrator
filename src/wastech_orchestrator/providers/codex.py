@@ -78,15 +78,20 @@ _SANDBOX_HELPER_EXE = "codex-windows-sandbox-setup.exe"
 _PACKAGE_MANIFEST_NAME = "codex-package.json"
 _DEFAULT_RESOURCES_DIRNAME = "codex-resources"
 
-# A fatal sandbox-helper launch failure on stderr. Codex can still print a clean terminal SUCCESS
-# event (exit 0) while this error means the run never touched the workspace, so it is matched both
-# as an ordinary ``PERMISSION_DENIED`` stderr signature (the nonzero-exit path, below) and by the
-# post-success guard (``_post_success_infra_error``) that flips a false success into an infra
+# A fatal Windows-sandbox failure on stderr — either the setup helper could not be launched OR the
+# sandbox could not spawn a child process at run time (seclogon ``CreateProcessWithLogonW`` failing
+# on every command and on the ``apply_patch`` write path). Codex can still print a clean terminal
+# SUCCESS event (exit 0) while this error means the run never touched the workspace, so it is
+# matched both as an ordinary ``PERMISSION_DENIED`` stderr signature (the nonzero-exit path) and by
+# the post-success guard (``_post_success_infra_error``) that flips a false success into an infra
 # failure so the Router falls over to the other provider.
 _HELPER_LAUNCH_FAILED_PATTERN = (
     r"orchestrator_helper_launch_failed"
     r"|codex-windows-sandbox-setup\.exe"
     r"|setup refresh failed to launch helper"
+    r"|CreateProcessWithLogonW failed"  # seclogon could not spawn the sandbox child at run time
+    r"|fs sandbox helper failed"  # the same failure on the apply_patch (write) path
+    r"|windows sandbox(?: failed)?:"  # the general Codex windows-sandbox error prefix
 )
 _HELPER_LAUNCH_FAILED_RE = re.compile(_HELPER_LAUNCH_FAILED_PATTERN, re.IGNORECASE)
 
@@ -257,6 +262,12 @@ def build_codex_argv(
         # enable it for the workspace-write sandbox. This toggles ONLY network — the sandbox's
         # filesystem limit and the ``never`` approval policy stay in force (the ceiling holds).
         argv += ["-c", "sandbox_workspace_write.network_access=true"]
+    else:
+        # No network grant → also deny the host-side ``web_search`` tool. It runs on the OpenAI
+        # backend, OUTSIDE the sandbox network toggle above, so without this an "offline" node can
+        # still reach the web (F5: a network_access=false writer performed 9 web searches).
+        # Disabling the tool makes network_access=false actually offline.
+        argv += ["-c", 'web_search="disabled"']
     if output_schema_path is not None:
         argv += ["--output-schema", output_schema_path]
     # Durable session resume (P2.2): ``codex exec [exec-options] resume <SESSION_ID>`` continues the

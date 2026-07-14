@@ -7,6 +7,7 @@ from __future__ import annotations
 import io
 import sys
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 
@@ -86,7 +87,7 @@ def test_busy_interactive_prompt_names_force_full_as_interrupt_now(
     monkeypatch: pytest.MonkeyPatch, make_git_config: _ConfigFactory, tmp_path
 ) -> None:
     # The busy prompt must point the operator at --force-full to interrupt the running agent NOW
-    # (soft only finishes the current step) — the discoverability gap the ADR closes.
+    # (soft finishes the current flow node) — the discoverability gap the ADR closes.
     captured: list[str] = []
     monkeypatch.setattr(cli, "has_active_task", lambda _c: True)
     monkeypatch.setattr(cli, "_confirm_yes", lambda prompt: captured.append(prompt) or False)
@@ -243,21 +244,26 @@ def test_cmd_stop_reports_tree_kill(
         cli.process_control,
         "stop_process",
         lambda _p, **_k: process_control.StopOutcome(
-            found=True, pid=7, signaled=True, killed=True, already_dead=False, tree_killed=True
+            found=True,
+            pid=7,
+            signaled=True,
+            killed=True,
+            already_dead=False,
+            timed_out=True,
+            tree_killed=True,
         ),
     )
     cli.cmd_stop(cli.build_parser().parse_args(["stop", "--force-full"]))
     out = capsys.readouterr().out
-    assert "hard-stopped" in out and "process tree" in out
+    assert "hard-stopped after the graceful timeout" in out and "process tree" in out
 
 
-def test_timed_out_stop_message_windows_suggests_taskkill() -> None:
-    # Windows soft-stop timeout: point the operator at the concrete kill command for a wedged daemon
-    # (its PID file is already cleared, so the CLI can no longer target it). Tested on the pure
-    # helper so no global os.name flip is needed (that would break pathlib's flavor on POSIX).
+def test_timed_out_stop_message_windows_keeps_pid_for_force_full() -> None:
+    # Only used when no hard-kill seam was available: tell the operator the target remains intact.
     msg = cli._timed_out_stop_message(1234, 30.0, is_windows=True)
     assert "did not confirm shutdown in 30s" in msg
-    assert "taskkill /F /PID 1234" in msg
+    assert "kept its PID file" in msg
+    assert "--force-full" in msg
 
 
 def test_timed_out_stop_message_posix_omits_taskkill() -> None:
@@ -267,13 +273,39 @@ def test_timed_out_stop_message_posix_omits_taskkill() -> None:
     assert "taskkill" not in msg
 
 
-def test_cmd_stop_wires_hard_kill_seam(
-    monkeypatch: pytest.MonkeyPatch, make_git_config: _ConfigFactory, tmp_path
+def test_cmd_stop_reports_preserved_handles_when_pid_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    make_git_config: _ConfigFactory,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """cmd_stop passes the taskkill seam so the Windows hard rung is real, not a soft-degrade."""
+    config = make_git_config(tmp_path)
+    root = cli.worc_home_for(config)
+    stop_file = process_control.stop_file_path(root)
+    stop_file.parent.mkdir(parents=True, exist_ok=True)
+    stop_file.write_text("stop\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "load_config_for", lambda args: config)
+    monkeypatch.setattr(
+        process_control,
+        "stop_process",
+        lambda path, **kwargs: process_control.StopOutcome(
+            found=False, pid=None, signaled=False, killed=False, already_dead=False
+        ),
+    )
+
+    assert cli.cmd_stop(cli.build_parser().parse_args(["stop", "--force"])) == 0
+    assert "preserved pending stop/child handles" in capsys.readouterr().out
+    assert stop_file.exists()
+
+
+@pytest.mark.parametrize("flag", ["--force", "--force-full"])
+def test_cmd_stop_wires_hard_kill_seam(
+    flag: str, monkeypatch: pytest.MonkeyPatch, make_git_config: _ConfigFactory, tmp_path
+) -> None:
+    """The seam supports both timeout escalation and the explicit Windows hard rung."""
     config = make_git_config(tmp_path / "clone")
     captured = _patch_stop(monkeypatch, config, active=True, tty=False)
-    cli.cmd_stop(cli.build_parser().parse_args(["stop", "--force-full"]))
+    cli.cmd_stop(cli.build_parser().parse_args(["stop", flag]))
     assert captured.get("hard_kill_fn") is cli.agent_process.hard_kill_tree
 
 

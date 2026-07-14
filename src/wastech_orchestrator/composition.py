@@ -95,8 +95,9 @@ def build_orchestrator(
     the re-run id past the duplicate-id check (scoped to one id; every other gate check still runs).
 
     ``agent_handle_recorder`` and ``is_cancelled`` are set only by the ``watch`` daemon: the
-    recorder lets a hard stop reap a running agent's subtree, and ``is_cancelled`` tells the Router
-    a raised provider error is a stop-kill (not a crash) so it never falls back to a fresh agent.
+    recorder lets a hard stop reap a running agent's subtree, while ``is_cancelled`` both stops the
+    flow at the next node boundary and tells the Router a raised provider error is a stop-kill (not
+    a crash), so it never falls back to a fresh agent.
     """
     root = Path(artifacts_root)
     providers = build_providers(
@@ -140,4 +141,5 @@ def build_orchestrator(
         resolver=resolver,
         heartbeat_seconds=heartbeat_seconds,
         isolation_checks=ISOLATION_CHECKS,
+        is_cancelled=is_cancelled,
     )
