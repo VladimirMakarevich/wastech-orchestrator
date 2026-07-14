@@ -129,7 +129,7 @@ Only providers named in `agents.allowed` are required. If Claude Code is not ins
 
 ## 4. Create A First Task
 
-Create `tasks/pending/task-001.md`:
+Create `tasks/preparing/task-001.md`, then promote it into the queue with `worc promote task-001`:
 
 ```markdown
 ---
@@ -304,7 +304,7 @@ worc top --log-file ./logs/daemon.jsonl          # live monitor; q (then Enter) 
 
 ```bash
 pip install wastech-orchestrator[shell]
-worc shell                                       # attach-or-idle; up / enqueue / ps / down / quit
+worc shell                                       # attach-or-idle; up / enqueue / promote / ps / down / quit
 ```
 
 ## 7. Choose Which Provider Runs a Node

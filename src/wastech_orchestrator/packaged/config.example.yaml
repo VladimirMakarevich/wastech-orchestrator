@@ -29,7 +29,9 @@ repo:
                                     #   to return. current always stays regardless.
 
 paths:                              # where the task lifecycle lives (optional; omit = defaults)
-  tasks_dir: "tasks"                # repo-relative dir holding pending/done/failed.
+  tasks_dir: "tasks"                # repo-relative dir holding preparing/pending/done/failed.
+                                    # `preparing/` is the staging area the watch scanner never looks
+                                    # in — compose a task there, then `worc promote` it into pending.
                                     # Rename to avoid clashing with a repo that already uses tasks/.
                                     # Must be repo-relative (no .. / absolute) and NOT under .worc/
                                     # (that home is gitignored — the audit trail would be lost). The

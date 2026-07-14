@@ -242,11 +242,12 @@ class RepoConfig:
 
 @dataclass(frozen=True)
 class PathsConfig:
-    # Repo-relative directory holding the task lifecycle (pending/done/failed). The
+    # Repo-relative directory holding the task lifecycle (preparing/pending/done/failed). The
     # default "tasks" reproduces the historical layout; an operator may rename it to avoid a clash
-    # with a repo that already uses `tasks/`. Validated repo-relative — never absolute, no `..`, and
-    # never under the gitignored `.worc/` home (that would silently break the git audit trail). The
-    # lifecycle subfolder names themselves are not configurable.
+    # with a repo that already uses `tasks/`. `preparing/` is the staging area the watch scanner
+    # never reads (compose there, then `promote` into `pending/`). Validated repo-relative — never
+    # absolute, no `..`, and never under the gitignored `.worc/` home (that would silently break the
+    # git audit trail). The lifecycle subfolder names themselves are not configurable.
     tasks_dir: str = "tasks"
 
 

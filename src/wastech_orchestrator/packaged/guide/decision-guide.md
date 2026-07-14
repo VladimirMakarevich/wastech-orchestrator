@@ -7,9 +7,9 @@ A decision guide for the optional knobs. Defaults are almost always right — re
 You usually do not choose this — the operator does — but it affects where your task file goes:
 
 - **`run <task-file>`** processes exactly one task file, end to end. The argument is a **path** to the file (e.g. `tasks/pending/my-task.md`), not a task id.
-- **`watch`** polls the `tasks/pending/` folder and processes tasks dropped there, looping with periodic git sync.
+- **`watch`** polls the `tasks/pending/` folder and processes tasks promoted there, looping with periodic git sync.
 
-A live task belongs in the repo's own `tasks/pending/` directory (committed and pushed there) — that is how a teammate hands work to a watching orchestrator.
+A live task belongs in the repo's own `tasks/pending/` directory (committed and pushed there) — that is how a teammate hands work to a watching orchestrator. Compose the file in the `tasks/preparing/` staging folder first (the watcher never scans it), then `worc promote <id>` moves it into `tasks/pending/` once it is complete, so a half-written draft is never picked up mid-edit.
 
 ## `task_type` — choose the flow
 
@@ -117,7 +117,7 @@ You cannot flag a task to skip refinement. The orchestrator skips it automatical
 
 ## Where task files live
 
-There is a single canonical layout. Drop your task file in the repo's own `tasks/pending/` directory at the repo root, where it is git-tracked, committed, and pushed — that is how work reaches a watching orchestrator. Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home; only the `tasks/` lifecycle directories stay at the repo root and are tracked. The orchestrator commits the task file and its `<id>.summary.md` as an audit trail; a rejected task is quarantined under `.worc/tasks/rejected`.
+There is a single canonical layout. Compose your task file in the repo's `tasks/preparing/` staging folder — the watcher never scans it, so an in-progress draft is invisible to the daemon — then run `worc promote <id>` (or the `promote` verb inside `worc shell`) to move it atomically into `tasks/pending/`, where it is git-tracked, committed, and pushed and a watching orchestrator picks it up. (`enqueue <file>` in the shell is a fast path for an already-complete external file: it lands straight in `tasks/pending/`, atomically.) Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home; only the `tasks/` lifecycle directories (`preparing`/`pending`/`done`/`failed`) stay at the repo root and are tracked. The orchestrator commits the task file and its `<id>.summary.md` as an audit trail; a rejected task is quarantined under `.worc/tasks/rejected`.
 
 ## `contacts` and Telegram
 

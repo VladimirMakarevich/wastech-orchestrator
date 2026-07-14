@@ -3,6 +3,7 @@ REPL, and the lazy ``[shell]`` extra. No real TTY, no real daemon, no engine."""
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import io
 import os
@@ -381,6 +382,9 @@ def test_run_shell_detaches_attached_daemon_on_quit(
     assert rc == 0
     assert calls == []  # detach-on-quit → never stopped
     assert "left running" in out.getvalue()
+    # Part A: scripted quit prints the loud warning (never blocks) before detaching.
+    assert "WARNING" in out.getvalue()
+    assert "still serving the queue" in out.getvalue()
 
 
 def test_run_shell_without_extra_returns_2_and_does_not_spawn(
@@ -451,6 +455,157 @@ def test_run_interactive_quit_smoke(
 
     rc = cli_shell._run_interactive(_ctx(make_git_config(tmp_path / "clone")))
     assert rc == 0
+
+
+def test_run_interactive_quit_confirmation_declines_then_accepts(
+    monkeypatch: pytest.MonkeyPatch, make_git_config: _ConfigFactory, tmp_path: Path
+) -> None:
+    prompt_toolkit = pytest.importorskip("prompt_toolkit")
+    import prompt_toolkit.patch_stdout as patch_stdout_mod
+
+    class _ScriptedSession:
+        def __init__(self, *_a: object, **_k: object) -> None:
+            # line 'quit' → decline ('n') → still in REPL → line 'quit' → confirm ('y') → exit.
+            self._it = iter(["quit", "n", "quit", "y"])
+
+        async def prompt_async(self, message: str = "") -> str:
+            try:
+                return next(self._it)
+            except StopIteration as exc:
+                raise EOFError from exc
+
+    config = make_git_config(tmp_path / "clone")
+    _with_live_daemon(config)
+    monkeypatch.setattr(prompt_toolkit, "PromptSession", _ScriptedSession)
+    monkeypatch.setattr(patch_stdout_mod, "patch_stdout", lambda: contextlib.nullcontext())
+
+    ctx = _ctx(config)
+    rc = cli_shell._run_interactive(ctx)
+    assert rc == 0
+    out = _out(ctx)
+    assert "WARNING" in out
+    assert "quit cancelled" in out  # the first quit was declined
+
+
+# --- Part A: quit safety (warning + confirmation) ---------------------------------------
+
+
+def _with_live_daemon(config: OrchestratorConfig) -> None:
+    pid_path = process_control.pid_file_path(cli.worc_home_for(config))
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    process_control.write_pid_file(pid_path, pid=os.getpid())  # our own pid → "live"
+
+
+class _FakePrompter:
+    def __init__(self, *answers: str) -> None:
+        self._answers = list(answers)
+        self.prompts: list[str] = []
+
+    async def prompt_async(self, message: str) -> str:
+        self.prompts.append(message)
+        if not self._answers:
+            raise EOFError
+        return self._answers.pop(0)
+
+
+def test_quit_warning_none_without_daemon(make_git_config: _ConfigFactory, tmp_path: Path) -> None:
+    assert cli_shell._quit_warning(_ctx(make_git_config(tmp_path / "clone"))) is None
+
+
+def test_quit_warning_idle_serving(make_git_config: _ConfigFactory, tmp_path: Path) -> None:
+    config = make_git_config(tmp_path / "clone")
+    _with_live_daemon(config)
+    warning = cli_shell._quit_warning(_ctx(config))
+    assert warning is not None
+    assert "still serving the queue" in warning
+
+
+def test_quit_warning_busy(
+    monkeypatch: pytest.MonkeyPatch, make_git_config: _ConfigFactory, tmp_path: Path
+) -> None:
+    config = make_git_config(tmp_path / "clone")
+    _with_live_daemon(config)
+    monkeypatch.setattr(cli, "has_active_task", lambda _cfg: True)
+    warning = cli_shell._quit_warning(_ctx(config))
+    assert warning is not None
+    assert "actively running" in warning
+
+
+def test_confirm_quit_no_daemon_exits_without_prompting(
+    make_git_config: _ConfigFactory, tmp_path: Path
+) -> None:
+    ctx = _ctx(make_git_config(tmp_path / "clone"))
+    session = _FakePrompter("n")  # would decline if consulted
+    assert asyncio.run(cli_shell._confirm_quit(ctx, session)) is True
+    assert session.prompts == []  # no daemon → never prompted
+
+
+def test_confirm_quit_accepts_on_yes(make_git_config: _ConfigFactory, tmp_path: Path) -> None:
+    config = make_git_config(tmp_path / "clone")
+    _with_live_daemon(config)
+    ctx = _ctx(config)
+    session = _FakePrompter("y")
+    assert asyncio.run(cli_shell._confirm_quit(ctx, session)) is True
+    assert session.prompts  # was consulted
+
+
+def test_confirm_quit_declines_on_no(make_git_config: _ConfigFactory, tmp_path: Path) -> None:
+    config = make_git_config(tmp_path / "clone")
+    _with_live_daemon(config)
+    session = _FakePrompter("n")
+    assert asyncio.run(cli_shell._confirm_quit(_ctx(config), session)) is False
+
+
+def test_confirm_quit_declines_on_eof(make_git_config: _ConfigFactory, tmp_path: Path) -> None:
+    config = make_git_config(tmp_path / "clone")
+    _with_live_daemon(config)
+    session = _FakePrompter()  # no answers → prompt_async raises EOFError
+    assert asyncio.run(cli_shell._confirm_quit(_ctx(config), session)) is False
+
+
+# --- Part B: shell promote verb + atomic enqueue ----------------------------------------
+
+
+def test_promote_verb_moves_staged_file(make_git_config: _ConfigFactory, tmp_path: Path) -> None:
+    config = make_git_config(tmp_path / "clone")
+    ctx = _ctx(config)
+    prep = cli.preparing_dir(config)
+    prep.mkdir(parents=True)
+    (prep / "t1.md").write_text(
+        "---\nid: t1\ntitle: T\n---\n## Description\n\nx\n", encoding="utf-8"
+    )
+    cli_shell.dispatch("promote t1", ctx)
+    assert (cli.pending_dir(config) / "t1.md").is_file()
+    assert not (prep / "t1.md").exists()
+    assert "promoted t1.md -> pending" in _out(ctx)
+
+
+def test_promote_all_verb(make_git_config: _ConfigFactory, tmp_path: Path) -> None:
+    config = make_git_config(tmp_path / "clone")
+    ctx = _ctx(config)
+    prep = cli.preparing_dir(config)
+    prep.mkdir(parents=True)
+    (prep / "a.md").write_text("---\nid: a\ntitle: A\n---\n## Description\n\nx\n", encoding="utf-8")
+    cli_shell.dispatch("promote --all", ctx)
+    assert (cli.pending_dir(config) / "a.md").is_file()
+    assert "promoted a.md -> pending" in _out(ctx)
+
+
+def test_promote_verb_usage_when_empty(make_git_config: _ConfigFactory, tmp_path: Path) -> None:
+    ctx = _ctx(make_git_config(tmp_path / "clone"))
+    cli_shell.dispatch("promote", ctx)
+    assert "usage: promote" in _out(ctx)
+
+
+def test_enqueue_is_atomic_no_temp_left(make_git_config: _ConfigFactory, tmp_path: Path) -> None:
+    config = make_git_config(tmp_path / "clone")
+    ctx = _ctx(config)
+    src = tmp_path / "task.md"
+    src.write_text("---\nid: t1\ntitle: T\n---\n## Description\n\nx\n", encoding="utf-8")
+    cli_shell.dispatch(f"enqueue {src}", ctx)
+    pending = cli.pending_dir(config)
+    assert (pending / "task.md").is_file()
+    assert list(pending.glob("*.tmp")) == []  # no partial-write temp left behind
 
 
 # --- spawn → tail → reap integration (a real child process) -----------------------------

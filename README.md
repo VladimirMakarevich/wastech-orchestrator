@@ -39,7 +39,7 @@ tasks/pending/task-001.md
 ```
 
 - **One task at a time.** A single processing slot; other tasks wait in `tasks/pending/`. Auto mode (off by default) controls whether the next pending task starts automatically after cleanup.
-- **One canonical layout.** The task lifecycle dirs (`tasks/pending|processing|done|failed`) sit at the repo root and are git-tracked; everything else — `config.yaml`, `state.db`, `logs/`, and the installed guide bundle (task docs, task skills, config helper) — lives under the gitignored `<repo>/.worc/` home. See [Configuration](#configuration).
+- **One canonical layout.** The task lifecycle dirs (`tasks/preparing|pending|done|failed`) sit at the repo root and are git-tracked; everything else — `config.yaml`, `state.db`, `logs/`, and the installed guide bundle (task docs, task skills, config helper) — lives under the gitignored `<repo>/.worc/` home. See [Configuration](#configuration).
 - The detailed, code-derived reference (state machine, routing, recovery, security, the audit footprint) is the [Functional Map](docs/functional/index.md); the design rationale is in [docs/worc_architecture.md](docs/worc_architecture.md). The canonical project vocabulary (commands, config keys, flow nodes, statuses, artifacts, legacy terms) is in [docs/glossary.md](docs/glossary.md).
 
 ---
@@ -75,7 +75,7 @@ worc install .          # interactive wizard (detects origin, branch, agents, ch
 worc preflight
 ```
 
-Author a task in the repo's `tasks/pending/` directory:
+Author a task in the repo's `tasks/preparing/` staging directory, then promote it into the queue:
 
 ```markdown
 ---
@@ -181,7 +181,7 @@ worc top                live read-only monitor: active task + node, queue, recen
                           --poll-seconds N  --queue NAME  --log-file PATH  --recent N
 worc shell              interactive operator console over the watch daemon (needs the [shell] extra)
                           attaches to a live daemon or opens idle; 'up'/'watch' starts serving (verified),
-                          'enqueue <file>' queues, 'down' stops, 'quit' detaches (daemon keeps running)
+                          'enqueue <file>' queues, 'promote <id>' stages→pending, 'down' stops, 'quit' detaches (daemon keeps running)
                           --queue NAME  --log-file PATH
 worc list               enumerate active + pending + recent tasks (read-only)
                           --pending | --recent [N] | --all   focus one section
