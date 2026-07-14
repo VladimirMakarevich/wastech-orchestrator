@@ -1719,7 +1719,10 @@ def _report_finalize_plan(plan: FinalizePlan, *, as_: str) -> None:
         pr = plan.pr_url or "(none)"
         verify = f", verify={plan.verify_state}" if plan.verify_state else ""
         print(f"  pr url:    {pr} (source: {plan.pr_url_source}{verify})")
-    print(f"  cleanup:   checkout base '{plan.base_branch}'")
+    if plan.returns_to_base:
+        print(f"  cleanup:   checkout base '{plan.base_branch}'")
+    else:
+        print(f"  cleanup:   stay on branch '{plan.branch or '(current)'}'")
     print(f"  branch:    {plan.branch or '(none)'}")
     abandoned = ", outcome=abandoned" if plan.declared is Status.MANUAL_ACTION_REQUIRED else ""
     print(f"  ledger:    append a manual record{abandoned}")

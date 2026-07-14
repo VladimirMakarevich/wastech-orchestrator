@@ -154,7 +154,13 @@ from wastech_orchestrator.providers.base import ProviderId
 # guarantee), so it is a conscious opt-in: `config_writer` does NOT write it on a fresh install and
 # `upgrade-config` does not add it — documented in `config.example.yaml` only. Old configs load
 # fail-open with the safe default. Inert on Codex (no deny to gate there).
-CONFIG_SCHEMA_VERSION = 29
+# v30 (2026-07-14, cleanup-checkout-opt-out): adds the optional tri-state
+# `repo.checkout_base_on_cleanup` (bool | null, default null) gating whether cleanup returns
+# the tree to `base_branch`. null defers to `branch_mode` (new returns; existing/current
+# stay); false never returns (global off); true forces new + existing to return; current always
+# stays. Old (absent) configs take null => today's `new`-mode behavior is preserved. `config_writer`
+# does NOT write it on a fresh install; documented in `config.example.yaml` only.
+CONFIG_SCHEMA_VERSION = 30
 
 
 class AuditBranch(StrEnum):
@@ -226,6 +232,12 @@ class RepoConfig:
     # ``branch_mode`` overrides it. Defaults to ``new`` (create a fresh task branch from
     # ``base_branch``), so an absent key reproduces today's behavior exactly.
     branch_mode: BranchMode = BranchMode.NEW
+    # Whether terminal cleanup returns the working tree to ``base_branch`` after a terminal outcome
+    # (branch-mode ADR). ``None`` (default) defers to the branch mode: ``new`` returns to base,
+    # ``existing`` and ``current`` stay on the branch. ``False`` never returns (a global off switch,
+    # including ``new``); ``True`` forces ``new`` and ``existing`` to return. ``current`` always
+    # stays put regardless, since the operator owns its (possibly dirty) tree.
+    checkout_base_on_cleanup: bool | None = None
 
 
 @dataclass(frozen=True)

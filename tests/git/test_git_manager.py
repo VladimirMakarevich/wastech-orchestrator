@@ -42,6 +42,7 @@ def _manager(
     create_pr: bool = True,
     audit_on_branch: str = "task",
     tasks_dir: str = "tasks",
+    checkout_base_on_cleanup: bool | None = None,
     gh_runner=None,
 ) -> GitManager:
     config = make_git_config(
@@ -49,6 +50,7 @@ def _manager(
         create_pr=create_pr,
         audit_on_branch=audit_on_branch,
         tasks_dir=tasks_dir,
+        checkout_base_on_cleanup=checkout_base_on_cleanup,
     )
     return GitManager(config, store=store, artifacts_root=str(artifacts_root), gh_runner=gh_runner)
 
@@ -1101,6 +1103,57 @@ def test_terminal_cleanup_current_leaves_working_branch(
     assert outcome.safe is True
     assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "operator/wip"
     assert (git_repo.clone / "dirty.txt").exists()  # operator state preserved
+
+
+def test_terminal_cleanup_existing_stays_on_branch_by_default(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # `existing` shares an operator-owned branch across tasks; by default cleanup stays on it.
+    _task(store)
+    git_run(["branch", "feature/keep"], git_repo.clone)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch(
+        "task-001", "x", epoch=_EPOCH, mode=BranchMode.EXISTING, branch_ref="feature/keep"
+    )
+    (git_repo.clone / "src.py").write_text("x\n", encoding="utf-8")
+    gm.commit_code("task-001", "feat")
+    outcome = gm.terminal_cleanup("task-001", mode=BranchMode.EXISTING)
+    assert outcome.safe is True
+    assert outcome.target_branch == "feature/keep"
+    assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "feature/keep"
+
+
+def test_terminal_cleanup_flag_false_stays_on_new_branch(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # A global ``checkout_base_on_cleanup: false`` disables the switch-back even for a `new` branch.
+    _task(store)
+    gm = _manager(
+        git_repo, store, tmp_path / "art", make_git_config, checkout_base_on_cleanup=False
+    )
+    branch = gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    (git_repo.clone / "src.py").write_text("x\n", encoding="utf-8")
+    gm.commit_code("task-001", "feat")
+    outcome = gm.terminal_cleanup("task-001")  # default mode = NEW
+    assert outcome.safe is True
+    assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == branch
+
+
+def test_terminal_cleanup_flag_true_returns_existing_to_base(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # Explicit ``checkout_base_on_cleanup: true`` forces even `existing` back to base.
+    _task(store)
+    git_run(["branch", "feature/keep"], git_repo.clone)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, checkout_base_on_cleanup=True)
+    gm.prepare_branch(
+        "task-001", "x", epoch=_EPOCH, mode=BranchMode.EXISTING, branch_ref="feature/keep"
+    )
+    (git_repo.clone / "src.py").write_text("x\n", encoding="utf-8")
+    gm.commit_code("task-001", "feat")
+    outcome = gm.terminal_cleanup("task-001", mode=BranchMode.EXISTING)
+    assert outcome.safe is True
+    assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "main"
 
 
 def _reuse_gh(

@@ -249,6 +249,7 @@ class FinalizePlan:
     source_path: str | None = None
     branch: str | None = None
     base_branch: str = ""
+    returns_to_base: bool = True  # whether terminal cleanup will check out base_branch (else stay)
     pr_url: str | None = None
     pr_url_source: str = "none"  # explicit | recorded | none
     verify_state: str | None = None  # gh PR state when checked (MERGED/OPEN/CLOSED)
@@ -1301,6 +1302,7 @@ class Orchestrator:
             source_path=row.source_path,
             branch=row.branch,
             base_branch=self._config.repo.base_branch,
+            returns_to_base=self._git.returns_to_base(self._persisted_branch_mode(task_id)),
             pr_url=resolved_url,
             pr_url_source=source,
             verify_state=verify_state,
@@ -1324,7 +1326,7 @@ class Orchestrator:
         row = self._store.get_task(task_id)
         if row is None:
             raise PipelineFailed(f"unknown task id '{task_id}'")
-        cleanup = self._git.terminal_cleanup(task_id)
+        cleanup = self._git.terminal_cleanup(task_id, mode=self._persisted_branch_mode(task_id))
         if not cleanup.safe:
             # Fail-closed: do not touch status/file/ledger when the tree can't be safely restored.
             self._store.update_task(
@@ -1581,13 +1583,14 @@ class Orchestrator:
         return PipelineResult(task_id=first, final_status=Status.MANUAL_ACTION_REQUIRED)
 
     def _resume_cleanup(self, task_id: str | None) -> PipelineResult | None:
-        """Finish an interrupted terminal cleanup: checkout base once, then ledger."""
+        """Finish an interrupted terminal cleanup once (checkout base or stay per the task's branch
+        mode / ``repo.checkout_base_on_cleanup``), then append the ledger record."""
         if task_id is None:
             return None
         row = self._store.get_task(task_id)
         if row is None:
             return None
-        cleanup = self._git.terminal_cleanup(task_id)
+        cleanup = self._git.terminal_cleanup(task_id, mode=self._persisted_branch_mode(task_id))
         self._store.update_task(
             task_id,
             cleanup_target_branch=cleanup.target_branch,

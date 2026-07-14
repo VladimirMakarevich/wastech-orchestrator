@@ -136,7 +136,7 @@ The PR title still comes from `title`; `branch_name` changes only the Git branch
 | Value | Behavior |
 | --- | --- |
 | `new` (default) | Fork a fresh task branch from `repo.base_branch`, exactly as before. The branch is **orchestrator-owned**. |
-| `existing` | Work in an already-existing branch named by `branch_ref` (checked out with a plain checkout; a local tracking branch is created from `origin/<ref>` when only the remote ref exists). |
+| `existing` | Work in an already-existing branch named by `branch_ref` (checked out with a plain checkout; a local tracking branch is created from `origin/<ref>` when only the remote ref exists). Terminal cleanup leaves the tree on this branch by default (no switch back to base) — override with `repo.checkout_base_on_cleanup`. |
 | `current` | Work in whatever branch the working tree is on — no create, no switch, no `pull`, and a dirty tree is left untouched. |
 
 ```yaml
@@ -154,7 +154,7 @@ Rules and safety:
 
 - **`existing` requires `branch_ref`**, and `branch_ref` is only valid with `existing` (either violation is a validation error). The ref must already exist locally or on the remote — the orchestrator never auto-creates it (a missing ref is rejected at preflight, before any slot or branch is taken).
 - **`current` needs a real branch** — a detached `HEAD` is rejected. Because it rides your live checkout, `current` is a poor fit for unattended `watch` (it emits a warning), and sub-tasks from decomposition inherit the parent's one working branch.
-- **The orchestrator never mutates a branch it does not own.** In `existing`/`current` mode it never deletes, resets-to-base, or force-checks-out-away from the branch; terminal cleanup leaves a `current`-mode tree exactly where you left it. Consequently a **fresh** `rerun` is refused in these modes — use `rerun --continue` to resume in place, or clean up the branch yourself.
+- **The orchestrator never mutates a branch it does not own.** In `existing`/`current` mode it never deletes, resets-to-base, or force-checks-out-away from the branch; terminal cleanup leaves both an `existing`- and a `current`-mode tree exactly where you left it (by default — `new` returns to base, and `repo.checkout_base_on_cleanup` overrides either way; `current` always stays). Consequently a **fresh** `rerun` is refused in these modes — use `rerun --continue` to resume in place, or clean up the branch yourself.
 - **`branch_name` is ignored** outside `new` mode (there is nothing to name); setting it there is a validation warning.
 - **Publishing is orthogonal.** Branch mode only redirects where the `publish` node's commit/push/PR point; whether a `publish` node runs at all is still the flow's decision. When the working branch resolves to the PR base (e.g. `current` on `main`), a PR is impossible — the orchestrator still commits and pushes (directly to the base, subject to branch protection) and **skips the PR** with a logged note; `auto_merge` then no-ops. A chain of tasks on one shared branch converges on a **single** PR: an already-open `head→base` PR is reused rather than re-created, and each reusing task appends its own `## <title>` + summary section to the PR body (keyed by task id, so a rerun does not duplicate it) — the PR reflects the whole chain instead of only its first task.
 

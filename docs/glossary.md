@@ -86,9 +86,10 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`repo`** - The target repository block. It names the remote URL, local clone path, base branch, and branch prefix.
 - **`repo.url`** - Remote repository URL for the target clone.
 - **`repo.local_path`** - Dedicated clone or workspace path used for agent runs.
-- **`repo.base_branch`** - The branch checked out before task work and restored after terminal cleanup.
+- **`repo.base_branch`** - The branch checked out before task work and, by default, restored after terminal cleanup (see `repo.checkout_base_on_cleanup`).
 - **`repo.branch_prefix`** - Prefix for the default task branch name.
 - **`repo.branch_mode`** - Instance default for where task git operations point (`new`/`existing`/`current`, default `new`); a per-task `branch_mode` overrides it.
+- **`repo.checkout_base_on_cleanup`** - Tri-state (`true`/`false`/unset) gating whether terminal cleanup returns to `base_branch`; unset defers to the branch mode (`new` returns; `existing`/`current` stay). Instance-only.
 - **`paths`** - Optional block locating the task lifecycle on disk.
 - **`paths.tasks_dir`** - Repo-relative directory holding the `pending`/`done`/`failed` lifecycle subfolders (default `tasks`). Validated repo-relative (no `..`/absolute) and rejected if it lives under the gitignored `.worc/` home; a subpath such as `config/tasks` is allowed.
 - **`agents`** - Provider availability, retry budgets, decomposition, and provider-specific settings.
@@ -243,7 +244,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 ## Git, artifacts, and recovery
 
 - **`Git Manager`** - The only component that commits, pushes, or opens a PR.
-- **`base_branch`** - The branch that the orchestrator returns to after a task is finished.
+- **`base_branch`** - The branch that the orchestrator returns to after a task is finished (by default in `new` mode; `repo.checkout_base_on_cleanup` and the branch mode decide whether it returns at all).
 - **`branch_prefix`** - The prefix used for the default task branch name.
 - **`branch_name`** - A full branch override supplied by the task author.
 - **`scoped staging`** - Explicit pathspec staging that excludes orchestrator runtime artifacts and task lifecycle folders.
@@ -253,7 +254,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`Pull Request` / `PR`** - The publish artifact created by the Git Manager.
 - **`publish`** - The terminal Git step that turns the reviewed result into a PR, and optionally auto-merges it when configured.
 - **`publish idempotency`** - The guarantee that a rerun does not create duplicate commits, pushes, or PRs.
-- **`terminal cleanup`** - The safe return of the working tree to `base_branch` after a task reaches a terminal status.
+- **`terminal cleanup`** - Freeing the single processing slot after a task reaches a terminal status: it returns the working tree to `base_branch` (safely, or fails closed) when the branch mode / `repo.checkout_base_on_cleanup` calls for it, otherwise it leaves HEAD on the working branch.
 - **`workspace/repo`** - The dedicated clone or workspace used for agent edits.
 - **`<repo>/.worc/`** - The orchestrator runtime home. It holds config, the seeded editable `flows/` (and their `roles/`), the installed `guide/`, logs (check logs included, under `logs/<task-id>/checks/`), workspace state, and other generated files.
 - **State Store** - The SQLite-backed persistence layer around `state.db` that stores task state and run records.

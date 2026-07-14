@@ -1,8 +1,6 @@
 # Баг-репорт: `worc rerun ... --continue --from review`
 
-Репозиторий: `wastech-mdlint`
-Задача: `p6-04-config-writer-schema`
-Команда: `worc rerun p6-04-config-writer-schema --continue --from review`
+Репозиторий: `wastech-mdlint` Задача: `p6-04-config-writer-schema` Команда: `worc rerun p6-04-config-writer-schema --continue --from review`
 
 ## Случай A — запуск из `worc shell`
 

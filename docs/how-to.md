@@ -102,7 +102,7 @@ worc watch                                      # or `up` in the shell
 **Details / caveats:**
 
 - **Verify "nothing is running" before finalizing.** If a `worc run`/daemon really is still alive in another terminal, don't finalize under it — stop that first (`worc stop`). The `ls .worc/*.pid` + `ps` checks above are the tell: no PID file **and** no `worc`/`codex`/`claude` process means the `running` is stale.
-- **`finalize` needs an idle slot and no live daemon** — it runs terminal cleanup (`git checkout base`) in the shared clone. With the daemon already stopped this is satisfied. `--as failed` keeps the task rerun-eligible; `--as abandoned` records it as manually abandoned.
-- **Preview first if unsure:** `worc finalize <task-id> --as failed --dry-run` prints exactly what it will do (status transition, base checkout, ledger record) and writes nothing.
-- **`finalize` leaves an operator-owned branch alone** — it only checks out the base branch; it does not delete or reset `branch_mode: existing`/`current` branches shared across tasks.
+- **`finalize` needs an idle slot and no live daemon** — it runs terminal cleanup in the shared clone (`git checkout base` when the branch mode / `repo.checkout_base_on_cleanup` calls for it). With the daemon already stopped this is satisfied. `--as failed` keeps the task rerun-eligible; `--as abandoned` records it as manually abandoned.
+- **Preview first if unsure:** `worc finalize <task-id> --as failed --dry-run` prints exactly what it will do (status transition, whether cleanup checks out base or stays on the branch, ledger record) and writes nothing.
+- **`finalize` leaves an operator-owned branch alone** — it never deletes or resets a `branch_mode: existing`/`current` branch, and by default it does not even check out base for those modes (they stay on the branch). Only `new` mode returns to base by default; set `repo.checkout_base_on_cleanup` to override either way.
 - **The fix is `finalize`/`rerun`/restart — never `stop`.** `stop` only manages the daemon; reaching for it here is the natural mistake this recipe exists to correct.

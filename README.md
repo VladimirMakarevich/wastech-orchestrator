@@ -275,4 +275,4 @@ The full documentation is published at **[vladimirmakarevich.github.io/wastech-o
 5. **Only the orchestrator does commit / push / PR.** Agents are forbidden from touching the Git lifecycle, and the code commit never contains orchestration/task files.
 6. **Checkpoints at every step** → crash recovery and idempotent publishing.
 7. **The security policy cannot be weakened** through a task or `extra_args`; flow-wide ceilings (`permission_ceiling`/`output_policy`/`network_policy`) are validated fail-closed before any task runs; no secrets in logs, SQLite, or artifacts.
-8. **Auto mode is opt-in** — by default one task is processed, the working copy returns to `repo.base_branch`, and further pending tasks are left for the operator.
+8. **Auto mode is opt-in** — by default one task is processed, the working copy returns to `repo.base_branch` (unless the branch mode / `repo.checkout_base_on_cleanup` keeps it on the working branch), and further pending tasks are left for the operator.
