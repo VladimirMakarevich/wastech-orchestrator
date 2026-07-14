@@ -61,7 +61,7 @@ agents:
   providers:
     claude:
       command: "claude"       # executable name (found on PATH) or an absolute path to the CLI
-      model: "claude-sonnet-4-6"   # "" = use the Claude CLI/account default
+      model: "claude-sonnet-5"   # "" = use the Claude CLI/account default
       reasoning: high          # low | medium | high | xhigh | max
       timeout_seconds: 7200    # per-attempt CLI wall-clock ceiling (seconds)
       max_turns: 400           # Claude turn cap (positive int); "none" or "max" = no cap (unlimited)

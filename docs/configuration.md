@@ -222,7 +222,7 @@ agents:
     claude:
       command: "claude"
       primary: true # the global primary — runs any node with no provider; sole fallback target
-      model: "claude-sonnet-4-6" # explicit default; "" = use the CLI/account default
+      model: "claude-sonnet-5" # explicit default; "" = use the CLI/account default
       reasoning: high # low | medium | high | xhigh | max
       timeout_seconds: 7200
       max_turns: 400 # positive int = turn cap; "none" or "max" = no cap (unlimited)
@@ -246,7 +246,7 @@ Common fields:
 | --- | --- | --- | --- |
 | `command` | string | provider id (`"claude"` or `"codex"`) | Executable name or path. |
 | `primary` | boolean | `false` | Marks the **global primary**. Exactly one configured provider must set it; that provider runs any flow node with no explicit `provider` and is the sole infrastructure-fallback target. It must also be in `agents.allowed`. |
-| `model` | string | `claude-sonnet-4-6` (claude), `gpt-5.4` (codex) | Provider model setting. The packaged template ships an explicit default per provider; set `""` to fall back to the CLI/account default. (A flow node may override it per node.) |
+| `model` | string | `claude-sonnet-5` (claude), `gpt-5.4` (codex) | Provider model setting. The packaged template ships an explicit default per provider; set `""` to fall back to the CLI/account default. (A flow node may override it per node.) |
 | `reasoning` | string or null | `high` (both, in the packaged template) | Provider-specific reasoning effort level. Claude accepts `low`, `medium`, `high`, `xhigh`, `max` and maps it to `--effort`. Codex accepts `minimal`, `low`, `medium`, `high`, `xhigh`, plus legacy `max` mapped to `xhigh`, and passes it as `-c model_reasoning_effort="..."`. Set `null` to omit the override and use the CLI/account default. (A flow node may override it per node.) |
 | `timeout_seconds` | integer | `7200` | Timeout for a stage run. |
 | `permission_profile` | string | `"workspace-write"` | Orchestrator permission profile passed into the adapter. |
@@ -689,7 +689,7 @@ Configures the **constant supervisor layer** — a per-task oversight layer that
 ```yaml
 supervisor:
   role_file: "roles/supervisor.md"
-  model: "claude-sonnet-4-6" # install writes the primary provider's model; null → provider default
+  model: "claude-sonnet-5" # install writes the primary provider's model; null → provider default
   reasoning: high # install writes a non-max tier; null → provider default
   provider: claude # install pins the global primary; null → inherit the global primary
 ```
