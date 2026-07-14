@@ -200,12 +200,34 @@ class BaseCliProvider:
         """Extra provider-specific keys for the request artifact (inserted before ``argv``)."""
         return {}
 
+    def _augment_child_env(self, env: dict[str, str]) -> dict[str, str]:
+        """Subclass hook: adjust the allowlisted child env just before preflight/probe/run.
+
+        The base builds the env purely from the security allowlist (:func:`build_child_env`) and
+        knows no CLI syntax; a subclass may need to make its own runtime discoverable — e.g. prepend
+        a package directory onto ``PATH`` so the CLI can find a sibling helper binary. It only ever
+        adjusts the *value* of an already-allowlisted key; it never adds a key the allowlist omits.
+        Default: return ``env`` unchanged.
+        """
+        return env
+
+    def _post_success_infra_error(self, stderr_text: str) -> NormalizedError | None:
+        """Subclass hook: veto a parseable terminal *success* when stderr proves it did no work.
+
+        Some CLIs emit a clean terminal ``result`` event (exit 0) even though a fatal infrastructure
+        error on stderr meant the run never actually touched the workspace (e.g. a sandbox helper
+        that could not launch). The stdout parser cannot see that. A subclass returns a
+        :class:`NormalizedError` (an infra class) to turn such a false success into a raised
+        infrastructure failure; ``None`` (the default) trusts the parsed success.
+        """
+        return None
+
     # --- shared lifecycle ----------------------------------------------------------------------
 
     def preflight(self) -> ProviderHealth:
         """Detect the executable and parse its version (auth is best-effort/offline in P2)."""
         label = self._executable_label()
-        env = build_child_env(self._security.allowed_environment)
+        env = self._augment_child_env(build_child_env(self._security.allowed_environment))
         with tempfile.TemporaryDirectory() as scratch:
             stdout_path = str(Path(scratch) / "version.out")
             proc = self._run_process(
@@ -253,7 +275,8 @@ class BaseCliProvider:
             version=version,
             authenticated=True,
             supports_required_features=version is not None,
-            message=f"{label} {version or 'unknown version'} available",
+            message=f"{label} {version or 'unknown version'} available"
+            f"{self._preflight_healthy_detail(env)}",
             degraded_reasons=self._preflight_degraded_reasons(env),
         )
 
@@ -276,6 +299,12 @@ class BaseCliProvider:
         CLI syntax; it does not know ``agents.allowed``). Default: none.
         """
         return ()
+
+    def _preflight_healthy_detail(self, env: Mapping[str, str]) -> str:
+        """Subclass hook: extra detail appended to the healthy preflight message (e.g. a resolved
+        runtime path a subclass wants an operator to see). Secret-free; default: empty string.
+        """
+        return ""
 
     def _probe(self, argv: list[str], env: Mapping[str, str]) -> tuple[bool, str]:
         """Run a short, read-only probe command (e.g. ``<cli> … --help``) for a capability check.
@@ -318,7 +347,7 @@ class BaseCliProvider:
 
         self._write_request(paths, request, argv=argv)
 
-        env = build_child_env(self._security.allowed_environment)
+        env = self._augment_child_env(build_child_env(self._security.allowed_environment))
         log = bind(
             _LOG,
             task_id=request.task_id,
@@ -424,6 +453,18 @@ class BaseCliProvider:
             )
             self._finalize_failure(paths, request, started_at, finished_at, proc, error)
             raise ProviderError(error.error_class, error.message)
+
+        if parsed.succeeded:
+            infra_error = self._post_success_infra_error(proc.stderr_text)
+            if infra_error is not None:
+                # A parseable terminal SUCCESS whose stderr still proves a fatal infra failure (e.g.
+                # a sandbox helper that could not launch): the run never did the work. RAISE the
+                # infra class so the Router falls over to the other provider instead of trusting the
+                # false success. Because this raises, ``outcome.result`` is None and no resumable
+                # session lineage is persisted for the broken run — the next hop is a fallback, not
+                # a resume of a session that did nothing.
+                self._finalize_failure(paths, request, started_at, finished_at, proc, infra_error)
+                raise ProviderError(infra_error.error_class, infra_error.message)
 
         if parsed.succeeded:
             status, error_obj = RunStatus.SUCCEEDED, None

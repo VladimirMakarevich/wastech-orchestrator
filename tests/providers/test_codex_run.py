@@ -230,6 +230,54 @@ def test_invalid_output_raises_invalid_output(
     assert exc.value.error_class is ErrorClass.INVALID_OUTPUT
 
 
+_HELPER_STDERR = (
+    "ERROR codex_core::exec: windows sandbox: orchestrator_helper_launch_failed: setup refresh "
+    "failed to launch helper: helper=codex-windows-sandbox-setup.exe, error=program not found"
+)
+
+
+def test_sandbox_helper_failure_stderr_normalizes_to_permission_denied(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # Nonzero exit with no parseable terminal event: classify() matches the Windows sandbox-helper
+    # signature and normalizes it into the existing PERMISSION_DENIED infra class.
+    fake = FakeRun(exit_code=1, stderr=_HELPER_STDERR)
+    provider = _provider(codex_config, security_config, tmp_path, fake)
+    with pytest.raises(ProviderError) as exc:
+        provider.run(make_request())
+    assert exc.value.error_class is ErrorClass.PERMISSION_DENIED
+
+
+def test_false_success_with_helper_stderr_raises_infra_not_succeeded(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # The Windows-10 incident: codex printed a clean terminal SUCCESS (exit 0) while stderr carried
+    # the fatal sandbox-helper failure, so the run never touched the workspace. The post-success
+    # guard turns that false success into a raised PERMISSION_DENIED (an infra failure the Router
+    # falls over on) instead of returning RunStatus.SUCCEEDED.
+    fake = FakeRun(
+        stdout=_success_stream(),
+        exit_code=0,
+        stderr=_HELPER_STDERR,
+        last_message="Could not create the file: the sandbox helper is broken.",
+    )
+    provider = _provider(codex_config, security_config, tmp_path, fake)
+    with pytest.raises(ProviderError) as exc:
+        provider.run(make_request())
+    assert exc.value.error_class is ErrorClass.PERMISSION_DENIED
+    # The failed-attempt artifact is written before the raise, recording the infra class — and
+    # crucially NOT the false "succeeded" the incident logged.
+    result_json = json.loads((_attempt_dir(tmp_path) / "result.json").read_text(encoding="utf-8"))
+    assert result_json["status"] == "failed"
+    assert result_json["error"]["error_class"] == "permission_denied"
+
+
 def test_configuration_error_raises_before_launch(
     codex_config: ProviderConfig,
     security_config: SecurityConfig,
