@@ -1510,7 +1510,7 @@ def _format_exhausted(loops: tuple[ExhaustedLoop, ...]) -> str:
 
 def _report_rerun_plan(plan: RerunPlan) -> None:
     """Print the planned reconciliation for ``rerun --dry-run``; writes nothing."""
-    mode = "continue" if plan.continue_mode else "fresh"
+    mode = "restart" if plan.restart_in_place else "continue" if plan.continue_mode else "fresh"
     current = plan.current_status.value if plan.current_status else "unknown"
     print(f"rerun (dry-run): would re-attempt {plan.task_id} [{mode}]")
     print(f"  current status: {current}")
@@ -1539,6 +1539,11 @@ def _report_rerun_plan(plan: RerunPlan) -> None:
                 "  budget:    the global max_total_fix_iterations backstop is exhausted; it is a "
                 "hard ceiling and cannot be reset"
             )
+    elif plan.restart_in_place:
+        archive = f"attempt-{max(plan.attempt - 1, 0)}"
+        print(f"  branch:    reuse {plan.branch or '(current)'} as-is (operator-owned; no reset)")
+        print(f"  artifacts: archived to logs/{plan.task_id}/{archive}/")
+        print("  state:     per-attempt row state cleared; re-driven from the top")
     else:
         target = plan.branch or "worc/<id>-<slug>"
         archive = f"attempt-{max(plan.attempt - 1, 0)}"
@@ -1649,11 +1654,16 @@ def cmd_rerun(args: argparse.Namespace) -> int:
     # input() fights 'worc shell's own stdin reader (H1: the single-stdin-reader rule) — the same
     # class of bug already fixed for 'stop'/'restart'. Refuse-with-instructions instead of hanging.
     non_interactive = getattr(args, "non_interactive", False) or not sys.stdin.isatty()
-    mode = "continue" if args.continue_ else "fresh"
-    # --continue reuses the existing branch in place (base_branch is never touched); only a fresh
-    # rerun resets the branch to base. The prompt names what actually happens in each mode — saying
-    # "from base" on a --continue wrongly implies a checkout to base_branch, which never happens.
-    target = f"on branch '{plan.branch}'" if args.continue_ else f"from base '{plan.base_branch}'"
+    # The prompt names what actually happens in each mode. --continue reuses the existing branch in
+    # place (base_branch is never touched); restart-in-place likewise re-drives on the operator's
+    # branch with no reset (a plain `rerun` of a pre-checkpoint failure); only a fresh rerun resets
+    # to base. Saying "from base" on the first two would wrongly imply a base_branch checkout.
+    if plan.restart_in_place:
+        mode, target = "restart", f"on branch '{plan.branch}'"
+    elif args.continue_:
+        mode, target = "continue", f"on branch '{plan.branch}'"
+    else:
+        mode, target = "fresh", f"from base '{plan.base_branch}'"
     if not args.yes:
         if non_interactive:
             print("rerun: refusing without confirmation (non-interactive); pass --yes to proceed")
@@ -1662,7 +1672,11 @@ def cmd_rerun(args: argparse.Namespace) -> int:
             print("rerun: aborted")
             return 0
 
-    if args.continue_:
+    if plan.restart_in_place:
+        assert plan.source_path is not None  # guarded by plan_rerun refusals
+        result = orchestrator.restart_task_in_place(args.task_id, source_path=plan.source_path)
+        label = "rerun/restart"
+    elif args.continue_:
         resolved_reset, abort_code = _resolve_reset_fix_budget(
             args, plan, non_interactive=non_interactive
         )

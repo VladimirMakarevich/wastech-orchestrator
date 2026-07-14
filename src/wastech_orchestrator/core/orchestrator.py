@@ -200,6 +200,9 @@ class RerunPlan:
     pr_url: str | None = None
     reset_fix_budget: bool = False  # --reset-fix-budget: grant a fresh consecutive fix budget
     from_node: str | None = None  # --from <node>: re-enter here instead of the checkpoint
+    # A plain ``rerun`` (no --continue) on an operator-owned branch (``existing``/``current``) that
+    # never reached a flow checkpoint: re-drive from the top on the branch as-is, no base reset.
+    restart_in_place: bool = False
     notes: tuple[str, ...] = ()  # non-fatal advisories surfaced in --dry-run / the confirm prompt
     refusals: tuple[str, ...] = ()
     # Already-exhausted named fix loops reachable forward from the resume node, using the live
@@ -1014,24 +1017,36 @@ class Orchestrator:
                 backstop_exhausted = global_backstop_exhausted(
                     live.doc.budgets, self._config.agents.max_total_fix_iterations, counters
                 )
+        restart_in_place = False
+        display_branch = row.branch
         if not continue_mode:
             # A fresh rerun resets the branch to base (delete + recreate) — safe only on a branch
-            # the orchestrator owns (``new`` mode). In ``existing``/``current`` the branch is the
-            # operator's, so refuse and direct them to resume in place instead of destroying it.
+            # the orchestrator owns (``new`` mode). On an operator-owned branch (``existing``/
+            # ``current``) the outcome depends on whether the run produced any work: a checkpoint
+            # means resume in place with --continue; no checkpoint means the run died before any
+            # work, so there is nothing to reset and no resume point — restart it in place.
             rerun_mode = self._persisted_branch_mode(task_id)
-            if rerun_mode is not BranchMode.NEW:
+            if rerun_mode is BranchMode.NEW:
+                pr_url = self._git.recorded_pr_url(task_id)
+                has_remote = bool(row.branch) and self._git.remote_branch_exists(row.branch or "")
+                if (has_remote or pr_url) and not force_reset_remote:
+                    refusals.append(
+                        f"a prior attempt left a remote branch / open PR ({pr_url or row.branch}); "
+                        "resolve it with `finalize` first, or pass --force-reset-remote to delete "
+                        "the remote branch (this closes the PR)"
+                    )
+            elif self._store.get_flow_checkpoint(task_id)[0]:
                 refusals.append(
                     f"task '{task_id}' runs in branch_mode '{rerun_mode.value}' (operator-owned); "
                     "a fresh rerun would reset a branch the orchestrator does not own. Use "
                     "`rerun --continue` to resume in place, or clean up the branch manually"
                 )
-            pr_url = self._git.recorded_pr_url(task_id)
-            has_remote = bool(row.branch) and self._git.remote_branch_exists(row.branch or "")
-            if (has_remote or pr_url) and not force_reset_remote:
-                refusals.append(
-                    f"a prior attempt left a remote branch / open PR ({pr_url or row.branch}); "
-                    "resolve it with `finalize` first, or pass --force-reset-remote to delete the "
-                    "remote branch (this closes the PR)"
+            else:
+                restart_in_place = True
+                display_branch = self._restart_display_branch(task_id, rerun_mode) or row.branch
+                notes.append(
+                    f"restart-in-place: re-drives from the top on branch '{display_branch}' "
+                    "without resetting it (no checkpoint to resume)"
                 )
         return RerunPlan(
             task_id=task_id,
@@ -1039,7 +1054,7 @@ class Orchestrator:
             found=True,
             current_status=row.status,
             source_path=source_path,
-            branch=row.branch,
+            branch=display_branch,
             base_branch=self._config.repo.base_branch,
             attempt=_ledger_attempt_count(self._ledger, task_id) + 1,
             interrupted_node=interrupted_node,
@@ -1052,6 +1067,7 @@ class Orchestrator:
             refusals=tuple(refusals),
             exhausted_fix_loops=exhausted,
             global_backstop_exhausted=backstop_exhausted,
+            restart_in_place=restart_in_place,
         )
 
     def rerun_task(
@@ -1088,6 +1104,37 @@ class Orchestrator:
         self._store.reset_task_for_rerun(task_id)
         self._rerun_attempt[task_id] = prior + 1
         self._log(task_id).info("rerun: fresh attempt", extra={"attempt": prior + 1})
+        return self.run_task(source_path)
+
+    def restart_task_in_place(self, task_id: str, *, source_path: str) -> PipelineResult:
+        """Re-drive a terminal task from the top on its existing (operator-owned) branch.
+
+        For a pre-checkpoint failure (no flow checkpoint recorded) in ``existing``/``current`` mode
+        there is no per-attempt work to reset and no resume point, so clear the DB row state and
+        re-run, reusing the branch as-is. Unlike ``rerun_task`` this never touches git (no
+        reset-to-base) — the branch is the operator's. Preserves the ledger attempt linkage.
+        """
+        row = self._store.get_task(task_id)
+        if row is None:
+            raise PipelineFailed(f"unknown task id '{task_id}'")
+        # Defense-in-depth over ``plan_rerun``'s routing: restart-in-place is only for an
+        # operator-owned branch (it must never reset one) and only when nothing was checkpointed
+        # (a checkpoint means there is work to resume via --continue).
+        rerun_mode = self._persisted_branch_mode(task_id)
+        if rerun_mode is BranchMode.NEW:
+            raise PipelineFailed(
+                f"cannot restart-in-place '{task_id}' in branch_mode 'new'; use a fresh `rerun`"
+            )
+        current_node = self._store.get_flow_checkpoint(task_id)[0]
+        if current_node:
+            raise PipelineFailed(
+                f"'{task_id}' has a recorded checkpoint at '{current_node}'; use `rerun --continue`"
+            )
+        prior = _ledger_attempt_count(self._ledger, task_id)
+        archive_task_artifacts(self._artifacts_root, task_id, prior)
+        self._store.reset_task_for_rerun(task_id)  # DB-only reset; the branch is left untouched
+        self._rerun_attempt[task_id] = prior + 1
+        self._log(task_id).info("rerun: restart in place", extra={"attempt": prior + 1})
         return self.run_task(source_path)
 
     def continue_task(
@@ -3103,6 +3150,19 @@ class Orchestrator:
         except (json.JSONDecodeError, OSError, KeyError, ValueError):
             return self._config.repo.branch_mode
         return self._branch_mode(task)
+
+    def _restart_display_branch(self, task_id: str, mode: BranchMode) -> str | None:
+        """Best-effort name of the operator-owned branch a restart-in-place will run on, for the
+        confirm / dry-run view. ``current`` → the current git branch; ``existing`` → the task's
+        ``branch_ref`` from its persisted manifest. Returns ``None`` if it can't be resolved (the
+        caller falls back to the stored row branch)."""
+        if mode is BranchMode.CURRENT:
+            return self._git.current_branch()
+        try:
+            task = load_normalized(self._artifacts_root, task_id)
+        except (json.JSONDecodeError, OSError, KeyError, ValueError):
+            return None
+        return task.branch_ref
 
     def _persisted_flow_snapshot(self, task_id: str) -> FlowSnapshot | None:
         """Resolve the task's flow from its persisted manifest — the rerun path.
