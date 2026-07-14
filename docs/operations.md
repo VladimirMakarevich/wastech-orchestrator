@@ -105,6 +105,7 @@ The distinction matters:
 - `worc` works in a standalone PowerShell window, but not in the IDE terminal: the IDE was started before `PATH` changed, or it launches PowerShell with a different environment. Restart the IDE, or apply the temporary `$env:Path = ...` fix in the integrated terminal.
 - `python -m worc preflight` fails with `No module named worc`: expected. Use `worc preflight` or `python -m wastech_orchestrator preflight`.
 - You can verify what the current shell resolves with `where.exe worc`, `where.exe wastech-orchestrator`, and `python -c "import sysconfig; print(sysconfig.get_path('scripts'))"`.
+- `preflight` reports `codex: FAIL — Codex sandbox helper codex-windows-sandbox-setup.exe is not discoverable …`: on Windows the `workspace-write` sandbox launches that helper from the Codex standalone package's `codex-resources` directory. The orchestrator resolves it from `codex`'s own install and prepends it to the run's `PATH` automatically, so a normal install passes; this failure means the helper is genuinely missing (an incomplete or partial Codex install). Reinstall or upgrade the Codex CLI so `%USERPROFILE%\.codex\packages\standalone\current\codex-resources\codex-windows-sandbox-setup.exe` exists, then re-run `preflight`. (The healthy line shows where the helper resolved.)
 
 ---
 

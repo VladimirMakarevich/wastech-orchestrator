@@ -237,6 +237,28 @@ def test_cross_provider_fallback_drops_provider_specific_request_fields(
     assert fallback.requests[0].network_access is True  # type: ignore[attr-defined]
 
 
+def test_permission_denied_infra_falls_back_to_claude(
+    config: OrchestratorConfig,
+    make_fake_provider: Callable[..., object],
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # The corrected Windows sandbox-helper routing: a pinned-Codex workspace-write node that raises
+    # PERMISSION_DENIED (the normalized helper failure) is a CONDITIONAL fallback — allowed here
+    # because the fallback profile is same-or-stricter (both providers are workspace-write in the
+    # packaged config) — so the stage falls over to Claude instead of dead-ending in a fixing loop.
+    primary = make_fake_provider(ProviderId.CODEX, raises=ErrorClass.PERMISSION_DENIED)
+    fallback = make_fake_provider(ProviderId.CLAUDE)
+    router = AgentRouter(config, {ProviderId.CODEX: primary, ProviderId.CLAUDE: fallback})
+    route = router.resolve_route("review", ProviderId.CODEX)
+
+    outcome = router.run_stage(make_request(node_id="review"), route)
+
+    assert outcome.provider_used is ProviderId.CLAUDE
+    assert outcome.stage_attempts == 2  # one Codex hop, one Claude hop — no fixing loop
+    assert outcome.result is not None and outcome.result.status is RunStatus.SUCCEEDED
+    assert outcome.attempts[0].error_class is ErrorClass.PERMISSION_DENIED
+
+
 def test_codex_minimal_reasoning_fallback_maps_to_claude_low(
     config: OrchestratorConfig,
     make_fake_provider: Callable[..., object],

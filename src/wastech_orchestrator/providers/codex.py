@@ -17,7 +17,11 @@ only as file paths.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+import os
+import platform
+import re
+import shutil
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +35,7 @@ from wastech_orchestrator.providers.artifacts import ArtifactPaths
 from wastech_orchestrator.providers.base import (
     AgentRunRequest,
     ErrorClass,
+    NormalizedError,
     ProviderError,
     ProviderId,
     build_context_footer,
@@ -57,11 +62,33 @@ __all__ = [
     "build_effective_prompt",
     "isolation_reasons",
     "parse_events",
+    "resolve_codex_resources_dir",
 ]
 
 _DEFAULT_SANDBOX = "workspace-write"
 _LAST_MESSAGE_FILENAME = "last-message.txt"
 _OUTPUT_SCHEMA_FILENAME = "output-schema.json"
+
+# The Windows sandbox helper and its package layout. On Windows ``workspace-write``, Codex launches
+# this helper BY NAME, so the directory holding it must be discoverable on the child ``PATH``. The
+# orchestrator rebuilds a clean allowlisted env that drops it, so
+# :func:`resolve_codex_resources_dir` locates the Codex standalone package's ``codex-resources``
+# directory and the adapter prepends it.
+_SANDBOX_HELPER_EXE = "codex-windows-sandbox-setup.exe"
+_PACKAGE_MANIFEST_NAME = "codex-package.json"
+_DEFAULT_RESOURCES_DIRNAME = "codex-resources"
+
+# A fatal sandbox-helper launch failure on stderr. Codex can still print a clean terminal SUCCESS
+# event (exit 0) while this error means the run never touched the workspace, so it is matched both
+# as an ordinary ``PERMISSION_DENIED`` stderr signature (the nonzero-exit path, below) and by the
+# post-success guard (``_post_success_infra_error``) that flips a false success into an infra
+# failure so the Router falls over to the other provider.
+_HELPER_LAUNCH_FAILED_PATTERN = (
+    r"orchestrator_helper_launch_failed"
+    r"|codex-windows-sandbox-setup\.exe"
+    r"|setup refresh failed to launch helper"
+)
+_HELPER_LAUNCH_FAILED_RE = re.compile(_HELPER_LAUNCH_FAILED_PATTERN, re.IGNORECASE)
 
 # Statuses on a terminal Codex ``result`` event that mark the turn as NOT having satisfied the task.
 # Any other status (incl. a missing one) is treated as a completed run — task quality is judged
@@ -113,10 +140,61 @@ _CODEX_SIGNATURES = make_signatures(
         ),
         (
             ErrorClass.PERMISSION_DENIED,
-            r"sandbox denied|permission denied|operation not permitted|blocked by sandbox",
+            r"sandbox denied|permission denied|operation not permitted|blocked by sandbox|"
+            + _HELPER_LAUNCH_FAILED_PATTERN,
         ),
     ]
 )
+
+
+def _resources_dir_for_package(package_root: Path) -> Path:
+    """The package's resources directory: ``resourcesDir`` from ``codex-package.json`` if present,
+    else the default ``codex-resources`` name (the observed layout: a sibling of ``bin``)."""
+    manifest = package_root / _PACKAGE_MANIFEST_NAME
+    subdir: object = None
+    try:
+        subdir = json.loads(manifest.read_text(encoding="utf-8")).get("resourcesDir")
+    except (OSError, ValueError, AttributeError):
+        subdir = None
+    name = subdir if isinstance(subdir, str) and subdir else _DEFAULT_RESOURCES_DIRNAME
+    return package_root / name
+
+
+def resolve_codex_resources_dir(
+    command: str,
+    *,
+    system: str | None = None,
+    which: Callable[[str], str | None] | None = None,
+    userprofile: str | None = None,
+) -> Path | None:
+    """Locate the Codex ``codex-resources`` directory that holds the Windows sandbox helper.
+
+    Returns the directory (the one containing :data:`_SANDBOX_HELPER_EXE`) to prepend onto the child
+    ``PATH`` on Windows, or ``None`` when it need not / cannot be resolved. Pure and injectable
+    (``system`` / ``which`` / ``userprofile`` seams, resolved at call time) so it is unit-testable
+    on any host. Resolution tries, first-match wins: (1) the package the ``command`` executable
+    resolves into — ``codex.exe`` sits in ``bin\\`` with ``codex-resources`` as a sibling, reached
+    after resolving the AppData junction; (2) the well-known
+    ``%USERPROFILE%\\.codex\\packages\\standalone\\current`` package.
+    """
+    name = system if system is not None else platform.system()
+    if name != "Windows":
+        return None
+    which_fn = which if which is not None else shutil.which
+    candidates: list[Path] = []
+    exe = which_fn(command)
+    if exe:
+        # `…\bin\codex.exe` → resolve the junction → package root (…\releases\<ver>\) holding `bin`.
+        package_root = Path(exe).resolve().parent.parent
+        candidates.append(_resources_dir_for_package(package_root))
+    profile = userprofile if userprofile is not None else os.environ.get("USERPROFILE")
+    if profile:
+        current = (Path(profile) / ".codex" / "packages" / "standalone" / "current").resolve()
+        candidates.append(_resources_dir_for_package(current))
+    for candidate in candidates:
+        if (candidate / _SANDBOX_HELPER_EXE).exists():
+            return candidate
+    return None
 
 
 def _effective_sandbox(config: ProviderConfig, request: AgentRunRequest) -> str:
@@ -316,6 +394,75 @@ class CodexProvider(BaseCliProvider):
     def _executable_label(self) -> str:
         return "codex"
 
+    def _sandbox_needs_windows_helper(self) -> bool:
+        """Whether the configured sandbox engages the Windows sandbox helper.
+
+        The helper backs the OS sandbox used by ``workspace-write``; ``read-only`` and the
+        full-access sandbox (no isolation) do not launch it, so they never need it discoverable.
+        """
+        configured = self._config.sandbox or self._config.permission_profile or _DEFAULT_SANDBOX
+        return configured not in ("read-only", FORBIDDEN_SANDBOX_VALUE)
+
+    def _augment_child_env(self, env: dict[str, str]) -> dict[str, str]:
+        """Prepend the Codex ``codex-resources`` directory onto ``PATH`` on Windows.
+
+        On Windows ``workspace-write``, Codex launches ``codex-windows-sandbox-setup.exe`` by name;
+        the orchestrator's clean allowlisted ``PATH`` does not include it. Resolve the helper's
+        package directory and prepend it so the CLI can find it — adjusting only the value of an
+        already-allowlisted key (``PATH``), never widening the env allowlist or the sandbox.
+        """
+        resources = resolve_codex_resources_dir(self._config.command)
+        if resources is None:
+            return env
+        prefix = str(resources)
+        path = env.get("PATH", "")
+        env["PATH"] = prefix + os.pathsep + path if path else prefix
+        return env
+
+    def _post_success_infra_error(self, stderr_text: str) -> NormalizedError | None:
+        """Turn a clean terminal SUCCESS whose stderr proves a fatal sandbox-helper failure into a
+        raised infra error (``permission_denied``), so the Router falls over instead of trusting a
+        run that never touched the workspace. Matched narrowly (helper signatures only)."""
+        if _HELPER_LAUNCH_FAILED_RE.search(stderr_text):
+            return NormalizedError(
+                ErrorClass.PERMISSION_DENIED, message_for(ErrorClass.PERMISSION_DENIED)
+            )
+        return None
+
+    def _windows_sandbox_helper_error(self, env: Mapping[str, str]) -> str | None:
+        """Operator-facing preflight message when the Windows sandbox helper is undiscoverable.
+
+        Runs on the already-augmented ``env``. Returns ``None`` off Windows, for a sandbox that
+        needs no helper, or when the helper is reachable (via the package layout or already on
+        ``PATH``); otherwise a precise message naming where ``codex`` resolved and what is missing.
+        """
+        if platform.system() != "Windows" or not self._sandbox_needs_windows_helper():
+            return None
+        if resolve_codex_resources_dir(self._config.command) is not None:
+            return None
+        if shutil.which(_SANDBOX_HELPER_EXE, path=env.get("PATH")) is not None:
+            return None
+        exe = shutil.which(self._config.command) or self._config.command
+        return (
+            f"Codex sandbox helper {_SANDBOX_HELPER_EXE} is not discoverable for the "
+            f"workspace-write sandbox on Windows: codex resolved to {exe}, but its "
+            f"{_DEFAULT_RESOURCES_DIRNAME!r} package directory was not found and the helper is not "
+            "on PATH. Reinstall or upgrade the Codex standalone package so its "
+            f"{_DEFAULT_RESOURCES_DIRNAME} directory (with {_SANDBOX_HELPER_EXE}) exists next to "
+            "bin/, or add it to PATH"
+        )
+
+    def _preflight_healthy_detail(self, env: Mapping[str, str]) -> str:
+        """Show where the Windows sandbox helper resolved on the healthy preflight line."""
+        if platform.system() != "Windows" or not self._sandbox_needs_windows_helper():
+            return ""
+        resources = resolve_codex_resources_dir(self._config.command)
+        if resources is not None:
+            return f" (Windows sandbox helper: {resources})"
+        if shutil.which(_SANDBOX_HELPER_EXE, path=env.get("PATH")) is not None:
+            return " (Windows sandbox helper: on PATH)"
+        return ""
+
     def _preflight_capability_error(self, env: Mapping[str, str]) -> str | None:
         """Verify ``codex exec`` exposes ``-c/--config`` for model config overrides.
 
@@ -323,8 +470,12 @@ class CodexProvider(BaseCliProvider):
         grants also use ``-c``. Probe ``codex exec --help`` and fail preflight if the subcommand
         lacks config overrides, catching an incompatible CLI before a real node run. A probe that
         does not cleanly exit is treated as inconclusive (no block) — the version check already
-        passed.
+        passed. First, on Windows, block when the sandbox helper is undiscoverable — a mid-run
+        ``orchestrator_helper_launch_failed`` is far more useful surfaced here, before the flow.
         """
+        helper_error = self._windows_sandbox_helper_error(env)
+        if helper_error is not None:
+            return helper_error
         ok, help_text = self._probe([self._config.command, "exec", "--help"], env)
         if ok and "--config" not in help_text and "-c" not in help_text:
             return (
