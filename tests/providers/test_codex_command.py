@@ -63,6 +63,24 @@ def test_network_access_off_by_default_no_sandbox_network_flag(
     assert "sandbox_workspace_write.network_access=true" not in argv
 
 
+def test_web_search_disabled_when_offline(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # F5: an offline node must also deny the host web_search tool (backend-side, outside the sandbox
+    # network toggle) so network_access=false is truly offline.
+    argv = _argv(codex_config, make_request())
+    assert argv[argv.index("-c") + 1] == 'web_search="disabled"'
+
+
+def test_web_search_not_disabled_when_network_granted(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # A networked node keeps web_search; only the sandbox network -c is added.
+    argv = _argv(codex_config, make_request(network_access=True))
+    assert 'web_search="disabled"' not in argv
+    assert "sandbox_workspace_write.network_access=true" in argv
+
+
 def test_network_access_enables_sandbox_network_when_granted(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
