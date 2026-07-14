@@ -39,13 +39,14 @@ def _reset_package_logger() -> Iterator[None]:
 
 
 class _FakeOrch:
-    def __init__(self, *, resume=None, runs=None, notifier=None) -> None:
+    def __init__(self, *, resume=None, runs=None, notifier=None, settled=None) -> None:
         self._resume = resume
         self._runs = list(runs or [])
         self.run_calls: list[str] = []
         self.resume_calls = 0
         self.refresh_calls = 0
         self.notifier = notifier  # the next-task gate (idea 27) reads this
+        self._settled = dict(settled or {})  # task_id -> TaskRow (scanner terminal-skip guard)
 
     def resume(self):
         self.resume_calls += 1
@@ -53,6 +54,9 @@ class _FakeOrch:
 
     def acquire_slot(self, task_id: str) -> bool:
         return True
+
+    def lookup_task(self, task_id: str):
+        return self._settled.get(task_id)
 
     def refresh_repo(self) -> None:
         self.refresh_calls += 1
@@ -67,6 +71,17 @@ def _pending(tmp_path: Path, *names: str) -> Path:
     folder.mkdir()
     for name in names:
         (folder / name).write_text("x", encoding="utf-8")
+    return folder
+
+
+def _pending_fm(tmp_path: Path, *ids: str) -> Path:
+    """Like :func:`_pending` but writes real front matter so the scan extracts each ``id``."""
+    folder = tmp_path / "pending"
+    folder.mkdir(exist_ok=True)
+    for task_id in ids:
+        (folder / f"{task_id}.md").write_text(
+            f"---\nid: {task_id}\ntitle: {task_id}\n---\nbody\n", encoding="utf-8"
+        )
     return folder
 
 
@@ -100,6 +115,40 @@ def test_watch_manual_blocks_continuation(make_git_config, git_repo, tmp_path: P
     results = cli.watch_once(orch, config, folder)  # type: ignore[arg-type]
     assert len(results) == 1  # the manual task blocks the second
     assert results[0].final_status is Status.MANUAL_ACTION_REQUIRED
+
+
+def test_watch_skips_settled_own_file(make_git_config, git_repo, tmp_path: Path) -> None:
+    # A manual_action_required task keeps its file in pending/ (branch preserved for the operator).
+    # The daemon must skip it, not re-run it into a duplicate_task_id reject; an independent pending
+    # task still runs.
+    config = make_git_config(git_repo.clone, auto_mode=True)
+    folder = _pending_fm(tmp_path, "a", "b")
+    row = TaskRow(
+        task_id="a",
+        title="a",
+        status=Status.MANUAL_ACTION_REQUIRED,
+        source_path=str(folder / "a.md"),
+    )
+    orch = _FakeOrch(runs=[_done("b")], settled={"a": row})
+    results = cli.watch_once(orch, config, folder)  # type: ignore[arg-type]
+    assert orch.run_calls == [str(folder / "b.md")]  # 'a' skipped, 'b' still runs
+    assert [r.task_id for r in results] == ["b"]
+
+
+def test_watch_reruns_when_settled_file_differs(make_git_config, git_repo, tmp_path: Path) -> None:
+    # A *different* file colliding on an already-used id is not the task's own leftover, so it must
+    # fall through to run_task (the gate then rejects it loudly as a duplicate id).
+    config = make_git_config(git_repo.clone, auto_mode=False)
+    folder = _pending_fm(tmp_path, "a")
+    row = TaskRow(
+        task_id="a",
+        title="a",
+        status=Status.FAILED,
+        source_path=str(tmp_path / "elsewhere" / "a.md"),
+    )
+    orch = _FakeOrch(runs=[_done("a")], settled={"a": row})
+    cli.watch_once(orch, config, folder)  # type: ignore[arg-type]
+    assert orch.run_calls == [str(folder / "a.md")]  # collision falls through to the gate
 
 
 def test_watch_resume_manual_blocks(make_git_config, git_repo, tmp_path: Path) -> None:

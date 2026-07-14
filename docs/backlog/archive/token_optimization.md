@@ -2,7 +2,7 @@
 
 Status: **backlog / not scheduled** Date: 2026-06-11 Owner: Vladimir Makarevich
 
-This document captures the idea of reducing token consumption in the orchestrator and the analysis behind it. It is a backlog item, not part of the v1 scope (see [worc_architecture.md](../../worc_architecture.md) §2). Nothing here overrides the canonical reference (the [Functional Map](../../functional/index.md)) or the hard invariants in [CLAUDE.md](../../../CLAUDE.md) and [.agents/rules/](../../../.agents/rules).
+This document captures the idea of reducing token consumption in the orchestrator and the analysis behind it. It is a backlog item, not part of the v1 scope (see [worc_architecture.md](../../worc_architecture.md) §2). Nothing here overrides the canonical reference or the hard invariants in [CLAUDE.md](../../../CLAUDE.md) and [.agents/rules/](../../../.agents/rules).
 
 ## 1. Goal
 
@@ -18,7 +18,7 @@ Codex / Claude Code run shell commands (`git`, `pytest`, `npm`, build, …) insi
 
 ### Sink B — context the orchestrator injects
 
-For each stage run the Core assembles a prompt plus artifacts (see the [Functional Map](../../functional/index.md)): `current.diff`, check logs (`checks/<run-id>.log`), `review/findings.json`, `plan.md`, `task.normalized.json`. Large diffs and verbose test logs inflate easily. The Core fully controls this — it builds the `AgentRunRequest` ([src/wastech_orchestrator/providers/base.py](../../../src/wastech_orchestrator/providers/base.py)).
+For each stage run the Core assembles a prompt plus artifacts: `current.diff`, check logs (`checks/<run-id>.log`), `review/findings.json`, `plan.md`, `task.normalized.json`. Large diffs and verbose test logs inflate easily. The Core fully controls this — it builds the `AgentRunRequest` ([src/wastech_orchestrator/providers/base.py](../../../src/wastech_orchestrator/providers/base.py)).
 
 > Key consequence: a single tool will not cover both sinks. RTK ≈ sink A, Headroom/LLMLingua ≈ sink B, and sink A is typically the bigger one.
 
@@ -28,7 +28,7 @@ Mapped to the existing architecture and invariants. Each phase is independently 
 
 ### Phase 0 — measure first
 
-`AgentRunResult.usage` already exists ([base.py](../../../src/wastech_orchestrator/providers/base.py)) and `provider_attempts` is already a State Store entity (see the [Functional Map](../../functional/index.md)).
+`AgentRunResult.usage` already exists ([base.py](../../../src/wastech_orchestrator/providers/base.py)) and `provider_attempts` is already a State Store entity.
 
 - Persist tokens/cost per attempt in SQLite.
 - Collect a baseline of "tokens per stage" on a few real tasks.

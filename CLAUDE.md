@@ -24,7 +24,7 @@ You are working on **wastech-orchestrator** — an orchestrator that launches co
 - Providers: `codex`, `claude`.
 - Default-flow node ids: `refinement`, `planning`, `implementation`, `testing`, `review`, `fixing`, `publish` (the packaged `implementation` flow; the whole-task `summary` is the supervisor layer, not a node). These are flow node ids, not a `Stage` type — there is no `Stage` enum.
 - Default task branch: `repo.branch_prefix/<task-id>-<slug>` (`worc/...` by default); task `branch_name` may override the full branch name after validation.
-- State machine statuses: see the [system flows](docs/functional/system-flows.md) and `src/wastech_orchestrator/core/state_machine.py`.
+- State machine statuses: see the `src/wastech_orchestrator/core/state_machine.py`.
 
 ## Commands
 

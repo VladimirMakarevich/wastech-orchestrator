@@ -557,6 +557,15 @@ class Orchestrator:
         """True iff no *other* task currently owns the processing slot."""
         return not any(t.task_id != task_id for t in self._store.find_active_tasks())
 
+    def lookup_task(self, task_id: str) -> TaskRow | None:
+        """The persisted task row for ``task_id`` (read-only), or ``None`` if unknown.
+
+        The scanner uses this to skip a pending file whose id already reached a terminal state (its
+        own leftover) instead of re-running it into a ``duplicate_task_id`` reject — a
+        ``manual_action_required`` task keeps its file in ``pending/`` by design.
+        """
+        return self._store.get_task(task_id)
+
     # --- operator-authored decomposition (``subtasks:`` manifest) -------------------------
 
     def _validate_operator_subtasks(

@@ -31,7 +31,6 @@ Ship both parts; they are independent and can land separately.
 - Update every place that currently tells a human or an agent to write straight into `tasks/pending/` (doc-sync sweep, per [CLAUDE.md](../../CLAUDE.md)'s doc-sync rule — this reaches the shipped, operator-facing docs under `packaged/`, not just `docs/`):
   - `packaged/guide/tasks/skills/worc-task/SKILL.md` step 4 ("Write the file to `tasks/pending/<id>.md`")
   - `packaged/guide/tasks/skills/worc-deco-task/SKILL.md` (root task + subtasks paths)
-  - `docs/functional/blocks/B02-watch-daemon-and-scheduling.md` ("discover task files dropped ... into `tasks/pending`") — reframe as "promoted into", not "dropped into"
   - any other guide/quickstart under `packaged/guide/` that names `tasks/pending/` as a direct write target
 
 ## Constraints

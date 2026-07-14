@@ -117,7 +117,14 @@ You cannot flag a task to skip refinement. The orchestrator skips it automatical
 
 ## Where task files live
 
-There is a single canonical layout. Compose your task file in the repo's `tasks/preparing/` staging folder — the watcher never scans it, so an in-progress draft is invisible to the daemon — then run `worc promote <id>` (or the `promote` verb inside `worc shell`) to move it atomically into `tasks/pending/`, where it is git-tracked, committed, and pushed and a watching orchestrator picks it up. (`enqueue <file>` in the shell is a fast path for an already-complete external file: it lands straight in `tasks/pending/`, atomically.) Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home; only the `tasks/` lifecycle directories (`preparing`/`pending`/`done`/`failed`) stay at the repo root and are tracked. The orchestrator commits the task file and its `<id>.summary.md` as an audit trail; a rejected task is quarantined under `.worc/tasks/rejected`.
+There is a single canonical layout. Compose your task file in the repo's `tasks/preparing/` staging folder — the watcher never scans it, so an in-progress draft is invisible to the daemon — then run `worc promote <id>` (or the `promote` verb inside `worc shell`) to move it atomically into `tasks/pending/`, where it is git-tracked, committed, and pushed and a watching orchestrator picks it up. (`enqueue <file>` in the shell is a fast path for an already-complete external file: it lands straight in `tasks/pending/`, atomically.) Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home; only the `tasks/` lifecycle directories (`preparing`/`pending`/`done`/`failed`) stay at the repo root and are tracked. On a terminal outcome the orchestrator commits the task file and its `<id>.summary.md` as an audit trail: `done` moves it to `tasks/done/`, `failed` to `tasks/failed/`, and a rejected task is quarantined under `.worc/tasks/rejected`.
+
+## When a task needs manual action
+
+A task that ends in **`manual_action_required`** (a stuck fix loop, an evaluator that could not run, a blocked merge) is the one terminal that keeps its file **in `tasks/pending/`** — its branch is preserved for you to review and publish, not discarded. The watcher deliberately leaves it there and does **not** re-pick it: it never re-runs an id that has already reached a terminal state, so the task does not churn into a spurious `failed` on the next tick. You resolve it yourself, on your schedule:
+
+- `worc rerun <id> --continue` — re-enter from the saved checkpoint (see `branch_mode` above for the `--reset-fix-budget` / `--from` recovery controls).
+- `worc finalize <id> --as done|failed|abandoned` — close it out: `done`/`failed` move the file to the matching lifecycle folder, `abandoned` leaves it in place (still `manual_action_required` in the ledger).
 
 ## `contacts` and Telegram
 

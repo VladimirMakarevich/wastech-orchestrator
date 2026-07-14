@@ -72,7 +72,7 @@ def main() -> int:
             "src/wastech_orchestrator/packaged/ (the guide/ quickstarts, config.example.yaml, the "
             "built-in flows / role prompts) — they live under src/ and are routinely forgotten. "
             "Note: docs/functional/ and docs/likec4/ are updated separately via weekly reverse "
-            "engineering — do not touch them here. "
+            "engineering — DO NOT TOUCH THEM HERE. "
             "If the change has no documentation impact, say so explicitly and finish."
         )
         print(json.dumps({"decision": "block", "reason": reason}))

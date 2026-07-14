@@ -39,7 +39,7 @@ When to skip — say so plainly and move on:
 
 - **The agreed scope** — the feature from the request + conversation + any linked task/backlog doc.
 - **The blast radius** — the files, modules, and seams the feature will actually touch or extend. Find this first; everything else is judged against it.
-- **The codebase** — existing patterns, the Functional Map (`docs/functional/`), `.agents/rules/` (especially the hard invariants in [architecture.md](../../../.agents/rules/architecture.md)), and the tests covering the area ([testing.md](../../../.agents/rules/testing.md)).
+- **The codebase** — existing patterns, `.agents/rules/` (especially the hard invariants in [architecture.md](../../../.agents/rules/architecture.md)), and the tests covering the area ([testing.md](../../../.agents/rules/testing.md)).
 
 ## How to run
 

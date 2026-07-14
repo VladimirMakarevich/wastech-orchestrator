@@ -40,7 +40,7 @@ tasks/pending/task-001.md
 
 - **One task at a time.** A single processing slot; other tasks wait in `tasks/pending/`. Auto mode (off by default) controls whether the next pending task starts automatically after cleanup.
 - **One canonical layout.** The task lifecycle dirs (`tasks/preparing|pending|done|failed`) sit at the repo root and are git-tracked; everything else — `config.yaml`, `state.db`, `logs/`, and the installed guide bundle (task docs, task skills, config helper) — lives under the gitignored `<repo>/.worc/` home. See [Configuration](#configuration).
-- The detailed, code-derived reference (state machine, routing, recovery, security, the audit footprint) is the [Functional Map](docs/functional/index.md); the design rationale is in [docs/worc_architecture.md](docs/worc_architecture.md). The canonical project vocabulary (commands, config keys, flow nodes, statuses, artifacts, legacy terms) is in [docs/glossary.md](docs/glossary.md).
+- The design rationale is in [docs/worc_architecture.md](docs/worc_architecture.md). The canonical project vocabulary (commands, config keys, flow nodes, statuses, artifacts, legacy terms) is in [docs/glossary.md](docs/glossary.md).
 
 ---
 
@@ -252,7 +252,7 @@ Coding agents working _in this repo_ follow [CLAUDE.md](CLAUDE.md) (Claude Code)
 
 | Document | Role |
 | --- | --- |
-| [docs/functional/index.md](docs/functional/index.md) | **Functional map** (code-derived): contracts, blocks, state machine, routing, fallback, the `.worc/` layout, security, invariants. The code is the source of truth on any discrepancy. |
+| [docs/functional/index.md](docs/functional/index.md) | **Functional map** (code-derived): contracts, blocks, state machine, routing, fallback, the `.worc/` layout, security, invariants. |
 | [docs/operations.md](docs/operations.md) | **Operator guide**: install, the `.worc/` layout, authorization, preflight, upgrading, diagnostics, and the `manual_action_required` recovery playbook. |
 | [docs/cookbook.md](docs/cookbook.md) | Practical recipes: workspace setup, repo config, running tasks, routing, reading artifacts, recovery. |
 | [docs/configuration.md](docs/configuration.md) | Full `config.yaml` reference with defaults, allowed values, and validation rules. |

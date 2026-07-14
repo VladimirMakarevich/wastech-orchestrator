@@ -15,7 +15,7 @@ There are two levels of git here: (A) how the orchestrator **itself** is develop
 
 ## B. How the orchestrator manages a target repository (implementation contract)
 
-This is a product invariant (see [architecture.md](architecture.md) and the [Functional Map](../../docs/functional/index.md)):
+This is a product invariant (see [architecture.md](architecture.md):
 
 - Default task branch: **`repo.branch_prefix/<task-id>-<slug>`** (`worc/...` by default). A validated task `branch_name` may override the full branch name for project/customer conventions.
 - Sequence: `git fetch` → checkout `base_branch` → `pull` → create the task branch.

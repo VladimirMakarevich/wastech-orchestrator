@@ -30,7 +30,7 @@ Run these phases in order. Skip a phase only when it plainly doesn't apply, and 
 
 ### 1. Understand the task (WHAT)
 
-- Read the source of truth: the backlog/ADR file, the linked spec sections, the relevant part of the [Functional Map](../../../docs/functional/index.md), and the code the task names.
+- Read the source of truth: the backlog/ADR file, the linked spec sections and the code the task names.
 - If the goal, scope, or boundaries are fuzzy or contradictory, run **`/clarify-task`** and resolve it with the user before touching code. Don't guess your way past ambiguity.
 - Restate in 2–3 lines: the goal, what's explicitly out of scope, and the acceptance signal (how we'll know it's done).
 

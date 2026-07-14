@@ -1,6 +1,6 @@
 # Testing rules
 
-The source of truth is the code (`src/wastech_orchestrator/`, `tests/`); see the [Functional Map](../../docs/functional/index.md).
+The source of truth is the code (`src/wastech_orchestrator/`, `tests/`).
 
 ## Levels
 

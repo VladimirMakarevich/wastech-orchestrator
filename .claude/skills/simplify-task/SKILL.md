@@ -25,7 +25,7 @@ For a tiny, obvious change — skip it and just implement.
 
 - **The agreed requirements** — request + conversation + the linked task/backlog doc.
 - **The proposed approach/plan, if one exists.** If none exists yet, derive the simplest sound one from the requirements + codebase.
-- **The codebase** — existing patterns, the Functional Map (`docs/functional/`), `.agents/rules/`, the hard invariants. Reuse what's there before adding anything new.
+- **The codebase** — existing patterns, `.agents/rules/`, the hard invariants. Reuse what's there before adding anything new.
 
 ## How to run
 

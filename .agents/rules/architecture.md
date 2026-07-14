@@ -1,6 +1,6 @@
 # Architecture rules (invariants)
 
-The source of truth is the code (`src/wastech_orchestrator/`); the [Functional Map](../../docs/functional/index.md) is the code-derived reference. These invariants must not be violated.
+The source of truth is the code (`src/wastech_orchestrator/`). These invariants must not be violated.
 
 ## Domain-agnostic and data-driven (no hardcoding)
 

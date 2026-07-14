@@ -1,5 +1,7 @@
 # Functional Map of the System
 
+IMPORTANT: This is not the source of truth. See the code instead.
+
 ```yaml
 LastDateSync: 2026-06-21
 ```

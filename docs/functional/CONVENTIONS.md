@@ -1,5 +1,7 @@
 # Conventions and Maintenance Rules for Functional Documentation
 
+IMPORTANT: This is not the source of truth. See the code instead.
+
 This document describes how to maintain and keep current the documentation set in `docs/functional/` (index, block registry, cross-cutting flows, and block files). This is a **meta-document**: it does not describe system behavior — it defines the rules for working with the documentation itself.
 
 ## Documentation Language

@@ -72,4 +72,4 @@ Every **agent** node's output is automatically persisted (as `<node_id>.out.md`)
 - It never substitutes a task body, a diff, a check log, an environment value, or a secret — only the paths/metadata above. Read large or sensitive content from the artifact file the path points to.
 - It never lets a prompt weaken the sandbox, the argv, the environment allowlist, denied commands/reads, or the fallback policy. A prompt is prompt text only.
 
-See also: the orchestrator repo's `docs/configuration.md` and `docs/functional/blocks/B15-prompt-templates.md` (the contributor-facing view of this same allowlist), and `README.md` in this folder for authoring a whole flow.
+See also: the orchestrator repo's `docs/configuration.md` (the contributor-facing view of this same allowlist), and `README.md` in this folder for authoring a whole flow.

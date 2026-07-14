@@ -1,6 +1,6 @@
 # Security rules
 
-The source of truth is the code (`src/wastech_orchestrator/security/`); see the [Functional Map](../../docs/functional/index.md). These rules must not be violated; the configuration validator is required to reject unsafe settings.
+The source of truth is the code (`src/wastech_orchestrator/security/`). These rules must not be violated; the configuration validator is required to reject unsafe settings.
 
 ## Isolation
 
