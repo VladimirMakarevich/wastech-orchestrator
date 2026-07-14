@@ -17,6 +17,7 @@ Where to find the design detail:
 
 | Document | Purpose |
 | --- | --- |
+| [codex-provider-improvements/README.md](codex-provider-improvements/README.md) | Prioritized implementation tasks produced by the 2026-07-14 full Codex-provider review. |
 | [follow_ups.md](follow_ups.md) | **Open** implementation follow-ups / tech-debt discovered while building — distinct from product features. Recorded via `/sync-docs`. Completed/superseded entries are archived in [archive/follow_ups_history.md](archive/follow_ups_history.md). |
 | [runtime_provider_capacity_gate.md](archive/runtime_provider_capacity_gate.md) | Detailed backlog task for checking Codex and Claude capacity before autonomous `watch` admits a pending task. |
 | [archive/concurrent-task-worktrees.md](archive/concurrent-task-worktrees.md) | Decision record for processing tasks in parallel via `git worktree`: chosen as the v2 concurrency primitive (not for isolation), gated on a mandatory provider capacity gate. |
