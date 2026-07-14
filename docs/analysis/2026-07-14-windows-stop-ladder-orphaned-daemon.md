@@ -1,5 +1,7 @@
 # Post-mortem: `down`/`--force`/`--force-full` не останавливают watch-демон на Windows
 
+**Статус исправления:** дефекты A/B/C закрыты 2026-07-14. FlowEngine теперь проверяет cooperative cancellation перед каждой нодой и паркует задачу на сохранённом checkpoint; Windows soft-stop сохраняет PID до подтверждённого завершения и по таймауту автоматически вызывает `taskkill /F /T`; повторный stop без PID на несигнализируемой платформе больше не удаляет живые stop/children-файлы. Живой Windows smoke подтвердил уничтожение временного parent/child process tree и очистку runtime-файлов. Отдельный статус задачи `cancelled`, `CTRL_BREAK` и owner-level end-to-end smoke с настоящим watcher/agent остаются самостоятельными follow-up.
+
 **Задача:** `blog-happy-in-my-misfortunes-2`
 **Целевой репозиторий:** `C:\Users\Vladimir Makarevich\Obsidian\WastimeApp`
 **Watch-демон:** PID `8956`, `poll_interval` 300s

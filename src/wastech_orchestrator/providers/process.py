@@ -239,8 +239,8 @@ def hard_kill_tree(pid: int) -> None:
     agents are its child processes, so ``/T`` (whole tree) reaches them while the daemon's parent
     (the console) is untouched. An argv list, ``shell=False``; ``check=False`` ignores a non-zero
     exit (dead / recycled PID — no start-time guard on Windows), and an unlaunchable ``taskkill``
-    is suppressed so the stop stays idempotent (the CLI already prints `taskkill /F /PID` as the
-    operator backstop on a soft-stop timeout).
+    is suppressed so the stop stays idempotent. The same seam serves both explicit
+    ``--force-full`` and automatic escalation after a Windows soft-stop grace timeout.
     """
     with contextlib.suppress(OSError):
         subprocess.run(

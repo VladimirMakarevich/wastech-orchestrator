@@ -170,8 +170,8 @@ worc watch              process pending tasks; loop + periodic git sync
                           --poll-seconds N            override orchestrator.poll_interval_seconds
                           --queue NAME                serve only this queue (override orchestrator.queue)
 worc stop               stop a running watch daemon (stop ladder: idle stops, busy confirms/forces)
-                          --timeout SECONDS           graceful-shutdown wait before SIGKILL (default: 30)
-                          --force                     stop a busy daemon softly (finish the current step)
+                          --timeout SECONDS           cooperative grace period before hard escalation (default: 30)
+                          --force                     stop softly at the next flow-node boundary
                           --force-full                hard-stop now: kill the daemon + agent (POSIX group / Windows tree)
                           --non-interactive           never prompt; refuse a busy daemon unless --force/--force-full
 worc restart            stop the running watch daemon (same stop ladder), then start a fresh one

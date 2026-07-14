@@ -318,7 +318,11 @@ def _build(
         store_has_task_id=store.task_id_exists,
         ledger_has_task_id=ledger.has_task_id,
     )
-    extra = {"clock": clock} if clock is not None else {}
+    extra: dict[str, object] = {}
+    if clock is not None:
+        extra["clock"] = clock
+    if is_cancelled is not None:
+        extra["is_cancelled"] = is_cancelled
     orch = Orchestrator(
         config,
         router=router,
@@ -1141,15 +1145,24 @@ def test_stop_cancellation_parks_task_resumable(git_repo, make_git_config, tmp_p
     # the Router reclassifies it as CANCELLED (is_cancelled True) instead of falling back, and the
     # Core parks the task resumable — never a fallback respawn, never a terminal FAILED report.
     providers = _both(infra_fail={"implementation"}, infra_error_class=ErrorClass.PROCESS_CRASHED)
+    stop = {"requested": False}
     orch, store, ledger, art = _build(
         git_repo,
         make_git_config,
         tmp_path,
         providers=providers,
         check_verdicts=[0],
-        is_cancelled=lambda: True,  # an operator stop is in flight
+        is_cancelled=lambda: stop["requested"],
     )
     _patch_impl_edit(providers, git_repo)
+    original_run = providers[ProviderId.CLAUDE].run
+
+    def cancel_during_implementation(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            stop["requested"] = True
+        return original_run(request)
+
+    providers[ProviderId.CLAUDE].run = cancel_during_implementation  # type: ignore[method-assign]
 
     result = orch.run_task(_complete_task(tmp_path, "task-cancel"))
 
@@ -1168,6 +1181,57 @@ def test_stop_cancellation_parks_task_resumable(git_repo, make_git_config, tmp_p
         if r.node_id == "implementation"
     ]
     assert len(impl_runs) == 1
+
+
+def test_boundary_cancellation_parks_then_resumes_from_untouched_node(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    providers = _both()
+    stop = {"requested": False}
+    orch, store, ledger, art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        is_cancelled=lambda: stop["requested"],
+    )
+    _patch_impl_edit(providers, git_repo)
+    original_run = providers[ProviderId.CLAUDE].run
+
+    def stop_after_planning(request: AgentRunRequest) -> AgentRunResult:
+        result = original_run(request)
+        if request.node_id == "planning":
+            stop["requested"] = True
+        return result
+
+    providers[ProviderId.CLAUDE].run = stop_after_planning  # type: ignore[method-assign]
+
+    first = orch.run_task(_complete_task(tmp_path, "task-boundary-cancel"))
+
+    assert first.final_status is Status.RUNNING
+    row = store.get_task("task-boundary-cancel")
+    assert row is not None and row.status is Status.RUNNING and row.blocked_since is not None
+    assert store.get_flow_checkpoint("task-boundary-cancel")[0] == "implementation"
+    assert not any(
+        request.node_id == "implementation"
+        for provider in providers.values()
+        for request in provider.requests
+    )
+    assert ledger.records() == []
+    assert not (art / "logs" / "task-boundary-cancel" / "failure_report.json").exists()
+
+    stop["requested"] = False
+    resumed = orch.resume()
+
+    assert resumed is not None and resumed.final_status is Status.DONE
+    implementation_runs = [
+        request
+        for provider in providers.values()
+        for request in provider.requests
+        if request.node_id == "implementation"
+    ]
+    assert len(implementation_runs) == 1
 
 
 def test_parked_task_resumes_when_provider_recovers(

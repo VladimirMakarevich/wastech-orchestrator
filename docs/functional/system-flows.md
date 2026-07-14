@@ -28,7 +28,7 @@ If planning proposes a split that passes the deterministic gate ([B11](./blocks/
 
 ## `watch` daemon
 
-Between ticks ([B02](./blocks/B02-watch-daemon-and-scheduling.md)): `refresh_repo` fetch/ff-pulls the base branch (slot free), then `watch_once` resumes any in-flight task first, then processes pending tasks one at a time — back-to-back only with `auto_mode`; `manual_action_required` always blocks. A stop is honored between ticks: a `SIGTERM` (POSIX) and/or an `orchestrator.stop` sentinel file the loop polls (the cross-platform channel — `SIGTERM` is undeliverable cross-process on Windows).
+Scheduling ticks ([B02](./blocks/B02-watch-daemon-and-scheduling.md)): `refresh_repo` fetch/ff-pulls the base branch (slot free), then `watch_once` resumes any in-flight task first, then processes pending tasks one at a time — back-to-back only with `auto_mode`; `manual_action_required` always blocks. A `SIGTERM`-set event (POSIX) and/or `orchestrator.stop` sentinel stops idle polling immediately and is also injected into FlowEngine, so an active task parks before its next node.
 
 ## Resume (`resume`)
 

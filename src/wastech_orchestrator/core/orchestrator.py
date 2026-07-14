@@ -34,7 +34,12 @@ from wastech_orchestrator.core.decomposition import (
     update_subtask_index,
     write_subtask_artifacts,
 )
-from wastech_orchestrator.core.flow.engine import FlowRunResult, NodeOutcome, entry_node_id
+from wastech_orchestrator.core.flow.engine import (
+    FlowCancelled,
+    FlowRunResult,
+    NodeOutcome,
+    entry_node_id,
+)
 from wastech_orchestrator.core.flow.engine_driver import (
     DecompositionRegions,
     drive_flow,
@@ -427,6 +432,7 @@ class Orchestrator:
         skill_scanner: SkillInventoryScanner | None = None,
         heartbeat_seconds: float = 30.0,
         isolation_checks: Mapping[ProviderId, IsolationCheck] | None = None,
+        is_cancelled: Callable[[], bool] = lambda: False,
     ) -> None:
         self._config = config
         self._router = router
@@ -448,6 +454,10 @@ class Orchestrator:
         # Composition-root-injected ProviderId→isolation-check table for the strict_isolation
         # preflight; empty for a directly-constructed Orchestrator (binds no concrete adapter).
         self._isolation_checks: Mapping[ProviderId, IsolationCheck] = isolation_checks or {}
+        # The watch daemon's cross-platform stop predicate. The same callable is also wired into
+        # the Router, so a stop either interrupts at a clean node boundary or suppresses fallback
+        # when a hard-killed provider exits abnormally mid-node.
+        self._is_cancelled = is_cancelled
         # Repo skill inventory scanner. Defaults to the target repo clone's `.claude/skills`.
         self._skill_scanner = skill_scanner or self._default_skill_scanner()
         # Per-id attempt number stamped onto the next ledger record, set by ``rerun``/``continue``.
@@ -1894,6 +1904,7 @@ class Orchestrator:
             facts=lambda _fact: False,  # merge.yaml has no `when` predicates
             agents=self._config.agents,
             task_id=p.task.id,
+            is_cancelled=self._is_cancelled,
         )
         return result.status is Status.DONE
 
@@ -1979,6 +1990,13 @@ class Orchestrator:
         except NodeManualRequired as exc:
             self._sync_counters_from_run_state(p, run_state)
             return self._go_terminal(p, Status.MANUAL_ACTION_REQUIRED, manual_reason=str(exc))
+        except FlowCancelled as exc:
+            self._sync_counters_from_run_state(p, run_state)
+            return self._park(
+                p,
+                run_state,
+                NodeInfraError(str(exc), error_class=ErrorClass.CANCELLED),
+            )
         except EvaluatorInfraError as exc:
             # An evaluator that could not *run* (infra/misconfig) must not discard an already-green
             # diff: degrade to manual (branch preserved, operator reviews/publishes), not failed.
@@ -2115,6 +2133,7 @@ class Orchestrator:
                 facts=facts,
                 agents=self._config.agents,
                 task_id=p.task.id,
+                is_cancelled=self._is_cancelled,
                 post_node=post_node,
                 # EXPERIMENTAL(no-work-infra): feeds the engine's no-effective-work stall guard — an
                 # opaque fingerprint of the working tree read from the last-written ``current.diff``

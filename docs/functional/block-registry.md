@@ -17,7 +17,7 @@ All 32 functional blocks (B01–B32) carry the status `documented`, (re)built fr
 
 ### B02 — Watch Daemon and Task Scheduling
 
-- **Purpose:** periodic discovery of pending tasks and one-at-a-time submission; daemonization with a PID file, graceful `SIGTERM` shutdown between ticks, protection against a second daemon; auto-mode gating.
+- **Purpose:** periodic discovery and one-at-a-time submission; daemon PID/stop lifecycle, cooperative node-boundary shutdown with hard timeout escalation, second-daemon protection, and auto-mode gating.
 - **Entry points:** `cli.py` `watch_loop`/`watch_once`/`cmd_watch`/`cmd_stop`/`cmd_restart`; `process_control.py` (`StopController`, `stop_process`, `is_running`).
 - **Dependencies:** B06 (`resume`, `acquire_slot`, `run_task`, `refresh_repo`), B05, B16 (pending files).
 - **Status:** `documented` · [file](./blocks/B02-watch-daemon-and-scheduling.md)
