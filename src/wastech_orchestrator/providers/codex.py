@@ -81,10 +81,10 @@ _DEFAULT_RESOURCES_DIRNAME = "codex-resources"
 # A fatal Windows-sandbox failure on stderr — either the setup helper could not be launched OR the
 # sandbox could not spawn a child process at run time (seclogon ``CreateProcessWithLogonW`` failing
 # on every command and on the ``apply_patch`` write path). Codex can still print a clean terminal
-# SUCCESS event (exit 0) while this error means the run never touched the workspace, so it is matched
-# both as an ordinary ``PERMISSION_DENIED`` stderr signature (the nonzero-exit path, below) and by the
-# post-success guard (``_post_success_infra_error``) that flips a false success into an infra failure
-# so the Router falls over to the other provider.
+# SUCCESS event (exit 0) while this error means the run never touched the workspace, so it is
+# matched both as an ordinary ``PERMISSION_DENIED`` stderr signature (the nonzero-exit path) and by
+# the post-success guard (``_post_success_infra_error``) that flips a false success into an infra
+# failure so the Router falls over to the other provider.
 _HELPER_LAUNCH_FAILED_PATTERN = (
     r"orchestrator_helper_launch_failed"
     r"|codex-windows-sandbox-setup\.exe"
@@ -265,8 +265,8 @@ def build_codex_argv(
     else:
         # No network grant → also deny the host-side ``web_search`` tool. It runs on the OpenAI
         # backend, OUTSIDE the sandbox network toggle above, so without this an "offline" node can
-        # still reach the web (F5: a network_access=false writer performed 9 web searches). Disabling
-        # the tool makes network_access=false actually offline.
+        # still reach the web (F5: a network_access=false writer performed 9 web searches).
+        # Disabling the tool makes network_access=false actually offline.
         argv += ["-c", 'web_search="disabled"']
     if output_schema_path is not None:
         argv += ["--output-schema", output_schema_path]

@@ -280,7 +280,7 @@ def test_false_success_with_helper_stderr_raises_infra_not_succeeded(
 
 # The run-000011 incident string: on this Windows host the sandbox could not spawn a child process,
 # so EVERY command and the apply_patch write failed with seclogon's CreateProcessWithLogonW — a
-# DIFFERENT stderr shape than the setup-helper _HELPER_STDERR above, which the guard must also catch.
+# DIFFERENT stderr shape than the setup-helper _HELPER_STDERR above, which the guard must catch too.
 _SANDBOX_RUNTIME_STDERR = (
     "ERROR codex_core::exec: exec error: windows sandbox: CreateProcessWithLogonW failed: 2\n"
     "apply_patch verification failed: fs sandbox helper failed with status exit code: 1: "
@@ -295,7 +295,7 @@ def test_sandbox_runtime_failure_nonzero_exit_normalizes_to_permission_denied(
     make_request: Callable[..., AgentRunRequest],
 ) -> None:
     # Nonzero exit with no parseable terminal event: classify() matches the runtime sandbox-child
-    # launch failure (CreateProcessWithLogonW / fs sandbox helper) and normalizes it to PERMISSION_DENIED.
+    # launch failure (CreateProcessWithLogonW / fs sandbox helper) and normalizes to PERMISSION.
     fake = FakeRun(exit_code=1, stderr=_SANDBOX_RUNTIME_STDERR)
     provider = _provider(codex_config, security_config, tmp_path, fake)
     with pytest.raises(ProviderError) as exc:
@@ -311,8 +311,8 @@ def test_false_success_with_createprocess_stderr_raises_infra(
 ) -> None:
     # The run-000011 incident: codex printed a clean terminal SUCCESS (exit 0) while stderr carried
     # the runtime CreateProcessWithLogonW failure, so the run never touched the workspace (the whole
-    # article went only to last-message.txt). The post-success guard must turn this false success into
-    # a raised PERMISSION_DENIED so the Router falls over to Claude instead of trusting it.
+    # article went only to last-message.txt). The post-success guard must turn this false success
+    # into a raised PERMISSION_DENIED so the Router falls over to Claude instead of trusting it.
     fake = FakeRun(
         stdout=_success_stream(),
         exit_code=0,
