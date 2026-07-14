@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import tempfile
 import time
 from collections.abc import Callable, Sequence
@@ -110,11 +111,35 @@ def _append_missing_lines(target: Path, lines: Sequence[str]) -> list[str]:
     return additions
 
 
+def _worc_runtime_already_ignored(repo_root: str | Path) -> bool:
+    """Whether a runtime-only ``.worc`` path is already covered by an existing ignore rule.
+
+    Guards :func:`append_runtime_excludes` against stomping an operator's own ``.worc/*`` +
+    ``!.worc/flows/`` scheme (see ``docs/how-to.md``) on ``install --reconfigure``: appending the
+    blanket ``.worc/`` line after such a negation would silently re-exclude ``.worc/flows/``, since
+    a parent-directory exclusion from any source blocks re-inclusion of its children.
+    """
+    with tempfile.TemporaryDirectory() as scratch:
+        stdout_path = Path(scratch) / "stdout"
+        result = run_process(
+            ["git", "check-ignore", "-q", ".worc/state.db"],
+            cwd=repo_root,
+            env=dict(os.environ),
+            timeout_seconds=30,
+            stdout_path=str(stdout_path),
+        )
+    return result.exit_code == 0
+
+
 def append_runtime_excludes(repo_root: str | Path) -> list[str]:
     """Idempotently add the ``.worc/`` ignore line to the repo's tracked ``.gitignore``.
 
-    Returns the lines actually appended — empty when everything was already present.
+    A no-op when a runtime-only path is already ignored by an existing rule — see
+    :func:`_worc_runtime_already_ignored`. Returns the lines actually appended — empty when
+    everything was already present or the append was skipped.
     """
+    if _worc_runtime_already_ignored(repo_root):
+        return []
     return _append_missing_lines(Path(repo_root) / ".gitignore", RUNTIME_GITIGNORE_LINES)
 
 
@@ -621,7 +646,16 @@ class GitManager:
         ``.worc/`` (state.db, logs/, workspace/, checks/, config.yaml, …) out of the operator's
         ``git status``; ``tasks/`` stays trackable — it carries the audit trail. Idempotent.
         Resolved via ``rev-parse --git-path`` so it is correct for clones and linked worktrees.
+
+        Skipped when a runtime-only path (``.worc/state.db``) is already ignored by some existing
+        rule — e.g. an operator's own ``.worc/*`` + ``!.worc/flows/`` scheme in the tracked
+        ``.gitignore`` that deliberately un-ignores ``.worc/flows/`` to track flows in git (see
+        ``docs/how-to.md``). Appending the blanket ``.worc/`` line unconditionally would silently
+        defeat that negation: a parent-directory exclusion from *any* source blocks re-inclusion of
+        its children, regardless of which file or line it comes from.
         """
+        if self._git("check-ignore", "-q", ".worc/state.db").ok:
+            return
         rel = self._git("rev-parse", "--git-path", "info/exclude").stdout.strip()
         if not rel:
             return

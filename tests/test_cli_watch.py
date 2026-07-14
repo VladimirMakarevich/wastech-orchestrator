@@ -143,6 +143,27 @@ def test_watch_loop_honors_stop_file_created_during_tick(
     assert sleeps == [100]
 
 
+def test_watch_loop_event_present_honors_stop_file(
+    in_repo_config: OrchestratorConfig, tmp_path: Path
+) -> None:
+    # The real daemon always passes a stop_event (SIGTERM channel). On Windows that event never
+    # fires cross-process, so a stop request rides the stop-file alone. Regression guard: the
+    # between-tick wait must re-check the stop-file, not block the whole poll_interval on the event.
+    # Pre-fix this called stop_event.wait(100) on an unset event and slept ~100s (would hang here).
+    stop_file = tmp_path / "orchestrator.stop"
+    event = threading.Event()  # never set — mimics Windows (no cross-process SIGTERM)
+    orch = _FakeOrch(on_refresh=lambda: stop_file.write_text("stop\n", encoding="utf-8"))
+    cli.watch_loop(
+        orch,
+        in_repo_config,
+        tmp_path / "pending",
+        poll_interval=100,
+        stop_event=event,
+        stop_file=stop_file,
+    )
+    assert orch.refresh_calls == 1  # stop-file noticed in the interruptible wait; no second tick
+
+
 # --- idle-gap memory cleanup hook (04.3 / AC-C2) --------------------------------------------------
 
 

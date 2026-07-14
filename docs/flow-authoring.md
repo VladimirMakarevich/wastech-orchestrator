@@ -22,6 +22,8 @@ The dispatch file stays flat (`.worc/flows/<task_type>.yaml`) so the registry fi
     └── supervisor.md       # shared supervisor layer (all flows)
 ```
 
+`.worc/` is gitignored as a whole by default, so `.worc/flows/` has no git history out of the box. To track your flows in git (share them, review changes via PR, keep a diff), see [How-To → Track your operator flows in git](how-to.md#4-track-your-operator-flows-worcflows-in-git).
+
 ## A minimal custom flow
 
 This is a complete, valid coding flow: implement → test → publish, with a bounded test-fix loop. Save it as `.worc/flows/my_flow.yaml` and put its two prompts under `.worc/flows/my_flow/`.

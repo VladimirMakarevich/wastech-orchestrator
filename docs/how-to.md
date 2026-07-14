@@ -106,3 +106,33 @@ worc watch                                      # or `up` in the shell
 - **Preview first if unsure:** `worc finalize <task-id> --as failed --dry-run` prints exactly what it will do (status transition, whether cleanup checks out base or stays on the branch, ledger record) and writes nothing.
 - **`finalize` leaves an operator-owned branch alone** — it never deletes or resets a `branch_mode: existing`/`current` branch, and by default it does not even check out base for those modes (they stay on the branch). Only `new` mode returns to base by default; set `repo.checkout_base_on_cleanup` to override either way.
 - **The fix is `finalize`/`rerun`/restart — never `stop`.** `stop` only manages the daemon; reaching for it here is the natural mistake this recipe exists to correct.
+
+## 4. Track your operator flows (`.worc/flows/`) in git
+
+**Problem:** `install` gitignores the whole `.worc/` runtime home as one unit — `state.db`, `logs/`, `workspace/`, `config.yaml`, and your editable `flows/` copies all disappear from `git status` together (see [Operations → Installation](operations.md#1-installation)). But `.worc/flows/` holds the actual behavior you hand-author: the flow YAML files and their prompts (see [Flow authoring](flow-authoring.md)). By default that content has no git history, produces no diff to review, and can't be shared with teammates or shipped through a PR — you have to pass files around some other way.
+
+**Solution:** replace the blanket `.worc/` line in the repo's tracked `.gitignore` with a wildcard pattern that ignores everything under `.worc/` **except** `flows/`:
+
+```gitignore
+# Ignore the runtime home's contents (not the dir itself) so flows/ can be re-included:
+# Git won't descend into a fully-excluded dir, so `.worc/` would make any !.worc/flows a no-op.
+.worc/*
+!.worc/flows/
+```
+
+Then track and commit the flows you want to keep:
+
+```bash
+git add .gitignore .worc/flows
+git commit -m "chore: track .worc/flows in git"
+```
+
+**Details / caveats:**
+
+- **Replace the line, don't add to it.** `install` (and `install --reconfigure`) append a single blanket `.worc/` line. Keep only one scheme — a blanket `.worc/` and a `.worc/*` + `!.worc/flows/` pair are mutually exclusive; the blanket form always wins if both are present (see below), so delete it once you switch.
+- **Why the wildcard is needed, not just `!.worc/flows/`:** Git never descends into a directory that's already excluded, so a negation for a path _inside_ an excluded directory is a no-op — this is the classic gitignore gotcha the comment calls out. `.worc/*` ignores each direct child individually (so git still walks into `.worc/`), which lets `!.worc/flows/` re-include that one child and everything nested under it (the per-flow prompt folders, `roles/supervisor.md`, etc.) without an extra pattern per file.
+- **Everything else under `.worc/` stays ignored.** `state.db`, `logs/`, `workspace/`, `config.yaml`, `checks/`, `tools/`, and the memory home never ride along just because `flows/` is now tracked.
+- **The orchestrator won't fight you.** A parent-directory exclusion from _any_ source — tracked `.gitignore`, the untracked clone-local `.git/info/exclude`, or the global excludes file — blocks re-inclusion of its children, regardless of which file or line added it. Two mechanisms could otherwise reintroduce a blanket `.worc/` line and silently defeat your `!.worc/flows/` negation: the per-task-run safety net (`ensure_runtime_excludes()`) and `install --reconfigure`'s `.gitignore` writer. Both check whether a runtime-only path (`.worc/state.db`) is already ignored before appending anything, so once you've switched to the wildcard scheme they leave it alone.
+- **Same trick works for other subdirectories** — e.g. add `!.worc/tools/` if you also want the packaged tool executables tracked.
+
+See also: [flow-authoring.md](flow-authoring.md#where-flows-live) for where flows and prompts live, and [operations.md](operations.md#1-installation) for what `install` writes into `.worc/` by default.

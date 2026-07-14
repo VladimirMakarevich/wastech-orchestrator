@@ -1551,6 +1551,13 @@ def _build_cleanup_hook(config: OrchestratorConfig) -> Callable[[], None] | None
     return _run
 
 
+# Granularity for noticing a stop request during the between-tick poll sleep. Bounds how long a
+# stop takes to be seen on Windows, where the SIGTERM event never fires cross-process and the
+# stop-file is the only channel (see watch_loop's poll-sleep loop). Kept small so shutdown lands
+# well within `stop --timeout` (30s) even with a large poll_interval (300s default).
+_STOP_POLL_SECONDS = 1.0
+
+
 def watch_loop(
     orchestrator: Orchestrator,
     config: OrchestratorConfig,
@@ -1602,8 +1609,18 @@ def watch_loop(
         if max_iterations is not None and iteration >= max_iterations:
             break
         if stop_event is not None:
-            if stop_event.wait(poll_interval):  # returns True the instant SIGTERM fires (POSIX)
-                break
+            # Interruptible poll sleep: wait in _STOP_POLL_SECONDS chunks, re-checking both stop
+            # channels each chunk. On POSIX stop_event.wait wakes the instant SIGTERM fires; on
+            # Windows the event never fires cross-process, so the stop-file (checked by
+            # _stop_requested) is the only channel — a monolithic wait(poll_interval) would delay
+            # shutdown by up to poll_interval (300s), far past `stop --timeout` (30s), orphaning the
+            # daemon. Chunking bounds that latency to ~_STOP_POLL_SECONDS regardless of platform.
+            remaining = float(poll_interval)
+            while remaining > 0 and not _stop_requested():
+                chunk = min(_STOP_POLL_SECONDS, remaining)
+                if stop_event.wait(chunk):  # returns True the instant SIGTERM fires (POSIX)
+                    break
+                remaining -= chunk
         else:
             sleep_fn(poll_interval)
         if _stop_requested():  # cross-platform stop-file, noticed between ticks
@@ -2837,6 +2854,23 @@ def _gated_stop(
     return 0, outcome
 
 
+def _timed_out_stop_message(pid: int | None, timeout: float, *, is_windows: bool) -> str:
+    """Operator message for a soft stop that did not confirm shutdown within ``timeout``.
+
+    Only reachable on Windows in practice (POSIX escalates to SIGKILL → the ``killed`` branch). The
+    stop-file is now left in place, so a merely-busy daemon still stops on its next tick; on Windows
+    we also print the concrete ``taskkill`` command for a truly-wedged process (its PID file is
+    already cleared, so the CLI can no longer target it).
+    """
+    base = f"stop: watcher {pid} did not confirm shutdown in {timeout:g}s; cleared its PID file"
+    if is_windows:
+        return (
+            f"{base}. It will stop after its current tick; if it is still running, "
+            f"stop it now with: taskkill /F /PID {pid}"
+        )
+    return base
+
+
 def cmd_stop(args: argparse.Namespace) -> int:
     """Stop a running ``watch`` daemon via the stop ladder (idle: no prompt; busy: confirm/force).
 
@@ -2871,10 +2905,7 @@ def cmd_stop(args: argparse.Namespace) -> int:
     elif outcome.killed:
         print(f"stop: watcher {outcome.pid} did not exit in {args.timeout:g}s; sent SIGKILL")
     elif outcome.timed_out:
-        print(
-            f"stop: watcher {outcome.pid} did not confirm shutdown in {args.timeout:g}s; "
-            "cleared its PID file (if it is still running, stop it via Task Manager)"
-        )
+        print(_timed_out_stop_message(outcome.pid, args.timeout, is_windows=os.name == "nt"))
     else:
         print(f"stop: watcher {outcome.pid} stopped")
     note = _parked_slot_note(config)

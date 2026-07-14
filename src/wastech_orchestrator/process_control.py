@@ -652,7 +652,11 @@ def _stop_via_pid_file(
 
     No ``os.kill`` — it cannot reach an unrelated process. The daemon removes its own PID file on
     a clean exit, so the file's disappearance confirms shutdown. If it persists past the timeout
-    (wedged, or a stale file from a crash), clear it and report ``timed_out``.
+    (wedged inside a tick, or a stale file from a crash), drop the PID file so ``up``/``restart`` is
+    not blocked, but **leave the stop-file in place** and report ``timed_out``: a daemon that is
+    merely busy (not dead) then stops itself the moment it finishes the current tick and re-checks
+    the sentinel. The leftover stop-file is harmless — a fresh ``watch`` clears it on start, and the
+    daemon reaps it in its own exit path.
     """
     pid = record.pid
     if stop_file is not None:
@@ -660,9 +664,7 @@ def _stop_via_pid_file(
     deadline = now_fn() + timeout
     while path.exists():
         if now_fn() >= deadline:
-            path.unlink(missing_ok=True)
-            if stop_file is not None:
-                stop_file.unlink(missing_ok=True)
+            path.unlink(missing_ok=True)  # drop the PID file; keep the stop-file (see docstring)
             return StopOutcome(
                 found=True, pid=pid, signaled=True, killed=False, already_dead=False, timed_out=True
             )

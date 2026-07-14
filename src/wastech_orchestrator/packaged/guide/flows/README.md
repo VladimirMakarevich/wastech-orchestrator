@@ -12,6 +12,17 @@ If you only want to change _what a step says_, you do not need a new flow — ed
 
 `install` seeds editable, active copies of the built-in flows — `implementation`, `deep_research`, `security_audit`, `merge`, and the content-authoring flows `content_chapter` / `content_book` / `content_translate` — plus the executables their `tool` nodes resolve against (e.g. the `check_journey` prose gate) under `.worc/tools/`. The packaged copies inside the wheel are delivery-only (never read at run time), so those seeded copies under `.worc/flows/` are already yours to edit.
 
+**Tracking flows in git:** `install` gitignores the whole `.worc/` runtime home as one unit, so `.worc/flows/` has no git history by default. To track it (review changes via PR, share flows with teammates), replace the blanket `.worc/` line `install` wrote in the repo's tracked `.gitignore` with:
+
+```gitignore
+# Ignore the runtime home's contents (not the dir itself) so flows/ can be re-included:
+# Git won't descend into a fully-excluded dir, so `.worc/` would make any !.worc/flows a no-op.
+.worc/*
+!.worc/flows/
+```
+
+`state.db`, `logs/`, `workspace/`, `config.yaml`, and everything else under `.worc/` stay ignored — only `flows/` (and everything nested under it: per-flow prompt folders, `roles/supervisor.md`) is carved back out. Add `!.worc/tools/` too if you also want the packaged tool executables tracked.
+
 ## Minimal custom flow
 
 Save as `.worc/flows/my_flow.yaml`, with prompts under `.worc/flows/my_flow/`:

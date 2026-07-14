@@ -333,7 +333,8 @@ def test_stop_via_pid_file_graceful_waits_for_pid_file_removal(tmp_path: Path) -
 
 def test_stop_via_pid_file_times_out_when_pid_file_persists(tmp_path: Path) -> None:
     # A wedged daemon (or a stale PID file from a crash) never removes the PID file → timeout. We
-    # cannot force-kill an unrelated process on Windows, so clear the file and report timed_out.
+    # cannot force-kill an unrelated process on Windows, so clear the PID file (unblocks a fresh
+    # 'watch') but KEEP the stop-file so a merely-busy daemon still stops on its next tick.
     path = tmp_path / "orchestrator.pid"
     pc.write_pid_file(path, pid=4242, start_time_fn=_start)
     stop_file = pc.stop_file_path(tmp_path)
@@ -348,7 +349,7 @@ def test_stop_via_pid_file_times_out_when_pid_file_persists(tmp_path: Path) -> N
     assert outcome.timed_out is True
     assert outcome.killed is False  # no hard kill on Windows
     assert not path.exists()  # cleared so a fresh 'watch' can start
-    assert not stop_file.exists()
+    assert stop_file.exists()  # left in place so a busy-but-alive daemon stops itself next tick
 
 
 # --- StopController -------------------------------------------------------------------------------

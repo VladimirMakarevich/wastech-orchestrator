@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from wastech_orchestrator.git_manager import (
     GitCommandError,
     GitManager,
     GitResult,
+    append_runtime_excludes,
 )
 from wastech_orchestrator.state_store import PublishOpRow, StateStore, TaskRow
 
@@ -401,6 +403,48 @@ def test_ensure_runtime_excludes_writes_worc_line_to_local_exclude(
     # The tracked .gitignore is left untouched by the per-run fallback.
     gitignore = git_repo.clone / ".gitignore"
     assert not gitignore.exists() or ".worc/" not in gitignore.read_text(encoding="utf-8")
+
+
+def test_ensure_runtime_excludes_respects_operators_flows_tracking_scheme(
+    git_repo,
+    store: StateStore,
+    tmp_path: Path,
+    make_git_config: ConfigFactory,
+    git_run: GitRunner,
+) -> None:
+    # An operator who wants `.worc/flows/` tracked in git (docs/how-to.md) replaces the blanket
+    # `.worc/` line with `.worc/*` + `!.worc/flows/`. The per-run fallback must not append a
+    # blanket `.worc/` line on top of that — it would silently re-exclude `.worc/flows/`, since a
+    # parent-directory exclusion from any source blocks re-inclusion of its children.
+    (git_repo.clone / ".gitignore").write_text(".worc/*\n!.worc/flows/\n", encoding="utf-8")
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.ensure_runtime_excludes()
+    local_exclude = git_repo.clone / ".git" / "info" / "exclude"
+    assert not local_exclude.exists() or ".worc/" not in local_exclude.read_text(encoding="utf-8")
+    # `.worc/flows/` stays trackable; a runtime-only path is still ignored.
+    (git_repo.clone / ".worc" / "flows").mkdir(parents=True, exist_ok=True)
+    flow_file = git_repo.clone / ".worc" / "flows" / "my_flow.yaml"
+    flow_file.write_text("flow: {}\n", encoding="utf-8")
+    with pytest.raises(subprocess.CalledProcessError):
+        git_run(["check-ignore", "-q", str(flow_file.relative_to(git_repo.clone))], git_repo.clone)
+    git_run(["check-ignore", "-q", ".worc/state.db"], git_repo.clone)
+
+
+def test_append_runtime_excludes_respects_operators_flows_tracking_scheme(
+    git_repo, git_run: GitRunner
+) -> None:
+    # `install --reconfigure` calls append_runtime_excludes() again; it must not append a blanket
+    # `.worc/` line after an operator's own `.worc/*` + `!.worc/flows/` scheme (docs/how-to.md) —
+    # that would silently re-exclude `.worc/flows/` from the tracked .gitignore.
+    gitignore = git_repo.clone / ".gitignore"
+    gitignore.write_text(".worc/*\n!.worc/flows/\n", encoding="utf-8")
+    assert append_runtime_excludes(git_repo.clone) == []
+    assert gitignore.read_text(encoding="utf-8") == ".worc/*\n!.worc/flows/\n"
+    (git_repo.clone / ".worc" / "flows").mkdir(parents=True, exist_ok=True)
+    flow_file = git_repo.clone / ".worc" / "flows" / "my_flow.yaml"
+    flow_file.write_text("flow: {}\n", encoding="utf-8")
+    with pytest.raises(subprocess.CalledProcessError):
+        git_run(["check-ignore", "-q", str(flow_file.relative_to(git_repo.clone))], git_repo.clone)
 
 
 def test_diff_stat_returns_stat_only(

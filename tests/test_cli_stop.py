@@ -251,6 +251,22 @@ def test_cmd_stop_reports_tree_kill(
     assert "hard-stopped" in out and "process tree" in out
 
 
+def test_timed_out_stop_message_windows_suggests_taskkill() -> None:
+    # Windows soft-stop timeout: point the operator at the concrete kill command for a wedged daemon
+    # (its PID file is already cleared, so the CLI can no longer target it). Tested on the pure
+    # helper so no global os.name flip is needed (that would break pathlib's flavor on POSIX).
+    msg = cli._timed_out_stop_message(1234, 30.0, is_windows=True)
+    assert "did not confirm shutdown in 30s" in msg
+    assert "taskkill /F /PID 1234" in msg
+
+
+def test_timed_out_stop_message_posix_omits_taskkill() -> None:
+    # POSIX never reaches this branch in practice (it escalates to SIGKILL), but guard the wording.
+    msg = cli._timed_out_stop_message(1234, 30.0, is_windows=False)
+    assert "did not confirm shutdown in 30s" in msg
+    assert "taskkill" not in msg
+
+
 def test_cmd_stop_wires_hard_kill_seam(
     monkeypatch: pytest.MonkeyPatch, make_git_config: _ConfigFactory, tmp_path
 ) -> None:
