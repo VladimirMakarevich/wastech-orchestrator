@@ -6,7 +6,7 @@ Tasks can be Markdown (`.md`) or JSON (`.json`). Markdown is the normal operator
 
 > **Writing tasks with an AI agent?** A compact, agent-facing version of this guide ships in [`packaged/guide/`](../src/wastech_orchestrator/packaged/guide/README.md) and is copied to `<repo>/.worc/guide/` at `install` time. Point an agent at that local `.worc/guide/` folder and ask it to "write a task for this orchestrator." This document remains the full operator reference.
 
-Start from the packaged example tasks — `task-minimal.md` and `task-rich.md`, installed under `<repo>/.worc/guide/tasks/` — as editable starting points. Live task files belong in the repo's own `tasks/pending/` directory at the repository root (committed and pushed there) — that is how a teammate hands the orchestrator work over git. The `tasks/` lifecycle directories are git-tracked and intentionally not ignored; only the orchestrator's own `.worc/` home is gitignored.
+Start from the packaged example tasks — `task-minimal.md` and `task-rich.md`, installed under `<repo>/.worc/guide/tasks/` — as editable starting points. Compose a task in the repo's `tasks/preparing/` staging directory (the watcher never scans it, so a half-written draft is never picked up mid-write), then `worc promote <id>` moves it into the repo's own `tasks/pending/` directory at the repository root; commit and push it there — that is how a teammate hands the orchestrator work over git. The `tasks/` lifecycle directories are git-tracked and intentionally not ignored; only the orchestrator's own `.worc/` home is gitignored.
 
 The canonical task rules are enforced by the validation gate in the code (`src/wastech_orchestrator/task/`); see the [Functional Map](functional/index.md). For the meaning of all task-file fields, task statuses, and related vocabulary, see the [Glossary](glossary.md).
 
@@ -136,7 +136,7 @@ The PR title still comes from `title`; `branch_name` changes only the Git branch
 | Value | Behavior |
 | --- | --- |
 | `new` (default) | Fork a fresh task branch from `repo.base_branch`, exactly as before. The branch is **orchestrator-owned**. |
-| `existing` | Work in an already-existing branch named by `branch_ref` (checked out with a plain checkout; a local tracking branch is created from `origin/<ref>` when only the remote ref exists). |
+| `existing` | Work in an already-existing branch named by `branch_ref` (checked out with a plain checkout; a local tracking branch is created from `origin/<ref>` when only the remote ref exists). Terminal cleanup leaves the tree on this branch by default (no switch back to base) — override with `repo.checkout_base_on_cleanup`. |
 | `current` | Work in whatever branch the working tree is on — no create, no switch, no `pull`, and a dirty tree is left untouched. |
 
 ```yaml
@@ -154,7 +154,7 @@ Rules and safety:
 
 - **`existing` requires `branch_ref`**, and `branch_ref` is only valid with `existing` (either violation is a validation error). The ref must already exist locally or on the remote — the orchestrator never auto-creates it (a missing ref is rejected at preflight, before any slot or branch is taken).
 - **`current` needs a real branch** — a detached `HEAD` is rejected. Because it rides your live checkout, `current` is a poor fit for unattended `watch` (it emits a warning), and sub-tasks from decomposition inherit the parent's one working branch.
-- **The orchestrator never mutates a branch it does not own.** In `existing`/`current` mode it never deletes, resets-to-base, or force-checks-out-away from the branch; terminal cleanup leaves a `current`-mode tree exactly where you left it. Consequently a **fresh** `rerun` is refused in these modes — use `rerun --continue` to resume in place, or clean up the branch yourself.
+- **The orchestrator never mutates a branch it does not own.** In `existing`/`current` mode it never deletes, resets-to-base, or force-checks-out-away from the branch; terminal cleanup leaves both an `existing`- and a `current`-mode tree exactly where you left it (by default — `new` returns to base, and `repo.checkout_base_on_cleanup` overrides either way; `current` always stays). Consequently a **fresh** `rerun` is refused in these modes — use `rerun --continue` to resume in place, or clean up the branch yourself.
 - **`branch_name` is ignored** outside `new` mode (there is nothing to name); setting it there is a validation warning.
 - **Publishing is orthogonal.** Branch mode only redirects where the `publish` node's commit/push/PR point; whether a `publish` node runs at all is still the flow's decision. When the working branch resolves to the PR base (e.g. `current` on `main`), a PR is impossible — the orchestrator still commits and pushes (directly to the base, subject to branch protection) and **skips the PR** with a logged note; `auto_merge` then no-ops. A chain of tasks on one shared branch converges on a **single** PR: an already-open `head→base` PR is reused rather than re-created, and each reusing task appends its own `## <title>` + summary section to the PR body (keyed by task id, so a rerun does not duplicate it) — the PR reflects the whole chain instead of only its first task.
 
@@ -351,7 +351,7 @@ depends_on: [] # optional; slugs of earlier subtasks (default: none)
 
 - `slug` defaults to `slugify(title)` (override with an explicit `slug:`); it names the immutable `NN-<slug>.md` spec. The file body is materialized **verbatim** and injected into the edit nodes — write the per-subtask instructions however you like.
 - `depends_on` lists **slugs of earlier subtasks**; a forward, self, or unknown reference is rejected. The Core applies the same linear/`max_subtasks` gate as the agent split, so you cannot weaken it.
-- **Where they live:** put subtask files in a **subfolder** (e.g. `tasks/pending/subtasks/…`). The scheduler scans only the top level of `tasks/pending/`, so subtask files there never run as standalone tasks; a path that lands beside the root is rejected.
+- **Where they live:** put subtask files in a **subfolder** — author them under `tasks/preparing/subtasks/…` and `promote` carries them to `tasks/pending/subtasks/…`. The scheduler scans only the top level of `tasks/pending/`, so subtask files there never run as standalone tasks; a path that lands beside the root is rejected.
 - **Path rules (fail-closed):** each reference must be repo-relative with no `..`/absolute/traversal and resolve under the task directory.
 - **Rejected fail-closed before any branch** (quarantined to `tasks/rejected/` with a `validation_report.json`): a malformed/missing subtask file, a bad path, fewer than 2 or more than `max_subtasks` units, a forward dependency, or a `task_type` whose flow declares no `decomposition:` block (`flow_cannot_decompose`).
 
@@ -550,9 +550,9 @@ For JSON, `description` is the body text. It is not a front matter field and is 
 
 ## Authoring Checklist
 
-Before placing a task in `tasks/pending/`:
+Before promoting a task into `tasks/pending/`:
 
-- place it in the repository's own `tasks/pending/` directory at the repo root (git-tracked), then commit and push;
+- compose it in the repository's own `tasks/preparing/` staging directory (the watcher never scans it), then `worc promote <id>` moves it into `tasks/pending/` (git-tracked); commit and push;
 - use a lowercase normalized `id`;
 - write a short, specific `title`;
 - include a clear `## Description`;

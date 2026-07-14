@@ -34,10 +34,10 @@ Exactly one configured provider must set `primary: true` — the **global primar
 ## `schema_version`
 
 ```yaml
-schema_version: 29
+schema_version: 30
 ```
 
-Optional top-level integer marking the `config.yaml` **format** version (current: `29`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
+Optional top-level integer marking the `config.yaml` **format** version (current: `30`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
 
 ## Config Discovery
 
@@ -111,9 +111,10 @@ repo:
 | --- | --- | --- | --- |
 | `url` | string | `""` | Remote repository URL. |
 | `local_path` | string | `"./workspace/repo"` | Dedicated clone/worktree used for agent runs. |
-| `base_branch` | string | `"main"` | Branch checked out before task branches and after terminal cleanup. |
+| `base_branch` | string | `"main"` | Branch checked out before task branches and, by default, after terminal cleanup (see `checkout_base_on_cleanup`). |
 | `branch_prefix` | string | `"worc"` | Prefix for default task branches: `worc/<epoch>-<task-id>-<slug>` (`<epoch>` is the unix timestamp at branch-prep time, so a re-run never collides). The full auto-generated name is capped at 50 chars — the slug is truncated to fit, or dropped entirely if the prefix already fills the budget. A task-level `branch_name` overrides the full name; an override longer than 50 chars logs a warning and falls back to the auto-generated name. |
 | `branch_mode` | `new` \| `existing` \| `current` | `"new"` | Instance default for **where task git operations point** (added in `schema_version` 26). `new` creates a fresh task branch from `base_branch` (today's behavior). `existing` works in a named, already-existing branch (the task supplies `branch_ref`). `current` works in whatever branch the working tree is on — no create, switch, pull, or clean-tree requirement. A per-task `branch_mode` overrides this. A branch is **orchestrator-owned only in `new`** — destructive git ops (reset-to-base, force-checkout-away, branch delete) run only there, and a fresh `rerun` in `existing`/`current` is refused (use `rerun --continue`). See [task authoring](task-authoring.md#branch_mode). |
+| `checkout_base_on_cleanup` | `bool` \| `null` | `null` | Whether terminal cleanup returns the working tree to `base_branch` after a terminal outcome (added in `schema_version` 30). `null` (default) defers to `branch_mode`: `new` returns to base, `existing` and `current` stay on the branch. `false` never returns (a global off switch, including `new`); `true` forces `new` and `existing` to return. `current` always stays regardless (the operator owns its tree). Instance-only — no per-task override. Set `false` (or use `existing`/`current`) when every task runs on one shared branch and the switch-back is pure noise. |
 
 Git credentials are not stored in this file. Configure SSH, a credential helper, or `gh auth login` outside the orchestrator.
 
@@ -222,7 +223,7 @@ agents:
     claude:
       command: "claude"
       primary: true # the global primary — runs any node with no provider; sole fallback target
-      model: "claude-sonnet-4-6" # explicit default; "" = use the CLI/account default
+      model: "claude-sonnet-5" # explicit default; "" = use the CLI/account default
       reasoning: high # low | medium | high | xhigh | max
       timeout_seconds: 7200
       max_turns: 400 # positive int = turn cap; "none" or "max" = no cap (unlimited)
@@ -246,7 +247,7 @@ Common fields:
 | --- | --- | --- | --- |
 | `command` | string | provider id (`"claude"` or `"codex"`) | Executable name or path. |
 | `primary` | boolean | `false` | Marks the **global primary**. Exactly one configured provider must set it; that provider runs any flow node with no explicit `provider` and is the sole infrastructure-fallback target. It must also be in `agents.allowed`. |
-| `model` | string | `claude-sonnet-4-6` (claude), `gpt-5.4` (codex) | Provider model setting. The packaged template ships an explicit default per provider; set `""` to fall back to the CLI/account default. (A flow node may override it per node.) |
+| `model` | string | `claude-sonnet-5` (claude), `gpt-5.4` (codex) | Provider model setting. The packaged template ships an explicit default per provider; set `""` to fall back to the CLI/account default. (A flow node may override it per node.) |
 | `reasoning` | string or null | `high` (both, in the packaged template) | Provider-specific reasoning effort level. Claude accepts `low`, `medium`, `high`, `xhigh`, `max` and maps it to `--effort`. Codex accepts `minimal`, `low`, `medium`, `high`, `xhigh`, plus legacy `max` mapped to `xhigh`, and passes it as `-c model_reasoning_effort="..."`. Set `null` to omit the override and use the CLI/account default. (A flow node may override it per node.) |
 | `timeout_seconds` | integer | `7200` | Timeout for a stage run. |
 | `permission_profile` | string | `"workspace-write"` | Orchestrator permission profile passed into the adapter. |
@@ -689,7 +690,7 @@ Configures the **constant supervisor layer** — a per-task oversight layer that
 ```yaml
 supervisor:
   role_file: "roles/supervisor.md"
-  model: "claude-sonnet-4-6" # install writes the primary provider's model; null → provider default
+  model: "claude-sonnet-5" # install writes the primary provider's model; null → provider default
   reasoning: high # install writes a non-max tier; null → provider default
   provider: claude # install pins the global primary; null → inherit the global primary
 ```

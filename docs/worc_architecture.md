@@ -274,7 +274,7 @@ The **only** things outside `.worc/` are the `tasks/` lifecycle dirs (`pending`/
 ## 9. Task processing flow (end to end)
 
 ```text
-1.  watch finds a new task in tasks/pending/ (or a teammate pushed one to git) → it is picked up for this run (the file stays in pending/ until terminal; "running" is a state.db status, not a folder)
+1.  watch finds a new task in tasks/pending/ (promoted there via worc promote, or a teammate pushed one to git) → it is picked up for this run (the file stays in pending/ until terminal; "running" is a state.db status, not a folder)
 2.  §19 validation gate parses + hardens the task; a structural reject is terminal `failed` (quarantine, no branch)
 3.  acquire the single processing slot; register the task in state.db
 4.  resolve the flow for the task's task_type from `.worc/flows/<task_type>.yaml`, validated fail-closed (missing ⇒ terminal `failed`)

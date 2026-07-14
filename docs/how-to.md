@@ -37,19 +37,20 @@ See [Operations → Re-attempting a terminal task](operations.md#re-attempting-a
 
 **Problem:** `worc status`/`worc list` shows a task as `failed` (or `manual_action_required`), and you want to re-run it. The cause can be anything — a crashed provider, a rate limit, a missing tool, a real quality issue, or an **environmental/transient** problem (for example, you edited the flows while the daemon was serving the queue, so the flow file was momentarily absent when the daemon picked the task up: `reason=unknown task_type 'implementation': no flow file implementation.yaml … Run `worc install` …`). Once the underlying cause is fixed, you re-run — no need to recreate the task file.
 
-**First, decide which mode you need — fresh vs. `--continue`:**
+**First, decide which mode you need — fresh, restart-in-place, or `--continue`:**
 
-- **Fresh** (default, `worc rerun <task-id>`): re-attempts the task **from base** as if new — resets the branch to base and runs the whole flow again. Use this when the run **never produced usable work** — it died at pickup/flow-load or in an early stage (`refinement`/`planning`), or you simply want a clean attempt. A transient failure like the flow-drift case above is a fresh rerun: nothing was built, and the flow is back on disk now.
+- **Fresh** (default, `worc rerun <task-id>`): re-attempts the task **from base** as if new — resets the branch to base and runs the whole flow again. This is what a plain `rerun` does on a `new`-mode branch (the default), the only branch the orchestrator owns. Use it when the run **never produced usable work** — it died at pickup/flow-load or in an early stage (`refinement`/`planning`), or you simply want a clean attempt.
+- **Restart in place** (also just `worc rerun <task-id>` — chosen automatically): when the task runs on an **operator-owned branch** (`branch_mode: existing`/`current`) and failed **before producing any work** (no flow checkpoint — e.g. the flow-drift case above), a plain `rerun` must not reset a branch it doesn't own, so it re-drives the whole flow **from the top on that branch as-is** — nothing is reset and any commits already on the branch are kept. You pass no flag; `rerun` detects the case and the confirmation reads `[restart] on branch '<branch>'`. (If the operator-owned run **did** produce work, a fresh `rerun` refuses and points you at `--continue` instead.)
 - **`--continue`**: resumes **in place** — reuses the existing branch and re-enters at the stage that failed. Use this when the run **already produced code** you don't want to lose. This is section 1 above; see it for the dirty-tree and fix-budget details.
 
-Not sure which? Preview without touching anything: `worc rerun <task-id> --dry-run` (add `--continue` to preview that mode).
+Not sure which? Preview without touching anything: `worc rerun <task-id> --dry-run` names the mode it would take (`fresh` / `restart` / `continue`) and writes nothing (add `--continue` to preview that mode).
 
 **Solution (normal, non-shell mode):**
 
 ```bash
 worc stop                          # rerun refuses while the watch daemon owns the clone; stop it first (a no-op if none runs)
 worc rerun <task-id> --dry-run     # optional: preview the planned reconciliation, writes nothing
-worc rerun <task-id>               # fresh re-attempt; prompts y/N interactively (add -y to skip)
+worc rerun <task-id>               # re-attempt (fresh, or restart-in-place on an operator branch); prompts y/N (add -y to skip)
 ```
 
 **Solution (inside `worc shell`):**
@@ -65,6 +66,7 @@ up                                 # optional: resume serving the queue
 - **Stop the daemon first.** `rerun` drives the pipeline directly in the shared clone, so it refuses while a live `watch` daemon owns it (`rerun: the watch daemon is running (pid …); stop it first`). Use `worc stop` (non-shell) or `down` (shell).
 - **In `worc shell`, always pass `--yes`.** The console runs `rerun` non-interactively (a confirmation prompt would fight the REPL's own stdin reader), so a bare `rerun <task-id>` is refused with _"refusing without confirmation (non-interactive)"_. The `finalize` and `merge-task` verbs are slot-guarded the same way.
 - **You don't move the task file.** `rerun` finds it automatically wherever it currently lives (`tasks/pending/`, `tasks/done/`, or `tasks/failed/`); leave the failed file in `tasks/failed/`.
+- **Restart-in-place keeps the branch and the attempt history.** For a pre-checkpoint failure on an operator-owned branch, use `rerun` (not a manual re-queue via `worc run <file>`): it re-drives on the branch without resetting it and records the retry in the ledger as attempt 2 (`rerun_of` set), so the failure → retry chain stays auditable. A manual re-queue loses that linkage.
 - **Run it from the target repo** (the one holding `.worc/`), not from the orchestrator repo. `worc` is the short alias for `wastech-orchestrator` — the commands are identical.
 - Get the exact id with `worc list --format ids --scope rerun` (lists only the `failed` / `manual_action_required` ids a rerun accepts).
 - **Avoid the cause:** don't edit `.worc/flows/` while the daemon is serving the queue — stop it (`down` / `worc stop`), change the flows, then start again, so a task can't be picked up mid-edit.
@@ -100,7 +102,7 @@ worc watch                                      # or `up` in the shell
 **Details / caveats:**
 
 - **Verify "nothing is running" before finalizing.** If a `worc run`/daemon really is still alive in another terminal, don't finalize under it — stop that first (`worc stop`). The `ls .worc/*.pid` + `ps` checks above are the tell: no PID file **and** no `worc`/`codex`/`claude` process means the `running` is stale.
-- **`finalize` needs an idle slot and no live daemon** — it runs terminal cleanup (`git checkout base`) in the shared clone. With the daemon already stopped this is satisfied. `--as failed` keeps the task rerun-eligible; `--as abandoned` records it as manually abandoned.
-- **Preview first if unsure:** `worc finalize <task-id> --as failed --dry-run` prints exactly what it will do (status transition, base checkout, ledger record) and writes nothing.
-- **`finalize` leaves an operator-owned branch alone** — it only checks out the base branch; it does not delete or reset `branch_mode: existing`/`current` branches shared across tasks.
+- **`finalize` needs an idle slot and no live daemon** — it runs terminal cleanup in the shared clone (`git checkout base` when the branch mode / `repo.checkout_base_on_cleanup` calls for it). With the daemon already stopped this is satisfied. `--as failed` keeps the task rerun-eligible; `--as abandoned` records it as manually abandoned.
+- **Preview first if unsure:** `worc finalize <task-id> --as failed --dry-run` prints exactly what it will do (status transition, whether cleanup checks out base or stays on the branch, ledger record) and writes nothing.
+- **`finalize` leaves an operator-owned branch alone** — it never deletes or resets a `branch_mode: existing`/`current` branch, and by default it does not even check out base for those modes (they stay on the branch). Only `new` mode returns to base by default; set `repo.checkout_base_on_cleanup` to override either way.
 - **The fix is `finalize`/`rerun`/restart — never `stop`.** `stop` only manages the daemon; reaching for it here is the natural mistake this recipe exists to correct.

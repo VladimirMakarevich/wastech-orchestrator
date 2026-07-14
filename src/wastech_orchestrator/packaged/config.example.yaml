@@ -2,7 +2,7 @@
 # Copy to config.yaml and fill it in for your project. config.yaml is NOT committed to git.
 # This is the packaged copy used by `wastech-orchestrator init` (the only example config; nothing else to sync).
 
-schema_version: 29                  # config format version; the orchestrator refuses newer configs
+schema_version: 30                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -22,9 +22,16 @@ repo:
   branch_prefix: "worc"             # task branches: worc/<task-id>-<slug>
   branch_mode: "new"                # default target for task git ops: new | existing | current
                                     #   (a per-task `branch_mode` overrides this)
+  # checkout_base_on_cleanup:       # return the working tree to base_branch after a terminal
+                                    #   outcome. Omit/null = per branch_mode (new returns; existing
+                                    #   and current stay on the branch). false = never return (a
+                                    #   global off switch, incl. new). true = force new + existing
+                                    #   to return. current always stays regardless.
 
 paths:                              # where the task lifecycle lives (optional; omit = defaults)
-  tasks_dir: "tasks"                # repo-relative dir holding pending/done/failed.
+  tasks_dir: "tasks"                # repo-relative dir holding preparing/pending/done/failed.
+                                    # `preparing/` is the staging area the watch scanner never looks
+                                    # in — compose a task there, then `worc promote` it into pending.
                                     # Rename to avoid clashing with a repo that already uses tasks/.
                                     # Must be repo-relative (no .. / absolute) and NOT under .worc/
                                     # (that home is gitignored — the audit trail would be lost). The
@@ -61,7 +68,7 @@ agents:
   providers:
     claude:
       command: "claude"       # executable name (found on PATH) or an absolute path to the CLI
-      model: "claude-sonnet-4-6"   # "" = use the Claude CLI/account default
+      model: "claude-sonnet-5"   # "" = use the Claude CLI/account default
       reasoning: high          # low | medium | high | xhigh | max
       timeout_seconds: 7200    # per-attempt CLI wall-clock ceiling (seconds)
       max_turns: 400           # Claude turn cap (positive int); "none" or "max" = no cap (unlimited)

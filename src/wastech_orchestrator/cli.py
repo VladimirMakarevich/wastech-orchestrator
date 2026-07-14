@@ -113,10 +113,13 @@ WORC_HOME = ".worc"
 # Task lifecycle dirs created at the repo root by `install` (tracked; the audit commit captures the
 # task file + its `<id>.summary.md` in done/failed). `tasks/rejected` is the quarantine and
 # lives under `.worc/` instead, so rejected tasks are never swept into the audit commit.
+# `tasks/preparing` is the staging area: the watch scanner never looks in it, so a task file can be
+# composed there without being picked up mid-write. `promote` moves a finished file into `pending`.
 # These are the install-time *default* layout (`paths.tasks_dir` defaults to "tasks"); the runtime
 # reads `config.paths.tasks_dir` (see `pending_dir`). An operator who configures a different
 # directory creates its lifecycle subfolders themselves.
 REPO_TASK_DIRS: tuple[str, ...] = (
+    "tasks/preparing",
     "tasks/pending",
     "tasks/done",
     "tasks/failed",
@@ -292,6 +295,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="seconds to wait for graceful shutdown before escalating (default: 30)",
     )
     _add_stop_force_flags(stop_cmd)
+
+    promote_cmd = sub.add_parser(
+        "promote",
+        help="promote a staged task file from tasks/preparing/ into tasks/pending/ (atomic move)",
+    )
+    promote_cmd.add_argument(
+        "target",
+        nargs="?",
+        metavar="ID_OR_FILE",
+        help="task id or file name to promote (a decomposition root pulls its subtask specs too); "
+        "omit and pass --all to promote everything staged",
+    )
+    promote_cmd.add_argument(
+        "--all",
+        dest="all_files",
+        action="store_true",
+        help="promote every staged top-level task plus the whole subtasks/ subfolder",
+    )
 
     restart_cmd = sub.add_parser(
         "restart", help="stop the running 'watch' daemon, then start a fresh one with these flags"
@@ -1085,6 +1106,15 @@ def pending_dir(config: OrchestratorConfig) -> Path:
     return tasks_root_for(config) / config.paths.tasks_dir / "pending"
 
 
+def preparing_dir(config: OrchestratorConfig) -> Path:
+    """The staging area ``watch`` never scans: ``<repo>/<paths.tasks_dir>/preparing``.
+
+    Compose a task file here (invisible to the daemon by construction), then :func:`promote_tasks`
+    moves it into :func:`pending_dir` once it is complete — closing the mid-write pickup race.
+    """
+    return tasks_root_for(config) / config.paths.tasks_dir / "preparing"
+
+
 def has_active_task(config: OrchestratorConfig) -> bool:
     """True iff a task currently owns the processing slot (read-only ``state.db`` probe).
 
@@ -1232,6 +1262,117 @@ def scan_pending_sorted(folder: Path, selector: str) -> list[tuple[Path, _Pendin
     ]
     scans.sort(key=lambda item: (item[1].priority_rank, item[0]))
     return scans
+
+
+def find_task_file(folder: Path, target: str) -> Path | None:
+    """First task file in ``folder`` matching ``target`` by file name, stem, or front-matter id."""
+    for path in select_pending(folder):
+        if target in (path.name, path.stem, _scan_pending_meta(path).task_id):
+            return path
+    return None
+
+
+def _atomic_copy(src: Path, dest: Path) -> None:
+    """Copy ``src`` onto ``dest`` atomically: write a temp sibling, then a single ``os.replace``.
+
+    The temp uses a ``.tmp`` suffix (never ``.md``/``.json``) so that, when ``dest`` lives in the
+    watch-scanned ``pending/`` folder, the half-written temp is never itself a scan candidate.
+    ``os.replace`` is an atomic rename on the same filesystem on both POSIX and Windows.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=dest.parent, prefix=f".{dest.stem}-", suffix=".tmp")
+    try:
+        os.close(fd)
+        shutil.copyfile(src, tmp)
+        Path(tmp).replace(dest)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def _read_subtask_refs(task_file: Path) -> list[str]:
+    """Repo-relative ``subtasks:`` spec paths declared in a root task's front matter (else empty).
+
+    Best-effort: a read/parse problem or a non-list value yields no refs, so a single-file promote
+    simply moves the one file (the validation gate rejects a genuinely broken file if it later lands
+    in ``pending/``). Refs that escape the staging dir (absolute or containing ``..``) are dropped.
+    """
+    try:
+        source = read_task_source(task_file)
+        parse = split_frontmatter(source.raw_bytes.decode("utf-8"), source.suffix)
+    except (OSError, UnicodeDecodeError):
+        return []
+    if not parse.present or parse.malformed:
+        return []
+    raw = parse.frontmatter.get("subtasks", [])
+    if not isinstance(raw, (list, tuple)):
+        return []
+    refs: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, str) or not entry.strip():
+            continue
+        ref = entry.strip()
+        if Path(ref).is_absolute() or ".." in Path(ref).parts:
+            continue
+        refs.append(ref)
+    return refs
+
+
+def _promote_one(src: Path, dest: Path, moved: list[str], errors: list[str]) -> None:
+    """Atomically move one staged file into ``dest``; record the outcome in ``moved``/``errors``.
+
+    Refuses to overwrite an existing file in ``pending/`` — a same-named queued task is never
+    clobbered. ``src.replace`` is a single rename syscall (no partial-write window).
+    """
+    if not src.is_file():
+        errors.append(f"no such staged file: {src.name}")
+        return
+    if dest.exists():
+        errors.append(f"{dest.name} already in pending — not overwriting a queued task")
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    src.replace(dest)
+    moved.append(dest.name)
+
+
+def promote_tasks(
+    config: OrchestratorConfig, *, target: str | None = None, all_files: bool = False
+) -> tuple[list[str], list[str]]:
+    """Move staged task files from ``preparing/`` into ``pending/`` atomically (never a copy).
+
+    ``all_files`` moves every top-level ``.md``/``.json`` plus the whole ``subtasks/`` subfolder;
+    otherwise ``target`` (a task id or file name/stem) selects one root, and a decomposition root
+    pulls the subtask specs it references along with it. In both modes subtask specs move *before*
+    their root, so a root never appears in ``pending/`` without its specs. Returns
+    ``(moved_names, errors)`` for the caller to render.
+    """
+    preparing = preparing_dir(config)
+    pending = pending_dir(config)
+    moved: list[str] = []
+    errors: list[str] = []
+
+    if all_files:
+        sub_src = preparing / "subtasks"
+        if sub_src.is_dir():
+            for spec in select_pending(sub_src):
+                _promote_one(spec, pending / "subtasks" / spec.name, moved, errors)
+        for root in select_pending(preparing):
+            _promote_one(root, pending / root.name, moved, errors)
+        if not moved and not errors:
+            errors.append(f"nothing staged in {preparing.name}/")
+        return moved, errors
+
+    if not target:
+        errors.append("nothing to promote: give a task id/file or --all")
+        return moved, errors
+    match = find_task_file(preparing, target)
+    if match is None:
+        errors.append(f"{target!r} is not a staged file in {preparing.name}/")
+        return moved, errors
+    for ref in _read_subtask_refs(match):  # deco root: specs first, then the root
+        _promote_one(preparing / ref, pending / Path(ref), moved, errors)
+    _promote_one(match, pending / match.name, moved, errors)
+    return moved, errors
 
 
 def _confirm_next_task(
@@ -1510,7 +1651,7 @@ def _format_exhausted(loops: tuple[ExhaustedLoop, ...]) -> str:
 
 def _report_rerun_plan(plan: RerunPlan) -> None:
     """Print the planned reconciliation for ``rerun --dry-run``; writes nothing."""
-    mode = "continue" if plan.continue_mode else "fresh"
+    mode = "restart" if plan.restart_in_place else "continue" if plan.continue_mode else "fresh"
     current = plan.current_status.value if plan.current_status else "unknown"
     print(f"rerun (dry-run): would re-attempt {plan.task_id} [{mode}]")
     print(f"  current status: {current}")
@@ -1539,6 +1680,11 @@ def _report_rerun_plan(plan: RerunPlan) -> None:
                 "  budget:    the global max_total_fix_iterations backstop is exhausted; it is a "
                 "hard ceiling and cannot be reset"
             )
+    elif plan.restart_in_place:
+        archive = f"attempt-{max(plan.attempt - 1, 0)}"
+        print(f"  branch:    reuse {plan.branch or '(current)'} as-is (operator-owned; no reset)")
+        print(f"  artifacts: archived to logs/{plan.task_id}/{archive}/")
+        print("  state:     per-attempt row state cleared; re-driven from the top")
     else:
         target = plan.branch or "worc/<id>-<slug>"
         archive = f"attempt-{max(plan.attempt - 1, 0)}"
@@ -1649,11 +1795,16 @@ def cmd_rerun(args: argparse.Namespace) -> int:
     # input() fights 'worc shell's own stdin reader (H1: the single-stdin-reader rule) — the same
     # class of bug already fixed for 'stop'/'restart'. Refuse-with-instructions instead of hanging.
     non_interactive = getattr(args, "non_interactive", False) or not sys.stdin.isatty()
-    mode = "continue" if args.continue_ else "fresh"
-    # --continue reuses the existing branch in place (base_branch is never touched); only a fresh
-    # rerun resets the branch to base. The prompt names what actually happens in each mode — saying
-    # "from base" on a --continue wrongly implies a checkout to base_branch, which never happens.
-    target = f"on branch '{plan.branch}'" if args.continue_ else f"from base '{plan.base_branch}'"
+    # The prompt names what actually happens in each mode. --continue reuses the existing branch in
+    # place (base_branch is never touched); restart-in-place likewise re-drives on the operator's
+    # branch with no reset (a plain `rerun` of a pre-checkpoint failure); only a fresh rerun resets
+    # to base. Saying "from base" on the first two would wrongly imply a base_branch checkout.
+    if plan.restart_in_place:
+        mode, target = "restart", f"on branch '{plan.branch}'"
+    elif args.continue_:
+        mode, target = "continue", f"on branch '{plan.branch}'"
+    else:
+        mode, target = "fresh", f"from base '{plan.base_branch}'"
     if not args.yes:
         if non_interactive:
             print("rerun: refusing without confirmation (non-interactive); pass --yes to proceed")
@@ -1662,7 +1813,11 @@ def cmd_rerun(args: argparse.Namespace) -> int:
             print("rerun: aborted")
             return 0
 
-    if args.continue_:
+    if plan.restart_in_place:
+        assert plan.source_path is not None  # guarded by plan_rerun refusals
+        result = orchestrator.restart_task_in_place(args.task_id, source_path=plan.source_path)
+        label = "rerun/restart"
+    elif args.continue_:
         resolved_reset, abort_code = _resolve_reset_fix_budget(
             args, plan, non_interactive=non_interactive
         )
@@ -1705,7 +1860,10 @@ def _report_finalize_plan(plan: FinalizePlan, *, as_: str) -> None:
         pr = plan.pr_url or "(none)"
         verify = f", verify={plan.verify_state}" if plan.verify_state else ""
         print(f"  pr url:    {pr} (source: {plan.pr_url_source}{verify})")
-    print(f"  cleanup:   checkout base '{plan.base_branch}'")
+    if plan.returns_to_base:
+        print(f"  cleanup:   checkout base '{plan.base_branch}'")
+    else:
+        print(f"  cleanup:   stay on branch '{plan.branch or '(current)'}'")
     print(f"  branch:    {plan.branch or '(none)'}")
     abandoned = ", outcome=abandoned" if plan.declared is Status.MANUAL_ACTION_REQUIRED else ""
     print(f"  ledger:    append a manual record{abandoned}")
@@ -2696,6 +2854,25 @@ def cmd_stop(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_promote(args: argparse.Namespace) -> int:
+    """Move a staged task file from ``tasks/preparing/`` into ``tasks/pending/`` (atomic rename).
+
+    The daemon never scans ``preparing/``, so a file can be composed there without a mid-write
+    pickup; ``promote`` is the explicit "it's ready" step. A decomposition root pulls the subtask
+    specs it references; ``--all`` promotes everything staged (specs first, roots last).
+    """
+    _configure_runtime_logging(args)
+    config = load_config_for(args)
+    if config is None:
+        return 2
+    moved, errors = promote_tasks(config, target=args.target, all_files=args.all_files)
+    for name in moved:
+        print(f"promote: {name} -> pending")
+    for err in errors:
+        print(f"promote: {err}")
+    return 1 if errors else 0
+
+
 def cmd_restart(args: argparse.Namespace) -> int:
     """Stop the running watcher (via the stop ladder), then start a fresh ``watch`` with the flags.
 
@@ -3597,6 +3774,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_watch(args)
         if args.command == "stop":
             return cmd_stop(args)
+        if args.command == "promote":
+            return cmd_promote(args)
         if args.command == "restart":
             return cmd_restart(args)
         if args.command == "preflight":

@@ -32,9 +32,10 @@ Fill in the repository identity first:
 
 - `url` — the Git remote the orchestrator will push to.
 - `local_path` — the repo path the orchestrator should operate in.
-- `base_branch` — the branch to refresh before work and return to after cleanup.
+- `base_branch` — the branch to refresh before work and, by default, return to after cleanup (see `checkout_base_on_cleanup`).
 - `branch_prefix` — usually leave the default `worc`.
 - `branch_mode` — leave the default `new` (fork a fresh task branch from base). Only change it if most tasks on this repo should work in an existing or current branch; individual tasks can override it per-task.
+- `checkout_base_on_cleanup` — leave unset (the default). Unset means each task returns to `base_branch` when it finishes only in `new` mode; `existing`/`current` stay on the branch. Set `false` to never switch back (handy when every task runs on one shared branch), or `true` to force `new` and `existing` back to base.
 
 If the target project needs customer-specific branch names, keep `branch_prefix` default and let individual tasks set `branch_name`.
 

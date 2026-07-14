@@ -7,9 +7,9 @@ A decision guide for the optional knobs. Defaults are almost always right — re
 You usually do not choose this — the operator does — but it affects where your task file goes:
 
 - **`run <task-file>`** processes exactly one task file, end to end. The argument is a **path** to the file (e.g. `tasks/pending/my-task.md`), not a task id.
-- **`watch`** polls the `tasks/pending/` folder and processes tasks dropped there, looping with periodic git sync.
+- **`watch`** polls the `tasks/pending/` folder and processes tasks promoted there, looping with periodic git sync.
 
-A live task belongs in the repo's own `tasks/pending/` directory (committed and pushed there) — that is how a teammate hands work to a watching orchestrator.
+A live task belongs in the repo's own `tasks/pending/` directory (committed and pushed there) — that is how a teammate hands work to a watching orchestrator. Compose the file in the `tasks/preparing/` staging folder first (the watcher never scans it), then `worc promote <id>` moves it into `tasks/pending/` once it is complete, so a half-written draft is never picked up mid-edit.
 
 ## `task_type` — choose the flow
 
@@ -51,7 +51,7 @@ branch_ref: "feature/big-feature" # required for `existing`; the branch to check
 - `existing` — check out and work in the branch named by `branch_ref` (required). It must already exist locally or on the remote — the orchestrator never auto-creates it. Use this to continue/refine a branch or chain several tasks onto one feature branch (they converge on a single reused PR).
 - `current` — work in whatever branch the working tree is on, without creating, switching, requiring a clean tree, or pulling. A low-ceremony local experiment; a detached HEAD is rejected. Poor fit for unattended `watch` (it depends on your live checkout) — it warns there.
 
-The per-task value overrides the global `repo.branch_mode` default. **Safety:** in `existing`/`current` the branch belongs to you, so the orchestrator never deletes, resets, or force-checkouts away from it; a fresh (non-`--continue`) rerun in these modes is refused (use `rerun --continue`). `rerun --continue` tolerates the task's own uncommitted work once it has reached review/fixing/publish, and takes two recovery controls: `--reset-fix-budget` (grant a fresh fix budget when the fix loop hit `max_fix_cycles`, keeping the global backstop) and `--from <node>` (re-enter at a chosen node). Branch mode only governs _where_ git operations point; whether a `publish` node runs at all is still the flow's decision.
+The per-task value overrides the global `repo.branch_mode` default. **Safety:** in `existing`/`current` the branch belongs to you, so the orchestrator never deletes, resets, or force-checkouts away from it — and by default terminal cleanup leaves the tree on that branch rather than switching back to base (`repo.checkout_base_on_cleanup` overrides this); a branch-resetting fresh rerun in these modes is refused once the run produced work (use `rerun --continue`). A plain `rerun` of a run that failed **before any work** (no checkpoint — e.g. a transient pickup failure) instead restarts it **in place** on the branch, resetting nothing. `rerun --continue` tolerates the task's own uncommitted work once it has reached review/fixing/publish, and takes two recovery controls: `--reset-fix-budget` (grant a fresh fix budget when the fix loop hit `max_fix_cycles`, keeping the global backstop) and `--from <node>` (re-enter at a chosen node). Branch mode only governs _where_ git operations point; whether a `publish` node runs at all is still the flow's decision.
 
 ## `publish` — cap where a task stops (commit / push / PR)
 
@@ -117,7 +117,7 @@ You cannot flag a task to skip refinement. The orchestrator skips it automatical
 
 ## Where task files live
 
-There is a single canonical layout. Drop your task file in the repo's own `tasks/pending/` directory at the repo root, where it is git-tracked, committed, and pushed — that is how work reaches a watching orchestrator. Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home; only the `tasks/` lifecycle directories stay at the repo root and are tracked. The orchestrator commits the task file and its `<id>.summary.md` as an audit trail; a rejected task is quarantined under `.worc/tasks/rejected`.
+There is a single canonical layout. Compose your task file in the repo's `tasks/preparing/` staging folder — the watcher never scans it, so an in-progress draft is invisible to the daemon — then run `worc promote <id>` (or the `promote` verb inside `worc shell`) to move it atomically into `tasks/pending/`, where it is git-tracked, committed, and pushed and a watching orchestrator picks it up. (`enqueue <file>` in the shell is a fast path for an already-complete external file: it lands straight in `tasks/pending/`, atomically.) Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home; only the `tasks/` lifecycle directories (`preparing`/`pending`/`done`/`failed`) stay at the repo root and are tracked. The orchestrator commits the task file and its `<id>.summary.md` as an audit trail; a rejected task is quarantined under `.worc/tasks/rejected`.
 
 ## `contacts` and Telegram
 

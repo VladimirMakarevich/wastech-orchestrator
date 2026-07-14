@@ -129,7 +129,7 @@ Only providers named in `agents.allowed` are required. If Claude Code is not ins
 
 ## 4. Create A First Task
 
-Create `tasks/pending/task-001.md`:
+Create `tasks/preparing/task-001.md`, then promote it into the queue with `worc promote task-001`:
 
 ```markdown
 ---
@@ -218,7 +218,7 @@ worc finalize task-001 --as failed --note "superseded"                    # give
 worc finalize task-001 --as abandoned --note "obsolete"                   # drop it (audited)
 ```
 
-It sets the terminal status, returns the working copy to `base_branch` (fail-closed on a dirty tree), moves the task file, closes any waiting HITL prompt, and appends a `manual` ledger record. See [operations.md](operations.md) "Finalize a task you handled by hand" for the full rules.
+It sets the terminal status, runs terminal cleanup (returns the working copy to `base_branch`, fail-closed on a dirty tree — unless the branch mode / `repo.checkout_base_on_cleanup` keeps it on the working branch), moves the task file, closes any waiting HITL prompt, and appends a `manual` ledger record. See [operations.md](operations.md) "Finalize a task you handled by hand" for the full rules.
 
 ### Merge a reviewed PR (`prs` / `merge-task`)
 
@@ -260,7 +260,7 @@ orchestrator:
     enabled: true
 ```
 
-Auto mode does not introduce concurrency. There is a single active task slot, and checkout back to `repo.base_branch` must complete before the next task can start.
+Auto mode does not introduce concurrency. There is a single active task slot, and terminal cleanup (checkout back to `repo.base_branch`, or staying on the working branch per `repo.checkout_base_on_cleanup` / the branch mode) must complete before the next task can start.
 
 ### Monitor a running task
 
@@ -304,7 +304,7 @@ worc top --log-file ./logs/daemon.jsonl          # live monitor; q (then Enter) 
 
 ```bash
 pip install wastech-orchestrator[shell]
-worc shell                                       # attach-or-idle; up / enqueue / ps / down / quit
+worc shell                                       # attach-or-idle; up / enqueue / promote / ps / down / quit
 ```
 
 ## 7. Choose Which Provider Runs a Node

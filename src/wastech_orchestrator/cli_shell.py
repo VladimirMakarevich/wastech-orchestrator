@@ -28,7 +28,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TextIO
+from typing import Protocol, TextIO
 
 from wastech_orchestrator import cli, process_control
 from wastech_orchestrator.config.schema import OrchestratorConfig
@@ -49,7 +49,8 @@ _BANNER = "worc shell — client over the watch daemon. Type 'help' for commands
 
 _HELP = """\
 commands:
-  enqueue <file>              copy a task file into the pending queue (queued; not run until 'up')
+  enqueue <file>              copy a ready task file straight into the pending queue (atomic)
+  promote <id|file> | --all   move a staged task from tasks/preparing/ into pending (atomic)
   up | watch                  start serving the queue: spawn a watch daemon (verifies it came up)
   ps | jobs                   snapshot: active task + node, queue, recent, log tail
   status [<id>]               persisted status of the active/latest task (or <id>)
@@ -61,8 +62,8 @@ commands:
   cancel <id>                 de-queue a pending task file (-> .worc/tasks/rejected)
   down [--force|--force-full] stop the daemon (idle: no prompt; busy: needs --force/--force-full)
   restart [...]               restart the daemon
-  quit | exit                 leave; the daemon (and any in-flight task) keeps running — reopen to
-                              reattach, or stop it with 'down' / 'worc stop'
+  quit | exit                 leave; the daemon (and any in-flight task) keeps running (confirms
+                              first if it is still serving) — reopen to reattach, or 'down' to stop
 """
 
 # Verbs forwarded verbatim to the existing CLI dispatch; their own slot/daemon guards apply.
@@ -315,6 +316,8 @@ def dispatch(line: str, ctx: ShellContext) -> ShellResult:
     # Path-taking verbs: the argument is the raw (unquoted) remainder — never POSIX-tokenized (M1).
     if command == "enqueue":
         return _do_enqueue(ctx, _unquote(remainder))
+    if command == "promote":
+        return _do_promote(ctx, remainder)
     if command == "cancel":
         return _do_cancel(ctx, _unquote(remainder))
     if command == "logs":
@@ -356,19 +359,33 @@ def _do_enqueue(ctx: ShellContext, arg: str) -> ShellResult:
     if not src.is_file():
         print(f"shell: no such file: {src}", file=ctx.out)
         return ShellResult()
-    dest_dir = cli.pending_dir(ctx.config)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy(src, dest_dir / src.name)
+    # Atomic write into the scanned folder: a temp sibling + os.replace, so the daemon never sees a
+    # half-copied file mid-tick (the copy's temp uses a .tmp suffix, invisible to select_pending).
+    cli._atomic_copy(src, cli.pending_dir(ctx.config) / src.name)
     served = " — 'up' to start serving" if ctx.daemon is None else " (the daemon runs it next tick)"
     print(f"shell: enqueued {src.name}{served}", file=ctx.out)
     return ShellResult()
 
 
+def _do_promote(ctx: ShellContext, remainder: str) -> ShellResult:
+    # Path/id-taking like enqueue (raw remainder, not POSIX-tokenized — Windows paths, M1); `--all`
+    # is the one recognized flag. The move lives in cli.promote_tasks (single source of truth).
+    all_files = remainder.strip() == "--all"
+    target = None if all_files else _unquote(remainder)
+    if not all_files and not target:
+        print("usage: promote <id|file> | promote --all", file=ctx.out)
+        return ShellResult()
+    moved, errors = cli.promote_tasks(ctx.config, target=target, all_files=all_files)
+    served = " — 'up' to start serving" if ctx.daemon is None else " (the daemon runs it next tick)"
+    for name in moved:
+        print(f"shell: promoted {name} -> pending{served}", file=ctx.out)
+    for err in errors:
+        print(f"shell: {err}", file=ctx.out)
+    return ShellResult()
+
+
 def _find_pending(config: OrchestratorConfig, target: str) -> Path | None:
-    for path in cli.select_pending(cli.pending_dir(config)):
-        if target in (path.name, path.stem, cli._scan_pending_meta(path).task_id):
-            return path
-    return None
+    return cli.find_task_file(cli.pending_dir(config), target)
 
 
 def _do_cancel(ctx: ShellContext, arg: str) -> ShellResult:
@@ -496,10 +513,63 @@ class _LogTailer:
         return new
 
 
+class _Prompter(Protocol):
+    """The one method :func:`_confirm_quit` needs from a ``PromptSession`` (lets tests fake it)."""
+
+    async def prompt_async(self, message: str) -> str: ...
+
+
+def _quit_warning(ctx: ShellContext) -> str | None:
+    """A loud warning to print on quit while a daemon is still serving, or ``None`` if it is safe.
+
+    ``quit`` detaches by design (M3) — the daemon keeps polling and picks up the next task file.
+    Uses the live PID check (the ``_do_up`` idiom), not the possibly-stale ``ctx.daemon`` handle, so
+    a daemon started or stopped mid-session shows up. Distinguishes an actively-running task from an
+    idle-but-serving daemon (the pickup risk exists in both cases).
+    """
+    pid_path = process_control.pid_file_path(cli.worc_home_for(ctx.config))
+    if process_control.running_daemon_pid(pid_path) is None:
+        return None
+    if cli.has_active_task(ctx.config):
+        return (
+            "WARNING: a task is actively running. 'quit' detaches — the daemon and the running "
+            "task keep going in the background. Stop them with 'down' / 'down --force-full'."
+        )
+    return (
+        "WARNING: the watch daemon is still serving the queue. 'quit' detaches — it keeps polling "
+        "and will pick up the next task file added. Stop it with 'down'."
+    )
+
+
+async def _confirm_quit(ctx: ShellContext, session: _Prompter) -> bool:
+    """Gate quit/exit while a daemon serves: warn, then confirm via the REPL's own PromptSession.
+
+    Reusing the live session's ``prompt_async`` keeps the single-stdin-reader rule (H1) — no nested
+    ``input()`` fighting the REPL. Returns ``True`` to exit, ``False`` to stay; no daemon → exit
+    silently; EOF/Ctrl-C at the confirm prompt → stay (treated as a decline).
+    """
+    warning = _quit_warning(ctx)
+    if warning is None:
+        return True
+    print(warning, file=ctx.out)
+    try:
+        answer = (await session.prompt_async("Really quit and leave it running? [y/N] ")).strip()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return answer.lower() in ("y", "yes")
+
+
 def _run_scripted(ctx: ShellContext, lines: Sequence[str]) -> int:
-    """Headless dispatch over a pre-seeded line list — the testable stand-in for the REPL."""
+    """Headless dispatch over a pre-seeded line list — the testable stand-in for the REPL.
+
+    Scripted/headless has no user to confirm with, so quit never blocks (the ``--non-interactive``
+    convention): it prints the loud warning if a daemon is still serving, then exits.
+    """
     for line in lines:
         if dispatch(line, ctx).quit:
+            warning = _quit_warning(ctx)
+            if warning is not None:
+                print(warning, file=ctx.out)
             break
     return 0
 
@@ -533,7 +603,9 @@ def _run_interactive(ctx: ShellContext) -> int:
                     except (EOFError, KeyboardInterrupt):
                         break
                     if dispatch(line, ctx).quit:
-                        break
+                        if await _confirm_quit(ctx, session):
+                            break
+                        print("shell: quit cancelled — daemon still serving.", file=ctx.out)
         finally:
             tail.cancel()
             with contextlib.suppress(asyncio.CancelledError):

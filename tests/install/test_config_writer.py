@@ -123,7 +123,7 @@ def test_explicit_model_and_reasoning_defaults_are_written(tmp_path: Path) -> No
     claude = cfg.agents.providers[ProviderId.CLAUDE]
     codex = cfg.agents.providers[ProviderId.CODEX]
     # provider-config-cleanup #3: fresh installs ship explicit model/reasoning, not "" / null.
-    assert (claude.model, claude.reasoning) == ("claude-sonnet-4-6", "high")
+    assert (claude.model, claude.reasoning) == ("claude-sonnet-5", "high")
     assert (codex.model, codex.reasoning) == ("gpt-5.4", "high")
     # provider-config-cleanup #2: the unused max_budget_usd field is gone from the generated config.
     assert "max_budget_usd" not in text
@@ -151,7 +151,7 @@ def test_generated_config_includes_optional_sections(tmp_path: Path) -> None:
     assert cfg.supervisor.role_file == "roles/supervisor.md"
     # F2: the delivered supervisor block carries concrete, visible model/reasoning (the global
     # primary's model + a non-max reasoning), not an implicit inherit-from-primary null.
-    assert cfg.supervisor.model == "claude-sonnet-4-6"
+    assert cfg.supervisor.model == "claude-sonnet-5"
     assert cfg.supervisor.reasoning == "high"
     assert cfg.supervisor.reasoning not in ("xhigh", "max")  # F7b: default must not be fragile
     # F39: provider is pinned to the primary so it stays aligned with `model` (also the primary's).

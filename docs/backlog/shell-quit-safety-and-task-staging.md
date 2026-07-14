@@ -1,6 +1,6 @@
 # Shell quit safety + staged task-file creation (`preparing` → `pending`)
 
-Status: **proposed** Date: 2026-07-13 Owner: Vladimir Makarevich
+Status: **implemented** (2026-07-14) Date: 2026-07-13 Owner: Vladimir Makarevich
 
 This is a design record for two independent, composable operator-safety fixes found while investigating an incident: the operator ran `worc shell` → `up` → a task ran to completion → `quit`, then started composing a new task file directly in `tasks/pending/` — unaware that `quit` deliberately leaves the watch daemon running (the `M3` decision, shipped 2026-07-06 — see the _worc shell reliable control surface_ ADR referenced in [follow_ups.md](follow_ups.md)). The still-running daemon's next poll tick picked up the half-written file and the validation gate quarantined it, moving the operator's in-progress draft out of `tasks/pending/` before it was finished. `quit` detaching is correct, intentional, and tested behavior (`tests/test_cli_shell.py::test_run_shell_detaches_attached_daemon_on_quit`) and must not change; the gap is that nothing makes that state loud, and the pending-folder scanner has no write-atomicity at all. Both fixes below close that gap without touching the `M3` decision or the "broken task is quarantined immediately, never branched" invariant ([.agents/rules/architecture.md](../../.agents/rules/architecture.md)).
 
@@ -42,10 +42,10 @@ Ship both parts; they are independent and can land separately.
 - No shell interpolation — the new CLI verb takes a real argv like every other subcommand.
 - Greenfield MVP, no deployment — no migration path needed for the new folder or config; a fresh install just ships with it.
 
-## Open questions
+## Resolved decisions (as implemented 2026-07-14)
 
-- Final folder name: `preparing` / `staging` / `working`.
-- Command name/syntax for the promote verb, and its flags for "one file" vs. "all".
-- Whether `enqueue` should be redirected to target the staging folder instead of `tasks/pending/` directly, deprecated in favor of the new promote command, or left as-is (documented as the "already-complete external file" fast path) — otherwise it stays a second, undocumented way around the staging discipline Part B establishes.
-- Exact confirmation wording/threshold for Part A (idle-serving vs. busy vs. daemon-not-running) and whether a `quit --yes`/`exit --yes` bypass is needed, or scripted mode should simply never block.
-- Whether the scanner should _also_ keep a cheap mtime-settle check on `tasks/pending/` itself as defense-in-depth against a producer that bypasses staging (e.g. a human editing directly in `pending/` despite the docs) — defer unless real-world drift is observed, since staging already solves it for compliant producers.
+- **Folder name:** `preparing` (sibling of `pending`/`done`/`failed`, tracked at the repo root, created by `install`). Added to `REPO_TASK_DIRS`; `preparing_dir()` mirrors `pending_dir()`. The subfolder name is fixed (not a new config key) like the other lifecycle folders.
+- **Promote verb:** `worc promote <id|file>` (top-level CLI subcommand) and a `promote <id|file> | --all` verb inside `worc shell`, both delegating to `cli.promote_tasks()` (single source of truth). Single promote is decomposition-aware — a root pulls the subtask specs it references (`preparing/subtasks/…` → `pending/subtasks/…`, specs moved before the root); `--all` moves every staged top-level file plus the whole `subtasks/` subfolder. The move is a single atomic `Path.replace`; it refuses to overwrite an existing queued file.
+- **`enqueue`:** kept as the "already-complete external file" fast path, but its write is now atomic — `cli._atomic_copy` writes a `.tmp` sibling (never a `.md`/`.json` scan candidate) in `pending/`, then `os.replace`s it into place.
+- **Part A gate:** interactive `quit`/`exit` prints a loud `WARNING` and confirms via the REPL's own `PromptSession` (H1 — one stdin reader) when a daemon is still serving, distinguishing an actively-running task from an idle-but-serving daemon; scripted/headless prints the warning but never blocks. No `quit --yes` flag was needed. M3 (detach-by-default) is unchanged.
+- **Defense-in-depth mtime-settle check on `tasks/pending/`:** deferred (not implemented) — staging closes the race for compliant producers; revisit only if real-world drift from a producer that bypasses staging is observed.

@@ -1,6 +1,6 @@
 ---
 name: worc-task
-description: Convert a raw, free-form task into a valid wastech-orchestrator task file (YAML front matter + Description / Acceptance criteria / Constraints), ready for tasks/pending/. Use when you have an informal task — a paragraph, a ticket, a Slack message — and want a ready-to-run task file the orchestrator will accept.
+description: Convert a raw, free-form task into a valid wastech-orchestrator task file (YAML front matter + Description / Acceptance criteria / Constraints), staged in tasks/preparing/ and promoted to tasks/pending/. Use when you have an informal task — a paragraph, a ticket, a Slack message — and want a ready-to-run task file the orchestrator will accept.
 ---
 
 # worc-task
@@ -24,7 +24,7 @@ Speak in the user's language (default to the language they wrote in).
    - `## Acceptance criteria` — a testable checklist (see below). Include it unless you deliberately want refinement to enrich the task.
    - `## Constraints` — do-not-touch areas, dependency limits, compatibility/migration limits.
 3. **Set optional front-matter fields only when clearly warranted.** Default to omitting them — the defaults are almost always right.
-4. **Write the file** to `tasks/pending/<id>.md` (the canonical location, git-tracked). If you cannot find a `tasks/pending/` directory, confirm where it lives or fall back to the repo root, and tell the user.
+4. **Write the file** to `tasks/preparing/<id>.md` — the staging folder the watch daemon never scans, so a half-written draft is never picked up mid-edit. When it is complete, promote it into the queue with `worc promote <id>` (or the `promote` verb inside `worc shell`), which atomically moves it into `tasks/pending/` (the canonical, git-tracked location). If you cannot find a `tasks/preparing/` directory, confirm where the task lifecycle lives or fall back to the repo root, and tell the user.
 5. **Self-check** against the hard rules below before finishing.
 
 ## Write testable acceptance criteria

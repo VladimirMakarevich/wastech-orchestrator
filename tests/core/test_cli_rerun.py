@@ -331,8 +331,10 @@ def test_rerun_refuses_when_task_file_truly_missing(
 def test_rerun_refuses_fresh_in_operator_owned_branch_mode(
     git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # branch-mode ADR: a fresh rerun resets the branch to base — forbidden in existing/current mode,
-    # where the branch is the operator's. The refusal directs them to `rerun --continue` instead.
+    # branch-mode ADR: a fresh rerun resets the branch to base — forbidden in existing/current mode
+    # where the branch is the operator's. Once the task has produced work (a flow checkpoint), the
+    # refusal stands and directs them to `rerun --continue`. (A *pre-checkpoint* failure instead
+    # restarts in place — see test_rerun_restart_in_place_routes_without_branch_reset.)
     from wastech_orchestrator.config.schema import BranchMode
     from wastech_orchestrator.task.model import NormalizedTask
     from wastech_orchestrator.task.parser import write_normalized
@@ -345,6 +347,7 @@ def test_rerun_refuses_fresh_in_operator_owned_branch_mode(
         project,
         git_repo.clone,
         TaskRow("task-1", "T", Status.FAILED, source_path=str(source), branch="feature/keep"),
+        checkpoint_node="review",  # the task produced work, so a fresh rerun still refuses
     )
     # The rerun guard reads the effective branch mode from the persisted normalized manifest.
     write_normalized(
@@ -362,6 +365,200 @@ def test_rerun_refuses_fresh_in_operator_owned_branch_mode(
     assert code == 1
     assert "branch_mode 'existing'" in out and "operator-owned" in out
     assert "rerun --continue" in out
+
+
+# --- restart-in-place: a plain `rerun` of a pre-checkpoint failure on an operator-owned branch ---
+
+
+def _seed_operator_owned(
+    project: Path,
+    clone: Path,
+    *,
+    mode: str,
+    branch_ref: str | None = None,
+) -> Path:
+    """Seed a pre-checkpoint FAILED task in an operator-owned branch mode (+ its persisted manifest
+    and a ledger line, as a real terminal failure leaves behind)."""
+    from wastech_orchestrator.config.schema import BranchMode
+    from wastech_orchestrator.task.model import NormalizedTask
+    from wastech_orchestrator.task.parser import write_normalized
+
+    source = project / "failed" / "task-1.md"
+    _complete_task_file(source, "task-1")
+    config = _seed(
+        project,
+        clone,
+        TaskRow("task-1", "T", Status.FAILED, source_path=str(source)),
+    )
+    write_normalized(
+        NormalizedTask(
+            id="task-1",
+            title="T",
+            description="x",
+            branch_mode=BranchMode(mode),
+            branch_ref=branch_ref,
+        ),
+        clone / ".worc",
+    )
+    Ledger(clone / ".worc" / "logs").append(
+        LedgerRecord(id="task-1", title="T", final_status="failed", finished_at="t1")
+    )
+    return config
+
+
+def test_rerun_restart_in_place_routes_without_branch_reset(
+    git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plain `rerun` of a pre-checkpoint failure (no checkpoint) on an operator-owned branch
+    restarts in place: it clears per-attempt state and re-drives, but never resets the branch."""
+    from wastech_orchestrator.git_manager import GitManager
+
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _seed_operator_owned(
+        project, git_repo.clone, mode="existing", branch_ref="feature/keep"
+    )
+
+    seen: dict[str, object] = {}
+
+    def fake_run_task(self: Orchestrator, source_path: str) -> PipelineResult:
+        # Captured at run time: attempt stamped, per-attempt row state already cleared.
+        seen["source_path"] = source_path
+        seen["attempt"] = self._rerun_attempt.get("task-1")
+        row = self._store.get_task("task-1")
+        seen["branch_after_reset"] = row.branch if row else "missing-row"
+        return PipelineResult(task_id="task-1", final_status=Status.DONE)
+
+    def forbid_reset(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("restart-in-place must never reset an operator-owned branch to base")
+
+    monkeypatch.setattr(Orchestrator, "run_task", fake_run_task)
+    monkeypatch.setattr(GitManager, "reset_branch_to_base", forbid_reset)
+
+    code = cli.main(["--config", str(config), "rerun", "task-1", "--yes"])
+    assert code == 0
+    assert seen["source_path"] is not None  # re-driven from the top
+    assert seen["attempt"] == 2  # ledger attempt linkage stamped before the run
+    assert seen["branch_after_reset"] is None  # reset_task_for_rerun cleared per-attempt state
+
+
+def test_rerun_restart_confirm_names_restart_on_branch(
+    git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The restart-in-place confirmation names the operator branch it re-drives on (not "from
+    base") — the third mode label distinct from fresh and continue."""
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _seed_operator_owned(
+        project, git_repo.clone, mode="existing", branch_ref="feature/keep"
+    )
+    prompts: list[str] = []
+    monkeypatch.setattr(sys, "stdin", _TTY())
+
+    def _capture_confirm(prompt: str) -> bool:
+        prompts.append(prompt)
+        return False  # abort right after capturing the prompt text; nothing else needs to run
+
+    monkeypatch.setattr(cli, "_confirm", _capture_confirm)
+    code = cli.main(["--config", str(config), "rerun", "task-1"])
+    assert code == 0  # aborted
+    assert prompts == ["Rerun task-1 [restart] on branch 'feature/keep'? [y/N] "]
+
+
+def test_rerun_restart_confirm_current_mode_names_the_current_branch(
+    git_repo, git_run, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In `current` mode the restart-in-place branch is resolved from the live checkout."""
+    git_run(["checkout", "-b", "operator-wip"], git_repo.clone)
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _seed_operator_owned(project, git_repo.clone, mode="current")
+    prompts: list[str] = []
+    monkeypatch.setattr(sys, "stdin", _TTY())
+
+    def _capture_confirm(prompt: str) -> bool:
+        prompts.append(prompt)
+        return False
+
+    monkeypatch.setattr(cli, "_confirm", _capture_confirm)
+    code = cli.main(["--config", str(config), "rerun", "task-1"])
+    assert code == 0
+    assert prompts == ["Rerun task-1 [restart] on branch 'operator-wip'? [y/N] "]
+
+
+def test_rerun_restart_in_place_end_to_end_preserves_operator_commit(
+    git_repo, fake_cli, git_run, tmp_path: Path
+) -> None:
+    """End to end: a pre-checkpoint failure on an operator-owned branch is restarted in place — the
+    flow runs to done on the branch as-is, the operator's pre-existing commit survives (no reset to
+    base), and the ledger links the retry as attempt 2."""
+    from wastech_orchestrator.config.schema import BranchMode
+    from wastech_orchestrator.task.model import NormalizedTask
+    from wastech_orchestrator.task.parser import write_normalized
+
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_config(
+        project,
+        git_repo.clone,
+        claude=fake_cli("success_edit", "claude"),
+        codex=fake_cli("success_edit", "codex"),
+    )
+    external = git_repo.clone / ".worc"
+
+    # An operator-owned branch carrying a commit the orchestrator must never touch.
+    git_run(["checkout", "-b", "feature/keep"], git_repo.clone)
+    (git_repo.clone / "operator_marker.txt").write_text("operator work\n", encoding="utf-8")
+    git_run(["add", "operator_marker.txt"], git_repo.clone)
+    git_run(["commit", "-m", "operator commit"], git_repo.clone)
+    git_run(["checkout", "main"], git_repo.clone)
+
+    # A pre-checkpoint failure (no current_node) in existing mode: source + manifest both name the
+    # operator branch, and a prior ledger line marks the first attempt.
+    source = project / "failed" / "task-800.md"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        '---\nid: task-800\ntitle: "Add a thing"\nbranch_mode: existing\nbranch_ref: feature/keep\n'
+        "---\n\n## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
+        encoding="utf-8",
+    )
+    db = external / "state.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    store = StateStore.open(db)
+    store.insert_task(
+        TaskRow(
+            task_id="task-800", title="Add a thing", status=Status.FAILED, source_path=str(source)
+        )
+    )
+    store.close()
+    Ledger(external / "logs").append(
+        LedgerRecord(id="task-800", title="Add a thing", final_status="failed", finished_at="t1")
+    )
+    write_normalized(
+        NormalizedTask(
+            id="task-800",
+            title="Add a thing",
+            description="x",
+            branch_mode=BranchMode.EXISTING,
+            branch_ref="feature/keep",
+        ),
+        external,
+    )
+
+    code = cli.main(
+        ["--config", str(config), "--heartbeat-seconds", "0", "rerun", "task-800", "--yes"]
+    )
+    assert code == 0  # done
+
+    # The operator's commit survives on the branch (reused as-is, never reset to base).
+    assert git_run(["show", "feature/keep:operator_marker.txt"], git_repo.clone) == "operator work"
+    # The agent's change was committed onto the same operator branch.
+    committed = git_run(["show", "--name-only", "--format=", "feature/keep"], git_repo.clone)
+    assert "agent_change.py" in committed
+    # The ledger links the restart as attempt 2.
+    records = _ledger_records(git_repo.clone)
+    assert records[-1]["final_status"] == "done"
+    assert records[-1]["attempt"] == 2 and records[-1]["rerun_of"] == "task-800"
 
 
 def test_rerun_dry_run_writes_nothing(

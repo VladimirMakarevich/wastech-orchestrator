@@ -1325,18 +1325,31 @@ class GitManager:
 
     # --- terminal cleanup ----------------------------------------------------------
 
+    def returns_to_base(self, mode: BranchMode) -> bool:
+        """Whether terminal cleanup should check out ``base_branch`` for this branch mode.
+
+        Resolves ``repo.checkout_base_on_cleanup`` (branch-mode ADR): ``current`` never returns
+        (the operator owns its tree); otherwise an explicit flag wins, and when unset the default
+        is per-mode — ``new`` returns to base, ``existing`` stays on the branch.
+        """
+        if mode is BranchMode.CURRENT:
+            return False
+        flag = self._config.repo.checkout_base_on_cleanup
+        return mode is BranchMode.NEW if flag is None else flag
+
     def terminal_cleanup(
         self, task_id: str, *, mode: BranchMode = BranchMode.NEW
     ) -> CleanupOutcome:
         """Free the single processing slot after a terminal outcome, or report why it is unsafe.
 
-        ``new`` / ``existing``: check out ``base_branch`` when the tree is clean (both were a clean
-        checkout of a ref we may leave; deletion never happens here). ``current``: the operator owns
-        the branch and its (possibly dirty) tree, so this must **not** force-checkout away — it
-        leaves HEAD on the working branch as-is and reports safe. The next task's ``new``-mode prep
-        checks out base anyway, so the slot is still freed without destroying operator state.
+        When :meth:`returns_to_base` is true (``new`` by default, or as forced by
+        ``repo.checkout_base_on_cleanup``): check out ``base_branch`` once the tree is clean, else
+        **fail closed**. Otherwise (``current`` and ``existing`` by default, or the flag disabled):
+        leave HEAD on the working branch as-is and report safe — the operator owns that branch and
+        its (possibly dirty) tree, so this must not force-checkout away. A subsequent ``new``-mode
+        prep still checks out base, so the slot is freed either way without losing operator state.
         """
-        if mode is BranchMode.CURRENT:
+        if not self.returns_to_base(mode):
             branch = self.current_branch() or self._config.repo.base_branch
             outcome = CleanupOutcome(safe=True, target_branch=branch)
             self._write_cleanup_artifact(task_id, outcome, completed=True)

@@ -573,3 +573,29 @@ def test_repo_branch_mode_invalid_is_rejected() -> None:
     with pytest.raises(ConfigError) as exc:
         loads_config(_REPO_WITH_MODE.format(mode="sideways"))
     assert any("branch_mode" in issue for issue in exc.value.issues)
+
+
+# --- repo.checkout_base_on_cleanup (branch-mode ADR) ---
+
+_REPO_WITH_CLEANUP = (
+    'repo:\n  url: "git@example.com:o/r.git"\n  checkout_base_on_cleanup: {flag}\n'
+    'agents:\n  allowed: [codex]\n  providers:\n    codex:\n      command: "codex"\n'
+)
+
+
+def test_repo_checkout_base_on_cleanup_defaults_to_none() -> None:
+    cfg = loads_config(_LEGACY).config
+    assert cfg.repo.checkout_base_on_cleanup is None
+
+
+def test_repo_checkout_base_on_cleanup_is_read_when_present() -> None:
+    off = loads_config(_REPO_WITH_CLEANUP.format(flag="false")).config
+    assert off.repo.checkout_base_on_cleanup is False
+    on = loads_config(_REPO_WITH_CLEANUP.format(flag="true")).config
+    assert on.repo.checkout_base_on_cleanup is True
+
+
+def test_repo_checkout_base_on_cleanup_non_bool_is_rejected() -> None:
+    with pytest.raises(ConfigError) as exc:
+        loads_config(_REPO_WITH_CLEANUP.format(flag='"nope"'))
+    assert any("checkout_base_on_cleanup" in issue for issue in exc.value.issues)

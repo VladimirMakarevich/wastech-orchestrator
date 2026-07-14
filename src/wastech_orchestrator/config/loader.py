@@ -143,6 +143,17 @@ def _bool(m: Mapping[str, Any], key: str, default: bool, where: str, issues: lis
     return value
 
 
+def _opt_bool(m: Mapping[str, Any], key: str, where: str, issues: list[str]) -> bool | None:
+    """A tri-state bool: absent → ``None`` (defer to the default), else a validated bool."""
+    if key not in m:
+        return None
+    value = m[key]
+    if not isinstance(value, bool):
+        issues.append(f"{where}.{key}: expected a boolean, got {type(value).__name__}")
+        return None
+    return value
+
+
 def _float(m: Mapping[str, Any], key: str, default: float, where: str, issues: list[str]) -> float:
     if key not in m:
         return default
@@ -342,7 +353,17 @@ def _build_orchestrator(raw: Any, issues: list[str]) -> OrchestratorRuntimeConfi
 def _build_repo(raw: Any, issues: list[str]) -> RepoConfig:
     m = _mapping(raw, "repo", issues)
     _check_keys(
-        m, {"url", "local_path", "base_branch", "branch_prefix", "branch_mode"}, "repo", issues
+        m,
+        {
+            "url",
+            "local_path",
+            "base_branch",
+            "branch_prefix",
+            "branch_mode",
+            "checkout_base_on_cleanup",
+        },
+        "repo",
+        issues,
     )
     return RepoConfig(
         url=_str(m, "url", "", "repo", issues),
@@ -352,6 +373,7 @@ def _build_repo(raw: Any, issues: list[str]) -> RepoConfig:
         branch_mode=_enum(
             m.get("branch_mode"), BranchMode, "repo.branch_mode", issues, BranchMode.NEW
         ),
+        checkout_base_on_cleanup=_opt_bool(m, "checkout_base_on_cleanup", "repo", issues),
     )
 
 

@@ -132,9 +132,15 @@ def build_git_config(
     tasks_dir: str = "tasks",
     telegram_trace: bool = False,
     memory_enabled: bool = False,
+    checkout_base_on_cleanup: bool | None = None,
 ) -> OrchestratorConfig:
     """Build a config pointing ``repo.local_path`` at the clone, with the given footprint/checks."""
     env_lines = "\n".join(f"    - {e}" for e in _TEST_ALLOWED_ENV)
+    cleanup_line = (
+        f"  checkout_base_on_cleanup: {str(checkout_base_on_cleanup).lower()}\n"
+        if checkout_base_on_cleanup is not None
+        else ""
+    )
     paths_block = f"paths:\n  tasks_dir: {tasks_dir!r}\n" if tasks_dir != "tasks" else ""
     # ``checks`` (shell-string commands) map to one always-on ``default`` command set (v15).
     if checks:
@@ -154,7 +160,7 @@ repo:
   local_path: {str(clone)!r}
   base_branch: "main"
   branch_prefix: "worc"
-{paths_block}agents:
+{cleanup_line}{paths_block}agents:
   allowed: [claude, codex]
   max_fix_cycles: {max_fix_cycles}
   max_total_fix_iterations: {max_total_fix_iterations}

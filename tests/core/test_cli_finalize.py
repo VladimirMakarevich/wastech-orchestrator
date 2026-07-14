@@ -16,8 +16,19 @@ from wastech_orchestrator.state_store import PublishOpRow, StateStore, TaskRow
 _ENV = ["PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "TEMP", "TMP", "APPDATA", "LOCALAPPDATA"]
 
 
-def _write_config(project: Path, clone: Path, *, create_pr: bool = False) -> Path:
+def _write_config(
+    project: Path,
+    clone: Path,
+    *,
+    create_pr: bool = False,
+    checkout_base_on_cleanup: bool | None = None,
+) -> Path:
     env_lines = "\n".join(f"    - {e}" for e in _ENV)
+    cleanup_line = (
+        f"  checkout_base_on_cleanup: {str(checkout_base_on_cleanup).lower()}\n"
+        if checkout_base_on_cleanup is not None
+        else ""
+    )
     config = project / "config.yaml"
     config.write_text(
         f"""
@@ -30,7 +41,7 @@ repo:
   local_path: {str(clone)!r}
   base_branch: "main"
   branch_prefix: "worc"
-agents:
+{cleanup_line}agents:
   allowed: [claude, codex]
   providers:
     claude:
@@ -70,9 +81,12 @@ def _seed(
     branch: str | None = "worc/task-1-t",
     pr_url: str | None = None,
     create_pr: bool = False,
+    checkout_base_on_cleanup: bool | None = None,
 ) -> Path:
     """Seed a terminal task (state row + source file) and return the config path."""
-    config = _write_config(project, clone, create_pr=create_pr)
+    config = _write_config(
+        project, clone, create_pr=create_pr, checkout_base_on_cleanup=checkout_base_on_cleanup
+    )
     source = project / "task-1.md"
     source.write_text("---\nid: task-1\ntitle: T\n---\n\nbody\n", encoding="utf-8")
     db = clone / ".worc" / "state.db"
@@ -286,5 +300,19 @@ def test_finalize_dry_run_writes_nothing(
     assert code == 0
     out = capsys.readouterr().out
     assert "dry-run" in out and "recorded" in out  # the PR-url source is named
+    assert "checkout base 'main'" in out  # default (new mode) returns to base
     assert _status(git_repo.clone) is Status.FAILED  # unchanged
     assert _ledger_records(git_repo.clone) == []
+
+
+def test_finalize_dry_run_stays_on_branch_when_disabled(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "p"
+    project.mkdir()
+    config = _seed(project, git_repo.clone, checkout_base_on_cleanup=False)
+
+    code = cli.main(["--config", str(config), "finalize", "task-1", "--as", "failed", "--dry-run"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "stay on branch" in out and "checkout base" not in out

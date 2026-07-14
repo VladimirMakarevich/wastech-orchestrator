@@ -57,7 +57,7 @@ def _ordered_providers(providers: tuple[ProviderId, ...]) -> tuple[ProviderId, .
 # default" sentinel, so an operator may still clear either field. Keep the Codex id in step with the
 # installed Codex CLI's accepted ``--model`` values.
 _PROVIDER_DEFAULTS: dict[ProviderId, tuple[str, str]] = {
-    ProviderId.CLAUDE: ("claude-sonnet-4-6", "high"),
+    ProviderId.CLAUDE: ("claude-sonnet-5", "high"),
     ProviderId.CODEX: ("gpt-5.4", "high"),
 }
 
