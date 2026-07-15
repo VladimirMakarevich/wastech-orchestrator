@@ -105,8 +105,8 @@ Preflight checks each allowed provider and the configured isolation policy. A he
 
 ```text
 env: OK - loaded 2 variable(s) from .worc/.env
-claude: OK - claude 1.2.3 available (version=1.2.3, authenticated=True)
-codex: OK - codex 0.9.0 available (version=0.9.0, authenticated=True)
+claude: OK - claude 2.1.210 available (version=2.1.210, authenticated=True)
+codex: OK - codex 0.144.4 available (version=0.144.4, authenticated=True)
 isolation: OK (enforced)
 preflight: ready
 ```

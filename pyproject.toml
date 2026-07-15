@@ -9,7 +9,8 @@ dynamic = ["version"]
 description = "Lean-оркестратор кодинг-агентов (Codex / Claude Code) с публикацией в Git"
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "Proprietary" }
+license = { text = "Apache-2.0" }
+authors = [{ name = "Vladimir Makarevich", email = "vladimir.makarevich.23@gmail.com" }]
 dependencies = [
     "PyYAML>=6.0",
     "python-telegram-bot>=21.0",

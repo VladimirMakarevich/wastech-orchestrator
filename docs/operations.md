@@ -16,6 +16,8 @@ Related guides:
 
 Prerequisites: **Python 3.12+**, **git**, the **GitHub CLI** (`gh`) if you want PRs opened automatically, and the agent CLIs you intend to route to (`codex` and/or `claude`) on `PATH`.
 
+**Officially supported CLI versions:** `claude` **≥ 2.1.210** and `codex` **≥ 0.144.4** — the versions the orchestrator is developed and tested against. Older versions may work but are not guaranteed; provider argv contracts and structured-output behavior are pinned to these. `preflight` reports the installed version of each CLI so you can confirm.
+
 ```bash
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1        # Windows PowerShell  (source .venv/bin/activate on Unix)
@@ -182,8 +184,8 @@ python -m wastech_orchestrator preflight
 
 ```text
 env: OK — loaded 2 variable(s) from .worc/.env
-claude: OK — claude 1.2.3 available (version=1.2.3, authenticated=True)
-codex: OK — codex 0.9.0 available (version=0.9.0, authenticated=True)
+claude: OK — claude 2.1.210 available (version=2.1.210, authenticated=True)
+codex: OK — codex 0.144.4 available (version=0.144.4, authenticated=True)
 isolation: OK (enforced)
 checks: 2 command sets configured
   - repo: 3 commands (always runs)
