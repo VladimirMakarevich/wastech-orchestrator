@@ -16,6 +16,8 @@ Produce a project-specific config that:
 - keeps defaults unless the operator has a concrete reason to change them;
 - is ready for `worc preflight`.
 
+Before drafting or changing any field, consult `reference.md` in the packaged config guide (`.worc/guide/config/reference.md`) for that field's allowed values, default, and constraints — do not guess a field's meaning or invent values.
+
 ## How to run
 
 1. Inspect the repo before asking questions. Look for:
@@ -28,7 +30,7 @@ Produce a project-specific config that:
    - whether auto-merge is allowed here;
    - which checks are mandatory for safe delivery;
    - whether Telegram should stay disabled.
-3. Start from the existing `.worc/config.yaml` when present. If there is no installed config yet, draft one in the packaged block order (`schema_version`, `orchestrator`, `repo`, `agents`, `security`, `validation`, `checks`, `git`, `telegram`, `skills`, `supervisor`, `prompt_audit`).
+3. Start from the existing `.worc/config.yaml` when present. If there is no installed config yet, draft one in the packaged block order (`schema_version`, `orchestrator`, `repo`, `paths`, `agents`, `security`, `validation`, `checks`, `git`, `telegram`, `skills`, `supervisor`, `logging`, `memory`, `tools`, `prompt_audit`) — only `schema_version`, `repo`, `agents`, and `security` are required; omit any optional block to take its defaults.
 4. Keep the safe defaults unless the operator overrides them deliberately.
    - exactly one provider is `primary: true`;
    - `strict_isolation: true`;

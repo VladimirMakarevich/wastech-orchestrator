@@ -24,7 +24,10 @@ def test_worc_packaged_data_discoverable() -> None:
     assert _worc_root().joinpath("tasks", "skills", "worc-task", "SKILL.md").is_file()
     assert _worc_root().joinpath("tasks", "skills", "worc-deco-task", "SKILL.md").is_file()
     assert _worc_root().joinpath("config", "README.md").is_file()
+    assert _worc_root().joinpath("config", "reference.md").is_file()
     assert _worc_root().joinpath("config", "skills", "worc-config", "SKILL.md").is_file()
+    assert _worc_root().joinpath("flows", "reference.md").is_file()
+    assert _worc_root().joinpath("flows", "roles.md").is_file()
 
 
 def test_shipped_task_samples_pass_validation(packaged_config_text: str) -> None:
