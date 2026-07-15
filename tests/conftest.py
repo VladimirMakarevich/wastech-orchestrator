@@ -100,9 +100,20 @@ def fake_cli(tmp_path: Path) -> Callable[..., str]:
 
 
 def run_git(args: Sequence[str], cwd: Path) -> str:
-    """Run a git command for test setup/inspection (real git, not the manager); return stdout."""
+    """Run a git command for test setup/inspection (real git, not the manager); return stdout.
+
+    Decodes explicitly as UTF-8 rather than the platform locale encoding: Git always writes path
+    and ref data as UTF-8 on every OS, but Windows' default locale codec is not reliably UTF-8, so
+    a test asserting a literal non-ASCII path (e.g. via ``-z`` output) would be flaky there without
+    it.
+    """
     result = subprocess.run(
-        ["git", *args], cwd=str(cwd), capture_output=True, text=True, check=True
+        ["git", *args],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
     )
     return result.stdout.strip()
 
