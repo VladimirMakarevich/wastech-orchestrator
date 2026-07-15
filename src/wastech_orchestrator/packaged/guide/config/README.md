@@ -2,6 +2,7 @@
 
 **You are an AI agent helping an operator assemble or tune `config.yaml` for wastech-orchestrator.** Use this folder as the compact, installable reference for configuration work. If you only have a moment, read this file first.
 
+- **[reference.md](reference.md)** — the complete field reference: for the meaning, allowed values, default, and constraints of _every_ `config.yaml` field, read this. This README is the how-to; `reference.md` is the what-each-field-does.
 - **[best-practices.md](best-practices.md)** — safe defaults, how to structure checks, and what mistakes to avoid.
 - **[skills/worc-config/SKILL.md](skills/worc-config/SKILL.md)** — a copy-ready skill that can interview the operator and draft a config.
 
@@ -9,20 +10,24 @@
 
 Prefer editing the `.worc/config.yaml` that `worc install .` already generated for this repository. It starts from the packaged defaults, uses the detected repo root and base branch, and is already validated to the current schema shape.
 
-Only build from scratch when there is no installed config yet. In that case, keep the same block order as the packaged example:
+Only build from scratch when there is no installed config yet. In that case, keep the same block order as the packaged example (only `schema_version`, `repo`, `agents`, and `security` are required — every other block is optional and takes its defaults when omitted; see [reference.md](reference.md) for the defaults):
 
 1. `schema_version`
 2. `orchestrator`
 3. `repo`
-4. `agents`
-5. `security`
-6. `validation`
-7. `checks`
-8. `git`
-9. `telegram`
-10. `skills`
-11. `supervisor`
-12. `prompt_audit`
+4. `paths`
+5. `agents`
+6. `security`
+7. `validation`
+8. `checks`
+9. `git`
+10. `telegram`
+11. `skills`
+12. `supervisor`
+13. `logging`
+14. `memory`
+15. `tools`
+16. `prompt_audit`
 
 ## Build in this order
 
@@ -87,11 +92,15 @@ Keep publishing conservative by default:
 
 ### 6. Optional blocks
 
-Only enable these when the operator asked for them:
+Only enable these when the operator asked for them (each field is documented in full in [reference.md](reference.md)):
 
+- `orchestrator` — the `watch` loop cadence (`poll_interval_seconds`), the instance `queue` selector, and `auto_mode` task chaining.
+- `paths` — `tasks_dir`, the repo-relative home of the task lifecycle (rename only to avoid clashing with an existing `tasks/`).
 - `telegram` — real human-in-the-loop and notifications.
 - `skills` — repo-local `.claude/skills` inventory for planning.
 - `supervisor` — non-default model/reasoning for the read-only oversight layer.
+- `logging` — operator log `level` and per-attempt artifact retention (`artifacts`).
+- `memory` — persistent, repo-scoped memory (`enabled` plus retrieval/promotion/cleanup caps).
 - `prompt_audit` — prompt recording for debugging or compliance.
 - `tools` — only its `default_timeout_seconds` (default `3600`), the flow-wide timeout for custom `tool` nodes. The tool feature itself is enabled per-flow (a `kind: tool` node reading `.worc/tools/`), not here — see `flows/README.md`. Set this only to change the default timeout.
 
@@ -123,4 +132,4 @@ After editing the config:
 2. Fix every reported provider, isolation, flow, or Telegram issue.
 3. If the package was upgraded, run `worc upgrade-config` first so the file has the current schema shape.
 
-These docs are the compact helper. The full operator references remain `docs/configuration.md` and `docs/operations.md` in the orchestrator repository.
+[reference.md](reference.md) is the complete field reference — you should not need anything outside this guide to configure the orchestrator. The orchestrator repository's `docs/configuration.md` and `docs/operations.md` carry the same material with extra contributor-facing detail (design rationale, internals); reach for them only if you are working on the orchestrator itself.

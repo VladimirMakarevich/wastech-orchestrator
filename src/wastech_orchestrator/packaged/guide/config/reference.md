@@ -1,0 +1,233 @@
+# `config.yaml` — complete field reference
+
+**You are an operator (or an agent helping one) configuring wastech-orchestrator.** This is the complete, self-contained reference for every `config.yaml` field — its allowed values, its default, its constraints, and when to change it. You do not need the internet or the repo's own `docs/` to fill in a config. The copy-paste template carrying these same fields is `config.example.yaml` (the file `worc init` writes); this file explains what each one means. For the _how-to_ walkthrough ("build in this order") see [README.md](README.md); for safe defaults see [best-practices.md](best-practices.md).
+
+Two rules apply everywhere:
+
+- **Unknown keys fail closed.** A key the schema does not know — at the top level or inside any block — is a hard load error (a few long-removed keys are silently tolerated for back-compat). Do not invent fields.
+- **Three list fields _replace_, never extend, their defaults:** `security.allowed_environment`, `security.denied_read_paths`, `security.denied_commands`. If you write one, write the whole list you need.
+
+Blocks appear below in the packaged order. Every block except `schema_version`, `repo`, `agents`, and `security` is optional — omit it to take the defaults shown.
+
+## `schema_version`
+
+| Field | Type | Default | Constraint | Meaning |
+| --- | --- | --- | --- | --- |
+| `schema_version` | int | current is `30` | A value **greater** than the orchestrator's supported version fails closed ("upgrade wastech-orchestrator"); equal or lower is accepted, absent is accepted. | The config format version. `worc upgrade-config` re-emits the file at the current version. |
+
+## `orchestrator` — the watch loop and task queue
+
+| Field | Type / values | Default | Constraint | When to use |
+| --- | --- | --- | --- | --- |
+| `orchestrator.auto_mode.enabled` | bool | `false` | — | `true` lets `watch` pick the next pending task automatically after one finishes (task chaining). Leave off for one-task-at-a-time. |
+| `orchestrator.auto_mode.confirm_next_task` | bool | `false` | **Requires `telegram.enabled: true`.** | `true` asks approve/deny in Telegram before claiming _each_ next task; deny/timeout/no-transport stops chaining (fail-closed). Gates new claims only — never a resume. |
+| `orchestrator.poll_interval_seconds` | int | `300` | `>= 0` | Seconds between `watch` ticks (each tick fetch/pulls `base_branch`, then processes pending). `0` = single pass, no loop, no periodic sync. |
+| `orchestrator.queue` | string | `"default"` | Non-empty / non-whitespace. | This instance's selector: `watch` only claims a pending task whose `queue` equals this (string equality). Set it when several worc instances share one task pool. Override per launch with `--queue`. |
+
+## `repo` — repository identity and branch policy
+
+| Field | Type / values | Default | Constraint | When to use |
+| --- | --- | --- | --- | --- |
+| `repo.url` | string | `""` | — | The Git remote the orchestrator pushes to. |
+| `repo.local_path` | string | `"./workspace/repo"` | — | The local clone the orchestrator operates in. |
+| `repo.base_branch` | string | `"main"` | — | Branch tasks fork from, and (by default) return to after cleanup. |
+| `repo.branch_prefix` | string | `"worc"` | — | Task branch naming: `worc/<task-id>-<slug>`. Leave default unless the project mandates another prefix. |
+| `repo.branch_mode` | `new` \| `existing` \| `current` | `new` | — | Instance default for where task git ops point (a per-task `branch_mode` overrides it). `new` = fork a fresh branch from base (the only mode where destructive git ops run); `existing` = a named pre-existing branch; `current` = the working-tree branch as-is (no create/switch/clean-check). |
+| `repo.checkout_base_on_cleanup` | bool \| null (tri-state) | `null` | — | Whether terminal cleanup returns the tree to `base_branch`. `null` = defer to `branch_mode` (`new` returns; `existing`/`current` stay); `false` = never return (global off, incl. `new`); `true` = force `new`+`existing` to return. `current` always stays. |
+
+## `paths` — where the task lifecycle lives
+
+| Field | Type | Default | Constraint | When to use |
+| --- | --- | --- | --- | --- |
+| `paths.tasks_dir` | string | `"tasks"` | Repo-relative (no absolute, `~`, or `..`); must **not** live under `.worc/`. Lifecycle subfolder names (`preparing`/`pending`/`done`/`failed`) are fixed. | The repo-relative dir holding the task lifecycle. Rename it only to avoid clashing with a repo that already uses `tasks/`. `install` scaffolds the default `tasks/`; for another name, create its subfolders yourself. |
+
+## `agents` — providers, fix budgets, decomposition, retry
+
+| Field | Type / values | Default | Constraint | When to use |
+| --- | --- | --- | --- | --- |
+| `agents.allowed` | list of `claude` / `codex` | `[claude, codex]` | Each must be a known provider; must include the `primary` provider. | The providers this instance may launch. Keep it to what is actually installed. |
+| `agents.max_stage_attempts` | int | `3` | — | Provider attempts for one node before the stage fails, counting the cross-provider fallback hop (separate from `agents.retry`). |
+| `agents.max_fix_cycles` | int | `15` | — | Max iterations of a single fix loop (e.g. test → fixing → test). |
+| `agents.max_total_fix_iterations` | int | `30` | Must be `>= max_fix_cycles`. | Hard global cap across all fix loops and subtasks. |
+
+### `agents.decomposition` — split a task into subtasks
+
+| Field | Type | Default | Constraint | When to use |
+| --- | --- | --- | --- | --- |
+| `agents.decomposition.enabled` | bool | `false` | — | Global gate that _permits_ decomposition (a per-task `decomposition` field overrides it; the flow + planning still decide whether a split actually happens). Turn on once the team is ready for one-task-many-subtasks planning. |
+| `agents.decomposition.max_subtasks` | int | `8` | Must be `>= 2`. | A proposed split with more than this many subtasks (or fewer than 2) is rejected and the task runs as a single unit. |
+
+### `agents.retry` — transient provider-failure recovery
+
+Applies per provider in `[primary, fallback]`; only transient classes (`PROVIDER_UNAVAILABLE` / `NETWORK_UNAVAILABLE`) are retried. Leave at defaults unless a provider is flaky on your host.
+
+| Field | Type | Default | Constraint | When to use |
+| --- | --- | --- | --- | --- |
+| `agents.retry.max_attempts` | int | `2` | `>= 0` (`0` disables retry) | Same-provider retries _after_ the first attempt. |
+| `agents.retry.base_delay_s` | float | `2.0` | `>= 0` | Exponential-backoff base: `min(base * 2**k, max_delay_s)`, no jitter. |
+| `agents.retry.max_delay_s` | float | `30.0` | `>= 0` and `>= base_delay_s` | Per-retry delay cap. |
+| `agents.retry.max_blocked_s` | float | `21600.0` (6h) | `>= 0` | Park ceiling: once every provider is exhausted (outage _or_ rate-limit), the task parks resumable and fails only after this much total parked wall-clock. |
+
+### `agents.providers.<id>` — per-provider CLI settings
+
+`<id>` is `codex` or `claude`. Values marked "install" differ from the bare dataclass default when written by `worc install`.
+
+| Field | Type / values | Default (dataclass / install) | Constraint | When to use |
+| --- | --- | --- | --- | --- |
+| `.command` | string | the id (`"claude"` / `"codex"`) | — | Executable name on `PATH`, or an absolute path to the CLI. |
+| `.model` | string | `""` / install: claude `claude-sonnet-5`, codex `gpt-5.4` | Passed through unverified. `""`/blank = the CLI/account default. | Pin a model. Do not invent model ids. |
+| `.timeout_seconds` | int | `7200` | — | Per-attempt CLI wall-clock ceiling (seconds). |
+| `.permission_profile` | `read-only` \| `workspace-write` | `workspace-write` | A flow node's ceiling may lower it, never raise it. | Access level for this provider's runs. |
+| `.extra_args` | list[str] | `[]` | Sandbox/permission-weakening flags are **rejected at config time**. | Raw CLI flags appended verbatim — for benign options only. |
+| `.sandbox` | `workspace-write` \| `read-only` \| `danger-full-access` \| null | `null` | `danger-full-access` loads but is **rejected at preflight unless `security.strict_isolation: false`**. | Codex-specific sandbox (Codex's real isolation knob). |
+| `.max_turns` | positive int, or `"none"` / `"max"`, or null | `400` | `<= 0` or other strings are errors. | Claude turn cap. `none`/`max`/`null` = no cap. Pair a low cap with `max_turns_gate` for a Telegram continue prompt. |
+| `.reasoning` | string \| null | `null` / install: `high` | **Per-provider set:** Claude ∈ `{low, medium, high, xhigh, max}`; Codex ∈ `{minimal, low, medium, high, xhigh, max}` (`max`→`xhigh`). | Reasoning effort. A value valid for one provider may be invalid for the other. |
+| `.primary` | bool | `false` | **Exactly one** provider across the map must be `true`, and it must be in `agents.allowed`. | The global primary: runs every flow node with no explicit `provider`, and is the sole infrastructure-fallback target. |
+| `.max_turns_gate` | bool | `false` | **Requires `telegram.enabled: true`.** Claude-only. | `true` = hitting `max_turns` pauses for a Telegram continue/stop prompt (resumes the same session) instead of failing. Makes a low `max_turns` safe. |
+| `.allow_native_memory` | bool | `false` | Claude-only; installer never writes it. | **Opt-in risk.** `true` drops the deny that confines Claude Code's own auto-memory, letting it persist across tasks in a HOME store **outside** the orchestrator's redaction net and audit trail. Leave off unless you accept that. |
+
+## `security` — the guardrail block
+
+| Field | Type / values | Default (dataclass / install) | Constraint | When to use |
+| --- | --- | --- | --- | --- |
+| `security.strict_isolation` | bool | `true` | — | Fail-closed sandbox. `true` **rejects full-access provider modes at preflight** (Codex `danger-full-access`, Claude `bypassPermissions`). Set `false` only to consciously accept full-access runs. Absolutely-forbidden flags (`--dangerously-skip-permissions`, `--yolo`, `--ignore-rules`) stay banned regardless. |
+| `security.allowed_environment` | list[str] | OS-aware base (`PATH`, `HOME`, `USER`, `USERPROFILE`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR` + OS-launch essentials) | **REPLACES** the default. | The only env var _names_ forwarded to child processes (a name absent from the host is skipped). Keep the OS-launch essentials for your OS or the CLI may fail to start; secret **values** never go here. |
+| `security.denied_read_paths` | list of globs | `[".env", "secrets/**"]` | **REPLACES** the default. Same glob dialect as `protected_paths`. | Paths the agent CLI may never read (enforced as `--disallowedTools`), so a task cannot exfiltrate secrets. |
+| `security.denied_commands` | list[str] | `["git commit", "git push", "gh pr create", "gh pr merge"]` | **REPLACES** the default. | Commands the agent/checks may never run. Keep every entry you need — publishing is the orchestrator's job, not the agent's. |
+| `security.trust_level` | `strict` \| `auto` | `strict` / install: `auto` | Per-task `trust_level` overrides it. | Approval policy for the mid-task dangerous-diff gate. `strict` = gate every tracked-file deletion/rename or dependency-manifest/lock edit; `auto` = only a `protected_paths` match asks. Never lowers the hard ceiling — only which diffs raise the gate. |
+| `security.protected_paths` | list of repo-relative globs | `[]` | Each must be repo-relative (no absolute/`~`/`..`). | The always-ask floor: any change to a matching path requires approval regardless of `trust_level`. `[]` = no floor. Add sensitive surfaces (e.g. `.github/workflows/**`, `src/security/**`). |
+
+## `validation` — input hardening gate
+
+Rejects a malformed task **before** any branch or agent runs.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `validation.max_task_bytes` | int | `262144` | Reject a task file larger than this. |
+| `validation.max_task_lines` | int | `5000` | Reject a task file with more lines. |
+| `validation.max_line_bytes` | int | `8192` | Reject any single line longer than this. |
+| `validation.max_control_ratio` | float | `0.01` | Reject if control/binary chars exceed this fraction (0.01 = 1%). |
+| `validation.required_fields` | list[str] | `["id", "title"]` | Front-matter keys every task must define. |
+| `validation.reject_unknown_fields` | bool | `true` | `true` rejects a task carrying unknown front-matter keys. |
+| `validation.quarantine_folder` | string | `"./.worc/tasks/rejected"` | Where rejected task files are moved. |
+
+## `checks` — the quality gate (per-project command sets)
+
+Empty / omitted `command_sets` means **no gate** (every task passes the checks node). The runner runs the union of sets whose `paths` glob the task diff; a set with no `paths` always runs on a non-empty diff; an empty diff runs nothing. Nothing is auto-discovered — you author this.
+
+| Field | Type | Default | Constraint | When to use |
+| --- | --- | --- | --- | --- |
+| `checks.timeout_seconds` | int | `7200` | `> 0` | Global per-command timeout (argv, no shell). |
+| `checks.command_sets` | mapping `<name>` → set | `{}` | (per-set below) | Named per-project sets. Single-root repo: one catch-all set (no `paths`). Monorepo: one set per real path-ownership boundary. |
+
+### `checks.command_sets.<name>` — one command set
+
+| Field | Type | Default | Constraint | When to use |
+| --- | --- | --- | --- | --- |
+| `.commands` | list of command specs | — (required) | Non-empty. | The commands in the set. |
+| `.paths` | list of repo-relative globs | `[]` | Each non-empty. | Diff-path selectors deciding when the set runs. Empty = always runs on any non-empty diff. `**` crosses dirs, `*` stays within a segment. |
+| `.timeout_seconds` | int \| null | `null` (→ global) | If set, `> 0`. | Per-set override of the global per-command timeout (e.g. a slow iOS build). |
+| `.skip_if_unavailable` | bool | `false` (fail-closed) | — | `true` = when the toolchain binary is absent, skip loudly (never silently "passed"). Use only for genuinely optional toolchains (e.g. iOS checks on Linux), never to paper over a broken required suite. |
+
+### `checks.command_sets.<name>.commands[]` — one command
+
+| Field | Type | Default | Constraint | When to use |
+| --- | --- | --- | --- | --- |
+| `.argv` | list[str] | — (required) | Non-empty; no shell metacharacters; no forbidden/sandbox-weakening args; must not match a `denied_commands` entry. | The command as an explicit argv list (no shell string), e.g. `[ruff, check, .]`. |
+| `.name` | string \| null | `null` | — | A readable logical name (`tests`, `lint`, `types`) — keeps logs legible. |
+| `.cwd` | string \| null | `null` (= clone root) | Repo-relative, no `..`/absolute. | Working dir for the command. Use only when it must run below the repo root (monorepo subproject). |
+
+## `git` — publishing and audit trail
+
+| Field | Type / values | Default | Meaning / when to use |
+| --- | --- | --- | --- |
+| `git.create_pull_request` | bool | `true` | `false` = commit + push the task branch only, open no PR. |
+| `git.pr_base` | string | `"main"` | The branch the published PR targets (usually `base_branch`). |
+| `git.auto_merge` | bool | `false` | **DANGER — bypasses the human review gate.** `true` merges every published PR to `pr_base`. A per-task `auto_merge` wins outright over this. Enable only with protected branches + required CI already enforcing your bar. |
+| `git.auto_merge_strategy` | `merge` \| `squash` \| `rebase` | `squash` | The `gh pr merge` strategy when a merge fires. |
+| `git.auto_merge_wait_for_checks` | bool | `false` | `true` arms GitHub-native auto-merge (`--auto`) — merge only after required checks pass. |
+| `git.merge_flow` | string | `"merge"` | The flow `worc merge-task` runs to resolve base-merge conflicts (seeded at `.worc/flows/merge.yaml`). Clean merges are mechanical; only a conflicting base-merge runs it. |
+| `git.footprint.audit_commit_message` | string | `"chore(orchestrator): audit trail for {task_id}"` | Template for the separate audit commit (the task file + its `<id>.summary.md`, not a second code commit). |
+| `git.footprint.audit_on_branch` | `task` \| `sibling` | `task` | `task` = audit commit on the same branch as the code; `sibling` = on `<branch>-audit`. |
+
+## `telegram` — human-in-the-loop and notifications
+
+| Field | Type | Default | Constraint | When to use |
+| --- | --- | --- | --- | --- |
+| `telegram.enabled` | bool | `false` | — | Enable HITL prompts + notifications. Required by `auto_mode.confirm_next_task` and provider `max_turns_gate`. |
+| `telegram.bot_token_env` | string | `"TELEGRAM_BOT_TOKEN"` | Must be a valid env-var name (`^[A-Za-z_][A-Za-z0-9_]*$`). | The env var _name_ holding the bot token (never the token value). |
+| `telegram.chat_id_env` | string | `"TELEGRAM_CHAT_ID"` | Same env-name rule; must resolve to a non-zero numeric chat id. | The env var name holding the chat id. |
+| `telegram.ask_timeout_s` | int | `28800` (8h) | `> 0` | Blocking HITL timeout — fails closed on timeout. |
+| `telegram.trace` | bool | `false` | — | `true` = live per-node progress feed (best-effort; node id + outcome only). |
+
+## `skills` — repo skill selection
+
+At task start the orchestrator discovers every tracked `SKILL.md` in the clone; chosen ones reach a node as read-only reference paths (never executed).
+
+| Field | Type | Default | Meaning / when to use |
+| --- | --- | --- | --- |
+| `skills.dynamic` | bool | `false` (whole block absent) — but **`true` if the `skills:` block is present without this key** | `true` lets the supervisor propose a node→skills map once per task (adds one turn). Note the asymmetry: omitting `skills:` entirely ⇒ `false`; writing `skills:` with no `dynamic:` ⇒ `true`. `install` writes `false`. |
+| `skills.strict` | bool | `false` | Governs operator pins: `false` = warn and skip an unresolved pin; `true` = stop the task (`manual_action_required`). |
+
+## `supervisor` — the constant oversight layer
+
+A read-only layer above every flow that observes each step and writes the final summary. Its `permission_profile` is forced `read-only` in code.
+
+| Field | Type / values | Default (dataclass / install) | Constraint | When to use |
+| --- | --- | --- | --- | --- |
+| `supervisor.role_file` | string | `"roles/supervisor.md"` | No path traversal (`..`/absolute). | The observe-lens prompt. |
+| `supervisor.provider` | `codex` \| `claude` \| null | `null` / install: pinned to the primary | Must be in `agents.allowed` when set. | `null` inherits the global primary; pin it so `model` reaches a provider that accepts it. |
+| `supervisor.model` | string \| null | `null` / install: the primary's model (e.g. `claude-opus-4-8`) | Passed through unverified; a vendor/primary mismatch warns. | `null` = the resolved provider's default. Set a stronger model for oversight if needed. |
+| `supervisor.reasoning` | string \| null | `null` / install: `high` | Per-provider set (as providers, above). | `null` = the resolved provider's default. |
+
+## `logging` — operator verbosity and artifact retention
+
+| Field | Type / values | Default | Meaning |
+| --- | --- | --- | --- |
+| `logging.level` | `debug` \| `info` \| `warning` \| `error` | `info` | Operator trace verbosity. The `--log-level` CLI flag overrides it. |
+| `logging.artifacts` | `minimal` \| `standard` \| `full` | `standard` | Per-attempt provider files kept: `minimal` = `result.json` only; `standard` = + stdout/stderr; `full` = everything. Reclaim disk with `worc logs clean`. |
+
+## `memory` — persistent, repo-scoped memory
+
+Omitting the whole block ⇒ `enabled: false` (no store, empty packets, CLI no-op). All numeric knobs are runtime-clamped — never fatal. Defaults are deliberately small (precision over recall).
+
+| Field | Type | Default (dataclass / install) | Meaning |
+| --- | --- | --- | --- |
+| `memory.enabled` | bool | `false` / install: `true` | Global memory toggle. |
+| `memory.short_term_ttl_days` | int | `30` | Episodic entries expire after N days (long-term has no TTL). |
+| `memory.packet_max_lines` | int | `120` | Hard line backstop for a per-node memory brief. |
+| `memory.packet_max_long_term` | int | `3` | Max long-term lessons per packet. |
+| `memory.packet_max_entity` | int | `5` | Max entity cards per packet. |
+| `memory.packet_max_episodic` | int | `3` | Inert since V2 (episodic tier is write-only). |
+| `memory.promote_min_tasks` | int | `2` | Recurrence gate for artifact-backed lessons (repo-verified / human / review lessons promote on first sight). |
+| `memory.promote_window_days` | int | `60` | Window for the recurrence gate. |
+| `memory.cleanup_min_interval_s` | int | `300` | Minimum seconds between background cleanup passes. |
+| `memory.cleanup_max_scanned` | int | `200` | Max records examined per pass. |
+| `memory.cleanup_max_edits` | int | `50` | Max records changed per pass. |
+| `memory.cleanup_max_wall_clock_s` | float | `5.0` | Per-pass wall-clock ceiling. |
+| `memory.cleanup_promotions_per_pass` | int | `0` | Doc-only invariant: cleanup never promotes; non-zero is inert. |
+
+## `tools` — custom tool-node timeout
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `tools.default_timeout_seconds` | int | `3600` | Flow-wide default wall-clock timeout for a `kind: tool` node whose own `timeout_seconds` is unset (precedence: node → this → built-in 3600s). The tool feature itself is enabled per-flow (see [../flows/reference.md](../flows/reference.md)), not here. A tool that exceeds it parks the task at `manual_action_required` (not a quality fail). |
+
+## `prompt_audit` (top-level)
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `prompt_audit` | bool | `false` | Record each step's rendered prompt + who-metadata (provider/model/attempt/fallback/status) under `logs/<task-id>/prompt-audit/`. A per-task `prompt_audit` always overrides this. |
+
+## Cross-field rules and gotchas (read before you finish)
+
+- **Exactly one `primary`.** One `agents.providers.<id>.primary: true`, and that provider must be in `agents.allowed`.
+- **Reasoning is per-provider.** Claude accepts `{low, medium, high, xhigh, max}`; Codex accepts `{minimal, low, medium, high, xhigh, max}` (`max` maps to `xhigh`). A value that validates for one provider can be rejected for the other — including on `supervisor.reasoning` against the resolved supervisor provider.
+- **Telegram-gated fields.** `orchestrator.auto_mode.confirm_next_task` and any provider `max_turns_gate` require `telegram.enabled: true`.
+- **Ordering constraints.** `max_total_fix_iterations >= max_fix_cycles`; `retry.max_delay_s >= retry.base_delay_s`; `decomposition.max_subtasks >= 2`.
+- **Replace-not-extend.** `allowed_environment`, `denied_read_paths`, `denied_commands` replace their defaults wholesale.
+- **Full access needs `strict_isolation: false`.** Codex `danger-full-access` / Claude `bypassPermissions` load but are rejected at preflight unless you turn `strict_isolation` off (owning the risk).
+- **Install vs dataclass defaults differ** for a few fields: `security.trust_level` (`auto` on install), `memory.enabled` (`true`), `skills.dynamic` (`false`), provider `model`/`reasoning`, and `supervisor` (pinned to the primary). The table shows both.
+- **Comments are stripped on upgrade.** `worc upgrade-config` preserves values but re-emits the file without inline comments — keep the _reason_ for an unusual value recoverable elsewhere.
+
+After editing: run `worc preflight` (providers, isolation, Telegram) and `worc validate-flow --all` (flows are not checked by preflight — a config edit can invalidate a flow). Treat config editing as done only when both are green.

@@ -1,8 +1,14 @@
 # Authoring custom flows for wastech-orchestrator
 
-**You are an operator (or an agent helping one) authoring a flow for wastech-orchestrator.** A _flow_ is the pipeline a task runs through, written as data: a validated graph of typed nodes (`agent`, `evaluator`, `checks`, `tool`, `publish`) joined by outcome-labelled edges. A task's `task_type` selects its flow. This folder is a self-contained quickstart; the full reference is `docs/flow-authoring.md` and `docs/configuration.md` in the orchestrator's repository.
+**You are an operator (or an agent helping one) authoring a flow for wastech-orchestrator.** A _flow_ is the pipeline a task runs through, written as data: a validated graph of typed nodes (`agent`, `evaluator`, `checks`, `tool`, `publish`) joined by outcome-labelled edges. A task's `task_type` selects its flow. This file is the quickstart; the complete, self-contained references are alongside it:
 
-If you only want to change _what a step says_, you do not need a new flow — edit that node's `role_file` prompt in the delivered copy under `.worc/flows/`. Author a flow only when you need different steps, a different output kind, or a different route.
+- **[reference.md](reference.md)** — every flow-level and node-level field, with allowed values, defaults, and constraints (including what each `output_policy` / `publishing` / `permission_ceiling` / `network_policy` variant means and when to pick it).
+- **[roles.md](roles.md)** — how to write the node prompts: the built-in evaluator roles, the per-node output contract, output slots, and the supervisor layer.
+- **[prompt-variables.md](prompt-variables.md)** — the `{name}` variables a role prompt may reference.
+
+You should not need anything outside this guide to author a flow; the orchestrator repo's `docs/flow-authoring.md` and `docs/configuration.md` carry the same material with extra contributor-facing detail, for work on the orchestrator itself.
+
+If you only want to change _what a step says_, you do not need a new flow — edit that node's `role_file` prompt in the delivered copy under `.worc/flows/` (see [roles.md](roles.md)). Author a flow only when you need different steps, a different output kind, or a different route.
 
 ## Where flows live
 
@@ -32,8 +38,8 @@ flow:
   name: my_flow
   task_type: my_flow # must equal the file stem
   permission_ceiling: workspace-write # hard cap; no node may exceed it, no task may widen it
-  output_policy: code_change # code_change | repository_document | private_control_workspace_report
-  publishing: pull_request # pull_request | documentation_pull_request | none
+  output_policy: code_change # code_change | repository_document | private_control_workspace_report (reference.md explains each)
+  publishing: pull_request # pull_request | documentation_pull_request | local_artifact | private_control_workspace_report | none (reference.md explains each)
 
   nodes:
     - id: implement
@@ -181,4 +187,4 @@ supervisor:
 - Network is off by default; declare `network_policy` for a flow-wide grant or `network_access: true` on one node. A Codex `workspace-write` node with network is rejected — split external fetches into a `read-only` node.
 - If you set a custom `output_schema`, make every object in it `additionalProperties: false` — Codex rejects a non-strict schema with a 400 and the node fails every run. Prefer the built-in contract; an `evaluator` prompt must emit the findings result or the task fail-closes to manual.
 
-For the complete contract (node fields, per-node provider/model/reasoning overrides, the prompt-variable allowlist, and the validation layers), see `docs/flow-authoring.md` and `docs/configuration.md`.
+For the complete contract (every node field, per-node provider/model/reasoning overrides, edges, and the validation layers), see [reference.md](reference.md); for the node prompts see [roles.md](roles.md) and [prompt-variables.md](prompt-variables.md). The orchestrator repo's `docs/flow-authoring.md` and `docs/configuration.md` add contributor-facing internals on top of the same material.
