@@ -243,7 +243,7 @@ command -v claude
 command -v gh
 ```
 
-On Windows use `where <command>`. WSL, PowerShell, a global npm install, and the Codex IDE extension may expose different binaries. Different reported versions therefore do not necessarily indicate a broken installation; they usually mean different `PATH` resolution. Set a specific provider `command` only to an executable that can run inside the orchestrator's OS environment.
+On Windows use `where <command>`. WSL, PowerShell, a global npm install, and the Codex IDE extension may expose different binaries. Different reported versions therefore do not necessarily indicate a broken installation; they usually mean different `PATH` resolution. Set a specific provider `command` only to an executable that can run inside the orchestrator's OS environment. If `codex --version` and `worc preflight` disagree, follow [How-To §5](how-to.md#5-fix-conflicting-codex-installations-on-windows) to pin the intended native executable and verify its matching sandbox helpers.
 
 ---
 

@@ -66,6 +66,16 @@ flow:
 
 `my_flow/implement.md` is an ordinary Markdown prompt; it may use only allowlisted path variables like `{task_path}`, `{repo_path}`, `{plan_path}`, `{diff_path}` (never task bodies, diffs, env, or secrets). See `prompt-variables.md` in this folder for the full list, which runner populates each, and the `{?name}…{/name}` optional-variable syntax.
 
+## Output policy
+
+`output_policy` is a **closed set of three** — you choose which _shape_ of deliverable the flow produces, and the engine resolves that name to a fixed write area and required files. You cannot specify anything else or point a flow at an arbitrary directory, and the name is a **contract, not a description**.
+
+- **`code_change`** — the diff (anywhere in the repo) **is** the deliverable; no required files. Use for code **and** for a brand-new prose/Markdown file committed to the repo — a blog post, a chapter, a translation (the packaged `content_chapter` / `content_book` / `content_translate` flows all use this). Pair with `pull_request` / `documentation_pull_request`.
+- **`repository_document`** — writes are confined to `docs/research/<task_id>/` and must include `report.md` + `sources.json` (the `deep_research` shape; a `citation` node checks the manifest). Pair with `documentation_pull_request`.
+- **`private_control_workspace_report`** — writes are confined to `.worc/security-reports/<task_id>/`, produce `report.md`, and **never enter git** (the `security_audit` shape). Pair with `none`.
+
+**Common trap:** a brand-new document that is not a `docs/research/*` sources bundle — e.g. a blog post under `blog/` — is a `code_change`, not a `repository_document`. Choosing `repository_document` because "it's a document" confines every write to `docs/research/<task_id>/`, so the real file lands outside it and the flow hard-stops at `manual_action_required` on the first successful write. See `docs/flow-authoring.md → Output policy` for the full contract.
+
 ## Chaining node outputs (`{<node_id>_path}`)
 
 Every **agent** node's output is persisted and exposed to later nodes as `{<node_id>_path}` — a path to that node's `<id>.out.md`, never the inlined content. A **`tool`** node exposes the same variable (its redacted stdout). Both live under that run's `logs/<task-id>/stages/<id>/run-<run-id>/` directory, so a node that re-runs in a loop keeps every pass and `{<node_id>_path}` resolves to the latest. That is how a multi-step flow hands one node's result to the next by name, with no extra config:
