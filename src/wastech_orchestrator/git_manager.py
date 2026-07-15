@@ -195,6 +195,67 @@ class ChangedPath:
     previous_path: str | None = None
 
 
+# --- machine-safe Git path parsing (NUL-delimited `-z` output) ------------------------------
+#
+# Git's default text output C-quotes any path with a non-ASCII/space/quote/control byte (e.g. a
+# Cyrillic filename becomes `"\320\274..."`), so trimming lines assumes an invariant Git does not
+# hold. `-z` output is NUL-delimited and never quotes paths, so every path-bearing command below is
+# run with `-z` and parsed by one of these three helpers instead of `str.splitlines()`.
+
+
+def _parse_name_only_z(output: str) -> list[str]:
+    """Paths from a ``--name-only -z`` record stream (also fits plain ``ls-files -z``)."""
+    return [item for item in output.split("\0") if item]
+
+
+def _parse_name_status_z(output: str) -> list[tuple[str, str, str | None]]:
+    """``(status, path, previous_path)`` records from ``git diff --name-status -z`` output.
+
+    Each record is one status token followed by one path token, except a rename/copy (a status
+    starting with ``R``/``C``, e.g. ``R100``) which carries two path tokens — the original path,
+    then the new one — the same field order as the tab-separated non-``-z`` form.
+    """
+    tokens = [t for t in output.split("\0") if t]
+    entries: list[tuple[str, str, str | None]] = []
+    i = 0
+    while i < len(tokens):
+        status = tokens[i]
+        if status[:1] in ("R", "C") and i + 2 < len(tokens):
+            entries.append((status, tokens[i + 2], tokens[i + 1]))
+            i += 3
+        elif i + 1 < len(tokens):
+            entries.append((status, tokens[i + 1], None))
+            i += 2
+        else:  # malformed trailing token — nothing to pair it with
+            break
+    return entries
+
+
+def _parse_porcelain_status_z(output: str) -> list[tuple[str, str]]:
+    """``(code, path)`` records from ``git status --porcelain -z`` output.
+
+    Each record is ``"XY <path>"`` NUL-terminated, except a rename/copy (``X`` or ``Y`` is ``R``/
+    ``C``) which is followed by one extra NUL-terminated token carrying the *original* path. Per
+    Git's own docs, the ``-z`` field order for a rename is reversed versus the line-based ``"old ->
+    new"`` form — the destination path is the one in the ``"XY <path>"`` record, the source trails
+    it — so the destination is read directly and the trailing source token is skipped: no current
+    caller needs the rename source.
+    """
+    tokens = [t for t in output.split("\0") if t]
+    entries: list[tuple[str, str]] = []
+    i = 0
+    while i < len(tokens):
+        record = tokens[i]
+        code, path = record[:2], record[3:]
+        i += 1
+        if code[0] in ("R", "C") or code[1] in ("R", "C"):
+            if i >= len(tokens):  # a rename/copy record truncated mid-stream — drop it, don't crash
+                break
+            i += 1  # skip the rename/copy source path
+        entries.append((code, path))
+    return entries
+
+
 class GitCommandError(Exception):
     """A git/gh command exited non-zero (or failed to launch) where success was required."""
 
@@ -707,24 +768,18 @@ class GitManager:
         mandatory timeout — and is best-effort: a bad/missing sha yields ``[]`` rather than raising,
         so the handoff degrades to the rest of the floor.
         """
-        result = self._git("diff-tree", "--no-commit-id", "--name-only", "-r", sha)
+        result = self._git("diff-tree", "--no-commit-id", "--name-only", "-r", "-z", sha)
         if not result.ok:
             return []
-        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        return _parse_name_only_z(result.stdout)
 
     # --- staging + commit ---------------------------------------------------------
 
     def changed_code_paths(self) -> list[str]:
         """The changed paths that are *not* orchestration artifacts (the code staging set)."""
-        porcelain = self._git("status", "--porcelain").stdout
+        porcelain = self._git("status", "--porcelain", "-z").stdout
         paths: list[str] = []
-        for line in porcelain.splitlines():
-            if not line.strip():
-                continue
-            path = line[3:].strip()
-            if " -> " in path:  # a rename: take the destination
-                path = path.split(" -> ", 1)[1]
-            path = path.strip('"')
+        for _code, path in _parse_porcelain_status_z(porcelain):
             if self._is_artifact_path(path):
                 continue
             paths.append(path)
@@ -733,18 +788,8 @@ class GitManager:
     def changed_code_entries(self) -> tuple[ChangedPath, ...]:
         """Return tracked and untracked code changes for deterministic output guardrails."""
         entries: list[ChangedPath] = []
-        tracked = self._git("diff", "--name-status", "HEAD", "--").stdout
-        for line in tracked.splitlines():
-            fields = line.split("\t")
-            if len(fields) < 2:
-                continue
-            status = fields[0]
-            if status.startswith(("R", "C")) and len(fields) >= 3:
-                previous = fields[1]
-                path = fields[2]
-            else:
-                previous = None
-                path = fields[1]
+        tracked = self._git("diff", "--name-status", "-z", "HEAD", "--").stdout
+        for status, path, previous in _parse_name_status_z(tracked):
             if self._is_artifact_path(path):
                 continue
             entries.append(ChangedPath(status=status, path=path, previous_path=previous))
@@ -752,7 +797,7 @@ class GitManager:
         untracked = self._git("ls-files", "--others", "--exclude-standard", "-z").stdout
         entries.extend(
             ChangedPath(status="??", path=path)
-            for path in (item for item in untracked.split("\0") if item)
+            for path in _parse_name_only_z(untracked)
             if not self._is_artifact_path(path)
         )
         return tuple(entries)
@@ -793,14 +838,13 @@ class GitManager:
         untracked). Shared by the ``base_branch`` (check-set) and per-task (packet) variants."""
         paths: list[str] = []
         seen: set[str] = set()
-        tracked = self._git("diff", "--name-only", base, "--").stdout
-        for line in tracked.splitlines():
-            path = line.strip().strip('"')
-            if path and path not in seen and not self._is_artifact_path(path):
+        tracked = self._git("diff", "--name-only", "-z", base, "--").stdout
+        for path in _parse_name_only_z(tracked):
+            if path not in seen and not self._is_artifact_path(path):
                 seen.add(path)
                 paths.append(path)
         untracked = self._git("ls-files", "--others", "--exclude-standard", "-z").stdout
-        for path in (item for item in untracked.split("\0") if item):
+        for path in _parse_name_only_z(untracked):
             if path not in seen and not self._is_artifact_path(path):
                 seen.add(path)
                 paths.append(path)
@@ -822,13 +866,10 @@ class GitManager:
         ``git mv`` that git did not record as a rename); the porcelain X column is ``D`` and the Y
         (working-tree) column is blank (F18).
         """
-        porcelain = self._git("status", "--porcelain").stdout
+        porcelain = self._git("status", "--porcelain", "-z").stdout
         deletions: set[str] = set()
-        for line in porcelain.splitlines():
-            if len(line) < 4 or line[0] != "D" or line[1] != " ":
-                continue
-            path = line[3:].strip().strip('"')
-            if path and not self._is_artifact_path(path):
+        for code, path in _parse_porcelain_status_z(porcelain):
+            if code == "D " and path and not self._is_artifact_path(path):
                 deletions.add(path)
         return deletions
 
@@ -1415,15 +1456,9 @@ class GitManager:
 
     def _unaccounted_dirty_paths(self) -> set[str]:
         """Tracked, uncommitted changes (artifact dirs are expected and so are ignored)."""
-        porcelain = self._git("status", "--porcelain").stdout
+        porcelain = self._git("status", "--porcelain", "-z").stdout
         dirty: set[str] = set()
-        for line in porcelain.splitlines():
-            if not line.strip():
-                continue
-            code = line[:2]
-            path = line[3:].strip().strip('"')
-            if "->" in path:
-                path = path.split("->", 1)[1].strip()
+        for code, path in _parse_porcelain_status_z(porcelain):
             if self._is_artifact_path(path):
                 continue
             # An untracked non-artifact file (``??``) is unexpected; any tracked change is dirty.
