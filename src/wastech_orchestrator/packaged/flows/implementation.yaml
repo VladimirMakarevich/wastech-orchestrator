@@ -31,7 +31,8 @@
 #     network_access: true | false         per-node network grant/deny; default: flow network_policy
 #   agent nodes also: timeout_seconds, extra_args (extra CLI flags), best_effort,
 #                     permission_profile (≤ flow permission_ceiling), when
-#   evaluator nodes also: blocking (failing verdict blocks vs advisory), max_rework_per_stage
+#   evaluator nodes also: blocking (failing verdict blocks vs advisory), max_rework_per_stage,
+#                     gate_severity (min finding severity that gates: high|medium|low|critical|blocking; default high)
 #   Disabling a node is PER-TASK, not here: set `nodes.<id>.enabled: false` in the task file.
 # ----------------------------------------------------------------------------------------------------
 flow:
@@ -99,6 +100,8 @@ flow:
       # reasoning: high
       # network_access: false
       # blocking: true
+      # gate_severity: high  # min finding severity that gates (high|medium|low|critical|blocking).
+      #   Default high = block on high/critical/blocking; lower it (e.g. medium) to gate on nits too.
       # NOTE: `max_rework_per_stage` is a NON-blocking-only knob (e.g. test_quality) — it has no
       # effect on this blocking review node. To cap the review->fixing loop deterministically, lower
       # `budgets.review_fix` below; exhausting it parks the task to `manual`.

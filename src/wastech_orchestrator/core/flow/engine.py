@@ -91,8 +91,9 @@ def _never_cancelled() -> bool:
 class Finding:
     """A single evaluator finding (the shared evaluator primitive, P2.1).
 
-    ``severity`` drives blocking: a ``high`` finding blocks (an evaluator verdict of ``rework``
-    requires at least one); ``medium``/``low`` findings are advisory only. ``paths`` are the
+    ``severity`` is the typed audit-trail projection (``low``/``medium``/``high``). Whether a
+    finding actually drives ``rework`` is decided by the evaluator runner against the node's
+    configurable ``gate_severity`` (default ``high``) — NOT by this flag: ``paths`` are the
     files/locations the finding concerns. Carried on :class:`NodeOutcome` for the audit trail (the
     immutable ``evaluations`` row) — the engine never inspects it to route.
     """
@@ -103,7 +104,10 @@ class Finding:
 
     @property
     def blocking(self) -> bool:
-        """A finding blocks (drives ``rework``) iff ``high``; ``medium``/``low`` are advisory."""
+        """Audit-only high-severity flag (``severity == "high"``); does NOT decide routing.
+
+        The routing gate is the evaluator runner's ``gate_severity`` comparison, not this property.
+        """
         return self.severity == "high"
 
 

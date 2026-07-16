@@ -8,4 +8,4 @@ Flag where the revised text:
 - lets the story detach from the product (metaphor with no real feature behind it);
 - describes the product so bluntly it reads like a spec, losing the Journey's voice.
 
-Return findings in the output schema: `path` = the chapter file, `what` = the fidelity problem, `fix` = the concrete correction. Severity blocking/critical/high = must fix before publish; medium/low = advice. If the text is faithful to the product, return an empty `findings` array — not prose. Do not evaluate language or storytelling; those are other nodes' jobs. Read only; do not edit.
+Return findings in the output schema: `path` = the chapter file, `what` = the fidelity problem, `fix` = the concrete correction. Assign each an honest `severity` (blocking / critical / high / medium / low) reflecting how serious the fidelity problem is — the flow decides which severities block publishing, so do not inflate or downplay to force an outcome. If the text is faithful to the product, return an empty `findings` array — not prose. Do not evaluate language or storytelling; those are other nodes' jobs. Read only; do not edit.

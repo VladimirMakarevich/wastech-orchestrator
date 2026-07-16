@@ -8,4 +8,4 @@ Break the chapter honestly. Flag where it:
 - breaks the link to the previous or next part (per the Story Bible transition map);
 - carries a semantic AI cliché the regex gate missed (a hollow rhetorical flourish, a manufactured antithesis, a generic life-coach line).
 
-Return findings in the output schema: `path` = the chapter file, `what` = the storytelling weakness (concrete, quoted where useful), `fix` = a specific direction (not a full rewrite). Severity blocking/critical/high = must fix before publish; medium/low = advice. A genuinely strong chapter returns an empty `findings` array. Read only; do not edit.
+Return findings in the output schema: `path` = the chapter file, `what` = the storytelling weakness (concrete, quoted where useful), `fix` = a specific direction (not a full rewrite). Assign each an honest `severity` (blocking / critical / high / medium / low) reflecting how serious the weakness is — the flow decides which severities block publishing, so do not inflate or downplay to force an outcome. A genuinely strong chapter returns an empty `findings` array. Read only; do not edit.

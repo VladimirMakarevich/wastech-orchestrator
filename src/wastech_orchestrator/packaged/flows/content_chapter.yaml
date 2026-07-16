@@ -17,6 +17,13 @@
 # The supervisor is a constant layer above the flow (not a node); `emit_follow_ups` is deliberately
 # omitted (a code-oriented capability). Blocking evaluators are capped by their named-loop budgets
 # (`accuracy_fix` / `critic_fix`), not by `max_rework_per_stage` (a non-blocking-only knob).
+#
+# gate_severity (per evaluator, default `high`) sets the minimum finding severity that gates: `high`
+# blocks on high/critical/blocking and lets medium/low advise; lower it to raise the quality bar.
+# For detail-critical content you can set `gate_severity: low` on the critics below so ANY finding
+# forces a rework — but a stricter gate means more rework rounds, so raise the matching budget
+# (`accuracy_fix` / `critic_fix`) to give it headroom, or the loop may exhaust the budget and park
+# the task to `manual`. Shipped at the default `high`; uncomment the lines below to opt in.
 flow:
   name: content_chapter
   task_type: content_chapter
@@ -44,11 +51,13 @@ flow:
       role: verifier
       role_file: content_chapter/product_accuracy.md
       blocking: true
+      # gate_severity: low  # block on ANY finding (default high); raise `accuracy_fix` to match
     - id: story_critic
       kind: evaluator
       role: critic
       role_file: content_chapter/story_critic.md
       blocking: true
+      # gate_severity: low  # block on ANY finding (default high); raise `critic_fix` to match
     - id: style
       kind: agent
       role_file: content_chapter/style.md

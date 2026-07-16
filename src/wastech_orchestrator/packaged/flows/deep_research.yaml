@@ -11,7 +11,7 @@
 #     reasoning: minimal|low|medium|high|xhigh|max  default: agents.providers.<provider>.reasoning
 #     network_access: true | false         per-node network grant/deny; default: flow network_policy (research)
 #   agent nodes also: timeout_seconds, extra_args, best_effort, permission_profile (≤ flow ceiling), when
-#   evaluator nodes also: blocking, max_rework_per_stage
+#   evaluator nodes also: blocking, max_rework_per_stage, gate_severity (min severity that gates; default high)
 #   Disabling a node is PER-TASK: set `nodes.<id>.enabled: false` in the task file.
 # ----------------------------------------------------------------------------------------------------
 flow:
