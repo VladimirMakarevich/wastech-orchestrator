@@ -3,9 +3,21 @@
 - **Основание:** прогон `blog-review-happy-in-my-misfortunes-4`
 - **Связанный отчёт:** [полный анализ токенов](2026-07-16-blog-review-happy-in-my-misfortunes-4-token-analysis.md)
 - **Зона изменений:** `SupervisorConfig`, constant supervisor layer, post-node hook, summary finalization
-- **Статус:** proposal, код и конфигурация пока не изменены
+- **Статус:** proposal, код и конфигурация пока не изменены. Этот документ — трекер отдельной задачи «оптимизация supervisor»; сопутствующая задача по нормализации usage вынесена в [normalized-usage-accounting.md](../backlog/normalized-usage-accounting.md).
 
 ---
+
+## Проверено по коду (2026-07-16)
+
+Первый шаг (Вариант A / §8 P0 — не наблюдать детерминированные ноды) подтверждён по актуальному коду и является самым дешёвым безопасным изменением:
+
+- observe вызывается из post-node hook после каждой executed non-publish ноды; единственная фильтрация сегодня — `node.kind != "publish"` (`core/orchestrator.py:2484`). `length` — это `tool`-нода (`packaged/flows/blog_article_revise.yaml`), и `node.kind` в точке вызова уже доступен, поэтому пропуск kind ∈ {`tool`, `checks`} — правка **одного условия**, без новой машинерии.
+- Пропущенные (`when`-false / disabled) ноды и так не наблюдаются — post-node hook движка срабатывает только для executed нод (`core/flow/engine.py`), так что менять cadence безопасно.
+- Supervisor advisory-по-построению: все записи `verdict="advisory"`, движок их не читает для роутинга (`core/supervisor.py`), у него нет `route`/`rework`. Значит изменение cadence не влияет на стейт-машину.
+- model/reasoning/provider supervisor **уже** конфигурируемы (`SupervisorConfig`, `packaged/config.example.yaml`), но cadence / `observation_mode` / раздельные observe-vs-finalize настройки — нет; их добавление (§8 P1) трогает ~5 точек: `config/schema.py`, `config/loader.py`, `config/validation.py`, `packaged/config.example.yaml` и условие в hook.
+- Механизм fresh-finalize из digest (Вариант E) уже реализован как recovery-путь `Supervisor._finalize_digest` — задача в том, чтобы сделать его основным.
+
+CODEX WARNING остаётся в силе: для Codex-supervisor resume кумулятивен, поэтому точный token-budget (Вариант I) требует нормализованного usage из [normalized-usage-accounting.md](../backlog/normalized-usage-accounting.md) как предпосылки.
 
 CODEX WARNING: Важно заметить, что для Codex проблема еще более губительная, так как там при resume команде заново передается весь предыдущий контектс, из за чего потребление увеличивается по экспоненте!
 
@@ -85,7 +97,7 @@ resume той же supervisor session на следующем шаге
 Полный Claude input рассчитан как сумма `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`.
 
 | Вызов | Total input | Output | Cost, USD | Что дал |
-| --- | ---: | ---: | ---: | --- |
+| --- | --: | --: | --: | --- |
 | after context | 34 215 | 1 604 | 0.1137 | Повторно подтвердил качество scout brief |
 | after research | 37 891 | 215 | 0.0356 | Подтвердил, что research правильно ничего не искал |
 | after revise | 122 857 | 1 924 | 0.1891 | Повторно проверил четыре diff-hunk и отсутствие drift |
@@ -98,7 +110,7 @@ resume той же supervisor session на следующем шаге
 Разделение observation и finalize показывает, где находится основной необязательный расход.
 
 | Слой | Calls | Input | Output | Cost, USD | Provider duration |
-| --- | ---: | ---: | ---: | ---: | ---: |
+| --- | --: | --: | --: | --: | --: |
 | Per-step observations | 6 | 375 726 | 5 060 | 0.4375 | 100.5 s |
 | Finalize | 1 | 104 567 | 7 646 | 0.3319 | 76.7 s |
 | **Supervisor total** | **7** | **480 293** | **12 706** | **0.7694** | **177.2 s** |
@@ -206,7 +218,8 @@ LLM-observation запускается только по событиям с и�
 supervisor:
   observe:
     mode: events
-    triggers: [rework, failure, hitl, dangerous_diff, fallback, subtask_boundary]
+    triggers:
+      [rework, failure, hitl, dangerous_diff, fallback, subtask_boundary]
 ```
 
 На этой задаче не было rework, fallback или HITL. Per-step LLM observations можно было полностью пропустить.
@@ -434,7 +447,7 @@ supervisor:
   provider: claude
 
   observe:
-    mode: events                 # all | selected | events | none
+    mode: events # all | selected | events | none
     triggers:
       - rework
       - failure
@@ -444,7 +457,7 @@ supervisor:
       - subtask_boundary
     model: claude-sonnet-5
     reasoning: low
-    session: fresh_digest        # warm | fresh_digest
+    session: fresh_digest # warm | fresh_digest
     max_calls: 3
     max_digest_tokens: 4000
 
@@ -496,11 +509,11 @@ flow:
     "diff_stats": "+4/-4"
   },
   "steps": [
-    {"node": "revise", "outcome": "done", "message": "bounded text"},
-    {"node": "tone_style", "outcome": "accept", "findings": 1},
-    {"node": "polish", "outcome": "done", "message": "bounded text"}
+    { "node": "revise", "outcome": "done", "message": "bounded text" },
+    { "node": "tone_style", "outcome": "accept", "findings": 1 },
+    { "node": "polish", "outcome": "done", "message": "bounded text" }
   ],
-  "checks": {"passed": 1, "failed": 0},
+  "checks": { "passed": 1, "failed": 0 },
   "findings_path": ".../findings.json",
   "material_observations": []
 }
@@ -589,14 +602,14 @@ Packet должен ссылаться на полные artifacts и включ
 
 Для повторного `blog_article_revise` нужно сравнить текущий режим и finalize-only.
 
-| Метрика | Текущий run | Цель |
-| --- | ---: | ---: |
-| Supervisor calls | 7 | 1 |
-| Observation calls | 6 | 0 |
-| Supervisor input | 480 293 | < 60 000 |
-| Supervisor wall time | ~198 s | < 60 s |
-| Summary completeness | baseline | не хуже baseline |
-| Пропущенные blocking issues | 0 | 0, их держит tone evaluator |
+| Метрика                     | Текущий run |                        Цель |
+| --------------------------- | ----------: | --------------------------: |
+| Supervisor calls            |           7 |                           1 |
+| Observation calls           |           6 |                           0 |
+| Supervisor input            |     480 293 |                    < 60 000 |
+| Supervisor wall time        |      ~198 s |                      < 60 s |
+| Summary completeness        |    baseline |            не хуже baseline |
+| Пропущенные blocking issues |           0 | 0, их держит tone evaluator |
 
 Quality comparison должен проверять summary по четырём пунктам — что изменено, почему, какие проверки прошли и какие caveats остались. Красивый текст сам по себе не оправдывает постоянную warm session.
 
