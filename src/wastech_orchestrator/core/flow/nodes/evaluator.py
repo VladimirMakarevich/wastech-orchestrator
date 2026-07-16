@@ -39,6 +39,11 @@ from wastech_orchestrator.core.flow.nodes.base import (
 from wastech_orchestrator.core.flow.observability import record_run_observability
 from wastech_orchestrator.core.flow.prompt import RoleFileError, read_role_file, render_role_prompt
 from wastech_orchestrator.core.flow.schema import SEVERITY_ORDER, EvaluatorNode, FlowNode
+from wastech_orchestrator.core.flow.usage_accounting import (
+    deserialize_usage,
+    guard_output_baseline,
+    snapshot_for_lineage,
+)
 from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
 from wastech_orchestrator.providers.base import AgentRunRequest, build_effective_prompt
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
@@ -123,7 +128,12 @@ class EvaluatorNodeRunner:
                 started_at=started_at,
             )
         )
-        request = self._build_request(node, ctx, route, run_id)
+        lineage = self._resume_node_lineage(node, ctx, route)
+        baseline = deserialize_usage(lineage.usage_snapshot) if lineage else None
+        session_id = lineage.raw_session_id if lineage else None
+        request = self._build_request(
+            node, ctx, route, run_id, session_id, guard_output_baseline(baseline)
+        )
         outcome = self._s.router.run_stage(request, route, snapshot=self._s.snapshot)
         raw_findings = (
             self._findings_or_none(outcome.result.structured_output)
@@ -144,6 +154,8 @@ class EvaluatorNodeRunner:
             model=node.model,
             reasoning=node.reasoning,
             started_at=started_at,
+            usage_baseline=baseline,
+            baseline_session_id=session_id,
         )
         if outcome.result is None:
             error_class = outcome.terminal_error.error_class if outcome.terminal_error else None
@@ -240,6 +252,8 @@ class EvaluatorNodeRunner:
         ctx: NodeContext,
         route: ResolvedRoute,
         run_id: int,
+        session_id: str | None = None,
+        resume_baseline_output_tokens: int | None = None,
     ) -> AgentRunRequest:
         prompt = render_role_prompt(
             self._in.flow_dir, node.role_file, self._prompt_variables(ctx, node)
@@ -264,8 +278,10 @@ class EvaluatorNodeRunner:
             # Evaluators never inherit an author's editing lineage (validator-enforced read-only).
             # A ``fresh_disposable`` evaluator starts clean each pass; a ``resume_own_lineage`` one
             # (the research critic) resumes its OWN durable session so it remembers what it flagged
-            # across rework rounds (P3.3).
-            session_id=self._resume_own_session(node, ctx, route),
+            # across rework rounds (P3.3). The resumed session (and its usage baseline) is resolved
+            # by the caller so the row is read once.
+            session_id=session_id,
+            resume_baseline_output_tokens=resume_baseline_output_tokens,
             # Network is a per-node override on top of the flow-wide default (a research verifier
             # may need it): the node's ``network_access`` wins, else it inherits the flow's
             # ``network_policy`` default (P3.2). It only toggles network — evaluators stay read-only
@@ -275,22 +291,23 @@ class EvaluatorNodeRunner:
             ),
         )
 
-    def _resume_own_session(
+    def _resume_node_lineage(
         self, node: EvaluatorNode, ctx: NodeContext, route: ResolvedRoute
-    ) -> str | None:
-        """The durable own session to resume for a ``resume_own_lineage`` evaluator (P3.3).
+    ) -> NodeLineageRow | None:
+        """The durable own session this evaluator resumes, or ``None`` for a fresh session (P3.3).
 
         A ``fresh_disposable`` evaluator always starts clean (``None``). A ``resume_own_lineage``
         one (the research critic) resumes the session it stored on its previous pass — but only when
-        the stored session was produced by the same provider it now resolves to (you cannot resume a
+        the stored session was produced by the same provider it now resolves to (no resuming a
         Claude session on Codex). On the first round there is no lineage yet, so it starts fresh.
+        The row carries the usage snapshot the caller subtracts to get a per-run delta.
         """
         if node.session_scope is not SessionScope.RESUME_OWN_LINEAGE:
             return None
         row = self._s.store.get_node_lineage(ctx.task_id, node.id, ctx.subtask_order)
         if row is None or row.provider != route.primary.value:
             return None
-        return row.raw_session_id
+        return row
 
     def _persist_own_lineage(
         self, node: EvaluatorNode, ctx: NodeContext, outcome: StageOutcome
@@ -314,6 +331,7 @@ class EvaluatorNodeRunner:
                 raw_session_id=result.session_id,
                 subtask_order=ctx.subtask_order,
                 updated_at=self._s.clock(),
+                usage_snapshot=snapshot_for_lineage(result.normalized_usage),
             )
         )
 

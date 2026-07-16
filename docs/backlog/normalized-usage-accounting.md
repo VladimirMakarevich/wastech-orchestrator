@@ -1,6 +1,6 @@
 # Normalized token-usage accounting (provider-aware, persisted per attempt)
 
-**Status:** open **Priority:** P0 (measurement substrate — blocks any token A/B) **Source:** [2026-07-16 token analysis](../analysis/2026-07-16-blog-review-happy-in-my-misfortunes-4-token-analysis.md) (F1 / P0), realizes Phase 0 of [archive/token_optimization.md](archive/token_optimization.md)
+**Status:** implemented 2026-07-16 **Priority:** P0 (measurement substrate — blocks any token A/B) **Source:** [2026-07-16 token analysis](../analysis/2026-07-16-blog-review-happy-in-my-misfortunes-4-token-analysis.md) (F1 / P0), realizes Phase 0 of [archive/token_optimization.md](archive/token_optimization.md)
 
 ## Problem
 
@@ -16,13 +16,21 @@ The join key needed to compute a Codex resume delta **already exists**: the dura
 
 One provider-aware normalized usage record, persisted per attempt in SQLite alongside the raw payload, so that summing per-node usage is correct by construction and a token baseline can be collected.
 
+## Decisions (resolved 2026-07-16)
+
+- **Baseline storage:** the previous cumulative snapshot is stored as a **new column on the `editing_lineage` row** (it already keys by `lineage_key` = the session and holds `raw_session_id`), updated on every visit to the session — a per-session running cumulative, not per-node. This is the natural home and needs no new table.
+- **Delta computation boundary (dictated by invariants, not optional):** provider adapters map the raw payload → normalized **cumulative** fields (provider-specific); the baseline subtraction happens in the orchestrator/persistence layer, which has DB access. Providers never read the state store.
+- **Cost:** **deferred to a follow-up.** This task normalizes and persists **tokens only**. The `cost` field stays in the normalized structure but is left unpopulated for now (providers do not parse cost today; capturing Claude's `total_cost_usd` is a separate, small pass).
+- **Reporting:** **out of scope — persist only.** Normalized usage is written to SQLite and readable via SQL / existing artifacts; a `worc` report command or summary section is a separate follow-up.
+- **`reasoning_output` is provider-partial:** populated for Codex, left null for Claude (its artifacts fold extended thinking into output with no separate field). The normalized schema tolerates null.
+
 ## In scope
 
 - A typed normalized-usage structure with, at minimum: `scope` (e.g. `session_cumulative` vs `per_invocation`), `input_total`, `cache_read`, `cache_write`, `uncached_input`, `output_total`, `reasoning_output`, `cost` (nullable).
 - Keep the raw provider payload verbatim for audit (`provider_usage_raw`); normalized fields are derived, not a replacement.
-- **Codex:** fresh run → scope `session_cumulative` with baseline 0. Resume → subtract the previous snapshot of the same provider session (baseline keyed by the durable lineage/session id already in `editing_lineage`/`node_lineage`). If a new snapshot is smaller than the baseline (reset / compaction / version drift), keep raw, mark the delta unknown, and log a warning — never emit negative tokens.
+- **Codex:** fresh run → scope `session_cumulative` with baseline 0. Resume → subtract the previous snapshot of the same provider session, read from the running-cumulative column on the session's `editing_lineage` row (updated after each visit). If a new snapshot is smaller than the baseline (reset / compaction / version drift), keep raw, mark the delta unknown, and log a warning — never emit negative tokens.
 - **Claude:** normalize as `per_invocation` with `input_total` = sum of the three input categories.
-- Persist normalized usage (and cost where the CLI reports it) per attempt in SQLite — the `provider_attempts` entity is the natural home.
+- Persist normalized token usage per attempt in SQLite — the `provider_attempts` entity is the natural home. (Cost capture deferred — see Decisions.)
 - Fix `_produced_no_work` to use the normalized per-run delta, so the no-work guard works on resumed Codex nodes.
 
 ## Acceptance criteria
@@ -37,6 +45,8 @@ One provider-aware normalized usage record, persisted per attempt in SQLite alon
 ## Out of scope
 
 - Migration / backfill machinery — greenfield, nothing is deployed (see [greenfield-mvp-no-migration] memory / [architecture.md](../../.agents/rules/architecture.md)). Add the schema directly, no migration path.
+- **Cost capture** (Claude `total_cost_usd`) — deferred to a follow-up (see Decisions); tokens only in this task.
+- **Read/report surface** (a `worc` token report or summary section) — separate follow-up; this task only persists.
 - Cross-provider dollar normalization by billing rate (Codex ran on subscription and records no cost) — raw totals are a within-provider rate-limit/relative signal only.
 - Deterministic artifact reduction (sink B) and RTK (sink A) — those are Phase 1/2 of [archive/token_optimization.md](archive/token_optimization.md), separate work.
 - Supervisor cadence — tracked separately (see [../analysis/2026-07-16-supervisor-token-optimization-options.md](../analysis/2026-07-16-supervisor-token-optimization-options.md)).

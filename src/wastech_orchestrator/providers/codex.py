@@ -29,6 +29,7 @@ from wastech_orchestrator.config.schema import ProviderConfig
 from wastech_orchestrator.providers._adapter_base import (
     BaseCliProvider,
     ParsedEvents,
+    coerce_usage_int,
     read_text,
 )
 from wastech_orchestrator.providers.artifacts import ArtifactPaths
@@ -36,8 +37,10 @@ from wastech_orchestrator.providers.base import (
     AgentRunRequest,
     ErrorClass,
     NormalizedError,
+    NormalizedUsage,
     ProviderError,
     ProviderId,
+    UsageScope,
     build_context_footer,
     build_effective_prompt,
 )
@@ -312,6 +315,33 @@ def isolation_reasons(config: ProviderConfig) -> list[str]:
     return reasons
 
 
+def _normalize_codex_usage(usage: Mapping[str, Any] | None) -> NormalizedUsage | None:
+    """Map Codex's raw ``usage`` to the provider-neutral cumulative record.
+
+    Codex reports ``input_tokens`` inclusive of the cached subset, so uncached input is derived; it
+    has no cache-creation counter, so ``cache_write`` stays ``None``. Returns ``None`` when no usage
+    was emitted, preserving the no-work guard's "absent usage never fires" contract.
+    """
+    if not usage:
+        return None
+    input_total = coerce_usage_int(usage.get("input_tokens"))
+    cache_read = coerce_usage_int(usage.get("cached_input_tokens"))
+    uncached_input = (
+        input_total - cache_read
+        if input_total is not None and cache_read is not None
+        else input_total
+    )
+    return NormalizedUsage(
+        scope=UsageScope.SESSION_CUMULATIVE,
+        input_total=input_total,
+        cache_read=cache_read,
+        cache_write=None,
+        uncached_input=uncached_input,
+        output_total=coerce_usage_int(usage.get("output_tokens")),
+        reasoning_output=coerce_usage_int(usage.get("reasoning_output_tokens")),
+    )
+
+
 def parse_events(
     stdout_text: str, last_message_text: str | None = None, *, schema_requested: bool = False
 ) -> ParsedEvents:
@@ -387,6 +417,7 @@ def parse_events(
         final_message=final_message,
         structured_output=structured_output,
         usage=usage,
+        normalized_usage=_normalize_codex_usage(usage),
         session_id=session_id,
         succeeded=succeeded,
     )

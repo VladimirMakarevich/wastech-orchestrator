@@ -32,8 +32,9 @@
 # ----------------------------------------------------------------------------------------------------
 # Per-node tuning (ALL fields below are OPTIONAL — omit one to inherit the default). See
 # `blog_article.yaml`'s header for the same note — the authorial nodes (`revise`, `polish`, `fixing`)
-# are worth pinning to a consistent provider/model across the whole editing lineage if you deviate
-# from the flow-wide default; only the reasoning effort should drop for the bounded tail passes.
+# are worth pinning to a consistent provider/model for one voice if you deviate from the flow-wide
+# default (`revise` + `fixing` share one editing lineage; `polish` is a fresh session but still the
+# same author's voice); only the reasoning effort should drop for the bounded tail passes.
 # Commented out below (not pinned), so the flow runs on whatever provider/model an operator already
 # has configured; uncomment to adopt this tuning.
 #   agent + evaluator nodes:
@@ -93,13 +94,14 @@ flow:
     - id: polish
       kind: agent
       role_file: blog_article_revise/polish.md
-      session_scope: editing_lineage
-      lineage_affinity: revise
+      session_scope: fresh_disposable
       permission_profile: workspace-write
       network_access: false
       # Language polish is a bounded pass, not fresh reasoning, so it runs at medium regardless of
-      # the flow-wide default — less wall-time on the tail, no quality loss. It resumes revise's
-      # editing lineage, so it MUST carry the same model/provider if you pin one on revise above.
+      # the flow-wide default — less wall-time on the tail, no quality loss. It is a fresh session
+      # (it gets the diff and the reviewer findings as artifacts), so it does NOT re-read revise's
+      # whole transcript — cheaper input. It no longer needs revise's model/provider; pin it to the
+      # same as revise only for voice consistency if you pin revise above.
       reasoning: medium
       # provider: codex
       # model: gpt-5.4
@@ -110,7 +112,8 @@ flow:
       lineage_affinity: revise
       permission_profile: workspace-write
       network_access: false
-      # Same lineage-affinity note as polish above (uncomment to match revise's pin):
+      # fixing resumes revise's editing lineage (rework genuinely builds on the revision), so it
+      # MUST carry the same model/provider if you pin one on revise above (uncomment to match):
       # provider: codex
       # model: gpt-5.4
     - id: publish

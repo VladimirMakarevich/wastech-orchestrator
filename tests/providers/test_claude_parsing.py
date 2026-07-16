@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from wastech_orchestrator.providers.base import ErrorClass, ProviderError
+from wastech_orchestrator.providers.base import ErrorClass, ProviderError, UsageScope
 from wastech_orchestrator.providers.claude import parse_stream_json
 
 
@@ -58,6 +58,33 @@ def test_success_has_no_failure_subtype() -> None:
     parsed = parse_stream_json(_stream({"type": "result", "subtype": "success", "is_error": False}))
     assert parsed.succeeded is True
     assert parsed.failure_subtype is None
+
+
+def test_normalized_usage_sums_three_input_fields_per_invocation() -> None:
+    # Claude's real input is input + cache_creation + cache_read; reading only input_tokens would
+    # show a misleadingly tiny figure. Scope is per-invocation (each run is self-contained).
+    stream = _stream(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "usage": {
+                "input_tokens": 35,
+                "cache_creation_input_tokens": 122738,
+                "cache_read_input_tokens": 560305,
+                "output_tokens": 9000,
+            },
+        }
+    )
+    nu = parse_stream_json(stream).normalized_usage
+    assert nu is not None
+    assert nu.scope is UsageScope.PER_INVOCATION
+    assert nu.input_total == 35 + 122738 + 560305
+    assert nu.uncached_input == 35
+    assert nu.cache_write == 122738
+    assert nu.cache_read == 560305
+    assert nu.output_total == 9000
+    assert nu.reasoning_output is None  # Claude folds reasoning into output
 
 
 def test_non_dict_structured_output_is_ignored() -> None:

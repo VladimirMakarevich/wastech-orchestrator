@@ -249,6 +249,60 @@ def test_provider_attempts_round_trip(store: StateStore) -> None:
     assert [r["provider"] for r in cur.fetchall()] == ["claude"]
 
 
+def test_provider_attempt_usage_columns_round_trip(store: StateStore) -> None:
+    # The normalized per-run usage delta persists as queryable columns alongside the raw payload.
+    store.insert_task(_new_task())
+    run_id = store.record_node_run(
+        NodeRunRow(
+            task_id="task-001",
+            node_id="revise",
+            node_kind="agent",
+            status="running",
+            route_primary="codex",
+        )
+    )
+    store.record_provider_attempt(
+        ProviderAttemptRow(
+            node_run_id=run_id,
+            provider="codex",
+            attempt=1,
+            status="succeeded",
+            usage_scope="session_cumulative",
+            usage_input_total=141235,
+            usage_cache_read=111616,
+            usage_output_total=1035,
+            usage_reasoning_output=131,
+            usage_delta_status="ok",
+            provider_usage_raw='{"input_tokens":282699}',
+        )
+    )
+    rows = store.get_provider_attempts(run_id)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.usage_scope == "session_cumulative"
+    assert row.usage_input_total == 141235
+    assert row.usage_cache_read == 111616
+    assert row.usage_output_total == 1035
+    assert row.usage_reasoning_output == 131
+    assert row.usage_delta_status == "ok"
+    assert row.provider_usage_raw == '{"input_tokens":282699}'
+
+
+def test_provider_attempt_usage_columns_default_null(store: StateStore) -> None:
+    # A result-less attempt (no usage) leaves every usage column NULL.
+    store.insert_task(_new_task())
+    run_id = store.record_node_run(
+        NodeRunRow(task_id="task-001", node_id="revise", node_kind="agent", status="running")
+    )
+    store.record_provider_attempt(
+        ProviderAttemptRow(node_run_id=run_id, provider="codex", attempt=1, status="failed")
+    )
+    row = store.get_provider_attempts(run_id)[0]
+    assert row.usage_scope is None
+    assert row.usage_input_total is None
+    assert row.provider_usage_raw is None
+
+
 def test_check_run_and_artifact(store: StateStore) -> None:
     store.insert_task(_new_task())
     store.record_check_run(
@@ -591,6 +645,30 @@ def test_editing_lineage_multiple_lineages_per_unit_are_isolated(store: StateSto
         "SELECT COUNT(*) FROM editing_lineage WHERE task_id = ?", ("task-001",)
     ).fetchone()[0]
     assert count == 2
+
+
+def test_editing_lineage_usage_snapshot_round_trip(store: StateStore) -> None:
+    # The running cumulative usage snapshot rides on the lineage row and is rewritten on every visit
+    # (a resume subtracts it). NULL by default (a per-invocation provider carries no snapshot).
+    store.insert_task(_new_task())
+    store.upsert_editing_lineage(
+        EditingLineageRow(
+            task_id="task-001", lineage_key="revise", provider="codex", raw_session_id="s1"
+        )
+    )
+    assert store.get_editing_lineage("task-001", "revise").usage_snapshot is None  # type: ignore[union-attr]
+    store.upsert_editing_lineage(
+        EditingLineageRow(
+            task_id="task-001",
+            lineage_key="revise",
+            provider="codex",
+            raw_session_id="s1",
+            usage_snapshot='{"scope":"session_cumulative","input_total":282699}',
+        )
+    )
+    row = store.get_editing_lineage("task-001", "revise")
+    assert row is not None
+    assert row.usage_snapshot == '{"scope":"session_cumulative","input_total":282699}'
 
 
 def test_editing_lineage_survives_restart(tmp_path: Path) -> None:

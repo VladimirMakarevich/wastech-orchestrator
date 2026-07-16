@@ -19,8 +19,10 @@ from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact
 from wastech_orchestrator.providers.base import (
     AgentRunResult,
     ErrorClass,
+    NormalizedUsage,
     ProviderId,
     RunStatus,
+    UsageScope,
 )
 from wastech_orchestrator.routing.router import (
     ProviderAttempt,
@@ -152,6 +154,69 @@ def test_record_provider_attempts_writes_one_row_per_attempt() -> None:
     assert [r.node_run_id for r in store.rows] == [7, 7]
     assert store.rows[0].error_class == "rate_limited"
     assert store.rows[0].exit_code == 1
+
+
+def test_record_provider_attempts_persists_per_run_delta() -> None:
+    # A resumed cumulative run persists the summation-safe per-run delta (baseline subtracted) plus
+    # the verbatim raw payload — the double-count trap is closed at the persistence boundary.
+    store = _FakeStore()
+    resume = AgentRunResult(
+        status=RunStatus.SUCCEEDED,
+        provider="codex",
+        node_id="revise",
+        attempt=1,
+        exit_code=0,
+        started_at="t0",
+        finished_at="t1",
+        session_id="sess-x",
+        usage={"input_tokens": 282699},
+        normalized_usage=NormalizedUsage(
+            scope=UsageScope.SESSION_CUMULATIVE,
+            input_total=282699,
+            cache_read=187904,
+            uncached_input=94795,
+            output_total=9364,
+            reasoning_output=6066,
+        ),
+    )
+    outcome = StageOutcome(
+        route=_route(),
+        result=resume,
+        provider_used=ProviderId.CODEX,
+        stage_attempts=1,
+        terminal_error=None,
+        attempts=(
+            ProviderAttempt(
+                provider=ProviderId.CODEX,
+                attempt=1,
+                status=RunStatus.SUCCEEDED,
+                error_class=None,
+                result=resume,
+            ),
+        ),
+    )
+    baseline = NormalizedUsage(
+        scope=UsageScope.SESSION_CUMULATIVE,
+        input_total=141464,
+        cache_read=76288,
+        uncached_input=65176,
+        output_total=8329,
+        reasoning_output=5935,
+    )
+    record_provider_attempts(
+        _Services(store),
+        run_id=9,
+        outcome=outcome,
+        usage_baseline=baseline,
+        baseline_session_id="sess-x",
+    )
+    row = store.rows[0]
+    assert row.usage_scope == "session_cumulative"
+    assert row.usage_input_total == 141235
+    assert row.usage_output_total == 1035
+    assert row.usage_reasoning_output == 131
+    assert row.usage_delta_status == "ok"
+    assert row.provider_usage_raw == '{"input_tokens":282699}'
 
 
 class _Services:
