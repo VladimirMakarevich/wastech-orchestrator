@@ -172,7 +172,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **Security-audit flow nodes** - `scope` frames the audit, `repository_analysis` inspects the repo, `dependency_scan` runs evidence scanners, `threat_analysis` and `finding_verification` refine findings, `report` writes the private report, and `private_storage` records it without git.
 - **`when`** - A deterministic skip predicate on a node. It enables or disables execution based on a resolved fact.
 - **`permission_ceiling`** - The highest permission profile allowed by a flow.
-- **`output_policy`** - The write-containment policy for a flow. It says where deliverables may be written and what files must exist.
+- **`output_policy`** - The write-containment policy for a flow: a closed set of three — `code_change` (the diff anywhere in the repo is the deliverable), `repository_document` (a `docs/research/<task_id>/` report bundle that must produce `report.md` + `sources.json`), and `private_control_workspace_report` (a `.worc/security-reports/<task_id>/` report that never enters git). The name is a contract, not a description; see [flow-authoring.md → Output policy](flow-authoring.md#output-policy).
 - **`publishing`** - The terminal publication policy for a flow, such as PR publishing, documentation PRs, local artifacts, or no publish.
 - **`network_policy`** - The flow-wide network grant. Absence means no network by default.
 - **`session_scope`** - The provider session intent for a node, such as fresh disposable, editing lineage, or resumable own lineage.

@@ -123,7 +123,7 @@ command -v claude
 command -v gh
 ```
 
-On Windows use `where codex`, `where claude`, and `where gh`. WSL, PowerShell, the IDE extension, and a global npm installation can resolve different Codex executables and report different versions. Configure `agents.providers.codex.command` for the executable visible to the actual orchestrator process; do not infer it from a different terminal.
+On Windows use `where codex`, `where claude`, and `where gh`. WSL, PowerShell, the IDE extension, and a global npm installation can resolve different Codex executables and report different versions. Configure `agents.providers.codex.command` for the executable visible to the actual orchestrator process; do not infer it from a different terminal. If `codex --version` and `worc preflight` disagree, follow [How-To §5](how-to.md#5-fix-conflicting-codex-installations-on-windows) to pin the intended native executable.
 
 Only providers named in `agents.allowed` are required. If Claude Code is not installed, use Codex-only routing for every agent-driven stage. If `gh` is not installed, set `git.create_pull_request: false` until GitHub CLI is installed and authenticated.
 

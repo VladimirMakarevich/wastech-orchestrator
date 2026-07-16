@@ -1483,3 +1483,167 @@ def test_files_in_commit_bad_sha_returns_empty(
     # degrades to the rest of the floor.
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
     assert gm.files_in_commit("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef") == []
+
+
+# --- Unicode / unusual-path Git parsing hardening --------------------------------------
+#
+# Git's default text output C-quotes non-ASCII/space/quote paths (e.g. a Cyrillic filename becomes
+# `"\320\274..."`), which broke `git add -- <path>` on a real publish. These use literal non-ASCII
+# names (never escaped literals) so a parsing regression shows up as a real assertion failure.
+
+
+def _show_paths(git_run: GitRunner, clone: Path, ref: str = "HEAD") -> set[str]:
+    """The literal (unescaped) paths committed at ``ref``, via ``-z`` inspection."""
+    raw = git_run(["show", "-z", "--name-only", "--format=", ref], clone)
+    return {p for p in raw.split("\0") if p}
+
+
+def test_commit_code_untracked_unicode_file(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    unicode_name = "20260206-моя-история-(EN).md"
+    (git_repo.clone / unicode_name).write_text("привет\n", encoding="utf-8")
+
+    sha = gm.commit_code("task-001", "feat: add unicode file")
+    assert sha is not None
+    assert _show_paths(git_run, git_repo.clone) == {unicode_name}
+
+
+def test_commit_code_modified_tracked_unicode_file(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    unicode_name = "документ.md"
+    (git_repo.clone / unicode_name).write_text("v1\n", encoding="utf-8")
+    git_run(["add", "--", unicode_name], git_repo.clone)
+    git_run(["commit", "-m", "chore: seed unicode file"], git_repo.clone)
+
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    (git_repo.clone / unicode_name).write_text("v2\n", encoding="utf-8")
+
+    sha = gm.commit_code("task-001", "feat: update unicode file")
+    assert sha is not None
+    assert _show_paths(git_run, git_repo.clone) == {unicode_name}
+
+
+def test_commit_code_succeeds_with_unicode_rename(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # The exact shape of the incident: a staged rename whose destination is non-ASCII must still
+    # reach `git add -- <path>` with the real UTF-8 path, not a C-quoted escape.
+    old_name = "старое.md"
+    (git_repo.clone / old_name).write_text("l1\nl2\nl3\nl4\nl5\n", encoding="utf-8")
+    git_run(["add", "--", old_name], git_repo.clone)
+    git_run(["commit", "-m", "chore: seed rename source"], git_repo.clone)
+
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    new_name = "20260206-моя-история-(EN).md"
+    git_run(["mv", old_name, new_name], git_repo.clone)
+
+    sha = gm.commit_code("task-001", "feat: rename to unicode name")
+    assert sha is not None
+    assert _show_paths(git_run, git_repo.clone) == {new_name}
+
+
+def test_changed_code_entries_returns_literal_unicode_paths(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    tracked_name = "трекнутый.py"
+    (git_repo.clone / tracked_name).write_text("x = 1\n", encoding="utf-8")
+    git_run(["add", "--", tracked_name], git_repo.clone)
+    git_run(["commit", "-m", "chore: seed tracked unicode file"], git_repo.clone)
+
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    (git_repo.clone / tracked_name).write_text("x = 2\n", encoding="utf-8")
+    untracked_name = "новый-файл.py"
+    (git_repo.clone / untracked_name).write_text("y = 1\n", encoding="utf-8")
+
+    paths = {e.path for e in gm.changed_code_entries()}
+    assert tracked_name in paths
+    assert untracked_name in paths
+
+
+def test_changed_code_entries_unicode_rename(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # `--name-status -z` keeps the old-then-new field order (unlike `status --porcelain -z`, which
+    # reverses it) — the parser must consume both tokens as one record, not split them into two
+    # unrelated entries.
+    old_name = "старое-имя.txt"
+    (git_repo.clone / old_name).write_text("l1\nl2\nl3\nl4\nl5\n", encoding="utf-8")
+    git_run(["add", "--", old_name], git_repo.clone)
+    git_run(["commit", "-m", "chore: seed rename source"], git_repo.clone)
+
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    new_name = "новое имя (v2).txt"
+    git_run(["mv", old_name, new_name], git_repo.clone)
+
+    entries = gm.changed_code_entries()
+    renamed = next(e for e in entries if e.status.startswith("R"))
+    assert renamed.path == new_name
+    assert renamed.previous_path == old_name
+    # The staging set (`status --porcelain -z`) reports the rename's destination, not its source.
+    assert new_name in gm.changed_code_paths()
+    assert old_name not in gm.changed_code_paths()
+
+
+def test_changed_code_paths_since_base_returns_literal_unicode_paths(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    committed_name = "коммит.py"
+    (git_repo.clone / committed_name).write_text("x = 1\n", encoding="utf-8")
+    gm.commit_code("task-001", "feat: unicode")
+    untracked_name = "черновик.py"
+    (git_repo.clone / untracked_name).write_text("y = 1\n", encoding="utf-8")
+
+    since_base = gm.changed_code_paths_since_base()
+    assert committed_name in since_base
+    assert untracked_name in since_base
+    since_task_base = gm.changed_code_paths_since_task_base()
+    assert committed_name in since_task_base
+    assert untracked_name in since_task_base
+
+
+def test_files_in_commit_returns_literal_unicode_paths(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    unicode_name = "файл-в-коммите.txt"
+    (git_repo.clone / unicode_name).write_text("a\n", encoding="utf-8")
+    git_run(["add", "--", unicode_name], git_repo.clone)
+    git_run(["commit", "-m", "add unicode file"], git_repo.clone)
+    sha = git_run(["rev-parse", "HEAD"], git_repo.clone)
+
+    assert gm.files_in_commit(sha) == [unicode_name]
+
+
+def test_unaccounted_dirty_paths_reports_literal_unicode_path(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # Cleanup diagnostics (the terminal-cleanup fail-closed gate) must name the real path, not a
+    # C-quoted escape, so an operator reading the error can actually find the file.
+    unicode_name = "незафиксированный.md"
+    (git_repo.clone / unicode_name).write_text("v1\n", encoding="utf-8")
+    git_run(["add", "--", unicode_name], git_repo.clone)
+    git_run(["commit", "-m", "chore: seed"], git_repo.clone)
+
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    (git_repo.clone / unicode_name).write_text("v2 (uncommitted)\n", encoding="utf-8")
+
+    assert gm.unaccounted_dirty_paths() == {unicode_name}
+    outcome = gm.terminal_cleanup("task-001")
+    assert outcome.safe is False
+    assert unicode_name in (outcome.error or "")

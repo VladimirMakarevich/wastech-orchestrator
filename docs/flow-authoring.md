@@ -78,10 +78,24 @@ Implement the task at {task_path} in the repository {repo_path}. Follow the plan
 | `name` | yes | Flow name (match the `task_type`). |
 | `task_type` | yes | The dispatch key. Must equal the file stem (`<task_type>.yaml`); a task selects the flow by setting this value. |
 | `permission_ceiling` | yes | `read-only` or `workspace-write` — the hard cap; no node may exceed it, and it can never be widened by a task. |
-| `output_policy` | yes | What the flow may produce: `code_change`, `repository_document`, or `private_control_workspace_report`. |
+| `output_policy` | yes | What the flow may produce: `code_change`, `repository_document`, or `private_control_workspace_report`. A closed set — see [Output policy](#output-policy) for what each produces and when to use it. |
 | `publishing` | yes | `pull_request`, `documentation_pull_request`, or `none` (a graph-terminal that touches no Git). |
 | `network_policy` | no | `advisories` / `research` grants the flow network flow-wide; omit and every node is offline by default (nodes may still opt in with `network_access: true`). |
 | `budgets` | if loops | Bounds each named loop / rework edge (e.g. `test_fix: 5`). Every `fail`/`rework` edge must be bounded or validation fails. |
+
+## Output policy
+
+`output_policy` is a **closed set of three** — you pick which _shape_ of deliverable the flow produces, and the engine resolves that name to a fixed write area and required files ([`output_policy.py`](../src/wastech_orchestrator/core/flow/output_policy.py)). You cannot specify anything else, and you cannot point a flow at an arbitrary directory. The name is a **contract, not a description**: `repository_document` does not mean "any document in the repo", it means one specific research-report bundle. Choose by what the flow actually writes, never by which word reads best — picking the wrong one is silent until the first successful write, then hard-stops the task.
+
+| `output_policy` | Writing nodes may write to | Must produce | Enters git? | Pair with `publishing` | Use when |
+| --- | --- | --- | --- | --- | --- |
+| `code_change` | anywhere in the repo — the diff **is** the deliverable | — | yes | `pull_request` / `documentation_pull_request` | The result is edits to the working tree: code, **or** a brand-new prose/Markdown file committed to the repo (a blog post, a chapter, a translation). |
+| `repository_document` | `docs/research/<task_id>/` only | `report.md` + `sources.json` | yes | `documentation_pull_request` | The result is a research/analysis report **bundle** with a sources manifest (the `deep_research` shape; a `citation` checks node validates `sources.json`). |
+| `private_control_workspace_report` | `.worc/security-reports/<task_id>/` only | `report.md` | **no — never committed** | `none` | The result is an advisory report that must stay out of git (the `security_audit` shape). |
+
+**How it is enforced.** For the two report policies an after-stage guard fail-closes the task to `manual_action_required` the moment a writing node touches anything outside its report directory ([`agent.py` → `_apply_output_containment_guard`](../src/wastech_orchestrator/core/flow/nodes/agent.py)); `private_control_workspace_report` additionally refuses to publish if its report is git-trackable (a leak). `code_change` has **no** report directory, so that containment guard is off and the ordinary dangerous-diff guard applies instead.
+
+**The common trap.** A brand-new document committed under `blog/`, `docs/`, or anywhere that is **not** a `docs/research/*` sources-manifest bundle is a `code_change`, not a `repository_document` — exactly like the packaged `content_chapter` / `content_book` / `content_translate` flows, whose `.md` deliverables all declare `output_policy: code_change`. Reaching for `repository_document` because the phrase reads like "it's a document" confines every write to `docs/research/<task_id>/`, so the real file lands outside it and the task hard-stops instead of finishing.
 
 ## Node kinds
 

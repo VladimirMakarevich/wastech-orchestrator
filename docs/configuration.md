@@ -245,7 +245,7 @@ Common fields:
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `command` | string | provider id (`"claude"` or `"codex"`) | Executable name or path. |
+| `command` | string | provider id (`"claude"` or `"codex"`) | Executable name or path. On Windows, pin an absolute native `.exe` when npm, the Codex app, or an IDE expose conflicting installations; see [How-To §5](how-to.md#5-fix-conflicting-codex-installations-on-windows). |
 | `primary` | boolean | `false` | Marks the **global primary**. Exactly one configured provider must set it; that provider runs any flow node with no explicit `provider` and is the sole infrastructure-fallback target. It must also be in `agents.allowed`. |
 | `model` | string | `claude-sonnet-5` (claude), `gpt-5.4` (codex) | Provider model setting. The packaged template ships an explicit default per provider; set `""` to fall back to the CLI/account default. (A flow node may override it per node.) |
 | `reasoning` | string or null | `high` (both, in the packaged template) | Provider-specific reasoning effort level. Claude accepts `low`, `medium`, `high`, `xhigh`, `max` and maps it to `--effort`. Codex accepts `minimal`, `low`, `medium`, `high`, `xhigh`, plus legacy `max` mapped to `xhigh`, and passes it as `-c model_reasoning_effort="..."`. Set `null` to omit the override and use the CLI/account default. (A flow node may override it per node.) |
