@@ -1,6 +1,6 @@
 # CODX-009 — Add typed and path-safe image inputs
 
-**Status:** open
+**Status:** postponed
 **Priority:** P1
 **Source finding:** CXP-08
 **Dependencies:** CODX-008

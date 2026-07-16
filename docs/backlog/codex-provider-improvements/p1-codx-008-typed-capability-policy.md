@@ -1,6 +1,6 @@
 # CODX-008 — Add a typed Codex capability policy
 
-**Status:** open
+**Status:** postponed
 **Priority:** P1
 **Source finding:** CXP-08
 **Dependencies:** CODX-001, CODX-002

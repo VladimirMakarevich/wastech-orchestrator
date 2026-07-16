@@ -1,6 +1,6 @@
 # CODX-012 — Strengthen the Codex CLI contract preflight
 
-**Status:** open
+**Status:** postponed
 **Priority:** P2
 **Source finding:** CXP-10
 **Dependencies:** CODX-002, CODX-006, CODX-008

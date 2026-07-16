@@ -1,6 +1,6 @@
 # CODX-005 — Eliminate the raw-artifact crash window
 
-**Status:** open
+**Status:** postponed
 **Priority:** P1
 **Source finding:** CXP-05
 **Dependencies:** CODX-004

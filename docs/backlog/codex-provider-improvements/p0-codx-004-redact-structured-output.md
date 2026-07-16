@@ -1,6 +1,6 @@
 # CODX-004 — Redact structured provider output before persistence
 
-**Status:** open
+**Status:** postponed
 **Priority:** P0
 **Source finding:** CXP-04
 **Dependencies:** none
