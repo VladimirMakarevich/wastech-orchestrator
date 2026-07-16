@@ -7,10 +7,11 @@ overwrite** rule live here; the *content* (already redacted) is supplied by the 
 imports neither :mod:`~wastech_orchestrator.providers.redaction` nor any provider syntax.
 
 Per-attempt artifacts: ``request.json`` (redacted), ``stdout.log``, ``stderr.log``,
-``events.jsonl``, ``result.json``. The node's operator-facing per-run artifacts (review findings,
-rendered prompt, generic ``<node_id>.out.md``, checks reports, tool streams) are written by the flow
-nodes one level up, under :func:`node_run_dir` — the same never-overwrite, ``node_run_id``-keyed
-rule, so a re-running node keeps every pass; :func:`append_node_history` indexes them per node.
+``events.jsonl``, ``result.json``, and an optional provider capability manifest. The node's
+operator-facing per-run artifacts (review findings, rendered prompt, generic ``<node_id>.out.md``,
+checks reports, tool streams) are written by the flow nodes one level up, under
+:func:`node_run_dir` — the same never-overwrite, ``node_run_id``-keyed rule, so a re-running node
+keeps every pass; :func:`append_node_history` indexes them per node.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ STDOUT_FILENAME = "stdout.log"
 STDERR_FILENAME = "stderr.log"
 EVENTS_FILENAME = "events.jsonl"
 RESULT_FILENAME = "result.json"
+CAPABILITIES_FILENAME = "capabilities.json"
 
 # Custom tool-node (P5) artifact filenames, written under the tool run's :func:`node_run_dir`. The
 # stdout file is the one exposed downstream as ``{<node_id>_path}`` (both redacted before writing).
@@ -42,8 +44,10 @@ TOOL_STDERR_FILENAME = "stderr.txt"
 # level) keeps everything. ``result.json`` is always kept — it is the machine-readable outcome and
 # carries the exit code + normalized error class even on failure.
 _ARTIFACT_KEEP: dict[str, set[str]] = {
-    "minimal": {RESULT_FILENAME},
-    "standard": {RESULT_FILENAME, STDOUT_FILENAME, STDERR_FILENAME},
+    # The effective-capability manifest is a security audit record, not verbose provider output.
+    # Keep it at every level so lowering log retention cannot erase proof of the invocation ceiling.
+    "minimal": {RESULT_FILENAME, CAPABILITIES_FILENAME},
+    "standard": {RESULT_FILENAME, CAPABILITIES_FILENAME, STDOUT_FILENAME, STDERR_FILENAME},
 }
 
 
@@ -224,6 +228,17 @@ def write_request_artifact(paths: ArtifactPaths, redacted_request: Mapping[str, 
 def write_result_artifact(paths: ArtifactPaths, result: AgentRunResult) -> str:
     """Write the machine-readable :class:`AgentRunResult` to ``result.json``."""
     return _write_json(paths.result_path, dataclasses.asdict(result))
+
+
+def write_capabilities_artifact(paths: ArtifactPaths, manifest: Mapping[str, Any]) -> str:
+    """Write a credential-free effective-capability manifest beside one provider attempt.
+
+    The provider must construct ``manifest`` from policy decisions rather than discovered secret
+    state. This writer deliberately performs no provider-specific interpretation; it only gives the
+    audit record a stable filename and the same deterministic JSON encoding as other artifacts.
+    """
+    path = str(Path(paths.attempt_dir) / CAPABILITIES_FILENAME)
+    return _write_json(path, dict(manifest))
 
 
 def prune_attempt_artifacts(paths: ArtifactPaths, level: str) -> None:

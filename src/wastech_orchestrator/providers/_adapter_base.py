@@ -263,6 +263,16 @@ class BaseCliProvider:
                 message=f"{label} was found but '{label} --version' did not succeed",
             )
         version = _parse_version(stdout_text)
+        version_error = self._preflight_version_error(version)
+        if version_error is not None:
+            return ProviderHealth(
+                provider_id=self.id,
+                executable_found=True,
+                version=version,
+                authenticated=True,
+                supports_required_features=False,
+                message=version_error,
+            )
         capability_error = self._preflight_capability_error(env)
         if capability_error is not None:
             return ProviderHealth(
@@ -283,6 +293,15 @@ class BaseCliProvider:
             f"{self._preflight_healthy_detail(env)}",
             degraded_reasons=self._preflight_degraded_reasons(env),
         )
+
+    def _preflight_version_error(self, version: str | None) -> str | None:
+        """Subclass hook: reject a parsed CLI version before any capability or model probe.
+
+        The common adapter can extract a vendor-neutral numeric version but cannot decide which
+        release first implemented a provider's security contract. Concrete adapters return a
+        secret-free operator message when their minimum is not met; default: no minimum gate.
+        """
+        return None
 
     def _preflight_capability_error(self, env: Mapping[str, str]) -> str | None:
         """Subclass hook: a provider-specific capability probe run after the version check.

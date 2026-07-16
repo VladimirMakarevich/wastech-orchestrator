@@ -91,6 +91,9 @@ agents:
       permission_profile: "workspace-write"   # access level; codex's real isolation knob is `sandbox` above
       extra_args: []           # closed allowlist: --ignore-user-config, --strict-config, and safe
                                # -c keys only; authority-bearing options fail config validation
+                               # Every attempt ignores user/project config authority and disables
+                               # apps/MCP/browser/computer/plugins/hooks; network_access grants only
+                               # sandbox network + live web search. Auth still uses the CLI store.
 
 security:
   strict_isolation: true              # fail-closed sandbox (default). Full-access provider modes —
@@ -257,7 +260,7 @@ logging:                            # operator log verbosity + on-disk artifact 
   level: info                       # debug | info | warning | error. Persists the structured operator
                                     #   trace level; the --log-level CLI flag overrides it when given.
   artifacts: standard               # per-attempt provider files kept under logs/<id>/stages/.../<attempt>-<provider>/:
-                                    #   minimal  = result.json only (even on failure)
+                                    #   minimal  = result.json + Codex capabilities.json
                                     #   standard = + stdout.log, stderr.log  (events.jsonl is a dup of stdout)
                                     #   full     = all (request.json, events.jsonl, output-schema.json, ...)
                                     # Prompt-audit is independent (see prompt_audit). Reclaim disk with

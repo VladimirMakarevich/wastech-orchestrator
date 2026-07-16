@@ -8,10 +8,11 @@
 
 ## Problem
 
-Modern Codex features are either inherited implicitly from user configuration or reachable only
-through unsafe free-form extra_args. The orchestrator has no typed way to request, cap, audit or
-reject apps, MCP, browser/computer use, plugins, hooks, image generation, fast mode, personality,
-verbosity or native multi-agent capabilities.
+CODX-002 now places every Codex attempt behind a controlled boundary and disables ungranted
+external features. The orchestrator still has no typed way to request and globally cap apps, MCP,
+browser/computer use, plugins, hooks, image generation, fast mode, personality, verbosity, or
+native multi-agent capabilities; they can only remain at the safe baseline rather than be granted
+selectively.
 
 ## Required outcome
 

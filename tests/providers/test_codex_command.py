@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import replace
 
@@ -43,6 +44,9 @@ def test_argv_is_codex_exec_reading_from_stdin(
     assert "--cd" in argv and argv[argv.index("--cd") + 1] == "/clone"
     assert "--sandbox" in argv and argv[argv.index("--sandbox") + 1] == "workspace-write"
     assert argv.index("--ask-for-approval") < argv.index("exec")
+    assert argv.index("--ignore-user-config") > argv.index("exec")
+    assert argv.index("--ignore-rules") > argv.index("exec")
+    assert argv.index("--strict-config") > argv.index("exec")
     assert "--json" in argv
     assert argv[argv.index("--output-last-message") + 1] == LAST_MSG
 
@@ -55,12 +59,15 @@ def test_no_prompt_text_is_interpolated_into_argv(
     assert all("SECRET PROMPT CONTENT" not in token for token in argv)
 
 
-def test_network_access_off_by_default_no_sandbox_network_flag(
+def test_network_access_off_is_explicit_in_controlled_config(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # Absent a network grant, the Codex sandbox keeps its default (no network) — no -c override.
+    # The boundary records the deny explicitly instead of trusting a CLI default/user config.
     argv = _argv(codex_config, make_request())
-    assert "sandbox_workspace_write.network_access=true" not in argv
+    assert "sandbox_workspace_write.network_access=false" in _config_values(argv)
+    assert "network_proxy" in {
+        argv[index + 1] for index, token in enumerate(argv[:-1]) if token == "--disable"
+    }
 
 
 def test_web_search_disabled_when_offline(
@@ -69,23 +76,28 @@ def test_web_search_disabled_when_offline(
     # F5: an offline node must also deny the host web_search tool (backend-side, outside the sandbox
     # network toggle) so network_access=false is truly offline.
     argv = _argv(codex_config, make_request())
-    assert argv[argv.index("-c") + 1] == 'web_search="disabled"'
+    assert 'web_search="disabled"' in _config_values(argv)
 
 
-def test_web_search_not_disabled_when_network_granted(
+def test_web_search_live_only_when_network_granted(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # A networked node keeps web_search; only the sandbox network -c is added.
+    # A networked node gets the two typed grants explicitly; no user default decides the mode.
     argv = _argv(codex_config, make_request(network_access=True))
     assert 'web_search="disabled"' not in argv
-    assert "sandbox_workspace_write.network_access=true" in argv
+    assert 'web_search="live"' in _config_values(argv)
+    assert "sandbox_workspace_write.network_access=true" in _config_values(argv)
+    assert not any(
+        token == "--disable" and argv[index + 1] == "network_proxy"
+        for index, token in enumerate(argv[:-1])
+    )
 
 
 def test_network_access_enables_sandbox_network_when_granted(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
     argv = _argv(codex_config, make_request(network_access=True))
-    assert argv[argv.index("-c") + 1] == "sandbox_workspace_write.network_access=true"
+    assert "sandbox_workspace_write.network_access=true" in _config_values(argv)
     # Network is the only thing toggled — the sandbox + approval policy are unchanged.
     assert argv[argv.index("--sandbox") + 1] == "workspace-write"
     assert argv[:4] == ["codex", "--ask-for-approval", "never", "exec"]
@@ -132,15 +144,24 @@ def test_forbidden_extra_args_in_request_are_rejected(
     assert exc.value.error_class is ErrorClass.CONFIGURATION_ERROR
 
 
-def test_danger_full_access_sandbox_builds_argv(
+def test_danger_full_access_online_sandbox_builds_argv(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # Full access is operator-selectable (no absolute ban): the adapter no longer raises — it passes
-    # ``--sandbox danger-full-access`` through to the CLI. The strict_isolation preflight gate (not
-    # the adapter) is what blocks it by default — see tests/security/test_isolation.py.
+    # Full access remains operator-selectable for an explicitly online node; strict_isolation is
+    # still the normal preflight gate for the filesystem side of this operator-owned choice.
     full = replace(codex_config, sandbox="danger-full-access")
-    argv = _argv(full, make_request())
+    argv = _argv(full, make_request(network_access=True))
     assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
+
+
+def test_danger_full_access_offline_fails_before_spawn(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    full = replace(codex_config, sandbox="danger-full-access")
+    with pytest.raises(ProviderError) as exc:
+        _argv(full, make_request(network_access=False))
+    assert exc.value.error_class is ErrorClass.CONFIGURATION_ERROR
+    assert "offline" in str(exc.value)
 
 
 def test_read_only_request_uses_read_only_sandbox(
@@ -156,6 +177,45 @@ def test_safe_extra_args_are_appended(
     cfg = replace(codex_config, extra_args=("--config", 'model_verbosity="low"'))
     argv = _argv(cfg, make_request())
     assert "--config" in argv and 'model_verbosity="low"' in argv
+
+
+def test_ungranted_external_features_are_disabled_even_for_online_node(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    argv = _argv(codex_config, make_request(network_access=True))
+    disabled = {argv[index + 1] for index, token in enumerate(argv[:-1]) if token == "--disable"}
+    assert {
+        "apps",
+        "browser_use",
+        "browser_use_external",
+        "computer_use",
+        "hooks",
+        "image_generation",
+        "plugins",
+        "remote_plugin",
+        "skill_mcp_dependency_install",
+        "tool_call_mcp_elicitation",
+    } <= disabled
+    assert "apps._default.enabled=false" in _config_values(argv)
+    assert "mcp_servers={}" in _config_values(argv)
+
+
+@pytest.mark.parametrize(
+    "working_directory",
+    [
+        "/home/alice/work/repo.with.dots",
+        "/Users/Alice Smith/work/repo",
+        r"C:\Users\Alice Smith\work\repo.with.dots",
+    ],
+)
+def test_project_config_is_untrusted_with_cross_platform_safe_key_quoting(
+    codex_config: ProviderConfig,
+    make_request: Callable[..., AgentRunRequest],
+    working_directory: str,
+) -> None:
+    argv = _argv(codex_config, make_request(working_directory=working_directory))
+    quoted = json.dumps(working_directory, ensure_ascii=False)
+    assert f'projects.{quoted}.trust_level="untrusted"' in _config_values(argv)
 
 
 @pytest.mark.parametrize("session_id", [None, "019-session"])
@@ -174,6 +234,7 @@ def test_allowlisted_extra_args_work_for_fresh_and_resume(
     )
     assert "--strict-config" in argv
     assert "--ignore-user-config" in argv
+    assert "--ignore-rules" in argv
     assert 'model_reasoning_summary="auto"' in _config_values(argv)
     if session_id is None:
         assert "resume" not in argv

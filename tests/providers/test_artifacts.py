@@ -17,6 +17,7 @@ from wastech_orchestrator.providers.artifacts import (
     prune_attempt_artifacts,
     task_artifact_dir,
     task_artifact_relpath,
+    write_capabilities_artifact,
     write_request_artifact,
     write_result_artifact,
 )
@@ -99,6 +100,16 @@ def test_write_result_artifact_serializes_enums_and_error(tmp_path: Path) -> Non
     assert loaded["error"]["message"] == "did not satisfy the task"
 
 
+def test_write_capabilities_artifact_uses_stable_filename(tmp_path: Path) -> None:
+    paths = create_attempt_dir(tmp_path, "task-001", "planning", 1, "codex", node_run_id=1)
+    path = write_capabilities_artifact(paths, {"provider": "codex", "external_io": False})
+    assert Path(path).name == "capabilities.json"
+    assert json.loads(Path(path).read_text(encoding="utf-8")) == {
+        "provider": "codex",
+        "external_io": False,
+    }
+
+
 _FULL_FILE_SET = frozenset(
     {
         "request.json",
@@ -106,6 +117,7 @@ _FULL_FILE_SET = frozenset(
         "stderr.log",
         "events.jsonl",
         "result.json",
+        "capabilities.json",
         "output-schema.json",  # provider-specific extra (typed-output nodes)
     }
 )
@@ -119,18 +131,18 @@ def _seed_attempt(tmp_path: Path, task_id: str = "task-001") -> ArtifactPaths:
     return paths
 
 
-def test_prune_minimal_keeps_only_result_json(tmp_path: Path) -> None:
+def test_prune_minimal_keeps_result_and_capability_audit(tmp_path: Path) -> None:
     paths = _seed_attempt(tmp_path)
     prune_attempt_artifacts(paths, "minimal")
     survivors = {entry.name for entry in Path(paths.attempt_dir).iterdir()}
-    assert survivors == {"result.json"}
+    assert survivors == {"result.json", "capabilities.json"}
 
 
-def test_prune_standard_keeps_stdout_stderr_result(tmp_path: Path) -> None:
+def test_prune_standard_keeps_stdout_stderr_result_and_capability_audit(tmp_path: Path) -> None:
     paths = _seed_attempt(tmp_path)
     prune_attempt_artifacts(paths, "standard")
     survivors = {entry.name for entry in Path(paths.attempt_dir).iterdir()}
-    assert survivors == {"result.json", "stdout.log", "stderr.log"}
+    assert survivors == {"result.json", "capabilities.json", "stdout.log", "stderr.log"}
 
 
 @pytest.mark.parametrize("level", ["full", "weird-unknown-level"])
@@ -164,7 +176,10 @@ def test_per_run_payloads_survive_minimal_pruning(tmp_path: Path) -> None:
     findings.write_text("{}", encoding="utf-8")
     prune_attempt_artifacts(paths, "minimal")
     assert findings.is_file()  # the per-run payload is untouched
-    assert {e.name for e in Path(paths.attempt_dir).iterdir()} == {"result.json"}
+    assert {e.name for e in Path(paths.attempt_dir).iterdir()} == {
+        "result.json",
+        "capabilities.json",
+    }
 
 
 def test_append_node_history_appends_one_line_per_call(tmp_path: Path) -> None:

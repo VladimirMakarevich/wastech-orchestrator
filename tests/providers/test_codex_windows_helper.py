@@ -32,7 +32,7 @@ def _make_pkg(root: Path, *, with_helper: bool, with_manifest: bool = True) -> t
     Mirrors the real layout: ``<release>/bin/codex.exe`` with a sibling ``codex-resources`` dir
     holding the sandbox helper, and a ``codex-package.json`` naming ``resourcesDir``.
     """
-    pkg = root / "releases" / "0.142.5-x86_64-pc-windows-msvc"
+    pkg = root / "releases" / "0.144.4-x86_64-pc-windows-msvc"
     (pkg / "bin").mkdir(parents=True)
     exe = pkg / "bin" / "codex.exe"
     exe.write_text("binary", encoding="utf-8")
@@ -66,11 +66,17 @@ class _VersionAndHelpFake:
         monotonic: Any = None,
     ) -> ProcessResult:
         if "--version" in argv:
-            out = "codex-cli 0.142.5\n"
+            out = "codex-cli 0.144.4\n"
         elif "exec" in argv and "--help" in argv:
             out = "Usage: codex exec [OPTIONS]\n  --model <M>\n"
             if self._help_has_config:
-                out += "  -c, --config <key=value>\n"
+                out += (
+                    "  -c, --config <key=value>\n"
+                    "  --disable <FEATURE>\n"
+                    "  --ignore-rules\n"
+                    "  --ignore-user-config\n"
+                    "  --strict-config\n"
+                )
         else:
             out = ""
         Path(stdout_path).write_text(out, encoding="utf-8")

@@ -293,6 +293,36 @@ The config override may use split or equals syntax (`["-c", "model_verbosity=\"l
 options and config keys fail closed, even if a future CLI version recognizes them. Use the typed
 `model`, `reasoning`, `sandbox`, and flow `network_access` fields for supported behavior.
 
+#### Controlled Codex invocation (automatic)
+
+Every Codex attempt — fresh or resumed, offline or online — runs behind a fixed adapter-owned
+configuration boundary. This is not an `extra_args` extension point and cannot be changed by a
+task, flow, profile, or user config:
+
+- `--strict-config --ignore-user-config --ignore-rules` suppresses `$CODEX_HOME/config.toml`,
+  profiles, and user/project execpolicy rules while making unknown config fatal;
+- the exact target project is marked untrusted for the invocation, so its `.codex/config.toml`
+  cannot join the effective config layer;
+- apps/connectors, MCP, Browser/Computer Use, plugins, hooks, image generation, remote/delegated
+  runtimes, native memories, and equivalent external features are explicitly disabled;
+- `network_access: false` explicitly disables both sandbox network and host-side web search;
+  `network_access: true` grants only sandbox network (where the sandbox supports it) and live web
+  search. It does not grant apps, MCP, browser, computer-use, plugins, or hooks.
+
+Authentication remains in the Codex CLI's existing auth store (`CODEX_HOME`, or its normal default
+when the variable is absent). `--ignore-user-config` does not disable that auth store, and the
+orchestrator never copies, migrates, logs, or records its path. Codex CLI versions older than
+`0.144.4`, or builds missing any boundary flag, fail `preflight` before a model turn.
+
+An offline attempt with `sandbox: danger-full-access` is rejected by the command builder even when
+`strict_isolation: false`: that sandbox has no enforceable network boundary. Use a sandboxed mode,
+or grant network explicitly and own the full-access risk.
+
+Each started Codex attempt writes a credential-free `capabilities.json` beside `request.json`. It
+records the effective sandbox/network policy, suppressed config sources, and channel-by-channel
+capability booleans without auth data, tokens, connector names, or host paths. This security audit
+record is retained at every `logging.artifacts` level, including `minimal`.
+
 Example:
 
 ```yaml
@@ -318,7 +348,11 @@ by the provider command builder at launch, and re-checked on a flow node's `extr
 load. Codex errors identify the rejected option or config key but omit its value. The Codex request
 artifact likewise redacts every `extra_args` value, including values rejected before launch.
 
-**Full access — operator-selectable, gated by `strict_isolation`.** Selecting a provider's full-access mode is _not_ hard-forbidden: the orchestrator does not impose its own refusal, and the operator owns the risk. It is instead gated by [`security.strict_isolation`](#security): with the default `strict_isolation: true` it is rejected at the isolation **preflight** (the run fails before a branch is created); set `strict_isolation: false` to opt in.
+**Full access — operator-selectable, gated by `strict_isolation`.** Selecting a provider's
+full-access mode is gated by [`security.strict_isolation`](#security): with the default
+`strict_isolation: true` it is rejected at the isolation **preflight** (the run fails before a
+branch is created); set `strict_isolation: false` to opt in. The additional Codex offline rule above
+still applies: `danger-full-access` can run only when that node explicitly has network access.
 
 | Gated argument | Provider | Effect |
 | --- | --- | --- |
@@ -760,11 +794,11 @@ The `artifacts` level prunes each attempt directory at the end of a run (after t
 
 | Level | Files kept |
 | --- | --- |
-| `minimal` | `result.json` only — even on failure (it records the exit code + normalized error class). |
-| `standard` | `result.json`, `stdout.log`, `stderr.log`. (`events.jsonl` is a redacted copy of `stdout.log`, so nothing unique is lost; `request.json` is dropped.) |
-| `full` | everything: `request.json`, `stdout.log`, `stderr.log`, `events.jsonl`, `output-schema.json`, `result.json`. |
+| `minimal` | `result.json`, plus Codex `capabilities.json` — even on failure. |
+| `standard` | `result.json`, Codex `capabilities.json`, `stdout.log`, `stderr.log`. (`events.jsonl` is a redacted copy of `stdout.log`, so nothing unique is lost; `request.json` is dropped.) |
+| `full` | everything: `request.json`, Codex `capabilities.json`, `stdout.log`, `stderr.log`, `events.jsonl`, `output-schema.json`, `result.json`. |
 
-`minimal` makes remote post-mortem debugging harder (no stdout/stderr from failed runs); use it only on well-understood, frequently-run pipelines. This level governs **only** the per-attempt provider files inside each `<attempt>-<provider>/` dir. Prompt-audit is **independent** of it (governed by [`prompt_audit`](#prompt_audit)), and so is the **per-run operator-facing history** — the rendered prompt, review findings/summary, generic `<node-id>.out.md`, checks reports, and tool streams written at the `stages/<node-id>/run-<node-run-id>/` level (above the attempt dir), plus the once-only task-level slots (`plan.md`, `summary.md`, `current.diff`). None of these is ever pruned by `artifacts`; the only thing that removes them is an explicit [`worc logs clean`](operations.md) of the whole task tree. Reclaim disk from accumulated task directories that way.
+`minimal` makes remote post-mortem debugging harder (no stdout/stderr from failed runs); use it only on well-understood, frequently-run pipelines. Codex `capabilities.json` is a security audit record and is therefore retained at every level. This setting governs **only** the per-attempt provider files inside each `<attempt>-<provider>/` dir. Prompt-audit is **independent** of it (governed by [`prompt_audit`](#prompt_audit)), and so is the **per-run operator-facing history** — the rendered prompt, review findings/summary, generic `<node-id>.out.md`, checks reports, and tool streams written at the `stages/<node-id>/run-<node-run-id>/` level (above the attempt dir), plus the once-only task-level slots (`plan.md`, `summary.md`, `current.diff`). None of these is ever pruned by `artifacts`; the only thing that removes them is an explicit [`worc logs clean`](operations.md) of the whole task tree. Reclaim disk from accumulated task directories that way.
 
 ## `memory`
 

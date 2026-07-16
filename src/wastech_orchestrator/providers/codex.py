@@ -31,7 +31,7 @@ from wastech_orchestrator.providers._adapter_base import (
     ParsedEvents,
     read_text,
 )
-from wastech_orchestrator.providers.artifacts import ArtifactPaths
+from wastech_orchestrator.providers.artifacts import ArtifactPaths, write_capabilities_artifact
 from wastech_orchestrator.providers.base import (
     AgentRunRequest,
     ErrorClass,
@@ -58,6 +58,7 @@ __all__ = [
     "CodexProvider",
     "ParsedEvents",
     "build_codex_argv",
+    "build_codex_capability_manifest",
     "build_context_footer",
     "build_effective_prompt",
     "isolation_reasons",
@@ -68,6 +69,57 @@ __all__ = [
 _DEFAULT_SANDBOX = "workspace-write"
 _LAST_MESSAGE_FILENAME = "last-message.txt"
 _OUTPUT_SCHEMA_FILENAME = "output-schema.json"
+_MINIMUM_CODEX_VERSION = (0, 144, 4)
+_MINIMUM_CODEX_VERSION_TEXT = ".".join(str(part) for part in _MINIMUM_CODEX_VERSION)
+
+# These features can expose host/account state, launch external processes, delegate to another
+# runtime, or reach a service outside the workspace sandbox. They stay off for every orchestrated
+# run because today's policy has no typed per-app/MCP/browser/plugin grant. ``network_access``
+# grants only the two channels rendered separately below: sandbox network and live web search.
+_CONTROLLED_DISABLED_FEATURES: tuple[str, ...] = (
+    "apps",
+    "auth_elicitation",
+    "browser_use",
+    "browser_use_external",
+    "browser_use_full_cdp_access",
+    "chronicle",
+    "code_mode",
+    "code_mode_only",
+    "computer_use",
+    "deferred_executor",
+    "enable_fanout",
+    "enable_mcp_apps",
+    "external_migration",
+    "hooks",
+    "image_generation",
+    "imagegenext",
+    "in_app_browser",
+    "memories",
+    "multi_agent",
+    "multi_agent_v2",
+    "plugin_sharing",
+    "plugins",
+    "remote_control",
+    "remote_plugin",
+    "search_tool",
+    "skill_mcp_dependency_install",
+    "standalone_web_search",
+    "tool_call_mcp_elicitation",
+    "tool_suggest",
+    "web_search_cached",
+    "web_search_request",
+)
+
+_EXTERNAL_CAPABILITY_NAMES: tuple[str, ...] = (
+    "apps",
+    "browser",
+    "computer_use",
+    "hooks",
+    "image_generation",
+    "mcp",
+    "multi_agent",
+    "plugins",
+)
 
 # The Windows sandbox helper and its package layout. On Windows ``workspace-write``, Codex launches
 # this helper BY NAME, so the directory holding it must be discoverable on the child ``PATH``. The
@@ -210,6 +262,70 @@ def _effective_sandbox(config: ProviderConfig, request: AgentRunRequest) -> str:
     return configured
 
 
+def _controlled_config_values(request: AgentRunRequest, sandbox: str) -> tuple[str, ...]:
+    """Return the highest-precedence Codex config layer owned by the orchestrator.
+
+    The working-directory key is quoted as one TOML dotted-key segment, so Windows backslashes,
+    spaces, Unicode, and dots cannot change the key's structure. Marking that exact project
+    untrusted prevents its ``.codex/config.toml`` from joining the invocation; the fixed CLI layer
+    still repeats every security-sensitive value as defense in depth.
+    """
+    project_key = json.dumps(request.working_directory, ensure_ascii=False)
+    shell_network = request.network_access and sandbox != "read-only"
+    return (
+        f'projects.{project_key}.trust_level="untrusted"',
+        f"sandbox_workspace_write.network_access={str(shell_network).lower()}",
+        f'web_search="{"live" if request.network_access else "disabled"}"',
+        "apps._default.enabled=false",
+        "mcp_servers={}",
+        "hooks={}",
+        "skills.config=[]",
+        "tool_suggest.discoverables=[]",
+        "analytics.enabled=false",
+        "feedback.enabled=false",
+        "check_for_update_on_startup=false",
+    )
+
+
+def build_codex_capability_manifest(
+    config: ProviderConfig, request: AgentRunRequest
+) -> dict[str, Any]:
+    """Describe the effective Codex tool/config boundary without paths or credentials.
+
+    The manifest records policy, not discovered account contents: an audit reader can prove what
+    the adapter exposed without learning the operator's home directory, auth method, tokens, MCP
+    names, or installed plugins. ``external_io_disabled`` refers to agent-visible tools and sandbox
+    processes; the model transport itself necessarily remains available for a Codex turn.
+    """
+    sandbox = _effective_sandbox(config, request)
+    shell_network = request.network_access and sandbox != "read-only"
+    capabilities: dict[str, bool] = {
+        "shell_network": shell_network,
+        "web_search": request.network_access,
+    }
+    capabilities.update(dict.fromkeys(_EXTERNAL_CAPABILITY_NAMES, False))
+    return {
+        "schema_version": 1,
+        "provider": ProviderId.CODEX.value,
+        "configuration_boundary": {
+            "user_config": "ignored",
+            "project_config": "untrusted",
+            "user_and_project_rules": "ignored",
+            "strict_config": True,
+            "auth_storage": "codex_auth_store",
+            "auth_path_recorded": False,
+            "credentials_copied": False,
+        },
+        "policy": {
+            "permission_profile": request.permission_profile,
+            "sandbox": sandbox,
+            "network_access": request.network_access,
+            "external_io_disabled": not request.network_access,
+        },
+        "capabilities": capabilities,
+    }
+
+
 def build_codex_argv(
     config: ProviderConfig,
     request: AgentRunRequest,
@@ -234,6 +350,12 @@ def build_codex_argv(
         ) from None
 
     sandbox = _effective_sandbox(config, request)
+    if not request.network_access and sandbox == FORBIDDEN_SANDBOX_VALUE:
+        raise ProviderError(
+            ErrorClass.CONFIGURATION_ERROR,
+            "offline Codex invocation cannot enforce network isolation with "
+            "sandbox 'danger-full-access'; grant network explicitly or select a sandboxed mode",
+        )
 
     # Approval policy is a global Codex flag. Both Codex CLI 0.57 and current releases reject it
     # when it is placed after the ``exec`` subcommand.
@@ -242,6 +364,9 @@ def build_codex_argv(
         "--ask-for-approval",
         "never",
         "exec",
+        "--strict-config",
+        "--ignore-user-config",
+        "--ignore-rules",
     ]
     # Exec-level options belong to parent ``codex exec`` and MUST precede the optional ``resume``
     # subcommand (codex 0.142.x grammar: ``codex exec [OPTIONS] resume [SESSION_ID] [PROMPT]``).
@@ -257,17 +382,17 @@ def build_codex_argv(
         "--output-last-message",
         last_message_path,
     ]
-    if request.network_access:
-        # The flow granted network (network_policy). Codex blocks network in the sandbox by default;
-        # enable it for the workspace-write sandbox. This toggles ONLY network — the sandbox's
-        # filesystem limit and the ``never`` approval policy stay in force (the ceiling holds).
-        argv += ["-c", "sandbox_workspace_write.network_access=true"]
-    else:
-        # No network grant → also deny the host-side ``web_search`` tool. It runs on the OpenAI
-        # backend, OUTSIDE the sandbox network toggle above, so without this an "offline" node can
-        # still reach the web (F5: a network_access=false writer performed 9 web searches).
-        # Disabling the tool makes network_access=false actually offline.
-        argv += ["-c", 'web_search="disabled"']
+    # Disable every external capability for which the orchestrator has no typed grant. This is a
+    # fixed adapter layer, never ``extra_args``: online nodes receive only sandbox network + live
+    # web search from ``network_access``; apps/MCP/browser/computer/plugins/hooks remain denied.
+    for feature in _CONTROLLED_DISABLED_FEATURES:
+        argv += ["--disable", feature]
+    if not request.network_access:
+        # The managed proxy is another sandbox-network route. Keep it available only under the
+        # same typed network grant; online runs still use the explicit sandbox network setting.
+        argv += ["--disable", "network_proxy"]
+    for value in _controlled_config_values(request, sandbox):
+        argv += ["--config", value]
     if output_schema_path is not None:
         argv += ["--output-schema", output_schema_path]
     # Durable session resume (P2.2): ``codex exec [exec-options] resume <SESSION_ID>`` continues the
@@ -407,6 +532,23 @@ class CodexProvider(BaseCliProvider):
     def _executable_label(self) -> str:
         return "codex"
 
+    def _preflight_version_error(self, version: str | None) -> str | None:
+        """Require the first CLI release covered by the controlled-invocation contract."""
+        if version is None:
+            return (
+                "could not determine Codex CLI version; controlled invocation requires codex >= "
+                f"{_MINIMUM_CODEX_VERSION_TEXT}"
+            )
+        parts = tuple(int(part) for part in version.split("."))
+        normalized = parts + (0,) * (len(_MINIMUM_CODEX_VERSION) - len(parts))
+        if normalized < _MINIMUM_CODEX_VERSION:
+            return (
+                f"Codex CLI {version} is unsupported; codex >= {_MINIMUM_CODEX_VERSION_TEXT} is "
+                "required to enforce the orchestrator-controlled config/rules boundary before "
+                "model execution"
+            )
+        return None
+
     def _artifact_extra_args(self, args: Sequence[str]) -> list[str]:
         """Keep option names for audit while redacting every operator-supplied value.
 
@@ -493,24 +635,31 @@ class CodexProvider(BaseCliProvider):
         return ""
 
     def _preflight_capability_error(self, env: Mapping[str, str]) -> str | None:
-        """Verify ``codex exec`` exposes ``-c/--config`` for model config overrides.
+        """Verify ``codex exec`` exposes every controlled-invocation primitive.
 
-        Codex reasoning is set through the official ``model_reasoning_effort`` config key. Network
-        grants also use ``-c``. Probe ``codex exec --help`` and fail preflight if the subcommand
-        lacks config overrides, catching an incompatible CLI before a real node run. A probe that
-        does not cleanly exit is treated as inconclusive (no block) — the version check already
-        passed. First, on Windows, block when the sandbox helper is undiscoverable — a mid-run
-        ``orchestrator_helper_launch_failed`` is far more useful surfaced here, before the flow.
+        The adapter needs strict CLI overrides plus switches that suppress user config and both user
+        and project rules. Probe ``codex exec --help`` and fail before a real node when a vendor
+        build at an otherwise supported version lacks any primitive. A probe that does not cleanly
+        exit is inconclusive (the minimum-version gate already passed). First, on Windows, block
+        when the sandbox helper is undiscoverable — a mid-run helper failure is more useful here.
         """
         helper_error = self._windows_sandbox_helper_error(env)
         if helper_error is not None:
             return helper_error
         ok, help_text = self._probe([self._config.command, "exec", "--help"], env)
-        if ok and "--config" not in help_text and "-c" not in help_text:
+        required = (
+            "--config",
+            "--disable",
+            "--ignore-rules",
+            "--ignore-user-config",
+            "--strict-config",
+        )
+        missing = tuple(option for option in required if option not in help_text)
+        if ok and missing:
             return (
-                "codex exec does not expose -c/--config, required for "
-                "model_reasoning_effort and sandbox network overrides; upgrade Codex CLI or clear "
-                "Codex reasoning/network overrides"
+                "codex exec lacks controlled-invocation options required before model execution: "
+                + ", ".join(missing)
+                + f"; install Codex CLI >= {_MINIMUM_CODEX_VERSION_TEXT} with those capabilities"
             )
         return None
 
@@ -553,6 +702,7 @@ class CodexProvider(BaseCliProvider):
             output_schema_path=schema_path,
             last_message_path=last_message_path,
         )
+        write_capabilities_artifact(paths, build_codex_capability_manifest(self._config, request))
         return argv, (last_message_path, schema_path is not None)
 
     def _parse(

@@ -1,6 +1,6 @@
 # CODX-002 — Make offline Codex invocation fail closed
 
-**Status:** open
+**Status:** done
 **Priority:** P0
 **Source finding:** CXP-03
 **Dependencies:** CODX-001
@@ -31,17 +31,17 @@ account capabilities or project-local settings.
 
 ## Acceptance criteria
 
-- [ ] Offline argv/config uses the supported equivalent of <code>--ignore-user-config</code>.
-- [ ] Authentication continues to work through the approved auth storage path.
-- [ ] A deliberately unsafe user config cannot enable web search, MCP, apps, browser, computer-use,
+- [x] Offline argv/config uses the supported equivalent of <code>--ignore-user-config</code>.
+- [x] Authentication continues to work through the approved auth storage path.
+- [x] A deliberately unsafe user config cannot enable web search, MCP, apps, browser, computer-use,
       hooks or plugins for an offline node.
-- [ ] Project-local rules/config cannot weaken the orchestrator security ceiling.
-- [ ] The effective-capability artifact states that external I/O is disabled without exposing
+- [x] Project-local rules/config cannot weaken the orchestrator security ceiling.
+- [x] The effective-capability artifact states that external I/O is disabled without exposing
       credentials, tokens or secret paths.
-- [ ] Unsupported CLI versions fail in preflight/configuration, not during an agent turn.
-- [ ] Online nodes retain only capabilities explicitly granted by policy.
-- [ ] Fresh and resume invocations enforce the same boundary.
-- [ ] Cross-platform tests cover Windows, Linux and macOS path/config behavior.
+- [x] Unsupported CLI versions fail in preflight/configuration, not during an agent turn.
+- [x] Online nodes retain only capabilities explicitly granted by policy.
+- [x] Fresh and resume invocations enforce the same boundary.
+- [x] Cross-platform tests cover Windows, Linux and macOS path/config behavior.
 
 ## Verification
 

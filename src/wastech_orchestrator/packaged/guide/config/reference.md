@@ -185,7 +185,7 @@ A read-only layer above every flow that observes each step and writes the final 
 | Field | Type / values | Default | Meaning |
 | --- | --- | --- | --- |
 | `logging.level` | `debug` \| `info` \| `warning` \| `error` | `info` | Operator trace verbosity. The `--log-level` CLI flag overrides it. |
-| `logging.artifacts` | `minimal` \| `standard` \| `full` | `standard` | Per-attempt provider files kept: `minimal` = `result.json` only; `standard` = + stdout/stderr; `full` = everything. Reclaim disk with `worc logs clean`. |
+| `logging.artifacts` | `minimal` \| `standard` \| `full` | `standard` | Per-attempt provider files kept: `minimal` = `result.json` + Codex `capabilities.json`; `standard` = + stdout/stderr; `full` = everything. The capability security audit is never pruned. Reclaim disk with `worc logs clean`. |
 
 ## `memory` — persistent, repo-scoped memory
 
@@ -227,6 +227,11 @@ Omitting the whole block ⇒ `enabled: false` (no store, empty packets, CLI no-o
 - **Ordering constraints.** `max_total_fix_iterations >= max_fix_cycles`; `retry.max_delay_s >= retry.base_delay_s`; `decomposition.max_subtasks >= 2`.
 - **Replace-not-extend.** `allowed_environment`, `denied_read_paths`, `denied_commands` replace their defaults wholesale.
 - **Full access needs `strict_isolation: false`.** Codex `danger-full-access` / Claude `bypassPermissions` load but are rejected at preflight unless you turn `strict_isolation` off (owning the risk).
+- **Codex config is always controlled.** Every fresh/resume attempt ignores user config and
+  user/project rules, marks project config untrusted, and disables apps/MCP/browser/computer-use/
+  plugins/hooks plus equivalent external channels. `network_access` grants only sandbox network +
+  live web search. Auth still comes from the existing Codex auth store without copying it. Codex
+  `< 0.144.4` fails preflight; offline `danger-full-access` fails before spawn.
 - **Install vs dataclass defaults differ** for a few fields: `security.trust_level` (`auto` on install), `memory.enabled` (`true`), `skills.dynamic` (`false`), provider `model`/`reasoning`, and `supervisor` (pinned to the primary). The table shows both.
 - **Comments are stripped on upgrade.** `worc upgrade-config` preserves values but re-emits the file without inline comments — keep the _reason_ for an unusual value recoverable elsewhere.
 

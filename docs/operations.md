@@ -163,7 +163,10 @@ To install or pin a specific published (pre)release, append its tag to the `pipx
 The orchestrator passes child processes **only** the allowlisted environment variables (`security.allowed_environment`) and never reads or stores credentials. Set authorization up yourself, once, in the environment the orchestrator runs in:
 
 - **git / GitHub** — configure push access for `repo.url` (SSH key or credential helper) and authenticate `gh` (`gh auth login`) so `gh pr create` works. The orchestrator never embeds tokens.
-- **Codex** — sign in with the Codex CLI as usual (e.g. `codex login`); its config lives under `CODEX_HOME`, which is on the default allowlist.
+- **Codex** — sign in with the Codex CLI as usual (e.g. `codex login`). The orchestrator preserves
+  that CLI-managed auth store through `CODEX_HOME` (on the default allowlist) but ignores the
+  adjacent user config for every attempt; credentials are not copied into an orchestrator home or
+  artifact.
 - **Claude Code** — sign in with the Claude CLI (e.g. `claude login` or an API key in its own config); its config dir `CLAUDE_CONFIG_DIR` is on the default allowlist. On macOS a subscription/OAuth login keeps its token in the Keychain, which the CLI reaches via `$USER` — `USER` is on the default allowlist for this reason (drop it and the spawned CLI reports "Not logged in").
 
 Install only the providers you intend to route to. When Claude Code is unavailable, remove it from `agents.allowed` and route every agent-driven stage to Codex. GitHub CLI is required only when `git.create_pull_request: true`; disabling PR creation does not disable commit or push. When PR creation is enabled, `run`, `watch`, and `rerun` **pre-flight `gh` at startup** and exit `2` with an actionable message if it is not on `PATH`, rather than failing later inside the publish stage. On top of that hard gate there is a **non-blocking auth advisory**: if `gh` is present but not logged in, startup logs a `WARNING` ("gh present but not logged in — run `gh auth login`") and continues — it never blocks the run (a valid `GH_TOKEN`/`GITHUB_TOKEN` in the environment, or a transient probe failure, is honored, and the real `gh pr create` failure still degrades to `manual_action_required` safely). The advisory emits a fixed message only — never the raw `gh auth status` output, which would carry the account login and token scopes.
@@ -195,6 +198,9 @@ preflight: ready
 
 - Exit `0` when every allowed provider is healthy and the required isolation can be enabled; non-zero otherwise. The command-set summary is informational — an empty `command_sets` (`checks: no command sets configured (no gate)`) is valid and does not fail preflight.
 - A `FAIL` line names the problem without leaking secrets (e.g. `codex executable not found`).
+- Codex `< 0.144.4`, or a vendor build missing `--ignore-user-config`, `--ignore-rules`,
+  `--strict-config`, `--disable`, or `--config`, fails here before a model turn. Upgrade the binary
+  selected by `agents.providers.codex.command`; do not bypass the check with `extra_args`.
 - `isolation: OK (enforced)` — every provider in `agents.allowed` passed the offline isolation check (Codex sandbox, Claude permission mode) **and** `security.strict_isolation: true` (the default) is active, meaning a failed check would abort the run rather than silently downgrade isolation.
 - `isolation: OK (strict_isolation=false)` — the check still passed, but the operator has set `security.strict_isolation: false`, opting in to full-access provider modes (e.g. `danger-full-access` or `bypassPermissions`). The operator owns the risk; the gate will not abort a run if isolation cannot be enforced.
 - `isolation: FAIL` lists the offending provider/setting. With `security.strict_isolation: true` (the default) a run would **fail preflight** before any branch is created rather than silently downgrading isolation — fix the config (don't weaken the sandbox/permission profile) and re-run.
@@ -603,6 +609,7 @@ logs/
         stdout.txt / stderr.txt   # tool-node redacted streams
         <attempt>-<provider>/     # provider attempts for this run
           request.json            # redacted request (argv, no secrets)
+          capabilities.json       # Codex only: credential/path-free effective capability ceiling
           stdout.log / stderr.log # redacted process output
           events.jsonl            # redacted provider event stream
           result.json             # normalized AgentRunResult
@@ -612,6 +619,9 @@ logs/
 - **The ledger** (`completed.jsonl`): grep here first — id, title, branch, `pr_url`, `final_status`, `fix_iterations`, terminal cleanup status, and a pointer to `failure_report.json` when stuck.
 - **Why a task is stuck**: open `stuck.md` (human-readable) / `failure_report.json` (machine). They record which fix loop and which limit was exhausted, all counter values, the last failing check output, the last blocking review findings, and the final diff — plus, for a decomposed task, the failing subtask `k` of `n` and the SHAs already committed.
 - **Audit completeness**: SQLite records every `node_runs` and `provider_attempts` row (primary **and** any fallback), each artifact is registered with a **sha256 checksum**, and every commit/push/PR carries an idempotency fingerprint so a restart never double-publishes.
+- **Codex capability audit**: `capabilities.json` states whether agent external I/O is disabled and
+  records shell/web/apps/MCP/browser/computer/plugins/hooks grants as booleans. It never records the
+  auth-store path or credentials and survives even `logging.artifacts: minimal` pruning.
 - **Node run vs. attempt**: `run-<node-run-id>` is reserved in SQLite before the provider starts and changes for every repeated node invocation, including each fixing cycle and recovery run. `<attempt>` starts at `1` inside that run and increments only for provider fallback.
 - **Per-run history is preserved, never overwritten**: every operator-facing artifact a node produces (the rendered prompt, review `findings.json`/`summary.md`, the generic `<node-id>.out.md`, checks reports, tool streams) is written under that run's `stages/<node-id>/run-<node-run-id>/` dir, next to its provider attempts — so a `review → fixing → testing → review` loop keeps each pass's findings instead of clobbering the last. Read `stages/<node-id>/history.jsonl` for the chronological index of a node's runs (one line per run: `run_id`, `outcome`, `findings` count, `dir`). This history is exempt from `logging.artifacts` pruning and is removed only by an explicit [`worc logs clean`](operations.md) of the whole task tree.
 - **No secrets anywhere**: `request.json`, the stdout/stderr/events logs, diffs, SQLite rows, the ledger, and the failure report are all redacted; `denied_read_paths` (`.env`, `secrets/**`) are excluded from agent reads and their values are scrubbed from any sink.

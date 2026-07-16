@@ -128,7 +128,19 @@ A transport-neutral `Notifier` provides terminal notifications and one durable q
 
 ### 4.9 Security policy
 
-`argv` only (no shell interpolation of user strings); the agent runs in `workspace-write` sandbox with `on-request` approvals; only allowlisted environment variables reach child processes; `denied_read_paths` and `denied_commands` are enforced; front matter is scanned for injection-shaped tokens (belt-and-braces over the file-path-only context guarantee); `strict_isolation` fails preflight if isolation cannot be enforced. No task and no `extra_args` can weaken any of this; the flow ceilings are validated fatally before any task runs.
+`argv` only (no shell interpolation of user strings); the agent runs in a bounded sandbox; only
+allowlisted environment variables reach child processes; `denied_read_paths` and
+`denied_commands` are enforced; front matter is scanned for injection-shaped tokens
+(belt-and-braces over the file-path-only context guarantee); `strict_isolation` fails preflight if
+isolation cannot be enforced. No task and no `extra_args` can weaken any of this; the flow ceilings
+are validated fatally before any task runs.
+
+Every Codex fresh/resume attempt also receives an adapter-owned config boundary: user config and
+user/project rules are ignored, the project config is untrusted, and apps/MCP/browser/computer-use/
+plugins/hooks plus equivalent external channels are disabled. `network_access` grants only sandbox
+network and live web search; absent the grant both are explicitly off. The existing Codex auth store
+remains available without copying credentials. Unsupported CLI versions/capability flags fail
+preflight, and each attempt keeps a credential/path-free `capabilities.json` audit manifest.
 
 ---
 

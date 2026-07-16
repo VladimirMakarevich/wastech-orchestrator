@@ -76,7 +76,10 @@ def test_successful_run(
     attempt = (
         tmp_path / "logs" / "task-001" / "stages" / "planning" / "run-000001" / f"1-{provider_name}"
     )
-    for name in ("request.json", "stdout.log", "stderr.log", "events.jsonl", "result.json"):
+    expected = ["request.json", "stdout.log", "stderr.log", "events.jsonl", "result.json"]
+    if provider_name == "codex":
+        expected.append("capabilities.json")
+    for name in expected:
         assert (attempt / name).exists(), name
 
 

@@ -10,7 +10,7 @@
 
 The only place in the system that knows coding-agent CLI syntax. `base.py` defines the provider-agnostic contract (`AgentProvider` and its data structures); `claude.py` and `codex.py` are the two adapters that implement it, each translating an `AgentRunRequest` into an argv **list** for its CLI, launching the process via the shared subprocess runner, parsing the structured event stream into a normalized `AgentRunResult`, and mapping infrastructure failures to a normalized `ErrorClass`. `errors.py` holds the shared classification taxonomy and the secret-free messages.
 
-The two adapters' shared infrastructure spine — the attempt-directory lifecycle, the heartbeat-wrapped launch, the redact-every-sink discipline, durable-session scrubbing, and the request/result artifact shapes — lives in `_adapter_base.py` as `BaseCliProvider` (audit #7, 2026-06-22). `ClaudeCodeProvider`/`CodexProvider` subclass it and supply only what genuinely differs through four CLI-aware hooks: `_build_argv` (argv + any aux files), `_parse` (event stream → `ParsedEvents`), `_signatures` (the stderr-signature table), and `_executable_label` (the `<cli>` name in preflight messages). **`_adapter_base.py` deliberately names no CLI flag, subcommand, or sandbox value** — that boundary keeps all CLI syntax in the two adapters, preserving the architecture invariant. `build_context_footer`/`build_effective_prompt`/`ParsedEvents` are defined there and re-exported by each adapter for callers/tests.
+The two adapters' shared infrastructure spine — the attempt-directory lifecycle, the heartbeat-wrapped launch, the redact-every-sink discipline, durable-session scrubbing, and common request/result artifacts — lives in `_adapter_base.py` as `BaseCliProvider`. `ClaudeCodeProvider`/`CodexProvider` subclass it and supply only what genuinely differs through CLI-aware hooks: argv/aux-file construction, event parsing, stderr signatures, executable label, and provider-specific version/capability preflight. **`_adapter_base.py` deliberately names no CLI flag, subcommand, sandbox value, or vendor version** — that boundary keeps all CLI syntax in the adapters. `build_context_footer`/`build_effective_prompt`/`ParsedEvents` are defined there and re-exported for callers/tests.
 
 The adapters honour a hard contract: no fallback, no git, no state-machine changes, no shell interpolation of user strings, and no secret in any artifact ([claude.py:8-17](../../../src/wastech_orchestrator/providers/claude.py#L8), [codex.py:8-14](../../../src/wastech_orchestrator/providers/codex.py#L8)). Fallback, retries, and provider selection belong to the router ([B17](B17-agent-router-and-fallback.md)).
 
@@ -25,7 +25,11 @@ The adapters honour a hard contract: no fallback, no git, no state-machine chang
 - `AgentRunResult` ([base.py:126](../../../src/wastech_orchestrator/providers/base.py#L126)), `ProviderHealth` ([base.py:78](../../../src/wastech_orchestrator/providers/base.py#L78)), `NormalizedError` ([base.py:120](../../../src/wastech_orchestrator/providers/base.py#L120)), `ProviderError` ([base.py:144](../../../src/wastech_orchestrator/providers/base.py#L144)).
 - `AgentProvider` ([base.py:160](../../../src/wastech_orchestrator/providers/base.py#L160)) — the runtime-checkable `Protocol` with `preflight()` and `run()`.
 - `ClaudeCodeProvider` ([claude.py:398](../../../src/wastech_orchestrator/providers/claude.py#L398)) and `build_claude_argv` ([claude.py:258](../../../src/wastech_orchestrator/providers/claude.py#L258)), `map_permission` ([claude.py:212](../../../src/wastech_orchestrator/providers/claude.py#L212)), `parse_stream_json` ([claude.py:345](../../../src/wastech_orchestrator/providers/claude.py#L345)), `isolation_reasons` ([claude.py:324](../../../src/wastech_orchestrator/providers/claude.py#L324)).
-- `CodexProvider` ([codex.py:310](../../../src/wastech_orchestrator/providers/codex.py#L310)) and `build_codex_argv` ([codex.py:160](../../../src/wastech_orchestrator/providers/codex.py#L160)), `parse_events` ([codex.py:252](../../../src/wastech_orchestrator/providers/codex.py#L252)), `isolation_reasons` ([codex.py:235](../../../src/wastech_orchestrator/providers/codex.py#L235)).
+- `CodexProvider` ([codex.py:519](../../../src/wastech_orchestrator/providers/codex.py#L519)),
+  `build_codex_argv` ([codex.py:330](../../../src/wastech_orchestrator/providers/codex.py#L330)),
+  `build_codex_capability_manifest`
+  ([codex.py:291](../../../src/wastech_orchestrator/providers/codex.py#L291)), `parse_events`, and
+  `isolation_reasons`.
 - `classify` ([errors.py:63](../../../src/wastech_orchestrator/providers/errors.py#L63)), `make_signatures` ([errors.py:52](../../../src/wastech_orchestrator/providers/errors.py#L52)), `message_for` ([errors.py:39](../../../src/wastech_orchestrator/providers/errors.py#L39)).
 
 ## Behavior
@@ -45,16 +49,43 @@ Instruction-file loading is **automatic context, not a tool call**, so the `--al
 
 **Caveat — host-global context leak.** Because the env allowlist forwards `HOME` (and `CODEX_HOME` / `CLAUDE_CONFIG_DIR` when present in the parent env — see [B25](B25-security-policy.md)), the spawned CLI also reads the host operator's **global** memory (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`), not only the target repo's files. That host-global context sits outside the orchestrator's reproducibility boundary — two operators running the same task can give their agents different global instructions. Authoring/managing repo-scoped stubs (and any isolation of the global layer) is the deferred `agent_instructions:` feature. Note this is only the **read-only instruction-file** channel: the separate durable **native project memory** store (which the agent could otherwise write to under the config dir) is confined by the config-dir tool denial described below (F37).
 
-### `AgentRunRequest`: context as paths, `network_access` toggles only the network
+### `AgentRunRequest`: context as paths, `network_access` is the only external grant
 
 Every context input is a path field — `task_path`, `plan_path`, `diff_path`, `check_artifacts_path`, `review_artifacts_path`, `human_input_path`, and the advisory read-only `skill_reference_paths` ([base.py:97-105](../../../src/wastech_orchestrator/providers/base.py#L97)). `network_access` defaults to `False` ([base.py:116](../../../src/wastech_orchestrator/providers/base.py#L116)): the flow grants network only by declaring a `network_policy` (P3.2). When granted, the adapter maps it onto its own sandbox and **only** the network — never the filesystem sandbox/approvals:
 
 - Claude appends the web tools `("WebFetch", "WebSearch")` to `--allowedTools`; absent the grant they are omitted, so a headless run cannot reach the network through them, and the permission mode is unchanged ([claude.py:282-286](../../../src/wastech_orchestrator/providers/claude.py#L282)). Verified by `test_network_access_off_by_default_no_web_tools` / `test_network_access_allows_web_tools_when_granted`.
-- Codex appends `-c sandbox_workspace_write.network_access=true` when the grant is present; **without** the grant it instead appends `-c web_search="disabled"`, denying the host-side `web_search` tool (which runs on the OpenAI backend, outside the sandbox network toggle) so an offline node is truly offline. Either way the `--sandbox` value and the `never` approval policy stay in force ([codex.py:255-266](../../../src/wastech_orchestrator/providers/codex.py#L255)). The flow validator rejects Codex `workspace-write` agent nodes with resolved network access before launch; read-only Codex nodes keep a read-only sandbox. Verified by `test_network_access_*` / `test_web_search_*` and `test_read_only_request_uses_read_only_sandbox` in `test_codex_command.py`.
+- Codex renders both values explicitly: offline means sandbox network `false` +
+  `web_search="disabled"`; online means sandbox network where the effective sandbox supports it +
+  `web_search="live"`. Apps/MCP/browser/computer-use/plugins/hooks and equivalent channels stay
+  disabled in both cases ([codex.py:266-288](../../../src/wastech_orchestrator/providers/codex.py#L266),
+  [codex.py:330-417](../../../src/wastech_orchestrator/providers/codex.py#L330)). A read-only
+  sandbox never gains shell network; it may still receive live web search from the explicit grant.
+  Offline `danger-full-access` raises `CONFIGURATION_ERROR` before spawn because its shell network
+  cannot be confined. Command snapshot tests cover all four decisions.
+
+### Codex controlled config boundary and capability audit
+
+Every fresh/resume Codex argv includes `--strict-config --ignore-user-config --ignore-rules` before
+the optional `resume` subcommand. The fixed CLI config layer marks the exact project untrusted,
+explicitly sets network/web state, and disables apps, MCP, Browser/Computer Use, plugins, hooks,
+image generation, native memories, delegation/remote runtimes, and related discovery/install
+channels ([codex.py:266-288](../../../src/wastech_orchestrator/providers/codex.py#L266),
+[codex.py:365-417](../../../src/wastech_orchestrator/providers/codex.py#L365)). The harmless,
+closed `extra_args` extension is appended only after that boundary and cannot overwrite any
+authority-bearing key.
+
+The child retains the allowlisted `CODEX_HOME`/`HOME`, so Codex reads its existing CLI-managed auth
+store; `--ignore-user-config` separates that auth from `$CODEX_HOME/config.toml`. The orchestrator
+does not copy or inspect credentials. Before launch the provider writes a policy-derived,
+credential/path-free `capabilities.json` ([codex.py:291-327](../../../src/wastech_orchestrator/providers/codex.py#L291),
+[codex.py:691-703](../../../src/wastech_orchestrator/providers/codex.py#L691)); B20 retains it at
+every artifact level. Hostile-home tests seed config/profile/MCP/rules/hooks/plugins and verify the
+fixed boundary plus unchanged auth-home forwarding; cross-platform cases cover Linux, macOS, and
+Windows path strings.
 
 ### Permission/sandbox mapping; forbidden values raise `CONFIGURATION_ERROR`
 
-Claude maps a profile to a `(permission_mode, allowed_tools)` pair: `read-only → ("plan", Read/Glob/Grep)`, `workspace-write → ("acceptEdits", Read/Glob/Grep/Edit/Write/Bash)` ([claude.py:82-85](../../../src/wastech_orchestrator/providers/claude.py#L82)). `map_permission` raises `ProviderError(CONFIGURATION_ERROR)` for the forbidden full-access profile (`danger-full-access`) and for any unknown profile ([claude.py:219-226](../../../src/wastech_orchestrator/providers/claude.py#L219)), and the adapter never selects `bypassPermissions` itself. Codex resolves an effective sandbox from provider config plus the request profile without relaxing a read-only node to workspace-write. Its combined provider/node `extra_args` pass the closed typed parser immediately before argv construction: only `--ignore-user-config`, `--strict-config`, and allowlisted presentation/reasoning `-c` keys survive, rendered canonically. All path/sandbox/profile/feature/tool/network/rule/environment selectors fail with `CONFIGURATION_ERROR`; Codex full access is available only through the typed `sandbox` field and remains gated by `strict_isolation`. Claude argument behavior is unchanged. `CONFIGURATION_ERROR` is not in `FALLBACK_ELIGIBLE`, so the router never falls past it.
+Claude maps a profile to a `(permission_mode, allowed_tools)` pair: `read-only → ("plan", Read/Glob/Grep)`, `workspace-write → ("acceptEdits", Read/Glob/Grep/Edit/Write/Bash)` ([claude.py:82-85](../../../src/wastech_orchestrator/providers/claude.py#L82)). `map_permission` raises `ProviderError(CONFIGURATION_ERROR)` for the forbidden full-access profile (`danger-full-access`) and for any unknown profile ([claude.py:219-226](../../../src/wastech_orchestrator/providers/claude.py#L219)), and the adapter never selects `bypassPermissions` itself. Codex resolves an effective sandbox from provider config plus the request profile without relaxing a read-only node to workspace-write. Its combined provider/node `extra_args` pass the closed typed parser immediately before argv construction: only `--ignore-user-config`, `--strict-config`, and allowlisted presentation/reasoning `-c` keys survive, rendered canonically. All path/sandbox/profile/feature/tool/network/rule/environment selectors fail with `CONFIGURATION_ERROR`; Codex full access is available only through the typed `sandbox` field and remains gated by `strict_isolation`, while the adapter additionally refuses it for an offline attempt. Claude argument behavior is unchanged. `CONFIGURATION_ERROR` is not in `FALLBACK_ELIGIBLE`, so the router never falls past it.
 
 ### Tool-level denials (Claude only)
 
@@ -97,7 +128,7 @@ A subscription/session limit does **not** always reach stderr, though: the Claud
 
 ### `preflight` and `isolation_reasons`
 
-`preflight` launches `<cli> --version` in a throwaway temp dir with the allowlisted env: a `launch_error` → `executable_found=False`; a timeout or non-zero exit → found-but-not-ready; otherwise the version is regex-parsed and reported ([claude.py:422-463](../../../src/wastech_orchestrator/providers/claude.py#L422), [codex.py:334-375](../../../src/wastech_orchestrator/providers/codex.py#L334)). After the version check it runs a subclass capability probe (`_preflight_capability_error`, default none — `_adapter_base.py` stays CLI-blind via the `_probe` helper): **Codex** probes `codex exec --help` and reports `supports_required_features=False` if the help lacks `-c/--config`, because reasoning is passed through the official `model_reasoning_effort` config key and network grants also use `-c`. Authentication is best-effort/offline in P2 (`authenticated` is set from the version-probe outcome, not a real auth check). `isolation_reasons` is pure and offline (no CLI launched) and mirrors what the argv builder enforces, so it can drive the `strict_isolation` preflight in [B25](B25-security-policy.md): Claude requires a concrete non-`bypassPermissions` mode and no isolation-weakening `extra_args` ([claude.py:324-342](../../../src/wastech_orchestrator/providers/claude.py#L324)); Codex requires a non-`danger-full-access` sandbox and safe `extra_args` ([codex.py:235-249](../../../src/wastech_orchestrator/providers/codex.py#L235)).
+`preflight` launches `<cli> --version` in a throwaway temp dir with the allowlisted env: a `launch_error` → `executable_found=False`; a timeout or non-zero exit → found-but-not-ready; otherwise the version is regex-parsed and reported. The shared spine then invokes the provider-specific minimum-version hook before capability probes ([\_adapter_base.py:259-315](../../../src/wastech_orchestrator/providers/_adapter_base.py#L259)). Codex rejects `< 0.144.4`, then probes `codex exec --help` for `--config`, `--disable`, `--ignore-rules`, `--ignore-user-config`, and `--strict-config`; a missing primitive makes `supports_required_features=False` before any model turn ([codex.py:532-549](../../../src/wastech_orchestrator/providers/codex.py#L532), [codex.py:634-673](../../../src/wastech_orchestrator/providers/codex.py#L634)). Authentication is still best-effort/offline (`authenticated` is set from the version-probe outcome, not a real auth check). `isolation_reasons` remains pure and offline for the separate `strict_isolation` gate.
 
 ## Invariants & guarantees
 
@@ -107,7 +138,11 @@ A subscription/session limit does **not** always reach stderr, though: the Claud
 - Only the allowlisted env reaches the child process ([claude.py:491](../../../src/wastech_orchestrator/providers/claude.py#L491), [B25](B25-security-policy.md)).
 - No secret lands in any artifact: every sink is redacted before writing, and the raw session id only ever reaches state.db ([claude.py:518-525](../../../src/wastech_orchestrator/providers/claude.py#L518), [B21](B21-secret-redaction.md)).
 - An infrastructure failure raises `ProviderError`; a clean run that did not satisfy the task returns `AgentRunResult(status=failed, error=TASK_FAILURE)` (never an exception). `TASK_FAILURE`, `SESSION_UNAVAILABLE`, `INVALID_INVOCATION`, and `MODEL_REQUEST_INVALID` are not in `FALLBACK_ELIGIBLE` ([base.py:49-71](../../../src/wastech_orchestrator/providers/base.py#L49)); a 400 (bad request / unsupported schema) therefore fails loud rather than being misread as a generic `PROCESS_CRASHED` and burning the fallback provider.
-- `network_access` toggles only the network, never the filesystem sandbox/approvals ([claude.py:282-286](../../../src/wastech_orchestrator/providers/claude.py#L282), [codex.py:207-211](../../../src/wastech_orchestrator/providers/codex.py#L207)).
+- `network_access` toggles only network/web capabilities, never the filesystem sandbox/approvals
+  ([claude.py:282-286](../../../src/wastech_orchestrator/providers/claude.py#L282),
+  [codex.py:383-420](../../../src/wastech_orchestrator/providers/codex.py#L383)).
+- Codex user/project config authority and external capabilities are fixed by the adapter for fresh
+  and resume; `capabilities.json` records the effective policy without credentials or host paths.
 
 ## Dependencies
 
@@ -118,7 +153,7 @@ A subscription/session limit does **not** always reach stderr, though: the Claud
 
 - `tests/providers/test_claude_command.py`, `tests/providers/test_codex_command.py` — argv shape, stdin-only prompt, permission/sandbox mapping, forbidden `extra_args` / profiles / sandbox, weaker-override rejection, network toggle, model/reasoning/session/output-schema flags, denied-tool patterns.
 - `tests/providers/test_claude_parsing.py`, `tests/providers/test_codex_parsing.py` — terminal-event detection, success/failure subtype/status, stray-line tolerance, `INVALID_OUTPUT` on missing terminal event, Codex `thread.started` and last-message override.
-- `tests/providers/test_claude_run.py`, `tests/providers/test_codex_run.py` — full `run()`/`preflight()` with an injected process runner: success, quality failure, timeout, missing binary, rate-limit signature, invalid output, config-error-before-launch, stdin delivery, artifact redaction, and (Codex) raw-session-id redaction.
+- `tests/providers/test_claude_run.py`, `tests/providers/test_codex_run.py` — full `run()`/`preflight()` with an injected process runner: success, quality failure, timeout, missing binary, rate-limit signature, invalid output, config-error-before-launch, stdin delivery, artifact redaction, and (Codex) raw-session-id redaction, hostile-home isolation, capability manifests, minimum version, fresh/resume parity, and cross-platform auth paths.
 - `tests/providers/test_errors.py` — `classify` precedence table and the secret-free message guarantee.
 - `tests/providers/test_prompt_argv_isolation.py` — argv is independent of (hostile) prompt text for both adapters.
 - `tests/providers/test_redaction_sinks.py` — every written sink (stdout/events/stderr/request) is redacted of both token-shaped and file-only secrets; Claude `Read(...)` deny patterns reach argv.

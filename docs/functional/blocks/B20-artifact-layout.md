@@ -6,7 +6,7 @@
 
 ## Responsibility
 
-Single owner of the on-disk artifact layout and the **"logs are never overwritten"** invariant. It derives a deterministic directory and file paths for every attempt of a node run, and serializes two of the per-attempt files — `request.json` and `result.json` — as UTF-8 JSON ([artifacts.py:112](../../../src/wastech_orchestrator/providers/artifacts.py#L112), [artifacts.py:117](../../../src/wastech_orchestrator/providers/artifacts.py#L117)). It is the source of truth callers join onto rather than reconstructing path segments themselves ([artifacts.py:46](../../../src/wastech_orchestrator/providers/artifacts.py#L46)).
+Single owner of the on-disk artifact layout and the **"logs are never overwritten"** invariant. It derives deterministic paths for every attempt and serializes `request.json`, `result.json`, and the provider-supplied `capabilities.json` mapping as UTF-8 JSON ([artifacts.py:222-240](../../../src/wastech_orchestrator/providers/artifacts.py#L222)). It is the source of truth callers join onto rather than reconstructing path segments themselves.
 
 The module is deliberately content-blind and provider-agnostic: it imports neither the redaction module nor any provider syntax — it imports only `AgentRunResult` from `providers/base` for result serialization ([artifacts.py:23](../../../src/wastech_orchestrator/providers/artifacts.py#L23)). It does **not** import the `Stage` enum: a node run is identified by its flow `node_id` (a string), not a `Stage`. Redaction (B21) is the caller's job; the request passed in is already redacted ([artifacts.py:112-113](../../../src/wastech_orchestrator/providers/artifacts.py#L112)). The stream files (`stdout.log`, `stderr.log`, `events.jsonl`) and the optional `output-schema.json` are written directly by the providers (B18) using the paths this module hands back, not by this module.
 
@@ -21,6 +21,7 @@ The module is deliberately content-blind and provider-agnostic: it imports neith
 - `archive_task_artifacts(artifacts_root, task_id, attempt)` ([artifacts.py:56](../../../src/wastech_orchestrator/providers/artifacts.py#L56)) — moves a prior attempt's artifacts into `attempt-<N>/` on rerun; returns the archive dir or `None`.
 - `write_request_artifact(paths, redacted_request)` ([artifacts.py:112](../../../src/wastech_orchestrator/providers/artifacts.py#L112)) — writes the already-redacted request mapping to `request.json`.
 - `write_result_artifact(paths, result)` ([artifacts.py:117](../../../src/wastech_orchestrator/providers/artifacts.py#L117)) — writes `dataclasses.asdict(result)` to `result.json`.
+- `write_capabilities_artifact(paths, manifest)` ([artifacts.py:232](../../../src/wastech_orchestrator/providers/artifacts.py#L232)) — writes a provider-constructed, credential-free effective-capability mapping to `capabilities.json`.
 - `sha256_file(path)` ([artifacts.py:128](../../../src/wastech_orchestrator/providers/artifacts.py#L128)) — hex SHA-256 of a file's bytes, read in 64 KiB chunks ([artifacts.py:25](../../../src/wastech_orchestrator/providers/artifacts.py#L25)), for the SQLite artifact registry (B07).
 
 ## Behavior
@@ -43,12 +44,16 @@ The files inside one attempt directory:
 | --- | --- | --- |
 | `request.json` | `REQUEST_FILENAME` ([artifacts.py:27](../../../src/wastech_orchestrator/providers/artifacts.py#L27)) | B20 `write_request_artifact` |
 | `result.json` | `RESULT_FILENAME` ([artifacts.py:31](../../../src/wastech_orchestrator/providers/artifacts.py#L31)) | B20 `write_result_artifact` |
+| `capabilities.json` (Codex) | `CAPABILITIES_FILENAME` ([artifacts.py:35](../../../src/wastech_orchestrator/providers/artifacts.py#L35)) | B20 `write_capabilities_artifact`; content from B18 |
 | `stdout.log` | `STDOUT_FILENAME` ([artifacts.py:28](../../../src/wastech_orchestrator/providers/artifacts.py#L28)) | B18 provider ([codex.py:434](../../../src/wastech_orchestrator/providers/codex.py#L434)) |
 | `stderr.log` | `STDERR_FILENAME` ([artifacts.py:29](../../../src/wastech_orchestrator/providers/artifacts.py#L29)) | B18 provider ([codex.py:435](../../../src/wastech_orchestrator/providers/codex.py#L435)) |
 | `events.jsonl` | `EVENTS_FILENAME` ([artifacts.py:30](../../../src/wastech_orchestrator/providers/artifacts.py#L30)) | B18 provider ([codex.py:438](../../../src/wastech_orchestrator/providers/codex.py#L438)) |
 | `output-schema.json` (optional) | not in `ArtifactPaths` — joined onto `attempt_dir` | B18 provider ([codex.py:520](../../../src/wastech_orchestrator/providers/codex.py#L520), [claude.py:601](../../../src/wastech_orchestrator/providers/claude.py#L601)) |
 
-`ArtifactPaths` names only the five fixed paths ([artifacts.py:38-43](../../../src/wastech_orchestrator/providers/artifacts.py#L38)). `output-schema.json` is **not** an `ArtifactPaths` field — the provider writes it (when `request.output_schema` is present) by joining the filename onto `paths.attempt_dir` ([codex.py:520](../../../src/wastech_orchestrator/providers/codex.py#L520)); Codex also joins a `last-message.txt` onto `attempt_dir` the same way ([codex.py:388](../../../src/wastech_orchestrator/providers/codex.py#L388)).
+`ArtifactPaths` names the six fixed common paths; `capabilities.json`, `output-schema.json`, and
+`last-message.txt` are joined onto `attempt_dir` because they are provider-specific/optional.
+Codex constructs the capability manifest only from effective policy booleans and labels — never
+from auth/config discovery — before handing it to this content-blind writer (B18).
 
 ### Per-run operator-facing artifacts
 
@@ -78,7 +83,9 @@ This extends the never-overwrite rule from the per-attempt provider dirs to ever
 
 ### Serialization
 
-Both writers funnel through `_write_json`, which dumps `indent=2, ensure_ascii=False, sort_keys=False` and appends a trailing newline, UTF-8 ([artifacts.py:122-125](../../../src/wastech_orchestrator/providers/artifacts.py#L122)). `write_request_artifact` copies the mapping (`dict(redacted_request)`) ([artifacts.py:114](../../../src/wastech_orchestrator/providers/artifacts.py#L114)); `write_result_artifact` flattens the dataclass with `dataclasses.asdict`, which serializes nested enums and the `NormalizedError` ([artifacts.py:119](../../../src/wastech_orchestrator/providers/artifacts.py#L119)) — the test confirms `status`, `node_id`, and `error.error_class` land in `result.json` (the enum fields as their `.value` strings, `node_id` as the plain string) ([test_artifacts.py:88-91](../../../tests/providers/test_artifacts.py#L88)).
+All three writers funnel through `_write_json`, which dumps deterministic indented UTF-8 JSON with
+a trailing newline. Request/capability writers copy their mappings; the result writer flattens the
+dataclass with `dataclasses.asdict`.
 
 ### What this module does NOT do (caller boundary)
 
@@ -92,10 +99,12 @@ Both writers funnel through `_write_json`, which dumps `indent=2, ensure_ascii=F
 - **Provider/redaction-agnostic** — imports only `providers/base` ([artifacts.py:23](../../../src/wastech_orchestrator/providers/artifacts.py#L23)); content arrives already redacted.
 - **Archiving is non-destructive and idempotent** — `rename` (move) not delete; existing archive entries are preserved ([artifacts.py:73-76](../../../src/wastech_orchestrator/providers/artifacts.py#L73)).
 - **Per-run history survives `logging.artifacts` pruning by placement** — `prune_attempt_artifacts` iterates only the leaf `<attempt>-<provider>/` dir it is handed, so the operator-facing payloads written at the `run-<id>/` level (one dir up) are never touched by a `minimal`/`standard` level. The only thing that removes this history is an explicit `worc logs clean` of the whole task tree; no code change to pruning is needed.
+- **The capability security audit survives every retention level** — both `minimal` and `standard`
+  keep `capabilities.json` beside `result.json` ([artifacts.py:45-49](../../../src/wastech_orchestrator/providers/artifacts.py#L45)); only verbose request/events/schema files are pruned.
 
 ## Dependencies
 
-- **Uses:** B18 (`providers/base` — `AgentRunResult` for result serialization; the `node_id` segment is the request's flow node id, not a `Stage`). **Used by:** B18 (Codex/Claude providers call `create_attempt_dir` and the two writers, and join `output-schema.json`/`last-message.txt` onto `attempt_dir`), B24 (check execution joins `task_artifact_dir(...) / "checks"` and writes `<run-id>.log` with its own never-overwrite scheme — [check_runner.py:114](../../../src/wastech_orchestrator/check_runner.py#L114), [check_runner.py:184-188](../../../src/wastech_orchestrator/check_runner.py#L184)), B07 (the artifact row registers `sha256_file(path)` — [orchestrator.py:1779-1780](../../../src/wastech_orchestrator/core/orchestrator.py#L1779)), B06 (drives `archive_task_artifacts` on rerun and joins `task_artifact_dir` for plan/summary/subtasks/HITL). B21 supplies the redaction/normalization the providers apply before calling the writers.
+- **Uses:** B18 (`providers/base` — `AgentRunResult` for result serialization; the `node_id` segment is the request's flow node id, not a `Stage`). **Used by:** B18 (providers call `create_attempt_dir` and request/result writers; Codex also calls the capability writer), B24 (check execution), B07 (artifact checksums), and B06 (rerun archival/task artifact roots). B21 supplies request/result redaction; the Codex capability manifest is secret-free by construction.
 
 ## Tests
 

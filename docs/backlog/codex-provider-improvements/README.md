@@ -27,7 +27,7 @@ priority.
 | Priority | ID | Task | Source finding | Depends on |
 | --- | --- | --- | --- | --- |
 | P0 | CODX-001 | [Close authority-expanding Codex extra_args](p0-codx-001-close-extra-args-security-bypasses.md) | CXP-02 | — |
-| P0 | CODX-002 | [Make offline Codex invocation fail closed](p0-codx-002-controlled-offline-invocation.md) | CXP-03 | CODX-001 |
+| P0 | CODX-002 | [Make offline Codex invocation fail closed](p0-codx-002-controlled-offline-invocation.md) (**done**) | CXP-03 | CODX-001 |
 | P0 | CODX-003 | [Enforce denied commands and denied read paths](p0-codx-003-enforce-deny-policy.md) | CXP-01 | CODX-001, CODX-002 |
 | P0 | CODX-004 | [Redact structured provider output before persistence](p0-codx-004-redact-structured-output.md) | CXP-04 | — |
 | P1 | CODX-005 | [Eliminate the raw-artifact crash window](p1-codx-005-eliminate-raw-artifact-crash-window.md) | CXP-05 | CODX-004 |

@@ -33,7 +33,22 @@ The common detector remains the Claude/check defense-in-depth hinge. Codex adds 
 
 `build_child_env` returns a fresh dict containing exactly the allowlisted keys that exist in the parent, in allowlist order; a key absent from the parent is skipped, never added as empty ([env.py:30](../../../src/wastech_orchestrator/security/env.py#L30)). The parent defaults to the live `os.environ` only when no `parent_env` is passed ([env.py:29](../../../src/wastech_orchestrator/security/env.py#L29)). The child therefore **never** inherits the parent's full environment, so no secret or token (`OPENAI_API_KEY`, `GITHUB_TOKEN`, …) is forwarded implicitly — credentials are configured outside the orchestrator. Every external launch builds its env this way: the orchestrator's run env ([orchestrator.py:910](../../../src/wastech_orchestrator/core/orchestrator.py#L910)), the git manager ([git_manager.py:188](../../../src/wastech_orchestrator/git_manager.py#L188)), and the check runner ([check_runner.py:124](../../../src/wastech_orchestrator/check_runner.py#L124)).
 
-The allowlist intentionally **does** forward `HOME` (and `CODEX_HOME` / `CLAUDE_CONFIG_DIR` when present) so the spawned CLIs find their own auth/config. A side effect is that a coding agent also reads the host operator's **global** instruction files (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`) in addition to the target repo's `AGENTS.md` / `CLAUDE.md` — see the instruction-file discovery note in [B18](B18-agent-providers.md). This is host-global context, outside the per-task reproducibility boundary; isolating it is part of the deferred `agent_instructions:` work.
+The allowlist intentionally **does** forward `HOME` (and `CODEX_HOME` / `CLAUDE_CONFIG_DIR` when present) so the spawned CLIs find their own auth stores. Codex separates auth from config with its fixed `--ignore-user-config` boundary; the auth path is neither copied nor recorded. Instruction-file discovery is a separate CLI behavior: the agents may still read global `~/.claude/CLAUDE.md` / `~/.codex/AGENTS.md` plus target-repo instructions — see B18. That prompt context cannot change the adapter's fixed argv/config capability ceiling.
+
+### Controlled Codex invocation (provider-owned enforcement)
+
+Codex `extra_args` validation prevents operator/flow arguments from expanding authority, while the
+provider itself establishes the positive effective policy. `_controlled_config_values` marks the
+working project untrusted and explicitly sets sandbox network, web search, empty MCP/hooks/skills
+surfaces, app defaults, and startup side channels ([codex.py:266-288](../../../src/wastech_orchestrator/providers/codex.py#L266)). `build_codex_argv` adds strict config, ignores user config and user/project rules, and disables every external feature without a typed grant before fresh or resume execution ([codex.py:330-417](../../../src/wastech_orchestrator/providers/codex.py#L330)). The only grant is `AgentRunRequest.network_access`, which enables shell network where supported plus live web search; apps/MCP/browser/computer-use/plugins/hooks remain false.
+
+The provider rejects an offline `danger-full-access` attempt before spawn and writes a
+credential/path-free `capabilities.json` for every started attempt
+([codex.py:291-327](../../../src/wastech_orchestrator/providers/codex.py#L291),
+[codex.py:691-703](../../../src/wastech_orchestrator/providers/codex.py#L691)). Preflight requires
+Codex `>= 0.144.4` and all boundary primitives before any model turn. This runtime enforcement is
+adapter-owned because only the provider may know Codex CLI syntax; the core/security modules remain
+provider-agnostic.
 
 ### Front-matter injection scan (belt-and-braces over a structural guarantee)
 
@@ -53,7 +68,7 @@ The pipeline (B06) calls `check_isolation` only when `security.strict_isolation`
 
 ### Network policy (a security control, mapped in the adapters)
 
-Network access is **off by default** and is granted only by a flow declaring `network_policy` (B29). The runners reduce that declaration to a single boolean on the request — `network_access = (doc.network_policy is not None)` ([agent.py:385](../../../src/wastech_orchestrator/core/flow/nodes/agent.py#L385), [evaluator.py:188](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py#L188)), defaulting `False` on the request itself ([base.py:116](../../../src/wastech_orchestrator/providers/base.py#L116)). The adapters (B18) map that boolean and **only** that boolean: Codex appends `-c sandbox_workspace_write.network_access=true`, leaving the sandbox's filesystem limit and the `never` approval policy in force ([codex.py:207-211](../../../src/wastech_orchestrator/providers/codex.py#L207)); Claude appends the web tools `("WebFetch", "WebSearch")` to `--allowedTools`, never relaxing the filesystem permission mode ([claude.py:89](../../../src/wastech_orchestrator/providers/claude.py#L89), [:282-286](../../../src/wastech_orchestrator/providers/claude.py#L282)). Absent the grant, both leave the network unreachable for a headless run. So network is a toggle layered on top of the isolation ceiling — it can never widen the filesystem sandbox or the approvals ceiling.
+Network access is **off by default** and is granted only by a flow declaring `network_policy` (B29). The runners reduce that declaration to a single boolean on the request, defaulting `False`. Codex always renders the effective state: without the grant it sets sandbox network `false` and web search `disabled`; with the grant it enables sandbox network where supported and live web search, while every other external channel remains disabled ([codex.py:266-288](../../../src/wastech_orchestrator/providers/codex.py#L266), [codex.py:384-417](../../../src/wastech_orchestrator/providers/codex.py#L384)). Claude appends the web tools `("WebFetch", "WebSearch")` to `--allowedTools`, never relaxing the filesystem permission mode. Network is therefore a toggle layered on top of the isolation ceiling — it cannot widen filesystem permissions, approvals, or unrelated external capabilities.
 
 ## Invariants & guarantees
 
@@ -63,7 +78,7 @@ Network access is **off by default** and is granted only by a flow declaring `ne
 - **Reject, don't sanitize:** suspect front-matter values are refused, not rewritten ([injection.py:15-16](../../../src/wastech_orchestrator/security/injection.py#L15)).
 - **Fail-closed:** an unknown profile in `is_same_or_stricter` → `False` ([profiles.py:32-33](../../../src/wastech_orchestrator/security/profiles.py#L32)); an unknown provider/profile in isolation is skipped/flagged, never assumed safe; `strict_isolation` failure raises before any branch is created ([orchestrator.py:856](../../../src/wastech_orchestrator/core/orchestrator.py#L856)).
 - **Offline & pure:** none of the five primitives launch a process or mutate state; `check_isolation` only queries adapter rules ([isolation.py:32-37](../../../src/wastech_orchestrator/security/isolation.py#L32)).
-- **Network toggles only network:** the `network_policy`→`network_access` boolean adds sandbox network / web tools but never the filesystem sandbox or approvals ceiling ([codex.py:209-211](../../../src/wastech_orchestrator/providers/codex.py#L209), [claude.py:285-286](../../../src/wastech_orchestrator/providers/claude.py#L285)).
+- **Network toggles only network:** the `network_policy`→`network_access` boolean adds sandbox network / web tools but never the filesystem sandbox, approvals ceiling, apps, MCP, browser, computer-use, plugins, or hooks ([codex.py:384-417](../../../src/wastech_orchestrator/providers/codex.py#L384)).
 
 ## Dependencies
 
