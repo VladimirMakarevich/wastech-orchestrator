@@ -228,16 +228,16 @@ def test_install_writes_config_and_guide_into_worc(
     assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
     worc = git_repo.clone / ".worc"
     # The generated config and the installed guide bundle land under .worc/. The guide includes the
-    # task docs, copy-ready `worc-task` / `worc-deco-task` skills, and the config helper subtree
-    # with `worc-config`. (The built-in flows and their per-node prompt templates also land there —
-    # see the dedicated test below.)
+    # task docs, the copy-ready `worc-task` / `worc-deco-task` / `worc-config` skills gathered under
+    # a single `guide/skills/` folder, and the config helper subtree. (The built-in flows and their
+    # per-node prompt templates also land there — see the dedicated test below.)
     assert (worc / "guide" / "README.md").is_file()
     assert (worc / "guide" / "tasks" / "task-minimal.md").is_file()
     assert (worc / "guide" / "tasks" / "task-rich.md").is_file()
-    assert (worc / "guide" / "tasks" / "skills" / "worc-task" / "SKILL.md").is_file()
-    assert (worc / "guide" / "tasks" / "skills" / "worc-deco-task" / "SKILL.md").is_file()
+    assert (worc / "guide" / "skills" / "worc-task" / "SKILL.md").is_file()
+    assert (worc / "guide" / "skills" / "worc-deco-task" / "SKILL.md").is_file()
     assert (worc / "guide" / "config" / "README.md").is_file()
-    assert (worc / "guide" / "config" / "skills" / "worc-config" / "SKILL.md").is_file()
+    assert (worc / "guide" / "skills" / "worc-config" / "SKILL.md").is_file()
     assert (worc / "config.yaml").is_file()
 
 
@@ -319,16 +319,19 @@ def test_install_delivers_packaged_tools(git_repo: Any, monkeypatch: pytest.Monk
     assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
     tools = git_repo.clone / ".worc" / "tools"
     packaged_tools = BUILTIN_FLOWS_DIR.parent / "tools"
-    # The prose-gate executable + its Windows launcher are delivered, byte-for-byte from source.
-    for name in ("check_journey", "check_journey.cmd"):
+    # The prose-gate + size-floor executables and their Windows launchers are delivered,
+    # byte-for-byte from source.
+    for name in ("check_journey", "check_journey.cmd", "check_length", "check_length.cmd"):
         assert (tools / name).read_bytes() == (packaged_tools / name).read_bytes()
-    # On POSIX the delivered script must carry +x (a wheel / write_bytes drops the bit) so the
-    # registry resolves it; on Windows executability is by suffix (the .cmd), so the bit is moot.
+    # On POSIX the delivered scripts must carry +x (a wheel / write_bytes drops the bit) so the
+    # registry resolves them; on Windows executability is by suffix (the .cmd), so the bit is moot.
     if os.name != "nt":
         assert os.access(tools / "check_journey", os.X_OK)
-    # And it resolves through the very registry the runtime + preflight use, on this OS.
-    expected = "check_journey.cmd" if os.name == "nt" else "check_journey"
-    assert ToolRegistry(tools).resolve("check_journey").name == expected
+        assert os.access(tools / "check_length", os.X_OK)
+    # And each resolves through the very registry the runtime + preflight use, on this OS.
+    for base in ("check_journey", "check_length"):
+        expected = f"{base}.cmd" if os.name == "nt" else base
+        assert ToolRegistry(tools).resolve(base).name == expected
 
 
 def test_reconfigure_backs_up_and_refreshes_tools(

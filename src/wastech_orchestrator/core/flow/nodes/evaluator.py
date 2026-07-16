@@ -1,8 +1,10 @@
 """Evaluator node runner (P1.3/P2.1) — the shared in-flow evaluator primitive.
 
 Runs the evaluator's ``role_file`` prompt (read-only) through the router and maps its structured
-verdict to an engine outcome: a blocking finding (severity ``high``/``critical``/``blocking``) ->
-``rework``, a clean (or medium-only, advisory) verdict -> ``accept``. The findings schema
+verdict to an engine outcome: a gating finding -> ``rework``, an otherwise-clean verdict ->
+``accept``. A finding gates when its severity is at least as severe as the node's ``gate_severity``
+(default ``high`` — blocks on ``high``/``critical``/``blocking``, leaving ``medium``/``low``
+advisory; lower it to make a content critic block on any finding). The findings schema
 (``output_schema``, F19) is mandatory: a run whose ``structured_output`` does not carry a parseable
 ``findings`` array never silently accepts — it degrades straight to ``manual`` (fail-closed), the
 same as a provider that could not run the node at all. A **blocking** evaluator gates
@@ -36,17 +38,29 @@ from wastech_orchestrator.core.flow.nodes.base import (
 )
 from wastech_orchestrator.core.flow.observability import record_run_observability
 from wastech_orchestrator.core.flow.prompt import RoleFileError, read_role_file, render_role_prompt
-from wastech_orchestrator.core.flow.schema import EvaluatorNode, FlowNode
+from wastech_orchestrator.core.flow.schema import SEVERITY_ORDER, EvaluatorNode, FlowNode
 from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
 from wastech_orchestrator.providers.base import AgentRunRequest, build_effective_prompt
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import EvaluationRow, NodeLineageRow, NodeRunRow
 
-#: Raw severity tokens that make a finding blocking (drive ``rework``) and normalize to ``high`` on
-#: the typed ``Finding``. ``medium``/``moderate`` are advisory only (non-blocking) — this matches
-#: both the routing in ``_is_blocking`` and the typed ``Finding.blocking`` flag (one definition).
+#: Raw severity tokens that normalize to ``high`` / ``medium`` on the typed ``Finding`` (the
+#: audit-trail projection in ``_to_finding``). This is the severity-*naming* map, NOT the routing
+#: gate: whether a finding drives ``rework`` is decided by ``_is_blocking`` comparing its rank
+#: against the node's configurable ``gate_severity`` (ranked by :data:`SEVERITY_ORDER`).
 _BLOCKING_SEVERITIES = frozenset({"blocking", "critical", "high"})
 _MEDIUM_SEVERITIES = frozenset({"medium", "moderate"})
+
+
+def _severity_rank(token: str) -> int:
+    """Rank a raw severity token by :data:`SEVERITY_ORDER` (lower = more severe).
+
+    An unknown or absent token ranks as the least-severe floor (``len(SEVERITY_ORDER)``), so a
+    malformed severity never accidentally gates.
+    """
+    t = token.lower()
+    return SEVERITY_ORDER.index(t) if t in SEVERITY_ORDER else len(SEVERITY_ORDER)
+
 
 #: F19 — the mandatory structured findings schema every in-flow evaluator role (review / verifier /
 #: critic / operator-defined) is prompted to return. A role-prompt asking for findings "in prose"
@@ -71,7 +85,7 @@ _FINDINGS_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "severity": {
                         "type": "string",
-                        "enum": ["blocking", "critical", "high", "medium", "low"],
+                        "enum": list(SEVERITY_ORDER),
                     },
                     "path": {"type": ["string", "null"]},
                     "what": {"type": "string"},
@@ -203,7 +217,8 @@ class EvaluatorNodeRunner:
             return "accept"  # dead for routing: run() raises EvaluatorInfraError before using this
         if raw_findings is None:
             return "manual"  # dead for routing (run() raises); an accurate audit-trail label only
-        if not any(self._is_blocking(f) for f in raw_findings):
+        gate_rank = _severity_rank(node.gate_severity)
+        if not any(self._is_blocking(f, gate_rank) for f in raw_findings):
             return "accept"
         if node.blocking:
             # A blocking evaluator gates every time it finds a blocking issue; the engine's
@@ -375,10 +390,15 @@ class EvaluatorNodeRunner:
         return [dict(f) for f in raw if isinstance(f, Mapping)]
 
     @staticmethod
-    def _is_blocking(finding: Mapping[str, Any]) -> bool:
+    def _is_blocking(finding: Mapping[str, Any], gate_rank: int) -> bool:
+        """A finding gates iff it is explicitly ``blocking`` or at least as severe as the gate.
+
+        ``gate_rank`` is the node's ``gate_severity`` rank (``_severity_rank``); a finding blocks
+        when its own severity rank is ``<= gate_rank`` (lower rank = more severe).
+        """
         if finding.get("blocking") is True:
             return True
-        return str(finding.get("severity", "")).lower() in _BLOCKING_SEVERITIES
+        return _severity_rank(str(finding.get("severity", ""))) <= gate_rank
 
 
 def _to_finding(raw: Mapping[str, Any]) -> Finding:

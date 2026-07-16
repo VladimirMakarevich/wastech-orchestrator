@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""check_journey — deterministic prose-constraint gate for the Wastime Journey content flows.
+"""check_journey — deterministic prose-constraint gate for the content_chapter / content_book /
+content_translate flows.
 
 This is a **delivered operator tool**, not orchestrator code: `worc install` copies it into
 `<repo>/.worc/tools/`, and the packaged content flows reference it as a `tool` node
@@ -10,6 +11,14 @@ and it writes nothing to the repository. It reports back through its **exit code
 
 Because it is a self-contained script (any interpreter, no third-party imports) it stays portable:
 POSIX runs it via its shebang + `+x` bit; Windows runs the sibling `check_journey.cmd` wrapper.
+
+Its rule set is deliberately opinionated, not a generic prose linter: it encodes one project's
+long-form reflective book format — required `Purpose`/`Emotional point` framing per part, a fixed
+heading hierarchy, a small set of banned service-label headings and AI-tell phrases (tuned for
+Russian-language drafts), and EN/book per-page length bands. Treat every value under "domain
+constants (tunable)" below as a starting point: fork this delivered copy under your own
+`.worc/tools/check_journey` and edit the constants to match your own book's structure, language,
+and house style.
 
 Scope = only changed chapters: the changed `.md` files are read from the run's diff artifact
 (`paths.diff_path`); if that is absent, from the `.md` files named in the task file

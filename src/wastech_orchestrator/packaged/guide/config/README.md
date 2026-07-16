@@ -4,7 +4,7 @@
 
 - **[reference.md](reference.md)** — the complete field reference: for the meaning, allowed values, default, and constraints of _every_ `config.yaml` field, read this. This README is the how-to; `reference.md` is the what-each-field-does.
 - **[best-practices.md](best-practices.md)** — safe defaults, how to structure checks, and what mistakes to avoid.
-- **[skills/worc-config/SKILL.md](skills/worc-config/SKILL.md)** — a copy-ready skill that can interview the operator and draft a config.
+- **[../skills/worc-config/SKILL.md](../skills/worc-config/SKILL.md)** — a copy-ready skill that can interview the operator and draft a config.
 
 ## Start from the generated file
 

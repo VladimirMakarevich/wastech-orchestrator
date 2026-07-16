@@ -7,4 +7,4 @@ Flag where the English:
 - flattens the tone — English that is correct but lifeless where the RU had warmth or wit;
 - carries an AI cliché or a manufactured antithesis in English.
 
-Return findings in the output schema: `path` = the file, `what` = the adaptation problem, `fix` = a concrete direction. Severity blocking/critical/high = must fix before publish; medium/low = advice. A faithful, natural adaptation returns an empty `findings` array. Read only; do not edit.
+Return findings in the output schema: `path` = the file, `what` = the adaptation problem, `fix` = a concrete direction. Assign each an honest `severity` (blocking / critical / high / medium / low) reflecting how serious the problem is — the flow decides which severities block publishing, so do not inflate or downplay to force an outcome. A faithful, natural adaptation returns an empty `findings` array. Read only; do not edit.

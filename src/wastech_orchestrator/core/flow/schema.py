@@ -22,6 +22,14 @@ from wastech_orchestrator.core.flow.contracts import (
 )
 from wastech_orchestrator.providers.base import ProviderId
 
+#: Finding severities, most-severe first. Index = rank (lower index = more severe). The single
+#: source of truth for the evaluator findings output-schema enum, the ``gate_severity`` comparison,
+#: and ``gate_severity`` validation (see ``nodes/evaluator.py`` and ``snapshot.py``).
+SEVERITY_ORDER: tuple[str, ...] = ("blocking", "critical", "high", "medium", "low")
+#: Default evaluator gate: block on ``high`` and above (``high``/``critical``/``blocking``), leaving
+#: ``medium``/``low`` advisory — the historical, hardcoded behavior.
+DEFAULT_GATE_SEVERITY = "high"
+
 
 @dataclass(frozen=True, slots=True)
 class WhenPredicate:
@@ -92,6 +100,12 @@ class EvaluatorNode:
     #: true — a blocking evaluator reworks until the flow's named-loop budget (e.g. ``review_fix``)
     #: is spent, then parks to ``manual`` (see ``EvaluatorRunner._verdict``).
     max_rework_per_stage: int = 1
+    #: Minimum finding severity that gates (drives ``rework``): a finding whose severity is at least
+    #: this severe blocks; less-severe findings are advisory. One of :data:`SEVERITY_ORDER`. Default
+    #: ``high`` = block on high/critical/blocking (historical behavior). Lower it (e.g. ``low``) to
+    #: make a content critic block on any finding. Orthogonal to ``blocking`` (which decides whether
+    #: the evaluator gates at all): this decides *which* severities count.
+    gate_severity: str = DEFAULT_GATE_SEVERITY
     #: which provider runs this evaluator; None → the config's global primary (PRE.1).
     provider: ProviderId | None = None
     model: str | None = None
@@ -212,6 +226,7 @@ class EvaluatorDefaults:
     session_scope: SessionScope = SessionScope.FRESH_DISPOSABLE
     permission_profile: PermissionProfile = PermissionProfile.READ_ONLY
     max_rework_per_stage: int = 1
+    gate_severity: str = DEFAULT_GATE_SEVERITY
 
 
 @dataclass(frozen=True, slots=True)
