@@ -3,7 +3,7 @@
 - **Основание:** прогон `blog-review-happy-in-my-misfortunes-4`
 - **Связанный отчёт:** [полный анализ токенов](2026-07-16-blog-review-happy-in-my-misfortunes-4-token-analysis.md)
 - **Зона изменений:** `SupervisorConfig`, constant supervisor layer, post-node hook, summary finalization
-- **Статус:** proposal, код и конфигурация пока не изменены. Этот документ — трекер отдельной задачи «оптимизация supervisor»; сопутствующая задача по нормализации usage вынесена в [normalized-usage-accounting.md](../backlog/normalized-usage-accounting.md).
+- **Статус:** proposal, код и конфигурация пока не изменены. Этот документ — трекер отдельной задачи «оптимизация supervisor»; P0-срез оформлен как отдельный backlog-документ [supervisor-finalize-packet-and-cadence.md](../backlog/supervisor-finalize-packet-and-cadence.md) (packet → fresh finalize → пропуск tool/checks), а сопутствующая задача по нормализации usage вынесена в [normalized-usage-accounting.md](../backlog/normalized-usage-accounting.md).
 
 ---
 
