@@ -1,4 +1,40 @@
-Implement the task in the working tree, following the plan. Make a minimal focused change. If a human_input context file records a denied dangerous change, remove or safely rework that change.
+Implement the assigned task in the working tree by following the plan. Make the smallest focused change that satisfies it — do not refactor unrelated code, widen scope, or add abstractions the task does not require. Match the existing style and idioms of the module you touch; do not reformat or re-idiom surrounding code you were not asked to change. If a `human_input` context file records a denied dangerous change, remove or safely rework that change before you finish.
+
+## Rules Of Record
+
+If the repository documents its own conventions for AI agents or contributors — a `CLAUDE.md`/`AGENTS.md`, a `CONTRIBUTING` doc, or a rules directory such as `.agents/rules/` — those govern this change and override anything below on conflict. When the task file, its acceptance criteria, and those conventions disagree on load-bearing behavior, follow the more specific source and surface the contradiction explicitly instead of guessing.
+
+## Tests
+
+Add or extend tests alongside the change, scaled to its risk, following the project's existing test conventions and locations:
+
+- A test for the behavior or algorithm you added or changed.
+- A focused test for the scenario when the behavior is user-visible.
+- Keep tests small, local, and deterministic so a failure points at one behavior rather than a whole snapshot.
+
+## Verify
+
+Before finishing, run whatever check commands this project defines for the code you touched (build, type-check, lint, test) and confirm they pass — catching a failure now saves a full review/fix round trip later.
+
+## Authoring And Documentation Deliverables
+
+Some tasks ship prose, not code — a skill/agent doc, a README section, a doc page — and its correctness is whether every claim it makes about THIS product is true. Build/type/test checks do not read prose: they pass while the text is wrong, so they are not verification for this class of work.
+
+- Treat every command, flag, option value, output field, and path the document asserts as a claim to verify against the authoritative source before you write it — the actual CLI wiring, the public API/types/contracts, and any protocol or tool definitions the project exposes. Quote the source; do not recall it.
+- Bind each flag or option to the command that owns it — a flag on one command is not evidence another accepts it.
+- Describe behavior at its real edges, not the happy path alone; keep it host-neutral and portable exactly as the task requires.
+- Verify the deliverable the way its consumer will: parse it through the real validator/loader when one exists, resolve every referenced surface against the current tree. If a claim cannot be verified against source, do not make it.
+
+## Comments And Rationale
+
+- Treat comments as part of the deliverable: all new code must be documented where it is introduced, not left for a later cleanup pass.
+- Follow the rule `why, not what`: write comments to explain why the code exists, why a constraint matters, or why a specific shape was chosen.
+- Prefer rationale, invariants, tradeoffs, cross-platform notes, and bug-prevention context over narrating what the syntax already says.
+- Do not add comments that merely restate names, types, assignments, loops, or conditionals.
+- When behavior is non-obvious or surprising, capture that reason next to the relevant code path.
+- If a block is hard to justify with a short why-comment, simplify or restructure it until the intent and rationale are clear.
+
+## Additional Project Context
 
 {?memory_path}A brief of repository memory relevant to this task — distilled lessons, conventions, known-fragile areas, and entity cards for the files you will touch — is at {memory_path}. Read it before editing and let it guide the change; treat it as advisory and verify each point against the current code (it can be stale).{/memory_path}
 

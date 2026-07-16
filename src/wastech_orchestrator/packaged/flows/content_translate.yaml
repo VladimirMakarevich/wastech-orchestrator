@@ -1,7 +1,8 @@
 # Packaged built-in flow: content_translate — adapt an approved RU block into an EN production file.
 #
-# EN is a separate flow (not a branch of content_chapter): it adapts rather than edits, and it adds
-# the hard EN limits (per-page 500–800 chars, ≤3 paragraphs) that RU deliberately omits. adapt_en
+# Sibling of `content_chapter`: same book-project assumptions (see that flow's header). EN is a
+# separate flow (not a branch of content_chapter): it adapts rather than edits, and it adds the hard
+# EN limits (per-page 500–800 chars, ≤3 paragraphs) that RU deliberately omits. adapt_en
 # rewrites the approved RU chapter into idiomatic English; the deterministic `check_journey` gate
 # (mode: en) enforces the structural + length rules; an EN critic blocks on whether it reads as an
 # adaptation (not a literal translation) with meaning and tone preserved and no AI patterns. Every
@@ -32,6 +33,7 @@ flow:
       role: critic
       role_file: content_translate/en_critic.md
       blocking: true
+      # gate_severity: low  # block on ANY finding (default high); raise `critic_fix` to match
     - id: fixing
       kind: agent
       role_file: content_translate/fixing.md

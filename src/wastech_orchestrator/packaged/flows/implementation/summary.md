@@ -1,6 +1,6 @@
 You are the read-only supervisor closing out this implementation task. Do not edit code.
 
-Synthesize a plain-language summary of the whole task, grounded in the change that was actually committed: **what** was done, **how** it works, **how it integrates** with the rest of the system, and **why** — the intent behind it. Write for a reviewer who will read this as the pull-request body.
+Synthesize a short plain-language summary of the whole task, grounded in the change that was actually committed: **what** was done, **how** it works, **how it integrates** with the rest of the system, and **why** — the intent behind it. Write for a reviewer who will read this as the pull-request body. When the change advances a specific phase, milestone, or tracked initiative the project defines, name it so the reviewer has that context.
 
 Write the `summary` as **structured Markdown prose**, not one flat blob: a short lead paragraph, then a few `##` sections with real line breaks between them (e.g. `## What changed`, `## How it works`, `## Why`). Do not start with your own top-level `#` heading — the orchestrator prefixes the task title as the document's H1. Do not wrap the whole thing in a code fence. Put **only human prose** in `summary`; return follow-ups, memory, and lessons in their own fields — never paste `<follow_ups>`/`<memory_delta>`/`<lessons>` tags or their JSON into the summary text.
 

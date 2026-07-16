@@ -1,0 +1,128 @@
+# Packaged built-in flow: blog_article — the authorial blog-post writer.
+#
+# Writes ONE new authorial blog article on a chosen topic, from scratch, into a new .md file the
+# task names. An internal scout reads the task and the project's own rules of record (tone-of-voice,
+# content-writing conventions, signature phrases, values), if it defines them, and turns the topic
+# into an angle; a networked read-only researcher gathers external facts and perspectives; the writer
+# drafts the article in the author's voice; a tone/style critic blocks on quality; a final language
+# polish tightens the prose before publish. Every rework routes through `fixing`, which re-enters the
+# tone/style gate so a fix can never silently regress the voice. Fact-checking any product/brand the
+# article happens to mention is deliberately left to the human owner, not gated here.
+#
+# output_policy: code_change — the deliverable is a brand-new document, not a code change.
+# publishing: documentation_pull_request is the ceiling; run the content repo with
+# `git.create_pull_request: false` (install `--no-create-pr`) to land the article as a local commit
+# with no PR. network_policy: research grants the external-research node (read-only) web access;
+# every writing node stays offline and workspace-write, so a Codex writer with network is never
+# constructed. The one deterministic gate is `check_length` (a minimum chars/paragraphs floor for the
+# drafted article, delivered to `.worc/tools/` by `worc install`); there is no structural gate like
+# `check_journey` here — a free-form blog post has no fixed structure, so all remaining quality is
+# evaluator-driven.
+#
+# The supervisor is a constant layer above the flow (not a node); `emit_follow_ups` is deliberately
+# omitted (a code-oriented capability). The blocking evaluator is capped by its named-loop budget
+# (`style_fix`).
+#
+# ----------------------------------------------------------------------------------------------------
+# Per-node tuning (ALL fields below are OPTIONAL — omit one to inherit the default). Field use found
+# it worth running the authorial nodes (`draft`, `polish`, `fixing`) on a different provider/model
+# than the flow-wide default, at a high reasoning effort for the from-scratch draft and a lower one
+# for the bounded polish/fix passes that resume its editing lineage — a resumed session should change
+# effort, not the model underneath it. Commented out below (not pinned), so the flow runs on whatever
+# provider/model an operator already has configured; uncomment to adopt this tuning.
+#   agent + evaluator nodes:
+#     provider:  codex | claude            which agent runs the node (∈ agents.allowed); default: global primary
+#     model:     <model id>                overrides agents.providers.<provider>.model for THIS node
+#     reasoning: minimal|low|medium|high|xhigh|max  default: agents.providers.<provider>.reasoning
+# ----------------------------------------------------------------------------------------------------
+flow:
+  name: blog_article
+  task_type: blog_article
+  permission_ceiling: workspace-write
+  output_policy: code_change
+  publishing: documentation_pull_request
+  network_policy: research
+
+  defaults:
+    evaluator: { session_scope: fresh_disposable, permission_profile: read-only }
+
+  nodes:
+    - id: context
+      kind: agent
+      role_file: blog_article/context.md
+      session_scope: fresh_disposable
+      permission_profile: read-only
+      network_access: false
+    - id: research
+      kind: agent
+      role_file: blog_article/research.md
+      session_scope: fresh_disposable
+      permission_profile: read-only
+      network_access: true
+    - id: draft
+      kind: agent
+      role_file: blog_article/draft.md
+      session_scope: editing_lineage
+      permission_profile: workspace-write
+      network_access: false
+      # The from-scratch authorial draft benefits from a high reasoning effort (uncomment to pin):
+      # provider: codex
+      # model: gpt-5.4
+      # reasoning: xhigh
+    - id: length
+      kind: tool
+      tool: check_length
+      # Minimum-size floor for the drafted article: at least min_chars characters and min_paragraphs
+      # paragraphs (a longer piece always passes). Flat scalars only — tune per flow, never per task.
+      args: { min_chars: 3500, min_paragraphs: 13 }
+    - id: tone_style
+      kind: evaluator
+      role: critic
+      role_file: blog_article/tone_style.md
+      blocking: true
+      # gate_severity: low  # block on ANY finding (default high); raise `style_fix` to match
+    - id: polish
+      kind: agent
+      role_file: blog_article/polish.md
+      session_scope: editing_lineage
+      lineage_affinity: draft
+      permission_profile: workspace-write
+      network_access: false
+      # Language polish is a bounded pass, not fresh reasoning, so it runs at medium regardless of
+      # the flow-wide default — less wall-time on the tail, no quality loss. It resumes draft's
+      # editing lineage, so it MUST carry the same model/provider if you pin one on draft above.
+      reasoning: medium
+      # provider: codex
+      # model: gpt-5.4
+    - id: fixing
+      kind: agent
+      role_file: blog_article/fixing.md
+      session_scope: editing_lineage
+      lineage_affinity: draft
+      permission_profile: workspace-write
+      network_access: false
+      # Same lineage-affinity note as polish above (uncomment to match draft's pin):
+      # provider: codex
+      # model: gpt-5.4
+    - id: publish
+      kind: publish
+      policy: documentation_pull_request
+
+  edges:
+    - { from: context, to: research }
+    - { from: research, to: draft }
+    - { from: draft, to: length }
+    - { from: length, to: tone_style, outcome: pass }
+    - { from: length, to: fixing, outcome: fail, loop: length_fix }
+    - { from: tone_style, to: polish, outcome: accept }
+    - { from: tone_style, to: fixing, outcome: rework, loop: style_fix }
+    - { from: fixing, to: length } # every fix re-enters the deterministic length gate first
+    - { from: polish, to: publish }
+
+  budgets:
+    length_fix: 5
+    style_fix: 10
+
+  supervisor:
+    role_file: blog_article/supervisor.md
+    finalize_role_file: blog_article/summary.md

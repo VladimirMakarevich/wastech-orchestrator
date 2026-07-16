@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""check_length — deterministic minimum-size floor for drafted long-form content.
+
+This is a **delivered operator tool**, not orchestrator code: `worc install` copies it into
+`<repo>/.worc/tools/`, and any flow can reference it as a `tool` node (`tool: check_length`) — it is
+a generic reusable size floor, not tied to any one flow. Today the `blog_article` /
+`blog_article_revise` content flows gate a drafted or revised document on it before handing off to a
+quality critic, but any flow's `tool:` node can reuse it the same way. It runs out-of-process under
+the tool-node ceiling — it receives only an allowlisted path context + the flow's `args` on **stdin
+(JSON)**, never secrets or the environment, and it writes nothing to the repository. It reports back
+through its **exit code** (0 = pass, non-0 = fail) and a JSON object on stdout whose `outcome` is
+authoritative.
+
+Because it is a self-contained script (any interpreter, no third-party imports) it stays portable:
+POSIX runs it via its shebang + `+x` bit; Windows runs the sibling `check_length.cmd` wrapper.
+
+Scope = only changed documents, from the run's diff artifact (`paths.diff_path`) alone — no
+task-text fallback like `check_journey` has. A blog/article task body routinely names reference docs
+(a tone-of-voice guide, an idea doc) that are not the deliverable; falling back to "any `.md` named
+in the task text" on an empty diff would measure THOSE instead and report a misleading pass/fail on
+files the run never touched (this happened in the field — see docs/backlog/follow_ups.md, the
+2026-07-14 codex-Windows-sandbox post-mortem, finding F3). So an absent/empty diff is always a
+vacuous pass here: nothing to validate, never a guess.
+
+Args (`args.min_chars`, `args.min_paragraphs`) are both OPTIONAL minimum-size floors — never a
+ceiling, so a longer document always passes. Omitting either, or passing `0`, disables that
+particular floor entirely. Each document is measured with its markdown ATX heading lines
+(`#` .. `######`) stripped first, so a heading-only stub never reads as "long"; the remaining lines
+are grouped into paragraphs on blank-line boundaries.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+
+_ATX_HEADING_RE = re.compile(r"^#{1,6}\s")
+
+
+def _paragraphs(lines: list[str]) -> list[str]:
+    """Split lines into paragraphs on blank-line boundaries; drop empty blocks."""
+    blocks: list[str] = []
+    current: list[str] = []
+    for line in lines:
+        if line.strip():
+            current.append(line.strip())
+        elif current:
+            blocks.append(" ".join(current))
+            current = []
+    if current:
+        blocks.append(" ".join(current))
+    return blocks
+
+
+def evaluate_document(text: str, min_chars: int, min_paragraphs: int) -> list[str]:
+    """Return the ordered list of violation messages for one document (empty = clean)."""
+    prose_lines = [line for line in text.splitlines() if not _ATX_HEADING_RE.match(line)]
+    paragraphs = _paragraphs(prose_lines)
+    chars = len("\n\n".join(paragraphs))
+    paragraph_count = len(paragraphs)
+
+    violations: list[str] = []
+    if chars < min_chars:
+        violations.append(f"document is {chars} chars — below the {min_chars} minimum")
+    if paragraph_count < min_paragraphs:
+        violations.append(
+            f"document has {paragraph_count} paragraphs — below the {min_paragraphs} minimum"
+        )
+    return violations
+
+
+# -- scope resolution --------------------------------------------------------------------------
+
+_DIFF_NEW_PATH_RE = re.compile(r"^\+\+\+ b/(.*)$")
+
+
+def _changed_from_diff(diff_text: str) -> list[str]:
+    """Repo-relative `.md` paths added/modified in a unified diff (`+++ b/…`; `/dev/null` skipped).
+
+    The `+++ b/` line carries the path literally (spaces included), which the roadmap directory name
+    needs, so it is preferred over the ambiguous `diff --git` line.
+    """
+    paths: list[str] = []
+    for line in diff_text.splitlines():
+        m = _DIFF_NEW_PATH_RE.match(line)
+        if m is None:
+            continue
+        path = m.group(1).strip()
+        if path and path != "/dev/null" and path.endswith(".md") and path not in paths:
+            paths.append(path)
+    return paths
+
+
+def _read(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _resolve_scope(paths: dict[str, object]) -> tuple[Path, list[str]]:
+    """(repo_dir, list of repo-relative document paths to check), from the diff alone.
+
+    Deliberately no task-text fallback (unlike `check_journey`) — see the module docstring.
+    """
+    repo = Path(str(paths.get("repo") or "."))
+    diff_path = paths.get("diff_path")
+    if isinstance(diff_path, str) and diff_path:
+        diff_text = _read(Path(diff_path))
+        if diff_text is not None:
+            return repo, _changed_from_diff(diff_text)
+    return repo, []
+
+
+def main() -> int:
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+    except (json.JSONDecodeError, ValueError) as exc:
+        print(json.dumps({"outcome": "fail", "data": {"error": f"invalid stdin JSON: {exc}"}}))
+        return 1
+
+    args = payload.get("args") or {}
+    try:
+        min_chars = int(args.get("min_chars") or 0)
+        min_paragraphs = int(args.get("min_paragraphs") or 0)
+    except (TypeError, ValueError) as exc:
+        print(json.dumps({"outcome": "fail", "data": {"error": f"invalid args: {exc}"}}))
+        return 1
+
+    repo, rel_paths = _resolve_scope(payload.get("paths") or {})
+    checked: list[str] = []
+    violations: dict[str, list[str]] = {}
+    for rel in rel_paths:
+        text = _read(repo / rel)
+        if text is None:
+            continue  # deleted or unreadable — nothing to validate
+        checked.append(rel)
+        issues = evaluate_document(text, min_chars, min_paragraphs)
+        if issues:
+            violations[rel] = issues
+
+    outcome = "fail" if violations else "pass"
+    data = {"checked": checked, "violations": violations}
+    print(json.dumps({"outcome": outcome, "data": data}, ensure_ascii=False))
+    return 1 if violations else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

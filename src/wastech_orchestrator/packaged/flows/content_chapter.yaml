@@ -1,29 +1,56 @@
-# Packaged built-in flow: content_chapter — the Wastime Journey chapter editor (the workhorse).
+# Packaged built-in flow: content_chapter — a long-form book/journey chapter editor (the workhorse).
 #
-# Reworks one RU chapter of the content repo in place: a read-only scout builds a brief, an editor
-# revises the chapter, a deterministic prose gate (the `check_journey` tool) enforces the hard
-# structural constraints, a product-accuracy verifier and a story critic each block on quality, and a
-# style pass polishes the language before publish. Every gate/rework routes through `fixing`, which
-# re-enters the deterministic gate (`fixing → constraints`) so a fix can never break the limits.
+# Reworks one chapter of a content repo in place: a read-only scout builds a brief from the
+# project's own continuity/style references, an editor revises the chapter, a deterministic prose
+# gate (the `check_journey` tool) enforces this book's structural constraints, a story critic blocks
+# on narrative quality, and a style pass polishes the language before publish. Every gate/rework
+# routes through `fixing`, which re-enters the deterministic gate (`fixing → constraints`) so a fix
+# can never break the limits.
+#
+# This flow — together with `check_journey` — is deliberately opinionated for one kind of project: a
+# reflective, multi-voice long-form book (with `content_translate` adapting each chapter into a
+# second language). If your project's structure differs, fork the delivered copies under
+# `.worc/flows/content_chapter/` and `.worc/tools/check_journey` and tune them — see
+# docs/flow-authoring.md.
 #
 # output_policy: code_change — the chapter `.md` files are edited in place; the diff IS the
 # deliverable. publishing: pull_request is the ceiling; run the content repo with
 # `git.create_pull_request: false` (install `--no-create-pr`) to land edits as a local commit with no
 # PR. The deterministic gate is `check_journey` (delivered to `.worc/tools/` by `worc install`); it
 # reads only the changed chapter paths from the diff and enforces the mode-specific prose rules
-# (heading hierarchy, required Purpose/Emotional-point sections, the "не …, а …" AI-antithesis
-# pattern, and for `en`/`book` a hard per-page length cap) — never pre-existing issues elsewhere.
+# (heading hierarchy, required Purpose/Emotional-point sections, the AI-antithesis pattern, and for
+# `en`/`book` a hard per-page length cap) — never pre-existing issues elsewhere.
+#
+# A fact/accuracy check against some external source of truth is deliberately NOT a node here — field
+# use found it didn't generalize (most content projects have no such source, and where one exists it
+# overlapped with the story critic below). Add it back as your own evaluator node per
+# docs/flow-authoring.md if your project needs one.
 #
 # The supervisor is a constant layer above the flow (not a node); `emit_follow_ups` is deliberately
-# omitted (a code-oriented capability). Blocking evaluators are capped by their named-loop budgets
-# (`accuracy_fix` / `critic_fix`), not by `max_rework_per_stage` (a non-blocking-only knob).
+# omitted (a code-oriented capability). The blocking evaluator is capped by its named-loop budget
+# (`critic_fix`), not by `max_rework_per_stage` (a non-blocking-only knob).
 #
 # gate_severity (per evaluator, default `high`) sets the minimum finding severity that gates: `high`
-# blocks on high/critical/blocking and lets medium/low advise; lower it to raise the quality bar.
-# For detail-critical content you can set `gate_severity: low` on the critics below so ANY finding
-# forces a rework — but a stricter gate means more rework rounds, so raise the matching budget
-# (`accuracy_fix` / `critic_fix`) to give it headroom, or the loop may exhaust the budget and park
-# the task to `manual`. Shipped at the default `high`; uncomment the lines below to opt in.
+# blocks on high/critical/blocking and lets medium/low advise; lower it to raise the quality bar. For
+# detail-critical content you can set `gate_severity: low` on the critic below so ANY finding forces a
+# rework — but a stricter gate means more rework rounds, so raise `critic_fix` to give it headroom, or
+# the loop may exhaust the budget and park the task to `manual`. Shipped at the default `high`;
+# uncomment the line below to opt in.
+#
+# ----------------------------------------------------------------------------------------------------
+# Per-node tuning (ALL fields below are OPTIONAL — omit one to inherit the default). Field use on a
+# real book found this split worth pinning explicitly rather than leaving every node on the flow-wide
+# default: the strongest available model for the two judgment-heavy nodes (`revise`, `story_critic`,
+# `fixing` — creative editing and narrative taste), a lighter model at high reasoning for the
+# understanding-only scout (`context`), and the SAME model as `revise` at a lower reasoning for the
+# bounded polish pass (`style`) that resumes its editing lineage — a resumed session should change
+# effort, not the model underneath it. Left commented out below (not pinned), so the flow runs on
+# whatever provider/model an operator already has configured; uncomment to adopt this tuning.
+#   agent + evaluator nodes:
+#     provider:  codex | claude            which agent runs the node (∈ agents.allowed); default: global primary
+#     model:     <model id>                overrides agents.providers.<provider>.model for THIS node
+#     reasoning: minimal|low|medium|high|xhigh|max  default: agents.providers.<provider>.reasoning
+# ----------------------------------------------------------------------------------------------------
 flow:
   name: content_chapter
   task_type: content_chapter
@@ -37,27 +64,35 @@ flow:
       role_file: content_chapter/context.md
       session_scope: fresh_disposable
       permission_profile: read-only
+      # A brief is understanding + synthesis, not from-scratch creativity, so a lighter model can
+      # carry it — but the scout reads the rules, the continuity reference, and neighbouring
+      # chapters to plan the whole arc, so give it high reasoning for thoroughness (uncomment to pin):
+      # model: claude-sonnet-5
+      # reasoning: xhigh
     - id: revise
       kind: agent
       role_file: content_chapter/revise.md
       session_scope: editing_lineage
       permission_profile: workspace-write
+      # The editor is the workhorse: the strongest available model at high reasoning (uncomment to
+      # pin). xhigh buys little on prose and costs wall-time — high is the sweet spot for creative
+      # editing.
+      # model: claude-opus-4-8
+      # reasoning: high
     - id: constraints
       kind: tool
       tool: check_journey
       args: { mode: ru }
-    - id: product_accuracy
-      kind: evaluator
-      role: verifier
-      role_file: content_chapter/product_accuracy.md
-      blocking: true
-      # gate_severity: low  # block on ANY finding (default high); raise `accuracy_fix` to match
     - id: story_critic
       kind: evaluator
       role: critic
       role_file: content_chapter/story_critic.md
       blocking: true
       # gate_severity: low  # block on ANY finding (default high); raise `critic_fix` to match
+      # Narrative taste, voice, and emotional resonance are subjective — judgment quality matters
+      # most here (uncomment to pin):
+      # model: claude-opus-4-8
+      # reasoning: max
     - id: style
       kind: agent
       role_file: content_chapter/style.md
@@ -67,12 +102,19 @@ flow:
       # Language polish is a bounded pass, not fresh reasoning, so it runs at medium regardless of
       # the flow-wide default — less wall-time on the tail, no quality loss.
       reasoning: medium
+      # It resumes revise's editing lineage, so it MUST carry the same model if you pin one on
+      # revise above (uncomment to match):
+      # model: claude-opus-4-8
     - id: fixing
       kind: agent
       role_file: content_chapter/fixing.md
       session_scope: editing_lineage
       lineage_affinity: revise
       permission_profile: workspace-write
+      # A fix must satisfy the same critic as revise, so it needs the same calibre (uncomment to
+      # pin):
+      # model: claude-opus-4-8
+      # reasoning: high
     - id: publish
       kind: publish
       policy: pull_request
@@ -80,10 +122,8 @@ flow:
   edges:
     - { from: context, to: revise }
     - { from: revise, to: constraints }
-    - { from: constraints, to: product_accuracy, outcome: pass }
+    - { from: constraints, to: story_critic, outcome: pass }
     - { from: constraints, to: fixing, outcome: fail, loop: constraint_fix }
-    - { from: product_accuracy, to: story_critic, outcome: accept }
-    - { from: product_accuracy, to: fixing, outcome: rework, loop: accuracy_fix }
     - { from: story_critic, to: style, outcome: accept }
     - { from: story_critic, to: fixing, outcome: rework, loop: critic_fix }
     - { from: fixing, to: constraints } # every fix re-enters the deterministic gate
@@ -91,8 +131,9 @@ flow:
 
   budgets:
     constraint_fix: 8
-    accuracy_fix: 3
-    critic_fix: 3
+    # Raised from the flow's earlier default of 3: field use on a real book found a strict subjective
+    # narrative critic (especially at gate_severity: low) needs more headroom than a mechanical gate.
+    critic_fix: 6
 
   supervisor:
     role_file: content_chapter/supervisor.md
