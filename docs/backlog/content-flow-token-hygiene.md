@@ -1,8 +1,20 @@
 # Content-flow token hygiene (session-scope cost docs + packaged content-flow defaults)
 
-**Status:** open **Priority:** P1 **Source:** [2026-07-16 token analysis](../analysis/2026-07-16-blog-review-happy-in-my-misfortunes-4-token-analysis.md) (F2 doc-follow-up, F3, F5)
+**Status:** implemented 2026-07-16 **Priority:** P1 **Source:** [2026-07-16 token analysis](../analysis/2026-07-16-blog-review-happy-in-my-misfortunes-4-token-analysis.md) (F2 doc-follow-up, F3, F5)
 
 Two small, low-risk changes that reduce raw token growth on content flows without touching the engine. Both are safe to ship independently.
+
+## Decisions (resolved 2026-07-16)
+
+- **Fresh `polish` default — ship now.** Change the packaged default to `fresh_disposable` without waiting for A/B: the node is terminal (→ publish) and already receives the diff + reviewer findings as artifacts, so the risk is low. The savings/voice A/B confirms it afterward (and depends on the usage substrate — see the dependency note below).
+- **Model/provider after the lineage break — rely on the flow-wide default + update the YAML comment.** `polish` inherits the flow default (the packaged flow pins nothing — all provider/model blocks ship commented), so shipped behavior is unchanged. Rewrite the existing note on the `polish` node (currently "it resumes revise's editing lineage, so it MUST carry the same model/provider…") to say `polish` is now independent and, for voice consistency, should be pinned to the same model as `revise` if `revise` is pinned. No active pin is added.
+- **Rollout — ship the packaged default now + note the re-seed gap.** Packaged is the canonical source of truth; the change benefits new installs immediately. There is no `upgrade-flows` re-seed mechanism yet, so existing installs (e.g. the operator's `WastimeApp/.worc/`) need a manual copy to pick it up — call this out in the change.
+- **`fixing` stays on the `revise` lineage (confirmed safe).** After the change the editing lineage is `revise → fixing` (rework genuinely benefits); `polish` is peeled off. Verified: `polish` is terminal and no node has `lineage_affinity: polish`, so nothing resumes it — the break is safe. This is the intended shape.
+- **Docs canonical location:** the warning text lives in `docs/flow-authoring.md`; the packaged guide (`reference.md` / `README.md`) cross-references it rather than restating it, to avoid three drifting copies.
+
+## Cross-task dependency
+
+Part B's benefit (the ~60–80k saving **and** "quality is no worse") is only measurable via an A/B, and an honest A/B needs the normalized usage from [normalized-usage-accounting.md](normalized-usage-accounting.md). Order of work: land the usage substrate first, then ship + measure this change. The default flip itself does not block on task 1 (decision above), but its confirmation does.
 
 ## Part A — warn about the token cost of resumed sessions in the docs
 

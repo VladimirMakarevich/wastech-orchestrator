@@ -17,7 +17,9 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from wastech_orchestrator.core.flow.usage_accounting import compute_usage_delta
 from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
+from wastech_orchestrator.providers.base import AgentRunResult, NormalizedUsage
 from wastech_orchestrator.providers.redaction import redact_text
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import ProviderAttemptRow
@@ -41,9 +43,23 @@ def record_run_observability(
     model: str | None,
     reasoning: str | None,
     started_at: str,
+    usage_baseline: NormalizedUsage | None = None,
+    baseline_session_id: str | None = None,
 ) -> None:
-    """Record provider attempts + (when wired) the rendered prompt and the prompt-audit step."""
-    record_provider_attempts(services, run_id, outcome)
+    """Record provider attempts + (when wired) the rendered prompt and the prompt-audit step.
+
+    ``usage_baseline`` / ``baseline_session_id`` are the resumed session's previous cumulative usage
+    and the session it belongs to; the runner reads them from the lineage row (or, for an in-process
+    HITL re-run, the first invocation's result) so the per-attempt usage can be reduced to a per-run
+    delta. ``None`` for a fresh run.
+    """
+    record_provider_attempts(
+        services,
+        run_id,
+        outcome,
+        usage_baseline=usage_baseline,
+        baseline_session_id=baseline_session_id,
+    )
     register = services.register_artifact
     if register is None:  # observability not wired (e.g. a bare unit test) — skip file artifacts
         return
@@ -74,17 +90,26 @@ def record_run_observability(
         )
 
 
-def record_provider_attempts(services: NodeServices, run_id: int, outcome: StageOutcome) -> None:
+def record_provider_attempts(
+    services: NodeServices,
+    run_id: int,
+    outcome: StageOutcome,
+    *,
+    usage_baseline: NormalizedUsage | None = None,
+    baseline_session_id: str | None = None,
+) -> None:
     """Persist one ``provider_attempts`` row per attempt (primary + any fallback) — always recorded.
 
-    The row's ``node_run_id`` holds the ``node_runs`` id of the run these attempts belong to.
+    The row's ``node_run_id`` holds the ``node_runs`` id of the run these attempts belong to. The
+    result-bearing attempt (the router leaves at most one) also carries its normalized token usage
+    as a summation-safe per-run delta against the resumed session's baseline.
     """
     for attempt in outcome.attempts:
+        result = attempt.result
         attempt_dir = (
-            str(Path(attempt.result.stdout_path).parent)
-            if attempt.result and attempt.result.stdout_path
-            else None
+            str(Path(result.stdout_path).parent) if result and result.stdout_path else None
         )
+        scope, delta, status, raw = _usage_fields(result, usage_baseline, baseline_session_id)
         services.store.record_provider_attempt(
             ProviderAttemptRow(
                 node_run_id=run_id,
@@ -92,12 +117,45 @@ def record_provider_attempts(services: NodeServices, run_id: int, outcome: Stage
                 attempt=attempt.attempt,
                 status=attempt.status.value if attempt.status else None,
                 error_class=attempt.error_class.value if attempt.error_class else None,
-                exit_code=attempt.result.exit_code if attempt.result else None,
+                exit_code=result.exit_code if result else None,
                 attempt_dir=attempt_dir,
                 started_at=services.clock(),
                 finished_at=services.clock(),
+                usage_scope=scope,
+                usage_input_total=delta.input_total if delta else None,
+                usage_cache_read=delta.cache_read if delta else None,
+                usage_cache_write=delta.cache_write if delta else None,
+                usage_uncached_input=delta.uncached_input if delta else None,
+                usage_output_total=delta.output_total if delta else None,
+                usage_reasoning_output=delta.reasoning_output if delta else None,
+                usage_cost=delta.cost if delta else None,
+                usage_delta_status=status,
+                provider_usage_raw=raw,
             )
         )
+
+
+def _usage_fields(
+    result: AgentRunResult | None,
+    baseline: NormalizedUsage | None,
+    baseline_session_id: str | None,
+) -> tuple[str | None, NormalizedUsage | None, str | None, str | None]:
+    """``(scope, per-run delta, delta status, raw JSON)`` for one attempt's usage columns.
+
+    All ``None`` when the attempt reported no usage (a result-less fallback attempt, or a provider
+    that emitted none). An ``unknown`` delta returns ``(scope, None, "unknown", raw)`` — the raw
+    payload and scope are kept, but no numbers.
+    """
+    if result is None or result.normalized_usage is None:
+        return None, None, None, None
+    delta, status = compute_usage_delta(
+        result.normalized_usage,
+        baseline,
+        current_session_id=result.session_id,
+        baseline_session_id=baseline_session_id,
+    )
+    raw = json.dumps(result.usage, separators=(",", ":")) if result.usage is not None else None
+    return result.normalized_usage.scope.value, delta, status, raw
 
 
 def write_rendered_prompt(

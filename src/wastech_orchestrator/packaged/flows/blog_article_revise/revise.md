@@ -16,4 +16,6 @@ Do not:
 - Push the project/product harder than the article already did, or add a feature dump — mentions stay true to this project's own idea/premise doc (if one exists) and only where they genuinely serve the reader.
 - Introduce a new internal-linking convention the article didn't already use — match its existing style.
 
+Work in one pass to keep this efficient: read the brief, the target article, and the research findings together in a single batch up front, and do not re-read a file already open in your session. Make one focused set of edits, then inspect the diff once to confirm each change answers the brief — do not loop re-reading and re-editing.
+
 Edit the article in place. Keep every change small and defensible against the brief — if you cannot point to which weakness a change fixes, do not make it.

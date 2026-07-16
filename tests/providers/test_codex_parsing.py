@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from wastech_orchestrator.providers.base import ErrorClass, ProviderError
+from wastech_orchestrator.providers.base import ErrorClass, ProviderError, UsageScope
 from wastech_orchestrator.providers.codex import parse_events
 
 
@@ -92,6 +92,37 @@ def test_usage_read_from_terminal_event() -> None:
     stream = _stream({"type": "turn.completed", "usage": {"input_tokens": 7, "output_tokens": 3}})
     parsed = parse_events(stream)
     assert parsed.usage == {"input_tokens": 7, "output_tokens": 3}
+
+
+def test_normalized_usage_is_cumulative_with_derived_uncached() -> None:
+    # Codex reports input inclusive of the cached subset, so uncached is derived; scope is always
+    # session-cumulative and there is no cache-creation counter.
+    stream = _stream(
+        {
+            "type": "turn.completed",
+            "usage": {
+                "input_tokens": 141464,
+                "cached_input_tokens": 76288,
+                "output_tokens": 8329,
+                "reasoning_output_tokens": 5935,
+            },
+        }
+    )
+    nu = parse_events(stream).normalized_usage
+    assert nu is not None
+    assert nu.scope is UsageScope.SESSION_CUMULATIVE
+    assert nu.input_total == 141464
+    assert nu.cache_read == 76288
+    assert nu.cache_write is None
+    assert nu.uncached_input == 141464 - 76288
+    assert nu.output_total == 8329
+    assert nu.reasoning_output == 5935
+
+
+def test_normalized_usage_absent_when_no_usage_emitted() -> None:
+    # No usage payload → no normalized record (so the no-work guard keeps its "absent never fires").
+    parsed = parse_events(_stream({"type": "result", "status": "success"}))
+    assert parsed.normalized_usage is None
 
 
 def test_schema_requested_falls_back_to_last_message_json() -> None:

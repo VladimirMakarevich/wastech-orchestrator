@@ -129,6 +129,8 @@ Every `agent`/`evaluator` node may pin its own `provider` (`codex` | `claude`), 
 - **`editing_lineage`** — a durable session shared across a group of editing nodes so they keep continuous context. This is what an edit → fix loop uses.
 - **`resume_own_lineage`** — a node's **private** durable session across its own rework rounds (e.g. a critic that must remember what it already flagged); not shared with any other node.
 
+> **Token cost:** resuming a session (`editing_lineage`, `resume_own_lineage`, and joining via `lineage_affinity`) carries the shared session's **full accumulated history** into the next stage. That preserves context, but every following model turn re-sends the whole transcript, so input-token usage grows with each resumed turn. Share a session deliberately — it earns its cost when stages genuinely build on each other (an edit → fix loop), and wastes it when a later stage only needs a small, self-contained input (a one-line polish). Prefer `fresh_disposable` between semantically different stages, and pass what the stage actually needs as an artifact instead.
+
 A flow can carry **more than one** durable editing session per execution unit — one per **lineage**. The lineage key is derived from the graph, `lineage_affinity or <node id>`:
 
 - An `editing_lineage` node with **no** `lineage_affinity` **owns** a lineage named after itself.
