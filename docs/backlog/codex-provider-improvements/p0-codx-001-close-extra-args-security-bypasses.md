@@ -1,9 +1,10 @@
 # CODX-001 — Close authority-expanding Codex extra_args
 
-**Status:** open
+**Status:** done
 **Priority:** P0
 **Source finding:** CXP-02
 **Dependencies:** none
+**Officially supported CLI versions:** `codex` **≥ 0.144.4**
 
 ## Problem
 
@@ -31,21 +32,22 @@ tool restrictions.
 
 ## Acceptance criteria
 
-- [ ] <code>--add-dir</code> is rejected from provider and node extra_args.
-- [ ] Sandbox and sandbox_permissions overrides cannot select or approximate full disk access.
-- [ ] Network and web-search overrides cannot enable access denied by the node.
-- [ ] Profiles, user config selectors, rule bypasses and arbitrary feature enablement cannot expand
+- [x] <code>--add-dir</code> is rejected from provider and node extra_args.
+- [x] Sandbox and sandbox_permissions overrides cannot select or approximate full disk access.
+- [x] Network and web-search overrides cannot enable access denied by the node.
+- [x] Profiles, user config selectors, rule bypasses and arbitrary feature enablement cannot expand
       authority.
-- [ ] All supported syntactic forms, including repeated <code>-c</code>, split values and
+- [x] All supported syntactic forms, including repeated <code>-c</code>, split values and
       <code>--config=key=value</code>, are handled deterministically.
-- [ ] The same validation runs during config load and in CodexProvider immediately before spawn.
-- [ ] Benign allowlisted arguments still work for fresh and resume invocations.
-- [ ] Error messages and artifacts contain no secret config values.
-- [ ] Existing Claude argument behavior is unchanged.
+- [x] The same validation runs during config load and in CodexProvider immediately before spawn.
+- [x] Benign allowlisted arguments still work for fresh and resume invocations.
+- [x] Error messages and artifacts contain no secret config values.
+- [x] Existing Claude argument behavior is unchanged.
 
 ## Verification
 
-- Unit tests for every known authority-expanding Codex 0.142.5 flag/config key.
+- Unit tests for every known authority-expanding flag/config key in the supported Codex CLI
+  contract (`>= 0.144.4`).
 - Property/table-driven tests for alternate argument spellings and ordering.
 - Command-builder tests proving task extra_args cannot override fixed security options.
 - Full ruff, mypy, lint-imports and pytest gates.

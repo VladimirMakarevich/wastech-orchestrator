@@ -86,12 +86,12 @@ def test_codex_danger_full_access_sandbox_is_flagged(codex_config: ProviderConfi
 
 
 def test_codex_full_access_sandbox_in_extra_args_is_flagged(codex_config: ProviderConfig) -> None:
-    # Full access selected via extra_args (not the sandbox field) is also reported as "no isolation"
-    # — the structured selector is gated, not absolutely banned (provider-config-cleanup #1).
+    # Every Codex sandbox selector in extra_args is now rejected by the closed parser; the typed
+    # sandbox field is the only operator-selectable full-access path.
     reasons = codex_mod.isolation_reasons(
         replace(codex_config, extra_args=("--sandbox", "danger-full-access"))
     )
-    assert reasons and any("danger-full-access" in r for r in reasons)
+    assert reasons and any("Codex option '--sandbox'" in r for r in reasons)
 
 
 def test_codex_bypass_extra_arg_is_flagged(codex_config: ProviderConfig) -> None:

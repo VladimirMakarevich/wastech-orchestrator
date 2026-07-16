@@ -4,6 +4,7 @@
 **Priority:** P0
 **Source finding:** CXP-04
 **Dependencies:** none
+**Officially supported CLI versions:** `codex` **≥ 0.144.4**
 
 ## Problem
 

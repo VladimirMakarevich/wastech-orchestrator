@@ -97,7 +97,7 @@ Every node has an `id` (unique; see reserved ids below) and a `kind`. The six ki
 | `output_schema` | JSON-encoded string \| null | `null` | **Every object must set `additionalProperties: false`** (Codex 400s otherwise). | Custom structured-output shape. Prefer the built-in contract. |
 | `best_effort` | bool | `false` | — | Tolerate an infrastructure failure and continue the task (e.g. the summary node). |
 | `hitl` | `{allow_question, allow_approval}` \| null | `null` | — | Allow the agent to ask a question / request approval mid-node. |
-| `extra_args` | list[str] | `[]` | Forbidden-args scan; full-access mode is rejected under `strict_isolation`. | Raw CLI flags for this node. |
+| `extra_args` | list[str] | `[]` | Codex: closed harmless allowlist. Claude: forbidden-bypass scan; full access is rejected under `strict_isolation`. | Provider-specific CLI extension for this node. |
 | `skills` | list[str] | `[]` | Existence checked at task start (name or repo-relative `SKILL.md` path). | Operator-pinned repo skills for this node. |
 | `when` | `{fact, equals?}` \| null | `null` | `fact` must be namespaced `derived.*` or `config.*`. | Conditionally run the node (e.g. `derived.needs_refinement`). |
 
@@ -163,8 +163,8 @@ Allowed `outcome` values by source kind: **evaluator** `{accept, rework}`; **che
 ## Validation (what `validate-flow` checks — all fatal, all collected)
 
 1. **Graph integrity** — edges resolve; outcomes are legal for the source kind; every `rework`/`fail` edge is bounded; named loops are declared in `budgets`; exactly one entry node (no incoming edges); full forward reachability; at least one terminal and every node reaches one; `lineage_affinity` is valid; decomposition references resolve.
-2. **Security ceiling** — evaluators forced `read-only` and never `editing_lineage`; every agent `permission_profile <= permission_ceiling`; `extra_args` pass the forbidden-args scan; all `role_file` / supervisor prompt paths are flow-dir-contained.
-3. **Config-aware** (when a config is loaded) — every `provider` is in `agents.allowed`; `reasoning` is valid for the resolved provider; a Codex `workspace-write` node never also has network; the ceiling is satisfiable by some allowed provider; under `strict_isolation`, no `extra_args` full-access mode; every `tool` name resolves in `.worc/tools/`.
+2. **Security ceiling** — evaluators forced `read-only` and never `editing_lineage`; every agent `permission_profile <= permission_ceiling`; `extra_args` pass the common forbidden-args scan; all `role_file` / supervisor prompt paths are flow-dir-contained.
+3. **Config-aware** (when a config is loaded) — every `provider` is in `agents.allowed`; `reasoning` is valid for the resolved provider; Codex node `extra_args` pass the closed parser; a Codex `workspace-write` node never also has network; the ceiling is satisfiable by some allowed provider; under `strict_isolation`, no Claude `bypassPermissions` extra arg; every `tool` name resolves in `.worc/tools/`.
 
 Non-fatal: a `budgets` value above a config cap (the engine clamps to the min), a PR-publishing flow with no git configured (runs local-commit mode), and the prompt-variable anti-drift lint (warns on a `{name}` no node populates).
 

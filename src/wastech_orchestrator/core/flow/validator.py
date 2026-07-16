@@ -9,17 +9,15 @@ one pass:
      all nodes reachable; at least one terminal; ``lineage_affinity`` target valid; decomposition
      references valid.
   2. **Security ceiling** — evaluator always ``read-only`` and never ``editing_lineage``; every
-     agent ``permission_profile`` ≤ ``permission_ceiling``; ``extra_args`` pass
-     :func:`~wastech_orchestrator.security.forbidden_args.find_forbidden_args`; ``role_file``
-     paths contain no traversal (``..`` or absolute).
+     agent ``permission_profile`` ≤ ``permission_ceiling``; ``extra_args`` pass the common bypass
+     screen; ``role_file`` paths contain no traversal (``..`` or absolute).
 
 :func:`validate_flow_against_config` is the **config-aware** third layer (P4.2): it needs the
 ``OrchestratorConfig`` (node providers ∈ ``agents.allowed``; node reasoning is valid for the
 resolved provider; Codex never receives a write-enabled node with network access;
-``permission_ceiling`` ≤ a configured provider's capability; and — under
-``security.strict_isolation`` — no node selects a provider full-access mode in ``extra_args`` via
-:func:`~wastech_orchestrator.security.forbidden_args.find_full_access_args`, the flow-side half of
-the global isolation gate). It is kept separate so
+``permission_ceiling`` ≤ a configured provider's capability; Codex node ``extra_args`` pass the
+closed parser; and — under ``security.strict_isolation`` — no Claude node selects full access via
+``extra_args``). It is kept separate so
 :func:`validate_flow` stays unit-testable without a config, and so the layers (graph / ceiling /
 config) never mix in one signature. The :class:`~.registry.FlowRegistry` calls it after
 :func:`validate_flow`; both raise :class:`FlowValidationError`.
@@ -70,8 +68,10 @@ from wastech_orchestrator.providers.capabilities import (
     reasoning_levels_for,
 )
 from wastech_orchestrator.security.forbidden_args import (
+    CodexExtraArgsError,
     find_forbidden_args,
     find_full_access_args,
+    parse_codex_extra_args,
 )
 from wastech_orchestrator.security.profiles import is_same_or_stricter
 
@@ -496,6 +496,11 @@ def _check_config_consistency(
                 )
             )
         resolved_provider = node.provider or primary
+        if isinstance(node, AgentNode) and resolved_provider is ProviderId.CODEX:
+            try:
+                parse_codex_extra_args(node.extra_args)
+            except CodexExtraArgsError as exc:
+                errs.extend(cfg(f"node {node.id!r}: extra_args {reason}") for reason in exc.reasons)
         if node.reasoning is not None:
             if resolved_provider is None:
                 valid = all_reasoning_levels()
@@ -554,6 +559,10 @@ def _check_config_consistency(
     if config.security.strict_isolation:
         for node in doc.nodes:
             if not isinstance(node, AgentNode):
+                continue
+            resolved_provider = node.provider or primary
+            if resolved_provider is ProviderId.CODEX:
+                # Every Codex sandbox selector is already rejected by the closed parser above.
                 continue
             errs.extend(
                 cfg(

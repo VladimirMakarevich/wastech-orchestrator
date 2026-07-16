@@ -275,7 +275,7 @@ Every flow file — packaged and operator — is loaded and validated at `instal
 
 - **Graph integrity** — edges resolve, outcomes are valid per node kind, every `fail`/`rework` edge is bounded, exactly one entry node, every node reaches a terminal, and every `lineage_affinity` target is an `editing_lineage` owner with no affinity of its own (no chains).
 - **Security ceiling** — no node's `permission_profile` exceeds the flow `permission_ceiling`; evaluators are forced read-only; `role_file` paths contain no traversal; unknown fields fail closed.
-- **Config consistency** — a pinned `provider` is in `agents.allowed`, its `reasoning` is supported by that provider, and (under `security.strict_isolation`) no `extra_args` selects a full-access sandbox mode.
+- **Config consistency** — a pinned `provider` is in `agents.allowed`, its `reasoning` is supported by that provider, Codex `extra_args` pass the closed harmless allowlist, and (under `security.strict_isolation`) no Claude `extra_args` selects `bypassPermissions`.
 
 Run it explicitly with:
 

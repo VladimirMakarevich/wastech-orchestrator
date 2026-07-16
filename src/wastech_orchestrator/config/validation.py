@@ -1,9 +1,9 @@
 """Configuration validator — the fail-closed gate.
 
-Enforces every semantic rule so an unsafe or contradictory config never reaches the
-pipeline. This is the config-time half of the "security cannot be weakened" invariant
-(.agents/rules/security.md): ``extra_args`` that would disable the sandbox/approvals are
-rejected here. The adversarial test matrix lives in P6.
+Enforces every semantic rule so an unsafe or contradictory config never reaches the pipeline. This
+is the config-time half of the "security cannot be weakened" invariant: Claude ``extra_args`` pass
+the common bypass screen, while Codex uses a closed typed allowlist. The provider repeats the same
+decision immediately before spawn.
 
 All problems are collected and raised together via the typed :class:`ConfigError` from the loader.
 """
@@ -23,19 +23,28 @@ from wastech_orchestrator.config.loader import ConfigError
 from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.providers.capabilities import is_reasoning_supported, reasoning_levels_for
-from wastech_orchestrator.security.forbidden_args import find_forbidden_args
+from wastech_orchestrator.security.forbidden_args import (
+    CodexExtraArgsError,
+    find_forbidden_args,
+    parse_codex_extra_args,
+)
 
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _check_extra_args(pid: ProviderId, args: tuple[str, ...], issues: list[str]) -> None:
-    """Reject any extra_args flag that disables the sandbox/permissions.
+    """Apply the provider's extra-argument policy at config load.
 
-    Delegates the detection to the shared
-    :func:`~wastech_orchestrator.security.forbidden_args.find_forbidden_args` (also used at run time
-    by the provider command builders) and frames each finding as a config issue.
+    Codex is a closed typed extension because its generic config override can change authority.
+    Claude retains the shared bypass-flag screen and its existing open extension behavior.
     """
     where = f"agents.providers.{pid.value}.extra_args"
+    if pid is ProviderId.CODEX:
+        try:
+            parse_codex_extra_args(args)
+        except CodexExtraArgsError as exc:
+            issues.extend(f"{where}: {reason}" for reason in exc.reasons)
+        return
     issues.extend(f"{where}: {reason}" for reason in find_forbidden_args(args))
 
 

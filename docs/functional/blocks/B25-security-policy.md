@@ -6,7 +6,7 @@
 
 ## Responsibility
 
-A set of small, pure, provider-agnostic primitives that together enforce the system invariant **"a task or `extra_args` may never weaken the security policy"**. Each primitive owns one aspect — the environment allowlist, the forbidden bypass-flag detector, the front-matter injection scan, the offline isolation preflight, and the permission-profile strictness ranking — and each is applied at more than one call site so the guarantee holds in depth. The modules hold no provider CLI syntax and launch no process; they are decision functions consumed by other blocks (B05, B06, B16, B17, B18, B19, B22, B24, B29).
+A set of small, pure security decision functions that together enforce the system invariant **"a task or `extra_args` may never weaken the security policy"**. They cover the environment allowlist, common forbidden bypass flags, the closed Codex argument/config parser, front-matter injection, offline isolation preflight, and permission-profile strictness. Each runs at more than one call site so the guarantee holds in depth; none launches a process.
 
 The **network access control** is part of this same policy surface even though its mapping lives in the adapters (B18): a flow grants network only by declaring `network_policy` (B29), and the adapters translate that single boolean onto sandbox network / web tools while never touching the filesystem sandbox or approvals ceiling. It is documented here as a security control and cross-linked.
 
@@ -27,7 +27,7 @@ The **network access control** is part of this same policy surface even though i
 
 `find_forbidden_args` is the one place that decides whether an argv token "disables the sandbox/approvals". For each token it takes the part before `=` and rejects it when it starts with `--dangerously` or is one of the standalone flags `{--yolo, --ignore-rules}` ([forbidden_args.py:25-30](../../../src/wastech_orchestrator/security/forbidden_args.py#L25), [:47-48](../../../src/wastech_orchestrator/security/forbidden_args.py#L47)). For `--sandbox`/`-s` it reads the value either inline (`--sandbox=…`) or from the next token and rejects `danger-full-access`; it also rejects a **dangling** sandbox flag with a missing or empty value (last token, or a trailing `=`), which would otherwise be treated as safe (audit #28, 2026-06-22) — defense in depth, it can never weaken isolation ([forbidden_args.py:33](../../../src/wastech_orchestrator/security/forbidden_args.py#L33), [:50-60](../../../src/wastech_orchestrator/security/forbidden_args.py#L50)). The `--dangerously` prefix rule is deliberately broad so any **future** `--dangerously*` flag is caught without a code change ([forbidden_args.py:47](../../../src/wastech_orchestrator/security/forbidden_args.py#L47)). Reasons are returned unqualified (no config path, no provider prefix) so each caller can frame them in its own terms ([forbidden_args.py:38-43](../../../src/wastech_orchestrator/security/forbidden_args.py#L38)).
 
-This detector is the defense-in-depth hinge. It is invoked at **config load** by the validator (B05) for `agents.providers.<id>.extra_args` ([validation.py:40](../../../src/wastech_orchestrator/config/validation.py#L40)) and for check argv ([validation.py:165](../../../src/wastech_orchestrator/config/validation.py#L165)), and again at **provider command-build time** (B18) on the combined config + request `extra_args` — Claude raises a `CONFIGURATION_ERROR` before building the argv ([claude.py:274-278](../../../src/wastech_orchestrator/providers/claude.py#L274)). It is also reused inside both adapters' `isolation_reasons` and inside the flow validator (B29). So even if a config check were ever bypassed, the policy cannot be weakened through a task or `extra_args`.
+The common detector remains the Claude/check defense-in-depth hinge. Codex adds `parse_codex_extra_args`: a typed parser that recognizes split and equals `-c`/`--config` forms, accepts only a short harmless allowlist, canonicalizes successful entries, and reports only option/config-key names. Provider defaults are checked at config load, node values in the config-aware flow layer, and the combined values again in `CodexProvider` immediately before spawn. Thus a bypass of either load-time layer still cannot widen the final process authority.
 
 ### Environment allowlist (no implicit secret forwarding)
 
@@ -57,7 +57,7 @@ Network access is **off by default** and is granted only by a flow declaring `ne
 
 ## Invariants & guarantees
 
-- **Defense in depth on forbidden flags:** `find_forbidden_args` runs at config load (B05, [validation.py:40](../../../src/wastech_orchestrator/config/validation.py#L40)) **and** at command-build time (B18, [claude.py:274](../../../src/wastech_orchestrator/providers/claude.py#L274)), so a task or `extra_args` cannot weaken policy even if one layer is bypassed.
+- **Defense in depth on provider arguments:** Claude's common scan and Codex's closed parser run at load and command-build time, so a task or `extra_args` cannot weaken policy even if one layer is bypassed.
 - **No implicit secret forwarding:** `build_child_env` returns only allowlisted keys present in the parent — never the full parent env ([env.py:30](../../../src/wastech_orchestrator/security/env.py#L30)); the input mapping is never mutated.
 - **Task text can never become a flag:** structurally, task content reaches providers only as file paths; the front-matter scan is an additional, value-only guard ([injection.py:5-8](../../../src/wastech_orchestrator/security/injection.py#L5)).
 - **Reject, don't sanitize:** suspect front-matter values are refused, not rewritten ([injection.py:15-16](../../../src/wastech_orchestrator/security/injection.py#L15)).
@@ -68,7 +68,7 @@ Network access is **off by default** and is granted only by a flow declaring `ne
 ## Dependencies
 
 - **Uses:** B18 (the adapters' `isolation_reasons` rules, dispatched by `check_isolation`); `forbidden_args` is reused internally by `injection.scan_value`.
-- **Used by:** B05 (config validation runs `find_forbidden_args` on `extra_args` and check argv); B18 (providers run `find_forbidden_args` at build time and own the `network_access` mapping); B16 (the validation gate runs `scan_frontmatter`); B17 (the router uses `is_same_or_stricter` for conditional fallback); B29 (the flow validator uses `find_forbidden_args`, `is_same_or_stricter` for `permission_ceiling`, and `network_policy`); B06 (pipeline runs `check_isolation` at preflight) and B01 (the `preflight` command); B19/B22/B24 (`build_child_env` for every external launch).
+- **Used by:** B05 (provider-specific config validation); B18 (provider builders repeat their argument policy and own `network_access` mapping); B16 (`scan_frontmatter`); B17 (`is_same_or_stricter`); B29 (common plus Codex node argument validation, ceiling, network policy); B06/B01 (`check_isolation`); B19/B22/B24 (`build_child_env`).
 
 ## Tests
 

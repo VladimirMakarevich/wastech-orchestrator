@@ -153,9 +153,53 @@ def test_read_only_request_uses_read_only_sandbox(
 def test_safe_extra_args_are_appended(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    cfg = replace(codex_config, extra_args=("--config", "model_reasoning=high"))
+    cfg = replace(codex_config, extra_args=("--config", 'model_verbosity="low"'))
     argv = _argv(cfg, make_request())
-    assert "--config" in argv and "model_reasoning=high" in argv
+    assert "--config" in argv and 'model_verbosity="low"' in argv
+
+
+@pytest.mark.parametrize("session_id", [None, "019-session"])
+def test_allowlisted_extra_args_work_for_fresh_and_resume(
+    codex_config: ProviderConfig,
+    make_request: Callable[..., AgentRunRequest],
+    session_id: str | None,
+) -> None:
+    cfg = replace(codex_config, extra_args=("--strict-config", "--ignore-user-config"))
+    argv = _argv(
+        cfg,
+        make_request(
+            session_id=session_id,
+            extra_args=['--config=model_reasoning_summary="auto"'],
+        ),
+    )
+    assert "--strict-config" in argv
+    assert "--ignore-user-config" in argv
+    assert 'model_reasoning_summary="auto"' in _config_values(argv)
+    if session_id is None:
+        assert "resume" not in argv
+    else:
+        assert argv[argv.index("resume") + 1] == session_id
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        ["--add-dir", "../outside"],
+        ["--sandbox=read-only"],
+        ["-c", "sandbox_permissions=['disk-full-read-access']"],
+        ['--config=web_search="live"'],
+        ["--profile", "unconfined"],
+        ["--enable", "apps"],
+    ],
+)
+def test_request_extra_args_cannot_override_fixed_security_options(
+    codex_config: ProviderConfig,
+    make_request: Callable[..., AgentRunRequest],
+    extra_args: list[str],
+) -> None:
+    with pytest.raises(ProviderError) as exc:
+        _argv(codex_config, make_request(extra_args=extra_args, network_access=False))
+    assert exc.value.error_class is ErrorClass.CONFIGURATION_ERROR
 
 
 def test_context_footer_lists_only_present_paths(

@@ -213,7 +213,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`reasoning`** - The provider reasoning-effort setting.
 - **`timeout_seconds`** - The provider run timeout.
 - **`max_turns`** - The Claude turn cap.
-- **`extra_args`** - Additional provider CLI arguments, appended after the orchestrator's own safety checks.
+- **`extra_args`** - Optional provider CLI arguments. Codex uses a closed harmless allowlist and canonical rendering; Claude retains the common forbidden-bypass screen.
 
 ## Checks and security
 

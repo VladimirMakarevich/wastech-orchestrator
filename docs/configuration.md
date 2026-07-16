@@ -264,13 +264,36 @@ Provider-specific fields:
 
 #### `extra_args`
 
-`extra_args` appends extra arguments to the provider's CLI invocation, verbatim. It is empty (`[]`) by default, so nothing extra is passed.
+`extra_args` is an optional provider CLI extension point. It is empty (`[]`) by default. Claude
+arguments retain the existing forbidden-bypass screen; Codex arguments use a closed, typed
+allowlist because Codex flags and `-c` overrides can change filesystem, network, tools, rules, and
+environment authority.
 
 **Sources (both operator-authored).** The provider-level list here (`agents.providers.<id>.extra_args`) applies to every run of that provider. A flow node may also declare its own `extra_args` (a packaged flow, or a flow under `.worc/flows/`), applied only to that node — see the Flows section below. The two are concatenated (the provider list first, then the node's) and both go through the same validation. A task **cannot** set `extra_args`: task content never builds a command line.
 
-**How it is applied.** Arguments are passed as an argument list, never through a shell — each entry is one literal token, and shell metacharacters (`;`, `|`, `$(...)`) are not interpreted. A flag that takes a value is two entries (`["--add-dir", "../lib"]`) or one with `=` (`["--add-dir=../lib"]`). The list is appended **after** the orchestrator's own flags, so where a CLI resolves duplicates last-wins it can override an earlier value — but it can never override the safety rules below.
+**How it is applied.** Arguments are passed as an argument list, never through a shell — each entry
+is one literal token, and shell metacharacters (`;`, `|`, `$(...)`) are not interpreted. Provider
+and node lists are validated at load time and checked again immediately before process spawn.
+Accepted Codex arguments are parsed and rendered canonically instead of being appended verbatim.
 
-**What you can pass.** Anything your installed CLI accepts that does not weaken isolation or approvals — for example an extra working directory, an output/format option, or a config override. Confirm exact flag names against `claude --help` / `codex exec --help`; the orchestrator forwards them unchanged and does **not** check that a flag exists (an unknown flag simply makes the CLI fail, surfaced as a provider error). Illustrative — verify against your CLI version:
+**Claude.** Existing behavior is unchanged: arguments accepted by the installed Claude CLI may be
+used unless they hit the common sandbox/permission bypass screen. Confirm exact names with
+`claude --help`.
+
+**Codex.** Only the following options are accepted under the supported CLI contract
+(`codex >= 0.144.4`):
+
+- value-less flags: `--ignore-user-config`, `--strict-config`;
+- `-c` / `--config` keys: `disable_response_storage`, `hide_agent_reasoning`,
+  `model_reasoning_effort`, `model_reasoning_summary`, `model_verbosity`, `personality`, and
+  `show_raw_agent_reasoning`.
+
+The config override may use split or equals syntax (`["-c", "model_verbosity=\"low\""]`,
+`["--config=model_verbosity=\"low\""]`). Repeated overrides preserve their order. All other Codex
+options and config keys fail closed, even if a future CLI version recognizes them. Use the typed
+`model`, `reasoning`, `sandbox`, and flow `network_access` fields for supported behavior.
+
+Example:
 
 ```yaml
 agents:
@@ -278,7 +301,7 @@ agents:
     claude:
       extra_args: ["--add-dir", "../shared-lib"] # add another working directory
     codex:
-      extra_args: ["-c", "tools.web_search=true"] # a Codex -c config override
+      extra_args: ["--strict-config", "-c", 'model_verbosity="low"']
 ```
 
 **What is always forbidden.** Flags that disable approvals / sandbox / hook-trust wholesale are refused unconditionally — they cannot be enabled through a config or a flow node, regardless of `strict_isolation`:
@@ -287,22 +310,29 @@ agents:
 | --- | --- | --- |
 | any `--dangerously*` flag (`--dangerously-bypass-approvals-and-sandbox`, `--dangerously-skip-permissions`, `--dangerously-bypass-hook-trust`, …) | both | disables approvals / sandbox / hook-trust |
 | `--yolo`, `--ignore-rules` | Codex | disables approvals |
-| `--sandbox` / `-s` with no value | Codex | malformed: would swallow the next token |
+| every Codex option outside its allowlist, including `--add-dir`, `--sandbox` / `-s`, `--profile`, `--enable`, `--disable`, image/output/path selectors | Codex | may expand authority or bypass typed orchestrator fields |
+| every non-allowlisted Codex `-c` / `--config` key, including sandbox/permissions/network/web search/features/apps/MCP/hooks/plugins/environment/rules/provider keys | Codex | may expand filesystem, network, tool, process, or instruction authority |
 
-These are caught at **config load** — the whole config is rejected before any task runs — re-checked by the provider command builder at launch, and re-checked on a flow node's `extra_args` at flow load. Note `--dangerously-skip-permissions` stays forbidden even though it is functionally the flag form of `bypassPermissions`: keeping the whole `--dangerously*` namespace bright is the parity rule.
+These are caught at **config load** — the whole config is rejected before any task runs — re-checked
+by the provider command builder at launch, and re-checked on a flow node's `extra_args` at flow
+load. Codex errors identify the rejected option or config key but omit its value. The Codex request
+artifact likewise redacts every `extra_args` value, including values rejected before launch.
 
 **Full access — operator-selectable, gated by `strict_isolation`.** Selecting a provider's full-access mode is _not_ hard-forbidden: the orchestrator does not impose its own refusal, and the operator owns the risk. It is instead gated by [`security.strict_isolation`](#security): with the default `strict_isolation: true` it is rejected at the isolation **preflight** (the run fails before a branch is created); set `strict_isolation: false` to opt in.
 
 | Gated argument | Provider | Effect |
 | --- | --- | --- |
-| `--sandbox danger-full-access` (or `-s danger-full-access`), or the `sandbox: danger-full-access` field | Codex | full filesystem access — no isolation |
+| `sandbox: danger-full-access` field | Codex | full filesystem access — no isolation; Codex `--sandbox` in `extra_args` is always rejected |
 | `--permission-mode bypassPermissions` | Claude | disables permission prompts — no isolation |
 
-The gate covers full access selected in provider `extra_args`, the Codex `sandbox` field, **and** a flow node's `extra_args` (checked against `strict_isolation` at flow load). (A `--permission-mode` escalation above the resolved profile that is _not_ `bypassPermissions` — e.g. `acceptEdits` over a `plan` profile — is likewise reported by the `strict_isolation` preflight for the provider config.)
+The gate covers the Codex `sandbox` field and Claude full access selected in provider or flow-node
+`extra_args`. A Claude `--permission-mode` escalation above the resolved profile that is not
+`bypassPermissions` — for example `acceptEdits` over a `plan` profile — is likewise reported by the
+`strict_isolation` preflight for provider config.
 
 ```yaml
-# Codex full access — loads, but rejected at the strict_isolation preflight (default true)
-extra_args: ["--sandbox", "danger-full-access"]
+# Codex full access — only the typed field can select it; strict_isolation rejects it by default
+sandbox: danger-full-access
 ```
 
 ```yaml
@@ -310,7 +340,8 @@ extra_args: ["--sandbox", "danger-full-access"]
 extra_args: ["--permission-mode", "bypassPermissions"]
 ```
 
-Do not pass secrets through `extra_args`: values become argv tokens and are recorded (redacted) in the request artifact.
+Do not pass secrets through `extra_args`. Codex values are fully redacted in request artifacts, but
+accepted values still become process argv tokens; Claude values use the general secret redactor.
 
 ## `security`
 
@@ -341,7 +372,7 @@ security:
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `strict_isolation` | boolean | `true` | Preflight fails if the required isolation cannot be enforced. This is also the **sole gate** for operator-selected full access: a Codex `danger-full-access` sandbox or a Claude `--permission-mode bypassPermissions` — in provider config _or_ a flow node's `extra_args` — is rejected at preflight while this is `true` (the default). Set it `false` to opt in (you own the risk). |
+| `strict_isolation` | boolean | `true` | Preflight fails if the required isolation cannot be enforced. This is also the **sole gate** for operator-selected full access: a Codex `sandbox: danger-full-access` field or Claude `--permission-mode bypassPermissions` in provider/flow `extra_args` is rejected at preflight while this is `true` (the default). Set it `false` to opt in (you own the risk). Codex sandbox selectors in `extra_args` remain forbidden. |
 | `allowed_environment` | list of strings | cross-platform base (`PATH`, `HOME`, `USER`, `USERPROFILE`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR`) **+ the OS-launch essentials of the host OS** | Only these environment variables reach child processes. The default is OS-aware: `install` writes the host OS's launch essentials, and a config that omits the key falls back to them. On **Windows** that includes `SystemRoot` (without it the Node-based `claude.exe` aborts at startup with exit `0xC0000409`, so preflight reports it "did not succeed") plus `SystemDrive`, `windir`, `ComSpec`, `PATHEXT`, `TEMP`, `TMP`, `APPDATA`, `LOCALAPPDATA`, `HOMEDRIVE`, `HOMEPATH`, `NUMBER_OF_PROCESSORS`, `PROCESSOR_ARCHITECTURE`; on **Linux/macOS** (and WSL, which is Linux) it adds `TMPDIR`, `LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`. `USER` is required on macOS so subscription/OAuth-authenticated provider CLIs can reach their Keychain credentials (without it the CLI reports "Not logged in"). This list **replaces** (does not extend) the default — keep your OS's launch essentials or the spawned CLI may fail to start; names absent from the host OS are simply skipped. |
 | `denied_read_paths` | list of strings | `.env`, `secrets/**` | Paths agents must not read and artifacts must not expose. |
 | `denied_commands` | list of strings | `git commit`, `git push`, `gh pr create` | Commands agents are forbidden to run. |
@@ -611,8 +642,8 @@ There is no flow block in `config.yaml`. Flows live as files in the operator's `
 **Fatal validation (at flow dispatch, and on demand via `worc validate-flow`).** A flow is loaded and validated when a task resolves it (`FlowRegistry.resolve`), so a broken or unsafe flow fails that task (→ `failed`/quarantine) rather than a global gate; `worc validate-flow [NAME|--all]` runs the same validation on demand over your `.worc/flows/`. `preflight` no longer validates flows. Three layers run:
 
 - **Graph integrity** — edges resolve, outcomes are in the allowed set per node kind, every `rework`/`fail` edge is bounded by a budget or named loop, exactly one entry node, every node can reach a terminal.
-- **Security ceiling** — a node's `permission_profile` may not exceed the flow `permission_ceiling`; evaluators are forced `read-only`; `extra_args` pass the forbidden-args screen; `role_file` paths contain no traversal; unknown fields anywhere fail closed.
-- **Config consistency** — a node's pinned `provider` is in `agents.allowed`, its `reasoning` is supported by the provider that will run it, Codex is not routed to a `workspace-write` node that resolves `network_access: true`, the flow `permission_ceiling` is reachable by at least one configured provider's `permission_profile`, and — under `security.strict_isolation` — no node's `extra_args` selects a provider full-access mode (Codex `--sandbox danger-full-access` / Claude `--permission-mode bypassPermissions`; the flow-side half of the isolation gate). (On resume the live flow is re-validated against the live config, so a config change can only ever _narrow_ what a task may do.)
+- **Security ceiling** — a node's `permission_profile` may not exceed the flow `permission_ceiling`; evaluators are forced `read-only`; `extra_args` pass the common forbidden-args screen; `role_file` paths contain no traversal; unknown fields anywhere fail closed.
+- **Config consistency** — a node's pinned `provider` is in `agents.allowed`, its `reasoning` is supported by the provider that will run it, Codex node `extra_args` pass the closed Codex parser, Codex is not routed to a `workspace-write` node that resolves `network_access: true`, the flow `permission_ceiling` is reachable by at least one configured provider's `permission_profile`, and — under `security.strict_isolation` — no Claude node's `extra_args` selects `bypassPermissions`. (On resume the live flow is re-validated against the live config, so a config change can only ever _narrow_ what a task may do.)
 
 Two things are deliberately **not** fatal here because the orchestrator degrades them gracefully: a flow `budget` above `agents.max_*` is clamped to the cap at runtime (the cap always wins), and a PR-publishing flow under `git.create_pull_request: false` runs in local-commit mode (no PR). Neither is an escalation, so neither blocks the flow.
 
@@ -658,7 +689,7 @@ The full set of optional per-node fields (all default to the value shown):
 | `reasoning` | agent, evaluator | provider's `reasoning` | `low`/`medium`/`high`/`xhigh`/`max` (Codex clamps `max`→`xhigh`). |
 | `network_access` | agent, evaluator | flow `network_policy` | Tri-state per-node network grant/deny (see above). |
 | `timeout_seconds` | agent | provider `timeout_seconds` | Per-node wall-clock cap. |
-| `extra_args` | agent | `()` | Extra CLI flags for this node, concatenated after the provider list (same forbidden-args screen). |
+| `extra_args` | agent | `()` | Provider-specific CLI extension for this node, concatenated after the provider list. Codex uses the closed allowlist above; Claude uses the common forbidden-bypass screen. |
 | `permission_profile` | agent | flow `permission_ceiling` | May only be **≤** the ceiling; evaluators are forced `read-only`. |
 | `best_effort` | agent | `false` | Tolerate an infra failure (engine continues) instead of failing the task. |
 | `blocking` | evaluator | `true` | A failing verdict blocks (`true`) vs is advisory (`false`). |

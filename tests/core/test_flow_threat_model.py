@@ -9,6 +9,7 @@ catalogue in one file makes "is every ceiling threat covered?" answerable at a g
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,7 @@ from wastech_orchestrator.core.flow.validator import (
     validate_flow,
     validate_flow_against_config,
 )
+from wastech_orchestrator.providers.base import ProviderId
 
 # -- flow helpers -------------------------------------------------------------
 
@@ -322,35 +324,57 @@ def test_threat_ceiling_above_provider_capability_fatal(tmp_path: Path) -> None:
     assert _has(vs, "config", "permission_ceiling")
 
 
-@pytest.mark.parametrize(
-    "extra",
-    [
-        "extra_args: ['--sandbox', 'danger-full-access']",  # Codex full-access sandbox
-        "extra_args: ['--permission-mode', 'bypassPermissions']",  # Claude permission bypass
-    ],
-)
-def test_threat_node_full_access_blocked_under_strict_isolation(extra: str, tmp_path: Path) -> None:
-    # provider-config-cleanup Risk #2 (option b): a flow node selecting a provider full-access mode
-    # in extra_args is no longer an absolute ban (find_forbidden_args lets it through, so it is
-    # structurally valid), but under security.strict_isolation the config-aware layer rejects it —
-    # the flow-side half of the global isolation gate.
+def test_codex_node_authority_extra_args_rejected_regardless_of_isolation(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, strict_isolation=False)
+    vs = _config_violations(
+        _flow(extra="provider: codex\nextra_args: ['--add-dir', '../outside']"),
+        config,
+        tmp_path,
+    )
+    assert _has(vs, "config", "Codex option '--add-dir'")
+
+
+def test_inherited_codex_node_config_override_is_rejected(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    codex_primary = config.agents.providers.copy()
+    codex_primary[ProviderId.CLAUDE] = replace(codex_primary[ProviderId.CLAUDE], primary=False)
+    codex_primary[ProviderId.CODEX] = replace(codex_primary[ProviderId.CODEX], primary=True)
+    config = replace(config, agents=replace(config.agents, providers=codex_primary))
+    vs = _config_violations(
+        _flow(extra="extra_args: ['--config=web_search=\"live\"']"), config, tmp_path
+    )
+    assert _has(vs, "config", "config key 'web_search'")
+
+
+def test_codex_node_allowlisted_extra_args_are_valid(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    snap = _snap(
+        _flow(
+            extra=(
+                "provider: codex\n"
+                "extra_args: ['--strict-config', '--config=model_verbosity=\"low\"']"
+            )
+        ),
+        tmp_path,
+    )
+    validate_flow(snap)
+    validate_flow_against_config(snap, config)
+
+
+def test_claude_node_full_access_blocked_under_strict_isolation(tmp_path: Path) -> None:
     config = _config(tmp_path, strict_isolation=True)
-    vs = _config_violations(_flow(extra=extra), config, tmp_path)
+    vs = _config_violations(
+        _flow(extra="extra_args: ['--permission-mode', 'bypassPermissions']"), config, tmp_path
+    )
     assert _has(vs, "config", "strict_isolation")
 
 
-@pytest.mark.parametrize(
-    "extra",
-    [
-        "extra_args: ['--sandbox', 'danger-full-access']",
-        "extra_args: ['--permission-mode', 'bypassPermissions']",
-    ],
-)
-def test_node_full_access_allowed_when_strict_isolation_off(extra: str, tmp_path: Path) -> None:
-    # The operator opts in by setting strict_isolation: false; the gate then lets the node through
-    # (the operator owns the risk). validate_flow_against_config must not raise.
+def test_claude_node_full_access_allowed_when_strict_isolation_off(tmp_path: Path) -> None:
+    # Claude's structured full-access selector retains its existing operator opt-in behavior.
     config = _config(tmp_path, strict_isolation=False)
-    snap = _snap(_flow(extra=extra), tmp_path)
+    snap = _snap(_flow(extra="extra_args: ['--permission-mode', 'bypassPermissions']"), tmp_path)
     validate_flow(snap)  # structurally valid (no absolute ban on the structured selector)
     validate_flow_against_config(snap, config)  # no raise → operator-selected full access allowed
 

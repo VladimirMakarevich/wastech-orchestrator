@@ -200,6 +200,10 @@ class BaseCliProvider:
         """Extra provider-specific keys for the request artifact (inserted before ``argv``)."""
         return {}
 
+    def _artifact_extra_args(self, args: Sequence[str]) -> list[str]:
+        """Represent provider arguments before generic secret redaction."""
+        return list(args)
+
     def _augment_child_env(self, env: dict[str, str]) -> dict[str, str]:
         """Subclass hook: adjust the allowlisted child env just before preflight/probe/run.
 
@@ -542,8 +546,8 @@ class BaseCliProvider:
             "model": request.model or self._config.model or None,
             "prompt": build_effective_prompt(request),
             "context_paths": {k: v for k, v in context_paths.items() if v},
-            "extra_args": list(request.extra_args),
-            "config_extra_args": list(self._config.extra_args),
+            "extra_args": self._artifact_extra_args(request.extra_args),
+            "config_extra_args": self._artifact_extra_args(self._config.extra_args),
         }
         representation.update(self._representation_extras(request))
         representation["argv"] = argv

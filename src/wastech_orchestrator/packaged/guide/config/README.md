@@ -60,7 +60,8 @@ Treat this block as a guardrail, not a convenience area:
 - Keep `strict_isolation: true` unless the operator consciously accepts full-access runs.
 - Pass only names in `allowed_environment`; secret **values** never belong in the file.
 - Keep `denied_commands` complete; it replaces the default list rather than extending it.
-- Do not add `extra_args` that disable sandboxing, approvals, or rule enforcement.
+- Keep Codex `extra_args` within its documented closed allowlist; authority-bearing options fail
+  config validation. Claude retains the common sandbox/approval/rule-bypass screen.
 - `trust_level` sets the approval threshold for the mid-task dangerous-diff gate: `auto` (default) lets routine in-repo deletions/edits proceed; `strict` gates every deletion or dependency-manifest edit. It never lowers the hard ceiling — only which diffs raise the gate.
 - `protected_paths` is the always-ask floor: repo-relative globs (same dialect as `checks.command_sets[].paths`) that require approval on **any** change regardless of `trust_level`. Default `[]` (no floor); add sensitive surfaces here (e.g. `.github/workflows/**`, `src/security/**`).
 
@@ -120,7 +121,8 @@ If the repo already answers the question (`origin`, current branch, `pyproject.t
 
 - Do not put tokens, passwords, chat ids, or secret values in `config.yaml`.
 - Do not invent provider ids, stage names, or model ids.
-- Do not weaken security through `extra_args`.
+- Do not weaken security through `extra_args`; Codex rejects unknown options and config keys
+  fail-closed.
 - Do not make `skip_if_unavailable: true` the default for required test suites.
 - Do not turn on `auto_merge` just to reduce friction.
 

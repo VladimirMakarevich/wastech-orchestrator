@@ -186,14 +186,45 @@ def test_sandbox_bypass_extra_arg_is_rejected(base_config: OrchestratorConfig, f
         ("--sandbox", "danger-full-access"),
     ],
 )
-def test_full_access_sandbox_extra_arg_is_not_a_config_error(
+def test_codex_sandbox_extra_arg_is_rejected_at_config_load(
     base_config: OrchestratorConfig, extra_args: tuple[str, ...]
 ) -> None:
-    # provider-config-cleanup #1: a full-access sandbox is no longer an absolute config-validation
-    # error — it is operator-selectable and gated by the strict_isolation preflight (the absolute
-    # ban is reserved for --dangerously*/--yolo/--ignore-rules). See test_isolation.py for the gate.
     codex = replace(base_config.agents.providers[ProviderId.CODEX], extra_args=extra_args)
     providers = {**base_config.agents.providers, ProviderId.CODEX: codex}
+    with pytest.raises(ConfigError) as exc:
+        validate_config(_with_agents(base_config, providers=providers))
+    assert any("Codex option '--sandbox'" in issue for issue in exc.value.issues)
+
+
+def test_codex_add_dir_is_rejected_at_config_load(base_config: OrchestratorConfig) -> None:
+    codex = replace(
+        base_config.agents.providers[ProviderId.CODEX],
+        extra_args=("--add-dir", "../outside"),
+    )
+    providers = {**base_config.agents.providers, ProviderId.CODEX: codex}
+    with pytest.raises(ConfigError) as exc:
+        validate_config(_with_agents(base_config, providers=providers))
+    assert any("Codex option '--add-dir'" in issue for issue in exc.value.issues)
+
+
+def test_codex_config_error_omits_override_value(base_config: OrchestratorConfig) -> None:
+    secret = "ordinary-credential-value-987654"
+    codex = replace(
+        base_config.agents.providers[ProviderId.CODEX],
+        extra_args=("--config", f'openai_base_url="{secret}"'),
+    )
+    providers = {**base_config.agents.providers, ProviderId.CODEX: codex}
+    with pytest.raises(ConfigError) as exc:
+        validate_config(_with_agents(base_config, providers=providers))
+    assert secret not in str(exc.value)
+    assert "openai_base_url" in str(exc.value)
+
+
+def test_claude_add_dir_config_behavior_is_unchanged(base_config: OrchestratorConfig) -> None:
+    claude = replace(
+        base_config.agents.providers[ProviderId.CLAUDE], extra_args=("--add-dir", "../shared")
+    )
+    providers = {**base_config.agents.providers, ProviderId.CLAUDE: claude}
     assert validate_config(_with_agents(base_config, providers=providers)) == []
 
 

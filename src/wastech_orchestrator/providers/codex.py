@@ -47,11 +47,11 @@ from wastech_orchestrator.providers.errors import (
     make_signatures,
     message_for,
 )
-from wastech_orchestrator.providers.redaction import redact_text
+from wastech_orchestrator.providers.redaction import REDACTED, redact_text
 from wastech_orchestrator.security.forbidden_args import (
     FORBIDDEN_SANDBOX_VALUE,
-    find_forbidden_args,
-    find_full_access_args,
+    CodexExtraArgsError,
+    render_codex_extra_args,
 )
 
 __all__ = [
@@ -219,19 +219,19 @@ def build_codex_argv(
 ) -> list[str]:
     """Build the ``codex exec`` argv (a list, never a shell string).
 
-    Raises :class:`ProviderError` (``CONFIGURATION_ERROR``) if ``extra_args`` would weaken the
-    sandbox/approvals (the absolutely-forbidden ``--dangerously*`` / ``--yolo`` / ``--ignore-rules``
-    flags) — defence in depth over the P1 config validator. The full-access sandbox
-    (``danger-full-access``) is **not** rejected here: it is operator-selectable and gated by
-    ``strict_isolation`` at preflight (security rule #3), so it passes through to the CLI. The
-    prompt is delivered on stdin (the trailing ``-``), never on the command line.
+    Raises :class:`ProviderError` (``CONFIGURATION_ERROR``) unless ``extra_args`` parse as the
+    Codex-specific closed set of harmless flags/config keys. This repeats config/flow validation
+    immediately before spawn and canonicalizes accepted options for both fresh and resume grammar.
+    The prompt is delivered on stdin (the trailing ``-``), never on the command line.
     """
     combined_extra = tuple(config.extra_args) + tuple(request.extra_args)
-    reasons = find_forbidden_args(combined_extra)
-    if reasons:
+    try:
+        safe_extra = render_codex_extra_args(combined_extra)
+    except CodexExtraArgsError as exc:
         raise ProviderError(
-            ErrorClass.CONFIGURATION_ERROR, "rejected unsafe extra_args: " + "; ".join(reasons)
-        )
+            ErrorClass.CONFIGURATION_ERROR,
+            "rejected unsafe Codex extra_args: " + "; ".join(exc.reasons),
+        ) from None
 
     sandbox = _effective_sandbox(config, request)
 
@@ -288,7 +288,7 @@ def build_codex_argv(
                 f"unsupported Codex reasoning value {reasoning!r}",
             )
         argv += ["-c", f'model_reasoning_effort="{effort}"']
-    argv += list(combined_extra)
+    argv += safe_extra
     argv.append("-")  # read the prompt from stdin
     return argv
 
@@ -299,16 +299,18 @@ def isolation_reasons(config: ProviderConfig) -> list[str]:
     Pure and offline (no CLI launched), so it can drive the ``strict_isolation`` preflight
     (:mod:`wastech_orchestrator.security.isolation`). Codex has no per-tool deny mechanism — the
     sandbox *is* the isolation, so "isolation enabled" means a real sandbox mode is in force. The
-    full-access sandbox (``danger-full-access``) is reported as "no isolation" whether it is set via
-    the ``sandbox`` field or selected in ``extra_args`` (the gate, not an absolute ban), and
-    ``extra_args`` must not weaken the sandbox/approvals.
+    full-access sandbox (``danger-full-access``) is reported as "no isolation" when selected by the
+    typed ``sandbox`` field. Codex ``extra_args`` is a closed allowlist, checked here as part of the
+    same preflight report.
     """
     sandbox = config.sandbox or config.permission_profile or _DEFAULT_SANDBOX
     reasons: list[str] = []
     if sandbox == FORBIDDEN_SANDBOX_VALUE:
         reasons.append(f"sandbox {sandbox!r} grants full filesystem access (no isolation)")
-    reasons.extend(f"extra_args {r}" for r in find_full_access_args(config.extra_args))
-    reasons.extend(f"extra_args {r}" for r in find_forbidden_args(config.extra_args))
+    try:
+        render_codex_extra_args(config.extra_args)
+    except CodexExtraArgsError as exc:
+        reasons.extend(f"extra_args {reason}" for reason in exc.reasons)
     return reasons
 
 
@@ -404,6 +406,22 @@ class CodexProvider(BaseCliProvider):
 
     def _executable_label(self) -> str:
         return "codex"
+
+    def _artifact_extra_args(self, args: Sequence[str]) -> list[str]:
+        """Keep option names for audit while redacting every operator-supplied value.
+
+        A rejected arbitrary ``-c`` value may be a credential that does not match a known token
+        pattern. Redacting all Codex option values before the generic redaction pass makes the
+        configuration-error artifact fail closed without weakening the useful option-name audit.
+        """
+        represented: list[str] = []
+        for token in args:
+            if token.startswith("-"):
+                option, separator, _value = token.partition("=")
+                represented.append(f"{option}={REDACTED}" if separator else option)
+            else:
+                represented.append(REDACTED)
+        return represented
 
     def _sandbox_needs_windows_helper(self) -> bool:
         """Whether the configured sandbox engages the Windows sandbox helper.

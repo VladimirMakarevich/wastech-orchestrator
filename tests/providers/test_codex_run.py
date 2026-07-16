@@ -347,6 +347,27 @@ def test_configuration_error_raises_before_launch(
     assert (_attempt_dir(tmp_path) / "request.json").exists()
 
 
+def test_rejected_config_value_is_absent_from_error_and_request_artifact(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    from dataclasses import replace
+
+    secret = "ordinary-credential-value-987654"
+    bad = replace(codex_config, extra_args=("--config", f'openai_base_url="{secret}"'))
+    fake = FakeRun(stdout=_success_stream())
+    provider = _provider(bad, security_config, tmp_path, fake)
+    with pytest.raises(ProviderError) as exc:
+        provider.run(make_request())
+    request_text = (_attempt_dir(tmp_path) / "request.json").read_text(encoding="utf-8")
+    assert secret not in str(exc.value)
+    assert secret not in request_text
+    assert "openai_base_url" in str(exc.value)
+    assert fake.calls == 0
+
+
 def _provider_at_level(
     config: ProviderConfig, security: SecurityConfig, root: Path, fake: FakeRun, level: str
 ) -> CodexProvider:

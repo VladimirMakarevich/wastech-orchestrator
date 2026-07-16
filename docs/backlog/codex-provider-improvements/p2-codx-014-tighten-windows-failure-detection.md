@@ -4,6 +4,7 @@
 **Priority:** P2
 **Source finding:** CXP-12
 **Dependencies:** none
+**Officially supported CLI versions:** `codex` **≥ 0.144.4**
 
 ## Problem
 
