@@ -13,7 +13,7 @@ The **network access control** is part of this same policy surface even though i
 ## Public surface
 
 - `find_forbidden_args(args) -> list[str]` ([forbidden_args.py:38](../../../src/wastech_orchestrator/security/forbidden_args.py#L38)) — one reason string per offending token; `[]` means safe.
-- `FORBIDDEN_SANDBOX_VALUE = "danger-full-access"` ([forbidden_args.py:21](../../../src/wastech_orchestrator/security/forbidden_args.py#L21)) — the sandbox value that must never be selected.
+- `FORBIDDEN_SANDBOX_VALUE = "danger-full-access"` ([forbidden_args.py:21](../../../src/wastech_orchestrator/security/forbidden_args.py#L21)) — the sandbox value rejected in raw provider arguments; the typed provider field remains gated by `strict_isolation`.
 - `build_child_env(allowed_keys, parent_env=None) -> dict[str, str]` ([env.py:18](../../../src/wastech_orchestrator/security/env.py#L18)) — child env from the allowlist only.
 - `scan_frontmatter(frontmatter) -> InjectionFinding | None` ([injection.py:49](../../../src/wastech_orchestrator/security/injection.py#L49)) — first argv-shaped front-matter value, or `None`.
 - `scan_value(key, value) -> InjectionFinding | None` ([injection.py:58](../../../src/wastech_orchestrator/security/injection.py#L58)) — recursive single-value scan.
@@ -33,20 +33,31 @@ The common detector remains the Claude/check defense-in-depth hinge. Codex adds 
 
 `build_child_env` returns a fresh dict containing exactly the allowlisted keys that exist in the parent, in allowlist order; a key absent from the parent is skipped, never added as empty ([env.py:30](../../../src/wastech_orchestrator/security/env.py#L30)). The parent defaults to the live `os.environ` only when no `parent_env` is passed ([env.py:29](../../../src/wastech_orchestrator/security/env.py#L29)). The child therefore **never** inherits the parent's full environment, so no secret or token (`OPENAI_API_KEY`, `GITHUB_TOKEN`, …) is forwarded implicitly — credentials are configured outside the orchestrator. Every external launch builds its env this way: the orchestrator's run env ([orchestrator.py:910](../../../src/wastech_orchestrator/core/orchestrator.py#L910)), the git manager ([git_manager.py:188](../../../src/wastech_orchestrator/git_manager.py#L188)), and the check runner ([check_runner.py:124](../../../src/wastech_orchestrator/check_runner.py#L124)).
 
-The allowlist intentionally **does** forward `HOME` (and `CODEX_HOME` / `CLAUDE_CONFIG_DIR` when present) so the spawned CLIs find their own auth stores. Codex separates auth from config with its fixed `--ignore-user-config` boundary; the auth path is neither copied nor recorded. Instruction-file discovery is a separate CLI behavior: the agents may still read global `~/.claude/CLAUDE.md` / `~/.codex/AGENTS.md` plus target-repo instructions — see B18. That prompt context cannot change the adapter's fixed argv/config capability ceiling.
+The allowlist intentionally forwards `HOME`, `CODEX_HOME`, and `CLAUDE_CONFIG_DIR` so providers can
+resolve auth. Codex replaces the child value with an isolated policy home only after confirming the
+name remains allowlisted; an existing file auth store is hard-linked without copying contents, and
+its path is never recorded. Instruction-file context cannot change the adapter's fixed
+argv/config/policy ceiling.
 
 ### Controlled Codex invocation (provider-owned enforcement)
 
 Codex `extra_args` validation prevents operator/flow arguments from expanding authority, while the
 provider itself establishes the positive effective policy. `_controlled_config_values` marks the
-working project untrusted and explicitly sets sandbox network, web search, empty MCP/hooks/skills
-surfaces, app defaults, and startup side channels ([codex.py:266-288](../../../src/wastech_orchestrator/providers/codex.py#L266)). `build_codex_argv` adds strict config, ignores user config and user/project rules, and disables every external feature without a typed grant before fresh or resume execution ([codex.py:330-417](../../../src/wastech_orchestrator/providers/codex.py#L330)). The only grant is `AgentRunRequest.network_access`, which enables shell network where supported plus live web search; apps/MCP/browser/computer-use/plugins/hooks remain false.
+working project untrusted and explicitly sets permission-profile network, web search, empty
+MCP/hooks/skills surfaces, app defaults, and startup side channels
+([codex.py](../../../src/wastech_orchestrator/providers/codex.py)). `build_codex_argv` adds strict
+config, ignores user config, and disables every external feature without a typed grant before fresh
+or resume execution. [codex_policy.py](../../../src/wastech_orchestrator/providers/codex_policy.py)
+owns the isolated rules home, forbidden command rules, and deny-read permission entries. The only
+grant is `AgentRunRequest.network_access`; apps/MCP/browser/computer-use/plugins/hooks remain false.
 
-The provider rejects an offline `danger-full-access` attempt before spawn and writes a
-credential/path-free `capabilities.json` for every started attempt
+The provider rejects `danger-full-access` unless the operator sets `strict_isolation: false` and
+the node is online. That explicit mode retains generated command rules but cannot enforce denied
+reads. Every started attempt writes a credential/path-free `capabilities.json`
 ([codex.py:291-327](../../../src/wastech_orchestrator/providers/codex.py#L291),
 [codex.py:691-703](../../../src/wastech_orchestrator/providers/codex.py#L691)). Preflight requires
-Codex `>= 0.144.4` and all boundary primitives before any model turn. This runtime enforcement is
+Codex `>= 0.144.4`, validates every generated forbidden rule, and, for isolated modes, smokes the
+host's denied-read sandbox before any model turn. This runtime enforcement is
 adapter-owned because only the provider may know Codex CLI syntax; the core/security modules remain
 provider-agnostic.
 

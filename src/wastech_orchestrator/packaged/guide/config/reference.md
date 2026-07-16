@@ -5,7 +5,7 @@
 Two rules apply everywhere:
 
 - **Unknown keys fail closed.** A key the schema does not know — at the top level or inside any block — is a hard load error (a few long-removed keys are silently tolerated for back-compat). Do not invent fields.
-- **Three list fields _replace_, never extend, their defaults:** `security.allowed_environment`, `security.denied_read_paths`, `security.denied_commands`. If you write one, write the whole list you need.
+- **`allowed_environment` replaces its default; deny lists do not.** `security.denied_read_paths` and `security.denied_commands` extend a mandatory baseline, so config can add restrictions but cannot remove the defaults.
 
 Blocks appear below in the packaged order. Every block except `schema_version`, `repo`, `agents`, and `security` is optional — omit it to take the defaults shown.
 
@@ -79,7 +79,7 @@ Applies per provider in `[primary, fallback]`; only transient classes (`PROVIDER
 | `.timeout_seconds` | int | `7200` | — | Per-attempt CLI wall-clock ceiling (seconds). |
 | `.permission_profile` | `read-only` \| `workspace-write` | `workspace-write` | A flow node's ceiling may lower it, never raise it. | Access level for this provider's runs. |
 | `.extra_args` | list[str] | `[]` | Claude: common bypass screen. Codex: closed allowlist (`--ignore-user-config`, `--strict-config`, and documented safe `-c` keys); everything else is **rejected at config time**. | Optional provider CLI extension. |
-| `.sandbox` | `workspace-write` \| `read-only` \| `danger-full-access` \| null | `null` | `danger-full-access` loads but is **rejected at preflight unless `security.strict_isolation: false`**; Codex sandbox selectors in `extra_args` are always rejected. | Codex-specific sandbox (Codex's real isolation knob). |
+| `.sandbox` | `workspace-write` \| `read-only` \| `danger-full-access` \| null | `null` | `danger-full-access` requires `security.strict_isolation: false` and online nodes; denied reads are not enforced. Codex sandbox selectors in `extra_args` are always rejected. | Codex-specific sandbox (Codex's real isolation knob). |
 | `.max_turns` | positive int, or `"none"` / `"max"`, or null | `400` | `<= 0` or other strings are errors. | Claude turn cap. `none`/`max`/`null` = no cap. Pair a low cap with `max_turns_gate` for a Telegram continue prompt. |
 | `.reasoning` | string \| null | `null` / install: `high` | **Per-provider set:** Claude ∈ `{low, medium, high, xhigh, max}`; Codex ∈ `{minimal, low, medium, high, xhigh, max}` (`max`→`xhigh`). | Reasoning effort. A value valid for one provider may be invalid for the other. |
 | `.primary` | bool | `false` | **Exactly one** provider across the map must be `true`, and it must be in `agents.allowed`. | The global primary: runs every flow node with no explicit `provider`, and is the sole infrastructure-fallback target. |
@@ -90,10 +90,10 @@ Applies per provider in `[primary, fallback]`; only transient classes (`PROVIDER
 
 | Field | Type / values | Default (dataclass / install) | Constraint | When to use |
 | --- | --- | --- | --- | --- |
-| `security.strict_isolation` | bool | `true` | — | Fail-closed sandbox. `true` **rejects full-access provider modes at preflight** (Codex typed `sandbox: danger-full-access`, Claude `bypassPermissions`). Set `false` only to consciously accept full-access runs. Codex authority-bearing `extra_args` and common bypass flags stay banned regardless. |
+| `security.strict_isolation` | bool | `true` | — | Fail-closed sandbox. Typed provider full access can be consciously enabled with `false`; Codex then requires online nodes and cannot enforce denied reads. Authority-bearing `extra_args` stay banned. |
 | `security.allowed_environment` | list[str] | OS-aware base (`PATH`, `HOME`, `USER`, `USERPROFILE`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR` + OS-launch essentials) | **REPLACES** the default. | The only env var _names_ forwarded to child processes (a name absent from the host is skipped). Keep the OS-launch essentials for your OS or the CLI may fail to start; secret **values** never go here. |
-| `security.denied_read_paths` | list of globs | `[".env", "secrets/**"]` | **REPLACES** the default. Same glob dialect as `protected_paths`. | Paths the agent CLI may never read (enforced as `--disallowedTools`), so a task cannot exfiltrate secrets. |
-| `security.denied_commands` | list[str] | `["git commit", "git push", "gh pr create", "gh pr merge"]` | **REPLACES** the default. | Commands the agent/checks may never run. Keep every entry you need — publishing is the orchestrator's job, not the agent's. |
+| `security.denied_read_paths` | list of globs | `[".env", "secrets/**"]` | **EXTENDS** the mandatory default; repo-relative only, no absolute/`~`/`..`. | Paths the agent CLI may never read. Codex uses an OS permission profile; Claude uses tool denials; redaction remains defense in depth. |
+| `security.denied_commands` | list[str] | `["git commit", "git push", "gh pr create", "gh pr merge"]` | **EXTENDS** the mandatory default; non-empty whitespace-delimited argv prefixes. | Commands the agent/checks may never run. Codex uses forbidden execpolicy rules; Claude uses tool denials. |
 | `security.trust_level` | `strict` \| `auto` | `strict` / install: `auto` | Per-task `trust_level` overrides it. | Approval policy for the mid-task dangerous-diff gate. `strict` = gate every tracked-file deletion/rename or dependency-manifest/lock edit; `auto` = only a `protected_paths` match asks. Never lowers the hard ceiling — only which diffs raise the gate. |
 | `security.protected_paths` | list of repo-relative globs | `[]` | Each must be repo-relative (no absolute/`~`/`..`). | The always-ask floor: any change to a matching path requires approval regardless of `trust_level`. `[]` = no floor. Add sensitive surfaces (e.g. `.github/workflows/**`, `src/security/**`). |
 
@@ -225,13 +225,16 @@ Omitting the whole block ⇒ `enabled: false` (no store, empty packets, CLI no-o
 - **Reasoning is per-provider.** Claude accepts `{low, medium, high, xhigh, max}`; Codex accepts `{minimal, low, medium, high, xhigh, max}` (`max` maps to `xhigh`). A value that validates for one provider can be rejected for the other — including on `supervisor.reasoning` against the resolved supervisor provider.
 - **Telegram-gated fields.** `orchestrator.auto_mode.confirm_next_task` and any provider `max_turns_gate` require `telegram.enabled: true`.
 - **Ordering constraints.** `max_total_fix_iterations >= max_fix_cycles`; `retry.max_delay_s >= retry.base_delay_s`; `decomposition.max_subtasks >= 2`.
-- **Replace-not-extend.** `allowed_environment`, `denied_read_paths`, `denied_commands` replace their defaults wholesale.
-- **Full access needs `strict_isolation: false`.** Codex `danger-full-access` / Claude `bypassPermissions` load but are rejected at preflight unless you turn `strict_isolation` off (owning the risk).
+- **Non-weakening merge.** `allowed_environment` replaces its default; `denied_read_paths` and `denied_commands` always retain their mandatory defaults and append operator entries.
+- **Full access needs `strict_isolation: false`.** Claude `bypassPermissions` and Codex
+  `danger-full-access` are rejected unless you turn strict isolation off and own the risk. Codex
+  full access additionally requires `network_access: true` and leaves denied reads unenforced.
 - **Codex config is always controlled.** Every fresh/resume attempt ignores user config and
   user/project rules, marks project config untrusted, and disables apps/MCP/browser/computer-use/
   plugins/hooks plus equivalent external channels. `network_access` grants only sandbox network +
   live web search. Auth still comes from the existing Codex auth store without copying it. Codex
-  `< 0.144.4` fails preflight; offline `danger-full-access` fails before spawn.
+  `< 0.144.4` fails preflight. Full access keeps this controlled command/config boundary but opts
+  out of filesystem/read isolation.
 - **Install vs dataclass defaults differ** for a few fields: `security.trust_level` (`auto` on install), `memory.enabled` (`true`), `skills.dynamic` (`false`), provider `model`/`reasoning`, and `supervisor` (pinned to the primary). The table shows both.
 - **Comments are stripped on upgrade.** `worc upgrade-config` preserves values but re-emits the file without inline comments — keep the _reason_ for an unusual value recoverable elsewhere.
 

@@ -11,8 +11,7 @@ from wastech_orchestrator.security.env import default_allowed_environment
 
 
 def test_example_denied_commands_match_loader_default(packaged_config_text: str) -> None:
-    # denied_commands REPLACES (does not extend) the default, so an operator copying the example
-    # must not silently lose a default denial (e.g. ``gh pr merge``). Guards drift in the example.
+    # The shipped list mirrors the mandatory baseline; merging deduplicates it exactly.
     cfg = loads_config(packaged_config_text).config
     assert cfg.security.denied_commands == _DEFAULT_DENIED_COMMANDS
 

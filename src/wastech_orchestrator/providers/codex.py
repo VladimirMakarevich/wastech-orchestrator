@@ -21,6 +21,7 @@ import os
 import platform
 import re
 import shutil
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -37,11 +38,19 @@ from wastech_orchestrator.providers.base import (
     ErrorClass,
     NormalizedError,
     ProviderError,
+    ProviderHealth,
     ProviderId,
     build_context_footer,
     build_effective_prompt,
 )
 from wastech_orchestrator.providers.capabilities import normalize_codex_reasoning
+from wastech_orchestrator.providers.codex_policy import (
+    CodexPolicyError,
+    command_prefixes,
+    permission_config_values,
+    prepare_controlled_home,
+    resolve_user_codex_home,
+)
 from wastech_orchestrator.providers.errors import (
     StderrSignature,
     make_signatures,
@@ -151,6 +160,11 @@ _HELPER_LAUNCH_FAILED_RE = re.compile(_HELPER_LAUNCH_FAILED_PATTERN, re.IGNORECA
 # Any other status (incl. a missing one) is treated as a completed run — task quality is judged
 # later by the orchestrator's review/checks, not by the adapter.
 _FAILURE_STATUSES = frozenset({"error", "failed", "failure", "incomplete", "aborted"})
+_POLICY_DENIAL_RE = re.compile(
+    r"policy forbids|rejected: policy|blocked by (?:the )?(?:sandbox|policy)|"
+    r"permission denied|operation not permitted",
+    re.IGNORECASE,
+)
 
 # Codex stderr signatures → normalized error classes (most specific first).
 _CODEX_SIGNATURES = make_signatures(
@@ -262,7 +276,13 @@ def _effective_sandbox(config: ProviderConfig, request: AgentRunRequest) -> str:
     return configured
 
 
-def _controlled_config_values(request: AgentRunRequest, sandbox: str) -> tuple[str, ...]:
+def _controlled_config_values(
+    request: AgentRunRequest,
+    sandbox: str,
+    denied_read_paths: tuple[str, ...],
+    *,
+    strict_isolation: bool,
+) -> tuple[str, ...]:
     """Return the highest-precedence Codex config layer owned by the orchestrator.
 
     The working-directory key is quoted as one TOML dotted-key segment, so Windows backslashes,
@@ -271,10 +291,14 @@ def _controlled_config_values(request: AgentRunRequest, sandbox: str) -> tuple[s
     still repeats every security-sensitive value as defense in depth.
     """
     project_key = json.dumps(request.working_directory, ensure_ascii=False)
-    shell_network = request.network_access and sandbox != "read-only"
+    permission_values = permission_config_values(
+        sandbox=sandbox,
+        network_access=request.network_access,
+        denied_read_paths=denied_read_paths,
+        strict_isolation=strict_isolation,
+    )
     return (
         f'projects.{project_key}.trust_level="untrusted"',
-        f"sandbox_workspace_write.network_access={str(shell_network).lower()}",
         f'web_search="{"live" if request.network_access else "disabled"}"',
         "apps._default.enabled=false",
         "mcp_servers={}",
@@ -284,11 +308,17 @@ def _controlled_config_values(request: AgentRunRequest, sandbox: str) -> tuple[s
         "analytics.enabled=false",
         "feedback.enabled=false",
         "check_for_update_on_startup=false",
+        *permission_values,
     )
 
 
 def build_codex_capability_manifest(
-    config: ProviderConfig, request: AgentRunRequest
+    config: ProviderConfig,
+    request: AgentRunRequest,
+    *,
+    denied_commands: tuple[str, ...] = (),
+    denied_read_paths: tuple[str, ...] = (),
+    strict_isolation: bool = True,
 ) -> dict[str, Any]:
     """Describe the effective Codex tool/config boundary without paths or credentials.
 
@@ -298,7 +328,8 @@ def build_codex_capability_manifest(
     processes; the model transport itself necessarily remains available for a Codex turn.
     """
     sandbox = _effective_sandbox(config, request)
-    shell_network = request.network_access and sandbox != "read-only"
+    read_policy_enforced = sandbox != FORBIDDEN_SANDBOX_VALUE
+    shell_network = request.network_access
     capabilities: dict[str, bool] = {
         "shell_network": shell_network,
         "web_search": request.network_access,
@@ -310,7 +341,8 @@ def build_codex_capability_manifest(
         "configuration_boundary": {
             "user_config": "ignored",
             "project_config": "untrusted",
-            "user_and_project_rules": "ignored",
+            "user_rules": "isolated_policy_home",
+            "project_rules": "untrusted",
             "strict_config": True,
             "auth_storage": "codex_auth_store",
             "auth_path_recorded": False,
@@ -320,7 +352,13 @@ def build_codex_capability_manifest(
             "permission_profile": request.permission_profile,
             "sandbox": sandbox,
             "network_access": request.network_access,
+            "strict_isolation": strict_isolation,
             "external_io_disabled": not request.network_access,
+            "denied_command_prefixes": len(command_prefixes(denied_commands)),
+            "denied_read_patterns": len(tuple(path for path in denied_read_paths if path.strip())),
+            "denied_command_policy_enforced": True,
+            "denied_read_policy_enforced": read_policy_enforced,
+            "deny_policy_enforced": read_policy_enforced,
         },
         "capabilities": capabilities,
     }
@@ -330,6 +368,8 @@ def build_codex_argv(
     config: ProviderConfig,
     request: AgentRunRequest,
     *,
+    denied_read_paths: tuple[str, ...] = (),
+    strict_isolation: bool = True,
     output_schema_path: str | None,
     last_message_path: str,
 ) -> list[str]:
@@ -350,12 +390,18 @@ def build_codex_argv(
         ) from None
 
     sandbox = _effective_sandbox(config, request)
-    if not request.network_access and sandbox == FORBIDDEN_SANDBOX_VALUE:
+    try:
+        controlled_values = _controlled_config_values(
+            request,
+            sandbox,
+            denied_read_paths,
+            strict_isolation=strict_isolation,
+        )
+    except CodexPolicyError as exc:
         raise ProviderError(
             ErrorClass.CONFIGURATION_ERROR,
-            "offline Codex invocation cannot enforce network isolation with "
-            "sandbox 'danger-full-access'; grant network explicitly or select a sandboxed mode",
-        )
+            str(exc),
+        ) from None
 
     # Approval policy is a global Codex flag. Both Codex CLI 0.57 and current releases reject it
     # when it is placed after the ``exec`` subcommand.
@@ -366,18 +412,15 @@ def build_codex_argv(
         "exec",
         "--strict-config",
         "--ignore-user-config",
-        "--ignore-rules",
     ]
     # Exec-level options belong to parent ``codex exec`` and MUST precede the optional ``resume``
     # subcommand (codex 0.142.x grammar: ``codex exec [OPTIONS] resume [SESSION_ID] [PROMPT]``).
-    # --cd / --sandbox / --json / --output-last-message / --output-schema and the network -c are
+    # --cd / --json / --output-last-message / --output-schema and the policy -c values are
     # exec options; placing any after ``resume`` is rejected (unexpected argument '--cd', exit 2).
     # Only -m/--model and -c/--config are accepted by ``resume`` itself, so those go after it below.
     argv += [
         "--cd",
         request.working_directory,
-        "--sandbox",
-        sandbox,
         "--json",
         "--output-last-message",
         last_message_path,
@@ -391,7 +434,7 @@ def build_codex_argv(
         # The managed proxy is another sandbox-network route. Keep it available only under the
         # same typed network grant; online runs still use the explicit sandbox network setting.
         argv += ["--disable", "network_proxy"]
-    for value in _controlled_config_values(request, sandbox):
+    for value in controlled_values:
         argv += ["--config", value]
     if output_schema_path is not None:
         argv += ["--output-schema", output_schema_path]
@@ -422,11 +465,10 @@ def isolation_reasons(config: ProviderConfig) -> list[str]:
     """Reasons the configured Codex isolation cannot be enabled — an empty list means OK.
 
     Pure and offline (no CLI launched), so it can drive the ``strict_isolation`` preflight
-    (:mod:`wastech_orchestrator.security.isolation`). Codex has no per-tool deny mechanism — the
-    sandbox *is* the isolation, so "isolation enabled" means a real sandbox mode is in force. The
-    full-access sandbox (``danger-full-access``) is reported as "no isolation" when selected by the
-    typed ``sandbox`` field. Codex ``extra_args`` is a closed allowlist, checked here as part of the
-    same preflight report.
+    (:mod:`wastech_orchestrator.security.isolation`). Codex filesystem isolation is enforced by its
+    permission-profile sandbox, so "isolation enabled" means a real sandbox mode is in force. The
+    full-access mode (``danger-full-access``) is reported as "no isolation" when selected by the
+    typed ``sandbox`` field. Codex ``extra_args`` is a closed allowlist, checked here too.
     """
     sandbox = config.sandbox or config.permission_profile or _DEFAULT_SANDBOX
     reasons: list[str] = []
@@ -463,6 +505,7 @@ def parse_events(
     session_id: str | None = None
     terminal_seen = False
     succeeded = False
+    policy_denied = False
 
     for line in stdout_text.splitlines():
         stripped = line.strip()
@@ -475,6 +518,7 @@ def parse_events(
         if not isinstance(event, dict):
             continue
         event_type = str(event.get("type", ""))
+        policy_denied = policy_denied or _event_is_policy_denial(event_type, event)
         if event_type in ("session", "session.created") or "session_id" in event:
             session_id = event.get("session_id", session_id)
         # ``codex exec`` emits ``{"type":"thread.started","thread_id":"..."}`` — the thread id is
@@ -516,6 +560,23 @@ def parse_events(
         usage=usage,
         session_id=session_id,
         succeeded=succeeded,
+        policy_denied=policy_denied,
+    )
+
+
+def _event_is_policy_denial(event_type: str, event: dict[str, Any]) -> bool:
+    """Recognize the stable failed-command JSONL shape without retaining command/output text."""
+    if event_type != "item.completed":
+        return False
+    item = event.get("item")
+    if not isinstance(item, dict) or item.get("type") != "command_execution":
+        return False
+    status = str(item.get("status", "")).lower()
+    output = item.get("aggregated_output")
+    return (
+        status in {"failed", "declined"}
+        and isinstance(output, str)
+        and _POLICY_DENIAL_RE.search(output) is not None
     )
 
 
@@ -528,6 +589,33 @@ class CodexProvider(BaseCliProvider):
     """
 
     id: str = ProviderId.CODEX.value
+
+    def preflight(self) -> ProviderHealth:
+        """Prepare and validate the deny boundary before probing the provider binary."""
+        try:
+            self._prepare_policy_home()
+        except CodexPolicyError as exc:
+            return ProviderHealth(
+                provider_id=self.id,
+                executable_found=shutil.which(self._config.command) is not None,
+                version=None,
+                authenticated=False,
+                supports_required_features=False,
+                message=str(exc),
+            )
+        return super().preflight()
+
+    def _prepare_policy_home(self) -> tuple[Path, Path]:
+        """Materialize the generated rule set and isolated Codex config/rules namespace."""
+        if "CODEX_HOME" not in self._security.allowed_environment:
+            raise CodexPolicyError(
+                "security.allowed_environment must include CODEX_HOME to enforce Codex policy"
+            )
+        return prepare_controlled_home(
+            resolve_user_codex_home(),
+            self._artifacts_root,
+            self._security.denied_commands,
+        )
 
     def _executable_label(self) -> str:
         return "codex"
@@ -582,6 +670,8 @@ class CodexProvider(BaseCliProvider):
         package directory and prepend it so the CLI can find it — adjusting only the value of an
         already-allowlisted key (``PATH``), never widening the env allowlist or the sandbox.
         """
+        controlled_home, _rules_path = self._prepare_policy_home()
+        env["CODEX_HOME"] = os.fspath(controlled_home)
         resources = resolve_codex_resources_dir(self._config.command)
         if resources is None:
             return env
@@ -637,11 +727,10 @@ class CodexProvider(BaseCliProvider):
     def _preflight_capability_error(self, env: Mapping[str, str]) -> str | None:
         """Verify ``codex exec`` exposes every controlled-invocation primitive.
 
-        The adapter needs strict CLI overrides plus switches that suppress user config and both user
-        and project rules. Probe ``codex exec --help`` and fail before a real node when a vendor
-        build at an otherwise supported version lacks any primitive. A probe that does not cleanly
-        exit is inconclusive (the minimum-version gate already passed). First, on Windows, block
-        when the sandbox helper is undiscoverable — a mid-run helper failure is more useful here.
+        The adapter needs strict CLI overrides and user-config suppression; project rules are
+        disabled by untrusted project state and user rules are isolated by the controlled home.
+        Probe ``codex exec --help`` and fail before a real node when a supported-version vendor
+        build lacks a primitive. First, on Windows, block when the sandbox helper is undiscoverable.
         """
         helper_error = self._windows_sandbox_helper_error(env)
         if helper_error is not None:
@@ -650,7 +739,6 @@ class CodexProvider(BaseCliProvider):
         required = (
             "--config",
             "--disable",
-            "--ignore-rules",
             "--ignore-user-config",
             "--strict-config",
         )
@@ -661,7 +749,96 @@ class CodexProvider(BaseCliProvider):
                 + ", ".join(missing)
                 + f"; install Codex CLI >= {_MINIMUM_CODEX_VERSION_TEXT} with those capabilities"
             )
+        policy_error = self._preflight_exec_policy(env)
+        if policy_error is not None:
+            return policy_error
+        return self._preflight_denied_read_boundary(env)
+
+    def _preflight_exec_policy(self, env: Mapping[str, str]) -> str | None:
+        """Prove that every generated command prefix evaluates to ``forbidden``."""
+        _home, rules_path = self._prepare_policy_home()
+        for prefix in command_prefixes(self._security.denied_commands):
+            ok, output = self._probe(
+                [
+                    self._config.command,
+                    "execpolicy",
+                    "check",
+                    "--rules",
+                    os.fspath(rules_path),
+                    *prefix,
+                ],
+                env,
+            )
+            decision = None
+            for line in output.splitlines():
+                try:
+                    parsed = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(parsed, dict):
+                    decision = parsed.get("decision")
+                    break
+            if not ok or decision != "forbidden":
+                return (
+                    "Codex cannot enforce the generated denied-command policy before model "
+                    "execution; install a supported CLI with execpolicy forbidden rules"
+                )
         return None
+
+    def _preflight_denied_read_boundary(self, env: Mapping[str, str]) -> str | None:
+        """Smoke-test direct sandbox enforcement through a host-native reader."""
+        configured = self._config.sandbox or self._config.permission_profile or _DEFAULT_SANDBOX
+        if configured == FORBIDDEN_SANDBOX_VALUE:
+            if self._security.strict_isolation:
+                return "Codex danger-full-access requires security.strict_isolation=false"
+            return None
+
+        probe_name = ".worc-denied-read-probe"
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            denied = root / probe_name
+            allowed = root / "worc-allowed-read-probe"
+            denied.write_text("deny", encoding="utf-8")
+            allowed.write_text("allow", encoding="utf-8")
+            values = permission_config_values(
+                sandbox=configured,
+                network_access=False,
+                denied_read_paths=(probe_name,),
+            )
+            base = [self._config.command, "sandbox", "--cd", scratch]
+            for value in values:
+                base += ["--config", value]
+            allowed_result = self._run_policy_probe(base, allowed.name, env, root)
+            denied_result = self._run_policy_probe(base, denied.name, env, root)
+        if allowed_result and not denied_result:
+            return None
+        return (
+            "Codex permission profiles cannot enforce denied reads on this host; the allowed "
+            "control read and denied native read did not produce the required boundary"
+        )
+
+    def _run_policy_probe(
+        self, base_argv: list[str], filename: str, env: Mapping[str, str], cwd: Path
+    ) -> bool:
+        """Return whether a native file read completed inside the Codex sandbox profile."""
+        output = cwd / f"{filename}.out"
+        comspec = next(
+            (value for key, value in env.items() if key.casefold() == "comspec"), "cmd.exe"
+        )
+        command = (
+            [comspec, "/d", "/c", "type", filename]
+            if platform.system() == "Windows"
+            else ["/bin/cat", filename]
+        )
+        proc = self._run_process(
+            [*base_argv, *command],
+            cwd=cwd,
+            env=env,
+            timeout_seconds=10,
+            stdout_path=output,
+            monotonic=self._monotonic,
+        )
+        return proc.launch_error is None and not proc.timed_out and proc.exit_code == 0
 
     def _preflight_degraded_reasons(self, env: Mapping[str, str]) -> tuple[str, ...]:
         """Confirm ``codex exec resume`` still accepts the options this adapter places after it.
@@ -694,15 +871,30 @@ class CodexProvider(BaseCliProvider):
     def _build_argv(
         self, request: AgentRunRequest, paths: ArtifactPaths
     ) -> tuple[list[str], tuple[str, bool]]:
+        try:
+            self._prepare_policy_home()
+        except CodexPolicyError as exc:
+            raise ProviderError(ErrorClass.CONFIGURATION_ERROR, str(exc)) from None
         last_message_path = str(Path(paths.attempt_dir) / _LAST_MESSAGE_FILENAME)
         schema_path = self._write_output_schema(paths, request)
         argv = build_codex_argv(
             self._config,
             request,
+            denied_read_paths=self._security.denied_read_paths,
+            strict_isolation=self._security.strict_isolation,
             output_schema_path=schema_path,
             last_message_path=last_message_path,
         )
-        write_capabilities_artifact(paths, build_codex_capability_manifest(self._config, request))
+        write_capabilities_artifact(
+            paths,
+            build_codex_capability_manifest(
+                self._config,
+                request,
+                denied_commands=self._security.denied_commands,
+                denied_read_paths=self._security.denied_read_paths,
+                strict_isolation=self._security.strict_isolation,
+            ),
+        )
         return argv, (last_message_path, schema_path is not None)
 
     def _parse(

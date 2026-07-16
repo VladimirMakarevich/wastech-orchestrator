@@ -26,6 +26,7 @@ from wastech_orchestrator.providers.base import (
     build_effective_prompt,
 )
 from wastech_orchestrator.providers.codex import CodexProvider
+from wastech_orchestrator.providers.codex_policy import controlled_codex_home
 from wastech_orchestrator.providers.process import ProcessResult
 
 FIXED_TIME = datetime(2026, 6, 11, 12, 0, 0, tzinfo=UTC)
@@ -184,6 +185,47 @@ def test_clean_run_with_failure_status_returns_failed_not_raised(
     assert result.error.error_class is ErrorClass.TASK_FAILURE
     # task_failure is never fallback-eligible (it goes to the fixing stage, not another provider).
     assert ErrorClass.TASK_FAILURE not in FALLBACK_ELIGIBLE
+
+
+def test_blocked_command_returns_policy_denial_without_fallback(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    stream = "\n".join(
+        json.dumps(event)
+        for event in (
+            {"type": "thread.started", "thread_id": "sess-99"},
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "cmd-1",
+                    "type": "command_execution",
+                    "command": "git push origin main",
+                    "aggregated_output": (
+                        "rejected: policy forbids commands starting with `git push`"
+                    ),
+                    "exit_code": None,
+                    "status": "failed",
+                },
+            },
+            {"type": "turn.completed", "usage": {"output_tokens": 5}},
+        )
+    )
+    provider = _provider(
+        codex_config,
+        security_config,
+        tmp_path,
+        FakeRun(stdout=stream, last_message="The operation was blocked."),
+    )
+
+    result = provider.run(make_request())
+
+    assert result.status is RunStatus.FAILED
+    assert result.error is not None
+    assert result.error.error_class is ErrorClass.POLICY_DENIED
+    assert ErrorClass.POLICY_DENIED not in FALLBACK_ELIGIBLE
 
 
 def test_timeout_raises_and_writes_result(
@@ -482,10 +524,13 @@ def test_hostile_codex_home_is_config_isolated_but_auth_store_remains_available(
     provider.run(make_request(network_access=False))
 
     argv = fake.captured["argv"]
-    assert fake.captured["env"]["CODEX_HOME"] == str(codex_home)
+    managed_home = Path(fake.captured["env"]["CODEX_HOME"])
+    assert managed_home.parent.name == "worc-managed"
+    assert managed_home.parent.parent == codex_home
+    assert (managed_home / "auth.json").samefile(codex_home / "auth.json")
     assert "--ignore-user-config" in argv
-    assert "--ignore-rules" in argv
-    assert argv[argv.index("--sandbox") + 1] == "workspace-write"
+    assert "--ignore-rules" not in argv
+    assert 'default_permissions="worc-deny-policy"' in argv
     manifest_text = (_attempt_dir(tmp_path) / "capabilities.json").read_text(encoding="utf-8")
     assert str(codex_home) not in manifest_text
     assert auth_secret not in manifest_text
@@ -500,23 +545,13 @@ def test_hostile_codex_home_is_config_isolated_but_auth_store_remains_available(
         r"C:\Users\Alice Smith\.codex",
     ],
 )
-def test_auth_home_forwarding_is_cross_platform_and_omitted_from_manifest(
-    codex_config: ProviderConfig,
-    security_config: SecurityConfig,
+def test_controlled_auth_home_is_cross_platform(
     tmp_path: Path,
-    make_request: Callable[..., AgentRunRequest],
-    monkeypatch: pytest.MonkeyPatch,
     codex_home: str,
 ) -> None:
-    monkeypatch.setenv("CODEX_HOME", codex_home)
-    fake = FakeRun(stdout=_success_stream(), last_message="done")
-    provider = _provider(codex_config, security_config, tmp_path, fake)
-
-    provider.run(make_request())
-
-    assert fake.captured["env"]["CODEX_HOME"] == codex_home
-    manifest_text = (_attempt_dir(tmp_path) / "capabilities.json").read_text(encoding="utf-8")
-    assert codex_home not in manifest_text
+    managed = controlled_codex_home(Path(codex_home), tmp_path)
+    assert managed.parent.name == "worc-managed"
+    assert managed.parent.parent == Path(codex_home)
 
 
 def test_online_manifest_grants_only_shell_network_and_web_search(
@@ -548,6 +583,32 @@ def test_online_manifest_grants_only_shell_network_and_web_search(
         assert manifest["capabilities"][capability] is False
 
 
+def test_full_access_run_requires_operator_opt_out_and_audits_read_policy_gap(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    from dataclasses import replace
+
+    full = replace(codex_config, sandbox="danger-full-access")
+    opted_out = replace(security_config, strict_isolation=False)
+    fake = FakeRun(stdout=_success_stream(), last_message="done")
+    provider = _provider(full, opted_out, tmp_path, fake)
+
+    result = provider.run(make_request(network_access=True))
+
+    assert result.status is RunStatus.SUCCEEDED
+    assert 'default_permissions=":danger-full-access"' in fake.captured["argv"]
+    manifest = json.loads(
+        (_attempt_dir(tmp_path) / "capabilities.json").read_text(encoding="utf-8")
+    )
+    assert manifest["policy"]["strict_isolation"] is False
+    assert manifest["policy"]["denied_command_policy_enforced"] is True
+    assert manifest["policy"]["denied_read_policy_enforced"] is False
+    assert manifest["policy"]["deny_policy_enforced"] is False
+
+
 def test_resume_uses_same_controlled_boundary_as_fresh_invocation(
     codex_config: ProviderConfig,
     security_config: SecurityConfig,
@@ -561,7 +622,7 @@ def test_resume_uses_same_controlled_boundary_as_fresh_invocation(
     argv = fake.captured["argv"]
     resume_index = argv.index("resume")
     assert argv.index("--ignore-user-config") < resume_index
-    assert argv.index("--ignore-rules") < resume_index
+    assert "--ignore-rules" not in argv
     assert argv.index("--strict-config") < resume_index
     disable_positions = [index for index, token in enumerate(argv) if token == "--disable"]
     assert disable_positions and max(disable_positions) < resume_index
@@ -688,6 +749,23 @@ def test_preflight_missing_binary(
     assert health.version is None
 
 
+def test_preflight_fails_when_codex_home_name_is_not_allowlisted(
+    codex_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    from dataclasses import replace
+
+    security = replace(
+        security_config,
+        allowed_environment=tuple(
+            name for name in security_config.allowed_environment if name != "CODEX_HOME"
+        ),
+    )
+    health = _provider(codex_config, security, tmp_path, FakeRun()).preflight()
+
+    assert health.supports_required_features is False
+    assert "CODEX_HOME" in health.message
+
+
 class _ProbingFakeRun:
     """A fake runner answering ``--version``, ``exec --help`` and ``exec resume --help`` by argv."""
 
@@ -717,8 +795,15 @@ class _ProbingFakeRun:
         monotonic: Any = None,
     ) -> ProcessResult:
         self.argvs.append(list(argv))
+        exit_code = 0
         if "--version" in argv:
             out = f"codex-cli {self._version}\n"
+        elif "execpolicy" in argv and "check" in argv:
+            out = '{"decision":"forbidden","matchedRules":[]}\n'
+        elif "sandbox" in argv:
+            out = ""
+            if ".worc-denied-read-probe" in argv:
+                exit_code = 1
         elif "exec" in argv and "resume" in argv and "--help" in argv:
             # Must be checked before the plain ``exec --help`` branch (that also matches).
             if self._resume_help is None:
@@ -742,7 +827,7 @@ class _ProbingFakeRun:
             out = ""
         Path(stdout_path).write_text(out, encoding="utf-8")
         return ProcessResult(
-            exit_code=0,
+            exit_code=exit_code,
             timed_out=False,
             launch_error=None,
             duration_seconds=0.1,
@@ -834,6 +919,47 @@ def test_preflight_accepts_minimum_controlled_invocation_version(
     )
 
     assert provider.preflight().supports_required_features is True
+
+
+def test_preflight_allows_full_access_only_after_strict_isolation_opt_out(
+    codex_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    from dataclasses import replace
+
+    full = replace(codex_config, sandbox="danger-full-access")
+    fake = _ProbingFakeRun(help_has_config=True)
+    provider = CodexProvider(
+        full,
+        security=replace(security_config, strict_isolation=False),
+        artifacts_root=tmp_path,
+        clock=lambda: FIXED_TIME,
+        run_process=fake,
+    )
+
+    health = provider.preflight()
+
+    assert health.supports_required_features is True
+    assert not any("sandbox" in argv for argv in fake.argvs)
+
+
+def test_preflight_rejects_full_access_while_strict_isolation_is_enabled(
+    codex_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    from dataclasses import replace
+
+    fake = _ProbingFakeRun(help_has_config=True)
+    provider = CodexProvider(
+        replace(codex_config, sandbox="danger-full-access"),
+        security=security_config,
+        artifacts_root=tmp_path,
+        clock=lambda: FIXED_TIME,
+        run_process=fake,
+    )
+
+    health = provider.preflight()
+
+    assert health.supports_required_features is False
+    assert "strict_isolation=false" in health.message
 
 
 def test_preflight_probes_config_support_when_reasoning_unset(

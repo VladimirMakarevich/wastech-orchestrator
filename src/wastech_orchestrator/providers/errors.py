@@ -31,6 +31,7 @@ _MESSAGES: dict[ErrorClass, str] = {
     ErrorClass.PROCESS_CRASHED: "the provider process exited abnormally",
     ErrorClass.INVALID_OUTPUT: "the provider produced unparseable structured output",
     ErrorClass.PERMISSION_DENIED: "the provider reported a sandbox/permission denial",
+    ErrorClass.POLICY_DENIED: "the orchestrator security policy blocked an agent operation",
     ErrorClass.CONFIGURATION_ERROR: "the provider invocation was rejected by the security policy",
     ErrorClass.SESSION_UNAVAILABLE: "the provider could not resume the requested session",
     ErrorClass.INVALID_INVOCATION: "the provider CLI rejected the invocation (bad arguments)",

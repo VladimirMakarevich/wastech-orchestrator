@@ -104,8 +104,8 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`security`** - Isolation, environment allowlist, denied paths, denied commands, and the fail-closed security ceiling.
 - **`security.strict_isolation`** - Controls whether full-access provider modes are rejected at preflight.
 - **`security.allowed_environment`** - Environment variable names that are allowed to reach child processes.
-- **`security.denied_read_paths`** - Paths that the orchestrator will not read as secrets or task context.
-- **`security.denied_commands`** - Commands that are refused even if they are otherwise present in config or flow arguments.
+- **`security.denied_read_paths`** - Repo-relative path globs that provider runtimes deny to agent reads; contents are still harvested only for defense-in-depth redaction.
+- **`security.denied_commands`** - Provider-neutral command prefixes blocked in agent runtimes and refused in check configuration.
 - **`security.trust_level`** - Approval policy for the mid-task dangerous-diff gate: `strict` gates every deletion/dependency-manifest edit, `auto` (fresh-install default) gates only a `protected_paths` match. A per-task `trust_level` overrides it; it never lowers the hard security ceiling. Replaced the removed `deletion_approval_exempt_paths` (config v25).
 - **`security.protected_paths`** - Repo-relative globs (same dialect as `checks.command_sets[].paths`) whose files always require approval on any change regardless of `trust_level` — the always-ask floor no level can lower. `config.yaml`-only; default `[]`.
 - **`validation`** - The task input hardening block. It rejects malformed or suspicious task files before branch creation.
@@ -207,7 +207,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`read-only`** - A permission profile that forbids writes.
 - **`workspace-write`** - A permission profile that allows editing inside the workspace.
 - **`sandbox`** - The Codex isolation mode field.
-- **`danger-full-access`** - Codex full-access mode. It is operator-selectable but rejected when `strict_isolation` is enforced.
+- **`danger-full-access`** - Codex full-access mode; operator-selectable only with `strict_isolation: false` and online nodes. Generated command policy remains active, but denied reads are unenforced.
 - **`bypassPermissions`** - The Claude full-access mode. It is operator-selectable but rejected when `strict_isolation` is enforced.
 - **`model`** - The provider model name or account default selector.
 - **`reasoning`** - The provider reasoning-effort setting.
@@ -234,8 +234,8 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`quarantine_folder`** - The folder where invalid tasks are isolated.
 - **`strict_isolation`** - The policy switch that decides whether full-access provider modes are rejected before a run starts.
 - **`allowed_environment`** - The only environment variables that may be passed to child processes.
-- **`denied_read_paths`** - A denylist of secret or sensitive paths that cannot be read by the orchestrator in agent context.
-- **`denied_commands`** - A denylist of commands that cannot be launched, even if they appear in args or flow config.
+- **`denied_read_paths`** - A denylist of repo-relative secret/sensitive path globs enforced by each provider runtime.
+- **`denied_commands`** - A denylist of argv prefixes that agents cannot execute and checks cannot configure.
 - **Forbidden args** - Flags that disable approvals, sandboxing, or hook trust wholesale. They are rejected unconditionally.
 - **Dangerous diff** - A tracked-file deletion or dependency manifest or lock change that requires explicit approval before tests continue. `security.trust_level` sets which of those changes actually ask: `strict` gates all of them, `auto` (default) gates none of them (only a `protected_paths` match asks). `security.protected_paths` is the inverse always-ask floor — repo-relative globs whose files require approval on any change at any level.
 - **`approval`** - The HITL decision shape used for dangerous-diff gating.

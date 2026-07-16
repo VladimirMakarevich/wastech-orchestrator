@@ -63,9 +63,8 @@ agents:
   # primary below). Exactly one configured provider must set `primary: true` — it runs every node
   # with no `provider` field and is the sole infrastructure-fallback target. It must be in `allowed`.
   # `model`/`reasoning` below are explicit defaults; blank either ("" / null) to use the CLI default.
-  # Full access — Codex `sandbox: danger-full-access` (typed field only) or Claude
-  # `--permission-mode bypassPermissions` in `extra_args` — is operator-selectable but rejected at
-  # preflight unless `strict_isolation: false`. Codex sandbox selectors in extra_args are forbidden.
+  # Provider full access is operator-selectable only behind `strict_isolation: false`. Codex
+  # `danger-full-access` additionally requires online nodes and cannot enforce denied read paths.
   providers:
     claude:
       command: "claude"       # executable name (found on PATH) or an absolute path to the CLI
@@ -87,7 +86,8 @@ agents:
       model: "gpt-5.4"         # "" = use the Codex CLI/account default
       reasoning: high          # minimal | low | medium | high | xhigh | max->xhigh
       timeout_seconds: 7200    # per-attempt CLI wall-clock ceiling (seconds)
-      sandbox: "workspace-write"   # workspace-write | read-only | danger-full-access (needs strict_isolation: false)
+      sandbox: "workspace-write"   # workspace-write | read-only | danger-full-access (requires
+                                    # strict_isolation=false + online nodes; denied reads disabled)
       permission_profile: "workspace-write"   # access level; codex's real isolation knob is `sandbox` above
       extra_args: []           # closed allowlist: --ignore-user-config, --strict-config, and safe
                                # -c keys only; authority-bearing options fail config validation
@@ -96,13 +96,12 @@ agents:
                                # sandbox network + live web search. Auth still uses the CLI store.
 
 security:
-  strict_isolation: true              # fail-closed sandbox (default). Full-access provider modes —
-                                      #   Codex `sandbox: danger-full-access` field and Claude
-                                      #   `--permission-mode bypassPermissions` extra_args — are
+  strict_isolation: true              # fail-closed sandbox (default). Provider full access is
                                       #   REJECTED at preflight,
                                       #   and any provider whose required isolation can't be enabled
                                       #   fails preflight (no silent downgrade). Set false ONLY to
-                                      #   consciously opt into full access (you then own the risk); the
+                                      #   consciously opt into full access (you then own the risk,
+                                      #   including unenforced Codex denied-read paths); the
                                       #   absolutely-forbidden flags (--dangerously-skip-permissions,
                                       #   --yolo, --ignore-rules) stay banned regardless.
   allowed_environment:                  # REPLACES (does not extend) the default — keep the OS-launch
@@ -135,12 +134,16 @@ security:
     - "TMPDIR"
     - "LD_LIBRARY_PATH"
     - "DYLD_LIBRARY_PATH"
-  denied_read_paths:                  # REPLACES (does not extend) the default (.env, secrets/**). Globs
-                                      #   the agent CLI may never read — enforced as --disallowedTools so
-                                      #   a task can't exfiltrate secrets. Same glob dialect as protected_paths.
+  denied_read_paths:                  # EXTENDS the mandatory default (.env, secrets/**); defaults
+                                      #   cannot be removed through config.
+                                      #   Repo-relative globs the agent CLI may never read: Codex uses an
+                                      #   OS permission profile; Claude uses tool denials. Same glob dialect
+                                      #   as protected_paths; absolute/~ /.. paths are rejected.
     - ".env"
     - "secrets/**"
-  denied_commands:                    # REPLACES (does not extend) the default list — keep every entry you need
+  denied_commands:                    # EXTENDS the mandatory default. Whitespace-delimited prefixes;
+                                      #   Codex generates forbidden execpolicy rules, Claude tool denials.
+                                      #   Keep every entry you need; blank entries are rejected.
     - "git commit"
     - "git push"
     - "gh pr create"

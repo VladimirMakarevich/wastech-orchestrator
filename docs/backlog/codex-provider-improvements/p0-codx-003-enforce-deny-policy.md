@@ -1,6 +1,6 @@
 # CODX-003 — Enforce denied commands and denied read paths
 
-**Status:** open
+**Status:** done
 **Priority:** P0
 **Source finding:** CXP-01
 **Dependencies:** CODX-001, CODX-002
@@ -15,9 +15,10 @@ publish.
 
 ## Required outcome
 
-Codex attempts must be unable to execute every configured denied command or read every configured
-denied path. Enforcement must be fail closed and cross-platform; redaction or prompt instructions
-do not count as enforcement.
+Under the default strict-isolation contract, Codex attempts must be unable to execute every
+configured denied command or read every configured denied path. Enforcement must be fail closed
+and cross-platform; redaction or prompt instructions do not count as enforcement. The pre-existing
+operator-owned full-access opt-out remains outside that read-isolation guarantee.
 
 ## In scope
 
@@ -28,21 +29,23 @@ do not count as enforcement.
 - Apply identical policy to fresh and resume attempts.
 - Add preflight validation for policies the current host/CLI cannot enforce.
 - Preserve secret harvesting as defense in depth after access is denied.
+- Preserve the existing operator-owned `danger-full-access` escape hatch behind
+  `security.strict_isolation: false`; denied-read enforcement is intentionally unavailable there.
 
 ## Acceptance criteria
 
-- [ ] Default git commit, git push, gh pr create and gh pr merge commands are blocked for Codex.
-- [ ] Custom denied commands are blocked without requiring provider-specific syntax from the user.
-- [ ] .env and secrets/** are unreadable to Codex by default.
-- [ ] Custom denied paths support documented relative-path and glob semantics.
-- [ ] Alternate command paths, shell wrappers and interpreter-based reads do not trivially bypass
+- [x] Default git commit, git push, gh pr create and gh pr merge commands are blocked for Codex.
+- [x] Custom denied commands are blocked without requiring provider-specific syntax from the user.
+- [x] .env and secrets/** are unreadable to Codex by default and whenever strict isolation is on.
+- [x] Custom denied paths support documented relative-path and glob semantics.
+- [x] Alternate command paths, shell wrappers and interpreter-based reads do not trivially bypass
       the policy.
-- [ ] Task prompt and extra_args cannot remove or supersede generated restrictions.
-- [ ] Failure to construct/enforce the policy stops the attempt before the model runs.
-- [ ] A blocked operation is reported as a policy denial and does not trigger infrastructure
+- [x] Task prompt and extra_args cannot remove or supersede generated restrictions.
+- [x] Failure to construct/enforce the policy stops the attempt before the model runs.
+- [x] A blocked operation is reported as a policy denial and does not trigger infrastructure
       fallback.
-- [ ] Generated policy artifacts do not contain secret file contents.
-- [ ] Claude behavior and orchestrator-owned publish operations remain unchanged.
+- [x] Generated policy artifacts do not contain secret file contents.
+- [x] Claude behavior and orchestrator-owned publish operations remain unchanged.
 
 ## Verification
 
@@ -59,6 +62,7 @@ do not count as enforcement.
 - Content-based data-loss prevention outside configured denied paths.
 - Treating post-run redaction as access control.
 - Weakening the default deny list for compatibility.
+- Removing the existing explicit full-access opt-out controlled by `security.strict_isolation`.
 
 ## Likely implementation areas
 

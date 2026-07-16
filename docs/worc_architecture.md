@@ -95,7 +95,7 @@ class AgentProvider(Protocol):
     def run(self, request: AgentRunRequest) -> AgentRunResult: ...
 ```
 
-`CodexCLI` (wrapping `codex exec`, with `codex exec resume <id>` for durable sessions) and `ClaudeCLI` (wrapping `claude`, with `--resume <id>`) are the two adapters. Routing is **per node**: a node declares its own `provider` (`codex` | `claude`), and a node with no `provider` runs on the **global primary** — the single configured provider with `primary: true`. Infrastructure fallback is **symmetric**: a node whose primary differs from the global primary falls back to it, and a node already on the global primary falls back to the **other** allowed provider (Claude↔Codex). For a _transient_ class (`provider_unavailable` / `network_unavailable`) the Router first retries the **same** provider with bounded exponential backoff (`agents.retry`, a per-provider budget separate from `max_stage_attempts`) before switching; if **every** allowed provider is unavailable the orchestrator parks the task as **resumable** (`tasks.blocked_since`, soft pause) instead of failing, bounded by `agents.retry.max_blocked_s`. The watch daemon wires one cancellation predicate into both Router and FlowEngine: a soft stop parks at the untouched next-node checkpoint, while a hard-killed provider error is classified `CANCELLED` before fallback can respawn an agent. Test failures and review findings are _not_ infrastructure errors — they go to `fixing`.
+`CodexCLI` (wrapping `codex exec`, with `codex exec resume <id>` for durable sessions) and `ClaudeCLI` (wrapping `claude`, with `--resume <id>`) are the two adapters. Routing is **per node**: a node declares its own `provider` (`codex` | `claude`), and a node with no `provider` runs on the **global primary** — the single configured provider with `primary: true`. Infrastructure fallback is **symmetric**: a node whose primary differs from the global primary falls back to it, and a node already on the global primary falls back to the **other** allowed provider (Claude↔Codex). For a _transient_ class (`provider_unavailable` / `network_unavailable`) the Router first retries the **same** provider with bounded exponential backoff (`agents.retry`, a per-provider budget separate from `max_stage_attempts`) before switching; if **every** allowed provider is unavailable the orchestrator parks the task as **resumable** (`tasks.blocked_since`, soft pause) instead of failing, bounded by `agents.retry.max_blocked_s`. The watch daemon wires one cancellation predicate into both Router and FlowEngine: a soft stop parks at the untouched next-node checkpoint, while a hard-killed provider error is classified `CANCELLED` before fallback can respawn an agent. Test failures and review findings are _not_ infrastructure errors — they go to `fixing`. A runtime `policy_denied` result is likewise never fallback-eligible and stops at `manual_action_required`.
 
 ### 4.4 Supervisor (constant, advisory, read-only)
 
@@ -135,12 +135,13 @@ allowlisted environment variables reach child processes; `denied_read_paths` and
 isolation cannot be enforced. No task and no `extra_args` can weaken any of this; the flow ceilings
 are validated fatally before any task runs.
 
-Every Codex fresh/resume attempt also receives an adapter-owned config boundary: user config and
-user/project rules are ignored, the project config is untrusted, and apps/MCP/browser/computer-use/
-plugins/hooks plus equivalent external channels are disabled. `network_access` grants only sandbox
-network and live web search; absent the grant both are explicitly off. The existing Codex auth store
-remains available without copying credentials. Unsupported CLI versions/capability flags fail
-preflight, and each attempt keeps a credential/path-free `capabilities.json` audit manifest.
+Every Codex fresh/resume attempt also receives an adapter-owned config boundary: user config is
+ignored, project config/rules are untrusted, and an isolated policy home exposes only generated
+forbidden command rules plus a generated permission profile with deny-read globs. Apps/MCP/browser/
+computer-use/plugins/hooks and equivalent external channels are disabled. `network_access` grants
+only permission-profile network and live web search; absent the grant both are explicitly off. An
+existing file auth store is hard-linked without copying contents. Unsupported CLI/policy/sandbox
+capabilities fail preflight, and each attempt keeps a credential/path-free `capabilities.json`.
 
 ---
 

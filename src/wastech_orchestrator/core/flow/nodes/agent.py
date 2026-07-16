@@ -71,6 +71,7 @@ from wastech_orchestrator.providers.artifacts import (
 from wastech_orchestrator.providers.base import (
     MAX_TURNS_SUBTYPE,
     AgentRunRequest,
+    ErrorClass,
     ProviderId,
     build_effective_prompt,
 )
@@ -340,6 +341,13 @@ class AgentNodeRunner:
             raise NodeInfraError(
                 f"agent node {node.id!r}: no provider could complete it ({err})",
                 error_class=error_class,
+            )
+        if (
+            outcome.result.error is not None
+            and outcome.result.error.error_class is ErrorClass.POLICY_DENIED
+        ):
+            raise NodeManualRequired(
+                f"agent node {node.id!r}: provider policy denied a requested operation"
             )
         self._persist_session(node, ctx, outcome)
         return run_id, outcome

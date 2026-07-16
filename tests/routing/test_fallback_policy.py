@@ -34,6 +34,7 @@ def test_infra_classes_always_fall_back(error_class: ErrorClass) -> None:
     "error_class",
     [
         ErrorClass.CONFIGURATION_ERROR,
+        ErrorClass.POLICY_DENIED,
         ErrorClass.TASK_FAILURE,
         ErrorClass.INVALID_INVOCATION,
         ErrorClass.MODEL_REQUEST_INVALID,

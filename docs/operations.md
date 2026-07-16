@@ -198,11 +198,15 @@ preflight: ready
 
 - Exit `0` when every allowed provider is healthy and the required isolation can be enabled; non-zero otherwise. The command-set summary is informational — an empty `command_sets` (`checks: no command sets configured (no gate)`) is valid and does not fail preflight.
 - A `FAIL` line names the problem without leaking secrets (e.g. `codex executable not found`).
-- Codex `< 0.144.4`, or a vendor build missing `--ignore-user-config`, `--ignore-rules`,
-  `--strict-config`, `--disable`, or `--config`, fails here before a model turn. Upgrade the binary
-  selected by `agents.providers.codex.command`; do not bypass the check with `extra_args`.
+- Codex `< 0.144.4`, a vendor build missing the controlled config/execpolicy/permission-profile
+  primitives, a generated command rule that does not evaluate to `forbidden`, or a host sandbox
+  that cannot deny a native file read fails here before a model turn. Upgrade the binary selected
+  by `agents.providers.codex.command`; do not bypass the check with `extra_args`.
 - `isolation: OK (enforced)` — every provider in `agents.allowed` passed the offline isolation check (Codex sandbox, Claude permission mode) **and** `security.strict_isolation: true` (the default) is active, meaning a failed check would abort the run rather than silently downgrade isolation.
-- `isolation: OK (strict_isolation=false)` — the check still passed, but the operator has set `security.strict_isolation: false`, opting in to full-access provider modes (e.g. `danger-full-access` or `bypassPermissions`). The operator owns the risk; the gate will not abort a run if isolation cannot be enforced.
+- `isolation: OK (strict_isolation=false)` — the offline isolation gate is advisory because the
+  operator has opted into full-access provider modes. The operator owns that risk. Codex
+  `danger-full-access` is accepted only for nodes with `network_access: true`; its capability audit
+  records that denied-read enforcement is disabled while generated command denials remain active.
 - `isolation: FAIL` lists the offending provider/setting. With `security.strict_isolation: true` (the default) a run would **fail preflight** before any branch is created rather than silently downgrading isolation — fix the config (don't weaken the sandbox/permission profile) and re-run.
 
 ### Command-set diagnostics
@@ -277,6 +281,9 @@ When a coding-agent CLI dies mid-task with a **transient** server error (a 5xx /
 3. **Soft pause** — if **every** provider is unavailable, the task is **parked as resumable** rather than failed: it stays active, `watch` shows it as `running (paused)`, the checkpoint is preserved, and the next tick / restart resumes it from where it stopped (no work or commits are lost). A one-off `worc run` exits `3` and leaves the task resumable for the next `run`/`watch`/restart. The pause is bounded by `max_blocked_s` (default 6 h) — once exceeded, the task goes terminal `failed` so nothing hangs forever.
 
 A subscription/session **`rate_limited`** (HTTP 429 / a "session limit … resets" banner, on either provider) follows the **same** recovery: it is _not_ tight-retried on the same provider (a rate limit wants a long defer, not a hot loop), but it _is_ fallback-eligible — the other provider draws on a separate quota and usually finishes the work — and if **every** provider is rate-limited it **parks** (step 3) and waits out the reset window, rather than failing or marching the queue into the wall. The 6 h `max_blocked_s` default comfortably outlasts a provider's ~5 h usage window; because the parked task holds the single slot, `watch` also stops picking up new tasks until it clears (the queue self-throttles). `timeout` is still **not** treated as transient (it may have done long/partial work) and takes the existing fallback/terminal paths. Quality failures are never retried. Every attempt is in the `provider_attempts` audit trail.
+
+A Codex command/read blocked by the generated policy is recorded as `policy_denied`, never retried
+on another provider, and moves the task to `manual_action_required` for operator review.
 
 ### Listing tasks and shell completion (`list` / `completion`)
 
@@ -619,9 +626,10 @@ logs/
 - **The ledger** (`completed.jsonl`): grep here first — id, title, branch, `pr_url`, `final_status`, `fix_iterations`, terminal cleanup status, and a pointer to `failure_report.json` when stuck.
 - **Why a task is stuck**: open `stuck.md` (human-readable) / `failure_report.json` (machine). They record which fix loop and which limit was exhausted, all counter values, the last failing check output, the last blocking review findings, and the final diff — plus, for a decomposed task, the failing subtask `k` of `n` and the SHAs already committed.
 - **Audit completeness**: SQLite records every `node_runs` and `provider_attempts` row (primary **and** any fallback), each artifact is registered with a **sha256 checksum**, and every commit/push/PR carries an idempotency fingerprint so a restart never double-publishes.
-- **Codex capability audit**: `capabilities.json` states whether agent external I/O is disabled and
-  records shell/web/apps/MCP/browser/computer/plugins/hooks grants as booleans. It never records the
-  auth-store path or credentials and survives even `logging.artifacts: minimal` pruning.
+- **Codex capability audit**: `capabilities.json` states whether agent external I/O is disabled,
+  records shell/web/apps/MCP/browser/computer/plugins/hooks grants as booleans, and records only the
+  counts of enforced command/path denials. It never records policy-home/auth paths, credentials, or
+  denied-file contents and survives even `logging.artifacts: minimal` pruning.
 - **Node run vs. attempt**: `run-<node-run-id>` is reserved in SQLite before the provider starts and changes for every repeated node invocation, including each fixing cycle and recovery run. `<attempt>` starts at `1` inside that run and increments only for provider fallback.
 - **Per-run history is preserved, never overwritten**: every operator-facing artifact a node produces (the rendered prompt, review `findings.json`/`summary.md`, the generic `<node-id>.out.md`, checks reports, tool streams) is written under that run's `stages/<node-id>/run-<node-run-id>/` dir, next to its provider attempts — so a `review → fixing → testing → review` loop keeps each pass's findings instead of clobbering the last. Read `stages/<node-id>/history.jsonl` for the chronological index of a node's runs (one line per run: `run_id`, `outcome`, `findings` count, `dir`). This history is exempt from `logging.artifacts` pruning and is removed only by an explicit [`worc logs clean`](operations.md) of the whole task tree.
 - **No secrets anywhere**: `request.json`, the stdout/stderr/events logs, diffs, SQLite rows, the ledger, and the failure report are all redacted; `denied_read_paths` (`.env`, `secrets/**`) are excluded from agent reads and their values are scrubbed from any sink.

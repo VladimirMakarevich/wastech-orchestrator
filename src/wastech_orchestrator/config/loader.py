@@ -58,8 +58,7 @@ _DEFAULT_AUDIT_MESSAGE = "chore(orchestrator): audit trail for {task_id}"
 
 _REASONING_LEVELS: frozenset[str] = all_reasoning_levels()
 
-# ``denied_commands`` REPLACES (does not extend) this default, so the shipped config.example.yaml
-# must list every entry it wants — guarded by test_example_denied_commands_match_loader_default.
+_DEFAULT_DENIED_READ_PATHS: tuple[str, ...] = (".env", "secrets/**")
 _DEFAULT_DENIED_COMMANDS: tuple[str, ...] = (
     "git commit",
     "git push",
@@ -553,17 +552,24 @@ def _build_security(raw: Any, issues: list[str]) -> SecurityConfig:
         allowed_environment=_str_tuple(
             m, "allowed_environment", default_allowed_environment(), where, issues
         ),
-        denied_read_paths=_str_tuple(m, "denied_read_paths", (".env", "secrets/**"), where, issues),
-        denied_commands=_str_tuple(
-            m,
-            "denied_commands",
+        denied_read_paths=_with_security_defaults(
+            _DEFAULT_DENIED_READ_PATHS,
+            _str_tuple(m, "denied_read_paths", (), where, issues),
+        ),
+        denied_commands=_with_security_defaults(
             _DEFAULT_DENIED_COMMANDS,
-            where,
-            issues,
+            _str_tuple(m, "denied_commands", (), where, issues),
         ),
         trust_level=trust_level,
         protected_paths=_str_tuple(m, "protected_paths", (), where, issues),
     )
+
+
+def _with_security_defaults(
+    defaults: tuple[str, ...], configured: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Append operator denials to the mandatory baseline without duplicate rules."""
+    return tuple(dict.fromkeys((*defaults, *configured)))
 
 
 def _build_validation(raw: Any, issues: list[str]) -> ValidationConfig:

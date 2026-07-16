@@ -49,6 +49,8 @@ from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
 from wastech_orchestrator.providers.artifacts import node_run_dir
 from wastech_orchestrator.providers.base import (
     AgentRunResult,
+    ErrorClass,
+    NormalizedError,
     ProviderId,
     RunStatus,
 )
@@ -264,6 +266,35 @@ def test_agent_node_equals_direct_router_call(tmp_path: Path) -> None:
     assert req.plan_path == "/t/plan.md"
     assert req.working_directory == "/repo"
     assert store.completed[-1]["outcome"] == "done"
+
+
+def test_agent_policy_denial_stops_for_manual_action_without_fallback(tmp_path: Path) -> None:
+    from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
+
+    (tmp_path / "impl.md").write_text("Implement safely.", encoding="utf-8")
+    node = AgentNode(id="impl", kind="agent", role_file="impl.md")
+    denied = AgentRunResult(
+        status=RunStatus.FAILED,
+        provider="codex",
+        node_id="impl",
+        attempt=1,
+        exit_code=0,
+        started_at="t0",
+        finished_at="t1",
+        error=NormalizedError(ErrorClass.POLICY_DENIED, "operation denied by policy"),
+    )
+    router, store = FakeRouter(denied), FakeStore()
+    runner = AgentNodeRunner(
+        _services(router, store, FakeCheckRunner(CheckOutcome(passed=True, runs=()))),
+        _inputs(tmp_path),
+    )
+
+    with pytest.raises(NodeManualRequired, match="provider policy denied"):
+        runner.run(node, _ctx(node))
+
+    assert len(router.requests) == 1
+    assert store.completed[-1]["status"] == "failed"
+    assert store.completed[-1]["error_class"] == "policy_denied"
 
 
 def test_node_output_path_variable_resolves_downstream(tmp_path: Path) -> None:

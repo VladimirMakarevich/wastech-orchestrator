@@ -33,6 +33,10 @@ class ErrorClass(StrEnum):
     PROCESS_CRASHED = "process_crashed"
     INVALID_OUTPUT = "invalid_output"
     PERMISSION_DENIED = "permission_denied"
+    # The model attempted an operation forbidden by the orchestrator-owned runtime policy. This is
+    # returned as a failed result (never raised as infrastructure), so the Router cannot switch to
+    # a provider that might execute the same prohibited operation.
+    POLICY_DENIED = "policy_denied"
     CONFIGURATION_ERROR = "configuration_error"
     # The provider CLI rejected OUR invocation with an argparse/usage error (bad flags/args we
     # built; codex uses exit 2) — distinct from a genuine UNSUPPORTED_VERSION. Deliberately NOT in

@@ -91,6 +91,10 @@ class ParsedEvents:
     # ``task_failure`` but a transient infra event: the finalize step RAISES ``RATE_LIMITED`` (so
     # the Router falls over / the orchestrator parks) instead of returning a quality failure.
     rate_limited: bool = False
+    # A provider-owned runtime policy blocked an operation requested by the model. This is a
+    # security outcome, not broken provider infrastructure, so it is returned as a failed result
+    # and can never trigger Router fallback.
+    policy_denied: bool = False
 
 
 def _produced_no_work(parsed: ParsedEvents) -> bool:
@@ -489,7 +493,12 @@ class BaseCliProvider:
                 self._finalize_failure(paths, request, started_at, finished_at, proc, infra_error)
                 raise ProviderError(infra_error.error_class, infra_error.message)
 
-        if parsed.succeeded:
+        if parsed.policy_denied:
+            status = RunStatus.FAILED
+            error_obj = NormalizedError(
+                ErrorClass.POLICY_DENIED, message_for(ErrorClass.POLICY_DENIED)
+            )
+        elif parsed.succeeded:
             status, error_obj = RunStatus.SUCCEEDED, None
         else:
             # A parsed-but-unsuccessful terminal event is a task failure, never a crash. Append the

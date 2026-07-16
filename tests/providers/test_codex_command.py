@@ -21,7 +21,12 @@ LAST_MSG = "/logs/task/stages/planning/1-codex/last-message.txt"
 
 def _argv(config: ProviderConfig, request: AgentRunRequest, **kwargs: object) -> list[str]:
     return build_codex_argv(
-        config, request, output_schema_path=kwargs.get("schema"), last_message_path=LAST_MSG
+        config,
+        request,
+        denied_read_paths=kwargs.get("denied_read_paths", (".env", "secrets/**")),
+        strict_isolation=kwargs.get("strict_isolation", True),
+        output_schema_path=kwargs.get("schema"),
+        last_message_path=LAST_MSG,
     )
 
 
@@ -42,10 +47,11 @@ def test_argv_is_codex_exec_reading_from_stdin(
     assert argv[:4] == ["codex", "--ask-for-approval", "never", "exec"]
     assert argv[-1] == "-"  # prompt comes from stdin
     assert "--cd" in argv and argv[argv.index("--cd") + 1] == "/clone"
-    assert "--sandbox" in argv and argv[argv.index("--sandbox") + 1] == "workspace-write"
+    assert 'default_permissions="worc-deny-policy"' in _config_values(argv)
+    assert 'permissions.worc-deny-policy.extends=":workspace"' in _config_values(argv)
     assert argv.index("--ask-for-approval") < argv.index("exec")
     assert argv.index("--ignore-user-config") > argv.index("exec")
-    assert argv.index("--ignore-rules") > argv.index("exec")
+    assert "--ignore-rules" not in argv  # the isolated home contains only orchestrator rules
     assert argv.index("--strict-config") > argv.index("exec")
     assert "--json" in argv
     assert argv[argv.index("--output-last-message") + 1] == LAST_MSG
@@ -64,7 +70,7 @@ def test_network_access_off_is_explicit_in_controlled_config(
 ) -> None:
     # The boundary records the deny explicitly instead of trusting a CLI default/user config.
     argv = _argv(codex_config, make_request())
-    assert "sandbox_workspace_write.network_access=false" in _config_values(argv)
+    assert "permissions.worc-deny-policy.network.enabled=false" in _config_values(argv)
     assert "network_proxy" in {
         argv[index + 1] for index, token in enumerate(argv[:-1]) if token == "--disable"
     }
@@ -86,7 +92,7 @@ def test_web_search_live_only_when_network_granted(
     argv = _argv(codex_config, make_request(network_access=True))
     assert 'web_search="disabled"' not in argv
     assert 'web_search="live"' in _config_values(argv)
-    assert "sandbox_workspace_write.network_access=true" in _config_values(argv)
+    assert "permissions.worc-deny-policy.network.enabled=true" in _config_values(argv)
     assert not any(
         token == "--disable" and argv[index + 1] == "network_proxy"
         for index, token in enumerate(argv[:-1])
@@ -97,9 +103,9 @@ def test_network_access_enables_sandbox_network_when_granted(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
     argv = _argv(codex_config, make_request(network_access=True))
-    assert "sandbox_workspace_write.network_access=true" in _config_values(argv)
-    # Network is the only thing toggled — the sandbox + approval policy are unchanged.
-    assert argv[argv.index("--sandbox") + 1] == "workspace-write"
+    assert "permissions.worc-deny-policy.network.enabled=true" in _config_values(argv)
+    # Network is the only thing toggled — the permission profile + approval policy are unchanged.
+    assert 'permissions.worc-deny-policy.extends=":workspace"' in _config_values(argv)
     assert argv[:4] == ["codex", "--ask-for-approval", "never", "exec"]
 
 
@@ -144,14 +150,28 @@ def test_forbidden_extra_args_in_request_are_rejected(
     assert exc.value.error_class is ErrorClass.CONFIGURATION_ERROR
 
 
-def test_danger_full_access_online_sandbox_builds_argv(
+def test_danger_full_access_requires_explicit_strict_isolation_opt_out(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # Full access remains operator-selectable for an explicitly online node; strict_isolation is
-    # still the normal preflight gate for the filesystem side of this operator-owned choice.
     full = replace(codex_config, sandbox="danger-full-access")
-    argv = _argv(full, make_request(network_access=True))
-    assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
+    with pytest.raises(ProviderError) as exc:
+        _argv(full, make_request(network_access=True))
+    assert exc.value.error_class is ErrorClass.CONFIGURATION_ERROR
+    assert "strict_isolation=false" in str(exc.value)
+
+
+def test_danger_full_access_is_allowed_after_explicit_isolation_opt_out(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    full = replace(codex_config, sandbox="danger-full-access")
+    argv = _argv(
+        full,
+        make_request(network_access=True),
+        strict_isolation=False,
+    )
+    values = _config_values(argv)
+    assert 'default_permissions=":danger-full-access"' in values
+    assert not any('filesystem.":workspace_roots"' in value for value in values)
 
 
 def test_danger_full_access_offline_fails_before_spawn(
@@ -159,16 +179,20 @@ def test_danger_full_access_offline_fails_before_spawn(
 ) -> None:
     full = replace(codex_config, sandbox="danger-full-access")
     with pytest.raises(ProviderError) as exc:
-        _argv(full, make_request(network_access=False))
+        _argv(
+            full,
+            make_request(network_access=False),
+            strict_isolation=False,
+        )
     assert exc.value.error_class is ErrorClass.CONFIGURATION_ERROR
     assert "offline" in str(exc.value)
 
 
-def test_read_only_request_uses_read_only_sandbox(
+def test_read_only_request_uses_read_only_permission_parent(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
     argv = _argv(codex_config, make_request(permission_profile="read-only"))
-    assert argv[argv.index("--sandbox") + 1] == "read-only"
+    assert 'permissions.worc-deny-policy.extends=":read-only"' in _config_values(argv)
 
 
 def test_safe_extra_args_are_appended(
@@ -234,7 +258,7 @@ def test_allowlisted_extra_args_work_for_fresh_and_resume(
     )
     assert "--strict-config" in argv
     assert "--ignore-user-config" in argv
-    assert "--ignore-rules" in argv
+    assert "--ignore-rules" not in argv
     assert 'model_reasoning_summary="auto"' in _config_values(argv)
     if session_id is None:
         assert "resume" not in argv
@@ -349,8 +373,8 @@ def test_session_id_builds_exec_resume(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
     # Durable sessions (P2.2): a session id builds ``codex exec [exec-options] resume <ID>``.
-    # codex 0.142.x grammar (F38): exec-level options (--cd/--sandbox/--json/--output-last-message/
-    # --output-schema, network -c) MUST precede the ``resume`` subcommand; only -m/--model and
+    # Codex grammar: exec-level options (--cd/--json/--output-last-message/--output-schema and the
+    # permission profile) MUST precede the ``resume`` subcommand; only -m/--model and
     # -c/--config (model_reasoning_effort) follow it. The id is positional; the prompt is on stdin.
     argv = _argv(
         codex_config,
@@ -360,9 +384,9 @@ def test_session_id_builds_exec_resume(
     resume = argv.index("resume")
     assert argv[resume + 1] == "sess-123"  # id positional right after resume
     # exec-level options precede resume (the F38 fix: `--cd` before `resume`, not after).
-    for flag in ("--cd", "--sandbox", "--json", "--output-last-message", "--output-schema"):
+    for flag in ("--cd", "--json", "--output-last-message", "--output-schema"):
         assert argv.index(flag) < resume, f"{flag} must precede resume"
-    assert argv.index("sandbox_workspace_write.network_access=true") < resume  # network -c is exec
+    assert argv.index("permissions.worc-deny-policy.network.enabled=true") < resume
     # resume-compatible options follow the subcommand.
     assert argv.index("--model") > resume
     assert argv.index('model_reasoning_effort="high"') > resume  # reasoning -c is resume-compatible

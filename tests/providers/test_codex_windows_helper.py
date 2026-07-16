@@ -65,8 +65,15 @@ class _VersionAndHelpFake:
         stdin_text: str | None = None,
         monotonic: Any = None,
     ) -> ProcessResult:
+        exit_code = 0
         if "--version" in argv:
             out = "codex-cli 0.144.4\n"
+        elif "execpolicy" in argv and "check" in argv:
+            out = '{"decision":"forbidden","matchedRules":[]}\n'
+        elif "sandbox" in argv:
+            out = ""
+            if ".worc-denied-read-probe" in argv:
+                exit_code = 1
         elif "exec" in argv and "--help" in argv:
             out = "Usage: codex exec [OPTIONS]\n  --model <M>\n"
             if self._help_has_config:
@@ -81,7 +88,7 @@ class _VersionAndHelpFake:
             out = ""
         Path(stdout_path).write_text(out, encoding="utf-8")
         return ProcessResult(
-            exit_code=0,
+            exit_code=exit_code,
             timed_out=False,
             launch_error=None,
             duration_seconds=0.1,
@@ -186,7 +193,7 @@ def test_augment_prepends_resources_dir_onto_path(
     assert r"C:\existing" in env["PATH"]
 
 
-def test_augment_is_noop_when_helper_absent(
+def test_augment_only_adds_controlled_home_when_helper_absent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     codex_config: ProviderConfig,
@@ -195,7 +202,9 @@ def test_augment_is_noop_when_helper_absent(
     exe, _ = _make_pkg(tmp_path, with_helper=False)
     _patch_windows(monkeypatch, exe)
     provider = _provider(codex_config, security_config, tmp_path, _VersionAndHelpFake())
-    assert provider._augment_child_env({"PATH": r"C:\existing"}) == {"PATH": r"C:\existing"}
+    env = provider._augment_child_env({"PATH": r"C:\existing"})
+    assert env["PATH"] == r"C:\existing"
+    assert Path(env["CODEX_HOME"]).parent.name == "worc-managed"
 
 
 # --- preflight guard --------------------------------------------------------------------------

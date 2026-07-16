@@ -212,6 +212,8 @@ Rules (enforced at load/validate and at flow preflight):
 - a legacy `agents.routing` block is tolerated and ignored on load; `upgrade-config` strips it.
 
 Fallback is only for infrastructure errors such as missing binaries, authentication errors, rate limits, provider unavailability, timeouts, process crashes, and invalid provider output. Test failures and review findings go to `fixing`, not fallback.
+An enforced runtime-policy denial is also never a fallback trigger: it records
+`error_class=policy_denied` and stops the task at `manual_action_required`.
 
 ### `agents.providers`
 
@@ -257,7 +259,7 @@ Provider-specific fields:
 
 | Provider | Field | Type | Default | Meaning |
 | --- | --- | --- | --- | --- |
-| `codex` | `sandbox` | string or null | `null` if omitted | Codex sandbox mode (`workspace-write`, `read-only`, or `danger-full-access`). The example sets `workspace-write`. `danger-full-access` is operator-selectable but rejected at preflight unless `strict_isolation: false` (see `extra_args` / `security` below). |
+| `codex` | `sandbox` | string or null | `null` if omitted | Codex sandbox mode (`workspace-write`, `read-only`, or `danger-full-access`). The example sets `workspace-write`. Full access requires the explicit operator opt-out `security.strict_isolation: false` and online nodes; denied reads are not enforceable in that mode (see `extra_args` / `security` below). |
 | `claude` | `max_turns` | integer or `none`/`max` | `400` if omitted | Claude turn cap. A positive integer caps agentic turns; `none` or `max` (case-insensitive), or YAML `null`, means **no cap** — the orchestrator omits `--max-turns` so the CLI runs without a turn limit. A non-positive integer or any other string is rejected (falls back to the default 400). |
 | `claude` | `max_turns_gate` | boolean | `false` | When `true`, a run that exhausts `max_turns` (`error_max_turns`) pauses for a durable Telegram **continue/stop** prompt instead of failing immediately. Continue resumes the same agent session with a fresh turn grant; deny / timeout / no answer stops (terminal, as without the gate). Each continue needs a fresh approval, and timeout → STOP bounds an unattended loop (no separate resume cap in v1). With this on, a low `max_turns` (~50–100) is safe — short by default, extendable on demand. Requires `telegram.enabled` (preflight). Claude-only (Codex has no turn cap). |
 | `claude` | `allow_native_memory` | boolean | `false` | **Opt-in that relaxes a security control.** When `true`, the adapter drops the deny (F37) that confines Claude Code's **own** native auto-memory, letting it persist across tasks at `~/.claude/projects/<repo>/memory/` (honoring `CLAUDE_CONFIG_DIR`). Off (default) keeps the deny in place — today's behavior. **Risk:** that store is repo-keyed and never committed (so commit contamination / cross-repo bleed don't apply), but it is **outside the orchestrator's redaction net and audit** — an unredacted `originSessionId` was once observed leaking there. Turn it on only as a deliberate, operator-owned risk acceptance; it composes with `memory.enabled` (the orchestrator's own store) so you can run either, both, or neither memory source. `install` does **not** write it (conscious opt-in); add it by hand. Claude-only (Codex's native memory is unmanaged today). |
@@ -299,8 +301,15 @@ Every Codex attempt — fresh or resumed, offline or online — runs behind a fi
 configuration boundary. This is not an `extra_args` extension point and cannot be changed by a
 task, flow, profile, or user config:
 
-- `--strict-config --ignore-user-config --ignore-rules` suppresses `$CODEX_HOME/config.toml`,
-  profiles, and user/project execpolicy rules while making unknown config fatal;
+- `--strict-config --ignore-user-config` suppresses user config/profiles while making unknown config
+  fatal; the exact target project is untrusted, so project config and rules stay disabled;
+- the adapter selects an isolated, orchestrator-managed `CODEX_HOME` containing only generated
+  `decision="forbidden"` execpolicy rules for `security.denied_commands`; this keeps arbitrary user
+  rules out while preserving the most restrictive command policy for fresh and resumed turns;
+- in isolated modes, an adapter-owned permission profile inherits `:workspace` or `:read-only`, then applies every
+  `security.denied_read_paths` entry as an OS-sandbox `deny` rule under `:workspace_roots`; it also
+  denies `:root` and reopens only Codex's `:minimal` runtime paths plus the workspace roots, so the
+  managed auth/policy home is not agent-readable;
 - the exact target project is marked untrusted for the invocation, so its `.codex/config.toml`
   cannot join the effective config layer;
 - apps/connectors, MCP, Browser/Computer Use, plugins, hooks, image generation, remote/delegated
@@ -309,14 +318,17 @@ task, flow, profile, or user config:
   `network_access: true` grants only sandbox network (where the sandbox supports it) and live web
   search. It does not grant apps, MCP, browser, computer-use, plugins, or hooks.
 
-Authentication remains in the Codex CLI's existing auth store (`CODEX_HOME`, or its normal default
-when the variable is absent). `--ignore-user-config` does not disable that auth store, and the
-orchestrator never copies, migrates, logs, or records its path. Codex CLI versions older than
-`0.144.4`, or builds missing any boundary flag, fail `preflight` before a model turn.
+The managed home lives under the existing Codex home and hard-links an existing file-backed
+`auth.json`; credential contents are never copied, inspected, logged, or recorded. Codex CLI
+versions older than `0.144.4`, builds missing a boundary primitive, invalid generated rules, or a
+host sandbox that cannot pass the allowed-read/denied-read smoke test fail `preflight` before a
+model turn.
 
-An offline attempt with `sandbox: danger-full-access` is rejected by the command builder even when
-`strict_isolation: false`: that sandbox has no enforceable network boundary. Use a sandboxed mode,
-or grant network explicitly and own the full-access risk.
+`sandbox: danger-full-access` is an explicit operator-owned exception to the read boundary. It is
+rejected while `security.strict_isolation: true` and for offline nodes; with
+`strict_isolation: false` plus `network_access: true`, Codex uses its built-in full-access profile.
+Generated command denials and the controlled config/rules boundary remain active, but
+`denied_read_paths` cannot be enforced. A task, flow, or `extra_args` cannot select this mode.
 
 Each started Codex attempt writes a credential-free `capabilities.json` beside `request.json`. It
 records the effective sandbox/network policy, suppressed config sources, and channel-by-channel
@@ -348,26 +360,20 @@ by the provider command builder at launch, and re-checked on a flow node's `extr
 load. Codex errors identify the rejected option or config key but omit its value. The Codex request
 artifact likewise redacts every `extra_args` value, including values rejected before launch.
 
-**Full access — operator-selectable, gated by `strict_isolation`.** Selecting a provider's
-full-access mode is gated by [`security.strict_isolation`](#security): with the default
-`strict_isolation: true` it is rejected at the isolation **preflight** (the run fails before a
-branch is created); set `strict_isolation: false` to opt in. The additional Codex offline rule above
-still applies: `danger-full-access` can run only when that node explicitly has network access.
+**Full access.** Both providers' typed full-access modes are gated by
+[`security.strict_isolation`](#security): with the default `true` they are rejected at preflight;
+set `false` to opt in and own the loss of filesystem isolation. Codex additionally requires
+`network_access: true`, because its full-access profile cannot enforce an offline network boundary.
 
 | Gated argument | Provider | Effect |
 | --- | --- | --- |
-| `sandbox: danger-full-access` field | Codex | full filesystem access — no isolation; Codex `--sandbox` in `extra_args` is always rejected |
+| `sandbox: danger-full-access` field | Codex | disables filesystem/read isolation; requires `strict_isolation: false` and `network_access: true` |
 | `--permission-mode bypassPermissions` | Claude | disables permission prompts — no isolation |
 
-The gate covers the Codex `sandbox` field and Claude full access selected in provider or flow-node
-`extra_args`. A Claude `--permission-mode` escalation above the resolved profile that is not
+The gate covers Claude full access selected in provider or flow-node `extra_args` and Codex full
+access selected through its typed provider field. A Claude `--permission-mode` escalation above the resolved profile that is not
 `bypassPermissions` — for example `acceptEdits` over a `plan` profile — is likewise reported by the
 `strict_isolation` preflight for provider config.
-
-```yaml
-# Codex full access — only the typed field can select it; strict_isolation rejects it by default
-sandbox: danger-full-access
-```
 
 ```yaml
 # Claude full access — loads, but rejected at the strict_isolation preflight (default true)
@@ -406,12 +412,17 @@ security:
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `strict_isolation` | boolean | `true` | Preflight fails if the required isolation cannot be enforced. This is also the **sole gate** for operator-selected full access: a Codex `sandbox: danger-full-access` field or Claude `--permission-mode bypassPermissions` in provider/flow `extra_args` is rejected at preflight while this is `true` (the default). Set it `false` to opt in (you own the risk). Codex sandbox selectors in `extra_args` remain forbidden. |
+| `strict_isolation` | boolean | `true` | Preflight fails if required isolation cannot be enforced. Setting `false` explicitly permits typed full-access provider modes; Codex then requires online nodes and cannot enforce `denied_read_paths`. Sandbox selectors in `extra_args` remain forbidden. |
 | `allowed_environment` | list of strings | cross-platform base (`PATH`, `HOME`, `USER`, `USERPROFILE`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR`) **+ the OS-launch essentials of the host OS** | Only these environment variables reach child processes. The default is OS-aware: `install` writes the host OS's launch essentials, and a config that omits the key falls back to them. On **Windows** that includes `SystemRoot` (without it the Node-based `claude.exe` aborts at startup with exit `0xC0000409`, so preflight reports it "did not succeed") plus `SystemDrive`, `windir`, `ComSpec`, `PATHEXT`, `TEMP`, `TMP`, `APPDATA`, `LOCALAPPDATA`, `HOMEDRIVE`, `HOMEPATH`, `NUMBER_OF_PROCESSORS`, `PROCESSOR_ARCHITECTURE`; on **Linux/macOS** (and WSL, which is Linux) it adds `TMPDIR`, `LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`. `USER` is required on macOS so subscription/OAuth-authenticated provider CLIs can reach their Keychain credentials (without it the CLI reports "Not logged in"). This list **replaces** (does not extend) the default — keep your OS's launch essentials or the spawned CLI may fail to start; names absent from the host OS are simply skipped. |
-| `denied_read_paths` | list of strings | `.env`, `secrets/**` | Paths agents must not read and artifacts must not expose. |
-| `denied_commands` | list of strings | `git commit`, `git push`, `gh pr create` | Commands agents are forbidden to run. |
+| `denied_read_paths` | list of repo-relative globs | `.env`, `secrets/**` | Paths agents must not read and artifacts must not expose. `/`, `~`, Windows-absolute paths, and `..` traversal are rejected. Codex enforces them in isolated OS permission profiles; an explicit `danger-full-access` opt-out cannot. Claude uses tool denials. |
+| `denied_commands` | list of command-prefix strings | `git commit`, `git push`, `gh pr create` | Whitespace-delimited argv prefixes agents are forbidden to run. Codex generates forbidden execpolicy rules; Claude uses tool denials. Blank entries are rejected. |
 | `trust_level` | `"strict"` \| `"auto"` | `"auto"` (fresh install; the schema fallback for an absent block is `"strict"`) | Approval policy for the mid-task dangerous-diff gate (rule #14). A task may override it with a front-matter `trust_level` field. See below. |
 | `protected_paths` | list of globs | `[]` | Repo-relative globs that **always** require approval on any change, at any `trust_level` — the always-ask floor no level can lower. See below. |
+
+`allowed_environment` replaces its default. The two deny lists do not: configured
+`denied_read_paths` and `denied_commands` are appended to their mandatory defaults with stable
+deduplication. An empty list cannot remove `.env`, `secrets/**`, or the default publish-command
+denials; configuration can only make this ceiling stricter.
 
 Only the orchestrator's Git Manager commits, pushes, and creates PRs. Agent providers do not.
 

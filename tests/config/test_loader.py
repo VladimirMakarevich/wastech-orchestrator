@@ -495,6 +495,44 @@ def test_denied_commands_default_blocks_gh_pr_merge() -> None:
     assert "gh pr merge" in cfg.security.denied_commands
 
 
+def test_operator_denials_extend_mandatory_defaults() -> None:
+    cfg = loads_config(
+        _LEGACY
+        + "security:\n"
+        + '  denied_commands: ["custom deploy"]\n'
+        + '  denied_read_paths: ["private/**"]\n'
+    ).config
+    assert cfg.security.denied_commands == (
+        "git commit",
+        "git push",
+        "gh pr create",
+        "gh pr merge",
+        "custom deploy",
+    )
+    assert cfg.security.denied_read_paths == (".env", "secrets/**", "private/**")
+
+
+def test_empty_operator_denials_cannot_clear_mandatory_defaults() -> None:
+    cfg = loads_config(
+        _LEGACY + "security:\n  denied_commands: []\n  denied_read_paths: []\n"
+    ).config
+    assert "git push" in cfg.security.denied_commands
+    assert ".env" in cfg.security.denied_read_paths
+
+
+def test_operator_denials_are_stably_deduplicated() -> None:
+    cfg = loads_config(
+        _LEGACY
+        + "security:\n"
+        + '  denied_commands: ["git push", "custom deploy", "custom deploy"]\n'
+        + '  denied_read_paths: [".env", "private/**", "private/**"]\n'
+    ).config
+    assert cfg.security.denied_commands.count("git push") == 1
+    assert cfg.security.denied_commands.count("custom deploy") == 1
+    assert cfg.security.denied_read_paths.count(".env") == 1
+    assert cfg.security.denied_read_paths.count("private/**") == 1
+
+
 # --- legacy prompts block (removed in config v9) ---
 
 

@@ -59,7 +59,7 @@ Treat this block as a guardrail, not a convenience area:
 
 - Keep `strict_isolation: true` unless the operator consciously accepts full-access runs.
 - Pass only names in `allowed_environment`; secret **values** never belong in the file.
-- Keep `denied_commands` complete; it replaces the default list rather than extending it.
+- Add repository-specific restrictions to `denied_commands`; the mandatory publish-command baseline is always retained.
 - Keep Codex `extra_args` within its documented closed allowlist; authority-bearing options fail
   config validation. Claude retains the common sandbox/approval/rule-bypass screen.
 - Codex attempts automatically ignore user/project config authority and external connectors;
@@ -126,8 +126,8 @@ If the repo already answers the question (`origin`, current branch, `pyproject.t
 - Do not invent provider ids, stage names, or model ids.
 - Do not weaken security through `extra_args`; Codex rejects unknown options and config keys
   fail-closed.
-- Do not use Codex `danger-full-access` for an offline node: the provider rejects that combination
-  because it cannot enforce a network boundary.
+- Use Codex `danger-full-access` only as a conscious operator opt-out with
+  `strict_isolation: false` and online nodes; denied read paths are not enforceable in that mode.
 - Do not make `skip_if_unavailable: true` the default for required test suites.
 - Do not turn on `auto_merge` just to reduce friction.
 

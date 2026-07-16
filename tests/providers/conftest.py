@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from wastech_orchestrator.config.schema import ProviderConfig, SecurityConfig
 from wastech_orchestrator.providers.base import AgentRunRequest
+
+
+@pytest.fixture(autouse=True)
+def isolated_codex_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Keep generated provider policy/auth state out of the developer's real Codex home."""
+    home = tmp_path / "user-codex-home"
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    return home
 
 
 @pytest.fixture

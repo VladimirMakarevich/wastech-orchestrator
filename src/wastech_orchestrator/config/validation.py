@@ -259,9 +259,21 @@ def _validate_supervisor(
 
 
 def _validate_security(config: OrchestratorConfig, issues: list[str]) -> None:
-    """The protected-paths allowlist holds repo-relative globs (it matches against repo-relative
-    diff paths). Reject an absolute path, ``~``, or ``..`` traversal — the same containment rule
-    applied to a check command's ``cwd``."""
+    """Validate every operator security pattern before a provider can project it.
+
+    Denied reads and protected paths share repo-relative slash/glob semantics. Denied commands are
+    provider-neutral whitespace-delimited argv prefixes; an empty entry would render no rule and
+    is therefore rejected instead of silently weakening the policy.
+    """
+    for index, pattern in enumerate(config.security.denied_read_paths):
+        if not is_safe_relpath(pattern):
+            issues.append(
+                f"security.denied_read_paths[{index}] {pattern!r} must be a "
+                "repo-relative glob (no absolute path, no '~', no '..' traversal)"
+            )
+    for index, command in enumerate(config.security.denied_commands):
+        if not command.split():
+            issues.append(f"security.denied_commands[{index}] must be a non-empty command prefix")
     for index, pattern in enumerate(config.security.protected_paths):
         if not is_safe_relpath(pattern):
             issues.append(
