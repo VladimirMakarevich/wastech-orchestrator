@@ -1,6 +1,6 @@
 # CODX-014 — Tighten Windows sandbox failure detection
 
-**Status:** open
+**Status:** postponed
 **Priority:** P2
 **Source finding:** CXP-12
 **Dependencies:** none

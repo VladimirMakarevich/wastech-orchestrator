@@ -1,6 +1,6 @@
 # CODX-013 — Update the Codex JSONL event parser
 
-**Status:** open
+**Status:** postponed
 **Priority:** P2
 **Source finding:** CXP-11
 **Dependencies:** none

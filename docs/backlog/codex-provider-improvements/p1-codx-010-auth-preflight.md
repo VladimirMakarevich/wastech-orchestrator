@@ -1,6 +1,6 @@
 # CODX-010 — Verify Codex authentication during preflight
 
-**Status:** open
+**Status:** postponed
 **Priority:** P1
 **Source finding:** CXP-09
 **Dependencies:** none
