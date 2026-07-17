@@ -41,6 +41,7 @@ from wastech_orchestrator.providers.base import (
     AgentRunResult,
     ErrorClass,
     NormalizedError,
+    NormalizedUsage,
     ProviderError,
     ProviderHealth,
     RunStatus,
@@ -82,6 +83,10 @@ class ParsedEvents:
     usage: dict[str, Any] | None
     session_id: str | None
     succeeded: bool
+    # The provider-neutral view of ``usage`` (cumulative for Codex, per-invocation for Claude),
+    # ``None`` when the CLI emitted no usage. Derived from the same resolved ``usage`` dict, so the
+    # two always describe the same numbers.
+    normalized_usage: NormalizedUsage | None = None
     # The CLI's terminal ``result`` subtype when the run did not succeed (e.g. ``error_max_turns``),
     # else ``None``. Lets the adapter classify a parseable terminal failure as a task outcome (never
     # a crash) and surface a precise message.
@@ -97,22 +102,39 @@ class ParsedEvents:
     policy_denied: bool = False
 
 
-def _produced_no_work(parsed: ParsedEvents) -> bool:
+def coerce_usage_int(value: object) -> int | None:
+    """A plain ``int`` from a raw usage value, or ``None`` for an absent / non-integer / bool value.
+
+    Shared by the provider adapters when mapping their raw ``usage`` payloads to
+    :class:`NormalizedUsage`; ``bool`` is rejected because ``isinstance(True, int)`` is true.
+    """
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _produced_no_work(parsed: ParsedEvents, request: AgentRunRequest) -> bool:
     """EXPERIMENTAL(no-work-infra) — trial behavior; grep the tag ``no-work-infra`` to revert as one
 
     Conservative "the agent did no work at all" test on normalized fields only (no CLI syntax).
 
-    Fires only when a non-success terminal produced ZERO output tokens, carries no structured
-    output, and is not an ``error_max_turns`` stop (which IS work — a quality outcome). Absent usage
-    (or an absent ``output_tokens`` key) does NOT fire: a genuine quality ``task_failure`` must
-    still flow on, so the net stays deliberately narrow — a masked real failure is worse than a
-    missed no-work run. The caller gates this on ``not parsed.succeeded``.
+    Fires only when a non-success terminal produced ZERO NEW output tokens, carries no structured
+    output, and is not an ``error_max_turns`` stop (which IS work — a quality outcome). On a resumed
+    session the provider's ``output_total`` is cumulative and never 0, so the previous cumulative is
+    subtracted (passed in via ``resume_baseline_output_tokens``) to recover the per-run figure; the
+    baseline is honored only while ``session_id`` is set, so a run the router dropped to a fresh
+    session (session_id cleared) correctly reads its own absolute output. Absent usage (or an absent
+    output count) does NOT fire: a genuine quality ``task_failure`` must still flow on, so the net
+    stays deliberately narrow — a masked real failure is worse than a missed no-work run. The caller
+    gates this on ``not parsed.succeeded``.
     """
     if parsed.failure_subtype == MAX_TURNS_SUBTYPE:
         return False
     if parsed.structured_output:
         return False
-    return (parsed.usage or {}).get("output_tokens") == 0
+    usage = parsed.normalized_usage
+    if usage is None or usage.output_total is None:
+        return False
+    baseline = request.resume_baseline_output_tokens if request.session_id is not None else 0
+    return usage.output_total - (baseline or 0) == 0
 
 
 def read_text(path: str) -> str:
@@ -466,7 +488,7 @@ class BaseCliProvider:
             self._finalize_failure(paths, request, started_at, finished_at, proc, error)
             raise ProviderError(error.error_class, error.message)
 
-        if not parsed.succeeded and _produced_no_work(parsed):
+        if not parsed.succeeded and _produced_no_work(parsed, request):
             # EXPERIMENTAL(no-work-infra) — trial block; revert this whole `if` to fall back to the
             # plain TASK_FAILURE return below if we drop the ADR.
             # The GENERIC no-work net: a parseable terminal event that did NOTHING (zero output
@@ -522,6 +544,7 @@ class BaseCliProvider:
             final_message=final_message,
             structured_output=parsed.structured_output,
             usage=usage,
+            normalized_usage=parsed.normalized_usage,
             session_id=parsed.session_id,
             stdout_path=paths.stdout_path,
             stderr_path=paths.stderr_path,

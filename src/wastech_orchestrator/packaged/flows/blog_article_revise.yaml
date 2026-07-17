@@ -1,0 +1,140 @@
+# Packaged built-in flow: blog_article_revise — improve an EXISTING authorial blog article in place.
+#
+# Sibling of `blog_article` (which writes a new post from scratch): same shape, but the entry scout
+# reads the article that already exists — plus the task's specific improvement ask — instead of
+# turning a bare topic into an angle, and the editing node revises the file in place instead of
+# creating a new one. An internal scout reads the current article and the project's own rules of
+# record (tone-of-voice, content-writing conventions, signature phrases, values), if it defines them,
+# and turns the ask into a revision brief: what already works and must survive the edit, what is
+# weak, and what the task is actually asking for. A networked read-only researcher gathers fresh
+# material only for the gaps the brief flagged (skip it per task with
+# `nodes: { research: { enabled: false } }` when the ask is purely stylistic). The editor revises in
+# place; a tone/style critic blocks on quality AND on whether the ask was actually addressed without
+# needlessly rewriting passages that already worked; a final language polish tightens the prose
+# before publish. Every rework routes through `fixing`, which re-enters the deterministic length gate
+# so a fix can never silently regress the piece. Fact-checking any product/brand the article happens
+# to mention is deliberately left to the human owner, not gated here (matches `blog_article`).
+#
+# output_policy: code_change — the deliverable is an edit to an existing document, not a new file.
+# publishing: documentation_pull_request is the ceiling; run the content repo with
+# `git.create_pull_request: false` (install `--no-create-pr`) to land the revision as a local commit
+# with no PR. network_policy: research grants the external-research node (read-only) web access;
+# every writing node stays offline and workspace-write, so a Codex writer with network is never
+# constructed. The deterministic gate `check_length` here is a sanity floor against the edit
+# accidentally gutting the piece, not a growth mandate — its defaults are intentionally low (see the
+# node below); there is no structural gate like `check_journey` here — a free-form blog post has no
+# fixed structure, so all remaining quality is evaluator-driven.
+#
+# The supervisor is a constant layer above the flow (not a node); `emit_follow_ups` is deliberately
+# omitted (a code-oriented capability). The blocking evaluator is capped by its named-loop budget
+# (`style_fix`).
+#
+# ----------------------------------------------------------------------------------------------------
+# Per-node tuning (ALL fields below are OPTIONAL — omit one to inherit the default). See
+# `blog_article.yaml`'s header for the same note — the authorial nodes (`revise`, `polish`, `fixing`)
+# are worth pinning to a consistent provider/model for one voice if you deviate from the flow-wide
+# default (`revise` + `fixing` share one editing lineage; `polish` is a fresh session but still the
+# same author's voice); only the reasoning effort should drop for the bounded tail passes.
+# Commented out below (not pinned), so the flow runs on whatever provider/model an operator already
+# has configured; uncomment to adopt this tuning.
+#   agent + evaluator nodes:
+#     provider:  codex | claude            which agent runs the node (∈ agents.allowed); default: global primary
+#     model:     <model id>                overrides agents.providers.<provider>.model for THIS node
+#     reasoning: minimal|low|medium|high|xhigh|max  default: agents.providers.<provider>.reasoning
+# ----------------------------------------------------------------------------------------------------
+flow:
+  name: blog_article_revise
+  task_type: blog_article_revise
+  permission_ceiling: workspace-write
+  output_policy: code_change
+  publishing: documentation_pull_request
+  network_policy: research
+
+  defaults:
+    evaluator: { session_scope: fresh_disposable, permission_profile: read-only }
+
+  nodes:
+    - id: context
+      kind: agent
+      role_file: blog_article_revise/context.md
+      session_scope: fresh_disposable
+      permission_profile: read-only
+      network_access: false
+    - id: research
+      kind: agent
+      role_file: blog_article_revise/research.md
+      session_scope: fresh_disposable
+      permission_profile: read-only
+      network_access: true
+    - id: revise
+      kind: agent
+      role_file: blog_article_revise/revise.md
+      session_scope: editing_lineage
+      permission_profile: workspace-write
+      network_access: false
+      # Same tuning note as blog_article's draft node — for voice consistency across both flows, use
+      # the same pin here if you pin one there (uncomment to pin):
+      # provider: codex
+      # model: gpt-5.4
+      # reasoning: xhigh
+    - id: length
+      kind: tool
+      tool: check_length
+      # A sanity floor, not a growth mandate: catches the edit accidentally gutting the article, not
+      # asking it to be long. Deliberately lower than blog_article's from-scratch floor. Tune per the
+      # flow's typical article length, or disable per task (`nodes: { length: { enabled: false } }`)
+      # when the ask is explicitly to shorten the piece.
+      args: { min_chars: 1200, min_paragraphs: 5 }
+    - id: tone_style
+      kind: evaluator
+      role: critic
+      role_file: blog_article_revise/tone_style.md
+      blocking: true
+      # gate_severity: low  # block on ANY finding (default high); raise `style_fix` to match
+    - id: polish
+      kind: agent
+      role_file: blog_article_revise/polish.md
+      session_scope: fresh_disposable
+      permission_profile: workspace-write
+      network_access: false
+      # Language polish is a bounded pass, not fresh reasoning, so it runs at medium regardless of
+      # the flow-wide default — less wall-time on the tail, no quality loss. It is a fresh session
+      # (it gets the diff and the reviewer findings as artifacts), so it does NOT re-read revise's
+      # whole transcript — cheaper input. It no longer needs revise's model/provider; pin it to the
+      # same as revise only for voice consistency if you pin revise above.
+      reasoning: medium
+      # provider: codex
+      # model: gpt-5.4
+    - id: fixing
+      kind: agent
+      role_file: blog_article_revise/fixing.md
+      session_scope: editing_lineage
+      lineage_affinity: revise
+      permission_profile: workspace-write
+      network_access: false
+      # fixing resumes revise's editing lineage (rework genuinely builds on the revision), so it
+      # MUST carry the same model/provider if you pin one on revise above (uncomment to match):
+      # provider: codex
+      # model: gpt-5.4
+    - id: publish
+      kind: publish
+      policy: documentation_pull_request
+
+  edges:
+    - { from: context, to: research }
+    - { from: research, to: revise }
+    - { from: revise, to: length }
+    - { from: length, to: tone_style, outcome: pass }
+    - { from: length, to: fixing, outcome: fail, loop: length_fix }
+    - { from: tone_style, to: polish, outcome: accept }
+    - { from: tone_style, to: fixing, outcome: rework, loop: style_fix }
+    - { from: fixing, to: length } # every fix re-enters the deterministic length gate first
+    - { from: polish, to: publish }
+
+  budgets:
+    length_fix: 5
+    style_fix: 10
+
+  supervisor:
+    role_file: blog_article_revise/supervisor.md
+    finalize_role_file: blog_article_revise/summary.md

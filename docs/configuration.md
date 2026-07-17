@@ -739,6 +739,7 @@ The full set of optional per-node fields (all default to the value shown):
 | `best_effort` | agent | `false` | Tolerate an infra failure (engine continues) instead of failing the task. |
 | `blocking` | evaluator | `true` | A failing verdict blocks (`true`) vs is advisory (`false`). |
 | `max_rework_per_stage` | evaluator | `1` | Rework loops a **non-blocking** evaluator (e.g. `test_quality`) may trigger before it accepts. **Ignored for a blocking evaluator** (the default): a blocking loop is bounded by the flow's named-loop budget (e.g. `budgets.review_fix`), then parks to `manual`. |
+| `gate_severity` | evaluator | `high` | Minimum finding severity that gates (`blocking`/`critical`/`high`/`medium`/`low`): a finding at least this severe drives `rework`, less-severe ones are advisory. Default `high` blocks high/critical/blocking. Lower it (e.g. `low`) so a content critic blocks on any finding — pair with a larger fix budget for the extra rework rounds. Orthogonal to `blocking`. |
 
 Note: **disabling** a node is not a flow field — it is a per-task override (`nodes.<id>.enabled: false` in the task file; see [operations.md](operations.md#disabling-flow-nodes-per-task)).
 

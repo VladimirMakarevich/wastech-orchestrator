@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -30,13 +30,16 @@ from wastech_orchestrator.config.schema import ProviderConfig
 from wastech_orchestrator.providers._adapter_base import (
     BaseCliProvider,
     ParsedEvents,
+    coerce_usage_int,
 )
 from wastech_orchestrator.providers.artifacts import ArtifactPaths
 from wastech_orchestrator.providers.base import (
     AgentRunRequest,
     ErrorClass,
+    NormalizedUsage,
     ProviderError,
     ProviderId,
+    UsageScope,
     build_context_footer,
     build_effective_prompt,
 )
@@ -358,6 +361,31 @@ def isolation_reasons(config: ProviderConfig) -> list[str]:
     return reasons
 
 
+def _normalize_claude_usage(usage: Mapping[str, Any] | None) -> NormalizedUsage | None:
+    """Map Claude's raw ``usage`` to the provider-neutral per-invocation record.
+
+    Claude splits input across three sibling counts that are never pre-summed — the true input is
+    ``input_tokens + cache_creation_input_tokens + cache_read_input_tokens`` — and folds reasoning
+    into output, so ``reasoning_output`` stays ``None``. Each invocation is self-contained (not
+    cumulative). Returns ``None`` when no usage was emitted.
+    """
+    if not usage:
+        return None
+    uncached_input = coerce_usage_int(usage.get("input_tokens"))
+    cache_write = coerce_usage_int(usage.get("cache_creation_input_tokens"))
+    cache_read = coerce_usage_int(usage.get("cache_read_input_tokens"))
+    input_parts = [part for part in (uncached_input, cache_write, cache_read) if part is not None]
+    return NormalizedUsage(
+        scope=UsageScope.PER_INVOCATION,
+        input_total=sum(input_parts) if input_parts else None,
+        cache_read=cache_read,
+        cache_write=cache_write,
+        uncached_input=uncached_input,
+        output_total=coerce_usage_int(usage.get("output_tokens")),
+        reasoning_output=None,
+    )
+
+
 def parse_stream_json(stdout_text: str) -> ParsedEvents:
     """Parse a Claude ``stream-json`` event stream into :class:`ParsedEvents`.
 
@@ -427,6 +455,7 @@ def parse_stream_json(stdout_text: str) -> ParsedEvents:
         final_message=final_message,
         structured_output=structured_output,
         usage=usage,
+        normalized_usage=_normalize_claude_usage(usage),
         session_id=session_id,
         succeeded=succeeded,
         failure_subtype=failure_subtype,

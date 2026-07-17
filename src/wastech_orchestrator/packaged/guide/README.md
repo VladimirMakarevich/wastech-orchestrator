@@ -5,12 +5,12 @@
 - **[best-practices.md](best-practices.md)** — how to write a _good_ task (testable criteria, scoping, constraints, the project's own working rules).
 - **[decision-guide.md](decision-guide.md)** — _when to use what_ (run vs watch, disabling nodes, auto-merge, where task files live, Telegram).
 - **[tasks/task-minimal.md](tasks/task-minimal.md)** — the smallest valid task (just `id`, `title`, and a body) and **[tasks/task-rich.md](tasks/task-rich.md)** — a maximal task that exercises _every_ front-matter field with inline rule notes. Copy one and fill it in.
-- **[tasks/skills/worc-task/SKILL.md](tasks/skills/worc-task/SKILL.md)** — a copy-ready task-authoring skill that turns raw work into one valid orchestrator task file.
-- **[tasks/skills/worc-deco-task/SKILL.md](tasks/skills/worc-deco-task/SKILL.md)** — a copy-ready task-authoring skill for operator-authored decomposition (root task + subtask specs).
+- **[skills/worc-task/SKILL.md](skills/worc-task/SKILL.md)** — a copy-ready task-authoring skill that turns raw work into one valid orchestrator task file.
+- **[skills/worc-deco-task/SKILL.md](skills/worc-deco-task/SKILL.md)** — a copy-ready task-authoring skill for operator-authored decomposition (root task + subtask specs).
 - **[config/README.md](config/README.md)** — build or tune the orchestrator's own `config.yaml` for this repository.
 - **[config/reference.md](config/reference.md)** — the **complete field reference** for `config.yaml`: every field, its allowed values, default, constraints, and when to use it. Read this to understand any config field.
 - **[config/best-practices.md](config/best-practices.md)** — safe defaults, checks layout, and common config mistakes.
-- **[config/skills/worc-config/SKILL.md](config/skills/worc-config/SKILL.md)** — a copy-ready skill that interviews the operator and assembles a project-specific config.
+- **[skills/worc-config/SKILL.md](skills/worc-config/SKILL.md)** — a copy-ready skill that interviews the operator and assembles a project-specific config.
 - **[flows/README.md](flows/README.md)** — author a _custom flow_ (a new `task_type`): the graph of steps, where the flow YAML + its prompts live, registration, and validation.
 - **[flows/reference.md](flows/reference.md)** — the **complete field reference** for flows: every flow-level and node-level field (including `output_policy`, `publishing`, `permission_ceiling`, `network_policy`), plus edges and validation.
 - **[flows/roles.md](flows/roles.md)** — author a flow's **role prompts**: the built-in evaluator roles, the per-node output contract, output slots, and the supervisor layer.

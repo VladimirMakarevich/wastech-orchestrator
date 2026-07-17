@@ -100,7 +100,7 @@ Implement the task at {task_path} in the repository {repo_path}. Follow the plan
 ## Node kinds
 
 - **`agent`** — launches a coding-agent CLI (Codex or Claude Code) with the node's `role_file` as its prompt. Fields: `role_file` (required), `session_scope` (`fresh_disposable` | `editing_lineage` | `resume_own_lineage`), `permission_profile` (≤ the flow ceiling), optional `output_artifact`, `hitl`, `when`, `lineage_affinity`, and the per-node overrides below.
-- **`evaluator`** — a read-only judge that returns `accept` / `rework`. Fields: `role` (e.g. `review`), `role_file`, `blocking` (a failing verdict blocks vs is advisory), `max_rework_per_stage`. Evaluators are forced `read-only`. An evaluator returns a structured **findings** verdict and is **fail-closed** — see [What a node returns](#what-a-node-returns-output-contracts-schemas-and-slots).
+- **`evaluator`** — a read-only judge that returns `accept` / `rework`. Fields: `role` (e.g. `review`), `role_file`, `blocking` (a failing verdict blocks vs is advisory), `max_rework_per_stage`, `gate_severity` (minimum finding severity that gates; default `high`, lower it to make a critic block on any finding). Evaluators are forced `read-only`. An evaluator returns a structured **findings** verdict and is **fail-closed** — see [What a node returns](#what-a-node-returns-output-contracts-schemas-and-slots).
 - **`checks`** — runs deterministic repository commands, no agent. `checker: command_profile` runs the configured check command sets; other checkers exist (`citation`, `dependency_scan`). Outcomes: `pass` / `fail`.
 - **`tool`** — runs **your own** executable from `.worc/tools/` out-of-process (any language), under the same launch ceiling as an agent. Fields: `tool` (the registered executable name), optional flat-scalar `args`, optional `timeout_seconds`, `when`. Outcomes: `pass` / `fail` / `route:*` (by exit code or an optional JSON object on stdout). Use it for deterministic logic that is neither an LLM step (`agent`) nor a built-in gate (`checks`). See [Custom tool nodes](#custom-tool-nodes).
 - **`publish`** — the terminal. `policy: pull_request` / `documentation_pull_request` opens a PR; `policy: none` is a graph terminal that performs no Git action (the orchestrator still owns any real commit/push/PR).
@@ -128,6 +128,8 @@ Every `agent`/`evaluator` node may pin its own `provider` (`codex` | `claude`), 
 - **`fresh_disposable`** — a cold session every visit; nothing is carried forward. The default, and the only sound choice for a read-only evaluator (it must never inherit an author's context).
 - **`editing_lineage`** — a durable session shared across a group of editing nodes so they keep continuous context. This is what an edit → fix loop uses.
 - **`resume_own_lineage`** — a node's **private** durable session across its own rework rounds (e.g. a critic that must remember what it already flagged); not shared with any other node.
+
+> **Token cost:** resuming a session (`editing_lineage`, `resume_own_lineage`, and joining via `lineage_affinity`) carries the shared session's **full accumulated history** into the next stage. That preserves context, but every following model turn re-sends the whole transcript, so input-token usage grows with each resumed turn. Share a session deliberately — it earns its cost when stages genuinely build on each other (an edit → fix loop), and wastes it when a later stage only needs a small, self-contained input (a one-line polish). Prefer `fresh_disposable` between semantically different stages, and pass what the stage actually needs as an artifact instead.
 
 A flow can carry **more than one** durable editing session per execution unit — one per **lineage**. The lineage key is derived from the graph, `lineage_affinity or <node id>`:
 
@@ -192,7 +194,7 @@ A `tool` node runs **your own** program instead of an LLM — any language, by c
 
 **Where a tool lives.** Put the executable at `.worc/tools/<name>` and reference it from a flow by that **one name**, never a path. Resolution is cross-platform from the single name: on POSIX the bare `<name>` must be `chmod +x`; on Windows the resolver also tries launcher suffixes, so the same flow name finds `<name>.cmd`/`.exe` (and a `.cmd`/`.bat` is launched through the command interpreter, since Windows cannot start a batch file directly). The registry resolves the name to a contained, executable file and rejects anything else (a missing tool, a traversal, a symlink out of `.worc/tools/`) **fatally at preflight**, before any task starts.
 
-**Built-in tools ship with the orchestrator.** `worc install` delivers packaged tools into `.worc/tools/` (per machine, so the launcher always matches the OS), exactly as it delivers the built-in flows — a plain re-run fills in missing files, `--reconfigure` snapshots the existing dir first. The content flows' `check_journey` prose gate is one such tool (see [`check_journey`](#the-check_journey-prose-gate) below). Because a packaged `tool` node is validated in every repo at preflight, its executable must be delivered everywhere — which the installer guarantees.
+**Built-in tools ship with the orchestrator.** `worc install` delivers packaged tools into `.worc/tools/` (per machine, so the launcher always matches the OS), exactly as it delivers the built-in flows — a plain re-run fills in missing files, `--reconfigure` snapshots the existing dir first. The content flows' `check_journey` prose gate and the blog flows' `check_length` size floor are two such tools (see [`check_journey`](#the-check_journey-prose-gate) and [`check_length`](#the-check_length-size-floor-gate) below). Because a packaged `tool` node is validated in every repo at preflight, its executable must be delivered everywhere — which the installer guarantees.
 
 **The contract (like a Claude Code hook).** The orchestrator runs the tool through the same launch ceiling as an agent — an argv list (never a shell string), a mandatory timeout, and exactly the allowlisted `security.allowed_environment` (the parent environment is never inherited). It feeds a small JSON **context on stdin** — only allowlisted paths + your `args`, never secrets, the full environment, or a session id:
 
@@ -254,6 +256,21 @@ It reports through the standard tool contract above (JSON `{"outcome", "data"}` 
 | `ru` | ≤1 title per page; `## → ### → ####` hierarchy (no skipped level); `Purpose` + `Emotional point` present; the `не …, а …` AI-antithesis pattern (+ a small cliché list); no service-label headings (`Что это`, `Философия`, …). **No character limit.** |
 | `en` | all `ru` rules **plus** per-page length 500–800 chars (hard max 800) and ≤3 paragraphs. |
 | `book` | the length-bearing `en` ruleset applied across every assembled page. |
+
+Its rule set is deliberately opinionated for one long-form book format, not a generic prose linter — the constants under "domain constants (tunable)" in the delivered script are a starting point to fork and tune under your own `.worc/tools/check_journey` for a different book's structure, language, or house style.
+
+### The check_length size-floor gate
+
+`check_length` is the built-in `tool` shipped for the blog flows (`blog_article` / `blog_article_revise`) — a generic minimum-size floor, usable by any flow's `tool` node, not tied to blogging specifically. It is a self-contained script (no third-party dependencies), delivered on install as an extensionless `+x` file plus a `check_length.cmd` Windows launcher.
+
+It reports through the standard tool contract above (JSON `{"outcome", "data"}` on stdout, exit `0`/non-zero). Unlike `check_journey`, scope resolution has **no task-text fallback**: it reads the changed `.md` paths from the run's `diff_path` alone, and an absent/empty diff is always a vacuous `pass`. A prose task body routinely names reference docs (a tone-of-voice guide, an idea doc) that are not the deliverable; falling back to "any `.md` named in the task text" once made the gate measure those instead of the actual output on a run where nothing had been written yet (see docs/backlog/follow_ups.md, the 2026-07-14 codex-Windows-sandbox post-mortem, finding F3). For each resolved file it strips markdown heading lines, groups what remains into paragraphs on blank-line boundaries, and fails if the prose falls short of either floor in `args`:
+
+| `args` key | Enforces |
+| --- | --- |
+| `min_chars` | The heading-stripped prose must be at least this many characters. Omit or set `0` to disable. |
+| `min_paragraphs` | The heading-stripped prose must have at least this many paragraphs. Omit or set `0` to disable. |
+
+A longer/more-paragraphed document always passes — this is a floor, never a ceiling.
 
 ## Registering and running the flow
 

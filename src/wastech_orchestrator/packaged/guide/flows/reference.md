@@ -55,7 +55,7 @@ A node's `network_access` overrides this for that node alone (`true` grants even
 
 ### `defaults.evaluator`
 
-Applied to any evaluator node that omits the field. Keys: `session_scope` (default `fresh_disposable`), `permission_profile` (default `read-only`), `max_rework_per_stage` (default `1`). Use it to avoid repeating the same evaluator settings across many evaluator nodes.
+Applied to any evaluator node that omits the field. Keys: `session_scope` (default `fresh_disposable`), `permission_profile` (default `read-only`), `max_rework_per_stage` (default `1`), `gate_severity` (default `high`). Use it to avoid repeating the same evaluator settings across many evaluator nodes (e.g. set a stricter `gate_severity` once for a content flow's critics).
 
 ### `decomposition`
 
@@ -85,7 +85,7 @@ Every node has an `id` (unique; see reserved ids below) and a `kind`. The six ki
 | Field | Type / values | Default | Constraint | Meaning |
 | --- | --- | --- | --- | --- |
 | `role_file` | string | required | Flow-dir-relative; no `..`/absolute. | The node's prompt file, under this flow's own folder. |
-| `session_scope` | `fresh_disposable` \| `editing_lineage` \| `resume_own_lineage` | `fresh_disposable` | — | Session intent: fresh each pass, a durable editing session, or its own resumable session. |
+| `session_scope` | `fresh_disposable` \| `editing_lineage` \| `resume_own_lineage` | `fresh_disposable` | — | Session intent: fresh each pass, a durable editing session, or its own resumable session. Resuming re-sends the session's full history each turn (input tokens grow), so prefer `fresh_disposable` between unrelated stages — see `docs/flow-authoring.md`. |
 | `lineage_affinity` | string \| null | `null` | Target must be an `editing_lineage` owner with no affinity of its own (one hop; no cross-provider). | Join another editing node's session (e.g. `fixing` joins `implementation`). |
 | `permission_profile` | `read-only` \| `workspace-write` \| null | `null` → resolved from the flow ceiling | Must be `<= permission_ceiling`. | This node's filesystem access. Grant `workspace-write` only to nodes that edit. |
 | `network_access` | bool \| null (tri-state) | `null` (inherit `network_policy`) | Codex `workspace-write` + network is rejected. | Per-node network override. |
@@ -112,6 +112,7 @@ Every node has an `id` (unique; see reserved ids below) and a `kind`. The six ki
 | `network_access` | bool \| null | `null` (inherit) | — | Per-node network override. |
 | `blocking` | bool | `true` | — | `true` = a `rework` verdict loops until the named-loop budget is spent, then parks to manual. `false` = advisory. |
 | `max_rework_per_stage` | int | `1` | **Only used when `blocking: false`.** | A non-blocking evaluator accepts after this many rework verdicts instead of looping. |
+| `gate_severity` | `blocking` \| `critical` \| `high` \| `medium` \| `low` | `high` | Must be one of the five severities. | Minimum finding severity that gates: a finding at least this severe drives `rework`, less-severe ones are advisory. Default `high` blocks high/critical/blocking. Lower it (e.g. `low`) to make a critic block on any finding — pair with a larger fix budget so the extra rework rounds have headroom. Orthogonal to `blocking` (that decides whether the node gates at all; this decides which severities count). |
 | `provider` / `model` / `reasoning` | as agent | `null` | as agent | Per-node provider overrides. |
 | `when` | predicate | `null` | as agent | Conditional run. |
 

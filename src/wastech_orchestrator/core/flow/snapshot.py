@@ -26,6 +26,8 @@ from wastech_orchestrator.core.flow.contracts import (
     fingerprint,
 )
 from wastech_orchestrator.core.flow.schema import (
+    DEFAULT_GATE_SEVERITY,
+    SEVERITY_ORDER,
     AgentNode,
     ChecksNode,
     DecompositionConfig,
@@ -105,6 +107,7 @@ _EVALUATOR_FIELDS = frozenset(
         "network_access",
         "blocking",
         "max_rework_per_stage",
+        "gate_severity",
         "provider",
         "model",
         "reasoning",
@@ -139,6 +142,7 @@ _EVALUATOR_DEFAULTS_FIELDS = frozenset(
         "session_scope",
         "permission_profile",
         "max_rework_per_stage",
+        "gate_severity",
     }
 )
 
@@ -370,6 +374,16 @@ def _parse_agent_node(raw: dict[str, Any]) -> AgentNode:
     )
 
 
+def _parse_gate_severity(value: Any, ctx: str) -> str:
+    """Validate a ``gate_severity`` token against :data:`SEVERITY_ORDER` (fail-closed)."""
+    token = str(value).lower()
+    if token not in SEVERITY_ORDER:
+        raise FlowLoadError(
+            f"invalid 'gate_severity' {value!r} in {ctx}: must be one of {list(SEVERITY_ORDER)}"
+        )
+    return token
+
+
 def _parse_evaluator_node(raw: dict[str, Any], defaults: EvaluatorDefaults) -> EvaluatorNode:
     nid = str(_require(raw, "id", "evaluator node"))
     ctx = f"evaluator node '{nid}'"
@@ -393,6 +407,7 @@ def _parse_evaluator_node(raw: dict[str, Any], defaults: EvaluatorDefaults) -> E
         network_access=_parse_network_access(raw),
         blocking=bool(raw.get("blocking", True)),
         max_rework_per_stage=int(raw.get("max_rework_per_stage", defaults.max_rework_per_stage)),
+        gate_severity=_parse_gate_severity(raw.get("gate_severity", defaults.gate_severity), ctx),
         provider=provider,
         model=raw.get("model") or None,
         reasoning=raw.get("reasoning") or None,
@@ -574,6 +589,9 @@ def _parse_defaults(raw: Any) -> FlowDefaults:
                 "defaults.evaluator",
             ),
             max_rework_per_stage=int(ev_raw.get("max_rework_per_stage", 1)),
+            gate_severity=_parse_gate_severity(
+                ev_raw.get("gate_severity", DEFAULT_GATE_SEVERITY), "defaults.evaluator"
+            ),
         )
     )
 

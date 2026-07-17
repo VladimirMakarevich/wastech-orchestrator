@@ -47,6 +47,11 @@ from wastech_orchestrator.core.flow.output_policy import resolve_output_policy, 
 from wastech_orchestrator.core.flow.prompt import RoleFileError, read_role_file, render_role_prompt
 from wastech_orchestrator.core.flow.prompt_vars import valid_prompt_vars
 from wastech_orchestrator.core.flow.schema import AgentNode, FlowNode, ToolNode
+from wastech_orchestrator.core.flow.usage_accounting import (
+    deserialize_usage,
+    guard_output_baseline,
+    snapshot_for_lineage,
+)
 from wastech_orchestrator.core.hitl import (
     HumanInputSignal,
     OutputContract,
@@ -72,6 +77,7 @@ from wastech_orchestrator.providers.base import (
     MAX_TURNS_SUBTYPE,
     AgentRunRequest,
     ErrorClass,
+    NormalizedUsage,
     ProviderId,
     build_effective_prompt,
 )
@@ -148,6 +154,9 @@ class AgentNodeRunner:
             route,
             human_input_path=str(path),
             resume_session_id=_same_provider_session_id(outcome, route),
+            # Resuming the first run's session means its usage is the baseline: the second run's
+            # cumulative includes the first's turns, so subtracting it recovers only the new work.
+            resume_usage_baseline=outcome.result.normalized_usage if outcome.result else None,
         )
         if self._typed(node, ctx, outcome2).human_input is not None:
             raise NodeManualRequired(f"agent node {node.id!r}: second HITL request after an answer")
@@ -235,6 +244,7 @@ class AgentNodeRunner:
         *,
         human_input_path: str | None,
         resume_session_id: str | None = None,
+        resume_usage_baseline: NormalizedUsage | None = None,
     ) -> tuple[int, StageOutcome]:
         """Invoke the provider; when the Claude max-turns gate is on, pause on ``error_max_turns``
         for a durable operator continue/stop decision instead of failing immediately.
@@ -253,6 +263,7 @@ class AgentNodeRunner:
                 route,
                 human_input_path=human_input_path,
                 resume_session_id=resume_session_id,
+                resume_usage_baseline=resume_usage_baseline,
             )
         gate_path = turn_gate_interaction_path(
             self._s.artifacts_root, ctx.task_id, node.id, subtask=ctx.subtask_order
@@ -272,7 +283,12 @@ class AgentNodeRunner:
             # editing-lineage session (state.db) for editing nodes, else a fresh run + fresh grant.
             resume_session_id = None
         run_id, outcome = self._invoke(
-            node, ctx, route, human_input_path=human_input_path, resume_session_id=resume_session_id
+            node,
+            ctx,
+            route,
+            human_input_path=human_input_path,
+            resume_session_id=resume_session_id,
+            resume_usage_baseline=resume_usage_baseline,
         )
         while _is_max_turns(outcome):
             result = self._gate().request(
@@ -304,6 +320,7 @@ class AgentNodeRunner:
         *,
         human_input_path: str | None,
         resume_session_id: str | None = None,
+        resume_usage_baseline: NormalizedUsage | None = None,
     ) -> tuple[int, StageOutcome]:
         started_at = self._s.clock()
         run_id = self._s.store.record_node_run(
@@ -319,7 +336,12 @@ class AgentNodeRunner:
                 started_at=started_at,
             )
         )
-        request = self._build_request(node, ctx, route, run_id, human_input_path, resume_session_id)
+        session_id, baseline, baseline_session_id = self._resolve_resume(
+            node, ctx, route, resume_session_id, resume_usage_baseline
+        )
+        request = self._build_request(
+            node, ctx, route, run_id, human_input_path, session_id, guard_output_baseline(baseline)
+        )
         outcome = self._s.router.run_stage(request, route, snapshot=self._s.snapshot)
         self._record_completion(run_id, outcome)
         record_run_observability(
@@ -334,6 +356,8 @@ class AgentNodeRunner:
             model=node.model,
             reasoning=node.reasoning,
             started_at=started_at,
+            usage_baseline=baseline,
+            baseline_session_id=baseline_session_id,
         )
         if outcome.result is None:
             error_class = outcome.terminal_error.error_class if outcome.terminal_error else None
@@ -485,7 +509,8 @@ class AgentNodeRunner:
         route: ResolvedRoute,
         run_id: int,
         human_input_path: str | None,
-        resume_session_id: str | None = None,
+        session_id: str | None = None,
+        resume_baseline_output_tokens: int | None = None,
     ) -> AgentRunRequest:
         ceiling = ctx.snapshot.doc.permission_ceiling
         permission = (node.permission_profile or ceiling).value
@@ -523,10 +548,8 @@ class AgentNodeRunner:
             model=node.model,
             reasoning=node.reasoning,
             extra_args=list(node.extra_args),
-            # An explicit HITL resume id (the in-process round-trip) wins; otherwise fall back to
-            # the durable editing-lineage session. For an editing-lineage node these agree (the
-            # explicit value is the just-persisted lineage session).
-            session_id=resume_session_id or self._resume_session_id(node, ctx, route),
+            session_id=session_id,
+            resume_baseline_output_tokens=resume_baseline_output_tokens,
             # Network is a per-node override on top of the flow-wide default: the node's
             # ``network_access`` wins (a node-level grant works even in a flow with no
             # ``network_policy``; a node-level ``False`` opts out), and absent it the node inherits
@@ -648,10 +671,32 @@ class AgentNodeRunner:
             finished_at=self._s.clock(),
         )
 
-    def _resume_session_id(
+    def _resolve_resume(
+        self,
+        node: AgentNode,
+        ctx: NodeContext,
+        route: ResolvedRoute,
+        explicit_session_id: str | None,
+        explicit_baseline: NormalizedUsage | None,
+    ) -> tuple[str | None, NormalizedUsage | None, str | None]:
+        """Resolve ``(session_id, usage_baseline, baseline_session_id)`` for one invocation.
+
+        An explicit resume id (the in-process HITL round-trip) wins and carries the first
+        invocation's cumulative usage as the baseline; otherwise the durable editing lineage gives
+        both the session and its persisted usage snapshot. ``baseline_session_id`` is always the
+        session the baseline was captured on, so the delta is subtracted only when the run actually
+        continued that same session (a session the router silently dropped reads as fresh)."""
+        if explicit_session_id is not None:
+            return explicit_session_id, explicit_baseline, explicit_session_id
+        row = self._resume_lineage(node, ctx, route)
+        if row is None:
+            return None, None, None
+        return row.raw_session_id, deserialize_usage(row.usage_snapshot), row.raw_session_id
+
+    def _resume_lineage(
         self, node: AgentNode, ctx: NodeContext, route: ResolvedRoute
-    ) -> str | None:
-        """The durable editing session to resume for this node (durable sessions, P2.2).
+    ) -> EditingLineageRow | None:
+        """The durable editing lineage this node resumes, or ``None`` for a fresh session (P2.2).
 
         Only an ``editing_lineage`` node resumes an editing session, keyed by its lineage
         (:func:`_lineage_key`), and only when the stored lineage was produced by the same provider
@@ -666,7 +711,7 @@ class AgentNodeRunner:
         row = self._s.store.get_editing_lineage(ctx.task_id, _lineage_key(node), ctx.subtask_order)
         if row is None or row.provider != route.primary.value:
             return None  # no editing session yet, or it belongs to a different provider → fresh
-        return row.raw_session_id
+        return row
 
     def _persist_session(self, node: AgentNode, ctx: NodeContext, outcome: StageOutcome) -> None:
         """Persist this node's editing lineage after a successful editing-lineage run (durable).
@@ -688,6 +733,7 @@ class AgentNodeRunner:
                 provider=outcome.provider_used.value,
                 raw_session_id=result.session_id,
                 updated_at=self._s.clock(),
+                usage_snapshot=snapshot_for_lineage(result.normalized_usage),
             )
         )
 

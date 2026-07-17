@@ -263,7 +263,7 @@ def test_packaged_content_flows_require_delivered_check_journey(tmp_path: Path) 
     # only from there now); the content flows carry the `tool: check_journey` node under test.
     shutil.copytree(BUILTIN_FLOWS_DIR, flows)
     config = _config(tmp_path)
-    content = ("content_chapter", "content_book", "content_translate")
+    content = ("content_chapter", "content_translate")
 
     missing = FlowRegistry(operator_flows_dir=flows, config=config)
     for name in content:

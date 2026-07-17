@@ -222,6 +222,53 @@ flow:
     assert ev.max_rework_per_stage == 2  # explicit node value wins over default
 
 
+def _gate_flow(defaults_gate: str | None, node_gate: str | None) -> str:
+    defaults = (
+        f"  defaults:\n    evaluator:\n      gate_severity: {defaults_gate}\n"
+        if defaults_gate
+        else ""
+    )
+    node_line = f"      gate_severity: {node_gate}\n" if node_gate else ""
+    return (
+        "flow:\n"
+        "  name: test\n"
+        "  task_type: test\n"
+        "  permission_ceiling: workspace-write\n"
+        "  output_policy: code_change\n"
+        "  publishing: pull_request\n"
+        f"{defaults}"
+        "  nodes:\n"
+        "    - id: work\n"
+        "      kind: agent\n"
+        "      role_file: roles/work.md\n"
+        "    - id: check\n"
+        "      kind: evaluator\n"
+        "      role: review\n"
+        "      role_file: roles/review.md\n"
+        f"{node_line}"
+        "  edges:\n"
+        "    - { from: work, to: check }\n"
+    )
+
+
+def test_evaluator_gate_severity_defaults_to_high(tmp_path: Path) -> None:
+    ev = load_flow(_write(tmp_path, _gate_flow(None, None))).nodes_by_id["check"]
+    assert isinstance(ev, EvaluatorNode)
+    assert ev.gate_severity == "high"  # built-in default = historical behavior
+
+
+def test_evaluator_gate_severity_default_applied(tmp_path: Path) -> None:
+    ev = load_flow(_write(tmp_path, _gate_flow("low", None))).nodes_by_id["check"]
+    assert isinstance(ev, EvaluatorNode)
+    assert ev.gate_severity == "low"  # from defaults.evaluator, not the built-in high
+
+
+def test_evaluator_gate_severity_node_overrides_default(tmp_path: Path) -> None:
+    ev = load_flow(_write(tmp_path, _gate_flow("low", "medium"))).nodes_by_id["check"]
+    assert isinstance(ev, EvaluatorNode)
+    assert ev.gate_severity == "medium"  # explicit node value wins over default
+
+
 # -- specific node fields -----------------------------------------------------
 
 
@@ -526,6 +573,25 @@ def test_unknown_evaluator_default_field_rejected(tmp_path: Path) -> None:
     )
     with pytest.raises(FlowLoadError, match=r"unknown field.*bogus.*defaults.evaluator"):
         load_flow(_write(tmp_path, body))
+
+
+def test_unknown_evaluator_node_field_rejected(tmp_path: Path) -> None:
+    body = _gate_flow(None, None).replace(
+        "      role_file: roles/review.md\n",
+        "      role_file: roles/review.md\n      surprise: x\n",
+    )
+    with pytest.raises(FlowLoadError, match=r"unknown field.*surprise"):
+        load_flow(_write(tmp_path, body))
+
+
+def test_invalid_gate_severity_rejected(tmp_path: Path) -> None:
+    with pytest.raises(FlowLoadError, match=r"invalid 'gate_severity'.*trivial"):
+        load_flow(_write(tmp_path, _gate_flow(None, "trivial")))
+
+
+def test_invalid_gate_severity_default_rejected(tmp_path: Path) -> None:
+    with pytest.raises(FlowLoadError, match=r"invalid 'gate_severity'.*defaults.evaluator"):
+        load_flow(_write(tmp_path, _gate_flow("bogus", None)))
 
 
 # -- immutability -------------------------------------------------------------

@@ -19,6 +19,19 @@ class RunStatus(StrEnum):
     FAILED = "failed"
 
 
+class UsageScope(StrEnum):
+    """How a provider's normalized token counts are scoped.
+
+    Codex reports ``turn.completed.usage`` cumulatively for the whole session (a resume includes
+    every prior turn), so its normalized record is ``SESSION_CUMULATIVE`` and the orchestrator must
+    subtract the session's previous snapshot to get a per-run figure. Claude reports each invocation
+    independently, so its record is ``PER_INVOCATION`` and is already per-run.
+    """
+
+    SESSION_CUMULATIVE = "session_cumulative"
+    PER_INVOCATION = "per_invocation"
+
+
 class ErrorClass(StrEnum):
     """Normalized provider error classes."""
 
@@ -153,6 +166,11 @@ class AgentRunRequest:
     extra_args: list[str] = field(default_factory=list)
     reasoning: str | None = None
     session_id: str | None = None
+    # The resumed session's previous cumulative output-token count, for the no-work guard only.
+    # Set by the orchestrator only when ``session_id`` resumes a cumulative-scope session; the guard
+    # subtracts it so a resumed run that produced no NEW output is recognized (a cumulative
+    # ``output_tokens`` is never 0 on a resume). Inert whenever ``session_id`` is ``None``.
+    resume_baseline_output_tokens: int | None = None
     # Whether the agent process may reach the network (P3.2 ``network_policy`` enforcement). Default
     # ``False`` — the flow grants network only by declaring ``network_policy``; absent, no network.
     # The adapter maps it onto its sandbox: Codex enables the workspace-write sandbox's network
@@ -209,6 +227,29 @@ class NormalizedError:
 
 
 @dataclass(frozen=True)
+class NormalizedUsage:
+    """Provider-neutral token usage derived from the CLI's raw ``usage`` payload.
+
+    The counts are always the provider's own scope (``scope``): cumulative-per-session for Codex,
+    per-invocation for Claude. Deriving a summation-safe per-run figure (subtracting a resumed
+    session's previous snapshot) is the orchestrator's job, never the provider's. Every token field
+    is nullable so a provider that does not report a category (Codex has no cache-creation count;
+    Claude folds reasoning into output) leaves it ``None`` rather than guessing a zero. The field
+    invariant that holds for both providers: ``input_total == uncached_input + cache_read +
+    (cache_write or 0)``. ``cost`` is reserved but left ``None`` — cost capture is deferred.
+    """
+
+    scope: UsageScope
+    input_total: int | None = None
+    cache_read: int | None = None
+    cache_write: int | None = None
+    uncached_input: int | None = None
+    output_total: int | None = None
+    reasoning_output: int | None = None
+    cost: float | None = None
+
+
+@dataclass(frozen=True)
 class AgentRunResult:
     status: RunStatus
     provider: str
@@ -220,6 +261,10 @@ class AgentRunResult:
     final_message: str | None = None
     structured_output: dict[str, Any] | None = None
     usage: dict[str, Any] | None = None
+    # Provider-neutral view of ``usage`` (cumulative for Codex, per-invocation for Claude). Kept
+    # alongside the verbatim raw ``usage`` for audit; the summation-safe per-run delta is derived
+    # and persisted by the orchestrator, not stored here.
+    normalized_usage: NormalizedUsage | None = None
     session_id: str | None = None  # for auditing only
     stdout_path: str | None = None
     stderr_path: str | None = None

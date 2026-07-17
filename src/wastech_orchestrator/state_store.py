@@ -93,7 +93,14 @@ def _utc_now_iso() -> str:
 # lineage named after itself and a node with ``lineage_affinity: X`` joins lineage ``X``. A widened
 # primary key is a destructive change (not an additive column), so an older versioned DB is refused
 # fail-closed and recreated (greenfield — no production data to migrate).
-DB_SCHEMA_VERSION = 15
+# v16 (2026-07-16, normalized usage accounting): added the **additive** normalized-token-usage
+# columns — the per-run delta on ``provider_attempts`` (``usage_scope`` / ``usage_input_total`` /
+# ``usage_cache_read`` / ``usage_cache_write`` / ``usage_uncached_input`` / ``usage_output_total`` /
+# ``usage_reasoning_output`` / ``usage_cost`` / ``usage_delta_status`` / ``provider_usage_raw``) and
+# the running-cumulative ``usage_snapshot`` on ``editing_lineage`` and ``node_lineage``. All
+# nullable, so ``_migrate`` adds them on a brand-new (``0``) database; an older versioned DB is
+# refused fail-closed and recreated (greenfield).
+DB_SCHEMA_VERSION = 16
 
 
 class IncompatibleStateError(Exception):
@@ -122,6 +129,27 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE tasks ADD COLUMN test_fix_total INTEGER NOT NULL DEFAULT 0")
     if "review_fix_total" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN review_fix_total INTEGER NOT NULL DEFAULT 0")
+    # v16: normalized token usage — the per-run delta on ``provider_attempts`` and the running
+    # cumulative snapshot on the two lineage tables. All nullable, so no defaults.
+    attempt_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(provider_attempts)")}
+    for column, decl in (
+        ("usage_scope", "TEXT"),
+        ("usage_input_total", "INTEGER"),
+        ("usage_cache_read", "INTEGER"),
+        ("usage_cache_write", "INTEGER"),
+        ("usage_uncached_input", "INTEGER"),
+        ("usage_output_total", "INTEGER"),
+        ("usage_reasoning_output", "INTEGER"),
+        ("usage_cost", "REAL"),
+        ("usage_delta_status", "TEXT"),
+        ("provider_usage_raw", "TEXT"),
+    ):
+        if column not in attempt_cols:
+            conn.execute(f"ALTER TABLE provider_attempts ADD COLUMN {column} {decl}")
+    for table in ("editing_lineage", "node_lineage"):
+        cols = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+        if "usage_snapshot" not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN usage_snapshot TEXT")
 
 
 def _enforce_schema_version(conn: sqlite3.Connection, *, writable: bool) -> None:
@@ -230,7 +258,22 @@ CREATE TABLE IF NOT EXISTS provider_attempts (
     exit_code INTEGER,
     attempt_dir TEXT,
     started_at TEXT,
-    finished_at TEXT
+    finished_at TEXT,
+    -- Normalized token usage for this attempt, as a summation-safe PER-RUN delta (the session's
+    -- previous cumulative already subtracted). ``usage_scope`` records how the provider counted
+    -- (``session_cumulative`` / ``per_invocation``); ``usage_delta_status`` is ``ok`` or
+    -- ``unknown`` (a snapshot smaller than its baseline degrades to raw). ``provider_usage_raw``
+    -- keeps the verbatim redacted CLI payload for audit. All nullable (a result-less attempt).
+    usage_scope TEXT,
+    usage_input_total INTEGER,
+    usage_cache_read INTEGER,
+    usage_cache_write INTEGER,
+    usage_uncached_input INTEGER,
+    usage_output_total INTEGER,
+    usage_reasoning_output INTEGER,
+    usage_cost REAL,
+    usage_delta_status TEXT,
+    provider_usage_raw TEXT
 );
 
 CREATE TABLE IF NOT EXISTS check_runs (
@@ -301,6 +344,10 @@ CREATE TABLE IF NOT EXISTS editing_lineage (
     provider TEXT NOT NULL,
     raw_session_id TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    -- The session's running cumulative normalized usage (JSON), rewritten on every visit so a later
+    -- resume can subtract it to get a per-run delta. Only cumulative-scope providers (Codex) write
+    -- it; per-invocation providers (Claude) leave it NULL (nothing to subtract).
+    usage_snapshot TEXT,
     PRIMARY KEY (task_id, subtask_order, lineage_key)
 );
 
@@ -311,6 +358,8 @@ CREATE TABLE IF NOT EXISTS node_lineage (
     provider TEXT NOT NULL,
     raw_session_id TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    -- The session's running cumulative normalized usage (JSON); see ``editing_lineage`` above.
+    usage_snapshot TEXT,
     PRIMARY KEY (task_id, node_id, subtask_order)
 );
 """
@@ -402,6 +451,19 @@ class ProviderAttemptRow:
     attempt_dir: str | None = None
     started_at: str | None = None
     finished_at: str | None = None
+    # Normalized token usage as a summation-safe PER-RUN delta (see the ``provider_attempts`` DDL).
+    # Kept as plain scalars + a JSON blob so this storage layer stays independent of the provider
+    # domain types; the orchestrator maps its ``NormalizedUsage`` onto these before writing.
+    usage_scope: str | None = None
+    usage_input_total: int | None = None
+    usage_cache_read: int | None = None
+    usage_cache_write: int | None = None
+    usage_uncached_input: int | None = None
+    usage_output_total: int | None = None
+    usage_reasoning_output: int | None = None
+    usage_cost: float | None = None
+    usage_delta_status: str | None = None
+    provider_usage_raw: str | None = None
 
 
 @dataclass(frozen=True)
@@ -495,6 +557,9 @@ class EditingLineageRow:
     raw_session_id: str
     subtask_order: int | None = None
     updated_at: str | None = None
+    # The session's running cumulative normalized usage (JSON), or ``None`` for a per-invocation
+    # provider. Read as the baseline the orchestrator subtracts from a resume's cumulative.
+    usage_snapshot: str | None = None
 
 
 @dataclass(frozen=True)
@@ -513,6 +578,8 @@ class NodeLineageRow:
     raw_session_id: str
     subtask_order: int | None = None
     updated_at: str | None = None
+    # The session's running cumulative normalized usage (JSON); see ``EditingLineageRow``.
+    usage_snapshot: str | None = None
 
 
 # ``publish_operations`` uses -1 as the "no subtask" sentinel so the UNIQUE constraint works
@@ -988,8 +1055,11 @@ class StateStore:
                 """
                 INSERT INTO provider_attempts (
                     node_run_id, provider, attempt, status, error_class, exit_code,
-                    attempt_dir, started_at, finished_at
-                ) VALUES (?,?,?,?,?,?,?,?,?)
+                    attempt_dir, started_at, finished_at,
+                    usage_scope, usage_input_total, usage_cache_read, usage_cache_write,
+                    usage_uncached_input, usage_output_total, usage_reasoning_output, usage_cost,
+                    usage_delta_status, provider_usage_raw
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     attempt.node_run_id,
@@ -1001,8 +1071,59 @@ class StateStore:
                     attempt.attempt_dir,
                     attempt.started_at,
                     attempt.finished_at,
+                    attempt.usage_scope,
+                    attempt.usage_input_total,
+                    attempt.usage_cache_read,
+                    attempt.usage_cache_write,
+                    attempt.usage_uncached_input,
+                    attempt.usage_output_total,
+                    attempt.usage_reasoning_output,
+                    attempt.usage_cost,
+                    attempt.usage_delta_status,
+                    attempt.provider_usage_raw,
                 ),
             )
+
+    def get_provider_attempts(self, node_run_id: int) -> list[ProviderAttemptRow]:
+        """The provider attempts recorded for one node run, ordered by attempt.
+
+        Exposes the normalized per-run usage delta for inspection. ``provider_attempts`` has no
+        ``task_id`` of its own, so a task-level rollup must join through ``node_runs.id``.
+        """
+        cur = self._conn.execute(
+            """
+            SELECT node_run_id, provider, attempt, status, error_class, exit_code, attempt_dir,
+                   started_at, finished_at, usage_scope, usage_input_total, usage_cache_read,
+                   usage_cache_write, usage_uncached_input, usage_output_total,
+                   usage_reasoning_output, usage_cost, usage_delta_status, provider_usage_raw
+            FROM provider_attempts WHERE node_run_id = ? ORDER BY attempt
+            """,
+            (node_run_id,),
+        )
+        return [
+            ProviderAttemptRow(
+                node_run_id=row["node_run_id"],
+                provider=row["provider"],
+                attempt=row["attempt"],
+                status=row["status"],
+                error_class=row["error_class"],
+                exit_code=row["exit_code"],
+                attempt_dir=row["attempt_dir"],
+                started_at=row["started_at"],
+                finished_at=row["finished_at"],
+                usage_scope=row["usage_scope"],
+                usage_input_total=row["usage_input_total"],
+                usage_cache_read=row["usage_cache_read"],
+                usage_cache_write=row["usage_cache_write"],
+                usage_uncached_input=row["usage_uncached_input"],
+                usage_output_total=row["usage_output_total"],
+                usage_reasoning_output=row["usage_reasoning_output"],
+                usage_cost=row["usage_cost"],
+                usage_delta_status=row["usage_delta_status"],
+                provider_usage_raw=row["provider_usage_raw"],
+            )
+            for row in cur.fetchall()
+        ]
 
     # --- check_runs / artifacts -----------------------------------------------------------
 
@@ -1246,7 +1367,7 @@ class StateStore:
         """The active editing session for one lineage of an execution unit, or ``None`` (P2.2)."""
         subtask = _NO_SUBTASK if subtask_order is None else subtask_order
         cur = self._conn.execute(
-            "SELECT provider, raw_session_id, updated_at FROM editing_lineage "
+            "SELECT provider, raw_session_id, updated_at, usage_snapshot FROM editing_lineage "
             "WHERE task_id = ? AND subtask_order = ? AND lineage_key = ?",
             (task_id, subtask, lineage_key),
         )
@@ -1260,6 +1381,7 @@ class StateStore:
             raw_session_id=row["raw_session_id"],
             subtask_order=subtask_order,
             updated_at=row["updated_at"],
+            usage_snapshot=row["usage_snapshot"],
         )
 
     def upsert_editing_lineage(
@@ -1272,12 +1394,14 @@ class StateStore:
             c.execute(
                 """
                 INSERT INTO editing_lineage (
-                    task_id, subtask_order, lineage_key, provider, raw_session_id, updated_at
-                ) VALUES (?,?,?,?,?,?)
+                    task_id, subtask_order, lineage_key, provider, raw_session_id, updated_at,
+                    usage_snapshot
+                ) VALUES (?,?,?,?,?,?,?)
                 ON CONFLICT(task_id, subtask_order, lineage_key) DO UPDATE SET
                     provider = excluded.provider,
                     raw_session_id = excluded.raw_session_id,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    usage_snapshot = excluded.usage_snapshot
                 """,
                 (
                     row.task_id,
@@ -1286,6 +1410,7 @@ class StateStore:
                     row.provider,
                     row.raw_session_id,
                     row.updated_at or now,
+                    row.usage_snapshot,
                 ),
             )
 
@@ -1304,7 +1429,7 @@ class StateStore:
         """The durable own session for a ``resume_own_lineage`` node, or ``None`` if none yet."""
         subtask = _NO_SUBTASK if subtask_order is None else subtask_order
         cur = self._conn.execute(
-            "SELECT provider, raw_session_id, updated_at FROM node_lineage "
+            "SELECT provider, raw_session_id, updated_at, usage_snapshot FROM node_lineage "
             "WHERE task_id = ? AND node_id = ? AND subtask_order = ?",
             (task_id, node_id, subtask),
         )
@@ -1318,6 +1443,7 @@ class StateStore:
             raw_session_id=row["raw_session_id"],
             subtask_order=subtask_order,
             updated_at=row["updated_at"],
+            usage_snapshot=row["usage_snapshot"],
         )
 
     def upsert_node_lineage(
@@ -1330,12 +1456,14 @@ class StateStore:
             c.execute(
                 """
                 INSERT INTO node_lineage (
-                    task_id, node_id, subtask_order, provider, raw_session_id, updated_at
-                ) VALUES (?,?,?,?,?,?)
+                    task_id, node_id, subtask_order, provider, raw_session_id, updated_at,
+                    usage_snapshot
+                ) VALUES (?,?,?,?,?,?,?)
                 ON CONFLICT(task_id, node_id, subtask_order) DO UPDATE SET
                     provider = excluded.provider,
                     raw_session_id = excluded.raw_session_id,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    usage_snapshot = excluded.usage_snapshot
                 """,
                 (
                     row.task_id,
@@ -1344,6 +1472,7 @@ class StateStore:
                     row.provider,
                     row.raw_session_id,
                     row.updated_at or now,
+                    row.usage_snapshot,
                 ),
             )
 

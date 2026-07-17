@@ -1507,7 +1507,9 @@ def test_hitl_resumes_persisted_waiting_interaction(tmp_path: Path) -> None:
 # -- evaluator ----------------------------------------------------------------
 
 
-def _evaluator(node_id: str, *, blocking: bool = True) -> EvaluatorNode:
+def _evaluator(
+    node_id: str, *, blocking: bool = True, gate_severity: str = "high"
+) -> EvaluatorNode:
     return EvaluatorNode(
         id=node_id,
         kind="evaluator",
@@ -1515,6 +1517,7 @@ def _evaluator(node_id: str, *, blocking: bool = True) -> EvaluatorNode:
         role_file="r.md",
         permission_profile=PermissionProfile.READ_ONLY,
         blocking=blocking,
+        gate_severity=gate_severity,
     )
 
 
@@ -1542,6 +1545,73 @@ def test_evaluator_maps_blocking_findings(
     )
     result = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == expected
+
+
+@pytest.mark.parametrize(
+    ("gate_severity", "severity", "expected"),
+    [
+        # Lowered gate: low blocks on ANY finding (the content-quality use-case).
+        ("low", "low", "rework"),
+        ("low", "medium", "rework"),
+        # Medium gate: medium and above block, low is advisory.
+        ("medium", "medium", "rework"),
+        ("medium", "low", "accept"),
+        # Default high gate: unchanged — medium/low advisory, high blocks.
+        ("high", "high", "rework"),
+        ("high", "medium", "accept"),
+        ("high", "low", "accept"),
+    ],
+)
+def test_evaluator_gate_severity_threshold(
+    tmp_path: Path, gate_severity: str, severity: str, expected: str
+) -> None:
+    # gate_severity sets the minimum finding severity that gates: a finding at least as severe as
+    # the gate drives rework; less-severe findings are advisory (accept). Default high reproduces
+    # the historical behavior (blocks high/critical/blocking only).
+    (tmp_path / "r.md").write_text("review {diff_path}", "utf-8")
+    node = _evaluator("review", gate_severity=gate_severity)
+    router, store = (
+        FakeRouter(_result({"findings": [{"what": "x", "severity": severity}]})),
+        FakeStore(),
+    )
+    services = _services(
+        router,
+        store,
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    result = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == expected
+
+
+def test_evaluator_non_blocking_gate_severity_self_caps(tmp_path: Path) -> None:
+    # gate_severity composes with the non-blocking self-cap: a blocking:false evaluator with a
+    # lowered gate reworks on a medium finding (which the default high gate would ignore) up to its
+    # max_rework_per_stage, then accepts — never manual.
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    node = EvaluatorNode(
+        id="testing_quality",
+        kind="evaluator",
+        role="test_quality",
+        role_file="r.md",
+        permission_profile=PermissionProfile.READ_ONLY,
+        blocking=False,
+        max_rework_per_stage=1,
+        gate_severity="medium",
+    )
+    store = FakeStore()
+    router = FakeRouter(_result({"findings": [{"what": "x", "severity": "medium"}]}))
+    services = _services(
+        router,
+        store,
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    inputs = _inputs(tmp_path)
+    first = EvaluatorNodeRunner(services, inputs).run(node, _ctx(node))
+    assert first.outcome.kind == "rework"  # medium gates under the lowered gate
+    second = EvaluatorNodeRunner(services, inputs).run(node, _ctx(node))
+    assert second.outcome.kind == "accept"  # budget spent → accept, not manual
 
 
 def test_evaluator_builds_memory_packet_when_role_references_it(tmp_path: Path) -> None:

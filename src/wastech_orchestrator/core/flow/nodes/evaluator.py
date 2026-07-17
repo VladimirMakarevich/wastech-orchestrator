@@ -1,8 +1,10 @@
 """Evaluator node runner (P1.3/P2.1) — the shared in-flow evaluator primitive.
 
 Runs the evaluator's ``role_file`` prompt (read-only) through the router and maps its structured
-verdict to an engine outcome: a blocking finding (severity ``high``/``critical``/``blocking``) ->
-``rework``, a clean (or medium-only, advisory) verdict -> ``accept``. The findings schema
+verdict to an engine outcome: a gating finding -> ``rework``, an otherwise-clean verdict ->
+``accept``. A finding gates when its severity is at least as severe as the node's ``gate_severity``
+(default ``high`` — blocks on ``high``/``critical``/``blocking``, leaving ``medium``/``low``
+advisory; lower it to make a content critic block on any finding). The findings schema
 (``output_schema``, F19) is mandatory: a run whose ``structured_output`` does not carry a parseable
 ``findings`` array never silently accepts — it degrades straight to ``manual`` (fail-closed), the
 same as a provider that could not run the node at all. A **blocking** evaluator gates
@@ -36,17 +38,34 @@ from wastech_orchestrator.core.flow.nodes.base import (
 )
 from wastech_orchestrator.core.flow.observability import record_run_observability
 from wastech_orchestrator.core.flow.prompt import RoleFileError, read_role_file, render_role_prompt
-from wastech_orchestrator.core.flow.schema import EvaluatorNode, FlowNode
+from wastech_orchestrator.core.flow.schema import SEVERITY_ORDER, EvaluatorNode, FlowNode
+from wastech_orchestrator.core.flow.usage_accounting import (
+    deserialize_usage,
+    guard_output_baseline,
+    snapshot_for_lineage,
+)
 from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
 from wastech_orchestrator.providers.base import AgentRunRequest, build_effective_prompt
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import EvaluationRow, NodeLineageRow, NodeRunRow
 
-#: Raw severity tokens that make a finding blocking (drive ``rework``) and normalize to ``high`` on
-#: the typed ``Finding``. ``medium``/``moderate`` are advisory only (non-blocking) — this matches
-#: both the routing in ``_is_blocking`` and the typed ``Finding.blocking`` flag (one definition).
+#: Raw severity tokens that normalize to ``high`` / ``medium`` on the typed ``Finding`` (the
+#: audit-trail projection in ``_to_finding``). This is the severity-*naming* map, NOT the routing
+#: gate: whether a finding drives ``rework`` is decided by ``_is_blocking`` comparing its rank
+#: against the node's configurable ``gate_severity`` (ranked by :data:`SEVERITY_ORDER`).
 _BLOCKING_SEVERITIES = frozenset({"blocking", "critical", "high"})
 _MEDIUM_SEVERITIES = frozenset({"medium", "moderate"})
+
+
+def _severity_rank(token: str) -> int:
+    """Rank a raw severity token by :data:`SEVERITY_ORDER` (lower = more severe).
+
+    An unknown or absent token ranks as the least-severe floor (``len(SEVERITY_ORDER)``), so a
+    malformed severity never accidentally gates.
+    """
+    t = token.lower()
+    return SEVERITY_ORDER.index(t) if t in SEVERITY_ORDER else len(SEVERITY_ORDER)
+
 
 #: F19 — the mandatory structured findings schema every in-flow evaluator role (review / verifier /
 #: critic / operator-defined) is prompted to return. A role-prompt asking for findings "in prose"
@@ -71,7 +90,7 @@ _FINDINGS_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "severity": {
                         "type": "string",
-                        "enum": ["blocking", "critical", "high", "medium", "low"],
+                        "enum": list(SEVERITY_ORDER),
                     },
                     "path": {"type": ["string", "null"]},
                     "what": {"type": "string"},
@@ -109,7 +128,12 @@ class EvaluatorNodeRunner:
                 started_at=started_at,
             )
         )
-        request = self._build_request(node, ctx, route, run_id)
+        lineage = self._resume_node_lineage(node, ctx, route)
+        baseline = deserialize_usage(lineage.usage_snapshot) if lineage else None
+        session_id = lineage.raw_session_id if lineage else None
+        request = self._build_request(
+            node, ctx, route, run_id, session_id, guard_output_baseline(baseline)
+        )
         outcome = self._s.router.run_stage(request, route, snapshot=self._s.snapshot)
         raw_findings = (
             self._findings_or_none(outcome.result.structured_output)
@@ -130,6 +154,8 @@ class EvaluatorNodeRunner:
             model=node.model,
             reasoning=node.reasoning,
             started_at=started_at,
+            usage_baseline=baseline,
+            baseline_session_id=session_id,
         )
         if outcome.result is None:
             error_class = outcome.terminal_error.error_class if outcome.terminal_error else None
@@ -203,7 +229,8 @@ class EvaluatorNodeRunner:
             return "accept"  # dead for routing: run() raises EvaluatorInfraError before using this
         if raw_findings is None:
             return "manual"  # dead for routing (run() raises); an accurate audit-trail label only
-        if not any(self._is_blocking(f) for f in raw_findings):
+        gate_rank = _severity_rank(node.gate_severity)
+        if not any(self._is_blocking(f, gate_rank) for f in raw_findings):
             return "accept"
         if node.blocking:
             # A blocking evaluator gates every time it finds a blocking issue; the engine's
@@ -225,6 +252,8 @@ class EvaluatorNodeRunner:
         ctx: NodeContext,
         route: ResolvedRoute,
         run_id: int,
+        session_id: str | None = None,
+        resume_baseline_output_tokens: int | None = None,
     ) -> AgentRunRequest:
         prompt = render_role_prompt(
             self._in.flow_dir, node.role_file, self._prompt_variables(ctx, node)
@@ -249,8 +278,10 @@ class EvaluatorNodeRunner:
             # Evaluators never inherit an author's editing lineage (validator-enforced read-only).
             # A ``fresh_disposable`` evaluator starts clean each pass; a ``resume_own_lineage`` one
             # (the research critic) resumes its OWN durable session so it remembers what it flagged
-            # across rework rounds (P3.3).
-            session_id=self._resume_own_session(node, ctx, route),
+            # across rework rounds (P3.3). The resumed session (and its usage baseline) is resolved
+            # by the caller so the row is read once.
+            session_id=session_id,
+            resume_baseline_output_tokens=resume_baseline_output_tokens,
             # Network is a per-node override on top of the flow-wide default (a research verifier
             # may need it): the node's ``network_access`` wins, else it inherits the flow's
             # ``network_policy`` default (P3.2). It only toggles network — evaluators stay read-only
@@ -260,22 +291,23 @@ class EvaluatorNodeRunner:
             ),
         )
 
-    def _resume_own_session(
+    def _resume_node_lineage(
         self, node: EvaluatorNode, ctx: NodeContext, route: ResolvedRoute
-    ) -> str | None:
-        """The durable own session to resume for a ``resume_own_lineage`` evaluator (P3.3).
+    ) -> NodeLineageRow | None:
+        """The durable own session this evaluator resumes, or ``None`` for a fresh session (P3.3).
 
         A ``fresh_disposable`` evaluator always starts clean (``None``). A ``resume_own_lineage``
         one (the research critic) resumes the session it stored on its previous pass — but only when
-        the stored session was produced by the same provider it now resolves to (you cannot resume a
+        the stored session was produced by the same provider it now resolves to (no resuming a
         Claude session on Codex). On the first round there is no lineage yet, so it starts fresh.
+        The row carries the usage snapshot the caller subtracts to get a per-run delta.
         """
         if node.session_scope is not SessionScope.RESUME_OWN_LINEAGE:
             return None
         row = self._s.store.get_node_lineage(ctx.task_id, node.id, ctx.subtask_order)
         if row is None or row.provider != route.primary.value:
             return None
-        return row.raw_session_id
+        return row
 
     def _persist_own_lineage(
         self, node: EvaluatorNode, ctx: NodeContext, outcome: StageOutcome
@@ -299,6 +331,7 @@ class EvaluatorNodeRunner:
                 raw_session_id=result.session_id,
                 subtask_order=ctx.subtask_order,
                 updated_at=self._s.clock(),
+                usage_snapshot=snapshot_for_lineage(result.normalized_usage),
             )
         )
 
@@ -375,10 +408,15 @@ class EvaluatorNodeRunner:
         return [dict(f) for f in raw if isinstance(f, Mapping)]
 
     @staticmethod
-    def _is_blocking(finding: Mapping[str, Any]) -> bool:
+    def _is_blocking(finding: Mapping[str, Any], gate_rank: int) -> bool:
+        """A finding gates iff it is explicitly ``blocking`` or at least as severe as the gate.
+
+        ``gate_rank`` is the node's ``gate_severity`` rank (``_severity_rank``); a finding blocks
+        when its own severity rank is ``<= gate_rank`` (lower rank = more severe).
+        """
         if finding.get("blocking") is True:
             return True
-        return str(finding.get("severity", "")).lower() in _BLOCKING_SEVERITIES
+        return _severity_rank(str(finding.get("severity", ""))) <= gate_rank
 
 
 def _to_finding(raw: Mapping[str, Any]) -> Finding:

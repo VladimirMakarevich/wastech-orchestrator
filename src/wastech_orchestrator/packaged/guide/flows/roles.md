@@ -22,7 +22,7 @@ Every `agent` and `evaluator` node returns a **typed structured result**, not fr
 | `agent` named by `decomposition.proposed_by` (planning) | `content` + optional `human_input` + `decompose` + `subtasks` | Emit subtasks only when decomposition is permitted. |
 | `evaluator` | `{ findings: [ { severity, path, what, fix } ] }` | **Fail-closed**: a missing or malformed findings result routes the task to `manual_action_required` — never a silent `accept`. A prose-only "looks good" hard-stops the task. Return an **empty `findings` array** when clean, not prose. |
 
-Example evaluator prompt (the built-in `review.md`): _"Return findings in the output schema — severity blocking/critical/high must change before merge; medium/low are advisory. For each, set `path`, `what`, `fix`. No findings means clean — return an empty `findings` array, not prose."_
+Example evaluator prompt (the built-in `review.md`): _"Report each finding with a severity, and mark anything that must change before merge as blocking. Weight the review: correctness and invariant violations block; quality and style observations are advisory unless they introduce real risk … No findings means the diff is clean — return an empty `findings` array, not prose."_ Which severities actually gate is the node's `gate_severity` (default `high`), not the prompt's job — see [reference.md](reference.md).
 
 Example planning prompt (`refinement.md`): _"Enrich the task into a complete spec… Return the typed structured result required by the output schema. Set `human_input` only when a material ambiguity cannot be resolved from repository evidence."_
 
