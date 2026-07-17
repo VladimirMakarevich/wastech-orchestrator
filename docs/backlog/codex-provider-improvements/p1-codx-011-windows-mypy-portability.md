@@ -1,6 +1,6 @@
 # CODX-011 — Restore cross-platform mypy compliance
 
-**Status:** open
+**Status:** postponed
 **Priority:** P1
 **Source finding:** CXP-13
 **Dependencies:** none
