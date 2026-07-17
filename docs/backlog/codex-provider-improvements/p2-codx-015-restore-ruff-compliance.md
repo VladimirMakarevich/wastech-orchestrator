@@ -1,6 +1,6 @@
 # CODX-015 — Restore ruff line-length compliance
 
-**Status:** open
+**Status:** completed
 **Priority:** P2
 **Source finding:** CXP-13
 **Dependencies:** none
@@ -23,11 +23,11 @@ Restore a green ruff check without changing provider behavior, test meaning or l
 
 ## Acceptance criteria
 
-- [ ] ruff check . exits 0.
-- [ ] ruff format --check . exits 0.
-- [ ] No noqa, per-file ignore or line-length increase is introduced.
-- [ ] No executable code or test assertion behavior changes.
-- [ ] The Windows false-success rationale remains complete and readable.
+- [x] ruff check . exits 0.
+- [x] ruff format --check . exits 0.
+- [x] No noqa, per-file ignore or line-length increase is introduced.
+- [x] No executable code or test assertion behavior changes.
+- [x] The Windows false-success rationale remains complete and readable.
 - [ ] Full pytest remains green.
 
 ## Verification
