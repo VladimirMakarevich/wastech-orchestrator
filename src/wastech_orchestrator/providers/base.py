@@ -14,6 +14,18 @@ class ProviderId(StrEnum):
     CLAUDE = "claude"
 
 
+class CodexComputeMode(StrEnum):
+    """Codex single-agent compute modes that are not scalar reasoning efforts."""
+
+    MAX = "max"
+
+
+class CodexMultiAgentMode(StrEnum):
+    """Codex execution modes that may create auditable child-agent activity."""
+
+    ULTRA = "ultra"
+
+
 class RunStatus(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
@@ -165,6 +177,10 @@ class AgentRunRequest:
     model: str | None = None
     extra_args: list[str] = field(default_factory=list)
     reasoning: str | None = None
+    # Codex advanced modes stay distinct from the portable scalar effort. The Router populates
+    # these only for a Codex attempt and clears them on a cross-provider fallback.
+    codex_compute_mode: CodexComputeMode | None = None
+    codex_multi_agent_mode: CodexMultiAgentMode | None = None
     session_id: str | None = None
     # The resumed session's previous cumulative output-token count, for the no-work guard only.
     # Set by the orchestrator only when ``session_id`` resumes a cumulative-scope session; the guard
@@ -269,6 +285,12 @@ class AgentRunResult:
     stdout_path: str | None = None
     stderr_path: str | None = None
     event_log_path: str | None = None
+    # Effective execution controls are copied from the request so result.json remains useful even
+    # when verbose request artifacts are pruned. They never contain credentials or raw sessions.
+    model: str | None = None
+    reasoning: str | None = None
+    codex_compute_mode: CodexComputeMode | None = None
+    codex_multi_agent_mode: CodexMultiAgentMode | None = None
     error: NormalizedError | None = None
 
 

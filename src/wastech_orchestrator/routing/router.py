@@ -41,7 +41,10 @@ from wastech_orchestrator.providers.base import (
     ProviderId,
     RunStatus,
 )
-from wastech_orchestrator.providers.capabilities import map_reasoning_for_provider_switch
+from wastech_orchestrator.providers.capabilities import (
+    map_reasoning_for_provider_switch,
+    normalize_codex_reasoning,
+)
 from wastech_orchestrator.routing.snapshots import PartialChange, SnapshotHook
 from wastech_orchestrator.security.profiles import is_same_or_stricter
 
@@ -554,8 +557,9 @@ class AgentRouter:
         relaxed (``permission_profile`` is intentionally left untouched).
 
         A ``cross_provider`` fallback attempt (the substitute provider is a *different* CLI) drops
-        provider-specific request fields: ``model``, most ``reasoning`` values, ``extra_args``,
-        and ``session_id``. A model id is provider-specific (codex ``gpt-5.4`` is not a Claude
+        provider-specific request fields: ``model``, most ``reasoning`` values, Codex advanced
+        modes, ``extra_args``, and ``session_id``. A model id is provider-specific (a Codex model
+        is not a Claude
         model), provider CLI flags in ``extra_args`` are not portable, and a durable session id
         belongs to one provider. Cleared values make the substitute re-resolve its own
         config/defaults while preserving portable context (prompt, paths, schema, permissions,
@@ -575,7 +579,21 @@ class AgentRouter:
                 ),
                 extra_args=[],
                 session_id=None,
+                codex_compute_mode=None,
+                codex_multi_agent_mode=None,
             )
+        if to_provider is ProviderId.CODEX:
+            configured = self._config.agents.providers[to_provider].reasoning
+            selected = normalize_codex_reasoning(req.reasoning or configured or "")
+            if selected is not None:
+                req = replace(
+                    req,
+                    reasoning=selected.reasoning,
+                    codex_compute_mode=selected.compute_mode,
+                    codex_multi_agent_mode=selected.multi_agent_mode,
+                )
+        else:
+            req = replace(req, codex_compute_mode=None, codex_multi_agent_mode=None)
         return req
 
     def _profile_of(self, pid: ProviderId) -> str:

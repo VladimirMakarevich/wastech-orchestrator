@@ -36,6 +36,7 @@ from wastech_orchestrator.providers._adapter_base import (
 from wastech_orchestrator.providers.artifacts import ArtifactPaths, write_capabilities_artifact
 from wastech_orchestrator.providers.base import (
     AgentRunRequest,
+    CodexMultiAgentMode,
     ErrorClass,
     NormalizedError,
     NormalizedUsage,
@@ -46,7 +47,11 @@ from wastech_orchestrator.providers.base import (
     build_context_footer,
     build_effective_prompt,
 )
-from wastech_orchestrator.providers.capabilities import normalize_codex_reasoning
+from wastech_orchestrator.providers.capabilities import (
+    CodexReasoningSelection,
+    codex_model_reasoning_issue,
+    normalize_codex_reasoning,
+)
 from wastech_orchestrator.providers.codex_policy import (
     CodexPolicyError,
     command_prefixes,
@@ -83,6 +88,7 @@ _LAST_MESSAGE_FILENAME = "last-message.txt"
 _OUTPUT_SCHEMA_FILENAME = "output-schema.json"
 _MINIMUM_CODEX_VERSION = (0, 144, 4)
 _MINIMUM_CODEX_VERSION_TEXT = ".".join(str(part) for part in _MINIMUM_CODEX_VERSION)
+_ULTRA_MAX_CONCURRENT_THREADS = 4
 
 # These features can expose host/account state, launch external processes, delegate to another
 # runtime, or reach a service outside the workspace sandbox. They stay off for every orchestrated
@@ -338,6 +344,8 @@ def build_codex_capability_manifest(
         "web_search": request.network_access,
     }
     capabilities.update(dict.fromkeys(_EXTERNAL_CAPABILITY_NAMES, False))
+    ultra_enabled = request.codex_multi_agent_mode is CodexMultiAgentMode.ULTRA
+    capabilities["multi_agent"] = ultra_enabled
     return {
         "schema_version": 1,
         "provider": ProviderId.CODEX.value,
@@ -364,6 +372,13 @@ def build_codex_capability_manifest(
             "deny_policy_enforced": read_policy_enforced,
         },
         "capabilities": capabilities,
+        "reasoning": {
+            "scalar_effort": request.reasoning,
+            "compute_mode": request.codex_compute_mode,
+            "multi_agent_mode": request.codex_multi_agent_mode,
+            "max_concurrent_threads": (_ULTRA_MAX_CONCURRENT_THREADS if ultra_enabled else None),
+            "worker_timeout_seconds": request.timeout_seconds if ultra_enabled else None,
+        },
     }
 
 
@@ -406,6 +421,12 @@ def build_codex_argv(
             str(exc),
         ) from None
 
+    selection = _resolve_reasoning_selection(config, request)
+    model = request.model or config.model
+    issue = codex_model_reasoning_issue(model, selection.effective)
+    if issue is not None:
+        raise ProviderError(ErrorClass.CONFIGURATION_ERROR, issue)
+
     # Approval policy is a global Codex flag. Both Codex CLI 0.57 and current releases reject it
     # when it is placed after the ``exec`` subcommand.
     argv = [
@@ -432,6 +453,8 @@ def build_codex_argv(
     # fixed adapter layer, never ``extra_args``: online nodes receive only sandbox network + live
     # web search from ``network_access``; apps/MCP/browser/computer/plugins/hooks remain denied.
     for feature in _CONTROLLED_DISABLED_FEATURES:
+        if feature == "multi_agent_v2" and selection.multi_agent_mode is not None:
+            continue
         argv += ["--disable", feature]
     if not request.network_access:
         # The managed proxy is another sandbox-network route. Keep it available only under the
@@ -439,6 +462,17 @@ def build_codex_argv(
         argv += ["--disable", "network_proxy"]
     for value in controlled_values:
         argv += ["--config", value]
+    if selection.multi_agent_mode is CodexMultiAgentMode.ULTRA:
+        # Ultra is a native Codex mode: the CLI projects it to max model compute and proactive
+        # multi-agent instructions. The fixed adapter-owned cap cannot be raised by a task or
+        # extra_args, and the outer process timeout/cancellation still owns the whole process tree.
+        argv += [
+            "--config",
+            "features.multi_agent_v2="
+            f"{{enabled=true,max_concurrent_threads_per_session={_ULTRA_MAX_CONCURRENT_THREADS}}}",
+            "--config",
+            f"agents.job_max_runtime_seconds={request.timeout_seconds}",
+        ]
     if output_schema_path is not None:
         argv += ["--output-schema", output_schema_path]
     # Durable session resume (P2.2): ``codex exec [exec-options] resume <SESSION_ID>`` continues the
@@ -447,21 +481,49 @@ def build_codex_argv(
     # subcommand; on the fresh path (no subcommand) they follow the exec options.
     if request.session_id:
         argv += ["resume", request.session_id]
-    model = request.model or config.model
     if model:
         argv += ["--model", model]
-    reasoning = request.reasoning or config.reasoning
-    if reasoning:
-        effort = normalize_codex_reasoning(reasoning)
-        if effort is None:
-            raise ProviderError(
-                ErrorClass.CONFIGURATION_ERROR,
-                f"unsupported Codex reasoning value {reasoning!r}",
-            )
-        argv += ["-c", f'model_reasoning_effort="{effort}"']
+    if selection.effective is not None:
+        # Codex CLI 0.144.4 accepts Max and Ultra through this non-interactive config surface.
+        # Ultra remains a distinct typed request mode even though this is the CLI's projection key.
+        argv += ["-c", f'model_reasoning_effort="{selection.effective}"']
     argv += safe_extra
     argv.append("-")  # read the prompt from stdin
     return argv
+
+
+def _resolve_reasoning_selection(
+    config: ProviderConfig, request: AgentRunRequest
+) -> CodexReasoningSelection:
+    """Resolve one mutually exclusive Codex reasoning selection before argv construction."""
+    selected_count = sum(
+        value is not None
+        for value in (
+            request.reasoning,
+            request.codex_compute_mode,
+            request.codex_multi_agent_mode,
+        )
+    )
+    if selected_count > 1:
+        raise ProviderError(
+            ErrorClass.CONFIGURATION_ERROR,
+            "Codex scalar reasoning, Max compute, and Ultra multi-agent modes are "
+            "mutually exclusive",
+        )
+    if request.codex_compute_mode is not None:
+        return CodexReasoningSelection(compute_mode=request.codex_compute_mode)
+    if request.codex_multi_agent_mode is not None:
+        return CodexReasoningSelection(multi_agent_mode=request.codex_multi_agent_mode)
+    configured = request.reasoning if request.reasoning is not None else config.reasoning
+    if configured is None:
+        return CodexReasoningSelection()
+    selection = normalize_codex_reasoning(configured)
+    if selection is None:
+        raise ProviderError(
+            ErrorClass.CONFIGURATION_ERROR,
+            f"unsupported Codex reasoning value {configured!r}",
+        )
+    return selection
 
 
 def isolation_reasons(config: ProviderConfig) -> list[str]:
@@ -779,6 +841,17 @@ class CodexProvider(BaseCliProvider):
                 "codex exec lacks controlled-invocation options required before model execution: "
                 + ", ".join(missing)
                 + f"; install Codex CLI >= {_MINIMUM_CODEX_VERSION_TEXT} with those capabilities"
+            )
+        features_ok, features_text = self._probe([self._config.command, "features", "list"], env)
+        has_native_ultra = any(
+            line.split(maxsplit=1)[0] == "multi_agent_v2"
+            for line in features_text.splitlines()
+            if line.split()
+        )
+        if not features_ok or not has_native_ultra:
+            return (
+                "codex lacks the native multi_agent_v2 capability required for Ultra before "
+                "model execution; install a supported Codex CLI build exposing that feature"
             )
         policy_error = self._preflight_exec_policy(env)
         if policy_error is not None:

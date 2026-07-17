@@ -49,7 +49,7 @@ def _make_pkg(root: Path, *, with_helper: bool, with_manifest: bool = True) -> t
 
 
 class _VersionAndHelpFake:
-    """A preflight fake answering ``codex --version`` and ``codex exec --help`` (with ``-c``)."""
+    """A preflight fake answering version, feature, and exec-help probes."""
 
     def __init__(self, *, help_has_config: bool = True) -> None:
         self._help_has_config = help_has_config
@@ -68,6 +68,8 @@ class _VersionAndHelpFake:
         exit_code = 0
         if "--version" in argv:
             out = "codex-cli 0.144.4\n"
+        elif "features" in argv and "list" in argv:
+            out = "multi_agent_v2 experimental true\n"
         elif "execpolicy" in argv and "check" in argv:
             out = '{"decision":"forbidden","matchedRules":[]}\n'
         elif "sandbox" in argv:

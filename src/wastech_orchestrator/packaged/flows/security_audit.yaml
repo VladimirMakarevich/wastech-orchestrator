@@ -8,7 +8,7 @@
 #   agent + evaluator nodes:
 #     provider:  codex | claude            which agent runs the node (∈ agents.allowed); default: global primary
 #     model:     <model id>                overrides agents.providers.<provider>.model for THIS node
-#     reasoning: minimal|low|medium|high|xhigh|max  default: agents.providers.<provider>.reasoning
+#     reasoning: minimal|light|low|medium|high|xhigh|max|ultra  default: provider config
 #     network_access: true | false         per-node network grant/deny; default: flow network_policy (advisories)
 #   agent nodes also: timeout_seconds, extra_args, best_effort, permission_profile (≤ flow ceiling), when
 #   evaluator nodes also: blocking, max_rework_per_stage, gate_severity (min severity that gates; default high)

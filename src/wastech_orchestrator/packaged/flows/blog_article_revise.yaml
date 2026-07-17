@@ -40,7 +40,7 @@
 #   agent + evaluator nodes:
 #     provider:  codex | claude            which agent runs the node (∈ agents.allowed); default: global primary
 #     model:     <model id>                overrides agents.providers.<provider>.model for THIS node
-#     reasoning: minimal|low|medium|high|xhigh|max  default: agents.providers.<provider>.reasoning
+#     reasoning: minimal|light|low|medium|high|xhigh|max|ultra  default: provider config
 # ----------------------------------------------------------------------------------------------------
 flow:
   name: blog_article_revise
@@ -75,7 +75,7 @@ flow:
       # Same tuning note as blog_article's draft node — for voice consistency across both flows, use
       # the same pin here if you pin one there (uncomment to pin):
       # provider: codex
-      # model: gpt-5.4
+      # model: gpt-5.6-sol
       # reasoning: xhigh
     - id: length
       kind: tool
@@ -104,7 +104,7 @@ flow:
       # same as revise only for voice consistency if you pin revise above.
       reasoning: medium
       # provider: codex
-      # model: gpt-5.4
+      # model: gpt-5.6-sol
     - id: fixing
       kind: agent
       role_file: blog_article_revise/fixing.md
@@ -115,7 +115,7 @@ flow:
       # fixing resumes revise's editing lineage (rework genuinely builds on the revision), so it
       # MUST carry the same model/provider if you pin one on revise above (uncomment to match):
       # provider: codex
-      # model: gpt-5.4
+      # model: gpt-5.6-sol
     - id: publish
       kind: publish
       policy: documentation_pull_request

@@ -391,12 +391,12 @@ def test_reasoning_valid_levels_parse() -> None:
 def test_reasoning_invalid_value_is_rejected() -> None:
     text = _PROVIDER_BASE.replace(
         '    claude:\n      command: "claude"',
-        '    claude:\n      command: "claude"\n      reasoning: ultra',
+        '    claude:\n      command: "claude"\n      reasoning: impossible',
     )
     with pytest.raises(ConfigError) as exc:
         loads_config(text)
     assert any("reasoning" in issue for issue in exc.value.issues)
-    assert any("ultra" in issue for issue in exc.value.issues)
+    assert any("impossible" in issue for issue in exc.value.issues)
 
 
 def test_reasoning_null_parses_to_none() -> None:

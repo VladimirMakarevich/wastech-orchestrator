@@ -22,7 +22,11 @@ from wastech_orchestrator.checks.model import (
 from wastech_orchestrator.config.loader import ConfigError
 from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.providers.base import ProviderId
-from wastech_orchestrator.providers.capabilities import is_reasoning_supported, reasoning_levels_for
+from wastech_orchestrator.providers.capabilities import (
+    codex_model_reasoning_issue,
+    is_reasoning_supported,
+    reasoning_levels_for,
+)
 from wastech_orchestrator.security.forbidden_args import (
     CodexExtraArgsError,
     find_forbidden_args,
@@ -174,6 +178,10 @@ def validate_config(config: OrchestratorConfig) -> list[str]:
             reasoning=provider.reasoning,
             issues=issues,
         )
+        if pid is ProviderId.CODEX:
+            compatibility_issue = codex_model_reasoning_issue(provider.model, provider.reasoning)
+            if compatibility_issue is not None:
+                issues.append(f"agents.providers.codex: {compatibility_issue}")
         _check_extra_args(pid, provider.extra_args, issues)
 
     _validate_checks(config, issues, warnings)
@@ -220,9 +228,9 @@ def _validate_supervisor(
     ``permission_profile`` is forced ``read-only`` in code (the layer never writes). ``provider``
     (when set) must be in ``agents.allowed`` and ``reasoning`` must be supported by the resolved
     provider (the explicit ``supervisor.provider``, or the global primary when absent) — symmetric
-    with flow-node validation. Model is passed through unverified, as everywhere. We also enforce
-    that ``role_file`` has no path traversal (``..`` or an absolute path) — the flow validator's
-    containment rule for a node ``role_file``.
+    with flow-node validation. Model ids are passed through except for a known Codex
+    model/Max-or-Ultra incompatibility. We also enforce that ``role_file`` has no path traversal
+    (``..`` or an absolute path) — the flow validator's containment rule for a node ``role_file``.
 
     F39: when ``provider`` is unset, ``supervisor.model`` is sent to the inherited global primary. A
     model whose vendor plainly clashes with that primary (a ``claude-*`` model under a ``codex``
@@ -243,6 +251,15 @@ def _validate_supervisor(
             reasoning=config.supervisor.reasoning,
             issues=issues,
         )
+        if resolved is ProviderId.CODEX:
+            provider_config = config.agents.providers.get(resolved)
+            compatibility_issue = codex_model_reasoning_issue(
+                config.supervisor.model or (provider_config.model if provider_config else None),
+                config.supervisor.reasoning
+                or (provider_config.reasoning if provider_config else None),
+            )
+            if compatibility_issue is not None:
+                issues.append(f"supervisor: {compatibility_issue}")
         if provider is None:
             vendor = _infer_model_vendor(config.supervisor.model)
             if vendor is not None and vendor != resolved:

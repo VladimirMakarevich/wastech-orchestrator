@@ -23,6 +23,7 @@ from wastech_orchestrator.config.schema import (
 )
 from wastech_orchestrator.config.validation import validate_config
 from wastech_orchestrator.providers.base import ProviderId
+from wastech_orchestrator.providers.defaults import SHIPPED_PROVIDER_DEFAULTS
 from wastech_orchestrator.security.env import default_allowed_environment
 
 _HEADER = (
@@ -52,19 +53,9 @@ def _ordered_providers(providers: tuple[ProviderId, ...]) -> tuple[ProviderId, .
     return tuple(pid for pid in ProviderId if pid in selected)
 
 
-# Shipped default ``(model, reasoning)`` per provider (provider-config-cleanup #3). These replace
-# the old empty ``""`` / ``null`` placeholders; ``""`` / blank stays a valid "use the CLI/account
-# default" sentinel, so an operator may still clear either field. Keep the Codex id in step with the
-# installed Codex CLI's accepted ``--model`` values.
-_PROVIDER_DEFAULTS: dict[ProviderId, tuple[str, str]] = {
-    ProviderId.CLAUDE: ("claude-sonnet-5", "high"),
-    ProviderId.CODEX: ("gpt-5.4", "high"),
-}
-
-
 def _provider_block(pid: ProviderId, *, primary: bool) -> dict[str, Any]:
     """One ``agents.providers.<id>`` block, mirroring the packaged template's safe defaults."""
-    model, reasoning = _PROVIDER_DEFAULTS[pid]
+    model, reasoning = SHIPPED_PROVIDER_DEFAULTS[pid]
     block: dict[str, Any] = {
         "command": pid.value,
         "model": model,
@@ -200,7 +191,7 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
         # (F39) — an operator flipping the primary keeps a self-consistent supervisor.
         "supervisor": {
             "role_file": "roles/supervisor.md",
-            "model": _PROVIDER_DEFAULTS[primary_pid][0],
+            "model": SHIPPED_PROVIDER_DEFAULTS[primary_pid][0],
             "reasoning": "high",
             "provider": primary_pid.value,
         },

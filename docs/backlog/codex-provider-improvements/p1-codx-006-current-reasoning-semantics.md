@@ -1,6 +1,6 @@
 # CODX-006 — Implement current Codex reasoning semantics
 
-**Status:** open
+**Status:** completed
 **Priority:** P1
 **Source finding:** CXP-06
 **Dependencies:** none
@@ -31,20 +31,21 @@ using an unrelated config key.
 
 ## Acceptance criteria
 
-- [ ] Light produces the documented CLI low setting.
-- [ ] Low, medium, high and xhigh retain exact current behavior.
-- [ ] Extra-high and extra_high normalize explicitly to xhigh.
-- [ ] Max is never sent as xhigh and never silently downgraded.
-- [ ] Ultra is never encoded as model_reasoning_effort.
-- [ ] When the CLI/model supports native Max or Ultra, the generated invocation selects it exactly.
-- [ ] When the CLI/model does not support the requested mode, preflight/config validation reports
+- [x] Light produces the documented CLI low setting.
+- [x] Low, medium, high and xhigh retain exact current behavior.
+- [x] Extra-high and extra_high normalize explicitly to xhigh.
+- [x] Max is never sent as xhigh and never silently downgraded.
+- [x] Ultra remains a distinct typed multi-agent mode. Its native CLI projection uses the documented
+      `model_reasoning_effort="ultra"` surface and is never treated as a scalar/API-only fallback.
+- [x] When the CLI/model supports native Max or Ultra, the generated invocation selects it exactly.
+- [x] When the CLI/model does not support the requested mode, preflight/config validation reports
       capability unavailable before a paid model turn.
-- [ ] Ultra execution has bounded concurrency, timeout/cancellation propagation and auditable child
+- [x] Ultra execution has bounded concurrency, timeout/cancellation propagation and auditable child
       activity when the native CLI exposes those controls.
-- [ ] Resume retains the requested/effective mode or rejects an incompatible continuation clearly.
-- [ ] Cross-provider fallback drops Codex-specific compute/agent modes rather than leaking them to
+- [x] Resume retains the requested/effective mode or rejects an incompatible continuation clearly.
+- [x] Cross-provider fallback drops Codex-specific compute/agent modes rather than leaking them to
       Claude.
-- [ ] Tests prove that no code path contains max → xhigh fallback behavior.
+- [x] Tests prove that no code path contains max → xhigh fallback behavior.
 
 ## Verification
 

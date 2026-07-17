@@ -49,7 +49,7 @@
 #   agent + evaluator nodes:
 #     provider:  codex | claude            which agent runs the node (∈ agents.allowed); default: global primary
 #     model:     <model id>                overrides agents.providers.<provider>.model for THIS node
-#     reasoning: minimal|low|medium|high|xhigh|max  default: agents.providers.<provider>.reasoning
+#     reasoning: minimal|light|low|medium|high|xhigh|max|ultra  default: provider config
 # ----------------------------------------------------------------------------------------------------
 flow:
   name: content_chapter

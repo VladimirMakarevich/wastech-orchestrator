@@ -64,6 +64,7 @@ from wastech_orchestrator.core.prompts import ALLOWED_PROMPT_VARS, referenced_va
 from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.providers.capabilities import (
     all_reasoning_levels,
+    codex_model_reasoning_issue,
     is_reasoning_supported,
     reasoning_levels_for,
 )
@@ -518,6 +519,15 @@ def _check_config_consistency(
                         f"{sorted(reasoning_levels_for(resolved_provider))}"
                     )
                 )
+        if resolved_provider is ProviderId.CODEX:
+            provider_config = agents.providers.get(ProviderId.CODEX)
+            effective_model = node.model or (provider_config.model if provider_config else None)
+            effective_reasoning = node.reasoning or (
+                provider_config.reasoning if provider_config else None
+            )
+            compatibility_issue = codex_model_reasoning_issue(effective_model, effective_reasoning)
+            if compatibility_issue is not None:
+                errs.append(cfg(f"node {node.id!r}: {compatibility_issue}"))
         if (
             isinstance(node, AgentNode)
             and resolved_provider is ProviderId.CODEX

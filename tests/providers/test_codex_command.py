@@ -9,12 +9,19 @@ from dataclasses import replace
 import pytest
 
 from wastech_orchestrator.config.schema import ProviderConfig
-from wastech_orchestrator.providers.base import AgentRunRequest, ErrorClass, ProviderError
+from wastech_orchestrator.providers.base import (
+    AgentRunRequest,
+    CodexComputeMode,
+    CodexMultiAgentMode,
+    ErrorClass,
+    ProviderError,
+)
 from wastech_orchestrator.providers.codex import (
     build_codex_argv,
     build_context_footer,
     build_effective_prompt,
 )
+from wastech_orchestrator.providers.defaults import CURRENT_PUBLIC_CODEX_MODEL_EXAMPLES
 
 LAST_MSG = "/logs/task/stages/planning/1-codex/last-message.txt"
 
@@ -338,11 +345,85 @@ def test_reasoning_xhigh_passes_through(
     _assert_reasoning_config(argv, "xhigh")
 
 
-def test_reasoning_max_clamped_to_xhigh(
+def test_reasoning_max_is_preserved_exactly(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
     argv = _argv(codex_config, make_request(reasoning="max"))
+    _assert_reasoning_config(argv, "max")
+    assert 'model_reasoning_effort="xhigh"' not in _config_values(argv)
+
+
+def test_reasoning_light_normalizes_to_low(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    argv = _argv(codex_config, make_request(reasoning="light"))
+    _assert_reasoning_config(argv, "low")
+
+
+@pytest.mark.parametrize("alias", ["extra-high", "extra_high"])
+def test_extra_high_aliases_normalize_to_xhigh(
+    alias: str, codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    argv = _argv(codex_config, make_request(reasoning=alias))
     _assert_reasoning_config(argv, "xhigh")
+
+
+def test_typed_max_compute_mode_is_projected_exactly(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    argv = _argv(codex_config, make_request(codex_compute_mode=CodexComputeMode.MAX))
+    _assert_reasoning_config(argv, "max")
+
+
+def test_typed_ultra_enables_bounded_native_multi_agent(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    argv = _argv(
+        codex_config,
+        make_request(
+            codex_multi_agent_mode=CodexMultiAgentMode.ULTRA,
+            timeout_seconds=1234,
+        ),
+    )
+    values = _config_values(argv)
+    _assert_reasoning_config(argv, "ultra")
+    assert "features.multi_agent_v2={enabled=true,max_concurrent_threads_per_session=4}" in values
+    assert "agents.job_max_runtime_seconds=1234" in values
+    assert "multi_agent_v2" not in argv
+
+
+def test_reasoning_modes_are_mutually_exclusive(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    with pytest.raises(ProviderError) as exc:
+        _argv(
+            codex_config,
+            make_request(reasoning="high", codex_compute_mode=CodexComputeMode.MAX),
+        )
+    assert exc.value.error_class is ErrorClass.CONFIGURATION_ERROR
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        *CURRENT_PUBLIC_CODEX_MODEL_EXAMPLES,
+        "gpt-5.60-future",
+        "gpt-7-future-private",
+    ],
+)
+def test_current_and_future_model_ids_pass_through(
+    model: str, codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    argv = _argv(codex_config, make_request(model=model))
+    assert argv[argv.index("--model") + 1] == model
+
+
+def test_known_old_model_rejects_advanced_mode_before_spawn(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    with pytest.raises(ProviderError) as exc:
+        _argv(codex_config, make_request(model="gpt-5.3-codex", reasoning="max"))
+    assert exc.value.error_class is ErrorClass.CONFIGURATION_ERROR
 
 
 def test_reasoning_config_level_adds_reasoning_effort(
@@ -378,7 +459,12 @@ def test_session_id_builds_exec_resume(
     # -c/--config (model_reasoning_effort) follow it. The id is positional; the prompt is on stdin.
     argv = _argv(
         codex_config,
-        make_request(session_id="sess-123", model="gpt-5.4", reasoning="high", network_access=True),
+        make_request(
+            session_id="sess-123",
+            model="gpt-5.6-sol",
+            reasoning="high",
+            network_access=True,
+        ),
         schema="/logs/schema.json",
     )
     resume = argv.index("resume")
@@ -393,6 +479,26 @@ def test_session_id_builds_exec_resume(
     assert argv[-1] == "-"  # prompt still comes from stdin
     assert "--ask-for-approval" in argv  # security flags preserved
     assert argv[argv.index("--output-last-message") + 1] == LAST_MSG
+
+
+def test_ultra_resume_retains_mode_and_bounded_workers(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    argv = _argv(
+        codex_config,
+        make_request(
+            session_id="sess-ultra",
+            codex_multi_agent_mode=CodexMultiAgentMode.ULTRA,
+            timeout_seconds=987,
+        ),
+    )
+
+    resume = argv.index("resume")
+    values = _config_values(argv)
+    assert argv[resume + 1] == "sess-ultra"
+    assert argv.index('model_reasoning_effort="ultra"') > resume
+    assert "features.multi_agent_v2={enabled=true,max_concurrent_threads_per_session=4}" in values
+    assert "agents.job_max_runtime_seconds=987" in values
 
 
 def test_no_session_id_has_no_resume(

@@ -91,7 +91,7 @@ Every node has an `id` (unique; see reserved ids below) and a `kind`. The six ki
 | `network_access` | bool \| null (tri-state) | `null` (inherit `network_policy`) | Codex `workspace-write` + network is rejected. | Per-node network override. |
 | `provider` | `codex` \| `claude` \| null | `null` → global primary | Must be in `agents.allowed`. | Which provider runs this node. |
 | `model` | string \| null | `null` | Passed through unverified. | Override the provider's default model. |
-| `reasoning` | string \| null | `null` | Must be valid for the resolved provider (Claude vs Codex sets differ). | Override reasoning effort. |
+| `reasoning` | string \| null | `null` | Must be valid for the resolved provider. Codex accepts scalar `minimal|low|medium|high|xhigh`, aliases `light` and `extra-high|extra_high`, exact native `max`, and native four-thread-capped `ultra`; Claude accepts `low|medium|high|xhigh|max`. | Override reasoning effort or mode. |
 | `timeout_seconds` | int \| null | `null` | — | Per-attempt CLI wall-clock ceiling. |
 | `output_artifact` | `enriched_spec` \| `plan` \| `summary` \| null | `null` | Vocabulary is fixed to these three. | Persist the node's output into a well-known slot (see [roles.md](roles.md)). |
 | `output_schema` | JSON-encoded string \| null | `null` | **Every object must set `additionalProperties: false`** (Codex 400s otherwise). | Custom structured-output shape. Prefer the built-in contract. |

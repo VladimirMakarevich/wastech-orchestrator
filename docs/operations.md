@@ -237,7 +237,7 @@ worc validate-flow --all             # every *.yaml in .worc/flows/
 
 ```text
 flow content_chapter: OK
-flow my_flow: FAIL — node 'review': provider 'gpt-5.5' not in agents.allowed
+flow my_flow: FAIL — node 'review': provider 'openai' not in agents.allowed
 flow my_flow: WARN — roles/review.md references unknown {plann_path} (renders verbatim to the agent)
 ```
 

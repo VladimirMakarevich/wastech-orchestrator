@@ -549,6 +549,19 @@ class BaseCliProvider:
             stdout_path=paths.stdout_path,
             stderr_path=paths.stderr_path,
             event_log_path=paths.events_path,
+            model=request.model or self._config.model or None,
+            reasoning=(
+                request.reasoning
+                if request.reasoning is not None
+                else (
+                    None
+                    if request.codex_compute_mode is not None
+                    or request.codex_multi_agent_mode is not None
+                    else self._config.reasoning
+                )
+            ),
+            codex_compute_mode=request.codex_compute_mode,
+            codex_multi_agent_mode=request.codex_multi_agent_mode,
             error=error_obj,
         )
         # result.json carries the normalized (non-secret) session id; the raw id is returned
@@ -595,6 +608,18 @@ class BaseCliProvider:
             "permission_profile": request.permission_profile,
             "timeout_seconds": request.timeout_seconds,
             "model": request.model or self._config.model or None,
+            "reasoning": (
+                request.reasoning
+                if request.reasoning is not None
+                else (
+                    None
+                    if request.codex_compute_mode is not None
+                    or request.codex_multi_agent_mode is not None
+                    else self._config.reasoning
+                )
+            ),
+            "codex_compute_mode": request.codex_compute_mode,
+            "codex_multi_agent_mode": request.codex_multi_agent_mode,
             "prompt": build_effective_prompt(request),
             "context_paths": {k: v for k, v in context_paths.items() if v},
             "extra_args": self._artifact_extra_args(request.extra_args),
@@ -624,6 +649,19 @@ class BaseCliProvider:
             stdout_path=paths.stdout_path,
             stderr_path=paths.stderr_path,
             event_log_path=paths.events_path,
+            model=request.model or self._config.model or None,
+            reasoning=(
+                request.reasoning
+                if request.reasoning is not None
+                else (
+                    None
+                    if request.codex_compute_mode is not None
+                    or request.codex_multi_agent_mode is not None
+                    else self._config.reasoning
+                )
+            ),
+            codex_compute_mode=request.codex_compute_mode,
+            codex_multi_agent_mode=request.codex_multi_agent_mode,
             error=error,
         )
         write_result_artifact(paths, result)

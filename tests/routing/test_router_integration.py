@@ -25,6 +25,8 @@ from wastech_orchestrator.core.flow.nodes.evaluator import _FINDINGS_SCHEMA
 from wastech_orchestrator.providers.base import (
     AgentProvider,
     AgentRunRequest,
+    CodexComputeMode,
+    CodexMultiAgentMode,
     ErrorClass,
     ProviderId,
     RunStatus,
@@ -208,7 +210,7 @@ def test_cross_provider_fallback_drops_provider_specific_request_fields(
     outcome = router.run_stage(
         make_request(
             node_id="review",
-            model="gpt-5.4",
+            model="gpt-5.6-sol",
             reasoning="high",
             extra_args=["-c", 'model_reasoning_effort="high"'],
             session_id="codex-session-123",
@@ -221,7 +223,7 @@ def test_cross_provider_fallback_drops_provider_specific_request_fields(
 
     assert outcome.provider_used is ProviderId.CLAUDE
     # The primary saw the pins; the cross-provider fallback saw provider-specific fields cleared.
-    assert primary.requests[0].model == "gpt-5.4"  # type: ignore[attr-defined]
+    assert primary.requests[0].model == "gpt-5.6-sol"  # type: ignore[attr-defined]
     assert primary.requests[0].reasoning == "high"  # type: ignore[attr-defined]
     assert primary.requests[0].extra_args == [  # type: ignore[attr-defined]
         "-c",
@@ -274,6 +276,36 @@ def test_codex_minimal_reasoning_fallback_maps_to_claude_low(
     assert outcome.provider_used is ProviderId.CLAUDE
     assert primary.requests[0].reasoning == "minimal"  # type: ignore[attr-defined]
     assert fallback.requests[0].reasoning == "low"  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("reasoning", "field", "expected"),
+    [
+        ("max", "codex_compute_mode", CodexComputeMode.MAX),
+        ("ultra", "codex_multi_agent_mode", CodexMultiAgentMode.ULTRA),
+    ],
+)
+def test_codex_advanced_modes_are_typed_and_dropped_on_claude_fallback(
+    reasoning: str,
+    field: str,
+    expected: object,
+    config: OrchestratorConfig,
+    make_fake_provider: Callable[..., object],
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    primary = make_fake_provider(ProviderId.CODEX, raises=ErrorClass.RATE_LIMITED)
+    fallback = make_fake_provider(ProviderId.CLAUDE)
+    router = AgentRouter(config, {ProviderId.CODEX: primary, ProviderId.CLAUDE: fallback})
+    route = router.resolve_route("review", ProviderId.CODEX)
+
+    outcome = router.run_stage(make_request(node_id="review", reasoning=reasoning), route)
+
+    assert outcome.provider_used is ProviderId.CLAUDE
+    assert primary.requests[0].reasoning is None  # type: ignore[attr-defined]
+    assert getattr(primary.requests[0], field) is expected  # type: ignore[attr-defined]
+    assert fallback.requests[0].codex_compute_mode is None  # type: ignore[attr-defined]
+    assert fallback.requests[0].codex_multi_agent_mode is None  # type: ignore[attr-defined]
+    assert fallback.requests[0].reasoning is None  # type: ignore[attr-defined]
 
 
 def _with_retry(

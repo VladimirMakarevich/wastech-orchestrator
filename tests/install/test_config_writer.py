@@ -14,6 +14,7 @@ from wastech_orchestrator.config.validation import validate_config
 from wastech_orchestrator.install import config_writer
 from wastech_orchestrator.install.config_writer import InstallSpec, build_and_validate
 from wastech_orchestrator.providers.base import ProviderId
+from wastech_orchestrator.providers.defaults import CANONICAL_CODEX_MODEL_DEFAULT
 from wastech_orchestrator.security.env import default_allowed_environment
 
 
@@ -122,13 +123,22 @@ def test_explicit_model_and_reasoning_defaults_are_written(tmp_path: Path) -> No
     cfg = loads_config(text).config
     claude = cfg.agents.providers[ProviderId.CLAUDE]
     codex = cfg.agents.providers[ProviderId.CODEX]
-    # provider-config-cleanup #3: fresh installs ship explicit model/reasoning, not "" / null.
+    # Claude stays pinned; Codex deliberately delegates model choice to the CLI/account.
     assert (claude.model, claude.reasoning) == ("claude-sonnet-5", "high")
-    assert (codex.model, codex.reasoning) == ("gpt-5.4", "high")
+    assert (codex.model, codex.reasoning) == (CANONICAL_CODEX_MODEL_DEFAULT, "high")
     # provider-config-cleanup #2: the unused max_budget_usd field is gone from the generated config.
     assert "max_budget_usd" not in text
     assert not hasattr(claude, "max_budget_usd")
     assert not hasattr(codex, "max_budget_usd")
+
+
+def test_packaged_and_generated_codex_model_defaults_cannot_drift(tmp_path: Path) -> None:
+    generated = yaml.safe_load(build_and_validate(_spec(tmp_path, (ProviderId.CODEX,))))
+    packaged_path = Path(config_writer.__file__).parents[1] / "packaged" / "config.example.yaml"
+    packaged = yaml.safe_load(packaged_path.read_text(encoding="utf-8"))
+    generated_default = generated["agents"]["providers"]["codex"]["model"]
+    packaged_default = packaged["agents"]["providers"]["codex"]["model"]
+    assert generated_default == packaged_default == CANONICAL_CODEX_MODEL_DEFAULT
 
 
 def test_create_pr_and_auto_mode_are_reflected(tmp_path: Path) -> None:
@@ -173,7 +183,7 @@ def test_generated_config_includes_optional_sections(tmp_path: Path) -> None:
 def test_supervisor_model_tracks_the_global_primary(tmp_path: Path) -> None:
     # F2: a Codex-primary install resolves the supervisor model to Codex's model, not Claude's.
     cfg = loads_config(build_and_validate(_spec(tmp_path, (ProviderId.CODEX,)))).config
-    assert cfg.supervisor.model == "gpt-5.4"
+    assert cfg.supervisor.model == CANONICAL_CODEX_MODEL_DEFAULT
     assert cfg.supervisor.reasoning == "high"
     # F39: a codex-primary install pins supervisor.provider to codex, aligned with the codex model.
     assert cfg.supervisor.provider == ProviderId.CODEX

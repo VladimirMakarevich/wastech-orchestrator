@@ -1,6 +1,6 @@
 # CODX-007 — Refresh model defaults and establish one source of truth
 
-**Status:** open
+**Status:** completed
 **Priority:** P1
 **Source finding:** CXP-07
 **Dependencies:** CODX-006
@@ -28,15 +28,15 @@ tests and documentation. Keep arbitrary valid future model IDs pass-through comp
 
 ## Acceptance criteria
 
-- [ ] Fresh install writes the same canonical Codex model default as packaged config.
-- [ ] The canonical default is empty and delegates selection to the CLI/account.
-- [ ] Configuration docs explain how to pin gpt-5.6-sol, gpt-5.6-terra and gpt-5.6-luna.
-- [ ] GPT-5.4/GPT-5.5 remain only in historical analysis where historically accurate.
-- [ ] Flow comments and live examples no longer present stale IDs as current defaults.
-- [ ] Future/non-public model IDs are not rejected solely because they are absent from a static list.
-- [ ] Model/reasoning compatibility failures are explicit and do not cause infrastructure fallback.
-- [ ] Round-trip and installer tests enforce one source of truth.
-- [ ] Documentation states that private GPT-6 availability is not equivalent to a tested public
+- [x] Fresh install writes the same canonical Codex model default as packaged config.
+- [x] The canonical default is empty and delegates selection to the CLI/account.
+- [x] Configuration docs explain how to pin gpt-5.6-sol, gpt-5.6-terra and gpt-5.6-luna.
+- [x] GPT-5.4/GPT-5.5 remain only in historical analysis where historically accurate.
+- [x] Flow comments and live examples no longer present stale IDs as current defaults.
+- [x] Future/non-public model IDs are not rejected solely because they are absent from a static list.
+- [x] Model/reasoning compatibility failures are explicit and do not cause infrastructure fallback.
+- [x] Round-trip and installer tests enforce one source of truth.
+- [x] Documentation states that private GPT-6 availability is not equivalent to a tested public
       provider contract.
 
 ## Verification

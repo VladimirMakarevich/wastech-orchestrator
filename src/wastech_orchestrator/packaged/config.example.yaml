@@ -2,7 +2,7 @@
 # Copy to config.yaml and fill it in for your project. config.yaml is NOT committed to git.
 # This is the packaged copy used by `wastech-orchestrator init` (the only example config; nothing else to sync).
 
-schema_version: 30                  # config format version; the orchestrator refuses newer configs
+schema_version: 31                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -83,8 +83,9 @@ agents:
       primary: true            # the global primary (exactly one provider; must be in `allowed`)
     codex:
       command: "codex"        # executable name (found on PATH) or an absolute path to the CLI
-      model: "gpt-5.4"         # "" = use the Codex CLI/account default
-      reasoning: high          # minimal | low | medium | high | xhigh | max->xhigh
+      model: ""                # canonical default: let the Codex CLI/account select the model
+      reasoning: high          # minimal | light->low | low | medium | high | xhigh
+                               # extra-high/extra_high->xhigh | max | ultra (native multi-agent)
       timeout_seconds: 7200    # per-attempt CLI wall-clock ceiling (seconds)
       sandbox: "workspace-write"   # workspace-write | read-only | danger-full-access (requires
                                     # strict_isolation=false + online nodes; denied reads disabled)

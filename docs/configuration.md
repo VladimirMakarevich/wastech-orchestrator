@@ -34,10 +34,10 @@ Exactly one configured provider must set `primary: true` — the **global primar
 ## `schema_version`
 
 ```yaml
-schema_version: 30
+schema_version: 31
 ```
 
-Optional top-level integer marking the `config.yaml` **format** version (current: `30`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
+Optional top-level integer marking the `config.yaml` **format** version (current: `31`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
 
 ## Config Discovery
 
@@ -235,8 +235,8 @@ agents:
       extra_args: []
     codex:
       command: "codex"
-      model: "gpt-5.4" # "" = use the Codex CLI/account default
-      reasoning: high # minimal | low | medium | high | xhigh | max→xhigh
+      model: "" # canonical default: use the Codex CLI/account model selection
+      reasoning: high # scalar/alias, max compute, or ultra multi-agent (details below)
       timeout_seconds: 7200
       sandbox: "workspace-write"
       permission_profile: "workspace-write"
@@ -249,8 +249,8 @@ Common fields:
 | --- | --- | --- | --- |
 | `command` | string | provider id (`"claude"` or `"codex"`) | Executable name or path. On Windows, pin an absolute native `.exe` when npm, the Codex app, or an IDE expose conflicting installations; see [How-To §5](how-to.md#5-fix-conflicting-codex-installations-on-windows). |
 | `primary` | boolean | `false` | Marks the **global primary**. Exactly one configured provider must set it; that provider runs any flow node with no explicit `provider` and is the sole infrastructure-fallback target. It must also be in `agents.allowed`. |
-| `model` | string | `claude-sonnet-5` (claude), `gpt-5.4` (codex) | Provider model setting. The packaged template ships an explicit default per provider; set `""` to fall back to the CLI/account default. (A flow node may override it per node.) |
-| `reasoning` | string or null | `high` (both, in the packaged template) | Provider-specific reasoning effort level. Claude accepts `low`, `medium`, `high`, `xhigh`, `max` and maps it to `--effort`. Codex accepts `minimal`, `low`, `medium`, `high`, `xhigh`, plus legacy `max` mapped to `xhigh`, and passes it as `-c model_reasoning_effort="..."`. Set `null` to omit the override and use the CLI/account default. (A flow node may override it per node.) |
+| `model` | string | `claude-sonnet-5` (claude), `""` (codex) | Provider model setting. Codex deliberately ships unpinned: `""` delegates selection to the installed CLI/account. A flow node may still pin a model. |
+| `reasoning` | string or null | `high` | Provider-specific reasoning selection. Claude accepts `low`, `medium`, `high`, `xhigh`, `max`. Codex accepts scalar `minimal`, `low`, `medium`, `high`, `xhigh`; aliases `light` → `low` and `extra-high`/`extra_high` → `xhigh`; native single-agent `max`; and native multi-agent `ultra`. Set `null` to use the CLI/account default. |
 | `timeout_seconds` | integer | `7200` | Timeout for a stage run. |
 | `permission_profile` | string | `"workspace-write"` | Orchestrator permission profile passed into the adapter. |
 | `extra_args` | list of strings | `[]` | Additional provider CLI arguments after safety validation. |
@@ -323,6 +323,40 @@ The managed home lives under the existing Codex home and hard-links an existing 
 versions older than `0.144.4`, builds missing a boundary primitive, invalid generated rules, or a
 host sandbox that cannot pass the allowed-read/denied-read smoke test fail `preflight` before a
 model turn.
+
+#### Codex model and reasoning policy
+
+Fresh installs do not pin a Codex model. This prevents the generated config, packaged example,
+and account rollout from drifting apart. Pin a current public model only when the workflow needs a
+stable choice:
+
+```yaml
+# frontier capability
+model: "gpt-5.6-sol"
+# balanced capability/cost
+model: "gpt-5.6-terra"
+# efficient high-volume work
+model: "gpt-5.6-luna"
+```
+
+Model ids are not a hard allowlist: an arbitrary future/private id is passed through. That does not
+make it a tested public provider contract. In particular, private GPT-6 availability in one account
+does not prove that the supported Codex CLI, authentication path, structured output, Max, or Ultra
+work for that id.
+
+`max` is never lowered to `xhigh`. `ultra` is also distinct: Codex CLI receives its native Ultra
+selection, uses maximum model compute, and may proactively delegate to child agents. The
+orchestrator enables that native mode with a fixed four-thread ceiling, applies the node timeout to
+worker jobs, propagates process cancellation to the CLI process tree, and records the effective
+mode/concurrency in `request.json`, `result.json`, and `capabilities.json`. Cross-provider fallback
+clears Max/Ultra instead of leaking Codex-only controls to Claude.
+
+Known older public model families are rejected with Max/Ultra during config/flow validation. An
+unknown future model remains pass-through; if the account or selected model does not actually
+support it, Codex returns an explicit model-request/configuration error. Those errors are not
+infrastructure failures and therefore do **not** trigger provider fallback or consume a second paid
+turn on Claude. Model entitlement itself is external to the orchestrator: use a model available to
+the configured Codex account or clear `model` to delegate selection.
 
 `sandbox: danger-full-access` is an explicit operator-owned exception to the read boundary. It is
 rejected while `security.strict_isolation: true` and for offline nodes; with
@@ -731,7 +765,7 @@ The full set of optional per-node fields (all default to the value shown):
 | --- | --- | --- | --- |
 | `provider` | agent, evaluator | global primary | Which agent runs the node; must be in `agents.allowed`. |
 | `model` | agent, evaluator | provider's `model` | Model id for this node (not allowlisted — config carries one model per provider). Confirm ids against your installed CLIs. |
-| `reasoning` | agent, evaluator | provider's `reasoning` | `low`/`medium`/`high`/`xhigh`/`max` (Codex clamps `max`→`xhigh`). |
+| `reasoning` | agent, evaluator | provider's `reasoning` | Provider-specific. Codex also accepts `minimal`, aliases `light` and `extra-high`/`extra_high`, exact `max`, and bounded native `ultra`; Claude accepts `low` through `max`. |
 | `network_access` | agent, evaluator | flow `network_policy` | Tri-state per-node network grant/deny (see above). |
 | `timeout_seconds` | agent | provider `timeout_seconds` | Per-node wall-clock cap. |
 | `extra_args` | agent | `()` | Provider-specific CLI extension for this node, concatenated after the provider list. Codex uses the closed allowlist above; Claude uses the common forbidden-bypass screen. |

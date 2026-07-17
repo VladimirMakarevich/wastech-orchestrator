@@ -75,13 +75,13 @@ Applies per provider in `[primary, fallback]`; only transient classes (`PROVIDER
 | Field | Type / values | Default (dataclass / install) | Constraint | When to use |
 | --- | --- | --- | --- | --- |
 | `.command` | string | the id (`"claude"` / `"codex"`) | — | Executable name on `PATH`, or an absolute path to the CLI. |
-| `.model` | string | `""` / install: claude `claude-sonnet-5`, codex `gpt-5.4` | Passed through unverified. `""`/blank = the CLI/account default. | Pin a model. Do not invent model ids. |
+| `.model` | string | `""` / install: claude `claude-sonnet-5`, codex `""` | Passed through without a static allowlist. `""`/blank = the CLI/account default. Current Codex examples: `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`. | Pin a model only when the account is entitled to it. |
 | `.timeout_seconds` | int | `7200` | — | Per-attempt CLI wall-clock ceiling (seconds). |
 | `.permission_profile` | `read-only` \| `workspace-write` | `workspace-write` | A flow node's ceiling may lower it, never raise it. | Access level for this provider's runs. |
 | `.extra_args` | list[str] | `[]` | Claude: common bypass screen. Codex: closed allowlist (`--ignore-user-config`, `--strict-config`, and documented safe `-c` keys); everything else is **rejected at config time**. | Optional provider CLI extension. |
 | `.sandbox` | `workspace-write` \| `read-only` \| `danger-full-access` \| null | `null` | `danger-full-access` requires `security.strict_isolation: false` and online nodes; denied reads are not enforced. Codex sandbox selectors in `extra_args` are always rejected. | Codex-specific sandbox (Codex's real isolation knob). |
 | `.max_turns` | positive int, or `"none"` / `"max"`, or null | `400` | `<= 0` or other strings are errors. | Claude turn cap. `none`/`max`/`null` = no cap. Pair a low cap with `max_turns_gate` for a Telegram continue prompt. |
-| `.reasoning` | string \| null | `null` / install: `high` | **Per-provider set:** Claude ∈ `{low, medium, high, xhigh, max}`; Codex ∈ `{minimal, low, medium, high, xhigh, max}` (`max`→`xhigh`). | Reasoning effort. A value valid for one provider may be invalid for the other. |
+| `.reasoning` | string \| null | `null` / install: `high` | **Per-provider set:** Claude ∈ `{low, medium, high, xhigh, max}`; Codex scalar ∈ `{minimal, low, medium, high, xhigh}` with `light`→`low`, `extra-high`/`extra_high`→`xhigh`, plus exact native `max` and `ultra`. Ultra uses an adapter-owned four-thread ceiling. | Reasoning effort/mode. A value valid for one provider may be invalid for the other. |
 | `.primary` | bool | `false` | **Exactly one** provider across the map must be `true`, and it must be in `agents.allowed`. | The global primary: runs every flow node with no explicit `provider`, and is the sole infrastructure-fallback target. |
 | `.max_turns_gate` | bool | `false` | **Requires `telegram.enabled: true`.** Claude-only. | `true` = hitting `max_turns` pauses for a Telegram continue/stop prompt (resumes the same session) instead of failing. Makes a low `max_turns` safe. |
 | `.allow_native_memory` | bool | `false` | Claude-only; installer never writes it. | **Opt-in risk.** `true` drops the deny that confines Claude Code's own auto-memory, letting it persist across tasks in a HOME store **outside** the orchestrator's redaction net and audit trail. Leave off unless you accept that. |
@@ -222,7 +222,7 @@ Omitting the whole block ⇒ `enabled: false` (no store, empty packets, CLI no-o
 ## Cross-field rules and gotchas (read before you finish)
 
 - **Exactly one `primary`.** One `agents.providers.<id>.primary: true`, and that provider must be in `agents.allowed`.
-- **Reasoning is per-provider.** Claude accepts `{low, medium, high, xhigh, max}`; Codex accepts `{minimal, low, medium, high, xhigh, max}` (`max` maps to `xhigh`). A value that validates for one provider can be rejected for the other — including on `supervisor.reasoning` against the resolved supervisor provider.
+- **Reasoning is per-provider.** Claude accepts `{low, medium, high, xhigh, max}`. Codex accepts scalar `{minimal, low, medium, high, xhigh}`, the aliases `light` and `extra-high`/`extra_high`, exact native `max`, and native multi-agent `ultra`; Max is never lowered to xhigh. A value that validates for one provider can be rejected for the other — including on `supervisor.reasoning` against the resolved supervisor provider.
 - **Telegram-gated fields.** `orchestrator.auto_mode.confirm_next_task` and any provider `max_turns_gate` require `telegram.enabled: true`.
 - **Ordering constraints.** `max_total_fix_iterations >= max_fix_cycles`; `retry.max_delay_s >= retry.base_delay_s`; `decomposition.max_subtasks >= 2`.
 - **Non-weakening merge.** `allowed_environment` replaces its default; `denied_read_paths` and `denied_commands` always retain their mandatory defaults and append operator entries.

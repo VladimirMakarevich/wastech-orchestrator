@@ -31,8 +31,8 @@ priority.
 | P0 | CODX-003 | [Enforce denied commands and denied read paths](p0-codx-003-enforce-deny-policy.md) (**done**) | CXP-01 | CODX-001, CODX-002 |
 | P0 | CODX-004 | [Redact structured provider output before persistence](p0-codx-004-redact-structured-output.md) | CXP-04 | — |
 | P1 | CODX-005 | [Eliminate the raw-artifact crash window](p1-codx-005-eliminate-raw-artifact-crash-window.md) | CXP-05 | CODX-004 |
-| P1 | CODX-006 | [Implement current Codex reasoning semantics](p1-codx-006-current-reasoning-semantics.md) | CXP-06 | — |
-| P1 | CODX-007 | [Refresh model defaults and establish one source of truth](p1-codx-007-refresh-model-defaults.md) | CXP-07 | CODX-006 |
+| P1 | CODX-006 | [Implement current Codex reasoning semantics](p1-codx-006-current-reasoning-semantics.md) (**done**) | CXP-06 | — |
+| P1 | CODX-007 | [Refresh model defaults and establish one source of truth](p1-codx-007-refresh-model-defaults.md) (**done**) | CXP-07 | CODX-006 |
 | P1 | CODX-008 | [Add a typed Codex capability policy](p1-codx-008-typed-capability-policy.md) | CXP-08 | CODX-001, CODX-002 |
 | P1 | CODX-009 | [Add typed and path-safe image inputs](p1-codx-009-typed-image-inputs.md) | CXP-08 | CODX-008 |
 | P1 | CODX-010 | [Verify Codex authentication during preflight](p1-codx-010-auth-preflight.md) | CXP-09 | — |

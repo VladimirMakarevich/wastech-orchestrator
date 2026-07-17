@@ -160,7 +160,12 @@ from wastech_orchestrator.providers.base import ProviderId
 # stay); false never returns (global off); true forces new + existing to return; current always
 # stays. Old (absent) configs take null => today's `new`-mode behavior is preserved. `config_writer`
 # does NOT write it on a fresh install; documented in `config.example.yaml` only.
-CONFIG_SCHEMA_VERSION = 30
+# v31 (2026-07-17, current Codex reasoning): expands Codex `reasoning` with documented aliases
+# (`light`, `extra-high`, `extra_high`) plus native `max` and `ultra`. The YAML shape is unchanged,
+# but the accepted-value contract and runtime projection changed materially: aliases normalize
+# explicitly, Max is no longer lowered to xhigh, and Ultra activates bounded native multi-agent
+# execution. Older configs keep their exact scalar behavior.
+CONFIG_SCHEMA_VERSION = 31
 
 
 class AuditBranch(StrEnum):
@@ -290,7 +295,7 @@ class ProviderConfig:
     # Claude turn cap: positive int, or ``None`` = no cap. The loader maps ``"none"``/``"max"``/
     # ``null`` to ``None`` (adapter omits ``--max-turns``); config default 400.
     max_turns: int | None = None
-    reasoning: str | None = None  # provider-specific: "minimal" | "low" | "medium" | "high" | ...
+    reasoning: str | None = None  # provider-specific scalar, alias, Max, or Ultra selection
     # Exactly one configured provider must set ``primary: true`` — the global primary that runs any
     # flow node with no ``provider`` field, and the single infrastructure-fallback target (PRE.1).
     primary: bool = False

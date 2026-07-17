@@ -261,6 +261,71 @@ def test_codex_minimal_reasoning_is_valid(base_config: OrchestratorConfig) -> No
     assert validate_config(_with_agents(base_config, providers=providers)) == []
 
 
+@pytest.mark.parametrize("reasoning", ["light", "extra-high", "extra_high", "max", "ultra"])
+def test_current_codex_reasoning_values_are_valid(
+    base_config: OrchestratorConfig, reasoning: str
+) -> None:
+    codex = replace(
+        base_config.agents.providers[ProviderId.CODEX],
+        model="gpt-5.6-sol",
+        reasoning=reasoning,
+    )
+    providers = {**base_config.agents.providers, ProviderId.CODEX: codex}
+    assert validate_config(_with_agents(base_config, providers=providers)) == []
+
+
+@pytest.mark.parametrize("reasoning", ["max", "ultra"])
+def test_known_old_codex_model_rejects_advanced_reasoning(
+    base_config: OrchestratorConfig, reasoning: str
+) -> None:
+    codex = replace(
+        base_config.agents.providers[ProviderId.CODEX],
+        model="gpt-5.3-codex",
+        reasoning=reasoning,
+    )
+    providers = {**base_config.agents.providers, ProviderId.CODEX: codex}
+    with pytest.raises(ConfigError) as exc:
+        validate_config(_with_agents(base_config, providers=providers))
+    assert any("not supported" in issue and reasoning in issue for issue in exc.value.issues)
+
+
+def test_supervisor_inherited_codex_model_rejects_advanced_reasoning(
+    base_config: OrchestratorConfig,
+) -> None:
+    codex = replace(
+        base_config.agents.providers[ProviderId.CODEX],
+        model="gpt-5.3-codex",
+        reasoning="high",
+    )
+    providers = {**base_config.agents.providers, ProviderId.CODEX: codex}
+    config = replace(
+        _with_agents(base_config, providers=providers),
+        supervisor=replace(
+            base_config.supervisor,
+            provider=ProviderId.CODEX,
+            model="",
+            reasoning="ultra",
+        ),
+    )
+
+    with pytest.raises(ConfigError) as exc:
+        validate_config(config)
+
+    assert any("supervisor" in issue and "ultra" in issue for issue in exc.value.issues)
+
+
+def test_unknown_future_codex_model_is_not_rejected_by_catalog_absence(
+    base_config: OrchestratorConfig,
+) -> None:
+    codex = replace(
+        base_config.agents.providers[ProviderId.CODEX],
+        model="gpt-7-future-private",
+        reasoning="max",
+    )
+    providers = {**base_config.agents.providers, ProviderId.CODEX: codex}
+    assert validate_config(_with_agents(base_config, providers=providers)) == []
+
+
 def test_claude_minimal_reasoning_is_rejected(base_config: OrchestratorConfig) -> None:
     claude = replace(base_config.agents.providers[ProviderId.CLAUDE], reasoning="minimal")
     providers = {**base_config.agents.providers, ProviderId.CLAUDE: claude}

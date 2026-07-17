@@ -126,6 +126,8 @@ def test_tool_registry_rejects_non_executable(tmp_path: Path) -> None:
     plain.write_text("not executable\n", encoding="utf-8")  # no +x bit / no launchable suffix
     if os.name == "nt":
         pytest.skip("Windows executability is by suffix; an extensionless file is inert")
+    if os.access(plain, os.X_OK):
+        pytest.skip("filesystem does not preserve POSIX executable bits")
     with pytest.raises(ToolResolutionError, match="not executable"):
         ToolRegistry(tools).resolve("plain")
 

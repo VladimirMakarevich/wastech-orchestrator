@@ -20,6 +20,7 @@ from wastech_orchestrator.providers.base import (
     FALLBACK_ELIGIBLE,
     AgentProvider,
     AgentRunRequest,
+    CodexMultiAgentMode,
     ErrorClass,
     ProviderError,
     RunStatus,
@@ -478,6 +479,31 @@ def test_artifact_level_standard_keeps_stdout_stderr_result(
     assert survivors == {"result.json", "capabilities.json", "stdout.log", "stderr.log"}
 
 
+def test_ultra_mode_is_preserved_in_request_result_and_capability_audit(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    fake = FakeRun(stdout=_success_stream())
+    provider = _provider(codex_config, security_config, tmp_path, fake)
+    result = provider.run(
+        make_request(codex_multi_agent_mode=CodexMultiAgentMode.ULTRA, timeout_seconds=321)
+    )
+
+    request_json = json.loads((_attempt_dir(tmp_path) / "request.json").read_text(encoding="utf-8"))
+    result_json = json.loads((_attempt_dir(tmp_path) / "result.json").read_text(encoding="utf-8"))
+    manifest = json.loads(
+        (_attempt_dir(tmp_path) / "capabilities.json").read_text(encoding="utf-8")
+    )
+    assert result.codex_multi_agent_mode is CodexMultiAgentMode.ULTRA
+    assert request_json["codex_multi_agent_mode"] == "ultra"
+    assert result_json["codex_multi_agent_mode"] == "ultra"
+    assert manifest["capabilities"]["multi_agent"] is True
+    assert manifest["reasoning"]["max_concurrent_threads"] == 4
+    assert manifest["reasoning"]["worker_timeout_seconds"] == 321
+
+
 def test_prompt_is_delivered_via_stdin_not_argv(
     codex_config: ProviderConfig,
     security_config: SecurityConfig,
@@ -773,10 +799,12 @@ class _ProbingFakeRun:
         self,
         *,
         help_has_config: bool,
+        has_native_ultra: bool = True,
         resume_help: str | None = None,
         version: str = "0.144.4",
     ) -> None:
         self._help_has_config = help_has_config
+        self._has_native_ultra = has_native_ultra
         self._version = version
         # Canned ``codex exec resume --help`` text; None => the healthy 0.142.x form advertising the
         # -m/--model and -c/--config options this adapter places after ``resume`` (F38 probe).
@@ -800,6 +828,8 @@ class _ProbingFakeRun:
             out = f"codex-cli {self._version}\n"
         elif "execpolicy" in argv and "check" in argv:
             out = '{"decision":"forbidden","matchedRules":[]}\n'
+        elif "features" in argv and "list" in argv:
+            out = "multi_agent_v2 under-development false\n" if self._has_native_ultra else ""
         elif "sandbox" in argv:
             out = ""
             if ".worc-denied-read-probe" in argv:
@@ -880,6 +910,25 @@ def test_preflight_passes_when_codex_exec_accepts_config_override(
     )
     health = provider.preflight()
     assert health.supports_required_features is True
+
+
+def test_preflight_fails_before_model_run_without_native_ultra_capability(
+    security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    fake = _ProbingFakeRun(help_has_config=True, has_native_ultra=False)
+    provider = CodexProvider(
+        _codex_config_with_reasoning(),
+        security=security_config,
+        artifacts_root=tmp_path,
+        clock=lambda: FIXED_TIME,
+        run_process=fake,
+    )
+
+    health = provider.preflight()
+
+    assert health.supports_required_features is False
+    assert "multi_agent_v2" in health.message
+    assert not any("exec" in argv and "--json" in argv for argv in fake.argvs)
 
 
 @pytest.mark.parametrize("version", ["0.1.0", "0.144.3"])

@@ -16,9 +16,8 @@ the engine never learns what a field means (the same separation ``disabled_nodes
 
 Validation reuses the config-aware flow validator's checks (``agents.allowed`` membership,
 :func:`~wastech_orchestrator.providers.capabilities.is_reasoning_supported`, and the shared
-:func:`~wastech_orchestrator.core.flow.validator.global_primary`); there is deliberately **no**
-model check — model names have no reliable tier ordering, so a model string is passed through
-unverified (the provider config still supplies the default when none is given).
+:func:`~wastech_orchestrator.core.flow.validator.global_primary`). Model ids stay pass-through;
+only a provable incompatibility between a known older Codex family and Max/Ultra is rejected.
 """
 
 from __future__ import annotations
@@ -33,6 +32,7 @@ from wastech_orchestrator.core.flow.validator import global_primary
 from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.providers.capabilities import (
     all_reasoning_levels,
+    codex_model_reasoning_issue,
     is_reasoning_supported,
     reasoning_levels_for,
 )
@@ -111,10 +111,53 @@ def resolve_node_overrides(
         if override.model is not None:
             fields["model"] = override.model  # passthrough — no reliable model tier ordering
 
+        _drop_incompatible_codex_override(node_id, node, fields, config, primary, warnings)
+
         if fields:
             overlay[node_id] = fields
 
     return NodeOverrideResolution(overlay=overlay, warnings=tuple(warnings))
+
+
+def _drop_incompatible_codex_override(
+    node_id: str,
+    node: AgentNode | EvaluatorNode,
+    fields: dict[str, object],
+    config: OrchestratorConfig,
+    primary: ProviderId | None,
+    warnings: list[str],
+) -> None:
+    """Drop the task field that would create a known Codex model/mode incompatibility."""
+    resolved_provider = fields.get("provider") or node.provider or primary
+    if resolved_provider is not ProviderId.CODEX:
+        return
+    provider_config = config.agents.providers.get(ProviderId.CODEX)
+    effective_model = str(
+        fields.get("model") or node.model or (provider_config.model if provider_config else "")
+    )
+    effective_reasoning = str(
+        fields.get("reasoning")
+        or node.reasoning
+        or (provider_config.reasoning if provider_config else "")
+    )
+    compatibility_issue = codex_model_reasoning_issue(effective_model, effective_reasoning)
+    if compatibility_issue is None:
+        return
+    if "reasoning" in fields:
+        fields.pop("reasoning")
+        skipped = "reasoning"
+    elif "model" in fields:
+        fields.pop("model")
+        skipped = "model"
+    elif "provider" in fields:
+        fields.pop("provider")
+        skipped = "provider"
+    else:
+        skipped = "override"
+    warnings.append(
+        f"node {node_id!r}: {skipped} ignored ({compatibility_issue}); "
+        "using the flow/provider value"
+    )
 
 
 def _coerce_provider(value: str) -> ProviderId | None:

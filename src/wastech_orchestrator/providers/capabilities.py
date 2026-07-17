@@ -6,20 +6,52 @@ the concrete flag/config mapping; core validators only ask whether a provider ac
 
 from __future__ import annotations
 
-from wastech_orchestrator.providers.base import ProviderId
+import re
+from dataclasses import dataclass
 
-CODEX_REASONING_ALIASES: dict[str, str] = {
+from wastech_orchestrator.providers.base import (
+    CodexComputeMode,
+    CodexMultiAgentMode,
+    ProviderId,
+)
+
+CODEX_SCALAR_REASONING_ALIASES: dict[str, str] = {
     "minimal": "minimal",
+    "light": "low",
     "low": "low",
     "medium": "medium",
     "high": "high",
     "xhigh": "xhigh",
-    # Legacy orchestrator/Codex compatibility: Codex's practical ceiling is xhigh.
-    "max": "xhigh",
+    "extra-high": "xhigh",
+    "extra_high": "xhigh",
 }
 
 CLAUDE_REASONING_LEVELS: frozenset[str] = frozenset({"low", "medium", "high", "xhigh", "max"})
-CODEX_REASONING_LEVELS: frozenset[str] = frozenset(CODEX_REASONING_ALIASES)
+CODEX_REASONING_LEVELS: frozenset[str] = frozenset(
+    {
+        *CODEX_SCALAR_REASONING_ALIASES,
+        CodexComputeMode.MAX.value,
+        CodexMultiAgentMode.ULTRA.value,
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class CodexReasoningSelection:
+    """Normalized Codex execution controls with mutually exclusive advanced modes."""
+
+    reasoning: str | None = None
+    compute_mode: CodexComputeMode | None = None
+    multi_agent_mode: CodexMultiAgentMode | None = None
+
+    @property
+    def effective(self) -> str | None:
+        """Return the one user-visible effective mode represented by this selection."""
+        if self.compute_mode is not None:
+            return self.compute_mode.value
+        if self.multi_agent_mode is not None:
+            return self.multi_agent_mode.value
+        return self.reasoning
 
 
 def reasoning_levels_for(provider: ProviderId) -> frozenset[str]:
@@ -44,9 +76,35 @@ def is_reasoning_supported(provider: ProviderId, reasoning: str) -> bool:
     return reasoning in reasoning_levels_for(provider)
 
 
-def normalize_codex_reasoning(reasoning: str) -> str | None:
-    """Map a configured Codex reasoning value to Codex's model config value."""
-    return CODEX_REASONING_ALIASES.get(reasoning)
+def normalize_codex_reasoning(reasoning: str) -> CodexReasoningSelection | None:
+    """Normalize aliases while preserving Max and Ultra as distinct typed execution modes."""
+    scalar = CODEX_SCALAR_REASONING_ALIASES.get(reasoning)
+    if scalar is not None:
+        return CodexReasoningSelection(reasoning=scalar)
+    if reasoning == CodexComputeMode.MAX:
+        return CodexReasoningSelection(compute_mode=CodexComputeMode.MAX)
+    if reasoning == CodexMultiAgentMode.ULTRA:
+        return CodexReasoningSelection(multi_agent_mode=CodexMultiAgentMode.ULTRA)
+    return None
+
+
+def codex_model_reasoning_issue(model: str | None, reasoning: str | None) -> str | None:
+    """Explain a known public model/advanced-mode incompatibility, if one is provable.
+
+    Scalar effort and arbitrary future model ids remain pass-through. Advanced-mode validation is
+    deliberately a denylist of known older public families: rejecting every unknown id would make
+    the provider incompatible with future and private model rollouts.
+    """
+    if reasoning not in {CodexComputeMode.MAX, CodexMultiAgentMode.ULTRA} or not model:
+        return None
+    normalized_model = model.strip().lower()
+    if re.match(r"^gpt-5\.[1-5](?:-|$)", normalized_model):
+        return (
+            f"Codex reasoning mode {reasoning!r} is not supported by known model "
+            f"{model!r}; use a GPT-5.6 model, leave model empty for CLI/account selection, "
+            "or choose a scalar effort"
+        )
+    return None
 
 
 def map_reasoning_for_provider_switch(

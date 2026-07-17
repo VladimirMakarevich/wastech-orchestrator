@@ -17,6 +17,7 @@ The adapters honour a hard contract: no fallback, no git, no state-machine chang
 ## Public surface
 
 - `ProviderId` ([base.py:10](../../../src/wastech_orchestrator/providers/base.py#L10)) — the only two providers: `codex`, `claude`.
+- `CodexComputeMode` / `CodexMultiAgentMode` — typed advanced Codex controls (`max` / `ultra`), kept separate from scalar `AgentRunRequest.reasoning`.
 - `Stage` ([base.py:17](../../../src/wastech_orchestrator/providers/base.py#L17)) — a `StrEnum` of stage identities carried on the request/result; now a transitional _identity_ (output schema / HITL parsing / audit path), not the router key.
 - `RunStatus` ([base.py:28](../../../src/wastech_orchestrator/providers/base.py#L28)) — `succeeded` / `failed`.
 - `ErrorClass` ([base.py:33](../../../src/wastech_orchestrator/providers/base.py#L33)) — the normalized error taxonomy, including `SESSION_UNAVAILABLE`, `INVALID_INVOCATION` (a bad argv we built), and `MODEL_REQUEST_INVALID` (a model/schema HTTP 400 the provider rejected), all deliberately **not** in `FALLBACK_ELIGIBLE` — they surface loudly instead of silently failing over to the other provider.
@@ -86,6 +87,27 @@ copied nor inspected. The policy projection lives in
 [codex_policy.py](../../../src/wastech_orchestrator/providers/codex_policy.py). The provider's
 credential/path-free `capabilities.json` records only effective grants and deny counts; B20 retains
 it at every artifact level.
+
+### Codex reasoning: scalar aliases, Max, and bounded Ultra
+
+`providers.capabilities` normalizes only documented aliases: `light` → `low` and
+`extra-high`/`extra_high` → `xhigh`. Scalar `minimal`/`low`/`medium`/`high`/`xhigh` stay scalar.
+The Router projects `max` into `AgentRunRequest.codex_compute_mode` and `ultra` into
+`codex_multi_agent_mode`; it clears both on a cross-provider fallback. Max is therefore never
+silently reduced to xhigh.
+
+Codex CLI 0.144.4's non-interactive native surface is `model_reasoning_effort="max|ultra"`.
+Ultra is a CLI-level selection: the CLI sends maximum model compute and enables proactive
+multi-agent behavior. The adapter conditionally enables native `multi_agent_v2`, fixes its
+concurrency to four threads, applies the node timeout to agent jobs, and relies on the existing
+process-tree cancellation to stop root and children together. The event stream remains the audit
+source for child activity; `capabilities.json` additionally records the mode, cap, and timeout.
+Request/result artifacts retain the effective scalar/mode fields even when verbose artifacts are
+pruned.
+
+Known older public GPT-5.x families fail model/mode validation before launch. Unknown future model
+ids remain pass-through instead of becoming a static catalog; a provider-side unsupported-model or
+entitlement error is `MODEL_REQUEST_INVALID`/configuration failure and never triggers fallback.
 
 ### Permission/sandbox mapping; forbidden values raise `CONFIGURATION_ERROR`
 

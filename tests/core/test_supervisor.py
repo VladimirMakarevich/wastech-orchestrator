@@ -924,7 +924,7 @@ def test_supervisor_config_from_config_yaml(packaged_config_text: str) -> None:
 
 
 def test_supervisor_config_provider_parsed(packaged_config_text: str) -> None:
-    block = "supervisor:\n  provider: codex\n  model: gpt-5.4\n  reasoning: high\n"
+    block = "supervisor:\n  provider: codex\n  model: gpt-5.6-sol\n  reasoning: high\n"
     config = _config_with_supervisor(packaged_config_text, block)
     assert config.supervisor.provider == ProviderId.CODEX
 
